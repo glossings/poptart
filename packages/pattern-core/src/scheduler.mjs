@@ -86,8 +86,19 @@ export class Transport {
       const v = this._tempoSig.sample(now, this.cps, this.cycleAt(now));
       if (typeof v === 'number') this.setCps(v / 240);
     };
-    apply();
-    this._tempoTimer = setInterval(apply, POLL_INTERVAL_MS);
+    apply(); // throws (to the caller, at eval time) if the signal can't be sampled at all
+    this._tempoTimer = setInterval(() => {
+      try {
+        apply();
+      } catch (err) {
+        // Same lazy-throw hazard as Scheduler#_tick: never let a tempo signal's error escape
+        // the timer and kill the host. Hold the current tempo and stop polling.
+        clearInterval(this._tempoTimer);
+        this._tempoTimer = null;
+        // eslint-disable-next-line no-console
+        console.error(`[transport] tempo signal threw - holding ${this.cps * 240} bpm: ${err.message ?? err}`);
+      }
+    }, POLL_INTERVAL_MS);
   }
 
   /** Plain-data view for clients that mirror the clock (the editor's playback highlighting). */
@@ -224,15 +235,24 @@ export class Scheduler {
 
   _tick() {
     if (!this.pattern) return;
-    const nowSec = this.engine.getTime();
-    const targetCycle = this.transport.cycleAt(nowSec + DEFAULT_LOOKAHEAD_SEC);
+    try {
+      const nowSec = this.engine.getTime();
+      const targetCycle = this.transport.cycleAt(nowSec + DEFAULT_LOOKAHEAD_SEC);
 
-    this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle);
-    this._scheduledUntilCycle = targetCycle;
+      this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle);
+      this._scheduledUntilCycle = targetCycle;
 
-    this._pollGenericParams(nowSec);
-    for (const m of this._activeModulators.values()) {
-      if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
+      this._pollGenericParams(nowSec);
+      for (const m of this._activeModulators.values()) {
+        if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
+      }
+    } catch (err) {
+      // Patterns evaluate lazily, so a bad value can first throw here, inside the timer -
+      // uncaught, that would take down the whole host process. Stop just this track (also
+      // avoids re-throwing every 30ms) and report; other tracks keep playing.
+      this.stop();
+      // eslint-disable-next-line no-console
+      console.error(`[scheduler] track "${this.trackId}" stopped - pattern threw during playback: ${err.message ?? err}`);
     }
   }
 

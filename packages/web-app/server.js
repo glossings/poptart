@@ -110,7 +110,33 @@ function buildPattern(code) {
   if (pattern !== TEMPO_BLOCK && !(pattern instanceof patternCore.Sig)) {
     throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
   }
+  if (pattern !== TEMPO_BLOCK) dryRunPattern(pattern);
   return pattern;
+}
+
+// Patterns evaluate lazily, so a bad value ("badnote" where a note name should be, a throwing
+// signal) can first surface mid-playback rather than at eval. Force the first few cycles (and
+// one continuous sample) here so those errors come back as an eval error the editor shows,
+// instead of hitting the scheduler's timer. A few cycles because alternations (`<a b c>`) only
+// visit each branch every N cycles - this catches the common cases, and the scheduler's own
+// try/catch stops just the offending track for anything pathological beyond that.
+const DRY_RUN_CYCLES = 8;
+
+function dryRunPattern(sig) {
+  const cps = transport?.cps ?? DEFAULT_CPS;
+  const sigs = [
+    sig,
+    ...Object.values(sig.paramSignals),
+    ...Object.values(sig.channel),
+    ...(sig.velSig ? [sig.velSig] : []),
+    ...Object.values(sig.sampler ?? {}).filter((v) => v instanceof patternCore.Sig),
+  ];
+  for (const s of sigs) {
+    if (s.stepsForCycle) {
+      for (let cycle = 0; cycle < DRY_RUN_CYCLES; cycle++) s.stepsForCycle(cycle);
+    }
+    s.sample(0, cps, 0);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

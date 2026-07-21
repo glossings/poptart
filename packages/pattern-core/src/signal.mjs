@@ -526,15 +526,27 @@ function miniStepsForCycle(ast, valueFn) {
     getStepsForCycle(ast, cycle).map((s) => (s.value == null ? s : { ...s, value: valueFn ? valueFn(s.value) : s.value }));
 }
 
+// The builders below accept a number, a mini string, or an existing Sig (so transformed
+// patterns compose: note("45 73".sub(24)) === note("45 73").sub(24)). Anything else is a
+// user mistake - fail here, at eval time, with a message that says which builder.
+function assertBuilderInput(builder, value) {
+  if (typeof value === 'string' || typeof value === 'number' || value instanceof Sig) return;
+  throw new Error(`[signal] ${builder}(...) takes a number, a mini-notation string, or a signal - got ${Object.prototype.toString.call(value)}`);
+}
+
 /** Generic mini-notation signal of raw string/number values (used internally, and by .param("x", "1 2 3")). */
 export function mini(str) {
-  const ast = parseMini(str);
+  assertBuilderInput('mini', str);
+  if (str instanceof Sig) return str;
+  const ast = parseMini(String(str));
   const valueFn = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
   return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
 }
 
 /** Scale-degree control - degrees are plain numbers until `.scale(...)` turns them into MIDI notes. */
 export function n(value) {
+  assertBuilderInput('n', value);
+  if (value instanceof Sig) return value.mapValue((v) => Number(v));
   if (typeof value === 'number') return new Sig(() => value, { stepsForCycle: () => [{ start: 0, end: 1, value }] });
   const ast = parseMini(String(value));
   const valueFn = (v) => Number(v);
@@ -547,6 +559,8 @@ export function n(value) {
  * .stretch()/.fit()/.slice(); route through effects with .fx()/.param() as usual.
  */
 export function s(value) {
+  assertBuilderInput('s', value);
+  if (value instanceof Sig) return value._clone({ sampler: {} });
   const ast = parseMini(String(value));
   return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
 }
@@ -567,6 +581,8 @@ export function synth(pluginId, config) {
 
 /** Explicit-note control - numbers pass through as MIDI, strings may be note names ("f4") or numbers. */
 export function note(value) {
+  assertBuilderInput('note', value);
+  if (value instanceof Sig) return value.mapValue((v) => parseNoteValue(v));
   if (typeof value === 'number') return new Sig(() => value, { stepsForCycle: () => [{ start: 0, end: 1, value }] });
   const ast = parseMini(String(value));
   const valueFn = (v) => parseNoteValue(v);
