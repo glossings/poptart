@@ -497,6 +497,14 @@ footer#log .error {
   font-style: italic;
 }
 
+/* muted / un-soloed blocks (see client.js's updateMutedDim) - rendered like comments: one dim
+   color, no syntax highlighting, so only code that's actually playing is lit up. !important
+   beats every per-token color above. */
+.cm-s-poptart span.cm-muted-code {
+  color: var(--syn-comment) !important;
+  font-style: italic;
+}
+
 /* the mini-notation atom currently sounding (see client.js's highlight ticker) - a plain
    box around the element, Strudel-style ("white" = the theme's text color, so it stays
    visible on light themes too) */

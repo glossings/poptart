@@ -43,6 +43,7 @@ export class Sig {
     this.fxChain = opts.fxChain ?? [];
     this.paramSignals = opts.paramSignals ?? {}; // name -> Sig
     this.paramSlots = opts.paramSlots ?? {}; // name -> slot index (0 = instrument, 1..n = fx)
+    this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan' -> Sig
     // Sampler config, present only for s("pack") patterns: { index, begin, end, loop, speed,
     // stretch, fit, slice }, each a Sig (sampled per event onset) or absent for its default.
     this.sampler = opts.sampler ?? null;
@@ -57,6 +58,7 @@ export class Sig {
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
       paramSlots: this.paramSlots,
+      channel: this.channel,
       sampler: this.sampler,
       ...overrides,
     });
@@ -78,6 +80,7 @@ export class Sig {
         fxChain: this.fxChain,
         paramSignals: this.paramSignals,
         paramSlots: this.paramSlots,
+        channel: this.channel,
         sampler: this.sampler,
       },
     );
@@ -89,11 +92,13 @@ export class Sig {
   }
 
   /**
-   * Rescales a 0..1-ish signal (LFO/env builders) into [min,max]. Falls back to a generic
-   * mapValue for anything else. Bounds may themselves be signals (a mini string, a Sig, ...):
+   * Rescales a 0..1-ish signal (LFO/env builders) into [min,max] - shorthand for
+   * `.mul(max - min).add(min)`. Bounds may themselves be signals (a mini string, a Sig, ...):
    * `lfo().range("200 300", 4000)` sweeps 200..4000 in the first half of the cycle and
-   * 300..4000 in the second. Signal bounds can't stay a native Tier-2 modulator (the engine's
-   * oscillator only takes fixed lo/hi), so the result is a Tier-1 polled signal instead.
+   * 300..4000 in the second. Signal bounds on a Tier-2 modulator (LFO/env) stay symbolic:
+   * the bound signals ride along in the IR and the scheduler polls just them, updating the
+   * running native modulator's lo/hi in place - so even env() and note-synced lfo() shapes,
+   * whose values only exist engine-side, take signal bounds.
    */
   range(min, max) {
     if (typeof min === 'number' && typeof max === 'number') {
@@ -101,12 +106,8 @@ export class Sig {
       if (this.envIR) return withEnvIR({ ...this.envIR, min, max });
       return this.mapValue((v) => min + v * (max - min));
     }
-    this._assertSampleable('range');
-    if (this.lfoIR?.shape === 'custom' && this.lfoIR.mode !== 'free') {
-      throw new Error(
-        "[signal] signal-valued .range() bounds on a note-synced lfo() aren't supported - its value depends on note gates only the engine sees. Use fixed numbers, or mode: 'free'",
-      );
-    }
+    if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min: toBound(min), max: toBound(max) });
+    if (this.envIR) return withEnvIR({ ...this.envIR, min: toBound(min), max: toBound(max) });
     const minSig = toSignal(min);
     return this.mul(toSignal(max).sub(minSig)).add(minSig);
   }
@@ -131,6 +132,20 @@ export class Sig {
   /** Appends an effect plugin to this track's chain, after the instrument and any prior .fx() calls. */
   fx(pluginId) {
     return this._clone({ fxChain: [...this.fxChain, pluginId] });
+  }
+
+  /**
+   * Channel strip: the track's output gain (1 = unity, applied after the whole plugin chain).
+   * Accepts numbers, mini strings, or any signal - `.gain(env())` is a per-note VCA,
+   * `.gain("1 0.5 1 0.5")` a stepped tremolo.
+   */
+  gain(value) {
+    return this._clone({ channel: { ...this.channel, gain: toSignal(value) } });
+  }
+
+  /** Channel strip: stereo pan, -1 (left) .. 1 (right), 0 = center. Signals welcome: `.pan(sine(0.2).range(-1, 1))`. */
+  pan(value) {
+    return this._clone({ channel: { ...this.channel, pan: toSignal(value) } });
   }
 
   /**
@@ -171,8 +186,10 @@ export class Sig {
    */
   _binop(op, other, fn, linear) {
     if (typeof other === 'number' && linear) {
-      if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min: fn(this.lfoIR.min, other), max: fn(this.lfoIR.max, other) });
-      if (this.envIR) return withEnvIR({ ...this.envIR, min: fn(this.envIR.min, other), max: fn(this.envIR.max, other) });
+      // Bounds may be signals (see range()) - map those through fn instead of applying it directly.
+      const mapBound = (b) => (typeof b === 'number' ? fn(b, other) : b.mapValue((v) => fn(Number(v), other)));
+      if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min: mapBound(this.lfoIR.min), max: mapBound(this.lfoIR.max) });
+      if (this.envIR) return withEnvIR({ ...this.envIR, min: mapBound(this.envIR.min), max: mapBound(this.envIR.max) });
     }
     this._assertSampleable(op);
     const otherSig = toSignal(other);
@@ -201,6 +218,7 @@ export class Sig {
         fxChain: this.fxChain,
         paramSignals: this.paramSignals,
         paramSlots: this.paramSlots,
+        channel: this.channel,
         sampler: this.sampler,
       },
     );
@@ -264,6 +282,7 @@ export class Sig {
       fxChain: transformed.fxChain,
       paramSignals: transformed.paramSignals,
       paramSlots: transformed.paramSlots,
+      channel: transformed.channel,
       sampler: transformed.sampler,
     });
   }
@@ -331,6 +350,7 @@ export class Sig {
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
       paramSlots: this.paramSlots,
+      channel: this.channel,
       sampler: this.sampler,
     });
   }
@@ -392,6 +412,19 @@ function toSignal(value) {
   if (typeof value === 'number') return new Sig(() => value);
   if (typeof value === 'string') return mini(value);
   throw new Error(`[signal] don't know how to turn ${JSON.stringify(value)} into a signal`);
+}
+
+// An LFO/env IR bound (min/max): a plain number stays a number (the fully-static fast path);
+// anything else becomes a Sig the scheduler polls (see Scheduler#_sendModulator).
+function toBound(value) {
+  return typeof value === 'number' ? value : toSignal(value);
+}
+
+/** Samples an IR bound at a point in time; null while a signal bound is resting. */
+export function sampleBound(bound, t, cps, pos) {
+  if (typeof bound === 'number') return bound;
+  const v = bound.sample(t, cps, pos);
+  return typeof v === 'number' && !Number.isNaN(v) ? v : v == null ? null : Number(v);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -463,7 +496,7 @@ function hash01(i) {
   return s - Math.floor(s);
 }
 
-function sampleLfoIR(ir, tSeconds) {
+function sampleLfoIR(ir, tSeconds, cps, pos) {
   const total = tSeconds * ir.rateHz + ir.phaseCycles;
   const phase = ((total % 1) + 1) % 1;
   let unipolar;
@@ -496,11 +529,14 @@ function sampleLfoIR(ir, tSeconds) {
     default:
       unipolar = 0.5 + 0.5 * Math.sin(phase * 2 * Math.PI);
   }
-  return ir.min + unipolar * (ir.max - ir.min);
+  // Bounds may be signals (see range()); a resting bound holds the range's floor of 0.
+  const lo = sampleBound(ir.min, tSeconds, cps, pos) ?? 0;
+  const hi = sampleBound(ir.max, tSeconds, cps, pos) ?? 1;
+  return lo + unipolar * (hi - lo);
 }
 
 function withLfoIR(ir) {
-  return new Sig((t) => sampleLfoIR(ir, t), { lfoIR: ir });
+  return new Sig((t, cps, pos) => sampleLfoIR(ir, t, cps, pos), { lfoIR: ir });
 }
 
 function shapeSignal(shape) {
@@ -545,7 +581,7 @@ export function lfo(shape, opts = {}) {
 // ---------------------------------------------------------------------------------------------
 
 function withEnvIR(ir) {
-  return new Sig(() => ir.min, { envIR: ir });
+  return new Sig((t, cps, pos) => sampleBound(ir.min, t, cps, pos) ?? 0, { envIR: ir });
 }
 
 /**

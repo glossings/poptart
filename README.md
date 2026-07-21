@@ -109,7 +109,8 @@ window, set them by hand, and keep livecoding the rest.
 ### Sampler
 
 `s("pack")` plays sample packs alongside the VST tracks - a pack is a folder of audio files
-under `~/.poptart/samples/<pack>/` (override the root with `POPTART_SAMPLES_DIR`), addressed by
+under `~/Downloads/gsamps_for_poptart/<pack>/` (override the root with `POPTART_SAMPLES_DIR`;
+the legacy `~/.poptart/samples` is used if the default folder doesn't exist), addressed by
 index in filename order. Like everything else, every config accepts numbers, mini strings, or
 signals, sampled per event onset:
 

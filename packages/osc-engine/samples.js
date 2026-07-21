@@ -13,8 +13,14 @@ const os = require('node:os');
 
 const AUDIO_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac']);
 
+// Sample library location. POPTART_SAMPLES_DIR always wins; otherwise the default library is
+// ~/Downloads/gsamps_for_poptart, falling back to the legacy ~/.poptart/samples location if
+// the default folder doesn't exist on this machine.
 function samplesRoot() {
-  return process.env.POPTART_SAMPLES_DIR || path.join(os.homedir(), '.poptart', 'samples');
+  if (process.env.POPTART_SAMPLES_DIR) return process.env.POPTART_SAMPLES_DIR;
+  const defaultDir = path.join(os.homedir(), 'Downloads', 'gsamps_for_poptart');
+  if (fs.existsSync(defaultDir)) return defaultDir;
+  return path.join(os.homedir(), '.poptart', 'samples');
 }
 
 /** Absolute paths of a pack's audio files in filename order, or null if the folder is missing. */

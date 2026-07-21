@@ -71,6 +71,7 @@ function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
     'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'scale', 'range', 's', 'fx', 'param',
+    'gain', 'pan',
   ];
   for (const m of METHODS) {
     Object.defineProperty(String.prototype, m, {

@@ -127,7 +127,7 @@ pluginList = {
 trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 
 buildTrackDef = { |key|
-    SynthDef(trackDefName.(key), { |inBus|
+    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0|
         var sig = Silent.ar(2);
         maxSlots.do { |i|
             if (i == 0) {
@@ -143,6 +143,10 @@ buildTrackDef = { |key|
                 sig = Select.ar(("active" ++ i).asSymbol.kr(0), [sig, wet]);
             };
         };
+        // Channel strip (post-chain): gain + equal-power pan, addressed from Node as pseudo-slot
+        // -1 (Sig#gain/#pan; setParam sets these controls, setParam[Shape]LFO/Env map busses to
+        // them). Lag smooths the ~30ms Tier-1 polling steps; clip keeps a runaway signal sane.
+        sig = Balance2.ar(sig[0], sig[1], pan.lag(0.02).clip(-1, 1), gain.lag(0.02).clip(0, 4));
         Out.ar(0, sig);
     });
 };
@@ -392,10 +396,19 @@ OSCdef(\poptartSetParam, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger;
     var paramName = msg[3].asString, value = msg[4].asFloat, latency = msg[5].asFloat;
     var track = tracks[key];
-    var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
-    if (ctl.notNil) {
-        // ctl.set resolves parameter names in the UGen; values are normalized 0..1.
-        server.makeBundle(latency, { ctl.set(paramName, value.clip(0, 1)) });
+    var ctl;
+    if (track.isKindOf(Event)) {
+        if (slot == -1) {
+            // Channel controls (gain/pan) live on the track synth itself, not a plugin. Not
+            // clipped to 0..1 - gain may exceed unity, pan is -1..1 (the SynthDef clips sanely).
+            server.makeBundle(latency, { track[\synth].set(paramName.asSymbol, value) });
+        } {
+            ctl = track[\controllers][slot];
+            if (ctl.notNil) {
+                // ctl.set resolves parameter names in the UGen; values are normalized 0..1.
+                server.makeBundle(latency, { ctl.set(paramName, value.clip(0, 1)) });
+            };
+        };
     };
 }, '/poptart/setParam');
 
@@ -403,30 +416,39 @@ OSCdef(\poptartSetParam, { |msg|
 // running in scsynth's audio callback - zero further OSC traffic, genuinely continuous.
 // Re-eval with the same shape updates the running LFO's args in place, so its phase carries
 // across livecoding edits with no glitch/reset (same behavior the old native LFO.h had).
+// (Node also re-sends this at poll rate when .range() has signal-valued bounds - same in-place
+// update path, so the LFO stays native while its range wanders.)
+// slot -1 = the track's own channel controls (gain/pan): the bus maps onto the track synth's
+// control input instead of a VST parameter, and no plugin needs to be loaded.
 OSCdef(\poptartSetParamLFO, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
     var shape = msg[4].asSymbol, rateHz = msg[5].asFloat, phaseCycles = msg[6].asFloat;
     var lo = msg[7].asFloat, hi = msg[8].asFloat;
     fork {
         var track = awaitTrack.(key);
-        var ctl, index, lfoKey, existing;
+        var isChannel, ctl, index, lfoKey, existing;
         if (track.isNil) { ("poptart: setParamLFO: no track " ++ key).warn } {
-            if (awaitLoaded.(track, slot).not) {
+            isChannel = slot == -1;
+            if (isChannel.not and: { awaitLoaded.(track, slot).not }) {
                 ("poptart: setParamLFO: no plugin loaded in slot " ++ slot).warn;
             } {
-                ctl = track[\controllers][slot];
-                index = ctl.info.findParamIndex(paramName.asSymbol);
-                if (index.isNil) {
+                if (isChannel.not) {
+                    ctl = track[\controllers][slot];
+                    index = ctl.info.findParamIndex(paramName.asSymbol);
+                };
+                if (isChannel.not and: { index.isNil }) {
                     ("poptart: setParamLFO: plugin has no parameter named '" ++ paramName
                         ++ "' (see getParams / the plugin browser for real names)").warn;
                 } {
-                    if ((lo < 0) or: { hi > 1 }) {
+                    lfoKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+                    existing = track[\lfos][lfoKey];
+                    // Warn on creation only: signal-valued bounds re-send continuously and may
+                    // legitimately swing wide momentarily. Channel controls have their own ranges.
+                    if (existing.isNil and: { isChannel.not } and: { (lo < 0) or: { hi > 1 } }) {
                         ("poptart: LFO range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
                             ++ "' is outside the normalized 0..1 VST parameter range and will pin -"
                             + "use .range(0.2, 0.9)-style values until per-plugin calibration exists").warn;
                     };
-                    lfoKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
-                    existing = track[\lfos][lfoKey];
                     case
                     { existing.notNil and: { existing[\shape] == shape } } {
                         existing[\synth].set(\freq, rateHz, \lo, lo, \hi, hi); // phase preserved
@@ -443,7 +465,7 @@ OSCdef(\poptartSetParamLFO, { |msg|
                         var lfoSynth = Synth(("poptart_lfo_" ++ shape).asSymbol,
                             [\out, bus, \freq, rateHz, \phase, phaseCycles, \lo, lo, \hi, hi],
                             target: track[\group], addAction: \addToHead);
-                        ctl.map(index, bus);
+                        if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                         track[\lfos][lfoKey] = (synth: lfoSynth, bus: bus, shape: shape, index: index);
                     };
                 };
@@ -466,18 +488,22 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
     var lo = msg[7].asFloat, hi = msg[8].asFloat, pointsJson = msg[9].asString;
     fork {
         var track = awaitTrack.(key);
-        var ctl, index, lfoKey, existing, spec;
+        var isChannel, ctl, index, lfoKey, existing, spec;
         var points, xs, ys, cs, times, curves, defName, def, bus, shapeSynth;
         if (track.isNil) { ("poptart: setParamShapeLFO: no track " ++ key).warn } {
-            if (awaitLoaded.(track, slot).not) {
+            isChannel = slot == -1;
+            if (isChannel.not and: { awaitLoaded.(track, slot).not }) {
                 ("poptart: setParamShapeLFO: no plugin loaded in slot " ++ slot).warn;
             } {
-                ctl = track[\controllers][slot];
-                index = ctl.info.findParamIndex(paramName.asSymbol);
-                if (index.isNil) {
+                if (isChannel.not) {
+                    ctl = track[\controllers][slot];
+                    index = ctl.info.findParamIndex(paramName.asSymbol);
+                };
+                if (isChannel.not and: { index.isNil }) {
                     ("poptart: setParamShapeLFO: plugin has no parameter named '" ++ paramName ++ "'").warn;
                 } {
-                    if ((lo < 0) or: { hi > 1 }) {
+                    if (isChannel.not and: { track[\lfos][("slot" ++ slot ++ "_" ++ paramName).asSymbol].isNil }
+                        and: { (lo < 0) or: { hi > 1 } }) {
                         ("poptart: shape range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
                             ++ "' is outside the normalized 0..1 VST parameter range and will pin").warn;
                     };
@@ -517,7 +543,7 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
                              \t_trig, if ((mode != \free) and: { track[\held] > 0 }) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
                         if (existing.isNil) {
-                            ctl.map(index, bus);
+                            if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                             track[\lfos][lfoKey] = (synth: shapeSynth, bus: bus, shape: \custom,
                                 index: index, mode: mode, spec: spec);
                         } {
@@ -542,24 +568,27 @@ OSCdef(\poptartSetParamEnv, { |msg|
     var curve = msg[8].asFloat, lo = msg[9].asFloat, hi = msg[10].asFloat;
     fork {
         var track = awaitTrack.(key);
-        var ctl, index, envKey, existing;
+        var isChannel, ctl, index, envKey, existing;
         if (track.isNil) { ("poptart: setParamEnv: no track " ++ key).warn } {
-            if (awaitLoaded.(track, slot).not) {
+            isChannel = slot == -1;
+            if (isChannel.not and: { awaitLoaded.(track, slot).not }) {
                 ("poptart: setParamEnv: no plugin loaded in slot " ++ slot).warn;
             } {
-                ctl = track[\controllers][slot];
-                index = ctl.info.findParamIndex(paramName.asSymbol);
-                if (index.isNil) {
+                if (isChannel.not) {
+                    ctl = track[\controllers][slot];
+                    index = ctl.info.findParamIndex(paramName.asSymbol);
+                };
+                if (isChannel.not and: { index.isNil }) {
                     ("poptart: setParamEnv: plugin has no parameter named '" ++ paramName
                         ++ "' (see getParams / the params panel for real names)").warn;
                 } {
-                    if ((lo < 0) or: { hi > 1 }) {
+                    envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+                    existing = track[\envs][envKey];
+                    if (existing.isNil and: { isChannel.not } and: { (lo < 0) or: { hi > 1 } }) {
                         ("poptart: env range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
                             ++ "' is outside the normalized 0..1 VST parameter range and will pin -"
                             + "use .range(0.2, 0.9)-style values until per-plugin calibration exists").warn;
                     };
-                    envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
-                    existing = track[\envs][envKey];
                     if (existing.notNil) {
                         existing[\synth].set(\atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi);
                     } {
@@ -568,7 +597,7 @@ OSCdef(\poptartSetParamEnv, { |msg|
                             [\out, bus, \atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi,
                              \gate, if (track[\held] > 0) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
-                        ctl.map(index, bus);
+                        if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                         track[\envs][envKey] = (synth: envSynth, bus: bus, index: index);
                     };
                 };
@@ -577,13 +606,20 @@ OSCdef(\poptartSetParamEnv, { |msg|
     };
 }, '/poptart/setParamEnv');
 
+// Unmapping a channel control (slot -1) also resets it to its neutral value - map(ctl, -1)
+// removes the bus mapping but leaves the control at whatever the modulator last wrote.
 OSCdef(\poptartClearParamEnv, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
     var track = tracks[key];
     var envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
     var existing = if (track.isKindOf(Event)) { track[\envs][envKey] };
     if (existing.notNil) {
-        track[\controllers][slot].unmap(existing[\index]);
+        if (slot == -1) {
+            track[\synth].map(paramName.asSymbol, -1);
+            track[\synth].set(paramName.asSymbol, if (paramName == "gain") { 1 } { 0 });
+        } {
+            track[\controllers][slot].unmap(existing[\index]);
+        };
         existing[\synth].free;
         existing[\bus].free;
         track[\envs].removeAt(envKey);
@@ -596,7 +632,12 @@ OSCdef(\poptartClearParamLFO, { |msg|
     var lfoKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
     var existing = if (track.isKindOf(Event)) { track[\lfos][lfoKey] };
     if (existing.notNil) {
-        track[\controllers][slot].unmap(existing[\index]);
+        if (slot == -1) {
+            track[\synth].map(paramName.asSymbol, -1);
+            track[\synth].set(paramName.asSymbol, if (paramName == "gain") { 1 } { 0 });
+        } {
+            track[\controllers][slot].unmap(existing[\index]);
+        };
         existing[\synth].free;
         existing[\bus].free;
         track[\lfos].removeAt(lfoKey);

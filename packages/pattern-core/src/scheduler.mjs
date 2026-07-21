@@ -17,8 +17,16 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
+import { sampleBound } from './signal.mjs';
+
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
 const POLL_INTERVAL_MS = 30;
+
+// Track-level channel-strip controls (Sig#gain/#pan) ride the same setParam/setParamLFO/
+// setParamEnv engine calls as plugin parameters, addressed with this pseudo-slot instead of a
+// chain index - the engine maps them onto the track's own output stage rather than a VST param.
+const CHANNEL_SLOT = -1;
+const CHANNEL_DEFAULTS = { gain: 1, pan: 0 };
 
 /**
  * The shared clock: one Transport is owned by the host (web-app server) and read by every
@@ -102,7 +110,16 @@ export class Scheduler {
     this._scheduledUntilCycle = 0;
     this._timer = null;
     this._running = false;
-    this._activeModulators = new Map(); // "slot name" -> { slot, name, kind: 'lfo'|'env' }
+    this._activeModulators = new Map(); // "slot name" -> { slot, name, sig, kind: 'lfo'|'env', dynamic }
+    this._prevChannelNames = []; // channel controls set by the previous pattern, for default-reset
+  }
+
+  /** Every control signal the pattern carries: plugin params by slot, channel strip as slot -1. */
+  _controlEntries(sig) {
+    return [
+      ...Object.entries(sig.paramSignals).map(([name, s]) => ({ slot: sig.paramSlots[name], name, sig: s })),
+      ...Object.entries(sig.channel).map(([name, s]) => ({ slot: CHANNEL_SLOT, name, sig: s })),
+    ];
   }
 
   setPattern(sig) {
@@ -114,17 +131,23 @@ export class Scheduler {
     }
     sig.fxChain.forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
 
+    // A channel control the new pattern dropped (`.gain(...)` deleted mid-session) snaps back
+    // to its default - unlike plugin params, these have an obvious neutral value.
+    for (const name of this._prevChannelNames) {
+      if (!(name in sig.channel)) {
+        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, this.engine.getTime());
+      }
+    }
+    this._prevChannelNames = Object.keys(sig.channel);
+
     // Tier-2 modulators are persistent engine-side synths mapped onto the VST parameter - they
     // outlive the pattern that created them, so a re-eval must explicitly clear any that the new
     // pattern no longer carries (or whose kind changed, e.g. env -> LFO, or dropped to a Tier-1
     // polled signal, which a leftover bus mapping would fight with).
     const nextModulators = new Map();
-    for (const [name, paramSig] of Object.entries(sig.paramSignals)) {
-      const kind = paramSig.lfoIR ? 'lfo' : paramSig.envIR ? 'env' : null;
-      if (kind) {
-        const slot = sig.paramSlots[name];
-        nextModulators.set(`${slot} ${name}`, { slot, name, kind });
-      }
+    for (const c of this._controlEntries(sig)) {
+      const kind = c.sig.lfoIR ? 'lfo' : c.sig.envIR ? 'env' : null;
+      if (kind) nextModulators.set(`${c.slot} ${c.name}`, { ...c, kind });
     }
     for (const [key, prev] of this._activeModulators) {
       if (nextModulators.get(key)?.kind === prev.kind) continue; // survives - updated in place below
@@ -136,14 +159,37 @@ export class Scheduler {
     }
     this._activeModulators = nextModulators;
 
-    for (const [name, paramSig] of Object.entries(sig.paramSignals)) {
-      if (paramSig.lfoIR) {
-        this.engine.setParamLFO(this.trackId, sig.paramSlots[name], name, paramSig.lfoIR);
-      } else if (paramSig.envIR) {
-        // Same set-once Tier-2 contract as LFOs: the engine gates its native EnvGen from the
-        // track's own note on/offs, so nothing further to do here per tick.
-        this.engine.setParamEnv(this.trackId, sig.paramSlots[name], name, paramSig.envIR);
-      }
+    // Same set-once Tier-2 contract as always: the engine runs the modulator natively from here
+    // on. The one exception is signal-valued .range() bounds, which _tick re-resolves and
+    // re-sends (an in-place engine-side update - phase/gate state is preserved).
+    const nowSec = this.engine.getTime();
+    for (const m of this._activeModulators.values()) this._sendModulator(m, nowSec, true);
+  }
+
+  /**
+   * Sends a Tier-2 modulator's IR with any signal-valued bounds resolved to numbers at
+   * `nowSec`. After the initial send this only re-sends when a bound actually moved (the
+   * engine updates the running synth's lo/hi in place, so the modulator stays native and
+   * phase-continuous while its range wanders).
+   */
+  _sendModulator(m, nowSec, initial = false) {
+    const ir = m.sig.lfoIR ?? m.sig.envIR;
+    m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number';
+    const cps = this.transport.cps;
+    const pos = this.transport.cycleAt(nowSec);
+    // A resting signal bound (a mini-string bound mid-`~`) holds the last sent value; on the
+    // very first send there's nothing to hold, so fall back to the unipolar default.
+    const lo = sampleBound(ir.min, nowSec, cps, pos) ?? (initial ? 0 : null);
+    const hi = sampleBound(ir.max, nowSec, cps, pos) ?? (initial ? 1 : null);
+    if (lo == null || hi == null) return;
+    if (!initial && lo === m.lastLo && hi === m.lastHi) return;
+    m.lastLo = lo;
+    m.lastHi = hi;
+    const resolved = m.dynamic ? { ...ir, min: lo, max: hi } : ir;
+    if (m.kind === 'lfo') {
+      this.engine.setParamLFO(this.trackId, m.slot, m.name, resolved);
+    } else {
+      this.engine.setParamEnv(this.trackId, m.slot, m.name, resolved);
     }
   }
 
@@ -169,6 +215,9 @@ export class Scheduler {
     this._scheduledUntilCycle = targetCycle;
 
     this._pollGenericParams(nowSec);
+    for (const m of this._activeModulators.values()) {
+      if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
+    }
   }
 
   _scheduleNoteEdges(fromCycle, toCycle) {
@@ -230,12 +279,11 @@ export class Scheduler {
   }
 
   _pollGenericParams(nowSec) {
-    for (const [name, sig] of Object.entries(this.pattern.paramSignals)) {
-      if (sig.lfoIR || sig.envIR) continue; // native Tier 2 already owns this, set once in setPattern()
-      const slot = this.pattern.paramSlots[name];
-      const value = sig.sample(nowSec, this.transport.cps, this.transport.cycleAt(nowSec));
+    for (const c of this._controlEntries(this.pattern)) {
+      if (c.sig.lfoIR || c.sig.envIR) continue; // native Tier 2 already owns this, set once in setPattern()
+      const value = c.sig.sample(nowSec, this.transport.cps, this.transport.cycleAt(nowSec));
       if (typeof value === 'number') {
-        this.engine.setParam(this.trackId, slot, name, value, nowSec + DEFAULT_LOOKAHEAD_SEC);
+        this.engine.setParam(this.trackId, c.slot, c.name, value, nowSec + DEFAULT_LOOKAHEAD_SEC);
       }
     }
   }

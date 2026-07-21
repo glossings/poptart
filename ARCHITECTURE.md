@@ -154,7 +154,14 @@ all**:
   truthy, switching on cond's step grid). Linear ops (`mul/add/sub/div`) with a plain-number
   operand on a Tier-2 LFO/env rewrite its `min`/`max` symbolically, so it *stays* a native
   modulator; non-linear ops demote an LFO to Tier-1 polling and are an error on `env()` (whose
-  value only exists engine-side). web-app's eval additionally extends `String.prototype` with
+  value only exists engine-side). `.range()` always accepts signal-valued bounds (it's just
+  `.mul(max - min).add(min)` over a unipolar 0..1 signal): on a Tier-2 LFO/env the bound
+  signals stay in the IR and the scheduler polls only them, re-sending lo/hi as in-place
+  updates to the running native modulator - so even `env()` and note-synced `lfo()` shapes
+  take signal bounds without leaving the fast path. `Sig#gain`/`Sig#pan` are track-level
+  channel-strip controls (gain 1 = unity, post-chain; pan -1..1) accepting all the same value
+  kinds - engine-side they address pseudo-slot -1, the track synth's own control inputs,
+  mapped/set exactly like VST params. web-app's eval additionally extends `String.prototype` with
   these methods so `"0 0.5 1 0.3".gte(0.5)` works directly, Strudel-style.
 - **`src/scheduler.mjs`** — `Scheduler`, a lookahead clock in the same spirit as
   Tidal/SuperDirt's "compute absolute deadlines slightly ahead of playback" model, just
@@ -318,7 +325,8 @@ patch shares as a plain URL and opening a shared link restores the code.
   also ships a VST3, so this hasn't cost anything yet.
 - **Sampler** (`s("pack")` patterns): the division of labor is Node-heavy on purpose. Node
   (`samples.js` + `OscEngine#playSample`) owns pack discovery (folder under
-  `~/.poptart/samples` / `POPTART_SAMPLES_DIR`, filename order), WAV parsing and transient
+  `~/Downloads/gsamps_for_poptart`, overridable via `POPTART_SAMPLES_DIR`, with the legacy
+  `~/.poptart/samples` as fallback when the default folder is missing; filename order), WAV parsing and transient
   detection for `.slice()` (energy-flux onset detector; WAV-only, non-WAV files just have no
   slices), and all the per-event math - `fit` (repitch so the region lasts N cycles, N
   defaulting to the nearest power of 2 of its natural length), slice→begin/end resolution,
@@ -387,9 +395,10 @@ Not yet done, in rough priority order for a first real jam session:
    them. Still to do: a UI for authoring unit mappings from `getParams` output, and
    auto-calibration (probing a parameter's normalized↔display curve by reading value strings
    back from the plugin) so ranges don't have to be guessed per plugin.
-5. Per-track gain/pan and a proper master bus with metering in the UI (label-level mute/solo
-   exists - `_name:` / `nameS:` - but it works by not scheduling notes, not by a gain stage;
-   note that a Tier-2 LFO on a muted track keeps modulating its silent plugin, by design).
+5. A proper master bus with metering in the UI. (Per-track `.gain()`/`.pan()` exist - a
+   post-chain channel strip on each track synth, signal-modulatable via pseudo-slot -1.
+   Label-level mute/solo still works by not scheduling notes, not by the gain stage; a Tier-2
+   LFO on a muted track keeps modulating its silent plugin, by design.)
 6. Persisting a "rack" (which plugins + mappings are loaded) alongside a saved pattern file.
 7. Native perlin/noise modulation, if Tier-1 polling proves audibly stepped in practice.
 8. Mini-notation gaps if they turn out to matter in practice: polymeter (`{a b, c d}`),

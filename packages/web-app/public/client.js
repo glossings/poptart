@@ -35,6 +35,7 @@ Promise.all([
     labelsMod = l;
     shapeMod = s;
     initLfoEditor();
+    updateMutedDim();
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
 
@@ -72,7 +73,7 @@ let knownPlugins = [];
 
 const BUILDERS = ['n', 'note', 'mini', 's', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'setbpm'];
 const METHODS = [
-  'scale', 's', 'fx', 'param', 'range', 'fast', 'rate', 'phase', 'curve',
+  'scale', 's', 'fx', 'param', 'gain', 'pan', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
   'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold',
 ];
@@ -145,7 +146,34 @@ cm.on('change', () => {
   hashTimer = setTimeout(() => {
     history.replaceState(null, '', '#' + encodeCodeHash(cm.getValue()));
   }, 400);
+  clearTimeout(mutedDimTimer);
+  mutedDimTimer = setTimeout(updateMutedDim, 150);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Muted-code dimming: blocks that won't play - muted (`_name:`) or not soloed while another
+// block is (`Sname:`) - render in the comment color, no syntax highlighting, so what's actually
+// sounding is obvious at a glance. Recomputed straight from the buffer text on every edit
+// (mute/solo are just label spellings), no eval needed. Explicit `//` comments already get the
+// same treatment from the syntax mode itself.
+// ---------------------------------------------------------------------------------------------
+
+let mutedDimTimer = null;
+let mutedDimMarks = [];
+
+function updateMutedDim() {
+  if (!labelsMod) return;
+  for (const mk of mutedDimMarks) mk.clear();
+  mutedDimMarks = [];
+  const blocks = labelsMod.splitLabeledBlocks(cm.getValue());
+  const anySolo = blocks.some((b) => b.soloed && !b.muted);
+  for (const b of blocks) {
+    if (!b.muted && !(anySolo && !b.soloed)) continue;
+    mutedDimMarks.push(
+      cm.markText(cm.posFromIndex(b.start), cm.posFromIndex(b.end), { className: 'cm-muted-code' }),
+    );
+  }
+}
 
 // Rank case-insensitively: prefix matches first, then substring matches, alphabetical within
 // each group. Used for params and plugin names alike.
@@ -579,6 +607,30 @@ function clearPatternRegions() {
   patternRegions = [];
 }
 
+// Blanks out // and /* */ comments (string-aware, offsets preserved) so commented-out code
+// never gets playback highlighting - a `// .param("x", "0 1")` line isn't playing.
+function maskComments(code) {
+  const out = code.split('');
+  let inStr = null;
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if (inStr) {
+      if (ch === '\\') i++;
+      else if (ch === inStr) inStr = null;
+    } else if (ch === '"' || ch === "'") {
+      inStr = ch;
+    } else if (ch === '/' && code[i + 1] === '/') {
+      while (i < code.length && code[i] !== '\n') out[i++] = ' ';
+    } else if (ch === '/' && code[i + 1] === '*') {
+      const close = code.indexOf('*/', i + 2);
+      const end = close === -1 ? code.length : close + 2;
+      for (; i < end; i++) if (code[i] !== '\n') out[i] = ' ';
+      i--;
+    }
+  }
+  return out.join('');
+}
+
 function findStringLiterals(code) {
   const out = [];
   const re = /(["'])((?:\\.|(?!\1).)*?)\1/g;
@@ -607,10 +659,11 @@ function isPatternContext(code, lit) {
 function setupHighlighting(code, tracks) {
   clearPatternRegions();
   if (!miniMod) return;
+  const masked = maskComments(code); // same offsets, comments blanked
   const activeRanges = tracks.filter((t) => t.active).map((t) => [t.start, t.end]);
-  for (const lit of findStringLiterals(code)) {
+  for (const lit of findStringLiterals(masked)) {
     if (!activeRanges.some(([a, b]) => lit.index >= a && lit.index <= b)) continue;
-    if (!isPatternContext(code, lit)) continue;
+    if (!isPatternContext(masked, lit)) continue;
     let ast;
     try {
       ast = miniMod.parseMini(lit.raw);
