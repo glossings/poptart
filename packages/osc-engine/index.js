@@ -60,6 +60,10 @@ class OscEngine {
     // pack name -> { status: 'loading'|'ready'|'error', files: [{ path, duration, channels, slices }] }
     this._packs = new Map();
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
+    // Live CC feed callback, (device, channel 1-16, cc, value 0..1) - set by the host (web-app
+    // points it at pattern-core's live-value store). Fired for every /poptart/midiIn message
+    // once MIDI is enabled engine-side.
+    this.onMidiIn = null;
   }
 
   version() {
@@ -416,6 +420,36 @@ class OscEngine {
     this._send('/poptart/clearParamEnv', [trackId, slotIndex, paramName]);
   }
 
+  // --- MIDI input (see the "live MIDI input" section of sc/poptart.scd) ---
+
+  // Idempotent: sclang initializes CoreMIDI and starts forwarding CC events back as
+  // /poptart/midiIn (consumed via onMidiIn above). The native paths below enable MIDI on their
+  // own; this exists for patterns whose only MIDI use is Tier-1 (a cc signal inside arithmetic),
+  // which is sampled Node-side and would otherwise never get its live feed.
+  enableMidi() {
+    this._send('/poptart/midiInit', []);
+  }
+
+  // Route a device's live performance stream (notes/velocity/bend/aftertouch/raw CC) to the
+  // track's instrument, entirely engine-side - live playing never goes through the lookahead
+  // scheduler. channel 0 = all channels. Device names match by case-insensitive substring.
+  setMidiNotes(trackId, device, channel = 0) {
+    this._send('/poptart/midiRoute', [trackId, device, channel]);
+  }
+  clearMidiNotes(trackId) {
+    this._send('/poptart/clearMidiRoute', [trackId]);
+  }
+
+  // ir: { device, cc, channel (null = all), min, max }. sclang registers a MIDIdef that writes
+  // the scaled value to a control bus mapped onto the parameter - the CC sibling of
+  // setParamLFO's mechanism, zero per-event traffic from Node and no poll latency.
+  setParamCC(trackId, slotIndex, paramName, ir) {
+    this._send('/poptart/setParamCC', [trackId, slotIndex, paramName, ir.device, ir.cc, ir.channel ?? 0, ir.min, ir.max]);
+  }
+  clearParamCC(trackId, slotIndex, paramName) {
+    this._send('/poptart/clearParamCC', [trackId, slotIndex, paramName]);
+  }
+
   // --- internals ---
 
   _latency(targetTime) {
@@ -443,6 +477,12 @@ class OscEngine {
   }
 
   _handleMessage(msg) {
+    if (msg.address === '/poptart/midiIn') {
+      // Live CC feed for Tier-1 signal sampling: [deviceName, channel (1-16), cc, value 0..1].
+      const [device, channel, cc, value] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onMidiIn === 'function') this.onMidiIn(String(device), Number(channel), Number(cc), Number(value));
+      return;
+    }
     if (!msg.address.endsWith('.reply')) return;
 
     const args = msg.args ?? [];

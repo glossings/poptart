@@ -98,6 +98,18 @@ class MappedEngine {
     this.engine.clearParamEnv(trackId, slot, name);
   }
 
+  setParamCC(trackId, slot, name, ir) {
+    const spec = this._spec(trackId, slot, name);
+    const mapped = spec
+      ? { ...ir, min: toNormalized(ir.min, spec), max: toNormalized(ir.max, spec) }
+      : ir;
+    this.engine.setParamCC(trackId, slot, name, mapped);
+  }
+
+  clearParamCC(trackId, slot, name) {
+    this.engine.clearParamCC(trackId, slot, name);
+  }
+
   // --- pass-throughs ---
   start(...a) { return this.engine.start(...a); }
   stop(...a) { return this.engine.stop(...a); }
@@ -116,6 +128,9 @@ class MappedEngine {
   noteOff(...a) { return this.engine.noteOff(...a); }
   playSample(...a) { return this.engine.playSample(...a); }
   record(...a) { return this.engine.record(...a); }
+  enableMidi(...a) { return this.engine.enableMidi(...a); }
+  setMidiNotes(...a) { return this.engine.setMidiNotes(...a); }
+  clearMidiNotes(...a) { return this.engine.clearMidiNotes(...a); }
 }
 
 module.exports = { MappedEngine, loadMappings, toNormalized };

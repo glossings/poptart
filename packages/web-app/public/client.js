@@ -74,7 +74,7 @@ function copyText(text, what) {
 let chainSlots = [];
 let knownPlugins = [];
 
-const BUILDERS = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'setbpm'];
+const BUILDERS = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm'];
 const METHODS = [
   'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'vel', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',

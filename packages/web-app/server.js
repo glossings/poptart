@@ -61,6 +61,9 @@ async function init() {
   if (engine) {
     mappedEngine = new MappedEngine(engine);
     transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS });
+    // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
+    // live-value store - what a Tier-1 midicc() signal samples.
+    engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
   }
 }
 
@@ -86,7 +89,7 @@ function extendStringPrototype(core) {
   }
 }
 
-const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
+const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys'];
 
 // What a `setbpm(...)` block evaluates to - lets /api/evaluate tell tempo-only blocks apart
 // from actual patterns (blocks must otherwise evaluate to a Sig).
@@ -101,12 +104,17 @@ function setbpm(value) {
 }
 
 // One block of editor code (see labels.mjs) -> a Sig (or TEMPO_BLOCK), evaluated with the
-// builders in scope.
+// builders in scope. Evaluated via direct eval rather than wrapping the code in `return (...)`
+// so a block may contain *statements*, not just one expression - `const cc = midicc("Twister")`
+// on one line, the pattern using cc(...) as the last line. eval's completion value (the last
+// statement's value) is the block's result, so plain single-expression blocks behave exactly
+// as before. Each block is its own scope: a const defined in one block isn't visible in
+// another, so declare the device in each block that uses it.
 function buildPattern(code) {
   const names = [...BUILDER_NAMES, 'setbpm'];
   // eslint-disable-next-line no-new-func
-  const build = new Function(...names, `return (\n${code}\n);`);
-  const pattern = build(...BUILDER_NAMES.map((name) => patternCore[name]), setbpm);
+  const build = new Function(...names, '__blockCode', 'return eval(__blockCode)');
+  const pattern = build(...BUILDER_NAMES.map((name) => patternCore[name]), setbpm, code);
   if (pattern !== TEMPO_BLOCK && !(pattern instanceof patternCore.Sig)) {
     throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
   }
@@ -221,6 +229,12 @@ const routes = {
       sch.setPattern(b.sig);
       sch.start();
     }
+
+    // Any midicc()/midikeys() seen at eval time needs MIDI input running engine-side. The
+    // native paths (setParamCC/setMidiNotes) enable it themselves; this covers Tier-1-only
+    // use (a cc signal inside arithmetic), whose JS-side sampling needs the /poptart/midiIn
+    // feed. Idempotent, so re-sending every eval is fine.
+    if (patternCore.midiInUse()) engine.enableMidi();
 
     return {
       status: 200,

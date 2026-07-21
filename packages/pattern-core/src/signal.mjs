@@ -11,6 +11,7 @@
 import { parseMini, getStepsForCycle } from './mini.mjs';
 import { parseNoteValue, degreeToMidi } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
+import { latestCC, registerMidiDevice } from './midi.mjs';
 
 /**
  * @typedef {Object} Step
@@ -35,6 +36,7 @@ export class Sig {
     this.stepsForCycle = opts.stepsForCycle ?? null;
     this.lfoIR = opts.lfoIR ?? null; // present only for the sine/saw/tri/square builders below
     this.envIR = opts.envIR ?? null; // present only for the env() builder below
+    this.ccIR = opts.ccIR ?? null; // present only for midicc() signals (see midicc below)
 
     // Track-building metadata, threaded through by .synth()/.fx()/.param() etc. Every control
     // method returns a NEW Sig (same sample/stepsForCycle) with this metadata carried forward -
@@ -51,6 +53,9 @@ export class Sig {
     // Sampler config, present only for s("pack") patterns: { index, begin, end, loop, speed,
     // stretch, fit, slice }, each a Sig (sampled per event onset) or absent for its default.
     this.sampler = opts.sampler ?? null;
+    // Live MIDI note routing, from midikeys(): { device, channel (null = all) }. The scheduler
+    // hands this to the engine, which plays the device's note stream on this track directly.
+    this.midiNotes = opts.midiNotes ?? null;
   }
 
   _clone(overrides) {
@@ -58,6 +63,7 @@ export class Sig {
       stepsForCycle: this.stepsForCycle,
       lfoIR: this.lfoIR,
       envIR: this.envIR,
+      ccIR: this.ccIR,
       ...this._meta(),
       ...overrides,
     });
@@ -74,6 +80,7 @@ export class Sig {
       velSig: this.velSig,
       sampler: this.sampler,
       slotStates: this.slotStates,
+      midiNotes: this.midiNotes,
     };
   }
 
@@ -120,10 +127,12 @@ export class Sig {
     if (typeof min === 'number' && typeof max === 'number') {
       if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min, max });
       if (this.envIR) return withEnvIR({ ...this.envIR, min, max });
+      if (this.ccIR) return withCcIR({ ...this.ccIR, min, max });
       return this.mapValue((v) => min + v * (max - min));
     }
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min: toBound(min), max: toBound(max) });
     if (this.envIR) return withEnvIR({ ...this.envIR, min: toBound(min), max: toBound(max) });
+    if (this.ccIR) return withCcIR({ ...this.ccIR, min: toBound(min), max: toBound(max) });
     const minSig = toSignal(min);
     return this.mul(toSignal(max).sub(minSig)).add(minSig);
   }
@@ -236,6 +245,7 @@ export class Sig {
       const mapBound = (b) => (typeof b === 'number' ? fn(b, other) : b.mapValue((v) => fn(Number(v), other)));
       if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min: mapBound(this.lfoIR.min), max: mapBound(this.lfoIR.max) });
       if (this.envIR) return withEnvIR({ ...this.envIR, min: mapBound(this.envIR.min), max: mapBound(this.envIR.max) });
+      if (this.ccIR) return withCcIR({ ...this.ccIR, min: mapBound(this.ccIR.min), max: mapBound(this.ccIR.max) });
     }
     this._assertSampleable(op);
     const otherSig = toSignal(other);
@@ -442,8 +452,9 @@ export class Sig {
       return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
     }
     // Synth track: the note signal becomes the pattern itself; everything chained so far
-    // (instrument, fx, params, channel strip...) carries over.
-    return sig._clone(this._meta());
+    // (instrument, fx, params, channel strip...) carries over. A live source keeps its own
+    // midiNotes (synth("X").note(kb(1)) - the chain's meta would otherwise null it out).
+    return sig._clone({ ...this._meta(), midiNotes: sig.midiNotes ?? this.midiNotes });
   }
 }
 
@@ -488,6 +499,9 @@ function toSignal(value) {
   if (value instanceof Sig) return value;
   if (typeof value === 'number') return new Sig(() => value);
   if (typeof value === 'string') return mini(value);
+  if (typeof value === 'function') {
+    throw new Error('[signal] a midicc()/midikeys() device is a function - call it first: cc(12, 1), kb(1)');
+  }
   throw new Error(`[signal] don't know how to turn ${JSON.stringify(value)} into a signal`);
 }
 
@@ -699,4 +713,73 @@ function withEnvIR(ir) {
 export function env(opts = {}) {
   const { attack = 0.01, decay = 0.1, sustain = 0.7, release = 0.2, curve = -4 } = opts;
   return withEnvIR({ attack, decay, sustain, release, curve, min: 0, max: 1 });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Live MIDI input. midicc() signals are symbolic like the LFO builders (`ccIR`): assigned to a
+// control they compile to a native engine-side binding (MIDI event -> control bus -> parameter,
+// see setParamCC in the engine), so a hardware knob drives its parameter with no polling and no
+// scheduler latency. Their JS-side sample() reads the host-fed live-value store (midi.mjs), so
+// a cc signal demoted into Tier-1 (used inside arithmetic, .hold(), a signal-valued bound...)
+// still works - at poll-rate latency instead of the native path's.
+// ---------------------------------------------------------------------------------------------
+
+function withCcIR(ir) {
+  return new Sig(
+    (t, cps, pos) => {
+      const v = latestCC(ir.device, ir.cc, ir.channel);
+      if (v == null) return null; // nothing received yet - rest, so the param holds its value
+      const lo = sampleBound(ir.min, t, cps, pos) ?? 0;
+      const hi = sampleBound(ir.max, t, cps, pos) ?? 1;
+      return lo + v * (hi - lo);
+    },
+    { ccIR: ir },
+  );
+}
+
+function assertMidiDevice(builder, device) {
+  if (typeof device !== 'string' || !device.trim()) {
+    throw new Error(`[signal] ${builder}(...) takes a MIDI device name, e.g. ${builder}("Midi Fighter Twister") - names match connected devices by case-insensitive substring`);
+  }
+}
+
+/**
+ * `const cc = midicc("Midi Fighter Twister")` - a MIDI controller as a signal source. The
+ * result is a function of (ccNumber, channel): `cc(12, 1)` is the continuous 0..1 signal of
+ * CC 12 on channel 1; omit the channel to aggregate all 16 (last event on any channel wins).
+ * `.range(lo, hi)` rescales it (signal-valued bounds welcome, as with LFOs), and linear math
+ * (.mul/.add/...) rewrites the bounds symbolically so the binding stays native.
+ */
+export function midicc(device) {
+  assertMidiDevice('midicc', device);
+  registerMidiDevice(device);
+  return (cc, channel = null) => {
+    if (typeof cc !== 'number' || Number.isNaN(cc)) {
+      throw new Error('[signal] midicc: the device function takes (ccNumber, channel?) - e.g. cc(12, 1); channel omitted listens on all channels');
+    }
+    if (channel != null && !(channel >= 1 && channel <= 16)) {
+      throw new Error('[signal] midicc: channel must be 1..16 (omit it to aggregate all channels)');
+    }
+    return withCcIR({ device, cc, channel, min: 0, max: 1 });
+  };
+}
+
+/**
+ * `const kb = midikeys("Arturia KeyStep 32")` - a MIDI keyboard as a live note source. The
+ * result is a function of (channel): `kb(1).synth("Serum 2")` plays Serum live from channel 1
+ * (omit the channel for all 16). The full performance stream - notes with velocity, pitch
+ * bend, aftertouch (channel and poly), and raw CCs (mod wheel, sustain) - is routed to the
+ * track's instrument entirely engine-side, bypassing the lookahead scheduler, so latency is
+ * the MIDI driver's rather than the pattern clock's. Live notes gate env() modulators and
+ * retrigger note-synced lfo() shapes exactly like pattern notes do.
+ */
+export function midikeys(device) {
+  assertMidiDevice('midikeys', device);
+  registerMidiDevice(device);
+  return (channel = null) => {
+    if (channel != null && !(channel >= 1 && channel <= 16)) {
+      throw new Error('[signal] midikeys: channel must be 1..16 (omit it to listen on all channels)');
+    }
+    return new Sig(() => null, { midiNotes: { device, channel } });
+  };
 }

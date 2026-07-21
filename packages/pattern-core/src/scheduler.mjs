@@ -1,6 +1,7 @@
 // Bridges a Sig (see signal.mjs) to an "engine" - any object implementing the interface used
 // below (createTrack/loadInstrument/loadEffect/noteOn/noteOff/playSample/setParam/setParamLFO/
-// clearParamLFO/setParamEnv/clearParamEnv/getTime).
+// clearParamLFO/setParamEnv/clearParamEnv/setParamCC/clearParamCC/setMidiNotes/clearMidiNotes/
+// getTime).
 // This class is engine-agnostic by design: it's been driven by an in-process JUCE addon and is
 // now driven by an OSC-based engine talking to SuperCollider (see @poptart/osc-engine) without
 // any change here. Two independent mechanisms run side by side, matching the two ways a Sig can
@@ -121,7 +122,8 @@ export class Scheduler {
     this._scheduledUntilCycle = 0;
     this._timer = null;
     this._running = false;
-    this._activeModulators = new Map(); // "slot name" -> { slot, name, sig, kind: 'lfo'|'env', dynamic }
+    this._activeModulators = new Map(); // "slot name" -> { slot, name, sig, kind: 'lfo'|'env'|'cc', dynamic }
+    this._midiRouted = false; // live midikeys() route currently held engine-side
     this._prevChannelNames = []; // channel controls set by the previous pattern, for default-reset
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
   }
@@ -142,6 +144,16 @@ export class Scheduler {
       this.engine.loadInstrument(this.trackId, sig.instrument);
     }
     sig.fxChain.forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
+
+    // Live MIDI keys (midikeys(...)): the device's note stream plays this track engine-side -
+    // live input never goes through the lookahead clock, so latency stays at the MIDI driver's.
+    // Idempotent re-sends on re-eval; dropping the midikeys() source tears the route down.
+    if (sig.midiNotes) {
+      this.engine.setMidiNotes(this.trackId, sig.midiNotes.device, sig.midiNotes.channel ?? 0);
+    } else if (this._midiRouted) {
+      this.engine.clearMidiNotes(this.trackId);
+    }
+    this._midiRouted = !!sig.midiNotes;
 
     // Captured plugin state (synth/fx's `{ state }` argument). Sent only when the state string
     // (or the plugin occupying the slot) actually changed - a livecoding re-eval must not make
@@ -173,16 +185,13 @@ export class Scheduler {
     // polled signal, which a leftover bus mapping would fight with).
     const nextModulators = new Map();
     for (const c of this._controlEntries(sig)) {
-      const kind = c.sig.lfoIR ? 'lfo' : c.sig.envIR ? 'env' : null;
+      const kind = c.sig.lfoIR ? 'lfo' : c.sig.envIR ? 'env' : c.sig.ccIR ? 'cc' : null;
       if (kind) nextModulators.set(`${c.slot} ${c.name}`, { ...c, kind });
     }
+    const clears = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC' };
     for (const [key, prev] of this._activeModulators) {
       if (nextModulators.get(key)?.kind === prev.kind) continue; // survives - updated in place below
-      if (prev.kind === 'lfo') {
-        this.engine.clearParamLFO(this.trackId, prev.slot, prev.name);
-      } else {
-        this.engine.clearParamEnv(this.trackId, prev.slot, prev.name);
-      }
+      this.engine[clears[prev.kind]](this.trackId, prev.slot, prev.name);
     }
     this._activeModulators = nextModulators;
 
@@ -200,7 +209,7 @@ export class Scheduler {
    * phase-continuous while its range wanders).
    */
   _sendModulator(m, nowSec, initial = false) {
-    const ir = m.sig.lfoIR ?? m.sig.envIR;
+    const ir = m.sig.lfoIR ?? m.sig.envIR ?? m.sig.ccIR;
     m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number';
     const cps = this.transport.cps;
     const pos = this.transport.cycleAt(nowSec);
@@ -215,8 +224,10 @@ export class Scheduler {
     const resolved = m.dynamic ? { ...ir, min: lo, max: hi } : ir;
     if (m.kind === 'lfo') {
       this.engine.setParamLFO(this.trackId, m.slot, m.name, resolved);
-    } else {
+    } else if (m.kind === 'env') {
       this.engine.setParamEnv(this.trackId, m.slot, m.name, resolved);
+    } else {
+      this.engine.setParamCC(this.trackId, m.slot, m.name, resolved);
     }
   }
 
@@ -231,6 +242,13 @@ export class Scheduler {
     this._running = false;
     if (this._timer) clearInterval(this._timer);
     this._timer = null;
+    // A live midikeys() route plays notes engine-side with no scheduler tick involved, so
+    // stopping the track (mute, stop-all, label removal) must tear it down explicitly or the
+    // keyboard keeps sounding. setPattern re-establishes it on the next eval.
+    if (this._midiRouted) {
+      this.engine.clearMidiNotes(this.trackId);
+      this._midiRouted = false;
+    }
   }
 
   _tick() {
@@ -323,7 +341,7 @@ export class Scheduler {
 
   _pollGenericParams(nowSec) {
     for (const c of this._controlEntries(this.pattern)) {
-      if (c.sig.lfoIR || c.sig.envIR) continue; // native Tier 2 already owns this, set once in setPattern()
+      if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // native Tier 2 already owns this, set once in setPattern()
       const value = c.sig.sample(nowSec, this.transport.cps, this.transport.cycleAt(nowSec));
       if (typeof value === 'number') {
         this.engine.setParam(this.trackId, c.slot, c.name, value, nowSec + DEFAULT_LOOKAHEAD_SEC);

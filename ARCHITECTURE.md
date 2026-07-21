@@ -143,7 +143,8 @@ all**:
   string-or-number signal, used internally whenever a control is given a plain value), and the
   continuous builders `sine`/`saw`/`tri`/`square`/`ramp`/`rand` (continuous smoothed random),
   all taking `{rate, phase}` (or a bare rate number), plus `lfo(shapeString, {rate, mode})` for
-  hand-drawn breakpoint shapes (see `shape.mjs` and "custom shapes" below). Stepped random is
+  hand-drawn breakpoint shapes (see `shape.mjs` and "custom shapes" below), and the live MIDI
+  builders `midicc`/`midikeys` (see "Live MIDI input" below). Stepped random is
   `rand(r).hold("1*8")` - `Sig#hold(trigPattern)` is a general sample-and-hold that samples any
   signal at the trigger pattern's onsets and holds between them. `Sig#scale(name)` maps
   degree values to MIDI via `notes.mjs`. `Sig#range/.fast/.rate/.phase` update an LFO's
@@ -242,6 +243,54 @@ Note *events themselves* (the top-level pattern's own `stepsForCycle`) are sched
 exact onset/offset times, same as before - only *parameter* signals go through the tiered
 continuous-modulation path, since notes are inherently discrete triggers rather than
 continuously-varying values.
+
+## Live MIDI input
+
+Two builders (`src/signal.mjs` + the live-value store in `src/midi.mjs`) bring hardware in,
+both device-addressed by case-insensitive substring of the CoreMIDI name ("Twister" matches
+"Midi Fighter Twister"); the same matching rule runs on both sides of the OSC boundary, so
+Node and sclang always agree on which controller a name means. All MIDI I/O happens in sclang
+(`MIDIClient`/`MIDIdef` - CoreMIDI is built into SuperCollider), so this added **no native Node
+dependency** - the very thing the OSC pivot was for. MIDI is initialized lazily engine-side on
+first use (any MIDI-flavored `/poptart/*` command, or `/poptart/midiInit` which web-app sends
+after an eval that mentioned a MIDI builder).
+
+- **`midicc(device)`** returns a *function* `(ccNumber, channel?) → Sig`: with
+  `const cc = midicc("Midi Fighter Twister")`, `cc(12, 1)` is the continuous 0..1 signal of
+  CC 12 on channel 1, and `cc(12)` aggregates all 16 channels (last event on any wins). Like
+  the LFO builders it's symbolic (`ccIR`, a fourth modulator kind next to lfo/env/shape):
+  assigned to `.param()`/`.gain()`/`.pan()` it compiles to a native engine-side binding
+  (`/poptart/setParamCC`: a `MIDIdef` writes each incoming value, scaled into lo..hi, straight
+  to a control bus mapped onto the parameter - same bus+map mechanism as `setParamLFO`), so a
+  hardware knob drives its parameter with no Node round-trip, no polling, and no scheduler
+  lookahead latency. `.range(lo, hi)` (signal bounds welcome) and linear math rewrite the IR
+  bounds symbolically; re-evals update lo/hi in place, rescaling the knob's last position onto
+  the new range so a `.range()` edit doesn't jump the parameter. Non-linear math (or `.hold()`
+  etc.) demotes it to Tier-1 like any signal: sclang forwards every CC to Node as
+  `/poptart/midiIn`, web-app feeds `midi.mjs`'s store, and the demoted signal samples that at
+  poll rate. Until a knob first moves, a cc signal reads as a rest (null), so parameters hold
+  their current value rather than jumping to a guess. Unit mapping applies as usual -
+  `MappedEngine` converts setParamCC bounds through `mappings/*.json` like it does LFO/env.
+- **`midikeys(device)`** returns `(channel?) → Sig`: `midikeys("Arturia KeyStep 32")(1)
+  .synth("Serum 2")` plays Serum live from channel 1 (channel omitted = all). The scheduler
+  only *arms* the route (`setMidiNotes` → `/poptart/midiRoute`); the notes themselves never
+  touch Node - sclang `MIDIdef`s forward the whole performance stream (note on/off with
+  velocity, pitch bend, channel + poly aftertouch, and raw CCs so mod wheel/sustain work) to
+  the track's instrument immediately, deliberately *not* through the timestamped-bundle path:
+  live playing wants "now", not a lookahead deadline, so latency is the MIDI driver's rather
+  than the pattern clock's. Live notes run the same held-count bookkeeping as scheduled ones,
+  so `env()` modulators gate and note-synced `lfo()` shapes retrigger from the keyboard
+  exactly like from pattern notes. Because the route plays engine-side with no scheduler tick
+  involved, `Scheduler#stop` (mute, stop-all, label removal) tears it down explicitly - with
+  CC 123 all-notes-off on every channel so a held key doesn't drone - and re-evals re-arm it.
+
+To make the `const cc = midicc(...)` idiom work, `buildPattern` (web-app) evaluates blocks via
+direct `eval` instead of wrapping them in `return (...)`: a block may now contain statements,
+and its result is the completion value (the last expression), so plain single-expression
+blocks behave exactly as before. Blocks are still separate scopes - a `const` declared in one
+block isn't visible in another, so each block declares the devices it uses. A named device
+that isn't connected warns once engine-side (listing what *is* connected) and binds nothing;
+plug it in and re-evaluate.
 
 Held events (mini-notation ties: `"73 _"`, `<a _>`, `a/2`) extend this model minimally rather
 than importing Strudel's whole/part hap machinery: the onset step's `end` may exceed 1 (the
