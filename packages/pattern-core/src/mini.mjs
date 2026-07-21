@@ -30,7 +30,12 @@ export function parseMini(str) {
   return node;
 }
 
-/** Returns this cycle's steps as `[{ start, end, value }]`, fractions of a cycle in [0,1). `value` is `null` for rests. */
+/**
+ * Returns this cycle's steps as `[{ start, end, value, loc }]`, fractions of a cycle in [0,1).
+ * `value` is `null` for rests. `loc` is the `[startChar, endChar)` range of the atom this step
+ * came from, within the original pattern string - the editor uses it to highlight the atom
+ * that's currently playing.
+ */
 export function getStepsForCycle(ast, cycleNumber) {
   return astToSteps(ast, cycleNumber);
 }
@@ -53,7 +58,7 @@ function tokenize(str) {
       continue;
     }
     if (SINGLE_CHAR_TOKENS.has(ch)) {
-      tokens.push({ type: ch, text: ch });
+      tokens.push({ type: ch, text: ch, start: i, end: i + 1 });
       i++;
       continue;
     }
@@ -64,7 +69,7 @@ function tokenize(str) {
     if (!m) {
       throw new Error(`[mini] unexpected character "${ch}" in "${str}"`);
     }
-    tokens.push({ type: 'atom', text: m[0] });
+    tokens.push({ type: 'atom', text: m[0], start: i, end: i + m[0].length });
     i += m[0].length;
   }
   return tokens;
@@ -130,14 +135,14 @@ function parseElement(tokens) {
   if (!t) throw new Error('[mini] unexpected end of pattern');
 
   if (t.type === '~') {
-    node = { type: 'atom', value: null };
+    node = { type: 'atom', value: null, loc: [t.start, t.end] };
     rest = rest.slice(1);
   } else if (t.type === '[') {
     ({ node, rest } = parseGroup(rest));
   } else if (t.type === '<') {
     ({ node, rest } = parseAngle(rest));
   } else if (t.type === 'atom') {
-    node = { type: 'atom', value: t.text };
+    node = { type: 'atom', value: t.text, loc: [t.start, t.end] };
     rest = rest.slice(1);
   } else {
     throw new Error(`[mini] unexpected token "${t.text}"`);
@@ -225,7 +230,7 @@ function parseElement(tokens) {
 function astToSteps(node, cycle) {
   switch (node.type) {
     case 'atom':
-      return node.value == null ? [] : [{ start: 0, end: 1, value: node.value }];
+      return node.value == null ? [] : [{ start: 0, end: 1, value: node.value, loc: node.loc }];
 
     case 'seq':
       return seqToSteps(node.items, cycle);
@@ -245,7 +250,7 @@ function astToSteps(node, cycle) {
       for (let i = 0; i < n; i++) {
         const innerCycle = cycle * n + i;
         for (const s of astToSteps(node.item, innerCycle)) {
-          out.push({ start: (i + s.start) / n, end: (i + s.end) / n, value: s.value });
+          out.push({ start: (i + s.start) / n, end: (i + s.end) / n, value: s.value, loc: s.loc });
         }
       }
       return out;
@@ -266,7 +271,7 @@ function astToSteps(node, cycle) {
       const hits = rotateArray(bjorklund(node.pulses, node.steps), node.rotation ?? 0);
       const out = [];
       for (let i = 0; i < hits.length; i++) {
-        if (hits[i]) out.push({ start: i / hits.length, end: (i + 1) / hits.length, value: node.item.value });
+        if (hits[i]) out.push({ start: i / hits.length, end: (i + 1) / hits.length, value: node.item.value, loc: node.item.loc });
       }
       return out;
     }
@@ -306,7 +311,7 @@ function seqToSteps(items, cycle) {
   for (const el of expanded) {
     const span = el.weight / totalWeight;
     for (const s of astToSteps(el.node, cycle)) {
-      out.push({ start: cursor + s.start * span, end: cursor + s.end * span, value: s.value });
+      out.push({ start: cursor + s.start * span, end: cursor + s.end * span, value: s.value, loc: s.loc });
     }
     cursor += span;
   }
@@ -319,7 +324,7 @@ function clipAndRescale(steps, a, b) {
     const start = Math.max(s.start, a);
     const end = Math.min(s.end, b);
     if (start >= end) continue;
-    out.push({ start: (start - a) / (b - a), end: (end - a) / (b - a), value: s.value });
+    out.push({ start: (start - a) / (b - a), end: (end - a) / (b - a), value: s.value, loc: s.loc });
   }
   return out;
 }

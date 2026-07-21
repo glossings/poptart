@@ -119,11 +119,21 @@ all**:
   polymeter (`{a b, c d}`), degrade (`?`), cycle-internal rate patterns (`a*[2 3]`), or
   pattern-valued euclid arguments - these raise a clear parse error rather than silently
   misbehaving. The entry point is `getStepsForCycle(ast, cycleNumber)`,
-  which returns that cycle's steps as plain `{start, end, value}` objects (fractions of a
-  cycle) - verified against hand-computed expectations for every operator during development,
-  including the fast/slow/alternation cycle-threading math (slow(n) requires knowing the
-  *absolute* cycle number to decide which 1/n slice of the inner pattern to show, not just a
-  0..1 phase).
+  which returns that cycle's steps as plain `{start, end, value, loc}` objects (fractions of a
+  cycle; `loc` is the atom's character range in the source string, which is what the editor's
+  live playback highlighting consumes) - verified against hand-computed expectations for every
+  operator during development, including the fast/slow/alternation cycle-threading math
+  (slow(n) requires knowing the *absolute* cycle number to decide which 1/n slice of the inner
+  pattern to show, not just a 0..1 phase). Deliberately dependency-free so the browser can
+  import it directly (served under `/pattern-core/` by web-app) and compute exactly the steps
+  the server plays.
+- **`src/labels.mjs`** — Strudel-style pattern labels: `splitLabeledBlocks(code)` splits the
+  editor buffer into blocks on column-0 `name:` / `$:` lines, with `_name:`/`name_:` marking a
+  block muted and `Sname:`/`nameS:` soloing it (if anything is soloed, only soloed blocks
+  play; mute wins over solo). Each block becomes its own engine track named after the label.
+  Unlabeled code is one implicit anonymous block, so single-expression usage is unchanged.
+  Also dependency-free and served to the browser (block boundaries scope autocomplete and
+  highlighting).
 - **`src/notes.mjs`** — note-name parsing (`"f#3"` → MIDI, `c5 = 60`) and a small hardcoded
   scale-interval table (major/minor/modes/pentatonics/blues/chromatic), so `.scale("F minor")`
   needs no tonal.js dependency. Scale name parsing splits on whitespace *or* colon, so both
@@ -131,9 +141,18 @@ all**:
 - **`src/signal.mjs`** — the `Sig` class and the public builders: `n(...)` (scale-degree,
   numeric until `.scale()` runs), `note(...)` (explicit MIDI/note-name), `mini(...)` (generic
   string-or-number signal, used internally whenever a control is given a plain value), and the
-  continuous builders `sine`/`saw`/`tri`/`square`. `Sig#scale(name)` maps degree values to MIDI
-  via `notes.mjs`. `Sig#range/.fast/.rate/.phase` update an LFO's symbolic parameters directly
-  when present (see Tier 2 below), or fall back to a generic value-mapping otherwise.
+  continuous builders `sine`/`saw`/`tri`/`square`/`ramp`/`drift` (slow smoothed random)/`sandy`
+  (stepped random), all taking `{rate, phase}` (or a bare rate number). `Sig#scale(name)` maps
+  degree values to MIDI via `notes.mjs`. `Sig#range/.fast/.rate/.phase` update an LFO's
+  symbolic parameters directly when present (see Tier 2 below), or fall back to a generic
+  value-mapping otherwise. Signals also carry arithmetic/comparison operators
+  (`.add/.sub/.mul/.div/.mod/.round/.abs/.floor/.ceil/.clamp/.gte/.gt/.lte/.lt/.eq/.neq`) with
+  structure-from-the-left semantics, and `.when(cond, fn)` (apply `fn` wherever `cond` is
+  truthy, switching on cond's step grid). Linear ops (`mul/add/sub/div`) with a plain-number
+  operand on a Tier-2 LFO/env rewrite its `min`/`max` symbolically, so it *stays* a native
+  modulator; non-linear ops demote an LFO to Tier-1 polling and are an error on `env()` (whose
+  value only exists engine-side). web-app's eval additionally extends `String.prototype` with
+  these methods so `"0 0.5 1 0.3".gte(0.5)` works directly, Strudel-style.
 - **`src/scheduler.mjs`** — `Scheduler`, a lookahead clock in the same spirit as
   Tidal/SuperDirt's "compute absolute deadlines slightly ahead of playback" model, just
   operating on `Sig`/plain step objects instead of Hap objects queried from a Pattern. Each
@@ -177,17 +196,22 @@ resolves each parameter `Sig` via one of two tiers:
   updating one in place - preserving phase across a rate/range edit (no audible glitch/reset,
   the way the old native `LFO::configure` did) isn't wired up yet, see "what's next" below.
 
-`env({attack, decay, sustain, release})` is a third modulator kind riding the same Tier-2
-mechanism: it carries a symbolic `envIR`, compiles to a native `EnvGen` (`poptart_env`
+`env({attack, decay, sustain, release, curve})` is a third modulator kind riding the same
+Tier-2 mechanism: it carries a symbolic `envIR`, compiles to a native `EnvGen` (`poptart_env`
 SynthDef) mapped to the parameter via a control bus, and is *gated by the track's own note
 on/offs* - the noteOn/noteOff handlers set the gate in the same timestamped bundle as the MIDI
 event, so envelope attacks line up sample-accurately with their notes (a held-note count keeps
 the gate open across chords; retrigger starts from the envelope's current level, so legato
-lines don't click). An envelope can't ride Tier 1 at all - its value depends on note onsets,
-which only the engine sees - so unlike LFOs there is no polling fallback.
+lines don't click). `curve` (SC convention: negative = scoop, 0 = linear, positive = bulge;
+also settable via `.curve(c)`) is a plain control input into the Env, so re-evals update it in
+place. An envelope can't ride Tier 1 at all - its value depends on note onsets, which only the
+engine sees - so unlike LFOs there is no polling fallback.
 
-Perlin/noise-shaped modulation isn't implemented yet; when it is, it'll ride Tier 1 until (if)
-it's common enough to justify a native equivalent.
+Random-shaped modulation is covered by `drift` (smoothed) and `sandy` (stepped), which are
+full Tier-2 citizens (`LFDNoise3.kr`/`LFDNoise0.kr` in scsynth). Their JS-side `sample()` uses
+deterministic hash noise instead, so Tier-1 uses (e.g. inside an arithmetic expression) are
+reproducible - the JS and native values differ (both random), only the rate/range contract is
+shared.
 
 Note *events themselves* (the top-level pattern's own `stepsForCycle`) are scheduled with
 exact onset/offset times, same as before - only *parameter* signals go through the tiered
@@ -212,7 +236,13 @@ numbers, `Sig`s, or the LFO builders interchangeably.
 Each pattern is associated with a **track**: a named, ordered chain of loaded plugins,
 `[instrument, effect, effect, ...]`, mirrored on the SuperCollider side as one `SynthDef` per
 track containing a fixed-length chain of `VSTPlugin.ar` UGens (see "`osc-engine` internals"
-below).
+below). The editor buffer holds any number of patterns via labels (`keys: …`, `$: …` - see
+`labels.mjs` above): `/api/evaluate` splits the buffer into blocks, evaluates each, and runs
+one `Scheduler` + engine track per label, stopping tracks whose label disappeared or got
+muted/un-soloed since the last eval. The browser also gets `cps` and each block's source range
+back from an eval, which (with the shared mini parser and its per-step `loc` ranges, plus the
+shared wall clock - browser and Node run on the same machine) is everything needed to light up
+the currently-sounding mini-notation atom in the editor with no polling, Strudel-style.
 
 - `.s("Serum 2")` — resolves "Serum 2" against the scanned/known-plugins list and assigns it
   as the track's instrument slot (loaded once, reused; note on/off events are just MIDI to
@@ -314,7 +344,9 @@ Not yet done, in rough priority order for a first real jam session:
    them. Still to do: a UI for authoring unit mappings from `getParams` output, and
    auto-calibration (probing a parameter's normalized↔display curve by reading value strings
    back from the plugin) so ranges don't have to be guessed per plugin.
-5. Per-track gain/pan/mute and a proper master bus with metering in the UI.
+5. Per-track gain/pan and a proper master bus with metering in the UI (label-level mute/solo
+   exists - `_name:` / `nameS:` - but it works by not scheduling notes, not by a gain stage;
+   note that a Tier-2 LFO on a muted track keeps modulating its silent plugin, by design).
 6. Persisting a "rack" (which plugins + mappings are loaded) alongside a saved pattern file.
 7. Native perlin/noise modulation, if Tier-1 polling proves audibly stepped in practice.
 8. Mini-notation gaps if they turn out to matter in practice: polymeter (`{a b, c d}`),

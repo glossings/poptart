@@ -51,27 +51,31 @@ class MappedEngine {
   constructor(engine) {
     this.engine = engine;
     this.mappings = loadMappings();
-    this.chain = []; // slot index -> plugin name, set on every eval
+    this.chains = new Map(); // trackId -> [instrument, ...fx plugin names], set on every eval
   }
 
-  // Called on every eval with [instrument, ...fxChain]; also reload mapping files so editing
-  // a mapping JSON mid-session takes effect on the next eval, livecoding-style.
-  setChain(chain) {
-    this.chain = chain;
+  // Called on every eval, per track, with [instrument, ...fxChain]; also reload mapping files
+  // so editing a mapping JSON mid-session takes effect on the next eval, livecoding-style.
+  setChain(trackId, chain) {
+    this.chains.set(trackId, chain);
     this.mappings = loadMappings();
   }
 
-  _spec(slot, name) {
-    return this.mappings.get(this.chain[slot])?.params?.[name];
+  removeChain(trackId) {
+    this.chains.delete(trackId);
+  }
+
+  _spec(trackId, slot, name) {
+    return this.mappings.get(this.chains.get(trackId)?.[slot])?.params?.[name];
   }
 
   setParam(trackId, slot, name, value, targetTime) {
-    const spec = this._spec(slot, name);
+    const spec = this._spec(trackId, slot, name);
     this.engine.setParam(trackId, slot, name, spec ? toNormalized(value, spec) : value, targetTime);
   }
 
   setParamLFO(trackId, slot, name, ir) {
-    const spec = this._spec(slot, name);
+    const spec = this._spec(trackId, slot, name);
     const mapped = spec
       ? { ...ir, min: toNormalized(ir.min, spec), max: toNormalized(ir.max, spec) }
       : ir;
@@ -83,7 +87,7 @@ class MappedEngine {
   }
 
   setParamEnv(trackId, slot, name, ir) {
-    const spec = this._spec(slot, name);
+    const spec = this._spec(trackId, slot, name);
     const mapped = spec
       ? { ...ir, min: toNormalized(ir.min, spec), max: toNormalized(ir.max, spec) }
       : ir;

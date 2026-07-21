@@ -190,7 +190,8 @@ class OscEngine {
   setParam(trackId, slotIndex, paramName, value, targetTime) {
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
   }
-  // ir: { shape: 'sine'|'saw'|'tri'|'square', rateHz, phaseCycles, min, max } - see signal.mjs.
+  // ir: { shape: 'sine'|'saw'|'tri'|'square'|'ramp'|'drift'|'sandy', rateHz, phaseCycles, min, max }
+  // - see signal.mjs.
   // sclang maps a control bus to the VST parameter once and drives it with an internal UGen
   // (SinOsc.kr etc.) inside the track's SynthDef - the SC equivalent of the old native LFO.h,
   // zero further OSC traffic after this call.
@@ -220,6 +221,7 @@ class OscEngine {
       ir.decay,
       ir.sustain,
       ir.release,
+      ir.curve ?? -4,
       ir.min,
       ir.max,
     ]);

@@ -16,18 +16,24 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
 };
 
 // CodeMirror (v5: plain script files, no build step) is served under /vendor/codemirror/
-// straight out of node_modules - see resolveStaticPath().
+// straight out of node_modules - see resolveStaticPath(). pattern-core's dependency-free ESM
+// sources are served under /pattern-core/ so the browser can run the same mini-notation parser
+// and label splitter the server uses (playback highlighting needs identical step math).
 const CODEMIRROR_DIR = path.dirname(require.resolve('codemirror/package.json'));
+const PATTERN_CORE_SRC_DIR = path.join(__dirname, '..', 'pattern-core', 'src');
+
+const CPS = 0.5; // cycles per second - also returned to the client so highlighting stays in sync
 
 let patternCore = null; // loaded via dynamic import() since it's an ESM package
 let engine = null; // raw OscEngine (introspection/record endpoints talk to this directly)
 let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.js) - what the scheduler drives
 let engineError = null;
-let scheduler = null;
+const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
 
 async function loadEngine() {
   try {
@@ -48,11 +54,45 @@ async function loadEngine() {
 
 async function init() {
   patternCore = await import('@poptart/pattern-core');
+  extendStringPrototype(patternCore);
   engine = await loadEngine();
   if (engine) {
     mappedEngine = new MappedEngine(engine);
-    scheduler = new patternCore.Scheduler(mappedEngine, { cps: 0.5, trackId: 'default' });
   }
+}
+
+// Strudel-flavored ergonomics: let mini-notation strings be used directly as patterns in
+// evaluated code - `"0 0.5 1 0.3".gte(0.5)`, `"0 3 5".add(12)`, `"200 800".range(...)`. Each
+// method wraps the string in mini() and delegates. This deliberately shadows the dead Annex-B
+// legacy String methods where names collide (.sub's "<sub>…</sub>" wrapper, nothing of value).
+function extendStringPrototype(core) {
+  const METHODS = [
+    'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
+    'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'scale', 'range', 's', 'fx', 'param',
+  ];
+  for (const m of METHODS) {
+    Object.defineProperty(String.prototype, m, {
+      configurable: true,
+      writable: true,
+      enumerable: false,
+      value(...args) {
+        return core.mini(String(this))[m](...args);
+      },
+    });
+  }
+}
+
+const BUILDER_NAMES = ['n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'ramp', 'drift', 'sandy', 'env'];
+
+// One block of editor code (see labels.mjs) -> a Sig, evaluated with the builders in scope.
+function buildPattern(code) {
+  // eslint-disable-next-line no-new-func
+  const build = new Function(...BUILDER_NAMES, `return (\n${code}\n);`);
+  const pattern = build(...BUILDER_NAMES.map((name) => patternCore[name]));
+  if (!(pattern instanceof patternCore.Sig)) {
+    throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").s("Serum 2"))');
+  }
+  return pattern;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -75,37 +115,71 @@ const routes = {
     return { status: 200, body: await engine.getKnownPlugins() };
   },
 
+  // `code` is the whole editor buffer: one or more labeled blocks (see pattern-core's
+  // labels.mjs - `$:` anonymous, `name:` named, `_name:` muted, `Sname:` soloed), each
+  // evaluating to a Sig and playing on its own engine track named after the label. Unlabeled
+  // code is treated as a single anonymous block, so the original one-expression usage still
+  // works.
   'POST /api/evaluate': async (body) => {
-    if (!engine || !scheduler) throw new Error(engineError ?? 'engine not loaded');
+    if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
 
-    // Same MVP evaluation contract as the old app/main.js: `code` is a single JS expression that
-    // evaluates to a Sig, built from the names below (matches the brief's own example exactly).
-    const { n, note, mini, sine, saw, tri, square, env } = patternCore;
-    // eslint-disable-next-line no-new-func
-    const build = new Function('n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'env', `return (\n${body.code}\n);`);
-    const pattern = build(n, note, mini, sine, saw, tri, square, env);
+    const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
+    if (blocks.length === 0) throw new Error('nothing to evaluate');
 
-    if (!(pattern instanceof patternCore.Sig)) {
-      throw new Error('code must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").s("Serum 2"))');
+    const built = blocks.map((b) => {
+      try {
+        return { ...b, sig: buildPattern(b.code) };
+      } catch (err) {
+        throw new Error(`${b.label}: ${err.message ?? err}`);
+      }
+    });
+
+    // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
+    const anySolo = built.some((b) => b.soloed && !b.muted);
+    const active = built.filter((b) => !b.muted && (!anySolo || b.soloed));
+
+    // Stop tracks whose label disappeared (or that are now muted / un-soloed).
+    for (const [label, sch] of schedulers) {
+      if (!active.some((b) => b.label === label)) {
+        sch.stop();
+        schedulers.delete(label);
+        mappedEngine.removeChain(label);
+      }
     }
 
-    // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
-    mappedEngine.setChain([pattern.instrument, ...pattern.fxChain]);
-    scheduler.setPattern(pattern);
-    scheduler.start();
+    for (const b of active) {
+      // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
+      mappedEngine.setChain(b.label, [b.sig.instrument, ...b.sig.fxChain]);
+      let sch = schedulers.get(b.label);
+      if (!sch) {
+        sch = new patternCore.Scheduler(mappedEngine, { cps: CPS, trackId: b.label });
+        schedulers.set(b.label, sch);
+      }
+      sch.setPattern(b.sig);
+      sch.start();
+    }
 
     return {
       status: 200,
       body: {
-        instrument: pattern.instrument,
-        fxChain: pattern.fxChain,
-        paramNames: Object.keys(pattern.paramSignals),
+        cps: CPS,
+        tracks: built.map((b) => ({
+          label: b.label,
+          muted: b.muted,
+          soloed: b.soloed,
+          active: active.includes(b),
+          start: b.start,
+          end: b.end,
+          instrument: b.sig.instrument,
+          fxChain: b.sig.fxChain,
+          paramNames: Object.keys(b.sig.paramSignals),
+        })),
       },
     };
   },
 
   'POST /api/stop': async () => {
-    scheduler?.stop();
+    for (const sch of schedulers.values()) sch.stop();
     return { status: 200, body: {} };
   },
 
@@ -122,18 +196,20 @@ const routes = {
   'GET /api/chainParams': async () => {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     const slots = [];
-    for (let slot = 0; slot < mappedEngine.chain.length; slot++) {
-      const plugin = mappedEngine.chain[slot];
-      if (!plugin) continue;
-      if (!paramsByPlugin.has(plugin)) {
-        try {
-          paramsByPlugin.set(plugin, await getParamsWhenLoaded('default', slot));
-        } catch (err) {
-          slots.push({ slot, plugin, params: [], error: err.message ?? String(err) });
-          continue;
+    for (const [trackId, chain] of mappedEngine.chains) {
+      for (let slot = 0; slot < chain.length; slot++) {
+        const plugin = chain[slot];
+        if (!plugin) continue;
+        if (!paramsByPlugin.has(plugin)) {
+          try {
+            paramsByPlugin.set(plugin, await getParamsWhenLoaded(trackId, slot));
+          } catch (err) {
+            slots.push({ track: trackId, slot, plugin, params: [], error: err.message ?? String(err) });
+            continue;
+          }
         }
+        slots.push({ track: trackId, slot, plugin, params: paramsByPlugin.get(plugin) });
       }
-      slots.push({ slot, plugin, params: paramsByPlugin.get(plugin) });
     }
     return { status: 200, body: { slots } };
   },
@@ -175,10 +251,15 @@ async function getParamsWhenLoaded(trackId, slot, { tries = 30, delayMs = 500 } 
 // Plumbing: static file serving + JSON body parsing + route dispatch.
 // ---------------------------------------------------------------------------------------------
 
+const STATIC_ROOTS = [
+  { prefix: '/vendor/codemirror/', root: CODEMIRROR_DIR },
+  { prefix: '/pattern-core/', root: PATTERN_CORE_SRC_DIR },
+];
+
 function resolveStaticPath(urlPath) {
-  const vendorPrefix = '/vendor/codemirror/';
-  const root = urlPath.startsWith(vendorPrefix) ? CODEMIRROR_DIR : PUBLIC_DIR;
-  const rel = urlPath.startsWith(vendorPrefix) ? urlPath.slice(vendorPrefix.length) : urlPath;
+  const entry = STATIC_ROOTS.find((e) => urlPath.startsWith(e.prefix));
+  const root = entry?.root ?? PUBLIC_DIR;
+  const rel = entry ? urlPath.slice(entry.prefix.length) : urlPath;
   const filePath = path.join(root, rel);
   return filePath.startsWith(root) ? filePath : null;
 }

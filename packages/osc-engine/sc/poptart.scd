@@ -151,22 +151,29 @@ server.options.sampleRate = sampleRate;
 server.options.blockSize = blockSize;
 
 server.waitForBoot {
-    [\sine, \tri, \saw, \square].do { |shape|
+    // drift = slow smoothed random (cubic-interpolated noise), sandy = stepped random (held
+    // value per period); both ignore phase. ramp is a rising saw, same shape as \saw here.
+    [\sine, \tri, \saw, \ramp, \square, \drift, \sandy].do { |shape|
         SynthDef(("poptart_lfo_" ++ shape).asSymbol, { |out, freq = 1, phase = 0, lo = 0, hi = 1|
             var osc = switch(shape,
                 \sine, { SinOsc.kr(freq, phase * 2pi) },
                 \tri, { LFTri.kr(freq, phase * 4) },
                 \saw, { LFSaw.kr(freq, phase * 2) },
-                \square, { LFPulse.kr(freq, phase) }
+                \ramp, { LFSaw.kr(freq, phase * 2) },
+                \square, { LFPulse.kr(freq, phase) },
+                \drift, { LFDNoise3.kr(freq) },
+                \sandy, { LFDNoise0.kr(freq) }
             );
             Out.kr(out, osc.range(lo, hi));
         }).add;
     };
     // ADSR modulator, gated by the track's note on/offs (see the noteOn/noteOff OSCdefs) -
     // the parameter-modulation equivalent of a synth's filter envelope. Retriggers from the
-    // envelope's current level on each new gate, so overlapping notes don't click.
-    SynthDef(\poptart_env, { |out, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.2, gate = 0, lo = 0, hi = 1|
-        var envSig = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate);
+    // envelope's current level on each new gate, so overlapping notes don't click. `curve`
+    // shapes every segment (negative = scoop, 0 = linear, positive = bulge) and is a plain
+    // control input into the Env, so a livecoding re-eval updates it in place.
+    SynthDef(\poptart_env, { |out, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.2, curve = -4, gate = 0, lo = 0, hi = 1|
+        var envSig = EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate);
         Out.kr(out, lo + (envSig * (hi - lo)));
     }).add;
     server.sync;
@@ -373,7 +380,7 @@ OSCdef(\poptartSetParamLFO, { |msg|
 OSCdef(\poptartSetParamEnv, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
     var atk = msg[4].asFloat, dec = msg[5].asFloat, sus = msg[6].asFloat, rel = msg[7].asFloat;
-    var lo = msg[8].asFloat, hi = msg[9].asFloat;
+    var curve = msg[8].asFloat, lo = msg[9].asFloat, hi = msg[10].asFloat;
     fork {
         var track = awaitTrack.(key);
         var ctl, index, envKey, existing;
@@ -395,11 +402,11 @@ OSCdef(\poptartSetParamEnv, { |msg|
                     envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
                     existing = track[\envs][envKey];
                     if (existing.notNil) {
-                        existing[\synth].set(\atk, atk, \dec, dec, \sus, sus, \rel, rel, \lo, lo, \hi, hi);
+                        existing[\synth].set(\atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi);
                     } {
                         var bus = Bus.control(server, 1);
                         var envSynth = Synth(\poptart_env,
-                            [\out, bus, \atk, atk, \dec, dec, \sus, sus, \rel, rel, \lo, lo, \hi, hi,
+                            [\out, bus, \atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi,
                              \gate, if (track[\held] > 0) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
                         ctl.map(index, bus);
