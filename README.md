@@ -88,6 +88,10 @@ n("0 2 3")
   .param("Filter 1 Freq", sine({ rate: 0.3 }).range(200, 5000))
 ```
 
+Notes work on either side of `.synth()` - `synth("Serum 2").n("0 2 3").scale("F minor")` is the
+same pattern - and a note-less `synth("Serum 2")` plays a default C2 every cycle, so a bare
+synth makes sound immediately.
+
 ### Modulators
 
 Any `.param(...)` value can be a number, a mini-notation string (stepped), an LFO
@@ -135,7 +139,8 @@ drums: s("bd*4 hh*8")
   .stretch(2)            // timestretch (granular; pitch preserved)
   .fit()                 // repitch to the nearest power-of-2 measures (.fit(3) = exactly 3)
   .slice("0 1 2 3")      // play the nth detected transient (WAV files only; wraps)
-  .note("45 _ 52 57")    // repitch by MIDI note (60/"c5" = as recorded; .n() is an alias)
+  .note("45 _ 52 57")    // repitch by MIDI note (24/"c2" = as recorded)
+  .n("0 2 4")            // scale degrees; add .scale("F minor") to map them, like on synths
   .vel("1 .5 ~ 1")       // velocity: linear volume scaling per event
 ```
 

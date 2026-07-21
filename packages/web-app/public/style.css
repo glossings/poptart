@@ -246,6 +246,59 @@ aside {
   overflow: hidden;
 }
 
+/* sidebar tab bar (session | files) + minimize toggle */
+
+.side-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px 0;
+}
+
+.side-tab {
+  padding: 4px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: 7px;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+}
+
+.side-tab.active {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--accent);
+}
+
+.tab-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tab-body.hidden {
+  display: none;
+}
+
+/* minimized sidebar: a narrow rail with just the restore button */
+aside.collapsed {
+  width: 40px;
+}
+
+aside.collapsed .tab-body,
+aside.collapsed .side-tab {
+  display: none;
+}
+
+aside.collapsed .side-tabs {
+  padding: 8px 0 0;
+  justify-content: center;
+}
+
 aside section {
   display: flex;
   flex-direction: column;
@@ -309,7 +362,8 @@ aside h2 {
   padding: 4px;
 }
 
-#paramSearch {
+#paramSearch,
+#fileNameInput {
   width: 100%;
   margin-bottom: 6px;
   padding: 6px 10px;
@@ -322,8 +376,71 @@ aside h2 {
   outline: none;
 }
 
-#paramSearch:focus {
+#paramSearch:focus,
+#fileNameInput:focus {
   border-color: var(--accent);
+}
+
+/* ------------------------------------------------------------ files tab */
+
+#filesSection {
+  flex: 1;
+  padding-bottom: 10px;
+}
+
+.file-save-row {
+  display: flex;
+  gap: 6px;
+}
+
+.file-save-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-save-row button {
+  margin-bottom: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.file-row:hover {
+  background: var(--accent-soft);
+}
+
+.file-row .file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-row button {
+  flex-shrink: 0;
+  visibility: hidden;
+}
+
+.file-row:hover button {
+  visibility: visible;
+}
+
+.files-note {
+  margin-top: 6px;
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-dim);
 }
 
 .track-head {
@@ -429,19 +546,39 @@ aside h2 {
 
 /* --------------------------------------------------------------------- log */
 
-footer#log {
-  height: 110px;
-  overflow-y: auto;
+footer#console {
+  display: flex;
+  flex-direction: column;
   border-top: 1px solid var(--border);
   background: var(--bg-raised);
-  padding: 6px 14px;
+}
+
+.console-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 14px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+#log {
+  height: 110px;
+  overflow-y: auto;
+  padding: 0 14px 6px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-dim);
 }
 
-footer#log .error {
+#log .error {
   color: var(--err);
+}
+
+footer#console.collapsed #log {
+  display: none;
 }
 
 /* -------------------------------------------------- CodeMirror: poptart theme */

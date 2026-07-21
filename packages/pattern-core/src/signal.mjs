@@ -58,6 +58,14 @@ export class Sig {
       stepsForCycle: this.stepsForCycle,
       lfoIR: this.lfoIR,
       envIR: this.envIR,
+      ...this._meta(),
+      ...overrides,
+    });
+  }
+
+  /** Track-building metadata carried onto every derived Sig (chain, params, channel, sampler). */
+  _meta() {
+    return {
       instrument: this.instrument,
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
@@ -66,8 +74,7 @@ export class Sig {
       velSig: this.velSig,
       sampler: this.sampler,
       slotStates: this.slotStates,
-      ...overrides,
-    });
+    };
   }
 
   /** Maps this signal's values through `fn`; rests (null) pass through untouched. */
@@ -80,22 +87,23 @@ export class Sig {
         const v = this.sample(t, cps, pos);
         return v == null ? null : fn(v);
       },
-      {
-        stepsForCycle: mappedStepsForCycle,
-        instrument: this.instrument,
-        fxChain: this.fxChain,
-        paramSignals: this.paramSignals,
-        paramSlots: this.paramSlots,
-        channel: this.channel,
-        velSig: this.velSig,
-        sampler: this.sampler,
-        slotStates: this.slotStates,
-      },
+      { stepsForCycle: mappedStepsForCycle, ...this._meta() },
     );
   }
 
-  /** `n("0 2 3").scale("F minor")` - converts scale-degree values into absolute MIDI notes. */
+  /**
+   * `n("0 2 3").scale("F minor")` - converts scale-degree values into absolute MIDI notes.
+   * On a sampler pattern the degrees live in the `.n()`/`.note()` repitch signal (the pattern's
+   * own values are pack names), so scale maps that instead: s("pluck").n("0 2 4").scale("F minor").
+   */
   scale(scaleName) {
+    if (this.sampler) {
+      if (!this.sampler.note) {
+        throw new Error('[signal] .scale() on a sampler needs degrees first - e.g. s("pluck").n("0 2 4").scale("F minor")');
+      }
+      const mapped = this.sampler.note.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
+      return this._clone({ sampler: { ...this.sampler, note: mapped } });
+    }
     return this.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
   }
 
@@ -250,17 +258,7 @@ export class Sig {
         const b = otherSig.sample(t, cps, pos);
         return b == null ? null : fn(Number(a), Number(b));
       },
-      {
-        stepsForCycle,
-        instrument: this.instrument,
-        fxChain: this.fxChain,
-        paramSignals: this.paramSignals,
-        paramSlots: this.paramSlots,
-        channel: this.channel,
-        velSig: this.velSig,
-        sampler: this.sampler,
-        slotStates: this.slotStates,
-      },
+      { stepsForCycle, ...this._meta() },
     );
   }
 
@@ -316,17 +314,7 @@ export class Sig {
 
     // Track metadata comes from the transformed side - fn may have added .param()s etc.; those
     // apply unconditionally (only the note/value structure switches on cond).
-    return new Sig(sample, {
-      stepsForCycle,
-      instrument: transformed.instrument,
-      fxChain: transformed.fxChain,
-      paramSignals: transformed.paramSignals,
-      paramSlots: transformed.paramSlots,
-      channel: transformed.channel,
-      velSig: transformed.velSig,
-      sampler: transformed.sampler,
-      slotStates: transformed.slotStates,
-    });
+    return new Sig(sample, { stepsForCycle, ...transformed._meta() });
   }
 
   /** Envelope curve (see env()): negative = exponential-ish scoop, 0 = linear, positive = bulge. */
@@ -386,17 +374,7 @@ export class Sig {
       }));
     };
 
-    return new Sig(sample, {
-      stepsForCycle,
-      instrument: this.instrument,
-      fxChain: this.fxChain,
-      paramSignals: this.paramSignals,
-      paramSlots: this.paramSlots,
-      channel: this.channel,
-      velSig: this.velSig,
-      sampler: this.sampler,
-      slotStates: this.slotStates,
-    });
+    return new Sig(sample, { stepsForCycle, ...this._meta() });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -436,23 +414,37 @@ export class Sig {
   slice(v) { return this._samplerOpt('slice', 'slice', toSignal(v)); }
 
   /**
-   * Repitches a sampler pattern by MIDI note: 60 ("c5") plays the sample as recorded, 72 an
+   * Note pattern for this track - works before or after .synth(): note("c3 e3").synth("X")
+   * and synth("X").note("c3 e3") are equivalent (on a synth track this replaces the track's
+   * note events, keeping the chain/params/channel metadata).
+   *
+   * On a sampler pattern it repitches instead: 24 ("c2") plays the sample as recorded, 36 an
    * octave up. Takes note names, numbers, mini strings, or any Sig, sampled per onset. A
    * patterned note also gives structure - each fresh note step retriggers the sample, gated
    * to its step - so s("pluck").note("45 52 _ 57") plays a melodic line from one sample.
-   * (As a method this is sampler-only; melodies on synths start from the note("...") builder.)
    */
   note(value) {
-    if (!this.sampler) {
-      throw new Error('[signal] .note() as a method only applies to a sampler pattern - for synths, start from note("...")');
-    }
-    const sig = value instanceof Sig ? value : note(value);
-    const stepsForCycle = intersectSteps(this.stepsForCycle, sig);
-    return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
+    return this._noteLike(value instanceof Sig ? value : note(value));
   }
 
-  /** Alias of .note() for sampler repitching. */
-  n(value) { return this.note(value); }
+  /**
+   * Scale-degree pattern for this track - n()'s builder semantics as a method, so it too works
+   * before or after .synth(), and on samplers: s("pluck").n("0 2 4").scale("F minor") repitches
+   * by degree exactly like a synth melody (degrees are plain numbers until .scale()).
+   */
+  n(value) {
+    return this._noteLike(value instanceof Sig ? value : n(value));
+  }
+
+  _noteLike(sig) {
+    if (this.sampler) {
+      const stepsForCycle = intersectSteps(this.stepsForCycle, sig);
+      return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
+    }
+    // Synth track: the note signal becomes the pattern itself; everything chained so far
+    // (instrument, fx, params, channel strip...) carries over.
+    return sig._clone(this._meta());
+  }
 }
 
 // Splits a pattern's step grid on a control pattern's grid (patterned .vel()/.note()): each
@@ -559,18 +551,18 @@ export function s(value) {
   return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
 }
 
+// What a note-less synth("X") plays: C2 (MIDI 24 in this package's c5 = 60 convention), one
+// whole-cycle note per cycle - the same note at which a sample plays back at native speed.
+const DEFAULT_SYNTH_NOTE = 24;
+
 /**
- * Instrument-only pattern: loads `pluginId` as the track's instrument with no note events -
- * gets a plugin loaded (and its params panel up) before any notes exist. The full form is
- * n("0 2 3").scale("F minor").synth("Serum 2"). Takes the same optional `{ state }` second
- * argument as Sig#synth.
+ * Pattern starting from the instrument: synth("Serum 2") plays a default C2 every cycle until
+ * notes are given - add them before or after (`n("0 2 3").scale("F minor").synth("Serum 2")`
+ * and `synth("Serum 2").n("0 2 3").scale("F minor")` are equivalent). Takes the same optional
+ * `{ state }` second argument as Sig#synth.
  */
 export function synth(pluginId, config) {
-  return new Sig(() => null, {
-    stepsForCycle: () => [],
-    instrument: pluginId,
-    ...(config?.state ? { slotStates: { 0: config.state } } : {}),
-  });
+  return note(DEFAULT_SYNTH_NOTE).synth(pluginId, config);
 }
 
 /** Explicit-note control - numbers pass through as MIDI, strings may be note names ("f4") or numbers. */

@@ -8,6 +8,7 @@
 const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const { MappedEngine } = require('./param-mapping');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
@@ -110,6 +111,23 @@ function buildPattern(code) {
     throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
   }
   return pattern;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pattern files - the editor's "files" tab saves/loads whole editor buffers as plain .js files
+// under ~/.poptart/patterns (overridable via POPTART_PATTERNS_DIR), so they're ordinary files
+// the user can also back up / edit / version outside poptart.
+// ---------------------------------------------------------------------------------------------
+
+const PATTERNS_DIR = process.env.POPTART_PATTERNS_DIR || path.join(os.homedir(), '.poptart', 'patterns');
+
+// Names are used as filenames directly, so keep them to a single path segment.
+function patternFilePath(name) {
+  const clean = String(name ?? '').trim();
+  if (!clean || clean.length > 128 || clean.startsWith('.') || /[/\\]/.test(clean)) {
+    throw new Error('pattern name must be a plain file name (no slashes, not starting with ".")');
+  }
+  return path.join(PATTERNS_DIR, `${clean}.js`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -246,6 +264,54 @@ const routes = {
   'POST /api/showEditor': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     engine.showPluginEditor(body.trackId ?? 'default', body.slot ?? 0);
+    return { status: 200, body: {} };
+  },
+
+  // --- pattern files (the editor's "files" tab) ---
+
+  'GET /api/patterns': async () => {
+    let names = [];
+    try {
+      names = fs.readdirSync(PATTERNS_DIR).filter((f) => f.endsWith('.js'));
+    } catch {
+      // directory doesn't exist yet - nothing saved
+    }
+    const patterns = names
+      .map((f) => ({ name: f.slice(0, -3), mtime: fs.statSync(path.join(PATTERNS_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return { status: 200, body: { patterns } };
+  },
+
+  // Body: { name, code }. Overwrites silently - "save" in a livecoding tool means "keep this".
+  'POST /api/patterns/save': async (body) => {
+    const file = patternFilePath(body.name);
+    fs.mkdirSync(PATTERNS_DIR, { recursive: true });
+    fs.writeFileSync(file, String(body.code ?? ''), 'utf8');
+    return { status: 200, body: {} };
+  },
+
+  // Body: { name } -> { code }.
+  'POST /api/patterns/load': async (body) => {
+    const file = patternFilePath(body.name);
+    if (!fs.existsSync(file)) throw new Error(`no saved pattern named "${body.name}"`);
+    return { status: 200, body: { code: fs.readFileSync(file, 'utf8') } };
+  },
+
+  // Body: { name }.
+  'POST /api/patterns/delete': async (body) => {
+    const file = patternFilePath(body.name);
+    if (!fs.existsSync(file)) throw new Error(`no saved pattern named "${body.name}"`);
+    fs.unlinkSync(file);
+    return { status: 200, body: {} };
+  },
+
+  // Body: { from, to }.
+  'POST /api/patterns/rename': async (body) => {
+    const from = patternFilePath(body.from);
+    const to = patternFilePath(body.to);
+    if (!fs.existsSync(from)) throw new Error(`no saved pattern named "${body.from}"`);
+    if (fs.existsSync(to)) throw new Error(`a pattern named "${body.to}" already exists`);
+    fs.renameSync(from, to);
     return { status: 200, body: {} };
   },
 

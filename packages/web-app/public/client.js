@@ -55,6 +55,9 @@ function logLine(text, isError = false) {
   if (isError) line.className = 'error';
   line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
   log.prepend(line);
+  // Mirror everything to the devtools console too, so the log is still there when the in-app
+  // console is minimized (and gets devtools' filtering/timestamps).
+  (isError ? console.error : console.log)(`[poptart] ${text}`);
 }
 
 function copyText(text, what) {
@@ -1048,6 +1051,161 @@ async function loadKnownPlugins() {
     // engine not up yet - the rescan button still works later
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Sidebar tabs (session | files) + pattern file manager. Pattern files are whole editor
+// buffers saved server-side (~/.poptart/patterns/<name>.js) via /api/patterns*: save the
+// current buffer under a name, click a saved pattern to load it, rename/delete to organize.
+// ---------------------------------------------------------------------------------------------
+
+const sidebar = document.getElementById('sidebar');
+const sidebarToggle = document.getElementById('sidebarToggle');
+const sessionTab = document.getElementById('sessionTab');
+const filesTab = document.getElementById('filesTab');
+const fileNameInput = document.getElementById('fileNameInput');
+const fileSaveBtn = document.getElementById('fileSaveBtn');
+const fileList = document.getElementById('fileList');
+const consoleFooter = document.getElementById('console');
+const consoleToggle = document.getElementById('consoleToggle');
+
+for (const btn of document.querySelectorAll('.side-tab')) {
+  btn.addEventListener('click', () => {
+    for (const b of document.querySelectorAll('.side-tab')) b.classList.toggle('active', b === btn);
+    sessionTab.classList.toggle('hidden', btn.dataset.tab !== 'session');
+    filesTab.classList.toggle('hidden', btn.dataset.tab !== 'files');
+    if (btn.dataset.tab === 'files') refreshPatternFiles();
+  });
+}
+
+function renderPatternFiles(patterns) {
+  fileList.innerHTML = '';
+  if (!patterns.length) {
+    fileList.textContent = 'no saved patterns yet - name the current buffer above and hit save';
+    return;
+  }
+  for (const p of patterns) {
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    row.title = 'click to load into the editor';
+
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = p.name;
+    row.appendChild(name);
+
+    const when = document.createElement('span');
+    when.className = 'dim';
+    when.textContent = new Date(p.mtime).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    row.appendChild(when);
+
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'small';
+    renameBtn.textContent = '✎';
+    renameBtn.title = 'rename';
+    renameBtn.onclick = (e) => {
+      e.stopPropagation();
+      renamePatternFile(p.name);
+    };
+    row.appendChild(renameBtn);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'small';
+    deleteBtn.textContent = '✕';
+    deleteBtn.title = 'delete';
+    deleteBtn.onclick = (e) => {
+      e.stopPropagation();
+      deletePatternFile(p.name);
+    };
+    row.appendChild(deleteBtn);
+
+    row.onclick = () => loadPatternFile(p.name);
+    fileList.appendChild(row);
+  }
+}
+
+async function refreshPatternFiles() {
+  try {
+    const { patterns } = await api('GET', '/api/patterns');
+    renderPatternFiles(patterns);
+  } catch (e) {
+    fileList.textContent = 'failed to list patterns';
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function savePatternFile() {
+  const name = fileNameInput.value.trim();
+  if (!name) {
+    logLine('give the pattern a name before saving', true);
+    fileNameInput.focus();
+    return;
+  }
+  try {
+    await api('POST', '/api/patterns/save', { name, code: cm.getValue() });
+    logLine(`saved pattern "${name}"`);
+    refreshPatternFiles();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function loadPatternFile(name) {
+  try {
+    const { code } = await api('POST', '/api/patterns/load', { name });
+    cm.setValue(code);
+    foldConfigBlobs();
+    fileNameInput.value = name; // so re-saving after edits goes to the same file
+    logLine(`loaded pattern "${name}" - Cmd/Ctrl+Enter to play it`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function renamePatternFile(name) {
+  const to = prompt(`rename "${name}" to:`, name)?.trim();
+  if (!to || to === name) return;
+  try {
+    await api('POST', '/api/patterns/rename', { from: name, to });
+    if (fileNameInput.value.trim() === name) fileNameInput.value = to;
+    logLine(`renamed pattern "${name}" to "${to}"`);
+    refreshPatternFiles();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function deletePatternFile(name) {
+  if (!confirm(`delete pattern "${name}"?`)) return;
+  try {
+    await api('POST', '/api/patterns/delete', { name });
+    logLine(`deleted pattern "${name}"`);
+    refreshPatternFiles();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+fileSaveBtn.addEventListener('click', savePatternFile);
+fileNameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') savePatternFile();
+});
+
+// ---------------------------------------------------------------------------------------------
+// Minimizable sidebar + console - collapsed state persists per browser.
+// ---------------------------------------------------------------------------------------------
+
+function initCollapsible(el, toggleBtn, storageKey, labels) {
+  const apply = (collapsed) => {
+    el.classList.toggle('collapsed', collapsed);
+    toggleBtn.textContent = collapsed ? labels.collapsed : labels.open;
+    localStorage.setItem(storageKey, collapsed ? '1' : '');
+  };
+  toggleBtn.addEventListener('click', () => apply(!el.classList.contains('collapsed')));
+  apply(!!localStorage.getItem(storageKey));
+}
+
+initCollapsible(sidebar, sidebarToggle, 'poptart-sidebar-collapsed', { open: '»', collapsed: '«' });
+initCollapsible(consoleFooter, consoleToggle, 'poptart-console-collapsed', { open: '▾', collapsed: '▴' });
 
 // ---------------------------------------------------------------------------------------------
 // Themes: presets are palette blocks in style.css (`:root[data-theme="…"]`); the theme editor

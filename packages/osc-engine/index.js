@@ -280,7 +280,7 @@ class OscEngine {
    * fit ('auto' | measures), slice, note, vel, secPerCycle }. Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
    * played region lasts exactly the target number of cycles, `note` a further multiplier that
-   * repitches around MIDI 60 ("c5" = as recorded). `vel` scales volume linearly.
+   * repitches around MIDI 24 ("c2" = as recorded). `vel` scales volume linearly.
    */
   playSample(trackId, pack, cfg, onsetSec, offsetSec) {
     const entry = this._ensurePack(pack);
@@ -315,7 +315,7 @@ class OscEngine {
       const target = cfg.fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : cfg.fit;
       if (target > 0) speed *= measures / target;
     }
-    if (cfg.note != null) speed *= 2 ** ((cfg.note - 60) / 12); // repitch: MIDI 60 = as recorded
+    if (cfg.note != null) speed *= 2 ** ((cfg.note - 24) / 12); // repitch: MIDI 24 ("c2") = as recorded
 
     const loop = cfg.loop ? 1 : 0;
     // Natural playback length in seconds - what the one-shot synths' Line runs over.

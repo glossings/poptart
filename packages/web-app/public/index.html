@@ -47,26 +47,54 @@ keys: n("0 2 3 <5 7>")
   .param("Filter 1 Freq", lfo("0,0 0.5,1,-3 1,0", { rate: 0.3 }).range(200, 5000))</textarea>
         </div>
 
-        <aside>
-          <section id="trackSection">
-            <h2>tracks</h2>
-            <div id="trackInfo" class="panel">no pattern evaluated yet</div>
-          </section>
+        <aside id="sidebar">
+          <div class="side-tabs">
+            <button class="side-tab active" data-tab="session">session</button>
+            <button class="side-tab" data-tab="files">files</button>
+            <span class="spacer"></span>
+            <button id="sidebarToggle" class="small" title="minimize panel">»</button>
+          </div>
 
-          <section id="paramsSection">
-            <h2>params <span id="paramsCount" class="count"></span></h2>
-            <input id="paramSearch" type="search" placeholder="filter params… (click a param to copy)" />
-            <div id="paramList" class="panel list">evaluate a pattern to load its plugins’ parameters</div>
-          </section>
+          <div id="sessionTab" class="tab-body">
+            <section id="trackSection">
+              <h2>tracks</h2>
+              <div id="trackInfo" class="panel">no pattern evaluated yet</div>
+            </section>
 
-          <section id="pluginsSection">
-            <h2>plugins <button id="scanBtn" class="small">rescan</button></h2>
-            <div id="pluginList" class="panel list">not scanned yet</div>
-          </section>
+            <section id="paramsSection">
+              <h2>params <span id="paramsCount" class="count"></span></h2>
+              <input id="paramSearch" type="search" placeholder="filter params… (click a param to copy)" />
+              <div id="paramList" class="panel list">evaluate a pattern to load its plugins’ parameters</div>
+            </section>
+
+            <section id="pluginsSection">
+              <h2>plugins <button id="scanBtn" class="small">rescan</button></h2>
+              <div id="pluginList" class="panel list">not scanned yet</div>
+            </section>
+          </div>
+
+          <div id="filesTab" class="tab-body hidden">
+            <section id="filesSection">
+              <h2>pattern files</h2>
+              <div class="file-save-row">
+                <input id="fileNameInput" type="text" placeholder="pattern name…" spellcheck="false" />
+                <button id="fileSaveBtn" title="save the current editor buffer under this name">save</button>
+              </div>
+              <div id="fileList" class="panel list">loading…</div>
+              <div class="files-note">click a pattern to load it into the editor · saved under ~/.poptart/patterns</div>
+            </section>
+          </div>
         </aside>
       </main>
 
-      <footer id="log"></footer>
+      <footer id="console">
+        <div class="console-head">
+          <span>console</span>
+          <span class="spacer"></span>
+          <button id="consoleToggle" class="small" title="minimize console">▾</button>
+        </div>
+        <div id="log"></div>
+      </footer>
     </div>
 
     <div id="lfoPanel" class="lfo-panel hidden">
