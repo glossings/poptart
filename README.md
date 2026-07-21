@@ -6,7 +6,7 @@ signals, that plays and modulates real VST/AU instruments and effects instead of
 ```js
 n("0 2 3")
   .scale("F minor")
-  .s("Serum 2")
+  .synth("Serum 2")
   .param("Filter 1 Freq", sine({ rate: 0.3 }).range(200, 5000))
 ```
 
@@ -51,16 +51,16 @@ Then open `http://localhost:4000` in a browser.
 1. Run `npm run dev`, then open `http://localhost:4000`.
 2. Click **rescan** to have `osc-engine` (via SuperCollider's `VSTPlugin.search`) scan for
    installed VST2/VST3 plugins. Click a result to copy its exact name to the clipboard - that's
-   the string `.s()` and `.fx()` expect. Plugins that crash or hang their probe are skipped
+   the string `.synth()` and `.fx()` expect. Plugins that crash or hang their probe are skipped
    automatically (each probe runs in a disposable subprocess with a timeout) - watch the server
    log for `error!`/`timed out` lines to see which.
 3. Write a pattern in the editor and hit **eval** (or Cmd/Ctrl+Enter). The current evaluation
    contract is a single expression that evaluates to a pattern - see `packages/web-app/server.js`.
 4. **stop** halts playback (Cmd/Ctrl+.).
 
-The editor autocompletes as you type: plugin names inside `.s("…")`/`.fx("…")` (from the scan),
+The editor autocompletes as you type: plugin names inside `.synth("…")`/`.fx("…")` (from the scan),
 real VST parameter names inside `.param("…")` (from the loaded chain - so evaluate once with a
-`.s(...)` to load the plugin, then `param(` completions appear), and method/builder names
+`.synth(...)` to load the plugin, then `param(` completions appear), and method/builder names
 elsewhere (Ctrl+Space opens it manually). The **params** sidebar panel lists every parameter of
 every plugin in the current chain, searchable; click one to copy its name. Eval/stop hotkeys
 work with focus anywhere on the page, and the editor uses CodeMirror's sublime keymap
@@ -83,7 +83,7 @@ With it, this plays and sweeps in real Hertz (verified: the recorded master bus 
 ```js
 n("0 2 3")
   .scale("F minor")
-  .s("Serum 2")
+  .synth("Serum 2")
   .param("Filter 1 On", 1)
   .param("Filter 1 Freq", sine({ rate: 0.3 }).range(200, 5000))
 ```
@@ -106,6 +106,18 @@ For static sound-design settings that are fiddly as normalized numbers (unison v
 amounts …), click **ui** next to a plugin in the track panel to open the plugin's own editor
 window, set them by hand, and keep livecoding the rest.
 
+### Pinning plugin state into the code
+
+Click **pin** next to a plugin in the track panel to capture its complete current state
+(preset, every knob, wavetables - whatever the plugin serializes) into the code as the call's
+second argument: `synth("Serum 2", { state: "H4sI…" })`, same for `.fx(...)`. On every load or
+eval that state is restored into the plugin, Ableton-style: the patch sounds identical on a
+cold start, and since the whole buffer lives in the URL hash, sharing the link shares the
+sound. The blob is gzip+base64 (opaque by design) and the editor folds it - and long `lfo()`
+shape strings - down to a small `{⋯}` pill; click the pill to see the raw text. Re-pin after
+tweaking to update it; deleting it changes nothing until the next cold start (the plugin just
+keeps its current sound).
+
 ### Sampler
 
 `s("pack")` plays sample packs alongside the VST tracks - a pack is a folder of audio files
@@ -123,7 +135,20 @@ drums: s("bd*4 hh*8")
   .stretch(2)            // timestretch (granular; pitch preserved)
   .fit()                 // repitch to the nearest power-of-2 measures (.fit(3) = exactly 3)
   .slice("0 1 2 3")      // play the nth detected transient (WAV files only; wraps)
+  .note("45 _ 52 57")    // repitch by MIDI note (60/"c5" = as recorded; .n() is an alias)
+  .vel("1 .5 ~ 1")       // velocity: linear volume scaling per event
 ```
+
+Sampler events are always **gated**: a sample rings exactly as long as its event and is cut
+there (Ableton Sampler gate mode), so a bare `s("longsample")` cuts at each cycle instead of
+piling up. `.note()` and `.vel()` are *structural* controls - a patterned value splits events
+on its step grid (all the grids mix: each fresh step retriggers, a `~` drops the event, and
+the event lengths come from the exact overlaps, however complex the pattern). So
+`s("longsample").vel("1 1 ~ 1")` is three quarter-cycle hits, adding `.note("20 30 40")` on
+top subdivides further onto twelfths, and `vel("1 [1!3] 1 1@3")`-style nesting just works -
+each event is clipped to precisely its computed length. To let a sample ring *longer*, make
+its event longer: `s("long/2")`, `"long@2"`, or ties. `.vel()` works on synth tracks too,
+where it sets MIDI velocity (0..1) with the same structural behavior.
 
 Sample tracks run through the same `.fx()`/`.param()` chain as instruments, and their onsets
 gate `env()` modulators / retrigger note-synced `lfo()` shapes just like notes. Packs load on
@@ -158,9 +183,11 @@ applied as continuous, phase-preserving tempo changes shared by every track.
   can't be added to a running `Synth`. Swapping *which* plugin occupies a slot is fine; growing
   the chain past 8 isn't handled yet.
 - Mini-notation supports sequences, rests, brackets/stacks, alternation (nested alternations
-  advance strudel-style, one pick per visit), fast/slow, replicate, weight, euclidean rhythms,
-  and per-cycle alternation rates (`"[0 2]*<1 2>"`); polymeter (`{a b, c d}`), degrade (`?`),
-  and cycle-internal rate patterns (`a*[2 3]`) aren't implemented.
+  advance strudel-style, one pick per visit), fast/slow, replicate, weight, elongation/ties
+  (`"a _ _"`; inside `<...>` a `_` or `@2` holds the previous pick across cycles without
+  retriggering), euclidean rhythms, and per-cycle alternation rates (`"[0 2]*<1 2>"`);
+  polymeter (`{a b, c d}`), degrade (`?`), and cycle-internal rate patterns (`a*[2 3]`)
+  aren't implemented.
 - All three OSC/scsynth ports are env-overridable (`POPTART_OSC_NODE_PORT`,
   `POPTART_OSC_SC_PORT`, `POPTART_SCSYNTH_PORT`) so a second stack - tests, a parallel
   session - can run beside the first.

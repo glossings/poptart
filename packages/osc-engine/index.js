@@ -11,7 +11,9 @@
 // Promise resolved when the matching `/poptart/*.reply` OSC message arrives.
 
 const path = require('node:path');
+const os = require('node:os');
 const fs = require('node:fs');
+const zlib = require('node:zlib');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { samplesRoot, listPackFiles, detectSlices } = require('./samples');
@@ -28,6 +30,9 @@ const REPLY_TIMEOUT_MS = 10000;
 // A first-ever plugin scan probes every installed plugin (out-of-process, ~seconds each, with
 // VSTPlugin's own per-plugin timeout skipping any that hang) - can legitimately take minutes.
 const SCAN_TIMEOUT_MS = 600000;
+// Reading a whole pack into buffers is disk-bound - a gigabyte-scale folder of full-length
+// WAVs can legitimately take a minute-plus. The .scd's own read-wait cap stays just under this.
+const PACK_LOAD_TIMEOUT_MS = 120000;
 
 // The osc package with `metadata: true` requires args as { type, value } objects - raw JS
 // values would throw. Integers map to 'i', other numbers 'f', strings 's'.
@@ -77,7 +82,13 @@ class OscEngine {
         metadata: true,
       });
 
-      this._port.on('error', (err) => reject(err));
+      this._port.on('error', (err) => {
+        reject(err); // no-op once start() has settled
+        // Surface post-start transport errors (e.g. EMSGSIZE on an oversized datagram) instead
+        // of letting them vanish into the already-settled promise.
+        // eslint-disable-next-line no-console
+        console.error(`[poptart] OSC port error: ${err.message}`);
+      });
       this._port.on('message', (msg) => this._handleMessage(msg));
 
       const readyTimer = setTimeout(() => {
@@ -184,6 +195,36 @@ class OscEngine {
     this._send('/poptart/showPluginEditor', [trackId, slotIndex]);
   }
 
+  // --- plugin state (the synth("Serum 2", { state }) round-trip) ---
+  // The state string is gzip+base64 of VSTPlugin's own program-file format, so it's compact
+  // enough to live inside code / a URL hash and opaque by design. Both directions travel via
+  // temp file - a Serum state is far beyond any UDP datagram.
+
+  /** Captures the current full state of the plugin in a chain slot as an opaque string. */
+  async getPluginState(trackId, slotIndex) {
+    const reply = await this._request('/poptart/getPluginState', [trackId, slotIndex]);
+    const data = fs.readFileSync(reply.path);
+    fs.unlinkSync(reply.path);
+    return zlib.gzipSync(data).toString('base64');
+  }
+
+  /**
+   * Restores a state captured by getPluginState. Fire-and-forget like the other chain calls;
+   * the .scd side waits for the slot's plugin to finish loading before applying.
+   */
+  setPluginState(trackId, slotIndex, state) {
+    let data;
+    try {
+      data = zlib.gunzipSync(Buffer.from(String(state), 'base64'));
+    } catch (e) {
+      this._warnOnce(`state:${trackId}:${slotIndex}`, `[poptart] plugin state for ${trackId}/slot ${slotIndex} is not a valid captured state string (${e.message}) - ignoring`);
+      return;
+    }
+    const stateFile = path.join(os.tmpdir(), `poptart-state-${trackId}-${slotIndex}-${Date.now()}.fxp`);
+    fs.writeFileSync(stateFile, data);
+    this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile]);
+  }
+
   // --- sampler ---
 
   _warnOnce(key, message) {
@@ -209,7 +250,12 @@ class OscEngine {
       return entry;
     }
 
-    this._request('/poptart/loadSamplePack', [pack, JSON.stringify(paths)], 60000)
+    // The paths JSON can be far bigger than one UDP datagram (macOS caps sends at ~9KB and a
+    // 700-file pack is ~70KB), so mirror the .scd's replyOk temp-file scheme in this direction
+    // too: send only a file path, sclang reads and deletes the file.
+    const pathsFile = path.join(os.tmpdir(), `poptart-pack-${pack.replace(/[^\w-]/g, '_')}-${Date.now()}.json`);
+    fs.writeFileSync(pathsFile, JSON.stringify(paths));
+    this._request('/poptart/loadSamplePack', [pack, pathsFile], PACK_LOAD_TIMEOUT_MS)
       .then((metas) => {
         entry.files = metas.map((m, i) => ({
           path: paths[i],
@@ -231,13 +277,17 @@ class OscEngine {
   /**
    * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
    * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, stretch,
-   * fit ('auto' | measures), slice, secPerCycle }. Resolves pack/index/slice/fit down to the
-   * plain numbers the SC synth takes; `fit` becomes a speed multiplier so the played region
-   * lasts exactly the target number of cycles.
+   * fit ('auto' | measures), slice, note, vel, secPerCycle }. Resolves pack/index/slice/fit
+   * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
+   * played region lasts exactly the target number of cycles, `note` a further multiplier that
+   * repitches around MIDI 60 ("c5" = as recorded). `vel` scales volume linearly.
    */
   playSample(trackId, pack, cfg, onsetSec, offsetSec) {
     const entry = this._ensurePack(pack);
     if (entry.status !== 'ready' || entry.files.length === 0) return;
+
+    const amp = cfg.vel ?? 1;
+    if (amp <= 0) return;
 
     const idx = wrap(Math.round(cfg.index ?? 0), entry.files.length);
     const file = entry.files[idx];
@@ -265,10 +315,19 @@ class OscEngine {
       const target = cfg.fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : cfg.fit;
       if (target > 0) speed *= measures / target;
     }
+    if (cfg.note != null) speed *= 2 ** ((cfg.note - 60) / 12); // repitch: MIDI 60 = as recorded
 
     const loop = cfg.loop ? 1 : 0;
     // Natural playback length in seconds - what the one-shot synths' Line runs over.
     const durSec = (spanSec * stretch) / Math.abs(speed);
+    // Sampler events are always gated to their event: a one-shot that would outlast its step
+    // gets a gate-off at the step's end instead of ringing its natural length ("gate mode",
+    // like Ableton Sampler's). The event length is whatever the pattern's step grid computed -
+    // s() alone means whole steps (a bare s("long") cuts at each cycle); patterned .vel()/
+    // .note() subdivide it further. To let a sample ring longer, make its *event* longer
+    // ("long/2", "long@2", "long _"). Loops already gate there; the small margin avoids
+    // cutting a voice that ends naturally anyway.
+    const cut = !loop && durSec > offsetSec - onsetSec + 0.005 ? 1 : 0;
     this._send('/poptart/playSample', [
       trackId,
       pack,
@@ -281,6 +340,8 @@ class OscEngine {
       durSec,
       this._latency(onsetSec),
       this._latency(offsetSec),
+      amp,
+      cut,
     ]);
   }
 

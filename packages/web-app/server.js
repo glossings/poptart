@@ -70,8 +70,8 @@ async function init() {
 function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-    'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'scale', 'range', 's', 'fx', 'param',
-    'gain', 'pan',
+    'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'scale', 'range', 'synth', 'fx', 'param',
+    'gain', 'pan', 'vel',
   ];
   for (const m of METHODS) {
     Object.defineProperty(String.prototype, m, {
@@ -85,7 +85,7 @@ function extendStringPrototype(core) {
   }
 }
 
-const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
+const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
 
 // What a `setbpm(...)` block evaluates to - lets /api/evaluate tell tempo-only blocks apart
 // from actual patterns (blocks must otherwise evaluate to a Sig).
@@ -107,7 +107,7 @@ function buildPattern(code) {
   const build = new Function(...names, `return (\n${code}\n);`);
   const pattern = build(...BUILDER_NAMES.map((name) => patternCore[name]), setbpm);
   if (pattern !== TEMPO_BLOCK && !(pattern instanceof patternCore.Sig)) {
-    throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").s("Serum 2"))');
+    throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
   }
   return pattern;
 }
@@ -232,6 +232,13 @@ const routes = {
       }
     }
     return { status: 200, body: { slots } };
+  },
+
+  // Capture the full state of the plugin in a chain slot as an opaque string, for the editor's
+  // "pin" button to write into the code as synth/fx's `{ state }` argument. Body: { trackId, slot }.
+  'POST /api/pluginState': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    return { status: 200, body: { state: await engine.getPluginState(body.trackId ?? 'default', body.slot ?? 0) } };
   },
 
   // Pop open the native editor window of the plugin in a chain slot (design your supersaw in

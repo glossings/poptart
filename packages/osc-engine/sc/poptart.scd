@@ -167,7 +167,7 @@ awaitLoaded = { |track, slot, timeoutSec = 10|
     track[\loaded][slot].notNil;
 };
 
-// `.s("Serum 2")` uses the display name, but VSTPlugin's dict keys carry the file extension
+// `.synth("Serum 2")` uses the display name, but VSTPlugin's dict keys carry the file extension
 // ('Serum 2.vst3') - accept exact key, display name, or a literal file path.
 resolvePlugin = { |pluginId|
     var dict = VSTPlugin.plugins(server);
@@ -224,7 +224,10 @@ server.waitForBoot {
             var to = Select.kr(rate < 0, [endF, startF]);
             var sig = BufRd.ar(nc, buf, Line.ar(from, to, dur), loop: 0, interpolation: 4);
             var env = EnvGen.kr(Env.linen(0.003, max(0.001, dur - 0.011), 0.008), doneAction: 2);
-            Out.ar(out, toStereo.(sig) * env * amp);
+            // Gate mode (playSample's `cut`): closing the gate early releases and frees the
+            // voice before its natural end; whichever envelope finishes first wins.
+            var gateEnv = EnvGen.kr(Env.asr(0, 1, 0.008), gate, doneAction: 2);
+            Out.ar(out, toStereo.(sig) * env * gateEnv * amp);
         }).add;
         SynthDef(("poptart_sample_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1|
             var frames = BufFrames.ir(buf);
@@ -240,7 +243,8 @@ server.waitForBoot {
             var to = Select.kr(rate < 0, [end, begin]);
             var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs, 0.1, -1, 8, 0.1, 2);
             var env = EnvGen.kr(Env.linen(0.003, max(0.001, dur - 0.011), 0.008), doneAction: 2);
-            Out.ar(out, toStereo.(sig) * env * amp);
+            var gateEnv = EnvGen.kr(Env.asr(0, 1, 0.008), gate, doneAction: 2);
+            Out.ar(out, toStereo.(sig) * env * gateEnv * amp);
         }).add;
         SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1|
             var span = max(0.001, end - begin);
@@ -255,7 +259,7 @@ server.waitForBoot {
     server.sync;
     "poptart: server booted, ready".postln;
     nodeAddr.sendMsg("/poptart/ready");
-    // Populate the plugin dict in the background so .s("Name") can resolve names. Cached
+    // Populate the plugin dict in the background so .synth("Name") can resolve names. Cached
     // plugins re-verify instantly; only new/changed ones get probed (out-of-process, with a
     // per-plugin timeout so a hang skips that plugin instead of stalling the scan).
     VSTPlugin.search(server, dir: searchDirs, options: (timeout: 20, exclude: excludePaths), verbose: true, action: {
@@ -650,16 +654,20 @@ OSCdef(\poptartClearParamLFO, { |msg|
 // per-file metadata - Node needs frames/sampleRate for the fit/one-shot-duration math it does
 // per event. A file scsynth can't read still occupies its index (frames 0), so pack indices
 // stay aligned with the sorted file list; Node skips zero-duration entries.
+// The paths list arrives as a temp-file path, not inline JSON - same datagram-size reasoning
+// as replyOk above, in the other direction (a big pack's path list is ~70KB).
 OSCdef(\poptartLoadSamplePack, { |msg|
-    var requestId = msg[1], pack = msg[2].asSymbol, pathsJson = msg[3].asString;
+    var requestId = msg[1], pack = msg[2].asSymbol, pathsFile = msg[3].asString;
     fork {
-        var paths = pathsJson.parseJSON;
+        var paths = File.use(pathsFile, "r", { |f| f.readAllString }).parseJSON;
         var done = 0, tries = 0, bufs;
+        File.delete(pathsFile);
         samplePacks[pack] !? { |old| old.do { |b| b.free } };
         bufs = paths.collect { |p|
             Buffer.read(server, p.asString, action: { done = done + 1 })
         };
-        while { (done < bufs.size) and: { tries < 600 } } { 0.05.wait; tries = tries + 1 };
+        // Cap just under Node's PACK_LOAD_TIMEOUT_MS so a partial read still replies in time.
+        while { (done < bufs.size) and: { tries < 2200 } } { 0.05.wait; tries = tries + 1 };
         samplePacks[pack] = bufs;
         ("poptart: sample pack '" ++ pack ++ "': " ++ done ++ "/" ++ bufs.size ++ " file(s) read").postln;
         replyOk.("/poptart/loadSamplePack", requestId, toJson.(bufs.collect { |b|
@@ -671,17 +679,20 @@ OSCdef(\poptartLoadSamplePack, { |msg|
 // One sample event. Node already resolved slices/fit down to begin/end/rate/dur; this picks the
 // right voice def for (loop, stretch, channels), spawns it into the track group writing to the
 // track's input bus, and mirrors the note handlers' env-gate/lfo-retrigger behavior so param
-// modulators treat sample onsets like notes. Loops get a sample-accurate gate-off bundle at the
-// event's end; one-shots free themselves after dur.
+// modulators treat sample onsets like notes. Loops - and gate-mode one-shots (cut == 1, from a
+// .vel()/.note() pattern) - get a sample-accurate gate-off bundle at the event's end; other
+// one-shots free themselves after dur. amp scales the voice linearly (velocity).
 OSCdef(\poptartPlaySample, { |msg|
     var key = msg[1].asSymbol, pack = msg[2].asSymbol, idx = msg[3].asInteger;
     var begin = msg[4].asFloat, end = msg[5].asFloat, loop = msg[6].asInteger;
     var rate = msg[7].asFloat, stretch = msg[8].asFloat, dur = msg[9].asFloat;
     var latency = msg[10].asFloat, stopLatency = msg[11].asFloat;
+    var amp = (msg[12] ? 1).asFloat, cut = (msg[13] ? 0).asInteger;
     var track = tracks[key];
     var bufs = samplePacks[pack];
     var buf = bufs !? { bufs.wrapAt(idx) };
     var warp = (stretch - 1).abs > 1e-4;
+    var gated = (loop == 1) or: { cut == 1 };
     var defName, synth;
     if (track.isKindOf(Event) and: { buf.notNil } and: { (buf.numFrames ? 0) > 0 }) {
         defName = ("poptart_sample_" ++ (if (warp) { "warp_" } { "" })
@@ -690,17 +701,17 @@ OSCdef(\poptartPlaySample, { |msg|
         server.makeBundle(latency, {
             synth = Synth(defName,
                 [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
-                 \rate, rate, \dur, dur, \gate, 1],
+                 \rate, rate, \dur, dur, \gate, 1, \amp, amp],
                 target: track[\group], addAction: \addToHead);
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
             track[\lfos].do { |e|
                 if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
             };
         });
-        if (loop == 1) {
+        if (gated) {
             server.makeBundle(stopLatency, { synth.set(\gate, 0) });
         };
-        SystemClock.sched(if (loop == 1) { stopLatency } { latency + dur }, {
+        SystemClock.sched(if (gated) { stopLatency } { latency + dur }, {
             track[\held] = max(0, track[\held] - 1);
             if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
             nil
@@ -730,6 +741,53 @@ OSCdef(\poptartShowPluginEditor, { |msg|
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) { ctl.editor };
 }, '/poptart/showPluginEditor');
+
+// --- plugin state (synth("Serum 2", { state }) round-trip - see OscEngine's gz64 framing) ---
+
+// Capture: write the slot's full program (VSTPlugin's own file format) to a temp file and
+// reply with its path; Node reads/deletes/compresses it.
+OSCdef(\poptartGetPluginState, { |msg|
+    var requestId = msg[1], key = msg[2].asSymbol, slot = msg[3].asInteger;
+    var track = tracks[key];
+    var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
+    if (ctl.isNil or: { ctl.info.isNil }) {
+        replyErr.("/poptart/getPluginState", requestId, "no plugin loaded in that slot");
+    } {
+        var path = PathName.tmp +/+ ("poptart-state-" ++ requestId ++ ".fxp");
+        ctl.writeProgram(path, action: { |self, ok|
+            if (ok) {
+                replyOk.("/poptart/getPluginState", requestId, toJson.((path: path)));
+            } {
+                replyErr.("/poptart/getPluginState", requestId, "writeProgram failed");
+            };
+        });
+    };
+}, '/poptart/getPluginState');
+
+// Restore: the state arrives as a program file path (Node already unpacked it). The slot's
+// plugin load is fire-and-forget and possibly still in flight, so wait for it before applying -
+// this is what makes `synth("Serum 2", { state })` deterministic on a cold start.
+OSCdef(\poptartSetPluginState, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, path = msg[3].asString;
+    fork {
+        var track = awaitTrack.(key);
+        var ctl;
+        if (track.notNil and: { awaitLoaded.(track, slot) }) {
+            ctl = track[\controllers][slot];
+            ctl.readProgram(path, action: { |self, ok|
+                if (ok) {
+                    ("poptart: restored plugin state for " ++ key ++ " slot " ++ slot).postln;
+                } {
+                    ("poptart: FAILED to restore plugin state for " ++ key ++ " slot " ++ slot).warn;
+                };
+                File.delete(path);
+            });
+        } {
+            ("poptart: setPluginState: no loaded plugin in " ++ key ++ " slot " ++ slot).warn;
+            File.delete(path);
+        };
+    };
+}, '/poptart/setPluginState');
 
 OSCdef(\poptartScanPlugins, { |msg|
     var requestId = msg[1];

@@ -253,6 +253,19 @@ aside section {
   min-height: 0;
 }
 
+/* Tracks grow with the evaluated pattern - cap the section and scroll inside the panel, so
+   many tracks can never squeeze params/plugins into overlapping (same treatment as their
+   .panel.list scrollers). */
+#trackSection {
+  flex: 0 1 auto;
+  max-height: 40%;
+}
+
+#trackInfo {
+  overflow-y: auto;
+  min-height: 0;
+}
+
 #paramsSection {
   flex: 1;
 }
@@ -511,6 +524,22 @@ footer#log .error {
 .cm-playing {
   box-shadow: 0 0 0 1.5px var(--text);
   border-radius: 2px;
+}
+
+/* folded config blobs (captured plugin state, long lfo shapes) - click to expand */
+.cm-config-fold {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.85em;
+  vertical-align: baseline;
+}
+.cm-config-fold:hover {
+  border-color: var(--accent);
 }
 
 /* autocomplete popup */

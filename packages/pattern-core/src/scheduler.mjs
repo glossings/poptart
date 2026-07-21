@@ -112,6 +112,7 @@ export class Scheduler {
     this._running = false;
     this._activeModulators = new Map(); // "slot name" -> { slot, name, sig, kind: 'lfo'|'env', dynamic }
     this._prevChannelNames = []; // channel controls set by the previous pattern, for default-reset
+    this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
   }
 
   /** Every control signal the pattern carries: plugin params by slot, channel strip as slot -1. */
@@ -130,6 +131,21 @@ export class Scheduler {
       this.engine.loadInstrument(this.trackId, sig.instrument);
     }
     sig.fxChain.forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
+
+    // Captured plugin state (synth/fx's `{ state }` argument). Sent only when the state string
+    // (or the plugin occupying the slot) actually changed - a livecoding re-eval must not make
+    // the plugin re-chew a megabyte state blob every keystroke. Removing the state from the
+    // code deliberately resets nothing: the plugin just keeps sounding how it sounds.
+    if (typeof this.engine.setPluginState === 'function') {
+      const chain = [sig.instrument, ...sig.fxChain];
+      for (const [slotStr, state] of Object.entries(sig.slotStates ?? {})) {
+        const slot = Number(slotStr);
+        const key = `${slot}:${chain[slot]}`;
+        if (this._appliedStates.get(key) === state) continue;
+        this._appliedStates.set(key, state);
+        this.engine.setPluginState(this.trackId, slot, state);
+      }
+    }
 
     // A channel control the new pattern dropped (`.gain(...)` deleted mid-session) snaps back
     // to its default - unlike plugin params, these have an obvious neutral value.
@@ -226,6 +242,7 @@ export class Scheduler {
     for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
       for (const step of this.pattern.stepsForCycle(cycle)) {
         if (step.value == null) continue; // rest
+        if (step.cont) continue; // tie/hold: the sounding event's onset was in an earlier step
 
         const stepStartCycle = cycle + step.start;
         const stepEndCycle = cycle + step.end;
@@ -246,7 +263,13 @@ export class Scheduler {
           );
         } else {
           const midiNote = Math.round(step.value);
-          this.engine.noteOn(this.trackId, midiNote, 1.0, onsetSec);
+          let velocity = 1.0;
+          if (this.pattern.velSig) {
+            const v = this.pattern.velSig.sample(onsetSec, this.transport.cps, stepStartCycle);
+            if (typeof v === 'number' && !Number.isNaN(v)) velocity = v;
+            if (velocity <= 0) continue;
+          }
+          this.engine.noteOn(this.trackId, midiNote, Math.min(1, velocity), onsetSec);
           this.engine.noteOff(this.trackId, midiNote, offsetSec);
         }
       }
@@ -263,7 +286,7 @@ export class Scheduler {
       return typeof v === 'number' ? v : v == null ? undefined : Number(v);
     };
     const src = this.pattern.sampler;
-    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'stretch', 'slice']) {
+    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'stretch', 'slice', 'note', 'vel']) {
       if (src[key]) {
         const v = at(src[key]);
         if (v !== undefined && !Number.isNaN(v)) cfg[key] = v;

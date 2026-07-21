@@ -109,6 +109,8 @@ class MappedEngine {
   loadInstrument(...a) { return this.engine.loadInstrument(...a); }
   loadEffect(...a) { return this.engine.loadEffect(...a); }
   getParams(...a) { return this.engine.getParams(...a); }
+  getPluginState(...a) { return this.engine.getPluginState(...a); }
+  setPluginState(...a) { return this.engine.setPluginState(...a); }
   showPluginEditor(...a) { return this.engine.showPluginEditor(...a); }
   noteOn(...a) { return this.engine.noteOn(...a); }
   noteOff(...a) { return this.engine.noteOff(...a); }

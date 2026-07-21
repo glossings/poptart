@@ -36,7 +36,7 @@ export class Sig {
     this.lfoIR = opts.lfoIR ?? null; // present only for the sine/saw/tri/square builders below
     this.envIR = opts.envIR ?? null; // present only for the env() builder below
 
-    // Track-building metadata, threaded through by .s()/.fx()/.param() etc. Every control
+    // Track-building metadata, threaded through by .synth()/.fx()/.param() etc. Every control
     // method returns a NEW Sig (same sample/stepsForCycle) with this metadata carried forward -
     // see _clone().
     this.instrument = opts.instrument ?? null;
@@ -44,6 +44,10 @@ export class Sig {
     this.paramSignals = opts.paramSignals ?? {}; // name -> Sig
     this.paramSlots = opts.paramSlots ?? {}; // name -> slot index (0 = instrument, 1..n = fx)
     this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan' -> Sig
+    this.velSig = opts.velSig ?? null; // per-onset note velocity (see vel()); synth tracks only
+    // Captured plugin state per chain slot (0 = instrument, 1.. = fx), from synth/fx's second
+    // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load.
+    this.slotStates = opts.slotStates ?? {};
     // Sampler config, present only for s("pack") patterns: { index, begin, end, loop, speed,
     // stretch, fit, slice }, each a Sig (sampled per event onset) or absent for its default.
     this.sampler = opts.sampler ?? null;
@@ -59,7 +63,9 @@ export class Sig {
       paramSignals: this.paramSignals,
       paramSlots: this.paramSlots,
       channel: this.channel,
+      velSig: this.velSig,
       sampler: this.sampler,
+      slotStates: this.slotStates,
       ...overrides,
     });
   }
@@ -81,7 +87,9 @@ export class Sig {
         paramSignals: this.paramSignals,
         paramSlots: this.paramSlots,
         channel: this.channel,
+        velSig: this.velSig,
         sampler: this.sampler,
+        slotStates: this.slotStates,
       },
     );
   }
@@ -124,14 +132,29 @@ export class Sig {
     throw new Error('.phase() on a non-LFO signal is not supported yet');
   }
 
-  /** Sets which plugin (by id, from native-engine's scanned plugin list) is this track's instrument. */
-  s(pluginId) {
-    return this._clone({ instrument: pluginId });
+  /**
+   * Sets which plugin (by id, from native-engine's scanned plugin list) is this track's
+   * instrument. `config.state` (an opaque captured-state string - use the "pin" button in the
+   * editor's track panel to write it into the code) restores the plugin's full saved state on
+   * load, Ableton-style, so a shared/reloaded session sounds identical.
+   */
+  synth(pluginId, config) {
+    return this._clone({
+      instrument: pluginId,
+      ...(config?.state ? { slotStates: { ...this.slotStates, 0: config.state } } : {}),
+    });
   }
 
-  /** Appends an effect plugin to this track's chain, after the instrument and any prior .fx() calls. */
-  fx(pluginId) {
-    return this._clone({ fxChain: [...this.fxChain, pluginId] });
+  /**
+   * Appends an effect plugin to this track's chain, after the instrument and any prior .fx()
+   * calls. Takes the same optional `{ state }` second argument as synth().
+   */
+  fx(pluginId, config) {
+    const slot = this.fxChain.length + 1; // this fx's chain slot (0 = instrument)
+    return this._clone({
+      fxChain: [...this.fxChain, pluginId],
+      ...(config?.state ? { slotStates: { ...this.slotStates, [slot]: config.state } } : {}),
+    });
   }
 
   /**
@@ -146,6 +169,21 @@ export class Sig {
   /** Channel strip: stereo pan, -1 (left) .. 1 (right), 0 = center. Signals welcome: `.pan(sine(0.2).range(-1, 1))`. */
   pan(value) {
     return this._clone({ channel: { ...this.channel, pan: toSignal(value) } });
+  }
+
+  /**
+   * Per-note velocity, sampled at each onset. On synth tracks it becomes MIDI velocity (0..1);
+   * on sampler tracks it scales the sample's volume linearly. A patterned vel also gives the
+   * track structure: events are split on vel's step grid (a `~` drops the event), each fresh
+   * vel step retriggers, and each event is gated to its step - so s("long").vel("1 1 ~ 1")
+   * plays three quarter-cycle hits that stop ringing at their step ends (Ableton Sampler
+   * "gate" mode), instead of one full-length sample.
+   */
+  vel(value) {
+    const sig = toSignal(value);
+    const stepsForCycle = intersectSteps(this.stepsForCycle, sig);
+    if (this.sampler) return this._clone({ sampler: { ...this.sampler, vel: sig }, stepsForCycle });
+    return this._clone({ velSig: sig, stepsForCycle });
   }
 
   /**
@@ -219,7 +257,9 @@ export class Sig {
         paramSignals: this.paramSignals,
         paramSlots: this.paramSlots,
         channel: this.channel,
+        velSig: this.velSig,
         sampler: this.sampler,
+        slotStates: this.slotStates,
       },
     );
   }
@@ -283,7 +323,9 @@ export class Sig {
       paramSignals: transformed.paramSignals,
       paramSlots: transformed.paramSlots,
       channel: transformed.channel,
+      velSig: transformed.velSig,
       sampler: transformed.sampler,
+      slotStates: transformed.slotStates,
     });
   }
 
@@ -351,7 +393,9 @@ export class Sig {
       paramSignals: this.paramSignals,
       paramSlots: this.paramSlots,
       channel: this.channel,
+      velSig: this.velSig,
       sampler: this.sampler,
+      slotStates: this.slotStates,
     });
   }
 
@@ -390,6 +434,47 @@ export class Sig {
   }
   /** Play the nth detected transient slice (wraps past the last one). Needs a WAV sample. */
   slice(v) { return this._samplerOpt('slice', 'slice', toSignal(v)); }
+
+  /**
+   * Repitches a sampler pattern by MIDI note: 60 ("c5") plays the sample as recorded, 72 an
+   * octave up. Takes note names, numbers, mini strings, or any Sig, sampled per onset. A
+   * patterned note also gives structure - each fresh note step retriggers the sample, gated
+   * to its step - so s("pluck").note("45 52 _ 57") plays a melodic line from one sample.
+   * (As a method this is sampler-only; melodies on synths start from the note("...") builder.)
+   */
+  note(value) {
+    if (!this.sampler) {
+      throw new Error('[signal] .note() as a method only applies to a sampler pattern - for synths, start from note("...")');
+    }
+    const sig = value instanceof Sig ? value : note(value);
+    const stepsForCycle = intersectSteps(this.stepsForCycle, sig);
+    return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
+  }
+
+  /** Alias of .note() for sampler repitching. */
+  n(value) { return this.note(value); }
+}
+
+// Splits a pattern's step grid on a control pattern's grid (patterned .vel()/.note()): each
+// overlap becomes one event, control rests drop events, and an overlap is a new onset when
+// either side starts a fresh (non-`cont`) step there - otherwise it's a tie and stays `cont`.
+function intersectSteps(baseStepsForCycle, ctlSig) {
+  if (!baseStepsForCycle || !ctlSig.stepsForCycle) return baseStepsForCycle;
+  return (cycle) => {
+    const ctlSteps = ctlSig.stepsForCycle(cycle).filter((c) => c.value != null);
+    const out = [];
+    for (const s of baseStepsForCycle(cycle)) {
+      if (s.value == null) continue;
+      for (const c of ctlSteps) {
+        const start = Math.max(s.start, c.start);
+        const end = Math.min(s.end, c.end);
+        if (start >= end) continue;
+        const cont = (start > s.start || s.cont) && (start > c.start || c.cont);
+        out.push({ ...s, start, end, cont: cont || undefined });
+      }
+    }
+    return out;
+  };
 }
 
 // Rests/gaps in a condition pattern count as falsy regions, not holes - without this, a cond
@@ -472,6 +557,20 @@ export function n(value) {
 export function s(value) {
   const ast = parseMini(String(value));
   return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
+}
+
+/**
+ * Instrument-only pattern: loads `pluginId` as the track's instrument with no note events -
+ * gets a plugin loaded (and its params panel up) before any notes exist. The full form is
+ * n("0 2 3").scale("F minor").synth("Serum 2"). Takes the same optional `{ state }` second
+ * argument as Sig#synth.
+ */
+export function synth(pluginId, config) {
+  return new Sig(() => null, {
+    stepsForCycle: () => [],
+    instrument: pluginId,
+    ...(config?.state ? { slotStates: { 0: config.state } } : {}),
+  });
 }
 
 /** Explicit-note control - numbers pass through as MIDI, strings may be note names ("f4") or numbers. */

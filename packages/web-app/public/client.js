@@ -1,7 +1,7 @@
 'use strict';
 
 // Browser UI: CodeMirror editor with poptart-aware autocomplete (real VST parameter names
-// inside `.param("…")`, plugin names inside `.s("…")`/`.fx("…")`, method/builder names
+// inside `.param("…")`, plugin names inside `.synth("…")`/`.fx("…")`, method/builder names
 // elsewhere), live playback highlighting of mini-notation (the atom currently sounding lights
 // up, Strudel-style), a searchable params panel, plugin browser, an interactive theme editor,
 // and transport - all over the same fetch('/api/…') endpoints. No build step: CodeMirror 5 is
@@ -71,11 +71,12 @@ function copyText(text, what) {
 let chainSlots = [];
 let knownPlugins = [];
 
-const BUILDERS = ['n', 'note', 'mini', 's', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'setbpm'];
+const BUILDERS = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'setbpm'];
 const METHODS = [
-  'scale', 's', 'fx', 'param', 'gain', 'pan', 'range', 'fast', 'rate', 'phase', 'curve',
+  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'vel', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
   'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold',
+  'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
 ];
 
 // The sublime keymap supplies the expected editing chords (Cmd/Ctrl-/ comment, Cmd/Ctrl-D
@@ -135,8 +136,124 @@ function decodeCodeHash(hash) {
 if (location.hash.length > 1) {
   try {
     cm.setValue(decodeCodeHash(location.hash.slice(1)));
+    foldConfigBlobs();
   } catch {
     logLine('could not decode code from the URL - keeping the default snippet', true);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Config folding: captured plugin-state blobs (`synth("Serum 2", { state: "..." })`) and long
+// lfo() shape strings collapse to a small clickable widget so they don't drown the code. The
+// full text stays in the buffer - and therefore in the URL hash - only the *display* folds.
+// Click a widget to expand it; everything re-folds on load and after each eval.
+// ---------------------------------------------------------------------------------------------
+
+function foldSpan(fromIdx, toIdx, label, title) {
+  const from = cm.posFromIndex(fromIdx);
+  const to = cm.posFromIndex(toIdx);
+  if (cm.findMarks(from, to).some((mk) => mk.poptartFold)) return; // already folded
+  const widget = document.createElement('span');
+  widget.className = 'cm-config-fold';
+  widget.textContent = label;
+  widget.title = title;
+  const mk = cm.markText(from, to, { replacedWith: widget, atomic: true });
+  mk.poptartFold = true;
+  widget.onclick = () => mk.clear();
+}
+
+function foldConfigBlobs() {
+  const code = cm.getValue();
+  let m;
+  // Captured plugin state objects - base64ish payload, so a simple regex is safe.
+  const stateRe = /\{\s*state:\s*"[A-Za-z0-9+/=]+"\s*\}/g;
+  while ((m = stateRe.exec(code))) {
+    const kb = Math.max(1, Math.round(m[0].length / 1024));
+    foldSpan(m.index, m.index + m[0].length, `{⋯${kb}kb}`, 'captured plugin state — click to expand');
+  }
+  // Long lfo() shape strings; short ones stay readable inline.
+  const lfoRe = /\blfo\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
+  while ((m = lfoRe.exec(code))) {
+    const str = m[1];
+    if (str.length < 24) continue;
+    const start = m.index + m[0].length - str.length;
+    foldSpan(start, start + str.length, '"⋯"', 'lfo shape — click to expand, or use the shape editor');
+  }
+}
+
+// String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced.
+function matchParen(code, openIdx) {
+  let depth = 0;
+  let inStr = null;
+  for (let i = openIdx; i < code.length; i++) {
+    const ch = code[i];
+    if (inStr) {
+      if (ch === '\\') i++;
+      else if (ch === inStr) inStr = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') inStr = ch;
+    else if (ch === '(' || ch === '{' || ch === '[') depth++;
+    else if (ch === ')' || ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Index just past the closing quote of the first string literal in [from, to); -1 if none.
+function endOfFirstString(code, from, to) {
+  for (let i = from; i < to; i++) {
+    const q = code[i];
+    if (q !== '"' && q !== "'") continue;
+    for (let j = i + 1; j < to; j++) {
+      if (code[j] === '\\') j++;
+      else if (code[j] === q) return j + 1;
+    }
+    return -1;
+  }
+  return -1;
+}
+
+// Locates the synth(...) call (slot 0) or the slot-th .fx(...) call inside a track's block and
+// returns where its `{ state }` argument goes: [afterFirstArg, closeParen).
+function findChainCall(code, from, to, slot) {
+  const re = /\b(synth|fx)\s*\(/g;
+  re.lastIndex = from;
+  let m;
+  let fxSeen = 0;
+  while ((m = re.exec(code)) && m.index < to) {
+    const isTarget = m[1] === 'synth' ? slot === 0 : ++fxSeen === slot;
+    if (!isTarget) continue;
+    const open = m.index + m[0].length - 1;
+    const closeParen = matchParen(code, open);
+    if (closeParen < 0 || closeParen > to) return null;
+    const afterFirstArg = endOfFirstString(code, open + 1, closeParen);
+    if (afterFirstArg < 0) return null;
+    return { afterFirstArg, closeParen };
+  }
+  return null;
+}
+
+// The "pin" button: capture the live plugin's full state and write it into the code as the
+// synth/fx call's second argument (replacing any previous one), then fold it. The state then
+// restores on every load/eval and shares via the URL like the rest of the code.
+async function pinPluginState(trackLabel, blockStart, blockEnd, slot) {
+  try {
+    const { state } = await api('POST', '/api/pluginState', { trackId: trackLabel, slot });
+    const code = cm.getValue();
+    const end = Math.min(blockEnd, code.length);
+    const call = findChainCall(code, Math.min(blockStart, end), end, slot);
+    if (!call) {
+      logLine(`could not find the ${slot === 0 ? 'synth(...)' : '.fx(...)'} call for track "${trackLabel}" slot ${slot} - re-eval and try again`, true);
+      return;
+    }
+    cm.replaceRange(`, { state: "${state}" }`, cm.posFromIndex(call.afterFirstArg), cm.posFromIndex(call.closeParen));
+    foldConfigBlobs();
+    logLine(`pinned plugin state into the code (track "${trackLabel}", slot ${slot})`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
   }
 }
 
@@ -256,8 +373,8 @@ function poptartHint(cm) {
   let m = before.match(/\.param\s*\(\s*["']([^"']*)$/);
   if (m) return paramHints(cur, m[1], before);
 
-  // Inside .s(" or .fx(" → scanned plugin names.
-  m = before.match(/\.(?:s|fx)\s*\(\s*["']([^"']*)$/);
+  // Inside .synth(" or .fx(" → scanned plugin names.
+  m = before.match(/\.(?:synth|fx)\s*\(\s*["']([^"']*)$/);
   if (m) return pluginHints(cur, m[1]);
 
   // After a dot → chain methods; bare word → top-level builders.
@@ -641,16 +758,17 @@ function findStringLiterals(code) {
   return out;
 }
 
-// Only strings used *as patterns* get highlighted: arguments to n()/note()/mini()/s()/.when(),
+// Only strings used *as patterns* get highlighted: arguments to n()/note()/mini()/s(),
+// chain methods whose first argument can be mini-notation (.when()/.i()/.gain()/.add()/…),
 // second-position arguments (`.param("name", "0.2 0.8")`), and strings that immediately chain
-// a method (`"0 0.5 1".gte(0.5)`). Deliberately not: `.s("Serum 2")` (the lookbehind excludes
-// the *method* .s while keeping the global s() sampler builder), `.scale("F minor")`,
-// `.param("Filter 1 Freq", …)`'s name string.
+// a method (`"0 0.5 1".gte(0.5)`). Deliberately not: `.synth("Serum 2")`/`.fx(...)`/
+// `.scale("F minor")`, or `.param("Filter 1 Freq", …)`'s name string - those are lookups,
+// not patterns.
 function isPatternContext(code, lit) {
   const before = code.slice(0, lit.index);
   const after = code.slice(lit.end);
   if (/(?<!\.)\b(?:n|note|mini|s)\s*\(\s*$/.test(before)) return true;
-  if (/\.\s*when\s*\(\s*$/.test(before)) return true;
+  if (/\.\s*(?:when|hold|i|n|note|vel|begin|end|loop|speed|stretch|fit|slice|gain|pan|add|sub|mul|div|mod|gte|gt|lte|lt|eq|neq)\s*\(\s*$/.test(before)) return true;
   if (/,\s*$/.test(before)) return true;
   if (/^\s*\.\s*[A-Za-z_]/.test(after)) return true;
   return false;
@@ -755,6 +873,12 @@ function renderTracks(result) {
         uiBtn.onclick = () =>
           api('POST', '/api/showEditor', { trackId: t.label, slot }).catch((e) => logLine(e.message, true));
         row.appendChild(uiBtn);
+        const pinBtn = document.createElement('button');
+        pinBtn.className = 'small';
+        pinBtn.textContent = 'pin';
+        pinBtn.title = 'capture the plugin state into the code, so it restores on load and shares via the URL';
+        pinBtn.onclick = () => pinPluginState(t.label, t.start, t.end, slot);
+        row.appendChild(pinBtn);
       }
       trackInfo.appendChild(row);
     });
@@ -781,6 +905,7 @@ async function doEval() {
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0 };
     renderTracks(result);
     setupHighlighting(code, result.tracks);
+    foldConfigBlobs();
     playing = true;
     logLine(`evaluated ok (${result.tracks.filter((t) => t.active).length}/${result.tracks.length} pattern(s) playing)`);
     loadChainParams();
@@ -911,7 +1036,7 @@ async function doScan() {
 }
 
 // The engine's boot-time VSTPlugin.search usually already knows the plugins - populate the
-// browser (and .s()/.fx() autocomplete) without requiring a manual rescan.
+// browser (and .synth()/.fx() autocomplete) without requiring a manual rescan.
 async function loadKnownPlugins() {
   try {
     const plugins = await api('GET', '/api/knownPlugins');

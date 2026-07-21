@@ -11,6 +11,8 @@
 //   "a/2"          slow: stretch over 2 cycles (only 1/2 of it shows up per cycle)
 //   "a!3"          replicate: 3 separate onsets, each getting a normal-width slice
 //   "a@3"          weight: one onset, 3x the width of a normal slice
+//   "a _ _"        elongate: "_" extends the previous step (one onset over 3 slices - a tie,
+//                  not a retrigger). Inside "<...>" it holds the previous item across cycles.
 //   "bd(3,8)"      euclidean rhythm: 3 pulses over 8 steps (optionally "(3,8,2)" with rotation)
 //
 // NOT supported yet (will throw a clear parse error rather than silently doing the wrong
@@ -31,10 +33,15 @@ export function parseMini(str) {
 }
 
 /**
- * Returns this cycle's steps as `[{ start, end, value, loc }]`, fractions of a cycle in [0,1).
+ * Returns this cycle's steps as `[{ start, end, value, loc, cont? }]`, fractions of a cycle.
  * `value` is `null` for rests. `loc` is the `[startChar, endChar)` range of the atom this step
  * came from, within the original pattern string - the editor uses it to highlight the atom
  * that's currently playing.
+ *
+ * Two extensions for held events (from "_" / "@" inside "<...>", and from "/"): a step's `end`
+ * may exceed 1 (the event rings into following cycles), and those following cycles report the
+ * still-sounding part as a step with `cont: true` - same value/loc, but NOT a new onset. The
+ * scheduler must skip `cont` steps when triggering; samplers/highlighters treat them normally.
  */
 export function getStepsForCycle(ast, cycleNumber) {
   return astToSteps(ast, cycleNumber);
@@ -83,11 +90,28 @@ function tokenize(str) {
 //   { type: 'euclid', item, pulses, steps, rotation }
 // ---------------------------------------------------------------------------------------------
 
+// "_" (elongate/tie) never becomes an element of its own: it folds into the previous item's
+// weight at parse time, so "a _ _" is exactly "a@3" - one onset, three slices wide. Inside
+// "<...>" the widened weight instead holds the item across extra cycles (see the alt case).
+function isTie(element) {
+  return element.node.type === 'atom' && element.node.value === '_';
+}
+
+function pushElement(items, element) {
+  if (isTie(element)) {
+    const prev = items[items.length - 1];
+    if (!prev) throw new Error('[mini] "_" must follow a step to elongate');
+    prev.weight += element.weight;
+    return;
+  }
+  items.push(element);
+}
+
 function parseSequence(tokens, stopTypes) {
   const items = [];
   while (tokens.length > 0 && !stopTypes.has(tokens[0].type) && tokens[0].type !== ',') {
     const { element, rest } = parseElement(tokens);
-    items.push(element);
+    pushElement(items, element);
     tokens = rest;
   }
   return { node: { type: 'seq', items }, rest: tokens };
@@ -119,7 +143,7 @@ function parseAngle(tokens) {
   const items = [];
   while (tokens.length > 0 && tokens[0].type !== '>') {
     const { element, rest } = parseElement(tokens);
-    items.push(element);
+    pushElement(items, element);
     tokens = rest;
   }
   if (tokens[0]?.type !== '>') throw new Error('[mini] expected closing ">"');
@@ -240,14 +264,39 @@ function astToSteps(node, cycle) {
 
     case 'alt': {
       if (node.items.length === 0) return [];
-      const len = node.items.length;
-      const idx = ((cycle % len) + len) % len;
+      // "!" replicates into separate picks (retriggers each cycle); "@"/"_" weights make one
+      // pick span several consecutive cycles - stretched over its span, with one onset and
+      // `cont` steps for the cycles after it (so "<73 _>" holds 73 for 2 cycles, no retrigger).
+      const picks = node.items.flatMap((item) => {
+        const reps = item.reps || 1;
+        const w = Math.max(1, Math.round((item.weight ?? 1) / reps));
+        return Array.from({ length: reps }, () => ({ w, node: item.node }));
+      });
+      const total = picks.reduce((sum, p) => sum + p.w, 0);
+      const pos = ((cycle % total) + total) % total;
+      let acc = 0;
+      let idx = 0;
+      while (pos >= acc + picks[idx].w) {
+        acc += picks[idx].w;
+        idx++;
+      }
+      const pick = picks[idx];
+      const offset = pos - acc; // which cycle of the pick's span we're in
       // The chosen item sees its own cycle count ("how many times have I been picked"), not the
       // outer cycle - Strudel's slowcat semantics. This is what makes a nested alternation like
       // "<0 2 3 <5 7>>" step 5,7,5,7 on successive picks: the inner alt is picked at outer
       // cycles 3,7,11,... which all have the same parity, so passing `cycle` through unchanged
       // would pin it to one value forever.
-      return astToSteps(node.items[idx].node, Math.floor(cycle / len));
+      const innerCycle = Math.floor(cycle / total);
+      const out = [];
+      for (const s of astToSteps(pick.node, innerCycle)) {
+        const start = s.start * pick.w - offset;
+        const end = s.end * pick.w - offset;
+        if (end <= 0 || start >= 1) continue;
+        if (start >= 0) out.push({ ...s, start, end });
+        else out.push({ ...s, start: 0, end, cont: true });
+      }
+      return out;
     }
 
     case 'fast': {
@@ -256,7 +305,7 @@ function astToSteps(node, cycle) {
       for (let i = 0; i < n; i++) {
         const innerCycle = cycle * n + i;
         for (const s of astToSteps(node.item, innerCycle)) {
-          out.push({ start: (i + s.start) / n, end: (i + s.end) / n, value: s.value, loc: s.loc });
+          out.push({ ...s, start: (i + s.start) / n, end: (i + s.end) / n });
         }
       }
       return out;
@@ -317,7 +366,7 @@ function seqToSteps(items, cycle) {
   for (const el of expanded) {
     const span = el.weight / totalWeight;
     for (const s of astToSteps(el.node, cycle)) {
-      out.push({ start: cursor + s.start * span, end: cursor + s.end * span, value: s.value, loc: s.loc });
+      out.push({ ...s, start: cursor + s.start * span, end: cursor + s.end * span });
     }
     cursor += span;
   }
@@ -327,10 +376,12 @@ function seqToSteps(items, cycle) {
 function clipAndRescale(steps, a, b) {
   const out = [];
   for (const s of steps) {
+    if (s.end <= a || s.start >= b) continue;
     const start = Math.max(s.start, a);
-    const end = Math.min(s.end, b);
-    if (start >= end) continue;
-    out.push({ start: (start - a) / (b - a), end: (end - a) / (b - a), value: s.value, loc: s.loc });
+    // An event's tail past `b` is kept (its rescaled end lands past 1): it genuinely rings
+    // into the next cycle, whose own window then reports it as a `cont` step (onset before
+    // the window). This is what makes "a/2" one 2-cycle-long note instead of two onsets.
+    out.push({ ...s, start: (start - a) / (b - a), end: (s.end - a) / (b - a), cont: s.cont || start > s.start || undefined });
   }
   return out;
 }

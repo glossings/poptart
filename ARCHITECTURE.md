@@ -12,7 +12,7 @@ Example target syntax (from the original brief):
 ```js
 n("0 2 3")
   .scale("F minor")
-  .s("Serum 2")
+  .synth("Serum 2")
   .param("Filter 1 Freq", sine({ rate: 0.3 }).range(200, 5000))
 ```
 
@@ -243,14 +243,23 @@ exact onset/offset times, same as before - only *parameter* signals go through t
 continuous-modulation path, since notes are inherently discrete triggers rather than
 continuously-varying values.
 
-## `.s()`, `.fx()`, and signal chains
+Held events (mini-notation ties: `"73 _"`, `<a _>`, `a/2`) extend this model minimally rather
+than importing Strudel's whole/part hap machinery: the onset step's `end` may exceed 1 (the
+event rings into later cycles, and the scheduler's noteOff lands there), and later cycles
+report the still-sounding span as steps flagged `cont: true` - which the scheduler skips for
+triggering but samplers and the editor's highlighter treat normally. The same `cont` flag is
+how the structural controls (`Sig#vel`, and `Sig#note` on samplers) intersect a pattern's step
+grid with the control's grid without spurious retriggers: an overlap is a fresh onset only if
+one side starts a non-`cont` step exactly there.
+
+## `.synth()`, `.fx()`, and signal chains
 
 One naming snag shaped the `Sig` API: any control that accepts a plain string is run through
 `mini(...)` (see `toSignal()` in `signal.mjs`), because that's what makes
 `.param("Filter 1 Freq", "200 1000 3000")`-style stepped modulation possible. But plugin names routinely contain spaces -
 `"Serum 2"`, `"Massive X"`, `"Kontakt 7"` - and mini-notation reads a bare space as a sequence
-separator, so if `.s(...)`/`.fx(...)` went through the same path, `.s("Serum 2")` would
-silently become the two-step sequence `"Serum" "2"`, not one atomic plugin id. So `Sig#s()`
+separator, so if `.synth(...)`/`.fx(...)` went through the same path, `.synth("Serum 2")` would
+silently become the two-step sequence `"Serum" "2"`, not one atomic plugin id. So `Sig#synth()`
 and `Sig#fx()` deliberately do **not** call `toSignal()`/`mini()` at all: a plugin id is always
 one static, literal string per pattern (`this._clone({ instrument: pluginId })`), never
 patterned over time - which also matches reality, since swapping a track's loaded VST
@@ -271,7 +280,7 @@ the currently-sounding mini-notation atom in the editor with no polling, Strudel
 buffer itself is also kept base64url-encoded in `location.hash` (again Strudel-style), so a
 patch shares as a plain URL and opening a shared link restores the code.
 
-- `.s("Serum 2")` — resolves "Serum 2" against the scanned/known-plugins list and assigns it
+- `.synth("Serum 2")` — resolves "Serum 2" against the scanned/known-plugins list and assigns it
   as the track's instrument slot (loaded once, reused; note on/off events are just MIDI to
   that one instance — Serum 2 handles its own polyphony, same as any other synth).
 - `.fx("ValhallaRoom")` — appends an effect plugin to the chain; the track's audio output runs
@@ -313,7 +322,7 @@ patch shares as a plain URL and opening a shared link restores the code.
   equivalent of the old native engine's sample-timestamped event queue, and the same technique
   SuperDirt/Tidal use for sample-accurate OSC scheduling.
 - Verified end-to-end on the dev machine (SuperCollider 3.14.1 + VSTPlugin v0.6.2): the brief's
-  own pattern shape - `n("0 2 3").scale("F minor").s("Serum 2").param("Filter 1 Freq",
+  own pattern shape - `n("0 2 3").scale("F minor").synth("Serum 2").param("Filter 1 Freq",
   sine({rate:0.5}).range(0.1,0.8))` - was evaluated through the browser API, loaded the real
   Serum 2 VST3, produced audible notes, and the recorded master bus shows the 0.5Hz filter
   sweep. `getParams` returned Serum 2's full 2,621-entry parameter list. Two implementation
@@ -353,7 +362,7 @@ patch shares as a plain URL and opening a shared link restores the code.
 `pattern-core` is fully implemented and verified in isolation (no engine required to test it):
 the mini-notation parser/interpreter, note-name/scale tables, the `Sig` model, and `Scheduler`
 were all exercised directly against a mock engine object during development -
-`n("0 2 3").scale("F minor").s("Serum 2").param("Filter 1 Freq",
+`n("0 2 3").scale("F minor").synth("Serum 2").param("Filter 1 Freq",
 sine({rate:0.3}).range(200,5000))` (the brief's example, via `.param()` now that aliases are
 gone) produces the correct MIDI notes (F5/Ab5/Bb5), correct exact onset/offset times, a single
 `setParamLFO` call carrying the right IR and zero further calls for that parameter (Tier 2),
