@@ -29,12 +29,30 @@
 var nodePort = "POPTART_NODE_PORT".getenv.asInteger;
 var sampleRate = ("POPTART_SAMPLE_RATE".getenv ? "48000").asInteger;
 var blockSize = ("POPTART_BLOCK_SIZE".getenv ? "256").asInteger;
-// Colon-separated list of plugin directories to scan instead of the standard locations.
-// Escape hatch for collections where a full default-location scan is problematic - on the dev
-// machine, scanning everything reproducibly killed scsynth (exit 0, pre-probe - looks like a
-// VSTPlugin scan bug worth reporting upstream, not one bad plugin: the usual crashers probe
-// fine individually). Point this at a folder of just the plugins you're actually playing.
-var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split($:) };
+// Plugin directories to scan. Priority: POPTART_VST_DIRS (colon-separated) if set, else
+// ~/.poptart/plugins if it exists (a folder of symlinks to just the plugins being played),
+// else VSTPlugin's standard locations. The curated folder is the default on purpose: a full
+// default-location scan reproducibly kills scsynth on the dev machine (exit 0, pre-probe -
+// looks like a VSTPlugin scan bug worth reporting upstream, not one bad plugin: the usual
+// crashers probe fine individually), and relying on an env var meant any launch without it
+// silently fell back to the scsynth-killing full scan.
+var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split($:) }
+    ?? { var d = "~/.poptart/plugins".standardizePath; if (File.exists(d)) { [d] } };
+// Plugins skipped explicitly during scans (VSTPlugin's exclude option, which prunes these
+// paths from the directory traversal so they're never probed). Defaults are the known-bad
+// ones on the dev machine: Mellotron V and Jun-6 V segfault their probe subprocess; Melodyne ("couldn't
+// get plugin factory") and CloudSeed ("operation not permitted") fail every scan and just
+// spam the log; SpaceBlender and both MORPH 3 PRO variants are unwanted in the plugin list.
+// POPTART_VST_EXCLUDE (colon-separated paths) appends more without editing this.
+var excludePaths = [
+    "/Library/Audio/Plug-Ins/VST3/Mellotron V.vst3",
+    "/Library/Audio/Plug-Ins/VST3/Jun-6 V.vst3",
+    "/Library/Audio/Plug-Ins/VST3/Melodyne.vst3",
+    "/Library/Audio/Plug-Ins/VST3/CloudSeed.vst3",
+    "/Library/Audio/Plug-Ins/VST3/Soundtoys/SpaceBlender.vst3",
+    "/Library/Audio/Plug-Ins/VST3/MORPH 3 PRO VST3.vst3",
+    "/Library/Audio/Plug-Ins/VST3/MORPH 3 PRO DualMonoIn VST3.vst3"
+] ++ ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
 var maxSlots = 8; // slot 0 = instrument, 1..7 = effects
 var server = Server.default;
 var nodeAddr = NetAddr("127.0.0.1", nodePort);
@@ -94,9 +112,9 @@ pluginList = {
             manufacturer: desc.vendor,
             category: desc.category,
             format: desc.sdkVersion,
-            isInstrument: desc.isSynth,
-            numInputChannels: desc.numInputs,
-            numOutputChannels: desc.numOutputs,
+            isInstrument: desc.synth,
+            numInputChannels: desc.inputs[0] !? _.channels ?? 0,
+            numOutputChannels: desc.outputs[0] !? _.channels ?? 0,
             numParameters: desc.numParameters
         )
     };
@@ -182,7 +200,7 @@ server.waitForBoot {
     // Populate the plugin dict in the background so .s("Name") can resolve names. Cached
     // plugins re-verify instantly; only new/changed ones get probed (out-of-process, with a
     // per-plugin timeout so a hang skips that plugin instead of stalling the scan).
-    VSTPlugin.search(server, dir: searchDirs, options: (timeout: 20), verbose: true, action: {
+    VSTPlugin.search(server, dir: searchDirs, options: (timeout: 20, exclude: excludePaths), verbose: true, action: {
         "poptart: initial plugin search done (% plugins)".format(VSTPlugin.plugins(server).size).postln;
     });
 };
@@ -556,7 +574,7 @@ OSCdef(\poptartScanPlugins, { |msg|
     var requestId = msg[1];
     // extraPaths (msg[2], JSON array) not wired through yet; POPTART_VST_DIRS covers the
     // custom-directory need for now.
-    VSTPlugin.search(server, dir: searchDirs, options: (timeout: 20), verbose: true, action: {
+    VSTPlugin.search(server, dir: searchDirs, options: (timeout: 20, exclude: excludePaths), verbose: true, action: {
         replyOk.("/poptart/scanPlugins", requestId, toJson.((plugins: pluginList.(), crashed: [])));
     });
 }, '/poptart/scanPlugins');

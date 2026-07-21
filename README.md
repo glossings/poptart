@@ -105,11 +105,16 @@ window, set them by hand, and keep livecoding the rest.
 ## Known gaps (see ARCHITECTURE.md for the full list)
 
 - **Scanning the full default plugin locations kills scsynth on this machine** (reproducibly,
-  before probing anything - looks like a VSTPlugin scan bug, not one bad plugin). Workaround:
-  set `POPTART_VST_DIRS` to a colon-separated list of directories to scan instead - e.g. keep a
-  folder of symlinks to just the plugins you play:
-  `POPTART_VST_DIRS="$HOME/.poptart/plugins" npm run dev` (that folder is already set up here
-  with Serum 2, SerumFX, ValhallaVintageVerb, and OTT).
+  before probing anything - looks like a VSTPlugin scan bug, not one bad plugin). Because of
+  this, the scan defaults to `~/.poptart/plugins` when that folder exists - a folder of
+  symlinks to just the plugins you play (set up here with ~40 of them - Serum 2, Diva, Vital,
+  Pigments, the Soundtoys and FabFilter suites, and more; `ls ~/.poptart/plugins` for the
+  current list). `POPTART_VST_DIRS` (colon-separated directories) overrides the default, and
+  the full default-location scan only happens if neither exists. Individual plugins that
+  crash or spam errors during a scan are skipped via VSTPlugin's exclude option - a few
+  known-bad or unwanted ones are baked into `poptart.scd` (Mellotron V, Jun-6 V, Melodyne,
+  CloudSeed, SpaceBlender, MORPH 3 PRO), and
+  `POPTART_VST_EXCLUDE` (colon-separated paths) adds more.
 - If `scsynth` dies mid-session, nothing detects or restarts it - the UI keeps reporting
   "engine ready" while notes go nowhere. Restart `npm run dev` for now; supervision is a to-do.
 - Parameter values are normalized `0..1` for any parameter without a `mappings/*.json` units
