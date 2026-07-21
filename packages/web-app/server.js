@@ -27,12 +27,13 @@ const MIME_TYPES = {
 const CODEMIRROR_DIR = path.dirname(require.resolve('codemirror/package.json'));
 const PATTERN_CORE_SRC_DIR = path.join(__dirname, '..', 'pattern-core', 'src');
 
-const CPS = 0.5; // cycles per second - also returned to the client so highlighting stays in sync
+const DEFAULT_CPS = 0.5; // 120 bpm at 4 beats/cycle - overridable from code via setbpm()
 
 let patternCore = null; // loaded via dynamic import() since it's an ESM package
 let engine = null; // raw OscEngine (introspection/record endpoints talk to this directly)
 let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.js) - what the scheduler drives
 let engineError = null;
+let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
 
 async function loadEngine() {
@@ -58,6 +59,7 @@ async function init() {
   engine = await loadEngine();
   if (engine) {
     mappedEngine = new MappedEngine(engine);
+    transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS });
   }
 }
 
@@ -82,14 +84,28 @@ function extendStringPrototype(core) {
   }
 }
 
-const BUILDER_NAMES = ['n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
+const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
 
-// One block of editor code (see labels.mjs) -> a Sig, evaluated with the builders in scope.
+// What a `setbpm(...)` block evaluates to - lets /api/evaluate tell tempo-only blocks apart
+// from actual patterns (blocks must otherwise evaluate to a Sig).
+const TEMPO_BLOCK = Object.freeze({ poptartTempoBlock: true });
+
+// setbpm is global (there's one transport), so it's a server-provided builder rather than a
+// pattern-core export. Accepts a number or any signal - "120 140", sine(0.05).range(100, 160)...
+function setbpm(value) {
+  if (!transport) throw new Error(engineError ?? 'engine not loaded');
+  transport.setBpm(typeof value === 'string' ? patternCore.mini(value) : value);
+  return TEMPO_BLOCK;
+}
+
+// One block of editor code (see labels.mjs) -> a Sig (or TEMPO_BLOCK), evaluated with the
+// builders in scope.
 function buildPattern(code) {
+  const names = [...BUILDER_NAMES, 'setbpm'];
   // eslint-disable-next-line no-new-func
-  const build = new Function(...BUILDER_NAMES, `return (\n${code}\n);`);
-  const pattern = build(...BUILDER_NAMES.map((name) => patternCore[name]));
-  if (!(pattern instanceof patternCore.Sig)) {
+  const build = new Function(...names, `return (\n${code}\n);`);
+  const pattern = build(...BUILDER_NAMES.map((name) => patternCore[name]), setbpm);
+  if (pattern !== TEMPO_BLOCK && !(pattern instanceof patternCore.Sig)) {
     throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").s("Serum 2"))');
   }
   return pattern;
@@ -126,13 +142,15 @@ const routes = {
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
 
-    const built = blocks.map((b) => {
+    const evaluated = blocks.map((b) => {
       try {
         return { ...b, sig: buildPattern(b.code) };
       } catch (err) {
         throw new Error(`${b.label}: ${err.message ?? err}`);
       }
     });
+    // Tempo-only blocks (setbpm) act at eval time and don't become tracks.
+    const built = evaluated.filter((b) => b.sig !== TEMPO_BLOCK);
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
     const anySolo = built.some((b) => b.soloed && !b.muted);
@@ -152,7 +170,7 @@ const routes = {
       mappedEngine.setChain(b.label, [b.sig.instrument, ...b.sig.fxChain]);
       let sch = schedulers.get(b.label);
       if (!sch) {
-        sch = new patternCore.Scheduler(mappedEngine, { cps: CPS, trackId: b.label });
+        sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: b.label });
         schedulers.set(b.label, sch);
       }
       sch.setPattern(b.sig);
@@ -162,7 +180,8 @@ const routes = {
     return {
       status: 200,
       body: {
-        cps: CPS,
+        cps: transport.cps,
+        transport: transport.snapshot(),
         tracks: built.map((b) => ({
           label: b.label,
           muted: b.muted,

@@ -21,7 +21,10 @@ import { parseShapePoints, sampleShape } from './shape.mjs';
 
 export class Sig {
   /**
-   * @param {(tSeconds: number, cps: number) => *} sampleFn
+   * @param {(tSeconds: number, cps: number, cyclePos?: number) => *} sampleFn - `cyclePos` is
+   *   the transport's cycle position at tSeconds. Callers that have a Transport pass it so
+   *   cycle-based signals stay phase-correct across tempo changes (setbpm); when omitted it
+   *   defaults to `tSeconds * cps` (exact for a constant tempo).
    * @param {object} [opts]
    * @param {(ast: any, cycle: number) => Step[] | null} [opts.stepsForCycle] - present only for
    *   patterns with known step boundaries (mini-notation-derived). Lets the scheduler compute
@@ -40,6 +43,9 @@ export class Sig {
     this.fxChain = opts.fxChain ?? [];
     this.paramSignals = opts.paramSignals ?? {}; // name -> Sig
     this.paramSlots = opts.paramSlots ?? {}; // name -> slot index (0 = instrument, 1..n = fx)
+    // Sampler config, present only for s("pack") patterns: { index, begin, end, loop, speed,
+    // stretch, fit, slice }, each a Sig (sampled per event onset) or absent for its default.
+    this.sampler = opts.sampler ?? null;
   }
 
   _clone(overrides) {
@@ -51,6 +57,7 @@ export class Sig {
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
       paramSlots: this.paramSlots,
+      sampler: this.sampler,
       ...overrides,
     });
   }
@@ -61,8 +68,8 @@ export class Sig {
       ? (cycle) => this.stepsForCycle(cycle).map((s) => (s.value == null ? s : { ...s, value: fn(s.value) }))
       : null;
     return new Sig(
-      (t, cps) => {
-        const v = this.sample(t, cps);
+      (t, cps, pos) => {
+        const v = this.sample(t, cps, pos);
         return v == null ? null : fn(v);
       },
       {
@@ -71,6 +78,7 @@ export class Sig {
         fxChain: this.fxChain,
         paramSignals: this.paramSignals,
         paramSlots: this.paramSlots,
+        sampler: this.sampler,
       },
     );
   }
@@ -80,11 +88,27 @@ export class Sig {
     return this.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
   }
 
-  /** Rescales a 0..1-ish signal (LFO/env builders) into [min,max]. Falls back to a generic mapValue for anything else. */
+  /**
+   * Rescales a 0..1-ish signal (LFO/env builders) into [min,max]. Falls back to a generic
+   * mapValue for anything else. Bounds may themselves be signals (a mini string, a Sig, ...):
+   * `lfo().range("200 300", 4000)` sweeps 200..4000 in the first half of the cycle and
+   * 300..4000 in the second. Signal bounds can't stay a native Tier-2 modulator (the engine's
+   * oscillator only takes fixed lo/hi), so the result is a Tier-1 polled signal instead.
+   */
   range(min, max) {
-    if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min, max });
-    if (this.envIR) return withEnvIR({ ...this.envIR, min, max });
-    return this.mapValue((v) => min + v * (max - min));
+    if (typeof min === 'number' && typeof max === 'number') {
+      if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min, max });
+      if (this.envIR) return withEnvIR({ ...this.envIR, min, max });
+      return this.mapValue((v) => min + v * (max - min));
+    }
+    this._assertSampleable('range');
+    if (this.lfoIR?.shape === 'custom' && this.lfoIR.mode !== 'free') {
+      throw new Error(
+        "[signal] signal-valued .range() bounds on a note-synced lfo() aren't supported - its value depends on note gates only the engine sees. Use fixed numbers, or mode: 'free'",
+      );
+    }
+    const minSig = toSignal(min);
+    return this.mul(toSignal(max).sub(minSig)).add(minSig);
   }
 
   fast(rateHz) {
@@ -165,10 +189,10 @@ export class Sig {
           })
       : null;
     return new Sig(
-      (t, cps) => {
-        const a = this.sample(t, cps);
+      (t, cps, pos) => {
+        const a = this.sample(t, cps, pos);
         if (a == null) return null;
-        const b = otherSig.sample(t, cps);
+        const b = otherSig.sample(t, cps, pos);
         return b == null ? null : fn(Number(a), Number(b));
       },
       {
@@ -177,6 +201,7 @@ export class Sig {
         fxChain: this.fxChain,
         paramSignals: this.paramSignals,
         paramSlots: this.paramSlots,
+        sampler: this.sampler,
       },
     );
   }
@@ -210,7 +235,7 @@ export class Sig {
     if (!(transformed instanceof Sig)) throw new Error('[signal] .when() callback must return a pattern');
     const truthy = (v) => v != null && Number(v) !== 0;
 
-    const sample = (t, cps) => (truthy(condSig.sample(t, cps)) ? transformed : this).sample(t, cps);
+    const sample = (t, cps, pos) => (truthy(condSig.sample(t, cps, pos)) ? transformed : this).sample(t, cps, pos);
 
     const stepsForCycle = this.stepsForCycle
       ? (cycle) => {
@@ -239,6 +264,7 @@ export class Sig {
       fxChain: transformed.fxChain,
       paramSignals: transformed.paramSignals,
       paramSlots: transformed.paramSlots,
+      sampler: transformed.sampler,
     });
   }
 
@@ -275,9 +301,13 @@ export class Sig {
       return null;
     };
 
-    const sample = (t, cps) => {
-      const onset = lastOnset(t * cps);
-      return onset == null ? this.sample(t, cps) : this.sample(onset / cps, cps);
+    const sample = (t, cps, pos) => {
+      const cyclePos = pos ?? t * cps;
+      const onset = lastOnset(cyclePos);
+      if (onset == null) return this.sample(t, cps, pos);
+      // Convert the onset cycle back to seconds using the current cps - exact for constant
+      // tempo, a close approximation for a recent onset under a tempo signal.
+      return this.sample(t - (cyclePos - onset) / cps, cps, onset);
     };
 
     // Steps span trigger-to-trigger; values sampled in cycle-time (cps=1) - same caveat as
@@ -301,8 +331,45 @@ export class Sig {
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
       paramSlots: this.paramSlots,
+      sampler: this.sampler,
     });
   }
+
+  // -------------------------------------------------------------------------------------------
+  // Sampler config - only meaningful on s("pack") patterns. Every setter accepts a number, a
+  // mini string, or any Sig; the value is sampled at each event's onset, so patterns and LFOs
+  // all work: s("bd").i("0 3").speed(sine(0.2).range(0.5, 2)).
+  // -------------------------------------------------------------------------------------------
+
+  _samplerOpt(method, key, sig) {
+    if (!this.sampler) {
+      throw new Error(`[signal] .${method}() only applies to a sampler pattern - start with s("pack")`);
+    }
+    return this._clone({ sampler: { ...this.sampler, [key]: sig } });
+  }
+
+  /** Which sample of the pack to play, 0-based (wraps past the end). Strudel calls this `n`. */
+  i(v) { return this._samplerOpt('i', 'index', toSignal(v)); }
+  /** Playback start position within the sample, 0..1. */
+  begin(v) { return this._samplerOpt('begin', 'begin', toSignal(v)); }
+  /** Playback end position within the sample, 0..1. */
+  end(v) { return this._samplerOpt('end', 'end', toSignal(v)); }
+  /** Loop the begin..end region for the event's duration (instead of one-shot). Truthy/falsy. */
+  loop(v = 1) { return this._samplerOpt('loop', 'loop', toSignal(v)); }
+  /** Playback rate (repitches). Negative plays backward. */
+  speed(v) { return this._samplerOpt('speed', 'speed', toSignal(v)); }
+  /** Timestretch factor (2 = twice as long at the same pitch). Granular, so best on rhythmic material. */
+  stretch(v) { return this._samplerOpt('stretch', 'stretch', toSignal(v)); }
+  /**
+   * Repitch so the played region lasts exactly `measures` cycles at the current tempo -
+   * `.fit()` with no argument picks the nearest power of 2 of its natural length (2.4 measures
+   * -> 2, 3.6 -> 4).
+   */
+  fit(measures = 'auto') {
+    return this._samplerOpt('fit', 'fit', measures === 'auto' ? 'auto' : toSignal(measures));
+  }
+  /** Play the nth detected transient slice (wraps past the last one). Needs a WAV sample. */
+  slice(v) { return this._samplerOpt('slice', 'slice', toSignal(v)); }
 }
 
 // Rests/gaps in a condition pattern count as falsy regions, not holes - without this, a cond
@@ -333,8 +400,8 @@ function toSignal(value) {
 // ---------------------------------------------------------------------------------------------
 
 function miniStepSampler(ast, valueFn) {
-  return (tSeconds, cps) => {
-    const cyclePos = tSeconds * cps;
+  return (tSeconds, cps, pos) => {
+    const cyclePos = pos ?? tSeconds * cps;
     const cycle = Math.floor(cyclePos);
     const phase = cyclePos - cycle;
     const steps = getStepsForCycle(ast, cycle);
@@ -362,6 +429,16 @@ export function n(value) {
   const ast = parseMini(String(value));
   const valueFn = (v) => Number(v);
   return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
+}
+
+/**
+ * Sampler pattern - values are sample-pack names (folders under the samples directory), one
+ * event per step: `s("bd hh bd hh")`. Configure with .i()/.begin()/.end()/.loop()/.speed()/
+ * .stretch()/.fit()/.slice(); route through effects with .fx()/.param() as usual.
+ */
+export function s(value) {
+  const ast = parseMini(String(value));
+  return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
 }
 
 /** Explicit-note control - numbers pass through as MIDI, strings may be note names ("f4") or numbers. */

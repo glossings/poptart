@@ -54,12 +54,16 @@ var excludePaths = [
     "/Library/Audio/Plug-Ins/VST3/MORPH 3 PRO DualMonoIn VST3.vst3"
 ] ++ ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
 var maxSlots = 8; // slot 0 = instrument, 1..7 = effects
-var server = Server.default;
+// scsynth's own port, overridable so a second poptart stack (tests, parallel session) doesn't
+// collide with a running one on the default 57110.
+var scsynthPort = ("POPTART_SCSYNTH_PORT".getenv ? "57110").asInteger;
+var server = Server(\poptart, NetAddr("127.0.0.1", scsynthPort), Server.default.options);
 var nodeAddr = NetAddr("127.0.0.1", nodePort);
 // trackId (Symbol) -> (def:, group:, synth:, controllers:, loaded:, lfos:, envs:, held:).
 // Symbol keys, NOT Strings: IdentityDictionary lookups are by identity, and two equal Strings
 // are distinct objects (incoming OSC string args arrive as Symbols anyway).
 var tracks = IdentityDictionary.new;
+var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
 var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef;
 var awaitTrack, awaitLoaded, resolvePlugin;
 
@@ -123,11 +127,15 @@ pluginList = {
 trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 
 buildTrackDef = { |key|
-    SynthDef(trackDefName.(key), {
+    SynthDef(trackDefName.(key), { |inBus|
         var sig = Silent.ar(2);
         maxSlots.do { |i|
             if (i == 0) {
-                sig = VSTPlugin.ar(nil, 2, id: \slot0);
+                // The instrument slot's output, plus whatever the track's sample synths wrote
+                // to the private input bus this block (sample synths sit at the group's head,
+                // this synth at its tail, so In.ar sees them) - samples run through the same
+                // fx chain a VST instrument would.
+                sig = VSTPlugin.ar(nil, 2, id: \slot0) + In.ar(inBus, 2);
             } {
                 // An empty VSTPlugin slot outputs silence, not pass-through - so each fx slot
                 // gets a bypass switch, flipped on only once a plugin actually loads into it.
@@ -165,6 +173,8 @@ resolvePlugin = { |pluginId|
 
 // --- boot ---
 
+// Our server must be the default: SynthDef.add sends defs to Server.default's desc lib.
+Server.default = server;
 server.options.sampleRate = sampleRate;
 server.options.blockSize = blockSize;
 
@@ -194,6 +204,50 @@ server.waitForBoot {
         var envSig = EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate);
         Out.kr(out, lo + (envSig * (hi - lo)));
     }).add;
+    // Sampler voices, one per (loop?, timestretch?, buffer channels) combination - the
+    // combination is fixed per event, so picking a def beats building Select spaghetti with
+    // conflicting doneActions. All write to the track's private input bus (see buildTrackDef).
+    // begin/end are normalized 0..1 positions; rate is signed (negative = reversed); dur is the
+    // precomputed natural length in seconds (Node does that math - it knows file duration, fit
+    // and stretch). Plain defs repitch via BufRd index speed; warp defs (stretch != 1) keep
+    // pitch and time independent via Warp1 granulation.
+    [1, 2].do { |nc|
+        var toStereo = { |sig| if (nc == 1) { sig ! 2 } { sig } };
+        SynthDef(("poptart_sample_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1|
+            var frames = BufFrames.ir(buf);
+            var startF = begin * frames, endF = max(begin * frames, (end * frames) - 1);
+            var from = Select.kr(rate < 0, [startF, endF]);
+            var to = Select.kr(rate < 0, [endF, startF]);
+            var sig = BufRd.ar(nc, buf, Line.ar(from, to, dur), loop: 0, interpolation: 4);
+            var env = EnvGen.kr(Env.linen(0.003, max(0.001, dur - 0.011), 0.008), doneAction: 2);
+            Out.ar(out, toStereo.(sig) * env * amp);
+        }).add;
+        SynthDef(("poptart_sample_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1|
+            var frames = BufFrames.ir(buf);
+            var startF = begin * frames, endF = max((begin * frames) + 1, (end * frames) - 1);
+            var reset = Select.kr(rate < 0, [startF, endF]);
+            var idx = Phasor.ar(0, rate * BufRateScale.ir(buf), startF, endF, reset);
+            var sig = BufRd.ar(nc, buf, idx, loop: 1, interpolation: 4);
+            var env = EnvGen.kr(Env.asr(0.003, 1, 0.01), gate, doneAction: 2);
+            Out.ar(out, toStereo.(sig) * env * amp);
+        }).add;
+        SynthDef(("poptart_sample_warp_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1|
+            var from = Select.kr(rate < 0, [begin, end]);
+            var to = Select.kr(rate < 0, [end, begin]);
+            var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs, 0.1, -1, 8, 0.1, 2);
+            var env = EnvGen.kr(Env.linen(0.003, max(0.001, dur - 0.011), 0.008), doneAction: 2);
+            Out.ar(out, toStereo.(sig) * env * amp);
+        }).add;
+        SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1|
+            var span = max(0.001, end - begin);
+            var step = (span / max(0.001, dur)) * rate.sign / ControlRate.ir;
+            var reset = Select.kr(rate < 0, [begin, end]);
+            var ptr = Phasor.kr(0, step, begin, end, reset);
+            var sig = Warp1.ar(nc, buf, ptr, rate.abs, 0.1, -1, 8, 0.1, 2);
+            var env = EnvGen.kr(Env.asr(0.003, 1, 0.01), gate, doneAction: 2);
+            Out.ar(out, toStereo.(sig) * env * amp);
+        }).add;
+    };
     server.sync;
     "poptart: server booted, ready".postln;
     nodeAddr.sendMsg("/poptart/ready");
@@ -213,13 +267,15 @@ OSCdef(\poptartCreateTrack, { |msg|
         tracks[key] = \pending;
         fork {
             var group = Group.new(server);
+            var inBus = Bus.audio(server, 2); // sample synths write here, the track synth mixes it in
             var def = buildTrackDef.(key);
             def.add; // sends to server + global SynthDescLib
             server.sync;
             tracks[key] = (
                 def: def,
                 group: group,
-                synth: Synth(trackDefName.(key), target: group, addAction: \addToTail),
+                inBus: inBus,
+                synth: Synth(trackDefName.(key), [\inBus, inBus.index], target: group, addAction: \addToTail),
                 controllers: Array.newClear(maxSlots),
                 loaded: Array.newClear(maxSlots), // slot -> pluginId once open() succeeds
                 lfos: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, shape:, index:)
@@ -546,6 +602,70 @@ OSCdef(\poptartClearParamLFO, { |msg|
         track[\lfos].removeAt(lfoKey);
     };
 }, '/poptart/clearParamLFO');
+
+// --- sampler ---
+
+// Reads a pack's files (enumerated Node-side, filename order) into buffers and replies with
+// per-file metadata - Node needs frames/sampleRate for the fit/one-shot-duration math it does
+// per event. A file scsynth can't read still occupies its index (frames 0), so pack indices
+// stay aligned with the sorted file list; Node skips zero-duration entries.
+OSCdef(\poptartLoadSamplePack, { |msg|
+    var requestId = msg[1], pack = msg[2].asSymbol, pathsJson = msg[3].asString;
+    fork {
+        var paths = pathsJson.parseJSON;
+        var done = 0, tries = 0, bufs;
+        samplePacks[pack] !? { |old| old.do { |b| b.free } };
+        bufs = paths.collect { |p|
+            Buffer.read(server, p.asString, action: { done = done + 1 })
+        };
+        while { (done < bufs.size) and: { tries < 600 } } { 0.05.wait; tries = tries + 1 };
+        samplePacks[pack] = bufs;
+        ("poptart: sample pack '" ++ pack ++ "': " ++ done ++ "/" ++ bufs.size ++ " file(s) read").postln;
+        replyOk.("/poptart/loadSamplePack", requestId, toJson.(bufs.collect { |b|
+            (frames: b.numFrames ? 0, sampleRate: b.sampleRate ? 0, channels: b.numChannels ? 0)
+        }));
+    };
+}, '/poptart/loadSamplePack');
+
+// One sample event. Node already resolved slices/fit down to begin/end/rate/dur; this picks the
+// right voice def for (loop, stretch, channels), spawns it into the track group writing to the
+// track's input bus, and mirrors the note handlers' env-gate/lfo-retrigger behavior so param
+// modulators treat sample onsets like notes. Loops get a sample-accurate gate-off bundle at the
+// event's end; one-shots free themselves after dur.
+OSCdef(\poptartPlaySample, { |msg|
+    var key = msg[1].asSymbol, pack = msg[2].asSymbol, idx = msg[3].asInteger;
+    var begin = msg[4].asFloat, end = msg[5].asFloat, loop = msg[6].asInteger;
+    var rate = msg[7].asFloat, stretch = msg[8].asFloat, dur = msg[9].asFloat;
+    var latency = msg[10].asFloat, stopLatency = msg[11].asFloat;
+    var track = tracks[key];
+    var bufs = samplePacks[pack];
+    var buf = bufs !? { bufs.wrapAt(idx) };
+    var warp = (stretch - 1).abs > 1e-4;
+    var defName, synth;
+    if (track.isKindOf(Event) and: { buf.notNil } and: { (buf.numFrames ? 0) > 0 }) {
+        defName = ("poptart_sample_" ++ (if (warp) { "warp_" } { "" })
+            ++ (if (loop == 1) { "loop_" } { "" }) ++ buf.numChannels).asSymbol;
+        track[\held] = track[\held] + 1;
+        server.makeBundle(latency, {
+            synth = Synth(defName,
+                [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
+                 \rate, rate, \dur, dur, \gate, 1],
+                target: track[\group], addAction: \addToHead);
+            track[\envs].do { |e| e[\synth].set(\gate, 1) };
+            track[\lfos].do { |e|
+                if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
+            };
+        });
+        if (loop == 1) {
+            server.makeBundle(stopLatency, { synth.set(\gate, 0) });
+        };
+        SystemClock.sched(if (loop == 1) { stopLatency } { latency + dur }, {
+            track[\held] = max(0, track[\held] - 1);
+            if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
+            nil
+        });
+    };
+}, '/poptart/playSample');
 
 // --- introspection ---
 

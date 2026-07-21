@@ -112,6 +112,7 @@ class MappedEngine {
   showPluginEditor(...a) { return this.engine.showPluginEditor(...a); }
   noteOn(...a) { return this.engine.noteOn(...a); }
   noteOff(...a) { return this.engine.noteOff(...a); }
+  playSample(...a) { return this.engine.playSample(...a); }
   record(...a) { return this.engine.record(...a); }
 }
 

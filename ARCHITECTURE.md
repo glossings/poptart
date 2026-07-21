@@ -316,6 +316,29 @@ patch shares as a plain URL and opening a shared link restores the code.
   `Event` methods that shadow key lookup.
 - One caveat: VSTPlugin~ hosts VST2/VST3 only, no AudioUnits - in practice nearly every AU
   also ships a VST3, so this hasn't cost anything yet.
+- **Sampler** (`s("pack")` patterns): the division of labor is Node-heavy on purpose. Node
+  (`samples.js` + `OscEngine#playSample`) owns pack discovery (folder under
+  `~/.poptart/samples` / `POPTART_SAMPLES_DIR`, filename order), WAV parsing and transient
+  detection for `.slice()` (energy-flux onset detector; WAV-only, non-WAV files just have no
+  slices), and all the per-event math - `fit` (repitch so the region lasts N cycles, N
+  defaulting to the nearest power of 2 of its natural length), slice→begin/end resolution,
+  index wraparound, one-shot durations. sclang only reads buffers (`/poptart/loadSamplePack`,
+  replying with frames/sampleRate/channels - the inputs to Node's math) and spawns voices
+  (`/poptart/playSample`): one small SynthDef per (one-shot|loop, plain|timestretch, mono|
+  stereo) combination, since each combination wants a different index driver and doneAction.
+  Plain voices repitch via `BufRd` index rate; `stretch != 1` picks a `Warp1` granular def with
+  time and pitch decoupled. Voices write to a per-track private audio bus that the track's
+  `SynthDef` mixes in ahead of the effect slots, so samples run through `.fx()` chains exactly
+  like an instrument's output, and sample onsets gate `env()` modulators / retrigger note-synced
+  `lfo()` shapes the way notes do.
+- **Tempo** (`setbpm`, 4 beats/cycle): one `Transport` (pattern-core) is shared by every
+  `Scheduler` - it maps seconds↔cycles through a rebased linear clock (`baseSec`/`baseCycle`/
+  `cps`), and every tempo change rebases at the moment of change so cycle position is
+  continuous. A signal-valued tempo is just a poll loop of tiny rebases. This is also why
+  `Sig#sample` grew an optional third `cyclePos` argument: with variable tempo, cycle position
+  is no longer `t * cps`, so the scheduler passes the transport's value through; omitted, it
+  falls back to `t * cps` (exact at constant tempo, so standalone pattern-core use is
+  unchanged).
 
 ## What's built vs. what's next
 
@@ -371,3 +394,8 @@ Not yet done, in rough priority order for a first real jam session:
 7. Native perlin/noise modulation, if Tier-1 polling proves audibly stepped in practice.
 8. Mini-notation gaps if they turn out to matter in practice: polymeter (`{a b, c d}`),
    degrade (`?`), cycle-internal rate patterns (`a*[2 3]` - per-cycle `a*<2 3>` works).
+   (Nested alternation now matches Strudel's slowcat semantics - each `<...>` item sees its
+   own "times picked" count, so `<0 2 3 <5 7>>*8` alternates 5/7 on successive visits.)
+9. Sampler niceties: velocity/gain per event, a `.chop()`-style even slicer alongside the
+   transient-based `.slice()`, spectral-flux onset detection if the energy detector misses
+   soft onsets, and slice analysis for non-WAV formats (decode via scsynth or a decoder dep).

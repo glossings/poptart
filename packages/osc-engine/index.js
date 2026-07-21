@@ -14,11 +14,14 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
+const { samplesRoot, listPackFiles, detectSlices } = require('./samples');
 
 const SC_SCRIPT_PATH = path.join(__dirname, 'sc', 'poptart.scd');
 
-const DEFAULT_NODE_PORT = 57140; // Node listens here for replies from sclang
-const DEFAULT_SC_PORT = 57150; // sclang listens here for commands from Node
+// Overridable via env so a second poptart stack (or a test run) can coexist with a running
+// one - see also POPTART_SCSYNTH_PORT in sc/poptart.scd for the third port involved.
+const DEFAULT_NODE_PORT = Number(process.env.POPTART_OSC_NODE_PORT || 57140); // Node listens here for replies from sclang
+const DEFAULT_SC_PORT = Number(process.env.POPTART_OSC_SC_PORT || 57150); // sclang listens here for commands from Node
 
 const READY_TIMEOUT_MS = 60000; // sclang class-library compile + scsynth boot
 const REPLY_TIMEOUT_MS = 10000;
@@ -28,6 +31,9 @@ const SCAN_TIMEOUT_MS = 600000;
 
 // The osc package with `metadata: true` requires args as { type, value } objects - raw JS
 // values would throw. Integers map to 'i', other numbers 'f', strings 's'.
+const wrap = (i, n) => ((i % n) + n) % n;
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
 function toOscArgs(values) {
   return values.map((v) => {
     if (typeof v === 'string') return { type: 's', value: v };
@@ -46,6 +52,9 @@ class OscEngine {
     this._port = null;
     this._pending = new Map(); // requestId -> { resolve, reject, timer }
     this._nextRequestId = 1;
+    // pack name -> { status: 'loading'|'ready'|'error', files: [{ path, duration, channels, slices }] }
+    this._packs = new Map();
+    this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
   }
 
   version() {
@@ -173,6 +182,106 @@ class OscEngine {
   }
   showPluginEditor(trackId, slotIndex) {
     this._send('/poptart/showPluginEditor', [trackId, slotIndex]);
+  }
+
+  // --- sampler ---
+
+  _warnOnce(key, message) {
+    if (this._warned.has(key)) return;
+    this._warned.add(key);
+    // eslint-disable-next-line no-console
+    console.warn(message);
+  }
+
+  // Kicks off (once) the async load of a pack: enumerate its files, have sclang read them into
+  // buffers, then analyze WAVs for transient slices. Events that arrive while the pack is still
+  // loading are dropped - a beat of silence on first eval, then everything plays.
+  _ensurePack(pack) {
+    let entry = this._packs.get(pack);
+    if (entry) return entry;
+    entry = { status: 'loading', files: [] };
+    this._packs.set(pack, entry);
+
+    const paths = listPackFiles(pack);
+    if (!paths || paths.length === 0) {
+      entry.status = 'error';
+      this._warnOnce(`pack:${pack}`, `[poptart] sample pack "${pack}" has no audio files (looked in ${samplesRoot()}/${pack})`);
+      return entry;
+    }
+
+    this._request('/poptart/loadSamplePack', [pack, JSON.stringify(paths)], 60000)
+      .then((metas) => {
+        entry.files = metas.map((m, i) => ({
+          path: paths[i],
+          duration: m.sampleRate > 0 ? m.frames / m.sampleRate : 0,
+          channels: m.channels,
+          slices: detectSlices(paths[i]), // null for non-WAV - .slice() then warns instead of failing
+        }));
+        entry.status = 'ready';
+        // eslint-disable-next-line no-console
+        console.log(`[poptart] sample pack "${pack}": ${entry.files.length} file(s) loaded`);
+      })
+      .catch((err) => {
+        entry.status = 'error';
+        this._warnOnce(`pack:${pack}`, `[poptart] sample pack "${pack}" failed to load: ${err.message}`);
+      });
+    return entry;
+  }
+
+  /**
+   * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
+   * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, stretch,
+   * fit ('auto' | measures), slice, secPerCycle }. Resolves pack/index/slice/fit down to the
+   * plain numbers the SC synth takes; `fit` becomes a speed multiplier so the played region
+   * lasts exactly the target number of cycles.
+   */
+  playSample(trackId, pack, cfg, onsetSec, offsetSec) {
+    const entry = this._ensurePack(pack);
+    if (entry.status !== 'ready' || entry.files.length === 0) return;
+
+    const idx = wrap(Math.round(cfg.index ?? 0), entry.files.length);
+    const file = entry.files[idx];
+
+    let begin = clamp01(cfg.begin ?? 0);
+    let end = clamp01(cfg.end ?? 1);
+    if (cfg.slice != null) {
+      if (file.slices?.length) {
+        const k = wrap(Math.round(cfg.slice), file.slices.length);
+        begin = file.slices[k];
+        end = file.slices[k + 1] ?? 1;
+      } else {
+        this._warnOnce(`slices:${file.path}`, `[poptart] .slice(): no transient analysis for ${file.path} (only WAV files are analyzed) - playing the whole sample`);
+      }
+    }
+    if (end < begin) [begin, end] = [end, begin];
+
+    let speed = cfg.speed ?? 1;
+    const stretch = cfg.stretch > 0 ? cfg.stretch : 1;
+    const spanSec = file.duration * (end - begin);
+    if (speed === 0 || spanSec <= 0) return;
+
+    if (cfg.fit != null) {
+      const measures = spanSec / cfg.secPerCycle;
+      const target = cfg.fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : cfg.fit;
+      if (target > 0) speed *= measures / target;
+    }
+
+    const loop = cfg.loop ? 1 : 0;
+    // Natural playback length in seconds - what the one-shot synths' Line runs over.
+    const durSec = (spanSec * stretch) / Math.abs(speed);
+    this._send('/poptart/playSample', [
+      trackId,
+      pack,
+      idx,
+      begin,
+      end,
+      loop,
+      speed,
+      stretch,
+      durSec,
+      this._latency(onsetSec),
+      this._latency(offsetSec),
+    ]);
   }
 
   // --- events (targetTime is seconds, from OscEngine#getTime()'s clock) ---

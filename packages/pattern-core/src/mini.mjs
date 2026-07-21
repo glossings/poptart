@@ -240,8 +240,14 @@ function astToSteps(node, cycle) {
 
     case 'alt': {
       if (node.items.length === 0) return [];
-      const idx = ((cycle % node.items.length) + node.items.length) % node.items.length;
-      return astToSteps(node.items[idx].node, cycle);
+      const len = node.items.length;
+      const idx = ((cycle % len) + len) % len;
+      // The chosen item sees its own cycle count ("how many times have I been picked"), not the
+      // outer cycle - Strudel's slowcat semantics. This is what makes a nested alternation like
+      // "<0 2 3 <5 7>>" step 5,7,5,7 on successive picks: the inner alt is picked at outer
+      // cycles 3,7,11,... which all have the same parity, so passing `cycle` through unchanged
+      // would pin it to one value forever.
+      return astToSteps(node.items[idx].node, Math.floor(cycle / len));
     }
 
     case 'fast': {

@@ -98,9 +98,41 @@ Any `.param(...)` value can be a number, a mini-notation string (stepped), an LF
   own envelope section. `.range(lo, hi)` scales it exactly like an LFO. LFOs and envelopes
   both run natively inside the audio engine (sample-accurate, no OSC traffic per note).
 
+`.range(min, max)` bounds can themselves be signals - `lfo().range("200 300", 4000)` sweeps
+from a stepped floor. (Signal bounds drop that modulator from native Tier-2 to the polled
+Tier-1 path, since the engine-side oscillator only takes fixed lo/hi.)
+
 For static sound-design settings that are fiddly as normalized numbers (unison voices, detune
 amounts …), click **ui** next to a plugin in the track panel to open the plugin's own editor
 window, set them by hand, and keep livecoding the rest.
+
+### Sampler
+
+`s("pack")` plays sample packs alongside the VST tracks - a pack is a folder of audio files
+under `~/.poptart/samples/<pack>/` (override the root with `POPTART_SAMPLES_DIR`), addressed by
+index in filename order. Like everything else, every config accepts numbers, mini strings, or
+signals, sampled per event onset:
+
+```js
+drums: s("bd*4 hh*8")
+  .i("<0 1 2>")          // which file of the pack (strudel's `n`, renamed to avoid our n())
+  .begin(0).end(1)       // play region, 0..1
+  .loop()                // loop the region for the event's length instead of one-shot
+  .speed("1 -1")         // playback rate; negative = reversed
+  .stretch(2)            // timestretch (granular; pitch preserved)
+  .fit()                 // repitch to the nearest power-of-2 measures (.fit(3) = exactly 3)
+  .slice("0 1 2 3")      // play the nth detected transient (WAV files only; wraps)
+```
+
+Sample tracks run through the same `.fx()`/`.param()` chain as instruments, and their onsets
+gate `env()` modulators / retrigger note-synced `lfo()` shapes just like notes. Packs load on
+first use - the first evaluation of a new pack is silent for a beat while its files are read.
+
+### Tempo
+
+`setbpm(140)` in any block sets the global tempo (4 beats per cycle; the default is 120). It
+accepts signals too - `setbpm("120 140")`, `setbpm(sine(0.01).range(100, 160))` - polled and
+applied as continuous, phase-preserving tempo changes shared by every track.
 
 ## Known gaps (see ARCHITECTURE.md for the full list)
 
@@ -124,6 +156,13 @@ window, set them by hand, and keep livecoding the rest.
   one `SynthDef` per track, since `VSTPlugin~` instances live inside a `SynthDef`'s UGen graph and
   can't be added to a running `Synth`. Swapping *which* plugin occupies a slot is fine; growing
   the chain past 8 isn't handled yet.
-- Mini-notation supports sequences, rests, brackets/stacks, alternation, fast/slow, replicate,
-  weight, euclidean rhythms, and per-cycle alternation rates (`"[0 2]*<1 2>"`); polymeter
-  (`{a b, c d}`), degrade (`?`), and cycle-internal rate patterns (`a*[2 3]`) aren't implemented.
+- Mini-notation supports sequences, rests, brackets/stacks, alternation (nested alternations
+  advance strudel-style, one pick per visit), fast/slow, replicate, weight, euclidean rhythms,
+  and per-cycle alternation rates (`"[0 2]*<1 2>"`); polymeter (`{a b, c d}`), degrade (`?`),
+  and cycle-internal rate patterns (`a*[2 3]`) aren't implemented.
+- All three OSC/scsynth ports are env-overridable (`POPTART_OSC_NODE_PORT`,
+  `POPTART_OSC_SC_PORT`, `POPTART_SCSYNTH_PORT`) so a second stack - tests, a parallel
+  session - can run beside the first.
+- `.slice()` transient analysis is Node-side and WAV-only; other formats play fine but have no
+  slices. Editor playback highlighting mirrors the server's tempo clock per eval, so under a
+  *signal-valued* `setbpm` it drifts until the next eval (cosmetic).

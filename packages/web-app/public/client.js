@@ -70,7 +70,7 @@ function copyText(text, what) {
 let chainSlots = [];
 let knownPlugins = [];
 
-const BUILDERS = ['n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
+const BUILDERS = ['n', 'note', 'mini', 's', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'setbpm'];
 const METHODS = [
   'scale', 's', 'fx', 'param', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
@@ -563,7 +563,11 @@ function initLfoCanvas() {
 // position and marks their source ranges.
 // ---------------------------------------------------------------------------------------------
 
-let cps = 0.5; // authoritative value comes back from each /api/evaluate
+// Authoritative clock state comes back from each /api/evaluate: cyclePos is no longer simply
+// t*cps once setbpm() has run, so the server sends its Transport's {cps, baseSec, baseCycle}
+// and we mirror the same rebased formula. (A tempo *signal* keeps changing cps between evals;
+// highlighting then drifts until the next eval - known, cosmetic.)
+let transport = { cps: 0.5, baseSec: 0, baseCycle: 0 };
 let playing = false;
 let patternRegions = []; // { marker, ast, lastKey, marks: [] }
 
@@ -585,14 +589,15 @@ function findStringLiterals(code) {
   return out;
 }
 
-// Only strings used *as patterns* get highlighted: arguments to n()/note()/mini()/.when(),
+// Only strings used *as patterns* get highlighted: arguments to n()/note()/mini()/s()/.when(),
 // second-position arguments (`.param("name", "0.2 0.8")`), and strings that immediately chain
-// a method (`"0 0.5 1".gte(0.5)`). Deliberately not: `.s("Serum 2")`, `.scale("F minor")`,
+// a method (`"0 0.5 1".gte(0.5)`). Deliberately not: `.s("Serum 2")` (the lookbehind excludes
+// the *method* .s while keeping the global s() sampler builder), `.scale("F minor")`,
 // `.param("Filter 1 Freq", …)`'s name string.
 function isPatternContext(code, lit) {
   const before = code.slice(0, lit.index);
   const after = code.slice(lit.end);
-  if (/\b(?:n|note|mini)\s*\(\s*$/.test(before)) return true;
+  if (/(?<!\.)\b(?:n|note|mini|s)\s*\(\s*$/.test(before)) return true;
   if (/\.\s*when\s*\(\s*$/.test(before)) return true;
   if (/,\s*$/.test(before)) return true;
   if (/^\s*\.\s*[A-Za-z_]/.test(after)) return true;
@@ -620,7 +625,7 @@ function setupHighlighting(code, tracks) {
 
 function highlightTick() {
   if (!playing || !miniMod || patternRegions.length === 0) return;
-  const cyclePos = (Date.now() / 1000) * cps;
+  const cyclePos = transport.baseCycle + (Date.now() / 1000 - transport.baseSec) * transport.cps;
   const cycle = Math.floor(cyclePos);
   const phase = cyclePos - cycle;
 
@@ -720,7 +725,7 @@ async function doEval() {
   const code = cm.getValue();
   try {
     const result = await api('POST', '/api/evaluate', { code });
-    cps = result.cps ?? cps;
+    transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0 };
     renderTracks(result);
     setupHighlighting(code, result.tracks);
     playing = true;
