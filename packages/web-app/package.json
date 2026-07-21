@@ -1,0 +1,15 @@
+{
+  "name": "@poptart/web-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node HTTP server + plain browser UI: livecoding editor, plugin browser, transport - talks to osc-engine via pattern-core in the server process. Replaces the old Electron shell.",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "@poptart/pattern-core": "*",
+    "@poptart/osc-engine": "*",
+    "codemirror": "^5.65.16"
+  }
+}

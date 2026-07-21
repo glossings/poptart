@@ -1,0 +1,474 @@
+/* ------------------------------------------------------------------- themes
+   Every color in the UI (including the CodeMirror syntax colors) derives from
+   the palette variables below. To add a theme: copy one of the
+   :root[data-theme="…"] blocks, rename it, and add the name to THEMES in
+   client.js - that's the whole job. The picker in the header persists the
+   choice in localStorage. */
+
+:root {
+  /* poptart (default) - dark, pink accent */
+  --bg: #0e0f13;
+  --bg-raised: #15171d;
+  --bg-panel: #191c23;
+  --border: #262a34;
+  --text: #d7dbe4;
+  --text-dim: #8189a0;
+  --accent: #ff7a9c;
+  --ok: #7ed896;
+  --err: #ff8080;
+  --warn: #ffcb6b;
+  --selection: #2a2f3d;
+  --linenumber: #3a4050;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --syn-string: #a5d98a;
+  --syn-number: #f78c6c;
+  --syn-keyword: #c792ea;
+  --syn-variable: #82aaff;
+  --syn-property: #ffcb6b;
+  --syn-comment: #5a6274;
+}
+
+:root[data-theme='blueberry'] {
+  /* cool indigo/blue, Tokyo Night-ish */
+  --bg: #0b0e17;
+  --bg-raised: #111527;
+  --bg-panel: #151a30;
+  --border: #232a45;
+  --text: #d6dcf0;
+  --text-dim: #7e88ab;
+  --accent: #7aa2ff;
+  --ok: #9ece6a;
+  --err: #f7768e;
+  --warn: #e0af68;
+  --selection: #283457;
+  --linenumber: #3b4261;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --syn-string: #9ece6a;
+  --syn-number: #ff9e64;
+  --syn-keyword: #bb9af7;
+  --syn-variable: #7dcfff;
+  --syn-property: #e0af68;
+  --syn-comment: #565f89;
+}
+
+:root[data-theme='matcha'] {
+  /* earthy greens, Everforest-ish */
+  --bg: #101410;
+  --bg-raised: #161c16;
+  --bg-panel: #1a221a;
+  --border: #2a352a;
+  --text: #d8e2d4;
+  --text-dim: #869686;
+  --accent: #a7c080;
+  --ok: #a7c080;
+  --err: #e67e80;
+  --warn: #dbbc7f;
+  --selection: #2d3b2d;
+  --linenumber: #465446;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --syn-string: #a7c080;
+  --syn-number: #e69875;
+  --syn-keyword: #d699b6;
+  --syn-variable: #7fbbb3;
+  --syn-property: #dbbc7f;
+  --syn-comment: #59695c;
+}
+
+:root[data-theme='paper'] {
+  /* light */
+  --bg: #faf9f6;
+  --bg-raised: #f1efe9;
+  --bg-panel: #ffffff;
+  --border: #ddd8cc;
+  --text: #33322e;
+  --text-dim: #8a867a;
+  --accent: #c04c6e;
+  --ok: #2f855a;
+  --err: #c53030;
+  --warn: #b7791f;
+  --selection: #d8e4f5;
+  --linenumber: #c0bcb0;
+  --shadow: rgba(60, 50, 30, 0.18);
+  --syn-string: #448c27;
+  --syn-number: #c76b29;
+  --syn-keyword: #8b3fb5;
+  --syn-variable: #2563eb;
+  --syn-property: #b7791f;
+  --syn-comment: #9b9689;
+}
+
+/* derived - shared by all themes, computed from the palette */
+:root,
+:root[data-theme] {
+  --accent-soft: color-mix(in srgb, var(--accent) 15%, transparent);
+  --accent-strong: color-mix(in srgb, var(--accent) 28%, transparent);
+  --hover-bg: color-mix(in srgb, var(--text) 7%, var(--bg-panel));
+  --border-strong: color-mix(in srgb, var(--text) 20%, var(--border));
+  --ok-border: color-mix(in srgb, var(--ok) 45%, transparent);
+  --err-border: color-mix(in srgb, var(--err) 45%, transparent);
+  --mono: 'SF Mono', ui-monospace, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ------------------------------------------------------------------ header */
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--accent), var(--warn));
+  box-shadow: 0 0 10px var(--accent-soft);
+}
+
+header h1 {
+  font-size: 15px;
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.spacer {
+  flex: 1;
+}
+
+button,
+select {
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+select {
+  padding: 6px 8px;
+}
+
+button:hover,
+select:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+}
+
+button.primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+button.primary:hover {
+  background: var(--accent-strong);
+}
+
+button.small {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+
+.status {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 99px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.status.ok {
+  border-color: var(--ok-border);
+  color: var(--ok);
+}
+
+.status.error {
+  border-color: var(--err-border);
+  color: var(--err);
+}
+
+/* -------------------------------------------------------------------- main */
+
+main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+#editorPane {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+aside {
+  width: 320px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+aside section {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 0;
+  min-height: 0;
+}
+
+#paramsSection {
+  flex: 1;
+}
+
+#pluginsSection {
+  max-height: 32%;
+  padding-bottom: 10px;
+}
+
+aside h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin: 0 0 6px;
+}
+
+.count {
+  color: var(--accent);
+  font-weight: 400;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 12px;
+  word-break: break-word;
+  color: var(--text-dim);
+}
+
+.panel.list {
+  flex: 1;
+  min-height: 60px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+#paramSearch {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+#paramSearch:focus {
+  border-color: var(--accent);
+}
+
+.chain-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  padding: 2px 4px;
+}
+
+.chain-params {
+  margin-top: 6px;
+  padding: 2px 4px;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+.slot-head {
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  padding: 5px 6px 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+.param-row,
+.plugin-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.param-row:hover,
+.plugin-row:hover {
+  background: var(--accent-soft);
+}
+
+.dim {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+
+.more-note {
+  padding: 6px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-dim);
+}
+
+/* --------------------------------------------------------------------- log */
+
+footer#log {
+  height: 110px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg-raised);
+  padding: 6px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+footer#log .error {
+  color: var(--err);
+}
+
+/* -------------------------------------------------- CodeMirror: poptart theme */
+
+.CodeMirror {
+  flex: 1;
+  height: 100%;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.cm-s-poptart.CodeMirror {
+  background: var(--bg);
+  color: var(--text);
+  padding: 10px 4px;
+}
+
+.cm-s-poptart .CodeMirror-gutters {
+  background: var(--bg);
+  border-right: none;
+}
+
+.cm-s-poptart .CodeMirror-linenumber {
+  color: var(--linenumber);
+  padding: 0 12px 0 20px;
+}
+
+.cm-s-poptart .CodeMirror-cursor {
+  border-left: 2px solid var(--accent);
+}
+
+.cm-s-poptart .CodeMirror-selected {
+  background: var(--selection);
+}
+
+.cm-s-poptart .CodeMirror-matchingbracket {
+  color: var(--accent) !important;
+  outline: 1px solid var(--accent-soft);
+  background: var(--accent-soft);
+}
+
+.cm-s-poptart .cm-string {
+  color: var(--syn-string);
+}
+
+.cm-s-poptart .cm-number {
+  color: var(--syn-number);
+}
+
+.cm-s-poptart .cm-keyword,
+.cm-s-poptart .cm-operator {
+  color: var(--syn-keyword);
+}
+
+.cm-s-poptart .cm-variable {
+  color: var(--syn-variable);
+}
+
+.cm-s-poptart .cm-property {
+  color: var(--syn-property);
+}
+
+.cm-s-poptart .cm-comment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+
+/* autocomplete popup */
+
+.CodeMirror-hints {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 4px;
+  max-height: 22em;
+}
+
+.CodeMirror-hint {
+  color: var(--text);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+li.CodeMirror-hint-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}

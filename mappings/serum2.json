@@ -1,0 +1,6 @@
+{
+  "plugin": "Serum 2",
+  "params": {
+    "Filter 1 Freq": { "min": 8, "max": 22050, "curve": "log" }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm view *)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(npm install *)",
+      "Bash(node /private/tmp/claude-501/-Users-aria-poptart/454e5887-947e-4d14-8996-d6224d943b6d/scratchpad/mock-engine-test.mjs)",
+      "Bash(node /private/tmp/claude-501/-Users-aria-poptart/454e5887-947e-4d14-8996-d6224d943b6d/scratchpad/osc-port-test.js)",
+      "Bash(rm -f /private/tmp/claude-501/-Users-aria-poptart/454e5887-947e-4d14-8996-d6224d943b6d/scratchpad/mock-engine-test.mjs /private/tmp/claude-501/-Users-aria-poptart/454e5887-947e-4d14-8996-d6224d943b6d/scratchpad/osc-port-test.js /tmp/poptart-webapp.log *)",
+      "Bash(brew --version)",
+      "Bash(brew info *)",
+      "Bash(brew install *)",
+      "Read(//Applications/SuperCollider.app/Contents/Resources/**)",
+      "Bash(/Applications/SuperCollider.app/Contents/Resources/sclang -v)",
+      "Read(//Applications/SuperCollider.app/**)",
+      "Bash(ln -sf /Applications/SuperCollider.app/Contents/MacOS/sclang /opt/homebrew/bin/sclang)",
+      "Bash(ln -sf /Applications/SuperCollider.app/Contents/Resources/scsynth /opt/homebrew/bin/scsynth)",
+      "Bash(sclang -v)",
+      "Bash(timeout 120 sclang -e 'Quarks.install\\(\"VSTPlugin\"\\); 0.exit;')",
+      "Bash(sclang -e 'Quarks.install\\(\"VSTPlugin\"\\); 0.exit;')",
+      "Bash(sclang --help)",
+      "Bash(sclang /private/tmp/claude-501/-Users-aria-poptart/454e5887-947e-4d14-8996-d6224d943b6d/scratchpad/install-vstplugin.scd)",
+      "Bash(sclang /tmp/noop.scd)",
+      "Bash(/Applications/SuperCollider.app/Contents/MacOS/sclang /tmp/noop.scd)",
+      "Bash(rm /opt/homebrew/bin/sclang /opt/homebrew/bin/scsynth)",
+      "Bash(chmod +x /opt/homebrew/bin/sclang /opt/homebrew/bin/scsynth)",
+      "Bash(curl -s \"https://git.iem.at/api/v4/projects/pd%2Fvstplugin/releases?per_page=2\")",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -sL -o vstplugin_macOS.zip \"https://git.iem.at/pd/vstplugin/uploads/d7d04b43c6e025d00ddb7cd73217aadf/vstplugin_v0.6.2_macOS.zip\")",
+      "Bash(unzip -o -q vstplugin_macOS.zip -d vstplugin_extract)",
+      "Bash(file vstplugin_extract/sc/VSTPlugin/plugins/*)",
+      "Read(//Users/aria/Library/Application Support/SuperCollider/Extensions/VSTPlugin/classes/**)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
+  }
+}

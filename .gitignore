@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+*.node
+.DS_Store
+packages/native-engine/build/
+packages/native-engine/.cmake-js/
+*.log
+.cache/

@@ -1,0 +1,347 @@
+// A small, self-contained mini-notation parser/interpreter - deliberately NOT a dependency on
+// @strudel/mini, so this package never touches Strudel's Pattern/Hap object model (see
+// ARCHITECTURE.md). It supports the common, high-value subset of Tidal/Strudel mini-notation:
+//
+//   "0 2 3"        sequence (each token gets an equal slice of the cycle)
+//   "~"            rest (no event for that slice)
+//   "[a b]"        bracketed sub-sequence, occupying one slice of its parent
+//   "[a,b]"        stack: layers play simultaneously, each spanning the full bracket
+//   "<a b c>"      alternation: one item per cycle (cycles through on each absolute cycle)
+//   "a*3"          fast: repeat 3 times within this slice ("a*<2 3>" alternates the rate per cycle)
+//   "a/2"          slow: stretch over 2 cycles (only 1/2 of it shows up per cycle)
+//   "a!3"          replicate: 3 separate onsets, each getting a normal-width slice
+//   "a@3"          weight: one onset, 3x the width of a normal slice
+//   "bd(3,8)"      euclidean rhythm: 3 pulses over 8 steps (optionally "(3,8,2)" with rotation)
+//
+// NOT supported yet (will throw a clear parse error rather than silently doing the wrong
+// thing): polymeter `{a b, c d}`, degrade `?`, dot-groups `a . b c`, cycle-internal rate
+// patterns (`a*[2 3]` - only per-cycle alternation `a*<2 3>` works), and pattern-valued
+// euclid `(...)` arguments.
+//
+// The whole interpreter works in terms of one function: getStepsForCycle(ast, cycleNumber),
+// which returns this cycle's flat step list as plain objects - never anything Strudel-shaped.
+
+export function parseMini(str) {
+  const tokens = tokenize(str);
+  const { node, rest } = parseSequence(tokens, /* stopAt */ new Set());
+  if (rest.length > 0) {
+    throw new Error(`[mini] unexpected token "${rest[0].text}" while parsing "${str}"`);
+  }
+  return node;
+}
+
+/** Returns this cycle's steps as `[{ start, end, value }]`, fractions of a cycle in [0,1). `value` is `null` for rests. */
+export function getStepsForCycle(ast, cycleNumber) {
+  return astToSteps(ast, cycleNumber);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tokenizer
+// ---------------------------------------------------------------------------------------------
+
+const SINGLE_CHAR_TOKENS = new Set(['[', ']', '<', '>', '(', ')', ',', '*', '/', '!', '@', '~']);
+// atoms: note names, numbers, words, sample names - anything not whitespace/punctuation above
+const ATOM_RE = /^[A-Za-z0-9#.\-_:]+/;
+
+function tokenize(str) {
+  const tokens = [];
+  let i = 0;
+  while (i < str.length) {
+    const ch = str[i];
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+    if (SINGLE_CHAR_TOKENS.has(ch)) {
+      tokens.push({ type: ch, text: ch });
+      i++;
+      continue;
+    }
+    if (ch === '{' || ch === '}' || ch === '?') {
+      throw new Error(`[mini] "${ch}" (polymeter/degrade) is not supported yet, in "${str}"`);
+    }
+    const m = ATOM_RE.exec(str.slice(i));
+    if (!m) {
+      throw new Error(`[mini] unexpected character "${ch}" in "${str}"`);
+    }
+    tokens.push({ type: 'atom', text: m[0] });
+    i += m[0].length;
+  }
+  return tokens;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Parser (recursive descent) - produces our own tiny AST:
+//   { type: 'seq'|'stack'|'alt', items: [{ weight, reps, node }] }
+//   { type: 'atom', value: string }
+//   { type: 'fast'|'slow', item, amount }
+//   { type: 'euclid', item, pulses, steps, rotation }
+// ---------------------------------------------------------------------------------------------
+
+function parseSequence(tokens, stopTypes) {
+  const items = [];
+  while (tokens.length > 0 && !stopTypes.has(tokens[0].type) && tokens[0].type !== ',') {
+    const { element, rest } = parseElement(tokens);
+    items.push(element);
+    tokens = rest;
+  }
+  return { node: { type: 'seq', items }, rest: tokens };
+}
+
+function parseGroup(tokens) {
+  // tokens[0] is '['
+  tokens = tokens.slice(1);
+  const layers = [];
+  let { node: first, rest } = parseSequence(tokens, new Set([']']));
+  layers.push(first);
+  tokens = rest;
+  while (tokens[0]?.type === ',') {
+    tokens = tokens.slice(1);
+    const { node, rest: rest2 } = parseSequence(tokens, new Set([']']));
+    layers.push(node);
+    tokens = rest2;
+  }
+  if (tokens[0]?.type !== ']') throw new Error('[mini] expected closing "]"');
+  tokens = tokens.slice(1);
+
+  const node = layers.length === 1 ? layers[0] : { type: 'stack', items: layers.map((n) => ({ weight: 1, reps: 1, node: n })) };
+  return { node, rest: tokens };
+}
+
+function parseAngle(tokens) {
+  // tokens[0] is '<'
+  tokens = tokens.slice(1);
+  const items = [];
+  while (tokens.length > 0 && tokens[0].type !== '>') {
+    const { element, rest } = parseElement(tokens);
+    items.push(element);
+    tokens = rest;
+  }
+  if (tokens[0]?.type !== '>') throw new Error('[mini] expected closing ">"');
+  tokens = tokens.slice(1);
+  return { node: { type: 'alt', items }, rest: tokens };
+}
+
+function parseElement(tokens) {
+  let node;
+  let rest = tokens;
+
+  const t = rest[0];
+  if (!t) throw new Error('[mini] unexpected end of pattern');
+
+  if (t.type === '~') {
+    node = { type: 'atom', value: null };
+    rest = rest.slice(1);
+  } else if (t.type === '[') {
+    ({ node, rest } = parseGroup(rest));
+  } else if (t.type === '<') {
+    ({ node, rest } = parseAngle(rest));
+  } else if (t.type === 'atom') {
+    node = { type: 'atom', value: t.text };
+    rest = rest.slice(1);
+  } else {
+    throw new Error(`[mini] unexpected token "${t.text}"`);
+  }
+
+  let weight = 1;
+  let reps = 1;
+
+  // postfix operators, chainable (e.g. "a*2!3")
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const op = rest[0];
+    if (!op) break;
+
+    if (op.type === '*' || op.type === '/') {
+      const amountTok = rest[1];
+      let amount;
+      if (amountTok?.type === 'atom' && !Number.isNaN(Number(amountTok.text))) {
+        amount = Number(amountTok.text);
+        rest = rest.slice(2);
+      } else if (amountTok?.type === '<') {
+        // Alternation rate, e.g. "a*<2 3>" - one rate value per cycle. The general
+        // pattern-valued case ("a*[2 3]", rate changing *within* a cycle) still isn't
+        // supported; resolveRate() rejects it with a clear error.
+        const parsed = parseAngle(rest.slice(1));
+        amount = parsed.node;
+        rest = parsed.rest;
+      } else {
+        throw new Error(`[mini] "${op.type}" must be followed by a number or an alternation like <2 3>`);
+      }
+      node = { type: op.type === '*' ? 'fast' : 'slow', item: node, amount };
+      continue;
+    }
+
+    if (op.type === '!') {
+      const amountTok = rest[1];
+      const amount = amountTok && amountTok.type === 'atom' && !Number.isNaN(Number(amountTok.text)) ? Number(amountTok.text) : 2;
+      reps *= amount;
+      weight *= amount;
+      rest = rest.slice(amountTok && !Number.isNaN(Number(amountTok?.text)) ? 2 : 1);
+      continue;
+    }
+
+    if (op.type === '@') {
+      const amountTok = rest[1];
+      if (!amountTok || Number.isNaN(Number(amountTok.text))) {
+        throw new Error('[mini] "@" must be followed by a number');
+      }
+      weight *= Number(amountTok.text);
+      rest = rest.slice(2);
+      continue;
+    }
+
+    if (op.type === '(') {
+      const args = [];
+      rest = rest.slice(1);
+      while (rest[0]?.type !== ')') {
+        if (rest[0]?.type === ',') {
+          rest = rest.slice(1);
+          continue;
+        }
+        if (rest[0]?.type !== 'atom') throw new Error('[mini] expected number inside "(...)"');
+        args.push(Number(rest[0].text));
+        rest = rest.slice(1);
+      }
+      rest = rest.slice(1); // consume ')'
+      const [pulses, steps, rotation = 0] = args;
+      if (pulses === undefined || steps === undefined) {
+        throw new Error('[mini] euclid "(...)" needs at least (pulses,steps)');
+      }
+      node = { type: 'euclid', item: node, pulses, steps, rotation };
+      continue;
+    }
+
+    break;
+  }
+
+  return { element: { weight, reps, node }, rest };
+}
+
+// ---------------------------------------------------------------------------------------------
+// AST -> flat per-cycle steps
+// ---------------------------------------------------------------------------------------------
+
+function astToSteps(node, cycle) {
+  switch (node.type) {
+    case 'atom':
+      return node.value == null ? [] : [{ start: 0, end: 1, value: node.value }];
+
+    case 'seq':
+      return seqToSteps(node.items, cycle);
+
+    case 'stack':
+      return node.items.flatMap((item) => astToSteps(item.node, cycle));
+
+    case 'alt': {
+      if (node.items.length === 0) return [];
+      const idx = ((cycle % node.items.length) + node.items.length) % node.items.length;
+      return astToSteps(node.items[idx].node, cycle);
+    }
+
+    case 'fast': {
+      const n = Math.max(1, Math.round(resolveRate(node.amount, cycle)));
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const innerCycle = cycle * n + i;
+        for (const s of astToSteps(node.item, innerCycle)) {
+          out.push({ start: (i + s.start) / n, end: (i + s.end) / n, value: s.value });
+        }
+      }
+      return out;
+    }
+
+    case 'slow': {
+      const n = Math.max(1, Math.round(resolveRate(node.amount, cycle)));
+      const innerCycle = Math.floor(cycle / n);
+      const phase = ((cycle % n) + n) % n;
+      const innerSteps = astToSteps(node.item, innerCycle);
+      return clipAndRescale(innerSteps, phase / n, (phase + 1) / n);
+    }
+
+    case 'euclid': {
+      if (node.item.type !== 'atom' || node.item.value == null) {
+        throw new Error('[mini] euclid "(...)" is only supported on a plain atom for now');
+      }
+      const hits = rotateArray(bjorklund(node.pulses, node.steps), node.rotation ?? 0);
+      const out = [];
+      for (let i = 0; i < hits.length; i++) {
+        if (hits[i]) out.push({ start: i / hits.length, end: (i + 1) / hits.length, value: node.item.value });
+      }
+      return out;
+    }
+
+    default:
+      throw new Error(`[mini] unknown node type "${node.type}"`);
+  }
+}
+
+// A `*`/`/` rate is either a plain number or a pattern that must resolve to exactly one
+// number for the given cycle (alternations like `<2 3>` do; anything cycle-internal like
+// `[2 3]` doesn't and is rejected - honest per-cycle semantics rather than silently taking
+// the first value).
+function resolveRate(amount, cycle) {
+  if (typeof amount === 'number') return amount;
+  const steps = astToSteps(amount, cycle).filter((s) => s.value != null);
+  const value = Number(steps[0]?.value);
+  if (steps.length !== 1 || Number.isNaN(value)) {
+    throw new Error('[mini] a pattern-valued rate must produce exactly one number per cycle (e.g. "a*<2 3>")');
+  }
+  return value;
+}
+
+function seqToSteps(items, cycle) {
+  // Expand `!n` replicate into n separate equal-width elements (see the "0!3 1" example in
+  // ARCHITECTURE.md-adjacent design notes: weight=3,reps=3 means 3 separate 1-unit-wide
+  // onsets, NOT one 3-unit-wide onset - that's what plain `@3` weighting means instead).
+  const expanded = items.flatMap((item) => {
+    const repCount = item.reps || 1;
+    const perRepWeight = (item.weight ?? 1) / repCount;
+    return Array.from({ length: repCount }, () => ({ weight: perRepWeight, node: item.node }));
+  });
+
+  const totalWeight = expanded.reduce((sum, el) => sum + el.weight, 0) || 1;
+  let cursor = 0;
+  const out = [];
+  for (const el of expanded) {
+    const span = el.weight / totalWeight;
+    for (const s of astToSteps(el.node, cycle)) {
+      out.push({ start: cursor + s.start * span, end: cursor + s.end * span, value: s.value });
+    }
+    cursor += span;
+  }
+  return out;
+}
+
+function clipAndRescale(steps, a, b) {
+  const out = [];
+  for (const s of steps) {
+    const start = Math.max(s.start, a);
+    const end = Math.min(s.end, b);
+    if (start >= end) continue;
+    out.push({ start: (start - a) / (b - a), end: (end - a) / (b - a), value: s.value });
+  }
+  return out;
+}
+
+/**
+ * Equally-spaced Euclidean rhythm via the floor-division method (matches the canonical
+ * Bjorklund result for common cases like (3,8)/(5,8)/(4,9), but is a simpler approximation
+ * that may place hits at a different rotation than Tidal's exact recursive algorithm for some
+ * less common pulse/step combinations - flagged here rather than glossed over).
+ */
+function bjorklund(pulses, steps) {
+  const hits = [];
+  for (let i = 0; i < steps; i++) {
+    const cur = Math.floor((i * pulses) / steps);
+    const prev = Math.floor(((i - 1) * pulses) / steps);
+    hits.push(cur !== prev);
+  }
+  return hits;
+}
+
+function rotateArray(arr, n) {
+  const len = arr.length;
+  const r = ((n % len) + len) % len;
+  return arr.slice(r).concat(arr.slice(0, r));
+}
