@@ -20,16 +20,23 @@ const paramsCount = document.getElementById('paramsCount');
 const pluginList = document.getElementById('pluginList');
 const log = document.getElementById('log');
 
-// pattern-core modules, loaded async at startup; highlighting/label-aware features just stay
-// off until they arrive (or if the import fails).
+// pattern-core modules, loaded async at startup; highlighting/label/shape-editor features just
+// stay off until they arrive (or if the import fails).
 let miniMod = null;
 let labelsMod = null;
-Promise.all([import('/pattern-core/mini.mjs'), import('/pattern-core/labels.mjs')])
-  .then(([m, l]) => {
+let shapeMod = null;
+Promise.all([
+  import('/pattern-core/mini.mjs'),
+  import('/pattern-core/labels.mjs'),
+  import('/pattern-core/shape.mjs'),
+])
+  .then(([m, l, s]) => {
     miniMod = m;
     labelsMod = l;
+    shapeMod = s;
+    initLfoEditor();
   })
-  .catch((e) => logLine(`pattern-core import failed (no live highlighting): ${e.message}`, true));
+  .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -63,11 +70,11 @@ function copyText(text, what) {
 let chainSlots = [];
 let knownPlugins = [];
 
-const BUILDERS = ['n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'ramp', 'drift', 'sandy', 'env'];
+const BUILDERS = ['n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
 const METHODS = [
   'scale', 's', 'fx', 'param', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when',
+  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold',
 ];
 
 // The sublime keymap supplies the expected editing chords (Cmd/Ctrl-/ comment, Cmd/Ctrl-D
@@ -104,6 +111,40 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     doStop();
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Code-in-URL sharing (Strudel-style): the buffer is kept base64url-encoded in location.hash
+// (replaceState, so typing doesn't spam history) - copy the URL to share the patch; opening a
+// link restores the code instead of the default snippet.
+// ---------------------------------------------------------------------------------------------
+
+function encodeCodeHash(code) {
+  const bytes = new TextEncoder().encode(code);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function decodeCodeHash(hash) {
+  const bin = atob(hash.replace(/-/g, '+').replace(/_/g, '/'));
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+
+if (location.hash.length > 1) {
+  try {
+    cm.setValue(decodeCodeHash(location.hash.slice(1)));
+  } catch {
+    logLine('could not decode code from the URL - keeping the default snippet', true);
+  }
+}
+
+let hashTimer = null;
+cm.on('change', () => {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    history.replaceState(null, '', '#' + encodeCodeHash(cm.getValue()));
+  }, 400);
 });
 
 // Rank case-insensitively: prefix matches first, then substring matches, alphabetical within
@@ -209,6 +250,306 @@ cm.on('inputRead', (cm, change) => {
     cm.showHint({ hint: poptartHint, completeSingle: false });
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// Interactive LFO shape editor - put the cursor inside any `lfo(...)` call and a Serum-style
+// panel opens: drag breakpoints, drag a segment to bend it (curvature), double-click to
+// add/remove points, pick presets, set rate + free/retrigger/envelope mode. Every change is
+// serialized straight back into the code as `lfo("x,y,c …", { rate, mode })` - the code stays
+// the single source of truth (and shares via the URL hash like everything else).
+// ---------------------------------------------------------------------------------------------
+
+const lfoPanel = document.getElementById('lfoPanel');
+const lfoCanvas = document.getElementById('lfoCanvas');
+const lfoPreset = document.getElementById('lfoPreset');
+const lfoRandom = document.getElementById('lfoRandom');
+const lfoCloseBtn = document.getElementById('lfoClose');
+const lfoRate = document.getElementById('lfoRate');
+const lfoMode = document.getElementById('lfoMode');
+
+let lfoState = null; // { marker, callStart, points, rate, mode }
+let lfoDismissedStart = null; // call the user explicitly closed - don't auto-reopen it
+let lfoSuppressCursor = false;
+
+function matchParen(code, open) {
+  let depth = 0;
+  let inStr = null;
+  for (let i = open; i < code.length; i++) {
+    const ch = code[i];
+    if (inStr) {
+      if (ch === '\\') i++;
+      else if (ch === inStr) inStr = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") inStr = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
+function findLfoCallAt(code, idx) {
+  const re = /\blfo\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close == null) continue;
+    if (idx >= m.index && idx <= close + 1) return { start: m.index, open, close };
+  }
+  return null;
+}
+
+function parseLfoCall(inner) {
+  const shapeMatch = /(["'])((?:\\.|(?!\1).)*?)\1/.exec(inner);
+  const rate = Number((/rate\s*:\s*([\d.]+)/.exec(inner) ?? [])[1] ?? 1) || 1;
+  const mode = (/mode\s*:\s*["'](\w+)["']/.exec(inner) ?? [])[1] ?? 'free';
+  let points = null;
+  try {
+    if (shapeMatch?.[2]?.trim()) points = shapeMod.parseShapePoints(shapeMatch[2]);
+  } catch {
+    // unparseable shape string - fall back to the default below
+  }
+  if (!points) points = shapeMod.parseShapePoints('0,0 0.5,1 1,0');
+  return { points, rate, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
+}
+
+function serializeLfoCall({ points, rate, mode }) {
+  const cfg = mode === 'free' ? `{ rate: ${rate} }` : `{ rate: ${rate}, mode: '${mode}' }`;
+  return `lfo("${shapeMod.serializeShapePoints(points)}", ${cfg})`;
+}
+
+function openLfoEditor(call) {
+  const from = cm.posFromIndex(call.start);
+  const to = cm.posFromIndex(call.close + 1);
+  const inner = cm.getValue().slice(call.open + 1, call.close);
+  if (lfoState?.marker) lfoState.marker.clear();
+  lfoState = { marker: cm.markText(from, to, {}), callStart: call.start, ...parseLfoCall(inner) };
+  lfoRate.value = lfoState.rate;
+  lfoMode.value = lfoState.mode;
+  lfoPreset.value = '';
+  lfoPanel.classList.remove('hidden');
+  drawLfoShape();
+}
+
+function closeLfoEditor(dismissCall = false) {
+  if (dismissCall && lfoState) lfoDismissedStart = lfoState.callStart;
+  if (lfoState?.marker) lfoState.marker.clear();
+  lfoState = null;
+  lfoPanel.classList.add('hidden');
+}
+
+function writeLfoCall() {
+  if (!lfoState) return;
+  const range = lfoState.marker.find();
+  if (!range) return;
+  const text = serializeLfoCall(lfoState);
+  lfoSuppressCursor = true;
+  cm.replaceRange(text, range.from, range.to);
+  // replaceRange collapses the marker - re-pin it over the fresh text
+  lfoState.marker.clear();
+  const startIdx = cm.indexFromPos(range.from);
+  lfoState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+  lfoState.callStart = startIdx;
+  lfoSuppressCursor = false;
+}
+
+function initLfoEditor() {
+  for (const name of Object.keys(shapeMod.SHAPE_PRESETS)) lfoPreset.add(new Option(name, name));
+
+  cm.on('cursorActivity', () => {
+    if (lfoSuppressCursor || !shapeMod) return;
+    const call = findLfoCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
+    if (!call) {
+      lfoDismissedStart = null;
+      if (lfoState) closeLfoEditor();
+      return;
+    }
+    if (call.start === lfoDismissedStart) return;
+    if (lfoState && call.start === lfoState.callStart) return; // already editing this call
+    openLfoEditor(call);
+  });
+
+  lfoPreset.addEventListener('change', () => {
+    if (!lfoState || !lfoPreset.value) return;
+    lfoState.points = shapeMod.parseShapePoints(shapeMod.SHAPE_PRESETS[lfoPreset.value]);
+    writeLfoCall();
+    drawLfoShape();
+  });
+  lfoRandom.addEventListener('click', () => {
+    if (!lfoState) return;
+    const count = 3 + Math.floor(Math.random() * 5);
+    const xs = [0, 1, ...Array.from({ length: count }, () => Math.random())].sort((a, b) => a - b);
+    lfoState.points = xs.map((x) => ({
+      x,
+      y: Math.round(Math.random() * 100) / 100,
+      c: Math.random() < 0.4 ? Math.round((Math.random() * 8 - 4) * 10) / 10 : 0,
+    }));
+    lfoPreset.value = '';
+    writeLfoCall();
+    drawLfoShape();
+  });
+  lfoRate.addEventListener('change', () => {
+    if (!lfoState) return;
+    lfoState.rate = Math.max(0.01, Number(lfoRate.value) || 1);
+    writeLfoCall();
+  });
+  lfoMode.addEventListener('change', () => {
+    if (!lfoState) return;
+    lfoState.mode = lfoMode.value;
+    writeLfoCall();
+  });
+  lfoCloseBtn.addEventListener('click', () => closeLfoEditor(true));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && lfoState) closeLfoEditor(true);
+  });
+
+  initLfoCanvas();
+}
+
+// --- canvas: draw + interactions ---
+
+const LFO_PAD = 10;
+
+function lfoToCanvas(p) {
+  const w = lfoCanvas.width - 2 * LFO_PAD;
+  const h = lfoCanvas.height - 2 * LFO_PAD;
+  return { px: LFO_PAD + p.x * w, py: LFO_PAD + (1 - p.y) * h };
+}
+
+function canvasToLfo(px, py) {
+  const w = lfoCanvas.width - 2 * LFO_PAD;
+  const h = lfoCanvas.height - 2 * LFO_PAD;
+  return {
+    x: Math.min(1, Math.max(0, (px - LFO_PAD) / w)),
+    y: Math.min(1, Math.max(0, 1 - (py - LFO_PAD) / h)),
+  };
+}
+
+function drawLfoShape() {
+  if (!lfoState || !shapeMod) return;
+  const css = getComputedStyle(document.documentElement);
+  const col = (v) => css.getPropertyValue(v).trim();
+  const ctx = lfoCanvas.getContext('2d');
+  const { width: W, height: H } = lfoCanvas;
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.strokeStyle = col('--border');
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const gx = LFO_PAD + ((W - 2 * LFO_PAD) * i) / 4;
+    const gy = LFO_PAD + ((H - 2 * LFO_PAD) * i) / 4;
+    ctx.beginPath(); ctx.moveTo(gx, LFO_PAD); ctx.lineTo(gx, H - LFO_PAD); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(LFO_PAD, gy); ctx.lineTo(W - LFO_PAD, gy); ctx.stroke();
+  }
+
+  ctx.strokeStyle = col('--accent');
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i <= 200; i++) {
+    const x = i / 200;
+    const { px, py } = lfoToCanvas({ x, y: shapeMod.sampleShape(lfoState.points, x) });
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+
+  for (const p of lfoState.points) {
+    const { px, py } = lfoToCanvas(p);
+    ctx.beginPath();
+    ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
+    ctx.fillStyle = col('--bg-panel');
+    ctx.fill();
+    ctx.strokeStyle = col('--accent');
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+function initLfoCanvas() {
+  let drag = null; // { kind: 'point'|'curve', index }
+
+  const canvasPos = (e) => {
+    const r = lfoCanvas.getBoundingClientRect();
+    return { px: e.clientX - r.left, py: e.clientY - r.top };
+  };
+
+  const hitPoint = (px, py) => {
+    for (let i = 0; i < lfoState.points.length; i++) {
+      const c = lfoToCanvas(lfoState.points[i]);
+      if (Math.hypot(c.px - px, c.py - py) < 8) return i;
+    }
+    return null;
+  };
+
+  const segmentAt = (px) => {
+    const { x } = canvasToLfo(px, 0);
+    const pts = lfoState.points;
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (x >= pts[i].x && x <= pts[i + 1].x && pts[i + 1].x > pts[i].x) return i;
+    }
+    return null;
+  };
+
+  lfoCanvas.addEventListener('pointerdown', (e) => {
+    if (!lfoState) return;
+    lfoCanvas.setPointerCapture(e.pointerId);
+    const { px, py } = canvasPos(e);
+    const pointIdx = hitPoint(px, py);
+    drag = pointIdx != null ? { kind: 'point', index: pointIdx } : { kind: 'curve', index: segmentAt(px) };
+  });
+
+  lfoCanvas.addEventListener('pointermove', (e) => {
+    if (!drag || !lfoState || drag.index == null) return;
+    const { px, py } = canvasPos(e);
+    const pts = lfoState.points;
+    if (drag.kind === 'point') {
+      const i = drag.index;
+      const { x, y } = canvasToLfo(px, py);
+      const isEnd = i === 0 || i === pts.length - 1;
+      pts[i] = {
+        ...pts[i],
+        // endpoints keep their x (the shape always spans the full period)
+        x: isEnd ? pts[i].x : Math.min(pts[i + 1].x, Math.max(pts[i - 1].x, x)),
+        y,
+      };
+    } else {
+      // vertical drag bends the segment: push the curve toward the pointer
+      const seg = pts[drag.index];
+      const rising = pts[drag.index + 1].y >= seg.y;
+      const delta = (e.movementY ?? 0) * 0.08 * (rising ? 1 : -1);
+      seg.c = Math.max(-12, Math.min(12, (seg.c ?? 0) + delta));
+    }
+    drawLfoShape();
+  });
+
+  lfoCanvas.addEventListener('pointerup', (e) => {
+    if (drag && lfoState) writeLfoCall();
+    drag = null;
+    lfoCanvas.releasePointerCapture(e.pointerId);
+  });
+
+  lfoCanvas.addEventListener('dblclick', (e) => {
+    if (!lfoState) return;
+    const { px, py } = canvasPos(e);
+    const pointIdx = hitPoint(px, py);
+    const pts = lfoState.points;
+    if (pointIdx != null) {
+      // delete (endpoints stay - the shape must span the period)
+      if (pointIdx > 0 && pointIdx < pts.length - 1) pts.splice(pointIdx, 1);
+    } else {
+      const { x, y } = canvasToLfo(px, py);
+      const at = pts.findIndex((p) => p.x > x);
+      pts.splice(at === -1 ? pts.length - 1 : at, 0, { x, y, c: 0 });
+    }
+    lfoPreset.value = '';
+    writeLfoCall();
+    drawLfoShape();
+  });
+}
 
 // ---------------------------------------------------------------------------------------------
 // Live playback highlighting - light up the mini-notation atom currently sounding.

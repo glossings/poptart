@@ -497,12 +497,12 @@ footer#log .error {
   font-style: italic;
 }
 
-/* the mini-notation atom currently sounding (see client.js's highlight ticker) */
+/* the mini-notation atom currently sounding (see client.js's highlight ticker) - a plain
+   box around the element, Strudel-style ("white" = the theme's text color, so it stays
+   visible on light themes too) */
 .cm-playing {
-  background: var(--accent-strong);
-  color: var(--accent);
-  border-radius: 3px;
-  box-shadow: 0 0 0 1px var(--accent-soft);
+  box-shadow: 0 0 0 1.5px var(--text);
+  border-radius: 2px;
 }
 
 /* autocomplete popup */
@@ -600,4 +600,96 @@ li.CodeMirror-hint-active {
   font-style: italic;
   color: var(--text-dim);
   border-top: 1px solid var(--border);
+}
+
+/* --------------------------------------------------------------- lfo editor */
+
+.lfo-panel {
+  position: fixed;
+  left: 16px;
+  bottom: 128px;
+  width: 322px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px var(--shadow);
+  z-index: 20;
+  overflow: hidden;
+}
+
+.lfo-panel.hidden {
+  display: none;
+}
+
+.lfo-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.lfo-panel-head select {
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+#lfoCanvas {
+  display: block;
+  margin: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.lfo-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.lfo-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lfo-controls input[type='number'] {
+  width: 62px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+}
+
+.lfo-controls input[type='number']:focus {
+  border-color: var(--accent);
+}
+
+.lfo-controls select {
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.lfo-help {
+  padding: 6px 12px 10px;
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-dim);
 }

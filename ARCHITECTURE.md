@@ -141,8 +141,11 @@ all**:
 - **`src/signal.mjs`** — the `Sig` class and the public builders: `n(...)` (scale-degree,
   numeric until `.scale()` runs), `note(...)` (explicit MIDI/note-name), `mini(...)` (generic
   string-or-number signal, used internally whenever a control is given a plain value), and the
-  continuous builders `sine`/`saw`/`tri`/`square`/`ramp`/`drift` (slow smoothed random)/`sandy`
-  (stepped random), all taking `{rate, phase}` (or a bare rate number). `Sig#scale(name)` maps
+  continuous builders `sine`/`saw`/`tri`/`square`/`ramp`/`rand` (continuous smoothed random),
+  all taking `{rate, phase}` (or a bare rate number), plus `lfo(shapeString, {rate, mode})` for
+  hand-drawn breakpoint shapes (see `shape.mjs` and "custom shapes" below). Stepped random is
+  `rand(r).hold("1*8")` - `Sig#hold(trigPattern)` is a general sample-and-hold that samples any
+  signal at the trigger pattern's onsets and holds between them. `Sig#scale(name)` maps
   degree values to MIDI via `notes.mjs`. `Sig#range/.fast/.rate/.phase` update an LFO's
   symbolic parameters directly when present (see Tier 2 below), or fall back to a generic
   value-mapping otherwise. Signals also carry arithmetic/comparison operators
@@ -207,11 +210,26 @@ also settable via `.curve(c)`) is a plain control input into the Env, so re-eval
 place. An envelope can't ride Tier 1 at all - its value depends on note onsets, which only the
 engine sees - so unlike LFOs there is no polling fallback.
 
-Random-shaped modulation is covered by `drift` (smoothed) and `sandy` (stepped), which are
-full Tier-2 citizens (`LFDNoise3.kr`/`LFDNoise0.kr` in scsynth). Their JS-side `sample()` uses
-deterministic hash noise instead, so Tier-1 uses (e.g. inside an arithmetic expression) are
+Random-shaped modulation is covered by `rand` (continuous smoothed random, `LFDNoise3.kr`
+natively - a full Tier-2 citizen); its JS-side `sample()` uses deterministic hash noise, so
+Tier-1 uses (e.g. inside an arithmetic expression, or stepped via `.hold(...)`) are
 reproducible - the JS and native values differ (both random), only the rate/range contract is
 shared.
+
+**Custom shapes** (`lfo(...)`) are a fourth modulator kind: `shape.mjs` defines a compact
+breakpoint format (`"x,y[,c] …"`, c = per-segment curvature, SC curve semantics) with a
+parser/serializer/sampler shared verbatim between Node and the browser. In the editor, putting
+the cursor inside an `lfo(...)` call opens an interactive shape panel (drag points, drag a
+segment to bend it, presets, rate + mode) that serializes every change straight back into the
+code - the code string stays the single source of truth. Engine-side,
+`/poptart/setParamShapeLFO` compiles a small SynthDef from the breakpoints (an `IEnvGen`
+indexed by a `Sweep`-driven phase) on the same bus+map mechanism as the basic LFOs. Three
+modes: `free` (loops on its own clock), `retrigger` (loops, phase reset by each noteOn - the
+noteOn handler pulses `t_trig` on any shape modulator that wants it), `envelope` (one pass per
+note over 1/rate seconds, then holds its final level). A re-send with identical points+mode
+only updates rate/range in place (phase preserved across livecoding edits); changed shapes
+recompile the def and swap the synth on the same bus. JS-side sampling exists for `free` only -
+like `env()`, the note-synced modes hold their start level outside the engine.
 
 Note *events themselves* (the top-level pattern's own `stepsForCycle`) are scheduled with
 exact onset/offset times, same as before - only *parameter* signals go through the tiered
@@ -242,7 +260,9 @@ one `Scheduler` + engine track per label, stopping tracks whose label disappeare
 muted/un-soloed since the last eval. The browser also gets `cps` and each block's source range
 back from an eval, which (with the shared mini parser and its per-step `loc` ranges, plus the
 shared wall clock - browser and Node run on the same machine) is everything needed to light up
-the currently-sounding mini-notation atom in the editor with no polling, Strudel-style.
+the currently-sounding mini-notation atom in the editor with no polling, Strudel-style. The
+buffer itself is also kept base64url-encoded in `location.hash` (again Strudel-style), so a
+patch shares as a plain URL and opening a shared link restores the code.
 
 - `.s("Serum 2")` — resolves "Serum 2" against the scanned/known-plugins list and assigns it
   as the track's instrument slot (loaded once, reused; note on/off events are just MIDI to

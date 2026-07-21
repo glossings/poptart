@@ -190,12 +190,28 @@ class OscEngine {
   setParam(trackId, slotIndex, paramName, value, targetTime) {
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
   }
-  // ir: { shape: 'sine'|'saw'|'tri'|'square'|'ramp'|'drift'|'sandy', rateHz, phaseCycles, min, max }
-  // - see signal.mjs.
+  // ir: { shape: 'sine'|'saw'|'tri'|'square'|'ramp'|'rand', rateHz, phaseCycles, min, max } for
+  // the basic shapes, or { shape: 'custom', points, mode, ... } for lfo() drawn shapes - see
+  // signal.mjs / shape.mjs.
   // sclang maps a control bus to the VST parameter once and drives it with an internal UGen
   // (SinOsc.kr etc.) inside the track's SynthDef - the SC equivalent of the old native LFO.h,
-  // zero further OSC traffic after this call.
+  // zero further OSC traffic after this call. Custom shapes go through a separate handler that
+  // compiles a small SynthDef from the breakpoints (IEnvGen driven by a Sweep phase).
   setParamLFO(trackId, slotIndex, paramName, ir) {
+    if (ir.shape === 'custom') {
+      this._send('/poptart/setParamShapeLFO', [
+        trackId,
+        slotIndex,
+        paramName,
+        ir.mode ?? 'free',
+        ir.rateHz,
+        ir.phaseCycles ?? 0,
+        ir.min,
+        ir.max,
+        JSON.stringify(ir.points),
+      ]);
+      return;
+    }
     this._send('/poptart/setParamLFO', [
       trackId,
       slotIndex,

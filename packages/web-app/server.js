@@ -68,7 +68,7 @@ async function init() {
 function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-    'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'scale', 'range', 's', 'fx', 'param',
+    'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'scale', 'range', 's', 'fx', 'param',
   ];
   for (const m of METHODS) {
     Object.defineProperty(String.prototype, m, {
@@ -82,7 +82,7 @@ function extendStringPrototype(core) {
   }
 }
 
-const BUILDER_NAMES = ['n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'ramp', 'drift', 'sandy', 'env'];
+const BUILDER_NAMES = ['n', 'note', 'mini', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env'];
 
 // One block of editor code (see labels.mjs) -> a Sig, evaluated with the builders in scope.
 function buildPattern(code) {

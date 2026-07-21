@@ -151,9 +151,10 @@ server.options.sampleRate = sampleRate;
 server.options.blockSize = blockSize;
 
 server.waitForBoot {
-    // drift = slow smoothed random (cubic-interpolated noise), sandy = stepped random (held
-    // value per period); both ignore phase. ramp is a rising saw, same shape as \saw here.
-    [\sine, \tri, \saw, \ramp, \square, \drift, \sandy].do { |shape|
+    // rand = continuous smoothed random (cubic-interpolated noise; a new target per period),
+    // phase ignored. ramp is a rising saw, same shape as \saw here. Stepped random is done
+    // pattern-side via rand().hold(...) - no native def needed.
+    [\sine, \tri, \saw, \ramp, \square, \rand].do { |shape|
         SynthDef(("poptart_lfo_" ++ shape).asSymbol, { |out, freq = 1, phase = 0, lo = 0, hi = 1|
             var osc = switch(shape,
                 \sine, { SinOsc.kr(freq, phase * 2pi) },
@@ -161,8 +162,7 @@ server.waitForBoot {
                 \saw, { LFSaw.kr(freq, phase * 2) },
                 \ramp, { LFSaw.kr(freq, phase * 2) },
                 \square, { LFPulse.kr(freq, phase) },
-                \drift, { LFDNoise3.kr(freq) },
-                \sandy, { LFDNoise0.kr(freq) }
+                \rand, { LFDNoise3.kr(freq) }
             );
             Out.kr(out, osc.range(lo, hi));
         }).add;
@@ -293,6 +293,10 @@ OSCdef(\poptartNoteOn, { |msg|
         server.makeBundle(latency, {
             ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger);
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
+            // note-synced lfo() shapes: reset/replay on every note onset
+            track[\lfos].do { |e|
+                if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
+            };
         });
     };
 }, '/poptart/noteOn');
@@ -373,6 +377,87 @@ OSCdef(\poptartSetParamLFO, { |msg|
         };
     };
 }, '/poptart/setParamLFO');
+
+// lfo() drawn shapes: compile a tiny SynthDef from the breakpoints (an IEnvGen indexed by a
+// Sweep-driven phase) and run it on the same bus+map mechanism as setParamLFO. Modes:
+//   free      - loops on its own clock, ignores notes
+//   retrigger - loops, but phase resets on each noteOn (Sweep reset trigger)
+//   envelope  - one pass per noteOn over 1/rate seconds, then holds the final level
+// A re-send with identical points+mode only updates rate/range in place (phase preserved,
+// livecoding-friendly); changed points/mode recompile the def and swap the synth on the same
+// bus, keeping the parameter mapping.
+OSCdef(\poptartSetParamShapeLFO, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
+    var mode = msg[4].asSymbol, rateHz = msg[5].asFloat, phaseCycles = msg[6].asFloat;
+    var lo = msg[7].asFloat, hi = msg[8].asFloat, pointsJson = msg[9].asString;
+    fork {
+        var track = awaitTrack.(key);
+        var ctl, index, lfoKey, existing, spec;
+        var points, xs, ys, cs, times, curves, defName, def, bus, shapeSynth;
+        if (track.isNil) { ("poptart: setParamShapeLFO: no track " ++ key).warn } {
+            if (awaitLoaded.(track, slot).not) {
+                ("poptart: setParamShapeLFO: no plugin loaded in slot " ++ slot).warn;
+            } {
+                ctl = track[\controllers][slot];
+                index = ctl.info.findParamIndex(paramName.asSymbol);
+                if (index.isNil) {
+                    ("poptart: setParamShapeLFO: plugin has no parameter named '" ++ paramName ++ "'").warn;
+                } {
+                    if ((lo < 0) or: { hi > 1 }) {
+                        ("poptart: shape range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
+                            ++ "' is outside the normalized 0..1 VST parameter range and will pin").warn;
+                    };
+                    // parseJSON yields string values - convert everything explicitly.
+                    points = pointsJson.parseJSON;
+                    xs = points.collect { |p| p["x"].asFloat };
+                    ys = points.collect { |p| p["y"].asFloat };
+                    cs = points.collect { |p| (p["c"] ? "0").asFloat };
+                    times = (1..xs.size - 1).collect { |i| max(0, xs[i] - xs[i - 1]) }; // normalized, sums to 1
+                    curves = cs.copyRange(0, cs.size - 2);
+                    spec = mode.asString ++ "|" ++ pointsJson;
+                    lfoKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+                    existing = track[\lfos][lfoKey];
+                    if (existing.notNil and: { existing[\spec] == spec }) {
+                        existing[\synth].set(\rate, rateHz, \lo, lo, \hi, hi);
+                    } {
+                        defName = ("poptart_shape_" ++ key ++ "_" ++ lfoKey).asSymbol;
+                        def = SynthDef(defName, { |out, rate = 1, phase = 0, lo = 0, hi = 1, t_trig = 0|
+                            var env = Env(ys, times, curves);
+                            var idx = switch(mode,
+                                \retrigger, { (Sweep.kr(t_trig, rate) + phase) % 1 },
+                                \envelope, { Sweep.kr(t_trig, rate).min(1) },
+                                { (Sweep.kr(0, rate) + phase) % 1 } // free (default)
+                            );
+                            Out.kr(out, lo + (IEnvGen.kr(env, idx) * (hi - lo)));
+                        });
+                        def.add;
+                        server.sync;
+                        if (existing.notNil) {
+                            existing[\synth].free;
+                            bus = existing[\bus];
+                        } {
+                            bus = Bus.control(server, 1);
+                        };
+                        shapeSynth = Synth(defName,
+                            [\out, bus, \rate, rateHz, \phase, phaseCycles, \lo, lo, \hi, hi,
+                             \t_trig, if ((mode != \free) and: { track[\held] > 0 }) { 1 } { 0 }],
+                            target: track[\group], addAction: \addToHead);
+                        if (existing.isNil) {
+                            ctl.map(index, bus);
+                            track[\lfos][lfoKey] = (synth: shapeSynth, bus: bus, shape: \custom,
+                                index: index, mode: mode, spec: spec);
+                        } {
+                            existing[\synth] = shapeSynth;
+                            existing[\shape] = \custom;
+                            existing[\mode] = mode;
+                            existing[\spec] = spec;
+                        };
+                    };
+                };
+            };
+        };
+    };
+}, '/poptart/setParamShapeLFO');
 
 // Tier 2, envelope flavor: same bus+map mechanism as setParamLFO, but the modulator is an
 // EnvGen gated by the track's note events (see noteOn/noteOff above). Re-eval updates the

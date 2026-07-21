@@ -10,6 +10,7 @@
 
 import { parseMini, getStepsForCycle } from './mini.mjs';
 import { parseNoteValue, degreeToMidi } from './notes.mjs';
+import { parseShapePoints, sampleShape } from './shape.mjs';
 
 /**
  * @typedef {Object} Step
@@ -246,6 +247,62 @@ export class Sig {
     if (this.envIR) return withEnvIR({ ...this.envIR, curve: c });
     throw new Error('[signal] .curve() only applies to env() signals');
   }
+
+  /**
+   * Sample-and-hold: `rand(4).hold("1*8")` samples this signal at each truthy onset of the
+   * trigger pattern and holds the value until the next one - the stepped-random ("sandy") use
+   * case, but synced to any rhythm you like. Works on any sampleable signal.
+   */
+  hold(trig) {
+    this._assertSampleable('hold');
+    const trigSig = toSignal(trig);
+    if (!trigSig.stepsForCycle) {
+      throw new Error('[signal] .hold() needs a step pattern of triggers, e.g. .hold("1*8")');
+    }
+    const truthy = (v) => v != null && Number(v) !== 0;
+
+    // Most recent trigger onset at or before cyclePos (bounded lookback for sparse patterns).
+    const lastOnset = (cyclePos) => {
+      const from = Math.floor(cyclePos);
+      for (let cycle = from; cycle >= from - 16; cycle--) {
+        const onsets = trigSig
+          .stepsForCycle(cycle)
+          .filter((s) => truthy(s.value))
+          .map((s) => cycle + s.start)
+          .filter((p) => p <= cyclePos + 1e-9);
+        if (onsets.length) return Math.max(...onsets);
+      }
+      return null;
+    };
+
+    const sample = (t, cps) => {
+      const onset = lastOnset(t * cps);
+      return onset == null ? this.sample(t, cps) : this.sample(onset / cps, cps);
+    };
+
+    // Steps span trigger-to-trigger; values sampled in cycle-time (cps=1) - same caveat as
+    // _binop for real-seconds sources like LFOs; the sample() path above is always exact.
+    const stepsForCycle = (cycle) => {
+      const steps = trigSig
+        .stepsForCycle(cycle)
+        .filter((s) => truthy(s.value))
+        .sort((a, b) => a.start - b.start);
+      return steps.map((s, i) => ({
+        start: s.start,
+        end: steps[i + 1]?.start ?? 1,
+        value: this.sample(cycle + s.start, 1),
+        loc: s.loc,
+      }));
+    };
+
+    return new Sig(sample, {
+      stepsForCycle,
+      instrument: this.instrument,
+      fxChain: this.fxChain,
+      paramSignals: this.paramSignals,
+      paramSlots: this.paramSlots,
+    });
+  }
 }
 
 // Rests/gaps in a condition pattern count as falsy regions, not holes - without this, a cond
@@ -321,9 +378,9 @@ export function note(value) {
 // "Tier 2") instead of sampling them from JS at all.
 // ---------------------------------------------------------------------------------------------
 
-// Deterministic hash noise for drift/sandy's JS-side sampling, so Tier-1 values are
-// reproducible. The Tier-2 native versions use scsynth's own noise UGens, so JS values and
-// engine values differ - both are random, only the rate/range contract is shared.
+// Deterministic hash noise for rand()'s JS-side sampling, so Tier-1 values are reproducible.
+// The Tier-2 native version uses scsynth's own noise UGen, so JS values and engine values
+// differ - both are random, only the rate/range contract is shared.
 function hash01(i) {
   const s = Math.sin(i * 127.1 + 311.7) * 43758.5453123;
   return s - Math.floor(s);
@@ -344,17 +401,20 @@ function sampleLfoIR(ir, tSeconds) {
     case 'square':
       unipolar = phase < 0.5 ? 1 : 0;
       break;
-    case 'sandy': // stepped random: a new value each period, held
-      unipolar = hash01(Math.floor(total));
-      break;
-    case 'drift': {
-      // slow smoothed random: smoothstep-interpolated hash noise, one target per period
+    case 'rand': {
+      // continuous random: smoothstep-interpolated hash noise, one new target per period
+      // (stepped random is rand().hold("1*8") - see Sig#hold)
       const i = Math.floor(total);
       const u = total - i;
       const su = u * u * (3 - 2 * u);
       unipolar = hash01(i) * (1 - su) + hash01(i + 1) * su;
       break;
     }
+    case 'custom':
+      // lfo() shapes: only free mode has a JS-side value - retrigger/envelope depend on note
+      // gates only the engine sees, so (like env()) they just hold the shape's start level.
+      unipolar = ir.mode === 'free' || ir.mode == null ? sampleShape(ir.points, phase) : ir.points[0].y;
+      break;
     case 'sine':
     default:
       unipolar = 0.5 + 0.5 * Math.sin(phase * 2 * Math.PI);
@@ -379,8 +439,25 @@ export const saw = shapeSignal('saw');
 export const tri = shapeSignal('tri');
 export const square = shapeSignal('square');
 export const ramp = shapeSignal('ramp'); // rising 0->1 each period (alias shape of saw)
-export const drift = shapeSignal('drift'); // slow smoothed random - a wandering value
-export const sandy = shapeSignal('sandy'); // stepped random - a new held value each period
+export const rand = shapeSignal('rand'); // continuous random; step it with .hold("1*8")
+
+const DEFAULT_LFO_SHAPE = '0,0 0.5,1 1,0'; // triangle - what a bare lfo() starts as
+
+/**
+ * `lfo("0,0 0.25,1,-3 1,0", { rate: 1, mode: 'free' }).range(200, 5000)` - a hand-drawn
+ * modulator shape (see shape.mjs for the breakpoint format). In the editor, putting the cursor
+ * inside an lfo(...) call opens the interactive shape editor, which writes this string.
+ * Modes: 'free' (loops on its own clock), 'retrigger' (loops, phase resets on each note),
+ * 'envelope' (plays once per note over 1/rate seconds, then holds its final level).
+ */
+export function lfo(shape, opts = {}) {
+  const { rate = 1, phase = 0, mode = 'free' } = typeof opts === 'number' ? { rate: opts } : opts;
+  if (!['free', 'retrigger', 'envelope'].includes(mode)) {
+    throw new Error(`[signal] lfo() mode must be 'free', 'retrigger', or 'envelope' (got "${mode}")`);
+  }
+  const points = parseShapePoints(typeof shape === 'string' && shape.trim() ? shape : DEFAULT_LFO_SHAPE);
+  return withLfoIR({ shape: 'custom', points, mode, rateHz: rate, phaseCycles: phase, min: 0, max: 1 });
+}
 
 // ---------------------------------------------------------------------------------------------
 // Envelope generator - an ADSR retriggered by the track's own note on/offs. Like the LFO
