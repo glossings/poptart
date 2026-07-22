@@ -103,23 +103,43 @@ function setbpm(value) {
   return TEMPO_BLOCK;
 }
 
-// One block of editor code (see labels.mjs) -> a Sig (or TEMPO_BLOCK), evaluated with the
-// builders in scope. Evaluated via direct eval rather than wrapping the code in `return (...)`
-// so a block may contain *statements*, not just one expression - `const cc = midicc("Twister")`
-// on one line, the pattern using cc(...) as the last line. eval's completion value (the last
+// One block of editor code (see labels.mjs) -> its value, evaluated with the builders in
+// scope. Evaluated via direct eval rather than wrapping the code in `return (...)` so a block
+// may contain *statements*, not just one expression. eval's completion value (the last
 // statement's value) is the block's result, so plain single-expression blocks behave exactly
-// as before. Each block is its own scope: a const defined in one block isn't visible in
-// another, so declare the device in each block that uses it.
-function buildPattern(code) {
-  const names = [...BUILDER_NAMES, 'setbpm'];
-  // eslint-disable-next-line no-new-func
-  const build = new Function(...names, '__blockCode', 'return eval(__blockCode)');
-  const pattern = build(...BUILDER_NAMES.map((name) => patternCore[name]), setbpm, code);
-  if (pattern !== TEMPO_BLOCK && !(pattern instanceof patternCore.Sig)) {
-    throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
-  }
-  if (pattern !== TEMPO_BLOCK) dryRunPattern(pattern);
-  return pattern;
+// as before.
+//
+// The `label: pattern` paradigm is only for code that emits audio - a block may instead just
+// declare things (`const kb = midikeys("Twister")` on an unlabeled line) and its top-level
+// bindings stay visible to every block below it in the buffer. That sharing needs two tricks,
+// because const/let declared inside a direct eval are scoped to that eval alone: top-level
+// declarations are rewritten to `var` (which hoists into the wrapper function, where the
+// harvest object literal can read it), and the harvested values are re-injected as extra
+// parameters into each later block's wrapper. The typeof guard covers names the line-anchored
+// regex picks up inside nested callbacks, which stay scoped there and never reach the wrapper.
+function makeBlockEvaluator() {
+  const defs = new Map(); // name -> value, accumulated down the buffer
+  return function evalBlock(code) {
+    const declNames = [
+      ...new Set([...code.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1])),
+    ];
+    const body = code.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
+    const baseNames = [...BUILDER_NAMES, 'setbpm'].filter((n) => !defs.has(n)); // defs may shadow builders
+    const baseValues = baseNames.map((n) => (n === 'setbpm' ? setbpm : patternCore[n]));
+    const harvest = declNames
+      .map((n) => `${JSON.stringify(n)}: (typeof ${n} === 'undefined' ? undefined : ${n})`)
+      .join(', ');
+    // eslint-disable-next-line no-new-func
+    const build = new Function(
+      ...baseNames,
+      ...defs.keys(),
+      '__blockCode',
+      `var __value = eval(__blockCode); return { __value: __value, __defs: { ${harvest} } };`,
+    );
+    const { __value, __defs } = build(...baseValues, ...defs.values(), body);
+    for (const [n, v] of Object.entries(__defs)) if (v !== undefined) defs.set(n, v);
+    return __value;
+  };
 }
 
 // Patterns evaluate lazily, so a bad value ("badnote" where a note name should be, a throwing
@@ -184,6 +204,11 @@ const routes = {
     return { status: 200, body: await engine.getKnownPlugins() };
   },
 
+  'GET /api/midiDevices': async () => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    return { status: 200, body: await engine.getMidiDevices() };
+  },
+
   // `code` is the whole editor buffer: one or more labeled blocks (see pattern-core's
   // labels.mjs - `$:` anonymous, `name:` named, `_name:` muted, `Sname:` soloed), each
   // evaluating to a Sig and playing on its own engine track named after the label. Unlabeled
@@ -195,15 +220,25 @@ const routes = {
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
 
+    const evalBlock = makeBlockEvaluator();
     const evaluated = blocks.map((b) => {
       try {
-        return { ...b, sig: buildPattern(b.code) };
+        const value = evalBlock(b.code);
+        if (value instanceof patternCore.Sig) {
+          dryRunPattern(value);
+        } else if (value === undefined && b.label.startsWith('$')) {
+          // Definitions-only block (const kb = midikeys("...")): binds names for the blocks
+          // below, makes no sound, needs no label.
+        } else if (value !== TEMPO_BLOCK) {
+          throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
+        }
+        return { ...b, sig: value };
       } catch (err) {
         throw new Error(`${b.label}: ${err.message ?? err}`);
       }
     });
-    // Tempo-only blocks (setbpm) act at eval time and don't become tracks.
-    const built = evaluated.filter((b) => b.sig !== TEMPO_BLOCK);
+    // Tempo-only and definitions-only blocks act at eval time and don't become tracks.
+    const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig);
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
     const anySolo = built.some((b) => b.soloed && !b.muted);

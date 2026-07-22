@@ -19,6 +19,7 @@
 //    general, and fine for musical modulation rates.
 
 import { sampleBound } from './signal.mjs';
+import { scalePitchClasses } from './notes.mjs';
 
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
 const POLL_INTERVAL_MS = 30;
@@ -149,7 +150,8 @@ export class Scheduler {
     // live input never goes through the lookahead clock, so latency stays at the MIDI driver's.
     // Idempotent re-sends on re-eval; dropping the midikeys() source tears the route down.
     if (sig.midiNotes) {
-      this.engine.setMidiNotes(this.trackId, sig.midiNotes.device, sig.midiNotes.channel ?? 0);
+      const pcs = sig.midiNotes.scale ? scalePitchClasses(sig.midiNotes.scale) : null;
+      this.engine.setMidiNotes(this.trackId, sig.midiNotes.device, sig.midiNotes.channel ?? 0, pcs);
     } else if (this._midiRouted) {
       this.engine.clearMidiNotes(this.trackId);
     }

@@ -9,7 +9,7 @@
 // over time, sometimes with edges." Everything below is plain data + closures.
 
 import { parseMini, getStepsForCycle } from './mini.mjs';
-import { parseNoteValue, degreeToMidi } from './notes.mjs';
+import { parseNoteValue, degreeToMidi, parseScaleName } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 
@@ -52,6 +52,7 @@ export class Sig {
     this.slotStates = opts.slotStates ?? {};
     // Sampler config, present only for s("pack") patterns: { index, begin, end, loop, speed,
     // stretch, fit, slice }, each a Sig (sampled per event onset) or absent for its default.
+    // Patterned values also merge their step grid into the pattern's (see _samplerOpt).
     this.sampler = opts.sampler ?? null;
     // Live MIDI note routing, from midikeys(): { device, channel (null = all) }. The scheduler
     // hands this to the engine, which plays the device's note stream on this track directly.
@@ -102,16 +103,24 @@ export class Sig {
    * `n("0 2 3").scale("F minor")` - converts scale-degree values into absolute MIDI notes.
    * On a sampler pattern the degrees live in the `.n()`/`.note()` repitch signal (the pattern's
    * own values are pack names), so scale maps that instead: s("pluck").n("0 2 4").scale("F minor").
+   * On a live midikeys() route it does double duty: any degrees in the pattern still map as
+   * above, and incoming live notes are also quantized to the scale engine-side (see the
+   * scheduler's setMidiNotes call and the engine's midiRoute).
    */
   scale(scaleName) {
+    parseScaleName(scaleName); // validate now - a live-keys-only chain never samples, so a bad name would otherwise stay silent
+    let out;
     if (this.sampler) {
       if (!this.sampler.note) {
         throw new Error('[signal] .scale() on a sampler needs degrees first - e.g. s("pluck").n("0 2 4").scale("F minor")');
       }
       const mapped = this.sampler.note.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
-      return this._clone({ sampler: { ...this.sampler, note: mapped } });
+      out = this._clone({ sampler: { ...this.sampler, note: mapped } });
+    } else {
+      out = this.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
     }
-    return this.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
+    if (this.midiNotes) out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName } });
+    return out;
   }
 
   /**
@@ -390,14 +399,20 @@ export class Sig {
   // -------------------------------------------------------------------------------------------
   // Sampler config - only meaningful on s("pack") patterns. Every setter accepts a number, a
   // mini string, or any Sig; the value is sampled at each event's onset, so patterns and LFOs
-  // all work: s("bd").i("0 3").speed(sine(0.2).range(0.5, 2)).
+  // all work: s("bd").i("0 3").speed(sine(0.2).range(0.5, 2)). A patterned value also gives
+  // structure, subdividing the events it overlaps - s("breaks2").slice("0 1 2 3") retriggers
+  // on each slice step.
   // -------------------------------------------------------------------------------------------
 
   _samplerOpt(method, key, sig) {
     if (!this.sampler) {
       throw new Error(`[signal] .${method}() only applies to a sampler pattern - start with s("pack")`);
     }
-    return this._clone({ sampler: { ...this.sampler, [key]: sig } });
+    // Patterned values mix their structure into the event grid like .vel()/.note() do, so
+    // s("breaks2").slice("0 1 2 3") plays four quarter-cycle events, not one. 'auto' (fit) and
+    // plain-number Sigs have no stepsForCycle, so intersectSteps leaves the grid alone.
+    const stepsForCycle = sig instanceof Sig ? intersectSteps(this.stepsForCycle, sig) : this.stepsForCycle;
+    return this._clone({ sampler: { ...this.sampler, [key]: sig }, stepsForCycle });
   }
 
   /** Which sample of the pack to play, 0-based (wraps past the end). Strudel calls this `n`. */

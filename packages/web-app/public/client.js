@@ -359,6 +359,42 @@ function pluginHints(cur, typed) {
   return hintResult(cur, typed, completions);
 }
 
+// Connected MIDI device names for the device string of midicc("/midikeys(". Fetched lazily on
+// first use (the request also switches on MIDI input engine-side, which typing a MIDI builder
+// implies anyway) - the first popup awaits the fetch (show-hint accepts a promise), later ones
+// use the cache and refresh it in the background.
+let midiDevices = null;
+
+async function fetchMidiDevices() {
+  const firstFetch = midiDevices == null;
+  try {
+    midiDevices = await api('GET', '/api/midiDevices');
+    if (firstFetch && midiDevices.length === 0) {
+      logLine('midikeys/midicc: engine reports no MIDI sources - they are scanned once at engine start, so restart poptart after plugging a device in', true);
+    }
+  } catch (err) {
+    if (firstFetch) logLine(`midikeys/midicc: device list unavailable (${err.message})`, true);
+    midiDevices = midiDevices ?? []; // engine not up yet - background refreshes will self-heal
+  }
+  return midiDevices;
+}
+
+function midiDeviceHints(cur, typed) {
+  const toResult = (devices) => {
+    const pool = devices.map((d) => ({ key: d }));
+    let matches = rankedMatches(pool, typed, 24);
+    // The string must name a real connected device, so when what's typed matches nothing the
+    // most useful popup is the full list ("here's what IS connected"), not silence.
+    if (matches.length === 0) matches = pool.slice(0, 24);
+    return hintResult(cur, typed, matches.map((item) => ({ text: item.key })));
+  };
+  if (midiDevices) {
+    fetchMidiDevices();
+    return toResult(midiDevices);
+  }
+  return fetchMidiDevices().then(toResult);
+}
+
 function wordHints(cur, typed, words) {
   const pool = words.map((w) => ({ key: w }));
   const completions = rankedMatches(pool, typed, 24).map((item) => ({
@@ -379,6 +415,10 @@ function poptartHint(cm) {
   // Inside .synth(" or .fx(" → scanned plugin names.
   m = before.match(/\.(?:synth|fx)\s*\(\s*["']([^"']*)$/);
   if (m) return pluginHints(cur, m[1]);
+
+  // Inside the device string of midicc(" or midikeys(" → connected MIDI device names.
+  m = before.match(/\b(?:midicc|midikeys)\s*\(\s*["']([^"']*)$/);
+  if (m) return midiDeviceHints(cur, m[1]);
 
   // After a dot → chain methods; bare word → top-level builders.
   m = before.match(/\.([A-Za-z_]*)$/);

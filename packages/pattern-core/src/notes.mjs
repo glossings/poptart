@@ -92,6 +92,12 @@ export function parseScaleName(scaleName) {
   return { rootMidi, intervals };
 }
 
+/** The scale's allowed pitch classes (0-11, sorted) - what live-note quantization snaps to. */
+export function scalePitchClasses(scaleName) {
+  const { rootMidi, intervals } = parseScaleName(scaleName);
+  return [...new Set(intervals.map((iv) => (((rootMidi + iv) % 12) + 12) % 12))].sort((a, b) => a - b);
+}
+
 /** Converts a scale-degree number (can be negative, or beyond the scale length) to a MIDI note. */
 export function degreeToMidi(degree, scaleName) {
   const { rootMidi, intervals } = parseScaleName(scaleName);

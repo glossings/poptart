@@ -327,8 +327,8 @@ class OscEngine {
     // Sampler events are always gated to their event: a one-shot that would outlast its step
     // gets a gate-off at the step's end instead of ringing its natural length ("gate mode",
     // like Ableton Sampler's). The event length is whatever the pattern's step grid computed -
-    // s() alone means whole steps (a bare s("long") cuts at each cycle); patterned .vel()/
-    // .note() subdivide it further. To let a sample ring longer, make its *event* longer
+    // s() alone means whole steps (a bare s("long") cuts at each cycle); patterned config
+    // (.vel()/.note()/.slice()/.i()...) subdivides it further. To let a sample ring longer, make its *event* longer
     // ("long/2", "long@2", "long _"). Loops already gate there; the small margin avoids
     // cutting a voice that ends naturally anyway.
     const cut = !loop && durSec > offsetSec - onsetSec + 0.005 ? 1 : 0;
@@ -430,11 +430,19 @@ class OscEngine {
     this._send('/poptart/midiInit', []);
   }
 
+  // Connected CoreMIDI sources as the "device name" strings midicc()/midikeys() patterns are
+  // matched against. Enables MIDI input as a side effect (see poptart.scd).
+  getMidiDevices() {
+    return this._request('/poptart/getMidiDevices', []);
+  }
+
   // Route a device's live performance stream (notes/velocity/bend/aftertouch/raw CC) to the
   // track's instrument, entirely engine-side - live playing never goes through the lookahead
   // scheduler. channel 0 = all channels. Device names match by case-insensitive substring.
-  setMidiNotes(trackId, device, channel = 0) {
-    this._send('/poptart/midiRoute', [trackId, device, channel]);
+  // scalePcs (optional array of pitch classes 0-11, from .scale() on the midikeys chain)
+  // quantizes incoming notes to the scale before they reach the instrument.
+  setMidiNotes(trackId, device, channel = 0, scalePcs = null) {
+    this._send('/poptart/midiRoute', [trackId, device, channel, (scalePcs ?? []).join(',')]);
   }
   clearMidiNotes(trackId) {
     this._send('/poptart/clearMidiRoute', [trackId]);

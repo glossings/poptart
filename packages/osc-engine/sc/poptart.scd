@@ -693,6 +693,18 @@ OSCdef(\poptartClearParamLFO, { |msg|
 // below all enable it themselves).
 OSCdef(\poptartMidiInit, { midiEnable.() }, '/poptart/midiInit');
 
+// Connected sources as the "device name" strings midicc()/midikeys() match against, for the
+// editor's device autocomplete. Enables MIDI input as a side effect: the only caller is someone
+// typing a MIDI builder, so it's about to be on anyway (and midiEnable is idempotent). Devices
+// plugged in after this first init won't appear until a restart - CoreMIDI's source list here
+// is a snapshot taken by MIDIClient.init.
+OSCdef(\poptartGetMidiDevices, { |msg|
+    var requestId = msg[1];
+    midiEnable.();
+    replyOk.("/poptart/getMidiDevices", requestId,
+        toJson.(MIDIClient.sources.collect { |s| s.device.asString ++ " " ++ s.name.asString }));
+}, '/poptart/getMidiDevices');
+
 // midicc() -> parameter: the CC sibling of setParamLFO's bus+map mechanism. One MIDIdef writes
 // each incoming value (scaled into lo..hi) straight to a control bus mapped onto the VST
 // parameter - no Node round-trip, no polling, latency is the MIDI driver's. channel 0 = all
@@ -796,9 +808,27 @@ OSCdef(\poptartClearParamCC, { |msg|
 // idempotent (MIDIdefs replace by key); a changed device/channel just re-registers.
 OSCdef(\poptartMidiRoute, { |msg|
     var key = msg[1].asSymbol, device = msg[2].asString, channel = msg[3].asInteger;
+    var scaleStr = if (msg.size > 4) { msg[4].asString } { "" };
     fork {
         var track = awaitTrack.(key);
-        var src, uid, chanArg, kOn, kOff, kBend, kTouch, kPoly, kCc;
+        var src, uid, chanArg, kOn, kOff, kBend, kTouch, kPoly, kCc, scalePcs, quantize;
+        // .scale() on a midikeys() chain: snap each incoming note to the nearest of the scale's
+        // pitch classes (ties resolve downward). noteOff/polytouch quantize identically, so
+        // releases always match their onsets. Two adjacent keys can land on the same note - the
+        // synth just sees a retrigger, and the track's held-count still gates envs correctly.
+        scalePcs = if (scaleStr.isEmpty) { nil } { scaleStr.split($,).collect(_.asInteger) };
+        quantize = { |note|
+            var q = note;
+            if (scalePcs.notNil) {
+                block { |break|
+                    (0..11).do { |d|
+                        if (scalePcs.includes((note - d) % 12)) { q = note - d; break.() };
+                        if (scalePcs.includes((note + d) % 12)) { q = note + d; break.() };
+                    };
+                };
+            };
+            q.clip(0, 127);
+        };
         if (track.isNil) { ("poptart: midiRoute: no track " ++ key).warn } {
             midiEnable.();
             src = midiSourceFor.(device);
@@ -816,6 +846,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                 [kOn, kOff, kBend, kTouch, kPoly, kCc].do { |k| MIDIdef.all[k] !? { |d| d.free } };
                 MIDIdef.noteOn(kOn, { |veloc, note, chan|
                     var ctl = track[\controllers][0];
+                    note = quantize.(note);
                     if (ctl.notNil) {
                         if (veloc > 0) {
                             track[\held] = track[\held] + 1;
@@ -834,6 +865,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                 }, chan: chanArg, srcID: uid);
                 MIDIdef.noteOff(kOff, { |veloc, note, chan|
                     var ctl = track[\controllers][0];
+                    note = quantize.(note);
                     if (ctl.notNil) {
                         track[\held] = max(0, track[\held] - 1);
                         ctl.midi.noteOff(chan, note, veloc);
@@ -847,7 +879,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                     track[\controllers][0] !? { |c| c.midi.touch(chan, val) };
                 }, chan: chanArg, srcID: uid);
                 MIDIdef.polytouch(kPoly, { |val, note, chan|
-                    track[\controllers][0] !? { |c| c.midi.polyTouch(chan, note, val) };
+                    track[\controllers][0] !? { |c| c.midi.polyTouch(chan, quantize.(note), val) };
                 }, chan: chanArg, srcID: uid);
                 MIDIdef.cc(kCc, { |val, num, chan|
                     track[\controllers][0] !? { |c| c.midi.control(chan, num, val) };
