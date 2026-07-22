@@ -382,7 +382,7 @@ OSCdef(\poptartLoadInstrument, { |msg|
                         track[\loaded][0] = pluginId;
                         // Emulated DAW transport from the first sample on: a rolling transport
                         // at the current tempo (position re-syncs via '/poptart/setTempo').
-                        self.setTransportPlaying(true);
+                        self.setPlaying(true);
                         self.setTempo(currentTempo);
                         ("poptart: loaded instrument " ++ pluginId).postln;
                     } {
@@ -424,7 +424,7 @@ OSCdef(\poptartLoadEffect, { |msg|
                     if (ok) {
                         if (track[\wanted][slot] == pluginId) {
                             track[\loaded][slot] = pluginId;
-                            self.setTransportPlaying(true); // see loadInstrument
+                            self.setPlaying(true); // see loadInstrument
                             self.setTempo(currentTempo);
                             track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
                             ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
