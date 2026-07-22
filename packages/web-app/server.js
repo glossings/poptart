@@ -64,6 +64,8 @@ async function init() {
     // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
     // live-value store - what a Tier-1 midicc() signal samples.
     engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
+    // Live note edges from midikeys() routes - what an armed MIDI recording collects.
+    engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
   }
 }
 
@@ -75,7 +77,7 @@ function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
     'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'scale', 'range', 'synth', 'fx', 'param',
-    'gain', 'pan', 'vel',
+    'gain', 'pan', 'vel', 'as',
   ];
   for (const m of METHODS) {
     Object.defineProperty(String.prototype, m, {
@@ -182,6 +184,89 @@ function patternFilePath(name) {
     throw new Error('pattern name must be a plain file name (no slashes, not starting with ".")');
   }
   return path.join(PATTERNS_DIR, `${clean}.js`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// MIDI record - capture a midikeys() performance as mini-notation. sclang forwards every note
+// edge of an active midikeys() route as /poptart/midiNoteIn (see poptart.scd's midiRoute
+// handlers); arming a recording collects those between two cycle boundaries. Recording starts
+// at the next 4-cycle phrase boundary - the wait until then is the count-in - and runs for
+// `cycles` cycles. The editor polls /api/midiRecord/status and, on 'done', writes each track's
+// pattern into the code in place of its kb()/midikeys() call (see client.js applyRecording).
+// ---------------------------------------------------------------------------------------------
+
+const PHRASE_CYCLES = 4;
+
+let midiRec = null; // { phase: 'armed'|'recording'|'done', startCycle, endCycle, cycles, grid, held, events, results, timer }
+
+function midiRecStatus() {
+  if (!midiRec) return { phase: 'idle' };
+  const { phase, startCycle, endCycle, cycles, grid, results } = midiRec;
+  return { phase, startCycle, endCycle, cycles, grid, results, transport: transport.snapshot() };
+}
+
+function pushRecEvent(trackId, ev) {
+  let list = midiRec.events.get(trackId);
+  if (!list) midiRec.events.set(trackId, (list = []));
+  list.push(ev);
+}
+
+// One live note edge. Held notes wait per track+note (a stack, so fast retriggers of the same
+// key pair up correctly) until their note-off completes the event.
+function handleMidiNoteIn(trackId, note, vel, isOn) {
+  if (!midiRec || midiRec.phase === 'done') return;
+  const rel = transport.cycleAt(engine.getTime()) - midiRec.startCycle;
+  if (isOn && vel > 0) {
+    // Slightly-early onsets (played into the count-in's last moment, meant for beat 1) snap to
+    // the window start; anything earlier is count-in noodling and stays unrecorded.
+    const preRoll = 0.5 / (midiRec.grid > 0 ? midiRec.grid : patternCore.UNQUANTIZED_GRID);
+    if (rel < -preRoll || rel >= midiRec.cycles) return;
+    let held = midiRec.held.get(trackId);
+    if (!held) midiRec.held.set(trackId, (held = new Map()));
+    let stack = held.get(note);
+    if (!stack) held.set(note, (stack = []));
+    stack.push({ note, vel, start: Math.max(0, rel) });
+  } else {
+    const ev = midiRec.held.get(trackId)?.get(note)?.pop();
+    if (!ev) return; // off for a note that started before the window (or after it closed)
+    pushRecEvent(trackId, { ...ev, end: Math.min(midiRec.cycles, Math.max(ev.start + 1e-3, rel)) });
+  }
+}
+
+function midiRecTick() {
+  if (!midiRec || midiRec.phase === 'done') return;
+  const pos = transport.cycleAt(engine.getTime());
+  if (midiRec.phase === 'armed' && pos >= midiRec.startCycle) midiRec.phase = 'recording';
+  // Small overshoot so a note-off landing right on the end boundary completes its event first.
+  if (pos >= midiRec.endCycle + 0.02) finalizeMidiRec();
+}
+
+function finalizeMidiRec() {
+  clearInterval(midiRec.timer);
+  midiRec.timer = null;
+  // Keys still held when the window closes become events that ring to the end.
+  for (const [trackId, held] of midiRec.held) {
+    for (const stack of held.values()) {
+      for (const ev of stack) pushRecEvent(trackId, { ...ev, end: midiRec.cycles });
+    }
+  }
+  midiRec.held.clear();
+  const results = [];
+  for (const [label, events] of midiRec.events) {
+    if (events.length === 0) continue;
+    try {
+      const { pattern, count } = patternCore.recordingToMini(events, {
+        cycles: midiRec.cycles,
+        grid: midiRec.grid,
+        startCycle: midiRec.startCycle,
+      });
+      results.push({ label, pattern, count });
+    } catch (err) {
+      results.push({ label, error: err.message ?? String(err) });
+    }
+  }
+  midiRec.results = results;
+  midiRec.phase = 'done';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -387,6 +472,41 @@ const routes = {
     if (!fs.existsSync(from)) throw new Error(`no saved pattern named "${body.from}"`);
     if (fs.existsSync(to)) throw new Error(`a pattern named "${body.to}" already exists`);
     fs.renameSync(from, to);
+    return { status: 200, body: {} };
+  },
+
+  // --- MIDI record (see the "MIDI record" section above) ---
+
+  // Arm a recording. Body: { cycles, grid } - grid is slots per cycle (16 = sixteenth notes at
+  // 4 beats/cycle), 0 = unquantized. Starts at the next 4-cycle phrase boundary; the response
+  // carries start/end cycles + a transport snapshot so the editor renders the count-in locally.
+  'POST /api/midiRecord/start': async (body) => {
+    if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
+    if (midiRec && midiRec.phase !== 'done') throw new Error('a MIDI recording is already armed or running - cancel it first');
+    const cycles = Math.min(64, Math.max(1, Math.round(Number(body.cycles) || 4)));
+    const grid = Math.max(0, Math.round(body.grid == null ? 16 : Number(body.grid) || 0));
+    const startCycle = (Math.floor(transport.cycleAt(engine.getTime()) / PHRASE_CYCLES) + 1) * PHRASE_CYCLES;
+    if (midiRec?.timer) clearInterval(midiRec.timer);
+    midiRec = {
+      phase: 'armed',
+      startCycle,
+      endCycle: startCycle + cycles,
+      cycles,
+      grid,
+      held: new Map(),
+      events: new Map(),
+      results: null,
+      timer: setInterval(midiRecTick, 50),
+    };
+    return { status: 200, body: midiRecStatus() };
+  },
+
+  'GET /api/midiRecord/status': async () => ({ status: 200, body: midiRecStatus() }),
+
+  // Abort an armed/running recording, or acknowledge a finished one (clears its results).
+  'POST /api/midiRecord/cancel': async () => {
+    if (midiRec?.timer) clearInterval(midiRec.timer);
+    midiRec = null;
     return { status: 200, body: {} };
   },
 

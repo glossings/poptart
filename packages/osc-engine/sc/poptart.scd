@@ -847,6 +847,11 @@ OSCdef(\poptartMidiRoute, { |msg|
                 MIDIdef.noteOn(kOn, { |veloc, note, chan|
                     var ctl = track[\controllers][0];
                     note = quantize.(note);
+                    // Every note edge also goes to Node (the note as it sounds, post-quantize) -
+                    // that's the feed web-app's MIDI record collects. Sent before the ctl check
+                    // so recording works even while the instrument is still opening.
+                    nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note,
+                        veloc / 127.0, if (veloc > 0) { 1 } { 0 });
                     if (ctl.notNil) {
                         if (veloc > 0) {
                             track[\held] = track[\held] + 1;
@@ -866,6 +871,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                 MIDIdef.noteOff(kOff, { |veloc, note, chan|
                     var ctl = track[\controllers][0];
                     note = quantize.(note);
+                    nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note, veloc / 127.0, 0);
                     if (ctl.notNil) {
                         track[\held] = max(0, track[\held] - 1);
                         ctl.midi.noteOff(chan, note, veloc);

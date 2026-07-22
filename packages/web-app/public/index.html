@@ -30,6 +30,30 @@
         <h1>poptart</h1>
         <span id="engineStatus" class="status">checking engine…</span>
         <div class="spacer"></div>
+        <div id="phraseViz" title="position in the 4-cycle phrase - one circle per cycle"></div>
+        <div class="rec-wrap">
+          <button id="recBtn" title="record MIDI keys into the pattern - arms now, starts when the current 4-cycle phrase ends">● rec</button>
+          <button id="recOptsBtn" class="small" title="record options">▾</button>
+          <div id="recPanel" class="rec-panel hidden">
+            <label>cycles
+              <select id="recCycles">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="4" selected>4</option>
+                <option value="8">8</option>
+              </select>
+            </label>
+            <label>quantize
+              <select id="recGrid">
+                <option value="0">off</option>
+                <option value="4">1/4</option>
+                <option value="8">1/8</option>
+                <option value="16" selected>1/16</option>
+                <option value="32">1/32</option>
+              </select>
+            </label>
+          </div>
+        </div>
         <select id="themeSelect" title="color theme"></select>
         <button id="themeEditBtn" title="edit theme colors">🎨</button>
         <button id="evalBtn" class="primary" title="Cmd/Ctrl + Enter">▶ eval</button>

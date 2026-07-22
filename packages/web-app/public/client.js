@@ -78,7 +78,7 @@ const BUILDERS = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'squa
 const METHODS = [
   'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'vel', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold',
+  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'as',
   'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
 ];
 
@@ -469,7 +469,7 @@ function matchParen(code, open) {
       else if (ch === inStr) inStr = null;
       continue;
     }
-    if (ch === '"' || ch === "'") inStr = ch;
+    if (ch === '"' || ch === "'" || ch === '`') inStr = ch;
     else if (ch === '(') depth++;
     else if (ch === ')') {
       depth--;
@@ -777,7 +777,7 @@ function maskComments(code) {
     if (inStr) {
       if (ch === '\\') i++;
       else if (ch === inStr) inStr = null;
-    } else if (ch === '"' || ch === "'") {
+    } else if (ch === '"' || ch === "'" || ch === '`') {
       inStr = ch;
     } else if (ch === '/' && code[i + 1] === '/') {
       while (i < code.length && code[i] !== '\n') out[i++] = ' ';
@@ -793,7 +793,9 @@ function maskComments(code) {
 
 function findStringLiterals(code) {
   const out = [];
-  const re = /(["'])((?:\\.|(?!\1).)*?)\1/g;
+  // Backticks included (multi-line `<...>*n` patterns from midi-record); the s flag lets a
+  // template literal's newlines match. Comments are already masked out by the caller.
+  const re = /(["'`])((?:\\.|(?!\1).)*?)\1/gs;
   let m;
   while ((m = re.exec(code)) !== null) {
     out.push({ index: m.index, raw: m[2], end: m.index + m[0].length });
@@ -837,9 +839,14 @@ function setupHighlighting(code, tracks) {
   }
 }
 
+// The transport mirror as a cycle position "now" - the same rebased formula the server uses.
+function currentCyclePos() {
+  return transport.baseCycle + (Date.now() / 1000 - transport.baseSec) * transport.cps;
+}
+
 function highlightTick() {
   if (!playing || !miniMod || patternRegions.length === 0) return;
-  const cyclePos = transport.baseCycle + (Date.now() / 1000 - transport.baseSec) * transport.cps;
+  const cyclePos = currentCyclePos();
   const cycle = Math.floor(cyclePos);
   const phase = cyclePos - cycle;
 
@@ -865,7 +872,11 @@ function highlightTick() {
     });
   }
 }
-setInterval(highlightTick, 33);
+setInterval(() => {
+  highlightTick();
+  updatePhraseViz();
+  updateRecButton();
+}, 33);
 
 function stopHighlighting() {
   playing = false;
@@ -873,6 +884,229 @@ function stopHighlighting() {
     for (const mk of r.marks) mk.clear();
     r.marks = [];
     r.lastKey = '';
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phrase position - four clock-face circles in the header, one per cycle of the 4-cycle
+// phrase. The current cycle's circle fills around its circumference; completed cycles stay
+// full rings; everything resets when the phrase (cycle % 4) wraps. Driven from the same
+// transport mirror as playback highlighting, so it needs no polling.
+// ---------------------------------------------------------------------------------------------
+
+const PHRASE_CYCLES = 4;
+const phraseViz = document.getElementById('phraseViz');
+for (let i = 0; i < PHRASE_CYCLES; i++) {
+  phraseViz.insertAdjacentHTML(
+    'beforeend',
+    '<svg class="phrase-c" viewBox="0 0 16 16"><circle class="ring" cx="8" cy="8" r="6"></circle><circle class="arc" cx="8" cy="8" r="6" pathLength="1"></circle></svg>',
+  );
+}
+const phraseArcs = [...phraseViz.querySelectorAll('.arc')];
+
+function updatePhraseViz() {
+  const active = playing || recState != null;
+  phraseViz.classList.toggle('rec', recState != null);
+  const pos = currentCyclePos();
+  const cycle = Math.floor(pos);
+  const idx = ((cycle % PHRASE_CYCLES) + PHRASE_CYCLES) % PHRASE_CYCLES;
+  const phase = pos - cycle;
+  phraseArcs.forEach((arc, i) => {
+    const p = !active ? 0 : i < idx ? 1 : i === idx ? phase : 0;
+    arc.style.strokeDasharray = `${p} 1`;
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// MIDI record - capture what's being played on a midikeys() route and write it back into the
+// code as a `<...>*n`.as("note:vel:clip") pattern, replacing the kb()/midikeys() call. The
+// server owns the recording window (/api/midiRecord/*): it arms at the next 4-cycle phrase
+// boundary (the wait is the count-in - watch the circles), records for the chosen number of
+// cycles at the chosen grid, and serves the converted pattern; this side polls for it, edits
+// the buffer, and re-evaluates so the loop takes over from the live keys seamlessly.
+// ---------------------------------------------------------------------------------------------
+
+const recBtn = document.getElementById('recBtn');
+const recOptsBtn = document.getElementById('recOptsBtn');
+const recPanel = document.getElementById('recPanel');
+const recCycles = document.getElementById('recCycles');
+const recGrid = document.getElementById('recGrid');
+
+let recState = null; // latest /api/midiRecord status while armed/recording, else null
+let recPollTimer = null;
+
+recOptsBtn.addEventListener('click', () => recPanel.classList.toggle('hidden'));
+recBtn.addEventListener('click', () => (recState ? cancelMidiRecord(true) : startMidiRecord()));
+
+async function startMidiRecord() {
+  recPanel.classList.add('hidden');
+  try {
+    recState = await api('POST', '/api/midiRecord/start', {
+      cycles: Number(recCycles.value),
+      grid: Number(recGrid.value),
+    });
+    if (recState.transport) transport = recState.transport;
+    recPollTimer = setInterval(pollMidiRecord, 300);
+    logLine(
+      `midi record armed: ${recState.cycles} cycle(s), quantize ${recGrid.selectedOptions[0].textContent} - recording starts when the phrase ends`,
+    );
+  } catch (e) {
+    recState = null;
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function cancelMidiRecord(log = false) {
+  clearInterval(recPollTimer);
+  recPollTimer = null;
+  recState = null;
+  try {
+    await api('POST', '/api/midiRecord/cancel');
+  } catch {
+    // server may already be idle - nothing to clean up
+  }
+  if (log) logLine('midi record cancelled');
+}
+
+async function pollMidiRecord() {
+  try {
+    const s = await api('GET', '/api/midiRecord/status');
+    if (s.transport) transport = s.transport;
+    if (s.phase === 'done') {
+      clearInterval(recPollTimer);
+      recPollTimer = null;
+      recState = null;
+      api('POST', '/api/midiRecord/cancel').catch(() => {}); // ack: clear the served results
+      applyRecording(s.results ?? []);
+    } else if (s.phase === 'idle') {
+      // server restarted / lost the recording
+      clearInterval(recPollTimer);
+      recPollTimer = null;
+      recState = null;
+      logLine('midi record: the server dropped the recording', true);
+    } else {
+      recState = s;
+    }
+  } catch {
+    // transient fetch error - keep polling
+  }
+}
+
+function updateRecButton() {
+  if (!recState) {
+    if (recBtn.textContent !== '● rec') recBtn.textContent = '● rec';
+    recBtn.classList.remove('rec-armed', 'rec-live');
+    return;
+  }
+  const pos = currentCyclePos();
+  if (pos < recState.startCycle) {
+    recBtn.textContent = `● in ${Math.max(0, recState.startCycle - pos).toFixed(1)}`;
+    recBtn.classList.add('rec-armed');
+    recBtn.classList.remove('rec-live');
+  } else {
+    recBtn.textContent = `● ${Math.min(recState.cycles, pos - recState.startCycle).toFixed(1)}/${recState.cycles}`;
+    recBtn.classList.add('rec-live');
+    recBtn.classList.remove('rec-armed');
+  }
+}
+
+function applyRecording(results) {
+  if (!results.length) {
+    logLine('midi record: no notes were played during the recording window', true);
+    return;
+  }
+  let applied = 0;
+  for (const r of results) {
+    if (r.error) {
+      logLine(`midi record (${r.label}): ${r.error}`, true);
+      continue;
+    }
+    const replacement = '`' + r.pattern + '`.as("note:vel:clip")';
+    if (replaceKbCall(r.label, replacement)) {
+      applied++;
+      logLine(`midi record: wrote ${r.count} note(s) into "${r.label}"`);
+    } else {
+      logLine(
+        `midi record (${r.label}): no midikeys/kb call found to replace - recorded pattern: ${r.pattern.replace(/\n\s*/g, ' ')}`,
+        true,
+      );
+    }
+  }
+  if (applied) doEval();
+}
+
+// Finds the live-keys call in the labeled block - either `midikeys("device")(ch)` directly or
+// `kb(ch)` through any `const kb = midikeys(...)` binding declared in the buffer - and swaps
+// the whole call expression for the recorded pattern. First candidate in the block wins.
+function replaceKbCall(label, replacement) {
+  if (!labelsMod) return false;
+  const code = cm.getValue();
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label);
+  if (!block) return false;
+
+  const spanFrom = (callStart, openParenIdx) => {
+    const close = matchParen(code, openParenIdx);
+    return close == null || close < 0 ? null : [callStart, close + 1];
+  };
+  const spans = [];
+
+  const direct = /\bmidikeys\s*\(/g;
+  let m;
+  while ((m = direct.exec(code))) {
+    if (m.index < block.start || m.index >= block.end) continue;
+    const close1 = matchParen(code, m.index + m[0].length - 1);
+    if (close1 == null || close1 < 0) continue;
+    let j = close1 + 1;
+    while (j < code.length && /\s/.test(code[j])) j++;
+    if (code[j] !== '(') continue; // a bare midikeys(...) definition, not a played route
+    const span = spanFrom(m.index, j);
+    if (span) spans.push(span);
+  }
+
+  const declRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*midikeys\s*\(/g;
+  const names = new Set([...code.matchAll(declRe)].map((d) => d[1]));
+  for (const name of names) {
+    const call = new RegExp(`(?<![.\\w$])${name.replace(/\$/g, '\\$')}\\s*\\(`, 'g');
+    while ((m = call.exec(code))) {
+      if (m.index < block.start || m.index >= block.end) continue;
+      const span = spanFrom(m.index, m.index + m[0].length - 1);
+      if (span) spans.push(span);
+    }
+  }
+  if (!spans.length) return false;
+
+  spans.sort((a, b) => a[0] - b[0]);
+  const [from, to] = spans[0];
+  cm.replaceRange(replacement, cm.posFromIndex(from), cm.posFromIndex(to));
+  removeChainedScale(from + replacement.length);
+  return true;
+}
+
+// Recorded notes are absolute MIDI (live scale-quantization already happened engine-side), so
+// a .scale() chained directly onto the replaced call would wrongly remap them as degrees -
+// walk the method chain that follows the replacement and drop the first .scale(...) in it.
+function removeChainedScale(idx) {
+  const code = cm.getValue();
+  let i = idx;
+  for (;;) {
+    let j = i;
+    while (j < code.length && /\s/.test(code[j])) j++;
+    if (code[j] !== '.') return;
+    let k = j + 1;
+    while (k < code.length && /\s/.test(code[k])) k++;
+    const m = /^[A-Za-z_$][\w$]*/.exec(code.slice(k));
+    if (!m) return;
+    let p = k + m[0].length;
+    while (p < code.length && /\s/.test(code[p])) p++;
+    if (code[p] !== '(') return;
+    const close = matchParen(code, p);
+    if (close == null || close < 0) return;
+    if (m[0] === 'scale') {
+      cm.replaceRange('', cm.posFromIndex(j), cm.posFromIndex(close + 1));
+      logLine('midi record: dropped the chained .scale() - the recorded notes are already absolute');
+      return;
+    }
+    i = close + 1;
   }
 }
 
@@ -958,6 +1192,7 @@ async function doEval() {
 }
 
 async function doStop() {
+  if (recState) cancelMidiRecord(true);
   await api('POST', '/api/stop');
   stopHighlighting();
   logLine('stopped');

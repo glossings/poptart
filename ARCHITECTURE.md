@@ -162,8 +162,21 @@ all**:
   take signal bounds without leaving the fast path. `Sig#gain`/`Sig#pan` are track-level
   channel-strip controls (gain 1 = unity, post-chain; pan -1..1) accepting all the same value
   kinds - engine-side they address pseudo-slot -1, the track synth's own control inputs,
-  mapped/set exactly like VST params. web-app's eval additionally extends `String.prototype` with
-  these methods so `"0 0.5 1 0.3".gte(0.5)` works directly, Strudel-style.
+  mapped/set exactly like VST params. `Sig#as(spec)` destructures multi-field tokens
+  Strudel-style - `` `<36:1:4 ~ 47:0.5:3 ~>*8`.as("note:vel:clip") `` splits each token on `:`
+  and reads fields in spec order (`note` = MIDI/name, `n` = degree, `vel` = per-event velocity
+  carried on the step and consumed by the scheduler's noteOn, `clip` = duration as a multiple
+  of the token's own step width, so notes ring past their slot without `@` weight chains); this
+  is the form midi-record emits (see `record.mjs` and "Live MIDI input" below). web-app's eval
+  additionally extends `String.prototype` with these methods so `"0 0.5 1 0.3".gte(0.5)` works
+  directly, Strudel-style.
+- **`src/record.mjs`** — `recordingToMini(events, { cycles, grid, startCycle })`: converts a
+  captured live-MIDI performance into the `` `<...>*n`.as("note:vel:clip") `` house style - one
+  token per grid slot (rest, `note:vel:clip`, or a `[a:v:c,b:v:c]` stack for chords, with
+  per-note velocity and duration), 8 tokens per line, rest runs collapsed via `~!k` only when
+  recording unquantized (96 slots/cycle). Because `<...>*n` indexes by absolute cycle, the
+  token list is rotated by `startCycle` so the loop replays on the same cycles it was recorded
+  on. Self-checks its output through `parseMini` before returning.
 - **`src/scheduler.mjs`** — `Scheduler`, a lookahead clock in the same spirit as
   Tidal/SuperDirt's "compute absolute deadlines slightly ahead of playback" model, just
   operating on `Sig`/plain step objects instead of Hap objects queried from a Pattern. Each
@@ -291,6 +304,20 @@ blocks behave exactly as before. Blocks are still separate scopes - a `const` de
 block isn't visible in another, so each block declares the devices it uses. A named device
 that isn't connected warns once engine-side (listing what *is* connected) and binds nothing;
 plug it in and re-evaluate.
+
+**MIDI record** turns a live `midikeys()` take into pattern code. The route's MIDIdef handlers
+in sclang forward every note edge (post scale-quantization, so what's recorded is what
+sounded) to Node as `/poptart/midiNoteIn`; web-app's `/api/midiRecord/start` arms a window
+that opens at the next 4-cycle phrase boundary - the wait is the count-in - and runs for a
+chosen number of cycles at a chosen grid (1/4..1/32 of a cycle, or unquantized). The editor's
+`● rec` button (with a cycles/quantize dropdown) polls `/api/midiRecord/status`, shows the
+count-in/progress against the header's phrase indicator (four clock-face circles, one per
+cycle of the phrase, the current one filling like a clock hand and all four resetting each
+phrase), and when the window closes, `recordingToMini` (see `record.mjs` above) converts each
+routed track's events and the client swaps the block's `kb(...)`/`midikeys(...)(...)` call for
+the resulting `` `<...>*n`.as("note:vel:clip") `` template literal, drops a directly-chained
+`.scale()` (the recorded notes are already absolute), and re-evaluates - so the loop takes
+over from the live keys at the next boundary, looper-style.
 
 Held events (mini-notation ties: `"73 _"`, `<a _>`, `a/2`) extend this model minimally rather
 than importing Strudel's whole/part hap machinery: the onset step's `end` may exceed 1 (the

@@ -461,6 +461,60 @@ export class Sig {
     return this._noteLike(value instanceof Sig ? value : n(value));
   }
 
+  /**
+   * Destructures multi-field tokens into note/velocity/duration, Strudel-style:
+   * `"<36:1:4 ~ 47:0.5:3 ~>*8".as("note:vel:clip")`. Each token's fields are split on ":" and
+   * read in the order the spec names them. Fields: `note` (MIDI number or note name), `n`
+   * (scale degree - map it with .scale() afterwards), `vel` (0..1 velocity for that one
+   * event), `clip` (duration as a multiple of the token's own step width - at *8, clip 3 rings
+   * for three eighth-slots). Missing/empty fields keep their defaults (vel 1, clip 1). This is
+   * the form the editor's midi-record writes in place of a kb()/midikeys() call.
+   */
+  as(spec) {
+    const fields = String(spec).split(':').map((f) => f.trim().toLowerCase());
+    const KNOWN = ['note', 'n', 'vel', 'clip'];
+    for (const f of fields) {
+      if (!KNOWN.includes(f)) {
+        throw new Error(`[signal] .as(): unknown field "${f}" - fields are note, n, vel, clip (e.g. .as("note:vel:clip"))`);
+      }
+    }
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .as() needs a step pattern, e.g. "<36:1:4 ~>*8".as("note:vel:clip")');
+    }
+    const explode = (raw) => {
+      const parts = String(raw).split(':');
+      const out = { value: null, vel: null, clip: 1 };
+      fields.forEach((f, i) => {
+        const p = parts[i];
+        if (p === undefined || p === '') return;
+        if (f === 'note') out.value = parseNoteValue(p);
+        else if (f === 'n') out.value = Number(p);
+        else if (f === 'vel') out.vel = Number(p);
+        else if (f === 'clip') out.clip = Number(p);
+      });
+      return out;
+    };
+    const stepsForCycle = (cycle) =>
+      this.stepsForCycle(cycle).map((s) => {
+        if (s.value == null) return s;
+        const e = explode(s.value);
+        const clip = e.clip > 0 && !Number.isNaN(e.clip) ? e.clip : 1;
+        return {
+          ...s,
+          value: e.value,
+          // clip stretches the event past its slot; the noteOff just lands later (possibly in
+          // a following cycle), same as a mini-notation tie's ringing tail.
+          end: s.start + (s.end - s.start) * clip,
+          ...(typeof e.vel === 'number' && !Number.isNaN(e.vel) ? { vel: e.vel } : {}),
+        };
+      });
+    const sample = (t, cps, pos) => {
+      const v = this.sample(t, cps, pos);
+      return v == null ? null : explode(v).value;
+    };
+    return new Sig(sample, { stepsForCycle, ...this._meta() });
+  }
+
   _noteLike(sig) {
     if (this.sampler) {
       const stepsForCycle = intersectSteps(this.stepsForCycle, sig);

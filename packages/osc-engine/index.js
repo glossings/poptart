@@ -64,6 +64,10 @@ class OscEngine {
     // points it at pattern-core's live-value store). Fired for every /poptart/midiIn message
     // once MIDI is enabled engine-side.
     this.onMidiIn = null;
+    // Live note feed callback, (trackId, note, velocity 0..1, isOn) - fired for every
+    // /poptart/midiNoteIn message, i.e. each note edge of an active midikeys() route (the note
+    // as it sounds, post scale-quantization). What web-app's MIDI record collects.
+    this.onMidiNoteIn = null;
   }
 
   version() {
@@ -489,6 +493,12 @@ class OscEngine {
       // Live CC feed for Tier-1 signal sampling: [deviceName, channel (1-16), cc, value 0..1].
       const [device, channel, cc, value] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onMidiIn === 'function') this.onMidiIn(String(device), Number(channel), Number(cc), Number(value));
+      return;
+    }
+    if (msg.address === '/poptart/midiNoteIn') {
+      // Live note feed from an active midikeys() route: [trackId, note, velocity 0..1, isOn].
+      const [track, note, vel, on] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onMidiNoteIn === 'function') this.onMidiNoteIn(String(track), Number(note), Number(vel), Number(on) !== 0);
       return;
     }
     if (!msg.address.endsWith('.reply')) return;

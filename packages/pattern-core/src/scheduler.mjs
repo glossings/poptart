@@ -305,12 +305,14 @@ export class Scheduler {
           this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
         } else {
           const midiNote = Math.round(step.value);
-          let velocity = 1.0;
+          // Per-step velocity (from .as("note:vel:clip") tokens) is the default; a .vel()
+          // control signal still overrides it, structure-from-the-control as usual.
+          let velocity = typeof step.vel === 'number' && !Number.isNaN(step.vel) ? step.vel : 1.0;
           if (this.pattern.velSig) {
             const v = this.pattern.velSig.sample(onsetSec, this.transport.cps, stepStartCycle);
             if (typeof v === 'number' && !Number.isNaN(v)) velocity = v;
-            if (velocity <= 0) continue;
           }
+          if (velocity <= 0) continue;
           this.engine.noteOn(this.trackId, midiNote, Math.min(1, velocity), onsetSec);
           this.engine.noteOff(this.trackId, midiNote, offsetSec);
         }
