@@ -75,6 +75,7 @@ keys: n("0 2 3 <5 7>")
           <div class="side-tabs">
             <button class="side-tab active" data-tab="session">session</button>
             <button class="side-tab" data-tab="files">files</button>
+            <button class="side-tab" data-tab="settings">settings</button>
             <span class="spacer"></span>
             <button id="sidebarToggle" class="small" title="minimize panel">»</button>
           </div>
@@ -106,6 +107,20 @@ keys: n("0 2 3 <5 7>")
               </div>
               <div id="fileList" class="panel list">loading…</div>
               <div class="files-note">click a pattern to load it into the editor · saved under ~/.poptart/patterns</div>
+            </section>
+          </div>
+
+          <div id="settingsTab" class="tab-body hidden">
+            <section id="audioSection">
+              <h2>audio</h2>
+              <label class="settings-row">output device
+                <select id="audioDeviceSelect" title="which audio device the engine plays to"></select>
+              </label>
+              <div class="files-note">
+                changing the device restarts the audio engine — re-evaluate to resume playback.
+                in code, .o(n) picks a track’s stereo output pair on the device: .o(1) = channels 1/2,
+                .o(2) = 3/4, … (wraps past the last pair)
+              </div>
             </section>
           </div>
         </aside>

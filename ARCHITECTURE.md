@@ -159,10 +159,11 @@ all**:
   `.mul(max - min).add(min)` over a unipolar 0..1 signal): on a Tier-2 LFO/env the bound
   signals stay in the IR and the scheduler polls only them, re-sending lo/hi as in-place
   updates to the running native modulator - so even `env()` and note-synced `lfo()` shapes
-  take signal bounds without leaving the fast path. `Sig#gain`/`Sig#pan` are track-level
-  channel-strip controls (gain 1 = unity, post-chain; pan -1..1) accepting all the same value
-  kinds - engine-side they address pseudo-slot -1, the track synth's own control inputs,
-  mapped/set exactly like VST params. `Sig#as(spec)` destructures multi-field tokens
+  take signal bounds without leaving the fast path. `Sig#gain`/`Sig#pan`/`Sig#o` are
+  track-level channel-strip controls (gain 1 = unity, post-chain; pan -1..1; o = which stereo
+  output pair the track plays to, 1 = channels 1/2, 2 = 3/4, wrapping past the device's last
+  pair) accepting all the same value kinds - engine-side they address pseudo-slot -1, the
+  track synth's own control inputs, mapped/set exactly like VST params. `Sig#as(spec)` destructures multi-field tokens
   Strudel-style - `` `<36:1:4 ~ 47:0.5:3 ~>*8`.as("note:vel:clip") `` splits each token on `:`
   and reads fields in spec order (`note` = MIDI/name, `n` = degree, `vel` = per-event velocity
   carried on the step and consumed by the scheduler's noteOn, `clip` = duration as a multiple
@@ -408,6 +409,15 @@ patch shares as a plain URL and opening a shared link restores the code.
   `Event` methods that shadow key lookup.
 - One caveat: VSTPlugin~ hosts VST2/VST3 only, no AudioUnits - in practice nearly every AU
   also ships a VST3, so this hasn't cost anything yet.
+- **Audio output device**: the editor's settings tab lists CoreAudio output devices (web-app
+  enumerates them with `system_profiler SPAudioDataType -json` - names *and* channel counts,
+  which sclang's `ServerOptions.outDevices` doesn't provide) and persists the choice in
+  `~/.poptart/settings.json`. scsynth only picks its device at boot, so applying a change
+  restarts the whole sclang/scsynth stack (`OscEngine#stop` now waits for sclang to quit
+  scsynth cleanly first - an orphaned scsynth would keep the old device and port 57110
+  wedged); playing tracks stop and the user re-evaluates. The selected device's channel count
+  rides in as `numOutputBusChannels`, which is what `Sig#o`'s stereo-pair wraparound is
+  computed against in each track's SynthDef.
 - **Sampler** (`s("pack")` patterns): the division of labor is Node-heavy on purpose. Node
   (`samples.js` + `OscEngine#playSample`) owns pack discovery (folder under
   `~/Downloads/gsamps_for_poptart`, overridable via `POPTART_SAMPLES_DIR`, with the legacy

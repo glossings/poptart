@@ -165,6 +165,19 @@ first use - the first evaluation of a new pack is silent for a beat while its fi
 accepts signals too - `setbpm("120 140")`, `setbpm(sine(0.01).range(100, 160))` - polled and
 applied as continuous, phase-preserving tempo changes shared by every track.
 
+### Audio output
+
+The **settings** sidebar tab picks the audio output device (the list shows each device's
+output channel count; the choice persists in `~/.poptart/settings.json`). Applying a change
+restarts the audio engine - scsynth only picks its device at boot - so playing tracks stop;
+re-evaluate to resume.
+
+On a multichannel device, `.o(n)` routes a track's stereo output to a channel pair: `.o(1)` is
+channels 1/2 (the default), `.o(2)` is 3/4, and so on, wrapping past the device's last pair
+(so `.o(2)` on a stereo interface is 1/2 again). It's a channel-strip control like
+`.gain()`/`.pan()`, so patterns and signals work too: `.o("1 2")` bounces the track between
+pairs each half-cycle.
+
 ## Known gaps (see ARCHITECTURE.md for the full list)
 
 - **Scanning the full default plugin locations kills scsynth on this machine** (reproducibly,

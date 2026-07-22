@@ -29,6 +29,11 @@
 var nodePort = "POPTART_NODE_PORT".getenv.asInteger;
 var sampleRate = ("POPTART_SAMPLE_RATE".getenv ? "48000").asInteger;
 var blockSize = ("POPTART_BLOCK_SIZE".getenv ? "256").asInteger;
+// Audio output device (empty/unset = system default) and its channel count, chosen in the
+// editor's settings tab and passed through by OscEngine. The channel count sizes
+// numOutputBusChannels so .o(n)'s stereo-pair wraparound matches the hardware.
+var outDevice = "POPTART_OUT_DEVICE".getenv;
+var outChannels = ("POPTART_OUT_CHANNELS".getenv ? "2").asInteger;
 // Plugin directories to scan. Priority: POPTART_VST_DIRS (colon-separated) if set, else
 // ~/.poptart/plugins if it exists (a folder of symlinks to just the plugins being played),
 // else VSTPlugin's standard locations. The curated folder is the default on purpose: a full
@@ -64,7 +69,7 @@ var nodeAddr = NetAddr("127.0.0.1", nodePort);
 // are distinct objects (incoming OSC string args arrive as Symbols anyway).
 var tracks = IdentityDictionary.new;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
-var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef;
+var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
 var awaitTrack, awaitLoaded, resolvePlugin;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing;
@@ -129,7 +134,10 @@ pluginList = {
 trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 
 buildTrackDef = { |key|
-    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0|
+    // .o(n)'s wraparound: numOutputBusChannels was sized from the selected device's channel
+    // count at boot, so pair indices past the hardware's last pair fold back onto real outputs.
+    var numPairs = max(1, server.options.numOutputBusChannels div: 2);
+    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, out = 1|
         var sig = Silent.ar(2);
         maxSlots.do { |i|
             if (i == 0) {
@@ -149,8 +157,16 @@ buildTrackDef = { |key|
         // -1 (Sig#gain/#pan; setParam sets these controls, setParam[Shape]LFO/Env map busses to
         // them). Lag smooths the ~30ms Tier-1 polling steps; clip keeps a runaway signal sane.
         sig = Balance2.ar(sig[0], sig[1], pan.lag(0.02).clip(-1, 1), gain.lag(0.02).clip(0, 4));
-        Out.ar(0, sig);
+        // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like
+        // gain/pan): pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair.
+        Out.ar((out.round - 1).mod(numPairs) * 2, sig);
     });
+};
+
+// Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
+// unity gain, center pan, first output pair.
+channelDefault = { |name|
+    if ((name == "gain") or: { name == "out" }) { 1 } { 0 };
 };
 
 // Both helpers must be called from within a Routine (all handlers that use them fork first).
@@ -219,6 +235,9 @@ midiWarnMissing = { |context, device|
 Server.default = server;
 server.options.sampleRate = sampleRate;
 server.options.blockSize = blockSize;
+if (outDevice.notNil and: { outDevice.isEmpty.not }) { server.options.outDevice = outDevice };
+// At least stereo; more when the selected device has it, so .o(n) can address every pair.
+server.options.numOutputBusChannels = max(2, outChannels);
 
 server.waitForBoot {
     // rand = continuous smoothed random (cubic-interpolated noise; a new target per period),
@@ -659,7 +678,7 @@ OSCdef(\poptartClearParamEnv, { |msg|
     if (existing.notNil) {
         if (slot == -1) {
             track[\synth].map(paramName.asSymbol, -1);
-            track[\synth].set(paramName.asSymbol, if (paramName == "gain") { 1 } { 0 });
+            track[\synth].set(paramName.asSymbol, channelDefault.(paramName));
         } {
             track[\controllers][slot].unmap(existing[\index]);
         };
@@ -677,7 +696,7 @@ OSCdef(\poptartClearParamLFO, { |msg|
     if (existing.notNil) {
         if (slot == -1) {
             track[\synth].map(paramName.asSymbol, -1);
-            track[\synth].set(paramName.asSymbol, if (paramName == "gain") { 1 } { 0 });
+            track[\synth].set(paramName.asSymbol, channelDefault.(paramName));
         } {
             track[\controllers][slot].unmap(existing[\index]);
         };
@@ -789,7 +808,7 @@ OSCdef(\poptartClearParamCC, { |msg|
         MIDIdef.all[existing[\defKey]] !? { |d| d.free };
         if (slot == -1) {
             track[\synth].map(paramName.asSymbol, -1);
-            track[\synth].set(paramName.asSymbol, if (paramName == "gain") { 1 } { 0 });
+            track[\synth].set(paramName.asSymbol, channelDefault.(paramName));
         } {
             track[\controllers][slot].unmap(existing[\index]);
         };
@@ -1080,5 +1099,11 @@ OSCdef(\poptartGetKnownPlugins, { |msg|
     replyOk.("/poptart/getKnownPlugins", requestId, toJson.(pluginList.()));
 }, '/poptart/getKnownPlugins');
 
-OSCdef(\poptartQuit, { |msg| 0.exit }, '/poptart/quit');
+// Quit scsynth before exiting: sclang dying alone orphans the server, which then keeps hold of
+// the audio device and its UDP port - wedging the next engine start (an output-device change
+// from the settings tab restarts the whole stack through this path).
+OSCdef(\poptartQuit, { |msg|
+    fork { 3.wait; 0.exit }; // fallback if the server never answers the quit
+    server.quit(onComplete: { 0.exit }, onFailure: { 0.exit }, watchShutDown: false);
+}, '/poptart/quit');
 )

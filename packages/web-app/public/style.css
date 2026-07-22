@@ -443,6 +443,19 @@ aside h2 {
   color: var(--text-dim);
 }
 
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.settings-row select {
+  flex: 1;
+  min-width: 0;
+}
+
 .track-head {
   display: flex;
   align-items: center;

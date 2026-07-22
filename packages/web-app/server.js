@@ -9,6 +9,7 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 const { MappedEngine } = require('./param-mapping');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
@@ -37,11 +38,66 @@ let engineError = null;
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
 
+// ---------------------------------------------------------------------------------------------
+// Settings - small persisted knobs (currently just the audio output device), plain JSON under
+// ~/.poptart so they survive restarts and are hand-editable.
+// ---------------------------------------------------------------------------------------------
+
+const SETTINGS_FILE = process.env.POPTART_SETTINGS_FILE || path.join(os.homedir(), '.poptart', 'settings.json');
+
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+  } catch {
+    return {}; // missing or corrupt - defaults
+  }
+}
+
+function saveSettings() {
+  fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+}
+
+const settings = loadSettings();
+
+// CoreAudio output devices with channel counts, via system_profiler (macOS - the platform the
+// audio/MIDI plumbing already assumes). Channel counts are why this isn't sclang's
+// ServerOptions.outDevices: scsynth needs numOutputBusChannels at boot, and .o(n)'s
+// stereo-pair wraparound has to match the hardware.
+function audioOutputDevices() {
+  try {
+    const raw = execFileSync('system_profiler', ['SPAudioDataType', '-json'], { encoding: 'utf8', timeout: 15000 });
+    const groups = JSON.parse(raw).SPAudioDataType ?? [];
+    return groups
+      .flatMap((g) => g._items ?? [])
+      .filter((d) => Number(d.coreaudio_device_output) > 0)
+      .map((d) => ({
+        name: d._name,
+        channels: Number(d.coreaudio_device_output),
+        isDefault: d.coreaudio_default_audio_output_device === 'spaudio_yes',
+      }));
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[poptart] could not list audio output devices: ${err.message}`);
+    return [];
+  }
+}
+
 async function loadEngine() {
   try {
     const { OscEngine } = require('@poptart/osc-engine');
-    const e = new OscEngine();
+    const devices = audioOutputDevices();
+    const wanted = settings.audioOutputDevice;
+    const chosen = wanted ? devices.find((d) => d.name === wanted) : null;
+    if (wanted && !chosen) {
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] saved audio output device "${wanted}" is not connected - using the system default`);
+    }
+    // Whichever device scsynth will actually open decides the channel count .o(n) wraps at.
+    const active = chosen ?? devices.find((d) => d.isDefault);
+    const e = new OscEngine({ outDevice: chosen?.name ?? null, outChannels: active?.channels ?? 2 });
     await e.start(48000, 256);
+    engineError = null;
     return e;
   } catch (err) {
     engineError = err.message ?? String(err);
@@ -51,6 +107,41 @@ async function loadEngine() {
       err,
     );
     return null;
+  }
+}
+
+let engineRestarting = false;
+
+// Tear the whole engine stack (sclang + scsynth) down and boot a fresh one - how an audio
+// output device change is applied, since scsynth only picks its device at boot. Playing tracks
+// are stopped rather than migrated (their synths and plugins lived in the old scsynth); the
+// editor tells the user to re-evaluate.
+async function restartEngine() {
+  if (engineRestarting) throw new Error('an engine restart is already in progress');
+  engineRestarting = true;
+  try {
+    for (const [label, sch] of schedulers) {
+      sch.stop();
+      mappedEngine?.removeChain(label);
+    }
+    schedulers.clear();
+    if (engine) {
+      await engine.stop();
+      // Let the OS actually release the OSC UDP port and the audio device before the
+      // replacement sclang/scsynth try to grab them - both frees complete asynchronously.
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    engine = null;
+    mappedEngine = null;
+    engine = await loadEngine();
+    if (engine) {
+      mappedEngine = new MappedEngine(engine);
+      if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS });
+      engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
+      engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
+    }
+  } finally {
+    engineRestarting = false;
   }
 }
 
@@ -77,7 +168,7 @@ function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
     'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'scale', 'range', 'synth', 'fx', 'param',
-    'gain', 'pan', 'vel', 'as',
+    'gain', 'pan', 'o', 'vel', 'as',
   ];
   for (const m of METHODS) {
     Object.defineProperty(String.prototype, m, {
@@ -515,6 +606,29 @@ const routes = {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     return { status: 200, body: await engine.record(body.path, body.seconds ?? 4) };
   },
+
+  // --- settings (the editor's "settings" tab) ---
+
+  // Output devices with channel counts, plus the saved selection (null = system default).
+  'GET /api/audioDevices': async () => ({
+    status: 200,
+    body: { devices: audioOutputDevices(), selected: settings.audioOutputDevice ?? null },
+  }),
+
+  // Body: { device } - a device name, or null/"" for the system default. Persists the choice
+  // and restarts the engine on the new device (scsynth can't switch devices while running),
+  // so the response takes a few seconds and any playing tracks stop.
+  'POST /api/audioDevice': async (body) => {
+    const device = body.device ? String(body.device) : null;
+    if (device && !audioOutputDevices().some((d) => d.name === device)) {
+      throw new Error(`no audio output device named "${device}"`);
+    }
+    settings.audioOutputDevice = device;
+    saveSettings();
+    await restartEngine();
+    if (!engine) throw new Error(engineError ?? 'engine failed to restart');
+    return { status: 200, body: { device } };
+  },
 };
 
 // Full parameter lists keyed by plugin name - Serum 2's is 2,621 entries and round-trips
@@ -617,6 +731,8 @@ init().then(() => {
 });
 
 process.on('SIGINT', () => {
-  engine?.stop();
-  process.exit(0);
+  // stop() is async now (it waits for sclang to quit scsynth cleanly) - give it a moment, but
+  // never hang the Ctrl-C.
+  setTimeout(() => process.exit(0), 4000).unref();
+  Promise.resolve(engine?.stop()).finally(() => process.exit(0));
 });

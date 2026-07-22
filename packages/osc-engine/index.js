@@ -49,10 +49,15 @@ function toOscArgs(values) {
 }
 
 class OscEngine {
-  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = 'sclang' } = {}) {
+  // outDevice: CoreAudio output device name (null = system default). outChannels: that
+  // device's output channel count - sclang sizes numOutputBusChannels from it so the .o(n)
+  // stereo-pair selector wraps at the hardware's real channel count.
+  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = 'sclang', outDevice = null, outChannels = 2 } = {}) {
     this.nodePort = nodePort;
     this.scPort = scPort;
     this.sclangPath = sclangPath;
+    this.outDevice = outDevice;
+    this.outChannels = outChannels;
     this._sclangProcess = null;
     this._port = null;
     this._pending = new Map(); // requestId -> { resolve, reject, timer }
@@ -115,6 +120,8 @@ class OscEngine {
               POPTART_NODE_PORT: String(this.nodePort),
               POPTART_SAMPLE_RATE: String(sampleRate),
               POPTART_BLOCK_SIZE: String(bufferSize),
+              ...(this.outDevice ? { POPTART_OUT_DEVICE: String(this.outDevice) } : {}),
+              POPTART_OUT_CHANNELS: String(this.outChannels),
             },
             stdio: ['ignore', 'pipe', 'pipe'],
           },
@@ -151,11 +158,27 @@ class OscEngine {
     });
   }
 
-  stop() {
+  // Asks sclang to shut down cleanly - which also quits scsynth (see the .scd's quit handler;
+  // an orphaned scsynth would keep the audio device and its port wedged for the next start,
+  // e.g. across an output-device change) - escalating to SIGKILL if it doesn't exit in time.
+  // Await it before starting a replacement engine.
+  async stop() {
     if (this._sclangProcess) {
-      this._send('/poptart/quit', []);
-      this._sclangProcess.kill();
+      const proc = this._sclangProcess;
       this._sclangProcess = null;
+      try {
+        this._send('/poptart/quit', []);
+      } catch {
+        // port already gone - fall through to the kill path
+      }
+      await new Promise((resolve) => {
+        if (proc.exitCode != null) return resolve();
+        const killTimer = setTimeout(() => proc.kill('SIGKILL'), 5000);
+        proc.once('exit', () => {
+          clearTimeout(killTimer);
+          resolve();
+        });
+      });
     }
     if (this._port) {
       this._port.close();

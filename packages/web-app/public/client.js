@@ -76,7 +76,7 @@ let knownPlugins = [];
 
 const BUILDERS = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm'];
 const METHODS = [
-  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'vel', 'range', 'fast', 'rate', 'phase', 'curve',
+  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
   'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'as',
   'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
@@ -1337,6 +1337,8 @@ const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const sessionTab = document.getElementById('sessionTab');
 const filesTab = document.getElementById('filesTab');
+const settingsTab = document.getElementById('settingsTab');
+const audioDeviceSelect = document.getElementById('audioDeviceSelect');
 const fileNameInput = document.getElementById('fileNameInput');
 const fileSaveBtn = document.getElementById('fileSaveBtn');
 const fileList = document.getElementById('fileList');
@@ -1348,9 +1350,61 @@ for (const btn of document.querySelectorAll('.side-tab')) {
     for (const b of document.querySelectorAll('.side-tab')) b.classList.toggle('active', b === btn);
     sessionTab.classList.toggle('hidden', btn.dataset.tab !== 'session');
     filesTab.classList.toggle('hidden', btn.dataset.tab !== 'files');
+    settingsTab.classList.toggle('hidden', btn.dataset.tab !== 'settings');
     if (btn.dataset.tab === 'files') refreshPatternFiles();
+    if (btn.dataset.tab === 'settings') refreshAudioDevices();
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Settings tab - audio output device. Devices come with channel counts (what .o(n) wraps
+// against); changing the selection restarts the engine server-side, so playing tracks stop
+// and the user re-evaluates.
+// ---------------------------------------------------------------------------------------------
+
+async function refreshAudioDevices() {
+  try {
+    const { devices, selected } = await api('GET', '/api/audioDevices');
+    audioDeviceSelect.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    const sysDefault = devices.find((d) => d.isDefault);
+    def.textContent = sysDefault ? `system default (${sysDefault.name})` : 'system default';
+    audioDeviceSelect.appendChild(def);
+    for (const d of devices) {
+      const opt = document.createElement('option');
+      opt.value = d.name;
+      opt.textContent = `${d.name} · ${d.channels} ch`;
+      audioDeviceSelect.appendChild(opt);
+    }
+    // A saved device that's since been unplugged falls back to "" - the server already plays
+    // on the system default in that case.
+    audioDeviceSelect.value = selected ?? '';
+    if (audioDeviceSelect.value !== (selected ?? '')) audioDeviceSelect.value = '';
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+audioDeviceSelect.addEventListener('change', async () => {
+  const device = audioDeviceSelect.value || null;
+  const label = device ?? 'the system default';
+  audioDeviceSelect.disabled = true;
+  engineStatus.textContent = 'restarting engine…';
+  engineStatus.className = 'status';
+  logLine(`switching audio output to ${label} - restarting the engine…`);
+  try {
+    await api('POST', '/api/audioDevice', { device });
+    stopHighlighting();
+    playing = false;
+    logLine(`audio output is now ${label} - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    audioDeviceSelect.disabled = false;
+    refreshStatus().catch(() => {});
+  }
+});
 
 function renderPatternFiles(patterns) {
   fileList.innerHTML = '';

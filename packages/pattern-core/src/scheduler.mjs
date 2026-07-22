@@ -28,7 +28,7 @@ const POLL_INTERVAL_MS = 30;
 // setParamEnv engine calls as plugin parameters, addressed with this pseudo-slot instead of a
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
 const CHANNEL_SLOT = -1;
-const CHANNEL_DEFAULTS = { gain: 1, pan: 0 };
+const CHANNEL_DEFAULTS = { gain: 1, pan: 0, out: 1 }; // out = stereo pair (Sig#o), 1-based
 
 /**
  * The shared clock: one Transport is owned by the host (web-app server) and read by every
