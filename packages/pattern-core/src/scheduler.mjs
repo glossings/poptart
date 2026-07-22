@@ -2,10 +2,10 @@
 // below (createTrack/loadInstrument/loadEffect/noteOn/noteOff/playSample/setParam/setParamLFO/
 // clearParamLFO/anchorParamLFO (optional)/setParamEnv/clearParamEnv/setParamCC/clearParamCC/
 // setMidiNotes/clearMidiNotes/getTime).
-// This class is engine-agnostic by design: it's been driven by an in-process JUCE addon and is
-// now driven by an OSC-based engine talking to SuperCollider (see @poptart/osc-engine) without
-// any change here. Two independent mechanisms run side by side, matching the two ways a Sig can
-// carry time-varying information:
+// This class is engine-agnostic by design: anything implementing that interface works
+// unchanged - the OSC engine talking to SuperCollider (see @poptart/osc-engine) is the one in
+// use. Two independent mechanisms run side by side, matching the two ways a Sig can carry
+// time-varying information:
 //
 //  - Note edges: if the top-level pattern has known step boundaries (mini-notation-derived),
 //    we know exact onset/offset times ahead of playback, the same "compute deadlines slightly

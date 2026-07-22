@@ -12,6 +12,7 @@ import { parseMini, getStepsForCycle } from './mini.mjs';
 import { parseNoteValue, degreeToMidi, parseScaleName } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
+import { macroValue, assertMacroIndex } from './macros.mjs';
 
 /**
  * @typedef {Object} Step
@@ -868,6 +869,17 @@ export function midicc(device) {
     }
     return withCcIR({ device, cc, channel, min: 0, max: 1 });
   };
+}
+
+/**
+ * `macro(3)` - the live 0..1 value of knob 3 in the editor's Macros panel, as a continuous
+ * signal. Every knob is also pre-bound in evaluated code as `macro1`..`macro8`, so the usual
+ * form is `param("Filter 1 Freq", macro1.range(200, 4000))`. Tier-1: the scheduler polls the
+ * knob's latest value, like any other sampled signal.
+ */
+export function macro(index) {
+  assertMacroIndex(index);
+  return new Sig(() => macroValue(index));
 }
 
 /**

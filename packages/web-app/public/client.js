@@ -74,7 +74,10 @@ function copyText(text, what) {
 let chainSlots = [];
 let knownPlugins = [];
 
-const BUILDERS = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm'];
+const BUILDERS = [
+  'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
+  'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
+];
 const METHODS = [
   'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
@@ -806,7 +809,7 @@ function initLfoCanvas() {
 // position and marks their source ranges.
 // ---------------------------------------------------------------------------------------------
 
-// Authoritative clock state comes back from each /api/evaluate: cyclePos is no longer simply
+// Authoritative clock state comes back from each /api/evaluate: cyclePos isn't simply
 // t*cps once setbpm() has run, so the server sends its Transport's {cps, baseSec, baseCycle}
 // and we mirror the same rebased formula. (A tempo *signal* keeps changing cps between evals;
 // highlighting then drifts until the next eval - known, cosmetic.)
@@ -1255,6 +1258,146 @@ async function doStop() {
   if (result.transport) transport = result.transport; // frozen at cycle 0
   stopHighlighting();
   logLine('stopped');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Macros panel - a bank of knobs exposed to evaluated code as macro1..macroN (0..1 signals).
+// The values live server-side in pattern-core's macro store (that's what the scheduler polls);
+// these knobs are just the write side, streaming moves over POST /api/macros/set.
+// ---------------------------------------------------------------------------------------------
+
+const macroBank = document.getElementById('macroBank');
+
+async function initMacros() {
+  let macros;
+  try {
+    ({ macros } = await api('GET', '/api/macros'));
+  } catch (e) {
+    macroBank.textContent = `macros unavailable: ${e.message}`;
+    return;
+  }
+  macroBank.innerHTML = '';
+  for (const m of macros) macroBank.appendChild(macroKnob(m));
+}
+
+// One knob: vertical drag turns it (shift = fine), scroll nudges it, double-click resets to 0.
+// Double-clicking the name opens an inline rename (empty = back to "Macro N").
+function macroKnob(m) {
+  const root = document.createElement('div');
+  root.className = 'macro';
+
+  const knob = document.createElement('div');
+  knob.className = 'macro-knob';
+  const num = document.createElement('span');
+  num.className = 'macro-num';
+  num.textContent = m.index;
+  knob.appendChild(num);
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'macro-name';
+  nameEl.title = 'double-click to rename';
+  root.append(knob, nameEl);
+
+  let value = m.value;
+  let name = m.name;
+
+  const paint = () => {
+    knob.style.setProperty('--v', value);
+    knob.title = `${name} = ${value.toFixed(2)}  ·  macro${m.index} in code  ·  double-click resets`;
+    nameEl.textContent = name;
+  };
+  paint();
+
+  // A drag streams values; keep at most one POST in flight and always land on the final one.
+  let inFlight = false;
+  let dirty = false;
+  const push = async () => {
+    if (inFlight) {
+      dirty = true;
+      return;
+    }
+    inFlight = true;
+    const sent = value;
+    try {
+      await api('POST', '/api/macros/set', { index: m.index, value: sent });
+    } catch (e) {
+      logLine(`macro ${m.index}: ${e.message}`, true);
+    }
+    inFlight = false;
+    if (dirty) {
+      dirty = false;
+      if (value !== sent) push();
+    }
+  };
+
+  const setValue = (v) => {
+    value = Math.min(1, Math.max(0, v));
+    paint();
+    push();
+  };
+
+  knob.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    knob.setPointerCapture(e.pointerId);
+    const startY = e.clientY;
+    const startV = value;
+    const onMove = (ev) => {
+      const pxPerSweep = ev.shiftKey ? 1200 : 160; // px of vertical drag for the full 0..1 sweep
+      setValue(startV + (startY - ev.clientY) / pxPerSweep);
+    };
+    const onUp = () => {
+      knob.removeEventListener('pointermove', onMove);
+      knob.removeEventListener('pointerup', onUp);
+      knob.removeEventListener('pointercancel', onUp);
+    };
+    knob.addEventListener('pointermove', onMove);
+    knob.addEventListener('pointerup', onUp);
+    knob.addEventListener('pointercancel', onUp);
+  });
+
+  knob.addEventListener('dblclick', () => setValue(0));
+
+  knob.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      setValue(value - Math.sign(e.deltaY) * (e.shiftKey ? 0.002 : 0.02));
+    },
+    { passive: false },
+  );
+
+  nameEl.addEventListener('dblclick', () => {
+    const input = document.createElement('input');
+    input.className = 'macro-name-input';
+    input.value = name;
+    input.maxLength = 24;
+    input.spellcheck = false;
+    nameEl.replaceChildren(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = async () => {
+      if (done) return;
+      done = true;
+      try {
+        const res = await api('POST', '/api/macros/name', { index: m.index, name: input.value });
+        name = res.name;
+      } catch (e) {
+        logLine(`macro ${m.index}: ${e.message}`, true);
+      }
+      paint();
+    };
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') input.blur();
+      if (ev.key === 'Escape') {
+        done = true;
+        paint();
+      }
+    });
+    input.addEventListener('blur', commit);
+  });
+
+  return root;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1740,3 +1883,4 @@ scanBtn.addEventListener('click', doScan);
 refreshStatus().then((loaded) => {
   if (loaded) loadKnownPlugins();
 });
+initMacros();

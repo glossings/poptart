@@ -334,6 +334,82 @@ aside section {
   flex: 1;
 }
 
+/* Macros - the knob bank. Each knob is a conic-gradient ring (--v is the 0..1 value, swept
+   over 270° starting at the 7-o'clock position, like a hardware pot) around a raised center
+   holding the knob number; the editable name sits underneath. */
+.macro-bank {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px 6px;
+  justify-items: center;
+}
+
+.macro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.macro-knob {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  user-select: none;
+  touch-action: none;
+  background:
+    radial-gradient(closest-side, var(--bg-raised) 70%, transparent 71%),
+    conic-gradient(
+      from 225deg,
+      var(--accent) calc(var(--v, 0) * 270deg),
+      var(--accent-soft) calc(var(--v, 0) * 270deg) 270deg,
+      transparent 270deg
+    );
+}
+
+.macro-knob:hover .macro-num {
+  color: var(--text);
+}
+
+.macro-num {
+  font-size: 13px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.macro-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  cursor: text;
+}
+
+.macro-name-input {
+  width: 60px;
+  font-size: 10.5px;
+  font-family: inherit;
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 3px;
+}
+
+.macros-note {
+  margin-top: 6px;
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-dim);
+}
+
 #pluginsSection {
   max-height: 32%;
   padding-bottom: 10px;

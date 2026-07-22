@@ -1,9 +1,8 @@
 'use strict';
 
-// Plain Node HTTP server replacing the old Electron shell (app/main.js) - serves the browser UI
-// from public/ and exposes the same operations the old IPC handlers did, now as HTTP endpoints.
-// All request/reply here (no push updates needed yet), so plain HTTP is enough - no WebSocket
-// dependency required for what this currently does.
+// Plain Node HTTP server - serves the browser UI from public/ and exposes engine, transport,
+// and file operations as JSON-over-HTTP endpoints (see `routes`). Everything is request/reply
+// (no push updates needed), so plain HTTP is enough - no WebSocket dependency.
 
 const http = require('node:http');
 const path = require('node:path');
@@ -206,7 +205,15 @@ function extendStringPrototype(core) {
   }
 }
 
-const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys'];
+const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro'];
+
+// The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
+// code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
+// param("Filter 1 Freq", macro1.range(200, 4000)). Built lazily: patternCore is a dynamic
+// import and isn't loaded yet when this module's top level runs.
+function macroSigNames() {
+  return Array.from({ length: patternCore.MACRO_COUNT }, (_, i) => `macro${i + 1}`);
+}
 
 // What a `setbpm(...)` block evaluates to - lets /api/evaluate tell tempo-only blocks apart
 // from actual patterns (blocks must otherwise evaluate to a Sig).
@@ -241,8 +248,13 @@ function makeBlockEvaluator() {
       ...new Set([...code.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1])),
     ];
     const body = code.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
-    const baseNames = [...BUILDER_NAMES, 'setbpm'].filter((n) => !defs.has(n)); // defs may shadow builders
-    const baseValues = baseNames.map((n) => (n === 'setbpm' ? setbpm : patternCore[n]));
+    const macroNames = macroSigNames();
+    const baseNames = [...BUILDER_NAMES, ...macroNames, 'setbpm'].filter((n) => !defs.has(n)); // defs may shadow builders
+    const baseValues = baseNames.map((n) => {
+      if (n === 'setbpm') return setbpm;
+      if (macroNames.includes(n)) return patternCore.macro(Number(n.slice(5)));
+      return patternCore[n];
+    });
     const harvest = declNames
       .map((n) => `${JSON.stringify(n)}: (typeof ${n} === 'undefined' ? undefined : ${n})`)
       .join(', ');
@@ -385,7 +397,7 @@ function finalizeMidiRec() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// API handlers - one per old ipcMain.handle() call in app/main.js, same request/response shapes.
+// API handlers, keyed "METHOD /path" and dispatched by the plumbing at the bottom of the file.
 // ---------------------------------------------------------------------------------------------
 
 const routes = {
@@ -637,6 +649,41 @@ const routes = {
     return { status: 200, body: await engine.record(body.path, body.seconds ?? 4) };
   },
 
+  // --- macros (the editor's "macros" knob bank) ---
+
+  // Knob values are live performance state (in-memory, reset on restart); names persist in
+  // settings so a renamed knob keeps its name across sessions.
+  'GET /api/macros': async () => ({
+    status: 200,
+    body: {
+      macros: Array.from({ length: patternCore.MACRO_COUNT }, (_, i) => ({
+        index: i + 1,
+        value: patternCore.macroValue(i + 1),
+        name: settings.macroNames?.[i] || `Macro ${i + 1}`,
+      })),
+    },
+  }),
+
+  // Body: { index, value } - value 0..1. Called on every knob move (throttled client-side),
+  // so it deliberately touches nothing but the in-memory store.
+  'POST /api/macros/set': async (body) => {
+    patternCore.setMacro(Number(body.index), Number(body.value));
+    return { status: 200, body: {} };
+  },
+
+  // Body: { index, name }. An empty name resets to the default "Macro N".
+  'POST /api/macros/name': async (body) => {
+    const index = Number(body.index);
+    if (!Number.isInteger(index) || index < 1 || index > patternCore.MACRO_COUNT) {
+      throw new Error(`macro index must be 1..${patternCore.MACRO_COUNT}`);
+    }
+    const name = String(body.name ?? '').trim().slice(0, 24);
+    settings.macroNames = settings.macroNames ?? [];
+    settings.macroNames[index - 1] = name;
+    saveSettings();
+    return { status: 200, body: { name: name || `Macro ${index}` } };
+  },
+
   // --- settings (the editor's "settings" tab) ---
 
   // Output devices with channel counts, plus the saved selection (null = system default).
@@ -761,7 +808,7 @@ init().then(() => {
 });
 
 process.on('SIGINT', () => {
-  // stop() is async now (it waits for sclang to quit scsynth cleanly) - give it a moment, but
+  // stop() is async (it waits for sclang to quit scsynth cleanly) - give it a moment, but
   // never hang the Ctrl-C.
   setTimeout(() => process.exit(0), 4000).unref();
   Promise.resolve(engine?.stop()).finally(() => process.exit(0));
