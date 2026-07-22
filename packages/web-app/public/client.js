@@ -878,6 +878,94 @@ function isPatternContext(code, lit) {
   return false;
 }
 
+// Walk every atom value string in a parsed mini AST (skipping rests). Used to bound how far
+// back highlighting has to look for a clip-stretched tail.
+function walkAtomValues(node, fn) {
+  if (!node) return;
+  if (node.type === 'atom') {
+    if (node.value != null) fn(node.value);
+    return;
+  }
+  if (node.items) for (const it of node.items) walkAtomValues(it.node, fn);
+  if (node.item) walkAtomValues(node.item, fn);
+}
+
+// Numeric value of a mini number-pattern at absolute cycle-time t - the clip control read at an
+// event's onset, matching signal.mjs's `.clip("<1 4 1>")` (structure stays with the note).
+function sampleNumberPattern(ast, t) {
+  const c = Math.floor(t);
+  const ph = t - c;
+  let steps;
+  try {
+    steps = miniMod.getStepsForCycle(ast, c);
+  } catch {
+    return NaN;
+  }
+  for (const s of steps) {
+    if (s.value != null && ph >= s.start && ph < s.end) return Number(s.value);
+  }
+  return NaN;
+}
+
+// clip elongates a step's duration - the noteOff, and here the highlight, lasts longer than the
+// step's own slot. Two client-visible sources, mirroring signal.mjs: the `clip` field of a
+// trailing `.as(spec)` (per-atom `:N` suffix), and a trailing `.clip(N)` / `.clip("pat")`. The
+// literal owns whichever of those immediately follows it in the chain; a method taking a string
+// argument in between (`.scale("min")`) hides a later `.clip`, which then just isn't stretched.
+function detectClip(masked, litEnd, ast) {
+  const tail = masked.slice(litEnd, litEnd + 400);
+  let asIndex = -1;
+  let clipConst = null;
+  let clipAst = null;
+
+  const asM = /^[^"'`\n]*?\.as\(\s*(["'])([^"'`]*)\1\s*\)/.exec(tail);
+  if (asM) asIndex = asM[2].split(':').map((f) => f.trim().toLowerCase()).indexOf('clip');
+
+  const clipM = /^[^"'`\n]*?\.clip\(\s*(?:(["'])([^"'`]*)\1|([-\d.]+))\s*\)/.exec(tail);
+  if (clipM) {
+    if (clipM[3] != null) clipConst = Number(clipM[3]);
+    else {
+      try {
+        clipAst = miniMod.parseMini(clipM[2]);
+      } catch {
+        clipAst = null;
+      }
+    }
+  }
+
+  if (asIndex < 0 && clipConst == null && !clipAst) return null;
+
+  // Bound the per-tick look-back at the largest multiplier the pattern can produce (a step is at
+  // most one cycle wide, so ceil(maxMult) cycles of tail, plus a margin), capped for safety.
+  let maxMult = 1;
+  const consider = (v) => {
+    const n = Number(v);
+    if (!Number.isNaN(n) && n > maxMult) maxMult = n;
+  };
+  if (asIndex >= 0) walkAtomValues(ast, (val) => consider(String(val).split(':')[asIndex]));
+  if (clipConst != null) consider(clipConst);
+  if (clipAst) walkAtomValues(clipAst, consider);
+
+  return { asIndex, clipConst, clipAst, maxCycles: Math.min(32, Math.ceil(maxMult) + 1) };
+}
+
+// The duration multiplier for one step under a region's clip descriptor (1 = unchanged).
+function clipMultiplier(clip, step, cycle) {
+  let m = 1;
+  if (clip.asIndex >= 0) {
+    const part = String(step.value).split(':')[clip.asIndex];
+    const v = Number(part);
+    if (part !== undefined && part !== '' && v > 0 && !Number.isNaN(v)) m *= v;
+  }
+  if (clip.clipConst != null) {
+    if (clip.clipConst > 0 && !Number.isNaN(clip.clipConst)) m *= clip.clipConst;
+  } else if (clip.clipAst) {
+    const v = sampleNumberPattern(clip.clipAst, cycle + (step.start + step.end) / 2);
+    if (v > 0 && !Number.isNaN(v)) m *= v;
+  }
+  return m;
+}
+
 function setupHighlighting(code, tracks) {
   clearPatternRegions();
   if (!miniMod) return;
@@ -894,7 +982,8 @@ function setupHighlighting(code, tracks) {
     }
     const from = cm.posFromIndex(lit.index + 1); // just inside the opening quote
     const to = cm.posFromIndex(lit.index + 1 + lit.raw.length);
-    patternRegions.push({ marker: cm.markText(from, to, {}), ast, lastKey: '', marks: [] });
+    const clip = detectClip(masked, lit.end, ast);
+    patternRegions.push({ marker: cm.markText(from, to, {}), ast, clip, lastKey: '', marks: [] });
   }
 }
 
@@ -909,28 +998,46 @@ function highlightTick() {
   if (!playing || !miniMod || patternRegions.length === 0) return;
   const cyclePos = currentCyclePos();
   const cycle = Math.floor(cyclePos);
-  const phase = cyclePos - cycle;
 
   for (const r of patternRegions) {
     const range = r.marker.find();
     if (!range) continue; // the string was deleted from the buffer
-    let steps;
-    try {
-      steps = miniMod.getStepsForCycle(r.ast, cycle);
-    } catch {
-      continue;
+
+    // Work in absolute cycle-time so a clip-stretched event that rings past the cycle boundary
+    // stays lit: an onset in an earlier cycle keeps its atom highlighted until its stretched end.
+    // Without clip, maxCycles is 0 - this collapses to "steps of the current cycle", as before.
+    // A step's location can recur (chords, or the same alt element revisited), so dedupe by loc.
+    const locs = new Map();
+    const maxK = r.clip ? r.clip.maxCycles : 0;
+    for (let k = 0; k <= maxK; k++) {
+      const cyc = cycle - k;
+      if (cyc < 0) break; // nothing played before cycle 0 - no tail to inherit
+      let steps;
+      try {
+        steps = miniMod.getStepsForCycle(r.ast, cyc);
+      } catch {
+        continue;
+      }
+      for (const s of steps) {
+        if (s.value == null || !s.loc) continue;
+        // Only true onsets stretch; `cont` tails already carry their remaining length.
+        const mult = r.clip && !s.cont ? clipMultiplier(r.clip, s, cyc) : 1;
+        const absStart = cyc + s.start;
+        const absEnd = cyc + s.start + (s.end - s.start) * mult;
+        if (cyclePos >= absStart && cyclePos < absEnd) locs.set(s.loc.join('-'), s.loc);
+      }
     }
-    const sounding = steps.filter((s) => s.value != null && s.loc && phase >= s.start && phase < s.end);
-    const key = sounding.map((s) => s.loc.join('-')).join(',');
+
+    const key = [...locs.keys()].sort().join(',');
     if (key === r.lastKey) continue; // same atoms still sounding - don't churn marks
     r.lastKey = key;
     for (const mk of r.marks) mk.clear();
-    r.marks = sounding.map((s) => {
-      const base = cm.indexFromPos(range.from);
-      return cm.markText(cm.posFromIndex(base + s.loc[0]), cm.posFromIndex(base + s.loc[1]), {
+    const base = cm.indexFromPos(range.from);
+    r.marks = [...locs.values()].map((loc) =>
+      cm.markText(cm.posFromIndex(base + loc[0]), cm.posFromIndex(base + loc[1]), {
         className: 'cm-playing',
-      });
-    });
+      })
+    );
   }
 }
 setInterval(() => {
