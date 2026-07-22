@@ -90,6 +90,10 @@ function audioOutputDevices() {
       .map((d) => ({
         name: d._name,
         channels: Number(d.coreaudio_device_output),
+        // The device's input channel count (0 for output-only devices). scsynth opens this one
+        // device for both in and out (see poptart.scd), so it must not be asked for more input
+        // channels than the device has - this is what numInputBusChannels gets sized from.
+        inChannels: Number(d.coreaudio_device_input) || 0,
         isDefault: d.coreaudio_default_audio_output_device === 'spaudio_yes',
       }));
   } catch (err) {
@@ -111,7 +115,7 @@ async function loadEngine() {
     }
     // Whichever device scsynth will actually open decides the channel count .o(n) wraps at.
     const active = chosen ?? devices.find((d) => d.isDefault);
-    const e = new OscEngine({ outDevice: chosen?.name ?? null, outChannels: active?.channels ?? 2 });
+    const e = new OscEngine({ outDevice: chosen?.name ?? null, outChannels: active?.channels ?? 2, inChannels: active?.inChannels ?? 0 });
     await e.start(48000, 256);
     engineError = null;
     return e;

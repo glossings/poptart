@@ -34,6 +34,12 @@ var blockSize = ("POPTART_BLOCK_SIZE".getenv ? "256").asInteger;
 // numOutputBusChannels so .o(n)'s stereo-pair wraparound matches the hardware.
 var outDevice = "POPTART_OUT_DEVICE".getenv;
 var outChannels = ("POPTART_OUT_CHANNELS".getenv ? "2").asInteger;
+// The chosen device's input channel count (0 for output-only devices). Currently poptart plays
+// out only, so this is 0 in practice, but it's the device's real input count so live-input
+// features can use it later without a boot-config change. It also has to match the device: when
+// inDevice == outDevice (set below) scsynth opens one device and will fail to boot if it's told
+// to open more input channels than the device has.
+var inChannels = ("POPTART_IN_CHANNELS".getenv ? "0").asInteger;
 // Plugin directories to scan. Priority: POPTART_VST_DIRS (colon-separated) if set, else
 // ~/.poptart/plugins if it exists (a folder of symlinks to just the plugins being played),
 // else VSTPlugin's standard locations. The curated folder is the default on purpose: a full
@@ -239,7 +245,19 @@ midiWarnMissing = { |context, device|
 Server.default = server;
 server.options.sampleRate = sampleRate;
 server.options.blockSize = blockSize;
-if (outDevice.notNil and: { outDevice.isEmpty.not }) { server.options.outDevice = outDevice };
+server.options.numInputBusChannels = inChannels;
+if (outDevice.notNil and: { outDevice.isEmpty.not }) {
+    // Pin input and output to the SAME device. Setting only outDevice leaves inDevice nil, and
+    // on macOS SC then emits `-H "" "<out>"` (default input + chosen output). CoreAudio can't run
+    // two independent-clock devices directly, so it silently builds an *aggregate* of the default
+    // mic (often 44.1kHz) and the chosen output (e.g. BlackHole 64ch at 48kHz); when the rates
+    // don't reconcile scsynth's DriverStart fails and the server exits code 0 right after printing
+    // the device info - the "switched to BlackHole 64ch and SC died" crash. One device, no
+    // aggregate. inChannels is that same device's input count, so this can't over-request inputs
+    // (asking a single device for more inputs than it has is itself a boot failure).
+    server.options.inDevice = outDevice;
+    server.options.outDevice = outDevice;
+};
 // At least stereo; more when the selected device has it, so .o(n) can address every pair.
 server.options.numOutputBusChannels = max(2, outChannels);
 
