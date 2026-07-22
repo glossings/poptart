@@ -69,6 +69,10 @@ var nodeAddr = NetAddr("127.0.0.1", nodePort);
 // are distinct objects (incoming OSC string args arrive as Symbols anyway).
 var tracks = IdentityDictionary.new;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
+// Host tempo (bpm) mirrored into every open VST as emulated DAW transport, so plugin-internal
+// synced LFOs/delays/arps follow setbpm instead of assuming their own default. Updated by
+// '/poptart/setTempo' and applied to plugins as they open (see loadInstrument/loadEffect).
+var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
 var awaitTrack, awaitLoaded, resolvePlugin;
 var midiInitialized = false, midiWarned = IdentitySet.new;
@@ -376,6 +380,10 @@ OSCdef(\poptartLoadInstrument, { |msg|
                 ctl.open(resolvePlugin.(pluginId), editor: true, action: { |self, ok|
                     if (ok) {
                         track[\loaded][0] = pluginId;
+                        // Emulated DAW transport from the first sample on: a rolling transport
+                        // at the current tempo (position re-syncs via '/poptart/setTempo').
+                        self.setTransportPlaying(true);
+                        self.setTempo(currentTempo);
                         ("poptart: loaded instrument " ++ pluginId).postln;
                     } {
                         ("poptart: FAILED to load instrument '" ++ pluginId
@@ -416,6 +424,8 @@ OSCdef(\poptartLoadEffect, { |msg|
                     if (ok) {
                         if (track[\wanted][slot] == pluginId) {
                             track[\loaded][slot] = pluginId;
+                            self.setTransportPlaying(true); // see loadInstrument
+                            self.setTempo(currentTempo);
                             track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
                             ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
                         };
@@ -456,6 +466,31 @@ OSCdef(\poptartUnloadEffect, { |msg|
         };
     };
 }, '/poptart/unloadEffect');
+
+// Host-transport mirror: stores the tempo for plugins that open later and pushes tempo + song
+// position (in beats, 4 per cycle) to every open plugin in one timestamped bundle. Sent by
+// the host on every setbpm change and as a periodic re-sync - between syncs plugins advance
+// their own transport on the audio clock, so each position correction is only a few seconds'
+// worth of ppm-level clock skew (microseconds, inaudible), and position-anchored synced LFOs
+// stay locked to the pattern grid indefinitely.
+OSCdef(\poptartSetTempo, { |msg|
+    var bpm = msg[1].asFloat, beats = msg[2].asFloat, latency = msg[3].asFloat;
+    currentTempo = bpm;
+    server.makeBundle(latency, {
+        tracks.do { |track|
+            if (track.isKindOf(Event)) {
+                track[\loaded].do { |id, i|
+                    if (id.notNil) {
+                        track[\controllers][i] !? { |ctl|
+                            ctl.setTempo(bpm);
+                            ctl.setTransportPos(beats);
+                        };
+                    };
+                };
+            };
+        };
+    });
+}, '/poptart/setTempo');
 
 // --- events (latency = seconds from now, computed by OscEngine against its own clock; ---
 // --- makeBundle turns it into a timestamped OSC bundle scsynth executes sample-accurately) ---

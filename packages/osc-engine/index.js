@@ -193,6 +193,17 @@ class OscEngine {
     return Date.now() / 1000;
   }
 
+  // Mirrors the host tempo into every open VST as emulated DAW transport (VSTPlugin's
+  // setTempo/setTransportPos), applied engine-side in a timestamped bundle at targetTime -
+  // this is what makes plugin-internal synced LFOs/delays/arps follow setbpm instead of
+  // assuming their own default 120. beatsPos is the song position in beats (4 per cycle,
+  // matching setbpm's bpm = cps * 240 convention). Sent on every tempo change and as a
+  // periodic re-sync (see web-app server.js), so the plugins' self-advanced transport can't
+  // drift against the pattern grid.
+  setTempo(bpm, beatsPos, targetTime) {
+    this._send('/poptart/setTempo', [bpm, beatsPos, this._latency(targetTime)]);
+  }
+
   // --- plugin discovery ---
   // Returns { plugins, crashed } like the old NativeEngine, for UI compatibility - `crashed`
   // will typically be empty now since VSTPlugin~'s own scanner (VSTPlugin.search) owns

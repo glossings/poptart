@@ -68,6 +68,10 @@ export class Transport {
     this._baseCycle = 0;
     this._tempoSig = null;
     this._tempoTimer = null;
+    // Fired after every effective tempo change (with the new cps). The host uses it to mirror
+    // the tempo out to listeners beyond the schedulers - e.g. web-app forwards it to the
+    // engine so VST-internal synced LFOs/delays follow setbpm (see server.js).
+    this.onCpsChange = null;
   }
 
   cycleAt(sec) {
@@ -85,6 +89,7 @@ export class Transport {
     this._baseCycle = this.cycleAt(now);
     this._baseSec = now;
     this.cps = cps;
+    if (typeof this.onCpsChange === 'function') this.onCpsChange(cps);
   }
 
   /** @param {number | import('./signal.mjs').Sig} bpm - beats per minute, 4 beats per cycle. */

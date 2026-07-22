@@ -132,6 +132,7 @@ class MappedEngine {
   getPluginState(...a) { return this.engine.getPluginState(...a); }
   setPluginState(...a) { return this.engine.setPluginState(...a); }
   showPluginEditor(...a) { return this.engine.showPluginEditor(...a); }
+  setTempo(...a) { return this.engine.setTempo(...a); }
   noteOn(...a) { return this.engine.noteOn(...a); }
   noteOff(...a) { return this.engine.noteOff(...a); }
   playSample(...a) { return this.engine.playSample(...a); }

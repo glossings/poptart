@@ -447,7 +447,12 @@ patch shares as a plain URL and opening a shared link restores the code.
   `Sig#sample` grew an optional third `cyclePos` argument: with variable tempo, cycle position
   is no longer `t * cps`, so the scheduler passes the transport's value through; omitted, it
   falls back to `t * cps` (exact at constant tempo, so standalone pattern-core use is
-  unchanged).
+  unchanged). The tempo is also mirrored into every open VST as emulated DAW transport
+  (`Transport#onCpsChange` → `OscEngine#setTempo` → VSTPlugin's `setTempo`/`setTransportPos`,
+  with a rolling transport enabled at plugin open), so plugin-internal synced LFOs, delays and
+  arpeggiators follow `setbpm`; a periodic beat-position re-sync (same reasoning as the
+  scheduler's LFO anchors) keeps the plugins' self-advanced transport from drifting against
+  the pattern grid.
 
 ## What's built vs. what's next
 

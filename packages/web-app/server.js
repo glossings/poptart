@@ -38,6 +38,23 @@ let engineError = null;
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
 
+// VST host-transport mirror: pushes the Transport's tempo + song position (in beats, 4 per
+// cycle) into the engine, which forwards it to every open plugin as emulated DAW transport -
+// what makes plugin-internal synced LFOs/delays/arpeggiators follow setbpm. Called on every
+// tempo change (transport.onCpsChange), after every engine (re)start, and on a periodic timer:
+// plugins advance their own transport on the audio clock between calls, so like the
+// scheduler's LFO anchors, the periodic re-sync keeps ppm-level clock skew from accumulating
+// into drift against the pattern grid (each correction is microseconds).
+const VST_TRANSPORT_SYNC_MS = 4000;
+const VST_TRANSPORT_LOOKAHEAD_SEC = 0.15; // applied engine-side at this target, like note events
+
+function syncVstTransport() {
+  if (!engine || !transport) return;
+  const targetSec = engine.getTime() + VST_TRANSPORT_LOOKAHEAD_SEC;
+  engine.setTempo(transport.cps * 240, transport.cycleAt(targetSec) * 4, targetSec);
+}
+setInterval(syncVstTransport, VST_TRANSPORT_SYNC_MS);
+
 // ---------------------------------------------------------------------------------------------
 // Settings - small persisted knobs (currently just the audio output device), plain JSON under
 // ~/.poptart so they survive restarts and are hand-editable.
@@ -137,6 +154,8 @@ async function restartEngine() {
     if (engine) {
       mappedEngine = new MappedEngine(engine);
       if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS });
+      transport.onCpsChange = syncVstTransport;
+      syncVstTransport(); // the fresh sclang needs the surviving transport's tempo, not 120
       engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
       engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
     }
@@ -152,6 +171,8 @@ async function init() {
   if (engine) {
     mappedEngine = new MappedEngine(engine);
     transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS });
+    transport.onCpsChange = syncVstTransport;
+    syncVstTransport();
     // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
     // live-value store - what a Tier-1 midicc() signal samples.
     engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
