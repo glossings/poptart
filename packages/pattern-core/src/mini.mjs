@@ -14,6 +14,8 @@
 //   "a _ _"        elongate: "_" extends the previous step (one onset over 3 slices - a tie,
 //                  not a retrigger). Inside "<...>" it holds the previous item across cycles.
 //   "bd(3,8)"      euclidean rhythm: 3 pulses over 8 steps (optionally "(3,8,2)" with rotation)
+//   "<a b>:x"      field suffix on a group: distributes onto every atom inside, so
+//                  "<18 16>:3" is exactly "<18:3 16:3>" (pairs with .as("n:clip") etc.)
 //
 // NOT supported yet (will throw a clear parse error rather than silently doing the wrong
 // thing): polymeter `{a b, c d}`, degrade `?`, dot-groups `a . b c`, cycle-internal rate
@@ -76,7 +78,11 @@ function tokenize(str) {
     if (!m) {
       throw new Error(`[mini] unexpected character "${ch}" in "${str}"`);
     }
-    tokens.push({ type: 'atom', text: m[0], start: i, end: i + m[0].length });
+    // ":x" pressed right up against a closing bracket is a field suffix for that whole group
+    // ("<18 16>:3"), not an atom of its own - the parser distributes it onto the group's atoms.
+    const prev = tokens[tokens.length - 1];
+    const isSuffix = m[0][0] === ':' && prev && prev.end === i && (prev.type === '>' || prev.type === ']' || prev.type === ')');
+    tokens.push({ type: isSuffix ? 'suffix' : 'atom', text: m[0], start: i, end: i + m[0].length });
     i += m[0].length;
   }
   return tokens;
@@ -201,6 +207,12 @@ function parseElement(tokens) {
       continue;
     }
 
+    if (op.type === 'suffix') {
+      node = appendFieldSuffix(node, op.text);
+      rest = rest.slice(1);
+      continue;
+    }
+
     if (op.type === '!') {
       const amountTok = rest[1];
       const amount = amountTok && amountTok.type === 'atom' && !Number.isNaN(Number(amountTok.text)) ? Number(amountTok.text) : 2;
@@ -245,6 +257,22 @@ function parseElement(tokens) {
   }
 
   return { element: { weight, reps, node }, rest };
+}
+
+// Distributes a group field suffix onto every atom inside the node, so "<18 16>:3" parses as
+// "<18:3 16:3>". Rests pass through; ties ("_") never survive parsing as atoms, so every atom
+// here is a real value.
+function appendFieldSuffix(node, suffix) {
+  if (node.type === 'atom') {
+    return node.value == null ? node : { ...node, value: node.value + suffix };
+  }
+  if (node.items) {
+    return { ...node, items: node.items.map((it) => ({ ...it, node: appendFieldSuffix(it.node, suffix) })) };
+  }
+  if (node.item) {
+    return { ...node, item: appendFieldSuffix(node.item, suffix) };
+  }
+  return node;
 }
 
 // ---------------------------------------------------------------------------------------------

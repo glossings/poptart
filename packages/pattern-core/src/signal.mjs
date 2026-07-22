@@ -223,6 +223,31 @@ export class Sig {
   }
 
   /**
+   * Multiplies each event's duration, sampled per onset: `.clip(2)` makes every note ring for
+   * twice its step width; `.clip("<1 4 1>*4")` reads the control at each event (structure
+   * stays with the pattern, unlike .vel()). Same knob as the `clip` field in
+   * .as("note:vel:clip") - the noteOff just lands later (possibly in a following cycle), like
+   * a mini-notation tie's ringing tail. Non-positive or missing control values fall back to 1.
+   */
+  clip(value) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .clip() needs a step pattern, e.g. n("0 3 5").clip(2)');
+    }
+    const sig = toSignal(value);
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) =>
+      base(cycle).map((s) => {
+        if (s.value == null) return s;
+        // Steps only know cycle positions, so sample the control in cycle-time at the step's
+        // midpoint - same convention as _binop's patterned operands.
+        const raw = Number(sig.sample(cycle + (s.start + s.end) / 2, 1));
+        const clip = raw > 0 && !Number.isNaN(raw) ? raw : 1;
+        return { ...s, end: s.start + (s.end - s.start) * clip };
+      });
+    return this._clone({ stepsForCycle });
+  }
+
+  /**
    * Sets any named parameter (by its real VST parameter name - see the params panel /
    * autocomplete in the editor), targeting whatever's last in the chain right now.
    */

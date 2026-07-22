@@ -76,7 +76,7 @@ let knownPlugins = [];
 
 const BUILDERS = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm'];
 const METHODS = [
-  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'range', 'fast', 'rate', 'phase', 'curve',
+  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
   'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'as',
   'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
@@ -84,7 +84,61 @@ const METHODS = [
 
 // The sublime keymap supplies the expected editing chords (Cmd/Ctrl-/ comment, Cmd/Ctrl-D
 // select-next, etc.); extraKeys layers transport + VS Code-style line moving/duplication
-// (Alt-Up/Down move, Shift-Alt-Down copies) on top and wins on conflicts.
+// (Alt-Up/Down move, Shift-Alt-Up/Down copy) on top and wins on conflicts.
+
+// VS Code-style copy line up/down: always duplicates the full lines touched by each
+// selection (sublime's duplicateLine instead splices the selected region in place).
+// A selection ending at column 0 doesn't include that final line, matching VS Code.
+function selectionLineSpan(cm, sel) {
+  const from = sel.from(), to = sel.to();
+  let endLine = to.line;
+  if (endLine > from.line && to.ch === 0) endLine--;
+  return { startLine: from.line, endLine };
+}
+
+function copyLines(cm, dir) {
+  cm.operation(() => {
+    const sels = cm.listSelections();
+    const edits = [];
+    const newSels = [];
+    let offset = 0;
+    for (const sel of sels) {
+      const { startLine, endLine } = selectionLineSpan(cm, sel);
+      const nLines = endLine - startLine + 1;
+      const text = cm.getRange(
+        CodeMirror.Pos(startLine, 0),
+        CodeMirror.Pos(endLine, cm.getLine(endLine).length)
+      );
+      if (dir === 'down') {
+        // Insert the copy above; the original slides down and stays selected,
+        // which reads as "cursor follows the copy below".
+        edits.push({ pos: CodeMirror.Pos(startLine, 0), text: text + '\n' });
+        offset += nLines;
+        newSels.push({
+          anchor: CodeMirror.Pos(sel.anchor.line + offset, sel.anchor.ch),
+          head: CodeMirror.Pos(sel.head.line + offset, sel.head.ch),
+        });
+      } else {
+        // Insert the copy below; selection stays on the upper (original) lines.
+        edits.push({
+          pos: CodeMirror.Pos(endLine, cm.getLine(endLine).length),
+          text: '\n' + text,
+        });
+        newSels.push({
+          anchor: CodeMirror.Pos(sel.anchor.line + offset, sel.anchor.ch),
+          head: CodeMirror.Pos(sel.head.line + offset, sel.head.ch),
+        });
+        offset += nLines;
+      }
+    }
+    for (let i = edits.length - 1; i >= 0; i--) {
+      cm.replaceRange(edits[i].text, edits[i].pos, edits[i].pos, '+copyLine');
+    }
+    cm.setSelections(newSels);
+    cm.scrollIntoView();
+  });
+}
+
 const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   mode: { name: 'javascript' },
   theme: 'poptart',
@@ -98,7 +152,8 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Ctrl-Enter': doEval,
     'Cmd-.': doStop,
     'Ctrl-.': doStop,
-    'Shift-Alt-Down': 'duplicateLine',
+    'Shift-Alt-Down': (cm) => copyLines(cm, 'down'),
+    'Shift-Alt-Up': (cm) => copyLines(cm, 'up'),
     'Alt-Up': 'swapLineUp',
     'Alt-Down': 'swapLineDown',
     'Ctrl-Space': (cm) => cm.showHint({ hint: poptartHint, completeSingle: false }),
