@@ -203,9 +203,33 @@ function extendStringPrototype(core) {
       },
     });
   }
+  builtinSigMethods = new Set(Object.getOwnPropertyNames(core.Sig.prototype));
 }
 
-const BUILDER_NAMES = ['n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro'];
+// Names on Signal's prototype when the server booted - anything beyond these was added from
+// userland (`Signal.prototype.co = ...`) and gets mirrored onto strings too, below.
+let builtinSigMethods = null;
+
+// Userland language extensions work on bare mini strings exactly like the built-in methods:
+// after each evaluated block, any method newly added to Signal.prototype is mirrored onto
+// String.prototype with the same mini()-wrapping shim - unless strings already have that name
+// (never shadow a real String method like .slice()/.at()).
+function syncUserStringMethods() {
+  for (const m of Object.getOwnPropertyNames(patternCore.Sig.prototype)) {
+    if (builtinSigMethods.has(m) || m in String.prototype) continue;
+    if (typeof patternCore.Sig.prototype[m] !== 'function') continue;
+    Object.defineProperty(String.prototype, m, {
+      configurable: true,
+      writable: true,
+      enumerable: false,
+      value(...args) {
+        return patternCore.mini(String(this))[m](...args);
+      },
+    });
+  }
+}
+
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -267,6 +291,7 @@ function makeBlockEvaluator() {
     );
     const { __value, __defs } = build(...baseValues, ...defs.values(), body);
     for (const [n, v] of Object.entries(__defs)) if (v !== undefined) defs.set(n, v);
+    syncUserStringMethods(); // the block may have extended Signal.prototype - strings follow
     return __value;
   };
 }
@@ -459,10 +484,12 @@ const routes = {
         const value = evalBlock(b.code);
         if (value instanceof patternCore.Sig) {
           dryRunPattern(value);
-        } else if (value === undefined && b.label.startsWith('$')) {
-          // Definitions-only block (const kb = midikeys("...")): binds names for the blocks
-          // below, makes no sound, needs no label.
-        } else if (value !== TEMPO_BLOCK) {
+        } else if (value !== TEMPO_BLOCK && !b.label.startsWith('$')) {
+          // Only an explicitly *named* block promises sound. Anything anonymous (bare code
+          // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
+          // style: declarations shared with the blocks below (const kb = midikeys("...")),
+          // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
+          // it evaluated to is simply not played.
           throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
         }
         return { ...b, sig: value };

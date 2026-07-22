@@ -54,8 +54,11 @@ Then open `http://localhost:4000` in a browser.
    the string `.synth()` and `.fx()` expect. Plugins that crash or hang their probe are skipped
    automatically (each probe runs in a disposable subprocess with a timeout) - watch the server
    log for `error!`/`timed out` lines to see which.
-3. Write a pattern in the editor and hit **eval** (or Cmd/Ctrl+Enter). The current evaluation
-   contract is a single expression that evaluates to a pattern - see `packages/web-app/server.js`.
+3. Write a pattern in the editor and hit **eval** (or Cmd/Ctrl+Enter). A *named* block
+   (`bass: …`) must evaluate to a pattern; anonymous code - bare lines outside any label, or
+   `$:` blocks - may be anything, Strudel-style: patterns play, and everything else (shared
+   `const` declarations, `Signal.prototype` extensions, one-off statements) just runs as setup
+   for the blocks below it.
 4. **stop** halts playback (Cmd/Ctrl+.).
 
 The editor autocompletes as you type: plugin names inside `.synth("…")`/`.fx("…")` (from the scan),
@@ -109,6 +112,29 @@ Tier-1 path, since the engine-side oscillator only takes fixed lo/hi.)
 For static sound-design settings that are fiddly as normalized numbers (unison voices, detune
 amounts …), click **ui** next to a plugin in the track panel to open the plugin's own editor
 window, set them by hand, and keep livecoding the rest.
+
+### Constants and extending the language
+
+`Signal(x)` is the constant-signal constructor (no `new` needed): `Signal(1)` is a continuous
+1, and it takes anything a control takes - a number, a mini string, an existing signal (where
+it's the identity). A bare number stays continuous with no step grid, which is what controls
+want; use `n(...)`/`note(...)`/`mini(...)` when a constant should instead *trigger* as a
+whole-cycle step.
+
+`Signal.prototype` is the shared prototype of every pattern, LFO, and (via the string shims)
+mini string - extend it right from the editor, exactly like Strudel's `Pattern.prototype`:
+
+```js
+const cc = midicc("Midi Fighter Twister")
+Signal.prototype.co = function (num) {
+  return this.o(num).gain("1".sub(cc(num - 1, 2)));
+};
+
+drums: s("bd hh sd hh").co(1)
+```
+
+New methods work on bare mini strings too (`"bd*4".co(1)`) - never shadowing a real String
+method - and, like any prototype patch, persist across evals until the server restarts.
 
 ### Pinning plugin state into the code
 

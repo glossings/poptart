@@ -170,7 +170,12 @@ all**:
   of the token's own step width, so notes ring past their slot without `@` weight chains); this
   is the form midi-record emits (see `record.mjs` and "Live MIDI input" below). web-app's eval
   additionally extends `String.prototype` with these methods so `"0 0.5 1 0.3".gte(0.5)` works
-  directly, Strudel-style.
+  directly, Strudel-style. Userland sees the signal type itself as `Signal`: a callable
+  constant/coercion constructor (`Signal(1)`; `toSignal` semantics, identity on signals)
+  sharing `Sig`'s prototype, so `Signal.prototype.co = function …` extends the language in
+  place, Strudel's `Pattern.prototype` idiom - and after each evaluated block web-app mirrors
+  any newly added prototype methods onto `String.prototype` (never shadowing a real String
+  method), so extensions work on bare mini strings too.
 - **`src/record.mjs`** — `recordingToMini(events, { cycles, grid, startCycle })`: converts a
   captured live-MIDI performance into the `` `<...>*n`.as("note:vel:clip") `` house style - one
   token per grid slot (rest, `note:vel:clip`, or a `[a:v:c,b:v:c]` stack for chords, with
@@ -356,7 +361,10 @@ track containing a fixed-length chain of `VSTPlugin.ar` UGens (see "`osc-engine`
 below). The editor buffer holds any number of patterns via labels (`keys: …`, `$: …` - see
 `labels.mjs` above): `/api/evaluate` splits the buffer into blocks, evaluates each, and runs
 one `Scheduler` + engine track per label, stopping tracks whose label disappeared or got
-muted/un-soloed since the last eval. The browser also gets `cps` and each block's source range
+muted/un-soloed since the last eval. Only explicitly *named* blocks must evaluate to a
+pattern; anonymous code (bare lines, `$:` blocks) evaluating to anything else is a setup
+block - shared declarations, `Signal.prototype` extensions, side effects - and simply isn't
+played. The browser also gets `cps` and each block's source range
 back from an eval, which (with the shared mini parser and its per-step `loc` ranges, plus the
 shared wall clock - browser and Node run on the same machine) is everything needed to light up
 the currently-sounding mini-notation atom in the editor with no polling, Strudel-style. The

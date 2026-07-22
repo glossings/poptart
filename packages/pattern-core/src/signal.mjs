@@ -563,6 +563,24 @@ export class Sig {
   }
 }
 
+/**
+ * The signal type itself, as userland sees it. Two uses:
+ *
+ *   Signal(1)                       // constant signal (also takes a mini string or a Sig)
+ *   Signal.prototype.co = function (num) {   // extend the language, Strudel's
+ *     return this.o(num).gain(...);          // Pattern.prototype idiom - every pattern,
+ *   };                                       // LFO, and mini string picks the method up
+ *
+ * It's a plain callable (no `new` needed) sharing `Sig`'s prototype, so `instanceof Signal`
+ * holds for every signal and prototype extensions land on all of them. A bare number stays a
+ * continuous constant (no step grid - the right thing for controls); use n()/note()/mini() when
+ * the constant should have a whole-cycle step (a trigger).
+ */
+export function Signal(value) {
+  return toSignal(value);
+}
+Signal.prototype = Sig.prototype; // one shared prototype: extending Signal extends every Sig
+
 // Splits a pattern's step grid on a control pattern's grid (patterned .vel()/.note()): each
 // overlap becomes one event, control rests drop events, and an overlap is a new onset when
 // either side starts a fresh (non-`cont`) step there - otherwise it's a tie and stays `cont`.
