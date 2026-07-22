@@ -215,6 +215,11 @@ class OscEngine {
   loadEffect(trackId, pluginId, position = -1) {
     this._send('/poptart/loadEffect', [trackId, pluginId, position]);
   }
+  // Empties an effect slot: re-bypasses it and closes the plugin (freeing its memory).
+  // Engine-side no-op if the slot is already empty.
+  unloadEffect(trackId, slot) {
+    this._send('/poptart/unloadEffect', [trackId, slot]);
+  }
   getParams(trackId, slotIndex) {
     return this._request('/poptart/getParams', [trackId, slotIndex]);
   }

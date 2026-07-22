@@ -120,6 +120,7 @@ class MappedEngine {
   createTrack(...a) { return this.engine.createTrack(...a); }
   loadInstrument(...a) { return this.engine.loadInstrument(...a); }
   loadEffect(...a) { return this.engine.loadEffect(...a); }
+  unloadEffect(...a) { return this.engine.unloadEffect(...a); }
   getParams(...a) { return this.engine.getParams(...a); }
   getPluginState(...a) { return this.engine.getPluginState(...a); }
   setPluginState(...a) { return this.engine.setPluginState(...a); }

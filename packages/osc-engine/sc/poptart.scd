@@ -343,6 +343,7 @@ OSCdef(\poptartCreateTrack, { |msg|
                 synth: Synth(trackDefName.(key), [\inBus, inBus.index], target: group, addAction: \addToTail),
                 controllers: Array.newClear(maxSlots),
                 loaded: Array.newClear(maxSlots), // slot -> pluginId once open() succeeds
+                wanted: Array.newClear(maxSlots), // slot -> pluginId an in-flight open() should commit
                 lfos: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, shape:, index:)
                 envs: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, index:)
                 ccs: IdentityDictionary.new,      // \slotN_param -> (bus:, index:, lo:, hi:, last:, binding:, defKey:)
@@ -393,18 +394,26 @@ OSCdef(\poptartLoadEffect, { |msg|
             { (slot < 1) or: { slot >= maxSlots } } {
                 ("poptart: no free effect slot on track " ++ key ++ " (max " ++ (maxSlots - 1) ++ ")").warn;
             }
-            { track[\loaded][slot] != pluginId } {
+            { (track[\loaded][slot] != pluginId) and: { track[\wanted][slot] != pluginId } } {
                 var ctl = track[\controllers][slot] ?? {
                     VSTPluginController(track[\synth], id: ("slot" ++ slot).asSymbol, synthDef: track[\def])
                 };
                 track[\controllers][slot] = ctl;
                 track[\loaded][slot] = nil;
+                // `wanted` marks the open in flight: the action only commits (and un-bypasses)
+                // if the slot still wants this plugin when the open completes - an unloadEffect
+                // or a different loadEffect racing the async open must win. A failed open
+                // clears it so the next eval retries.
+                track[\wanted][slot] = pluginId;
                 ctl.open(resolvePlugin.(pluginId), editor: true, action: { |self, ok|
                     if (ok) {
-                        track[\loaded][slot] = pluginId;
-                        track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
-                        ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
+                        if (track[\wanted][slot] == pluginId) {
+                            track[\loaded][slot] = pluginId;
+                            track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
+                            ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
+                        };
                     } {
+                        track[\wanted][slot] = nil;
                         ("poptart: FAILED to load effect '" ++ pluginId ++ "'").warn;
                     };
                 });
@@ -412,6 +421,34 @@ OSCdef(\poptartLoadEffect, { |msg|
         };
     };
 }, '/poptart/loadEffect');
+
+// Commenting a .fx(...) out of a chain must actually silence it: re-bypass the slot, then
+// close the plugin (close is what frees the plugin instance and its memory). The controller
+// object is kept for reuse - a later loadEffect re-opens into it. No-op when the slot is
+// already empty, so the scheduler can blanket-clear all trailing slots on every eval.
+OSCdef(\poptartUnloadEffect, { |msg|
+    var key = msg[1].asSymbol;
+    var slot = msg[2].asInteger;
+    fork {
+        var track = awaitTrack.(key);
+        if (track.isNil) { ("poptart: unloadEffect: no track " ++ key).warn } {
+            if ((slot < 1) or: { slot >= maxSlots }) {
+                ("poptart: unloadEffect: bad slot " ++ slot).warn;
+            } {
+                var ctl = track[\controllers][slot];
+                track[\wanted][slot] = nil; // an in-flight open() must no longer commit
+                if (track[\loaded][slot].notNil or: { ctl.notNil }) {
+                    track[\synth].set(("active" ++ slot).asSymbol, 0); // bypass before the close
+                    ctl !? { ctl.close };
+                    track[\loaded][slot] !? { |id|
+                        ("poptart: unloaded effect " ++ id ++ " from slot " ++ slot).postln;
+                    };
+                    track[\loaded][slot] = nil;
+                };
+            };
+        };
+    };
+}, '/poptart/unloadEffect');
 
 // --- events (latency = seconds from now, computed by OscEngine against its own clock; ---
 // --- makeBundle turns it into a timestamped OSC bundle scsynth executes sample-accurately) ---

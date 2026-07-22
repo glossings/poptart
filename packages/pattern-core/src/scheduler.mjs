@@ -30,6 +30,9 @@ const POLL_INTERVAL_MS = 30;
 const CHANNEL_SLOT = -1;
 const CHANNEL_DEFAULTS = { gain: 1, pan: 0, out: 1 }; // out = stereo pair (Sig#o), 1-based
 
+// Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
+const MAX_CHAIN_SLOTS = 8;
+
 /**
  * The shared clock: one Transport is owned by the host (web-app server) and read by every
  * Scheduler, so all tracks agree on where in the cycle grid "now" is. Tempo changes rebase
@@ -145,6 +148,22 @@ export class Scheduler {
       this.engine.loadInstrument(this.trackId, sig.instrument);
     }
     sig.fxChain.forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
+
+    // An .fx(...) removed from the code must actually stop sounding (and release its plugin):
+    // empty every slot past the new chain's end. All trailing slots are cleared, not a diff
+    // against this Scheduler's previous pattern, because the engine-side track outlives the
+    // Scheduler - a label removed and later re-added gets a fresh Scheduler on the same track,
+    // stale plugins and all. Emptying an already-empty slot is a no-op engine-side. The
+    // applied-state cache for a vacated slot goes too: the closed plugin lost its state, so a
+    // re-added `{ state }` must be re-sent even if the string is unchanged.
+    if (typeof this.engine.unloadEffect === 'function') {
+      for (let slot = sig.fxChain.length + 1; slot < MAX_CHAIN_SLOTS; slot++) {
+        this.engine.unloadEffect(this.trackId, slot);
+        for (const key of this._appliedStates.keys()) {
+          if (key.startsWith(`${slot}:`)) this._appliedStates.delete(key);
+        }
+      }
+    }
 
     // Live MIDI keys (midikeys(...)): the device's note stream plays this track engine-side -
     // live input never goes through the lookahead clock, so latency stays at the MIDI driver's.
