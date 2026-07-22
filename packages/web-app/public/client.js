@@ -83,8 +83,8 @@ const METHODS = [
 ];
 
 // The sublime keymap supplies the expected editing chords (Cmd/Ctrl-/ comment, Cmd/Ctrl-D
-// select-next, line swapping, etc.); extraKeys layers transport + VS Code-style duplicate-line
-// on top and wins on conflicts.
+// select-next, etc.); extraKeys layers transport + VS Code-style line moving/duplication
+// (Alt-Up/Down move, Shift-Alt-Down copies) on top and wins on conflicts.
 const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   mode: { name: 'javascript' },
   theme: 'poptart',
@@ -98,9 +98,9 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Ctrl-Enter': doEval,
     'Cmd-.': doStop,
     'Ctrl-.': doStop,
-    'Shift-Cmd-Down': 'duplicateLine',
-    'Shift-Ctrl-Down': 'duplicateLine',
     'Shift-Alt-Down': 'duplicateLine',
+    'Alt-Up': 'swapLineUp',
+    'Alt-Down': 'swapLineDown',
     'Ctrl-Space': (cm) => cm.showHint({ hint: poptartHint, completeSingle: false }),
   },
 });

@@ -24,6 +24,13 @@ import { scalePitchClasses } from './notes.mjs';
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
 const POLL_INTERVAL_MS = 30;
 
+// MIDI noteOffs are pulled this much earlier than the step grid says. Back-to-back events on
+// the same pitch (legato lines, clip N on every-Nth-step patterns) put one event's noteOff and
+// the next's noteOn at the exact same target time; they travel as separate OSC messages whose
+// engine-side execution order is jitter-dependent, and off-after-on silences the new voice at
+// birth. A few ms of daylight makes the ordering deterministic and is inaudible as a release.
+const NOTE_OFF_EARLY_SEC = 0.005;
+
 // Track-level channel-strip controls (Sig#gain/#pan) ride the same setParam/setParamLFO/
 // setParamEnv engine calls as plugin parameters, addressed with this pseudo-slot instead of a
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
@@ -333,7 +340,7 @@ export class Scheduler {
           }
           if (velocity <= 0) continue;
           this.engine.noteOn(this.trackId, midiNote, Math.min(1, velocity), onsetSec);
-          this.engine.noteOff(this.trackId, midiNote, offsetSec);
+          this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC));
         }
       }
     }
