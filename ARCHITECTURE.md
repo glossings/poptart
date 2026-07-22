@@ -217,9 +217,15 @@ resolves each parameter `Sig` via one of two tiers:
   zero OSC traffic after the initial call, sample-accurate, immune to JS GC pauses or Node event
   loop jank - genuinely continuous, the direct SC equivalent of what a native `LFO.h` oscillator
   gave the old JUCE host. Re-evaluating the code (a livecoding edit that only changes rate/range)
-  re-sends `setParamLFO`, which currently creates a fresh modulator Synth+mapping rather than
-  updating one in place - preserving phase across a rate/range edit (no audible glitch/reset,
-  the way the old native `LFO::configure` did) isn't wired up yet, see "what's next" below.
+  re-sends `setParamLFO`, which updates the running modulator Synth's args in place. Native LFOs
+  are not left free-running against the note grid: the audio device's sample clock skews against
+  the scheduler's wall clock by tens of ppm (milliseconds per minute), so the scheduler re-anchors
+  every free-running LFO's phase to the transport clock every few seconds
+  (`anchorParamLFO` → a timestamped `\t_trig`/`\phase` reset, see `LFO_ANCHOR_INTERVAL_SEC` in
+  `scheduler.mjs`). Each correction is only the skew accumulated since the last anchor -
+  microseconds, inaudible - and the anchor phase uses the same wall-clock formula as the JS-side
+  `sampleLfoIR`, so an LFO's phase is a deterministic function of time: reproducible across
+  re-evals, in step with its Tier-1 sampled twin, and locked to the groove indefinitely.
 
 `env({attack, decay, sustain, release, curve})` is a third modulator kind riding the same
 Tier-2 mechanism: it carries a symbolic `envIR`, compiles to a native `EnvGen` (`poptart_env`

@@ -432,6 +432,12 @@ class OscEngine {
   clearParamLFO(trackId, slotIndex, paramName) {
     this._send('/poptart/clearParamLFO', [trackId, slotIndex, paramName]);
   }
+  // Re-pins a free-running LFO's phase (0..1) to the scheduler's clock at targetTime - the
+  // periodic drift correction described at scheduler.mjs's LFO_ANCHOR_INTERVAL_SEC. sclang
+  // resets the modulator's phase in a timestamped bundle, same path as note events.
+  anchorParamLFO(trackId, slotIndex, paramName, phase01, targetTime) {
+    this._send('/poptart/anchorParamLFO', [trackId, slotIndex, paramName, phase01, this._latency(targetTime)]);
+  }
   // ADSR envelope retriggered by the track's note on/offs - same set-once Tier-2 contract as
   // setParamLFO (see the poptart_env SynthDef + gate wiring in sc/poptart.scd).
   setParamEnv(trackId, slotIndex, paramName, ir) {

@@ -86,6 +86,13 @@ class MappedEngine {
     this.engine.clearParamLFO(trackId, slot, name);
   }
 
+  // Phase-only, no unit conversion - but it must be a real method (not a missing one): the
+  // Scheduler feature-detects anchorParamLFO on whatever engine it's given, and this wrapper
+  // is what it's given in production.
+  anchorParamLFO(trackId, slot, name, phase01, targetTime) {
+    this.engine.anchorParamLFO(trackId, slot, name, phase01, targetTime);
+  }
+
   setParamEnv(trackId, slot, name, ir) {
     const spec = this._spec(trackId, slot, name);
     const mapped = spec

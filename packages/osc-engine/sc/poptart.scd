@@ -244,16 +244,23 @@ server.waitForBoot {
     // phase ignored. ramp is a rising saw, same shape as \saw here. Stepped random is done
     // pattern-side via rand().hold(...) - no native def needed.
     [\sine, \tri, \saw, \ramp, \square, \rand].do { |shape|
-        SynthDef(("poptart_lfo_" ++ shape).asSymbol, { |out, freq = 1, phase = 0, lo = 0, hi = 1|
-            var osc = switch(shape,
-                \sine, { SinOsc.kr(freq, phase * 2pi) },
-                \tri, { LFTri.kr(freq, phase * 4) },
-                \saw, { LFSaw.kr(freq, phase * 2) },
-                \ramp, { LFSaw.kr(freq, phase * 2) },
-                \square, { LFPulse.kr(freq, phase) },
-                \rand, { LFDNoise3.kr(freq) }
+        SynthDef(("poptart_lfo_" ++ shape).asSymbol, { |out, freq = 1, phase = 0, lo = 0, hi = 1, t_trig = 0|
+            // Phase comes from one resettable Sweep, not each oscillator UGen's own internal
+            // accumulator, so the scheduler can re-pin it to the shared transport clock with
+            // set(\t_trig, 1, \phase, p) in a timestamped bundle ('/poptart/anchorParamLFO') -
+            // otherwise the audio clock's ppm-level skew against the note grid accumulates into
+            // audible drift. The unipolar waveforms match pattern-core sampleLfoIR's exactly
+            // (same shapes, same phase origin), so JS and native samplings of a signal agree.
+            var ph = (Sweep.kr(t_trig, freq) + phase).wrap(0, 1);
+            var uni = switch(shape,
+                \sine, { (ph * 2pi).sin * 0.5 + 0.5 },
+                \tri, { 1 - ((ph * 2) - 1).abs },
+                \saw, { ph },
+                \ramp, { ph },
+                \square, { ph < 0.5 },
+                \rand, { LFDNoise3.kr(freq) * 0.5 + 0.5 } // no phase - never anchored
             );
-            Out.kr(out, osc.range(lo, hi));
+            Out.kr(out, lo + (uni * (hi - lo)));
         }).add;
     };
     // ADSR modulator, gated by the track's note on/offs (see the noteOn/noteOff OSCdefs) -
@@ -573,6 +580,23 @@ OSCdef(\poptartSetParamLFO, { |msg|
     };
 }, '/poptart/setParamLFO');
 
+// Phase re-anchor for a free-running LFO (basic shapes and free-mode lfo() shapes): resets the
+// modulator's Sweep to `phase` at the bundled target time. The scheduler sends one shortly
+// after creating an LFO and every few seconds thereafter, pinning the modulator to its clock
+// so audio-clock skew can't accumulate into drift against the note grid; each correction is
+// only the skew of a few seconds (microseconds), inaudible. One arriving while the LFO is
+// still being set up (the setParamLFO fork awaiting the plugin) finds no entry and is dropped -
+// the next periodic anchor locks it.
+OSCdef(\poptartAnchorParamLFO, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
+    var phase = msg[4].asFloat, latency = msg[5].asFloat;
+    var track = tracks[key];
+    var entry = if (track.isKindOf(Event)) { track[\lfos][("slot" ++ slot ++ "_" ++ paramName).asSymbol] };
+    if (entry.notNil) {
+        server.makeBundle(latency, { entry[\synth].set(\t_trig, 1, \phase, phase) });
+    };
+}, '/poptart/anchorParamLFO');
+
 // lfo() drawn shapes: compile a tiny SynthDef from the breakpoints (an IEnvGen indexed by a
 // Sweep-driven phase) and run it on the same bus+map mechanism as setParamLFO. Modes:
 //   free      - loops on its own clock, ignores notes
@@ -625,7 +649,10 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
                             var idx = switch(mode,
                                 \retrigger, { (Sweep.kr(t_trig, rate) + phase) % 1 },
                                 \envelope, { Sweep.kr(t_trig, rate).min(1) },
-                                { (Sweep.kr(0, rate) + phase) % 1 } // free (default)
+                                // free (default): t_trig is the anchor reset (only free mode
+                                // gets '/poptart/anchorParamLFO' corrections - in the gated
+                                // modes the trigger belongs to note onsets)
+                                { (Sweep.kr(t_trig, rate) + phase) % 1 }
                             );
                             Out.kr(out, lo + (IEnvGen.kr(env, idx) * (hi - lo)));
                         });

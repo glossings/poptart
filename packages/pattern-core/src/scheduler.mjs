@@ -1,7 +1,7 @@
 // Bridges a Sig (see signal.mjs) to an "engine" - any object implementing the interface used
 // below (createTrack/loadInstrument/loadEffect/noteOn/noteOff/playSample/setParam/setParamLFO/
-// clearParamLFO/setParamEnv/clearParamEnv/setParamCC/clearParamCC/setMidiNotes/clearMidiNotes/
-// getTime).
+// clearParamLFO/anchorParamLFO (optional)/setParamEnv/clearParamEnv/setParamCC/clearParamCC/
+// setMidiNotes/clearMidiNotes/getTime).
 // This class is engine-agnostic by design: it's been driven by an in-process JUCE addon and is
 // now driven by an OSC-based engine talking to SuperCollider (see @poptart/osc-engine) without
 // any change here. Two independent mechanisms run side by side, matching the two ways a Sig can
@@ -23,6 +23,16 @@ import { scalePitchClasses } from './notes.mjs';
 
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
 const POLL_INTERVAL_MS = 30;
+
+// Free-running Tier-2 LFOs execute on the audio device's sample clock, which ticks at a
+// slightly different rate than the wall clock the note grid is scheduled against (tens of ppm
+// - milliseconds of skew per minute). Left alone they audibly drift out of the groove over a
+// long session, so the scheduler re-anchors each one's phase to the transport clock this
+// often, via a timestamped bundle (engine.anchorParamLFO). Each correction is only the skew
+// accumulated since the last anchor - microseconds - so it's inaudible; the target phase is
+// the same wall-clock formula sampleLfoIR uses, so Tier-1 and Tier-2 samplings of one signal
+// agree too. Note-gated shapes (retrigger/envelope lfo() modes) and rand keep their own time.
+const LFO_ANCHOR_INTERVAL_SEC = 4;
 
 // MIDI noteOffs are pulled this much earlier than the step grid says. Back-to-back events on
 // the same pitch (legato lines, clip N on every-Nth-step patterns) put one event's noteOff and
@@ -292,6 +302,7 @@ export class Scheduler {
       for (const m of this._activeModulators.values()) {
         if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
       }
+      this._anchorLFOs(nowSec);
     } catch (err) {
       // Patterns evaluate lazily, so a bad value can first throw here, inside the timer -
       // uncaught, that would take down the whole host process. Stop just this track (also
@@ -371,12 +382,35 @@ export class Scheduler {
     return cfg;
   }
 
+  // Pins every free-running LFO's phase to the transport clock (see LFO_ANCHOR_INTERVAL_SEC).
+  // Anchors are sent lookahead-ahead like note events, so the engine applies them at the exact
+  // target time; one sent while the engine is still setting the modulator up is dropped there
+  // and the next periodic one locks it. Engines without anchorParamLFO just stay free-running.
+  _anchorLFOs(nowSec) {
+    if (typeof this.engine.anchorParamLFO !== 'function') return;
+    for (const m of this._activeModulators.values()) {
+      const ir = m.sig.lfoIR;
+      if (!ir || ir.shape === 'rand') continue; // rand has no phase to anchor
+      if (ir.shape === 'custom' && ir.mode != null && ir.mode !== 'free') continue; // note-gated
+      if (m.anchoredAtSec != null && nowSec - m.anchoredAtSec < LFO_ANCHOR_INTERVAL_SEC) continue;
+      const targetSec = nowSec + DEFAULT_LOOKAHEAD_SEC;
+      const total = targetSec * ir.rateHz + (ir.phaseCycles ?? 0); // sampleLfoIR's phase formula
+      this.engine.anchorParamLFO(this.trackId, m.slot, m.name, ((total % 1) + 1) % 1, targetSec);
+      m.anchoredAtSec = nowSec;
+    }
+  }
+
   _pollGenericParams(nowSec) {
+    // Sample each signal at the time the value will actually be applied (the engine schedules
+    // setParam in a timestamped bundle at applySec) - sampling at nowSec instead would put
+    // every polled control a constant lookahead (150ms) behind the note grid.
+    const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
+    const applyCycle = this.transport.cycleAt(applySec);
     for (const c of this._controlEntries(this.pattern)) {
       if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // native Tier 2 already owns this, set once in setPattern()
-      const value = c.sig.sample(nowSec, this.transport.cps, this.transport.cycleAt(nowSec));
+      const value = c.sig.sample(applySec, this.transport.cps, applyCycle);
       if (typeof value === 'number') {
-        this.engine.setParam(this.trackId, c.slot, c.name, value, nowSec + DEFAULT_LOOKAHEAD_SEC);
+        this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);
       }
     }
   }
