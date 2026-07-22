@@ -61,11 +61,12 @@ const MAX_CHAIN_SLOTS = 8;
  * the historical default).
  */
 export class Transport {
-  constructor(getTime, { cps = 0.5 } = {}) {
+  constructor(getTime, { cps = 0.5, paused = false } = {}) {
     this.getTime = getTime;
     this.cps = cps;
     this._baseSec = getTime();
     this._baseCycle = 0;
+    this._paused = paused;
     this._tempoSig = null;
     this._tempoTimer = null;
     // Fired after every effective tempo change (with the new cps). The host uses it to mirror
@@ -75,11 +76,30 @@ export class Transport {
   }
 
   cycleAt(sec) {
+    if (this._paused) return this._baseCycle;
     return this._baseCycle + (sec - this._baseSec) * this.cps;
   }
 
   secAt(cycle) {
     return this._baseSec + (cycle - this._baseCycle) / this.cps;
+  }
+
+  get paused() {
+    return this._paused;
+  }
+
+  /** Freeze the clock and rewind to cycle 0. Tempo (cps) survives; only position resets. */
+  stop() {
+    this._paused = true;
+    this._baseCycle = 0;
+    this._baseSec = this.getTime();
+  }
+
+  /** Un-freeze: the clock advances again from wherever it sits (cycle 0 after stop()). */
+  start() {
+    if (!this._paused) return;
+    this._baseSec = this.getTime();
+    this._paused = false;
   }
 
   setCps(cps) {
@@ -130,7 +150,7 @@ export class Transport {
 
   /** Plain-data view for clients that mirror the clock (the editor's playback highlighting). */
   snapshot() {
-    return { cps: this.cps, baseSec: this._baseSec, baseCycle: this._baseCycle };
+    return { cps: this.cps, baseSec: this._baseSec, baseCycle: this._baseCycle, paused: this._paused };
   }
 
   dispose() {

@@ -452,7 +452,11 @@ patch shares as a plain URL and opening a shared link restores the code.
   with a rolling transport enabled at plugin open), so plugin-internal synced LFOs, delays and
   arpeggiators follow `setbpm`; a periodic beat-position re-sync (same reasoning as the
   scheduler's LFO anchors) keeps the plugins' self-advanced transport from drifting against
-  the pattern grid.
+  the pattern grid. The transport is also a stoppable clock: it's born paused at cycle 0, the
+  first eval with active tracks starts it, and stop (`/api/stop`, or the engine restart on a
+  device change) freezes it back at cycle 0 - so playback always restarts from the top of the
+  grid, and nothing advances while stopped. `Transport#snapshot` carries the `paused` flag so
+  the editor's clock mirror (highlighting, phrase circles) freezes with it.
 
 ## What's built vs. what's next
 

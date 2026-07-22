@@ -755,7 +755,8 @@ function initLfoCanvas() {
 // t*cps once setbpm() has run, so the server sends its Transport's {cps, baseSec, baseCycle}
 // and we mirror the same rebased formula. (A tempo *signal* keeps changing cps between evals;
 // highlighting then drifts until the next eval - known, cosmetic.)
-let transport = { cps: 0.5, baseSec: 0, baseCycle: 0 };
+// Starts paused at cycle 0 - the server's clock only advances while something is playing.
+let transport = { cps: 0.5, baseSec: 0, baseCycle: 0, paused: true };
 let playing = false;
 let patternRegions = []; // { marker, ast, lastKey, marks: [] }
 
@@ -840,7 +841,9 @@ function setupHighlighting(code, tracks) {
 }
 
 // The transport mirror as a cycle position "now" - the same rebased formula the server uses.
+// A paused transport is frozen at baseCycle (0 after a stop / at page load).
 function currentCyclePos() {
+  if (transport.paused) return transport.baseCycle;
   return transport.baseCycle + (Date.now() / 1000 - transport.baseSec) * transport.cps;
 }
 
@@ -1179,7 +1182,7 @@ async function doEval() {
   const code = cm.getValue();
   try {
     const result = await api('POST', '/api/evaluate', { code });
-    transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0 };
+    transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: false };
     renderTracks(result);
     setupHighlighting(code, result.tracks);
     foldConfigBlobs();
@@ -1193,7 +1196,8 @@ async function doEval() {
 
 async function doStop() {
   if (recState) cancelMidiRecord(true);
-  await api('POST', '/api/stop');
+  const result = await api('POST', '/api/stop');
+  if (result.transport) transport = result.transport; // frozen at cycle 0
   stopHighlighting();
   logLine('stopped');
 }
@@ -1397,6 +1401,7 @@ audioDeviceSelect.addEventListener('change', async () => {
     await api('POST', '/api/audioDevice', { device });
     stopHighlighting();
     playing = false;
+    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
     logLine(`audio output is now ${label} - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
   } catch (e) {
     logLine(e.message ?? String(e), true);

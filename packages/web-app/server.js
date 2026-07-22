@@ -142,6 +142,7 @@ async function restartEngine() {
       mappedEngine?.removeChain(label);
     }
     schedulers.clear();
+    transport?.stop(); // playback is over - freeze the clock at cycle 0 until the next eval
     if (engine) {
       await engine.stop();
       // Let the OS actually release the OSC UDP port and the audio device before the
@@ -153,7 +154,7 @@ async function restartEngine() {
     engine = await loadEngine();
     if (engine) {
       mappedEngine = new MappedEngine(engine);
-      if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS });
+      if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
       transport.onCpsChange = syncVstTransport;
       syncVstTransport(); // the fresh sclang needs the surviving transport's tempo, not 120
       engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
@@ -170,7 +171,9 @@ async function init() {
   engine = await loadEngine();
   if (engine) {
     mappedEngine = new MappedEngine(engine);
-    transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS });
+    // Born paused at cycle 0: the clock only advances while something is playing (first eval
+    // starts it, /api/stop freezes it back at 0).
+    transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
     transport.onCpsChange = syncVstTransport;
     syncVstTransport();
     // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
@@ -450,6 +453,10 @@ const routes = {
       }
     }
 
+    // Playback (re)starts: un-freeze the clock. After a stop it sits at cycle 0, so every
+    // pattern comes in from the top of the grid; mid-performance evals are a no-op here.
+    if (active.length > 0) transport.start();
+
     for (const b of active) {
       // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
       mappedEngine.setChain(b.label, [b.sig.instrument, ...b.sig.fxChain]);
@@ -490,7 +497,9 @@ const routes = {
 
   'POST /api/stop': async () => {
     for (const sch of schedulers.values()) sch.stop();
-    return { status: 200, body: {} };
+    // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top.
+    transport?.stop();
+    return { status: 200, body: { transport: transport?.snapshot() ?? null } };
   },
 
   // Introspection: real parameter names of the plugin in a track slot. Body: { trackId, slot }.
