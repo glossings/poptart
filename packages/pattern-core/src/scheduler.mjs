@@ -294,13 +294,15 @@ export class Scheduler {
         const offsetSec = this.transport.secAt(stepEndCycle);
 
         if (this.pattern.sampler) {
-          this.engine.playSample(
-            this.trackId,
-            String(step.value),
-            this._sampleConfigAt(onsetSec, stepStartCycle),
-            onsetSec,
-            offsetSec,
-          );
+          const cfg = this._sampleConfigAt(onsetSec, stepStartCycle);
+          let pack = String(step.value);
+          // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
+          const m = /^(.+):(-?\d+)$/.exec(pack);
+          if (m) {
+            pack = m[1];
+            if (cfg.index === undefined) cfg.index = Number(m[2]);
+          }
+          this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
         } else {
           const midiNote = Math.round(step.value);
           let velocity = 1.0;

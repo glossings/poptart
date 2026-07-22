@@ -131,7 +131,7 @@ index in filename order. Like everything else, every config accepts numbers, min
 signals, sampled per event onset:
 
 ```js
-drums: s("bd*4 hh*8")
+drums: s("bd*4 hh*8")    // "bd:4" picks a file inline, strudel-style: = s("bd").i(4)
   .i("<0 1 2>")          // which file of the pack (strudel's `n`, renamed to avoid our n())
   .begin(0).end(1)       // play region, 0..1
   .loop()                // loop the region for the event's length instead of one-shot

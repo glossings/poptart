@@ -584,8 +584,10 @@ export function n(value) {
 
 /**
  * Sampler pattern - values are sample-pack names (folders under the samples directory), one
- * event per step: `s("bd hh bd hh")`. Configure with .i()/.begin()/.end()/.loop()/.speed()/
- * .stretch()/.fit()/.slice(); route through effects with .fx()/.param() as usual.
+ * event per step: `s("bd hh bd hh")`. A `:n` suffix picks the pack's nth file, strudel-style:
+ * `s("bd:4")` = `s("bd").i(4)` (an explicit .i() overrides the suffix). Configure with
+ * .i()/.begin()/.end()/.loop()/.speed()/.stretch()/.fit()/.slice(); route through effects
+ * with .fx()/.param() as usual.
  */
 export function s(value) {
   assertBuilderInput('s', value);
