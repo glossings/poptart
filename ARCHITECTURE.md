@@ -131,9 +131,15 @@ all**:
   editor buffer into blocks on column-0 `name:` / `$:` lines, with `_name:`/`name_:` marking a
   block muted and `Sname:`/`nameS:` soloing it (if anything is soloed, only soloed blocks
   play; mute wins over solo). Each block becomes its own engine track named after the label.
-  Unlabeled code is one implicit anonymous block, so single-expression usage is unchanged.
-  Also dependency-free and served to the browser (block boundaries scope autocomplete and
-  highlighting).
+  A **column-0 line that isn't a label** starts its own anonymous block too, so top-level
+  statements - `Signal.prototype.co = …` language extensions, shared `const kb = …`
+  declarations - can sit anywhere in the buffer, between tracks, not only at the top; a
+  non-pattern anonymous block is a setup block (see server.js). Telling a genuine continuation
+  (a `.param(…)` chain line, a `function () { … }` body, a multi-line `` `<…>` `` template)
+  apart from a fresh statement needs no JS parse - `continuesBlock`/`endsOpen` scan only for an
+  unbalanced bracket / open template / block comment, plus a leading-dot ASI line. Unlabeled
+  code is still one implicit anonymous block for single-expression usage. Dependency-free and
+  served to the browser (block boundaries scope autocomplete and highlighting).
 - **`src/notes.mjs`** — note-name parsing (`"f#3"` → MIDI, `c5 = 60`) and a small hardcoded
   scale-interval table (major/minor/modes/pentatonics/blues/chromatic), so `.scale("F minor")`
   needs no tonal.js dependency. Scale name parsing splits on whitespace *or* colon, so both

@@ -136,6 +136,12 @@ drums: s("bd hh sd hh").co(1)
 New methods work on bare mini strings too (`"bd*4".co(1)`) - never shadowing a real String
 method - and, like any prototype patch, persist across evals until the server restarts.
 
+These `Signal.prototype.…` / `const …` lines are ordinary top-level statements: put them on
+their own column-0 line **anywhere** in the buffer, between tracks or above them - each becomes
+its own setup block. (A bare `$: Signal(0.5)` is *not* setup, though: it evaluates to a signal,
+so it becomes a silent track with no synth attached. To reuse a constant, name it -
+`const half = Signal(0.5)` - and reference it: `bass: n("0").synth("X").gain(half)`.)
+
 ### Pinning plugin state into the code
 
 Click **pin** next to a plugin in the track panel to capture its complete current state
