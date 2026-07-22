@@ -262,19 +262,26 @@ aside {
 .side-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 8px 10px 0;
+  flex-wrap: nowrap;
+  gap: 2px;
+  padding: 8px 8px 0;
 }
 
 .side-tab {
-  padding: 4px 12px;
+  padding: 4px 9px;
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   border-radius: 7px;
   background: none;
   border: 1px solid transparent;
   color: var(--text-dim);
+}
+
+/* The minimize toggle must stay reachable even when the tabs crowd the row - never let it be
+   the item that gets clipped by the sidebar's overflow: hidden. */
+#sidebarToggle {
+  flex-shrink: 0;
 }
 
 .side-tab.active {
