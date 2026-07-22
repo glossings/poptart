@@ -421,6 +421,27 @@ const routes = {
     return { status: 200, body: await engine.getMidiDevices() };
   },
 
+  // Sample packs on disk - one folder per pack under the samples root (see osc-engine's
+  // samples.js). Files come back in the same filename-sorted order the sampler indexes them
+  // in, so a file's position in the list is its `s("pack:idx")` index. Reads the filesystem
+  // directly rather than going through the engine, so it works even before the engine is up.
+  'GET /api/samples': async () => {
+    const { samplesRoot, listPackFiles } = require('@poptart/osc-engine/samples');
+    const root = samplesRoot();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      // missing root = no packs, not an error
+    }
+    const packs = entries
+      .filter((e) => e.isDirectory() || e.isSymbolicLink())
+      .map((e) => ({ name: e.name, files: (listPackFiles(e.name) ?? []).map((f) => path.basename(f)) }))
+      .filter((p) => p.files.length > 0)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return { status: 200, body: { root, packs } };
+  },
+
   // `code` is the whole editor buffer: one or more labeled blocks (see pattern-core's
   // labels.mjs - `$:` anonymous, `name:` named, `_name:` muted, `Sname:` soloed), each
   // evaluating to a Sig and playing on its own engine track named after the label. Unlabeled

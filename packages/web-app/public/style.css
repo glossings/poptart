@@ -310,19 +310,20 @@ aside.collapsed .side-tabs {
   justify-content: center;
 }
 
+/* Sections are flex children that may be squeezed on short windows; overflow: hidden makes a
+   squeezed section clip its content instead of painting over the section below. Anything that
+   should survive squeezing scrolls inside its own .panel/.panel.list. */
 aside section {
   display: flex;
   flex-direction: column;
   padding: 10px 12px 0;
   min-height: 0;
+  overflow: hidden;
 }
 
-/* Tracks grow with the evaluated pattern - cap the section and scroll inside the panel, so
-   many tracks can never squeeze params/plugins into overlapping (same treatment as their
-   .panel.list scrollers). */
+/* session tab: tracks take whatever the macro bank doesn't need, scrolling inside the panel */
 #trackSection {
-  flex: 0 1 auto;
-  max-height: 40%;
+  flex: 1;
 }
 
 #trackInfo {
@@ -330,8 +331,24 @@ aside section {
   min-height: 0;
 }
 
+/* the knob bank has a fixed footprint - never squeeze it */
+#macrosSection {
+  flex-shrink: 0;
+  padding-bottom: 10px;
+}
+
+/* sounds tab: three scrolling lists sharing the height */
 #paramsSection {
-  flex: 1;
+  flex: 3;
+}
+
+#pluginsSection {
+  flex: 2;
+}
+
+#samplesSection {
+  flex: 3;
+  padding-bottom: 10px;
 }
 
 /* Macros - the knob bank. Each knob is a conic-gradient ring (--v is the 0..1 value, swept
@@ -410,11 +427,6 @@ aside section {
   color: var(--text-dim);
 }
 
-#pluginsSection {
-  max-height: 32%;
-  padding-bottom: 10px;
-}
-
 aside h2 {
   display: flex;
   align-items: center;
@@ -450,6 +462,7 @@ aside h2 {
 }
 
 #paramSearch,
+#sampleSearch,
 #fileNameInput {
   width: 100%;
   margin-bottom: 6px;
@@ -464,6 +477,7 @@ aside h2 {
 }
 
 #paramSearch:focus,
+#sampleSearch:focus,
 #fileNameInput:focus {
   border-color: var(--accent);
 }
@@ -610,6 +624,15 @@ aside h2 {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--accent);
+}
+
+/* pack headers in the samples list are sticky like .slot-head but also clickable */
+.sample-pack-head {
+  cursor: pointer;
+}
+
+.sample-pack-head:hover {
+  background: var(--hover-bg);
 }
 
 .param-row,

@@ -1530,14 +1530,104 @@ async function loadKnownPlugins() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sidebar tabs (session | files) + pattern file manager. Pattern files are whole editor
-// buffers saved server-side (~/.poptart/patterns/<name>.js) via /api/patterns*: save the
-// current buffer under a name, click a saved pattern to load it, rename/delete to organize.
+// Samples browser (sounds tab) - the packs under the samples root (folders of audio files; see
+// osc-engine's samples.js). A file's position in its pack is its sampler index, so file rows
+// copy `s("pack:idx")` and pack headers copy `s("pack")`. Reloaded every time the tab opens,
+// so packs added on disk mid-session show up.
+// ---------------------------------------------------------------------------------------------
+
+const sampleSearch = document.getElementById('sampleSearch');
+const sampleList = document.getElementById('sampleList');
+const samplesCount = document.getElementById('samplesCount');
+
+const MAX_SAMPLE_ROWS = 300;
+let samplePacks = null; // null until the first load, then [{ name, files }]
+let samplesRootDir = '';
+
+function renderSamples() {
+  const query = sampleSearch.value.trim().toLowerCase();
+  sampleList.innerHTML = '';
+  if (!samplePacks?.length) {
+    samplesCount.textContent = '';
+    sampleList.textContent = samplePacks
+      ? `no sample packs found - put folders of audio files in ${samplesRootDir}`
+      : 'loading…';
+    return;
+  }
+
+  samplesCount.textContent = `${samplePacks.reduce((sum, p) => sum + p.files.length, 0)}`;
+
+  let shown = 0;
+  let matched = 0;
+  for (const pack of samplePacks) {
+    const packMatches = pack.name.toLowerCase().includes(query);
+    // Indexes must be positions in the full pack, not the filtered view - attach before filtering.
+    const files = pack.files
+      .map((name, i) => ({ name, i }))
+      .filter((f) => !query || packMatches || f.name.toLowerCase().includes(query));
+    if (!files.length) continue;
+    matched += files.length;
+    if (shown >= MAX_SAMPLE_ROWS) continue; // keep counting for the more-note, stop rendering
+
+    const head = document.createElement('div');
+    head.className = 'slot-head sample-pack-head';
+    head.title = 'click to copy';
+    head.textContent = `${pack.name} · ${pack.files.length}`;
+    head.onclick = () => copyText(`s("${pack.name}")`, 'pack');
+    sampleList.appendChild(head);
+
+    for (const f of files) {
+      if (shown >= MAX_SAMPLE_ROWS) break;
+      const row = document.createElement('div');
+      row.className = 'param-row';
+      row.title = 'click to copy';
+      const name = document.createElement('span');
+      name.textContent = f.name;
+      row.appendChild(name);
+      const idx = document.createElement('span');
+      idx.className = 'dim';
+      idx.textContent = `:${f.i}`;
+      row.appendChild(idx);
+      row.onclick = () => copyText(`s("${pack.name}:${f.i}")`, 'sample');
+      sampleList.appendChild(row);
+      shown++;
+    }
+  }
+
+  if (matched > shown) {
+    const more = document.createElement('div');
+    more.className = 'more-note';
+    more.textContent = `…${matched - shown} more — refine the filter to see them`;
+    sampleList.appendChild(more);
+  }
+  if (!matched) sampleList.textContent = 'no samples match';
+}
+
+async function loadSamples() {
+  try {
+    const { root, packs } = await api('GET', '/api/samples');
+    samplesRootDir = root;
+    samplePacks = packs;
+  } catch (e) {
+    samplePacks = [];
+    logLine(e.message ?? String(e), true);
+  }
+  renderSamples();
+}
+
+sampleSearch.addEventListener('input', renderSamples);
+
+// ---------------------------------------------------------------------------------------------
+// Sidebar tabs (session | sounds | files | settings) + pattern file manager. Pattern files are
+// whole editor buffers saved server-side (~/.poptart/patterns/<name>.js) via /api/patterns*:
+// save the current buffer under a name, click a saved pattern to load it, rename/delete to
+// organize.
 // ---------------------------------------------------------------------------------------------
 
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const sessionTab = document.getElementById('sessionTab');
+const soundsTab = document.getElementById('soundsTab');
 const filesTab = document.getElementById('filesTab');
 const settingsTab = document.getElementById('settingsTab');
 const audioDeviceSelect = document.getElementById('audioDeviceSelect');
@@ -1551,8 +1641,10 @@ for (const btn of document.querySelectorAll('.side-tab')) {
   btn.addEventListener('click', () => {
     for (const b of document.querySelectorAll('.side-tab')) b.classList.toggle('active', b === btn);
     sessionTab.classList.toggle('hidden', btn.dataset.tab !== 'session');
+    soundsTab.classList.toggle('hidden', btn.dataset.tab !== 'sounds');
     filesTab.classList.toggle('hidden', btn.dataset.tab !== 'files');
     settingsTab.classList.toggle('hidden', btn.dataset.tab !== 'settings');
+    if (btn.dataset.tab === 'sounds') loadSamples();
     if (btn.dataset.tab === 'files') refreshPatternFiles();
     if (btn.dataset.tab === 'settings') refreshAudioDevices();
   });
