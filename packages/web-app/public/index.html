@@ -132,6 +132,20 @@ keys: n("0 2 3 <5 7>")
                 <select id="audioDeviceSelect" title="which audio device the engine plays to"></select>
               </label>
             </section>
+            <section id="librarySection">
+              <h2>sample library</h2>
+              <label class="settings-row">folder
+                <input id="samplesDirInput" type="text" spellcheck="false"
+                  placeholder="~/.poptart/samples"
+                  title="folder whose subfolders are your sample packs" />
+              </label>
+              <div class="settings-actions">
+                <button id="samplesDirBrowse" class="small">browse…</button>
+                <button id="samplesDirSave" class="small">save</button>
+                <button id="samplesDirReset" class="small" title="use the default ~/.poptart/samples">reset</button>
+              </div>
+              <div id="samplesDirNote" class="files-note"></div>
+            </section>
           </div>
         </aside>
       </main>
@@ -177,6 +191,24 @@ keys: n("0 2 3 <5 7>")
       </div>
       <div id="themeVars" class="theme-vars"></div>
       <div class="theme-note">edits fork the current preset into a “custom” theme, saved in this browser</div>
+    </div>
+
+    <div id="dirPickerBackdrop" class="dir-picker-backdrop hidden">
+      <div id="dirPicker" class="dir-picker" role="dialog" aria-label="choose folder">
+        <div class="dir-picker-head">
+          <span>choose sample folder</span>
+          <span class="spacer"></span>
+          <button id="dirPickerClose" class="small">✕</button>
+        </div>
+        <input id="dirPickerPath" class="dir-picker-path" type="text" spellcheck="false"
+          title="current folder — edit or paste a path, then Enter to go there" />
+        <div id="dirPickerList" class="dir-picker-list"></div>
+        <div class="dir-picker-foot">
+          <span id="dirPickerNote" class="dir-picker-note"></span>
+          <span class="spacer"></span>
+          <button id="dirPickerUse" class="small primary">use this folder</button>
+        </div>
+      </div>
     </div>
 
     <script src="/vendor/codemirror/lib/codemirror.js"></script>

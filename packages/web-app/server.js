@@ -76,6 +76,10 @@ function saveSettings() {
 
 const settings = loadSettings();
 
+// Apply the persisted sample-library folder to the engine's samples module (env var still wins
+// - see samples.js). Chosen in the "settings" tab; null/absent means the default ~/.poptart/samples.
+require('@poptart/osc-engine/samples').setSamplesRoot(settings.samplesDir ?? null);
+
 // CoreAudio output devices with channel counts, via system_profiler (macOS - the platform the
 // audio/MIDI plumbing already assumes). Channel counts are why this isn't sclang's
 // ServerOptions.outDevices: scsynth needs numOutputBusChannels at boot, and .o(n)'s
@@ -498,6 +502,62 @@ const routes = {
     return { status: 200, body: { root, packs } };
   },
 
+  // The sample-library folder shown/edited in the settings tab. `envOverride` is true when
+  // POPTART_SAMPLES_DIR is set, in which case the saved folder is ignored until it's unset.
+  'GET /api/samplesDir': async () => {
+    const { samplesRoot } = require('@poptart/osc-engine/samples');
+    return {
+      status: 200,
+      body: { dir: samplesRoot(), envOverride: !!process.env.POPTART_SAMPLES_DIR },
+    };
+  },
+
+  // Filesystem folder browser for the settings-tab folder picker. Query `path` is the folder to
+  // list (absolute, or ~-relative; defaults to home); returns its immediate subfolders plus its
+  // parent so the client can navigate up. Hidden (dot) folders are included on purpose - the
+  // default library lives in ~/.poptart. Only ever lists one directory (never recurses), so this
+  // stays cheap. If the requested folder doesn't exist or can't be read (e.g. the default
+  // ~/.poptart/samples on a fresh install), it walks up to the nearest readable ancestor and
+  // lists that instead, so the picker always opens somewhere navigable rather than an error.
+  'GET /api/browseDir': async (query) => {
+    const raw = (query.path || '').trim();
+    const expanded = raw.startsWith('~')
+      ? path.join(os.homedir(), raw.slice(1))
+      : (raw || os.homedir());
+    const listDir = (d) => fs.readdirSync(d, { withFileTypes: true })
+      .filter((e) => {
+        if (e.isDirectory()) return true;
+        if (!e.isSymbolicLink()) return false;
+        try { return fs.statSync(path.join(d, e.name)).isDirectory(); } catch { return false; }
+      })
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+
+    let dir = path.resolve(expanded);
+    let dirs;
+    for (;;) {
+      try { dirs = listDir(dir); break; } catch {
+        const up = path.dirname(dir);
+        if (up === dir) break; // reached the filesystem root; give up
+        dir = up;
+      }
+    }
+    if (!dirs) throw new Error(`can't read ${path.resolve(expanded)}`);
+    const parent = path.dirname(dir);
+    return { status: 200, body: { path: dir, parent: parent === dir ? null : parent, dirs } };
+  },
+
+  // Body: { dir } - a folder path, or null/"" to reset to the default (~/.poptart/samples).
+  // Persisted and applied immediately; the next `s(...)` eval reads packs from the new root.
+  'POST /api/samplesDir': async (body) => {
+    const { setSamplesRoot, samplesRoot } = require('@poptart/osc-engine/samples');
+    const dir = body.dir ? String(body.dir).trim() : null;
+    settings.samplesDir = dir;
+    setSamplesRoot(dir);
+    saveSettings();
+    return { status: 200, body: { dir: samplesRoot(), envOverride: !!process.env.POPTART_SAMPLES_DIR } };
+  },
+
   // `code` is the whole editor buffer: one or more labeled blocks (see pattern-core's
   // labels.mjs - `$:` anonymous, `name:` named, `_name:` muted, `Sname:` soloed), each
   // evaluating to a Sig and playing on its own engine track named after the label. Unlabeled
@@ -882,8 +942,8 @@ function readJsonBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const routeKey = `${req.method} ${req.url}`;
-  const handler = routes[routeKey];
+  const url = new URL(req.url, 'http://localhost');
+  const handler = routes[`${req.method} ${url.pathname}`];
 
   if (!handler) {
     if (req.method === 'GET') return serveStatic(req, res);
@@ -892,8 +952,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    const body = req.method === 'POST' ? await readJsonBody(req) : {};
-    const { status, body: responseBody } = await handler(body);
+    // POST handlers receive the parsed JSON body; GET handlers receive the query params.
+    const arg = req.method === 'POST'
+      ? await readJsonBody(req)
+      : Object.fromEntries(url.searchParams);
+    const { status, body: responseBody } = await handler(arg);
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(responseBody));
   } catch (err) {

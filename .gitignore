@@ -7,3 +7,8 @@ packages/native-engine/build/
 packages/native-engine/.cmake-js/
 *.log
 .cache/
+
+# Local-only working files (design notes, agent config, scratch)
+.claude/
+ARCHITECTURE.md
+tmp/

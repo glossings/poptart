@@ -50,20 +50,10 @@ var inChannels = ("POPTART_IN_CHANNELS".getenv ? "0").asInteger;
 var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split($:) }
     ?? { var d = "~/.poptart/plugins".standardizePath; if (File.exists(d)) { [d] } };
 // Plugins skipped explicitly during scans (VSTPlugin's exclude option, which prunes these
-// paths from the directory traversal so they're never probed). Defaults are the known-bad
-// ones on the dev machine: Mellotron V and Jun-6 V segfault their probe subprocess; Melodyne ("couldn't
-// get plugin factory") and CloudSeed ("operation not permitted") fail every scan and just
-// spam the log; SpaceBlender and both MORPH 3 PRO variants are unwanted in the plugin list.
-// POPTART_VST_EXCLUDE (colon-separated paths) appends more without editing this.
-var excludePaths = [
-    "/Library/Audio/Plug-Ins/VST3/Mellotron V.vst3",
-    "/Library/Audio/Plug-Ins/VST3/Jun-6 V.vst3",
-    "/Library/Audio/Plug-Ins/VST3/Melodyne.vst3",
-    "/Library/Audio/Plug-Ins/VST3/CloudSeed.vst3",
-    "/Library/Audio/Plug-Ins/VST3/Soundtoys/SpaceBlender.vst3",
-    "/Library/Audio/Plug-Ins/VST3/MORPH 3 PRO VST3.vst3",
-    "/Library/Audio/Plug-Ins/VST3/MORPH 3 PRO DualMonoIn VST3.vst3"
-] ++ ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
+// paths from the directory traversal so they're never probed). Set POPTART_VST_EXCLUDE
+// (colon-separated absolute paths) to skip plugins that crash or spam errors on your machine
+// during a scan, e.g. copy-protection or analysis plugins that fail to probe headlessly.
+var excludePaths = ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
 var maxSlots = 8; // slot 0 = instrument, 1..7 = effects
 // scsynth's own port, overridable so a second poptart stack (tests, parallel session) doesn't
 // collide with a running one on the default 57110.

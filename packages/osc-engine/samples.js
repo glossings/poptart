@@ -13,13 +13,21 @@ const os = require('node:os');
 
 const AUDIO_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac']);
 
-// Sample library location. POPTART_SAMPLES_DIR always wins; otherwise the default library is
-// ~/Downloads/gsamps_for_poptart, falling back to the legacy ~/.poptart/samples location if
-// the default folder doesn't exist on this machine.
+// Sample library location, in priority order:
+//   1. POPTART_SAMPLES_DIR - environment override, always wins (useful for tests/CI).
+//   2. a runtime value set via setSamplesRoot() - the UI's "settings" tab persists a chosen
+//      folder here (see the web-app's settings handling).
+//   3. the default library at ~/.poptart/samples.
+// A pack is a subfolder of this root; drop or symlink your sample folders in and they appear.
+let configuredRoot = null;
+
+function setSamplesRoot(dir) {
+  configuredRoot = dir ? String(dir) : null;
+}
+
 function samplesRoot() {
   if (process.env.POPTART_SAMPLES_DIR) return process.env.POPTART_SAMPLES_DIR;
-  const defaultDir = path.join(os.homedir(), 'Downloads', 'gsamps_for_poptart');
-  if (fs.existsSync(defaultDir)) return defaultDir;
+  if (configuredRoot) return configuredRoot;
   return path.join(os.homedir(), '.poptart', 'samples');
 }
 
@@ -158,4 +166,4 @@ function detectSlices(filePath) {
   return detectOnsets(wav.samples, wav.sampleRate);
 }
 
-module.exports = { samplesRoot, listPackFiles, detectSlices, readWav };
+module.exports = { samplesRoot, setSamplesRoot, listPackFiles, detectSlices, readWav };

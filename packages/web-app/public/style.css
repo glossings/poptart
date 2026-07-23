@@ -593,9 +593,20 @@ aside h2 {
   color: var(--text);
 }
 
-.settings-row select {
+.settings-row select,
+.settings-row input {
   flex: 1;
   min-width: 0;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#librarySection {
+  margin-top: 14px;
 }
 
 .track-head {
@@ -938,6 +949,108 @@ li.CodeMirror-hint-active {
   font-style: italic;
   color: var(--text-dim);
   border-top: 1px solid var(--border);
+}
+
+/* --------------------------------------------------------------- folder picker */
+
+.dir-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--shadow);
+  z-index: 40;
+}
+
+.dir-picker-backdrop.hidden {
+  display: none;
+}
+
+.dir-picker {
+  display: flex;
+  flex-direction: column;
+  width: min(480px, 92vw);
+  max-height: 70vh;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px var(--shadow);
+  overflow: hidden;
+}
+
+.dir-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.dir-picker-path {
+  margin: 10px 12px 6px;
+  font-size: 12px;
+}
+
+.dir-picker-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 8px;
+  min-height: 120px;
+}
+
+.dir-row {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dir-row::before {
+  content: '📁 ';
+}
+
+.dir-row.dir-up::before {
+  content: '';
+}
+
+.dir-row:hover {
+  background: var(--hover-bg);
+}
+
+.dir-up {
+  color: var(--text-dim);
+}
+
+.dir-empty {
+  padding: 10px 8px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-dim);
+}
+
+.dir-picker-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.dir-picker-note {
+  font-size: 10.5px;
+  color: var(--err);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --------------------------------------------------------------- lfo editor */

@@ -1861,7 +1861,7 @@ for (const btn of document.querySelectorAll('.side-tab')) {
     settingsTab.classList.toggle('hidden', btn.dataset.tab !== 'settings');
     if (btn.dataset.tab === 'sounds') loadSamples();
     if (btn.dataset.tab === 'files') refreshPatternFiles();
-    if (btn.dataset.tab === 'settings') refreshAudioDevices();
+    if (btn.dataset.tab === 'settings') { refreshAudioDevices(); refreshSamplesDir(); }
   });
 }
 
@@ -1914,6 +1914,111 @@ audioDeviceSelect.addEventListener('change', async () => {
     audioDeviceSelect.disabled = false;
     refreshStatus().catch(() => {});
   }
+});
+
+// Sample-library folder. The saved folder is what `s(...)` reads packs from; when
+// POPTART_SAMPLES_DIR is set in the environment it overrides this, so the field goes read-only
+// and says so.
+const samplesDirInput = document.getElementById('samplesDirInput');
+const samplesDirSave = document.getElementById('samplesDirSave');
+const samplesDirReset = document.getElementById('samplesDirReset');
+const samplesDirNote = document.getElementById('samplesDirNote');
+
+async function refreshSamplesDir() {
+  try {
+    const { dir, envOverride } = await api('GET', '/api/samplesDir');
+    samplesDirInput.value = dir;
+    samplesDirInput.disabled = envOverride;
+    samplesDirSave.disabled = envOverride;
+    samplesDirReset.disabled = envOverride;
+    samplesDirNote.textContent = envOverride
+      ? 'set by POPTART_SAMPLES_DIR - unset it to edit here'
+      : 'subfolders of this folder are your sample packs';
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function saveSamplesDir(dir) {
+  try {
+    const res = await api('POST', '/api/samplesDir', { dir });
+    samplesDirInput.value = res.dir;
+    logLine(`sample library folder is now ${res.dir}`);
+    loadSamples().catch(() => {}); // refresh the sounds browser against the new root
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+samplesDirSave.addEventListener('click', () => saveSamplesDir(samplesDirInput.value.trim() || null));
+samplesDirReset.addEventListener('click', () => saveSamplesDir(null));
+samplesDirInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); saveSamplesDir(samplesDirInput.value.trim() || null); }
+});
+
+// Folder picker - a server-side directory browser (the server and browser are the same machine,
+// and browsers can't hand back a real filesystem path). Navigate into subfolders, up via ".."
+// or the path field, and "use this folder" saves the current path as the sample library.
+const dirPickerBackdrop = document.getElementById('dirPickerBackdrop');
+const dirPickerPath = document.getElementById('dirPickerPath');
+const dirPickerList = document.getElementById('dirPickerList');
+const dirPickerNote = document.getElementById('dirPickerNote');
+const dirPickerUse = document.getElementById('dirPickerUse');
+const dirPickerClose = document.getElementById('dirPickerClose');
+const samplesDirBrowse = document.getElementById('samplesDirBrowse');
+let dirPickerCurrent = '';
+
+async function browseTo(pathArg) {
+  dirPickerNote.textContent = '';
+  try {
+    const { path, parent, dirs } = await api('GET', `/api/browseDir?path=${encodeURIComponent(pathArg ?? '')}`);
+    dirPickerCurrent = path;
+    dirPickerPath.value = path;
+    dirPickerList.innerHTML = '';
+    if (parent) {
+      const up = document.createElement('div');
+      up.className = 'dir-row dir-up';
+      up.textContent = '↑ ..';
+      up.addEventListener('click', () => browseTo(parent));
+      dirPickerList.appendChild(up);
+    }
+    for (const name of dirs) {
+      const row = document.createElement('div');
+      row.className = 'dir-row';
+      row.textContent = name;
+      row.addEventListener('click', () => browseTo(`${path}/${name}`));
+      dirPickerList.appendChild(row);
+    }
+    if (!dirs.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dir-empty';
+      empty.textContent = 'no subfolders here';
+      dirPickerList.appendChild(empty);
+    }
+  } catch (e) {
+    dirPickerNote.textContent = e.message ?? String(e);
+  }
+}
+
+function openDirPicker() {
+  dirPickerBackdrop.classList.remove('hidden');
+  browseTo(samplesDirInput.value.trim() || null);
+}
+function closeDirPicker() { dirPickerBackdrop.classList.add('hidden'); }
+
+samplesDirBrowse.addEventListener('click', openDirPicker);
+dirPickerClose.addEventListener('click', closeDirPicker);
+dirPickerBackdrop.addEventListener('click', (e) => { if (e.target === dirPickerBackdrop) closeDirPicker(); });
+dirPickerPath.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); browseTo(dirPickerPath.value.trim()); }
+});
+dirPickerUse.addEventListener('click', () => {
+  samplesDirInput.value = dirPickerCurrent;
+  closeDirPicker();
+  saveSamplesDir(dirPickerCurrent || null);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !dirPickerBackdrop.classList.contains('hidden')) closeDirPicker();
 });
 
 function renderPatternFiles(patterns) {
