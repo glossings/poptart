@@ -8,30 +8,10 @@ no completion notes.
 ## General
 - [ ] Add button in files to create a new one
 
-## Strudel ports
-- [ ] `.degrade` that accepts a 0-1 probability of dropping any given note
-- [ ] `.ply` which accepts two args. One is the number of repetitions, the second is
-  a function `(x, n)` which returns a new signal. `x` is the current signal, `n` is the current
-  repetition that we're on
-- [ ] `.echo` Similar to ply. Accepts number of reptitions, spacing between repetitions (e.g. 1 / 4)
-  and then a third argument of `(x, n)`
-- [ ] mini notation `?`, `|` (the former is either a 50% chance of degrade or a probabilistic degrade
-  given by the # after it - like `4?0.3`; the latter is a random choice between options like "4 | 3" or "<0 1 [2 | 3]>)
-- [ ] `choose` is a signal that is a random choice between signals. Syntax is `choose(a, b, c, ...)`
-  the probability is uniform unless the entries are arrays, in which case the first entry of each array is the signal, the second is the weight (for a weighted prob). E.g.
-  `choose(["4", 3], ["5", 1], ["6", 1])`
-
 ## Signals (new)
-- [ ] **`keyboard`** signal — use the computer keyboard as a MIDI keyboard (à la Ableton)
-  - `a`–`l` = white keys; the row above = black keys
-  - `z` / `x` = octave down / up
-  - `c` / `v` = velocity down / up
-  - Emits notes + velocities like a normal MIDI keyboard
-  - Add a keyboard icon/dropdown up top to select mode: **midi / normal / both**
-    - `midi` = disable normal keyboard typing; `normal` = disable midi; `both` = do both simultaneously
-- [ ] **`tap`** signal — like `keyboard`, but any non-mapped key emits a velocity with **no note**
-  - `c` / `v` retain the velocity down/up function
 - [ ] **`pianoroll`** signal that pulls up an interactive piano roll and emits the drawn notes/velocities
+- [ ] Ability to send signals/midi to specific VSTs. E.g. Kickstart can use a midi trigger OR audio as a secondary input
+  to control when the target sound is sidechained.
 
 ## Docs
 - [ ] Add a link (opens new tab) to **docs**
