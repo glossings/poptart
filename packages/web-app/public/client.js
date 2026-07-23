@@ -396,8 +396,15 @@ async function stopConf() {
 async function pollConf(labelOverride) {
   const trackLabel = labelOverride ?? confSession?.trackLabel;
   if (!trackLabel) return;
-  const { params } = await api('POST', '/api/confPending', { trackId: trackLabel });
+  const { active, params } = await api('POST', '/api/confPending', { trackId: trackLabel });
   for (const p of params ?? []) upsertParam(trackLabel, p.slot, p.name, p.value);
+  // active:false on a session we think is live means the server restarted out from under it -
+  // stop and say so instead of silently polling a dead session with the button still lit.
+  // (Not on the final-drain call from stopConf, which passes labelOverride and expects this.)
+  if (!active && !labelOverride && confSession?.trackLabel === trackLabel) {
+    await stopConf();
+    logLine('conf: the server lost this capture session (restarted?) - click conf again to re-arm it', true);
+  }
 }
 
 function upsertParam(trackLabel, slot, name, value) {
@@ -485,6 +492,15 @@ function blockAtCursor() {
   return blocks.find((b) => idx >= b.start && idx <= b.end) ?? null;
 }
 
+// Give each parameter its address string - the plain name, or "Name#index" when the plugin
+// reuses that name (Diva's three "Frequency"), so completing/copying it targets the exact one.
+// Duplicate detection is per param list (a name collides only within its own plugin).
+function withParamAddrs(params) {
+  const counts = new Map();
+  for (const p of params) counts.set(p.name, (counts.get(p.name) ?? 0) + 1);
+  return params.map((p) => ({ ...p, addr: counts.get(p.name) > 1 ? `${p.name}#${p.index}` : p.name }));
+}
+
 function paramHints(cur, typed, textBefore) {
   // A `.param(` call targets whatever is last in the chain at that point of the method chain:
   // slot 0 (the instrument) before any .fx(), then slot 1, 2, … after each. Count `.fx(`
@@ -497,12 +513,12 @@ function paramHints(cur, typed, textBefore) {
     chainSlots.find((s) => s.slot === slot);
   // Fall back to every loaded plugin's params (tagged by plugin) if the slot isn't loaded yet.
   const pool = entry?.params?.length
-    ? entry.params.map((p) => ({ key: p.name, param: p }))
-    : chainSlots.flatMap((s) => s.params.map((p) => ({ key: p.name, param: p, plugin: s.plugin })));
+    ? withParamAddrs(entry.params).map((p) => ({ key: p.addr, param: p }))
+    : chainSlots.flatMap((s) => withParamAddrs(s.params).map((p) => ({ key: p.addr, param: p, plugin: s.plugin })));
   const completions = rankedMatches(pool, typed, 80).map((item) => ({
-    text: item.param.name,
+    text: item.param.addr,
     displayText:
-      item.param.name +
+      item.param.addr +
       (item.param.label ? ` · ${item.param.label}` : '') +
       (item.plugin ? `  (${item.plugin})` : ''),
   }));
@@ -1635,7 +1651,9 @@ function renderParams() {
   let shown = 0;
   let matched = 0;
   for (const slot of chainSlots) {
-    const matches = slot.params.filter((p) => !query || p.name.toLowerCase().includes(query));
+    // addr disambiguates reused names ("Frequency#95") so the copied string targets exactly the
+    // clicked parameter; searching still matches on it (the base name is a substring of the addr).
+    const matches = withParamAddrs(slot.params).filter((p) => !query || p.addr.toLowerCase().includes(query));
     matched += matches.length;
 
     const head = document.createElement('div');
@@ -1650,7 +1668,7 @@ function renderParams() {
       row.className = 'param-row';
       row.title = 'click to copy';
       const name = document.createElement('span');
-      name.textContent = p.name;
+      name.textContent = p.addr;
       row.appendChild(name);
       if (p.label) {
         const label = document.createElement('span');
@@ -1658,7 +1676,7 @@ function renderParams() {
         label.textContent = p.label;
         row.appendChild(label);
       }
-      row.onclick = () => copyText(p.name, 'param');
+      row.onclick = () => copyText(p.addr, 'param');
       paramList.appendChild(row);
       shown++;
     }

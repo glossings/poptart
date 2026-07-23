@@ -123,6 +123,16 @@ Notes work on either side of `.synth()` — `synth("Serum 2").n("0 2 3").scale("
 same pattern — and a note-less `synth("Serum 2")` plays a default C2 every cycle, so a bare synth
 makes sound immediately.
 
+#### Duplicate parameter names
+
+Some plugins reuse a parameter name across sections — Diva, for instance, has three parameters
+named `Frequency`, one per filter model. A plain `.param("Frequency", …)` targets the **first**
+one. To address a specific one, append its parameter index: `.param("Frequency#95", …)`. You
+rarely type this by hand: the params panel and autocomplete show the `#index` form automatically
+for any name that collides, and the **conf** capture button writes it for you when the knob you
+touch in the plugin's own editor is one of a duplicated set. A parameter whose real name happens
+to contain `#` is matched exactly first, so the suffix only kicks in when there's no literal match.
+
 ### Modulators
 
 Any `.param(...)` value can be a number, a mini-notation string (stepped), an LFO, or an envelope:

@@ -74,7 +74,14 @@ class MappedEngine {
   }
 
   _spec(trackId, slot, name) {
-    return this.mappings.get(this.chains.get(trackId)?.[slot])?.params?.[name];
+    const params = this.mappings.get(this.chains.get(trackId)?.[slot])?.params;
+    if (!params) return undefined;
+    // Accept a "Name#index" disambiguator (see the resolver in poptart.scd): a mapping may key
+    // the exact "Name#index" if two same-named params need different units, otherwise the units
+    // for the base "Name" apply to whichever one is addressed.
+    if (params[name]) return params[name];
+    const base = name.replace(/#\d+$/, '');
+    return base !== name ? params[base] : undefined;
   }
 
   // Public view of _spec, for the conf-capture path (server.js) which needs to know whether a

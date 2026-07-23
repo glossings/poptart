@@ -76,10 +76,11 @@ class OscEngine {
     // /poptart/midiNoteIn message, i.e. each note edge of an active midikeys() route (the note
     // as it sounds, post scale-quantization). What web-app's MIDI record collects.
     this.onMidiNoteIn = null;
-    // Plugin-GUI parameter-gesture feed, (trackId, slot, paramName, value 0..1) - fired for every
-    // /poptart/paramAutomated message, i.e. each parameter a user moves in a plugin's own editor
-    // window while that track is in "conf" (configure) capture mode. Drives web-app's conf
-    // feature, which writes the touched parameter into the code as .param(name, value).
+    // Plugin-GUI parameter-gesture feed, (trackId, slot, paramName, paramIndex, value 0..1) -
+    // fired for every /poptart/paramAutomated message, i.e. each parameter a user moves in a
+    // plugin's own editor window while that track is in "conf" (configure) capture mode. Drives
+    // web-app's conf feature, which writes the touched parameter into the code as .param(name,
+    // value); the index lets it disambiguate plugins that reuse a name (see server's conf code).
     this.onParamAutomated = null;
   }
 
@@ -563,9 +564,9 @@ class OscEngine {
       return;
     }
     if (msg.address === '/poptart/paramAutomated') {
-      // A parameter moved in a plugin's own editor GUI: [trackId, slot, paramName, value 0..1].
-      const [track, slot, name, value] = (msg.args ?? []).map((a) => a?.value ?? a);
-      if (typeof this.onParamAutomated === 'function') this.onParamAutomated(String(track), Number(slot), String(name), Number(value));
+      // A parameter moved in a plugin's own editor GUI: [trackId, slot, paramName, paramIndex, value 0..1].
+      const [track, slot, name, index, value] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onParamAutomated === 'function') this.onParamAutomated(String(track), Number(slot), String(name), Number(index), Number(value));
       return;
     }
     if (!msg.address.endsWith('.reply')) return;

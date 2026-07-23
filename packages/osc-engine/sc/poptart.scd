@@ -65,12 +65,13 @@ var nodeAddr = NetAddr("127.0.0.1", nodePort);
 // are distinct objects (incoming OSC string args arrive as Symbols anyway).
 var tracks = IdentityDictionary.new;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
+var confWant = IdentityDictionary.new; // trackId -> latest requested conf state (see setConfMode)
 // Host tempo (bpm) mirrored into every open VST as emulated DAW transport, so plugin-internal
 // synced LFOs/delays/arps follow setbpm instead of assuming their own default. Updated by
 // '/poptart/setTempo' and applied to plugins as they open (see loadInstrument/loadEffect).
 var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
-var awaitTrack, awaitLoaded, resolvePlugin;
+var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing;
 
@@ -191,6 +192,26 @@ resolvePlugin = { |pluginId|
     var dict = VSTPlugin.plugins(server);
     var desc = dict[pluginId.asSymbol] ?? { dict.values.detect { |d| d.name == pluginId } };
     desc !? { desc.key } ? pluginId;
+};
+
+// Resolve a parameter name to its index. A plain name matches the first parameter with that
+// name (VSTPlugin's own lookup). A "Name#N" suffix - written by conf / the params panel to
+// disentangle plugins that reuse a name across sections (e.g. Diva's three "Frequency") -
+// addresses parameter index N directly. A real name is tried first, so a parameter whose actual
+// name contains '#' still resolves. Returns nil if nothing matches.
+resolveParamIndex = { |info, name|
+    var idx = if (info.notNil) { info.findParamIndex(name.asSymbol) };
+    if (idx.isNil and: { info.notNil }) {
+        var rev = name.reverse.indexOf($#);
+        if (rev.notNil) {
+            var suffix = name.copyRange(name.size - rev, name.size - 1); // chars after '#'
+            if ((suffix.size > 0) and: { suffix.every({ |c| c.isDecDigit }) }) {
+                var n = suffix.asInteger;
+                if ((n >= 0) and: { n < info.parameters.size }) { idx = n };
+            };
+        };
+    };
+    idx;
 };
 
 // --- live MIDI input (midicc()/midikeys() - see /poptart/setParamCC and /poptart/midiRoute) ---
@@ -396,7 +417,7 @@ OSCdef(\poptartLoadInstrument, { |msg|
                         self.parameterAutomated = { |index, value|
                             if (track[\confMode] == true) {
                                 self.info.parameters[index] !? { |p|
-                                    nodeAddr.sendMsg("/poptart/paramAutomated", key, 0, p.name.asString, value.asFloat);
+                                    nodeAddr.sendMsg("/poptart/paramAutomated", key, 0, p.name.asString, index, value.asFloat);
                                 };
                             };
                         };
@@ -447,7 +468,7 @@ OSCdef(\poptartLoadEffect, { |msg|
                             self.parameterAutomated = { |index, value|
                                 if (track[\confMode] == true) {
                                     self.info.parameters[index] !? { |p|
-                                        nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, value.asFloat);
+                                        nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, index, value.asFloat);
                                     };
                                 };
                             };
@@ -570,8 +591,12 @@ OSCdef(\poptartSetParam, { |msg|
         } {
             ctl = track[\controllers][slot];
             if (ctl.notNil) {
-                // ctl.set resolves parameter names in the UGen; values are normalized 0..1.
-                server.makeBundle(latency, { ctl.set(paramName, value.clip(0, 1)) });
+                // Resolve by name (or a "Name#N" index suffix - see resolveParamIndex) and set
+                // that specific parameter; values are normalized 0..1.
+                server.makeBundle(latency, {
+                    var index = resolveParamIndex.(ctl.info, paramName);
+                    if (index.notNil) { ctl.set(index, value.clip(0, 1)) };
+                });
             };
         };
     };
@@ -599,7 +624,7 @@ OSCdef(\poptartSetParamLFO, { |msg|
             } {
                 if (isChannel.not) {
                     ctl = track[\controllers][slot];
-                    index = ctl.info.findParamIndex(paramName.asSymbol);
+                    index = resolveParamIndex.(ctl.info, paramName);
                 };
                 if (isChannel.not and: { index.isNil }) {
                     ("poptart: setParamLFO: plugin has no parameter named '" ++ paramName
@@ -679,7 +704,7 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
             } {
                 if (isChannel.not) {
                     ctl = track[\controllers][slot];
-                    index = ctl.info.findParamIndex(paramName.asSymbol);
+                    index = resolveParamIndex.(ctl.info, paramName);
                 };
                 if (isChannel.not and: { index.isNil }) {
                     ("poptart: setParamShapeLFO: plugin has no parameter named '" ++ paramName ++ "'").warn;
@@ -761,7 +786,7 @@ OSCdef(\poptartSetParamEnv, { |msg|
             } {
                 if (isChannel.not) {
                     ctl = track[\controllers][slot];
-                    index = ctl.info.findParamIndex(paramName.asSymbol);
+                    index = resolveParamIndex.(ctl.info, paramName);
                 };
                 if (isChannel.not and: { index.isNil }) {
                     ("poptart: setParamEnv: plugin has no parameter named '" ++ paramName
@@ -869,7 +894,7 @@ OSCdef(\poptartSetParamCC, { |msg|
             } {
                 if (isChannel.not) {
                     ctl = track[\controllers][slot];
-                    index = ctl.info.findParamIndex(paramName.asSymbol);
+                    index = resolveParamIndex.(ctl.info, paramName);
                 };
                 if (isChannel.not and: { index.isNil }) {
                     ("poptart: setParamCC: plugin has no parameter named '" ++ paramName
@@ -1150,11 +1175,24 @@ OSCdef(\poptartShowPluginEditor, { |msg|
 
 // "conf" (configure) capture on/off for a track. When on, each open plugin's parameterAutomated
 // hook (set in loadInstrument/loadEffect) forwards GUI knob moves to Node; off, they stay quiet.
-// A missing/pending track just no-ops - the next eval re-arms and the client re-sends conf mode.
+// The track may not exist yet (conf clicked after a restart but before the first eval), so wait
+// for it rather than dropping the flag. confWant holds the latest requested state per track:
+// every waiting fork applies that instead of its own captured arg, so an on->off flip while the
+// track is still being built resolves to the last click no matter which fork wakes first.
 OSCdef(\poptartSetConfMode, { |msg|
     var key = msg[1].asSymbol, on = msg[2].asInteger;
-    var track = tracks[key];
-    if (track.isKindOf(Event)) { track[\confMode] = (on == 1) };
+    confWant[key] = (on == 1);
+    fork {
+        var track = awaitTrack.(key, 30);
+        if (track.notNil) {
+            track[\confMode] = confWant[key];
+            ("poptart: conf capture " ++ if (confWant[key]) { "ON" } { "OFF" }
+                ++ " for track " ++ key).postln;
+        } {
+            ("poptart: conf: track '" ++ key ++ "' never appeared - conf not armed"
+                ++ " (evaluate the pattern, then toggle conf again)").warn;
+        };
+    };
 }, '/poptart/setConfMode');
 
 // --- plugin state (synth("Serum 2", { state }) round-trip - see OscEngine's gz64 framing) ---

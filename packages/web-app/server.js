@@ -159,37 +159,37 @@ async function restartEngine() {
     engine = null;
     mappedEngine = null;
     engine = await loadEngine();
-    if (engine) {
-      mappedEngine = new MappedEngine(engine);
-      if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
-      transport.onCpsChange = syncVstTransport;
-      syncVstTransport(); // the fresh sclang needs the surviving transport's tempo, not 120
-      engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
-      engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
-      engine.onParamAutomated = (trackId, slot, name, value) => handleParamAutomated(trackId, slot, name, value);
-    }
+    if (engine) wireEngine();
   } finally {
     engineRestarting = false;
   }
+}
+
+// ALL post-start engine wiring, shared by init() and restartEngine(). Single function on
+// purpose: when these were two hand-maintained copies, onParamAutomated existed only on the
+// restart path - so conf capture silently dropped every gesture on a fresh boot until the
+// first audio-device change. Any new engine callback goes here and nowhere else.
+function wireEngine() {
+  mappedEngine = new MappedEngine(engine);
+  // Born paused at cycle 0: the clock only advances while something is playing (first eval
+  // starts it, /api/stop freezes it back at 0). Survives engine restarts, hence the guard.
+  if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
+  transport.onCpsChange = syncVstTransport;
+  syncVstTransport(); // a fresh sclang needs the surviving transport's tempo, not 120
+  // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
+  // live-value store - what a Tier-1 midicc() signal samples.
+  engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
+  // Live note edges from midikeys() routes - what an armed MIDI recording collects.
+  engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
+  // Plugin-GUI knob gestures - what conf capture writes into the code.
+  engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackId, slot, name, index, value);
 }
 
 async function init() {
   patternCore = await import('@poptart/pattern-core');
   extendStringPrototype(patternCore);
   engine = await loadEngine();
-  if (engine) {
-    mappedEngine = new MappedEngine(engine);
-    // Born paused at cycle 0: the clock only advances while something is playing (first eval
-    // starts it, /api/stop freezes it back at 0).
-    transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
-    transport.onCpsChange = syncVstTransport;
-    syncVstTransport();
-    // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
-    // live-value store - what a Tier-1 midicc() signal samples.
-    engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
-    // Live note edges from midikeys() routes - what an armed MIDI recording collects.
-    engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
-  }
+  if (engine) wireEngine();
 }
 
 // Strudel-flavored ergonomics: let mini-notation strings be used directly as patterns in
@@ -439,7 +439,7 @@ function finalizeMidiRec() {
 // written .param() call round-trips - and reads in Hz/dB/etc. like the rest of that plugin's code.
 // ---------------------------------------------------------------------------------------------
 
-let conf = null; // { trackId, touched: Map<`slot|name`, { slot, name, value }> } while a track configures
+let conf = null; // { trackId, touched: Map<`slot|name`, { slot, name, value }>, seen: Set<addr> } while a track configures
 
 // Round to `sig` significant figures - real-world unit values (Hz, ms) span wide magnitudes, so a
 // fixed decimal count would be either lossy or noisy. Normalized values use a plain 4 decimals.
@@ -449,11 +449,35 @@ function roundSig(x, sig = 4) {
   return Math.round(x * mag) / mag;
 }
 
-function handleParamAutomated(trackId, slot, name, normValue) {
-  if (!conf || conf.trackId !== trackId) return; // gesture from a track not currently configuring
+// The address a touched parameter is written as: its plain name, or "Name#index" when the
+// plugin has more than one parameter sharing that name (Diva's three "Frequency", etc.), so the
+// generated .param() call targets the exact one that was moved rather than the first match. Falls
+// back to the plain name if the plugin's parameter list isn't cached yet (nothing to compare).
+function paramAddr(plugin, name, index) {
+  const list = paramsByPlugin.get(plugin);
+  if (!list) return name;
+  const sameName = list.reduce((n, p) => n + (p.name === name ? 1 : 0), 0);
+  return sameName > 1 ? `${name}#${index}` : name;
+}
+
+function handleParamAutomated(trackId, slot, name, index, normValue) {
+  if (!conf || conf.trackId !== trackId) {
+    // sclang only forwards gestures for a conf-armed track, so landing here means the two ends
+    // disagree about the session - log it, this is the diagnostic for every "conf writes
+    // nothing" report.
+    console.log(`[conf] gesture "${name}" from track "${trackId}" ignored - configuring: ${conf ? `"${conf.trackId}"` : 'none'}`);
+    return;
+  }
   const spec = mappedEngine?.specFor(trackId, slot, name);
   const value = spec ? roundSig(toRealWorld(normValue, spec)) : Math.round(normValue * 1e4) / 1e4;
-  conf.touched.set(`${slot}|${name}`, { slot, name, value });
+  const addr = paramAddr(mappedEngine?.chains.get(trackId)?.[slot], name, index);
+  // One line per param per session (not per gesture - dragging floods otherwise), so the server
+  // console shows what conf is capturing.
+  if (!conf.seen.has(addr)) {
+    conf.seen.add(addr);
+    console.log(`[conf] capturing "${addr}" (track "${trackId}" slot ${slot})`);
+  }
+  conf.touched.set(`${slot}|${addr}`, { slot, name: addr, value });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -626,6 +650,10 @@ const routes = {
     // feed. Idempotent, so re-sending every eval is fine.
     if (patternCore.midiInUse()) engine.enableMidi();
 
+    // Re-arm conf capture engine-side: sclang keeps the flag on its track object, which an
+    // engine restart discards - the eval that recreates the track re-sends it. Idempotent.
+    if (conf && active.some((b) => b.label === conf.trackId)) engine.setConfMode(conf.trackId, true);
+
     return {
       status: 200,
       body: {
@@ -706,7 +734,7 @@ const routes = {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const trackId = body.trackId ?? 'default';
     if (conf && conf.trackId !== trackId) engine.setConfMode(conf.trackId, false); // release the previous track
-    conf = body.on ? { trackId, touched: new Map() } : null;
+    conf = body.on ? { trackId, touched: new Map(), seen: new Set() } : null;
     engine.setConfMode(trackId, !!body.on);
     return { status: 200, body: { on: !!body.on, trackId } };
   },
@@ -920,7 +948,12 @@ function serveStatic(req, res) {
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream' });
+    // no-cache (= revalidate, not "don't cache"): without it browsers heuristically cache
+    // client.js etc., so after a server update a plain reload can keep running stale UI code.
+    res.writeHead(200, {
+      'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
+      'Cache-Control': 'no-cache',
+    });
     res.end(data);
   });
 }
