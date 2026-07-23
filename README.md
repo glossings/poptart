@@ -324,9 +324,9 @@ Two knobs help:
   and can't be added to a running `Synth`. Swapping *which* plugin occupies a slot is fine;
   growing the chain past 8 isn't handled yet.
 - Mini-notation supports sequences, rests, brackets/stacks, alternation, fast/slow, replicate,
-  weight, elongation/ties, euclidean rhythms, and per-cycle alternation rates. Polymeter
-  (`{a b, c d}`), degrade (`?`), and cycle-internal rate patterns (`a*[2 3]`) aren't implemented
-  yet.
+  weight, elongation/ties, euclidean rhythms, per-cycle alternation rates, degrade (`?`), and
+  random choice (`|`). Polymeter (`{a b, c d}`) and cycle-internal rate patterns (`a*[2 3]`)
+  aren't implemented yet.
 - `.slice()` transient analysis is Node-side and WAV-only; other formats play fine but have no
   slices.
 

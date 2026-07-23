@@ -149,6 +149,10 @@ async function restartEngine() {
       mappedEngine?.removeChain(label);
     }
     schedulers.clear();
+    // The replacement engine has no tracks and no held notes - drop the keyboard-routing state
+    // so a stale held note isn't "released" against the new engine on the next eval.
+    kbTracks.clear();
+    kbHeld.clear();
     transport?.stop(); // playback is over - freeze the clock at cycle 0 until the next eval
     if (engine) {
       await engine.stop();
@@ -239,7 +243,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro'];
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -473,6 +477,44 @@ function handleMidiNoteIn(trackId, note, vel, isOn) {
     if (!ev) return; // off for a note that started before the window (or after it closed)
     pushRecEvent(trackId, { ...ev, end: Math.min(midiRec.cycles, Math.max(ev.start + 1e-3, rel)) });
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Live computer-keyboard routing (keyboard()/tap()). Unlike a midikeys() route, the note source
+// is the browser, not the audio engine - so the flow is inverted: after each eval we tell the
+// editor which tracks are keyboard targets (kbTracks), and the browser POSTs every key edge to
+// /api/keyNote, which drives engine.noteOn/noteOff on that track (the same call the scheduler
+// makes for pattern notes, so env()/lfo() gating is identical). We track held notes per track so
+// a stop, re-eval, or dropped keyboard() can release anything still down instead of leaving a
+// stuck note. Key edges also feed the MIDI recorder, so a typed performance records like a
+// midikeys() one.
+// ---------------------------------------------------------------------------------------------
+
+const kbTracks = new Map(); // trackId -> { kind: 'keyboard'|'tap' } - tracks currently accepting key edges
+const kbHeld = new Map(); // trackId -> Set<note> currently held via /api/keyNote
+
+// Send note-offs for every key still held on a track and forget them (stop, re-eval, un-arm).
+function releaseKbNotes(trackId) {
+  const held = kbHeld.get(trackId);
+  if (held && engine) {
+    const now = engine.getTime();
+    for (const note of held) {
+      engine.noteOff(trackId, note, now);
+      handleMidiNoteIn(trackId, note, 0, false); // close its recorded event too
+    }
+  }
+  kbHeld.delete(trackId);
+}
+
+// Re-derive the armed keyboard tracks from the just-evaluated active patterns, releasing any
+// track that is no longer a keyboard target. Returns the list the eval response hands the editor.
+function syncKbTracks(active) {
+  const next = new Map();
+  for (const b of active) if (b.sig.keyboardRoute) next.set(b.label, b.sig.keyboardRoute);
+  for (const id of kbTracks.keys()) if (!next.has(id)) releaseKbNotes(id);
+  kbTracks.clear();
+  for (const [id, route] of next) kbTracks.set(id, route);
+  return [...kbTracks].map(([trackId, route]) => ({ trackId, kind: route.kind }));
 }
 
 function midiRecTick() {
@@ -739,11 +781,15 @@ const routes = {
     // engine restart discards - the eval that recreates the track re-sends it. Idempotent.
     if (conf && active.some((b) => b.label === conf.trackId)) engine.setConfMode(conf.trackId, true);
 
+    // Which tracks the browser should route computer-keyboard input to (keyboard()/tap()).
+    const keyboardTracks = syncKbTracks(active);
+
     return {
       status: 200,
       body: {
         cps: transport.cps,
         transport: transport.snapshot(),
+        keyboardTracks,
         tracks: built.map((b) => ({
           label: b.label,
           muted: b.muted,
@@ -754,6 +800,7 @@ const routes = {
           instrument: b.sig.instrument,
           fxChain: b.sig.fxChain,
           paramNames: Object.keys(b.sig.paramSignals),
+          keyboard: b.sig.keyboardRoute?.kind ?? null,
         })),
       },
     };
@@ -761,9 +808,45 @@ const routes = {
 
   'POST /api/stop': async () => {
     for (const sch of schedulers.values()) sch.stop();
+    // Release any live-keyboard notes still held so nothing rings through the stop. The tracks
+    // stay armed (kbTracks intact) - a live keyboard isn't sequenced, so it keeps playing after
+    // stop until the pattern is removed or re-evaluated.
+    for (const id of kbTracks.keys()) releaseKbNotes(id);
     // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top.
     transport?.stop();
     return { status: 200, body: { transport: transport?.snapshot() ?? null } };
+  },
+
+  // A live computer-keyboard note edge from the browser (keyboard()/tap() tracks). Body:
+  // { trackId, note, vel, isOn }. Routed straight to the instrument like a scheduled note, so
+  // env()/lfo() shapes gate the same way; also fed to the MIDI recorder so typed takes record.
+  // Ignored for a track that isn't currently a keyboard target (a stale key-up after re-eval).
+  'POST /api/keyNote': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    const trackId = String(body.trackId ?? '');
+    if (!kbTracks.has(trackId)) return { status: 200, body: { ok: false, reason: 'not a keyboard track' } };
+    const note = Math.round(Number(body.note));
+    if (!Number.isFinite(note)) throw new Error('keyNote: note must be a number');
+    const isOn = !!body.isOn;
+    const now = engine.getTime();
+    let held = kbHeld.get(trackId);
+    if (!held) kbHeld.set(trackId, (held = new Set()));
+    if (isOn) {
+      const vel = Math.max(0, Math.min(1, Number(body.vel ?? 1)));
+      if (vel <= 0) return { status: 200, body: { ok: true } };
+      // Retrigger a re-pressed key cleanly (some layouts fire keydown without an intervening
+      // keyup); the browser suppresses auto-repeat, so a real double-down means a new hit.
+      if (held.has(note)) engine.noteOff(trackId, note, now);
+      engine.noteOn(trackId, note, vel, now);
+      held.add(note);
+      handleMidiNoteIn(trackId, note, vel, true);
+    } else {
+      if (!held.has(note)) return { status: 200, body: { ok: true } };
+      engine.noteOff(trackId, note, now);
+      held.delete(note);
+      handleMidiNoteIn(trackId, note, 0, false);
+    }
+    return { status: 200, body: { ok: true } };
   },
 
   // Introspection: real parameter names of the plugin in a track slot. Body: { trackId, slot }.

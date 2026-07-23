@@ -125,8 +125,8 @@ hand.
   still reports "engine ready." Restart the dev server. Supervision is on the roadmap.
 - **Sparse parameter mappings.** Only one worked mapping file ships so far; other plugins need a
   mapping file for real-world units.
-- **Mini-notation gaps.** Polymeter (`{a b, c d}`), degrade (`?`), and cycle-internal rate patterns
-  (`a*[2 3]`) aren't implemented yet.
+- **Mini-notation gaps.** Polymeter (`{a b, c d}`) and cycle-internal rate patterns (`a*[2 3]`)
+  aren't implemented yet. Degrade (`?`) and random choice (`|`) now are.
 - **Slice analysis is WAV-only** and Node-side; other formats play but have no transient slices.
 
 ---

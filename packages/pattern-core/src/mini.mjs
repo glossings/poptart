@@ -16,18 +16,24 @@
 //   "bd(3,8)"      euclidean rhythm: 3 pulses over 8 steps (optionally "(3,8,2)" with rotation)
 //   "<a b>:x"      field suffix on a group: distributes onto every atom inside, so
 //                  "<18 16>:3" is exactly "<18:3 16:3>" (pairs with .as("n:clip") etc.)
+//   "a?"  "a?0.3"  degrade: drop this event with 50% (bare) or the given probability. The coin
+//                  flip is deterministic per cycle+onset (see rng), so the scheduler and the
+//                  editor's highlighter agree and a bar replays identically.
+//   "a | b | c"    random choice: pick one of the `|`-separated alternatives each cycle (uniform,
+//                  deterministic per cycle). Works at top level and inside "[...]", so
+//                  "<0 1 [2 | 3]>" alternates 0, 1, then a coin-flip between 2 and 3.
 //
 // NOT supported yet (will throw a clear parse error rather than silently doing the wrong
-// thing): polymeter `{a b, c d}`, degrade `?`, dot-groups `a . b c`, cycle-internal rate
-// patterns (`a*[2 3]` - only per-cycle alternation `a*<2 3>` works), and pattern-valued
-// euclid `(...)` arguments.
+// thing): polymeter `{a b, c d}`, dot-groups `a . b c`, cycle-internal rate patterns
+// (`a*[2 3]` - only per-cycle alternation `a*<2 3>` works), and pattern-valued euclid `(...)`
+// arguments.
 //
 // The whole interpreter works in terms of one function: getStepsForCycle(ast, cycleNumber),
 // which returns this cycle's flat step list as plain objects - never anything Strudel-shaped.
 
 export function parseMini(str) {
   const tokens = tokenize(str);
-  const { node, rest } = parseSequence(tokens, /* stopAt */ new Set());
+  const { node, rest } = parseLayers(tokens, /* stopType */ null);
   if (rest.length > 0) {
     throw new Error(`[mini] unexpected token "${rest[0].text}" while parsing "${str}"`);
   }
@@ -53,7 +59,7 @@ export function getStepsForCycle(ast, cycleNumber) {
 // Tokenizer
 // ---------------------------------------------------------------------------------------------
 
-const SINGLE_CHAR_TOKENS = new Set(['[', ']', '<', '>', '(', ')', ',', '*', '/', '!', '@', '~']);
+const SINGLE_CHAR_TOKENS = new Set(['[', ']', '<', '>', '(', ')', ',', '*', '/', '!', '@', '~', '|', '?']);
 // atoms: note names, numbers, words, sample names - anything not whitespace/punctuation above
 const ATOM_RE = /^[A-Za-z0-9#.\-_:]+/;
 
@@ -71,8 +77,8 @@ function tokenize(str) {
       i++;
       continue;
     }
-    if (ch === '{' || ch === '}' || ch === '?') {
-      throw new Error(`[mini] "${ch}" (polymeter/degrade) is not supported yet, in "${str}"`);
+    if (ch === '{' || ch === '}') {
+      throw new Error(`[mini] "${ch}" (polymeter) is not supported yet, in "${str}"`);
     }
     const m = ATOM_RE.exec(str.slice(i));
     if (!m) {
@@ -90,10 +96,11 @@ function tokenize(str) {
 
 // ---------------------------------------------------------------------------------------------
 // Parser (recursive descent) - produces our own tiny AST:
-//   { type: 'seq'|'stack'|'alt', items: [{ weight, reps, node }] }
+//   { type: 'seq'|'stack'|'alt'|'choice', items: [{ weight, reps, node }] }
 //   { type: 'atom', value: string }
 //   { type: 'fast'|'slow', item, amount }
 //   { type: 'euclid', item, pulses, steps, rotation }
+//   { type: 'degrade', item, prob, seed }
 // ---------------------------------------------------------------------------------------------
 
 // "_" (elongate/tie) never becomes an element of its own: it folds into the previous item's
@@ -115,7 +122,7 @@ function pushElement(items, element) {
 
 function parseSequence(tokens, stopTypes) {
   const items = [];
-  while (tokens.length > 0 && !stopTypes.has(tokens[0].type) && tokens[0].type !== ',') {
+  while (tokens.length > 0 && !stopTypes.has(tokens[0].type) && tokens[0].type !== ',' && tokens[0].type !== '|') {
     const { element, rest } = parseElement(tokens);
     pushElement(items, element);
     tokens = rest;
@@ -123,24 +130,49 @@ function parseSequence(tokens, stopTypes) {
   return { node: { type: 'seq', items }, rest: tokens };
 }
 
+// Reads one or more sequences separated by `,` (stack: play simultaneously) and/or `|` (random
+// choice: pick one per cycle), up to `stopType` (']' inside a group, or null at top level). This
+// is the shared entry for "[...]" and the whole pattern, so both get stacks and choices. When the
+// two mix, `,` binds tighter: "[a, b | c]" is a coin-flip between the stack "[a, b]" and "c".
+function parseLayers(tokens, stopType) {
+  const stop = stopType ? new Set([stopType]) : new Set();
+  const seqs = [];
+  const seps = []; // separator token before each seq after the first
+  let firstBarPos = 0; // char offset of the first `|`, the choice node's decorrelating seed
+  let r = parseSequence(tokens, stop);
+  seqs.push(r.node);
+  tokens = r.rest;
+  while (tokens[0]?.type === ',' || tokens[0]?.type === '|') {
+    if (tokens[0].type === '|' && !firstBarPos) firstBarPos = tokens[0].start + 1;
+    seps.push(tokens[0].type);
+    tokens = tokens.slice(1);
+    r = parseSequence(tokens, stop);
+    seqs.push(r.node);
+    tokens = r.rest;
+  }
+  return { node: buildLayers(seqs, seps, firstBarPos), rest: tokens };
+}
+
+// Folds `,`/`|`-separated sequences into a node: split the run at each `|` into choice chunks,
+// each chunk's `,`-joined members become a stack (or pass through if solitary), then a multi-chunk
+// run wraps in a 'choice'. A single sequence returns unwrapped, so plain "a b" is unchanged.
+function buildLayers(seqs, seps, seed) {
+  const toStack = (layers) =>
+    layers.length === 1 ? layers[0] : { type: 'stack', items: layers.map((n) => ({ weight: 1, reps: 1, node: n })) };
+  const chunks = [[seqs[0]]];
+  for (let i = 0; i < seps.length; i++) {
+    if (seps[i] === '|') chunks.push([seqs[i + 1]]);
+    else chunks[chunks.length - 1].push(seqs[i + 1]);
+  }
+  if (chunks.length === 1) return toStack(chunks[0]);
+  return { type: 'choice', seed, items: chunks.map((c) => ({ weight: 1, reps: 1, node: toStack(c) })) };
+}
+
 function parseGroup(tokens) {
   // tokens[0] is '['
-  tokens = tokens.slice(1);
-  const layers = [];
-  let { node: first, rest } = parseSequence(tokens, new Set([']']));
-  layers.push(first);
-  tokens = rest;
-  while (tokens[0]?.type === ',') {
-    tokens = tokens.slice(1);
-    const { node, rest: rest2 } = parseSequence(tokens, new Set([']']));
-    layers.push(node);
-    tokens = rest2;
-  }
-  if (tokens[0]?.type !== ']') throw new Error('[mini] expected closing "]"');
-  tokens = tokens.slice(1);
-
-  const node = layers.length === 1 ? layers[0] : { type: 'stack', items: layers.map((n) => ({ weight: 1, reps: 1, node: n })) };
-  return { node, rest: tokens };
+  const { node, rest } = parseLayers(tokens.slice(1), ']');
+  if (rest[0]?.type !== ']') throw new Error('[mini] expected closing "]"');
+  return { node, rest: rest.slice(1) };
 }
 
 function parseAngle(tokens) {
@@ -229,6 +261,18 @@ function parseElement(tokens) {
       }
       weight *= Number(amountTok.text);
       rest = rest.slice(2);
+      continue;
+    }
+
+    if (op.type === '?') {
+      // "a?" is a 50% drop; "a?0.3" a 30% drop. The probability must sit right up against the
+      // "?" (no space) to count - "a? 3" is a degrade followed by a separate step "3". The "?"'s
+      // own char offset seeds the coin flip so sibling "?"s in one pattern don't flip in lockstep.
+      const probTok = rest[1];
+      const adjacent = probTok && probTok.type === 'atom' && probTok.start === op.end && !Number.isNaN(Number(probTok.text));
+      const prob = adjacent ? Number(probTok.text) : 0.5;
+      node = { type: 'degrade', item: node, prob, seed: op.start };
+      rest = rest.slice(adjacent ? 2 : 1);
       continue;
     }
 
@@ -359,6 +403,21 @@ function astToSteps(node, cycle) {
       return out;
     }
 
+    case 'degrade':
+      // Drop each onset with probability `prob`, deterministically per cycle+onset (see rng).
+      // A dropped step becomes a rest (value null) so surrounding steps keep their timing.
+      return astToSteps(node.item, cycle).map((s) =>
+        s.value != null && rng(cycle + s.start, node.seed + 1) < node.prob ? { ...s, value: null } : s,
+      );
+
+    case 'choice': {
+      // One alternative per cycle, chosen by the same deterministic hash. The pick sees the outer
+      // cycle unchanged (so a "<...>" inside a chosen chunk still steps by absolute cycle).
+      if (node.items.length === 0) return [];
+      const idx = Math.min(node.items.length - 1, Math.floor(rng(cycle, node.seed) * node.items.length));
+      return astToSteps(node.items[idx].node, cycle);
+    }
+
     default:
       throw new Error(`[mini] unknown node type "${node.type}"`);
   }
@@ -434,4 +493,14 @@ function rotateArray(arr, n) {
   const len = arr.length;
   const r = ((n % len) + len) % len;
   return arr.slice(r).concat(arr.slice(0, r));
+}
+
+// Deterministic 0..1 hash of two numbers, driving the `?` (degrade) and `|` (choice) operators.
+// Same formula as pattern-core's signal.mjs rng2, on purpose: this file also runs in the browser
+// for playback highlighting, so client and server must flip every coin identically. Determinism
+// per (cycle, seed) is the whole point - stepsForCycle is queried repeatedly and a bar must play
+// the same each time it comes round.
+function rng(a, b) {
+  const s = Math.sin(a * 12.9898 + b * 78.233 + 43.123) * 43758.5453;
+  return s - Math.floor(s);
 }

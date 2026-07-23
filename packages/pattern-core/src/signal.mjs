@@ -59,6 +59,11 @@ export class Sig {
     // Live MIDI note routing, from midikeys(): { device, channel (null = all) }. The scheduler
     // hands this to the engine, which plays the device's note stream on this track directly.
     this.midiNotes = opts.midiNotes ?? null;
+    // Live computer-keyboard routing, from keyboard()/tap(): { kind: 'keyboard'|'tap' }. Unlike
+    // midiNotes this can't be routed engine-side (the keys are in the browser) - the server
+    // reports the track as a keyboard target after eval and the browser POSTs its key edges to
+    // /api/keyNote, which drives engine.noteOn/noteOff. Schedules no notes of its own.
+    this.keyboardRoute = opts.keyboardRoute ?? null;
   }
 
   _clone(overrides) {
@@ -84,6 +89,7 @@ export class Sig {
       sampler: this.sampler,
       slotStates: this.slotStates,
       midiNotes: this.midiNotes,
+      keyboardRoute: this.keyboardRoute,
     };
   }
 
@@ -441,6 +447,102 @@ export class Sig {
   }
 
   // -------------------------------------------------------------------------------------------
+  // Randomised / structural combinators (Strudel ports). Each rebuilds the step grid and routes
+  // sample() through it (sampleViaSteps), so the two stay in lock-step; randomness is a
+  // deterministic hash of cycle+onset (rng2), so re-queries and the highlighter always agree.
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Randomly drops notes: `.degrade(0.3)` silences each event with 30% probability (default
+   * 0.5, Strudel's `.degradeBy`). The choice is deterministic per cycle+onset, so the scheduler
+   * and the editor's highlighter agree and a bar replays the same each time it comes round. The
+   * mini-notation `?` postfix (`"4?0.3"`) is the same operation written inside a pattern string.
+   * `seed` decorrelates independent .degrade()s that would otherwise flip together.
+   */
+  degrade(prob = 0.5, seed = 0) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .degrade() needs a step pattern, e.g. n("0 1 2 3").degrade(0.3)');
+    }
+    const p = Number(prob);
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) =>
+      base(cycle).map((s) => (s.value != null && rng2(cycle + s.start, seed + 1) < p ? { ...s, value: null } : s));
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Subdivides each event into `reps` retriggers (Strudel's `ply`). The optional second argument
+   * `(x, n) => signal` transforms the value on each repetition - `n` is the repetition index
+   * (0..reps-1) and `x` is this whole signal - so `n("0 2").ply(3, (x, n) => x.add(n * 12))`
+   * plays each degree three times, climbing an octave per hit. Omit it for a plain retrigger
+   * (`s("bd").ply(2)`). The transform is sampled at the original event's onset.
+   */
+  ply(reps, fn) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .ply() needs a step pattern, e.g. n("0 2").ply(3)');
+    }
+    const count = Math.max(1, Math.round(Number(reps)));
+    const variants = Array.from({ length: count }, (_, i) => (fn ? toSignal(fn(this, i)) : this));
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => {
+      const out = [];
+      for (const s of base(cycle)) {
+        if (s.value == null || s.cont) { out.push(s); continue; } // rests/ties don't subdivide
+        const w = (s.end - s.start) / count;
+        const mid = cycle + (s.start + s.end) / 2; // sample the transform at the source onset
+        for (let i = 0; i < count; i++) {
+          const v = variants[i].sample(mid, 1);
+          out.push({ ...s, start: s.start + i * w, end: s.start + (i + 1) * w, value: v == null ? null : v });
+        }
+      }
+      return out;
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Overlays `reps` delayed copies of the pattern, each offset a further `time` cycles (like a
+   * tape echo): `.echo(3, 1/8)` plays the dry hit plus two repeats an eighth-cycle apart. The
+   * optional `(x, n) => signal` transforms copy `n` (`n = 0` is the dry copy), so
+   * `.echo(4, 1/8, (x, n) => x.gain(Math.pow(0.6, n)))` fades the tail. Copies ring across cycle
+   * boundaries, reported as `cont` tails in the following cycle like a held note (so the
+   * scheduler triggers each onset exactly once).
+   */
+  echo(reps, time = 0.25, fn) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .echo() needs a step pattern, e.g. s("bd").echo(3, 1/8)');
+    }
+    const count = Math.max(1, Math.round(Number(reps)));
+    const dt = Number(time);
+    const variants = Array.from({ length: count }, (_, i) => (fn ? toSignal(fn(this, i)) : this));
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => {
+      const out = [];
+      for (let n = 0; n < count; n++) {
+        const shift = n * dt;
+        // Copies land `shift` cycles later, so this cycle's events can originate up to a cycle
+        // either side of (cycle - shift). Each source cycle's steps are distinct - no double count.
+        const anchor = Math.floor(cycle - shift);
+        for (let src = anchor - 1; src <= anchor + 1; src++) {
+          for (const s of base(src)) {
+            if (s.value == null || s.cont) continue;
+            const start = src + s.start + shift - cycle;
+            const end = src + s.end + shift - cycle;
+            if (end <= 0 || start >= 1) continue;
+            const v = variants[n].sample(src + (s.start + s.end) / 2, 1);
+            const value = v == null ? null : v;
+            // Onset before this cycle -> a ringing tail, not a fresh trigger (cont), same as a tie.
+            if (start < 0) out.push({ ...s, start: 0, end, value, cont: true });
+            else out.push({ ...s, start, end, value });
+          }
+        }
+      }
+      return out.sort((a, b) => a.start - b.start);
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  // -------------------------------------------------------------------------------------------
   // Sampler config - only meaningful on s("pack") patterns. Every setter accepts a number, a
   // mini string, or any Sig; the value is sampled at each event's onset, so patterns and LFOs
   // all work: s("bd").i("0 3").speed(sine(0.2).range(0.5, 2)). A patterned value also gives
@@ -782,6 +884,46 @@ export function s(value) {
   return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
 }
 
+// Independent choose() calls need to draw independently - a per-call seed decorrelates them.
+// Assigned at build time (eval), so it's stable across every cycle the resulting Sig plays.
+let chooseSeedCounter = 0;
+
+/**
+ * `choose("0", "3", "5")` - a signal that randomly picks one of its options each cycle (uniform
+ * by default). Options are anything toSignal accepts (mini strings, numbers, other signals), and
+ * a `[option, weight]` pair biases the draw: `choose(["0", 3], ["3", 1], ["5", 1])` picks "0"
+ * three times as often as the others. The pick is deterministic per cycle (stable across
+ * re-queries and re-triggers within a take), so it drops in anywhere a signal goes -
+ * `n(choose("0", "3", "7"))`, `.speed(choose(0.5, 1, 2))`, `s(choose("bd", "hh"))`. A chosen
+ * option that is itself a pattern plays in full for that cycle (mini `|` is the in-string form).
+ */
+export function choose(...options) {
+  if (options.length === 0) throw new Error('[signal] choose() needs at least one option');
+  const entries = options.map((o) => {
+    const [val, weight] = Array.isArray(o) ? [o[0], Number(o[1] ?? 1)] : [o, 1];
+    return { sig: toSignal(val), weight: weight > 0 ? weight : 0 };
+  });
+  const total = entries.reduce((sum, e) => sum + e.weight, 0);
+  if (!(total > 0)) throw new Error('[signal] choose() needs at least one positive weight');
+  const seed = ++chooseSeedCounter;
+  const pick = (cycle) => {
+    let r = rng2(cycle, seed) * total;
+    for (const e of entries) {
+      r -= e.weight;
+      if (r < 0) return e;
+    }
+    return entries[entries.length - 1];
+  };
+  const stepsForCycle = (cycle) => {
+    const e = pick(cycle);
+    if (e.sig.stepsForCycle) return e.sig.stepsForCycle(cycle);
+    const v = e.sig.sample(cycle + 0.5, 1); // a constant/continuous option becomes one whole-cycle step
+    return v == null ? [] : [{ start: 0, end: 1, value: v }];
+  };
+  const sample = (t, cps, pos) => pick(Math.floor(pos ?? t * cps)).sig.sample(t, cps, pos);
+  return new Sig(sample, { stepsForCycle });
+}
+
 // What a note-less synth("X") plays: C2 (MIDI 24 in this package's c5 = 60 convention), one
 // whole-cycle note per cycle - the same note at which a sample plays back at native speed.
 const DEFAULT_SYNTH_NOTE = 24;
@@ -818,6 +960,32 @@ export function note(value) {
 function hash01(i) {
   const s = Math.sin(i * 127.1 + 311.7) * 43758.5453123;
   return s - Math.floor(s);
+}
+
+// Deterministic 0..1 hash of two numbers - the shared RNG behind the randomised combinators
+// (.degrade()/choose()) and, mirrored by the same formula in mini.mjs, the `?`/`|` mini-notation
+// operators. It must stay deterministic per (cycle, seed): the scheduler and the editor's
+// highlighter query stepsForCycle independently, so a coin flip has to land the same way both
+// times, and a given bar has to replay identically each cycle it comes round.
+function rng2(a, b) {
+  const s = Math.sin(a * 12.9898 + b * 78.233 + 43.123) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+// Samples a step-list-backed signal at a point in time by locating the step covering that phase -
+// keeps a derived pattern's continuous sample() in agreement with its stepsForCycle. The
+// randomised/structural combinators below (.degrade()/.ply()/.echo()) build their step grid first
+// and sample through it, so the two views can never disagree. Last covering step wins, so
+// overlapping copies (.echo()) read as the most recent onset.
+function sampleViaSteps(stepsForCycleFn, t, cps, pos) {
+  const cyclePos = pos ?? t * cps;
+  const cycle = Math.floor(cyclePos);
+  const phase = cyclePos - cycle;
+  let found = null;
+  for (const s of stepsForCycleFn(cycle)) {
+    if (s.value != null && phase >= s.start && phase < s.end) found = s;
+  }
+  return found ? found.value : null;
 }
 
 function sampleLfoIR(ir, tSeconds, cps, pos) {
@@ -996,4 +1164,27 @@ export function midikeys(device) {
     }
     return new Sig(() => null, { midiNotes: { device, channel } });
   };
+}
+
+/**
+ * `keyboard().synth("Serum 2")` - play a track live from the computer keyboard, à la Ableton's
+ * typing keyboard. The note stream comes from the *browser* (the keys can't be read engine-side
+ * like a MIDI device): the home row plays the white keys, the row above the black keys, z/x shift
+ * octave and c/v nudge velocity - see client.js for the exact map and the midi/normal/both mode
+ * toggle. Like midikeys() it schedules no notes of its own; each key edge is routed straight to
+ * the instrument, gating env()/lfo() shapes exactly like a pattern or MIDI note. Chain it with
+ * .synth()/.fx()/.param()/.scale() as usual.
+ */
+export function keyboard() {
+  return new Sig(() => null, { keyboardRoute: { kind: 'keyboard' } });
+}
+
+/**
+ * `tap().synth("Serum 2")` - like keyboard(), but every key is a fixed-pitch hit: any key
+ * triggers the track's default note at the current velocity (z/x octave and c/v velocity still
+ * apply), turning the whole keyboard into one velocity-sensitive pad. Good for drums, stabs, and
+ * one-shots where only the timing and dynamics matter.
+ */
+export function tap() {
+  return new Sig(() => null, { keyboardRoute: { kind: 'tap' } });
 }

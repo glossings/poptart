@@ -76,12 +76,13 @@ let knownPlugins = [];
 
 const BUILDERS = [
   'Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
+  'choose', 'keyboard', 'tap',
   'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
 ];
 const METHODS = [
   'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'as',
+  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'as', 'degrade', 'ply', 'echo',
   'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
 ];
 
@@ -1419,6 +1420,13 @@ function renderTracks(result) {
     if (t.muted) head.appendChild(badge('muted', 'badge-muted'));
     if (t.soloed) head.appendChild(badge('solo', 'badge-solo'));
     if (!t.active && !t.muted) head.appendChild(badge('off', 'badge-muted'));
+    if (t.keyboard) {
+      const b = badge(`⌨ ${t.keyboard}`, 'badge-solo');
+      b.title = kbMode === 'normal'
+        ? 'live from the computer keyboard - set the ⌨ dropdown up top to midi or both to play'
+        : `live from the computer keyboard (${kbMode} mode)`;
+      head.appendChild(b);
+    }
     const confBtn = document.createElement('button');
     confBtn.className = 'small conf-btn';
     confBtn.textContent = 'conf';
@@ -1487,6 +1495,7 @@ async function evaluate(start) {
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     renderTracks(result);
     setupHighlighting(code, result.tracks);
+    setKeyboardRoutes(result.keyboardTracks ?? []);
     foldConfigBlobs();
     if (start) playing = true; // Update keeps the current play state; Play begins it
     const nActive = result.tracks.filter((t) => t.active).length;
@@ -1511,7 +1520,184 @@ async function doStop() {
   stopHighlighting();
   updateTransportButtons();
   logLine('stopped');
+  kbForgetHeld(); // the server released our held keys; drop our local view so keyup won't re-off
 }
+
+// ---------------------------------------------------------------------------------------------
+// Computer-keyboard instrument (keyboard() / tap() tracks). The note source is *here*, in the
+// browser (the engine can't read the typing keyboard like a MIDI device), so each eval tells us
+// which tracks are keyboard targets and we POST every key edge to /api/keyNote - the server turns
+// those into engine.noteOn/noteOff on the track. The #kbMode dropdown gates it: `off` types
+// normally (no capture), `midi` plays notes and swallows the keystroke so it doesn't reach the
+// editor, `both` does both at once. Held keys are tracked so switching mode, alt-tabbing, or a
+// stop releases anything still down instead of leaving a note stuck on.
+//
+// Layout (à la Ableton/tracker typing keyboards): the home row a s d f g h j k l are the white
+// keys and the row above (w e t y u o p) the black keys; z / x shift octave, c / v nudge
+// velocity. A tap() track ignores pitch - any other key is a hit at the current velocity on a
+// fixed note - so the whole keyboard is one velocity pad.
+// ---------------------------------------------------------------------------------------------
+
+const kbModeSelect = document.getElementById('kbMode');
+const KB_SEMITONES = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12, o: 13, l: 14, p: 15 };
+const KB_BASE_NOTE = 48; // MIDI note the home-row `a` plays at octave shift 0 (C, this package's c5 = 60)
+const KB_TAP_NOTE = 60; // fixed pitch a tap() key strikes - only its velocity/timing matter
+const KB_OCT_MIN = -3;
+const KB_OCT_MAX = 4;
+const KB_CONTROL_KEYS = new Set(['z', 'x', 'c', 'v']); // octave -/+, velocity -/+ (never notes)
+
+let kbMode = localStorage.getItem('poptart-kb-mode') || 'normal';
+let kbRoutes = []; // [{ trackId, kind }] from the latest eval
+let kbOctave = 0; // octave shift in whole octaves (z/x)
+let kbVelocity = 0.8; // 0.1..1 (c/v)
+const kbHeldKeys = new Map(); // key char -> [{ trackId, note }] currently sounding, for keyup/release
+
+kbModeSelect.value = kbMode;
+kbModeSelect.addEventListener('change', () => {
+  kbMode = kbModeSelect.value;
+  localStorage.setItem('poptart-kb-mode', kbMode);
+  if (kbMode === 'normal') kbReleaseAll();
+  logLine(`computer keyboard: ${kbMode}${kbMode !== 'normal' && kbRoutes.length === 0 ? ' (no keyboard()/tap() track yet)' : ''}`);
+});
+
+// Called from evaluate() with the eval response's keyboardTracks. Drops held notes for any track
+// that is no longer a keyboard target, and nudges the user if they've written keyboard()/tap()
+// but left the mode off.
+function setKeyboardRoutes(routes) {
+  const nextIds = new Set(routes.map((r) => r.trackId));
+  for (const [key, held] of [...kbHeldKeys]) {
+    const kept = held.filter((h) => nextIds.has(h.trackId));
+    if (kept.length !== held.length) {
+      for (const h of held) if (!nextIds.has(h.trackId)) kbSend(h.trackId, h.note, false);
+      if (kept.length) kbHeldKeys.set(key, kept);
+      else kbHeldKeys.delete(key);
+    }
+  }
+  const gained = routes.length > 0 && kbRoutes.length === 0;
+  kbRoutes = routes;
+  if (gained && kbMode === 'normal') {
+    logLine('keyboard()/tap() track ready - pick "⌨ midi" (or "both") up top to play it from your keyboard');
+  }
+}
+
+function kbSend(trackId, note, isOn) {
+  api('POST', '/api/keyNote', { trackId, note, vel: kbVelocity, isOn }).catch(() => {});
+}
+
+// Release every currently-held key (send note-offs and forget them). Used on mode change, window
+// blur, and losing all keyboard tracks.
+function kbReleaseAll() {
+  for (const held of kbHeldKeys.values()) for (const { trackId, note } of held) kbSend(trackId, note, false);
+  kbHeldKeys.clear();
+}
+
+// Forget held keys WITHOUT sending note-offs - for when the server already released them (stop).
+function kbForgetHeld() {
+  kbHeldKeys.clear();
+}
+
+function kbAdjustOctave(delta) {
+  const next = Math.max(KB_OCT_MIN, Math.min(KB_OCT_MAX, kbOctave + delta));
+  if (next !== kbOctave) {
+    kbOctave = next;
+    logLine(`keyboard octave ${kbOctave >= 0 ? '+' : ''}${kbOctave}`);
+  }
+}
+
+function kbAdjustVelocity(delta) {
+  const next = Math.max(0.1, Math.min(1, Math.round((kbVelocity + delta) * 100) / 100));
+  if (next !== kbVelocity) {
+    kbVelocity = next;
+    logLine(`keyboard velocity ${kbVelocity.toFixed(2)}`);
+  }
+}
+
+// Should this keydown be intercepted at all? Not when a non-editor text field has focus (so the
+// file-name box, param search, etc. type normally) - the CodeMirror editor itself is fair game.
+function kbShouldCapture() {
+  const el = document.activeElement;
+  if (!el) return true;
+  if (el.closest && el.closest('.CodeMirror')) return true;
+  if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) return false;
+  return true;
+}
+
+// A tap() track strikes on any single-character key that isn't a reserved control.
+function kbIsTapKey(key) {
+  return key.length === 1 && !KB_CONTROL_KEYS.has(key);
+}
+
+function onKbKeyDown(e) {
+  if (kbMode === 'normal' || kbRoutes.length === 0) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return; // never swallow shortcuts (Cmd+Enter to eval, etc.)
+  const key = e.key.toLowerCase();
+  if (!kbShouldCapture()) return;
+
+  // In midi mode we swallow every key we act on so it never reaches the editor; both mode lets
+  // it through so it plays *and* types. Auto-repeat is dropped (a held key is one sustained note).
+  const swallow = () => {
+    if (kbMode === 'midi') {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+
+  if (KB_CONTROL_KEYS.has(key)) {
+    if (!e.repeat) {
+      if (key === 'z') kbAdjustOctave(-1);
+      else if (key === 'x') kbAdjustOctave(1);
+      else if (key === 'c') kbAdjustVelocity(-0.1);
+      else if (key === 'v') kbAdjustVelocity(0.1);
+    }
+    swallow();
+    return;
+  }
+
+  if (e.repeat || kbHeldKeys.has(key)) {
+    // Already sounding (OS auto-repeat) - keep swallowing in midi mode, but don't retrigger.
+    let anyMapped = false;
+    for (const r of kbRoutes) anyMapped = anyMapped || (r.kind === 'tap' ? kbIsTapKey(key) : key in KB_SEMITONES);
+    if (anyMapped) swallow();
+    return;
+  }
+
+  const struck = [];
+  for (const r of kbRoutes) {
+    let note;
+    if (r.kind === 'tap') {
+      if (!kbIsTapKey(key)) continue;
+      note = KB_TAP_NOTE;
+    } else {
+      if (!(key in KB_SEMITONES)) continue;
+      note = KB_BASE_NOTE + kbOctave * 12 + KB_SEMITONES[key];
+    }
+    kbSend(r.trackId, note, true);
+    struck.push({ trackId: r.trackId, note });
+  }
+  if (struck.length) {
+    kbHeldKeys.set(key, struck);
+    swallow();
+  }
+}
+
+// Key-up always releases whatever that key started, regardless of the current mode/focus, so a
+// note can never get stuck (mode may have changed while the key was down).
+function onKbKeyUp(e) {
+  const key = e.key.toLowerCase();
+  const held = kbHeldKeys.get(key);
+  if (!held) return;
+  kbHeldKeys.delete(key);
+  for (const { trackId, note } of held) kbSend(trackId, note, false);
+  if (kbMode === 'midi') {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+}
+
+// Capture phase so we beat CodeMirror to the key and can suppress typing in midi mode.
+document.addEventListener('keydown', onKbKeyDown, true);
+document.addEventListener('keyup', onKbKeyUp, true);
+window.addEventListener('blur', kbReleaseAll); // alt-tab away -> don't leave notes ringing
 
 // ---------------------------------------------------------------------------------------------
 // Macros panel - a bank of knobs exposed to evaluated code as macro1..macroN (0..1 signals).
