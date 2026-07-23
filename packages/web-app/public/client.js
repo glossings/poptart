@@ -2031,7 +2031,7 @@ async function refreshSamplesDir() {
     samplesDirReset.disabled = envOverride;
     samplesDirNote.textContent = envOverride
       ? 'set by POPTART_SAMPLES_DIR - unset it to edit here'
-      : 'subfolders of this folder are your sample packs';
+      : '';
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }

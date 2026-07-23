@@ -62,9 +62,7 @@
 
       <main>
         <div id="editorPane">
-          <textarea id="editor" spellcheck="false">// label: pattern   ·  $: anonymous  ·  _name: muted  ·  nameS: solo
-// put the cursor inside lfo(...) to open the shape editor
-keys: n("0 2 3 <5 7>")
+          <textarea id="editor" spellcheck="false">keys: n("0 2 3 <5 7>")
   .scale("F minor")
   .synth("Serum 2")
   .param("Filter 1 On", 1)
@@ -90,7 +88,6 @@ keys: n("0 2 3 <5 7>")
             <section id="macrosSection">
               <h2>macros</h2>
               <div id="macroBank" class="macro-bank panel"></div>
-              <div class="macros-note">drag to turn · double-click the name to rename · in code: macro1…macro8</div>
             </section>
           </div>
 
@@ -121,7 +118,6 @@ keys: n("0 2 3 <5 7>")
                 <button id="fileSaveBtn" title="save the current editor buffer under this name">save</button>
               </div>
               <div id="fileList" class="panel list">loading…</div>
-              <div class="files-note">click a pattern to load it into the editor · saved under ~/.poptart/patterns</div>
             </section>
           </div>
 
@@ -151,7 +147,6 @@ keys: n("0 2 3 <5 7>")
               <div class="settings-actions">
                 <button id="prebakeEditBtn" class="small">edit prebake…</button>
               </div>
-              <div class="files-note">code that runs once when poptart loads — helpers, custom scales, and <code>Signal.prototype</code> extensions, then available in every buffer</div>
             </section>
           </div>
         </aside>
