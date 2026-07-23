@@ -5,18 +5,10 @@ no completion notes.
 
 ---
 
-## General
-- [ ] Add button in files to create a new one
-
 ## Signals (new)
 - [ ] **`pianoroll`** signal that pulls up an interactive piano roll and emits the drawn notes/velocities
 - [ ] Ability to send signals/midi to specific VSTs. E.g. Kickstart can use a midi trigger OR audio as a secondary input
   to control when the target sound is sidechained.
-
-## Docs
-- [ ] Add a link (opens new tab) to **docs**
-  - Fun, comprehensive intro written like lectures / "studies" guiding a new user through poptart
-  - **Non-interactive** (can't assume knowledge of the user's synths/params)
 
 ## Hotkeys
 - [ ] Build **infrastructure** making it easy for the user to add their own hotkeys

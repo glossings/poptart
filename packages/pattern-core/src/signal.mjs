@@ -9,7 +9,7 @@
 // over time, sometimes with edges." Everything below is plain data + closures.
 
 import { parseMini, getStepsForCycle } from './mini.mjs';
-import { parseNoteValue, degreeToMidi, parseScaleName } from './notes.mjs';
+import { parseNoteValue, degreeToMidi, parseScaleName, quantizeToScale } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
@@ -64,6 +64,12 @@ export class Sig {
     // reports the track as a keyboard target after eval and the browser POSTs its key edges to
     // /api/keyNote, which drives engine.noteOn/noteOff. Schedules no notes of its own.
     this.keyboardRoute = opts.keyboardRoute ?? null;
+    // Whether this signal's values are absolute MIDI notes ('note'), scale degrees ('degree'),
+    // or neither/unknown (null). Only .scale() reads it: on a note pattern it quantizes each
+    // value to the nearest scale tone, on a degree pattern it maps degrees to MIDI. Set by the
+    // n()/note()/synth() builders and threaded through arithmetic/track metadata so
+    // note("c4 e4").add(12).scale(...) still knows it's holding notes.
+    this.pitchKind = opts.pitchKind ?? null;
   }
 
   _clone(overrides) {
@@ -90,6 +96,7 @@ export class Sig {
       slotStates: this.slotStates,
       midiNotes: this.midiNotes,
       keyboardRoute: this.keyboardRoute,
+      pitchKind: this.pitchKind,
     };
   }
 
@@ -108,26 +115,40 @@ export class Sig {
   }
 
   /**
-   * `n("0 2 3").scale("F minor")` - converts scale-degree values into absolute MIDI notes.
-   * On a sampler pattern the degrees live in the `.n()`/`.note()` repitch signal (the pattern's
-   * own values are pack names), so scale maps that instead: s("pluck").n("0 2 4").scale("F minor").
-   * On a live midikeys() route it does double duty: any degrees in the pattern still map as
-   * above, and incoming live notes are also quantized to the scale engine-side (see the
+   * Applies a scale, in one of two ways depending on what the pattern already holds:
+   *   - degree pattern (`n("0 2 3").scale("F minor")`) - reads the numbers as scale degrees and
+   *     converts them to absolute MIDI notes (0 = the root, 1 = the next scale tone, ...).
+   *   - note pattern (`note("c4 e4 f#4").scale("F minor")`) - quantizes each already-absolute
+   *     note to the nearest tone in the scale, bending out-of-key notes into it. This is the
+   *     same snap the engine does to live midikeys() notes, so pattern and live notes agree.
+   * The kind comes from which builder made the values (n() -> degree, note()/synth() -> note),
+   * carried through any arithmetic in between; an unmarked signal (a bare mini string) is read
+   * as degrees, the historical default.
+   *
+   * On a sampler pattern the note/degree values live in the `.n()`/`.note()` repitch signal (the
+   * pattern's own values are pack names), so scale maps that instead: s("pluck").n("0 2 4").scale(...)
+   * quantizes-or-converts by that signal's kind exactly as above. On a live midikeys() route it
+   * also tags the route with the scale so incoming live notes are quantized engine-side (see the
    * scheduler's setMidiNotes call and the engine's midiRoute).
    */
   scale(scaleName) {
     parseScaleName(scaleName); // validate now - a live-keys-only chain never samples, so a bad name would otherwise stay silent
+    const mapFor = (kind) =>
+      kind === 'note'
+        ? (v) => quantizeToScale(Number(v), scaleName)
+        : (v) => degreeToMidi(Number(v), scaleName);
     let out;
     if (this.sampler) {
       if (!this.sampler.note) {
-        throw new Error('[signal] .scale() on a sampler needs degrees first - e.g. s("pluck").n("0 2 4").scale("F minor")');
+        throw new Error('[signal] .scale() on a sampler needs degrees or notes first - e.g. s("pluck").n("0 2 4").scale("F minor")');
       }
-      const mapped = this.sampler.note.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
+      const mapped = this.sampler.note.mapValue(mapFor(this.sampler.note.pitchKind));
       out = this._clone({ sampler: { ...this.sampler, note: mapped } });
     } else {
-      out = this.mapValue((degree) => degreeToMidi(Number(degree), scaleName));
+      out = this.mapValue(mapFor(this.pitchKind));
     }
     if (this.midiNotes) out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName } });
+    out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     return out;
   }
 
@@ -619,7 +640,7 @@ export class Sig {
    * to its step - so s("pluck").note("45 52 _ 57") plays a melodic line from one sample.
    */
   note(value) {
-    return this._noteLike(value instanceof Sig ? value : note(value));
+    return this._noteLike(note(value));
   }
 
   /**
@@ -628,7 +649,7 @@ export class Sig {
    * by degree exactly like a synth melody (degrees are plain numbers until .scale()).
    */
   n(value) {
-    return this._noteLike(value instanceof Sig ? value : n(value));
+    return this._noteLike(n(value));
   }
 
   /**
@@ -701,7 +722,10 @@ export class Sig {
     // Synth track: the note signal becomes the pattern itself; everything chained so far
     // (instrument, fx, params, channel strip...) carries over. A live source keeps its own
     // midiNotes (synth("X").note(kb(1)) - the chain's meta would otherwise null it out).
-    return sig._clone({ ...this._meta(), midiNotes: sig.midiNotes ?? this.midiNotes });
+    // pitchKind follows the note signal, not the track: whether these are notes or degrees is a
+    // property of the values just supplied, so a later .scale() reads them the right way even on
+    // a synth("X") track (which is note-kind by default from its C2 placeholder).
+    return sig._clone({ ...this._meta(), midiNotes: sig.midiNotes ?? this.midiNotes, pitchKind: sig.pitchKind });
   }
 }
 
@@ -800,6 +824,14 @@ function productGain(a, b) {
   });
 }
 
+// Tags a freshly-built Sig as note- or degree-valued (see Sig#pitchKind / Sig#scale). The
+// builders own the Sig they pass in here, so mutating it in place is safe - same pattern as
+// toSignal tagging constVal below.
+function withPitchKind(sig, kind) {
+  sig.pitchKind = kind;
+  return sig;
+}
+
 function toSignal(value) {
   if (value instanceof Sig) return value;
   if (typeof value === 'number') {
@@ -871,11 +903,11 @@ export function mini(str) {
 /** Scale-degree control - degrees are plain numbers until `.scale(...)` turns them into MIDI notes. */
 export function n(value) {
   assertBuilderInput('n', value);
-  if (value instanceof Sig) return value.mapValue((v) => Number(v));
-  if (typeof value === 'number') return new Sig(() => value, { stepsForCycle: () => [{ start: 0, end: 1, value }] });
+  if (value instanceof Sig) return withPitchKind(value.mapValue((v) => Number(v)), 'degree');
+  if (typeof value === 'number') return new Sig(() => value, { stepsForCycle: () => [{ start: 0, end: 1, value }], pitchKind: 'degree' });
   const ast = parseMini(String(value));
   const valueFn = (v) => Number(v);
-  return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
+  return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn), pitchKind: 'degree' });
 }
 
 /**
@@ -949,11 +981,11 @@ export function synth(pluginId, config) {
 /** Explicit-note control - numbers pass through as MIDI, strings may be note names ("f4") or numbers. */
 export function note(value) {
   assertBuilderInput('note', value);
-  if (value instanceof Sig) return value.mapValue((v) => parseNoteValue(v));
-  if (typeof value === 'number') return new Sig(() => value, { stepsForCycle: () => [{ start: 0, end: 1, value }] });
+  if (value instanceof Sig) return withPitchKind(value.mapValue((v) => parseNoteValue(v)), 'note');
+  if (typeof value === 'number') return new Sig(() => value, { stepsForCycle: () => [{ start: 0, end: 1, value }], pitchKind: 'note' });
   const ast = parseMini(String(value));
   const valueFn = (v) => parseNoteValue(v);
-  return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
+  return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn), pitchKind: 'note' });
 }
 
 // ---------------------------------------------------------------------------------------------

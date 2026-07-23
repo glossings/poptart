@@ -2144,6 +2144,7 @@ const settingsTab = document.getElementById('settingsTab');
 const audioDeviceSelect = document.getElementById('audioDeviceSelect');
 const fileNameInput = document.getElementById('fileNameInput');
 const fileSaveBtn = document.getElementById('fileSaveBtn');
+const fileNewBtn = document.getElementById('fileNewBtn');
 const fileList = document.getElementById('fileList');
 const consoleFooter = document.getElementById('console');
 const consoleToggle = document.getElementById('consoleToggle');
@@ -2514,7 +2515,19 @@ async function deletePatternFile(name) {
   }
 }
 
+// Start a fresh buffer. Clears the editor and the name field (so the next save creates a new
+// file rather than overwriting whatever was last loaded); guarded by a confirm when the current
+// buffer has content, since that content isn't saved anywhere yet.
+function newPatternFile() {
+  if (cm.getValue().trim() && !confirm('start a new pattern? the current editor buffer will be cleared')) return;
+  cm.setValue('');
+  fileNameInput.value = '';
+  logLine('new pattern - write it, then name it above and hit save to keep it');
+  cm.focus();
+}
+
 fileSaveBtn.addEventListener('click', savePatternFile);
+fileNewBtn.addEventListener('click', newPatternFile);
 fileNameInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') savePatternFile();
 });

@@ -66,6 +66,7 @@
         </select>
         <select id="themeSelect" title="color theme"></select>
         <button id="themeEditBtn" title="edit theme colors">🎨</button>
+        <a id="docsLink" class="hbtn" href="/docs.html" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs ↗</a>
         <button id="playBtn" class="primary" title="Cmd/Ctrl + Enter">▶ play</button>
         <button id="updateBtn" title="evaluate without changing play state">⟳ update</button>
       </header>
@@ -122,7 +123,7 @@
 
           <div id="filesTab" class="tab-body hidden">
             <section id="filesSection">
-              <h2>pattern files</h2>
+              <h2>pattern files <button id="fileNewBtn" class="small" title="clear the editor and start a new pattern">＋ new</button></h2>
               <div class="file-save-row">
                 <input id="fileNameInput" type="text" placeholder="pattern name…" spellcheck="false" />
                 <button id="fileSaveBtn" title="save the current editor buffer under this name">save</button>

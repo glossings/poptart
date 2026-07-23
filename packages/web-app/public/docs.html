@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>poptart — the guide</title>
+    <style>
+      :root {
+        --bg: #16181d;
+        --bg-raised: #1c1f26;
+        --bg-panel: #21252e;
+        --border: #2c313c;
+        --border-strong: #3a4150;
+        --text: #d7dbe3;
+        --text-dim: #8f97a6;
+        --accent: #e0916f;
+        --accent-soft: rgba(224, 145, 111, 0.14);
+        --accent-strong: rgba(224, 145, 111, 0.32);
+        --ok: #8fbf7f;
+        --warn: #e6c07a;
+        --code: #e8c9a0;
+        --link: #7fb0d8;
+        --mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+
+      html { scroll-behavior: smooth; }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 16px;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a { color: var(--link); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      .wrap {
+        display: grid;
+        grid-template-columns: 250px minmax(0, 1fr);
+        gap: 48px;
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 0 32px;
+      }
+
+      /* --- sidebar / table of contents --- */
+      nav {
+        position: sticky;
+        top: 0;
+        align-self: start;
+        height: 100vh;
+        overflow-y: auto;
+        padding: 32px 8px 48px 0;
+        border-right: 1px solid var(--border);
+      }
+      nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 700;
+        font-size: 18px;
+        letter-spacing: 0.03em;
+        margin-bottom: 4px;
+      }
+      nav .brand .dot {
+        width: 14px; height: 14px; border-radius: 4px;
+        background: linear-gradient(135deg, var(--accent), var(--warn));
+        box-shadow: 0 0 12px var(--accent-strong);
+      }
+      nav .tagline { color: var(--text-dim); font-size: 12.5px; margin: 0 0 20px 24px; }
+      nav a {
+        display: block;
+        color: var(--text-dim);
+        font-size: 13.5px;
+        padding: 3px 10px;
+        border-radius: 6px;
+        border-left: 2px solid transparent;
+      }
+      nav a:hover { color: var(--text); background: var(--bg-raised); text-decoration: none; }
+      nav a.study { margin-top: 2px; }
+      nav a .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 8px; }
+      nav .back { margin-top: 24px; font-size: 12.5px; }
+
+      /* --- main content --- */
+      main { padding: 40px 0 120px; max-width: 760px; }
+
+      header.hero { margin-bottom: 8px; }
+      header.hero h1 { font-size: 34px; margin: 0 0 6px; letter-spacing: -0.01em; }
+      header.hero p.lede { font-size: 18px; color: var(--text-dim); margin: 0 0 8px; }
+
+      section { margin-top: 56px; scroll-margin-top: 24px; }
+      section > h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--accent);
+        margin: 0 0 4px;
+      }
+      section > h3 { font-size: 25px; margin: 0 0 16px; letter-spacing: -0.01em; }
+      h4 { font-size: 17px; margin: 32px 0 10px; }
+
+      p { margin: 14px 0; }
+      strong { color: #eef1f6; font-weight: 600; }
+      em { color: var(--text); }
+
+      ul, ol { padding-left: 22px; }
+      li { margin: 7px 0; }
+
+      code {
+        font-family: var(--mono);
+        font-size: 0.87em;
+        background: var(--bg-panel);
+        color: var(--code);
+        padding: 1.5px 5px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+      }
+
+      pre {
+        background: var(--bg-raised);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 18px;
+        overflow-x: auto;
+        margin: 18px 0;
+        line-height: 1.55;
+      }
+      pre code {
+        background: none;
+        border: none;
+        padding: 0;
+        color: var(--text);
+        font-size: 13.5px;
+      }
+      /* tiny inline syntax accents, applied by hand in the markup */
+      .s { color: var(--ok); }       /* strings */
+      .f { color: var(--accent); }   /* builder / function names */
+      .c { color: var(--text-dim); font-style: italic; } /* comments */
+      .k { color: #c58fd8; }         /* keywords */
+
+      .callout {
+        border: 1px solid var(--border-strong);
+        border-left: 3px solid var(--accent);
+        background: var(--accent-soft);
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 22px 0;
+        font-size: 15px;
+      }
+      .callout.new { border-left-color: var(--ok); }
+      .callout .tag {
+        display: inline-block;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        font-weight: 700;
+        color: var(--accent);
+        margin-right: 8px;
+      }
+      .callout.new .tag { color: var(--ok); }
+
+      table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14px; }
+      th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+      th { color: var(--text-dim); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+      td code { white-space: nowrap; }
+
+      hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+
+      .lead-in { color: var(--text-dim); font-size: 16px; }
+
+      footer.end { margin-top: 72px; padding-top: 28px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 14px; }
+
+      @media (max-width: 880px) {
+        .wrap { grid-template-columns: 1fr; gap: 0; padding: 0 20px; }
+        nav { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 20px 0; }
+        main { padding-top: 24px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <nav>
+        <div class="brand"><span class="dot"></span> poptart</div>
+        <p class="tagline">a field guide</p>
+        <a href="#intro">Overture</a>
+        <a class="study" href="#s0"><span class="num">0</span>The editor &amp; the loop</a>
+        <a class="study" href="#s1"><span class="num">1</span>Patterns are signals</a>
+        <a class="study" href="#s2"><span class="num">2</span>Mini-notation</a>
+        <a class="study" href="#s3"><span class="num">3</span>Notes, degrees, scales</a>
+        <a class="study" href="#s4"><span class="num">4</span>Instruments &amp; effects</a>
+        <a class="study" href="#s5"><span class="num">5</span>Modulation</a>
+        <a class="study" href="#s6"><span class="num">6</span>The channel strip</a>
+        <a class="study" href="#s7"><span class="num">7</span>The sampler</a>
+        <a class="study" href="#s8"><span class="num">8</span>Playing live</a>
+        <a class="study" href="#s9"><span class="num">9</span>Transforms</a>
+        <a class="study" href="#s10"><span class="num">10</span>Making it yours</a>
+        <a href="#cheat">Cheat sheet</a>
+        <a class="back" href="/">← back to poptart</a>
+      </nav>
+
+      <main>
+        <header class="hero" id="intro">
+          <h1>poptart, from scratch</h1>
+          <p class="lede">A livecoding instrument that plays real plugins from terse patterns.</p>
+          <p>
+            This is a guided tour — a handful of short <em>studies</em> that build on each other. Read
+            them in order the first time and you'll come out the other side able to play. There's
+            nothing to click along with here; keep the editor open in the other tab and try each idea
+            as you meet it. Everything below is plain text you can paste and bend.
+          </p>
+          <p class="lead-in">
+            The one-sentence version: you write little patterns, poptart turns them into notes and
+            knob-turns, and it sends those to actual VST/VST3 instruments and effects running inside a
+            SuperCollider audio engine. No samples pretending to be a synth — the real thing, modulated
+            continuously while it plays.
+          </p>
+        </header>
+
+        <!-- ================================================================= -->
+        <section id="s0">
+          <h2>Study 0</h2>
+          <h3>The editor &amp; the loop</h3>
+          <p>
+            The whole workflow is one gesture: <strong>type, then evaluate</strong>. Press
+            <code>Cmd/Ctrl + Enter</code> to play what's in the editor; press <code>Cmd/Ctrl + .</code>
+            to stop. Editing and re-evaluating swaps the running sound out from under itself without a
+            gap — that's livecoding. There's an <strong>update</strong> button too, which re-evaluates
+            without changing the play/stop state.
+          </p>
+          <p>
+            A buffer is split into <strong>blocks</strong>. A block that starts with a
+            <em>label</em> — a name, then a colon, at the very start of a line — becomes one
+            <strong>track</strong>:
+          </p>
+          <pre><code><span class="f">bass</span>: note(<span class="s">"c2 c2 g1 a1"</span>).synth(<span class="s">"Serum 2"</span>)
+<span class="f">drums</span>: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)</code></pre>
+          <p>
+            Two labels, two tracks, playing together. The label is just an identifier — call it
+            whatever you like. Lines that continue an expression (a <code>.param(…)</code> chain, a
+            multi-line template) stay attached to the block above them, so you can spread one track
+            across many lines.
+          </p>
+          <p>Two decorations on a label change whether it sounds, without deleting the code:</p>
+          <ul>
+            <li>
+              A leading or trailing underscore <strong>mutes</strong> it: <code>_bass:</code> or
+              <code>bass_:</code> go silent.
+            </li>
+            <li>
+              A leading or trailing capital <code>S</code> <strong>solos</strong> it:
+              <code>Sdrums:</code> — if anything is soloed, only soloed tracks play (mute still wins
+              over solo).
+            </li>
+          </ul>
+          <p>
+            Code that <em>isn't</em> a labelled track — a bare line, or a block starting with
+            <code>$:</code> — runs as <strong>setup</strong>: shared <code>const</code>s, language
+            extensions, one-off statements. More on that in <a href="#s10">Study 10</a>. A named block,
+            by contrast, <em>must</em> evaluate to a pattern.
+          </p>
+          <div class="callout">
+            <span class="tag">panels</span>
+            The sidebar has four tabs. <strong>session</strong> shows the live tracks and the macro
+            knobs; <strong>sounds</strong> lists your scanned plugins, their parameters, and your
+            samples; <strong>files</strong> saves and loads whole buffers (hit <strong>＋ new</strong>
+            to start a blank one); <strong>settings</strong> holds the audio device, sample folder, and
+            the startup <em>prebake</em> file.
+          </div>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s1">
+          <h2>Study 1</h2>
+          <h3>Everything is a signal</h3>
+          <p>
+            Here is the single idea that makes the rest of poptart click. A <strong>signal</strong> is
+            a value that changes over time. That's it. A melody is a signal. An LFO is a signal. A
+            single unchanging number is a (boring) signal. They are all the same kind of thing, so they
+            all compose the same way.
+          </p>
+          <p>
+            Some signals have <em>edges</em> — known moments where one value ends and the next begins.
+            A note pattern <code>"c e g"</code> has three steps per cycle, so poptart knows exactly when
+            to trigger each note-on and note-off. Other signals are <em>smooth</em>: an LFO has no
+            steps, it's just sampled continuously wherever a value is needed. The same machinery reads
+            both.
+          </p>
+          <p>
+            The unit of time is the <strong>cycle</strong> (a bar). Tempo is set with
+            <code>setbpm(120)</code> — read as 4 beats per cycle, so 120 bpm is two cycles per second.
+            Whatever you write inside a pattern string is laid out to fill exactly one cycle, then
+            repeats.
+          </p>
+          <p>
+            Because signals compose, the interesting verbs are the ones that combine and reshape them —
+            <code>.add()</code>, <code>.range()</code>, <code>.when()</code>, <code>.mul()</code> — and
+            they don't care whether they're working on a melody, an LFO, or a knob. Keep the mental
+            picture of "a value that changes over time" and the API stops being a list to memorise.
+          </p>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s2">
+          <h2>Study 2</h2>
+          <h3>Mini-notation: the string language</h3>
+          <p>
+            The strings inside <code>note("…")</code>, <code>s("…")</code>, <code>.param("…", "…")</code>
+            and friends are their own tiny rhythmic language, borrowed from Strudel/Tidal. A space-
+            separated list divides the cycle evenly:
+          </p>
+          <pre><code><span class="s">"0 1 2 3"</span>        <span class="c">// four equal steps</span>
+<span class="s">"0 ~ 2 ~"</span>        <span class="c">// ~ is a rest (a gap / gate-off)</span></code></pre>
+          <p>The rest of the vocabulary, by example:</p>
+          <table>
+            <tr><th>Syntax</th><th>Means</th></tr>
+            <tr><td><code>[a b]</code></td><td>Sub-group: the pair shares one step's worth of time.</td></tr>
+            <tr><td><code>a b, c d</code></td><td>Stack: comma layers voices that play at once.</td></tr>
+            <tr><td><code>&lt;a b c&gt;</code></td><td>Alternation: one item per cycle, cycling round.</td></tr>
+            <tr><td><code>a*4</code></td><td>Fast: repeat <code>a</code> four times inside its slot.</td></tr>
+            <tr><td><code>a/2</code></td><td>Slow: stretch <code>a</code> across two cycles.</td></tr>
+            <tr><td><code>a!3</code></td><td>Replicate: three separate <code>a</code> steps.</td></tr>
+            <tr><td><code>a@3 b</code></td><td>Weight: <code>a</code> takes 3× the room of <code>b</code>.</td></tr>
+            <tr><td><code>a _ _</code></td><td>Tie: <code>_</code> extends the previous note, so it holds.</td></tr>
+            <tr><td><code>a(3,8)</code></td><td>Euclidean: 3 hits spread over 8 steps.</td></tr>
+            <tr><td><code>a?</code> / <code>a?0.3</code></td><td>Degrade: randomly drop the step (30% here).</td></tr>
+            <tr><td><code>a|b|c</code></td><td>Random choice: pick one per cycle.</td></tr>
+          </table>
+          <p>
+            These nest freely: <code>"&lt;[0 2] [3 5]&gt;*2"</code> is legal and does what it looks like.
+            A couple of Strudel features aren't in yet — polymeter <code>{a b, c d}</code> and
+            cycle-internal rate patterns <code>a*[2 3]</code> — everything above works.
+          </p>
+          <div class="callout">
+            <span class="tag">tip</span>
+            The randomness in <code>?</code> and <code>|</code> is deterministic per cycle: a given bar
+            plays the same each time it comes round, and the editor's playback highlight always agrees
+            with what you hear.
+          </div>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s3">
+          <h2>Study 3</h2>
+          <h3>Notes, degrees, and scales</h3>
+          <p>There are two ways to say which pitch you want, and it's worth being clear on the difference.</p>
+          <p>
+            <code>note(…)</code> is <strong>absolute pitch</strong>. It takes note names or MIDI
+            numbers: <code>note("c4 e4 g4")</code>, <code>note("60 64 67")</code>. The convention is
+            <code>c5 = 60</code> (middle C), the same as Strudel. Sharps and flats are
+            <code>c#4</code> / <code>db4</code>.
+          </p>
+          <p>
+            <code>n(…)</code> is <strong>scale degrees</strong>. The numbers are steps within a scale —
+            <code>0</code> is the root, <code>1</code> the next note up, <code>7</code> the octave —
+            and they mean nothing musical until you name the scale:
+          </p>
+          <pre><code><span class="f">n</span>(<span class="s">"0 2 4 6"</span>).<span class="f">scale</span>(<span class="s">"F minor"</span>)   <span class="c">// degrees → the notes of F minor</span></code></pre>
+          <p>
+            A scale name is <code>"&lt;root&gt; &lt;mode&gt;"</code>: <code>"F minor"</code>,
+            <code>"c dorian"</code>, <code>"Bb mixolydian"</code>. Bare mode names default to root C.
+            The usual modes, pentatonics, blues, harmonic/melodic minor, and chromatic are all there,
+            with the common aliases (<code>maj</code>, <code>min</code>, <code>m</code>, …).
+          </p>
+
+          <div class="callout new">
+            <span class="tag">note-quantizing</span>
+            <p style="margin:0 0 8px">
+              <code>.scale()</code> now does the sensible thing for <em>both</em> kinds of pattern:
+            </p>
+            <ul style="margin:0">
+              <li>
+                On a <strong>degree</strong> pattern (<code>n(…)</code>) it maps degrees to notes, as
+                above.
+              </li>
+              <li>
+                On a <strong>note</strong> pattern (<code>note(…)</code>) it <strong>snaps each note to
+                the nearest pitch in the scale</strong>, bending out-of-key notes into the key:
+              </li>
+            </ul>
+            <pre style="margin:12px 0 0"><code><span class="f">note</span>(<span class="s">"c4 e4 f#4 g4"</span>).<span class="f">scale</span>(<span class="s">"C major"</span>)
+<span class="c">// f#4 is not in C major → snaps to the nearest scale tone (f4). The rest are already in key.</span></code></pre>
+            <p style="margin:8px 0 0">
+              This is the exact same snap poptart applies to live notes coming off a MIDI keyboard, so
+              a played line and a written line land on the same pitches. Ties resolve downward.
+            </p>
+          </div>
+
+          <p>
+            Both builders work on <strong>either side</strong> of the instrument, and the pitch kind is
+            remembered through arithmetic — <code>note("c4 f#4").add(12).scale("C major")</code> still
+            knows it's holding notes, not degrees. A bare <code>synth("…")</code> with no notes plays a
+            default C2 every cycle, so a fresh instrument makes sound immediately while you decide what
+            it should play.
+          </p>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s4">
+          <h2>Study 4</h2>
+          <h3>Instruments &amp; effects</h3>
+          <p>
+            <code>.synth("…")</code> loads a VST/VST3 <em>instrument</em> into the track;
+            <code>.fx("…")</code> chains an <em>effect</em> after it (and after any earlier
+            <code>.fx()</code>). The strings are the plugins' real names.
+          </p>
+          <div class="callout">
+            <span class="tag">your rig, not mine</span>
+            This guide writes <code>"Serum 2"</code>, <code>"Diva"</code>, and so on as stand-ins.
+            <strong>Substitute plugins you actually have.</strong> Open the <strong>sounds</strong> tab,
+            hit <strong>rescan</strong> to scan your installed plugins, and click any result to copy its
+            exact name — that copied string is what <code>.synth()</code> / <code>.fx()</code> want.
+            Names also autocomplete as you type inside the quotes.
+          </div>
+          <pre><code><span class="f">lead</span>: note(<span class="s">"c4 e4 g4 b4"</span>)
+  .synth(<span class="s">"Serum 2"</span>)
+  .fx(<span class="s">"ValhallaDelay"</span>)
+  .fx(<span class="s">"Pro-Q 3"</span>)</code></pre>
+          <p>
+            Chain length maxes out at 8 slots (1 instrument + 7 effects) — a deliberate limit of how the
+            audio engine is built.
+          </p>
+
+          <h4>Parameters</h4>
+          <p>
+            <code>.param("&lt;real VST name&gt;", value)</code> sets any knob on whatever plugin is
+            currently last in the chain. There's <strong>no alias layer</strong> — you address the
+            plugin's own parameter names directly:
+          </p>
+          <pre><code>.param(<span class="s">"Filter 1 On"</span>, 1)
+.param(<span class="s">"Filter 1 Freq"</span>, 0.6)</code></pre>
+          <p>
+            To discover names: evaluate once with the <code>.synth(...)</code> so the plugin loads, then
+            open the <strong>params</strong> panel (sounds tab) — every parameter of every plugin in the
+            chain, searchable; click one to copy it. Inside <code>.param("…")</code> the names also
+            autocomplete.
+          </p>
+          <p>
+            A raw parameter value is <strong>normalized 0..1</strong> unless a <em>mapping file</em>
+            gives it real-world units. With a mapping in place, <code>.range(200, 5000)</code> on a
+            filter cutoff means literal Hertz. Mapping files live in <code>mappings/*.json</code> and
+            hot-reload each eval; one worked example (<code>serum2.json</code>) ships. Without a mapping,
+            just think in 0..1.
+          </p>
+          <div class="callout">
+            <span class="tag">duplicate names</span>
+            Some plugins reuse a name across sections (Diva has three params called
+            <code>Frequency</code>). Plain <code>.param("Frequency", …)</code> hits the first; append the
+            parameter index to pick one — <code>.param("Frequency#95", …)</code>. The params panel and
+            autocomplete show the <code>#index</code> form for you whenever a name collides.
+          </div>
+          <p>
+            For fiddly static sound-design settings (unison voices, wavetable position), click
+            <strong>ui</strong> next to a plugin in the track panel to open its own editor window and set
+            them by hand — then keep livecoding everything else. And <strong>pin</strong> captures the
+            plugin's <em>entire</em> state into the code (see <a href="#s10">Study 10</a>).
+          </p>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s5">
+          <h2>Study 5</h2>
+          <h3>Modulation: making it move</h3>
+          <p>
+            Any <code>.param()</code> value can be a number, a mini-notation string, an LFO, or an
+            envelope. This is where poptart earns its keep — modulation runs <em>natively inside the
+            audio engine</em>, sample-accurate, with no per-note network traffic.
+          </p>
+
+          <h4>LFOs</h4>
+          <p>
+            <code>sine</code>, <code>saw</code>, <code>tri</code>, <code>square</code>, plus
+            <code>ramp</code> and <code>rand</code>. Each is a 0..1 shape; <code>.range(lo, hi)</code>
+            rescales it. Set the speed with a rate in Hz:
+          </p>
+          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, sine({ rate: 0.3 }).range(200, 5000))
+.param(<span class="s">"Filter 1 Freq"</span>, sine(0.3).range(200, 5000))  <span class="c">// rate shorthand</span></code></pre>
+          <p>
+            <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape. Put your
+            cursor inside an <code>lfo(...)</code> call in the editor and an interactive shape editor
+            opens — drag points, bend segments — and writes the breakpoint string for you. Modes:
+            <code>free</code> (its own clock), <code>retrigger</code> (phase resets on each note),
+            <code>envelope</code> (plays once per note then holds).
+          </p>
+
+          <h4>Envelopes</h4>
+          <p>
+            <code>env({ attack, decay, sustain, release, curve })</code> is an ADSR retriggered by the
+            track's own notes — a per-note filter or mod envelope, times in seconds, sustain 0..1.
+            <code>.range()</code> scales it like an LFO:
+          </p>
+          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, env({ attack: 0.01, decay: 0.3, sustain: 0.2 }).range(300, 6000))</code></pre>
+          <p>
+            An envelope's value only exists inside the engine (it depends on note gates), so you can't
+            do arithmetic on it in JS — shape it with <code>.range()</code> and the <code>curve</code>
+            option instead.
+          </p>
+
+          <h4>Macros &amp; MIDI knobs</h4>
+          <p>
+            The <strong>macros</strong> panel gives you eight knobs, pre-bound in code as
+            <code>macro1</code>…<code>macro8</code> (also <code>macro(3)</code>). Drop one anywhere a
+            signal goes for a hands-on control:
+          </p>
+          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, macro1.range(200, 4000))</code></pre>
+          <p>
+            <code>midicc("&lt;device&gt;")</code> turns a hardware controller into a signal source:
+            <code>const cc = midicc("Twister"); … cc(12, 1).range(0, 1)</code> is CC 12 on channel 1.
+            Assigned to a param it binds natively — a real knob driving a real knob, no polling lag.
+          </p>
+          <div class="callout">
+            <span class="tag">signal bounds</span>
+            <code>.range()</code>'s bounds can themselves be signals:
+            <code>lfo().range("200 300", 4000)</code> sweeps from a stepped floor. (Signal bounds move
+            that modulator onto the polled path, since the native oscillator takes only fixed lo/hi —
+            still musical, just not sample-accurate.)
+          </div>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s6">
+          <h2>Study 6</h2>
+          <h3>The channel strip</h3>
+          <p>
+            Three controls live on the track's output stage, after the whole plugin chain. They take
+            numbers, mini strings, or any signal:
+          </p>
+          <table>
+            <tr><th>Method</th><th>Does</th></tr>
+            <tr><td><code>.gain(v)</code></td><td>Output level (1 = unity). Chains multiply: <code>.gain(0.5).gain(env())</code> is a base level times a VCA.</td></tr>
+            <tr><td><code>.pan(v)</code></td><td>Stereo pan, −1 (left) … 1 (right), 0 = centre.</td></tr>
+            <tr><td><code>.o(n)</code></td><td>Which output pair: <code>.o(1)</code> = channels 1/2, <code>.o(2)</code> = 3/4, wrapping past the device's last pair.</td></tr>
+          </table>
+          <pre><code>pad: note(<span class="s">"c3 e3 g3"</span>).synth(<span class="s">"Diva"</span>)
+  .gain(0.7)
+  .pan(sine(0.2).range(-1, 1))    <span class="c">// slow auto-pan</span></code></pre>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s7">
+          <h2>Study 7</h2>
+          <h3>The sampler</h3>
+          <p>
+            <code>s("pack")</code> plays a folder of audio files — a <em>pack</em> — from your sample
+            library (default <code>~/.poptart/samples</code>; set it in the settings tab). Files are
+            addressed by index in filename order, and everything runs through the same
+            <code>.fx()</code>/<code>.param()</code> chain as an instrument:
+          </p>
+          <pre><code>drums: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)   <span class="c">// "bd:4" picks a file inline = s("bd").i(4)</span>
+  .i(<span class="s">"&lt;0 1 2&gt;"</span>)          <span class="c">// which file of the pack (Strudel's n, renamed)</span>
+  .begin(0).end(1)          <span class="c">// play region, 0..1</span>
+  .loop()                   <span class="c">// loop the region instead of one-shot</span>
+  .speed(<span class="s">"1 -1"</span>)           <span class="c">// playback rate; negative = reversed</span>
+  .stretch(2)               <span class="c">// granular timestretch (pitch preserved)</span>
+  .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// play the nth transient (WAV only)</span>
+  .note(<span class="s">"45 _ 52 57"</span>)       <span class="c">// repitch by MIDI note (24 / "c2" = as recorded)</span>
+  .vel(<span class="s">"1 .5 ~ 1"</span>)          <span class="c">// per-event volume (also on synth tracks: MIDI velocity)</span>
+  .adsr(0.1, 0.2, 0.6, 0.2) <span class="c">// amplitude envelope, as multiples of the note length</span></code></pre>
+          <p>
+            On a sampler, <code>.note()</code> / <code>.n()</code> <strong>repitch</strong> the sample
+            instead of choosing an instrument note — and <code>.scale()</code> applies exactly as in
+            <a href="#s3">Study 3</a> (degrees map, absolute notes snap to key). Sampler events are
+            always <strong>gated</strong>: a sample rings for exactly its event length and is cut there,
+            so a bare <code>s("longsample")</code> chops at each cycle rather than piling up. To let it
+            ring longer, make the event longer: <code>s("long/2")</code>, <code>"long@2"</code>, or ties.
+          </p>
+          <p>
+            Patterned <code>.note()</code>/<code>.vel()</code>/<code>.slice()</code> are
+            <em>structural</em> — each fresh step retriggers, a <code>~</code> drops the event — so you
+            can carve a melody or a beat out of a single sample.
+          </p>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s8">
+          <h2>Study 8</h2>
+          <h3>Playing live</h3>
+          <p>Three ways to play a track by hand, in real time, alongside the patterns:</p>
+          <table>
+            <tr><th>Source</th><th>What it is</th></tr>
+            <tr><td><code>midikeys("&lt;device&gt;")</code></td><td>A MIDI keyboard. <code>midikeys("KeyStep")(1).synth("Serum 2")</code> plays channel 1 live — notes, velocity, pitch bend, aftertouch, CCs — routed engine-side, so latency is the MIDI driver's, not the pattern clock's.</td></tr>
+            <tr><td><code>keyboard()</code></td><td>Your computer's typing keyboard as a piano: home row = white keys, the row above = black keys, <code>z</code>/<code>x</code> shift octave, <code>c</code>/<code>v</code> nudge velocity.</td></tr>
+            <tr><td><code>tap()</code></td><td>Like <code>keyboard()</code>, but <em>every</em> key fires the track's default note — the whole keyboard becomes one velocity-sensitive pad. Great for drums and stabs.</td></tr>
+          </table>
+          <pre><code>keys: keyboard().synth(<span class="s">"Serum 2"</span>).scale(<span class="s">"F minor"</span>)</code></pre>
+          <p>
+            For the computer keyboard, flip the <strong>⌨</strong> switch in the header: <em>off</em>
+            types normally, <em>midi</em> plays notes and suppresses typing, <em>both</em> does each at
+            once. Live notes gate <code>env()</code> modulators and retrigger note-synced
+            <code>lfo()</code> shapes exactly like pattern notes — and <code>.scale()</code> on a live
+            source quantizes incoming notes to the key.
+          </p>
+          <div class="callout">
+            <span class="tag">recording</span>
+            The header's <strong>● rec</strong> button captures MIDI-key playing back into the pattern:
+            it arms now and starts on the next 4-cycle phrase, quantizing to the grid you pick. What it
+            writes is an ordinary pattern string you can then edit by hand.
+          </div>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s9">
+          <h2>Study 9</h2>
+          <h3>Transforms &amp; combinators</h3>
+          <p>
+            Since patterns are signals, you reshape them with methods. <strong>Arithmetic</strong> takes
+            its structure from the left side, so the right can be a number, a string, or another signal:
+          </p>
+          <pre><code>note(<span class="s">"c3 e3 g3"</span>).add(12)          <span class="c">// up an octave</span>
+n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scale(<span class="s">"C major"</span>)  <span class="c">// transpose every other cycle</span></code></pre>
+          <p>
+            Full set: <code>add sub mul div mod round abs floor ceil clamp</code>, and comparisons
+            <code>gte gt lte lt eq neq</code> (which return 1/0, handy as conditions).
+          </p>
+          <table>
+            <tr><th>Method</th><th>Does</th></tr>
+            <tr><td><code>.when(cond, fn)</code></td><td>Apply <code>fn</code> to this pattern wherever <code>cond</code> is truthy, on cond's own grid. <code>n("0 1 2 3").when("1 0".gte(1), x =&gt; x.add(12))</code>.</td></tr>
+            <tr><td><code>.degrade(p)</code></td><td>Randomly drop each event with probability <code>p</code> (default 0.5). The <code>?</code> in mini-notation, as a method.</td></tr>
+            <tr><td><code>.ply(n, fn?)</code></td><td>Retrigger each event <code>n</code> times; optional <code>(x, i) =&gt; …</code> transforms each repeat.</td></tr>
+            <tr><td><code>.echo(n, dt, fn?)</code></td><td>Overlay <code>n</code> delayed copies, each <code>dt</code> cycles further along — a pattern-level tape echo.</td></tr>
+            <tr><td><code>.hold(trig)</code></td><td>Sample-and-hold: freeze this signal at each onset of <code>trig</code>. <code>rand().hold("1*8")</code> is stepped random.</td></tr>
+          </table>
+          <p>
+            And <code>choose("0", "3", "5")</code> is a signal that randomly picks one option per cycle
+            — weight a pick with a <code>[value, weight]</code> pair. It drops in anywhere a signal goes:
+            <code>n(choose("0", "3", "7"))</code>, <code>.speed(choose(0.5, 1, 2))</code>,
+            <code>s(choose("bd", "hh"))</code>.
+          </p>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s10">
+          <h2>Study 10</h2>
+          <h3>Making it yours</h3>
+
+          <h4>Extend the language</h4>
+          <p>
+            <code>Signal.prototype</code> is the shared prototype of every pattern, LFO, and mini string.
+            Add a method to it and every signal — <em>and every bare string</em> — picks it up, right
+            from the editor, exactly like Strudel's <code>Pattern.prototype</code>:
+          </p>
+          <pre><code>Signal.prototype.acid = function () {
+  return this.param(<span class="s">"Filter 1 Freq"</span>, 0.3).param(<span class="s">"Filter 1 Reso"</span>, 0.8);
+};
+
+bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).acid()</code></pre>
+          <p>
+            These <code>Signal.prototype.…</code> and <code>const …</code> lines are ordinary setup
+            statements: put each on its own column-0 line <strong>anywhere</strong> in the buffer,
+            between tracks or above them. (A bare <code>$: Signal(0.5)</code> is <em>not</em> setup — it
+            evaluates to a signal, so it becomes a silent track. To reuse a value, name it:
+            <code>const half = Signal(0.5)</code>.)
+          </p>
+
+          <h4>Prebake: setup that runs at startup</h4>
+          <p>
+            Anything you'd paste at the top of every session — helpers, custom scales, prototype
+            extensions — goes in the <strong>prebake</strong>, run once at load before any pattern
+            plays. Edit it from the settings tab (<strong>edit prebake…</strong>; saving re-runs it, no
+            restart) or in <code>~/.poptart/prebake.js</code>:
+          </p>
+          <pre><code><span class="c">// ~/.poptart/prebake.js</span>
+const kick = s(<span class="s">"bd*4"</span>);
+const acid = (p) =&gt; p.param(<span class="s">"Filter 1 Freq"</span>, 0.3);</code></pre>
+          <p>
+            Its top-level bindings are injected into every buffer afterward, so <code>drums: kick</code>
+            or <code>bass: acid(note("c2*8").synth("Serum 2"))</code> just work. For more, add a
+            <code>~/.poptart/prebake/</code> folder of <code>*.js</code> files (they run in filename
+            order). Removing a prototype extension needs a restart; everything else re-runs on save.
+          </p>
+
+          <h4>Pin a sound, share a link</h4>
+          <p>
+            Click <strong>pin</strong> next to a plugin in the track panel to capture its complete state
+            — preset, every knob, wavetables — into the code as the call's second argument:
+            <code>synth("Serum 2", { state: "H4sI…" })</code>. On every load that state is restored, so
+            the patch sounds identical on a cold start. Because the whole buffer lives in the URL hash,
+            <strong>sharing the link shares the exact sound</strong>. The editor folds the long blob (and
+            <code>lfo()</code> shape strings) into a small <code>{⋯}</code> pill — click it to expand.
+          </p>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="cheat">
+          <h2>Reference</h2>
+          <h3>Cheat sheet</h3>
+          <table>
+            <tr><th>Sources</th><th></th></tr>
+            <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
+            <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
+            <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
+            <tr><td><code>s("bd hh")</code></td><td>sampler pack</td></tr>
+            <tr><td><code>midikeys("…")(ch)</code> · <code>keyboard()</code> · <code>tap()</code></td><td>live input</td></tr>
+            <tr><td><code>choose(a, b, c)</code></td><td>random pick per cycle</td></tr>
+          </table>
+          <table>
+            <tr><th>Chain</th><th></th></tr>
+            <tr><td><code>.fx("…")</code> · <code>.param("name", v)</code></td><td>effects &amp; knobs</td></tr>
+            <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
+            <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity &amp; note length</td></tr>
+            <tr><td><code>.scale("…")</code></td><td>map degrees / snap notes to key</td></tr>
+          </table>
+          <table>
+            <tr><th>Modulators</th><th></th></tr>
+            <tr><td><code>sine/saw/tri/square/ramp/rand(rate)</code></td><td>LFOs, 0..1</td></tr>
+            <tr><td><code>lfo("shape", {rate, mode})</code></td><td>hand-drawn shape</td></tr>
+            <tr><td><code>env({a, d, s, r})</code></td><td>per-note ADSR</td></tr>
+            <tr><td><code>.range(lo, hi)</code></td><td>rescale a 0..1 signal</td></tr>
+            <tr><td><code>macro1…macro8</code> · <code>midicc("…")(cc, ch)</code></td><td>live knobs</td></tr>
+          </table>
+          <table>
+            <tr><th>Transforms</th><th></th></tr>
+            <tr><td><code>.add .sub .mul .div .mod</code></td><td>arithmetic (structure from the left)</td></tr>
+            <tr><td><code>.when(cond, fn)</code></td><td>conditional transform</td></tr>
+            <tr><td><code>.degrade(p)</code> · <code>.ply(n)</code> · <code>.echo(n, dt)</code></td><td>rhythmic reshaping</td></tr>
+            <tr><td><code>.hold(trig)</code></td><td>sample &amp; hold</td></tr>
+          </table>
+          <table>
+            <tr><th>Session</th><th></th></tr>
+            <tr><td><code>name: …</code></td><td>a track</td></tr>
+            <tr><td><code>_name:</code> / <code>Sname:</code></td><td>mute / solo</td></tr>
+            <tr><td><code>$:</code> / bare lines</td><td>setup blocks</td></tr>
+            <tr><td><code>setbpm(120)</code></td><td>tempo (4 beats/cycle)</td></tr>
+            <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code></td><td>eval · stop</td></tr>
+          </table>
+        </section>
+
+        <footer class="end">
+          That's the whole instrument. The fastest way to learn the rest is to keep a track playing and
+          change one thing at a time — poptart is built to be interrupted. Have fun.
+          <br /><br />
+          <a href="/">← back to poptart</a>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

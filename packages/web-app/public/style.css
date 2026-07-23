@@ -270,6 +270,26 @@ button.small {
   border-radius: 4px;
 }
 
+/* An anchor styled to sit among the header buttons (the docs link opens in a new tab). */
+a.hbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-size: 13px;
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+a.hbtn:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+}
+
 /* conf (configure) capture is armed for this track - knob moves in its plugin windows are being
    written into the code. */
 button.small.conf-active {

@@ -98,6 +98,25 @@ export function scalePitchClasses(scaleName) {
   return [...new Set(intervals.map((iv) => (((rootMidi + iv) % 12) + 12) % 12))].sort((a, b) => a - b);
 }
 
+/**
+ * Snaps an absolute MIDI note to the nearest pitch that belongs to `scaleName` (ties resolve
+ * downward). This is what `.scale()` does to a *note* pattern - `note("c4 e4 f#4 g4")` played
+ * through `.scale("C major")` bends the out-of-key f#4 to the nearest scale tone - as opposed to
+ * an `n(...)` *degree* pattern, where `.scale()` reads the numbers as scale steps instead. It's
+ * the exact same rule the engine applies to live midikeys() notes (see poptart.scd's quantize),
+ * kept here so pattern notes and live notes snap identically.
+ */
+export function quantizeToScale(midi, scaleName) {
+  const pcs = scalePitchClasses(scaleName);
+  if (!pcs.length) return midi;
+  const note = Math.round(midi);
+  for (let d = 0; d <= 11; d++) {
+    if (pcs.includes((((note - d) % 12) + 12) % 12)) return note - d;
+    if (pcs.includes((((note + d) % 12) + 12) % 12)) return note + d;
+  }
+  return note;
+}
+
 /** Converts a scale-degree number (can be negative, or beyond the scale length) to a MIDI note. */
 export function degreeToMidi(degree, scaleName) {
   const { rootMidi, intervals } = parseScaleName(scaleName);
