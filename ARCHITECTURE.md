@@ -169,7 +169,14 @@ all**:
   track-level channel-strip controls (gain 1 = unity, post-chain; pan -1..1; o = which stereo
   output pair the track plays to, 1 = channels 1/2, 2 = 3/4, wrapping past the device's last
   pair) accepting all the same value kinds - engine-side they address pseudo-slot -1, the
-  track synth's own control inputs, mapped/set exactly like VST params. `Sig#as(spec)` destructures multi-field tokens
+  track synth's own control inputs, mapped/set exactly like VST params. `Sig#gain` is
+  chainable and multiplicative - `.gain(0.5).gain(env())` composes a base level with a modulator
+  (overall gain = the product); a plain-number factor folds into a Tier-2 gain modulator's bounds
+  symbolically so it stays native, and multiplying two native modulators (which can't share one
+  gain bus) is a clear error rather than a silent demotion. In a gain product a *resting* factor
+  (a cc/mini before its first value, `null`) counts as unity rather than poisoning the product to
+  `null` - so `.gain(1 - cc(...)).gain(0)` still mutes even before the fader is touched, while a
+  single resting `.gain(...)` (never a product) still holds the current value. `Sig#as(spec)` destructures multi-field tokens
   Strudel-style - `` `<36:1:4 ~ 47:0.5:3 ~>*8`.as("note:vel:clip") `` splits each token on `:`
   and reads fields in spec order (`note` = MIDI/name, `n` = degree, `vel` = per-event velocity
   carried on the step and consumed by the scheduler's noteOn, `clip` = duration as a multiple
@@ -395,6 +402,19 @@ patch shares as a plain URL and opening a shared link restores the code.
   per plugin and retries while a freshly-evaluated plugin is still opening), and what mapping
   files (`mappings/*.json`, unit ranges/curves per parameter) are authored against rather than
   guessed.
+- **`conf` (configure) capture** turns knob-twiddling in a plugin's own editor window into code,
+  Ableton-"configure"-style. The per-track `conf` toggle sends `/poptart/setConfMode`; while on,
+  each loaded plugin's `VSTPluginController#parameterAutomated` hook (set on open) forwards every
+  GUI parameter *gesture* — the plugin's own `/vst_auto` notification, so only knobs the user
+  actually moves, not automation we drive — to Node as `/poptart/paramAutomated (track, slot,
+  name, value)`. web-app coalesces the latest value per parameter; the editor polls
+  `POST /api/confPending` and drops each into the code as `.param("Name", value)`, inserted right
+  after that slot's `synth()`/`.fx()` call (so it targets the right plugin) or overwriting an
+  existing `.param()` for the same name in place. Gesture values arrive normalized 0..1 (what a
+  VST parameter takes); for a parameter with a units mapping the value is converted back to
+  real-world units (`toRealWorld`, the inverse of the mapping's normalization) so the written call
+  round-trips and reads in Hz/dB like the rest of that plugin's `.param()` calls. Reuses the same
+  chain-call-location machinery as the "pin" button.
 
 ## `osc-engine` internals (SuperCollider)
 

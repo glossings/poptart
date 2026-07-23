@@ -76,6 +76,11 @@ class OscEngine {
     // /poptart/midiNoteIn message, i.e. each note edge of an active midikeys() route (the note
     // as it sounds, post scale-quantization). What web-app's MIDI record collects.
     this.onMidiNoteIn = null;
+    // Plugin-GUI parameter-gesture feed, (trackId, slot, paramName, value 0..1) - fired for every
+    // /poptart/paramAutomated message, i.e. each parameter a user moves in a plugin's own editor
+    // window while that track is in "conf" (configure) capture mode. Drives web-app's conf
+    // feature, which writes the touched parameter into the code as .param(name, value).
+    this.onParamAutomated = null;
   }
 
   version() {
@@ -244,6 +249,13 @@ class OscEngine {
   }
   showPluginEditor(trackId, slotIndex) {
     this._send('/poptart/showPluginEditor', [trackId, slotIndex]);
+  }
+
+  // "conf" (configure) capture: while on, the track's open plugins forward every parameter the
+  // user moves in their own editor GUI as /poptart/paramAutomated (see onParamAutomated). Off by
+  // default so idle plugin windows never chatter over OSC.
+  setConfMode(trackId, on) {
+    this._send('/poptart/setConfMode', [trackId, on ? 1 : 0]);
   }
 
   // --- plugin state (the synth("Serum 2", { state }) round-trip) ---
@@ -548,6 +560,12 @@ class OscEngine {
       // Live note feed from an active midikeys() route: [trackId, note, velocity 0..1, isOn].
       const [track, note, vel, on] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onMidiNoteIn === 'function') this.onMidiNoteIn(String(track), Number(note), Number(vel), Number(on) !== 0);
+      return;
+    }
+    if (msg.address === '/poptart/paramAutomated') {
+      // A parameter moved in a plugin's own editor GUI: [trackId, slot, paramName, value 0..1].
+      const [track, slot, name, value] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onParamAutomated === 'function') this.onParamAutomated(String(track), Number(slot), String(name), Number(value));
       return;
     }
     if (!msg.address.endsWith('.reply')) return;

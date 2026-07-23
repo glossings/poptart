@@ -47,6 +47,14 @@ function toNormalized(value, spec) {
   return Math.min(1, Math.max(0, norm));
 }
 
+// Inverse of toNormalized: a normalized 0..1 value back to the mapping's real-world units. Used
+// by the "conf" capture (server.js): the plugin reports a touched parameter as normalized, but a
+// mapped param's .param() call is authored in real units, so we convert before writing it back.
+function toRealWorld(norm, spec) {
+  const { min, max, curve = 'lin' } = spec;
+  return curve === 'log' ? min * Math.exp(norm * Math.log(max / min)) : min + norm * (max - min);
+}
+
 class MappedEngine {
   constructor(engine) {
     this.engine = engine;
@@ -67,6 +75,12 @@ class MappedEngine {
 
   _spec(trackId, slot, name) {
     return this.mappings.get(this.chains.get(trackId)?.[slot])?.params?.[name];
+  }
+
+  // Public view of _spec, for the conf-capture path (server.js) which needs to know whether a
+  // touched parameter has real-world units to convert a normalized value back into.
+  specFor(trackId, slot, name) {
+    return this._spec(trackId, slot, name);
   }
 
   setParam(trackId, slot, name, value, targetTime) {
@@ -142,4 +156,4 @@ class MappedEngine {
   clearMidiNotes(...a) { return this.engine.clearMidiNotes(...a); }
 }
 
-module.exports = { MappedEngine, loadMappings, toNormalized };
+module.exports = { MappedEngine, loadMappings, toNormalized, toRealWorld };

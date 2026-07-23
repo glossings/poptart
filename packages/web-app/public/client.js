@@ -297,6 +297,44 @@ function findChainCall(code, from, to, slot) {
   return null;
 }
 
+// First string literal in [from, to): its unescaped content and the index just past its closing
+// quote, or null. Used by conf's param upsert to read a .param("name", ...) call's name.
+function firstStringLiteral(code, from, to) {
+  for (let i = from; i < to; i++) {
+    const q = code[i];
+    if (q !== '"' && q !== "'") continue;
+    let s = '';
+    for (let j = i + 1; j < to; j++) {
+      if (code[j] === '\\') { s += code[j + 1]; j++; }
+      else if (code[j] === q) return { content: s, end: j + 1 };
+      else s += code[j];
+    }
+    return null;
+  }
+  return null;
+}
+
+// Finds an existing `.param("name", <value>)` call for `name` within [from, to) and returns the
+// character range of its value argument (after the separator comma, up to the close paren), so
+// conf can overwrite the value in place instead of appending a duplicate. null if not present.
+function findParamCall(code, from, to, name) {
+  const re = /\.param\s*\(/g;
+  re.lastIndex = from;
+  let m;
+  while ((m = re.exec(code)) && m.index < to) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0 || close > to) continue;
+    const lit = firstStringLiteral(code, open + 1, close);
+    if (!lit || lit.content !== name) continue;
+    let i = lit.end;
+    while (i < close && code[i] !== ',') i++;
+    if (code[i] !== ',') continue;
+    return { valueStart: i + 1, valueEnd: close };
+  }
+  return null;
+}
+
 // The "pin" button: capture the live plugin's full state and write it into the code as the
 // synth/fx call's second argument (replacing any previous one), then fold it. The state then
 // restores on every load/eval and shares via the URL like the rest of the code.
@@ -316,6 +354,69 @@ async function pinPluginState(trackLabel, blockStart, blockEnd, slot) {
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// "conf" (configure) capture, Ableton-style: toggle it on for a track, then every knob you move
+// in that track's plugin editor windows is dropped into the code as .param("Name", value). The
+// server coalesces the touched parameters (latest value per param) and we poll for them; each is
+// inserted right after its slot's synth()/.fx() call (so it targets that plugin) or, if a
+// .param("Name", ...) for it already exists in the block, overwrites that value in place.
+// ---------------------------------------------------------------------------------------------
+
+let confSession = null; // { trackLabel, timer } while a track is configuring
+
+async function toggleConf(trackLabel, btn) {
+  if (confSession && confSession.trackLabel === trackLabel) {
+    await stopConf();
+    return;
+  }
+  await stopConf(); // only one track configures at a time
+  try {
+    await api('POST', '/api/confMode', { trackId: trackLabel, on: true });
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    return;
+  }
+  confSession = { trackLabel, timer: setInterval(() => pollConf().catch(() => {}), 200) };
+  btn?.classList.add('conf-active');
+  logLine(`conf on for "${trackLabel}" - move knobs in its plugin windows and they drop into the code (click conf again to finish)`);
+}
+
+async function stopConf() {
+  if (!confSession) return;
+  const { trackLabel, timer } = confSession;
+  clearInterval(timer);
+  confSession = null;
+  try { await pollConf(trackLabel); } catch {} // final drain of anything touched since the last poll
+  try { await api('POST', '/api/confMode', { trackId: trackLabel, on: false }); } catch {}
+  document.querySelectorAll('.conf-active').forEach((b) => b.classList.remove('conf-active'));
+}
+
+async function pollConf(labelOverride) {
+  const trackLabel = labelOverride ?? confSession?.trackLabel;
+  if (!trackLabel) return;
+  const { params } = await api('POST', '/api/confPending', { trackId: trackLabel });
+  for (const p of params ?? []) upsertParam(trackLabel, p.slot, p.name, p.value);
+}
+
+function upsertParam(trackLabel, slot, name, value) {
+  if (!labelsMod) return;
+  const code = cm.getValue();
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === trackLabel);
+  if (!block) return;
+  // Overwrite an existing .param() for this name, else insert one targeting the touched slot.
+  const existing = findParamCall(code, block.start, block.end, name);
+  if (existing) {
+    cm.replaceRange(` ${value}`, cm.posFromIndex(existing.valueStart), cm.posFromIndex(existing.valueEnd));
+    return;
+  }
+  const call = findChainCall(code, block.start, block.end, slot);
+  if (!call) {
+    logLine(`conf: couldn't find slot ${slot}'s call in "${trackLabel}" - re-evaluate and try again`, true);
+    return;
+  }
+  cm.replaceRange(`.param(${JSON.stringify(name)}, ${value})`, cm.posFromIndex(call.closeParen + 1));
 }
 
 let hashTimer = null;
@@ -1301,6 +1402,13 @@ function renderTracks(result) {
     if (t.muted) head.appendChild(badge('muted', 'badge-muted'));
     if (t.soloed) head.appendChild(badge('solo', 'badge-solo'));
     if (!t.active && !t.muted) head.appendChild(badge('off', 'badge-muted'));
+    const confBtn = document.createElement('button');
+    confBtn.className = 'small conf-btn';
+    confBtn.textContent = 'conf';
+    confBtn.title = "configure: capture knobs you touch in this track's plugin (ui) windows into .param(...) calls in the code";
+    if (confSession && confSession.trackLabel === t.label) confBtn.classList.add('conf-active');
+    confBtn.onclick = () => toggleConf(t.label, confBtn);
+    head.appendChild(confBtn);
     trackInfo.appendChild(head);
 
     const chain = [t.instrument, ...t.fxChain];

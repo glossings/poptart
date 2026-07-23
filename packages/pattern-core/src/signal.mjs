@@ -188,9 +188,16 @@ export class Sig {
    * Channel strip: the track's output gain (1 = unity, applied after the whole plugin chain).
    * Accepts numbers, mini strings, or any signal - `.gain(env())` is a per-note VCA,
    * `.gain("1 0.5 1 0.5")` a stepped tremolo.
+   *
+   * Chainable: `.gain(a).gain(b)` multiplies (overall gain = a*b), so a base level and a
+   * modulator compose - `.gain(0.5).gain(env())`. Multiplying a plain number onto a Tier-2
+   * gain modulator (LFO/env/cc) stays symbolic (scales its bounds), so it keeps the native
+   * fast path; two signal gains multiply into one polled (Tier-1) signal.
    */
   gain(value) {
-    return this._clone({ channel: { ...this.channel, gain: toSignal(value) } });
+    const incoming = toSignal(value);
+    const combined = this.channel.gain ? multiplyGain(this.channel.gain, incoming) : incoming;
+    return this._clone({ channel: { ...this.channel, gain: combined } });
   }
 
   /** Channel strip: stereo pan, -1 (left) .. 1 (right), 0 = center. Signals welcome: `.pan(sine(0.2).range(-1, 1))`. */
@@ -618,9 +625,55 @@ function fillCondGaps(steps) {
   return out;
 }
 
+// Chainable .gain() multiplies factors together (see Sig#gain). The engine drives one Sig per
+// track-gain control, so factors must fold into a single Sig - and a Tier-2 modulator (LFO/env/
+// cc) must survive the fold, since demoting it would lose the native fast path (and env() can't
+// be sampled in JS at all). A plain-number factor folds into a modulator's bounds symbolically;
+// two native modulators can't share one gain control, so that's a clear error rather than a
+// silent demotion.
+function multiplyGain(a, b) {
+  const ac = a.constVal;
+  const bc = b.constVal;
+  const aMod = a.lfoIR || a.envIR || a.ccIR;
+  const bMod = b.lfoIR || b.envIR || b.ccIR;
+  if (ac != null && bc != null) return toSignal(ac * bc); // constant * constant
+  if (aMod && bc != null) return a.mul(bc); // modulator * scalar -> rewrite bounds (either order)
+  if (bMod && ac != null) return b.mul(ac);
+  if (aMod && bMod) {
+    throw new Error(
+      "[signal] .gain(): can't multiply two native modulators (LFO/env/cc) on one track's gain - combine them in a single expression instead, e.g. .gain(env().range(0.2, 1).mul(sine(2).range(0.5, 1)))",
+    );
+  }
+  if (a.envIR || b.envIR) {
+    throw new Error("[signal] .gain(): an env() gain can only be multiplied by a constant here - shape it with .range() first, or fold the other factor into a single expression");
+  }
+  return productGain(a, b); // generic product (Tier-1 polled) - mini strings, LFOs sampled in JS, etc.
+}
+
+// The product of two gain factors, where a *resting* factor (null - e.g. a cc/mini before its
+// first value) contributes unity rather than poisoning the whole product to null. Plain
+// `.mul()` propagates null (right for note patterns: a rest is a gate-off), but for a channel
+// gain built from independent factors a resting one just isn't attenuating yet - so a hard
+// `.gain(0)` still mutes even while a `.gain(1 - cc(...))` fader hasn't been touched. Only when
+// *every* factor rests does the product rest (hold the current gain).
+function productGain(a, b) {
+  return new Sig((t, cps, pos) => {
+    const av = a.sample(t, cps, pos);
+    const bv = b.sample(t, cps, pos);
+    if (av == null && bv == null) return null;
+    return (av == null ? 1 : Number(av)) * (bv == null ? 1 : Number(bv));
+  });
+}
+
 function toSignal(value) {
   if (value instanceof Sig) return value;
-  if (typeof value === 'number') return new Sig(() => value);
+  if (typeof value === 'number') {
+    // Tag plain-number constants so combinators (multiplyGain) can fold them into a Tier-2
+    // modulator's bounds symbolically instead of demoting it to a generic product.
+    const s = new Sig(() => value);
+    s.constVal = value;
+    return s;
+  }
   if (typeof value === 'string') return mini(value);
   if (typeof value === 'function') {
     throw new Error('[signal] a midicc()/midikeys() device is a function - call it first: cc(12, 1), kb(1)');

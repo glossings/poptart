@@ -9,7 +9,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
-const { MappedEngine } = require('./param-mapping');
+const { MappedEngine, toRealWorld } = require('./param-mapping');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -162,6 +162,7 @@ async function restartEngine() {
       syncVstTransport(); // the fresh sclang needs the surviving transport's tempo, not 120
       engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
       engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
+      engine.onParamAutomated = (trackId, slot, name, value) => handleParamAutomated(trackId, slot, name, value);
     }
   } finally {
     engineRestarting = false;
@@ -426,6 +427,32 @@ function finalizeMidiRec() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// "conf" (configure) capture - Ableton-style. While a track is in conf mode, sclang forwards
+// every parameter a user moves in a plugin's own editor GUI as /poptart/paramAutomated; we
+// coalesce the latest value per (slot, name) and hand them to the editor, which drops each into
+// the code as .param(name, value). Values arrive normalized 0..1 (what VST params take); for a
+// parameter with a units mapping (mappings/*.json) we convert back to real-world units so the
+// written .param() call round-trips - and reads in Hz/dB/etc. like the rest of that plugin's code.
+// ---------------------------------------------------------------------------------------------
+
+let conf = null; // { trackId, touched: Map<`slot|name`, { slot, name, value }> } while a track configures
+
+// Round to `sig` significant figures - real-world unit values (Hz, ms) span wide magnitudes, so a
+// fixed decimal count would be either lossy or noisy. Normalized values use a plain 4 decimals.
+function roundSig(x, sig = 4) {
+  if (x === 0 || !Number.isFinite(x)) return x;
+  const mag = 10 ** (sig - Math.ceil(Math.log10(Math.abs(x))));
+  return Math.round(x * mag) / mag;
+}
+
+function handleParamAutomated(trackId, slot, name, normValue) {
+  if (!conf || conf.trackId !== trackId) return; // gesture from a track not currently configuring
+  const spec = mappedEngine?.specFor(trackId, slot, name);
+  const value = spec ? roundSig(toRealWorld(normValue, spec)) : Math.round(normValue * 1e4) / 1e4;
+  conf.touched.set(`${slot}|${name}`, { slot, name, value });
+}
+
+// ---------------------------------------------------------------------------------------------
 // API handlers, keyed "METHOD /path" and dispatched by the plumbing at the bottom of the file.
 // ---------------------------------------------------------------------------------------------
 
@@ -610,6 +637,29 @@ const routes = {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     engine.showPluginEditor(body.trackId ?? 'default', body.slot ?? 0);
     return { status: 200, body: {} };
+  },
+
+  // Turn "conf" (configure) capture on/off for a track (see handleParamAutomated). Only one
+  // track configures at a time; turning it on for a track supersedes any previous one. Body:
+  // { trackId, on }.
+  'POST /api/confMode': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    const trackId = body.trackId ?? 'default';
+    if (conf && conf.trackId !== trackId) engine.setConfMode(conf.trackId, false); // release the previous track
+    conf = body.on ? { trackId, touched: new Map() } : null;
+    engine.setConfMode(trackId, !!body.on);
+    return { status: 200, body: { on: !!body.on, trackId } };
+  },
+
+  // Drain the parameters touched since the last poll while conf mode is on: the editor polls this
+  // and writes each into the code. Returns latest-value-per-param (coalesced), then clears, so a
+  // knob swept between polls lands once at its final position. Body: { trackId }.
+  'POST /api/confPending': async (body) => {
+    const trackId = body.trackId ?? 'default';
+    if (!conf || conf.trackId !== trackId) return { status: 200, body: { active: false, params: [] } };
+    const params = [...conf.touched.values()];
+    conf.touched.clear();
+    return { status: 200, body: { active: true, params } };
   },
 
   // --- pattern files (the editor's "files" tab) ---

@@ -241,6 +241,14 @@ button.small {
   border-radius: 4px;
 }
 
+/* conf (configure) capture is armed for this track - knob moves in its plugin windows are being
+   written into the code. */
+button.small.conf-active {
+  background: var(--accent, #d08770);
+  border-color: var(--accent, #d08770);
+  color: #1a1a1a;
+}
+
 .status {
   font-size: 11px;
   padding: 3px 10px;

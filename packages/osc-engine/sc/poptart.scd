@@ -402,6 +402,14 @@ OSCdef(\poptartLoadInstrument, { |msg|
                         // at the current tempo (position re-syncs via '/poptart/setTempo').
                         self.setPlaying(true);
                         self.setTempo(currentTempo);
+                        // "conf" capture: forward GUI knob moves to Node while conf mode is on.
+                        self.parameterAutomated = { |index, value|
+                            if (track[\confMode] == true) {
+                                self.info.parameters[index] !? { |p|
+                                    nodeAddr.sendMsg("/poptart/paramAutomated", key, 0, p.name.asString, value.asFloat);
+                                };
+                            };
+                        };
                         ("poptart: loaded instrument " ++ pluginId).postln;
                     } {
                         ("poptart: FAILED to load instrument '" ++ pluginId
@@ -445,6 +453,14 @@ OSCdef(\poptartLoadEffect, { |msg|
                             self.setPlaying(true); // see loadInstrument
                             self.setTempo(currentTempo);
                             track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
+                            // "conf" capture: forward GUI knob moves to Node (see loadInstrument).
+                            self.parameterAutomated = { |index, value|
+                                if (track[\confMode] == true) {
+                                    self.info.parameters[index] !? { |p|
+                                        nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, value.asFloat);
+                                    };
+                                };
+                            };
                             ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
                         };
                     } {
@@ -1141,6 +1157,15 @@ OSCdef(\poptartShowPluginEditor, { |msg|
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) { ctl.editor };
 }, '/poptart/showPluginEditor');
+
+// "conf" (configure) capture on/off for a track. When on, each open plugin's parameterAutomated
+// hook (set in loadInstrument/loadEffect) forwards GUI knob moves to Node; off, they stay quiet.
+// A missing/pending track just no-ops - the next eval re-arms and the client re-sends conf mode.
+OSCdef(\poptartSetConfMode, { |msg|
+    var key = msg[1].asSymbol, on = msg[2].asInteger;
+    var track = tracks[key];
+    if (track.isKindOf(Event)) { track[\confMode] = (on == 1) };
+}, '/poptart/setConfMode');
 
 // --- plugin state (synth("Serum 2", { state }) round-trip - see OscEngine's gz64 framing) ---
 
