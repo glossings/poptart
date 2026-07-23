@@ -1785,7 +1785,12 @@ let samplesRootDir = '';
 let previewCtx = null;
 let previewSource = null; // the currently-playing BufferSourceNode, if any
 let previewRow = null; // the row element marked 'previewing', so we can clear it when it ends
-let previewGen = 0; // bumped on every click, so a slow fetch/decode from an older click is dropped
+let previewGen = 0; // bumped on every press, so a slow fetch/decode from an older press is dropped
+let previewHeld = false; // true between pointerdown and release - hold-to-preview gate
+
+// Release anywhere ends the audition, even if the pointer drifted off the row first. Also
+// cancels a press that's released before its fetch/decode has started playing (see previewSample).
+window.addEventListener('pointerup', () => { previewHeld = false; stopPreview(); });
 
 function stopPreview() {
   if (previewSource) {
@@ -1801,13 +1806,15 @@ function stopPreview() {
 async function previewSample(pack, i, row) {
   stopPreview();
   const gen = ++previewGen;
+  previewHeld = true;
   previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
   if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
   try {
     const res = await fetch(`/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`);
     if (!res.ok) throw new Error(`preview failed: ${res.status}`);
     const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
-    if (gen !== previewGen) return; // a newer click superseded this one while we fetched/decoded
+    // Drop this press if a newer one superseded it, or the button was already released.
+    if (gen !== previewGen || !previewHeld) return;
     const src = previewCtx.createBufferSource();
     src.buffer = buf;
     src.connect(previewCtx.destination);
@@ -1857,7 +1864,7 @@ function renderSamples() {
       if (shown >= MAX_SAMPLE_ROWS) break;
       const row = document.createElement('div');
       row.className = 'param-row sample-row';
-      row.title = 'click to preview + copy';
+      row.title = 'hold to preview · click copies';
       const name = document.createElement('span');
       name.textContent = f.name;
       row.appendChild(name);
@@ -1865,7 +1872,10 @@ function renderSamples() {
       idx.className = 'dim';
       idx.textContent = `:${f.i}`;
       row.appendChild(idx);
-      row.onclick = () => {
+      // Hold-to-preview: audition starts on press and stops on release (so a long sample
+      // doesn't play to the end), while the plain click still copies the pattern.
+      row.onpointerdown = (e) => {
+        if (e.button !== 0) return; // left button only
         copyText(`s("${pack.name}:${f.i}")`, 'sample');
         previewSample(pack.name, f.i, row);
       };
