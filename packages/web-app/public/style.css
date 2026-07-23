@@ -972,12 +972,37 @@ li.CodeMirror-hint-active {
   cursor: pointer;
 }
 
-.theme-note {
+.theme-save-row {
+  display: flex;
+  gap: 6px;
   padding: 8px 12px;
-  font-size: 10.5px;
-  font-style: italic;
-  color: var(--text-dim);
   border-top: 1px solid var(--border);
+}
+
+.theme-save-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.theme-save-row input:focus {
+  border-color: var(--accent);
+}
+
+.theme-save-row input:disabled {
+  opacity: 0.5;
+}
+
+.theme-save-row button {
+  padding: 4px 12px;
+  font-size: 12px;
 }
 
 /* --------------------------------------------------------------- folder picker */

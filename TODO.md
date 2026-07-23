@@ -24,10 +24,6 @@ no completion notes.
   - Fun, comprehensive intro written like lectures / "studies" guiding a new user through poptart
   - **Non-interactive** (can't assume knowledge of the user's synths/params)
 
-## UI text removals / tweaks
-- [ ] Remove hint: `edits fork the current preset into a "custom" theme, saved in this browser`
-  - Instead: **prompt the user to save their theme**
-
 ## Hotkeys
 - [ ] Build **infrastructure** making it easy for the user to add their own hotkeys
 - [ ] Port over the existing **Strudel hotkeys** (full source preserved below)

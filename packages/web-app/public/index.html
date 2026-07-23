@@ -5,18 +5,23 @@
     <title>poptart</title>
     <script>
       // Apply the saved theme before the stylesheet paints, so there's no flash of the default.
-      // The "custom" theme is a preset base + per-variable inline overrides (see client.js).
+      // Custom themes (the unsaved "custom" draft and any named saved theme) are a preset base
+      // plus per-variable inline overrides (see client.js).
       (function () {
+        var root = document.documentElement;
         var t = localStorage.getItem('poptart-theme') || 'poptart';
-        if (t === 'custom') {
-          document.documentElement.dataset.theme = localStorage.getItem('poptart-custom-base') || 'poptart';
-          try {
-            var custom = JSON.parse(localStorage.getItem('poptart-custom-theme')) || {};
-            for (var k in custom) document.documentElement.style.setProperty(k, custom[k]);
-          } catch (e) {}
-        } else {
-          document.documentElement.dataset.theme = t;
-        }
+        var base = t, vars = null;
+        try {
+          if (t === 'custom') {
+            base = localStorage.getItem('poptart-custom-base') || 'poptart';
+            vars = JSON.parse(localStorage.getItem('poptart-custom-theme')) || {};
+          } else {
+            var saved = JSON.parse(localStorage.getItem('poptart-saved-themes') || '{}');
+            if (saved[t]) { base = saved[t].base || 'poptart'; vars = saved[t].vars || {}; }
+          }
+        } catch (e) {}
+        root.dataset.theme = base;
+        if (vars) for (var k in vars) root.style.setProperty(k, vars[k]);
       })();
     </script>
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
@@ -188,11 +193,14 @@
       <div class="theme-panel-head">
         <span>theme editor</span>
         <span class="spacer"></span>
-        <button id="themeReset" class="small" title="delete the custom theme and go back to the preset">reset</button>
+        <button id="themeReset" class="small" hidden>reset</button>
         <button id="themeClose" class="small">✕</button>
       </div>
       <div id="themeVars" class="theme-vars"></div>
-      <div class="theme-note">edits fork the current preset into a “custom” theme, saved in this browser</div>
+      <div class="theme-save-row">
+        <input id="themeNameInput" type="text" placeholder="name this theme…" spellcheck="false" />
+        <button id="themeSaveBtn" class="small" title="save the current colors as a named theme">save</button>
+      </div>
     </div>
 
     <div id="dirPickerBackdrop" class="dir-picker-backdrop hidden">

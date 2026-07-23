@@ -2347,6 +2347,7 @@ initCollapsible(consoleFooter, consoleToggle, 'poptart-console-collapsed', { ope
 const PRESET_THEMES = ['poptart', 'blueberry', 'matcha', 'paper', 'glossing'];
 const CUSTOM_KEY = 'poptart-custom-theme';
 const CUSTOM_BASE_KEY = 'poptart-custom-base';
+const SAVED_KEY = 'poptart-saved-themes';
 
 const THEME_VARS = [
   ['--bg', 'background'],
@@ -2375,6 +2376,8 @@ const themePanel = document.getElementById('themePanel');
 const themeVarsEl = document.getElementById('themeVars');
 const themeResetBtn = document.getElementById('themeReset');
 const themeCloseBtn = document.getElementById('themeClose');
+const themeNameInput = document.getElementById('themeNameInput');
+const themeSaveBtn = document.getElementById('themeSaveBtn');
 
 function savedCustomTheme() {
   try {
@@ -2384,26 +2387,67 @@ function savedCustomTheme() {
   }
 }
 
+// Named themes the user has saved: { name: { base: presetName, vars: { '--x': '#..' } } }.
+function savedThemes() {
+  try {
+    return JSON.parse(localStorage.getItem(SAVED_KEY)) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSavedThemes(map) {
+  localStorage.setItem(SAVED_KEY, JSON.stringify(map));
+}
+
 function rebuildThemeOptions() {
   themeSelect.innerHTML = '';
   for (const t of PRESET_THEMES) themeSelect.add(new Option(t, t));
-  if (savedCustomTheme()) themeSelect.add(new Option('custom', 'custom'));
+  for (const name of Object.keys(savedThemes()).sort()) themeSelect.add(new Option(name, name));
+  // The unsaved working draft sits last, flagged so it reads as ephemeral.
+  if (savedCustomTheme()) themeSelect.add(new Option('custom (unsaved)', 'custom'));
 }
 
 function applyTheme(name) {
   const root = document.documentElement;
-  // Clear any custom inline overrides first, then re-apply if picking the custom theme.
+  // Clear any custom inline overrides first, then re-apply for draft or saved themes.
   for (const [v] of THEME_VARS) root.style.removeProperty(v);
+  const saved = savedThemes();
   if (name === 'custom') {
     const custom = savedCustomTheme() ?? {};
     root.dataset.theme = localStorage.getItem(CUSTOM_BASE_KEY) ?? 'poptart';
     for (const [v, value] of Object.entries(custom)) root.style.setProperty(v, value);
+  } else if (saved[name]) {
+    root.dataset.theme = saved[name].base ?? 'poptart';
+    for (const [v, value] of Object.entries(saved[name].vars ?? {})) root.style.setProperty(v, value);
   } else {
     root.dataset.theme = name;
   }
   localStorage.setItem('poptart-theme', name);
   themeSelect.value = name;
+  updateThemeControls();
   if (!themePanel.classList.contains('hidden')) populateThemeInputs();
+}
+
+// The reset button doubles as discard (unsaved draft) / delete (saved theme); save is only
+// meaningful when there's a draft to name.
+function updateThemeControls() {
+  const cur = themeSelect.value;
+  const isDraft = cur === 'custom';
+  const isSaved = !!savedThemes()[cur];
+  themeSaveBtn.disabled = !isDraft;
+  themeNameInput.disabled = !isDraft;
+  if (isDraft) {
+    themeResetBtn.hidden = false;
+    themeResetBtn.textContent = 'discard';
+    themeResetBtn.title = 'discard unsaved edits and go back to the base theme';
+  } else if (isSaved) {
+    themeResetBtn.hidden = false;
+    themeResetBtn.textContent = 'delete';
+    themeResetBtn.title = 'delete this saved theme';
+  } else {
+    themeResetBtn.hidden = true;
+  }
 }
 
 // Computed styles come back as rgb(r, g, b); <input type="color"> wants #rrggbb.
@@ -2448,27 +2492,74 @@ function setCustomVar(varName, value) {
   document.documentElement.style.setProperty(varName, value);
   // Make sure all snapshot values are applied (first edit only sets one inline var otherwise).
   for (const [v, val] of Object.entries(custom)) document.documentElement.style.setProperty(v, val);
+  updateThemeControls();
+}
+
+// Promote the current colors into a named theme, then clear the working draft.
+function saveTheme() {
+  const name = themeNameInput.value.trim();
+  if (!name) return;
+  if (PRESET_THEMES.includes(name) || name === 'custom') {
+    logLine(`"${name}" is a reserved name — pick another`, true);
+    return;
+  }
+  const computed = getComputedStyle(document.documentElement);
+  const vars = Object.fromEntries(THEME_VARS.map(([v]) => [v, cssColorToHex(computed.getPropertyValue(v))]));
+  const base = document.documentElement.dataset.theme ?? 'poptart';
+  const map = savedThemes();
+  const existed = !!map[name];
+  map[name] = { base, vars };
+  writeSavedThemes(map);
+  localStorage.removeItem(CUSTOM_KEY);
+  localStorage.removeItem(CUSTOM_BASE_KEY);
+  themeNameInput.value = '';
+  rebuildThemeOptions();
+  applyTheme(name);
+  logLine(existed ? `updated theme "${name}"` : `saved theme "${name}"`);
 }
 
 themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
 themeEditBtn.addEventListener('click', () => {
   themePanel.classList.toggle('hidden');
-  if (!themePanel.classList.contains('hidden')) populateThemeInputs();
+  if (!themePanel.classList.contains('hidden')) {
+    populateThemeInputs();
+    updateThemeControls();
+  }
 });
 themeCloseBtn.addEventListener('click', () => themePanel.classList.add('hidden'));
+themeSaveBtn.addEventListener('click', saveTheme);
+themeNameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); saveTheme(); }
+});
 themeResetBtn.addEventListener('click', () => {
-  localStorage.removeItem(CUSTOM_KEY);
-  const base = localStorage.getItem(CUSTOM_BASE_KEY) ?? 'poptart';
-  localStorage.removeItem(CUSTOM_BASE_KEY);
-  rebuildThemeOptions();
-  applyTheme(PRESET_THEMES.includes(base) ? base : 'poptart');
+  const cur = themeSelect.value;
+  if (cur === 'custom') {
+    // Discard the unsaved draft, returning to whichever theme it forked from.
+    localStorage.removeItem(CUSTOM_KEY);
+    const base = localStorage.getItem(CUSTOM_BASE_KEY) ?? 'poptart';
+    localStorage.removeItem(CUSTOM_BASE_KEY);
+    rebuildThemeOptions();
+    applyTheme(PRESET_THEMES.includes(base) || savedThemes()[base] ? base : 'poptart');
+  } else if (savedThemes()[cur]) {
+    // Delete this saved theme, falling back to its base preset.
+    const map = savedThemes();
+    const base = map[cur].base ?? 'poptart';
+    delete map[cur];
+    writeSavedThemes(map);
+    rebuildThemeOptions();
+    applyTheme(PRESET_THEMES.includes(base) ? base : 'poptart');
+    logLine(`deleted theme "${cur}"`);
+  }
 });
 
 rebuildThemeOptions();
 {
   const saved = localStorage.getItem('poptart-theme') ?? 'poptart';
-  const valid = saved === 'custom' ? !!savedCustomTheme() : PRESET_THEMES.includes(saved);
+  const valid = saved === 'custom'
+    ? !!savedCustomTheme()
+    : PRESET_THEMES.includes(saved) || !!savedThemes()[saved];
   themeSelect.value = valid ? saved : 'poptart';
+  updateThemeControls();
   // index.html already applied the theme pre-paint; this just syncs the picker.
 }
 
