@@ -52,7 +52,8 @@ export class Sig {
     // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load.
     this.slotStates = opts.slotStates ?? {};
     // Sampler config, present only for s("pack") patterns: { index, begin, end, loop, speed,
-    // stretch, fit, slice }, each a Sig (sampled per event onset) or absent for its default.
+    // stretch, fit, slice, attack, decay, sustain, release }, each a Sig (sampled per event
+    // onset) or absent for its default.
     // Patterned values also merge their step grid into the pattern's (see _samplerOpt).
     this.sampler = opts.sampler ?? null;
     // Live MIDI note routing, from midikeys(): { device, channel (null = all) }. The scheduler
@@ -481,6 +482,30 @@ export class Sig {
   /** Play the nth detected transient slice (wraps past the last one). Needs a WAV sample. */
   slice(v) { return this._samplerOpt('slice', 'slice', toSignal(v)); }
 
+  // ADSR amplitude envelope over the voice. attack/decay/release scale the played duration:
+  // .attack(0.5) fades in over half the note, .attack(2) ramps over 2x the note (never reaching
+  // full before it ends). Attack->decay->sustain run across playback; once the note's duration
+  // ends the envelope releases from wherever it is. sustain is a 0..1 level. All default to 0
+  // (sustain 1), which floors to the tiny declick the sampler used before, so unset ADSR is
+  // unchanged.
+  /** Attack time as a multiple of the played duration - the fade-in from silence toward full. */
+  attack(v) { return this._samplerOpt('attack', 'attack', toSignal(v)); }
+  /** Decay time as a multiple of the played duration - the fall from the attack peak to the sustain level. */
+  decay(v) { return this._samplerOpt('decay', 'decay', toSignal(v)); }
+  /** Sustain level, 0..1 - the held level after decay (a level, not a duration). */
+  sustain(v) { return this._samplerOpt('sustain', 'sustain', toSignal(v)); }
+  /** Release time as a multiple of the played duration - the fade-out once the note's duration ends. */
+  release(v) { return this._samplerOpt('release', 'release', toSignal(v)); }
+  /** Set all four ADSR controls at once: .adsr(attack, decay, sustain, release). */
+  adsr(a, d, s, r) {
+    let out = this;
+    if (a !== undefined) out = out.attack(a);
+    if (d !== undefined) out = out.decay(d);
+    if (s !== undefined) out = out.sustain(s);
+    if (r !== undefined) out = out.release(r);
+    return out;
+  }
+
   /**
    * Note pattern for this track - works before or after .synth(): note("c3 e3").synth("X")
    * and synth("X").note("c3 e3") are equivalent (on a synth track this replaces the track's
@@ -747,8 +772,8 @@ export function n(value) {
  * Sampler pattern - values are sample-pack names (folders under the samples directory), one
  * event per step: `s("bd hh bd hh")`. A `:n` suffix picks the pack's nth file, strudel-style:
  * `s("bd:4")` = `s("bd").i(4)` (an explicit .i() overrides the suffix). Configure with
- * .i()/.begin()/.end()/.loop()/.speed()/.stretch()/.fit()/.slice(); route through effects
- * with .fx()/.param() as usual.
+ * .i()/.begin()/.end()/.loop()/.speed()/.stretch()/.fit()/.slice()/.attack()/.decay()/
+ * .sustain()/.release() (or .adsr()); route through effects with .fx()/.param() as usual.
  */
 export function s(value) {
   assertBuilderInput('s', value);

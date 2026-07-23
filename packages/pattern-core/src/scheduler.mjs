@@ -392,7 +392,8 @@ export class Scheduler {
       return typeof v === 'number' ? v : v == null ? undefined : Number(v);
     };
     const src = this.pattern.sampler;
-    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'stretch', 'slice', 'note', 'vel']) {
+    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'stretch', 'slice', 'note', 'vel',
+      'attack', 'decay', 'sustain', 'release']) {
       if (src[key]) {
         const v = at(src[key]);
         if (v !== undefined && !Number.isNaN(v)) cfg[key] = v;

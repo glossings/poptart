@@ -204,7 +204,15 @@ drums: s("bd*4 hh*8")    // "bd:4" picks a file inline, Strudel-style: = s("bd")
   .note("45 _ 52 57")    // repitch by MIDI note (24/"c2" = as recorded)
   .n("0 2 4")            // scale degrees; add .scale("F minor") to map them, like on synths
   .vel("1 .5 ~ 1")       // velocity: linear volume scaling per event
+  .attack(0.1).decay(0.2).sustain(0.6).release(0.2) // amplitude ADSR (or .adsr(a,d,s,r))
 ```
+
+The ADSR shapes the voice's amplitude. `attack`/`decay`/`release` are **multiples of the played
+duration**: `.decay(0.5)` reaches the sustain level halfway through the note, while `.attack(2)`
+ramps for twice the note's length and so never reaches full before it ends. `sustain` is a `0..1`
+level. Attack → decay → sustain play across the note; once its duration ends the envelope releases
+from wherever it is (a `.loop()` or cut one-shot releases at its gate-off instead). Left unset,
+playback is unchanged.
 
 The sample library root defaults to `~/.poptart/samples` — drop or symlink your sample folders in
 and they appear. You can change it in the **settings** tab (type a path or click **browse…** to

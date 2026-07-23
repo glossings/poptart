@@ -5,8 +5,9 @@ no completion notes.
 
 ---
 
-## Samples & synthesis
-- [ ] Add **ADSR** (attack, decay, sustain, release) envelope controls for samples
+## General
+- [ ] Remove "label: pattern   ·  $: anonymous  ·  _name: muted  ·  nameS: solo put the cursor inside lfo(...) to open the shape editor" text from default file
+- [ ] Add button in files to create a new one
 
 ## Signals (new)
 - [ ] **`keyboard`** signal — use the computer keyboard as a MIDI keyboard (à la Ableton)

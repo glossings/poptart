@@ -341,7 +341,8 @@ class OscEngine {
   /**
    * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
    * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, stretch,
-   * fit ('auto' | measures), slice, note, vel, secPerCycle }. Resolves pack/index/slice/fit
+   * fit ('auto' | measures), slice, note, vel, attack, decay, sustain, release, secPerCycle }.
+   * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
    * played region lasts exactly the target number of cycles, `note` a further multiplier that
    * repitches around MIDI 24 ("c2" = as recorded). `vel` scales volume linearly.
@@ -406,6 +407,13 @@ class OscEngine {
       this._latency(offsetSec),
       amp,
       cut,
+      // ADSR amplitude envelope: attack/decay/release multiply the played duration (SC scales
+      // them by dur - .attack(2) ramps over 2*dur), sustain is a 0..1 level. Defaults of 0/0/1/0
+      // floor down to the sampler's original tiny declick envelope, so unset ADSR is unchanged.
+      cfg.attack ?? 0,
+      cfg.decay ?? 0,
+      cfg.sustain ?? 1,
+      cfg.release ?? 0,
     ]);
   }
 
