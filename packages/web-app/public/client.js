@@ -1945,7 +1945,7 @@ initCollapsible(consoleFooter, consoleToggle, 'poptart-console-collapsed', { ope
 // re-applied pre-paint by index.html).
 // ---------------------------------------------------------------------------------------------
 
-const PRESET_THEMES = ['poptart', 'blueberry', 'matcha', 'paper'];
+const PRESET_THEMES = ['poptart', 'blueberry', 'matcha', 'paper', 'glossing'];
 const CUSTOM_KEY = 'poptart-custom-theme';
 const CUSTOM_BASE_KEY = 'poptart-custom-base';
 

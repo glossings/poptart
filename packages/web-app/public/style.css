@@ -97,6 +97,32 @@
   --syn-comment: #9b9689;
 }
 
+:root[data-theme='glossing'] {
+  /* evil red - near-black, faintly blue-tinted background with bright, vibrant
+     villain-console red. Deliberately low syntax variation: code is just bright
+     red + clean white, with only labels (properties) and comments pulled aside
+     enough to read. No pinks - reds stay saturated, whites stay cool. */
+  --bg: #090a0d;
+  --bg-raised: #0d0f14;
+  --bg-panel: #11141b;
+  --border: #242a36;
+  --text: #f2f4f7;
+  --text-dim: #838a97;
+  --accent: #ff3040;
+  --ok: #45b98f;
+  --err: #ff4b56;
+  --warn: #d8a24a;
+  --selection: #1b2540;
+  --linenumber: #3c4452;
+  --shadow: rgba(0, 0, 0, 0.7);
+  --syn-string: #e6e9f0;
+  --syn-number: #ff3040;
+  --syn-keyword: #ff3040;
+  --syn-variable: #ff3040;
+  --syn-property: #c53640;
+  --syn-comment: #5b636f;
+}
+
 /* derived - shared by all themes, computed from the palette */
 :root,
 :root[data-theme] {
