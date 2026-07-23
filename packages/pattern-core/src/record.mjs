@@ -29,10 +29,13 @@ const TOKENS_PER_LINE = 8;
  *   absolute cycle number, so the token list is rotated to replay on the same cycles it was
  *   recorded on (the window starts on a phrase boundary, which need not be a multiple of
  *   `cycles`).
+ * @param {boolean} [opts.noteless] - drop pitch from every token (a tap() recording): each hit
+ *   becomes `vel` or `vel:clip`, replayed with .as("vel:clip") on the default note. Simultaneous
+ *   hits collapse to one (a fixed-pitch pad has no chords).
  * @returns {{ pattern: string, count: number }} - `pattern` is the multi-line `<...>*n` string,
- *   ready to wrap as a template literal with .as("note:vel:clip").
+ *   ready to wrap as a template literal with .as("note:vel:clip") (or .as("vel:clip") if noteless).
  */
-export function recordingToMini(events, { cycles, grid = 16, startCycle = 0 }) {
+export function recordingToMini(events, { cycles, grid = 16, startCycle = 0, noteless = false }) {
   const R = grid > 0 ? Math.round(grid) : UNQUANTIZED_GRID;
   const total = Math.round(cycles * R);
   const phaseSlots = ((Math.round(startCycle * R) % total) + total) % total;
@@ -55,6 +58,7 @@ export function recordingToMini(events, { cycles, grid = 16, startCycle = 0 }) {
 
   const one = (x) => {
     const vel = Math.round(Math.min(1, Math.max(0.01, x.vel)) * 100) / 100;
+    if (noteless) return x.clip === 1 ? String(vel) : `${vel}:${x.clip}`; // tap: vel[:clip], no pitch
     if (x.clip === 1) return vel === 1 ? String(x.note) : `${x.note}:${vel}`;
     return `${x.note}:${vel}:${x.clip}`;
   };

@@ -638,7 +638,12 @@ export class Sig {
    * (scale degree - map it with .scale() afterwards), `vel` (0..1 velocity for that one
    * event), `clip` (duration as a multiple of the token's own step width - at *8, clip 3 rings
    * for three eighth-slots). Missing/empty fields keep their defaults (vel 1, clip 1). This is
-   * the form the editor's midi-record writes in place of a kb()/midikeys() call.
+   * the form the editor's midi-record writes in place of a kb()/midikeys()/keyboard() call.
+   *
+   * A spec with no pitch field - `.as("vel:clip")` - is the note-less form a tap() recording
+   * writes: every present token triggers the default note (C2, like a note-less synth("X")) at
+   * its velocity/clip, so the whole thing is a fixed-pitch velocity/rhythm pattern. Rests (`~`)
+   * stay rests either way.
    */
   as(spec) {
     const fields = String(spec).split(':').map((f) => f.trim().toLowerCase());
@@ -651,9 +656,12 @@ export class Sig {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .as() needs a step pattern, e.g. "<36:1:4 ~>*8".as("note:vel:clip")');
     }
+    // With no pitch field the token carries only vel/clip, so a present token still has to sound:
+    // it fires the default note (tap()'s fixed pad pitch). With a pitch field an absent one is a rest.
+    const hasPitch = fields.includes('note') || fields.includes('n');
     const explode = (raw) => {
       const parts = String(raw).split(':');
-      const out = { value: null, vel: null, clip: 1 };
+      const out = { value: hasPitch ? null : DEFAULT_SYNTH_NOTE, vel: null, clip: 1 };
       fields.forEach((f, i) => {
         const p = parts[i];
         if (p === undefined || p === '') return;

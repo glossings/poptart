@@ -1308,13 +1308,14 @@ function applyRecording(results) {
       logLine(`midi record (${r.label}): ${r.error}`, true);
       continue;
     }
-    const replacement = '`' + r.pattern + '`.as("note:vel:clip")';
+    const spec = r.noteless ? 'vel:clip' : 'note:vel:clip'; // tap() records note-less
+    const replacement = '`' + r.pattern + '`.as("' + spec + '")';
     if (replaceKbCall(r.label, replacement)) {
       applied++;
-      logLine(`midi record: wrote ${r.count} note(s) into "${r.label}"`);
+      logLine(`midi record: wrote ${r.count} ${r.noteless ? 'hit' : 'note'}(s) into "${r.label}"`);
     } else {
       logLine(
-        `midi record (${r.label}): no midikeys/kb call found to replace - recorded pattern: ${r.pattern.replace(/\n\s*/g, ' ')}`,
+        `midi record (${r.label}): no midikeys/kb/keyboard/tap call found to replace - recorded pattern: ${r.pattern.replace(/\n\s*/g, ' ')}`,
         true,
       );
     }
@@ -1322,9 +1323,10 @@ function applyRecording(results) {
   if (applied) evaluate(true);
 }
 
-// Finds the live-keys call in the labeled block - either `midikeys("device")(ch)` directly or
-// `kb(ch)` through any `const kb = midikeys(...)` binding declared in the buffer - and swaps
-// the whole call expression for the recorded pattern. First candidate in the block wins.
+// Finds the live-keys call in the labeled block and swaps the whole call expression for the
+// recorded pattern. Handles the MIDI routes - `midikeys("device")(ch)` directly, or `kb(ch)`
+// through a `const kb = midikeys(...)` binding - and the computer-keyboard sources `keyboard()`
+// and `tap()` (called directly, no channel). First candidate in the block wins.
 function replaceKbCall(label, replacement) {
   if (!labelsMod) return false;
   const code = cm.getValue();
@@ -1336,6 +1338,16 @@ function replaceKbCall(label, replacement) {
     return close == null || close < 0 ? null : [callStart, close + 1];
   };
   const spans = [];
+
+  // Computer-keyboard sources: `keyboard()` / `tap()` used directly (they return a signal, so no
+  // trailing channel call like midikeys). Match the whole `keyboard(...)` / `tap(...)` call.
+  const kbCall = /(?<![.\w$])(?:keyboard|tap)\s*\(/g;
+  let km;
+  while ((km = kbCall.exec(code))) {
+    if (km.index < block.start || km.index >= block.end) continue;
+    const span = spanFrom(km.index, km.index + km[0].length - 1);
+    if (span) spans.push(span);
+  }
 
   const direct = /\bmidikeys\s*\(/g;
   let m;
@@ -1541,7 +1553,8 @@ async function doStop() {
 const kbModeSelect = document.getElementById('kbMode');
 const KB_SEMITONES = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12, o: 13, l: 14, p: 15 };
 const KB_BASE_NOTE = 48; // MIDI note the home-row `a` plays at octave shift 0 (C, this package's c5 = 60)
-const KB_TAP_NOTE = 60; // fixed pitch a tap() key strikes - only its velocity/timing matter
+const KB_TAP_NOTE = 24; // fixed pitch a tap() key strikes (C2 - the engine's default note, so a
+// live tap and its .as("vel:clip") recording play the same pitch); only velocity/timing matter
 const KB_OCT_MIN = -3;
 const KB_OCT_MAX = 4;
 const KB_CONTROL_KEYS = new Set(['z', 'x', 'c', 'v']); // octave -/+, velocity -/+ (never notes)

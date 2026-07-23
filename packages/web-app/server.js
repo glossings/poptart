@@ -538,13 +538,16 @@ function finalizeMidiRec() {
   const results = [];
   for (const [label, events] of midiRec.events) {
     if (events.length === 0) continue;
+    // A tap() track records note-less (velocity/clip only) - the client wraps it .as("vel:clip").
+    const noteless = kbTracks.get(label)?.kind === 'tap';
     try {
       const { pattern, count } = patternCore.recordingToMini(events, {
         cycles: midiRec.cycles,
         grid: midiRec.grid,
         startCycle: midiRec.startCycle,
+        noteless,
       });
-      results.push({ label, pattern, count });
+      results.push({ label, pattern, count, noteless });
     } catch (err) {
       results.push({ label, error: err.message ?? String(err) });
     }
