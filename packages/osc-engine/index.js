@@ -82,6 +82,69 @@ class OscEngine {
     // web-app's conf feature, which writes the touched parameter into the code as .param(name,
     // value); the index lets it disambiguate plugins that reuse a name (see server's conf code).
     this.onParamAutomated = null;
+    // Track->track MIDI routes for the midi() source builder / .midi() injector when the source
+    // is another track (not a device): each { name, targetTrackId, slot, note }. Resolved lazily
+    // at note time (see _fanoutMidi) so it doesn't matter which track was evaluated first. slot 0
+    // routes to the target's instrument (a midi("track") head source); slot >= 1 injects into
+    // that fx (a .midi("track") injector). Device sources ("dev:...") don't use this - they go
+    // straight to sclang (setMidiNotes / injectMidiDevice).
+    this._midiRoutes = [];
+  }
+
+  // Does the routing name refer to `sourceTrackId`? Track-first: a bare name (or "track:name")
+  // matches a track by exact id; a "dev:" name is a device, never a track.
+  _nameIsTrack(name, sourceTrackId) {
+    if (name.startsWith('dev:')) return false;
+    const n = name.startsWith('track:') ? name.slice(6) : name;
+    return n === sourceTrackId;
+  }
+
+  // Fan a track's note edge out to every MIDI route whose source resolves to it. Synth sources
+  // carry pitch (an instrument route replays it; an injector too, for melodic effects); a fixed
+  // note is only used for note-less sources (see playSample). Called after the source's own note.
+  _fanoutMidi(sourceTrackId, note, velocity, targetTime, isOn) {
+    if (this._midiRoutes.length === 0) return;
+    const latency = this._latency(targetTime);
+    for (const r of this._midiRoutes) {
+      if (!this._nameIsTrack(r.name, sourceTrackId)) continue;
+      if (r.slot === 0) {
+        if (isOn) this._send('/poptart/noteOn', [r.targetTrackId, note, velocity, latency]);
+        else this._send('/poptart/noteOff', [r.targetTrackId, note, latency]);
+      } else if (isOn) {
+        this._send('/poptart/noteOnSlot', [r.targetTrackId, r.slot, note, velocity, latency]);
+      } else {
+        this._send('/poptart/noteOffSlot', [r.targetTrackId, r.slot, note, latency]);
+      }
+    }
+  }
+
+  // Fan-out for a note-less (sampler) source: fire the route's fixed note on the sample's rhythm,
+  // note-on at onset and note-off at offset (there's no separate off edge to hook like noteOff).
+  _fanoutMidiSample(sourceTrackId, velocity, onsetSec, offsetSec) {
+    if (this._midiRoutes.length === 0) return;
+    for (const r of this._midiRoutes) {
+      if (!this._nameIsTrack(r.name, sourceTrackId)) continue;
+      const note = r.note ?? 60;
+      const onL = this._latency(onsetSec);
+      const offL = this._latency(offsetSec);
+      if (r.slot === 0) {
+        this._send('/poptart/noteOn', [r.targetTrackId, note, velocity, onL]);
+        this._send('/poptart/noteOff', [r.targetTrackId, note, offL]);
+      } else {
+        this._send('/poptart/noteOnSlot', [r.targetTrackId, r.slot, note, velocity, onL]);
+        this._send('/poptart/noteOffSlot', [r.targetTrackId, r.slot, note, offL]);
+      }
+    }
+  }
+
+  // Add/replace a track->track MIDI route for (targetTrackId, slot); removes any prior route to
+  // the same sink first so a re-eval with a different source doesn't leave a stale one.
+  _addMidiRoute(name, targetTrackId, slot, note) {
+    this._removeMidiRoute(targetTrackId, slot);
+    this._midiRoutes.push({ name, targetTrackId, slot, note });
+  }
+  _removeMidiRoute(targetTrackId, slot) {
+    this._midiRoutes = this._midiRoutes.filter((r) => !(r.targetTrackId === targetTrackId && r.slot === slot));
   }
 
   version() {
@@ -348,6 +411,10 @@ class OscEngine {
    * repitches around MIDI 24 ("c2" = as recorded). `vel` scales volume linearly.
    */
   playSample(trackId, pack, cfg, onsetSec, offsetSec) {
+    // A sampler source has no pitch, so any MIDI route off this track fires its fixed note on the
+    // sample's rhythm. Done first, so a ducker/arp keyed off a drum pattern triggers even before
+    // the pack finishes loading (when the sample itself would still be silent).
+    this._fanoutMidiSample(trackId, cfg.vel ?? 1, onsetSec, offsetSec);
     const entry = this._ensurePack(pack);
     if (entry.status !== 'ready' || entry.files.length === 0) return;
 
@@ -425,9 +492,11 @@ class OscEngine {
   // Server:sendBundle treats negative latency as "now" inconsistently across versions.
   noteOn(trackId, note, velocity, targetTime) {
     this._send('/poptart/noteOn', [trackId, note, velocity, this._latency(targetTime)]);
+    this._fanoutMidi(trackId, note, velocity, targetTime, true);
   }
   noteOff(trackId, note, targetTime) {
     this._send('/poptart/noteOff', [trackId, note, this._latency(targetTime)]);
+    this._fanoutMidi(trackId, note, 0, targetTime, false);
   }
   setParam(trackId, slotIndex, paramName, value, targetTime) {
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
@@ -530,6 +599,60 @@ class OscEngine {
   }
   clearParamCC(trackId, slotIndex, paramName) {
     this._send('/poptart/clearParamCC', [trackId, slotIndex, paramName]);
+  }
+
+  // --- midi()/audio() source + injector routing ---
+  //
+  // A routing `name` is either another track (bare, or "track:label") or a hardware input
+  // ("dev:substring"). Track-first resolution: bare names are treated as track names here (MIDI
+  // fanned out in Node, audio bussed in sclang); only "dev:" names hit a device path.
+
+  _isDevice(name) {
+    return String(name).startsWith('dev:');
+  }
+  _deviceName(name) {
+    return String(name).slice(4); // strip "dev:"
+  }
+
+  // Live head input from the midi()/audio() source builders. io 'midi': play the source's notes
+  // on this track's instrument (slot 0) - a track source fans out in Node, a device reuses the
+  // midikeys note-route. io 'audio': feed the source's audio into the chain input (sclang).
+  setInputSource(trackId, io, name, channel = 0, scalePcs = null) {
+    if (io === 'midi') {
+      if (this._isDevice(name)) this.setMidiNotes(trackId, this._deviceName(name), channel, scalePcs);
+      else this._addMidiRoute(name, trackId, 0, null); // slot 0 = instrument, null note = pass source pitch
+    } else if (io === 'audio') {
+      this._send('/poptart/setAudioInput', [trackId, name]);
+    }
+  }
+  clearInputSource(trackId) {
+    this._removeMidiRoute(trackId, 0);
+    this.clearMidiNotes(trackId); // no-op unless a device note-route was set for this track
+    this._send('/poptart/clearAudioInput', [trackId]);
+  }
+
+  // Inject audio into the plugin at `slot` as its aux/sidechain input (Sig#audio injector). A
+  // track source: sclang allocates a cross-track bus, maps it into that slot's VSTPlugin aux bus,
+  // adds a send from the source track's output, and orders the source ahead so the send lands the
+  // same block. A "dev:" source: sclang feeds SoundIn into the aux bus. gain scales the send.
+  injectAudio(trackId, slot, name, gain = 1) {
+    this._send('/poptart/injectAudio', [trackId, slot, name, gain]);
+  }
+  clearAudioInject(trackId, slot) {
+    this._send('/poptart/clearAudioInject', [trackId, slot]);
+  }
+
+  // Inject MIDI into the plugin at `slot` from a named source (Sig#midi injector, named form). A
+  // track source fans out in Node (its notes replay to the plugin); a "dev:" source routes the
+  // hardware device's MIDI to the plugin in sclang. `note` is the fixed pitch for note-less
+  // (sampler) sources; melodic sources pass their own pitch through.
+  injectMidi(trackId, slot, name, note = 60) {
+    if (this._isDevice(name)) this._send('/poptart/injectMidiDevice', [trackId, slot, this._deviceName(name), note]);
+    else this._addMidiRoute(name, trackId, slot, note);
+  }
+  clearMidiInject(trackId, slot) {
+    this._removeMidiRoute(trackId, slot);
+    this._send('/poptart/clearMidiInject', [trackId, slot]); // frees any device MIDIdefs for this sink
   }
 
   // --- internals ---

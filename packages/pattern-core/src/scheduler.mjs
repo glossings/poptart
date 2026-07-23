@@ -1,7 +1,9 @@
 // Bridges a Sig (see signal.mjs) to an "engine" - any object implementing the interface used
-// below (createTrack/loadInstrument/loadEffect/noteOn/noteOff/playSample/setParam/setParamLFO/
-// clearParamLFO/anchorParamLFO (optional)/setParamEnv/clearParamEnv/setParamCC/clearParamCC/
-// setMidiNotes/clearMidiNotes/getTime).
+// below (createTrack/loadInstrument/loadEffect/noteOn/noteOff/noteOnSlot (optional)/noteOffSlot
+// (optional)/playSample/setParam/setParamLFO/clearParamLFO/anchorParamLFO (optional)/setParamEnv/
+// clearParamEnv/setParamCC/clearParamCC/setMidiNotes/clearMidiNotes/getTime, and - all optional -
+// setInputSource/clearInputSource/injectAudio/clearAudioInject/injectMidi/clearMidiInject for the
+// midi()/audio() source + injector routing).
 // This class is engine-agnostic by design: anything implementing that interface works
 // unchanged - the OSC engine talking to SuperCollider (see @poptart/osc-engine) is the one in
 // use. Two independent mechanisms run side by side, matching the two ways a Sig can carry
@@ -171,6 +173,9 @@ export class Scheduler {
     this._activeModulators = new Map(); // "slot name" -> { slot, name, sig, kind: 'lfo'|'env'|'cc', dynamic }
     this._midiRouted = false; // live midikeys() route currently held engine-side
     this._prevChannelNames = []; // channel controls set by the previous pattern, for default-reset
+    this._prevAudioInjectSlots = new Set(); // fx slots the previous pattern audio-injected, for teardown
+    this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
+    this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
   }
 
@@ -241,6 +246,49 @@ export class Scheduler {
       }
     }
     this._prevChannelNames = Object.keys(sig.channel);
+
+    // Live head input from the midi()/audio() source builders (Sig#inputSource): play a named
+    // MIDI source on this track's instrument, or feed a named audio source into the chain input.
+    // The engine resolves the name to a track or a device. Dropped on re-eval when it's gone.
+    if (typeof this.engine.setInputSource === 'function') {
+      const src = sig.inputSource;
+      if (src) {
+        const pcs = src.scale ? scalePitchClasses(src.scale) : null;
+        this.engine.setInputSource(this.trackId, src.io, src.name, src.channel ?? 0, pcs);
+      } else if (this._prevInputSource) {
+        this.engine.clearInputSource(this.trackId);
+      }
+      this._prevInputSource = sig.inputSource ?? null;
+    }
+
+    // Audio injected into a plugin's aux/sidechain input (Sig#audio, injector form): wire each
+    // { slot, name } and tear down any slot the new pattern dropped. `name` is a track or a
+    // hardware audio input; the engine routes the audio and orders any source track ahead of this.
+    if (typeof this.engine.injectAudio === 'function') {
+      const nextSlots = new Set();
+      for (const inj of sig.audioInjects ?? []) {
+        nextSlots.add(inj.slot);
+        this.engine.injectAudio(this.trackId, inj.slot, inj.name, inj.gain ?? 1);
+      }
+      for (const slot of this._prevAudioInjectSlots) {
+        if (!nextSlots.has(slot)) this.engine.clearAudioInject(this.trackId, slot);
+      }
+      this._prevAudioInjectSlots = nextSlots;
+    }
+
+    // MIDI injected into a plugin from a named source (Sig#midi injector): another track's notes
+    // or a MIDI device fanned into the plugin. Torn down for any slot the new pattern dropped.
+    if (typeof this.engine.injectMidi === 'function') {
+      const nextSlots = new Set();
+      for (const inj of sig.midiInjects ?? []) {
+        nextSlots.add(inj.slot);
+        this.engine.injectMidi(this.trackId, inj.slot, inj.name, inj.note);
+      }
+      for (const slot of this._prevMidiInjectSlots) {
+        if (!nextSlots.has(slot)) this.engine.clearMidiInject(this.trackId, slot);
+      }
+      this._prevMidiInjectSlots = nextSlots;
+    }
 
     // Tier-2 modulators are persistent engine-side synths mapped onto the VST parameter - they
     // outlive the pattern that created them, so a re-eval must explicitly clear any that the new

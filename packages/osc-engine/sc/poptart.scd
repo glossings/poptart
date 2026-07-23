@@ -74,6 +74,12 @@ var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackD
 var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing;
+// Audio sidechain routing (Sig#sidechain / '/poptart/setSidechain'). silentBus is the read-only
+// default for every fx slot's aux input (never written -> silence); trashBus is the write-only
+// default for a track's sidechain send when it feeds nothing (parked, never read). scArgsFor
+// builds the per-track defaults. The two dicts track live routes both ways for teardown.
+var silentBus, trashBus, scArgsFor, scKey, wireAudio, unwireAudio;
+var sidechainByTarget, sidechainBySource;
 
 // --- tiny JSON writer (the class library has String.parseJSON but no serializer) ---
 jsonEscape = { |str|
@@ -138,8 +144,14 @@ buildTrackDef = { |key|
     // .o(n)'s wraparound: numOutputBusChannels was sized from the selected device's channel
     // count at boot, so pair indices past the hardware's last pair fold back onto real outputs.
     var numPairs = max(1, server.options.numOutputBusChannels div: 2);
-    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, out = 1|
+    // scBus1..7 are per-fx-slot auxiliary (sidechain) input buses; scSend/scSendGain are this
+    // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses
+    // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
+    // route is set up - see scArgsFor and the setSidechain OSCdef.
+    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, out = 1, scSend, scSendGain = 1,
+        scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
         var sig = Silent.ar(2);
+        var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
         maxSlots.do { |i|
             if (i == 0) {
                 // The instrument slot's output, plus whatever the track's sample synths wrote
@@ -148,9 +160,15 @@ buildTrackDef = { |key|
                 // fx chain a VST instrument would.
                 sig = VSTPlugin.ar(nil, 2, id: \slot0) + In.ar(inBus, 2);
             } {
+                // Effect slots take TWO input buses: the chain signal (bus 0, main) and a
+                // sidechain bus (bus 1, aux) read from this slot's scBus arg. The aux bus is
+                // silent unless a .sidechain() feeds it; a plugin with no aux input simply
+                // ignores the extra bus (VSTPlugin tolerates a surplus bus). The `Ref([...])`
+                // wrapping is how VSTPlugin.ar takes multi-bus input.
+                var scIn = In.ar(scBuses[i - 1], 2);
+                var wet = VSTPlugin.ar(Ref([[sig[0], sig[1]], [scIn[0], scIn[1]]]), 2, id: ("slot" ++ i).asSymbol);
                 // An empty VSTPlugin slot outputs silence, not pass-through - so each fx slot
                 // gets a bypass switch, flipped on only once a plugin actually loads into it.
-                var wet = VSTPlugin.ar(sig, 2, id: ("slot" ++ i).asSymbol);
                 sig = Select.ar(("active" ++ i).asSymbol.kr(0), [sig, wet]);
             };
         };
@@ -158,6 +176,10 @@ buildTrackDef = { |key|
         // -1 (Sig#gain/#pan; setParam sets these controls, setParam[Shape]LFO/Env map busses to
         // them). Lag smooths the ~30ms Tier-1 polling steps; clip keeps a runaway signal sane.
         sig = Balance2.ar(sig[0], sig[1], pan.lag(0.02).clip(-1, 1), gain.lag(0.02).clip(0, 4));
+        // Sidechain send: a copy of this track's post-fader output written to another track's
+        // aux bus (scSend). Parked to trashBus when this track feeds nothing, so the graph stays
+        // static; scSendGain scales the amount. Always-on Out keeps the UGen graph fixed.
+        Out.ar(scSend, sig * scSendGain);
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like
         // gain/pan): pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair.
         Out.ar((out.round - 1).mod(numPairs) * 2, sig);
@@ -168,6 +190,94 @@ buildTrackDef = { |key|
 // unity gain, center pan, first output pair.
 channelDefault = { |name|
     if ((name == "gain") or: { name == "out" }) { 1 } { 0 };
+};
+
+// Parked sidechain args for a freshly created track synth: every fx-slot aux input reads the
+// silent bus (so plugins see silence until routed), and the track's own send is parked to the
+// trash bus. setSidechain repoints the relevant args when a route is set up.
+scArgsFor = {
+    [\scSend, trashBus.index, \scSendGain, 1,
+     \scBus1, silentBus.index, \scBus2, silentBus.index, \scBus3, silentBus.index,
+     \scBus4, silentBus.index, \scBus5, silentBus.index, \scBus6, silentBus.index,
+     \scBus7, silentBus.index];
+};
+// Dict key for a sidechain route, identifying the aux input by (target track, fx slot).
+scKey = { |targetKey, slot| (targetKey.asString ++ "#" ++ slot).asSymbol };
+
+// Wire an audio route into a sink on `targetKey`: slot >= 1 is an fx aux (sidechain) input, slot
+// 0 is the chain input (a head audio() source). `rawName` is a source track ("label"/"track:label")
+// or a hardware input ("dev:..."). A track source sends its output to the sink bus and is ordered
+// ahead of the target; a device source runs a SoundIn feeder at the head writing that bus. The fx
+// aux gets a freshly allocated bus (pointed at via \scBusN); the chain input reuses the track's
+// own inBus. Idempotent: an existing route on the same sink is torn down first.
+wireAudio = { |targetKey, slot, rawName, gain|
+    fork {
+        var target = awaitTrack.(targetKey);
+        var str = rawName.asString;
+        var isDev = str.copyRange(0, 3) == "dev:";
+        var name = case
+            { isDev } { str.drop(4) }
+            { str.copyRange(0, 5) == "track:" } { str.drop(6) }
+            { str };
+        var key = scKey.(targetKey, slot);
+        case
+        { target.isNil } { ("poptart: audio route: no track " ++ targetKey).warn }
+        { (slot < 0) or: { slot >= maxSlots } } { ("poptart: audio route: bad slot " ++ slot).warn }
+        { true } {
+            var destBus, ownsBus;
+            unwireAudio.(targetKey, slot); // retire any existing route on this sink first
+            if (slot >= 1) {
+                destBus = Bus.audio(server, 2);
+                ownsBus = true;
+                target[\synth].set(("scBus" ++ slot).asSymbol, destBus.index);
+            } {
+                destBus = target[\inBus]; // chain input: the track already mixes inBus into slot 0
+                ownsBus = false;
+            };
+            if (isDev) {
+                var feeder;
+                if (server.options.numInputBusChannels < 2) {
+                    ("poptart: audio(\"dev:...\"): the audio device exposes < 2 input channels - "
+                        ++ "no hardware input to read (pick an input-capable device in settings)").warn;
+                };
+                feeder = Synth(\poptart_soundin, [\out, destBus.index, \in, 0, \gain, gain],
+                    target: server.defaultGroup, addAction: \addToHead);
+                sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nil, feeder: feeder, owns: ownsBus);
+                ("poptart: audio input: dev '" ++ name ++ "' -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
+            } {
+                var source = awaitTrack.(name.asSymbol);
+                if (source.isNil) { ("poptart: audio route: source track '" ++ name ++ "' not found").warn } {
+                    // One send per source (single \scSend): retire its previous sink if different.
+                    sidechainBySource[name.asSymbol] !? { |p|
+                        if ((p[\targetKey] != targetKey) or: { p[\slot] != slot }) { unwireAudio.(p[\targetKey], p[\slot]) };
+                    };
+                    source[\synth].set(\scSend, destBus.index, \scSendGain, gain);
+                    if (name.asSymbol != targetKey) { target[\group].moveAfter(source[\group]) };
+                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: name.asSymbol, feeder: nil, owns: ownsBus);
+                    sidechainBySource[name.asSymbol] = (targetKey: targetKey, slot: slot);
+                    ("poptart: audio route: " ++ name ++ " -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
+                };
+            };
+        };
+    };
+};
+
+// Undo a route on (targetKey, slot): park an fx aux back to silence, park a track source's send
+// (or free a device feeder), and free the bus if we allocated it. No-op if not routed.
+unwireAudio = { |targetKey, slot|
+    var key = scKey.(targetKey, slot);
+    var entry = sidechainByTarget[key];
+    entry !? {
+        var target = tracks[targetKey];
+        if ((slot >= 1) and: { target.isKindOf(Event) }) { target[\synth].set(("scBus" ++ slot).asSymbol, silentBus.index) };
+        entry[\source] !? { |src|
+            tracks[src] !? { |s| if (s.isKindOf(Event)) { s[\synth].set(\scSend, trashBus.index) } };
+            sidechainBySource[src] = nil;
+        };
+        entry[\feeder] !? { |f| f.free };
+        if (entry[\owns]) { entry[\bus].free };
+        sidechainByTarget[key] = nil;
+    };
 };
 
 // Both helpers must be called from within a Routine (all handlers that use them fork first).
@@ -369,6 +479,17 @@ server.waitForBoot {
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
     };
+    // Feeder for a hardware audio input as a sidechain/chain source (audio("dev:...")): reads a
+    // stereo pair off the booted device's inputs (SoundIn, 0-indexed) and writes it to a bus.
+    SynthDef(\poptart_soundin, { |out, in = 0, gain = 1|
+        Out.ar(out, SoundIn.ar([in, in + 1]) * gain);
+    }).add;
+    // Parked buses + route bookkeeping for audio sidechains (see Sig#sidechain). Allocated once,
+    // here, so every track synth's sc* args have a valid default (silence in, send to nowhere).
+    silentBus = Bus.audio(server, 2);
+    trashBus = Bus.audio(server, 2);
+    sidechainByTarget = IdentityDictionary.new; // scKey -> (bus:, target:, slot:, source:)
+    sidechainBySource = IdentityDictionary.new; // sourceKey (Symbol) -> scKey it currently feeds
     server.sync;
     "poptart: server booted, ready".postln;
     nodeAddr.sendMsg("/poptart/ready");
@@ -396,7 +517,7 @@ OSCdef(\poptartCreateTrack, { |msg|
                 def: def,
                 group: group,
                 inBus: inBus,
-                synth: Synth(trackDefName.(key), [\inBus, inBus.index], target: group, addAction: \addToTail),
+                synth: Synth(trackDefName.(key), [\inBus, inBus.index] ++ scArgsFor.(), target: group, addAction: \addToTail),
                 controllers: Array.newClear(maxSlots),
                 loaded: Array.newClear(maxSlots), // slot -> pluginId once open() succeeds
                 wanted: Array.newClear(maxSlots), // slot -> pluginId an in-flight open() should commit
@@ -593,6 +714,30 @@ OSCdef(\poptartNoteOff, { |msg|
         });
     };
 }, '/poptart/noteOff');
+
+// MIDI to a specific plugin in the chain (Sig#trig / '/poptart/noteOnSlot'): a side channel to
+// one slot's plugin, so - unlike the instrument noteOn above - it does NOT touch the track's
+// held-note count or gate its env()/lfo() modulators (those follow the track's own voice, which
+// this stream isn't). Slot 0 is the instrument, 1..n the effects. A note-off matches the same
+// slot + pitch, so a ducker sees a gate exactly as long as the triggering step.
+OSCdef(\poptartNoteOnSlot, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, note = msg[3].asInteger;
+    var veloc = msg[4].asFloat, latency = msg[5].asFloat;
+    var track = tracks[key];
+    var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
+    if (ctl.notNil) {
+        server.makeBundle(latency, { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) });
+    };
+}, '/poptart/noteOnSlot');
+
+OSCdef(\poptartNoteOffSlot, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, note = msg[3].asInteger, latency = msg[4].asFloat;
+    var track = tracks[key];
+    var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
+    if (ctl.notNil) {
+        server.makeBundle(latency, { ctl.midi.noteOff(0, note, 0) });
+    };
+}, '/poptart/noteOffSlot');
 
 OSCdef(\poptartSetParam, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger;
@@ -1094,6 +1239,63 @@ OSCdef(\poptartClearMidiRoute, { |msg|
         track[\controllers][0] !? { |ctl| 16.do { |c| ctl.midi.control(c, 123, 0) } };
     };
 }, '/poptart/clearMidiRoute');
+
+// --- audio + MIDI routing (the midi()/audio() source builders and injector methods) ---
+
+// Audio into an fx aux (Sig#audio injector): wireAudio handles both a track source (cross-track
+// bus + send + ordering) and a device source (SoundIn feeder). See wireAudio for the mechanics.
+OSCdef(\poptartInjectAudio, { |msg|
+    wireAudio.(msg[1].asSymbol, msg[2].asInteger, msg[3].asString, msg[4].asFloat);
+}, '/poptart/injectAudio');
+
+OSCdef(\poptartClearAudioInject, { |msg|
+    unwireAudio.(msg[1].asSymbol, msg[2].asInteger);
+}, '/poptart/clearAudioInject');
+
+// Audio into a track's chain input (the audio() head source): same wiring, sink slot 0 (the
+// track's inBus, already mixed into its instrument slot).
+OSCdef(\poptartSetAudioInput, { |msg|
+    wireAudio.(msg[1].asSymbol, 0, msg[2].asString, 1.0);
+}, '/poptart/setAudioInput');
+
+OSCdef(\poptartClearAudioInput, { |msg|
+    unwireAudio.(msg[1].asSymbol, 0);
+}, '/poptart/clearAudioInput');
+
+// MIDI from a hardware device into the plugin at `slot` (Sig#midi injector, "dev:..." source).
+// Mirrors midiRoute but targets one slot's plugin and doesn't touch the track's held/env state -
+// it's a side channel, like noteOnSlot. Track sources are fanned out Node-side instead (see the
+// osc-engine), so only devices reach here.
+OSCdef(\poptartInjectMidiDevice, { |msg|
+    var targetKey = msg[1].asSymbol, slot = msg[2].asInteger, device = msg[3].asString;
+    fork {
+        var track = awaitTrack.(targetKey);
+        if (track.notNil) {
+            midiEnable.();
+            (midiSourceFor.(device)) !? { |src|
+                var kOn = ("poptart_mi_on_" ++ targetKey ++ "_" ++ slot).asSymbol;
+                var kOff = ("poptart_mi_off_" ++ targetKey ++ "_" ++ slot).asSymbol;
+                [kOn, kOff].do { |k| MIDIdef.all[k] !? { |d| d.free } };
+                MIDIdef.noteOn(kOn, { |veloc, n| track[\controllers][slot] !? { |c| c.midi.noteOn(0, n, veloc) } }, srcID: src.uid);
+                MIDIdef.noteOff(kOff, { |veloc, n| track[\controllers][slot] !? { |c| c.midi.noteOff(0, n, veloc) } }, srcID: src.uid);
+                track[\midiInjectDefs] = track[\midiInjectDefs] ? IdentityDictionary.new;
+                track[\midiInjectDefs][slot] = [kOn, kOff];
+                ("poptart: midi inject: dev '" ++ device ++ "' -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
+            } ?? { midiWarnMissing.("midi inject", device) };
+        };
+    };
+}, '/poptart/injectMidiDevice');
+
+OSCdef(\poptartClearMidiInject, { |msg|
+    var targetKey = msg[1].asSymbol, slot = msg[2].asInteger;
+    var track = tracks[targetKey];
+    if (track.isKindOf(Event) and: { track[\midiInjectDefs].notNil }) {
+        track[\midiInjectDefs][slot] !? { |keys|
+            keys.do { |k| MIDIdef.all[k] !? { |d| d.free } };
+            track[\midiInjectDefs][slot] = nil;
+        };
+    };
+}, '/poptart/clearMidiInject');
 
 // --- sampler ---
 

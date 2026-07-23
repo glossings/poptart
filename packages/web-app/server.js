@@ -243,7 +243,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap'];
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap', 'midi', 'audio'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -

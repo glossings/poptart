@@ -161,6 +161,15 @@ class MappedEngine {
   enableMidi(...a) { return this.engine.enableMidi(...a); }
   setMidiNotes(...a) { return this.engine.setMidiNotes(...a); }
   clearMidiNotes(...a) { return this.engine.clearMidiNotes(...a); }
+  // Signal routing (midi()/audio() source builders and .midi()/.audio() injectors). Plain
+  // pass-throughs - no parameter mapping involved, but the scheduler feature-detects each of
+  // these (typeof engine.X === 'function'), so they must exist on the wrapper to be reached.
+  setInputSource(...a) { return this.engine.setInputSource(...a); }
+  clearInputSource(...a) { return this.engine.clearInputSource(...a); }
+  injectAudio(...a) { return this.engine.injectAudio(...a); }
+  clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
+  injectMidi(...a) { return this.engine.injectMidi(...a); }
+  clearMidiInject(...a) { return this.engine.clearMidiInject(...a); }
 }
 
 module.exports = { MappedEngine, loadMappings, toNormalized, toRealWorld };

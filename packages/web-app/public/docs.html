@@ -199,6 +199,7 @@
         <a class="study" href="#s6"><span class="num">6</span>The channel strip</a>
         <a class="study" href="#s7"><span class="num">7</span>The sampler</a>
         <a class="study" href="#s8"><span class="num">8</span>Playing live</a>
+        <a class="study" href="#s8b"><span class="num">8½</span>Routing: midi &amp; audio</a>
         <a class="study" href="#s9"><span class="num">9</span>Transforms</a>
         <a class="study" href="#s10"><span class="num">10</span>Making it yours</a>
         <a href="#cheat">Cheat sheet</a>
@@ -605,6 +606,61 @@
         </section>
 
         <!-- ================================================================= -->
+        <section id="s8b">
+          <h2>Study 8½</h2>
+          <h3>Routing: <code>midi()</code> &amp; <code>audio()</code></h3>
+          <p>
+            Two builders, <code>midi()</code> and <code>audio()</code>, move MIDI and audio between
+            <em>inputs</em> — another track, or a piece of hardware — and your tracks and plugins. Each
+            works in two positions, and that position decides what it does.
+          </p>
+
+          <h4>As a source, at the head of a track</h4>
+          <p>A bare <code>midi(...)</code> / <code>audio(...)</code> is where a track's signal comes from:</p>
+          <pre><code><span class="f">midi</span>(<span class="s">"KeyStep 32"</span>).synth(<span class="s">"Serum 2"</span>)     <span class="c">// play Serum from a MIDI device's notes</span>
+<span class="f">audio</span>(<span class="s">"Scarlett Input 1"</span>).fx(<span class="s">"ValhallaRoom"</span>) <span class="c">// run a hardware input through a reverb</span></code></pre>
+
+          <h4>As an injector, after a plugin</h4>
+          <p>Called as a method after an <code>.fx(...)</code>, it feeds that plugin's extra input:</p>
+          <pre><code>bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Kickstart"</span>).midi(<span class="s">"kick"</span>)  <span class="c">// duck to kick's rhythm (MIDI trigger)</span>
+bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Pro-C 2"</span>).audio(<span class="s">"kick"</span>)   <span class="c">// Pro-C's sidechain listens to kick (audio)</span>
+kick: s(<span class="s">"bd*4"</span>)</code></pre>
+          <p>
+            <code>.midi("kick")</code> injects MIDI into the plugin — a track source replays its notes
+            (a drum track fires a fixed note on each hit, a melodic track passes its pitch through), so
+            a MIDI-triggered ducker like Kickstart follows the rhythm. <code>.audio("kick")</code> feeds
+            the source's <em>audio</em> into the plugin's sidechain input, for audio-keyed
+            compressors/duckers (Pro-C 2, ShaperBox). Both target whatever plugin is last in the chain,
+            like <code>.param()</code>.
+          </p>
+
+          <h4>Names: tracks or hardware</h4>
+          <p>
+            The argument to any of these is a <strong>name</strong>, resolved <strong>track-first</strong>:
+            if a track with that label exists it wins; otherwise it's matched against connected devices
+            (case-insensitive substring). Force either with a prefix:
+          </p>
+          <table>
+            <tr><th>Name</th><th>Means</th></tr>
+            <tr><td><code>"kick"</code></td><td>the track labelled <code>kick</code> (or a device, if no such track)</td></tr>
+            <tr><td><code>"track:kick"</code></td><td>always the track</td></tr>
+            <tr><td><code>"dev:KeyStep"</code></td><td>always a hardware MIDI/audio input</td></tr>
+          </table>
+          <div class="callout">
+            <span class="tag">tip</span>
+            For a plain MIDI-note trigger with no dedicated track, make a muted one and point at it:
+            <code>_trig: note("c5 ~ c5 ~")</code> then <code>…​.fx("Kickstart").midi("trig")</code>. A
+            leading underscore mutes the trigger track so you only hear its effect on the target.
+          </div>
+          <div class="callout">
+            <span class="tag">note</span>
+            Audio routing runs the source ahead of the target in the engine so the send is heard the
+            same instant. Hardware <em>audio</em> input depends on your audio device actually exposing
+            inputs (many output devices have none) — pick an input-capable device in settings.
+          </div>
+        </section>
+
+        <!-- ================================================================= -->
         <section id="s9">
           <h2>Study 9</h2>
           <h3>Transforms &amp; combinators</h3>
@@ -697,11 +753,13 @@ const acid = (p) =&gt; p.param(<span class="s">"Filter 1 Freq"</span>, 0.3);</co
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code></td><td>sampler pack</td></tr>
             <tr><td><code>midikeys("…")(ch)</code> · <code>keyboard()</code> · <code>tap()</code></td><td>live input</td></tr>
+            <tr><td><code>midi("kick")</code> · <code>audio("mic")</code></td><td>source: play/route an input</td></tr>
             <tr><td><code>choose(a, b, c)</code></td><td>random pick per cycle</td></tr>
           </table>
           <table>
             <tr><th>Chain</th><th></th></tr>
             <tr><td><code>.fx("…")</code> · <code>.param("name", v)</code></td><td>effects &amp; knobs</td></tr>
+            <tr><td><code>.midi("kick")</code> · <code>.audio("kick")</code></td><td>inject MIDI / audio sidechain into the last fx</td></tr>
             <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
             <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity &amp; note length</td></tr>
             <tr><td><code>.scale("…")</code></td><td>map degrees / snap notes to key</td></tr>

@@ -46,6 +46,20 @@ export class Sig {
     this.fxChain = opts.fxChain ?? [];
     this.paramSignals = opts.paramSignals ?? {}; // name -> Sig
     this.paramSlots = opts.paramSlots ?? {}; // name -> slot index (0 = instrument, 1..n = fx)
+    // MIDI injected into a specific plugin in the chain (see Sig#midi, the injector form): each
+    // { slot, name, note } routes another track's notes (or a MIDI device) into the plugin at
+    // `slot` (1..n = fx). The engine fans a track source's notes to the plugin, or wires a device.
+    // Drives MIDI-keyed effects: a sidechain ducker off a rhythm, an arp/vocoder fed a note line.
+    this.midiInjects = opts.midiInjects ?? [];
+    // Audio injected into a specific plugin's auxiliary (sidechain) input (see Sig#audio, the
+    // injector form): each { slot, name, gain } feeds another track's output, or a hardware audio
+    // input, into the plugin at `slot` - so an audio-keyed ducker/compressor responds to it.
+    this.audioInjects = opts.audioInjects ?? [];
+    // Live input feeding this track's HEAD (see the midi()/audio() source builders): { io, name,
+    // channel? }. io 'midi' plays the named source's notes on this track's instrument (a MIDI
+    // device, or another track's notes); io 'audio' feeds the named source's audio into the chain
+    // input (a hardware input, or another track's output). null for an ordinary pattern track.
+    this.inputSource = opts.inputSource ?? null;
     this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan' -> Sig
     this.velSig = opts.velSig ?? null; // per-onset note velocity (see vel()); synth tracks only
     // Captured plugin state per chain slot (0 = instrument, 1.. = fx), from synth/fx's second
@@ -90,6 +104,9 @@ export class Sig {
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
       paramSlots: this.paramSlots,
+      midiInjects: this.midiInjects,
+      audioInjects: this.audioInjects,
+      inputSource: this.inputSource,
       channel: this.channel,
       velSig: this.velSig,
       sampler: this.sampler,
@@ -148,6 +165,8 @@ export class Sig {
       out = this.mapValue(mapFor(this.pitchKind));
     }
     if (this.midiNotes) out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName } });
+    // A midi() source: quantize its live notes to the scale engine-side, like a midikeys() route.
+    if (this.inputSource?.io === 'midi') out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName } });
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     return out;
   }
@@ -294,6 +313,58 @@ export class Sig {
       paramSignals: { ...this.paramSignals, [name]: sig },
       paramSlots: { ...this.paramSlots, [name]: slotIndex },
     });
+  }
+
+  /**
+   * Injects MIDI into the plugin last added to the chain, alongside (and independent of) the
+   * track's own notes. Two argument forms:
+   *
+   *   bass: note("c2*8").synth("Serum 2").fx("Kickstart").midi("kick")   // ducked by kick's rhythm
+   *   lead: synth("Serum 2").fx("Arp").midi("KeyStep")                    // hardware keys drive the arp
+   *
+   * `source` is another track's label or a MIDI device, resolved track-first (a connected device
+   * is matched case-insensitively by substring); prefix "track:"/"dev:" to force one. A track
+   * source replays its notes into the plugin - a melodic track passes its pitch through, a drum
+   * track fires a fixed note (default MIDI 60 / c5; `{ note }` overrides) on each hit, which is
+   * what a ducker wants. Like .param() it targets whatever plugin is last in the chain, so put
+   * .midi() right after the .fx(...) it should drive. As a *source* at the head of a track, the
+   * bare midi("...") builder plays that input on the track's own instrument instead - see midi().
+   */
+  midi(source, opts = {}) {
+    const slot = this.fxChain.length; // 0 = instrument, 1..n = fx, in call order (last one)
+    if (slot < 1) {
+      throw new Error('[signal] .midi() injects into an effect - put it after an .fx(...), e.g. .fx("Kickstart").midi("kick")');
+    }
+    if (typeof source !== 'string' || !source.trim()) {
+      throw new Error('[signal] .midi() takes a source name - a track label or a MIDI device, e.g. .midi("kick")');
+    }
+    const note = Math.round(opts.note ?? DEFAULT_TRIG_NOTE);
+    return this._clone({ midiInjects: [...this.midiInjects, { slot, name: source.trim(), note }] });
+  }
+
+  /**
+   * Injects audio into the plugin last added to the chain, as that plugin's auxiliary (sidechain)
+   * input - so an audio-keyed ducker or compressor responds to the source:
+   *
+   *   bass: note("c2*8").synth("Serum 2").fx("Pro-C 2").audio("kick")   // Pro-C's sidechain = kick
+   *   kick: s("bd*4")
+   *
+   * `source` is another track's label, or a hardware audio input (resolved track-first, same as
+   * .midi(); prefix "track:"/"dev:" to force). `{ gain }` scales the amount sent (default 1). Put
+   * .audio() right after the .fx(...) whose sidechain input it should feed - it needs an effect,
+   * since the instrument has no audio input. The engine routes the cross-track audio and orders
+   * the source ahead of this track so the send lands the same block. As a *source* at the head of
+   * a track, the bare audio("...") builder feeds that input through the chain - see audio().
+   */
+  audio(source, opts = {}) {
+    const slot = this.fxChain.length; // last plugin in the chain (0 = instrument)
+    if (slot < 1) {
+      throw new Error('[signal] .audio() feeds an effect\'s aux input - put it after an .fx(...), e.g. .fx("Pro-C 2").audio("kick")');
+    }
+    if (typeof source !== 'string' || !source.trim()) {
+      throw new Error('[signal] .audio() takes a source name (track or audio input), e.g. .audio("kick")');
+    }
+    return this._clone({ audioInjects: [...this.audioInjects, { slot, name: source.trim(), gain: opts.gain ?? 1 }] });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -968,6 +1039,11 @@ export function choose(...options) {
 // whole-cycle note per cycle - the same note at which a sample plays back at native speed.
 const DEFAULT_SYNTH_NOTE = 24;
 
+// The pitch a .midi() injection fires for a note-less (drum) source, when no { note } is given:
+// middle C (c5 = 60 here). A MIDI-triggered ducker (Kickstart, LFOTool) ignores the note, so any
+// fixed pitch works; a melodic source passes its own pitch through instead.
+const DEFAULT_TRIG_NOTE = 60;
+
 /**
  * Pattern starting from the instrument: synth("Serum 2") plays a default C2 every cycle until
  * notes are given - add them before or after (`n("0 2 3").scale("F minor").synth("Serum 2")`
@@ -1227,4 +1303,42 @@ export function keyboard() {
  */
 export function tap() {
   return new Sig(() => null, { keyboardRoute: { kind: 'tap' } });
+}
+
+function assertInputName(builder, name) {
+  if (typeof name !== 'string' || !name.trim()) {
+    const what = builder === 'audio' ? 'an audio input' : 'a MIDI device';
+    throw new Error(`[signal] ${builder}(...) takes a source name - a track label or ${what}, e.g. ${builder}("kick")`);
+  }
+}
+
+/**
+ * Live MIDI as a track SOURCE: `midi("KeyStep 32").synth("Serum 2")` plays Serum from that input's
+ * note stream. The name is a connected MIDI device (case-insensitive substring) or another track's
+ * label, whose notes are re-triggered here; resolved track-first, prefix "track:"/"dev:" to force.
+ * `channel` (1..16, omitted = all) narrows a hardware device to one MIDI channel. Like midikeys()
+ * it schedules no notes of its own - the source's notes are routed to this track's instrument
+ * engine-side, gating env()/lfo() shapes like any note. Chain .synth()/.fx()/.param()/.scale() as
+ * usual. Called as a *method* after a plugin, `.midi(...)` injects into that plugin instead - see
+ * Sig#midi. (For the computer keyboard use keyboard()/tap(); for a specific device, midikeys().)
+ */
+export function midi(name, channel = null) {
+  assertInputName('midi', name);
+  if (channel != null && !(channel >= 1 && channel <= 16)) {
+    throw new Error('[signal] midi(): channel must be 1..16 (omit it for all channels)');
+  }
+  return new Sig(() => null, { inputSource: { io: 'midi', name: String(name).trim(), channel } });
+}
+
+/**
+ * Live audio as a track SOURCE: `audio("Scarlett Input 1").fx("ValhallaRoom")` runs that input
+ * through a reverb; `audio("drums").fx("Pro-C 2")` processes a copy of another track's output. The
+ * name is a hardware audio input or a track label (track-first; prefix "track:"/"dev:" to force).
+ * The audio flows into the same chain input a synth/sampler would, so the whole .fx()/.param()
+ * chain and channel strip apply; it schedules no notes of its own. Called as a *method* after a
+ * plugin, `.audio(...)` injects into that plugin's sidechain instead - see Sig#audio.
+ */
+export function audio(name) {
+  assertInputName('audio', name);
+  return new Sig(() => null, { inputSource: { io: 'audio', name: String(name).trim() } });
 }
