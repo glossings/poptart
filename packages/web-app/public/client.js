@@ -9,8 +9,8 @@
 // splitter are imported as ESM from /pattern-core/ (both served by server.js), so the browser
 // computes exactly the same steps the server plays.
 
-const evalBtn = document.getElementById('evalBtn');
-const stopBtn = document.getElementById('stopBtn');
+const playBtn = document.getElementById('playBtn');
+const updateBtn = document.getElementById('updateBtn');
 const scanBtn = document.getElementById('scanBtn');
 const engineStatus = document.getElementById('engineStatus');
 const trackInfo = document.getElementById('trackInfo');
@@ -151,8 +151,8 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   autoCloseBrackets: true,
   viewportMargin: Infinity,
   extraKeys: {
-    'Cmd-Enter': doEval,
-    'Ctrl-Enter': doEval,
+    'Cmd-Enter': () => evaluate(true),
+    'Ctrl-Enter': () => evaluate(true),
     'Cmd-.': doStop,
     'Ctrl-.': doStop,
     'Shift-Alt-Down': (cm) => copyLines(cm, 'down'),
@@ -169,7 +169,7 @@ document.addEventListener('keydown', (e) => {
   if (e.defaultPrevented || !(e.metaKey || e.ctrlKey)) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    doEval();
+    evaluate(true);
   } else if (e.key === '.') {
     e.preventDefault();
     doStop();
@@ -1165,6 +1165,7 @@ setInterval(() => {
 
 function stopHighlighting() {
   playing = false;
+  updateTransportButtons();
   for (const r of patternRegions) {
     for (const mk of r.marks) mk.clear();
     r.marks = [];
@@ -1317,7 +1318,7 @@ function applyRecording(results) {
       );
     }
   }
-  if (applied) doEval();
+  if (applied) evaluate(true);
 }
 
 // Finds the live-keys call in the labeled block - either `midikeys("device")(ch)` directly or
@@ -1467,20 +1468,40 @@ function badge(text, cls) {
   return b;
 }
 
-async function doEval() {
+// Reflect play state on the single Play/Stop toggle button (see the transport TODO): it reads
+// "▶ play" when stopped and turns into "■ stop" once playing.
+function updateTransportButtons() {
+  playBtn.innerHTML = playing ? '■ stop' : '▶ play';
+  playBtn.classList.toggle('is-playing', playing);
+  playBtn.title = playing ? 'Cmd/Ctrl + .' : 'Cmd/Ctrl + Enter';
+}
+
+// The one code-evaluation path. `start: true` (Play) un-freezes the clock so playback (re)starts
+// from cycle 0; `start: false` (Update) leaves the clock alone - a running performance is
+// re-patched seamlessly, a stopped one just reloads the patterns without making sound. Either
+// way the params panel, autocomplete, and highlighting regions refresh.
+async function evaluate(start) {
   const code = cm.getValue();
   try {
-    const result = await api('POST', '/api/evaluate', { code });
-    transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: false };
+    const result = await api('POST', '/api/evaluate', { code, start });
+    transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     renderTracks(result);
     setupHighlighting(code, result.tracks);
     foldConfigBlobs();
-    playing = true;
-    logLine(`evaluated ok (${result.tracks.filter((t) => t.active).length}/${result.tracks.length} pattern(s) playing)`);
+    if (start) playing = true; // Update keeps the current play state; Play begins it
+    const nActive = result.tracks.filter((t) => t.active).length;
+    logLine(`${start ? 'playing' : 'updated'} (${nActive}/${result.tracks.length} pattern(s))`);
     loadChainParams();
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
+  updateTransportButtons();
+}
+
+// Play button: state-aware. Playing -> stop; stopped -> evaluate and start.
+function togglePlay() {
+  if (playing) doStop();
+  else evaluate(true);
 }
 
 async function doStop() {
@@ -1488,6 +1509,7 @@ async function doStop() {
   const result = await api('POST', '/api/stop');
   if (result.transport) transport = result.transport; // frozen at cycle 0
   stopHighlighting();
+  updateTransportButtons();
   logLine('stopped');
 }
 
@@ -1981,6 +2003,7 @@ audioDeviceSelect.addEventListener('change', async () => {
     await api('POST', '/api/audioDevice', { device });
     stopHighlighting();
     playing = false;
+    updateTransportButtons();
     transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
     logLine(`audio output is now ${label} - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
   } catch (e) {
@@ -2363,8 +2386,8 @@ rebuildThemeOptions();
 
 // ---------------------------------------------------------------------------------------------
 
-evalBtn.addEventListener('click', doEval);
-stopBtn.addEventListener('click', doStop);
+playBtn.addEventListener('click', togglePlay);
+updateBtn.addEventListener('click', () => evaluate(false));
 scanBtn.addEventListener('click', doScan);
 
 refreshStatus().then((loaded) => {

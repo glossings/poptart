@@ -235,6 +235,35 @@ button.primary:hover {
   background: var(--accent-strong);
 }
 
+/* Play/Stop and Update are a matched pair: same fixed width + centered "icon label" so they
+   sit symmetrically and the Play/Stop toggle doesn't reflow the header when it changes text. */
+#playBtn,
+#updateBtn {
+  min-width: 96px;
+  text-align: center;
+}
+
+/* Play/Stop toggle: green while it says "▶ play", red once it flips to "■ stop". */
+#playBtn {
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+#playBtn:hover {
+  background: color-mix(in srgb, var(--ok) 28%, transparent);
+}
+
+#playBtn.is-playing {
+  background: color-mix(in srgb, var(--err) 16%, transparent);
+  border-color: var(--err);
+  color: var(--err);
+}
+
+#playBtn.is-playing:hover {
+  background: color-mix(in srgb, var(--err) 28%, transparent);
+}
+
 button.small {
   padding: 2px 8px;
   font-size: 11px;

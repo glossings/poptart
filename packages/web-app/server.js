@@ -630,7 +630,9 @@ const routes = {
 
     // Playback (re)starts: un-freeze the clock. After a stop it sits at cycle 0, so every
     // pattern comes in from the top of the grid; mid-performance evals are a no-op here.
-    if (active.length > 0) transport.start();
+    // `start: false` (the editor's "Update" button) evaluates without touching the clock: a
+    // stopped clock stays frozen (patterns load silently), a running one keeps running.
+    if (active.length > 0 && body.start !== false) transport.start();
 
     for (const b of active) {
       // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.

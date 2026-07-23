@@ -1,7 +1,7 @@
 # poptart — TODO
 
-Working checklist. This file is gitignored (local-only). Say "sync the TODO" (or just
-tell me what's done) and I'll check items off and add notes inline.
+Working checklist. When an item is done, just delete its entry outright — no checking off,
+no completion notes.
 
 ---
 
@@ -18,17 +18,6 @@ tell me what's done) and I'll check items off and add notes inline.
     - `midi` = disable normal keyboard typing; `normal` = disable midi; `both` = do both simultaneously
 - [ ] **`tap`** signal — like `keyboard`, but any non-mapped key emits a velocity with **no note**
   - `c` / `v` retain the velocity down/up function
-
-## Editor / top bar
-- [ ] Replace the **eval / stop** buttons with **Play** and **Update**
-  - Play toggles into **Stop** once playing (single button, state-aware)
-  - Update evaluates the code **without** changing play state
-
-## Samples section
-- [x] Clicking a sound in the Samples section should **preview** it
-  → click now auditions the file (Web Audio) *and* still copies `s("pack:i")`. New binary
-    endpoint `GET /api/sampleAudio?pack=&i=` streams the actual file; row lights up while playing;
-    each click stops the previous preview.
 
 ## Docs
 - [ ] Add a link (opens new tab) to **docs**
