@@ -8,6 +8,9 @@ no completion notes.
 ## General
 - [ ] Remove "label: pattern   ·  $: anonymous  ·  _name: muted  ·  nameS: solo put the cursor inside lfo(...) to open the shape editor" text from default file
 - [ ] Add button in files to create a new one
+- [ ] Remove "subfolders of this folder are your sample packs"
+- [ ] Remove "code that runs once when poptart loads — helpers, custom scales, and Signal.prototype extensions, then available in every buffer"
+- [ ] Add note to self to avoid writing helper text italicized and permanently in the UI - it's tacky
 
 ## Signals (new)
 - [ ] **`keyboard`** signal — use the computer keyboard as a MIDI keyboard (à la Ableton)
@@ -31,10 +34,6 @@ no completion notes.
 - [ ] Remove hint: `subfolders of this folder are your sample packs`
 - [ ] Remove hint: `edits fork the current preset into a "custom" theme, saved in this browser`
   - Instead: **prompt the user to save their theme**
-
-## Prebake
-- [ ] Add a **"prebake" file (or files)** the user can edit
-  - Automatically run **exactly once** every time the program loads
 
 ## Hotkeys
 - [ ] Build **infrastructure** making it easy for the user to add their own hotkeys

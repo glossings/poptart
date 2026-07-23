@@ -146,6 +146,13 @@ keys: n("0 2 3 <5 7>")
               </div>
               <div id="samplesDirNote" class="files-note"></div>
             </section>
+            <section id="prebakeSection">
+              <h2>startup</h2>
+              <div class="settings-actions">
+                <button id="prebakeEditBtn" class="small">edit prebake…</button>
+              </div>
+              <div class="files-note">code that runs once when poptart loads — helpers, custom scales, and <code>Signal.prototype</code> extensions, then available in every buffer</div>
+            </section>
           </div>
         </aside>
       </main>
@@ -207,6 +214,21 @@ keys: n("0 2 3 <5 7>")
           <span id="dirPickerNote" class="dir-picker-note"></span>
           <span class="spacer"></span>
           <button id="dirPickerUse" class="small primary">use this folder</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="prebakeBackdrop" class="dir-picker-backdrop hidden">
+      <div class="prebake-dialog" role="dialog" aria-label="edit prebake">
+        <div class="dir-picker-head">
+          <span>prebake — runs once at startup</span>
+          <span class="spacer"></span>
+          <button id="prebakeSave" class="small primary">save &amp; run</button>
+          <button id="prebakeClose" class="small">✕</button>
+        </div>
+        <textarea id="prebakeEditor" spellcheck="false"></textarea>
+        <div class="dir-picker-foot">
+          <span id="prebakeNote" class="prebake-note"></span>
         </div>
       </div>
     </div>

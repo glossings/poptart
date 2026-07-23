@@ -177,6 +177,35 @@ between tracks or above them — each becomes its own setup block. (A bare `$: S
 setup: it evaluates to a signal, so it becomes a silent track with no synth. To reuse a constant,
 name it — `const half = Signal(0.5)` — and reference it.)
 
+### Prebake: setup that runs at startup
+
+Anything you'd otherwise paste into the top of every session — personal helpers, custom scales,
+`Signal.prototype` extensions — goes in a **prebake** file that poptart runs **once at load**,
+before any pattern plays. Edit it in the browser from the **settings** tab → **edit prebake…**
+(saving re-runs it immediately, no restart needed), or edit `~/.poptart/prebake.js` directly:
+
+```js
+// ~/.poptart/prebake.js
+Signal.prototype.co = function (num) {
+  return this.o(num).gain("1".sub(midicc("Midi Fighter Twister")(num - 1, 2)));
+};
+const kick = s("bd*4")           // reusable named building blocks
+const acid = (p) => p.lpf(300).lpq(8)
+```
+
+Prebake runs as **setup**, exactly like a `$:` block: nothing auto-plays. What it leaves behind is
+available everywhere after — `Signal.prototype.…` methods (globally) and top-level
+`const`/`let`/`var` bindings, which are injected into every buffer so you can write `drums:
+kick.co(1)` or `bass: acid(n("0 3 5").synth("Serum 2"))` in any pattern without redefining them. A
+buffer can still shadow a prebake name by redeclaring it locally.
+
+For more than one file, add a `~/.poptart/prebake/` folder: its `*.js` files run after `prebake.js`
+in filename order (so `10-scales.js` before `20-drums.js`), each seeing the previous ones'
+bindings (these folder files are disk-only — the in-browser editor edits just `prebake.js`). A
+prebake file that throws is logged and skipped — it never blocks startup, and the in-browser editor
+surfaces the error on save. One caveat: *removing* a `Signal.prototype` extension needs a restart,
+since the prototype keeps methods already added to it.
+
 ### Pinning plugin state into the code
 
 Click **pin** next to a plugin in the track panel to capture its complete current state (preset,
@@ -257,6 +286,7 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Plugin scan directories | `POPTART_VST_DIRS` (colon-separated) | `~/.poptart/plugins` if it exists, else the standard VST locations |
 | Plugins to skip when scanning | `POPTART_VST_EXCLUDE` (colon-separated paths) | none |
 | Saved patterns | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |
+| Startup setup file / folder | `POPTART_PREBAKE_FILE`, `POPTART_PREBAKE_DIR` | `~/.poptart/prebake.js`, `~/.poptart/prebake/` |
 | Persisted settings | `POPTART_SETTINGS_FILE` | `~/.poptart/settings.json` |
 | OSC / scsynth ports | `POPTART_OSC_NODE_PORT`, `POPTART_OSC_SC_PORT`, `POPTART_SCSYNTH_PORT` | `57140` / `57150` / `57110` |
 

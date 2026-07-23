@@ -1089,6 +1089,41 @@ li.CodeMirror-hint-active {
   white-space: nowrap;
 }
 
+/* --------------------------------------------------------------- prebake editor */
+
+.prebake-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 94vw);
+  height: min(560px, 82vh);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px var(--shadow);
+  overflow: hidden;
+}
+
+/* The panel's own CodeMirror fills the space between the header and footer. */
+.prebake-dialog .CodeMirror {
+  flex: 1;
+  height: auto;
+  font-size: 13px;
+}
+
+.prebake-note {
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prebake-note.error {
+  color: var(--err);
+  font-style: normal;
+}
+
 /* --------------------------------------------------------------- lfo editor */
 
 .lfo-panel {

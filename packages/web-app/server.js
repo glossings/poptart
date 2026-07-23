@@ -190,6 +190,7 @@ async function init() {
   extendStringPrototype(patternCore);
   engine = await loadEngine();
   if (engine) wireEngine();
+  runPrebake(); // once, after builders + transport exist and before the first eval
 }
 
 // Strudel-flavored ergonomics: let mini-notation strings be used directly as patterns in
@@ -274,9 +275,10 @@ function setbpm(value) {
 // harvest object literal can read it), and the harvested values are re-injected as extra
 // parameters into each later block's wrapper. The typeof guard covers names the line-anchored
 // regex picks up inside nested callbacks, which stay scoped there and never reach the wrapper.
-function makeBlockEvaluator() {
-  const defs = new Map(); // name -> value, accumulated down the buffer
-  return function evalBlock(code) {
+function makeBlockEvaluator(defs = new Map()) {
+  // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
+  // top-level bindings are in scope for every user block too (see runPrebake).
+  const evalBlock = function evalBlock(code) {
     const declNames = [
       ...new Set([...code.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1])),
     ];
@@ -303,6 +305,85 @@ function makeBlockEvaluator() {
     syncUserStringMethods(); // the block may have extended Signal.prototype - strings follow
     return __value;
   };
+  evalBlock.defs = defs;
+  return evalBlock;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Prebake - a user-owned setup file (plus an optional prebake/ folder of files) evaluated once
+// at load, before any pattern is played. It's for the setup you'd otherwise paste into every
+// buffer: personal helpers, custom scales, Signal.prototype extensions. Plain .js under
+// ~/.poptart so it's hand-editable like settings.json and the patterns folder.
+//
+// Blocks run as setup - their values are ignored (nothing auto-plays and the engine needn't even
+// be up). What persists is the same two things a `$:` setup block leaves behind: Signal.prototype
+// mutations (global) and top-level const/let/var bindings, which are harvested into prebakeDefs
+// and seeded into every later /api/evaluate so `const kick = s("bd*4")` in prebake is usable by
+// name in any pattern.
+// ---------------------------------------------------------------------------------------------
+
+const PREBAKE_FILE = process.env.POPTART_PREBAKE_FILE || path.join(os.homedir(), '.poptart', 'prebake.js');
+const PREBAKE_DIR = process.env.POPTART_PREBAKE_DIR || path.join(os.homedir(), '.poptart', 'prebake');
+
+let prebakeDefs = new Map(); // top-level bindings from the prebake sources, injected into every eval
+
+// The prebake sources in run order: prebake.js first, then prebake/*.js by filename. Later files
+// see earlier files' bindings (they share one evaluator), so numbered files impose an order.
+function prebakeSources() {
+  const sources = [];
+  try {
+    const code = fs.readFileSync(PREBAKE_FILE, 'utf8');
+    if (code.trim()) sources.push({ name: 'prebake.js', code });
+  } catch { /* no single-file prebake - fine */ }
+  let names = [];
+  try {
+    names = fs.readdirSync(PREBAKE_DIR).filter((f) => f.endsWith('.js')).sort((a, b) => a.localeCompare(b));
+  } catch { /* no prebake/ folder - fine */ }
+  for (const f of names) {
+    try {
+      const code = fs.readFileSync(path.join(PREBAKE_DIR, f), 'utf8');
+      if (code.trim()) sources.push({ name: `prebake/${f}`, code });
+    } catch { /* unreadable entry - skip it */ }
+  }
+  return sources;
+}
+
+// Runs (or re-runs) all prebake sources into a fresh evaluator, replacing prebakeDefs with the
+// result. Called once at startup and again whenever the browser saves the file, so an edit takes
+// effect without a restart. Returns the list of per-block error messages (empty on success) for
+// the save endpoint to hand back to the editor; a broken prebake never throws or blocks startup.
+function runPrebake() {
+  const sources = prebakeSources();
+  const errors = [];
+  const evalBlock = makeBlockEvaluator();
+  for (const src of sources) {
+    for (const b of patternCore.splitLabeledBlocks(src.code)) {
+      try {
+        evalBlock(b.code); // value ignored - prebake is setup, not a track
+      } catch (err) {
+        const where = b.label && !b.label.startsWith('$') ? ` (${b.label})` : '';
+        const msg = `${src.name}${where}: ${err.message ?? err}`;
+        errors.push(msg);
+        console.error(`[poptart] prebake ${msg}`);
+      }
+    }
+  }
+  prebakeDefs = evalBlock.defs; // replaces the previous set - a cleared prebake clears its defs
+  if (sources.length) {
+    const defs = prebakeDefs.size ? `; defs: ${[...prebakeDefs.keys()].join(', ')}` : '';
+    console.log(`[poptart] prebake ran ${sources.length} file(s)${defs}`);
+  }
+  return errors;
+}
+
+// The single ~/.poptart/prebake.js file, read for the browser's prebake editor ('' if missing).
+// The optional prebake/ folder is a disk-only power feature, so only this file is edited in-app.
+function readPrebakeFile() {
+  try {
+    return fs.readFileSync(PREBAKE_FILE, 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 // Patterns evaluate lazily, so a bad value ("badnote" where a note name should be, a throwing
@@ -593,7 +674,9 @@ const routes = {
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
 
-    const evalBlock = makeBlockEvaluator();
+    // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
+    // and a redeclared name in the buffer overrides the copy without clobbering the original.
+    const evalBlock = makeBlockEvaluator(new Map(prebakeDefs));
     const evaluated = blocks.map((b) => {
       try {
         const value = evalBlock(b.code);
@@ -798,6 +881,19 @@ const routes = {
     if (fs.existsSync(to)) throw new Error(`a pattern named "${body.to}" already exists`);
     fs.renameSync(from, to);
     return { status: 200, body: {} };
+  },
+
+  // --- prebake (the settings tab's "edit prebake" panel; see runPrebake) ---
+
+  'GET /api/prebake': async () => ({ status: 200, body: { code: readPrebakeFile() } }),
+
+  // Body: { code }. Overwrites prebake.js and re-runs all prebake sources immediately, so an edit
+  // applies without a restart. Returns per-block errors (empty on success) for the editor to show.
+  // (Removing a Signal.prototype extension still needs a restart - the prototype keeps it.)
+  'POST /api/prebake': async (body) => {
+    fs.mkdirSync(path.dirname(PREBAKE_FILE), { recursive: true });
+    fs.writeFileSync(PREBAKE_FILE, String(body.code ?? ''), 'utf8');
+    return { status: 200, body: { errors: runPrebake() } };
   },
 
   // --- MIDI record (see the "MIDI record" section above) ---

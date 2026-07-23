@@ -2119,6 +2119,94 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !dirPickerBackdrop.classList.contains('hidden')) closeDirPicker();
 });
 
+// ---------------------------------------------------------------------------------------------
+// Prebake editor - a modal CodeMirror over ~/.poptart/prebake.js (settings tab -> "edit
+// prebake…"). Saving writes the file and re-runs it server-side, so edits apply without a
+// restart; per-block errors come back and show in the footer. Its own CodeMirror is created
+// lazily on first open (and refreshed then, since it's laid out while hidden).
+// ---------------------------------------------------------------------------------------------
+
+const prebakeBackdrop = document.getElementById('prebakeBackdrop');
+const prebakeEditBtn = document.getElementById('prebakeEditBtn');
+const prebakeSaveBtn = document.getElementById('prebakeSave');
+const prebakeCloseBtn = document.getElementById('prebakeClose');
+const prebakeNote = document.getElementById('prebakeNote');
+const PREBAKE_HINT = 'saved to ~/.poptart/prebake.js · ⌘S / ⌘↵ to save';
+let prebakeCM = null;
+
+function ensurePrebakeCM() {
+  if (!prebakeCM) {
+    prebakeCM = CodeMirror.fromTextArea(document.getElementById('prebakeEditor'), {
+      mode: { name: 'javascript' },
+      theme: 'poptart',
+      keyMap: 'sublime',
+      lineNumbers: true,
+      matchBrackets: true,
+      autoCloseBrackets: true,
+      viewportMargin: Infinity,
+      extraKeys: {
+        'Cmd-Enter': savePrebake,
+        'Ctrl-Enter': savePrebake,
+        'Cmd-S': savePrebake,
+        'Ctrl-S': savePrebake,
+      },
+    });
+  }
+  return prebakeCM;
+}
+
+function setPrebakeNote(text, isError = false) {
+  prebakeNote.textContent = text;
+  prebakeNote.classList.toggle('error', isError);
+}
+
+async function openPrebake() {
+  const editor = ensurePrebakeCM();
+  setPrebakeNote('loading…');
+  try {
+    const { code } = await api('GET', '/api/prebake');
+    editor.setValue(code ?? '');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+  prebakeBackdrop.classList.remove('hidden');
+  editor.refresh(); // it was laid out while hidden - size it now that it's visible
+  editor.focus();
+  editor.setCursor(editor.lineCount(), 0);
+  setPrebakeNote(PREBAKE_HINT);
+}
+
+function closePrebake() { prebakeBackdrop.classList.add('hidden'); }
+
+async function savePrebake() {
+  if (!prebakeCM) return;
+  prebakeSaveBtn.disabled = true;
+  setPrebakeNote('saving…');
+  try {
+    const { errors } = await api('POST', '/api/prebake', { code: prebakeCM.getValue() });
+    if (errors && errors.length) {
+      setPrebakeNote(`saved, but: ${errors.join(' · ')}`, true);
+      for (const msg of errors) logLine(`prebake ${msg}`, true);
+    } else {
+      setPrebakeNote(`saved & ran ✓ · ${PREBAKE_HINT}`);
+      logLine('prebake saved & re-run');
+    }
+  } catch (e) {
+    setPrebakeNote(e.message ?? String(e), true);
+    logLine(e.message ?? String(e), true);
+  } finally {
+    prebakeSaveBtn.disabled = false;
+  }
+}
+
+prebakeEditBtn.addEventListener('click', openPrebake);
+prebakeSaveBtn.addEventListener('click', savePrebake);
+prebakeCloseBtn.addEventListener('click', closePrebake);
+prebakeBackdrop.addEventListener('click', (e) => { if (e.target === prebakeBackdrop) closePrebake(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !prebakeBackdrop.classList.contains('hidden')) closePrebake();
+});
+
 function renderPatternFiles(patterns) {
   fileList.innerHTML = '';
   if (!patterns.length) {
