@@ -3,9 +3,6 @@
 Working checklist. This file is gitignored (local-only). Say "sync the TODO" (or just
 tell me what's done) and I'll check items off and add notes inline.
 
-> ⚠️ This file is untracked/gitignored, same as the lost `.claude/` + `ARCHITECTURE.md`.
-> A `git clean -x` or similar could wipe it. Consider committing it if it matters.
-
 ---
 
 ## Samples & synthesis
@@ -28,7 +25,10 @@ tell me what's done) and I'll check items off and add notes inline.
   - Update evaluates the code **without** changing play state
 
 ## Samples section
-- [ ] Clicking a sound in the Samples section should **preview** it
+- [x] Clicking a sound in the Samples section should **preview** it
+  → click now auditions the file (Web Audio) *and* still copies `s("pack:i")`. New binary
+    endpoint `GET /api/sampleAudio?pack=&i=` streams the actual file; row lights up while playing;
+    each click stops the previous preview.
 
 ## Docs
 - [ ] Add a link (opens new tab) to **docs**

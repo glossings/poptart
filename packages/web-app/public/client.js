@@ -1777,6 +1777,50 @@ const MAX_SAMPLE_ROWS = 300;
 let samplePacks = null; // null until the first load, then [{ name, files }]
 let samplesRootDir = '';
 
+// Sample preview (auditioning). Plays the actual file the sounds browser lists - fetched from
+// /api/sampleAudio by the same pack/index that `s("pack:i")` uses - through Web Audio, so a
+// click both copies the pattern and lets you hear what it plays. The AudioContext is created
+// lazily on the first click (a user gesture, which browsers require to start audio), and each
+// new preview stops the previous one so rapid clicking doesn't stack overlapping sounds.
+let previewCtx = null;
+let previewSource = null; // the currently-playing BufferSourceNode, if any
+let previewRow = null; // the row element marked 'previewing', so we can clear it when it ends
+let previewGen = 0; // bumped on every click, so a slow fetch/decode from an older click is dropped
+
+function stopPreview() {
+  if (previewSource) {
+    try { previewSource.stop(); } catch {}
+    previewSource = null;
+  }
+  if (previewRow) {
+    previewRow.classList.remove('previewing');
+    previewRow = null;
+  }
+}
+
+async function previewSample(pack, i, row) {
+  stopPreview();
+  const gen = ++previewGen;
+  previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+  if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
+  try {
+    const res = await fetch(`/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`);
+    if (!res.ok) throw new Error(`preview failed: ${res.status}`);
+    const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
+    if (gen !== previewGen) return; // a newer click superseded this one while we fetched/decoded
+    const src = previewCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(previewCtx.destination);
+    src.onended = () => { if (src === previewSource) stopPreview(); };
+    previewSource = src;
+    previewRow = row;
+    row?.classList.add('previewing');
+    src.start();
+  } catch (e) {
+    if (gen === previewGen) { stopPreview(); logLine(e.message ?? String(e), true); }
+  }
+}
+
 function renderSamples() {
   const query = sampleSearch.value.trim().toLowerCase();
   sampleList.innerHTML = '';
@@ -1812,8 +1856,8 @@ function renderSamples() {
     for (const f of files) {
       if (shown >= MAX_SAMPLE_ROWS) break;
       const row = document.createElement('div');
-      row.className = 'param-row';
-      row.title = 'click to copy';
+      row.className = 'param-row sample-row';
+      row.title = 'click to preview + copy';
       const name = document.createElement('span');
       name.textContent = f.name;
       row.appendChild(name);
@@ -1821,7 +1865,10 @@ function renderSamples() {
       idx.className = 'dim';
       idx.textContent = `:${f.i}`;
       row.appendChild(idx);
-      row.onclick = () => copyText(`s("${pack.name}:${f.i}")`, 'sample');
+      row.onclick = () => {
+        copyText(`s("${pack.name}:${f.i}")`, 'sample');
+        previewSample(pack.name, f.i, row);
+      };
       sampleList.appendChild(row);
       shown++;
     }

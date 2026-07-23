@@ -958,6 +958,45 @@ function serveStatic(req, res) {
   });
 }
 
+// Streams a single sample file's raw bytes for the sounds-browser preview (the client decodes
+// it with Web Audio). Addressed the same way `s("pack:i")` is - by the file's index in its
+// pack's filename-sorted list - so what you preview is exactly what that pattern plays. Kept out
+// of the JSON `routes` table because it returns binary audio, not JSON.
+const AUDIO_MIME = {
+  '.wav': 'audio/wav',
+  '.aif': 'audio/aiff',
+  '.aiff': 'audio/aiff',
+  '.flac': 'audio/flac',
+};
+
+function serveSampleAudio(query, res) {
+  const pack = String(query.pack ?? '');
+  const i = Number(query.i);
+  // Pack is a single folder name under the samples root; reject anything that could escape it.
+  if (!pack || pack.includes('/') || pack.includes('\\') || pack.includes('..') || !Number.isInteger(i) || i < 0) {
+    res.writeHead(400).end('bad request');
+    return;
+  }
+  const { listPackFiles } = require('@poptart/osc-engine/samples');
+  const files = listPackFiles(pack);
+  const filePath = files?.[i];
+  if (!filePath) {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404).end('not found');
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': AUDIO_MIME[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream',
+      'Cache-Control': 'no-cache',
+    });
+    res.end(data);
+  });
+}
+
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
@@ -976,6 +1015,12 @@ function readJsonBody(req) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+
+  // Binary sample preview - answered outside the JSON route table (see serveSampleAudio).
+  if (req.method === 'GET' && url.pathname === '/api/sampleAudio') {
+    return serveSampleAudio(Object.fromEntries(url.searchParams), res);
+  }
+
   const handler = routes[`${req.method} ${url.pathname}`];
 
   if (!handler) {

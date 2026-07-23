@@ -706,6 +706,13 @@ aside h2 {
   background: var(--accent-soft);
 }
 
+/* Sample row lit up while its preview is auditioning (see previewSample). */
+.sample-row.previewing,
+.sample-row.previewing:hover {
+  background: var(--accent-strong);
+  color: var(--accent);
+}
+
 .dim {
   color: var(--text-dim);
   font-size: 10.5px;
