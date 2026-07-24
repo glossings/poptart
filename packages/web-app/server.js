@@ -279,6 +279,43 @@ function setbpm(value) {
 // harvest object literal can read it), and the harvested values are re-injected as extra
 // parameters into each later block's wrapper. The typeof guard covers names the line-anchored
 // regex picks up inside nested callbacks, which stay scoped there and never reach the wrapper.
+// The prebake file is shared with the browser, which runs it too for its hotkeys/UI side (see
+// runUserPrebake in client.js). Those browser-only calls - hotkey(), editor/repl, alert/prompt -
+// have no meaning here, so we hand the evaluator harmless stubs rather than let them throw as
+// ReferenceErrors. The pure utils (bjorklund/rotate/clamp) are real, since they're safe anywhere.
+const PREBAKE_BROWSER_SHIMS = {
+  hotkey: () => {},
+  alert: () => {},
+  prompt: (_msg, def) => def,
+  log: (msg) => console.log(`[poptart] prebake log: ${msg}`),
+  editor: new Proxy(() => '', { get: () => () => '', apply: () => '' }),
+  get repl() { return this.editor; },
+  clamp: (x, lo, hi) => Math.max(lo, Math.min(hi, x)),
+  rotate: (arr, n) => {
+    const len = arr.length;
+    if (!len) return arr.slice();
+    const k = ((n % len) + len) % len;
+    return arr.slice(k).concat(arr.slice(0, k));
+  },
+  bjorklund: (pulses, steps) => {
+    pulses = Math.max(0, Math.min(Math.floor(pulses), Math.floor(steps)));
+    steps = Math.max(0, Math.floor(steps));
+    if (steps === 0) return [];
+    if (pulses === 0) return new Array(steps).fill(false);
+    let groups = Array.from({ length: pulses }, () => [true]);
+    let rem = Array.from({ length: steps - pulses }, () => [false]);
+    while (rem.length > 1) {
+      const n = Math.min(groups.length, rem.length);
+      const ng = [], nr = [];
+      for (let i = 0; i < n; i++) ng.push(groups[i].concat(rem[i]));
+      if (groups.length > n) for (let i = n; i < groups.length; i++) nr.push(groups[i]);
+      else for (let i = n; i < rem.length; i++) nr.push(rem[i]);
+      groups = ng; rem = nr;
+    }
+    return groups.concat(rem).flat();
+  },
+};
+
 function makeBlockEvaluator(defs = new Map()) {
   // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
   // top-level bindings are in scope for every user block too (see runPrebake).
@@ -294,17 +331,21 @@ function makeBlockEvaluator(defs = new Map()) {
       if (macroNames.includes(n)) return patternCore.macro(Number(n.slice(5)));
       return patternCore[n];
     });
+    // Browser-only userland API stubs, minus anything a builder or a user def already provides.
+    const shimNames = Object.keys(PREBAKE_BROWSER_SHIMS).filter((n) => !defs.has(n) && !baseNames.includes(n));
+    const shimValues = shimNames.map((n) => PREBAKE_BROWSER_SHIMS[n]);
     const harvest = declNames
       .map((n) => `${JSON.stringify(n)}: (typeof ${n} === 'undefined' ? undefined : ${n})`)
       .join(', ');
     // eslint-disable-next-line no-new-func
     const build = new Function(
       ...baseNames,
+      ...shimNames,
       ...defs.keys(),
       '__blockCode',
       `var __value = eval(__blockCode); return { __value: __value, __defs: { ${harvest} } };`,
     );
-    const { __value, __defs } = build(...baseValues, ...defs.values(), body);
+    const { __value, __defs } = build(...baseValues, ...shimValues, ...defs.values(), body);
     for (const [n, v] of Object.entries(__defs)) if (v !== undefined) defs.set(n, v);
     syncUserStringMethods(); // the block may have extended Signal.prototype - strings follow
     return __value;

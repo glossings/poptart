@@ -1565,13 +1565,18 @@ let kbOctave = 0; // octave shift in whole octaves (z/x)
 let kbVelocity = 0.8; // 0.1..1 (c/v)
 const kbHeldKeys = new Map(); // key char -> [{ trackId, note }] currently sounding, for keyup/release
 
+// Set the computer-keyboard instrument mode ('normal' | 'midi' | 'both'), keeping the dropdown,
+// persisted state, and held-note bookkeeping in sync. Also invoked by the ctrl+b hotkey.
+function setKbMode(mode) {
+  kbMode = mode;
+  kbModeSelect.value = mode;
+  localStorage.setItem('poptart-kb-mode', mode);
+  if (mode === 'normal') kbReleaseAll();
+  logLine(`computer keyboard: ${mode}${mode !== 'normal' && kbRoutes.length === 0 ? ' (no keyboard()/tap() track yet)' : ''}`);
+}
+
 kbModeSelect.value = kbMode;
-kbModeSelect.addEventListener('change', () => {
-  kbMode = kbModeSelect.value;
-  localStorage.setItem('poptart-kb-mode', kbMode);
-  if (kbMode === 'normal') kbReleaseAll();
-  logLine(`computer keyboard: ${kbMode}${kbMode !== 'normal' && kbRoutes.length === 0 ? ' (no keyboard()/tap() track yet)' : ''}`);
-});
+kbModeSelect.addEventListener('change', () => setKbMode(kbModeSelect.value));
 
 // Called from evaluate() with the eval response's keyboardTracks. Drops held notes for any track
 // that is no longer a keyboard target, and nudges the user if they've written keyboard()/tap()
@@ -2149,17 +2154,24 @@ const fileList = document.getElementById('fileList');
 const consoleFooter = document.getElementById('console');
 const consoleToggle = document.getElementById('consoleToggle');
 
+// Switch the sidebar to a named tab (also invoked by the ctrl+p hotkey, see the hotkeys section).
+function activateTab(name) {
+  for (const b of document.querySelectorAll('.side-tab')) b.classList.toggle('active', b.dataset.tab === name);
+  sessionTab.classList.toggle('hidden', name !== 'session');
+  soundsTab.classList.toggle('hidden', name !== 'sounds');
+  filesTab.classList.toggle('hidden', name !== 'files');
+  settingsTab.classList.toggle('hidden', name !== 'settings');
+  if (name === 'sounds') loadSamples();
+  if (name === 'files') refreshPatternFiles();
+  if (name === 'settings') { refreshAudioDevices(); refreshSamplesDir(); }
+}
+
+function activeTabName() {
+  return document.querySelector('.side-tab.active')?.dataset.tab ?? 'session';
+}
+
 for (const btn of document.querySelectorAll('.side-tab')) {
-  btn.addEventListener('click', () => {
-    for (const b of document.querySelectorAll('.side-tab')) b.classList.toggle('active', b === btn);
-    sessionTab.classList.toggle('hidden', btn.dataset.tab !== 'session');
-    soundsTab.classList.toggle('hidden', btn.dataset.tab !== 'sounds');
-    filesTab.classList.toggle('hidden', btn.dataset.tab !== 'files');
-    settingsTab.classList.toggle('hidden', btn.dataset.tab !== 'settings');
-    if (btn.dataset.tab === 'sounds') loadSamples();
-    if (btn.dataset.tab === 'files') refreshPatternFiles();
-    if (btn.dataset.tab === 'settings') { refreshAudioDevices(); refreshSamplesDir(); }
-  });
+  btn.addEventListener('click', () => activateTab(btn.dataset.tab));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2383,7 +2395,11 @@ async function savePrebake() {
   prebakeSaveBtn.disabled = true;
   setPrebakeNote('saving…');
   try {
-    const { errors } = await api('POST', '/api/prebake', { code: prebakeCM.getValue() });
+    const code = prebakeCM.getValue();
+    const { errors } = await api('POST', '/api/prebake', { code });
+    // The server ran it for DSL defs; run it in the browser too so any hotkey()/editor calls
+    // in the same file take effect immediately (see runUserPrebake).
+    runUserPrebake(code);
     if (errors && errors.length) {
       setPrebakeNote(`saved, but: ${errors.join(' · ')}`, true);
       for (const msg of errors) logLine(`prebake ${msg}`, true);
@@ -2544,9 +2560,10 @@ function initCollapsible(el, toggleBtn, storageKey, labels) {
   };
   toggleBtn.addEventListener('click', () => apply(!el.classList.contains('collapsed')));
   apply(!!localStorage.getItem(storageKey));
+  return apply; // so callers (e.g. the ctrl+p hotkey) can drive the collapse programmatically
 }
 
-initCollapsible(sidebar, sidebarToggle, 'poptart-sidebar-collapsed', { open: '»', collapsed: '«' });
+const setSidebarCollapsed = initCollapsible(sidebar, sidebarToggle, 'poptart-sidebar-collapsed', { open: '»', collapsed: '«' });
 initCollapsible(consoleFooter, consoleToggle, 'poptart-console-collapsed', { open: '▾', collapsed: '▴' });
 
 // ---------------------------------------------------------------------------------------------
@@ -2785,3 +2802,240 @@ refreshStatus().then((loaded) => {
   if (loaded) loadKnownPlugins();
 });
 initMacros();
+
+// ---------------------------------------------------------------------------------------------
+// Hotkeys - a small dispatcher plus a userland API. Built-in transport/UI chords are registered
+// here; everything else is meant to live in the user's prebake, which the browser runs through
+// runUserPrebake() (the same file the server runs for DSL defs - browser-only calls like
+// hotkey()/editor no-op on the server, DSL builders no-op here). See the `hotkey`, `editor`, and
+// the util helpers handed to that sandbox below.
+//
+// Matching is on event.code (physical key position), so a chord fires regardless of which
+// character Shift/AltGr would produce - `cmd+shift+.` matches the `.` key even though the event's
+// .key is `>`. Combos are strings like 'cmd+shift+0', 'ctrl+p', 'mod+enter' (mod = cmd on macOS,
+// ctrl elsewhere). Modifiers: cmd/meta, ctrl, alt/option, shift, mod.
+// ---------------------------------------------------------------------------------------------
+
+const IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
+
+const KEY_CODE_MAP = {
+  '.': 'Period', ',': 'Comma', '/': 'Slash', ';': 'Semicolon', "'": 'Quote',
+  '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash', '-': 'Minus', '=': 'Equal', '`': 'Backquote',
+  enter: 'Enter', return: 'Enter', space: 'Space', tab: 'Tab', esc: 'Escape', escape: 'Escape',
+  backspace: 'Backspace', delete: 'Delete', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+};
+
+// A combo token -> KeyboardEvent.code, or null if we should fall back to matching event.key.
+function keyTokenToCode(tok) {
+  if (/^[a-z]$/.test(tok)) return 'Key' + tok.toUpperCase();
+  if (/^[0-9]$/.test(tok)) return 'Digit' + tok;
+  return KEY_CODE_MAP[tok] ?? null;
+}
+
+function comboToSpec(combo) {
+  const spec = { meta: false, ctrl: false, shift: false, alt: false, mod: false, code: null, key: null };
+  for (const raw of String(combo).toLowerCase().split('+')) {
+    const tok = raw.trim();
+    if (!tok) continue;
+    if (tok === 'cmd' || tok === 'meta' || tok === 'command' || tok === 'win' || tok === 'super') spec.meta = true;
+    else if (tok === 'ctrl' || tok === 'control') spec.ctrl = true;
+    else if (tok === 'shift') spec.shift = true;
+    else if (tok === 'alt' || tok === 'option' || tok === 'opt') spec.alt = true;
+    else if (tok === 'mod') spec.mod = true;
+    else { spec.code = keyTokenToCode(tok); spec.key = tok; }
+  }
+  return spec;
+}
+
+function specMatches(spec, e) {
+  const wantMeta = spec.meta || (spec.mod && IS_MAC);
+  const wantCtrl = spec.ctrl || (spec.mod && !IS_MAC);
+  if (e.metaKey !== wantMeta) return false;
+  if (e.ctrlKey !== wantCtrl) return false;
+  if (e.altKey !== spec.alt) return false;
+  if (e.shiftKey !== spec.shift) return false;
+  if (spec.code) return e.code === spec.code;
+  return spec.key != null && e.key.toLowerCase() === spec.key;
+}
+
+const builtinHotkeys = []; // app chords - persist for the session
+let userHotkeys = []; // registered from the prebake - cleared and rebuilt on every prebake run
+
+function addHotkey(list, combo, handler, label) {
+  list.push({ spec: comboToSpec(combo), handler, combo, label });
+}
+
+async function runHotkey(hk, e) {
+  try {
+    await hk.handler(e);
+  } catch (err) {
+    logLine(`hotkey ${hk.combo}: ${err.message ?? err}`, true);
+  }
+}
+
+// A blocking modal (prebake editor, folder picker) is open - don't let chords reach through it.
+function anyModalOpen() {
+  return !prebakeBackdrop.classList.contains('hidden') || !dirPickerBackdrop.classList.contains('hidden');
+}
+
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.repeat || anyModalOpen()) return;
+    for (const hk of builtinHotkeys) {
+      if (specMatches(hk.spec, e)) { e.preventDefault(); e.stopPropagation(); runHotkey(hk, e); return; }
+    }
+    for (const hk of userHotkeys) {
+      if (specMatches(hk.spec, e)) { e.preventDefault(); e.stopPropagation(); runHotkey(hk, e); return; }
+    }
+  },
+  true, // capture, so we beat CodeMirror and can suppress the keystroke
+);
+
+// --- built-in chords (Ctrl-based: free on macOS where Cmd owns the browser shortcuts) ---
+
+// ctrl+p - open the settings tab (expanding the sidebar if collapsed), or close it if already showing.
+addHotkey(builtinHotkeys, 'ctrl+p', () => {
+  const showing = activeTabName() === 'settings' && !sidebar.classList.contains('collapsed');
+  if (showing) {
+    setSidebarCollapsed(true);
+  } else {
+    setSidebarCollapsed(false);
+    activateTab('settings');
+  }
+}, 'toggle settings');
+
+// ctrl+r - arm/stop MIDI recording (mirrors the ● rec button).
+addHotkey(builtinHotkeys, 'ctrl+r', () => (recState ? cancelMidiRecord(true) : startMidiRecord()), 'toggle record');
+
+// ctrl+b - toggle the keyboard/tap instrument between off and midi.
+addHotkey(builtinHotkeys, 'ctrl+b', () => setKbMode(kbMode === 'normal' ? 'midi' : 'normal'), 'toggle midi keyboard');
+
+// ---------------------------------------------------------------------------------------------
+// Userland API + sandbox. runUserPrebake() executes the prebake source in a function scope where
+// the DSL builder names are chainable no-ops (so `const kick = s("bd*4")` doesn't throw here) and
+// hotkey()/editor/util helpers are real. This is what lets a single prebake file carry both DSL
+// setup (meaningful on the server) and hotkeys/UI code (meaningful in the browser).
+// ---------------------------------------------------------------------------------------------
+
+// A chainable no-op: any property access returns a function that returns the same stub, and
+// calling it returns the stub too - so arbitrary builder/method chains evaluate without error.
+function makeChainStub() {
+  const stub = new Proxy(function () {}, {
+    get: (_t, prop) => (prop === Symbol.toPrimitive ? () => '' : () => stub),
+    apply: () => stub,
+  });
+  return stub;
+}
+
+// editor: a thin, offset-based facade over the main CodeMirror instance, close to Strudel's `repl`
+// so ports read the same. Offsets are character indices into the whole document.
+const editor = {
+  get cm() { return cm; },
+  get code() { return cm.getValue(); },
+  getCode() { return cm.getValue(); },
+  setCode(str) { cm.setValue(str); },
+  appendCode(str) {
+    const end = cm.posFromIndex(cm.getValue().length);
+    cm.replaceRange(str, end);
+  },
+  insertCode(str, at) {
+    const pos = at == null ? cm.getCursor() : cm.posFromIndex(at);
+    cm.replaceRange(str, pos);
+  },
+  replaceCode(str, from, to) {
+    cm.replaceRange(str, cm.posFromIndex(from), cm.posFromIndex(to));
+  },
+  sliceCode(from, to) {
+    return cm.getRange(cm.posFromIndex(from), cm.posFromIndex(to));
+  },
+  getCursorLocation() { return cm.indexFromPos(cm.getCursor()); },
+  setCursorLocation(at) { cm.setCursor(cm.posFromIndex(at)); cm.focus(); },
+  // { from, to, text } as character offsets; from === to when nothing is selected.
+  getSelection() {
+    const from = cm.indexFromPos(cm.getCursor('from'));
+    const to = cm.indexFromPos(cm.getCursor('to'));
+    return { from, to, text: cm.getRange(cm.posFromIndex(from), cm.posFromIndex(to)) };
+  },
+  focus() { cm.focus(); },
+};
+
+// Euclidean rhythm (Bjorklund): `pulses` hits spread as evenly as possible over `steps`,
+// returned as a boolean array. Standard livecoding helper the ported hotkeys lean on.
+function bjorklund(pulses, steps) {
+  pulses = Math.max(0, Math.min(Math.floor(pulses), Math.floor(steps)));
+  steps = Math.max(0, Math.floor(steps));
+  if (steps === 0) return [];
+  if (pulses === 0) return new Array(steps).fill(false);
+  let groups = [];
+  for (let i = 0; i < pulses; i++) groups.push([true]);
+  let remainders = [];
+  for (let i = 0; i < steps - pulses; i++) remainders.push([false]);
+  while (remainders.length > 1) {
+    const n = Math.min(groups.length, remainders.length);
+    const nextGroups = [], nextRemainders = [];
+    for (let i = 0; i < n; i++) nextGroups.push(groups[i].concat(remainders[i]));
+    if (groups.length > n) for (let i = n; i < groups.length; i++) nextRemainders.push(groups[i]);
+    else for (let i = n; i < remainders.length; i++) nextRemainders.push(remainders[i]);
+    groups = nextGroups;
+    remainders = nextRemainders;
+  }
+  return groups.concat(remainders).flat();
+}
+
+// Rotate an array by n (positive = left). Negative and out-of-range n wrap.
+function rotate(arr, n) {
+  const len = arr.length;
+  if (!len) return arr.slice();
+  const k = ((n % len) + len) % len;
+  return arr.slice(k).concat(arr.slice(0, k));
+}
+
+function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+// The DSL builder names to stub in the browser sandbox (real on the server). Sourced from the
+// same BUILDERS list the autocomplete uses, so new builders are covered automatically.
+const PREBAKE_STUB_NAMES = [...new Set(BUILDERS)];
+
+// Names/values handed to every prebake run. Order must stay paired.
+function prebakeScope() {
+  const names = [];
+  const values = [];
+  // Each builder is a chainable Proxy: callable (so `s("bd*4")` works), tolerant of property
+  // sets (so `Signal.prototype.foo = …` doesn't throw), and every access/call returns a stub.
+  for (const n of PREBAKE_STUB_NAMES) { names.push(n); values.push(makeChainStub()); }
+  const api = {
+    hotkey: (combo, handler) => addHotkey(userHotkeys, combo, handler, 'user'),
+    editor,
+    repl: editor, // alias so Strudel-style ports read unchanged
+    prompt: (msg, def) => Promise.resolve(window.prompt(msg, def == null ? '' : String(def))),
+    alert: (msg) => window.alert(msg),
+    log: (msg) => logLine(String(msg)),
+    bjorklund,
+    rotate,
+    clamp,
+  };
+  for (const [n, v] of Object.entries(api)) { names.push(n); values.push(v); }
+  return { names, values };
+}
+
+// Clear any hotkeys a previous prebake run registered, then execute `code` in the sandbox. Errors
+// are logged, not thrown - a broken prebake must never take the editor down. Called at startup and
+// again whenever the prebake is saved.
+function runUserPrebake(code) {
+  userHotkeys = [];
+  if (!code || !code.trim()) return;
+  const { names, values } = prebakeScope();
+  try {
+    // eslint-disable-next-line no-new-func
+    const fn = new Function(...names, `"use strict";\n${code}\n//# sourceURL=poptart-prebake.js`);
+    fn(...values);
+  } catch (err) {
+    logLine(`prebake (browser): ${err.message ?? err}`, true);
+  }
+}
+
+// Load and run the prebake once at startup for its hotkeys/UI side. A missing file is fine.
+api('GET', '/api/prebake')
+  .then(({ code }) => runUserPrebake(code))
+  .catch(() => {});

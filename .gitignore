@@ -9,3 +9,6 @@ packages/native-engine/.cmake-js/
 .cache/
 
 tmp/
+
+# Local userland hotkey repro - paste into ~/.poptart/prebake.js; not part of the repo
+packages/web-app/prebake.hotkeys.js
