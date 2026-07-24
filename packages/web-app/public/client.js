@@ -2166,10 +2166,6 @@ function activateTab(name) {
   if (name === 'settings') { refreshAudioDevices(); refreshSamplesDir(); }
 }
 
-function activeTabName() {
-  return document.querySelector('.side-tab.active')?.dataset.tab ?? 'session';
-}
-
 for (const btn of document.querySelectorAll('.side-tab')) {
   btn.addEventListener('click', () => activateTab(btn.dataset.tab));
 }
@@ -2894,22 +2890,16 @@ window.addEventListener(
 
 // --- built-in chords (Ctrl-based: free on macOS where Cmd owns the browser shortcuts) ---
 
-// ctrl+p - open the settings tab (expanding the sidebar if collapsed), or close it if already showing.
+// ctrl+p - minimize/restore the RHS panel, keeping whatever tab was open.
 addHotkey(builtinHotkeys, 'ctrl+p', () => {
-  const showing = activeTabName() === 'settings' && !sidebar.classList.contains('collapsed');
-  if (showing) {
-    setSidebarCollapsed(true);
-  } else {
-    setSidebarCollapsed(false);
-    activateTab('settings');
-  }
-}, 'toggle settings');
+  setSidebarCollapsed(!sidebar.classList.contains('collapsed'));
+}, 'toggle sidebar');
 
 // ctrl+r - arm/stop MIDI recording (mirrors the ● rec button).
 addHotkey(builtinHotkeys, 'ctrl+r', () => (recState ? cancelMidiRecord(true) : startMidiRecord()), 'toggle record');
 
-// ctrl+b - toggle the keyboard/tap instrument between off and midi.
-addHotkey(builtinHotkeys, 'ctrl+b', () => setKbMode(kbMode === 'normal' ? 'midi' : 'normal'), 'toggle midi keyboard');
+// ctrl+m - toggle the keyboard/tap instrument between off and midi.
+addHotkey(builtinHotkeys, 'ctrl+m', () => setKbMode(kbMode === 'normal' ? 'midi' : 'normal'), 'toggle midi keyboard');
 
 // ---------------------------------------------------------------------------------------------
 // Userland API + sandbox. runUserPrebake() executes the prebake source in a function scope where
