@@ -7,7 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace packages/web-app"
+    "dev": "npm run dev --workspace packages/web-app",
+    "test": "npm run test --workspaces --if-present"
   },
   "engines": {
     "node": ">=20"

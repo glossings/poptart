@@ -5,7 +5,8 @@
   "description": "Node HTTP server + plain browser UI: livecoding editor, plugin browser, transport - talks to osc-engine via pattern-core in the server process.",
   "main": "server.js",
   "scripts": {
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@poptart/pattern-core": "*",
