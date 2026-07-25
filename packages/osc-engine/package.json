@@ -1,5 +1,6 @@
 {
   "name": "@poptart/osc-engine",
+  "license": "AGPL-3.0-only",
   "version": "0.1.0",
   "private": true,
   "description": "Engine adapter matching pattern-core's Scheduler engine interface, backed by OSC to a spawned sclang process (SuperCollider) which hosts VST3/AU plugins via VSTPlugin~.",
