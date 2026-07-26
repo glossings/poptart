@@ -1182,6 +1182,27 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
       unipolar = hash01(i) * (1 - su) + hash01(i + 1) * su;
       break;
     }
+    case 'perlin': {
+      // Fractal value noise (fBm): rand's smoothstep hash noise summed over a few octaves, each
+      // double the frequency and half the amplitude. Reads as a smoother, more organic drift than
+      // plain rand. Deterministic in `total`, so JS and any highlighter agree.
+      let sum = 0;
+      let amp = 1;
+      let norm = 0;
+      let freq = 1;
+      for (let oct = 0; oct < 4; oct++) {
+        const x = total * freq + oct * 17.13; // offset per octave so they decorrelate
+        const i = Math.floor(x);
+        const u = x - i;
+        const su = u * u * (3 - 2 * u);
+        sum += amp * (hash01(i) * (1 - su) + hash01(i + 1) * su);
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2;
+      }
+      unipolar = sum / norm;
+      break;
+    }
     case 'custom':
       // lfo() shapes: only free mode has a JS-side value - retrigger/envelope depend on note
       // gates only the engine sees, so (like env()) they just hold the shape's start level.
@@ -1215,6 +1236,7 @@ export const tri = shapeSignal('tri');
 export const square = shapeSignal('square');
 export const ramp = shapeSignal('ramp'); // rising 0->1 each period (alias shape of saw)
 export const rand = shapeSignal('rand'); // continuous random; step it with .hold("1*8")
+export const perlin = shapeSignal('perlin'); // fractal value noise - smoother, organic drift
 
 const DEFAULT_LFO_SHAPE = '0,0 0.5,1 1,0'; // triangle - what a bare lfo() starts as
 

@@ -79,7 +79,7 @@ let chainSlots = [];
 let knownPlugins = [];
 
 const BUILDERS = [
-  'Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
+  'Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
   'choose', 'keyboard', 'tap', 'pianoroll',
   'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
 ];
@@ -1838,6 +1838,10 @@ function walkAtomValues(node, fn) {
   }
   if (node.items) for (const it of node.items) walkAtomValues(it.node, fn);
   if (node.item) walkAtomValues(node.item, fn);
+  if (node.type === 'arith') {
+    walkAtomValues(node.a, fn);
+    walkAtomValues(node.b, fn);
+  }
 }
 
 // Numeric value of a mini number-pattern at absolute cycle-time t - the clip control read at an

@@ -464,7 +464,7 @@ export class Scheduler {
     if (typeof this.engine.anchorParamLFO !== 'function') return;
     for (const m of this._activeModulators.values()) {
       const ir = m.sig.lfoIR;
-      if (!ir || ir.shape === 'rand') continue; // rand has no phase to anchor
+      if (!ir || ir.shape === 'rand' || ir.shape === 'perlin') continue; // noise shapes have no phase to anchor
       if (ir.shape === 'custom' && ir.mode != null && ir.mode !== 'free') continue; // note-gated
       if (m.anchoredAtSec != null && nowSec - m.anchoredAtSec < LFO_ANCHOR_INTERVAL_SEC) continue;
       const targetSec = nowSec + DEFAULT_LOOKAHEAD_SEC;
