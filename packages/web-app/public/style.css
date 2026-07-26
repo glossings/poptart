@@ -1256,6 +1256,101 @@ li.CodeMirror-hint-active {
   color: var(--text-dim);
 }
 
+/* --------------------------------------------- piano roll editor (Ableton-style, centered) */
+
+.pianoroll-panel {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: fit-content;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px var(--shadow), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  z-index: 30;
+  overflow: hidden;
+}
+
+.pianoroll-panel.hidden {
+  display: none;
+}
+
+.pianoroll-panel-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 9px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 6%, var(--bg-panel)), var(--bg-panel));
+  border-bottom: 1px solid var(--border);
+}
+
+.pianoroll-panel-head .pr-text-btn {
+  min-width: 40px;
+  font-family: var(--mono);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.pianoroll-ctl {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+
+.pianoroll-ctl input[type='number'] {
+  width: 46px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+}
+
+.pianoroll-ctl select {
+  padding: 3px 20px 3px 7px;
+  font-size: 12px;
+  font-family: var(--mono);
+  background-position: right 6px center;
+}
+
+.pianoroll-ctl input[type='number']:focus {
+  border-color: var(--accent);
+}
+
+#pianorollPreview.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#pianorollCanvas {
+  display: block;
+  margin: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: crosshair;
+  outline: none;
+  touch-action: none;
+}
+
 /* --------------------------------------------- phrase position + midi record (header) */
 
 #phraseViz {

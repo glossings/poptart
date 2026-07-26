@@ -11,6 +11,7 @@
 import { parseMini, getStepsForCycle } from './mini.mjs';
 import { parseNoteValue, degreeToMidi, parseScaleName, quantizeToScale } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
+import { parsePianoRoll, normalizePianoRollSteps } from './pianoroll.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 
@@ -1062,6 +1063,59 @@ export function note(value) {
   const ast = parseMini(String(value));
   const valueFn = (v) => parseNoteValue(v);
   return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn), pitchKind: 'note' });
+}
+
+/**
+ * A note pattern drawn on an interactive piano roll: `pianoroll("60,0,4 64,0,4", { grid: 16, len:
+ * 16 })`. Putting the cursor inside a pianoroll(...) call in the editor opens the roll - draw,
+ * erase, resize, set per-note velocity/probability, and drag the loop length - and every change is
+ * serialized straight back into the string (see pianoroll.mjs for the format), the code staying the
+ * single source of truth exactly like lfo()'s shape editor.
+ *
+ * Two independent dimensions: `grid` is the granularity - cells per cycle, so grid 16 is a 1/16
+ * grid (this is the `*grid` multiplier of the equivalent mini-notation). `len` is the loop length
+ * measured in cells (grid-th notes), so `{ grid: 16, len: 3 }` is a three-1/16-note loop. Notes
+ * live in cells 0..len-1; the loop repeats every `len` cells, exactly like `<…len cells…>*grid`.
+ * `grid` may also be given as a bare number shorthand, `pianoroll(str, 32)` (len then defaults to a
+ * full cycle). Each note carries its own velocity and probability (a note with prob < 1 fires that
+ * fraction of the time, like a `?` degrade), and overlapping notes play as chords. Holds absolute
+ * MIDI notes, so it chains with .synth()/.scale()/.add()/etc. just like note().
+ */
+export function pianoroll(str, opts = {}) {
+  if (typeof str !== 'string') {
+    throw new Error('[signal] pianoroll(...) takes a note string from the piano roll editor, e.g. pianoroll("60,0,4 64,0,4")');
+  }
+  const grid = normalizePianoRollSteps(typeof opts === 'number' ? opts : (opts.grid ?? opts.steps));
+  const len = Math.max(1, Math.round(opts.len ?? grid));
+  const notes = parsePianoRoll(str);
+  // Index onsets by their loop cell. Playback walks absolute cells m = cycle*grid + j; the cell
+  // sounding is (m mod len), so a len-cell loop threads seamlessly across cycles - identical to
+  // `<len cells>*grid`. dur is the note's length in cycles; _prob/_seed drive the per-onset random
+  // gate (the same rng2 the `?` degrade uses, keyed on the absolute cell so each loop pass is
+  // independent yet a given pass replays identically).
+  const byStart = new Map();
+  notes.forEach((nt, i) => {
+    if (nt.start >= len) return; // outside the loop window - never sounds
+    const list = byStart.get(nt.start) ?? [];
+    list.push({ value: nt.midi, vel: nt.vel, dur: nt.len / grid, prob: nt.prob, seed: i + 1 });
+    byStart.set(nt.start, list);
+  });
+  const stepsForCycle = (cycle) => {
+    const out = [];
+    for (let j = 0; j < grid; j++) {
+      const m = cycle * grid + j;
+      const onsets = byStart.get(((m % len) + len) % len);
+      if (!onsets) continue;
+      const start = j / grid;
+      for (const o of onsets) {
+        if (o.prob < 1 && !(rng2(m, o.seed) < o.prob)) continue;
+        out.push({ start, end: start + o.dur, value: o.value, vel: o.vel });
+      }
+    }
+    return out;
+  };
+  const sample = (t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos);
+  return new Sig(sample, { stepsForCycle, pitchKind: 'note' });
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -1,18 +1,18 @@
 ## Preamble
 
-Hey, [Glossing](linktr.ee/glossing) here. Poptart is like the evil stepsister of other livecoding environments in that it uses (almost exclusively) VSTs instead of built-in synths. I wanted to see if that was possible and if it was fun. So far, the answer to both is yes :p
+Hey, [Glossing](https://linktr.ee/glossing) here. Poptart is like the evil stepsister of other livecoding environments in that it uses (almost exclusively) VSTs instead of built-in synths. I wanted to see if that was possible and if it was fun. So far, the answer to both is yes :p
 
-Did I use AI to assist with this? YEP. Whole bunch. That said, all of the API design, planning for the functionality, and testing was done by me, and has been inspired by the many many hours I've poured into developing tools for Max and Strudel by hand.
+Did I use AI to assist with this? YEP. Whole bunch. That said, all of the API design, planning, and testing was done by me, and has been inspired by the many many hours I've poured into developing tools for Max and Strudel by hand.
 
-I think whether we should be using technology like this to build our tools is a complicated question and I'm by no means trying to take a stance by releasing this. Honestly I built something fun for myself to test out ideas locally and then others wanted to take it for a spin as well. It felt weirder to keep it secret than just release it with this preamble.
+I think whether we should be using technology like this to build our tools is a complicated question and I'm by no means trying to take a stance by releasing this. Honestly I built something fun for myself to test out ideas locally and then others wanted to take it for a spin as well, so here we are. It felt weirder to keep it secret than just release it with this preamble.
 
 This leads to the next point: this was never meant to be a large-scale open source framework. I'm likely going to just keep developing it as a silly little sideproject for myself to augment my music. If such improvements bring some joy to others, then that would be a wonderful bonus.
 
 I hope you enjoy! AI slop readme begins in 3.. 2.. 1..
 
-# poptart
+# Poptart
 
-A livecoding environment for real instruments. You write terse, Strudel-style patterns; poptart
+A livecoding environment for real instruments. You arrange your music in simple notation; Poptart
 plays and continuously modulates actual VST/VST3 plugins.
 
 ```js
@@ -23,6 +23,8 @@ n("0 2 3")
 ```
 
 That's a synth line in F minor played through Serum, with its filter cutoff swept by a 0.3 Hz sine. Edit the code, hit eval, and the sound changes underneath your hands.
+
+(Glossing again. If you somehow ended up here without previously checking out [Tidal Cycles](https://tidalcycles.org) and [Strudel](https://strudel.cc), please do yourself a favor and give them a try - Poptart mirrors a lot of the patterning concepts and mini notation pioneered in those programs.)
 
 ## Highlights
 
@@ -190,7 +192,7 @@ name it — `const half = Signal(0.5)` — and reference it.)
 ### Prebake: setup that runs at startup
 
 Anything you'd otherwise paste into the top of every session — personal helpers, custom scales,
-`Signal.prototype` extensions — goes in a **prebake** file that poptart runs **once at load**,
+`Signal.prototype` extensions — goes in a **prebake** file that Poptart runs **once at load**,
 before any pattern plays. Edit it in the browser from the **settings** tab → **edit prebake…**
 (saving re-runs it immediately, no restart needed), or edit `~/.poptart/prebake.js` directly:
 
@@ -342,15 +344,12 @@ Two knobs help:
 
 ## License
 
-poptart is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0-only) — see
+Poptart is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0-only) — see
 [LICENSE](LICENSE).
 
 In plain terms: you can use it, study it, share it, and modify it freely. Make whatever music you
 like with it and sell that music — your tracks are yours, the license doesn't touch them. The one
 condition is on the *code*: if you distribute a modified version, or run one as a network service,
-you have to make your source available under the same license. That's deliberate — it keeps poptart
+you have to make your source available under the same license. That's deliberate — it keeps Poptart
 open for artists and hobbyists while stopping anyone from quietly rolling it into a closed,
 proprietary product.
-
-I retain the copyright, so if AGPL doesn't work for your situation, reach out — a separate
-commercial license is possible. Contributions are accepted under the AGPL.

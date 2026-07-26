@@ -5,5 +5,8 @@
   "private": true,
   "type": "module",
   "description": "A self-contained mini-notation parser and unified continuous-signal (CV/gate) pattern model. Engine-agnostic - drives any object implementing the engine interface documented in scheduler.mjs. No Strudel/Tidal packages - see ARCHITECTURE.md for why.",
-  "main": "src/index.mjs"
+  "main": "src/index.mjs",
+  "scripts": {
+    "test": "node --test"
+  }
 }

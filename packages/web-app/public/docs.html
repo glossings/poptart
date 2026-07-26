@@ -400,6 +400,33 @@
             default C2 every cycle, so a fresh instrument makes sound immediately while you decide what
             it should play.
           </p>
+
+          <div class="callout new">
+            <span class="tag">draw it</span>
+            <p style="margin:0 0 8px">
+              <code>pianoroll("…", { grid, len })</code> is the same absolute-note pattern as
+              <code>note(…)</code>, but <strong>drawn</strong>. <code>grid</code> is the granularity
+              (cells per cycle — the <code>*grid</code> of the equivalent mini-notation) and
+              <code>len</code> is the loop length in cells, so <code>{ grid: 16, len: 3 }</code> is a
+              three-1/16-note loop. Put your cursor inside the call and an Ableton-style grid opens
+              over the editor, with a real piano keyboard down the side, a draggable loop bar along
+              the top, and a playhead that sweeps the loop as it plays.
+            </p>
+            <p style="margin:0 0 8px">
+              Draw with the pencil (drag), or press <strong>B</strong> for the arrow tool to
+              marquee-select; click to select (shift-click or ctrl/cmd-A for more), drag to move,
+              drag the right edge to resize, <strong>cmd-drag</strong> up/down to set velocity (or
+              flip the <code>vel</code>/<code>prob</code> toggle to set per-note probability, which
+              becomes a <code>?</code> degrade). <strong>cmd-D</strong> duplicates, arrow keys nudge
+              (shift = octave / bar), delete removes, double-click erases one. Overlapping notes play
+              as chords; the <strong>grid</strong> and <strong>len</strong> fields (or dragging the
+              top loop bar) size it; <strong>cmd −/+</strong> zoom; <strong>🎧</strong> auditions each
+              note through the track's synth; and <strong>→♪</strong> converts the whole roll to the
+              equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation.
+            </p>
+            <pre style="margin:0"><code><span class="f">pianoroll</span>(<span class="s">"60,0,4 64,0,4 67,8,8"</span>, { steps: <span class="s">16</span> }).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)
+<span class="c">// each note is midi,start,len[,vel] over a `steps`-cell cycle. Chains like note(): .scale(), .add(), …</span></code></pre>
+          </div>
         </section>
 
         <!-- ================================================================= -->

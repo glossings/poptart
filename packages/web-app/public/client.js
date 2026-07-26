@@ -25,16 +25,20 @@ const log = document.getElementById('log');
 let miniMod = null;
 let labelsMod = null;
 let shapeMod = null;
+let pianorollMod = null;
 Promise.all([
   import('/pattern-core/mini.mjs'),
   import('/pattern-core/labels.mjs'),
   import('/pattern-core/shape.mjs'),
+  import('/pattern-core/pianoroll.mjs'),
 ])
-  .then(([m, l, s]) => {
+  .then(([m, l, s, pr]) => {
     miniMod = m;
     labelsMod = l;
     shapeMod = s;
+    pianorollMod = pr;
     initLfoEditor();
+    initPianorollEditor();
     updateMutedDim();
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
@@ -76,7 +80,7 @@ let knownPlugins = [];
 
 const BUILDERS = [
   'Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
-  'choose', 'keyboard', 'tap',
+  'choose', 'keyboard', 'tap', 'pianoroll',
   'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
 ];
 const METHODS = [
@@ -240,6 +244,14 @@ function foldConfigBlobs() {
     if (str.length < 24) continue;
     const start = m.index + m[0].length - str.length;
     foldSpan(start, start + str.length, '"⋯"', 'lfo shape — click to expand, or use the shape editor');
+  }
+  // Long pianoroll() note strings; short ones stay readable inline.
+  const prRe = /\bpianoroll\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
+  while ((m = prRe.exec(code))) {
+    const str = m[1];
+    if (str.length < 24) continue;
+    const start = m.index + m[0].length - str.length;
+    foldSpan(start, start + str.length, '"⋯"', 'piano roll notes — click to expand, or use the piano roll editor');
   }
 }
 
@@ -913,6 +925,826 @@ function initLfoCanvas() {
     writeLfoCall();
     drawLfoShape();
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Interactive piano roll editor - put the cursor inside any `pianoroll(...)` call and an Ableton-
+// style grid opens over the editor, with a real piano keyboard down the left edge and a playhead
+// that sweeps the steps as it plays. Two tools (pencil draws, arrow marquee-selects); click a note
+// to select it (shift-click extends, ctrl/cmd-A selects all), drag to move, drag a note's right
+// edge to resize, cmd-drag vertically to set velocity or probability (the vel/prob toggle), cmd-D
+// duplicates. Arrow keys nudge the selection (shift = octave / bar), delete removes it, double-
+// click erases one. Wheel scrolls pitch, shift-wheel scrolls time, ctrl-wheel (or the −/+ buttons)
+// zooms in on fine grids. With 🎧 on, drawing/dragging previews the note through the track's own
+// synth; →♪ rewrites the whole roll as an equivalent mini-notation note("…"). Every change is
+// serialized straight back into `pianoroll("midi,start,len[,vel[,prob]] …", { steps })` - the code
+// stays the single source of truth, exactly like the lfo() shape editor.
+// ---------------------------------------------------------------------------------------------
+
+const prPanel = document.getElementById('pianorollPanel');
+const prCanvas = document.getElementById('pianorollCanvas');
+const prGridSelect = document.getElementById('pianorollGrid');
+const prLenInput = document.getElementById('pianorollLen');
+const prToolBtn = document.getElementById('pianorollTool');
+const prCmdModeBtn = document.getElementById('pianorollCmdMode');
+const prZoomOutBtn = document.getElementById('pianorollZoomOut');
+const prZoomInBtn = document.getElementById('pianorollZoomIn');
+const prPreviewBtn = document.getElementById('pianorollPreview');
+const prToMiniBtn = document.getElementById('pianorollToMini');
+const prCloseBtn = document.getElementById('pianorollClose');
+
+const PR_W = 560; // logical canvas size (backing store is scaled by devicePixelRatio for crispness)
+const PR_TOPBAR = 16; // loop-ruler strip along the top (drag it to set the loop length)
+const PR_GRIDH = 384; // piano-grid height below the ruler
+const PR_CH = PR_TOPBAR + PR_GRIDH; // full canvas height
+const PR_ROWS = 24; // visible semitone rows (2 octaves)
+const PR_GUTTER = 54; // left piano-keyboard gutter, px
+const PR_DEFAULT_TOP = 72; // top row when a fresh/empty roll opens (c5 = 60 here, so 72 = c6)
+const PR_DEFAULT_VEL = 0.8; // velocity of a freshly drawn note
+const PR_EDGE_PX = 6; // right-edge grab zone for resizing
+const PR_MAX_ZOOM = 24; // deepest horizontal zoom (cells that many times wider than "fit")
+const PR_ZOOM_WHEEL = 0.0012; // wheel-zoom sensitivity (smaller = slower); proportional to deltaY
+const PR_PITCH_WHEEL = 0.013; // wheel pitch-scroll sensitivity, rows per deltaY unit (smaller = slower)
+const PR_BTN_ZOOM = 1.4; // per-click / per-keypress zoom step for the −/+ buttons and cmd ±
+const PR_GRID_DIVS = [['1/4', 4], ['1/8', 8], ['1/8T', 12], ['1/16', 16], ['1/16T', 24], ['1/32', 32], ['1/64', 64]];
+
+// Cursors that echo the tool under the pointer (Ableton's pencil / bracket / up-down), as inline
+// SVGs so no asset files are needed. The trailing two numbers are the hotspot.
+const svgCursor = (svg, x, y, fallback) => `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${x} ${y}, ${fallback}`;
+const CUR_PENCIL = svgCursor(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><path d="M2.5 17.5l1.2-3.2 9-9 2 2-9 9-3.2 1.2z" fill="#fff" stroke="#111" stroke-width="1.1" stroke-linejoin="round"/><path d="M13 4.5l2-2 2 2-2 2z" fill="#7aa2ff" stroke="#111" stroke-width="1.1" stroke-linejoin="round"/></svg>',
+  2, 18, 'crosshair',
+);
+const CUR_BRACKET = svgCursor(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="20" viewBox="0 0 18 20"><g fill="none" stroke="#111" stroke-width="3"><path d="M5 3H3v14h2"/><path d="M13 3h2v14h-2"/></g><g fill="none" stroke="#fff" stroke-width="1.3"><path d="M5 3H3v14h2"/><path d="M13 3h2v14h-2"/></g></svg>',
+  9, 10, 'ew-resize',
+);
+const CUR_UPDOWN = svgCursor(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="22" viewBox="0 0 16 22"><g fill="#fff" stroke="#111" stroke-width="1.1" stroke-linejoin="round"><path d="M8 1l4 5H9v10h3l-4 5-4-5h3V6H4z"/></g></svg>',
+  8, 11, 'ns-resize',
+);
+
+let prState = null; // see openPianorollEditor for the full shape (notes, steps, pitchTop, zoom, scroll, sel, tool, cmdMode, trackLabel)
+let prDismissedStart = null; // call the user explicitly closed - don't auto-reopen it
+let prSuppressCursor = false;
+let prPreviewEnabled = localStorage.getItem('poptartPianorollPreview') !== '0';
+let prSounding = null; // midi note currently ringing from a preview (so we can note-off it)
+let prTool = localStorage.getItem('poptartPianorollTool') === 'select' ? 'select' : 'draw'; // pencil vs arrow
+let prCmdMode = localStorage.getItem('poptartPianorollCmd') === 'prob' ? 'prob' : 'vel'; // what cmd-drag sets
+let prRaf = null; // requestAnimationFrame handle for the playhead sweep
+let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
+let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
+
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const midiName = (m) => `${NOTE_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12)}`;
+const isBlackKey = (m) => [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
+
+function findPianorollCallAt(code, idx) {
+  const re = /\bpianoroll\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close == null || close < 0) continue;
+    if (idx >= m.index && idx <= close + 1) return { start: m.index, open, close };
+  }
+  return null;
+}
+
+// The label of the block a `pianoroll(...)` call lives in - the engine track we preview through.
+function prBlockLabelAt(idx) {
+  if (!labelsMod) return null;
+  return labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => idx >= b.start && idx <= b.end)?.label ?? null;
+}
+
+// --- note preview: play the drawn note through the track's own synth (if the 🎧 toggle is on and
+// the track has been evaluated with an instrument). One note at a time; always paired with an off.
+function prPreviewSend(note, isOn) {
+  if (!prState?.trackLabel) return;
+  api('POST', '/api/previewNote', { trackId: prState.trackLabel, note, vel: PR_DEFAULT_VEL, isOn }).catch(() => {});
+}
+function prPreview(midi) {
+  if (!prPreviewEnabled || prSounding === midi) return;
+  if (prSounding != null) prPreviewSend(prSounding, false);
+  prPreviewSend(midi, true);
+  prSounding = midi;
+}
+function prPreviewOff() {
+  if (prSounding == null) return;
+  prPreviewSend(prSounding, false);
+  prSounding = null;
+}
+
+function parsePianorollCall(inner) {
+  const strMatch = /(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner);
+  const noteStr = strMatch?.[2] ?? '';
+  const int = (re) => { const m = re.exec(inner); return m ? Math.max(1, Math.round(Number(m[1]))) : null; };
+  // grid: `grid: N`, the legacy `steps: N`, or a bare-number second arg. len: `len: N`, else a cycle.
+  let grid = int(/\bgrid\s*:\s*(\d+)/) ?? int(/\bsteps\s*:\s*(\d+)/);
+  if (grid == null) { const bare = /["'`]\s*,\s*(\d+)\s*$/.exec(inner.trim()); if (bare) grid = Math.max(1, Number(bare[1])); }
+  if (grid == null) grid = 16;
+  const len = int(/\blen\s*:\s*(\d+)/) ?? grid;
+  let notes = [];
+  try {
+    notes = pianorollMod.parsePianoRoll(noteStr);
+  } catch {
+    // unparseable note string - start from an empty roll
+  }
+  return { notes, grid, len };
+}
+
+function serializePianorollCall({ notes, grid, len }) {
+  return `pianoroll("${pianorollMod.serializePianoRoll(notes)}", { grid: ${grid}, len: ${len} })`;
+}
+
+// Frame the pitch window so the drawn notes sit centered; default to PR_DEFAULT_TOP for an empty
+// roll. Clamped so the whole PR_ROWS window stays within 0..127.
+function pitchTopFor(notes) {
+  if (!notes.length) return PR_DEFAULT_TOP;
+  const lo = Math.min(...notes.map((nt) => nt.midi));
+  const hi = Math.max(...notes.map((nt) => nt.midi));
+  const center = Math.round((lo + hi) / 2);
+  return Math.min(127, Math.max(PR_ROWS - 1, center + Math.floor(PR_ROWS / 2)));
+}
+
+// (Re)populate the grid <select> and len field from prState; a non-standard grid gets its own option.
+function prSyncGridLenInputs() {
+  if (!prState) return;
+  const opts = [...PR_GRID_DIVS];
+  if (!opts.some(([, n]) => n === prState.grid)) opts.push([String(prState.grid), prState.grid]);
+  opts.sort((a, b) => a[1] - b[1]);
+  prGridSelect.innerHTML = '';
+  for (const [label, n] of opts) prGridSelect.add(new Option(label, String(n)));
+  prGridSelect.value = String(prState.grid);
+  prLenInput.value = prState.len;
+}
+
+function openPianorollEditor(call) {
+  const from = cm.posFromIndex(call.start);
+  const to = cm.posFromIndex(call.close + 1);
+  const inner = cm.getValue().slice(call.open + 1, call.close);
+  if (prState?.marker) prState.marker.clear();
+  const { notes, grid, len } = parsePianorollCall(inner);
+  prState = {
+    marker: cm.markText(from, to, {}),
+    callStart: call.start,
+    notes,
+    grid, // granularity: cells per cycle (the *grid multiplier)
+    len, // loop length in cells (grid-th notes)
+    pitchTop: pitchTopFor(notes),
+    zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
+    scrollCells: 0, // leftmost visible cell when zoomed in
+    sel: new Set(), // currently selected note objects (transient; mutated in place, never reserialized)
+    trackLabel: prBlockLabelAt(call.start),
+  };
+  prSyncGridLenInputs();
+  prPanel.classList.remove('hidden');
+  drawPianoroll();
+  if (!prRaf) prRaf = requestAnimationFrame(prPlayheadLoop); // sweep a playhead while it plays
+  // Focus moves to the canvas on first click (see pointerdown), not on open, so opening the panel
+  // never steals keys from the code editor mid-type.
+}
+
+function closePianorollEditor(dismissCall = false) {
+  prPreviewOff();
+  if (prRaf) { cancelAnimationFrame(prRaf); prRaf = null; }
+  if (dismissCall && prState) prDismissedStart = prState.callStart;
+  if (prState?.marker) prState.marker.clear();
+  prState = null;
+  prPanel.classList.add('hidden');
+}
+
+// Redraw each frame while the transport is running, so the playhead tracks the cycle; when it's
+// paused, redraw once to clear the last playhead, then idle (the loop keeps spinning cheaply so it
+// picks straight back up when play resumes). currentCyclePos() is the scheduler's own timebase.
+function prPlayheadLoop() {
+  if (!prState) { prRaf = null; return; }
+  if (!transport.paused) drawPianoroll();
+  else if (prPlayheadOn) drawPianoroll();
+  prRaf = requestAnimationFrame(prPlayheadLoop);
+}
+
+function writePianorollCall() {
+  if (!prState) return;
+  const range = prState.marker.find();
+  if (!range) return;
+  const text = serializePianorollCall(prState);
+  prSuppressCursor = true;
+  cm.replaceRange(text, range.from, range.to);
+  // replaceRange collapses the marker - re-pin it over the fresh text (see writeLfoCall)
+  prState.marker.clear();
+  const startIdx = cm.indexFromPos(range.from);
+  prState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+  prState.callStart = startIdx;
+  prSuppressCursor = false;
+}
+
+// --- canvas geometry (logical coordinates; the backing store is scaled by devicePixelRatio) ---
+// The grid renders `cols` cells - at least the loop (len) plus a little headroom, and at least one
+// cycle (grid) for context. Horizontal zoom widens each cell past the "fit" width and scrolls; the
+// pitch axis never zooms. A loop ruler occupies the top PR_TOPBAR px; note rows sit below it.
+
+// Rendered columns: the loop rounded up to its next whole bar, plus a little headroom to drag into.
+// Frozen (prState._dragCols) during a loop drag so the cell width - and thus the drag mapping -
+// stays put instead of feeding back on itself as len changes.
+const prRenderCols = () => (Math.floor(prState.len / prState.grid) + 1) * prState.grid + 4;
+
+function prMetrics() {
+  const gridW = PR_W - PR_GUTTER;
+  const rowH = PR_GRIDH / PR_ROWS;
+  const cols = prState._dragCols ?? prRenderCols();
+  const cellW = (gridW / cols) * prState.zoom;
+  const visibleCells = gridW / cellW; // = cols / zoom
+  const maxScroll = Math.max(0, cols - visibleCells);
+  const scroll = Math.min(maxScroll, Math.max(0, prState.scrollCells));
+  prState.scrollCells = scroll; // keep state clamped as len/grid/zoom change
+  return { W: PR_W, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, gridW, cols, cellW, rowH, visibleCells, maxScroll, scroll, bottomMidi: prState.pitchTop - PR_ROWS };
+}
+
+const prCellToX = (cell, m) => PR_GUTTER + (cell - m.scroll) * m.cellW;
+const prMidiToY = (midi, m) => PR_TOPBAR + (prState.pitchTop - midi) * m.rowH;
+const prCellFloat = (px, m) => m.scroll + (px - PR_GUTTER) / m.cellW; // fractional cell under px
+
+function prCanvasPos(e) {
+  const r = prCanvas.getBoundingClientRect();
+  return { px: (e.clientX - r.left) * (PR_W / r.width), py: (e.clientY - r.top) * (PR_CH / r.height) };
+}
+
+function prCellAt(px, m) {
+  if (px < PR_GUTTER) return null;
+  const cell = Math.floor(prCellFloat(px, m));
+  return cell >= 0 && cell < m.cols ? cell : null;
+}
+
+const prClampCell = (px, m) => Math.max(0, Math.min(m.cols - 1, Math.floor(prCellFloat(px, m))));
+// pitchTop is fractional (smooth scroll); the integer note whose lane contains py is ceil(top - rows).
+const prMidiAt = (py, m) => Math.ceil(prState.pitchTop - (py - PR_TOPBAR) / m.rowH);
+
+// Topmost note covering (cell, midi) - later notes draw on top, so scan from the end.
+function prNoteAt(cell, midi) {
+  for (let i = prState.notes.length - 1; i >= 0; i--) {
+    const nt = prState.notes[i];
+    if (nt.midi === midi && cell >= nt.start && cell < nt.start + nt.len) return i;
+  }
+  return null;
+}
+
+function prRoundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) { ctx.roundRect(x, y, w, h, r); return; }
+  r = Math.min(r, w / 2, h / 2);
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// A literal piano down the left edge - white/black keys, note names, C's called out. Fixed
+// key colours (a piano reads the same in any theme); the divider follows the theme.
+function drawPianoKeys(ctx, col, m) {
+  const { H, gridTop, rowH } = m;
+  ctx.textBaseline = 'middle';
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = '#ececed';
+  ctx.fillRect(0, gridTop, PR_GUTTER, H - gridTop);
+
+  ctx.save(); // clip keys/labels to the grid area so partial edge lanes don't spill into the ruler
+  ctx.beginPath(); ctx.rect(0, gridTop, PR_GUTTER, H - gridTop); ctx.clip();
+  const topM = Math.ceil(prState.pitchTop);
+  const botM = Math.floor(prState.pitchTop - PR_ROWS) - 1;
+
+  ctx.textAlign = 'right';
+  for (let M = topM; M >= botM; M--) {
+    if (isBlackKey(M)) continue;
+    const y = prMidiToY(M, m);
+    ctx.strokeStyle = 'rgba(0,0,0,0.13)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y + rowH); ctx.lineTo(PR_GUTTER, y + rowH); ctx.stroke();
+    const isC = M % 12 === 0;
+    ctx.fillStyle = isC ? '#232327' : '#70707a';
+    ctx.fillText(midiName(M), PR_GUTTER - 5, y + rowH / 2 + 0.5);
+  }
+
+  const bw = PR_GUTTER * 0.62; // black keys reach ~62% across the gutter
+  for (let M = topM; M >= botM; M--) {
+    if (!isBlackKey(M)) continue;
+    const y = prMidiToY(M, m);
+    ctx.fillStyle = '#242429';
+    prRoundRect(ctx, -3, y + 1, bw + 3, rowH - 2, 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.textAlign = 'right';
+    ctx.fillText(midiName(M), bw - 4, y + rowH / 2 + 0.5);
+  }
+  ctx.restore();
+
+  ctx.strokeStyle = col('--border-strong');
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PR_GUTTER + 0.5, 0); ctx.lineTo(PR_GUTTER + 0.5, H); ctx.stroke();
+}
+
+// The loop ruler across the top: bar ticks, the loop region [0,len] highlighted, and a grab handle
+// at the loop end. Returns the loop-end x so the interaction code can hit-test the handle.
+function drawLoopBar(ctx, col, m) {
+  const accent = col('--accent');
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, 0, m.W, PR_TOPBAR);
+
+  const loopEndX = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prState.len, m)));
+  const loopStartX = Math.max(PR_GUTTER, prCellToX(0, m));
+  ctx.fillStyle = col('--accent-soft');
+  ctx.fillRect(loopStartX, 0, Math.max(0, loopEndX - loopStartX), PR_TOPBAR);
+
+  // bar ticks + numbers (a bar = `grid` cells = one cycle)
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.font = '8px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = col('--text-dim');
+  for (let c = 0; c <= m.cols; c += prState.grid) {
+    const x = prCellToX(c, m);
+    if (x < PR_GUTTER - 0.5 || x > m.W + 0.5) continue;
+    ctx.strokeStyle = col('--border-strong');
+    ctx.lineWidth = 0.6;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, PR_TOPBAR); ctx.stroke();
+    ctx.fillText(String(c / prState.grid + 1), x + 3, PR_TOPBAR / 2);
+  }
+
+  // grab handle at the loop end
+  if (loopEndX <= m.W) {
+    ctx.fillStyle = accent;
+    ctx.beginPath();
+    ctx.moveTo(loopEndX, 0); ctx.lineTo(loopEndX, PR_TOPBAR); ctx.lineTo(loopEndX - 6, PR_TOPBAR / 2);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.strokeStyle = col('--border');
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PR_GUTTER, PR_TOPBAR + 0.5); ctx.lineTo(m.W, PR_TOPBAR + 0.5); ctx.stroke();
+  return loopEndX;
+}
+
+function drawPianoroll() {
+  if (!prState || !pianorollMod) return;
+  const css = getComputedStyle(document.documentElement);
+  const col = (v) => css.getPropertyValue(v).trim();
+  const ctx = prCanvas.getContext('2d');
+  ctx.setTransform(prCanvas._dpr || 1, 0, 0, prCanvas._dpr || 1, 0, 0);
+  const m = prMetrics();
+  const { W, H, gridTop, gridH, rowH } = m;
+  ctx.clearRect(0, 0, W, H);
+
+  // grid background + per-note lanes. Iterating integer notes (not fixed rows) lets a fractional
+  // pitchTop scroll smoothly - each lane sits at its own y, partial lanes clipped at the edges.
+  ctx.fillStyle = col('--bg');
+  ctx.fillRect(PR_GUTTER, gridTop, W - PR_GUTTER, gridH);
+  const topM = Math.ceil(prState.pitchTop);
+  const botM = Math.floor(prState.pitchTop - PR_ROWS) - 1;
+  for (let M = topM; M >= botM; M--) {
+    const y = prMidiToY(M, m);
+    if (isBlackKey(M)) {
+      const y0 = Math.max(gridTop, y), y1 = Math.min(H, y + rowH);
+      if (y1 > y0) { ctx.fillStyle = col('--hover-bg'); ctx.fillRect(PR_GUTTER, y0, W - PR_GUTTER, y1 - y0); }
+    }
+    if (y >= gridTop - 0.5 && y <= H + 0.5) {
+      ctx.strokeStyle = col('--border');
+      ctx.lineWidth = M % 12 === 0 ? 1.2 : 0.5; // heavier at each C (octave boundary)
+      ctx.beginPath(); ctx.moveTo(PR_GUTTER, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+  }
+  // vertical lines (visible span only): heaviest at each bar (a cycle = grid cells), medium at beats
+  const beat = prState.grid % 4 === 0 ? prState.grid / 4 : prState.grid;
+  const c0 = Math.max(0, Math.floor(m.scroll));
+  const c1 = Math.min(m.cols, Math.ceil(m.scroll + m.visibleCells));
+  for (let c = c0; c <= c1; c++) {
+    const x = prCellToX(c, m);
+    if (x < PR_GUTTER - 0.5 || x > W + 0.5) continue;
+    ctx.strokeStyle = c % prState.grid === 0 ? col('--border-strong') : col('--border');
+    ctx.lineWidth = c % prState.grid === 0 ? 1.4 : c % beat === 0 ? 1.1 : 0.5;
+    ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, H); ctx.stroke();
+  }
+  // dim the region past the loop end (cells >= len are outside the loop)
+  const dimX = prCellToX(prState.len, m);
+  if (dimX < W) {
+    ctx.fillStyle = 'rgba(120,120,130,0.22)';
+    ctx.fillRect(Math.max(PR_GUTTER, dimX), gridTop, W - Math.max(PR_GUTTER, dimX), gridH);
+  }
+
+  // notes: fill opacity encodes velocity; a dashed outline marks a sub-unity probability; selected
+  // notes get a bright solid outline. Rectangles are clipped to the grid when scrolled.
+  const accent = col('--accent');
+  const selCol = col('--text');
+  for (const nt of prState.notes) {
+    if (nt.midi > prState.pitchTop + 1 || nt.midi < m.bottomMidi) continue; // +1: keep a partial top lane
+    const x = prCellToX(nt.start, m);
+    const x2 = prCellToX(nt.start + nt.len, m);
+    if (x2 <= PR_GUTTER || x >= W) continue;
+    const dx = Math.max(PR_GUTTER + 0.5, x);
+    const dx2 = Math.min(W, x2);
+    const y = prMidiToY(nt.midi, m);
+    const w = Math.max(2, dx2 - dx - 1);
+    const selected = prState.sel.has(nt);
+    ctx.globalAlpha = 0.4 + 0.6 * nt.vel;
+    ctx.fillStyle = accent;
+    prRoundRect(ctx, dx + 1, y + 1.5, w, rowH - 3, 3); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeStyle = selected ? selCol : accent;
+    ctx.setLineDash(nt.prob < 1 && !selected ? [3, 2] : []);
+    prRoundRect(ctx, dx + 1, y + 1.5, w, rowH - 3, 3); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // marquee rubber-band (select tool)
+  if (prState.marquee) {
+    const r = prState.marquee;
+    ctx.fillStyle = col('--accent-soft');
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+  }
+
+  // playhead: sweeps the loop (position = absolute cell mod len) while the transport runs
+  prPlayheadOn = false;
+  if (!transport.paused) {
+    const abs = currentCyclePos() * prState.grid;
+    const x = prCellToX(((abs % prState.len) + prState.len) % prState.len, m);
+    if (x >= PR_GUTTER && x <= W) {
+      ctx.strokeStyle = col('--accent');
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, H); ctx.stroke();
+      ctx.globalAlpha = 1;
+      prPlayheadOn = true;
+    }
+  }
+
+  drawLoopBar(ctx, col, m);
+  drawPianoKeys(ctx, col, m); // last, so it overlays the grid's left edge cleanly
+}
+
+// Keep the moved selection within the visible pitch window.
+function prScrollTo(notes) {
+  if (!notes.length) return;
+  const hi = Math.max(...notes.map((n) => n.midi));
+  const lo = Math.min(...notes.map((n) => n.midi));
+  if (hi > prState.pitchTop) prState.pitchTop = Math.min(127, hi);
+  else if (lo < prState.pitchTop - PR_ROWS + 1) prState.pitchTop = Math.max(PR_ROWS - 1, lo + PR_ROWS - 1);
+}
+
+// Which cursor the pointer should show at (px,py), given whether a velocity/prob modifier is held.
+function prCursorFor(px, py, m, velMod) {
+  if (py < PR_TOPBAR) return px >= PR_GUTTER ? 'ew-resize' : 'default'; // loop ruler (drag its end)
+  if (px < PR_GUTTER) return 'pointer'; // over the piano keyboard
+  const cell = prCellAt(px, m);
+  const emptyCursor = prTool === 'draw' ? CUR_PENCIL : 'crosshair'; // pencil draws, arrow marquees
+  if (cell == null) return emptyCursor;
+  const hit = prNoteAt(cell, prMidiAt(py, m));
+  if (hit == null) return emptyCursor;
+  const nt = prState.notes[hit];
+  if (velMod) return CUR_UPDOWN; // cmd/ctrl over a note = velocity/probability drag
+  if (px >= prCellToX(nt.start + nt.len, m) - PR_EDGE_PX) return CUR_BRACKET; // right-edge = length
+  return 'move';
+}
+
+// Duplicate the selection one block-length to the right (Ableton's cmd-D), selecting the copies.
+function prDuplicate() {
+  if (!prState.sel.size) return;
+  const sel = [...prState.sel];
+  const shift = Math.max(1, Math.max(...sel.map((n) => n.start + n.len)) - Math.min(...sel.map((n) => n.start)));
+  const copies = sel.map((n) => ({ ...n, start: Math.min(prState.len - 1, n.start + shift) }));
+  prState.notes.push(...copies);
+  prState.sel = new Set(copies);
+  writePianorollCall();
+  drawPianoroll();
+}
+
+// Horizontal zoom that keeps the cell currently under `anchorPx` pinned to that same screen x, so
+// it zooms toward the pointer; anchorPx defaults to the view's center. (scrollCells is clamped in
+// prMetrics, so the pin gives way gracefully at the edges.)
+function prZoomBy(factor, anchorPx) {
+  const m = prMetrics();
+  const px = anchorPx ?? PR_GUTTER + m.gridW / 2;
+  const cell = prCellFloat(px, m); // the cell under the pointer before zooming
+  prState.zoom = Math.min(PR_MAX_ZOOM, Math.max(1, prState.zoom * factor));
+  const m2 = prMetrics();
+  prState.scrollCells = cell - (px - PR_GUTTER) / m2.cellW; // put that cell back under the pointer
+  drawPianoroll();
+}
+
+function initPianorollCanvas() {
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  prCanvas._dpr = dpr;
+  prCanvas.width = PR_W * dpr;
+  prCanvas.height = PR_CH * dpr;
+  prCanvas.style.width = PR_W + 'px';
+  prCanvas.style.height = PR_CH + 'px';
+  prCanvas.tabIndex = 0; // focusable, so arrow keys / delete / ctrl-a reach it
+
+  let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'marquee'|'loop'|'audition', ... }
+  const snapshotPos = () => [...prState.sel].map((n) => ({ n, start: n.start, midi: n.midi }));
+  const snapshotLen = () => [...prState.sel].map((n) => ({ n, len: n.len }));
+  const setCursor = (c) => { if (prCanvas.style.cursor !== c) prCanvas.style.cursor = c; };
+  const dragCursor = (d) =>
+    ({ vel: CUR_UPDOWN, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', loop: 'ew-resize', audition: 'pointer' }[d.kind] ?? 'default');
+
+  prCanvas.addEventListener('contextmenu', (e) => { if (prState) e.preventDefault(); }); // ctrl-drag (mac) = velocity, not a menu
+
+  prCanvas.addEventListener('pointerdown', (e) => {
+    if (!prState) return;
+    prCanvas.focus();
+    prCanvas.setPointerCapture(e.pointerId);
+    const m = prMetrics();
+    const { px, py } = prCanvasPos(e);
+    prPointer = { px, py };
+    if (py < PR_TOPBAR) { // loop ruler - drag to set the loop length (written on pointerup)
+      if (px >= PR_GUTTER) { drag = { kind: 'loop' }; prState._dragCols = m.cols; prState.len = Math.max(1, Math.round(prCellFloat(px, m))); prLenInput.value = prState.len; drawPianoroll(); }
+      return;
+    }
+    const midi = prMidiAt(py, m);
+    const cell = prCellAt(px, m);
+    if (cell == null) {
+      // clicked the piano keyboard - audition that key, don't edit
+      if (px < PR_GUTTER && midi <= prState.pitchTop && midi >= m.bottomMidi) { drag = { kind: 'audition' }; prPreview(midi); }
+      return;
+    }
+    const hit = prNoteAt(cell, midi);
+    const velMod = e.metaKey || e.ctrlKey; // cmd (mac) / ctrl - velocity or probability drag
+    if (hit != null) {
+      const nt = prState.notes[hit];
+      if (e.shiftKey && !velMod) { // shift-click toggles this note in/out of the selection
+        if (prState.sel.has(nt)) prState.sel.delete(nt); else prState.sel.add(nt);
+        drawPianoroll();
+        return;
+      }
+      if (!prState.sel.has(nt)) prState.sel = new Set([nt]); // clicking an unselected note selects just it
+      if (velMod) {
+        drag = { kind: 'vel' };
+      } else if (px >= prCellToX(nt.start + nt.len, m) - PR_EDGE_PX) {
+        drag = { kind: 'resize', grabCell: cell, orig: snapshotLen() };
+      } else {
+        drag = { kind: 'move', grabCell: cell, grabMidi: midi, orig: snapshotPos() };
+        prPreview(nt.midi);
+      }
+    } else if (prTool === 'select') {
+      // rubber-band select (shift keeps the existing selection as a base)
+      drag = { kind: 'marquee', x0: px, y0: py, base: e.shiftKey ? new Set(prState.sel) : new Set() };
+      prState.marquee = { x: px, y: py, w: 0, h: 0 };
+    } else if (cell < prState.len) { // draw a note (only inside the loop)
+      if (!e.shiftKey) prState.sel = new Set();
+      const nt = { midi, start: cell, len: 1, vel: PR_DEFAULT_VEL, prob: 1 };
+      prState.notes.push(nt);
+      prState.sel.add(nt);
+      drag = { kind: 'create', note: nt };
+      prPreview(midi);
+    } else {
+      prState.sel = new Set(); // click in the dimmed area past the loop end - just clear selection
+    }
+    drawPianoroll();
+  });
+
+  prCanvas.addEventListener('pointermove', (e) => {
+    if (!prState) return;
+    const m = prMetrics();
+    const { px, py } = prCanvasPos(e);
+    prPointer = { px, py };
+    if (!drag) { setCursor(prCursorFor(px, py, m, e.metaKey || e.ctrlKey)); return; }
+    if (drag.kind === 'loop') {
+      prState.len = Math.max(1, Math.round(prCellFloat(px, m)));
+      prLenInput.value = prState.len;
+    } else if (drag.kind === 'create') {
+      drag.note.len = Math.max(1, prClampCell(px, m) - drag.note.start + 1);
+    } else if (drag.kind === 'resize') {
+      const d = prClampCell(px, m) - drag.grabCell;
+      for (const o of drag.orig) o.n.len = Math.max(1, o.len + d);
+    } else if (drag.kind === 'move') {
+      const cell = prCellAt(px, m);
+      if (cell == null) return;
+      const dCell = cell - drag.grabCell;
+      const dMidi = prMidiAt(py, m) - drag.grabMidi;
+      for (const o of drag.orig) {
+        o.n.start = Math.min(prState.len - 1, Math.max(0, o.start + dCell));
+        o.n.midi = Math.min(127, Math.max(0, o.midi + dMidi));
+      }
+      if (drag.orig[0]) prPreview(drag.orig[0].n.midi);
+    } else if (drag.kind === 'vel') {
+      const d = (e.movementY ?? 0) * 0.01;
+      for (const n of prState.sel) {
+        if (prCmdMode === 'prob') n.prob = Math.min(1, Math.max(0, n.prob - d));
+        else n.vel = Math.min(1, Math.max(0, n.vel - d));
+      }
+    } else if (drag.kind === 'marquee') {
+      const xa = Math.min(Math.max(px, PR_GUTTER), PR_W), xb = Math.min(Math.max(drag.x0, PR_GUTTER), PR_W);
+      const ya = Math.min(Math.max(py, PR_TOPBAR), PR_CH), yb = Math.min(Math.max(drag.y0, PR_TOPBAR), PR_CH);
+      const rx = Math.min(xa, xb), rw = Math.abs(xa - xb), ry = Math.min(ya, yb), rh = Math.abs(ya - yb);
+      prState.marquee = { x: rx, y: ry, w: rw, h: rh };
+      const c0 = prCellFloat(rx, m), c1 = prCellFloat(rx + rw, m);
+      const midiHi = prMidiAt(ry, m), midiLo = prMidiAt(ry + rh, m);
+      const inRect = (n) => n.midi >= midiLo && n.midi <= midiHi && n.start < c1 && n.start + n.len > c0;
+      prState.sel = new Set([...drag.base, ...prState.notes.filter(inRect)]);
+    }
+    setCursor(dragCursor(drag));
+    drawPianoroll();
+  });
+
+  prCanvas.addEventListener('pointerup', (e) => {
+    if (drag && prState) {
+      if (drag.kind === 'marquee') prState.marquee = null;
+      else if (drag.kind !== 'audition') writePianorollCall();
+      prState._dragCols = null; // unfreeze the loop-drag column width
+    }
+    prPreviewOff();
+    drag = null;
+    try { prCanvas.releasePointerCapture(e.pointerId); } catch {}
+    drawPianoroll();
+  });
+
+  prCanvas.addEventListener('dblclick', (e) => {
+    if (!prState) return;
+    const m = prMetrics();
+    const { px, py } = prCanvasPos(e);
+    const cell = prCellAt(px, m);
+    if (cell == null) return;
+    const hit = prNoteAt(cell, prMidiAt(py, m));
+    if (hit != null) { // double-click a note erases it
+      prState.sel.delete(prState.notes[hit]);
+      prState.notes.splice(hit, 1);
+      writePianorollCall();
+      drawPianoroll();
+    } else if (prTool === 'select' && cell < prState.len) { // double-click empty in the arrow tool draws a note
+      const nt = { midi: prMidiAt(py, m), start: cell, len: 1, vel: PR_DEFAULT_VEL, prob: 1 };
+      prState.notes.push(nt);
+      prState.sel = new Set([nt]);
+      writePianorollCall();
+      drawPianoroll();
+    }
+  });
+
+  prCanvas.addEventListener('wheel', (e) => {
+    if (!prState) return;
+    e.preventDefault();
+    const m = prMetrics();
+    const { px } = prCanvasPos(e);
+    if (e.ctrlKey || e.metaKey) {
+      prZoomBy(Math.exp(-e.deltaY * PR_ZOOM_WHEEL), px); // proportional, pinned to the pointer
+      return;
+    }
+    // Horizontal component (a trackpad left/right swipe or a horizontal wheel), or shift+wheel,
+    // pans time - the way to get around once zoomed in. The vertical component scrolls pitch.
+    const panCells = e.deltaX + (e.shiftKey ? e.deltaY : 0);
+    let changed = false;
+    if (panCells) {
+      prState.scrollCells += (panCells / 120) * Math.max(1, m.visibleCells * 0.2);
+      changed = true;
+    }
+    if (e.deltaY && !e.shiftKey) {
+      // pitch scrolls continuously (pitchTop is fractional), so it glides instead of stepping rows
+      prState.pitchTop = Math.min(127, Math.max(PR_ROWS - 1, prState.pitchTop - e.deltaY * PR_PITCH_WHEEL));
+      changed = true;
+    }
+    if (changed) drawPianoroll();
+  }, { passive: false });
+
+  prCanvas.addEventListener('keydown', (e) => {
+    if (!prState) return;
+    const sel = [...prState.sel];
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && (e.key === 'a' || e.key === 'A')) {
+      e.preventDefault();
+      prState.sel = new Set(prState.notes);
+      drawPianoroll();
+    } else if (mod && (e.key === 'd' || e.key === 'D')) {
+      e.preventDefault();
+      prDuplicate();
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (!sel.length) return;
+      e.preventDefault();
+      prState.notes = prState.notes.filter((n) => !prState.sel.has(n));
+      prState.sel.clear();
+      writePianorollCall();
+      drawPianoroll();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      if (prState.sel.size) { prState.sel.clear(); drawPianoroll(); } else closePianorollEditor(true);
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      if (!sel.length) return;
+      e.preventDefault();
+      const step = (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 12 : 1);
+      for (const n of sel) n.midi = Math.min(127, Math.max(0, n.midi + step));
+      prScrollTo(sel);
+      prPreview(Math.max(...sel.map((n) => n.midi)));
+      writePianorollCall();
+      drawPianoroll();
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      if (!sel.length) return;
+      e.preventDefault();
+      const step = (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 4 : 1);
+      for (const n of sel) n.start = Math.min(prState.len - 1, Math.max(0, n.start + step));
+      writePianorollCall();
+      drawPianoroll();
+    }
+  });
+  // keep the cursor in sync when the cmd/ctrl modifier is pressed/released over a note
+  const refreshCursor = (e) => { if (prState && prPointer.px >= 0 && !drag) setCursor(prCursorFor(prPointer.px, prPointer.py, prMetrics(), e.metaKey || e.ctrlKey)); };
+  prCanvas.addEventListener('keyup', (e) => { prPreviewOff(); refreshCursor(e); });
+  prCanvas.addEventListener('keydown', refreshCursor);
+  prCanvas.addEventListener('blur', prPreviewOff);
+  prCanvas.addEventListener('pointerleave', () => { prPointer = { px: -1, py: -1 }; });
+}
+
+function initPianorollEditor() {
+  cm.on('cursorActivity', () => {
+    if (prSuppressCursor || !pianorollMod) return;
+    const call = findPianorollCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
+    if (!call) {
+      prDismissedStart = null;
+      if (prState) closePianorollEditor();
+      return;
+    }
+    if (call.start === prDismissedStart) return;
+    if (prState && call.start === prState.callStart) return; // already editing this call
+    openPianorollEditor(call);
+  });
+
+  // grid (granularity) and len (loop length in cells) are independent - changing the grid just
+  // reinterprets each cell as a coarser/finer note; it doesn't move notes or resize the loop.
+  prGridSelect.addEventListener('change', () => {
+    if (!prState) return;
+    prState.grid = Math.max(1, Math.round(Number(prGridSelect.value) || 16));
+    writePianorollCall();
+    drawPianoroll();
+  });
+  prLenInput.addEventListener('change', () => {
+    if (!prState) return;
+    prState.len = Math.max(1, Math.round(Number(prLenInput.value) || prState.grid));
+    prLenInput.value = prState.len;
+    writePianorollCall();
+    drawPianoroll();
+  });
+
+  const reflectTool = () => { prToolBtn.textContent = prTool === 'draw' ? '✏️' : '⬚'; prToolBtn.title = `tool: ${prTool} — click or press B to switch (draw = pencil, select = marquee)`; };
+  reflectTool();
+  prToolBtn.addEventListener('click', () => {
+    prTool = prTool === 'draw' ? 'select' : 'draw';
+    localStorage.setItem('poptartPianorollTool', prTool);
+    reflectTool();
+  });
+
+  const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `cmd-drag sets ${prCmdMode === 'vel' ? 'velocity' : 'probability'} — click to switch`; };
+  reflectCmdMode();
+  prCmdModeBtn.addEventListener('click', () => {
+    prCmdMode = prCmdMode === 'vel' ? 'prob' : 'vel';
+    localStorage.setItem('poptartPianorollCmd', prCmdMode);
+    reflectCmdMode();
+  });
+
+  prZoomOutBtn.addEventListener('click', () => prState && prZoomBy(1 / PR_BTN_ZOOM));
+  prZoomInBtn.addEventListener('click', () => prState && prZoomBy(PR_BTN_ZOOM));
+
+  const reflectPreview = () => prPreviewBtn.classList.toggle('active', prPreviewEnabled);
+  reflectPreview();
+  prPreviewBtn.addEventListener('click', () => {
+    prPreviewEnabled = !prPreviewEnabled;
+    localStorage.setItem('poptartPianorollPreview', prPreviewEnabled ? '1' : '0');
+    if (!prPreviewEnabled) prPreviewOff();
+    reflectPreview();
+  });
+
+  prToMiniBtn.addEventListener('click', () => {
+    if (!prState) return;
+    const range = prState.marker.find();
+    if (!range) return;
+    const indent = (cm.getLine(range.from.line).match(/^\s*/)?.[0]) ?? ''; // align continuation lines
+    const expr = pianorollMod.pianoRollToMini(prState.notes, { grid: prState.grid, len: prState.len, indent });
+    prSuppressCursor = true;
+    cm.replaceRange(expr, range.from, range.to);
+    closePianorollEditor(); // the pianoroll() call is gone now
+    prSuppressCursor = false;
+    logLine('piano roll → mini-notation');
+  });
+
+  prCloseBtn.addEventListener('click', () => closePianorollEditor(true));
+
+  // Panel-wide keys while it's open: Escape (when the code has focus - the canvas handles its own),
+  // B toggles the tool (unless typing in a field), and cmd/ctrl +/- zoom the roll (overriding the
+  // browser's page zoom).
+  document.addEventListener('keydown', (e) => {
+    if (!prState) return;
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? '') || document.activeElement?.isContentEditable;
+    if (e.key === 'Escape' && document.activeElement !== prCanvas) { closePianorollEditor(true); return; }
+    if ((e.key === 'b' || e.key === 'B') && !typing && !(e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      prTool = prTool === 'draw' ? 'select' : 'draw';
+      localStorage.setItem('poptartPianorollTool', prTool);
+      reflectTool();
+    } else if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_')) {
+      e.preventDefault();
+      prZoomBy(e.key === '-' || e.key === '_' ? 1 / PR_BTN_ZOOM : PR_BTN_ZOOM);
+    }
+  });
+
+  initPianorollCanvas();
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -5,9 +5,6 @@ no completion notes.
 
 ---
 
-## Signals (new)
-- [ ] **`pianoroll`** signal that pulls up an interactive piano roll and emits the drawn notes/velocities
-
 ## Hotkeys
 Infrastructure shipped: `hotkey(combo, handler)` + an `editor`/`repl` facade are provided to the
 prebake sandbox in the browser (see `runUserPrebake` in `client.js`); the server no-ops those

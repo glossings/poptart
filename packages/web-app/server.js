@@ -243,7 +243,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap', 'midi', 'audio'];
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -889,6 +889,25 @@ const routes = {
       engine.noteOff(trackId, note, now);
       held.delete(note);
       handleMidiNoteIn(trackId, note, 0, false);
+    }
+    return { status: 200, body: { ok: true } };
+  },
+
+  // A one-off audition note from the piano roll editor. Body: { trackId, note, vel, isOn }. Unlike
+  // keyNote this isn't gated on a keyboard()/tap() route - it plays straight on whatever track the
+  // pianoroll(...) block built, so the note previews through that track's own synth. If the track
+  // hasn't been evaluated (no instrument loaded), the engine call simply makes no sound.
+  'POST /api/previewNote': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    const trackId = String(body.trackId ?? '');
+    const note = Math.round(Number(body.note));
+    if (!trackId || !Number.isFinite(note)) return { status: 200, body: { ok: false } };
+    const now = engine.getTime();
+    if (body.isOn) {
+      const vel = Math.max(0, Math.min(1, Number(body.vel ?? 0.8)));
+      if (vel > 0) engine.noteOn(trackId, note, vel, now);
+    } else {
+      engine.noteOff(trackId, note, now);
     }
     return { status: 200, body: { ok: true } };
   },
