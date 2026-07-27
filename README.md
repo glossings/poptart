@@ -77,9 +77,40 @@ pattern language is its own small implementation.
   unzip its `sc/VSTPlugin` folder into your SuperCollider `Extensions` directory (on macOS,
   `~/Library/Application Support/SuperCollider/Extensions/`).
 
-> **macOS note:** if you install `sclang` via a wrapper, make sure it's an `exec` script and not
-> a symlink — a symlinked `sclang` resolves its class library relative to the symlink's location
-> and fails to compile.
+> **Troubleshooting "engine did not finish booting":** the error message includes the last lines
+> of SuperCollider's own log plus a diagnosis — read that first; it names the actual cause. The
+> usual suspects:
+>
+> - **Orphaned processes from an earlier run** holding poptart's ports or the audio device:
+>   `pkill -f sclang; pkill -f scsynth`, then retry. (Also quit the SuperCollider IDE if open.)
+> - **A leftover `sclang` symlink on your `PATH`** from a manual install. A symlinked `sclang`
+>   can't find its class library and fails to compile; poptart finds the real binary by itself,
+>   so the symlink only gets in the way. Check for one:
+>   ```sh
+>   which -a sclang            # lists every sclang on your PATH (poptart needs none of them)
+>   ls -l "$(which sclang)"    # a symlink shows an arrow: /opt/homebrew/bin/sclang -> /Applications/SuperCollider.app/...
+>   ```
+>   If the `ls -l` line contains a `->`, it's a symlink — delete it (only removes the link, not
+>   the real app):
+>   ```sh
+>   rm "$(which sclang)"       # add sudo if it lives in /usr/local/bin or /opt/homebrew/bin and rm reports "Permission denied"
+>   ```
+>   Repeat `which -a sclang` until it prints nothing, then retry poptart.
+> - **VSTPlugin missing** — see above; poptart warns at startup if it isn't in the standard
+>   Extensions folder.
+> - **Broken files in `~/Library/Application Support/SuperCollider/`** (a half-installed
+>   extension, a bad `startup.scd`) left over from other SuperCollider projects. In the error's
+>   sclang output, look for lines starting with `ERROR:` or `WARNING:` — especially
+>   `duplicate Class found`, `Class not defined`, or `Library has not been compiled
+>   successfully` — and for any file path under `.../SuperCollider/Extensions/`. That path is the
+>   culprit. Move the offending extension out and retry:
+>   ```sh
+>   # back the whole Extensions folder out of the way (keeps VSTPlugin too, so you'll re-add that)
+>   mv ~/Library/Application\ Support/SuperCollider/Extensions ~/Desktop/sc-extensions-backup
+>   ```
+>   then reinstall just VSTPlugin (see above) into a fresh `Extensions/` and retry. Reinstalling
+>   SuperCollider itself does **not** help — the installer never touches this user directory, so
+>   the broken file survives.
 
 ## Getting started
 

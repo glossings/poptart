@@ -126,10 +126,7 @@ async function loadEngine() {
   } catch (err) {
     engineError = err.message ?? String(err);
     // eslint-disable-next-line no-console
-    console.error(
-      '[poptart] osc-engine failed to start - is SuperCollider (sclang, with VSTPlugin~) installed and on PATH? see README.',
-      err,
-    );
+    console.error('[poptart] osc-engine failed to start:', err);
     return null;
   }
 }

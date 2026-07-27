@@ -74,6 +74,87 @@ function resolveSclangPath() {
   return 'sclang';
 }
 
+// Where the VSTPlugin server extension lives when installed per the README. Used only for
+// diagnostics - sclang_conf.yaml can include other dirs, so absence here is a strong hint, not
+// proof. User dir first (the README's instruction), then the system-wide one.
+function vstPluginExtensionDirs() {
+  if (process.platform === 'darwin') {
+    return [
+      path.join(os.homedir(), 'Library/Application Support/SuperCollider/Extensions/VSTPlugin'),
+      '/Library/Application Support/SuperCollider/Extensions/VSTPlugin',
+    ];
+  }
+  if (process.platform === 'win32') {
+    return [
+      path.join(process.env.LOCALAPPDATA || '', 'SuperCollider', 'Extensions', 'VSTPlugin'),
+      'C:\\ProgramData\\SuperCollider\\Extensions\\VSTPlugin',
+    ];
+  }
+  return [
+    path.join(os.homedir(), '.local/share/SuperCollider/Extensions/VSTPlugin'),
+    '/usr/local/share/SuperCollider/Extensions/VSTPlugin',
+    '/usr/share/SuperCollider/Extensions/VSTPlugin',
+  ];
+}
+
+function vstPluginExtensionInstalled() {
+  return vstPluginExtensionDirs().some((d) => fs.existsSync(d));
+}
+
+// Map sclang's boot log to a human diagnosis of why /poptart/ready never arrived. The log is
+// the only place the real cause appears, and users hitting this are exactly the ones not reading
+// it - so pattern-match the handful of failure modes we've actually seen and say what to do.
+// Returns null when nothing matches (the raw log tail still gets shown). `vstInstalled` is
+// injected (default: filesystem check) so tests can exercise both branches.
+function diagnoseSclangOutput(output, vstInstalled = vstPluginExtensionInstalled()) {
+  if (/Library has not been compiled successfully|duplicate Class found|There is a discrepancy/i.test(output)) {
+    return (
+      "sclang's class library failed to compile, so poptart's engine script never ran. " +
+      'The usual cause is a broken class file or extension in your SuperCollider user directory ' +
+      '(on macOS: ~/Library/Application Support/SuperCollider/ - check Extensions/ and startup.scd); ' +
+      "the ERROR lines in sclang's log name the file. Also: if you ever symlinked sclang onto your " +
+      'PATH by hand, delete the symlink - a symlinked sclang cannot find its class library, and ' +
+      'poptart auto-detects the real install anyway.'
+    );
+  }
+  if (/unable to bind udp|failed to bind udp|address (already )?in use|Exception in World_OpenUDP/i.test(output)) {
+    return (
+      "poptart's OSC/audio ports are already taken - usually an orphaned sclang or scsynth from an " +
+      'earlier run, or another SuperCollider session. Quit the SuperCollider IDE if it is open and ' +
+      'kill leftovers (`pkill -f sclang; pkill -f scsynth`), then retry.'
+    );
+  }
+  if (/could not initialize audio|DriverStart failed|Requested devices could not be found|device .* not found/i.test(output)) {
+    return (
+      'scsynth (the audio server) could not open the audio device. Check that the selected output ' +
+      'device is connected (or pick another in settings), and that no orphaned scsynth is holding it ' +
+      '(`pkill -f scsynth`).'
+    );
+  }
+  if (/Class not defined/i.test(output)) {
+    if (!vstInstalled) {
+      return (
+        'the VSTPlugin SuperCollider extension is not installed (looked in ' +
+        `${vstPluginExtensionDirs().join(' and ')}). Download the SC extension for your platform ` +
+        'from https://git.iem.at/pd/vstplugin/-/releases and unzip its VSTPlugin folder there, ' +
+        'then retry.'
+      );
+    }
+    return (
+      "a class poptart's engine script needs failed to load - the ERROR lines in sclang's log say " +
+      'which. A stale or half-installed extension in your SuperCollider Extensions folder is the ' +
+      'usual cause.'
+    );
+  }
+  if (/server failed to start/i.test(output)) {
+    return (
+      'scsynth (the audio server) failed to boot - usually the audio device being unavailable, or ' +
+      'an orphaned scsynth from an earlier run holding it (`pkill -f scsynth`).'
+    );
+  }
+  return null;
+}
+
 // Overridable via env so a second poptart stack (or a test run) can coexist with a running
 // one - see also POPTART_SCSYNTH_PORT in sc/poptart.scd for the third port involved.
 const DEFAULT_NODE_PORT = Number(process.env.POPTART_OSC_NODE_PORT || 57140); // Node listens here for replies from sclang
@@ -214,7 +295,45 @@ class OscEngine {
   // happen synchronously over a subprocess + OSC round-trip - callers (packages/web-app) must
   // await it before driving the engine.
   start(sampleRate = 48000, bufferSize = 256) {
+    // Instant heads-up for the most common fresh-install gap, instead of a 60s timeout: the
+    // engine script cannot compile without the VSTPlugin extension. Warn-only, since
+    // sclang_conf.yaml can legitimately include it from a non-standard directory.
+    if (!vstPluginExtensionInstalled()) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[poptart] VSTPlugin extension not found in ${vstPluginExtensionDirs().join(' or ')} - ` +
+          'the engine will likely fail to boot. Download it from https://git.iem.at/pd/vstplugin/-/releases ' +
+          "and unzip its sc/VSTPlugin folder there (it's a binary extension, not a Quark).",
+      );
+    }
     return new Promise((resolve, reject) => {
+      // Boot-phase failures reject AND tear the half-started stack down: a timed-out start that
+      // leaves its sclang running would hold the OSC port and the audio device, making every
+      // retry fail the same way - the "works once, then times out forever" trap.
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(readyTimer);
+        reject(err);
+        this.stop().catch(() => {});
+      };
+      // sclang's boot log is where the real cause of a boot failure appears; keep a tail of it
+      // to diagnose and embed in the error, since that error (not the terminal) is what the
+      // user actually reads.
+      let bootLog = '';
+      const logBoot = (chunk) => {
+        bootLog = (bootLog + chunk).slice(-8000);
+      };
+      const bootFailure = (headline) => {
+        const diagnosis = diagnoseSclangOutput(bootLog);
+        const tail = bootLog.trim().split('\n').slice(-12).join('\n');
+        return new Error(
+          `${headline}${diagnosis ? ` Likely cause: ${diagnosis}` : ''}` +
+            (tail ? `\n--- last sclang output ---\n${tail}` : '\n(sclang produced no output)'),
+        );
+      };
+
       this._port = new osc.UDPPort({
         localAddress: '127.0.0.1',
         localPort: this.nodePort,
@@ -224,7 +343,7 @@ class OscEngine {
       });
 
       this._port.on('error', (err) => {
-        reject(err); // no-op once start() has settled
+        fail(err);
         // Surface post-start transport errors (e.g. EMSGSIZE on an oversized datagram) instead
         // of letting them vanish into the already-settled promise.
         // eslint-disable-next-line no-console
@@ -233,7 +352,9 @@ class OscEngine {
       this._port.on('message', (msg) => this._handleMessage(msg));
 
       const readyTimer = setTimeout(() => {
-        reject(new Error(`sclang did not report /poptart/ready within ${READY_TIMEOUT_MS}ms - is SuperCollider installed and is 'sclang' on PATH?`));
+        // sclang spawned but never finished booting - do NOT blame PATH here; discovery
+        // demonstrably worked.
+        fail(bootFailure(`sclang started but the engine did not finish booting within ${READY_TIMEOUT_MS / 1000}s.`));
       }, READY_TIMEOUT_MS);
 
       this._port.once('ready', () => {
@@ -259,18 +380,29 @@ class OscEngine {
         // Forward sclang's output (prefixed) rather than letting it accumulate: an unread pipe
         // fills its OS buffer and then blocks sclang mid-print - and scan/load logs are the
         // main debugging surface for plugin problems anyway.
-        this._sclangProcess.stdout.on('data', (d) => process.stdout.write(`[sclang] ${d}`));
-        this._sclangProcess.stderr.on('data', (d) => process.stderr.write(`[sclang] ${d}`));
+        this._sclangProcess.stdout.on('data', (d) => {
+          logBoot(d);
+          process.stdout.write(`[sclang] ${d}`);
+        });
+        this._sclangProcess.stderr.on('data', (d) => {
+          logBoot(d);
+          process.stderr.write(`[sclang] ${d}`);
+        });
 
         this._sclangProcess.on('error', (err) => {
-          clearTimeout(readyTimer);
           const hint =
             err.code === 'ENOENT'
               ? " - couldn't find sclang. Install SuperCollider, or set POPTART_SCLANG to the sclang binary's full path."
               : '';
-          reject(new Error(`failed to spawn '${this.sclangPath}': ${err.message}${hint}`));
+          fail(new Error(`failed to spawn '${this.sclangPath}': ${err.message}${hint}`));
         });
         this._sclangProcess.on('exit', (code) => {
+          // Dying before ready is a boot failure - reject now with the log's diagnosis instead
+          // of leaving the user staring at a 60s timeout.
+          if (!settled) {
+            fail(bootFailure(`sclang exited (code ${code}) before the engine finished booting.`));
+            return;
+          }
           if (code !== 0 && code !== null) {
             // eslint-disable-next-line no-console
             console.error(`[poptart] sclang exited with code ${code}`);
@@ -279,6 +411,7 @@ class OscEngine {
 
         const onReady = (msg) => {
           if (msg.address === '/poptart/ready') {
+            settled = true;
             clearTimeout(readyTimer);
             this._port.off('message', onReady);
             resolve();
@@ -306,7 +439,12 @@ class OscEngine {
       }
       await new Promise((resolve) => {
         if (proc.exitCode != null) return resolve();
-        const killTimer = setTimeout(() => proc.kill('SIGKILL'), 5000);
+        // Resolve at the SIGKILL too, not only on 'exit': a process that never spawned (ENOENT)
+        // never emits 'exit', and this promise must not hang on it.
+        const killTimer = setTimeout(() => {
+          proc.kill('SIGKILL');
+          resolve();
+        }, 5000);
         proc.once('exit', () => {
           clearTimeout(killTimer);
           resolve();
@@ -801,4 +939,12 @@ class OscEngine {
   }
 }
 
-module.exports = { OscEngine, resolveSclangPath, knownSclangLocations, onPath };
+module.exports = {
+  OscEngine,
+  resolveSclangPath,
+  knownSclangLocations,
+  onPath,
+  diagnoseSclangOutput,
+  vstPluginExtensionDirs,
+  vstPluginExtensionInstalled,
+};
