@@ -26,17 +26,22 @@ let miniMod = null;
 let labelsMod = null;
 let shapeMod = null;
 let pianorollMod = null;
-Promise.all([
+let notesMod = null; // notes.mjs - pure music-theory helpers piped up to the userland prebake scope
+// Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
+// top-level noteToMidi()/etc. call in the prebake never races the import.
+const coreReady = Promise.all([
   import('/pattern-core/mini.mjs'),
   import('/pattern-core/labels.mjs'),
   import('/pattern-core/shape.mjs'),
   import('/pattern-core/pianoroll.mjs'),
+  import('/pattern-core/notes.mjs'),
 ])
-  .then(([m, l, s, pr]) => {
+  .then(([m, l, s, pr, nt]) => {
     miniMod = m;
     labelsMod = l;
     shapeMod = s;
     pianorollMod = pr;
+    notesMod = nt;
     initLfoEditor();
     initPianorollEditor();
     updateMutedDim();
@@ -3840,6 +3845,12 @@ function prebakeScope() {
     bjorklund,
     rotate,
     clamp,
+    // Pure music-theory helpers, real here exactly as in patterns/setup (see server.js). Called
+    // through notesMod so they track the loaded module; hotkey handlers run well after load, and
+    // the startup prebake waits on coreReady, so notesMod is always ready by call time.
+    noteToMidi: (name) => notesMod.noteToMidi(name),
+    degreeToMidi: (degree, scaleName) => notesMod.degreeToMidi(degree, scaleName),
+    parseScaleName: (scaleName) => notesMod.parseScaleName(scaleName),
   };
   for (const [n, v] of Object.entries(api)) { names.push(n); values.push(v); }
   return { names, values };
@@ -3861,7 +3872,9 @@ function runUserPrebake(code) {
   }
 }
 
-// Load and run the prebake once at startup for its hotkeys/UI side. A missing file is fine.
-api('GET', '/api/prebake')
+// Load and run the prebake once at startup for its hotkeys/UI side. A missing file is fine. Wait
+// on coreReady first so a top-level noteToMidi()/etc. in the prebake sees the loaded notes module.
+coreReady
+  .then(() => api('GET', '/api/prebake'))
   .then(({ code }) => runUserPrebake(code))
   .catch(() => {});

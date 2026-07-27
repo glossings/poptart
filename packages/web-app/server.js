@@ -240,7 +240,12 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll'];
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll',
+  // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
+  // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
+  // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
+  // (see client.js), so they behave the same in patterns, setup blocks, and hotkey handlers.
+  'noteToMidi', 'degreeToMidi', 'parseScaleName'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -

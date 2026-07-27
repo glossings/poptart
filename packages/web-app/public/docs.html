@@ -496,8 +496,17 @@
           <p>
             For fiddly static sound-design settings (unison voices, wavetable position), click
             <strong>ui</strong> next to a plugin in the track panel to open its own editor window and set
-            them by hand — then keep livecoding everything else. And <strong>pin</strong> captures the
-            plugin's <em>entire</em> state into the code (see <a href="#s10">Study 10</a>).
+            them by hand — then keep livecoding everything else.
+          </p>
+
+          <h4>Pin a sound, share a link</h4>
+          <p>
+            Click <strong>pin</strong> next to a plugin in the track panel to capture its complete state
+            — preset, every knob, wavetables — into the code as the call's second argument:
+            <code>synth("Serum 2", { state: "H4sI…" })</code>. On every load that state is restored, so
+            the patch sounds identical on a cold start. Because the whole buffer lives in the URL hash,
+            <strong>sharing the link shares the exact sound</strong>. The editor folds the long blob (and
+            <code>lfo()</code> shape strings) into a small <code>{⋯}</code> pill — click it to expand.
           </p>
         </section>
 
@@ -768,14 +777,40 @@ const acid = (p) =&gt; p.param(<span class="s">"Filter 1 Freq"</span>, 0.3);</co
             order). Removing a prototype extension needs a restart; everything else re-runs on save.
           </p>
 
-          <h4>Pin a sound, share a link</h4>
+          <h4>Write your own functions</h4>
           <p>
-            Click <strong>pin</strong> next to a plugin in the track panel to capture its complete state
-            — preset, every knob, wavetables — into the code as the call's second argument:
-            <code>synth("Serum 2", { state: "H4sI…" })</code>. On every load that state is restored, so
-            the patch sounds identical on a cold start. Because the whole buffer lives in the URL hash,
-            <strong>sharing the link shares the exact sound</strong>. The editor folds the long blob (and
-            <code>lfo()</code> shape strings) into a small <code>{⋯}</code> pill — click it to expand.
+            Inside a method, <code>this</code> is a signal and you return one — chain the same methods a
+            pattern has (<code>.add</code>/<code>.mul</code>/<code>.range</code>/<code>.when</code>/<code>.hold</code>/<code>.gain</code>/<code>.param</code>/<code>.mapValue</code>, and the rest). For
+            pitch math, three helpers are exposed by name everywhere: <code>noteToMidi("c4")</code> (note
+            name → MIDI), <code>degreeToMidi(degree, "c minor")</code> (scale step → MIDI, wrapping past
+            the scale), and <code>parseScaleName("f dorian")</code> (→ <code>{ rootMidi, intervals }</code>).
+          </p>
+          <pre><code><span class="c">// a chord builder: intervals above a root, stacked into one mini "," layer</span>
+const chord = (root, ...ivs) =&gt;
+  note(ivs.map((iv) =&gt; noteToMidi(root) + iv).join(<span class="s">","</span>));
+
+pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Serum 2"</span>)   <span class="c">// Cmaj7</span></code></pre>
+
+          <h4>Hotkeys &amp; editor scripting</h4>
+          <p>
+            The prebake runs in the <strong>browser</strong> too (DSL builders are inert there; the UI
+            helpers are live), so it's where you bind keys and script the editor. Register a chord with
+            <code>hotkey(combo, handler)</code>:
+          </p>
+          <pre><code><span class="c">// rotate the selected space-separated steps by one</span>
+hotkey(<span class="s">"alt+r"</span>, () =&gt; {
+  const { from, to, text } = editor.getSelection();
+  editor.replaceCode(rotate(text.trim().split(/\s+/), 1).join(<span class="s">" "</span>), from, to);
+});</code></pre>
+          <p>
+            Combos are <code>+</code>-joined: modifiers <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>/<code>mod</code>
+            (<code>mod</code> = ⌘ on macOS, Ctrl elsewhere) plus one key, matched on physical key position.
+            The <code>editor</code> handle (aliased <code>repl</code>) reads and rewrites the buffer by
+            character offset — <code>getCode</code>/<code>setCode</code>, <code>insertCode</code>/<code>replaceCode</code>,
+            <code>getSelection</code>, <code>getCursorLocation</code>/<code>setCursorLocation</code> — and the sandbox
+            also hands you <code>prompt</code>, <code>alert</code>, <code>log</code>, and the rhythm helpers
+            <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>. Built-in <code>ctrl+p</code>/<code>ctrl+r</code>/<code>ctrl+m</code>
+            are reserved.
           </p>
         </section>
 
