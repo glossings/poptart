@@ -289,3 +289,47 @@ test('highlight: a bare function step is loc-ed to the call', () => {
   const [step] = getStepsForCycle(parseMini(str), 0).filter((s) => s.value != null);
   assert.equal(str.slice(step.loc[0], step.loc[1]), 'i(0,7)');
 });
+
+// What the editor actually boxes for a step: its live sub-pattern spans if any, else its whole loc.
+function hlText(str, cycle = 0) {
+  return getStepsForCycle(parseMini(str), cycle)
+    .filter((s) => s.value != null && !s.cont)
+    .flatMap((s) => (s.subLocs && s.subLocs.length ? s.subLocs : [s.loc]))
+    .map((l) => str.slice(l[0], l[1]));
+}
+
+test('highlight: arith with an inner "<...>" lights only the live pick', () => {
+  const str = '(4 * i(1, 6) + <3 0>)';
+  // cycle 0 -> the "3" of "<3 0>"; cycle 1 -> the "0". Not the whole expression.
+  assert.deepEqual(hlText(str, 0), ['3']);
+  assert.deepEqual(hlText(str, 1), ['0']);
+});
+
+test('highlight: arith with no selecting operand lights the whole expression', () => {
+  const str = '(3 + i(4,5))';
+  assert.deepEqual(hlText(str, 0), ['3 + i(4,5)']);
+  // and the step still carries the whole-expression loc (unchanged), with no subLocs
+  const [step] = getStepsForCycle(parseMini(str), 0).filter((s) => s.value != null);
+  assert.equal(str.slice(step.loc[0], step.loc[1]), '3 + i(4,5)');
+  assert.equal(step.subLocs, undefined);
+});
+
+test('highlight: both operands selecting lights both live picks', () => {
+  const str = '(<4 8> + <3 0>)';
+  assert.deepEqual(hlText(str, 0).sort(), ['3', '4']); // cycle 0: 4 and 3
+  assert.deepEqual(hlText(str, 1).sort(), ['0', '8']); // cycle 1: 8 and 0
+});
+
+test('highlight: a sequence element inside arith lights just that element', () => {
+  // "[1 2]" has two elements sharing the arith's single left slot; each half lights its own atom.
+  const str = '([1 2] + 10)';
+  const spans = hlText(str, 0);
+  assert.deepEqual(spans, ['1', '2']);
+});
+
+test('highlight: nested arith with an inner "<...>" still lights just the pick', () => {
+  // left operand is itself an arith ("<5 7> * 2"); the live pick should surface through it.
+  const str = '(<5 7> * 2 + 1)';
+  assert.deepEqual(hlText(str, 0), ['5']);
+  assert.deepEqual(hlText(str, 1), ['7']);
+});

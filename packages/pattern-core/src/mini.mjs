@@ -72,6 +72,11 @@ export function parseMini(str) {
  * may exceed 1 (the event rings into following cycles), and those following cycles report the
  * still-sounding part as a step with `cont: true` - same value/loc, but NOT a new onset. The
  * scheduler must skip `cont` steps when triggering; samplers/highlighters treat them normally.
+ *
+ * Arithmetic steps (from "(...)" expressions) may also carry `subLocs`: the `[start, end)` spans of
+ * the sub-pattern(s) currently selecting inside the expression (an "<...>" pick, a sequence
+ * element). When present, a highlighter should light those instead of `loc` - so "(4 + <3 0>)"
+ * lights just the live "3"/"0" rather than the whole expression. Absent when no operand selects.
  */
 export function getStepsForCycle(ast, cycleNumber) {
   return astToSteps(ast, cycleNumber);
@@ -615,12 +620,47 @@ function evalFunc(node, cycle, salt) {
 
 // Numeric value of a step list at a phase in [0,1) - the last step covering it (matches
 // signal.mjs sampleViaSteps). Used to sample an arithmetic operator's right operand.
-function sampleStepsAt(steps, phase) {
+// The step of `steps` sounding at `phase` (fraction of a cycle), or undefined. The last match
+// wins so a later, narrower step overrides an earlier one covering the same phase.
+function sampleStepAt(steps, phase) {
   let found;
   for (const s of steps) {
     if (s.value != null && phase >= s.start && phase < s.end) found = s;
   }
-  return found ? Number(found.value) : NaN;
+  return found;
+}
+
+// The source span [start, end) a node covers. Only atom/func/alt/arith carry their own `loc`;
+// structural nodes (seq, fast, euclid, ...) don't, so derive theirs from their children. Used to
+// tell whether an active leaf is a proper *sub-selection* of an operand (a narrower span) or is
+// the operand in full.
+function spanOf(node) {
+  if (!node) return null;
+  if (node.loc) return node.loc;
+  const spans = [];
+  const add = (n) => {
+    const s = spanOf(n);
+    if (s) spans.push(s);
+  };
+  if (node.items) for (const it of node.items) add(it.node);
+  if (node.item) add(node.item);
+  if (node.a) add(node.a);
+  if (node.b) add(node.b);
+  if (spans.length === 0) return null;
+  return [Math.min(...spans.map((s) => s[0])), Math.max(...spans.map((s) => s[1]))];
+}
+
+// Collect, into `out`, the source spans of the sub-pattern(s) actually *selecting* a value inside
+// `operand` at this step - an alternation pick, a sequence element: any active leaf whose span is
+// narrower than the operand's own. A plain atom/func operand has no such leaf (its leaf IS the
+// whole operand), so it contributes nothing. This is what lets arith highlighting light just the
+// live "<3 0>" pick rather than the entire "(... + <3 0>)" expression.
+function collectSubLocs(operand, step, out) {
+  const span = spanOf(operand);
+  const locs = step.subLocs && step.subLocs.length ? step.subLocs : step.loc ? [step.loc] : [];
+  for (const l of locs) {
+    if (!span || l[0] > span[0] || l[1] < span[1]) out.push(l);
+  }
 }
 
 // Smoothstep-interpolated 1D value noise in [0,1], the "poor man's perlin" already used by the
@@ -658,9 +698,11 @@ function astToSteps(node, cycle, salt = 0) {
     case 'arith': {
       // Combine two sub-patterns numerically: structure from the LEFT operand, the right sampled at
       // each left step's onset. Rests and non-numeric values pass the left value through unchanged.
-      // Every step is re-`loc`d to the whole expression's source span, so playback highlighting
-      // lights the entire "(... + ...)" (whose computed value is what actually sounds), not just the
-      // left operand's token.
+      // A step's `loc` is the whole expression's source span (its computed value is what actually
+      // sounds), but when an operand is *selecting* - an "<...>" pick, a sequence element - we also
+      // record that live sub-span in `subLocs`, so the highlighter can light just the part that's
+      // playing (the "3" then the "0" of "<3 0>") rather than the entire "(... + <3 0>)". With no
+      // such operand, `subLocs` is absent and the whole expression lights, as before.
       const A = astToSteps(node.a, cycle, salt);
       const B = astToSteps(node.b, cycle, salt);
       const out = [];
@@ -670,13 +712,18 @@ function astToSteps(node, cycle, salt = 0) {
           continue;
         }
         const av = Number(s.value);
-        const bv = sampleStepsAt(B, s.start);
+        const bStep = sampleStepAt(B, s.start);
+        const bv = bStep ? Number(bStep.value) : NaN;
         const loc = node.loc ?? s.loc;
+        const subLocs = [];
+        collectSubLocs(node.a, s, subLocs);
+        if (bStep) collectSubLocs(node.b, bStep, subLocs);
+        const extra = subLocs.length ? { subLocs } : null;
         if (Number.isNaN(av) || Number.isNaN(bv)) {
-          out.push({ ...s, loc });
+          out.push({ ...s, loc, ...extra });
           continue;
         }
-        out.push({ ...s, value: String(applyArith(node.op, av, bv)), loc });
+        out.push({ ...s, value: String(applyArith(node.op, av, bv)), loc, ...extra });
       }
       return out;
     }

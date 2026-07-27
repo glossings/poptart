@@ -1978,12 +1978,17 @@ function highlightTick() {
         continue;
       }
       for (const s of steps) {
-        if (s.value == null || !s.loc) continue;
+        if (s.value == null) continue;
+        // A "(...)" arith step that has a live sub-pattern reports it in `subLocs` - light those
+        // (the current "<3 0>" pick) instead of the whole expression's `loc`. Otherwise fall back
+        // to the single atom loc, as everywhere else.
+        const hl = s.subLocs && s.subLocs.length ? s.subLocs : s.loc ? [s.loc] : [];
+        if (hl.length === 0) continue;
         // Only true onsets stretch; `cont` tails already carry their remaining length.
         const mult = r.clip && !s.cont ? clipMultiplier(r.clip, s, cyc) : 1;
         const absStart = cyc + s.start;
         const absEnd = cyc + s.start + (s.end - s.start) * mult;
-        if (cyclePos >= absStart && cyclePos < absEnd) locs.set(s.loc.join('-'), s.loc);
+        if (cyclePos >= absStart && cyclePos < absEnd) for (const l of hl) locs.set(l.join('-'), l);
       }
     }
 
