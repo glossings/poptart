@@ -47,7 +47,7 @@ const NOTE_OFF_EARLY_SEC = 0.005;
 // setParamEnv engine calls as plugin parameters, addressed with this pseudo-slot instead of a
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
 const CHANNEL_SLOT = -1;
-const CHANNEL_DEFAULTS = { gain: 1, pan: 0, out: 1 }; // out = stereo pair (Sig#o), 1-based
+const CHANNEL_DEFAULTS = { gain: 1, pan: 0, out: 1, dry: 1 }; // out = stereo pair (Sig#o), 1-based; dry = direct-output level (Sig#dry)
 
 // Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
 const MAX_CHAIN_SLOTS = 8;
@@ -176,6 +176,7 @@ export class Scheduler {
     this._prevAudioInjectSlots = new Set(); // fx slots the previous pattern audio-injected, for teardown
     this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
+    this._busRouted = false; // track output currently diverted to a named bus (see Sig#bus)
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
   }
 
@@ -259,6 +260,21 @@ export class Scheduler {
         this.engine.clearInputSource(this.trackId);
       }
       this._prevInputSource = sig.inputSource ?? null;
+    }
+
+    // Output-to-bus sends (Sig#bus): feed this track's output to one or more named buses (summing
+    // with any other track on the same name), read back elsewhere via audio("name"). Replaced
+    // wholesale each eval and torn down when the pattern drops .bus() - the engine track outlives
+    // the Scheduler, so a stale send would keep feeding a bus the pattern no longer mentions. The
+    // dry level travels separately as the 'dry' channel control above.
+    if (typeof this.engine.setBusSends === 'function') {
+      const sends = sig.busSends ?? [];
+      if (sends.length > 0) {
+        this.engine.setBusSends(this.trackId, sends);
+      } else if (this._busRouted) {
+        this.engine.clearBusSends(this.trackId);
+      }
+      this._busRouted = sends.length > 0;
     }
 
     // Audio injected into a plugin's aux/sidechain input (Sig#audio, injector form): wire each
@@ -359,6 +375,12 @@ export class Scheduler {
     if (this._midiRouted) {
       this.engine.clearMidiNotes(this.trackId);
       this._midiRouted = false;
+    }
+    // Bus sends also outlive the tick loop - drop them so a stopped/muted track stops feeding its
+    // buses (and releases them). setPattern re-establishes them on the next eval.
+    if (this._busRouted && typeof this.engine.clearBusSends === 'function') {
+      this.engine.clearBusSends(this.trackId);
+      this._busRouted = false;
     }
   }
 

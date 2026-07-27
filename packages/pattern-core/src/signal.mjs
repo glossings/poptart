@@ -61,7 +61,13 @@ export class Sig {
     // device, or another track's notes); io 'audio' feeds the named source's audio into the chain
     // input (a hardware input, or another track's output). null for an ordinary pattern track.
     this.inputSource = opts.inputSource ?? null;
-    this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan' -> Sig
+    // Output-to-bus sends (see Sig#bus): each { name, amount } sends `amount` of this track's
+    // output to a named audio bus. A track may feed several buses at once, and any number of tracks
+    // sharing a name sum into that bus; read the sum with the audio("name") head source on another
+    // track. Independent of the dry path (Sig#dry, a channel control) - a bus send doesn't change
+    // how much still reaches the track's own output pair.
+    this.busSends = opts.busSends ?? [];
+    this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan'/'out'/'dry' -> Sig
     this.velSig = opts.velSig ?? null; // per-onset note velocity (see vel()); synth tracks only
     // Captured plugin state per chain slot (0 = instrument, 1.. = fx), from synth/fx's second
     // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load.
@@ -108,6 +114,7 @@ export class Sig {
       midiInjects: this.midiInjects,
       audioInjects: this.audioInjects,
       inputSource: this.inputSource,
+      busSends: this.busSends,
       channel: this.channel,
       velSig: this.velSig,
       sampler: this.sampler,
@@ -261,6 +268,49 @@ export class Sig {
    */
   o(value) {
     return this._clone({ channel: { ...this.channel, out: toSignal(value) } });
+  }
+
+  /**
+   * Sends `amount` of this track's output to a named audio bus, so several tracks can be summed and
+   * processed together: give any number of tracks the same bus name and their outputs mix into it,
+   * then read the sum on another track with the audio("name") head source and run it through one
+   * chain -
+   *
+   *   kick:  s("bd*4").bus("drums")
+   *   snare: s("~ sn").bus("drums")
+   *   drums: audio("drums").fx("Saturn 2")   // the summed kick+snare, distorted once, to master
+   *
+   * A track may call .bus() more than once to feed several buses at once (e.g. a reverb bus and a
+   * delay bus). This is an aux *send* - it doesn't touch the dry signal still going to the track's
+   * own output pair; control that independently with .dry() (or use .bsend() to send and mute the
+   * dry in one call). `amount` defaults to 1. The bus is created on first use and freed when
+   * nothing references it; reading a bus that no track feeds is silence.
+   */
+  bus(name, amount = 1) {
+    if (typeof name !== 'string' || !name.trim()) {
+      throw new Error('[signal] .bus() takes a bus name, e.g. .bus("drums")');
+    }
+    if (typeof amount !== 'number' || !Number.isFinite(amount)) {
+      throw new Error('[signal] .bus() amount must be a number (a send level), e.g. .bus("reverb", 0.3)');
+    }
+    return this._clone({ busSends: [...this.busSends, { name: name.trim(), amount }] });
+  }
+
+  /**
+   * How much of the dry signal still reaches this track's own output pair, sampled per onset like
+   * .gain()/.pan(). Defaults to 1 (untouched). Independent of .bus() sends, so .dry(0) mutes the
+   * direct output while any bus sends keep carrying the signal - the basis of .bsend().
+   */
+  dry(value) {
+    return this._clone({ channel: { ...this.channel, dry: toSignal(value) } });
+  }
+
+  /**
+   * Bus send with the dry killed: `.bsend("reverb")` is exactly `.bus("reverb").dry(0)` - route the
+   * track entirely into the bus and stop it playing directly. `amount` scales the send (default 1).
+   */
+  bsend(name, amount = 1) {
+    return this.bus(name, amount).dry(0);
   }
 
   /**
@@ -1387,10 +1437,12 @@ export function midi(name, channel = null) {
 /**
  * Live audio as a track SOURCE: `audio("Scarlett Input 1").fx("ValhallaRoom")` runs that input
  * through a reverb; `audio("drums").fx("Pro-C 2")` processes a copy of another track's output. The
- * name is a hardware audio input or a track label (track-first; prefix "track:"/"dev:" to force).
- * The audio flows into the same chain input a synth/sampler would, so the whole .fx()/.param()
- * chain and channel strip apply; it schedules no notes of its own. Called as a *method* after a
- * plugin, `.audio(...)` injects into that plugin's sidechain instead - see Sig#audio.
+ * name is a hardware audio input, a track label, or a named bus that other tracks feed with .bus()
+ * (resolved track-first, then bus; prefix "track:"/"bus:"/"dev:" to force). Reading a bus sums
+ * every track sending to it - the way to mix several tracks down and process them together. The
+ * audio flows into the same chain input a synth/sampler would, so the whole .fx()/.param() chain
+ * and channel strip apply; it schedules no notes of its own. Called as a *method* after a plugin,
+ * `.audio(...)` injects into that plugin's sidechain instead - see Sig#audio.
  */
 export function audio(name) {
   assertInputName('audio', name);

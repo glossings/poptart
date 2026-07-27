@@ -166,6 +166,8 @@ class MappedEngine {
   // these (typeof engine.X === 'function'), so they must exist on the wrapper to be reached.
   setInputSource(...a) { return this.engine.setInputSource(...a); }
   clearInputSource(...a) { return this.engine.clearInputSource(...a); }
+  setBusSends(...a) { return this.engine.setBusSends(...a); }
+  clearBusSends(...a) { return this.engine.clearBusSends(...a); }
   injectAudio(...a) { return this.engine.injectAudio(...a); }
   clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
   injectMidi(...a) { return this.engine.injectMidi(...a); }

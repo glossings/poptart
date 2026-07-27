@@ -55,6 +55,8 @@ var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split($:) }
 // during a scan, e.g. copy-protection or analysis plugins that fail to probe headlessly.
 var excludePaths = ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
 var maxSlots = 8; // slot 0 = instrument, 1..7 = effects
+var maxBusSends = 4; // a track can send to this many named buses at once (Sig#bus); must match the
+                     // busOut1..N / busSend1..N controls hardcoded in the track SynthDef below
 // scsynth's own port, overridable so a second poptart stack (tests, parallel session) doesn't
 // collide with a running one on the default 57110.
 var scsynthPort = ("POPTART_SCSYNTH_PORT".getenv ? "57110").asInteger;
@@ -80,6 +82,13 @@ var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing;
 // builds the per-track defaults. The two dicts track live routes both ways for teardown.
 var silentBus, trashBus, scArgsFor, scKey, wireAudio, unwireAudio;
 var sidechainByTarget, sidechainBySource;
+// Named audio buses (Sig#bus / '/poptart/setBusOut'): a track can divert its output to a bus,
+// where any number of tracks sum, and another track reads the sum via the audio("name") head
+// source. busGroup sits at the head of the node tree so bus-writer tracks execute before the
+// readers that In.ar the bus (scsynth zeroes buses each block, so a reader ordered before its
+// writers would only see silence). acquire/releaseBus refcount the buses so they live exactly as
+// long as some writer or reader references them.
+var namedBuses, busGroup, acquireBus, releaseBus;
 
 // --- tiny JSON writer (the class library has String.parseJSON but no serializer) ---
 jsonEscape = { |str|
@@ -148,7 +157,8 @@ buildTrackDef = { |key|
     // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
-    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, out = 1, scSend, scSendGain = 1,
+    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, out = 1, dry = 1, scSend, scSendGain = 1,
+        busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
         var sig = Silent.ar(2);
         var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
@@ -180,16 +190,25 @@ buildTrackDef = { |key|
         // aux bus (scSend). Parked to trashBus when this track feeds nothing, so the graph stays
         // static; scSendGain scales the amount. Always-on Out keeps the UGen graph fixed.
         Out.ar(scSend, sig * scSendGain);
-        // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like
-        // gain/pan): pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair.
-        Out.ar((out.round - 1).mod(numPairs) * 2, sig);
+        // Named-bus sends (Sig#bus): up to maxBusSends independent aux sends, each a copy of the
+        // post-fader output to busOutK scaled by busSendK. Unused slots park busOutK at trashBus
+        // with busSendK = 0. Lagged so a routing change doesn't click. Any number of tracks sending
+        // to the same bus sum into it; read the sum on another track with the audio("name") source.
+        [busOut1, busOut2, busOut3, busOut4].do { |b, i|
+            Out.ar(b, sig * [busSend1, busSend2, busSend3, busSend4][i].lag(0.02));
+        };
+        // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
+        // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by
+        // `dry` (Sig#dry, channel control, default 1) so .dry(0)/.bsend() can mute the dry path
+        // while the bus sends carry the signal.
+        Out.ar((out.round - 1).mod(numPairs) * 2, sig * dry.lag(0.02));
     });
 };
 
 // Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
 // unity gain, center pan, first output pair.
 channelDefault = { |name|
-    if ((name == "gain") or: { name == "out" }) { 1 } { 0 };
+    if ((name == "gain") or: { name == "out" } or: { name == "dry" }) { 1 } { 0 };
 };
 
 // Parked sidechain args for a freshly created track synth: every fx-slot aux input reads the
@@ -197,12 +216,31 @@ channelDefault = { |name|
 // trash bus. setSidechain repoints the relevant args when a route is set up.
 scArgsFor = {
     [\scSend, trashBus.index, \scSendGain, 1,
+     \busOut1, trashBus.index, \busOut2, trashBus.index, \busOut3, trashBus.index, \busOut4, trashBus.index,
      \scBus1, silentBus.index, \scBus2, silentBus.index, \scBus3, silentBus.index,
      \scBus4, silentBus.index, \scBus5, silentBus.index, \scBus6, silentBus.index,
      \scBus7, silentBus.index];
 };
 // Dict key for a sidechain route, identifying the aux input by (target track, fx slot).
 scKey = { |targetKey, slot| (targetKey.asString ++ "#" ++ slot).asSymbol };
+
+// Get-or-create a named audio bus, bumping its refcount; returns the Bus. Every writer (Sig#bus)
+// and reader (audio("name")) holds one ref, so the bus outlives whichever end is set up first.
+acquireBus = { |name|
+    var key = name.asSymbol;
+    var entry = namedBuses[key];
+    if (entry.isNil) { entry = (bus: Bus.audio(server, 2), refs: 0); namedBuses[key] = entry };
+    entry[\refs] = entry[\refs] + 1;
+    entry[\bus];
+};
+// Drop one ref on a named bus; free it (and forget the name) once nothing references it.
+releaseBus = { |name|
+    var key = name.asSymbol;
+    namedBuses[key] !? { |entry|
+        entry[\refs] = entry[\refs] - 1;
+        if (entry[\refs] <= 0) { entry[\bus].free; namedBuses[key] = nil };
+    };
+};
 
 // Wire an audio route into a sink on `targetKey`: slot >= 1 is an fx aux (sidechain) input, slot
 // 0 is the chain input (a head audio() source). `rawName` is a source track ("label"/"track:label")
@@ -215,8 +253,10 @@ wireAudio = { |targetKey, slot, rawName, gain|
         var target = awaitTrack.(targetKey);
         var str = rawName.asString;
         var isDev = str.copyRange(0, 3) == "dev:";
+        var isBusPrefix = str.copyRange(0, 3) == "bus:";
         var name = case
             { isDev } { str.drop(4) }
+            { isBusPrefix } { str.drop(4) }
             { str.copyRange(0, 5) == "track:" } { str.drop(6) }
             { str };
         var key = scKey.(targetKey, slot);
@@ -224,7 +264,7 @@ wireAudio = { |targetKey, slot, rawName, gain|
         { target.isNil } { ("poptart: audio route: no track " ++ targetKey).warn }
         { (slot < 0) or: { slot >= maxSlots } } { ("poptart: audio route: bad slot " ++ slot).warn }
         { true } {
-            var destBus, ownsBus;
+            var destBus, ownsBus, nameKey = name.asSymbol;
             unwireAudio.(targetKey, slot); // retire any existing route on this sink first
             if (slot >= 1) {
                 destBus = Bus.audio(server, 2);
@@ -234,7 +274,8 @@ wireAudio = { |targetKey, slot, rawName, gain|
                 destBus = target[\inBus]; // chain input: the track already mixes inBus into slot 0
                 ownsBus = false;
             };
-            if (isDev) {
+            case
+            { isDev } {
                 var feeder;
                 if (server.options.numInputBusChannels < 2) {
                     ("poptart: audio(\"dev:...\"): the audio device exposes < 2 input channels - "
@@ -242,21 +283,51 @@ wireAudio = { |targetKey, slot, rawName, gain|
                 };
                 feeder = Synth(\poptart_soundin, [\out, destBus.index, \in, 0, \gain, gain],
                     target: server.defaultGroup, addAction: \addToHead);
-                sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nil, feeder: feeder, owns: ownsBus);
+                sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nil, feeder: feeder, busName: nil, owns: ownsBus);
                 ("poptart: audio input: dev '" ++ name ++ "' -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
-            } {
-                var source = awaitTrack.(name.asSymbol);
-                if (source.isNil) { ("poptart: audio route: source track '" ++ name ++ "' not found").warn } {
-                    // One send per source (single \scSend): retire its previous sink if different.
-                    sidechainBySource[name.asSymbol] !? { |p|
+            }
+            { true } {
+                // Resolve a bare / "track:" / "bus:" name. Both a source track and a bus writer may
+                // be created in the same eval as this reader, so wait briefly for either to appear;
+                // "bus:" forces a bus, otherwise track-first with a bus of that name as fallback. A
+                // track reading its OWN name (drums: audio("drums")) means the bus, not itself -
+                // self-routing would feed the track's output back into its own input - so a self
+                // match doesn't count as a track here, and we wait for the bus instead.
+                var tries = 0, max = (5 / 0.05).asInteger, source, useBus;
+                while {
+                    ((isBusPrefix.not and: { nameKey != targetKey } and: { tracks[nameKey].isKindOf(Event) })
+                        or: { namedBuses[nameKey].notNil }).not
+                    and: { tries < max }
+                } { 0.05.wait; tries = tries + 1 };
+                source = if (isBusPrefix or: { nameKey == targetKey }) { nil } { tracks[nameKey] };
+                useBus = source.isKindOf(Event).not and: { namedBuses[nameKey].notNil };
+                case
+                { source.isKindOf(Event) } {
+                    // A track source pushes its output to the sink via its own \scSend (one per
+                    // source): retire its previous sink if different, then order source ahead.
+                    sidechainBySource[nameKey] !? { |p|
                         if ((p[\targetKey] != targetKey) or: { p[\slot] != slot }) { unwireAudio.(p[\targetKey], p[\slot]) };
                     };
                     source[\synth].set(\scSend, destBus.index, \scSendGain, gain);
-                    if (name.asSymbol != targetKey) { target[\group].moveAfter(source[\group]) };
-                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: name.asSymbol, feeder: nil, owns: ownsBus);
-                    sidechainBySource[name.asSymbol] = (targetKey: targetKey, slot: slot);
+                    if (nameKey != targetKey) { target[\group].moveAfter(source[\group]) };
+                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nameKey, feeder: nil, busName: nil, owns: ownsBus);
+                    sidechainBySource[nameKey] = (targetKey: targetKey, slot: slot);
                     ("poptart: audio route: " ++ name ++ " -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
-                };
+                }
+                { useBus } {
+                    // A named bus (Sig#bus): a reader feeder copies the bus into the sink's input,
+                    // at the head of the sink's group so it lands before the track synth reads it.
+                    // The bus's writer tracks live in busGroup at the tree head; move this sink to
+                    // the tail of the default group so it runs after them (and thus sees their sum
+                    // this block, not a block late). The reader holds a bus ref while it's routed.
+                    var busObj = acquireBus.(name);
+                    var feeder = Synth(\poptart_busread, [\out, destBus.index, \in, busObj.index, \gain, gain],
+                        target: target[\group], addAction: \addToHead);
+                    target[\group].moveToTail(server.defaultGroup);
+                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nil, feeder: feeder, busName: name, owns: ownsBus);
+                    ("poptart: audio route: bus '" ++ name ++ "' -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
+                }
+                { true } { ("poptart: audio route: '" ++ name ++ "' is neither a track nor a bus").warn };
             };
         };
     };
@@ -274,6 +345,7 @@ unwireAudio = { |targetKey, slot|
             tracks[src] !? { |s| if (s.isKindOf(Event)) { s[\synth].set(\scSend, trashBus.index) } };
             sidechainBySource[src] = nil;
         };
+        entry[\busName] !? { |bn| releaseBus.(bn) }; // a bus reader held a ref - drop it
         entry[\feeder] !? { |f| f.free };
         if (entry[\owns]) { entry[\bus].free };
         sidechainByTarget[key] = nil;
@@ -484,12 +556,21 @@ server.waitForBoot {
     SynthDef(\poptart_soundin, { |out, in = 0, gain = 1|
         Out.ar(out, SoundIn.ar([in, in + 1]) * gain);
     }).add;
+    // Feeder for a named audio bus read as a chain source (audio("busName")): copies the summed
+    // bus into the sink's input bus. Runs at the sink group's head, after the bus's writer tracks
+    // (which live in busGroup at the tree head), so the sum is already present this block.
+    SynthDef(\poptart_busread, { |out, in, gain = 1|
+        Out.ar(out, In.ar(in, 2) * gain);
+    }).add;
     // Parked buses + route bookkeeping for audio sidechains (see Sig#sidechain). Allocated once,
     // here, so every track synth's sc* args have a valid default (silence in, send to nowhere).
     silentBus = Bus.audio(server, 2);
     trashBus = Bus.audio(server, 2);
     sidechainByTarget = IdentityDictionary.new; // scKey -> (bus:, target:, slot:, source:)
     sidechainBySource = IdentityDictionary.new; // sourceKey (Symbol) -> scKey it currently feeds
+    // Named-bus registry + the head group its writer tracks live in (see the var declaration).
+    namedBuses = IdentityDictionary.new; // busName (Symbol) -> (bus: Bus, refs: Int)
+    busGroup = Group.new(server, \addToHead);
     server.sync;
     "poptart: server booted, ready".postln;
     nodeAddr.sendMsg("/poptart/ready");
@@ -1261,6 +1342,53 @@ OSCdef(\poptartSetAudioInput, { |msg|
 OSCdef(\poptartClearAudioInput, { |msg|
     unwireAudio.(msg[1].asSymbol, 0);
 }, '/poptart/clearAudioInput');
+
+// Output-to-bus sends (Sig#bus). msg = [trackId, name1, amount1, name2, amount2, ...]: replace the
+// track's whole set of bus sends. Each name acquires a ref on its bus; the previous set is released
+// afterwards (acquire-before-release, so a bus kept across the change never briefly hits zero refs
+// and gets freed). The writer track is moved into busGroup at the tree head so it executes before
+// any reader that In.ar's the bus. Sends past maxBusSends are dropped (with a warning).
+OSCdef(\poptartSetBusSends, { |msg|
+    var key = msg[1].asSymbol;
+    var pairs = msg.drop(2);
+    fork {
+        var track = awaitTrack.(key);
+        track !? {
+            var requested = pairs.size div: 2;
+            var n = min(maxBusSends, requested);
+            var newNames = [];
+            if (requested > maxBusSends) {
+                ("poptart: .bus(): track " ++ key ++ " asked for " ++ requested ++ " sends; only "
+                    ++ maxBusSends ++ " are supported - extra buses dropped").warn;
+            };
+            n.do { |i|
+                var name = pairs[i * 2].asString;
+                var amt = pairs[(i * 2) + 1].asFloat;
+                track[\synth].set(("busOut" ++ (i + 1)).asSymbol, acquireBus.(name).index, ("busSend" ++ (i + 1)).asSymbol, amt);
+                newNames = newNames.add(name);
+            };
+            for (n, maxBusSends - 1, { |i|
+                track[\synth].set(("busOut" ++ (i + 1)).asSymbol, trashBus.index, ("busSend" ++ (i + 1)).asSymbol, 0);
+            });
+            track[\busSends] !? { |prev| prev.do { |bn| releaseBus.(bn) } };
+            track[\busSends] = newNames;
+            track[\group].moveToHead(busGroup);
+            busGroup.moveToHead(server.defaultGroup);
+        };
+    };
+}, '/poptart/setBusSends');
+
+OSCdef(\poptartClearBusSends, { |msg|
+    var key = msg[1].asSymbol;
+    var track = tracks[key];
+    if (track.isKindOf(Event)) {
+        for (0, maxBusSends - 1, { |i|
+            track[\synth].set(("busOut" ++ (i + 1)).asSymbol, trashBus.index, ("busSend" ++ (i + 1)).asSymbol, 0);
+        });
+        track[\busSends] !? { |prev| prev.do { |bn| releaseBus.(bn) }; track[\busSends] = nil };
+        track[\group].moveToHead(server.defaultGroup); // back into the normal (reader) node order
+    };
+}, '/poptart/clearBusSends');
 
 // MIDI from a hardware device into the plugin at `slot` (Sig#midi injector, "dev:..." source).
 // Mirrors midiRoute but targets one slot's plugin and doesn't touch the track's held/env state -

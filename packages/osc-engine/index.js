@@ -691,6 +691,19 @@ class OscEngine {
     this._send('/poptart/clearAudioInput', [trackId]);
   }
 
+  // Route a track's output to one or more named audio buses (Sig#bus). `sends` is an array of
+  // { name, amount }; the whole set replaces the track's current sends. sclang allocates each bus
+  // on first use (any number of tracks on the same name sum into it) and frees it when
+  // unreferenced. The dry path is untouched (see the 'dry' channel param); read a bus's sum with
+  // the audio("name") head source (setInputSource io 'audio').
+  setBusSends(trackId, sends = []) {
+    const pairs = sends.flatMap(({ name, amount }) => [String(name), amount ?? 1]);
+    this._send('/poptart/setBusSends', [trackId, ...pairs]);
+  }
+  clearBusSends(trackId) {
+    this._send('/poptart/clearBusSends', [trackId]);
+  }
+
   // Inject audio into the plugin at `slot` as its aux/sidechain input (Sig#audio injector). A
   // track source: sclang allocates a cross-track bus, maps it into that slot's VSTPlugin aux bus,
   // adds a send from the source track's output, and orders the source ahead so the send lands the
