@@ -321,11 +321,17 @@ const PREBAKE_BROWSER_SHIMS = {
 function makeBlockEvaluator(defs = new Map()) {
   // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
   // top-level bindings are in scope for every user block too (see runPrebake).
-  const evalBlock = function evalBlock(code) {
+  const evalBlock = function evalBlock(code, locBase) {
     const declNames = [
       ...new Set([...code.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1])),
     ];
-    const body = code.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
+    // Playback-highlight source locations: when a document offset is given (a real editor block),
+    // wrap pattern-position string literals in mini("…", ABS_OFFSET) so the emitted steps carry
+    // document-absolute atom spans (see pattern-core/locations.mjs). Prebake/def blocks pass no
+    // base and stay untagged. The wrapping only touches string literals inside expressions, so the
+    // decl-name harvest above and the const/let->var rewrite below are unaffected.
+    const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase) : code;
+    const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
     const macroNames = macroSigNames();
     const baseNames = [...BUILDER_NAMES, ...macroNames, 'setbpm'].filter((n) => !defs.has(n)); // defs may shadow builders
     const baseValues = baseNames.map((n) => {
@@ -456,6 +462,56 @@ function dryRunPattern(sig) {
     }
     s.sample(0, cps, 0);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Playback-highlight grid. The browser highlights the atom currently sounding by reading the
+// SAME step grid the scheduler plays - so any transform in the method chain (.fast/.slow/.when/
+// degrade/…) is reflected exactly, instead of the browser re-guessing from the source text. The
+// server (which holds the real evaluated Sig) computes, per active track, the sounding steps for
+// a window of cycles, each step tagged with its document-absolute atom spans (`locs`), converted
+// to block-relative offsets the client anchors at the track's start position. Deterministic per
+// cycle, so a later window can be re-requested identically via /api/highlight.
+// ---------------------------------------------------------------------------------------------
+
+const HL_WINDOW = 32; // cycles of grid shipped per track (initial window and each top-up)
+const hlTracks = new Map(); // label -> { sig, start, end } for the last eval's active tracks
+
+// The sounding steps of `sig` for cycles [from, from+count), each as { start, end, cont?, locs }.
+// `locs` are the step's source spans (see pattern-core stepLocs), kept only where they fall inside
+// the block's own [start,end] document range - so a location that rode in from a prebake-defined
+// pattern or a dynamic string (which the client can't place in this block) is dropped - then
+// rebased to block-relative. A step with no in-range span is still emitted (it sounds), just
+// with an empty `locs`, so timing math on the client stays complete.
+function highlightGrid(sig, start, end, from, count) {
+  if (!sig.stepsForCycle) return null;
+  const grid = [];
+  for (let c = Math.max(0, from); c < Math.max(0, from) + count; c++) {
+    let steps;
+    try {
+      steps = sig.stepsForCycle(c);
+    } catch {
+      steps = [];
+    }
+    const out = [];
+    for (const s of steps) {
+      if (s.value == null) continue;
+      const locs = patternCore
+        .stepLocs(s)
+        .filter((l) => l[0] >= start && l[1] <= end)
+        .map((l) => [l[0] - start, l[1] - start]);
+      out.push({ start: s.start, end: s.end, ...(s.cont ? { cont: true } : {}), locs });
+    }
+    grid.push({ cycle: c, steps: out });
+  }
+  return grid;
+}
+
+// The cycle the transport is on right now (0 while paused / just after a stop). The highlight
+// window starts here so a running clock gets the cycles it's about to play, not cycle 0.
+function currentGridCycle() {
+  if (!transport) return 0;
+  return Math.max(0, Math.floor(transport.cycleAt(transport.getTime())));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -767,7 +823,7 @@ const routes = {
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs));
     const evaluated = blocks.map((b) => {
       try {
-        const value = evalBlock(b.code);
+        const value = evalBlock(b.code, b.start);
         if (value instanceof patternCore.Sig) {
           dryRunPattern(value);
         } else if (value !== TEMPO_BLOCK && !b.label.startsWith('$')) {
@@ -830,12 +886,20 @@ const routes = {
     // Which tracks the browser should route computer-keyboard input to (keyboard()/tap()).
     const keyboardTracks = syncKbTracks(active);
 
+    // Refresh the highlight-grid source set to this eval's active tracks, and ship each active
+    // track's first window inline so playback lights up immediately without a follow-up request.
+    hlTracks.clear();
+    for (const b of active) hlTracks.set(b.label, { sig: b.sig, start: b.start, end: b.end });
+    const gridFrom = currentGridCycle();
+
     return {
       status: 200,
       body: {
         cps: transport.cps,
         transport: transport.snapshot(),
         keyboardTracks,
+        gridFrom,
+        gridCount: HL_WINDOW,
         tracks: built.map((b) => ({
           label: b.label,
           muted: b.muted,
@@ -847,9 +911,24 @@ const routes = {
           fxChain: b.sig.fxChain,
           paramNames: Object.keys(b.sig.paramSignals),
           keyboard: b.sig.keyboardRoute?.kind ?? null,
+          grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW) : null,
         })),
       },
     };
+  },
+
+  // Playback-highlight top-up. Patterns that vary per cycle (`<…>`, r/i, degrade, choice) outrun
+  // the window shipped with /api/evaluate; the browser requests the next window as its clock nears
+  // the end of what it has. Query: { from, count? }. Returns the same per-track grid shape, for the
+  // still-active tracks of the last eval - deterministic, so it matches what /api/evaluate sent.
+  'GET /api/highlight': async (q) => {
+    const from = Math.max(0, Math.floor(Number(q.from)) || 0);
+    const count = Math.min(HL_WINDOW * 4, Math.max(1, Math.floor(Number(q.count)) || HL_WINDOW));
+    const tracks = [...hlTracks.entries()].map(([label, t]) => ({
+      label,
+      grid: highlightGrid(t.sig, t.start, t.end, from, count),
+    }));
+    return { status: 200, body: { gridFrom: from, gridCount: count, tracks } };
   },
 
   'POST /api/stop': async () => {

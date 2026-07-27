@@ -7,8 +7,12 @@
 //   "[a b]"        bracketed sub-sequence, occupying one slice of its parent
 //   "[a,b]"        stack: layers play simultaneously, each spanning the full bracket
 //   "<a b c>"      alternation: one item per cycle (cycles through on each absolute cycle)
-//   "a*3"          fast: repeat 3 times within this slice ("a*<2 3>" alternates the rate per cycle)
-//   "a/2"          slow: stretch over 2 cycles (only 1/2 of it shows up per cycle)
+//   "a*3"          fast: repeat 3 times within this slice. The rate may itself be a pattern:
+//                  "a*<2 3>" alternates it per cycle, and "a*[1 2]" changes it WITHIN the cycle -
+//                  each rate step becomes a window playing the sped-up pattern's own slice of the
+//                  cycle (only onsets landing inside the window sound).
+//   "a/2"          slow: stretch over 2 cycles (only 1/2 of it shows up per cycle). Patterned
+//                  rates work here too ("a/<1 2>", "a/[1 2]").
 //   "a!3"          replicate: 3 separate onsets, each getting a normal-width slice
 //   "a@3"          weight: one onset, 3x the width of a normal slice
 //   "a _ _"        elongate: "_" extends the previous step (one onset over 3 slices - a tie,
@@ -46,20 +50,50 @@
 // two `r`s in one pattern decorrelate because they sit at different character offsets.
 //
 // NOT supported yet (will throw a clear parse error rather than silently doing the wrong
-// thing): polymeter `{a b, c d}`, dot-groups `a . b c`, cycle-internal rate patterns
-// (`a*[2 3]` - only per-cycle alternation `a*<2 3>` works), and pattern-valued euclid `(...)`
+// thing): polymeter `{a b, c d}`, dot-groups `a . b c`, and pattern-valued euclid `(...)`
 // arguments.
 //
 // The whole interpreter works in terms of one function: getStepsForCycle(ast, cycleNumber),
 // which returns this cycle's flat step list as plain objects - never anything Strudel-shaped.
 
-export function parseMini(str) {
+// `offset` shifts every source span (`loc`/`subLocs`, derived from token positions) by a fixed
+// amount, so the atom spans a step reports resolve against the ORIGINAL document rather than the
+// bare mini string - this is how playback highlighting places an atom inside a `n("…")` literal
+// sitting anywhere in the editor buffer (see web-app's location transpile). Only the highlight
+// spans move; decorrelating seeds (`?`/`|`, r/i/p) stay string-relative and untouched, so a
+// pattern degrades/chooses identically no matter where in the buffer it lives.
+export function parseMini(str, offset = 0) {
   const tokens = tokenize(str);
   const { node, rest } = parseLayers(tokens, /* stopType */ null);
   if (rest.length > 0) {
     throw new Error(`[mini] unexpected token "${rest[0].text}" while parsing "${str}"`);
   }
+  if (offset) offsetLocs(node, offset);
   return node;
+}
+
+// Shifts every `loc` in the AST by `offset`, in place. Walks the same child shapes as spanOf.
+// Leaves seed fields alone - only `.loc` (the highlight span) moves.
+function offsetLocs(node, offset) {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node.loc)) node.loc = [node.loc[0] + offset, node.loc[1] + offset];
+  if (node.items) for (const it of node.items) offsetLocs(it.node, offset);
+  if (node.item) offsetLocs(node.item, offset);
+  if (node.a) offsetLocs(node.a, offset);
+  if (node.b) offsetLocs(node.b, offset);
+  if (node.args) for (const a of node.args) offsetLocs(a, offset);
+  // Pattern-valued fast/slow rates carry their own sub-AST (loc spans to highlight the rate).
+  if (node.amount && typeof node.amount === 'object') offsetLocs(node.amount, offset);
+}
+
+// The source spans to highlight for one emitted step, newest convention first: an explicit
+// accumulated `locs` set (unioned across pattern merges - see signal.mjs _binop), else an arith
+// step's live `subLocs`, else the single atom `loc`. Empty when the step has no source span (a
+// computed/continuous value). Shared by the server's highlight-grid builder and any step consumer.
+export function stepLocs(step) {
+  if (step.locs && step.locs.length) return step.locs;
+  if (step.subLocs && step.subLocs.length) return step.subLocs;
+  return step.loc ? [step.loc] : [];
 }
 
 /**
@@ -80,6 +114,36 @@ export function parseMini(str) {
  */
 export function getStepsForCycle(ast, cycleNumber) {
   return astToSteps(ast, cycleNumber);
+}
+
+// Time-warps a step grid by factor `f` (the result at cycle-position P reads the source at P*f) -
+// the engine of Sig .fast()/.slow(), and reused by the client's playback highlighter so its
+// timing matches the scheduler's. Each result cycle scans the source cycles it covers and maps
+// every source onset back into result time. A NEGATIVE f flips each mapped interval (the source
+// onset lands at the result interval's end), so result time walks the source backwards - reverse
+// playback, cycles included. An onset whose mapped start falls in an earlier result cycle is
+// reported as a `cont` tail, like a tie or an echo tail; scanning one source cycle beyond the
+// covered span catches tails up to a source cycle long (echo's bounded-lookback convention).
+export function warpSteps(baseStepsForCycle, f) {
+  if (!baseStepsForCycle) return null;
+  return (cycle) => {
+    const lo = Math.min(cycle * f, (cycle + 1) * f);
+    const hi = Math.max(cycle * f, (cycle + 1) * f);
+    const out = [];
+    for (let src = Math.floor(lo) - 1; src < Math.ceil(hi) + 1; src++) {
+      for (const s of baseStepsForCycle(src)) {
+        if (s.value == null || s.cont) continue;
+        const a = (src + s.start) / f;
+        const b = (src + s.end) / f;
+        const start = Math.min(a, b) - cycle;
+        const end = Math.max(a, b) - cycle;
+        if (end <= 0 || start >= 1) continue;
+        if (start < 0) out.push({ ...s, start: 0, end, cont: true });
+        else out.push({ ...s, start, end });
+      }
+    }
+    return out.sort((a, b) => a.start - b.start);
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -314,16 +378,16 @@ function parseElement(tokens, arith = false) {
         amount = Number(amountTok.text);
         rest = rest.slice(2);
         lastEnd = amountTok.end;
-      } else if (amountTok?.type === '<') {
-        // Alternation rate, e.g. "a*<2 3>" - one rate value per cycle. The general
-        // pattern-valued case ("a*[2 3]", rate changing *within* a cycle) still isn't
-        // supported; resolveRate() rejects it with a clear error.
-        const parsed = parseAngle(rest.slice(1));
+      } else if (amountTok?.type === '<' || amountTok?.type === '[') {
+        // Pattern-valued rate: "a*<2 3>" alternates the rate per cycle; "a*[1 2]" changes it
+        // within the cycle, each rate step becoming a window of the sped/slowed pattern (see
+        // rateWindows).
+        const parsed = amountTok.type === '<' ? parseAngle(rest.slice(1)) : parseGroup(rest.slice(1));
         amount = parsed.node;
         rest = parsed.rest;
         lastEnd = parsed.end;
       } else {
-        throw new Error(`[mini] "${op.type}" must be followed by a number or an alternation like <2 3>`);
+        throw new Error(`[mini] "${op.type}" must be followed by a number or a pattern like <2 3> or [1 2]`);
       }
       node = { type: op.type === '*' ? 'fast' : 'slow', item: node, amount };
       continue;
@@ -772,23 +836,33 @@ function astToSteps(node, cycle, salt = 0) {
     }
 
     case 'fast': {
-      const n = Math.max(1, Math.round(resolveRate(node.amount, cycle)));
       const out = [];
-      for (let i = 0; i < n; i++) {
-        const innerCycle = cycle * n + i;
-        for (const s of astToSteps(node.item, innerCycle, salt)) {
-          out.push({ ...s, start: (i + s.start) / n, end: (i + s.end) / n });
+      for (const w of rateWindows(node.amount, cycle)) {
+        const n = Math.max(1, Math.round(w.rate));
+        for (let i = 0; i < n; i++) {
+          const innerCycle = cycle * n + i;
+          for (const s of astToSteps(node.item, innerCycle, salt)) {
+            const start = (i + s.start) / n;
+            if (start < w.start - RATE_EPS || start >= w.end - RATE_EPS) continue;
+            out.push({ ...s, start, end: (i + s.end) / n });
+          }
         }
       }
       return out;
     }
 
     case 'slow': {
-      const n = Math.max(1, Math.round(resolveRate(node.amount, cycle)));
-      const innerCycle = Math.floor(cycle / n);
-      const phase = ((cycle % n) + n) % n;
-      const innerSteps = astToSteps(node.item, innerCycle, salt);
-      return clipAndRescale(innerSteps, phase / n, (phase + 1) / n);
+      const out = [];
+      for (const w of rateWindows(node.amount, cycle)) {
+        const n = Math.max(1, Math.round(w.rate));
+        const innerCycle = Math.floor(cycle / n);
+        const phase = ((cycle % n) + n) % n;
+        for (const s of clipAndRescale(astToSteps(node.item, innerCycle, salt), phase / n, (phase + 1) / n)) {
+          if (s.start < w.start - RATE_EPS || s.start >= w.end - RATE_EPS) continue;
+          out.push(s);
+        }
+      }
+      return out;
     }
 
     case 'euclid': {
@@ -849,18 +923,25 @@ function applyArith(op, a, b) {
   }
 }
 
-// A `*`/`/` rate is either a plain number or a pattern that must resolve to exactly one
-// number for the given cycle (alternations like `<2 3>` do; anything cycle-internal like
-// `[2 3]` doesn't and is rejected - honest per-cycle semantics rather than silently taking
-// the first value).
-function resolveRate(amount, cycle) {
-  if (typeof amount === 'number') return amount;
+// The `*`/`/` rate, resolved for this cycle into one or more windows [{ start, end, rate }].
+// A plain number - or a pattern producing one whole-cycle value, like "<2 3>" - is a single
+// full-cycle window, the classic case. A cycle-internal rate pattern ("a*[1 2]") yields one
+// window per rate step: within each window the item plays sped/slowed by that window's rate,
+// and only events whose ONSET lands inside the window sound (Tidal's patterned-rate semantics -
+// the sped-up pattern is laid over the whole cycle and each window shows its own slice of it).
+// A rest in the rate pattern is a window with no rate: nothing plays there. The epsilon keeps
+// float error at window boundaries from dropping or double-placing a boundary onset.
+const RATE_EPS = 1e-9;
+function rateWindows(amount, cycle) {
+  if (typeof amount === 'number') return [{ start: 0, end: 1, rate: amount }];
   const steps = astToSteps(amount, cycle, 0).filter((s) => s.value != null);
-  const value = Number(steps[0]?.value);
-  if (steps.length !== 1 || Number.isNaN(value)) {
-    throw new Error('[mini] a pattern-valued rate must produce exactly one number per cycle (e.g. "a*<2 3>")');
-  }
-  return value;
+  return steps.map((s) => {
+    const rate = Number(s.value);
+    if (Number.isNaN(rate)) {
+      throw new Error(`[mini] a pattern-valued rate must be numeric - got "${s.value}"`);
+    }
+    return { start: s.start, end: s.end, rate };
+  });
 }
 
 function seqToSteps(items, cycle, salt = 0) {

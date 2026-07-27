@@ -89,7 +89,7 @@ const BUILDERS = [
   'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
 ];
 const METHODS = [
-  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'rate', 'phase', 'curve',
+  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'slow', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
   'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'as', 'degrade', 'ply', 'echo',
   'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
@@ -1771,179 +1771,81 @@ function initPianorollEditor() {
 // Starts paused at cycle 0 - the server's clock only advances while something is playing.
 let transport = { cps: 0.5, baseSec: 0, baseCycle: 0, paused: true };
 let playing = false;
-let patternRegions = []; // { marker, ast, lastKey, marks: [] }
+// Playback highlighting is driven by the step grid the SERVER computes from each active track's
+// real evaluated Sig (see server.js highlightGrid) - the exact grid the scheduler plays, so every
+// transform in the method chain (.fast/.slow/.when/degrade/…) is reflected without the browser
+// re-guessing from source text. Each region: an anchor marker at the track's block (highlights are
+// placed relative to it, so they survive edits until re-eval), the grid indexed by cycle, and the
+// longest ring so lookback catches a stretched/held note still sounding from an earlier cycle.
+let patternRegions = []; // { label, anchor, grid: Map<cycle, steps>, maxEnd, lastKey, marks: [] }
+let gridFrom = 0; // first cycle covered by every region's grid
+let gridTo = 0; // one past the last covered cycle (extended by /api/highlight top-ups)
+let gridCount = 32; // window size the server ships (mirrored from the eval response)
+let gridFetching = false; // a top-up request is in flight - don't stack another
 
 function clearPatternRegions() {
   for (const r of patternRegions) {
-    r.marker.clear();
+    r.anchor.clear();
     for (const mk of r.marks) mk.clear();
   }
   patternRegions = [];
 }
 
-// Blanks out // and /* */ comments (string-aware, offsets preserved) so commented-out code
-// never gets playback highlighting - a `// .param("x", "0 1")` line isn't playing.
-function maskComments(code) {
-  const out = code.split('');
-  let inStr = null;
-  for (let i = 0; i < code.length; i++) {
-    const ch = code[i];
-    if (inStr) {
-      if (ch === '\\') i++;
-      else if (ch === inStr) inStr = null;
-    } else if (ch === '"' || ch === "'" || ch === '`') {
-      inStr = ch;
-    } else if (ch === '/' && code[i + 1] === '/') {
-      while (i < code.length && code[i] !== '\n') out[i++] = ' ';
-    } else if (ch === '/' && code[i + 1] === '*') {
-      const close = code.indexOf('*/', i + 2);
-      const end = close === -1 ? code.length : close + 2;
-      for (; i < end; i++) if (code[i] !== '\n') out[i] = ' ';
-      i--;
-    }
-  }
-  return out.join('');
-}
-
-function findStringLiterals(code) {
-  const out = [];
-  // Backticks included (multi-line `<...>*n` patterns from midi-record); the s flag lets a
-  // template literal's newlines match. Comments are already masked out by the caller.
-  const re = /(["'`])((?:\\.|(?!\1).)*?)\1/gs;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    out.push({ index: m.index, raw: m[2], end: m.index + m[0].length });
-  }
-  return out;
-}
-
-// Only strings used *as patterns* get highlighted: arguments to n()/note()/mini()/s(),
-// chain methods whose first argument can be mini-notation (.when()/.i()/.gain()/.add()/…),
-// second-position arguments (`.param("name", "0.2 0.8")`), and strings that immediately chain
-// a method (`"0 0.5 1".gte(0.5)`). Deliberately not: `.synth("Serum 2")`/`.fx(...)`/
-// `.scale("F minor")`, or `.param("Filter 1 Freq", …)`'s name string - those are lookups,
-// not patterns.
-function isPatternContext(code, lit) {
-  const before = code.slice(0, lit.index);
-  const after = code.slice(lit.end);
-  if (/(?<!\.)\b(?:n|note|mini|s)\s*\(\s*$/.test(before)) return true;
-  if (/\.\s*(?:when|hold|i|n|note|vel|begin|end|loop|speed|stretch|fit|slice|gain|pan|add|sub|mul|div|mod|gte|gt|lte|lt|eq|neq)\s*\(\s*$/.test(before)) return true;
-  if (/,\s*$/.test(before)) return true;
-  if (/^\s*\.\s*[A-Za-z_]/.test(after)) return true;
-  return false;
-}
-
-// Walk every atom value string in a parsed mini AST (skipping rests). Used to bound how far
-// back highlighting has to look for a clip-stretched tail.
-function walkAtomValues(node, fn) {
-  if (!node) return;
-  if (node.type === 'atom') {
-    if (node.value != null) fn(node.value);
-    return;
-  }
-  if (node.items) for (const it of node.items) walkAtomValues(it.node, fn);
-  if (node.item) walkAtomValues(node.item, fn);
-  if (node.type === 'arith') {
-    walkAtomValues(node.a, fn);
-    walkAtomValues(node.b, fn);
-  }
-}
-
-// Numeric value of a mini number-pattern at absolute cycle-time t - the clip control read at an
-// event's onset, matching signal.mjs's `.clip("<1 4 1>")` (structure stays with the note).
-function sampleNumberPattern(ast, t) {
-  const c = Math.floor(t);
-  const ph = t - c;
-  let steps;
-  try {
-    steps = miniMod.getStepsForCycle(ast, c);
-  } catch {
-    return NaN;
-  }
-  for (const s of steps) {
-    if (s.value != null && ph >= s.start && ph < s.end) return Number(s.value);
-  }
-  return NaN;
-}
-
-// clip elongates a step's duration - the noteOff, and here the highlight, lasts longer than the
-// step's own slot. Two client-visible sources, mirroring signal.mjs: the `clip` field of a
-// trailing `.as(spec)` (per-atom `:N` suffix), and a trailing `.clip(N)` / `.clip("pat")`. The
-// literal owns whichever of those immediately follows it in the chain; a method taking a string
-// argument in between (`.scale("min")`) hides a later `.clip`, which then just isn't stretched.
-function detectClip(masked, litEnd, ast) {
-  const tail = masked.slice(litEnd, litEnd + 400);
-  let asIndex = -1;
-  let clipConst = null;
-  let clipAst = null;
-
-  const asM = /^[^"'`\n]*?\.as\(\s*(["'])([^"'`]*)\1\s*\)/.exec(tail);
-  if (asM) asIndex = asM[2].split(':').map((f) => f.trim().toLowerCase()).indexOf('clip');
-
-  const clipM = /^[^"'`\n]*?\.clip\(\s*(?:(["'])([^"'`]*)\1|([-\d.]+))\s*\)/.exec(tail);
-  if (clipM) {
-    if (clipM[3] != null) clipConst = Number(clipM[3]);
-    else {
-      try {
-        clipAst = miniMod.parseMini(clipM[2]);
-      } catch {
-        clipAst = null;
-      }
-    }
-  }
-
-  if (asIndex < 0 && clipConst == null && !clipAst) return null;
-
-  // Bound the per-tick look-back at the largest multiplier the pattern can produce (a step is at
-  // most one cycle wide, so ceil(maxMult) cycles of tail, plus a margin), capped for safety.
-  let maxMult = 1;
-  const consider = (v) => {
-    const n = Number(v);
-    if (!Number.isNaN(n) && n > maxMult) maxMult = n;
-  };
-  if (asIndex >= 0) walkAtomValues(ast, (val) => consider(String(val).split(':')[asIndex]));
-  if (clipConst != null) consider(clipConst);
-  if (clipAst) walkAtomValues(clipAst, consider);
-
-  return { asIndex, clipConst, clipAst, maxCycles: Math.min(32, Math.ceil(maxMult) + 1) };
-}
-
-// The duration multiplier for one step under a region's clip descriptor (1 = unchanged).
-function clipMultiplier(clip, step, cycle) {
-  let m = 1;
-  if (clip.asIndex >= 0) {
-    const part = String(step.value).split(':')[clip.asIndex];
-    const v = Number(part);
-    if (part !== undefined && part !== '' && v > 0 && !Number.isNaN(v)) m *= v;
-  }
-  if (clip.clipConst != null) {
-    if (clip.clipConst > 0 && !Number.isNaN(clip.clipConst)) m *= clip.clipConst;
-  } else if (clip.clipAst) {
-    const v = sampleNumberPattern(clip.clipAst, cycle + (step.start + step.end) / 2);
-    if (v > 0 && !Number.isNaN(v)) m *= v;
-  }
-  return m;
-}
-
-function setupHighlighting(code, tracks) {
+// Builds the per-track highlight regions from an /api/evaluate response: each active track carries
+// its grid (sounding steps per cycle, atom spans block-relative) plus its block [start,end], which
+// we anchor a marker to so highlights track edits until the next eval. No source-text parsing - the
+// server already did the real evaluation.
+function setupHighlighting(tracks, from, count) {
   clearPatternRegions();
-  if (!miniMod) return;
-  const masked = maskComments(code); // same offsets, comments blanked
-  const activeRanges = tracks.filter((t) => t.active).map((t) => [t.start, t.end]);
-  for (const lit of findStringLiterals(masked)) {
-    if (!activeRanges.some(([a, b]) => lit.index >= a && lit.index <= b)) continue;
-    if (!isPatternContext(masked, lit)) continue;
-    let ast;
-    try {
-      ast = miniMod.parseMini(lit.raw);
-    } catch {
-      continue; // not parseable mini-notation (e.g. a plain word) - just skip it
-    }
-    const from = cm.posFromIndex(lit.index + 1); // just inside the opening quote
-    const to = cm.posFromIndex(lit.index + 1 + lit.raw.length);
-    const clip = detectClip(masked, lit.end, ast);
-    patternRegions.push({ marker: cm.markText(from, to, {}), ast, clip, lastKey: '', marks: [] });
+  gridFrom = from;
+  gridTo = from + count;
+  gridCount = count;
+  gridFetching = false;
+  for (const t of tracks) {
+    if (!t.active || !t.grid) continue;
+    const anchor = cm.markText(cm.posFromIndex(t.start), cm.posFromIndex(t.end), {});
+    const region = { label: t.label, anchor, grid: new Map(), maxEnd: 1, lastKey: '', marks: [] };
+    ingestGrid(region, t.grid);
+    patternRegions.push(region);
   }
+}
+
+// Folds a grid window ([{ cycle, steps }]) into a region, tracking the longest step end so the
+// look-back in highlightTick reaches a note still ringing from an earlier cycle (clip/tie/echo).
+function ingestGrid(region, grid) {
+  for (const g of grid) {
+    region.grid.set(g.cycle, g.steps);
+    for (const s of g.steps) if (s.end > region.maxEnd) region.maxEnd = s.end;
+  }
+}
+
+// Request the next grid window as the clock nears the end of what we hold - patterns that vary per
+// cycle (<…>, r/i, degrade, choice) outrun the initial window. Coarse: one request per window, not
+// per frame. Deterministic on the server, so the extension lines up seamlessly.
+const GRID_PREFETCH = 8; // cycles of headroom before the covered end that triggers a top-up
+function maybePrefetchGrid(cycle) {
+  if (gridFetching || patternRegions.length === 0) return;
+  if (cycle < gridTo - GRID_PREFETCH) return;
+  gridFetching = true;
+  const from = gridTo;
+  api('GET', `/api/highlight?from=${from}&count=${gridCount}`)
+    .then((res) => {
+      const byLabel = new Map(res.tracks.map((t) => [t.label, t.grid]));
+      // Drop cycles well behind the play head so a set-and-forget pattern doesn't grow the grid
+      // forever; kept margin (2 windows) stays clear of the bounded look-back for ringing tails.
+      const pruneBefore = res.gridFrom - gridCount * 2;
+      for (const r of patternRegions) {
+        const grid = byLabel.get(r.label);
+        if (grid) ingestGrid(r, grid);
+        for (const c of r.grid.keys()) if (c < pruneBefore) r.grid.delete(c);
+      }
+      gridFrom = Math.max(gridFrom, pruneBefore);
+      gridTo = Math.max(gridTo, res.gridFrom + res.gridCount);
+    })
+    .catch(() => {})
+    .finally(() => {
+      gridFetching = false;
+    });
 }
 
 // The transport mirror as a cycle position "now" - the same rebased formula the server uses.
@@ -1954,41 +1856,30 @@ function currentCyclePos() {
 }
 
 function highlightTick() {
-  if (!playing || !miniMod || patternRegions.length === 0) return;
+  if (!playing || patternRegions.length === 0) return;
   const cyclePos = currentCyclePos();
   const cycle = Math.floor(cyclePos);
+  maybePrefetchGrid(cycle);
 
   for (const r of patternRegions) {
-    const range = r.marker.find();
-    if (!range) continue; // the string was deleted from the buffer
+    const range = r.anchor.find();
+    if (!range) continue; // the block was deleted from the buffer
 
-    // Work in absolute cycle-time so a clip-stretched event that rings past the cycle boundary
-    // stays lit: an onset in an earlier cycle keeps its atom highlighted until its stretched end.
-    // Without clip, maxCycles is 0 - this collapses to "steps of the current cycle", as before.
-    // A step's location can recur (chords, or the same alt element revisited), so dedupe by loc.
+    // A step (start/end are cycle fractions) sounds at cyclePos when it falls in [cyc+start,
+    // cyc+end). `end` may exceed 1 - a clip-stretched, held, or echoed note rings past its own
+    // cycle - so look back far enough (bounded by the region's longest ring) to keep a tail from
+    // an earlier cycle lit. Locations recur (chords, revisited alt picks), so dedupe by span.
     const locs = new Map();
-    const maxK = r.clip ? r.clip.maxCycles : 0;
-    for (let k = 0; k <= maxK; k++) {
+    const lookback = Math.min(64, Math.ceil(r.maxEnd));
+    for (let k = 0; k <= lookback; k++) {
       const cyc = cycle - k;
-      if (cyc < 0) break; // nothing played before cycle 0 - no tail to inherit
-      let steps;
-      try {
-        steps = miniMod.getStepsForCycle(r.ast, cyc);
-      } catch {
-        continue;
-      }
+      if (cyc < gridFrom) break; // nothing loaded before the window start
+      const steps = r.grid.get(cyc);
+      if (!steps) continue;
       for (const s of steps) {
-        if (s.value == null) continue;
-        // A "(...)" arith step that has a live sub-pattern reports it in `subLocs` - light those
-        // (the current "<3 0>" pick) instead of the whole expression's `loc`. Otherwise fall back
-        // to the single atom loc, as everywhere else.
-        const hl = s.subLocs && s.subLocs.length ? s.subLocs : s.loc ? [s.loc] : [];
-        if (hl.length === 0) continue;
-        // Only true onsets stretch; `cont` tails already carry their remaining length.
-        const mult = r.clip && !s.cont ? clipMultiplier(r.clip, s, cyc) : 1;
-        const absStart = cyc + s.start;
-        const absEnd = cyc + s.start + (s.end - s.start) * mult;
-        if (cyclePos >= absStart && cyclePos < absEnd) for (const l of hl) locs.set(l.join('-'), l);
+        if (cyclePos >= cyc + s.start && cyclePos < cyc + s.end) {
+          for (const l of s.locs) locs.set(l[0] + '-' + l[1], l);
+        }
       }
     }
 
@@ -2352,7 +2243,7 @@ async function evaluate(start) {
     const result = await api('POST', '/api/evaluate', { code, start });
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     renderTracks(result);
-    setupHighlighting(code, result.tracks);
+    setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
     setKeyboardRoutes(result.keyboardTracks ?? []);
     foldConfigBlobs();
     if (start) playing = true; // Update keeps the current play state; Play begins it

@@ -8,7 +8,7 @@
 // @strudel/core's whole object system for what is conceptually just "a value that changes
 // over time, sometimes with edges." Everything below is plain data + closures.
 
-import { parseMini, getStepsForCycle } from './mini.mjs';
+import { parseMini, getStepsForCycle, warpSteps, stepLocs } from './mini.mjs';
 import { parseNoteValue, degreeToMidi, parseScaleName, quantizeToScale } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps } from './pianoroll.mjs';
@@ -202,12 +202,97 @@ export class Sig {
     return this.mul(toSignal(max).sub(minSig)).add(minSig);
   }
 
-  fast(rateHz) {
-    if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz });
-    throw new Error('.fast() on a non-LFO signal is not supported yet');
+  /**
+   * Speeds playback up: `.fast(2)` fits two cycles of the pattern into every cycle; `.fast(1/2)`
+   * (= `.slow(2)`) stretches it over two. A NEGATIVE factor plays the pattern in reverse -
+   * `.fast(-1)` is reverse playback at normal speed, `.fast(-2)` reversed double-time. The step
+   * grid, ties/ringing tails, and per-event controls attached BEFORE the .fast() (.vel(), sampler
+   * .i()/.speed()/...) all warp together, so their values stay aligned with their events;
+   * track-level params and channel modulators (.param(sine(...)), .gain(env())...) stay in real
+   * time. On an LFO builder it multiplies the rate instead - sine(2).fast(2) runs at 4 Hz - use
+   * .rate() to set an LFO's rate absolutely.
+   */
+  fast(factor) {
+    // A PATTERNED factor - a mini string or any step Sig - lets the rate vary across the cycle,
+    // mirroring mini-notation's "a*[2 3]": each rate step is a window in which the whole pattern
+    // plays sped by that window's rate (only onsets landing inside the window sound). A plain
+    // number (or numeric-valued factor) keeps the exact fast path below.
+    if (typeof factor === 'string' || (factor instanceof Sig && factor.stepsForCycle)) {
+      return this._fastPatterned(toSignal(factor));
+    }
+    const f = Number(factor);
+    if (!Number.isFinite(f) || f === 0) {
+      throw new Error('[signal] .fast() takes a nonzero factor, e.g. .fast(2) - negative plays in reverse');
+    }
+    if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz: this.lfoIR.rateHz * f });
+    if (this.envIR) {
+      throw new Error("[signal] .fast() on an env() isn't supported - envelope times are set in its options");
+    }
+    if (f === 1) return this;
+    // Result time P reads source time P*f, for the continuous sample and the step grid alike.
+    // The tiny negative-direction nudge keeps an onset-time sample (how the scheduler reads
+    // .vel()/sampler configs) inside its own source step: reversed, an onset maps exactly onto
+    // its source step's exclusive END boundary, which would otherwise read the neighbour.
+    const srcTime = (x) => x * f - (f < 0 ? 1e-6 : 0);
+    const warp = (sig) =>
+      sig instanceof Sig
+        ? new Sig((t, cps, pos) => sig.sample(srcTime(t), cps, pos == null ? undefined : srcTime(pos)), {
+            stepsForCycle: warpSteps(sig.stepsForCycle, f),
+            ...sig._meta(),
+          })
+        : sig;
+    const out = warp(this);
+    if (this.sampler) {
+      out.sampler = Object.fromEntries(Object.entries(this.sampler).map(([k, v]) => [k, warp(v)]));
+    }
+    if (this.velSig) out.velSig = warp(this.velSig);
+    return out;
   }
+
+  /** `.slow(4)` spreads the pattern over 4 cycles - the inverse of .fast(). Negative reverses too. */
+  slow(factor) {
+    // Patterned factor: slow by a pattern is fast by its reciprocal, per window (.slow("2 3") =
+    // .fast("0.5 0.333...")). mapValue keeps the factor's step grid, inverting each rate value.
+    if (typeof factor === 'string' || (factor instanceof Sig && factor.stepsForCycle)) {
+      return this.fast(toSignal(factor).mapValue((v) => 1 / Number(v)));
+    }
+    const f = Number(factor);
+    if (!Number.isFinite(f) || f === 0) {
+      throw new Error('[signal] .slow() takes a nonzero factor, e.g. .slow(2) - negative plays in reverse');
+    }
+    return this.fast(1 / f);
+  }
+
+  // Patterned .fast() (see fast()): warps the step grid by a rate that varies across the cycle.
+  // Only meaningful on a step pattern; the factor's own step grid supplies the windows. velocity
+  // and sampler-config sub-signals warp alongside so their per-onset values stay aligned.
+  _fastPatterned(factorSig) {
+    if (this.lfoIR || this.envIR || !this.stepsForCycle) {
+      throw new Error('[signal] a patterned .fast()/.slow() factor needs a step pattern, e.g. n("0 1 2").fast("2 3")');
+    }
+    // A factor that never yields a usable rate (a non-numeric token like "x", or a constant 0) is
+    // a user error, flagged now at eval time rather than silently producing an empty grid - same
+    // guard the numeric path applies. Check the first couple of cycles so an alternation whose
+    // first pick is a rest ("<~ 2>") isn't misjudged.
+    const usable = [0, 1].some((c) => factorWindows(factorSig, c).some((w) => Number.isFinite(w.rate) && w.rate !== 0));
+    if (!usable) {
+      throw new Error('[signal] .fast()/.slow() takes a nonzero factor or a numeric rate pattern, e.g. .fast(2) or .fast("2 3")');
+    }
+    const patWarp = (sig) => {
+      if (!(sig instanceof Sig) || !sig.stepsForCycle) return sig; // constants/LFOs stay real-time
+      const swc = warpStepsWindowed(sig.stepsForCycle, factorSig);
+      return new Sig((t, cps, pos) => sampleViaSteps(swc, t, cps, pos), { stepsForCycle: swc, ...sig._meta() });
+    };
+    const out = patWarp(this);
+    if (this.sampler) out.sampler = Object.fromEntries(Object.entries(this.sampler).map(([k, v]) => [k, patWarp(v)]));
+    if (this.velSig) out.velSig = patWarp(this.velSig);
+    return out;
+  }
+
+  /** Sets an LFO's rate in Hz, absolutely (unlike .fast(), which multiplies the current rate). */
   rate(rateHz) {
-    return this.fast(rateHz);
+    if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz });
+    throw new Error('[signal] .rate() only applies to LFO signals - on a pattern use .fast()/.slow()');
   }
   phase(phaseCycles) {
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, phaseCycles });
@@ -459,8 +544,17 @@ export class Sig {
       ? (cycle) =>
           this.stepsForCycle(cycle).map((s) => {
             if (s.value == null) return s;
-            const b = otherSig.sample(cycle + (s.start + s.end) / 2, 1);
-            return b == null ? { ...s, value: null } : { ...s, value: fn(Number(s.value), Number(b)) };
+            const mid = (s.start + s.end) / 2;
+            const b = otherSig.sample(cycle + mid, 1);
+            if (b == null) return { ...s, value: null };
+            // Union the highlight spans of both operands, so `n("0 1").add("7 0")` lights the
+            // live atom in each literal - the value that sounds genuinely propagated from both.
+            let locs = stepLocs(s);
+            if (otherSig.stepsForCycle) {
+              const bStep = coveringStep(otherSig.stepsForCycle(cycle), mid);
+              if (bStep) locs = [...locs, ...stepLocs(bStep)];
+            }
+            return { ...s, value: fn(Number(s.value), Number(b)), locs };
           })
       : null;
     return new Sig(
@@ -514,10 +608,16 @@ export class Sig {
           for (const c of fillCondGaps(raw)) {
             const branch = truthy(c.value) ? transformed : this;
             if (!branch.stepsForCycle) continue;
+            // The condition atom currently selecting here (a "<0 1>" pick) lights up alongside the
+            // note it gates - its span rode in on the cond step (empty for a synthesized gap fill).
+            const condLocs = stepLocs(c);
             for (const s of branch.stepsForCycle(cycle)) {
               const start = Math.max(s.start, c.start);
               const end = Math.min(s.end, c.end);
-              if (start < end) out.push({ ...s, start, end });
+              if (start < end) {
+                const locs = condLocs.length ? [...stepLocs(s), ...condLocs] : undefined;
+                out.push({ ...s, start, end, ...(locs ? { locs } : {}) });
+              }
             }
           }
           return out;
@@ -869,6 +969,57 @@ export function Signal(value) {
 }
 Signal.prototype = Sig.prototype; // one shared prototype: extending Signal extends every Sig
 
+// Warps a step grid by a rate that varies across the cycle (patterned .fast()/.slow()). The rate
+// pattern's own steps become windows: within window [start,end) at `rate`, the whole pattern is
+// laid over the cycle sped by `rate` (via the constant-rate warpSteps) and only onsets falling in
+// the window are kept - the same windowed semantics as mini-notation's "a*[2 3]". `cont` tails
+// (ties/echoes/reverse spill) overlapping the window carry through. A resting or non-numeric rate
+// step is a silent window.
+const WARP_WIN_EPS = 1e-9;
+function warpStepsWindowed(baseStepsForCycle, factorSig) {
+  return (cycle) => {
+    const out = [];
+    for (const w of factorWindows(factorSig, cycle)) {
+      if (!Number.isFinite(w.rate) || w.rate === 0) continue;
+      // The rate atom driving this window (the "-1"/"1" of .fast("-1 1")) lights up with the notes
+      // it warps - union its span onto each step falling in the window.
+      const tag = (s) => (w.locs && w.locs.length ? { ...s, locs: [...stepLocs(s), ...w.locs] } : s);
+      for (const s of warpSteps(baseStepsForCycle, w.rate)(cycle)) {
+        if (s.cont) {
+          if (s.start < w.end - WARP_WIN_EPS && s.end > w.start + WARP_WIN_EPS) out.push(tag(s));
+        } else if (s.start >= w.start - WARP_WIN_EPS && s.start < w.end - WARP_WIN_EPS) {
+          out.push(tag(s));
+        }
+      }
+    }
+    return out.sort((a, b) => a.start - b.start);
+  };
+}
+
+// The rate windows a factor signal supplies for a cycle: one window per step of a step pattern
+// (["2 3"] -> two half-cycle windows), or a single full-cycle window for a whole-cycle/constant
+// factor (a number, "<2 3>", or a continuous signal sampled at the cycle midpoint).
+function factorWindows(factorSig, cycle) {
+  if (factorSig.stepsForCycle) {
+    return factorSig
+      .stepsForCycle(cycle)
+      .filter((s) => s.value != null && !s.cont)
+      .map((s) => ({ start: s.start, end: s.end, rate: Number(s.value), locs: stepLocs(s) }));
+  }
+  return [{ start: 0, end: 1, rate: Number(factorSig.sample(cycle + 0.5, 1)), locs: [] }];
+}
+
+// The step of `steps` sounding at cycle-phase `phase` (fraction of a cycle), or undefined - the
+// last covering match wins, matching mini.mjs's sampleStepAt. Used to recover the right operand's
+// atom span in _binop so both operands' highlight locations survive the merge.
+function coveringStep(steps, phase) {
+  let found;
+  for (const s of steps) {
+    if (s.value != null && phase >= s.start && phase < s.end) found = s;
+  }
+  return found;
+}
+
 // Splits a pattern's step grid on a control pattern's grid (patterned .vel()/.note()): each
 // overlap becomes one event, control rests drop events, and an overlap is a new onset when
 // either side starts a fresh (non-`cont`) step there - otherwise it's a tie and stays `cont`.
@@ -1013,11 +1164,18 @@ function assertBuilderInput(builder, value) {
   throw new Error(`[signal] ${builder}(...) takes a number, a mini-notation string, or a signal - got ${Object.prototype.toString.call(value)}`);
 }
 
-/** Generic mini-notation signal of raw string/number values (used internally, and by .param("x", "1 2 3")). */
-export function mini(str) {
+/**
+ * Generic mini-notation signal of raw string/number values (used internally, and by
+ * .param("x", "1 2 3")). `offset` shifts every atom's source span by that many characters, so the
+ * emitted steps' spans resolve against the document rather than the bare string - the editor's
+ * playback highlighter needs this, and the eval-time location transpile supplies it by rewriting a
+ * pattern literal "…" into mini("…", offset) (see pattern-core/locations.mjs). Omit it everywhere
+ * else; the builders that take a Sig (n/note/s) thread these spans through unchanged.
+ */
+export function mini(str, offset = 0) {
   assertBuilderInput('mini', str);
   if (str instanceof Sig) return str;
-  const ast = parseMini(String(str));
+  const ast = parseMini(String(str), offset);
   const valueFn = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
   return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
 }
