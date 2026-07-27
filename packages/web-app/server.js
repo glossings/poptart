@@ -447,15 +447,24 @@ function readPrebakeFile() {
 // try/catch stops just the offending track for anything pathological beyond that.
 const DRY_RUN_CYCLES = 8;
 
-function dryRunPattern(sig) {
-  const cps = transport?.cps ?? DEFAULT_CPS;
-  const sigs = [
+// Every signal a track carries that can hold a mini-notation pattern: the note/value pattern
+// itself, plus each param modulation (.param), channel-strip control (.gain/.pan/.o/.dry), the
+// velocity signal (.vel), and each sampler config (.i/.speed/…). LFO/env/constant controls have
+// no step grid and fall out where callers check `.stepsForCycle`. Shared by the eval-time dry run
+// and the highlight grid so BOTH see the whole track, not just its note pattern.
+function patternSigs(sig) {
+  return [
     sig,
     ...Object.values(sig.paramSignals),
     ...Object.values(sig.channel),
     ...(sig.velSig ? [sig.velSig] : []),
     ...Object.values(sig.sampler ?? {}).filter((v) => v instanceof patternCore.Sig),
   ];
+}
+
+function dryRunPattern(sig) {
+  const cps = transport?.cps ?? DEFAULT_CPS;
+  const sigs = patternSigs(sig);
   for (const s of sigs) {
     if (s.stepsForCycle) {
       for (let cycle = 0; cycle < DRY_RUN_CYCLES; cycle++) s.stepsForCycle(cycle);
@@ -477,30 +486,34 @@ function dryRunPattern(sig) {
 const HL_WINDOW = 32; // cycles of grid shipped per track (initial window and each top-up)
 const hlTracks = new Map(); // label -> { sig, start, end } for the last eval's active tracks
 
-// The sounding steps of `sig` for cycles [from, from+count), each as { start, end, cont?, locs }.
-// `locs` are the step's source spans (see pattern-core stepLocs), kept only where they fall inside
-// the block's own [start,end] document range - so a location that rode in from a prebake-defined
-// pattern or a dynamic string (which the client can't place in this block) is dropped - then
-// rebased to block-relative. A step with no in-range span is still emitted (it sounds), just
-// with an empty `locs`, so timing math on the client stays complete.
+// The sounding steps of a track for cycles [from, from+count), each as { start, end, cont?, locs }.
+// Every pattern signal on the track contributes (see patternSigs), so a `.param("x","0 1")` /
+// `.gain("1 0.5")` / `.speed("<1 2>")` modulation highlights just like the note pattern. `locs` are
+// the step's source spans (see pattern-core stepLocs), kept only where they fall inside the block's
+// own [start,end] document range - so a location that rode in from a prebake-defined pattern or a
+// dynamic string (which the client can't place in this block) is dropped - then rebased to
+// block-relative. Steps that end up with no in-range span are omitted (they light nothing).
 function highlightGrid(sig, start, end, from, count) {
-  if (!sig.stepsForCycle) return null;
+  const sigs = patternSigs(sig).filter((s) => s.stepsForCycle);
   const grid = [];
-  for (let c = Math.max(0, from); c < Math.max(0, from) + count; c++) {
-    let steps;
-    try {
-      steps = sig.stepsForCycle(c);
-    } catch {
-      steps = [];
-    }
+  const base = Math.max(0, from);
+  for (let c = base; c < base + count; c++) {
     const out = [];
-    for (const s of steps) {
-      if (s.value == null) continue;
-      const locs = patternCore
-        .stepLocs(s)
-        .filter((l) => l[0] >= start && l[1] <= end)
-        .map((l) => [l[0] - start, l[1] - start]);
-      out.push({ start: s.start, end: s.end, ...(s.cont ? { cont: true } : {}), locs });
+    for (const sub of sigs) {
+      let steps;
+      try {
+        steps = sub.stepsForCycle(c);
+      } catch {
+        continue;
+      }
+      for (const s of steps) {
+        if (s.value == null) continue;
+        const locs = patternCore
+          .stepLocs(s)
+          .filter((l) => l[0] >= start && l[1] <= end)
+          .map((l) => [l[0] - start, l[1] - start]);
+        if (locs.length) out.push({ start: s.start, end: s.end, ...(s.cont ? { cont: true } : {}), locs });
+      }
     }
     grid.push({ cycle: c, steps: out });
   }
