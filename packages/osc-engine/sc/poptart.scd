@@ -456,9 +456,11 @@ server.options.numOutputBusChannels = max(2, outChannels);
 
 server.waitForBoot {
     // rand = continuous smoothed random (cubic-interpolated noise; a new target per period),
-    // phase ignored. ramp is a rising saw, same shape as \saw here. Stepped random is done
-    // pattern-side via rand().hold(...) - no native def needed.
-    [\sine, \tri, \saw, \ramp, \square, \rand].do { |shape|
+    // phase ignored. perlin = fractal (fBm) value noise: rand layered over a few octaves, a
+    // smoother/organic drift. Like rand, the native and JS samplings differ (both random, only the
+    // rate/range contract is shared - see signal.mjs). ramp is a rising saw, same shape as \saw
+    // here. Stepped random is done pattern-side via rand().hold(...) - no native def needed.
+    [\sine, \tri, \saw, \ramp, \square, \rand, \perlin].do { |shape|
         SynthDef(("poptart_lfo_" ++ shape).asSymbol, { |out, freq = 1, phase = 0, lo = 0, hi = 1, t_trig = 0|
             // Phase comes from one resettable Sweep, not each oscillator UGen's own internal
             // accumulator, so the scheduler can re-pin it to the shared transport clock with
@@ -473,7 +475,13 @@ server.waitForBoot {
                 \saw, { ph },
                 \ramp, { ph },
                 \square, { ph < 0.5 },
-                \rand, { LFDNoise3.kr(freq) * 0.5 + 0.5 } // no phase - never anchored
+                \rand, { LFDNoise3.kr(freq) * 0.5 + 0.5 }, // no phase - never anchored
+                \perlin, { // fBm: octaves of smoothed noise, each 2x rate and 1/2 amplitude
+                    ((LFDNoise3.kr(freq) * 0.5)
+                        + (LFDNoise3.kr(freq * 2) * 0.25)
+                        + (LFDNoise3.kr(freq * 4) * 0.125)
+                        + (LFDNoise3.kr(freq * 8) * 0.0625)) * (1 / 0.9375) * 0.5 + 0.5
+                }
             );
             Out.kr(out, lo + (uni * (hi - lo)));
         }).add;

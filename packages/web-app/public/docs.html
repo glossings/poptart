@@ -329,20 +329,30 @@
             <tr><td><code>a!3</code></td><td>Replicate: three separate <code>a</code> steps.</td></tr>
             <tr><td><code>a@3 b</code></td><td>Weight: <code>a</code> takes 3× the room of <code>b</code>.</td></tr>
             <tr><td><code>a _ _</code></td><td>Tie: <code>_</code> extends the previous note, so it holds.</td></tr>
-            <tr><td><code>a(3,8)</code></td><td>Euclidean: 3 hits spread over 8 steps.</td></tr>
+            <tr><td><code>1.e(3,8)</code></td><td>Euclidean: 3 hits over 8 steps, as a <code>value.method(...)</code> postfix (on a sample: <code>bd.e(3,8)</code>). Each hit is <em>legato</em> — held until the next onset.</td></tr>
             <tr><td><code>a?</code> / <code>a?0.3</code></td><td>Degrade: randomly drop the step (30% here).</td></tr>
             <tr><td><code>a|b|c</code></td><td>Random choice: pick one per cycle.</td></tr>
+            <tr><td><code>(&lt;12 13&gt;*4 + 5 * i(0,5))</code></td><td>Expression: full mini-notation combined with <code>+ - * /</code>. See below.</td></tr>
+            <tr><td><code>r</code> / <code>r(a)</code> / <code>r(a,b)</code></td><td>Random float: <code>[0,1]</code> / <code>[0,a]</code> / <code>[a,b]</code>.</td></tr>
+            <tr><td><code>i(a)</code> / <code>i(a,b)</code></td><td>Random integer, inclusive of both ends.</td></tr>
+            <tr><td><code>p</code> / <code>p(a,b)</code></td><td>Perlin-ish drift: value-noise that changes gradually across cycles.</td></tr>
+            <tr><td><code>round/floor/ceil(x)</code></td><td>Rounding, e.g. <code>(floor(r*12))</code>.</td></tr>
           </table>
           <p>
             These nest freely: <code>"&lt;[0 2] [3 5]&gt;*2"</code> is legal and does what it looks like.
-            A couple of Strudel features aren't in yet — polymeter <code>{a b, c d}</code> and
-            cycle-internal rate patterns <code>a*[2 3]</code> — everything above works.
+            Inside <code>(...)</code> you can write full mini-notation and combine it arithmetically:
+            operators bind tighter than the space that separates sequence steps, and each operator
+            takes the left pattern's structure. Crucially <code>*</code>/<code>/</code> stay fast/slow
+            when glued to a value (<code>2*4</code>) but mean multiply/divide when spaced
+            (<code>2 * 4</code>); put a space before a <code>-</code>. <code>r i p round floor ceil</code>
+            are reserved names. A couple of Strudel features aren't in yet — polymeter
+            <code>{a b, c d}</code> and cycle-internal rate patterns <code>a*[2 3]</code>.
           </p>
           <div class="callout">
             <span class="tag">tip</span>
-            The randomness in <code>?</code> and <code>|</code> is deterministic per cycle: a given bar
-            plays the same each time it comes round, and the editor's playback highlight always agrees
-            with what you hear.
+            The randomness in <code>?</code>, <code>|</code>, <code>r</code>, <code>i</code> and <code>p</code>
+            is deterministic per cycle: a given bar plays the same each time it comes round, and the
+            editor's playback highlight always agrees with what you hear.
           </div>
         </section>
 
