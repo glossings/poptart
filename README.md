@@ -67,8 +67,11 @@ pattern language is its own small implementation.
 ## Requirements
 
 - **Node 20+**
-- **SuperCollider** — `sclang` must be on your `PATH` (`brew install --cask supercollider` on
-  macOS).
+- **SuperCollider** — install it (`brew install --cask supercollider` on macOS). poptart
+  auto-detects `sclang` at the standard install location (`/Applications/SuperCollider.app` on
+  macOS, `C:\Program Files\SuperCollider` on Windows), so you don't have to put it on your
+  `PATH` yourself. If yours lives somewhere non-standard, point poptart straight at the binary
+  with `POPTART_SCLANG=/full/path/to/sclang`.
 - **The VSTPlugin server extension.** This is a compiled binary extension, *not* a Quark:
   download the build for your platform from <https://git.iem.at/pd/vstplugin/-/releases> and
   unzip its `sc/VSTPlugin` folder into your SuperCollider `Extensions` directory (on macOS,
@@ -301,6 +304,7 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Startup setup file / folder | `POPTART_PREBAKE_FILE`, `POPTART_PREBAKE_DIR` | `~/.poptart/prebake.js`, `~/.poptart/prebake/` |
 | Persisted settings | `POPTART_SETTINGS_FILE` | `~/.poptart/settings.json` |
 | OSC / scsynth ports | `POPTART_OSC_NODE_PORT`, `POPTART_OSC_SC_PORT`, `POPTART_SCSYNTH_PORT` | `57140` / `57150` / `57110` |
+| SuperCollider binary | `POPTART_SCLANG` | auto-detected (PATH, then the standard install location) |
 
 To make an environment variable permanent, add it to your shell profile. For the default zsh on
 macOS:

@@ -5,6 +5,9 @@
   "private": true,
   "description": "Engine adapter matching pattern-core's Scheduler engine interface, backed by OSC to a spawned sclang process (SuperCollider) which hosts VST3/AU plugins via VSTPlugin~.",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "osc": "^2.4.5"
   }

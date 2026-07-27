@@ -20,6 +20,60 @@ const { samplesRoot, listPackFiles, detectSlices } = require('./samples');
 
 const SC_SCRIPT_PATH = path.join(__dirname, 'sc', 'poptart.scd');
 
+// Standard SuperCollider install locations to fall back on when `sclang` isn't on PATH - the
+// macOS/Windows installers drop the binary inside the app bundle / Program Files but don't put
+// it on PATH, which is the single most common "engine failed to start" cause. Keep macOS first
+// since that's where the .app-bundle path is genuinely non-obvious to users.
+function knownSclangLocations() {
+  if (process.platform === 'darwin') {
+    return ['/Applications/SuperCollider.app/Contents/MacOS/sclang'];
+  }
+  if (process.platform === 'win32') {
+    return [
+      'C:\\Program Files\\SuperCollider\\sclang.exe',
+      'C:\\Program Files (x86)\\SuperCollider\\sclang.exe',
+    ];
+  }
+  return ['/usr/local/bin/sclang', '/usr/bin/sclang'];
+}
+
+// Is `name` an executable on the current PATH? Walks PATH ourselves (rather than spawning) so
+// resolution stays synchronous - the constructor needs an answer before start(). On Windows a
+// bare name also matches name.exe.
+function onPath(name) {
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const names = process.platform === 'win32' ? [name, `${name}.exe`] : [name];
+  for (const dir of dirs) {
+    for (const n of names) {
+      try {
+        fs.accessSync(path.join(dir, n), fs.constants.X_OK);
+        return true;
+      } catch {
+        // not here - keep looking
+      }
+    }
+  }
+  return false;
+}
+
+// Decide which sclang to spawn. Priority: explicit POPTART_SCLANG override (points straight at a
+// binary, no PATH surgery needed), then a bare `sclang` when it's actually on PATH (let spawn
+// resolve it normally), then the platform's standard install location. Falls back to 'sclang' so
+// a genuine "not installed" still fails with the binary named in the error.
+function resolveSclangPath() {
+  if (process.env.POPTART_SCLANG) return process.env.POPTART_SCLANG;
+  if (onPath('sclang')) return 'sclang';
+  for (const loc of knownSclangLocations()) {
+    try {
+      fs.accessSync(loc, fs.constants.X_OK);
+      return loc;
+    } catch {
+      // not here - try the next candidate
+    }
+  }
+  return 'sclang';
+}
+
 // Overridable via env so a second poptart stack (or a test run) can coexist with a running
 // one - see also POPTART_SCSYNTH_PORT in sc/poptart.scd for the third port involved.
 const DEFAULT_NODE_PORT = Number(process.env.POPTART_OSC_NODE_PORT || 57140); // Node listens here for replies from sclang
@@ -54,10 +108,12 @@ class OscEngine {
   // stereo-pair selector wraps at the hardware's real channel count. inChannels: that same
   // device's input channel count (0 for output-only devices) - scsynth opens one device for
   // both in and out, so numInputBusChannels must not exceed what the device offers.
-  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = 'sclang', outDevice = null, outChannels = 2, inChannels = 0 } = {}) {
+  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, inChannels = 0 } = {}) {
     this.nodePort = nodePort;
     this.scPort = scPort;
-    this.sclangPath = sclangPath;
+    // An explicit path wins (programmatic intent, e.g. tests); otherwise auto-detect, which
+    // honours POPTART_SCLANG and the standard install locations.
+    this.sclangPath = sclangPath || resolveSclangPath();
     this.outDevice = outDevice;
     this.outChannels = outChannels;
     this.inChannels = inChannels;
@@ -208,7 +264,11 @@ class OscEngine {
 
         this._sclangProcess.on('error', (err) => {
           clearTimeout(readyTimer);
-          reject(new Error(`failed to spawn '${this.sclangPath}': ${err.message}`));
+          const hint =
+            err.code === 'ENOENT'
+              ? " - couldn't find sclang. Install SuperCollider, or set POPTART_SCLANG to the sclang binary's full path."
+              : '';
+          reject(new Error(`failed to spawn '${this.sclangPath}': ${err.message}${hint}`));
         });
         this._sclangProcess.on('exit', (code) => {
           if (code !== 0 && code !== null) {
@@ -728,4 +788,4 @@ class OscEngine {
   }
 }
 
-module.exports = { OscEngine };
+module.exports = { OscEngine, resolveSclangPath, knownSclangLocations, onPath };
