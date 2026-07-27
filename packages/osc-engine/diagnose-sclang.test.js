@@ -50,6 +50,49 @@ test('compile failure wins over a later Class not defined (root cause first)', (
   assert.match(d, /class library failed to compile/);
 });
 
+// --- silent-stall localization via the .scd's boot-progress checkpoints ---
+
+test('silence right after the Welcome banner -> blames a hanging user startup.scd', () => {
+  // The real-world log this was built from: compile succeeds, banner prints, then nothing -
+  // sclang runs the user's startup.scd before our script, so ours never even started.
+  const d = diagnoseSclangOutput('compile done\nWelcome to SuperCollider 3.14.1.\nFor help type cmd-d.\n', true);
+  assert.match(d, /never ran poptart's engine script/);
+  assert.match(d, /startup\.scd/);
+});
+
+test('script ran, scsynth never spoke -> Gatekeeper / permissions guidance', () => {
+  const d = diagnoseSclangOutput(
+    'Welcome to SuperCollider 3.14.1.\npoptart: engine script running\n' +
+      'poptart: booting scsynth (device: system default, sr: 48000, block: 256, out: 2ch, in: 0ch)\n',
+    true,
+  );
+  assert.match(d, /scsynth never produced any output/);
+  assert.match(d, /Gatekeeper/);
+  assert.match(d, /Microphone/);
+});
+
+test('scsynth spoke but never finished opening the device -> device guidance + IDE replay', () => {
+  const d = diagnoseSclangOutput(
+    'poptart: engine script running\npoptart: booting scsynth (device: Scarlett 2i2, sr: 48000, block: 256, out: 2ch, in: 2ch)\n' +
+      "Booting server 'poptart' on address 127.0.0.1:57110.\nNumber of Devices: 3\n",
+    true,
+  );
+  assert.match(d, /never finished/);
+  assert.match(d, /different output device/);
+  assert.match(d, /SuperCollider IDE/);
+});
+
+test('an explicit error beats silence localization (root cause first)', () => {
+  const d = diagnoseSclangOutput(
+    'poptart: engine script running\npoptart: booting scsynth (device: system default, sr: 48000, block: 256, out: 2ch, in: 0ch)\n' +
+      'could not initialize audio.\n',
+    true,
+  );
+  assert.match(d, /audio device/);
+  assert.doesNotMatch(d, /Gatekeeper/);
+});
+
 test('unrecognized output -> null (raw log tail still shown by the caller)', () => {
-  assert.strictEqual(diagnoseSclangOutput('compiling class library...\nWelcome to SuperCollider\n', true), null);
+  // No Welcome banner and no checkpoints: not enough signal to localize anything.
+  assert.strictEqual(diagnoseSclangOutput('compiling class library...\n', true), null);
 });

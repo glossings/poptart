@@ -152,6 +152,37 @@ function diagnoseSclangOutput(output, vstInstalled = vstPluginExtensionInstalled
       'an orphaned scsynth from an earlier run holding it (`pkill -f scsynth`).'
     );
   }
+  // --- silent-stall signatures ---
+  // Nothing above matched, so the log doesn't contain an explicit error: it just stops. Locate
+  // WHERE it stopped via the boot-progress checkpoints sc/poptart.scd postln's (the two
+  // "poptart: ..." strings - kept in sync by hand, see the comment there). Deepest checkpoint
+  // reached wins. "Booting server"/"Number of Devices"/"SC_AudioDriver" are sclang's and
+  // scsynth's own boot lines - their presence means scsynth actually started talking.
+  if (/poptart: booting scsynth/.test(output)) {
+    if (/Booting server|Number of Devices|SC_AudioDriver/i.test(output)) {
+      return (
+        'scsynth (the audio server) started opening the audio device but never finished. Usually ' +
+        'the device itself is wedged or misreporting: pick a different output device in settings, ' +
+        'kill leftovers (`pkill -f scsynth`), and retry. To see the actual complaint, replay the ' +
+        "error's boot config in the SuperCollider IDE - see Troubleshooting in poptart's README."
+      );
+    }
+    return (
+      'sclang asked scsynth (the audio server) to boot, but scsynth never produced any output - ' +
+      'macOS likely blocked it from starting. If SuperCollider was just installed, launch ' +
+      'SuperCollider.app once by hand (right-click it in /Applications, choose Open) so Gatekeeper ' +
+      'approves it, and check System Settings > Privacy & Security > Microphone for a pending ' +
+      'prompt for your terminal. Then retry.'
+    );
+  }
+  if (/Welcome to SuperCollider/i.test(output) && !/poptart: engine script running/.test(output)) {
+    return (
+      "sclang started but never ran poptart's engine script. sclang runs your personal startup " +
+      'file first, so a hanging ~/Library/Application Support/SuperCollider/startup.scd (one that ' +
+      'boots a server, waits on something, or opens a GUI) blocks poptart forever - move it aside ' +
+      'and retry. If you have no startup.scd, please report this log.'
+    );
+  }
   return null;
 }
 
@@ -353,8 +384,14 @@ class OscEngine {
 
       const readyTimer = setTimeout(() => {
         // sclang spawned but never finished booting - do NOT blame PATH here; discovery
-        // demonstrably worked.
-        fail(bootFailure(`sclang started but the engine did not finish booting within ${READY_TIMEOUT_MS / 1000}s.`));
+        // demonstrably worked. The boot config rides along so a pasted report carries the
+        // device/rate/channel picture even when the .scd's checkpoint line isn't in the tail -
+        // it's also what the README's IDE-replay procedure tells the user to copy from.
+        fail(bootFailure(
+          `sclang started but the engine did not finish booting within ${READY_TIMEOUT_MS / 1000}s ` +
+          `(boot config - device: ${this.outDevice ?? 'system default'}, sr: ${sampleRate}, ` +
+          `block: ${bufferSize}, out: ${this.outChannels}ch, in: ${this.inChannels}ch).`,
+        ));
       }, READY_TIMEOUT_MS);
 
       this._port.once('ready', () => {

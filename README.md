@@ -111,6 +111,33 @@ pattern language is its own small implementation.
 >   then reinstall just VSTPlugin (see above) into a fresh `Extensions/` and retry. Reinstalling
 >   SuperCollider itself does **not** help — the installer never touches this user directory, so
 >   the broken file survives.
+> - **The log has no `ERROR:` at all — it just stops.** The `poptart:` checkpoint lines say how
+>   far boot got, and the diagnosis reads them for you. The three cases:
+>   - *Nothing after the `Welcome to SuperCollider` banner*: sclang runs your personal
+>     `~/Library/Application Support/SuperCollider/startup.scd` **before** poptart's engine
+>     script, so a startup file that boots a server or opens a window hangs there forever. Move
+>     it aside (`mv ~/Library/Application\ Support/SuperCollider/startup.scd ~/Desktop/`) and
+>     retry.
+>   - *Nothing after `poptart: booting scsynth (…)`*: macOS blocked the audio server from
+>     starting. Launch SuperCollider.app once by hand (right-click it in `/Applications`, choose
+>     **Open**) so Gatekeeper approves it, and check **System Settings → Privacy & Security →
+>     Microphone** for a pending prompt for your terminal. Then retry.
+>   - *Some device output but never `server booted, ready`*: the audio device is wedged or
+>     misreporting. Pick a different output device in the settings tab — or replay poptart's
+>     exact boot config in the SuperCollider IDE, where the device's real complaint is visible
+>     instead of swallowed by the timeout. Copy the values from the error's `boot config` note:
+>     ```supercollider
+>     s.options.sampleRate = 48000;            // "sr"
+>     s.options.blockSize = 256;               // "block"
+>     s.options.numOutputBusChannels = 2;      // "out: Nch"
+>     s.options.numInputBusChannels = 0;       // "in: Nch"
+>     // only if boot config names a device (not "system default"):
+>     // s.options.inDevice = s.options.outDevice = "That Device Name";
+>     s.boot;
+>     ```
+>     If a plain `s.boot` in a fresh IDE session works but this doesn't, re-add the options one
+>     at a time — whichever one breaks the boot is what your hardware rejects (and worth
+>     reporting as a poptart issue: forced 48 kHz on a rate-locked device is the usual one).
 
 ## Getting started
 

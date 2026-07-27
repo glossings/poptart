@@ -90,6 +90,13 @@ var sidechainByTarget, sidechainBySource;
 // long as some writer or reader references them.
 var namedBuses, busGroup, acquireBus, releaseBus;
 
+// Boot-progress checkpoint ("poptart: booting scsynth" below is the other one):
+// diagnoseSclangOutput in ../index.js matches these exact strings to localize a boot that
+// goes silent - no line at all means sclang never ran this script (a hanging user startup.scd
+// runs first); this line but not the next means the stall is in this file; the next line but
+// no scsynth output means scsynth itself never started. Keep the text in sync with index.js.
+"poptart: engine script running".postln;
+
 // --- tiny JSON writer (the class library has String.parseJSON but no serializer) ---
 jsonEscape = { |str|
     str.asString
@@ -453,6 +460,14 @@ if (outDevice.notNil and: { outDevice.isEmpty.not }) {
 };
 // At least stereo; more when the selected device has it, so .o(n) can address every pair.
 server.options.numOutputBusChannels = max(2, outChannels);
+
+// Second boot-progress checkpoint (see "engine script running" above) - also puts the exact
+// boot config into the log, so a failure report carries it and the README's IDE-replay
+// procedure can copy the values straight out.
+"poptart: booting scsynth (device: %, sr: %, block: %, out: %ch, in: %ch)".format(
+    if (outDevice.notNil and: { outDevice.isEmpty.not }) { outDevice } { "system default" },
+    sampleRate, blockSize, server.options.numOutputBusChannels, inChannels
+).postln;
 
 server.waitForBoot {
     // rand = continuous smoothed random (cubic-interpolated noise; a new target per period),
