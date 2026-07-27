@@ -48,6 +48,8 @@ const NOTE_OFF_EARLY_SEC = 0.005;
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
 const CHANNEL_SLOT = -1;
 const CHANNEL_DEFAULTS = { gain: 1, pan: 0, out: 1, dry: 1 }; // out = stereo pair (Sig#o), 1-based; dry = direct-output level (Sig#dry)
+// Engine call that tears down each kind of Tier-2 modulator (persistent engine-side synth).
+const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC' };
 
 // Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
 const MAX_CHAIN_SLOTS = 8;
@@ -172,7 +174,13 @@ export class Scheduler {
     this._running = false;
     this._activeModulators = new Map(); // "slot name" -> { slot, name, sig, kind: 'lfo'|'env'|'cc', dynamic }
     this._midiRouted = false; // live midikeys() route currently held engine-side
-    this._prevChannelNames = []; // channel controls set by the previous pattern, for default-reset
+    // Channel controls set by the previous pattern, so a re-eval that drops one snaps it back to
+    // its default. Seeded with every known control (not []) because the engine track outlives this
+    // Scheduler: a label removed and re-added (or muted then unmuted) gets a fresh Scheduler on a
+    // synth still holding the old pattern's gain/pan/dry/out, so the first setPattern must reset any
+    // control the new pattern doesn't set - e.g. a track that had .bsend() (dry=0) coming back must
+    // return to dry=1. Same reasoning as clearing all trailing fx slots rather than diffing.
+    this._prevChannelNames = Object.keys(CHANNEL_DEFAULTS);
     this._prevAudioInjectSlots = new Set(); // fx slots the previous pattern audio-injected, for teardown
     this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
@@ -239,11 +247,16 @@ export class Scheduler {
       }
     }
 
-    // A channel control the new pattern dropped (`.gain(...)` deleted mid-session) snaps back
-    // to its default - unlike plugin params, these have an obvious neutral value.
+    // A channel control the new pattern dropped (`.gain(...)` deleted mid-session, or `.bsend()`
+    // removed - which drops dry) snaps back to its default. Schedule the reset at the lookahead
+    // horizon, NOT at getTime(): the last poll before this eval already queued the OLD value at
+    // nowSec+lookahead, so a reset sent at "now" gets overwritten ~150ms later by that stale
+    // in-flight value - for dry=0 that leaves the track silent forever. Matching the poll horizon
+    // (and being sent afterwards) makes the reset land at/after the stale value and win.
+    const resetSec = this.engine.getTime() + DEFAULT_LOOKAHEAD_SEC;
     for (const name of this._prevChannelNames) {
       if (!(name in sig.channel)) {
-        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, this.engine.getTime());
+        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, resetSec);
       }
     }
     this._prevChannelNames = Object.keys(sig.channel);
@@ -315,10 +328,9 @@ export class Scheduler {
       const kind = c.sig.lfoIR ? 'lfo' : c.sig.envIR ? 'env' : c.sig.ccIR ? 'cc' : null;
       if (kind) nextModulators.set(`${c.slot} ${c.name}`, { ...c, kind });
     }
-    const clears = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC' };
     for (const [key, prev] of this._activeModulators) {
       if (nextModulators.get(key)?.kind === prev.kind) continue; // survives - updated in place below
-      this.engine[clears[prev.kind]](this.trackId, prev.slot, prev.name);
+      this.engine[MODULATOR_CLEARS[prev.kind]](this.trackId, prev.slot, prev.name);
     }
     this._activeModulators = nextModulators;
 
@@ -382,6 +394,14 @@ export class Scheduler {
       this.engine.clearBusSends(this.trackId);
       this._busRouted = false;
     }
+    // Tier-2 modulators run as persistent engine-side synths, independent of the tick loop. Muting
+    // or removing the track must clear them or a leftover LFO/env keeps modulating the param after
+    // unmute - the fresh Scheduler an unmute creates never saw them and so can't clear them itself.
+    // setPattern re-establishes any the pattern still carries on the next eval.
+    for (const m of this._activeModulators.values()) {
+      this.engine[MODULATOR_CLEARS[m.kind]](this.trackId, m.slot, m.name);
+    }
+    this._activeModulators = new Map();
   }
 
   _tick() {

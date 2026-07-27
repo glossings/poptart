@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { note, synth, s } from './src/signal.mjs';
+import { note, synth, s, lfo } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 // A stand-in engine: every method is a spy that records its call; getTime is 0 so the Transport a
@@ -95,4 +95,47 @@ test('stop() releases a track\'s bus sends', () => {
   sch.setPattern(note('c2*4').synth('Serum 2').bus('drums'));
   sch.stop();
   assert.equal(callsTo('clearBusSends').length, 1);
+});
+
+// A channel-control reset is setParam on the pseudo-slot (-1) with the control's default. It must
+// be scheduled AHEAD of getTime() (0 here): a reset at "now" loses to the stale value the last
+// poll already queued a lookahead into the future, which for dry=0 leaves the track silent.
+const resetCalls = (callsTo, name, value) =>
+  callsTo('setParam').filter((c) => c.args[1] === -1 && c.args[2] === name && c.args[3] === value);
+const driedReset = (callsTo, name, value) => resetCalls(callsTo, name, value).length > 0;
+
+test('dropping .bsend() on re-eval snaps dry back to 1, scheduled ahead of stale polls', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'pad' });
+  sch.setPattern(note('c2').synth('Serum 2').bsend('reverb')); // dry -> 0
+  sch.setPattern(note('c2').synth('Serum 2'));                 // .bsend() gone
+
+  const resets = resetCalls(callsTo, 'dry', 1);
+  assert.equal(resets.length, 1, 'dry is reset to its default of 1');
+  assert.ok(resets[0].args[4] > 0, 'reset is scheduled at the lookahead horizon, not at getTime()=0');
+});
+
+test('a fresh Scheduler on a persisted track resets dry (mute/unmute, delete/retype)', () => {
+  // The engine track outlives the Scheduler, so a re-added label lands on a synth that may still
+  // hold dry=0 from a previous .bsend(). The first setPattern must reset it even though this
+  // Scheduler never saw the .bsend().
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'pad' });
+  sch.setPattern(note('c2').synth('Serum 2')); // plain track, no dry in its channel
+  assert.ok(driedReset(callsTo, 'dry', 1), 'a fresh Scheduler resets unspecified channel controls');
+});
+
+test('stop() clears active Tier-2 modulators (muting must stop the modulation)', () => {
+  // A modulated param runs as a persistent engine synth; muting stops the tick loop but that synth
+  // keeps modulating until explicitly cleared - and the fresh Scheduler an unmute makes never saw
+  // it. So stop() must tear it down.
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(note('c2').synth('Serum 2').param('cutoff', lfo()));
+  assert.ok(callsTo('setParamLFO').length >= 1, 'the LFO was set up on the param');
+
+  sch.stop();
+  const cleared = callsTo('clearParamLFO');
+  assert.equal(cleared.length, 1, 'stop() clears the LFO');
+  assert.deepEqual(cleared[0].args.slice(0, 3), ['lead', 0, 'cutoff']);
 });
