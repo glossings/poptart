@@ -80,11 +80,22 @@ test('pianoroll(): playback matches its own mini-notation conversion', () => {
   const asM = /^`([\s\S]*)`\.as\("([^"]*)"\)$/.exec(expr);
   const noteM = /^note\(`([\s\S]*)`\)$/.exec(expr);
   const rebuilt = asM ? mini(asM[1]).as(asM[2]) : note(noteM[1]);
-  const norm = (steps) =>
-    steps
-      .map((s) => ({ s: +s.start.toFixed(4), e: +s.end.toFixed(4), v: s.value, vel: s.vel ?? 1 }))
+  // Effective velocity the way the scheduler reads it: a velSig (what .as() now sets) sampled at
+  // the onset overrides the step's own vel (what the pianoroll builder bakes in). Both paths must
+  // land on the same value for playback to match.
+  const effVel = (sig, s, cycle) => {
+    if (sig.velSig) {
+      const v = sig.velSig.sample(cycle + s.start, 1, cycle + s.start);
+      if (typeof v === 'number' && !Number.isNaN(v)) return v;
+    }
+    return s.vel ?? 1;
+  };
+  const norm = (sig, cycle) =>
+    sig
+      .stepsForCycle(cycle)
+      .map((s) => ({ s: +s.start.toFixed(4), e: +s.end.toFixed(4), v: s.value, vel: effVel(sig, s, cycle) }))
       .sort((a, b) => a.s - b.s || a.v - b.v);
-  for (const c of [0, 1, 2, 3]) assert.deepEqual(norm(pr.stepsForCycle(c)), norm(rebuilt.stepsForCycle(c)));
+  for (const c of [0, 1, 2, 3]) assert.deepEqual(norm(pr, c), norm(rebuilt, c));
 });
 
 test('pianoroll(): builds a step grid with fractional onsets, durations, and velocity', () => {

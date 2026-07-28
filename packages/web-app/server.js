@@ -618,6 +618,14 @@ function releaseKbNotes(trackId) {
   kbHeld.delete(trackId);
 }
 
+// The fixed MIDI pitch a route's key strikes, when .note()/.n() set one (a Sig on the route). A
+// tap() with no .note() returns null and the browser falls back to its default pad note.
+function kbRouteNote(route) {
+  if (!route.note) return null;
+  const v = route.note.sample(0, 1);
+  return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null;
+}
+
 // Re-derive the armed keyboard tracks from the just-evaluated active patterns, releasing any
 // track that is no longer a keyboard target. Returns the list the eval response hands the editor.
 function syncKbTracks(active) {
@@ -626,7 +634,7 @@ function syncKbTracks(active) {
   for (const id of kbTracks.keys()) if (!next.has(id)) releaseKbNotes(id);
   kbTracks.clear();
   for (const [id, route] of next) kbTracks.set(id, route);
-  return [...kbTracks].map(([trackId, route]) => ({ trackId, kind: route.kind }));
+  return [...kbTracks].map(([trackId, route]) => ({ trackId, kind: route.kind, note: kbRouteNote(route) }));
 }
 
 function midiRecTick() {

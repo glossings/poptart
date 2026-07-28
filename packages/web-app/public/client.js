@@ -2297,7 +2297,7 @@ const KB_OCT_MAX = 4;
 const KB_CONTROL_KEYS = new Set(['z', 'x', 'c', 'v']); // octave -/+, velocity -/+ (never notes)
 
 let kbMode = localStorage.getItem('poptart-kb-mode') || 'normal';
-let kbRoutes = []; // [{ trackId, kind }] from the latest eval
+let kbRoutes = []; // [{ trackId, kind, note }] from the latest eval (note: fixed tap pitch, or null)
 let kbOctave = 0; // octave shift in whole octaves (z/x)
 let kbVelocity = 0.8; // 0.1..1 (c/v)
 const kbHeldKeys = new Map(); // key char -> [{ trackId, note }] currently sounding, for keyup/release
@@ -2421,7 +2421,9 @@ function onKbKeyDown(e) {
     let note;
     if (r.kind === 'tap') {
       if (!kbIsTapKey(key)) continue;
-      note = KB_TAP_NOTE;
+      // .note("f3")/.n(...).scale(...) on the track sets the struck pitch (route.note); with none
+      // set, fall back to the default pad note.
+      note = typeof r.note === 'number' ? r.note : KB_TAP_NOTE;
     } else {
       if (!(key in KB_SEMITONES)) continue;
       note = KB_BASE_NOTE + kbOctave * 12 + KB_SEMITONES[key];

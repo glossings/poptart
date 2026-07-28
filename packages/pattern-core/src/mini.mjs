@@ -55,6 +55,10 @@
 //
 // The whole interpreter works in terms of one function: getStepsForCycle(ast, cycleNumber),
 // which returns this cycle's flat step list as plain objects - never anything Strudel-shaped.
+//
+// The one dependency is frac.mjs (our own, dependency-free) - exact rational time, so a
+// fractional onset draws the same coin however its float was computed. See rngAtPos below.
+import { Frac } from './frac.mjs';
 
 // `offset` shifts every source span (`loc`/`subLocs`, derived from token positions) by a fixed
 // amount, so the atom spans a step reports resolve against the ORIGINAL document rather than the
@@ -892,7 +896,7 @@ function astToSteps(node, cycle, salt = 0) {
       // Drop each onset with probability `prob`, deterministically per cycle+onset (see rng).
       // A dropped step becomes a rest (value null) so surrounding steps keep their timing.
       return astToSteps(node.item, cycle, salt).map((s) =>
-        s.value != null && rng(cycle + s.start, node.seed + 1) < node.prob ? { ...s, value: null } : s,
+        s.value != null && rngAtPos(cycle, s.start, node.seed + 1) < node.prob ? { ...s, value: null } : s,
       );
 
     case 'choice': {
@@ -1010,4 +1014,11 @@ function rotateArray(arr, n) {
 function rng(a, b) {
   const s = Math.sin(a * 12.9898 + b * 78.233 + 43.123) * 43758.5453;
   return s - Math.floor(s);
+}
+
+// Deterministic draw keyed on an absolute cycle position, snapping the in-cycle phase to its exact
+// rational so a moment reached by two float paths draws identically. Mirror of signal.mjs's
+// rngAtPos - see frac.mjs. Used by `?` degrade, whose onset positions are fractional.
+function rngAtPos(cycle, phase, seed) {
+  return rng(cycle + Frac.fromNumber(phase).toNumber(), seed);
 }

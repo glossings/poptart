@@ -14,6 +14,7 @@ import { parseShapePoints, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps } from './pianoroll.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
+import { Frac } from './frac.mjs';
 
 /**
  * @typedef {Object} Step
@@ -175,6 +176,12 @@ export class Sig {
     if (this.midiNotes) out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName } });
     // A midi() source: quantize its live notes to the scale engine-side, like a midikeys() route.
     if (this.inputSource?.io === 'midi') out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName } });
+    // A keyboard()/tap() route carrying a fixed pitch (from .note()/.n()): map that pitch too, so
+    // tap().n("0").scale("F minor") strikes the scale's root rather than a bare degree 0.
+    if (this.keyboardRoute?.note) {
+      const nSig = this.keyboardRoute.note;
+      out = out._clone({ keyboardRoute: { ...this.keyboardRoute, note: nSig.mapValue(mapFor(nSig.pitchKind)) } });
+    }
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     return out;
   }
@@ -709,7 +716,7 @@ export class Sig {
     const p = Number(prob);
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) =>
-      base(cycle).map((s) => (s.value != null && rng2(cycle + s.start, seed + 1) < p ? { ...s, value: null } : s));
+      base(cycle).map((s) => (s.value != null && rngAtPos(cycle, s.start, seed + 1) < p ? { ...s, value: null } : s));
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
@@ -875,7 +882,7 @@ export class Sig {
   }
 
   /**
-   * Destructures multi-field tokens into note/velocity/duration, Strudel-style:
+   * Destructures multi-field tokens into separate note/velocity/duration controls, Strudel-style:
    * `"<36:1:4 ~ 47:0.5:3 ~>*8".as("note:vel:clip")`. Each token's fields are split on ":" and
    * read in the order the spec names them. Fields: `note` (MIDI number or note name), `n`
    * (scale degree - map it with .scale() afterwards), `vel` (0..1 velocity for that one
@@ -883,10 +890,14 @@ export class Sig {
    * for three eighth-slots). Missing/empty fields keep their defaults (vel 1, clip 1). This is
    * the form the editor's midi-record writes in place of a kb()/midikeys()/keyboard() call.
    *
-   * A spec with no pitch field - `.as("vel:clip")` - is the note-less form a tap() recording
-   * writes: every present token triggers the default note (C2, like a note-less synth("X")) at
-   * its velocity/clip, so the whole thing is a fixed-pitch velocity/rhythm pattern. Rests (`~`)
-   * stay rests either way.
+   * Each field is set onto the SAME channel the equivalent method would use - `note`/`n` become
+   * the pitch value stream, `vel` a velocity signal (as if by .vel()), `clip` a duration scale
+   * (as if by .clip()) - so any of them can be overridden afterwards: `"<0 1 0.5>".as("vel")`
+   * carries the velocities and a later .note("f3") (or .s("rave")) supplies the pitch/sound while
+   * the velocities ride along. A spec with no pitch field - `.as("vel:clip")` - is the note-less
+   * form a tap() recording writes: every present token fires the default note (C2, like a
+   * note-less synth("X")) at its velocity/clip, until a later .note()/.n() sets the pitch. Rests
+   * (`~`) stay rests throughout.
    */
   as(spec) {
     const fields = String(spec).split(':').map((f) => f.trim().toLowerCase());
@@ -899,44 +910,62 @@ export class Sig {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .as() needs a step pattern, e.g. "<36:1:4 ~>*8".as("note:vel:clip")');
     }
-    // With no pitch field the token carries only vel/clip, so a present token still has to sound:
-    // it fires the default note (tap()'s fixed pad pitch). With a pitch field an absent one is a rest.
-    const hasPitch = fields.includes('note') || fields.includes('n');
-    const explode = (raw) => {
-      const parts = String(raw).split(':');
-      const out = { value: hasPitch ? null : DEFAULT_SYNTH_NOTE, vel: null, clip: 1 };
-      fields.forEach((f, i) => {
-        const p = parts[i];
-        if (p === undefined || p === '') return;
-        if (f === 'note') out.value = parseNoteValue(p);
-        else if (f === 'n') out.value = Number(p);
-        else if (f === 'vel') out.vel = Number(p);
-        else if (f === 'clip') out.clip = Number(p);
+    // Pull field `f` out of each "a:b:c" token as its own sub-signal, keeping this pattern's step
+    // grid so every field's values line up with the same onsets. A token missing that field (or
+    // rests) yields null there - a gate-off for the pitch stream, "use the default" for vel/clip.
+    const fieldSig = (f, coerce) => {
+      const i = fields.indexOf(f);
+      return this.mapValue((raw) => {
+        const p = String(raw).split(':')[i];
+        return p === undefined || p === '' ? null : coerce(p);
       });
-      return out;
     };
-    const stepsForCycle = (cycle) =>
-      this.stepsForCycle(cycle).map((s) => {
-        if (s.value == null) return s;
-        const e = explode(s.value);
-        const clip = e.clip > 0 && !Number.isNaN(e.clip) ? e.clip : 1;
-        return {
-          ...s,
-          value: e.value,
-          // clip stretches the event past its slot; the noteOff just lands later (possibly in
-          // a following cycle), same as a mini-notation tie's ringing tail.
-          end: s.start + (s.end - s.start) * clip,
-          ...(typeof e.vel === 'number' && !Number.isNaN(e.vel) ? { vel: e.vel } : {}),
-        };
-      });
-    const sample = (t, cps, pos) => {
-      const v = this.sample(t, cps, pos);
-      return v == null ? null : explode(v).value;
-    };
-    return new Sig(sample, { stepsForCycle, ...this._meta() });
+    // The value stream is the pitch tokens (note = absolute MIDI, n = scale degree). With no pitch
+    // field every present token fires the default note, so a vel/clip-only spec still triggers
+    // (and a later .note()/.n() can replace this placeholder pitch).
+    let out;
+    if (fields.includes('note')) out = withPitchKind(fieldSig('note', parseNoteValue), 'note');
+    else if (fields.includes('n')) out = withPitchKind(fieldSig('n', (p) => Number(p)), 'degree');
+    else out = withPitchKind(this.mapValue(() => DEFAULT_SYNTH_NOTE), 'note');
+    // vel becomes a per-onset velocity signal (same channel .vel() sets); clip scales each event's
+    // duration (same channel .clip() sets). Both survive a later .note()/.n()/.s() (they ride in
+    // the track metadata / step grid), which is what lets .as("vel").note("f3") work.
+    if (fields.includes('vel')) out = out._clone({ velSig: fieldSig('vel', (p) => Number(p)) });
+    if (fields.includes('clip')) out = out.clip(fieldSig('clip', (p) => Number(p)));
+    return out;
+  }
+
+  /**
+   * Play this pattern's notes with a sample pack as the sound - the method form of s(). Whatever
+   * pitch this pattern carries (from note()/n()/.as("note")) becomes the sampler's repitch note
+   * and the value stream becomes the pack name, so `note("c e g").s("rave")` plays the rave sample
+   * as a three-note line and `"<0 1 0.5>".as("vel").note("f3").s("rave")` keeps the velocities.
+   * Configure it with .i()/.begin()/.speed()/etc. exactly like the s("...") builder.
+   */
+  s(pack) {
+    if (typeof pack !== 'string' || !pack.trim()) {
+      throw new Error('[signal] .s() takes a sample pack name, e.g. note("c e g").s("rave")');
+    }
+    const name = pack.trim();
+    // This pattern's values are the pitch: keep them as the sampler's repitch note and swap the
+    // value stream for the constant pack name over the same grid. An existing sampler keeps its
+    // note (re-.s()-ing just changes the pack).
+    const noteSig = this.sampler?.note ?? this;
+    const sampler = { ...(this.sampler ?? {}), note: noteSig };
+    // A velocity set while this was a synth track (via .vel()/.as("vel")) rides in velSig; on a
+    // sampler the scheduler reads velocity from the sampler config, so move it to sampler.vel.
+    if (this.velSig && !sampler.vel) sampler.vel = this.velSig;
+    return this.mapValue(() => name)._clone({ sampler, velSig: null });
   }
 
   _noteLike(sig) {
+    // A live keyboard()/tap() route schedules no notes of its own - the keys are the trigger. So
+    // .note()/.n() here just set the fixed pitch a key strikes (tap()'s pad note, or the base
+    // pitch), stored on the route for the browser to play; the track stays unscheduled (this
+    // Sig keeps its null step grid) instead of turning into a pattern that also fires every cycle.
+    if (this.keyboardRoute) {
+      return this._clone({ keyboardRoute: { ...this.keyboardRoute, note: sig } });
+    }
     if (this.sampler) {
       const stepsForCycle = intersectSteps(this.stepsForCycle, sig);
       return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
@@ -1348,6 +1377,16 @@ function hash01(i) {
 function rng2(a, b) {
   const s = Math.sin(a * 12.9898 + b * 78.233 + 43.123) * 43758.5453;
   return s - Math.floor(s);
+}
+
+// Deterministic draw keyed on an absolute cycle position. `cycle` is the exact integer cycle;
+// `phase` is the in-cycle position, which we snap to its exact rational before hashing so a
+// moment reached by two different float paths (or after a future rib/hold remap) draws
+// identically - the guarantee behind "the same time is never differentiated from itself". For a
+// position that is already a clean rational this is a no-op, so existing patterns are unchanged.
+// Mirrored verbatim in mini.mjs (rngAtPos) - the browser highlighter must land the same draws.
+function rngAtPos(cycle, phase, seed) {
+  return rng2(cycle + Frac.fromNumber(phase).toNumber(), seed);
 }
 
 // Samples a step-list-backed signal at a point in time by locating the step covering that phase -

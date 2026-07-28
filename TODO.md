@@ -5,9 +5,21 @@ no completion notes.
 
 ---
 
-## Hotkeys
-Infrastructure shipped: `hotkey(combo, handler)` + an `editor`/`repl` facade are provided to the
-prebake sandbox in the browser (see `runUserPrebake` in `client.js`); the server no-ops those
-calls when it runs the same prebake for DSL defs. Built-in chords: ctrl+p (toggle RHS panel),
-ctrl+r (record), ctrl+m (midi keyboard). The ported Strudel hotkeys live in the gitignored
-`packages/web-app/prebake.hotkeys.js` — paste into `~/.poptart/prebake.js` to use them.
+[ ] add `irand`, `rand`, `berlin`, `perlin` as signals
+[ ] see if we can get highlighting to work with string templates
+[ ] double check that random numbers are being sampled by the outside
+  pattern (and are deterministic in time)
+[ ] signal in format string
+```js
+const myInt = rand().mul(8).round()
+$: `<
+  0 4 ${myInt}
+  0 4 ${myInt}
+>*8`.as("n").scale("F3 minor")
+
+[ ] ignore labels within comments
+```js
+/*
+$: ...
+*/
+```
