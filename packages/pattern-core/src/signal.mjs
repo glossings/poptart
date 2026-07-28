@@ -415,7 +415,12 @@ export class Sig {
    */
   vel(value) {
     const sig = toSignal(value);
-    const stepsForCycle = intersectSteps(this.stepsForCycle, sig);
+    // Bundle the velocity onto the note steps as the `vel` channel (Step 2): a patterned vel
+    // subdivides + retriggers the events it overlaps, right-winning any upstream per-step vel
+    // (.as("note:vel")/pianoroll). velSig rides alongside for now - it's still what the scheduler
+    // samples, and it's the only carrier when vel is continuous (vel(sine)) and has no grid to
+    // merge. Step 3 makes the walker read the merged step.vel and retires velSig.
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, 'vel', Number);
     if (this.sampler) return this._clone({ sampler: { ...this.sampler, vel: sig }, stepsForCycle });
     return this._clone({ velSig: sig, stepsForCycle });
   }
@@ -806,8 +811,8 @@ export class Sig {
     }
     // Patterned values mix their structure into the event grid like .vel()/.note() do, so
     // s("breaks2").slice("0 1 2 3") plays four quarter-cycle events, not one. 'auto' (fit) and
-    // plain-number Sigs have no stepsForCycle, so intersectSteps leaves the grid alone.
-    const stepsForCycle = sig instanceof Sig ? intersectSteps(this.stepsForCycle, sig) : this.stepsForCycle;
+    // plain-number Sigs have no stepsForCycle, so crossMerge leaves the grid alone.
+    const stepsForCycle = sig instanceof Sig ? crossMerge(this.stepsForCycle, sig) : this.stepsForCycle;
     return this._clone({ sampler: { ...this.sampler, [key]: sig }, stepsForCycle });
   }
 
@@ -967,7 +972,7 @@ export class Sig {
       return this._clone({ keyboardRoute: { ...this.keyboardRoute, note: sig } });
     }
     if (this.sampler) {
-      const stepsForCycle = intersectSteps(this.stepsForCycle, sig);
+      const stepsForCycle = crossMerge(this.stepsForCycle, sig);
       return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
     }
     // Synth track: the note signal becomes the pattern itself; everything chained so far
@@ -1049,10 +1054,19 @@ function coveringStep(steps, phase) {
   return found;
 }
 
-// Splits a pattern's step grid on a control pattern's grid (patterned .vel()/.note()): each
-// overlap becomes one event, control rests drop events, and an overlap is a new onset when
-// either side starts a fresh (non-`cont`) step there - otherwise it's a tie and stays `cont`.
-function intersectSteps(baseStepsForCycle, ctlSig) {
+// The bundle trigger cross-product (Step 2 of the all-signals rewrite). Cross-products a base
+// trigger grid with a control pattern's grid: each overlap becomes one event and control rests
+// drop events, so a patterned control (.vel()/.note()/sampler config) subdivides the events it
+// overlaps. An overlap is a fresh onset (`cont` falsy) whenever EITHER side starts a fresh
+// (non-`cont`) step there, and only stays a tie (`cont`) when BOTH sides are continuing - a change
+// on either merged channel retriggers.
+//
+// With `channel` given it also MERGES the control's value onto each overlap under that channel name
+// (right-wins: `{ ...s }` copies any value the base carried there, then the control overwrites it),
+// so the merged step is a real bundle - e.g. a note step that also carries its own `vel`. A control
+// with no step structure (a plain number or a continuous LFO) has nothing to cross-product, so the
+// base grid passes through untouched and that channel is instead sampled continuously at each onset.
+function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v) {
   if (!baseStepsForCycle || !ctlSig.stepsForCycle) return baseStepsForCycle;
   return (cycle) => {
     const ctlSteps = ctlSig.stepsForCycle(cycle).filter((c) => c.value != null);
@@ -1064,7 +1078,12 @@ function intersectSteps(baseStepsForCycle, ctlSig) {
         const end = Math.min(s.end, c.end);
         if (start >= end) continue;
         const cont = (start > s.start || s.cont) && (start > c.start || c.cont);
-        out.push({ ...s, start, end, cont: cont || undefined });
+        const step = { ...s, start, end, cont: cont || undefined };
+        if (channel) {
+          const v = coerce(c.value);
+          if (typeof v !== 'number' || !Number.isNaN(v)) step[channel] = v;
+        }
+        out.push(step);
       }
     }
     return out;

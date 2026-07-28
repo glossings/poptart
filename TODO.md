@@ -71,10 +71,16 @@ via the EXISTING native-modulator installer (that code is good, keep it).
       hash off the canonical phase so a moment reached by two float paths draws identically.
       Clean rationals round-trip to the identical double → existing sequences unchanged.
       Tests: frac.test.mjs.
-- [ ] Step 2 — Trigger + generalized cross-product. Generalize `intersectSteps` (its `cont` flag
-      already = edge-vs-tie) into the bundle trigger cross-product with right-wins channel merge.
-      Wire note+vel through it first. cont rule: at a boundary, fresh-onset unless BOTH sides are
-      continuing there (a change on either merged channel retriggers).
+- [x] Step 2 — Trigger + generalized cross-product. DONE. `intersectSteps` → `crossMerge(base,
+      ctlSig, channel?, coerce?)` in signal.mjs: same structural split + cont rule (fresh onset
+      unless BOTH sides continue), now also MERGES the control's value onto each overlap under a
+      named channel, right-wins (`{...s}` copies then control overwrites). `.vel()` routes through
+      it (channel 'vel') so a note step is a real note+vel bundle carrying `step.vel`; velSig still
+      rides alongside and is still what the scheduler samples (Step 3 flips the walker to read the
+      merged step.vel and retires velSig). Sampler note/config splits keep the pure structural
+      form (no channel). Continuous vel (a number/LFO, no grid) no-ops the merge and stays in
+      velSig. Tests: crossmerge.test.mjs (value-merge, right-wins, rests, cont rule via slow()
+      ties). Scheduler untouched — all 135 pattern-core tests green.
 - [ ] Step 3 — Channels, one group at a time: pitch(note/n) → vel/clip → s → gain/pan → param.
       Each group: walker reads it uniformly, then delete its `_meta` field + its scheduler branch.
       This is where the surgical hacks die (the `_noteLike` keyboardRoute branch, the
