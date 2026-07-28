@@ -5,10 +5,13 @@ no completion notes.
 
 ---
 
-[ ] add `irand`, `rand`, `berlin`, `perlin` as signals
 [ ] see if we can get highlighting to work with string templates
-[ ] double check that random numbers are being sampled by the outside
-  pattern (and are deterministic in time)
+[ ] rand()/perlin() JS sampling is still seconds-based, so a rand demoted into a note-value
+  context (n(rand()...), .add(rand())) disagrees between playback and the cps=1 highlighter, and
+  isn't deterministic in cycle position. Decide: re-base sampleLfoIR's rand/perlin JS path on
+  `pos` (cycle) instead of tSeconds (makes highlighter==playback + deterministic, but changes
+  what rand(0.1)'s RATE means in JS and further diverges JS from the native noise UGen). irand()
+  already covers the deterministic-integer note-value case, so this is only the continuous LFO path.
 [ ] signal in format string
 ```js
 const myInt = rand().mul(8).round()
@@ -81,21 +84,29 @@ via the EXISTING native-modulator installer (that code is good, keep it).
       form (no channel). Continuous vel (a number/LFO, no grid) no-ops the merge and stays in
       velSig. Tests: crossmerge.test.mjs (value-merge, right-wins, rests, cont rule via slow()
       ties). Scheduler untouched — all 135 pattern-core tests green.
-- [ ] Step 3 — Channels, one group at a time: pitch(note/n) → vel/clip → s → gain/pan → param.
-      Each group: walker reads it uniformly, then delete its `_meta` field + its scheduler branch.
-      This is where the surgical hacks die (the `_noteLike` keyboardRoute branch, the
-      velSig→sampler.vel relocation in `.s()` — they exist only because controls live in separate
-      side-channels instead of one bundle).
-- [ ] Step 4 — naked `.hold()` (borrow upstream trigger structure; cycle boundaries when
-      standalone) + `rib(time,length)` = query remap `c -> time + ((c-time) mod length)`, exact
-      because Frac. `rand.rib(14,2)` loops a 2-cycle band. rand becomes deterministic edge-sampled
-      f(precise Frac time). (Also closes the top-of-file TODO items: rand/perlin/irand as signals,
-      deterministic-in-time sampling.)
-- [ ] Step 5 — delete the old per-control scheduler branches once every control is a channel.
-
-Decision still open: after step 2 lands, Aria may choose full-rewrite (greenfield `core2` module,
-port builders, swap `$:` binding, delete old — tests red until step 5) vs continuing incremental.
-Recommended: stay incremental unless step 2 feels like it's fighting the old model.
+- [x] Step 3 — Persistent note channels. DONE (greenfield semantics via a focused refactor, not a
+      separate module - it turned out the old model already WAS the target model everywhere except
+      the pitch-swap grid nuke). velSig is gone; vel and clip are `Sig#noteChannels` (a persistent
+      {vel,clip} bundle in _meta) that re-merge onto the new trigger when pitch is set later, so
+      "<0 1>".as("vel").note("f3") keeps its velocities - the structural bug that blocked the
+      deletion. applyNoteChannels/applyClip in signal.mjs; _noteLike re-applies them. The scheduler
+      reads velocity uniformly for synth AND sampler via _velAt (merged step.vel wins, else sample
+      the vel channel at onset, else default) - so the velSig scheduler branch, the .s()
+      velSig→sampler.vel relocation, and vel's slot in _sampleConfigAt all died. gain/pan/param were
+      already the streamed-channel model and are untouched. Tests: crossmerge/as/fastslow/pianoroll
+      updated to noteChannels; all pattern-core green.
+- [x] Step 5 — DONE, and it turned out trivial: velSig was the last per-control scheduler branch,
+      so deleting it in Step 3 finished this. The only branch left in _scheduleNoteEdges is the
+      inherent sampler-vs-synth track split; every channel-strip/param control already flows through
+      the uniform _controlEntries/_pollGenericParams path.
+- [~] Step 4 — irand + rib + naked hold DONE (rib-hold-irand.test.mjs). `irand(8)` = a deterministic
+      per-cycle random integer keyed on the Frac-snapped cycle position (via rngAtPos), so playback
+      and the highlighter agree and it replays identically; exported + wired into the browser/server
+      builder lists. `.rib(time,length)` remaps a query `c -> time + ((c-time) mod length)` exactly
+      (Frac), looping a band of cycles - `irand(8).rib(0,4)` is a repeating random melody. Naked
+      `.hold()` (no arg) freezes a continuous signal to one value per cycle, or borrows a pattern's
+      own onsets. STILL OPEN: the continuous rand()/perlin() JS-determinism decision - see the
+      seconds-vs-cycle re-basing note at the top of this file.
 
 Constraints (from memory): NO integration tests — unit-test logic, hand Aria a manual checklist,
 don't boot server/app. Narrate before bash + batch commands. Scheduler drives MappedEngine (a

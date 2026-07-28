@@ -65,7 +65,7 @@ export function isPatternPosition(before, after) {
   const complete = method || /^\s*[).,;\]}]/.test(after) || /^\s*$/.test(after);
   if (!complete) return false;
   if (/(?<!\.)\b(?:n|note|mini|s)\s*\(\s*$/.test(before)) return true;
-  if (/\.\s*(?:when|hold|i|n|note|vel|clip|fast|slow|begin|end|loop|speed|stretch|fit|slice|gain|pan|add|sub|mul|div|mod|gte|gt|lte|lt|eq|neq)\s*\(\s*$/.test(before)) return true;
+  if (/\.\s*(?:when|hold|i|n|note|vel|clip|fast|slow|rib|begin|end|loop|speed|stretch|fit|slice|gain|pan|add|sub|mul|div|mod|gte|gt|lte|lt|eq|neq)\s*\(\s*$/.test(before)) return true;
   if (/,\s*$/.test(before)) return true;
   if (method) return true;
   return false;

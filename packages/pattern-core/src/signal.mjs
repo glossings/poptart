@@ -69,7 +69,14 @@ export class Sig {
     // how much still reaches the track's own output pair.
     this.busSends = opts.busSends ?? [];
     this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan'/'out'/'dry' -> Sig
-    this.velSig = opts.velSig ?? null; // per-onset note velocity (see vel()); synth tracks only
+    // Persistent per-onset note channels (the "bundle" of the all-signals model): 'vel' and 'clip',
+    // each a Sig. Unlike a track channel these are sampled at each note ONSET, not streamed. Held
+    // separately from the step grid so they survive a later pitch swap - "<0 1>".as("vel").note("f3")
+    // re-merges the velocity onto note("f3")'s fresh trigger (see _noteLike / applyNoteChannels).
+    // A discrete (step) channel also cross-merges into the grid, subdividing + retriggering the
+    // events it overlaps and carrying its value as step.vel; a continuous one (vel(sine)/vel(0.6))
+    // has no grid, so it's sampled at each onset by the scheduler instead.
+    this.noteChannels = opts.noteChannels ?? {}; // 'vel'|'clip' -> Sig
     // Captured plugin state per chain slot (0 = instrument, 1.. = fx), from synth/fx's second
     // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load.
     this.slotStates = opts.slotStates ?? {};
@@ -117,7 +124,7 @@ export class Sig {
       inputSource: this.inputSource,
       busSends: this.busSends,
       channel: this.channel,
-      velSig: this.velSig,
+      noteChannels: this.noteChannels,
       sampler: this.sampler,
       slotStates: this.slotStates,
       midiNotes: this.midiNotes,
@@ -252,7 +259,7 @@ export class Sig {
     if (this.sampler) {
       out.sampler = Object.fromEntries(Object.entries(this.sampler).map(([k, v]) => [k, warp(v)]));
     }
-    if (this.velSig) out.velSig = warp(this.velSig);
+    out.noteChannels = Object.fromEntries(Object.entries(this.noteChannels).map(([k, v]) => [k, warp(v)]));
     return out;
   }
 
@@ -292,7 +299,7 @@ export class Sig {
     };
     const out = patWarp(this);
     if (this.sampler) out.sampler = Object.fromEntries(Object.entries(this.sampler).map(([k, v]) => [k, patWarp(v)]));
-    if (this.velSig) out.velSig = patWarp(this.velSig);
+    out.noteChannels = Object.fromEntries(Object.entries(this.noteChannels).map(([k, v]) => [k, patWarp(v)]));
     return out;
   }
 
@@ -415,14 +422,14 @@ export class Sig {
    */
   vel(value) {
     const sig = toSignal(value);
-    // Bundle the velocity onto the note steps as the `vel` channel (Step 2): a patterned vel
-    // subdivides + retriggers the events it overlaps, right-winning any upstream per-step vel
-    // (.as("note:vel")/pianoroll). velSig rides alongside for now - it's still what the scheduler
-    // samples, and it's the only carrier when vel is continuous (vel(sine)) and has no grid to
-    // merge. Step 3 makes the walker read the merged step.vel and retires velSig.
+    // Velocity is a note channel (see Sig#noteChannels): a discrete/patterned vel cross-merges onto
+    // the note steps, subdividing + retriggering the events it overlaps and carrying its value as
+    // step.vel (right-winning any upstream per-step vel from .as("note:vel")/pianoroll); a
+    // continuous vel (vel(sine)/vel(0.6)) has no grid, so crossMerge no-ops and the scheduler
+    // samples the channel at each onset instead. Synth and sampler tracks carry it identically -
+    // the walker reads step.vel / the channel uniformly, mapping it to MIDI velocity or sample gain.
     const stepsForCycle = crossMerge(this.stepsForCycle, sig, 'vel', Number);
-    if (this.sampler) return this._clone({ sampler: { ...this.sampler, vel: sig }, stepsForCycle });
-    return this._clone({ velSig: sig, stepsForCycle });
+    return this._clone({ noteChannels: { ...this.noteChannels, vel: sig }, stepsForCycle });
   }
 
   /**
@@ -437,17 +444,11 @@ export class Sig {
       throw new Error('[signal] .clip() needs a step pattern, e.g. n("0 3 5").clip(2)');
     }
     const sig = toSignal(value);
-    const base = this.stepsForCycle;
-    const stepsForCycle = (cycle) =>
-      base(cycle).map((s) => {
-        if (s.value == null) return s;
-        // Steps only know cycle positions, so sample the control in cycle-time at the step's
-        // midpoint - same convention as _binop's patterned operands.
-        const raw = Number(sig.sample(cycle + (s.start + s.end) / 2, 1));
-        const clip = raw > 0 && !Number.isNaN(raw) ? raw : 1;
-        return { ...s, end: s.start + (s.end - s.start) * clip };
-      });
-    return this._clone({ stepsForCycle });
+    // clip is a note channel (see Sig#noteChannels) so it survives a later pitch swap. Unlike vel it
+    // doesn't carry a merged value - it stretches each event's END (its ringing duration) - so it's
+    // applied by applyClip rather than crossMerge.
+    const stepsForCycle = applyClip(this.stepsForCycle, sig);
+    return this._clone({ noteChannels: { ...this.noteChannels, clip: sig }, stepsForCycle });
   }
 
   /**
@@ -651,14 +652,32 @@ export class Sig {
    * Sample-and-hold: `rand(4).hold("1*8")` samples this signal at each truthy onset of the
    * trigger pattern and holds the value until the next one - the stepped-random ("sandy") use
    * case, but synced to any rhythm you like. Works on any sampleable signal.
+   *
+   * Naked `.hold()` (no argument) discretizes the signal against its OWN structure: if it already
+   * has a step grid (a pattern), it re-samples the value at each of its onsets; if it's a bare
+   * continuous signal (rand()/sine()/a cc), it takes one value per cycle at the cycle boundary -
+   * the universal "freeze this continuous thing into strudel-cycle updates" operator.
    */
   hold(trig) {
     this._assertSampleable('hold');
-    const trigSig = toSignal(trig);
-    if (!trigSig.stepsForCycle) {
-      throw new Error('[signal] .hold() needs a step pattern of triggers, e.g. .hold("1*8")');
-    }
     const truthy = (v) => v != null && Number(v) !== 0;
+    let trigSig;
+    if (trig === undefined) {
+      // Naked: trigger on this signal's own onsets (every non-rest step), or once per cycle when it
+      // has no structure of its own. The trigger's values are all 1 so every onset counts (a "0"
+      // step is still an onset here - we're borrowing timing, not gating on the held value).
+      const base = this.stepsForCycle;
+      trigSig = new Sig(() => 1, {
+        stepsForCycle: base
+          ? (cycle) => base(cycle).filter((s) => s.value != null && !s.cont).map((s) => ({ start: s.start, end: s.end, value: 1, loc: s.loc }))
+          : (cycle) => [{ start: 0, end: 1, value: 1 }],
+      });
+    } else {
+      trigSig = toSignal(trig);
+      if (!trigSig.stepsForCycle) {
+        throw new Error('[signal] .hold() needs a step pattern of triggers, e.g. .hold("1*8") - or call it bare, .hold(), to freeze one value per cycle');
+      }
+    }
 
     // Most recent trigger onset at or before cyclePos (bounded lookback for sparse patterns).
     const lastOnset = (cyclePos) => {
@@ -698,6 +717,66 @@ export class Sig {
       }));
     };
 
+    return new Sig(sample, { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Loops a band of cycles forever: `.rib(14, 2)` plays cycles 14 and 15 over and over (Strudel's
+   * `ribbon`). A query for cycle position `c` is remapped to `time + ((c - time) mod length)` -
+   * exact via Frac, so a moment reached two different ways samples identically (deterministic
+   * randoms stay put). Handy for freezing a good couple of bars, or looping a short window of a
+   * deterministic random signal - `irand(8).rib(0, 2)` is a repeating 2-cycle random melody.
+   *
+   * Both arguments may be signals/patterns, sampled at the OUTER (pre-remap) cycle position so the
+   * band can move: `.rib("<0 8>", 2)` loops cycles 0-1 for a while, then jumps to loop 8-9. An
+   * ill-defined band (non-finite start or non-positive length) falls through as the identity, so a
+   * resting/zero patterned length just plays straight rather than dividing by zero.
+   *
+   * A FRACTIONAL length loops a sub-cycle window: `.rib(14, 0.5)` plays the first half of cycle 14
+   * twice per measure. The grid is remapped phase-aware (not floored to a whole source cycle) so the
+   * notes the scheduler triggers stay in lock-step with sample()'s continuous remap.
+   */
+  rib(time, length) {
+    const timeSig = toSignal(time);
+    const lenSig = toSignal(length);
+    // Constant args get validated up front with a helpful error; patterned args can't be checked
+    // statically (they're guarded per-query in remap instead).
+    if (
+      timeSig.constVal !== undefined &&
+      lenSig.constVal !== undefined &&
+      (!Number.isFinite(timeSig.constVal) || !(lenSig.constVal > 0))
+    ) {
+      throw new Error('[signal] .rib(time, length) takes a start cycle and a positive length in cycles, e.g. .rib(14, 2)');
+    }
+    // Remap an absolute cycle position into the loop band [t0, t0+len). t0/len are sampled at the
+    // outer position c so patterned args shift the band over time. Frac keeps whole-cycle bands
+    // landing exactly on integer cycles (no float drift into the neighbour).
+    const remap = (c) => {
+      const t0 = Number(timeSig.sample(c, 1, c));
+      const len = Number(lenSig.sample(c, 1, c));
+      if (!Number.isFinite(t0) || !(len > 0)) return c; // ill-defined band -> identity (play straight)
+      return Frac.fromNumber(c).sub(t0).mod(len).add(t0).toNumber();
+    };
+    // The grid is built phase-aware (remapGrid): each output cycle is walked in sub-windows split at
+    // the loop-band wraps, so a fractional band loops within the cycle exactly as sample() does. For
+    // a whole-cycle band this collapses to one window = one source cycle (the old fast path).
+    let stepsForCycle = this.stepsForCycle
+      ? (cycle) => remapGrid(cycle, this.stepsForCycle, timeSig, lenSig)
+      : null;
+    // rib re-times WHICH cycle sounds, so it affects the MIDI notes: a patterned time/length is
+    // combined into the trigger (crossMerge) so its edges retrigger and its live atom lights
+    // alongside the note (highlighting). A constant arg has no step structure, so crossMerge no-ops
+    // it - only a patterned band changes anything. A resting arg passes the note through rather than
+    // dropping it (crossMerge drops on a control rest), matching remap's play-straight fallback.
+    if (stepsForCycle) {
+      stepsForCycle = ribMergeArg(stepsForCycle, timeSig);
+      stepsForCycle = ribMergeArg(stepsForCycle, lenSig);
+    }
+    const sample = (t, cps, pos) => {
+      const c = pos ?? t * cps;
+      const rc = remap(c);
+      return this.sample(rc / cps, cps, rc);
+    };
     return new Sig(sample, { stepsForCycle, ...this._meta() });
   }
 
@@ -932,10 +1011,12 @@ export class Sig {
     if (fields.includes('note')) out = withPitchKind(fieldSig('note', parseNoteValue), 'note');
     else if (fields.includes('n')) out = withPitchKind(fieldSig('n', (p) => Number(p)), 'degree');
     else out = withPitchKind(this.mapValue(() => DEFAULT_SYNTH_NOTE), 'note');
-    // vel becomes a per-onset velocity signal (same channel .vel() sets); clip scales each event's
-    // duration (same channel .clip() sets). Both survive a later .note()/.n()/.s() (they ride in
-    // the track metadata / step grid), which is what lets .as("vel").note("f3") work.
-    if (fields.includes('vel')) out = out._clone({ velSig: fieldSig('vel', (p) => Number(p)) });
+    // vel becomes a note channel (same one .vel() sets), sampled per onset - not cross-merged here
+    // because .as()'s vel shares the note grid (no subdivision to do) and a token missing its vel
+    // field must default to 1 at the walker, not drop the note. clip stretches each event's duration
+    // (same channel .clip() sets). Both survive a later .note()/.n()/.s() (they ride in noteChannels
+    // and re-merge onto the new trigger), which is what lets .as("vel").note("f3") work.
+    if (fields.includes('vel')) out = out._clone({ noteChannels: { ...out.noteChannels, vel: fieldSig('vel', (p) => Number(p)) } });
     if (fields.includes('clip')) out = out.clip(fieldSig('clip', (p) => Number(p)));
     return out;
   }
@@ -957,10 +1038,11 @@ export class Sig {
     // note (re-.s()-ing just changes the pack).
     const noteSig = this.sampler?.note ?? this;
     const sampler = { ...(this.sampler ?? {}), note: noteSig };
-    // A velocity set while this was a synth track (via .vel()/.as("vel")) rides in velSig; on a
-    // sampler the scheduler reads velocity from the sampler config, so move it to sampler.vel.
-    if (this.velSig && !sampler.vel) sampler.vel = this.velSig;
-    return this.mapValue(() => name)._clone({ sampler, velSig: null });
+    // Velocity carries through untouched: it's a note channel now (Sig#noteChannels), read the same
+    // way on synth and sampler tracks, so a vel set while this was a synth track (.vel()/.as("vel"))
+    // needs no relocation - the walker maps step.vel / the channel to sample gain on the sampler
+    // path exactly as it maps it to MIDI velocity on the synth path.
+    return this.mapValue(() => name)._clone({ sampler });
   }
 
   _noteLike(sig) {
@@ -981,7 +1063,13 @@ export class Sig {
     // pitchKind follows the note signal, not the track: whether these are notes or degrees is a
     // property of the values just supplied, so a later .scale() reads them the right way even on
     // a synth("X") track (which is note-kind by default from its C2 placeholder).
-    return sig._clone({ ...this._meta(), midiNotes: sig.midiNotes ?? this.midiNotes, pitchKind: sig.pitchKind });
+    //
+    // The note pattern's grid becomes the track's trigger, but any note channels attached earlier
+    // (`.as("vel").note(...)`, `.clip(2).n(...)`) must re-merge onto it - the whole point of holding
+    // them separately from the grid (see Sig#noteChannels). In the ordinary pitch-first order
+    // noteChannels is empty here and this is a plain grid swap.
+    const stepsForCycle = applyNoteChannels(sig.stepsForCycle, this.noteChannels);
+    return sig._clone({ ...this._meta(), stepsForCycle, midiNotes: sig.midiNotes ?? this.midiNotes, pitchKind: sig.pitchKind });
   }
 }
 
@@ -1079,6 +1167,11 @@ function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v
         if (start >= end) continue;
         const cont = (start > s.start || s.cont) && (start > c.start || c.cont);
         const step = { ...s, start, end, cont: cont || undefined };
+        // Union both sides' highlight spans so the control's live atom lights alongside the note's:
+        // note("c e g").vel("1 0.5 0.2") lights each velocity with its note, and s("x").note("0 2")
+        // lights the repitch degrees. Same union _binop/.when() do for their operands.
+        const locs = [...stepLocs(s), ...stepLocs(c)];
+        if (locs.length) step.locs = locs;
         if (channel) {
           const v = coerce(c.value);
           if (typeof v !== 'number' || !Number.isNaN(v)) step[channel] = v;
@@ -1088,6 +1181,99 @@ function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v
     }
     return out;
   };
+}
+
+// Phase-aware grid for rib(): builds output cycle N by walking it in sub-windows split at the loop
+// band's wraps. Within a window the source advances 1:1 with output (a plain shift, no floor), so a
+// fractional band (len < 1) loops several times inside one output cycle and an offset band that
+// straddles a source-cycle boundary is followed across it - the note grid the scheduler reads then
+// matches sample()'s continuous remap exactly. A wrap back to the band start is a fresh onset (the
+// loop restarts the pattern); a note clipped by a non-wrap boundary is a continuation. t0/len are
+// sampled per window at its start, so patterned whole-cycle args behave as before.
+function remapGrid(N, srcStepsFor, timeSig, lenSig) {
+  const out = [];
+  const end = N + 1;
+  // Collect the source steps over [srcStart, srcStart+spanLen), mapped into output phase starting at
+  // outBase. `restart` marks the window as beginning at a loop wrap (its leftmost partial is fresh).
+  const collect = (aOut, spanLen, srcStart, restart) => {
+    const s0 = srcStart;
+    const s1 = srcStart + spanLen;
+    const outBase = aOut - N;
+    const firstCyc = Math.floor(s0 + 1e-9);
+    const lastCyc = Math.floor(s1 - 1e-9);
+    for (let cyc = firstCyc; cyc <= lastCyc; cyc++) {
+      for (const st of srcStepsFor(cyc)) {
+        const absStart = cyc + st.start;
+        const absEnd = cyc + st.end;
+        const cs = Math.max(absStart, s0);
+        const ce = Math.min(absEnd, s1);
+        if (cs >= ce - 1e-12) continue;
+        const clippedLeft = cs > absStart + 1e-12;
+        // A step clipped on the left was already sounding -> a tie, unless this window is a loop
+        // restart (the pattern jumped back to t0, so it re-strikes). A step that genuinely begins
+        // inside the window keeps its own cont.
+        const cont = clippedLeft ? !restart && true : st.cont || false;
+        out.push({ ...st, start: outBase + (cs - s0), end: outBase + (ce - s0), cont: cont || undefined });
+      }
+    }
+  };
+  let c = N;
+  let guard = 0;
+  while (c < end - 1e-9 && guard++ < 4096) {
+    const t0 = Number(timeSig.sample(c, 1, c));
+    const len = Number(lenSig.sample(c, 1, c));
+    if (!Number.isFinite(t0) || !(len > 0)) {
+      collect(c, end - c, c, false); // ill-defined band -> identity for the rest of the cycle
+      break;
+    }
+    const off = Frac.fromNumber(c).sub(t0).mod(len).toNumber(); // position within the band, in [0, len)
+    const rc = t0 + off; // source position at c
+    const winLen = Math.min(len - off, end - c); // until the band wraps or the output cycle ends
+    collect(c, winLen, rc, off < 1e-9); // off==0 -> this window opens at the band start (a wrap)
+    c += winLen;
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+// Folds a patterned rib() argument (time/length) into the note grid: the arg's step edges combine
+// into the trigger and its atom spans light with the note (via crossMerge, channel-less so no value
+// merges - only structure + loc union). Unlike a note channel, a resting arg must NOT drop the note
+// (crossMerge drops events a control rest covers), so a cycle where the arg has no atoms passes the
+// base grid straight through - matching rib()'s ill-defined-band-plays-straight fallback. A constant
+// arg (no stepsForCycle) is returned untouched, so plain .rib(0, 2) keeps its exact old behaviour.
+function ribMergeArg(baseStepsForCycle, argSig) {
+  if (!argSig.stepsForCycle) return baseStepsForCycle;
+  const merged = crossMerge(baseStepsForCycle, argSig);
+  return (cycle) => {
+    const hasAtoms = argSig.stepsForCycle(cycle).some((s) => s.value != null);
+    return hasAtoms ? merged(cycle) : baseStepsForCycle(cycle);
+  };
+}
+
+// Stretches each event's ringing duration by the clip factor (see Sig#clip): sampled per event at
+// its midpoint in cycle-time (cps=1), same convention as _binop's patterned operands. A non-positive
+// or missing factor falls back to 1. Factored out of Sig#clip so pitch-setting can re-apply it (see
+// applyNoteChannels).
+function applyClip(baseStepsForCycle, sig) {
+  return (cycle) =>
+    baseStepsForCycle(cycle).map((s) => {
+      if (s.value == null) return s;
+      const raw = Number(sig.sample(cycle + (s.start + s.end) / 2, 1));
+      const clip = raw > 0 && !Number.isNaN(raw) ? raw : 1;
+      return { ...s, end: s.start + (s.end - s.start) * clip };
+    });
+}
+
+// Re-merges the persistent note channels (vel, clip) onto a freshly (re)established trigger grid.
+// Called by the pitch-setting builders (_noteLike) so a channel attached BEFORE the pitch survives
+// the grid being replaced - "<0 1 0.5>".as("vel").note("f3") keeps its velocities. In the ordinary
+// order (pitch first, then .vel()/.clip()) the channels are already merged in and noteChannels is
+// empty at pitch-set time, so this is a no-op. vel before clip, matching .as()'s field order.
+function applyNoteChannels(baseStepsForCycle, noteChannels) {
+  let out = baseStepsForCycle;
+  if (noteChannels.vel) out = crossMerge(out, noteChannels.vel, 'vel', Number);
+  if (noteChannels.clip) out = applyClip(out, noteChannels.clip);
+  return out;
 }
 
 // Rests/gaps in a condition pattern count as falsy regions, not holes - without this, a cond
@@ -1289,6 +1475,32 @@ export function choose(...options) {
     return v == null ? [] : [{ start: 0, end: 1, value: v }];
   };
   const sample = (t, cps, pos) => pick(Math.floor(pos ?? t * cps)).sig.sample(t, cps, pos);
+  return new Sig(sample, { stepsForCycle });
+}
+
+// Independent irand() calls decorrelate the same way choose() does - a per-call build-time seed.
+let irandSeedCounter = 0;
+
+/**
+ * `irand(8)` - a deterministic random integer in 0..n-1, one value per cycle. Like choose() the
+ * draw is a hash of the cycle position (via rngAtPos), so it's stable across re-queries and replays
+ * identically each time a cycle comes round, and the editor's highlighter agrees with playback -
+ * the "sampled by the outside pattern, deterministic in time" contract. Drops in wherever a signal
+ * goes: `n(irand(8)).scale("F minor")` walks a random scale each cycle; sample it per note with
+ * arithmetic (`n("0 0 0 0").add(irand(12))`) for a fresh draw at every onset; loop a fixed band with
+ * `.rib(0, 4)`. Each independent irand() call draws independently.
+ */
+export function irand(n) {
+  const count = Math.max(1, Math.round(Number(n)));
+  const seed = ++irandSeedCounter;
+  // Keyed on the exact cycle position (integer cycle + Frac-snapped phase) so two float paths to the
+  // same moment - or a rib()/hold() remap onto it - draw the identical integer.
+  const valueAt = (cyclePos) => {
+    const cycle = Math.floor(cyclePos);
+    return Math.floor(rngAtPos(cycle, cyclePos - cycle, seed) * count);
+  };
+  const stepsForCycle = (cycle) => [{ start: 0, end: 1, value: valueAt(cycle) }];
+  const sample = (t, cps, pos) => valueAt(pos ?? t * cps);
   return new Sig(sample, { stepsForCycle });
 }
 

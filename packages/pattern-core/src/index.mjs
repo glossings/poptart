@@ -1,4 +1,4 @@
-export { Sig, Signal, n, note, mini, s, synth, sine, saw, tri, square, ramp, rand, perlin, lfo, env, midicc, midikeys, macro, choose, keyboard, tap, midi, audio, pianoroll } from './signal.mjs';
+export { Sig, Signal, n, note, mini, s, synth, sine, saw, tri, square, ramp, rand, perlin, lfo, env, midicc, midikeys, macro, choose, irand, keyboard, tap, midi, audio, pianoroll } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';
 export { Scheduler, Transport } from './scheduler.mjs';

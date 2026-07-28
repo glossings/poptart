@@ -85,13 +85,13 @@ let knownPlugins = [];
 
 const BUILDERS = [
   'Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
-  'choose', 'keyboard', 'tap', 'pianoroll',
+  'choose', 'irand', 'keyboard', 'tap', 'pianoroll',
   'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
 ];
 const METHODS = [
   'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'slow', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'as', 'degrade', 'ply', 'echo',
+  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'rib', 'as', 'degrade', 'ply', 'echo',
   'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
 ];
 
@@ -2426,7 +2426,9 @@ function onKbKeyDown(e) {
       note = typeof r.note === 'number' ? r.note : KB_TAP_NOTE;
     } else {
       if (!(key in KB_SEMITONES)) continue;
-      note = KB_BASE_NOTE + kbOctave * 12 + KB_SEMITONES[key];
+      // A fixed pitch from .note("f3")/.n(...).scale(...) replaces the played note: every piano key
+      // strikes that one note (keyboard().note("f3")). With none set, the key's own pitch plays.
+      note = typeof r.note === 'number' ? r.note : KB_BASE_NOTE + kbOctave * 12 + KB_SEMITONES[key];
     }
     kbSend(r.trackId, note, true);
     struck.push({ trackId: r.trackId, note });

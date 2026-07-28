@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, note } from './src/signal.mjs';
+import { n, note, mini } from './src/signal.mjs';
 
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, msg ?? `${a} !~ ${b}`);
 
@@ -56,11 +56,23 @@ test('a vel rest drops the event it covers', () => {
 
 test('a continuous vel (no step grid) leaves the note grid untouched', () => {
   // A plain-number vel has no stepsForCycle, so there is nothing to cross-product: the grid is
-  // unchanged and vel rides in velSig for the walker to sample at onset instead.
+  // unchanged and vel rides in the vel note channel for the walker to sample at onset instead.
   const sig = n('0 2 4').vel(0.6);
   assert.deepEqual(grid(sig).map((s) => s.value), [0, 2, 4]);
   assert.ok(grid(sig).every((s) => s.vel === undefined), 'no merged vel channel');
-  assert.ok(sig.velSig, 'velSig carries the continuous vel');
+  assert.ok(sig.noteChannels.vel, 'the continuous vel rides in the vel note channel');
+});
+
+test('the merged step carries BOTH the note and the vel source spans (highlighting)', () => {
+  // mini(str, offset) tags each atom with its [start,end) span; the merge must union them so the
+  // live velocity atom lights alongside its note (the editor's playback highlighter reads stepLocs).
+  const sig = note(mini('c e g', 0)).vel(mini('1 0.5 0.2', 20));
+  const locs = sig.stepsForCycle(0).filter((s) => s.value != null).map((s) => s.locs);
+  assert.deepEqual(locs, [
+    [[0, 1], [20, 21]], // c + "1"
+    [[2, 3], [22, 25]], // e + "0.5"
+    [[4, 5], [26, 29]], // g + "0.2"
+  ]);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -89,11 +101,11 @@ test('a held note (a real cont tie) survives where the vel is also continuing', 
 
 test('a continuous (non-step) vel leaves a held tie intact', () => {
   // A plain-number vel has no edges, so it never breaks structure: the cont tail stays a tie and
-  // the velocity rides in velSig (sampled continuously) rather than as a merged channel.
+  // the velocity rides in the vel note channel (sampled continuously) rather than as a merged step.
   const g = grid(n('0').slow(2).vel(0.7), 1);
   assert.equal(g.length, 1);
   assert.ok(g[0].cont, 'a continuous vel does not retrigger the held note');
-  assert.equal(g[0].vel, undefined, 'nothing merged - continuous vel rides in velSig');
+  assert.equal(g[0].vel, undefined, 'nothing merged - continuous vel rides in the note channel');
 });
 
 test('a vel edge landing on a held tie retriggers it', () => {

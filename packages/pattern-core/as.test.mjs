@@ -12,14 +12,16 @@ function stepsAt(sig, cycle = 0) {
   return sig.stepsForCycle(cycle).filter((st) => st.value != null);
 }
 
-// The velocity the scheduler would read at a step's onset (velSig overrides step.vel, matching
-// scheduler.mjs): sample velSig at the onset cycle, else fall back to the step's own vel, else 1.
+// The velocity the scheduler would read at a step's onset (matching scheduler.mjs's _velAt): the
+// merged step.vel wins, else the continuous vel note channel is sampled at the onset, else 1.
 function velAt(sig, step, cycle = 0) {
-  if (sig.velSig) {
-    const v = sig.velSig.sample(cycle + step.start, 1, cycle + step.start);
+  if (typeof step.vel === 'number' && !Number.isNaN(step.vel)) return step.vel;
+  const ch = sig.noteChannels?.vel;
+  if (ch) {
+    const v = ch.sample(cycle + step.start, 1, cycle + step.start);
     if (typeof v === 'number' && !Number.isNaN(v)) return v;
   }
-  return typeof step.vel === 'number' ? step.vel : 1;
+  return 1;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -69,7 +71,7 @@ test('as("vel").note("f3") keeps the velocities and sets the pitch', () => {
 
 test('as("vel").n("0").scale sees degrees; note override survives velocities', () => {
   const sig = mini('<0 1 0.5>').as('vel').note('c4');
-  assert.ok(sig.velSig, 'velocity signal carried onto the note pattern');
+  assert.ok(sig.noteChannels.vel, 'velocity channel carried onto the note pattern');
 });
 
 test('as("vel").note(...).s("rave") plays the sample repitched, velocities intact', () => {
@@ -80,10 +82,11 @@ test('as("vel").note(...).s("rave") plays the sample repitched, velocities intac
   const st = stepsAt(sig, 0);
   assert.equal(st[0].value, 'rave');
   assert.equal(Math.round(sig.sampler.note.sample(0, 1)), f3);
-  // on a sampler the scheduler reads velocity from the sampler config, so it moves off velSig
-  assert.equal(sig.velSig, null, 'velSig relocated to sampler.vel on the sampler track');
-  assert.ok(sig.sampler.vel, 'velocity preserved as sampler.vel through .s()');
-  close(sig.sampler.vel.sample(1, 1, 1), 1, 'cycle 1 velocity is 1');
+  // vel is a note channel now, read the same way on synth and sampler tracks - no relocation into
+  // the sampler config, so it survives .s() as-is (the walker maps it to sample gain).
+  assert.ok(sig.noteChannels.vel, 'velocity preserved as a note channel through .s()');
+  assert.ok(!sig.sampler.vel, 'not moved into the sampler config');
+  close(sig.noteChannels.vel.sample(1, 1, 1), 1, 'cycle 1 velocity is 1');
 });
 
 test('.s() is a method that repitches a note line by the pack', () => {

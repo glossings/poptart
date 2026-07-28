@@ -445,8 +445,12 @@ export class Scheduler {
         const onsetSec = this.transport.secAt(stepStartCycle);
         const offsetSec = this.transport.secAt(stepEndCycle);
 
+        // Velocity is one note channel now, read uniformly for both track kinds (see _velAt): the
+        // merged step.vel wins, else the channel is sampled at the onset, else it's unset.
+        const velocity = this._velAt(step, onsetSec, stepStartCycle);
         if (this.pattern.sampler) {
           const cfg = this._sampleConfigAt(onsetSec, stepStartCycle);
+          if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
           let pack = String(step.value);
           // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
           const m = /^(.+):(-?\d+)$/.exec(pack);
@@ -457,19 +461,28 @@ export class Scheduler {
           this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
         } else {
           const midiNote = Math.round(step.value);
-          // Per-step velocity (from .as("note:vel:clip") tokens) is the default; a .vel()
-          // control signal still overrides it, structure-from-the-control as usual.
-          let velocity = typeof step.vel === 'number' && !Number.isNaN(step.vel) ? step.vel : 1.0;
-          if (this.pattern.velSig) {
-            const v = this.pattern.velSig.sample(onsetSec, this.transport.cps, stepStartCycle);
-            if (typeof v === 'number' && !Number.isNaN(v)) velocity = v;
-          }
-          if (velocity <= 0) continue;
-          this.engine.noteOn(this.trackId, midiNote, Math.min(1, velocity), onsetSec);
+          const vel = velocity ?? 1.0; // unset velocity on a synth note is full
+          if (vel <= 0) continue;
+          this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec);
           this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC));
         }
       }
     }
+  }
+
+  // The velocity of one note event, read uniformly (all-signals model): the value merged onto the
+  // step by a discrete vel channel wins (step.vel, from .vel("1 0.5")/.as("note:vel")/pianoroll);
+  // otherwise a continuous vel channel (vel(sine)/vel(0.6)) is sampled at the onset; otherwise it's
+  // unset (undefined) and the caller supplies the default (full on a synth, engine default gain on a
+  // sampler). Maps to MIDI velocity or sample gain depending on the track kind - one read either way.
+  _velAt(step, onsetSec, onsetCycle) {
+    if (typeof step.vel === 'number' && !Number.isNaN(step.vel)) return step.vel;
+    const ch = this.pattern.noteChannels?.vel;
+    if (ch) {
+      const v = ch.sample(onsetSec, this.transport.cps, onsetCycle);
+      if (typeof v === 'number' && !Number.isNaN(v)) return v;
+    }
+    return undefined;
   }
 
   // Sampler config signals evaluated at one event's onset. `fit: 'auto'` passes through as-is
@@ -482,7 +495,8 @@ export class Scheduler {
       return typeof v === 'number' ? v : v == null ? undefined : Number(v);
     };
     const src = this.pattern.sampler;
-    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'stretch', 'slice', 'note', 'vel',
+    // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
+    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'stretch', 'slice', 'note',
       'attack', 'decay', 'sustain', 'release']) {
       if (src[key]) {
         const v = at(src[key]);

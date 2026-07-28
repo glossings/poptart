@@ -127,8 +127,8 @@ test('.vel() attached before .fast() warps with its events', () => {
   const sig = note('60').vel('1 0.5').fast(2);
   assert.equal(onsets(sig).length, 4); // the patterned vel's grid, doubled
   // Onset at result 0.25 reads the source vel at 0.5 - the "0.5" step.
-  assert.equal(sig.velSig.sample(0.25, 1), 0.5);
-  assert.equal(sig.velSig.sample(0, 1), 1);
+  assert.equal(sig.noteChannels.vel.sample(0.25, 1), 0.5);
+  assert.equal(sig.noteChannels.vel.sample(0, 1), 1);
 });
 
 test('sampler configs attached before .fast() warp with their events', () => {

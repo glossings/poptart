@@ -80,15 +80,17 @@ test('pianoroll(): playback matches its own mini-notation conversion', () => {
   const asM = /^`([\s\S]*)`\.as\("([^"]*)"\)$/.exec(expr);
   const noteM = /^note\(`([\s\S]*)`\)$/.exec(expr);
   const rebuilt = asM ? mini(asM[1]).as(asM[2]) : note(noteM[1]);
-  // Effective velocity the way the scheduler reads it: a velSig (what .as() now sets) sampled at
-  // the onset overrides the step's own vel (what the pianoroll builder bakes in). Both paths must
-  // land on the same value for playback to match.
+  // Effective velocity the way the scheduler reads it (matching scheduler.mjs's _velAt): the step's
+  // own merged vel wins (what the pianoroll builder bakes in), else the vel note channel (what .as()
+  // sets) is sampled at the onset, else 1. Both paths must land on the same value for playback to match.
   const effVel = (sig, s, cycle) => {
-    if (sig.velSig) {
-      const v = sig.velSig.sample(cycle + s.start, 1, cycle + s.start);
+    if (typeof s.vel === 'number' && !Number.isNaN(s.vel)) return s.vel;
+    const ch = sig.noteChannels?.vel;
+    if (ch) {
+      const v = ch.sample(cycle + s.start, 1, cycle + s.start);
       if (typeof v === 'number' && !Number.isNaN(v)) return v;
     }
-    return s.vel ?? 1;
+    return 1;
   };
   const norm = (sig, cycle) =>
     sig

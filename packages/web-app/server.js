@@ -240,7 +240,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
