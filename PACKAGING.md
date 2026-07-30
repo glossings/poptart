@@ -67,6 +67,30 @@ engine) does:
   `sclang`/`scsynth` processes holding ports or the audio device (warn + name the pkill,
   don't kill — it could be a deliberately open SC IDE).
 
+## Stage 1.5 (parked, 2026-07-30) — auto-install SuperCollider too
+
+Considered and deliberately not built yet: setup could also download SuperCollider itself,
+making macOS truly clone → run with zero manual steps. Recorded here because the reasoning
+changes how Stage 2 should be approached if it ever happens:
+
+- **No signing needed if we download instead of redistribute.** SC's official macOS releases
+  are Developer-ID-signed and notarized *by the SC project*. If the user's machine fetches the
+  pinned release dmg from SC's GitHub (checksummed, like the VSTPlugin flow), Gatekeeper is
+  satisfied by SC's signature — no $99/yr Apple fee, no notarization pipeline on our side.
+  This may make Stage 2's hardest part unnecessary.
+- **Same trick works on Windows**: SmartScreen only screens files carrying the Mark of the
+  Web, which browsers apply and Node's fetch does not — so programmatically fetched SC
+  binaries would run without warnings (only the standard one-click firewall prompt for
+  scsynth). But poptart has never been run on Windows, so the install mechanics are ~20% of
+  the risk there; don't advertise Windows support until someone has actually booted it once.
+- **Why parked**: current audience is terminal-comfortable, and setup already prints the exact
+  `brew install --cask supercollider` command when SC is missing — one manual step, zero
+  maintenance. Also, silently dropping a ~150MB app from a dev script needs a consent prompt
+  (y/N in terminal or `POPTART_INSTALL_SC=1`), which is design work.
+- **Un-park trigger** (same as Stage 2's): someone who won't open a terminal wants poptart —
+  a workshop, a musician friend, a residency. Then build this (macOS-first, `/Applications`
+  as target) before reaching for Electron.
+
 ## Stage 2 — the dmg: Electron + bundled SuperCollider
 
 The "double-click and you're livecoding" build. No research risk — Sonic Pi has proven every
@@ -81,7 +105,11 @@ piece — but real distribution mechanics:
   VSTPlugin already in it. `POPTART_SCLANG`-style override already exists, so pointing the
   engine at the bundled copy is small. This *removes* whole failure classes (symlinks,
   version mismatches, manual Extensions surgery) because we control every path.
-- **Signing & notarization (the genuinely annoying part).** Apple Developer ID ($99/yr),
+- **Signing & notarization (the genuinely annoying part — and not optional).** Since macOS
+  Sequoia there is no right-click → Open bypass for unsigned apps; users must dig through
+  System Settings → Privacy & Security → "Open Anyway", which is *worse* UX than the
+  terminal flow. An unsigned dmg is therefore pointless: ship Stage 2 signed or not at all.
+  Apple Developer ID ($99/yr),
   notarize in CI, sign every bundled binary (sclang, scsynth, VSTPlugin.scx, dylibs) with
   hardened runtime. **scsynth needs the `com.apple.security.cs.disable-library-validation`
   entitlement** — loading arbitrary third-party VSTs is the whole point, and without it a
