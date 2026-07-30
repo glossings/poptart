@@ -72,10 +72,12 @@ pattern language is its own small implementation.
   macOS, `C:\Program Files\SuperCollider` on Windows), so you don't have to put it on your
   `PATH` yourself. If yours lives somewhere non-standard, point poptart straight at the binary
   with `POPTART_SCLANG=/full/path/to/sclang`.
-- **The VSTPlugin server extension.** This is a compiled binary extension, *not* a Quark:
-  download the build for your platform from <https://git.iem.at/pd/vstplugin/-/releases> and
-  unzip its `sc/VSTPlugin` folder into your SuperCollider `Extensions` directory (on macOS,
-  `~/Library/Application Support/SuperCollider/Extensions/`).
+- **The VSTPlugin server extension — installed for you.** On first run poptart detects it's
+  missing, downloads the pinned build for your platform (checksum-verified), and unzips it
+  into your SuperCollider `Extensions` directory. Manual fallback, should the auto-install
+  fail (it's a compiled binary extension, *not* a Quark): download your platform's build from
+  <https://git.iem.at/pd/vstplugin/-/releases> and unzip its `sc/VSTPlugin` folder into the
+  `Extensions` directory (on macOS, `~/Library/Application Support/SuperCollider/Extensions/`).
 
 > **Troubleshooting "engine did not finish booting":** the error message includes the last lines
 > of SuperCollider's own log plus a diagnosis — read that first; it names the actual cause. The
@@ -146,7 +148,14 @@ npm install     # installs all workspaces
 npm run dev     # starts the server; it spawns sclang itself — no separate step
 ```
 
-Then open <http://localhost:4000>.
+The first run prints a short setup report: it checks for SuperCollider (and tells you the
+install command if it's missing), auto-installs the VSTPlugin extension if needed, and warns
+about known boot-wreckers (stale `sclang` symlinks, orphaned engine processes) before booting.
+
+Then open <http://localhost:4000>. The server listens on `127.0.0.1` only — evaluated code
+runs with your user's privileges, so it must not be reachable from the network. If you
+knowingly want LAN access (say, a collaborative jam on a trusted network), set
+`POPTART_HOST=0.0.0.0`; poptart will print a warning explaining what that exposes.
 
 1. Click **rescan** to scan for installed VST2/VST3 plugins (via SuperCollider's
    `VSTPlugin.search`). Click a result to copy its exact name — that's the string `.synth()` and

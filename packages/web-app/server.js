@@ -10,8 +10,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
+const { blockReason, isLoopbackHostname } = require('./request-guard');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
+// Loopback-only by default: this server evals arbitrary JS (/api/evaluate), so binding
+// 0.0.0.0 would hand code execution to anyone on the same network. POPTART_HOST exists for
+// a deliberate LAN bind (e.g. a collaborative jam) - that opt-out also relaxes the
+// browser-level guards below, which only make sense for a loopback-only server.
+const HOST = process.env.POPTART_HOST || '127.0.0.1';
+const LOOPBACK_ONLY = isLoopbackHostname(HOST);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const MIME_TYPES = {
@@ -189,6 +196,10 @@ function wireEngine() {
 async function init() {
   patternCore = await import('@poptart/pattern-core');
   extendStringPrototype(patternCore);
+  // First-run setup: SC detection, VSTPlugin auto-install, preflight warnings (see
+  // PACKAGING.md Stage 1). Logs what it finds; never throws, never blocks the boot -
+  // loadEngine()'s own diagnostics remain the backstop if something is still wrong.
+  await require('@poptart/osc-engine/setup').runSetup();
   engine = await loadEngine();
   if (engine) wireEngine();
   runPrebake(); // once, after builders + transport exist and before the first eval
@@ -1360,6 +1371,19 @@ function readJsonBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (LOOPBACK_ONLY) {
+    const refusal = blockReason({
+      method: req.method,
+      hostHeader: req.headers.host,
+      originHeader: req.headers.origin,
+    });
+    if (refusal) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: refusal }));
+      return;
+    }
+  }
+
   const url = new URL(req.url, 'http://localhost');
 
   // Binary sample preview - answered outside the JSON route table (see serveSampleAudio).
@@ -1390,9 +1414,17 @@ const server = http.createServer(async (req, res) => {
 });
 
 init().then(() => {
-  server.listen(PORT, () => {
+  server.listen(PORT, HOST, () => {
     // eslint-disable-next-line no-console
     console.log(`[poptart] listening on http://localhost:${PORT}`);
+    if (!LOOPBACK_ONLY) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[poptart] WARNING: bound to ${HOST} (POPTART_HOST) - anyone who can reach this ` +
+          'address can execute code on this machine via /api/evaluate. Only use on networks ' +
+          'you trust.',
+      );
+    }
   });
 });
 
