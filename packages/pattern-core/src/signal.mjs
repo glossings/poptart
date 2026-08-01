@@ -150,7 +150,7 @@ export class Sig {
         const v = this.sample(t, cps, pos);
         return v == null ? null : fn(v);
       },
-      { stepsForCycle: mappedStepsForCycle, ...this._meta() },
+      { stepsForCycle: mappedStepsForCycle, eventAt: mapEventAt(this, fn), ...this._meta() },
     );
   }
 
@@ -577,6 +577,20 @@ export class Sig {
             return { ...s, value: fn(Number(s.value), Number(b)), locs };
           })
       : null;
+    // A left operand with no honest grid (choose/irand) keeps its per-onset reader through the
+    // arithmetic, so `.begin(irand(16).div(16))` still draws at every event rather than freezing
+    // the cycle's first draw - and the step grid the highlighter reads agrees with what plays.
+    // The right operand's reader is folded in there but can't create one: when the LEFT has a real
+    // grid that structure is honest and must survive (n("0 1").add(irand(12)) keeps its two steps).
+    const eventAt = this.eventAt
+      ? (cyclePos) => {
+          const a = readEvent(this, cyclePos);
+          if (a.value == null) return { value: null, locs: a.locs };
+          const b = readEvent(otherSig, cyclePos);
+          if (b.value == null) return { value: null, locs: [...a.locs, ...b.locs] };
+          return { value: fn(Number(a.value), Number(b.value)), locs: [...a.locs, ...b.locs] };
+        }
+      : null;
     return new Sig(
       (t, cps, pos) => {
         const a = this.sample(t, cps, pos);
@@ -584,7 +598,7 @@ export class Sig {
         const b = otherSig.sample(t, cps, pos);
         return b == null ? null : fn(Number(a), Number(b));
       },
-      { stepsForCycle, ...this._meta() },
+      { stepsForCycle, eventAt, ...this._meta() },
     );
   }
 
@@ -709,22 +723,54 @@ export class Sig {
       return this.sample(t - (cyclePos - onset) / cps, cps, onset);
     };
 
-    // Steps span trigger-to-trigger; values sampled in cycle-time (cps=1) - same caveat as
-    // _binop for real-seconds sources like LFOs; the sample() path above is always exact.
+    // Steps span trigger-to-trigger; values read in cycle-time (cps=1) - same caveat as _binop for
+    // real-seconds sources like LFOs; the sample() path above is always exact. Reading through
+    // readEvent (rather than a bare sample) brings the source atom's highlight spans along, so a
+    // held pattern lights the value it froze alongside the trigger that froze it.
     const stepsForCycle = (cycle) => {
       const steps = trigSig
         .stepsForCycle(cycle)
         .filter((s) => truthy(s.value))
         .sort((a, b) => a.start - b.start);
-      return steps.map((s, i) => ({
-        start: s.start,
-        end: steps[i + 1]?.start ?? 1,
-        value: this.sample(cycle + s.start, 1),
-        loc: s.loc,
-      }));
+      return steps.map((s, i) => {
+        const ev = readEvent(this, cycle + s.start);
+        const locs = [...ev.locs, ...stepLocs(s)];
+        return {
+          start: s.start,
+          end: steps[i + 1]?.start ?? 1,
+          value: ev.value,
+          ...(locs.length ? { locs } : {}),
+          loc: s.loc,
+        };
+      });
     };
 
     return new Sig(sample, { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * `.seg(8)` - re-reads this pattern on an even grid of n steps per cycle, Strudel's
+   * `segment`/`seg`. Each step is a fresh event holding whatever this pattern is worth at that
+   * instant, so it's the operator that gives a *structureless* signal structure: `rand().seg(8)`
+   * is eighth-note stepped random, `s("breaks:19").fit().begin(irand(8).seg(8).div(8))` fires
+   * eight random slice starts per bar, and `s("breaks:19").fit().seg(16)` chops the break itself
+   * into sixteen retriggers. On a pattern that already has steps it re-quantizes onto the grid
+   * (each grid point takes the value sounding there; anything falling between grid points is
+   * skipped) - `n("0 1 2 3").seg(2)` plays "0 2".
+   *
+   * `n` may be patterned: `.seg("<8 16>")` alternates bar by bar, and `.seg("4 8")` reads as the
+   * windowed rate `"1*[4 8]"` does - a 4-per-cycle grid across the first half, 8-per-cycle across
+   * the second. Sample-and-hold against an arbitrary rhythm rather than an even grid is `.hold()`,
+   * which this is the evenly-spaced shorthand for.
+   */
+  seg(n) {
+    this._assertSampleable('seg');
+    return this.hold(segTrigger(n));
+  }
+
+  /** Strudel spells `.seg()` both ways; so do we. */
+  segment(n) {
+    return this.seg(n);
   }
 
   /**
@@ -1277,6 +1323,32 @@ function readEvent(sig, cyclePos) {
   return { value: sig.sample(cyclePos, 1, cyclePos), locs: [] };
 }
 
+// Carries a per-onset reader (Sig#eventAt) through a value mapping, so a signal with no honest
+// grid stays readable per event after .mapValue()/note()/n() have transformed it. Null - the
+// common case - when the source has no reader of its own to carry.
+function mapEventAt(sig, fn) {
+  if (!sig.eventAt) return null;
+  return (cyclePos) => {
+    const ev = sig.eventAt(cyclePos);
+    return ev.value == null ? ev : { value: fn(ev.value), locs: ev.locs };
+  };
+}
+
+// The even trigger grid behind Sig#seg: one whole-cycle pulse sped up by n - literally how mini's
+// "1*8" is built - so a patterned n inherits .fast()'s per-window semantics for free. The pulse is
+// rebuilt without source spans: mini('1') is synthesized here, not written by the user, and its
+// atom's [0,1] span would otherwise light the first character of their document.
+function segTrigger(n) {
+  const factor = n instanceof Sig && n.constVal !== undefined ? n.constVal : n;
+  if (typeof factor === 'number' && !(factor > 0)) {
+    throw new Error('[signal] .seg(n) takes a positive number of steps per cycle, e.g. .seg(8) or .seg("<8 16>")');
+  }
+  const pulse = mini('1').fast(factor);
+  return new Sig(() => 1, {
+    stepsForCycle: (cycle) => pulse.stepsForCycle(cycle).map((s) => ({ start: s.start, end: s.end, value: 1 })),
+  });
+}
+
 const CHORD_EPS = 1e-9;
 
 // Cuts one cycle's steps into the successive chords an arpeggiator sees (Sig#arp): a segment per
@@ -1724,22 +1796,71 @@ export function choose(...options) {
  * goes: `n(irand(8)).scale("F minor")` walks a random scale each cycle; sample it per note with
  * arithmetic (`n("0 0 0 0").add(irand(12))`) for a fresh draw at every onset; loop a fixed band with
  * `.rib(0, 4)`. Each independent irand() call draws independently.
+ *
+ * The bound may be PATTERNED, and a bound that subdivides the cycle gives the result that
+ * structure: `irand("8!8")` is eight draws in 0..7 per cycle, each its own event, so
+ * `.begin(irand("8!8").div(8))` retriggers a sampler eight times a bar (`.seg(8)` is the same
+ * thing said the other way round). A bound that stays whole-cycle - a number, `"8"`, `"<8 16>"` -
+ * imposes no grid and keeps the per-onset contract above, just with a bound that moves.
  */
 export function irand(n) {
-  const count = Math.max(1, Math.round(Number(n)));
   const seed = nextAutoSeed();
+  const nSig = typeof n === 'string' || n instanceof Sig ? toSignal(n) : null;
+  // A usable bound: a positive integer count of outcomes. Non-numeric (or resting) reads as a rest
+  // rather than a NaN draw; 0/negative clamps to 1, the historical behaviour for numbers.
+  const bound = (v) => {
+    if (v == null) return null;
+    const c = Math.round(Number(v));
+    return Number.isFinite(c) ? Math.max(1, c) : null;
+  };
+  if (!nSig && bound(n) == null) {
+    throw new Error('[signal] irand(n) takes a positive integer, a mini-notation string, or a signal - e.g. irand(8), irand("8!8")');
+  }
   // Keyed on the exact cycle position (integer cycle + Frac-snapped phase) so two float paths to the
   // same moment - or a rib()/hold() remap onto it - draw the identical integer.
-  const valueAt = (cyclePos) => {
+  const drawAt = (cyclePos, count) => {
     const cycle = Math.floor(cyclePos);
     return Math.floor(rngAtPos(cycle, cyclePos - cycle, seed) * count);
   };
-  const stepsForCycle = (cycle) => [{ start: 0, end: 1, value: valueAt(cycle) }];
-  const sample = (t, cps, pos) => valueAt(pos ?? t * cps);
+
+  // Does the bound genuinely subdivide the cycle, or is it one value per cycle? Only the former has
+  // a grid worth handing on; a whole-cycle bound must NOT impose one, or `.vel(irand("<8 16>"))`
+  // would freeze the bar's first draw where `.vel(irand(8))` draws per note. Probed over two cycles
+  // so an alternation isn't judged on one pick (the same probe _fastPatterned validates a rate by).
+  const grid = nSig?.stepsForCycle ?? null;
+  const subdivides =
+    grid &&
+    [0, 1].some((c) => {
+      const steps = grid(c);
+      return steps.length > 1 || steps.some((s) => s.start > 0 || s.end < 1);
+    });
+
+  if (subdivides) {
+    // Each bound step becomes one event, drawn at that step's onset. The bound's own atom rides
+    // along (`{ ...s }` keeps its spans), so the "8" that shaped a draw lights when it sounds.
+    const stepsForCycle = (cycle) =>
+      grid(cycle).map((s) => {
+        const count = bound(s.value);
+        return count == null ? { ...s, value: null } : { ...s, value: drawAt(cycle + s.start, count) };
+      });
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle });
+  }
+
   // Varies within the cycle like choose(), so as a control it is drawn per onset rather than
-  // holding the cycle's first draw: .vel(irand(2)) is a fresh coin at every note. No source atom
-  // of its own to light (irand is written as code, not mini notation), so no spans.
-  return new Sig(sample, { stepsForCycle, eventAt: (cyclePos) => ({ value: valueAt(cyclePos), locs: [] }) });
+  // holding the cycle's first draw: .vel(irand(2)) is a fresh coin at every note. A plain-number
+  // bound has no source atom to light (irand is written as code, not mini notation); a patterned
+  // one lends the spans of whichever atom set the bound there.
+  const eventAt = (cyclePos) => {
+    if (!nSig) return { value: drawAt(cyclePos, bound(n)), locs: [] };
+    const ev = readEvent(nSig, cyclePos);
+    const count = bound(ev.value);
+    return { value: count == null ? null : drawAt(cyclePos, count), locs: ev.locs };
+  };
+  const stepsForCycle = (cycle) => {
+    const ev = eventAt(cycle);
+    return [{ start: 0, end: 1, value: ev.value, ...(ev.locs.length ? { locs: ev.locs } : {}) }];
+  };
+  return new Sig((t, cps, pos) => eventAt(pos ?? t * cps).value, { stepsForCycle, eventAt });
 }
 
 // What a note-less synth("X") plays: C2 (MIDI 24 in this package's c5 = 60 convention), one

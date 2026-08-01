@@ -740,12 +740,21 @@ n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scal
             <tr><td><code>.echo(n, dt, fn?)</code></td><td>Overlay <code>n</code> delayed copies, each <code>dt</code> cycles further along — a pattern-level tape echo.</td></tr>
             <tr><td><code>.arp(pat)</code></td><td>Arpeggiate chords — the notes sounding together become a ladder, and <code>pat</code>'s numbers pick them off: <code>note("[c3,e3,g3]").arp("0 1 2 3")</code>. <code>0</code> is the lowest tone, and an index past the top wraps back to the bottom an octave up (<code>3</code> = c3+12), negatives off the top an octave down (<code>-1</code> = g3−12). The chord is whatever is ringing at each onset — a stack, or a drawn <code>pianoroll()</code> chord whose notes are all different lengths — so the arpeggio is one note at a time; one full pass of <code>pat</code> is squeezed into each chord.</td></tr>
             <tr><td><code>.hold(trig)</code></td><td>Sample-and-hold: freeze this signal at each onset of <code>trig</code>. <code>rand().hold("1*8")</code> is stepped random.</td></tr>
+            <tr><td><code>.seg(n)</code></td><td>Sample-and-hold on an even grid of <code>n</code> steps per cycle — the shorthand for <code>.hold("1*n")</code>, and the way to give a structureless signal structure. <code>rand().seg(8)</code> is eighth-note stepped random; <code>s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code> fires eight random slice starts a bar. <code>n</code> may be patterned (<code>.seg("&lt;8 16&gt;")</code>).</td></tr>
           </table>
           <p>
             And <code>choose("0", "3", "5")</code> is a signal that randomly picks one option per cycle
             — weight a pick with a <code>[value, weight]</code> pair. It drops in anywhere a signal goes:
             <code>n(choose("0", "3", "7"))</code>, <code>.speed(choose(0.5, 1, 2))</code>,
             <code>s(choose("bd", "hh"))</code>.
+          </p>
+          <p>
+            <code>irand(8)</code> is its numeric cousin — a random integer in 0…7, drawn per cycle as a
+            pattern and per onset as a control (<code>.vel(irand(2))</code> is a fresh coin at every note).
+            Its bound can be a pattern too, and a bound that <em>subdivides</em> the cycle hands the result
+            that structure: <code>irand("8!8")</code> is eight draws a bar, each its own event, so
+            <code>.begin(irand("8!8").div(8))</code> retriggers eight times — the same thing
+            <code>.begin(irand(8).seg(8).div(8))</code> says the other way round.
           </p>
         </section>
 
@@ -865,6 +874,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>.degrade(p)</code> · <code>.ply(n)</code> · <code>.echo(n, dt)</code></td><td>rhythmic reshaping</td></tr>
             <tr><td><code>.arp(pat)</code></td><td>arpeggiate a chord (indices wrap by octaves)</td></tr>
             <tr><td><code>.hold(trig)</code></td><td>sample &amp; hold</td></tr>
+            <tr><td><code>.seg(n)</code></td><td>sample &amp; hold on an even n-per-cycle grid</td></tr>
           </table>
           <table>
             <tr><th>Session</th><th></th></tr>

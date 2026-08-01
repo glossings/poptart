@@ -214,7 +214,7 @@ async function init() {
 function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-    'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'scale', 'range', 'synth', 'fx', 'param',
+    'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'seg', 'segment', 'scale', 'range', 'synth', 'fx', 'param',
     'gain', 'pan', 'o', 'vel', 'clip', 'as',
   ];
   for (const m of METHODS) {
