@@ -139,6 +139,14 @@
                 <select id="audioDeviceSelect" title="which audio device the engine plays to"></select>
               </label>
             </section>
+            <section id="editorSection">
+              <h2>editor</h2>
+              <label class="settings-row settings-check"
+                title="show a function's signature and description beside the autocomplete popup, and on ctrl+hover over a name in the code">
+                <input id="docTooltipsToggle" type="checkbox" checked />
+                documentation tooltips
+              </label>
+            </section>
             <section id="librarySection">
               <h2>sample library</h2>
               <label class="settings-row">folder
@@ -267,6 +275,7 @@
     <script src="/vendor/codemirror/addon/comment/comment.js"></script>
     <script src="/vendor/codemirror/addon/search/searchcursor.js"></script>
     <script src="/vendor/codemirror/keymap/sublime.js"></script>
+    <script src="api-docs.js"></script>
     <script src="client.js"></script>
   </body>
 </html>

@@ -172,7 +172,11 @@ knowingly want LAN access (say, a collaborative jam on a trusted network), set
 The editor autocompletes plugin names inside `.synth("…")`/`.fx("…")`, real VST parameter names
 inside `.param("…")` (from the loaded chain — evaluate once with a `.synth(...)` so the plugin
 loads, then `param(` completions appear), and method/builder names elsewhere (Ctrl+Space opens
-it manually). The **params** panel lists every parameter of every plugin in the current chain,
+it manually). Builder and method completions come with their signature and a one-line
+description, and the highlighted one is described in full in a panel beside the popup; hold
+**Ctrl** and hover over any name already in the buffer to see the same thing. Both live in
+`public/api-docs.js`, and both switch off under *settings → editor → documentation tooltips*.
+The **params** panel lists every parameter of every plugin in the current chain,
 searchable; click one to copy its name. Eval/stop hotkeys work with focus anywhere on the page,
 and the editor uses CodeMirror's sublime keymap.
 

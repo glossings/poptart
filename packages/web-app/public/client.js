@@ -1,8 +1,9 @@
 'use strict';
 
 // Browser UI: CodeMirror editor with poptart-aware autocomplete (real VST parameter names
-// inside `.param("…")`, plugin names inside `.synth("…")`/`.fx("…")`, method/builder names
-// elsewhere), live playback highlighting of mini-notation (the atom currently sounding lights
+// inside `.param("…")`, plugin names inside `.synth("…")`/`.fx("…")`, documented method/builder
+// names elsewhere - see api-docs.js, which also feeds the doc panel beside the popup and the
+// ctrl-hover tooltip), live playback highlighting of mini-notation (the atom currently sounding lights
 // up, Strudel-style), a searchable params panel, plugin browser, an interactive theme editor,
 // and transport - all over the same fetch('/api/…') endpoints. No build step: CodeMirror 5 is
 // loaded as plain scripts from /vendor/codemirror/, and pattern-core's own mini parser + label
@@ -83,19 +84,8 @@ function copyText(text, what) {
 let chainSlots = [];
 let knownPlugins = [];
 
-const BUILDERS = [
-  'Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
-  'choose', 'irand', 'keyboard', 'tap', 'pianoroll',
-  // The sampler config methods double as top-level control builders (x.mul(speed("-1"))).
-  'i', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release',
-  'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
-];
-const METHODS = [
-  'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'slow', 'rate', 'phase', 'curve',
-  'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'seg', 'segment', 'rib', 'as', 'degrade', 'ply', 'echo', 'arp',
-  'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
-];
+// BUILDERS / METHODS / API_DOCS / lookupDoc come from api-docs.js (loaded just before this
+// script): one documented entry per userland name, and the word lists are derived from it.
 
 // The sublime keymap supplies the expected editing chords (Cmd/Ctrl-/ comment, Cmd/Ctrl-D
 // select-next, etc.); extraKeys layers transport + VS Code-style line moving/duplication
@@ -171,7 +161,7 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Shift-Alt-Up': (cm) => copyLines(cm, 'up'),
     'Alt-Up': 'swapLineUp',
     'Alt-Down': 'swapLineDown',
-    'Ctrl-Space': (cm) => cm.showHint({ hint: poptartHint, completeSingle: false }),
+    'Ctrl-Space': () => showPoptartHint(),
   },
 });
 
@@ -604,13 +594,36 @@ function midiDeviceHints(cur, typed) {
   return fetchMidiDevices().then(toResult);
 }
 
-function wordHints(cur, typed, words) {
+function wordHints(cur, typed, words, context) {
   const pool = words.map((w) => ({ key: w }));
-  const completions = rankedMatches(pool, typed, 24).map((item) => ({
-    text: `${item.key}(`,
-    displayText: `${item.key}(`,
-  }));
+  const completions = rankedMatches(pool, typed, 24).map((item) => {
+    const doc = lookupDoc(item.key, context);
+    // A value (macro1..8) completes bare; everything else is a call, so type its paren too.
+    const text = doc && doc.call === false ? item.key : `${item.key}(`;
+    return { text, displayText: text, doc, render: doc ? renderHintRow : undefined };
+  });
   return hintResult(cur, typed, completions);
+}
+
+// One completion row: name, signature, and the start of its description - so the list itself
+// says what each name is, without waiting for the doc panel beside it.
+function renderHintRow(el, data, completion) {
+  const { name, display, desc } = completion.doc;
+  const nameEl = document.createElement('span');
+  nameEl.className = 'hint-name';
+  nameEl.textContent = name;
+  el.appendChild(nameEl);
+  const args = display.slice(display.indexOf(name) + name.length); // "(factor)", or "" for a value
+  if (args) {
+    const argsEl = document.createElement('span');
+    argsEl.className = 'hint-args';
+    argsEl.textContent = args;
+    el.appendChild(argsEl);
+  }
+  const descEl = document.createElement('span');
+  descEl.className = 'hint-desc';
+  descEl.textContent = desc;
+  el.appendChild(descEl);
 }
 
 function poptartHint(cm) {
@@ -631,9 +644,9 @@ function poptartHint(cm) {
 
   // After a dot → chain methods; bare word → top-level builders.
   m = before.match(/\.([A-Za-z_]*)$/);
-  if (m) return wordHints(cur, m[1], METHODS);
+  if (m) return wordHints(cur, m[1], METHODS, 'method');
   m = before.match(/(?:^|[^.\w"'])([A-Za-z_]+)$/);
-  if (m) return wordHints(cur, m[1], BUILDERS);
+  if (m) return wordHints(cur, m[1], BUILDERS, 'builder');
 
   return { list: [], from: cur, to: cur };
 }
@@ -644,9 +657,175 @@ cm.on('inputRead', (cm, change) => {
   if (cm.state.completionActive) return;
   const typedChar = change.text[change.text.length - 1].slice(-1);
   if (/[\w"'( ]/.test(typedChar)) {
-    cm.showHint({ hint: poptartHint, completeSingle: false });
+    showPoptartHint();
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// Documentation tooltips - the same api-docs.js entries in two places: a panel beside the
+// autocomplete popup describing whichever completion is selected, and a ctrl-hover tooltip over
+// any documented name already in the buffer. Both off together via the settings toggle.
+// ---------------------------------------------------------------------------------------------
+
+const DOC_TOOLTIPS_KEY = 'poptart-doc-tooltips';
+let docTooltipsEnabled = localStorage.getItem(DOC_TOOLTIPS_KEY) !== '0'; // default on
+
+function setDocTooltips(on) {
+  docTooltipsEnabled = on;
+  localStorage.setItem(DOC_TOOLTIPS_KEY, on ? '1' : '0');
+  if (!on) {
+    hideHintDoc();
+    hideHoverDoc();
+  }
+}
+
+// Signature / description / example, the shared body of both boxes.
+function renderDocBox(el, doc) {
+  el.innerHTML = '';
+  const sig = document.createElement('div');
+  sig.className = 'doc-sig';
+  sig.textContent = doc.display;
+  const desc = document.createElement('div');
+  desc.className = 'doc-desc';
+  desc.textContent = doc.desc;
+  el.append(sig, desc);
+  if (doc.eg) {
+    const eg = document.createElement('div');
+    eg.className = 'doc-eg';
+    eg.textContent = doc.eg;
+    el.appendChild(eg);
+  }
+}
+
+function makeDocBox(className) {
+  const el = document.createElement('div');
+  el.className = `doc-box ${className}`;
+  el.style.display = 'none';
+  document.body.appendChild(el);
+  return el;
+}
+
+// --- the panel beside the completion popup ---
+
+let hintDocEl = null;
+
+function hideHintDoc() {
+  if (hintDocEl) hintDocEl.style.display = 'none';
+}
+
+// Park the panel next to the hint list, flipping to its left when the window runs out.
+function showHintDoc(doc, listEl) {
+  if (!hintDocEl) hintDocEl = makeDocBox('doc-box-hint');
+  renderDocBox(hintDocEl, doc);
+  hintDocEl.style.display = 'block';
+  hintDocEl.style.left = '0px'; // measure at a known position before deciding where it goes
+  hintDocEl.style.top = '0px';
+  const list = listEl.getBoundingClientRect();
+  const box = hintDocEl.getBoundingClientRect();
+  const gap = 6;
+  const left = list.right + gap + box.width <= window.innerWidth - 4 ? list.right + gap : list.left - gap - box.width;
+  hintDocEl.style.left = `${Math.max(4, left)}px`;
+  hintDocEl.style.top = `${Math.max(4, Math.min(list.top, window.innerHeight - box.height - 4))}px`;
+}
+
+// Wrap a hint source so whichever completion is highlighted shows its docs. Completions without
+// a `doc` (param names, plugins, MIDI devices) just leave the panel closed.
+function withDocPanel(hintFn) {
+  return (...args) => {
+    const result = hintFn(...args);
+    const attach = (res) => {
+      if (!res || !res.list) return res;
+      CodeMirror.on(res, 'select', (completion, node) => {
+        if (docTooltipsEnabled && completion && completion.doc) showHintDoc(completion.doc, node.parentNode);
+        else hideHintDoc();
+      });
+      CodeMirror.on(res, 'close', hideHintDoc);
+      return res;
+    };
+    return result && typeof result.then === 'function' ? result.then(attach) : attach(result);
+  };
+}
+
+function showPoptartHint() {
+  cm.showHint({ hint: withDocPanel(poptartHint), completeSingle: false });
+}
+
+// --- ctrl-hover over a name in the buffer ---
+
+let hoverDocEl = null;
+let hoverDocKey = null; // the token the tooltip is currently showing, so a jiggle doesn't rerender
+
+function hideHoverDoc() {
+  if (hoverDocEl) hoverDocEl.style.display = 'none';
+  hoverDocKey = null;
+}
+
+function showHoverDoc(doc, key, tokenBox) {
+  if (!hoverDocEl) hoverDocEl = makeDocBox('doc-box-hover');
+  // Already open on this very token - moving the pointer within it shouldn't re-measure anything.
+  if (hoverDocKey === key && hoverDocEl.style.display === 'block') return;
+  renderDocBox(hoverDocEl, doc);
+  hoverDocKey = key;
+  hoverDocEl.style.display = 'block';
+  hoverDocEl.style.left = '0px';
+  hoverDocEl.style.top = '0px';
+  const box = hoverDocEl.getBoundingClientRect();
+  const left = Math.min(tokenBox.left, window.innerWidth - box.width - 4);
+  // Below the token by default; above it when the tooltip would fall off the bottom.
+  const below = tokenBox.bottom + 6;
+  const top = below + box.height <= window.innerHeight - 4 ? below : Math.max(4, tokenBox.top - 6 - box.height);
+  hoverDocEl.style.left = `${Math.max(4, left)}px`;
+  hoverDocEl.style.top = `${top}px`;
+}
+
+const IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
+
+// The documented name under the pointer, if any. CodeMirror's coordsChar snaps to the nearest
+// character, so the pointer is checked against the token's own box before we call it a hover.
+function docAtCoords(clientX, clientY) {
+  const pos = cm.coordsChar({ left: clientX, top: clientY }, 'window');
+  const line = cm.getLine(pos.line);
+  if (line == null) return null;
+  let token = cm.getTokenAt(pos, true);
+  // getTokenAt returns the token ENDING at pos, so on the left edge of a name we get whatever
+  // precedes it (the dot, a space) - look one character right before giving up.
+  if ((!token || !IDENTIFIER_RE.test(token.string)) && pos.ch < line.length) {
+    token = cm.getTokenAt(CodeMirror.Pos(pos.line, pos.ch + 1), true);
+  }
+  if (!token || !IDENTIFIER_RE.test(token.string)) return null;
+  const startBox = cm.charCoords(CodeMirror.Pos(pos.line, token.start), 'window');
+  const endBox = cm.charCoords(CodeMirror.Pos(pos.line, token.end), 'window');
+  if (clientY < startBox.top || clientY > startBox.bottom) return null;
+  if (clientX < startBox.left || clientX > endBox.left) return null;
+  const context = /\.\s*$/.test(line.slice(0, token.start)) ? 'method' : 'builder';
+  const doc = lookupDoc(token.string, context);
+  return doc ? { doc, key: `${token.string}:${context}`, box: startBox } : null;
+}
+
+const editorWrapper = cm.getWrapperElement();
+let lastHoverPoint = null; // so holding ctrl without moving the mouse still opens the tooltip
+
+function updateHoverDoc(point, ctrlHeld) {
+  lastHoverPoint = point;
+  if (!point || !ctrlHeld || !docTooltipsEnabled || cm.state.completionActive) {
+    hideHoverDoc();
+    return;
+  }
+  const hit = docAtCoords(point.x, point.y);
+  if (!hit) hideHoverDoc();
+  else showHoverDoc(hit.doc, hit.key, hit.box);
+}
+
+editorWrapper.addEventListener('mousemove', (e) => updateHoverDoc({ x: e.clientX, y: e.clientY }, e.ctrlKey));
+editorWrapper.addEventListener('mouseleave', () => updateHoverDoc(null, false));
+// Ctrl pressed with the pointer already parked over a name, and released again.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Control') updateHoverDoc(lastHoverPoint, true);
+});
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'Control' || !e.ctrlKey) hideHoverDoc();
+});
+cm.on('scroll', hideHoverDoc); // the code moved out from under the pointer
 
 // ---------------------------------------------------------------------------------------------
 // Interactive LFO shape editor - click the `lfo` name in any `lfo(...)` call (just the name: its
@@ -3107,6 +3286,12 @@ audioDeviceSelect.addEventListener('change', async () => {
   }
 });
 
+// Editor settings. The docs toggle governs both documentation tooltips - the panel beside the
+// autocomplete popup and the ctrl-hover one (see the tooltips section above).
+const docTooltipsToggle = document.getElementById('docTooltipsToggle');
+docTooltipsToggle.checked = docTooltipsEnabled;
+docTooltipsToggle.addEventListener('change', () => setDocTooltips(docTooltipsToggle.checked));
+
 // Sample-library folder. The saved folder is what `s(...)` reads packs from; when
 // POPTART_SAMPLES_DIR is set in the environment it overrides this, so the field goes read-only
 // and says so.
@@ -3876,9 +4061,6 @@ const PREBAKE_STUB_NAMES = [...new Set(BUILDERS)];
 function prebakeScope() {
   const names = [];
   const values = [];
-  // Each builder is a chainable Proxy: callable (so `s("bd*4")` works), tolerant of property
-  // sets (so `Signal.prototype.foo = …` doesn't throw), and every access/call returns a stub.
-  for (const n of PREBAKE_STUB_NAMES) { names.push(n); values.push(makeChainStub()); }
   const api = {
     hotkey: (combo, handler) => addHotkey(userHotkeys, combo, handler, 'user'),
     editor,
@@ -3897,6 +4079,16 @@ function prebakeScope() {
     parseScaleName: (scaleName) => notesMod.parseScaleName(scaleName),
   };
   for (const [n, v] of Object.entries(api)) { names.push(n); values.push(v); }
+  // Each remaining builder is a chainable Proxy: callable (so `s("bd*4")` works), tolerant of
+  // property sets (so `Signal.prototype.foo = …` doesn't throw), and every access/call returns a
+  // stub. Names the api above already provides for real (the music-theory helpers, which are
+  // builders too) keep the real one - and must not be pushed twice, since a duplicate parameter
+  // name is a SyntaxError in the strict-mode function the sandbox compiles.
+  for (const n of PREBAKE_STUB_NAMES) {
+    if (n in api) continue;
+    names.push(n);
+    values.push(makeChainStub());
+  }
   return { names, values };
 }
 

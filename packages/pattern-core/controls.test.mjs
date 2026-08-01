@@ -101,7 +101,9 @@ test('.when() over a whole-cycle condition switches bar by bar', () => {
 });
 
 test('.when() keeps a control that both sides share', () => {
-  const track = s('bd').speed(2).when('<1 0>', (x) => x.mul(begin(0.5)));
+  // .add(), not .mul(): begin's resting default is 0, so a multiply into an unset begin channel
+  // is 0 (see _ctlBinop - a control combines with what's there, it doesn't replace it).
+  const track = s('bd').speed(2).when('<1 0>', (x) => x.add(begin(0.5)));
   assert.equal(cfgAt(track, 'speed', 0.5), 2);
   assert.equal(cfgAt(track, 'speed', 1.5), 2, 'speed was never conditional');
   assert.equal(cfgAt(track, 'begin', 0.5), 0.5);

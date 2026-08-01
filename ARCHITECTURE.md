@@ -74,6 +74,9 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   browser and pattern-core + osc-engine.
 - `public/client.js` — the browser app: CodeMirror editor, transport, plugin browser, sample
   browser, params panel, macros, settings, theming.
+- `public/api-docs.js` — the editor's API reference: one entry per userland name (signature +
+  description). Drives the autocomplete word lists, the popup's doc panel, and the ctrl-hover
+  tooltip; `api-docs.test.js` checks it against the real builders and `Sig.prototype`.
 - `param-mapping.js` — loads `mappings/*.json` unit files that turn normalized `0..1` VST
   parameters into real-world units (Hz, etc.) with min/max/curve; hot-reloads per eval.
 
