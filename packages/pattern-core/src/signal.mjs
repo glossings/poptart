@@ -921,6 +921,75 @@ export class Sig {
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
+  /**
+   * Arpeggiates chords: the notes sounding SIMULTANEOUSLY become a sequence, picked out by an
+   * index pattern. `0` is the chord's lowest note, `1` the next up, and so on; an index past the
+   * top wraps back to the bottom an OCTAVE higher, and a negative one wraps off the top an octave
+   * down. On a C-E-G triad that makes 0=c, 1=e, 2=g, 3=c+12, 4=e+12, -1=g-12, -2=e-12 - so
+   * `note("[c3,e3,g3]").arp("0 1 2 3")` climbs the triad and lands on the octave.
+   *
+   * The index pattern is SQUEEZED into each chord's own span, mini-notation's "[...]" applied to a
+   * whole signal: one full pass fits each chord however long the chord is, so `.arp("0 1 2")`
+   * triplets a whole-cycle chord and puts three notes in each half of
+   * `note("[c3,e3,g3] [f3,a3,c4]")`. Anything that makes a signal works as the index - a mini
+   * string, `irand(3)` (a random chord tone per chord), an alternation like `"<0 1> 2"` (which
+   * advances chord by chord, since each chord sees the next of the squeezed pattern's cycles) -
+   * and a rest (`~`) leaves its slot silent.
+   *
+   * The chord at any moment is simply everything RINGING then, so the arpeggio is always one note
+   * at a time (only the index pattern can stack it: `.arp("0 1 [2,3]")`). It re-reads at every
+   * onset: a new note joining restarts the pass with the fuller chord, and notes of unequal length
+   * - a drawn pianoroll() chord, a triad struck over a held pedal - are one chord, not several
+   * overlapping arpeggios. A lone note is a chord of one, so each index is an octave
+   * transposition of it (`note("c3 e3").arp("0 1")` plays each note, then its octave). The pass
+   * runs until the next onset or until the chord dies away, and a chord still ringing at the
+   * cycle line ("<[c3,e3,g3]@2>") picks the arpeggio up again in the next cycle.
+   *
+   * Octaves are MIDI octaves (+12), so on a DEGREE pattern apply `.scale()` first -
+   * `n("[0,2,4]").scale("F minor").arp("0 1 2 3")` - or the wrap lands 12 scale steps up.
+   */
+  arp(indices) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .arp() needs a step pattern, e.g. note("[c3,e3,g3]").arp("0 1 2 3")');
+    }
+    if (this.sampler) {
+      throw new Error('[signal] .arp() reads the pattern\'s own notes - arpeggiate before .s(), e.g. note("[c3,e3,g3]").arp("0 1 2").s("pluck")');
+    }
+    const idxSig = toSignal(indices);
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => {
+      const out = [];
+      for (const seg of chordSegments(base(cycle))) {
+        const span = seg.end - seg.start;
+        // The chord's tones, low to high - the ladder the indices climb. Values are already MIDI
+        // numbers on a note()/n() pattern; a bare mini string ("[c3,e3,g3]".arp(...)) still holds
+        // note-name strings, so parse the same way the note() builder would.
+        const tones = seg.members
+          .map((m) => ({ midi: parseNoteValue(m.value), step: m }))
+          .sort((a, b) => a.midi - b.midi);
+        for (const idx of squeezeSteps(idxSig, cycle, seg.start, span)) {
+          if (idx.value == null) continue; // a rest in the index pattern = a gap in the arpeggio
+          const i = Math.round(Number(idx.value));
+          if (!Number.isFinite(i)) continue;
+          const len = tones.length;
+          const tone = tones[((i % len) + len) % len];
+          const start = seg.start + idx.start * span;
+          const end = seg.start + Math.min(1, idx.end) * span; // a tie past the arp pattern's own cycle stops at the chord's end
+          if (end <= start) continue;
+          // Each arp note is a fresh attack even when the chord it came from was a held tail
+          // (cont) - only a tie WITHIN the index pattern ("0 _ 1") stays a continuation.
+          const step = { ...tone.step, start, end, value: tone.midi + 12 * Math.floor(i / len), cont: idx.cont || undefined };
+          // Light the chord tone that sounded and the index that chose it, as crossMerge does.
+          const locs = [...stepLocs(tone.step), ...stepLocs(idx)];
+          if (locs.length) step.locs = locs;
+          out.push(step);
+        }
+      }
+      return out.sort((a, b) => a.start - b.start);
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
   // -------------------------------------------------------------------------------------------
   // Sampler config - only meaningful on s("pack") patterns. Every setter accepts a number, a
   // mini string, or any Sig; the value is sampled at each event's onset, so patterns and LFOs
@@ -1206,6 +1275,54 @@ function readEvent(sig, cyclePos) {
     return { value: found ? found.value : null, locs: found ? stepLocs(found) : [] };
   }
   return { value: sig.sample(cyclePos, 1, cyclePos), locs: [] };
+}
+
+const CHORD_EPS = 1e-9;
+
+// Cuts one cycle's steps into the successive chords an arpeggiator sees (Sig#arp): a segment per
+// ONSET, holding the notes sounding at that instant, low to high. Every note that has begun and
+// not yet ended counts, so a chord is whatever is ringing together - a "[c,e,g]" stack, a drawn
+// pianoroll() chord whose notes are all DIFFERENT lengths, a triad struck over a held pedal note.
+// Segmenting by onset rather than by identical spans is what keeps the arpeggio monophonic:
+// ragged note lengths would otherwise read as several one-note chords, each running its own pass
+// of the index pattern on top of the others.
+//
+// A segment runs until the next onset, or until its own notes have all died away, whichever comes
+// first - and never past the cycle end, since a chord ringing on is reported again next cycle (as
+// `cont` tails) and picks the arpeggio up there.
+function chordSegments(steps) {
+  const sounding = steps.filter((s) => s.value != null);
+  const onsets = [];
+  for (const start of sounding.map((s) => s.start).sort((a, b) => a - b)) {
+    if (!onsets.length || start - onsets[onsets.length - 1] > CHORD_EPS) onsets.push(start);
+  }
+  const segments = [];
+  for (let i = 0; i < onsets.length; i++) {
+    const at = onsets[i];
+    const members = sounding.filter((s) => s.start <= at + CHORD_EPS && s.end > at + CHORD_EPS);
+    if (!members.length) continue;
+    const ringsTo = Math.max(...members.map((s) => s.end));
+    const end = Math.min(onsets[i + 1] ?? Infinity, ringsTo, 1);
+    if (end - at <= CHORD_EPS) continue;
+    segments.push({ start: at, end, members });
+  }
+  return segments;
+}
+
+// One full pass of `sig` compressed into the span [start, start+span) of `cycle` - mini-notation's
+// "[...]" applied to a signal, in the signal's OWN step coordinates (0..1 across the span; the
+// caller rescales). Which of the signal's cycles plays follows the span's position on the grid it
+// tiles, so a half-cycle chord steps through two of them per cycle and an alternation inside the
+// pattern advances chord by chord. A signal with no honest grid - a number, an LFO, or a
+// within-cycle one like irand()/choose() - has no pass to squeeze, so it contributes one value,
+// read (with its highlight spans) at the span's onset.
+function squeezeSteps(sig, cycle, start, span) {
+  const from = cycle + start;
+  if (!sig.stepsForCycle || sig.eventAt) {
+    const ev = readEvent(sig, from);
+    return [{ start: 0, end: 1, value: ev.value, locs: ev.locs }];
+  }
+  return sig.stepsForCycle(Math.floor(from / span + CHORD_EPS));
 }
 
 // The bundle trigger cross-product (Step 2 of the all-signals rewrite). Cross-products a base

@@ -91,7 +91,7 @@ const BUILDERS = [
 const METHODS = [
   'scale', 'synth', 'fx', 'param', 'gain', 'pan', 'o', 'vel', 'clip', 'range', 'fast', 'slow', 'rate', 'phase', 'curve',
   'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
-  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'rib', 'as', 'degrade', 'ply', 'echo',
+  'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'rib', 'as', 'degrade', 'ply', 'echo', 'arp',
   'i', 'n', 'note', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice',
 ];
 
