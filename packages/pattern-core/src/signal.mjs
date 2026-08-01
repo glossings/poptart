@@ -182,8 +182,19 @@ export class Sig {
       if (!this.sampler.note) {
         throw new Error('[signal] .scale() on a sampler needs degrees or notes first - e.g. s("pluck").n("0 2 4").scale("F minor")');
       }
-      const mapped = this.sampler.note.mapValue(mapFor(this.sampler.note.pitchKind));
-      out = this._clone({ sampler: { ...this.sampler, note: mapped } });
+      const map = mapFor(this.sampler.note.pitchKind);
+      const mapped = this.sampler.note.mapValue(map);
+      // The repitch note also rides on each event (step.cfg.note, see crossMerge) - that merged
+      // copy is what the scheduler reads, so it has to be mapped too or .scale() would quantize
+      // the channel and leave the events playing their raw degrees.
+      const base = this.stepsForCycle;
+      const stepsForCycle = base
+        ? (cycle) =>
+            base(cycle).map((s) =>
+              s.cfg && s.cfg.note !== undefined ? { ...s, cfg: { ...s.cfg, note: Number(map(s.cfg.note)) } } : s,
+            )
+        : base;
+      out = this._clone({ sampler: { ...this.sampler, note: mapped }, stepsForCycle });
     } else {
       out = this.mapValue(mapFor(this.pitchKind));
     }
@@ -444,7 +455,7 @@ export class Sig {
     // continuous vel (vel(sine)/vel(0.6)) has no grid, so crossMerge no-ops and the scheduler
     // samples the channel at each onset instead. Synth and sampler tracks carry it identically -
     // the walker reads step.vel / the channel uniformly, mapping it to MIDI velocity or sample gain.
-    const stepsForCycle = crossMerge(this.stepsForCycle, sig, 'vel', Number);
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('vel'));
     return this._clone({ noteChannels: { ...this.noteChannels, vel: sig }, stepsForCycle });
   }
 
@@ -580,27 +591,48 @@ export class Sig {
     // for an LFO operand inside a note pattern. The continuous sample() path below stays in
     // real time, so param-signal math is always exact.
     const stepsForCycle = this.stepsForCycle
-      ? (cycle) =>
-          this.stepsForCycle(cycle).map((s) => {
-            if (s.value == null) return s;
+      ? (cycle) => {
+          const otherSteps = otherSig.stepsForCycle ? otherSig.stepsForCycle(cycle) : null;
+          const out = [];
+          for (const s of this.stepsForCycle(cycle)) {
+            if (s.value == null) {
+              out.push(s);
+              continue;
+            }
             const mid = (s.start + s.end) / 2;
+            // A `,`-stack on the right is several values sounding AT ONCE, so it fans each event
+            // out into one event per layer instead of collapsing to whichever layer sample() picks:
+            // `.add(note("0,7"))` keeps the note and sounds its fifth alongside it, `.add("-0.3,0.3")`
+            // detunes two ways at once. Layers cross-product with the left's own stack, so a chord
+            // plus a stacked offset gives every combination - which is what "both at the same time"
+            // means either side of the operator.
+            const layers = otherSteps ? coveringSteps(otherSteps, mid) : [];
+            if (layers.length > 1) {
+              for (const b of layers) {
+                out.push({ ...s, value: fn(Number(s.value), Number(b.value)), locs: [...stepLocs(s), ...stepLocs(b)] });
+              }
+              continue;
+            }
             const b = otherSig.sample(cycle + mid, 1);
-            if (b == null) return { ...s, value: null };
+            if (b == null) {
+              out.push({ ...s, value: null });
+              continue;
+            }
             // Union the highlight spans of both operands, so `n("0 1").add("7 0")` lights the
             // live atom in each literal - the value that sounds genuinely propagated from both.
-            let locs = stepLocs(s);
-            if (otherSig.stepsForCycle) {
-              const bStep = coveringStep(otherSig.stepsForCycle(cycle), mid);
-              if (bStep) locs = [...locs, ...stepLocs(bStep)];
-            }
-            return { ...s, value: fn(Number(s.value), Number(b)), locs };
-          })
+            const locs = layers.length === 1 ? [...stepLocs(s), ...stepLocs(layers[0])] : stepLocs(s);
+            out.push({ ...s, value: fn(Number(s.value), Number(b)), locs });
+          }
+          return out;
+        }
       : null;
     // A left operand with no honest grid (choose/irand) keeps its per-onset reader through the
     // arithmetic, so `.begin(irand(16).div(16))` still draws at every event rather than freezing
     // the cycle's first draw - and the step grid the highlighter reads agrees with what plays.
     // The right operand's reader is folded in there but can't create one: when the LEFT has a real
     // grid that structure is honest and must survive (n("0 1").add(irand(12)) keeps its two steps).
+    // One event in, one event out here - a per-onset reader has no grid to fan a stacked operand
+    // out into, so `,`-stacking only multiplies events on the step path above.
     const eventAt = this.eventAt
       ? (cyclePos) => {
           const a = readEvent(this, cyclePos);
@@ -1176,9 +1208,11 @@ export class Sig {
       throw new Error(`[signal] .${method}() only applies to a sampler pattern - start with s("pack")`);
     }
     // Patterned values mix their structure into the event grid like .vel()/.note() do, so
-    // s("breaks2").slice("0 1 2 3") plays four quarter-cycle events, not one. 'auto' (fit) and
-    // plain-number Sigs have no stepsForCycle, so crossMerge leaves the grid alone.
-    const stepsForCycle = sig instanceof Sig ? crossMerge(this.stepsForCycle, sig) : this.stepsForCycle;
+    // s("breaks2").slice("0 1 2 3") plays four quarter-cycle events, not one, and a `,`-stacked
+    // value plays its layers at once - `.speed("1.1,0.9")` is two hits, detuned apart. Each event
+    // carries the layer's own value (stampCfg), which is what the scheduler reads back. 'auto'
+    // (fit) and plain-number Sigs have no stepsForCycle, so crossMerge leaves the grid alone.
+    const stepsForCycle = sig instanceof Sig ? crossMerge(this.stepsForCycle, sig, stampCfg(key)) : this.stepsForCycle;
     return this._clone({ sampler: { ...this.sampler, [key]: sig }, stepsForCycle });
   }
 
@@ -1357,7 +1391,7 @@ export class Sig {
       return this._clone({ keyboardRoute: { ...this.keyboardRoute, note: sig } });
     }
     if (this.sampler) {
-      const stepsForCycle = crossMerge(this.stepsForCycle, sig);
+      const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampCfg('note'));
       return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
     }
     // Synth track: the note signal becomes the pattern itself; everything chained so far
@@ -1434,15 +1468,13 @@ function factorWindows(factorSig, cycle) {
   return [{ start: 0, end: 1, rate: Number(factorSig.sample(cycle + 0.5, 1)), locs: [] }];
 }
 
-// The step of `steps` sounding at cycle-phase `phase` (fraction of a cycle), or undefined - the
-// last covering match wins, matching mini.mjs's sampleStepAt. Used to recover the right operand's
-// atom span in _binop so both operands' highlight locations survive the merge.
-function coveringStep(steps, phase) {
-  let found;
-  for (const s of steps) {
-    if (s.value != null && phase >= s.start && phase < s.end) found = s;
-  }
-  return found;
+// Every step of `steps` sounding at cycle-phase `phase` (fraction of a cycle) - one for an ordinary
+// sequence, several for a `,`-stack, none over a rest. _binop reads the right operand this way so a
+// stacked operand fans the event out per layer (and so both operands' highlight spans survive the
+// merge); with a single layer it is just "the step sounding here", the last covering match, matching
+// mini.mjs's sampleStepAt.
+function coveringSteps(steps, phase) {
+  return steps.filter((s) => s.value != null && phase >= s.start && phase < s.end);
 }
 
 // Reads a signal as one event at an exact cycle position: `{ value, locs }`, the value together
@@ -1547,12 +1579,76 @@ function squeezeSteps(sig, cycle, start, span) {
 // (non-`cont`) step there, and only stays a tie (`cont`) when BOTH sides are continuing - a change
 // on either merged channel retriggers.
 //
-// With `channel` given it also MERGES the control's value onto each overlap under that channel name
-// (right-wins: `{ ...s }` copies any value the base carried there, then the control overwrites it),
-// so the merged step is a real bundle - e.g. a note step that also carries its own `vel`. A control
-// with no step structure (a plain number or a continuous LFO) has nothing to cross-product, so the
-// base grid passes through untouched and that channel is instead sampled continuously at each onset.
-function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v) {
+// With `stamp` given it also MERGES the control's value onto each overlap (right-wins: `{ ...s }`
+// copies any value the base carried there, then the stamp overwrites it), so the merged step is a
+// real bundle - e.g. a note step that also carries its own `vel`, or a sample event that carries its
+// own `speed`. Stamping is what makes a `,`-STACKED control sound: the cross-product already fans
+// one event out per layer, and the stamp gives each of those events its own layer's value instead of
+// leaving the scheduler to re-sample the channel and get the same value for all of them.
+// A control with no step structure (a plain number or a continuous LFO) has nothing to
+// cross-product, so the base grid passes through untouched and that channel is instead sampled
+// continuously at each onset.
+// Stamps a merged control's value onto the event it landed on, coerced to a number - a non-numeric
+// control value (a pack name, a junk token) leaves the field unset so the reader falls back to its
+// default. `vel` sits directly on the step (see Sig#noteChannels); sampler config values go under
+// `cfg`, keyed by their Sig#sampler key, which is where the scheduler reads them per event.
+function stampField(name) {
+  return (step, value) => {
+    const v = Number(value);
+    if (!Number.isNaN(v)) step[name] = v;
+  };
+}
+function stampCfg(key) {
+  return (step, value) => {
+    const v = Number(value);
+    if (!Number.isNaN(v)) step.cfg = { ...step.cfg, [key]: v };
+  };
+}
+
+// Everything about a merged step that the scheduler can actually hear: when it sounds, what it
+// plays, and every per-event channel merged onto it.
+function stepKey(s) {
+  const cfg = s.cfg
+    ? Object.keys(s.cfg)
+        .sort()
+        .map((k) => `${k}=${s.cfg[k]}`)
+        .join(',')
+    : '';
+  return `${s.start}|${s.end}|${s.value}|${s.cont ? 1 : 0}|${s.vel ?? ''}|${cfg}`;
+}
+
+// Collapses the duplicates a RE-merge of an already-merged channel produces. Setting a stacked
+// control twice - `s("x").n("0,7").add(12)`, where .add() rebuilds the whole note channel and hands
+// it back to crossMerge - crosses the channel's layers against a grid that already carries them, so
+// each event comes back once per old layer with the same new value. Two events that agree on
+// timing, value and every stamped channel are indistinguishable, so the extras go; the atoms they
+// lit move onto the survivor. Base steps that were ALREADY identical before the merge are left
+// alone - `s("bd,bd")` really is two hits, and stacking a control on it must not thin it out.
+function collapseRestamped(steps, keys, baseKeys) {
+  const first = new Map(); // step identity -> { idx, baseKey } of the first step to claim it
+  const keep = [];
+  let dropped = false;
+  for (let i = 0; i < steps.length; i++) {
+    const seen = first.get(keys[i]);
+    if (!seen) {
+      first.set(keys[i], { idx: i, baseKey: baseKeys[i] });
+      keep.push(true);
+      continue;
+    }
+    if (seen.baseKey === baseKeys[i]) {
+      keep.push(true);
+      continue;
+    }
+    const survivor = steps[seen.idx];
+    const locs = [...stepLocs(survivor), ...stepLocs(steps[i])];
+    if (locs.length) survivor.locs = locs;
+    keep.push(false);
+    dropped = true;
+  }
+  return dropped ? steps.filter((_, i) => keep[i]) : steps;
+}
+
+function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
   if (!baseStepsForCycle || !ctlSig.stepsForCycle) return baseStepsForCycle;
   // A control that varies within the cycle (choose/irand) has no honest grid to cross-product -
   // its stepsForCycle is only the phase-0 draw - so the base keeps its own structure and the
@@ -1568,10 +1664,7 @@ function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v
         const step = { ...s };
         const locs = [...stepLocs(s), ...ev.locs];
         if (locs.length) step.locs = locs;
-        if (channel) {
-          const v = coerce(ev.value);
-          if (typeof v !== 'number' || !Number.isNaN(v)) step[channel] = v;
-        }
+        if (stamp) stamp(step, ev.value);
         out.push(step);
       }
       return out;
@@ -1580,8 +1673,11 @@ function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v
   return (cycle) => {
     const ctlSteps = ctlSig.stepsForCycle(cycle).filter((c) => c.value != null);
     const out = [];
+    const keys = []; // out[i]'s identity, for the collapse below
+    const baseKeys = [];
     for (const s of baseStepsForCycle(cycle)) {
       if (s.value == null) continue;
+      const baseKey = stepKey(s);
       for (const c of ctlSteps) {
         const start = Math.max(s.start, c.start);
         const end = Math.min(s.end, c.end);
@@ -1593,14 +1689,13 @@ function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v
         // lights the repitch degrees. Same union _binop/.when() do for their operands.
         const locs = [...stepLocs(s), ...stepLocs(c)];
         if (locs.length) step.locs = locs;
-        if (channel) {
-          const v = coerce(c.value);
-          if (typeof v !== 'number' || !Number.isNaN(v)) step[channel] = v;
-        }
+        if (stamp) stamp(step, c.value);
         out.push(step);
+        keys.push(stepKey(step));
+        baseKeys.push(baseKey);
       }
     }
-    return out;
+    return collapseRestamped(out, keys, baseKeys);
   };
 }
 
@@ -1692,7 +1787,7 @@ function applyClip(baseStepsForCycle, sig) {
 // empty at pitch-set time, so this is a no-op. vel before clip, matching .as()'s field order.
 function applyNoteChannels(baseStepsForCycle, noteChannels) {
   let out = baseStepsForCycle;
-  if (noteChannels.vel) out = crossMerge(out, noteChannels.vel, 'vel', Number);
+  if (noteChannels.vel) out = crossMerge(out, noteChannels.vel, stampField('vel'));
   if (noteChannels.clip) out = applyClip(out, noteChannels.clip);
   return out;
 }

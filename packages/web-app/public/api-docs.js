@@ -239,9 +239,9 @@ const API_DOCS = {
   arp: { kind: 'method', sig: 'arp(indices)', desc: 'Spreads each chord over the index pattern - indices past the top wrap up an octave. Apply .scale() first on degrees.', eg: 'note("[c3,e3,g3]").arp("0 1 2 1")' },
 
   // ----------------------------------------------------------------- arithmetic
-  add: { kind: 'method', sig: 'add(x)', desc: 'Adds, keeping the left side\'s structure. On a control pattern it reaches into that channel.', eg: '.add("<0 12>")' },
-  sub: { kind: 'method', sig: 'sub(x)', desc: 'Subtracts, keeping the left side\'s structure.', eg: '.sub(12)' },
-  mul: { kind: 'method', sig: 'mul(x)', desc: 'Multiplies, keeping the left side\'s structure.', eg: '.mul(speed(2))' },
+  add: { kind: 'method', sig: 'add(x)', desc: 'Adds, keeping the left side\'s structure. On a control pattern it reaches into that channel. A `,`-stacked right side sounds every layer at once - .add(note("0,7")) keeps each note and adds its fifth alongside.', eg: '.add(note("0,7"))' },
+  sub: { kind: 'method', sig: 'sub(x)', desc: 'Subtracts, keeping the left side\'s structure. A `,`-stacked right side sounds every layer at once.', eg: '.sub(12)' },
+  mul: { kind: 'method', sig: 'mul(x)', desc: 'Multiplies, keeping the left side\'s structure. A `,`-stacked right side sounds every layer at once - .mul(speed("1.1,0.9")) is two hits, detuned apart.', eg: '.mul(speed(2))' },
   div: { kind: 'method', sig: 'div(x)', desc: 'Divides, keeping the left side\'s structure.', eg: 'irand(8).div(8)' },
   mod: { kind: 'method', sig: 'mod(x)', desc: 'Modulo (always positive), keeping the left side\'s structure.', eg: '.mod(12)' },
   round: { kind: 'method', sig: 'round()', desc: 'Rounds each value to the nearest integer.', eg: 'rand().range(0, 7).round()' },

@@ -459,7 +459,7 @@ export class Scheduler {
         // merged step.vel wins, else the channel is sampled at the onset, else it's unset.
         const velocity = this._velAt(step, onsetSec, stepStartCycle);
         if (this.pattern.sampler) {
-          const cfg = this._sampleConfigAt(onsetSec, stepStartCycle);
+          const cfg = this._sampleConfigAt(step, onsetSec, stepStartCycle);
           if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
           let pack = String(step.value);
           // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
@@ -498,23 +498,34 @@ export class Scheduler {
   // Sampler config signals evaluated at one event's onset. `fit: 'auto'` passes through as-is
   // (the engine resolves it against the sample's length); everything else becomes a number or
   // stays undefined for the engine's default.
-  _sampleConfigAt(onsetSec, onsetCycle) {
+  //
+  // A value merged onto the step wins over sampling the channel - exactly as step.vel does in
+  // _velAt. That's what a `,`-stacked control needs: `.speed("1.1,0.9")` fans one hit out into two
+  // events that sound TOGETHER, so there is no onset time at which sampling the channel could tell
+  // them apart; each event carries the layer that made it (step.cfg, see crossMerge). Channels
+  // with no step grid of their own (a plain number, an LFO) stamp nothing and are sampled here.
+  _sampleConfigAt(step, onsetSec, onsetCycle) {
     const cfg = { secPerCycle: 1 / this.transport.cps };
     const at = (sig) => {
       const v = sig.sample(onsetSec, this.transport.cps, onsetCycle);
       return typeof v === 'number' ? v : v == null ? undefined : Number(v);
     };
     const src = this.pattern.sampler;
+    const merged = step.cfg;
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
     for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'flip', 'stretch', 'slice', 'note',
       'attack', 'decay', 'sustain', 'release']) {
-      if (src[key]) {
+      if (merged && merged[key] !== undefined) {
+        cfg[key] = merged[key];
+      } else if (src[key]) {
         const v = at(src[key]);
         if (v !== undefined && !Number.isNaN(v)) cfg[key] = v;
       }
     }
     if (src.fit === 'auto') {
       cfg.fit = 'auto';
+    } else if (merged && merged.fit !== undefined) {
+      cfg.fit = merged.fit;
     } else if (src.fit) {
       const v = at(src.fit);
       if (v !== undefined && !Number.isNaN(v)) cfg.fit = v;

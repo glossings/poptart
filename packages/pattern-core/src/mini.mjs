@@ -698,6 +698,13 @@ function sampleStepAt(steps, phase) {
   return found;
 }
 
+// Every step sounding at `phase` - one for a sequence, several for a `,`-stack. An arithmetic
+// operator reads its right operand this way so a stacked operand fans each event out per layer
+// ("0 1 + [0,7]" sounds both the note and its fifth), matching Sig#_binop's `.add(note("0,7"))`.
+function stepsAt(steps, phase) {
+  return steps.filter((s) => s.value != null && phase >= s.start && phase < s.end);
+}
+
 // The source span [start, end) a node covers. Only atom/func/alt/arith carry their own `loc`;
 // structural nodes (seq, fast, euclid, ...) don't, so derive theirs from their children. Used to
 // tell whether an active leaf is a proper *sub-selection* of an operand (a narrower span) or is
@@ -780,18 +787,25 @@ function astToSteps(node, cycle, salt = 0) {
           continue;
         }
         const av = Number(s.value);
-        const bStep = sampleStepAt(B, s.start);
-        const bv = bStep ? Number(bStep.value) : NaN;
         const loc = node.loc ?? s.loc;
-        const subLocs = [];
-        collectSubLocs(node.a, s, subLocs);
-        if (bStep) collectSubLocs(node.b, bStep, subLocs);
-        const extra = subLocs.length ? { subLocs } : null;
-        if (Number.isNaN(av) || Number.isNaN(bv)) {
-          out.push({ ...s, loc, ...extra });
-          continue;
+        // A `,`-stacked right operand is several values at once, so the step fans out into one
+        // event per layer; anything else resolves to the single step sounding there (last wins).
+        const layers = stepsAt(B, s.start);
+        // A non-numeric left value passes through unchanged, so there is nothing for the layers to
+        // differ in - keep it one event rather than N copies of the same pass-through.
+        const bSteps = layers.length > 1 && !Number.isNaN(av) ? layers : [sampleStepAt(B, s.start)];
+        for (const bStep of bSteps) {
+          const bv = bStep ? Number(bStep.value) : NaN;
+          const subLocs = [];
+          collectSubLocs(node.a, s, subLocs);
+          if (bStep) collectSubLocs(node.b, bStep, subLocs);
+          const extra = subLocs.length ? { subLocs } : null;
+          if (Number.isNaN(av) || Number.isNaN(bv)) {
+            out.push({ ...s, loc, ...extra });
+            continue;
+          }
+          out.push({ ...s, value: String(applyArith(node.op, av, bv)), loc, ...extra });
         }
-        out.push({ ...s, value: String(applyArith(node.op, av, bv)), loc, ...extra });
       }
       return out;
     }
