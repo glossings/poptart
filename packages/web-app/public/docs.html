@@ -418,9 +418,13 @@
               <code>note(…)</code>, but <strong>drawn</strong>. <code>grid</code> is the granularity
               (cells per cycle — the <code>*grid</code> of the equivalent mini-notation) and
               <code>len</code> is the loop length in cells, so <code>{ grid: 16, len: 3 }</code> is a
-              three-1/16-note loop. Put your cursor inside the call and an Ableton-style grid opens
-              over the editor, with a real piano keyboard down the side, a draggable loop bar along
-              the top, and a playhead that sweeps the loop as it plays.
+              three-1/16-note loop. Click the word <code>pianoroll</code> and an Ableton-style grid
+              opens over the editor, with a real piano keyboard down the side, a draggable loop bar
+              along the top, and a playhead that sweeps the loop as it plays. (Only the name opens
+              it — the arguments stay ordinary code you can edit by hand, and the roll follows along
+              when you do.) Every change you draw is written back into the call <em>and</em>
+              re-evaluated, so what you hear is always what's on screen. An empty
+              <code>pianoroll()</code> is a valid empty roll — start there and draw.
             </p>
             <p style="margin:0 0 8px">
               Draw with the pencil (drag), or press <strong>B</strong> for the arrow tool to
@@ -505,8 +509,10 @@
             — preset, every knob, wavetables — into the code as the call's second argument:
             <code>synth("Serum 2", { state: "H4sI…" })</code>. On every load that state is restored, so
             the patch sounds identical on a cold start. Because the whole buffer lives in the URL hash,
-            <strong>sharing the link shares the exact sound</strong>. The editor folds the long blob (and
-            <code>lfo()</code> shape strings) into a small <code>{⋯}</code> pill — click it to expand.
+            <strong>sharing the link shares the exact sound</strong>. The editor folds the blob into a
+            small <code>{⋯}</code> pill — click it to expand. <code>lfo()</code> shape strings and
+            <code>pianoroll()</code> note strings fold the same way (they're editor-written data, not
+            code to read), so a call stays one readable line however much it holds.
           </p>
         </section>
 
@@ -529,9 +535,11 @@
           <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, sine({ rate: 0.3 }).range(200, 5000))
 .param(<span class="s">"Filter 1 Freq"</span>, sine(0.3).range(200, 5000))  <span class="c">// rate shorthand</span></code></pre>
           <p>
-            <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape. Put your
-            cursor inside an <code>lfo(...)</code> call in the editor and an interactive shape editor
-            opens — drag points, bend segments — and writes the breakpoint string for you. Modes:
+            <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape. Click the
+            word <code>lfo</code> in the editor and an interactive shape editor opens — drag points,
+            bend segments — writing the breakpoint string for you and re-evaluating as you go, so the
+            modulation follows the curve. (Only the name opens it; the arguments stay ordinary code,
+            and the panel follows along when you edit them by hand.) Modes:
             <code>free</code> (its own clock), <code>retrigger</code> (phase resets on each note),
             <code>envelope</code> (plays once per note then holds).
           </p>

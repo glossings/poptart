@@ -1656,9 +1656,9 @@ export function note(value) {
 
 /**
  * A note pattern drawn on an interactive piano roll: `pianoroll("60,0,4 64,0,4", { grid: 16, len:
- * 16 })`. Putting the cursor inside a pianoroll(...) call in the editor opens the roll - draw,
- * erase, resize, set per-note velocity/probability, and drag the loop length - and every change is
- * serialized straight back into the string (see pianoroll.mjs for the format), the code staying the
+ * 16 })`. Clicking the `pianoroll` name in the editor opens the roll - draw, erase, resize, set
+ * per-note velocity/probability, and drag the loop length - and every change is serialized straight
+ * back into the string (see pianoroll.mjs for the format) and re-evaluated, the code staying the
  * single source of truth exactly like lfo()'s shape editor.
  *
  * Two independent dimensions: `grid` is the granularity - cells per cycle, so grid 16 is a 1/16
@@ -1669,8 +1669,11 @@ export function note(value) {
  * full cycle). Each note carries its own velocity and probability (a note with prob < 1 fires that
  * fraction of the time, like a `?` degrade), and overlapping notes play as chords. Holds absolute
  * MIDI notes, so it chains with .synth()/.scale()/.add()/etc. just like note().
+ *
+ * A bare `pianoroll()` (or `pianoroll("")`) is a valid empty roll - silence - so typing the call to
+ * open the editor and drawing into it never has to pass through an error state.
  */
-export function pianoroll(str, opts = {}) {
+export function pianoroll(str = '', opts = {}) {
   if (typeof str !== 'string') {
     throw new Error('[signal] pianoroll(...) takes a note string from the piano roll editor, e.g. pianoroll("60,0,4 64,0,4")');
   }

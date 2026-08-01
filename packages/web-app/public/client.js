@@ -242,25 +242,25 @@ function foldConfigBlobs() {
     const kb = Math.max(1, Math.round(m[0].length / 1024));
     foldSpan(m.index, m.index + m[0].length, `{⋯${kb}kb}`, 'captured plugin state — click to expand');
   }
-  // Long lfo() shape strings; short ones stay readable inline.
-  const lfoRe = /\blfo\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
-  while ((m = lfoRe.exec(code))) {
-    const str = m[1];
-    if (str.length < 24) continue;
+  // lfo() shape strings and pianoroll() note strings: editor-written data, not code to read, so
+  // they always fold - length doesn't matter. An empty string is left alone: there's nothing to
+  // hide, and a "⋯" chip would imply content that isn't there.
+  const DATA_ARG_TITLES = {
+    lfo: 'lfo shape — click to expand, or use the shape editor',
+    pianoroll: 'piano roll notes — click to expand, or use the piano roll editor',
+  };
+  const dataArgRe = /\b(lfo|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
+  while ((m = dataArgRe.exec(code))) {
+    const str = m[2];
+    if (str.length <= 2) continue; // "" - already as small as it gets
     const start = m.index + m[0].length - str.length;
-    foldSpan(start, start + str.length, '"⋯"', 'lfo shape — click to expand, or use the shape editor');
-  }
-  // Long pianoroll() note strings; short ones stay readable inline.
-  const prRe = /\bpianoroll\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
-  while ((m = prRe.exec(code))) {
-    const str = m[1];
-    if (str.length < 24) continue;
-    const start = m.index + m[0].length - str.length;
-    foldSpan(start, start + str.length, '"⋯"', 'piano roll notes — click to expand, or use the piano roll editor');
+    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]]);
   }
 }
 
-// String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced.
+// String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced. The one
+// call-span scanner in this file - conf's param upsert, the lfo/pianoroll editors, and the MIDI
+// recorder's call rewrites all go through it.
 function matchParen(code, openIdx) {
   let depth = 0;
   let inStr = null;
@@ -633,11 +633,13 @@ cm.on('inputRead', (cm, change) => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Interactive LFO shape editor - put the cursor inside any `lfo(...)` call and a Serum-style
-// panel opens: drag breakpoints, drag a segment to bend it (curvature), double-click to
-// add/remove points, pick presets, set rate + free/retrigger/envelope mode. Every change is
-// serialized straight back into the code as `lfo("x,y,c …", { rate, mode })` - the code stays
-// the single source of truth (and shares via the URL hash like everything else).
+// Interactive LFO shape editor - click the `lfo` name in any `lfo(...)` call (just the name: its
+// arguments are code you may want to edit by hand) and a Serum-style panel opens: drag breakpoints,
+// drag a segment to bend it (curvature), double-click to add/remove points, pick presets, set rate
+// + free/retrigger/envelope mode. Every change is serialized straight back into the code as
+// `lfo("x,y,c …", { rate, mode })` and re-evaluated (debounced), so the modulation follows the
+// shape without a manual ⏎; hand edits to the call flow the other way, back into the open panel.
+// The code stays the single source of truth (and shares via the URL hash like everything else).
 // ---------------------------------------------------------------------------------------------
 
 const lfoPanel = document.getElementById('lfoPanel');
@@ -649,37 +651,23 @@ const lfoRate = document.getElementById('lfoRate');
 const lfoMode = document.getElementById('lfoMode');
 
 let lfoState = null; // { marker, callStart, points, rate, mode }
-let lfoDismissedStart = null; // call the user explicitly closed - don't auto-reopen it
 let lfoSuppressCursor = false;
+const LFO_EVAL_DEBOUNCE_MS = 150; // quiet time after the last shape edit before it re-evaluates
 
-function matchParen(code, open) {
-  let depth = 0;
-  let inStr = null;
-  for (let i = open; i < code.length; i++) {
-    const ch = code[i];
-    if (inStr) {
-      if (ch === '\\') i++;
-      else if (ch === inStr) inStr = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') inStr = ch;
-    else if (ch === '(') depth++;
-    else if (ch === ')') {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return null;
-}
-
+// The lfo(...) call containing idx, plus whether idx is on the *handle* that opens the editor: the
+// `lfo` name itself (or anywhere inside a still-empty `lfo()`, so the panel appears as soon as you
+// type the call). Its arguments - the shape string, rate:, mode: - are ordinary code you may want
+// to edit by hand, so putting the cursor in them opens nothing. Same rule as pianoroll's.
 function findLfoCallAt(code, idx) {
   const re = /\blfo\s*\(/g;
   let m;
   while ((m = re.exec(code)) !== null) {
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
-    if (close == null) continue;
-    if (idx >= m.index && idx <= close + 1) return { start: m.index, open, close };
+    if (close < 0) continue;
+    if (idx < m.index || idx > close + 1) continue;
+    const onName = idx <= m.index + 'lfo'.length || !code.slice(open + 1, close).trim();
+    return { start: m.index, open, close, onName };
   }
   return null;
 }
@@ -716,8 +704,7 @@ function openLfoEditor(call) {
   drawLfoShape();
 }
 
-function closeLfoEditor(dismissCall = false) {
-  if (dismissCall && lfoState) lfoDismissedStart = lfoState.callStart;
+function closeLfoEditor() {
   if (lfoState?.marker) lfoState.marker.clear();
   lfoState = null;
   lfoPanel.classList.add('hidden');
@@ -729,13 +716,47 @@ function writeLfoCall() {
   if (!range) return;
   const text = serializeLfoCall(lfoState);
   lfoSuppressCursor = true;
-  cm.replaceRange(text, range.from, range.to);
-  // replaceRange collapses the marker - re-pin it over the fresh text
-  lfoState.marker.clear();
-  const startIdx = cm.indexFromPos(range.from);
-  lfoState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
-  lfoState.callStart = startIdx;
-  lfoSuppressCursor = false;
+  try {
+    cm.replaceRange(text, range.from, range.to);
+    // replaceRange collapses the marker - re-pin it over the fresh text
+    lfoState.marker.clear();
+    const startIdx = cm.indexFromPos(range.from);
+    lfoState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    lfoState.callStart = startIdx;
+  } finally {
+    lfoSuppressCursor = false; // never leave it latched: that would wedge the panel shut for good
+  }
+  lfoScheduleEval();
+}
+
+// A shape edit isn't finished until it *sounds*, so every write re-evaluates the buffer - debounced,
+// so dragging a breakpoint costs one request, not one per pointerup. evaluate(false) is the "update"
+// path: a stopped clock stays stopped, a running one keeps running with the new modulation.
+let lfoEvalTimer = null;
+function lfoScheduleEval() {
+  clearTimeout(lfoEvalTimer);
+  lfoEvalTimer = setTimeout(() => { lfoEvalTimer = null; evaluate(false); }, LFO_EVAL_DEBOUNCE_MS);
+}
+
+// The reverse direction: the panel re-reads the call whenever it's edited by hand, so tweaking
+// `rate:`/`mode:`/the shape string in the code updates the panel instead of being silently reverted
+// by the next drag.
+function syncLfoFromCode() {
+  if (!lfoState || lfoSuppressCursor || !shapeMod) return;
+  const range = lfoState.marker.find();
+  if (!range) return;
+  const text = cm.getRange(range.from, range.to);
+  const open = text.indexOf('(');
+  const close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
+  const parsed = parseLfoCall(text.slice(open + 1, close));
+  lfoState.callStart = cm.indexFromPos(range.from);
+  lfoState.points = parsed.points;
+  lfoState.rate = parsed.rate;
+  lfoState.mode = parsed.mode;
+  lfoRate.value = parsed.rate;
+  lfoMode.value = parsed.mode;
+  drawLfoShape();
 }
 
 function initLfoEditor() {
@@ -745,14 +766,33 @@ function initLfoEditor() {
     if (lfoSuppressCursor || !shapeMod) return;
     const call = findLfoCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
     if (!call) {
-      lfoDismissedStart = null;
       if (lfoState) closeLfoEditor();
       return;
     }
-    if (call.start === lfoDismissedStart) return;
-    if (lfoState && call.start === lfoState.callStart) return; // already editing this call
+    if (lfoState && call.start === lfoState.callStart) return; // already editing this call (args included)
+    // Inside some other call's arguments - that's plain editing, not a request for the shape editor.
+    if (!call.onName) {
+      if (lfoState) closeLfoEditor();
+      return;
+    }
+    // No "don't reopen what I dismissed" guard: the name is an explicit handle, so landing on it is
+    // always a request to open, and leaving the cursor in the arguments after a ✕ reopens nothing.
     openLfoEditor(call);
   });
+
+  // Clicking the name opens the panel even when the cursor is *already* there: re-clicking the same
+  // spot leaves the selection unchanged, and an unchanged selection fires no cursorActivity - which
+  // is what made reopening after ✕ feel stuck. (No focus grab, unlike the piano roll: the shape
+  // editor has no keyboard shortcuts of its own, so the keys stay where they're useful - the code.)
+  cm.on('mousedown', (_cm, e) => {
+    if (!shapeMod) return;
+    const call = findLfoCallAt(cm.getValue(), cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window')));
+    if (!call?.onName) return;
+    if (lfoState && call.start === lfoState.callStart) return;
+    openLfoEditor(call);
+  });
+
+  cm.on('change', syncLfoFromCode); // hand edits to the open call flow back into the panel
 
   lfoPreset.addEventListener('change', () => {
     if (!lfoState || !lfoPreset.value) return;
@@ -783,9 +823,9 @@ function initLfoEditor() {
     lfoState.mode = lfoMode.value;
     writeLfoCall();
   });
-  lfoCloseBtn.addEventListener('click', () => closeLfoEditor(true));
+  lfoCloseBtn.addEventListener('click', () => closeLfoEditor());
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && lfoState) closeLfoEditor(true);
+    if (e.key === 'Escape' && lfoState) closeLfoEditor();
   });
 
   initLfoCanvas();
@@ -933,17 +973,20 @@ function initLfoCanvas() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Interactive piano roll editor - put the cursor inside any `pianoroll(...)` call and an Ableton-
-// style grid opens over the editor, with a real piano keyboard down the left edge and a playhead
-// that sweeps the steps as it plays. Two tools (pencil draws, arrow marquee-selects); click a note
+// Interactive piano roll editor - click the `pianoroll` name in any `pianoroll(...)` call (just the
+// name: its arguments are code the user may want to edit by hand) and an Ableton-style grid opens
+// over the editor, with a real piano keyboard down the left edge and a playhead that sweeps the
+// steps as it plays. Two tools (pencil draws, arrow marquee-selects); click a note
 // to select it (shift-click extends, ctrl/cmd-A selects all), drag to move, drag a note's right
 // edge to resize, cmd-drag vertically to set velocity or probability (the vel/prob toggle), cmd-D
 // duplicates. Arrow keys nudge the selection (shift = octave / bar), delete removes it, double-
 // click erases one. Wheel scrolls pitch, shift-wheel scrolls time, ctrl-wheel (or the −/+ buttons)
 // zooms in on fine grids. With 🎧 on, drawing/dragging previews the note through the track's own
 // synth; →♪ rewrites the whole roll as an equivalent mini-notation note("…"). Every change is
-// serialized straight back into `pianoroll("midi,start,len[,vel[,prob]] …", { steps })` - the code
-// stays the single source of truth, exactly like the lfo() shape editor.
+// serialized straight back into `pianoroll("midi,start,len[,vel[,prob]] …", { steps })` and
+// re-evaluated (debounced), so the track plays what's drawn without a manual ⏎; hand edits to the
+// call flow the other way, back into the open panel. The code stays the single source of truth,
+// exactly like the lfo() shape editor.
 // ---------------------------------------------------------------------------------------------
 
 const prPanel = document.getElementById('pianorollPanel');
@@ -971,6 +1014,7 @@ const PR_MAX_ZOOM = 24; // deepest horizontal zoom (cells that many times wider 
 const PR_ZOOM_WHEEL = 0.0012; // wheel-zoom sensitivity (smaller = slower); proportional to deltaY
 const PR_PITCH_WHEEL = 0.013; // wheel pitch-scroll sensitivity, rows per deltaY unit (smaller = slower)
 const PR_BTN_ZOOM = 1.4; // per-click / per-keypress zoom step for the −/+ buttons and cmd ±
+const PR_EVAL_DEBOUNCE_MS = 150; // quiet time after the last roll edit before it re-evaluates
 const PR_GRID_DIVS = [['1/4', 4], ['1/8', 8], ['1/8T', 12], ['1/16', 16], ['1/16T', 24], ['1/32', 32], ['1/64', 64]];
 
 // Cursors that echo the tool under the pointer (Ableton's pencil / bracket / up-down), as inline
@@ -990,7 +1034,6 @@ const CUR_UPDOWN = svgCursor(
 );
 
 let prState = null; // see openPianorollEditor for the full shape (notes, steps, pitchTop, zoom, scroll, sel, tool, cmdMode, trackLabel)
-let prDismissedStart = null; // call the user explicitly closed - don't auto-reopen it
 let prSuppressCursor = false;
 let prPreviewEnabled = localStorage.getItem('poptartPianorollPreview') !== '0';
 let prSounding = null; // midi note currently ringing from a preview (so we can note-off it)
@@ -999,19 +1042,26 @@ let prCmdMode = localStorage.getItem('poptartPianorollCmd') === 'prob' ? 'prob' 
 let prRaf = null; // requestAnimationFrame handle for the playhead sweep
 let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
 let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
+let prRefreshCursor = () => {}; // re-derives the canvas cursor in place (set by initPianorollCanvas)
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const midiName = (m) => `${NOTE_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12)}`;
 const isBlackKey = (m) => [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
 
+// The pianoroll(...) call containing idx, plus whether idx is on the *handle* that opens the
+// editor: the `pianoroll` name itself (or anywhere inside a still-empty `pianoroll()`, so the
+// panel appears as soon as you type the call). The arguments - the note string, grid:, len: -
+// are ordinary code the user may want to edit, so putting the cursor in them opens nothing.
 function findPianorollCallAt(code, idx) {
   const re = /\bpianoroll\s*\(/g;
   let m;
   while ((m = re.exec(code)) !== null) {
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
-    if (close == null || close < 0) continue;
-    if (idx >= m.index && idx <= close + 1) return { start: m.index, open, close };
+    if (close < 0) continue;
+    if (idx < m.index || idx > close + 1) continue;
+    const onName = idx <= m.index + 'pianoroll'.length || !code.slice(open + 1, close).trim();
+    return { start: m.index, open, close, onName };
   }
   return null;
 }
@@ -1106,14 +1156,14 @@ function openPianorollEditor(call) {
   prPanel.classList.remove('hidden');
   drawPianoroll();
   if (!prRaf) prRaf = requestAnimationFrame(prPlayheadLoop); // sweep a playhead while it plays
-  // Focus moves to the canvas on first click (see pointerdown), not on open, so opening the panel
-  // never steals keys from the code editor mid-type.
+  // Focus isn't taken here: opening by clicking the name hands it to the canvas from the mousedown
+  // handler, while opening because the cursor drifted onto the name (arrow keys, or typing a fresh
+  // `pianoroll()`) leaves the keyboard in the code, so the panel never steals keys mid-type.
 }
 
-function closePianorollEditor(dismissCall = false) {
+function closePianorollEditor() {
   prPreviewOff();
   if (prRaf) { cancelAnimationFrame(prRaf); prRaf = null; }
-  if (dismissCall && prState) prDismissedStart = prState.callStart;
   if (prState?.marker) prState.marker.clear();
   prState = null;
   prPanel.classList.add('hidden');
@@ -1135,13 +1185,50 @@ function writePianorollCall() {
   if (!range) return;
   const text = serializePianorollCall(prState);
   prSuppressCursor = true;
-  cm.replaceRange(text, range.from, range.to);
-  // replaceRange collapses the marker - re-pin it over the fresh text (see writeLfoCall)
-  prState.marker.clear();
-  const startIdx = cm.indexFromPos(range.from);
-  prState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
-  prState.callStart = startIdx;
-  prSuppressCursor = false;
+  try {
+    cm.replaceRange(text, range.from, range.to);
+    // replaceRange collapses the marker - re-pin it over the fresh text (see writeLfoCall)
+    prState.marker.clear();
+    const startIdx = cm.indexFromPos(range.from);
+    prState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    prState.callStart = startIdx;
+  } finally {
+    prSuppressCursor = false; // never leave it latched: that would wedge the panel shut for good
+  }
+  prScheduleEval();
+}
+
+// A roll edit isn't finished until it *sounds*, so every write re-evaluates the buffer - debounced,
+// so a drag that touches a dozen notes still costs one request. evaluate(false) is the "update"
+// path (the ⏎ shortcut): it keeps the current play state, so drawing while stopped stays stopped.
+let prEvalTimer = null;
+function prScheduleEval() {
+  clearTimeout(prEvalTimer);
+  prEvalTimer = setTimeout(() => { prEvalTimer = null; evaluate(false); }, PR_EVAL_DEBOUNCE_MS);
+}
+
+// The reverse direction: the panel re-reads the call whenever it's edited by hand, so tweaking
+// `grid:`/`len:`/the note string in the code updates the roll instead of being silently reverted
+// by the next drag. Notes are only rebuilt when the string actually changed (the parsed objects
+// are identity-tracked by the selection), so hand-editing grid/len keeps the selection intact.
+function syncPianorollFromCode() {
+  if (!prState || prSuppressCursor || !pianorollMod) return;
+  const range = prState.marker.find();
+  if (!range) return;
+  const text = cm.getRange(range.from, range.to);
+  const open = text.indexOf('(');
+  const close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
+  const parsed = parsePianorollCall(text.slice(open + 1, close));
+  prState.callStart = cm.indexFromPos(range.from);
+  prState.grid = parsed.grid;
+  prState.len = parsed.len;
+  if (pianorollMod.serializePianoRoll(parsed.notes) !== pianorollMod.serializePianoRoll(prState.notes)) {
+    prState.notes = parsed.notes;
+    prState.sel.clear(); // the old note objects are gone
+  }
+  prSyncGridLenInputs();
+  drawPianoroll();
 }
 
 // --- canvas geometry (logical coordinates; the backing store is scaled by devicePixelRatio) ---
@@ -1631,7 +1718,7 @@ function initPianorollCanvas() {
       drawPianoroll();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      if (prState.sel.size) { prState.sel.clear(); drawPianoroll(); } else closePianorollEditor(true);
+      if (prState.sel.size) { prState.sel.clear(); drawPianoroll(); } else closePianorollEditor();
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (!sel.length) return;
       e.preventDefault();
@@ -1651,7 +1738,18 @@ function initPianorollCanvas() {
     }
   });
   // keep the cursor in sync when the cmd/ctrl modifier is pressed/released over a note
-  const refreshCursor = (e) => { if (prState && prPointer.px >= 0 && !drag) setCursor(prCursorFor(prPointer.px, prPointer.py, prMetrics(), e.metaKey || e.ctrlKey)); };
+  // Re-derive the cursor for wherever the pointer already is - the tool or the cmd modifier can
+  // change what it should be without the mouse moving at all. The default → real two-step (with a
+  // reflow between) forces the change to actually land: browsers hide the pointer while you type,
+  // and only a genuine cursor change brings it back before the next mouse move.
+  prRefreshCursor = (velMod = false) => {
+    if (!prState || prPointer.px < 0 || drag) return;
+    const next = prCursorFor(prPointer.px, prPointer.py, prMetrics(), velMod);
+    prCanvas.style.cursor = 'default';
+    void prCanvas.offsetHeight;
+    prCanvas.style.cursor = next;
+  };
+  const refreshCursor = (e) => prRefreshCursor(e.metaKey || e.ctrlKey);
   prCanvas.addEventListener('keyup', (e) => { prPreviewOff(); refreshCursor(e); });
   prCanvas.addEventListener('keydown', refreshCursor);
   prCanvas.addEventListener('blur', prPreviewOff);
@@ -1663,14 +1761,39 @@ function initPianorollEditor() {
     if (prSuppressCursor || !pianorollMod) return;
     const call = findPianorollCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
     if (!call) {
-      prDismissedStart = null;
       if (prState) closePianorollEditor();
       return;
     }
-    if (call.start === prDismissedStart) return;
-    if (prState && call.start === prState.callStart) return; // already editing this call
+    if (prState && call.start === prState.callStart) return; // already editing this call (args included)
+    // Inside some other call's arguments - that's plain editing, not a request for the roll.
+    if (!call.onName) {
+      if (prState) closePianorollEditor();
+      return;
+    }
+    // No "don't reopen what I dismissed" guard here (unlike the lfo editor): the name is now an
+    // explicit handle, so landing on it is always a request to open, and merely leaving the cursor
+    // in the arguments after a ✕ can't reopen anything.
     openPianorollEditor(call);
   });
+
+  // Clicking the name opens the roll even when the cursor is *already* there: re-clicking the same
+  // spot leaves the selection unchanged, and an unchanged selection fires no cursorActivity - which
+  // is what made reopening after ✕ feel stuck (click elsewhere, then back, to wake it up).
+  cm.on('mousedown', (_cm, e) => {
+    if (!pianorollMod) return;
+    const call = findPianorollCallAt(cm.getValue(), cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window')));
+    if (!call?.onName) return;
+    if (!prState || call.start !== prState.callStart) openPianorollEditor(call);
+    // Clicking the name is a deliberate "I want the roll now", so give it the keyboard: cmd-A, the
+    // arrow keys and delete belong to the notes, not the code buffer. On mouseup, because
+    // CodeMirror focuses its own input while handling this mousedown - and only for a plain click,
+    // so dragging out from the name to select code still leaves the selection where it belongs.
+    window.addEventListener('mouseup', () => {
+      if (prState && !cm.somethingSelected()) prCanvas.focus({ preventScroll: true });
+    }, { once: true });
+  });
+
+  cm.on('change', syncPianorollFromCode); // hand edits to the open call flow back into the panel
 
   // grid (granularity) and len (loop length in cells) are independent - changing the grid just
   // reinterprets each cell as a coarser/finer note; it doesn't move notes or resize the loop.
@@ -1689,12 +1812,14 @@ function initPianorollEditor() {
   });
 
   const reflectTool = () => { prToolBtn.textContent = prTool === 'draw' ? '✏️' : '⬚'; prToolBtn.title = `tool: ${prTool} — click or press B to switch (draw = pencil, select = marquee)`; };
-  reflectTool();
-  prToolBtn.addEventListener('click', () => {
+  const toggleTool = () => {
     prTool = prTool === 'draw' ? 'select' : 'draw';
     localStorage.setItem('poptartPianorollTool', prTool);
     reflectTool();
-  });
+    prRefreshCursor(); // pencil ⇄ crosshair right away, without waiting for the pointer to move
+  };
+  reflectTool();
+  prToolBtn.addEventListener('click', toggleTool);
 
   const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `cmd-drag sets ${prCmdMode === 'vel' ? 'velocity' : 'probability'} — click to switch`; };
   reflectCmdMode();
@@ -1726,28 +1851,37 @@ function initPianorollEditor() {
     cm.replaceRange(expr, range.from, range.to);
     closePianorollEditor(); // the pianoroll() call is gone now
     prSuppressCursor = false;
+    prScheduleEval(); // the rewrite plays the same notes - keep the running track in step with it
     logLine('piano roll → mini-notation');
   });
 
-  prCloseBtn.addEventListener('click', () => closePianorollEditor(true));
+  prCloseBtn.addEventListener('click', () => closePianorollEditor());
 
   // Panel-wide keys while it's open: Escape (when the code has focus - the canvas handles its own),
-  // B toggles the tool (unless typing in a field), and cmd/ctrl +/- zoom the roll (overriding the
-  // browser's page zoom).
+  // B toggles the tool, and cmd/ctrl +/- zoom the roll (overriding the browser's page zoom).
+  //
+  // Capture phase, and the code editor deliberately doesn't count as "typing": while the roll is
+  // open B belongs to the roll, wherever focus happens to be. Otherwise B typed with focus still in
+  // the editor (where it lands after clicking the pianoroll name) went into the buffer instead, and
+  // the resulting edit moved the cursor off the name and closed the panel. Only real form fields -
+  // the panel's own grid/len inputs - still swallow it.
+  const typingInField = () => {
+    const el = document.activeElement;
+    if (!el || cm.getWrapperElement().contains(el)) return false;
+    return /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable;
+  };
   document.addEventListener('keydown', (e) => {
     if (!prState) return;
-    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? '') || document.activeElement?.isContentEditable;
-    if (e.key === 'Escape' && document.activeElement !== prCanvas) { closePianorollEditor(true); return; }
-    if ((e.key === 'b' || e.key === 'B') && !typing && !(e.metaKey || e.ctrlKey)) {
+    if (e.key === 'Escape' && document.activeElement !== prCanvas) { closePianorollEditor(); return; }
+    if ((e.key === 'b' || e.key === 'B') && !typingInField() && !(e.metaKey || e.ctrlKey) && !e.altKey) {
       e.preventDefault();
-      prTool = prTool === 'draw' ? 'select' : 'draw';
-      localStorage.setItem('poptartPianorollTool', prTool);
-      reflectTool();
+      e.stopPropagation(); // don't let it reach the code editor as a keystroke
+      toggleTool();
     } else if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_')) {
       e.preventDefault();
       prZoomBy(e.key === '-' || e.key === '_' ? 1 / PR_BTN_ZOOM : PR_BTN_ZOOM);
     }
-  });
+  }, true);
 
   initPianorollCanvas();
 }
@@ -2072,7 +2206,7 @@ function replaceKbCall(label, replacement) {
 
   const spanFrom = (callStart, openParenIdx) => {
     const close = matchParen(code, openParenIdx);
-    return close == null || close < 0 ? null : [callStart, close + 1];
+    return close < 0 ? null : [callStart, close + 1];
   };
   const spans = [];
 
@@ -2091,7 +2225,7 @@ function replaceKbCall(label, replacement) {
   while ((m = direct.exec(code))) {
     if (m.index < block.start || m.index >= block.end) continue;
     const close1 = matchParen(code, m.index + m[0].length - 1);
-    if (close1 == null || close1 < 0) continue;
+    if (close1 < 0) continue;
     let j = close1 + 1;
     while (j < code.length && /\s/.test(code[j])) j++;
     if (code[j] !== '(') continue; // a bare midikeys(...) definition, not a played route
@@ -2136,7 +2270,7 @@ function removeChainedScale(idx) {
     while (p < code.length && /\s/.test(code[p])) p++;
     if (code[p] !== '(') return;
     const close = matchParen(code, p);
-    if (close == null || close < 0) return;
+    if (close < 0) return;
     if (m[0] === 'scale') {
       cm.replaceRange('', cm.posFromIndex(j), cm.posFromIndex(close + 1));
       logLine('midi record: dropped the chained .scale() - the recorded notes are already absolute');

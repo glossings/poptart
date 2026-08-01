@@ -15,6 +15,7 @@ import {
   PIANOROLL_DEFAULT_STEPS,
 } from './src/pianoroll.mjs';
 import { pianoroll, note, mini } from './src/signal.mjs';
+import { Scheduler } from './src/scheduler.mjs';
 
 test('parsePianoRoll: fields, defaults, and empty input', () => {
   assert.deepEqual(parsePianoRoll(''), []);
@@ -165,4 +166,28 @@ test('pianoroll(): a phase inside a cell samples that cell continuously', () => 
 test('pianoroll(): rejects a non-string first argument', () => {
   assert.throws(() => pianoroll(123), /takes a note string/);
   assert.throws(() => pianoroll(null), /takes a note string/);
+});
+
+// Typing `pianoroll()` to open the editor - or clearing every note out of it - has to be an empty
+// roll, not an error: the panel writes the code back on each edit, so any state it can produce must
+// evaluate. Empty means silence, all the way through to the notes the scheduler would send.
+test('pianoroll(): an empty roll is silence, not an error', () => {
+  for (const p of [pianoroll(), pianoroll(''), pianoroll('   '), pianoroll('', { grid: 32, len: 3 })]) {
+    assert.equal(p.pitchKind, 'note');
+    for (const c of [0, 1, 5]) assert.deepEqual(p.stepsForCycle(c), []);
+    assert.equal(p.sample(0, 1, 0), null);
+  }
+  assert.equal(pianoRollToMini([], { grid: 4, len: 4 }), 'note(`<\n  ~ ~ ~ ~\n>*4`)');
+});
+
+test('pianoroll(): an empty roll schedules no notes', () => {
+  const calls = [];
+  const engine = new Proxy(
+    { getTime: () => 0 },
+    { get: (t, p) => (p in t ? t[p] : (...args) => { calls.push({ method: p, args }); }) },
+  );
+  const sch = new Scheduler(engine, { trackId: 'roll' });
+  sch.setPattern(pianoroll().synth('Serum 2'));
+  sch._scheduleNoteEdges(0, 4);
+  assert.equal(calls.filter((c) => c.method === 'noteOn').length, 0);
 });
