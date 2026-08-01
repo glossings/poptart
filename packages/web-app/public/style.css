@@ -933,9 +933,9 @@ footer#console.collapsed #log {
   color: var(--text);
   border-radius: 4px;
   padding: 3px 8px;
-  /* rows carry a signature and a description now - cap them and clip the overflow rather than
-     letting one long line stretch the popup (the doc panel beside it has the full text) */
-  max-width: 44em;
+  /* rows carry a signature - cap them and clip the overflow rather than letting one long
+     line stretch the popup (the doc panel beside it has the full text) */
+  max-width: 24em;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -945,17 +945,10 @@ li.CodeMirror-hint-active {
   color: var(--accent);
 }
 
-/* a documented completion: name, signature, then as much of the description as fits */
+/* a documented completion: name then signature */
 
 .hint-args {
   color: var(--text-dim);
-}
-
-.hint-desc {
-  margin-left: 10px;
-  color: var(--syn-comment);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 11px;
 }
 
 /* documentation tooltips - the panel beside the popup and the ctrl-hover one (settings ->

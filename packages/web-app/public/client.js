@@ -605,10 +605,10 @@ function wordHints(cur, typed, words, context) {
   return hintResult(cur, typed, completions);
 }
 
-// One completion row: name, signature, and the start of its description - so the list itself
-// says what each name is, without waiting for the doc panel beside it.
+// One completion row: name and signature only. The description belongs to the doc panel beside
+// the list - repeating it here just widens the popup, and at high zoom the two end up stacked.
 function renderHintRow(el, data, completion) {
-  const { name, display, desc } = completion.doc;
+  const { name, display } = completion.doc;
   const nameEl = document.createElement('span');
   nameEl.className = 'hint-name';
   nameEl.textContent = name;
@@ -620,10 +620,6 @@ function renderHintRow(el, data, completion) {
     argsEl.textContent = args;
     el.appendChild(argsEl);
   }
-  const descEl = document.createElement('span');
-  descEl.className = 'hint-desc';
-  descEl.textContent = desc;
-  el.appendChild(descEl);
 }
 
 function poptartHint(cm) {
@@ -715,19 +711,32 @@ function hideHintDoc() {
   if (hintDocEl) hintDocEl.style.display = 'none';
 }
 
-// Park the panel next to the hint list, flipping to its left when the window runs out.
+// Park the panel next to the hint list, flipping to its left when the window runs out. When the
+// window is zoomed far enough that neither side fits the panel at full width, narrow it into the
+// roomier side instead of letting it land on top of the list.
 function showHintDoc(doc, listEl) {
   if (!hintDocEl) hintDocEl = makeDocBox('doc-box-hint');
   renderDocBox(hintDocEl, doc);
   hintDocEl.style.display = 'block';
   hintDocEl.style.left = '0px'; // measure at a known position before deciding where it goes
   hintDocEl.style.top = '0px';
+  hintDocEl.style.maxWidth = '';
   const list = listEl.getBoundingClientRect();
-  const box = hintDocEl.getBoundingClientRect();
   const gap = 6;
-  const left = list.right + gap + box.width <= window.innerWidth - 4 ? list.right + gap : list.left - gap - box.width;
+  const roomRight = window.innerWidth - 4 - (list.right + gap);
+  const roomLeft = list.left - gap - 4;
+  let left;
+  const width = hintDocEl.getBoundingClientRect().width;
+  if (width <= roomRight) left = list.right + gap;
+  else if (width <= roomLeft) left = list.left - gap - width;
+  else {
+    const squeezed = Math.max(140, Math.max(roomRight, roomLeft));
+    hintDocEl.style.maxWidth = `${squeezed}px`;
+    left = roomRight >= roomLeft ? list.right + gap : list.left - gap - squeezed;
+  }
+  const height = hintDocEl.getBoundingClientRect().height; // re-measure: narrowing made it taller
   hintDocEl.style.left = `${Math.max(4, left)}px`;
-  hintDocEl.style.top = `${Math.max(4, Math.min(list.top, window.innerHeight - box.height - 4))}px`;
+  hintDocEl.style.top = `${Math.max(4, Math.min(list.top, window.innerHeight - height - 4))}px`;
 }
 
 // Wrap a hint source so whichever completion is highlighted shows its docs. Completions without
