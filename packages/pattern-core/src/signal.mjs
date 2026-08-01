@@ -238,10 +238,16 @@ export class Sig {
     // mirroring mini-notation's "a*[2 3]": each rate step is a window in which the whole pattern
     // plays sped by that window's rate (only onsets landing inside the window sound). A plain
     // number (or numeric-valued factor) keeps the exact fast path below.
-    if (typeof factor === 'string' || (factor instanceof Sig && factor.stepsForCycle)) {
-      return this._fastPatterned(toSignal(factor));
+    //
+    // Every signal kind counts as patterned except a constant: a Sig with no grid of its own (an
+    // LFO, a macro knob, `rand()`) is read once per cycle (.hold()) and drives the rate like any
+    // other pattern, and a constant-valued Sig - Signal(2), or the mini("2", …) the editor's
+    // location transpile makes of a `"2"` literal - takes the exact numeric path below.
+    const factorSig = factor instanceof Sig ? factor : null;
+    if (typeof factor === 'string' || (factorSig && factorSig.constVal === undefined)) {
+      return this._fastPatterned(factorSig && !factorSig.stepsForCycle ? factorSig.hold() : toSignal(factor));
     }
-    const f = Number(factor);
+    const f = Number(factorSig ? factorSig.constVal : factor);
     if (!Number.isFinite(f) || f === 0) {
       throw new Error('[signal] .fast() takes a nonzero factor, e.g. .fast(2) - negative plays in reverse');
     }
@@ -274,10 +280,13 @@ export class Sig {
   slow(factor) {
     // Patterned factor: slow by a pattern is fast by its reciprocal, per window (.slow("2 3") =
     // .fast("0.5 0.333...")). mapValue keeps the factor's step grid, inverting each rate value.
-    if (typeof factor === 'string' || (factor instanceof Sig && factor.stepsForCycle)) {
-      return this.fast(toSignal(factor).mapValue((v) => 1 / Number(v)));
+    // Same "what counts as patterned" rule as .fast() above.
+    const factorSig = factor instanceof Sig ? factor : null;
+    if (typeof factor === 'string' || (factorSig && factorSig.constVal === undefined)) {
+      const rate = factorSig && !factorSig.stepsForCycle ? factorSig.hold() : toSignal(factor);
+      return this.fast(rate.mapValue((v) => 1 / Number(v)));
     }
-    const f = Number(factor);
+    const f = Number(factorSig ? factorSig.constVal : factor);
     if (!Number.isFinite(f) || f === 0) {
       throw new Error('[signal] .slow() takes a nonzero factor, e.g. .slow(2) - negative plays in reverse');
     }
@@ -547,6 +556,16 @@ export class Sig {
    * demoting it to polled JS sampling.
    */
   _binop(op, other, fn, linear) {
+    // A CONTROL operand - one of the top-level sampler builders, `speed("-1")`/`begin(0.5)`/… -
+    // names a CHANNEL rather than a value stream, so the operation lands on that channel instead
+    // of on this pattern's own values: `x.mul(speed("-1"))` reverses playback and leaves the
+    // notes alone. This is what lets a combinator reach into a pattern it was handed
+    // (`.when(c, x => x.mul(speed("-1")))`), the same way `x.add(note(3))` reaches into pitch.
+    if (other instanceof Sig && other.ctl) return this._ctlBinop(other.ctl, other, fn);
+    // On a sampler pattern the values are PACK NAMES, so plain arithmetic can only sensibly mean
+    // the repitch note (24 = "c2" = as recorded): `s("rave").add(7)` is seven semitones up, the
+    // same thing `s("rave").add(note(7))` says. Without this the pack name coerces to NaN.
+    if (this.sampler) return this._ctlBinop('note', other, fn);
     if (typeof other === 'number' && linear) {
       // Bounds may be signals (see range()) - map those through fn instead of applying it directly.
       const mapBound = (b) => (typeof b === 'number' ? fn(b, other) : b.mapValue((v) => fn(Number(v), other)));
@@ -602,6 +621,33 @@ export class Sig {
     );
   }
 
+  /**
+   * Arithmetic aimed at one sampler CHANNEL rather than at the pattern's values (see _binop and
+   * the control builders below). The channel's current signal is the left operand; where it isn't
+   * set yet the channel's resting default stands in - 1 for speed/stretch, 0 for begin, 24 for the
+   * repitch note - so `x.mul(speed("-1"))` on a pattern with no explicit speed is 1 * -1, and
+   * `s("rave").add(7)` is "as recorded, seven semitones up". With the channel unset the OPERAND
+   * supplies the step structure (via mapValue), so `x.mul(speed("1 -1"))` subdivides exactly as
+   * `.speed("1 -1")` does.
+   */
+  _ctlBinop(ctl, other, fn) {
+    const spec = SAMPLER_CONTROLS[ctl];
+    if (!this.sampler) {
+      throw new Error(`[signal] ${ctl}() only applies to a sampler pattern - start with s("pack")`);
+    }
+    // fit() with no argument carries no number to combine with - it just sets the channel.
+    if (other instanceof Sig && other.ctlAuto) return this._samplerOpt(ctl, spec.key, 'auto');
+    const otherSig = bareSig(toSignal(other));
+    const current = this.sampler[spec.key];
+    const combined =
+      current instanceof Sig
+        ? bareSig(current)._binop(ctl, otherSig, fn, false)
+        : otherSig.mapValue((v) => fn(spec.unset, Number(v)));
+    // The repitch channel keeps its note/degree kind, so a later .scale() still reads it right.
+    if (spec.key === 'note') combined.pitchKind = current?.pitchKind ?? otherSig.pitchKind ?? 'note';
+    return this._samplerOpt(ctl, spec.key, combined);
+  }
+
   add(x) { return this._binop('add', x, (a, b) => a + b, true); }
   sub(x) { return this._binop('sub', x, (a, b) => a - b, true); }
   mul(x) { return this._binop('mul', x, (a, b) => a * b, true); }
@@ -611,7 +657,10 @@ export class Sig {
   abs() { return this._unop('abs', Math.abs); }
   floor() { return this._unop('floor', Math.floor); }
   ceil() { return this._unop('ceil', Math.ceil); }
-  clamp(lo, hi) { return this._unop('clamp', (v) => Math.min(hi, Math.max(lo, v))); }
+  /** Bounds each value into [lo, hi]. Both bounds take patterns/signals, like every other control. */
+  clamp(lo, hi) {
+    return this._binop('clamp', lo, (a, b) => Math.max(a, b), false)._binop('clamp', hi, (a, b) => Math.min(a, b), false);
+  }
 
   gte(x) { return this._binop('gte', x, (a, b) => (a >= b ? 1 : 0), false); }
   gt(x) { return this._binop('gt', x, (a, b) => (a > b ? 1 : 0), false); }
@@ -624,6 +673,13 @@ export class Sig {
    * `n("0 1 2 3").when("1 0".gte(1), x => x.add(12))` - applies `fn` to this pattern wherever
    * `cond` is truthy (nonzero), switching on cond's own step grid within the cycle. Where cond
    * is falsy (including rests) the original pattern plays.
+   *
+   * Per-onset controls the callback set switch WITH the condition - sampler config and velocity -
+   * so `.when(rand().gte(0.7), x => x.mul(speed("-1")))` reverses only the bars the condition
+   * picks. Everything the callback did that can't be turned on and off per event stays
+   * unconditional: the chain (.synth()/.fx()), the streamed channel strip (.gain()/.pan()) and
+   * .param() signals, whose "off" state would be an unknown value to revert to rather than an
+   * absent one. Put those inside the pattern you pass in, not inside the callback.
    */
   when(cond, fn) {
     const condSig = toSignal(cond);
@@ -632,6 +688,17 @@ export class Sig {
     const truthy = (v) => v != null && Number(v) !== 0;
 
     const sample = (t, cps, pos) => (truthy(condSig.sample(t, cps, pos)) ? transformed : this).sample(t, cps, pos);
+
+    // The condition read in CYCLE time, exactly the way the step grid below reads it: the per-onset
+    // controls have to flip on the same events the notes do, and an LFO/rand condition sampled in
+    // real seconds (as sample() above does) would disagree with the grid it just gated.
+    const condAtCycle = (cyclePos) => {
+      const cycle = Math.floor(cyclePos);
+      if (!condSig.stepsForCycle) return condSig.sample(cycle + 0.5, 1);
+      const phase = cyclePos - cycle;
+      const c = fillCondGaps(condSig.stepsForCycle(cycle)).find((x) => phase >= x.start && phase < x.end);
+      return c ? c.value : null;
+    };
 
     const stepsForCycle = this.stepsForCycle
       ? (cycle) => {
@@ -658,9 +725,21 @@ export class Sig {
         }
       : null;
 
-    // Track metadata comes from the transformed side - fn may have added .param()s etc.; those
-    // apply unconditionally (only the note/value structure switches on cond).
-    return new Sig(sample, { stepsForCycle, ...transformed._meta() });
+    // Track metadata comes from the transformed side - fn may have added an .fx()/.param(); those
+    // apply unconditionally. The controls the scheduler reads PER ONSET are the exception: they
+    // switch with the condition (see condSwitchMap), because "off" there is simply an absent
+    // value, which every reader already resolves to the right default.
+    const switched = (before, after, skip) => condSwitchMap(before, after, condAtCycle, truthy, skip);
+    return new Sig(sample, {
+      stepsForCycle,
+      ...transformed._meta(),
+      // clip is left out: it has already been baked into both grids (applyClip), so switching the
+      // channel too would stretch a re-merged grid twice.
+      noteChannels: switched(this.noteChannels, transformed.noteChannels, CLIP_ONLY),
+      // Only when the callback's result is still a sampler pattern - a callback that swapped the
+      // track for a synth one has no channels to switch, and must not be handed a sampler back.
+      ...(transformed.sampler ? { sampler: switched(this.sampler, transformed.sampler) } : {}),
+    });
   }
 
   /** Envelope curve (see env()): negative = exponential-ish scoop, 0 = linear, positive = bulge. */
@@ -760,8 +839,9 @@ export class Sig {
    *
    * `n` may be patterned: `.seg("<8 16>")` alternates bar by bar, and `.seg("4 8")` reads as the
    * windowed rate `"1*[4 8]"` does - a 4-per-cycle grid across the first half, 8-per-cycle across
-   * the second. Sample-and-hold against an arbitrary rhythm rather than an even grid is `.hold()`,
-   * which this is the evenly-spaced shorthand for.
+   * the second. Any signal works, not just a step pattern: a gridless one (`macro1.range(2, 16)`,
+   * `irand(8)`) is read once per cycle. Sample-and-hold against an arbitrary rhythm rather than an
+   * even grid is `.hold()`, which this is the evenly-spaced shorthand for.
    */
   seg(n) {
     this._assertSampleable('seg');
@@ -885,13 +965,20 @@ export class Sig {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .degrade() needs a step pattern, e.g. n("0 1 2 3").degrade(0.3)');
     }
-    const p = Number(prob);
+    // The probability is a control like any other and may be patterned - `.degrade("<0 0.4>")`
+    // thins every other bar - read at each event's own onset. A resting/non-numeric probability
+    // drops nothing.
+    const probSig = toSignal(prob);
     // An explicit seed keeps its historical hash (seed + 1, so the default 0 isn't the bare 0);
     // omitted, it comes off the shared counter, out of reach of anything hand-written.
     const hashSeed = seed == null ? nextAutoSeed() : Number(seed) + 1;
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) =>
-      base(cycle).map((s) => (s.value != null && rngAtPos(cycle, s.start, hashSeed) < p ? { ...s, value: null } : s));
+      base(cycle).map((s) => {
+        if (s.value == null) return s;
+        const p = Number(probSig.sample(cycle + (s.start + s.end) / 2, 1));
+        return Number.isFinite(p) && rngAtPos(cycle, s.start, hashSeed) < p ? { ...s, value: null } : s;
+      });
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
@@ -901,23 +988,45 @@ export class Sig {
    * (0..reps-1) and `x` is this whole signal - so `n("0 2").ply(3, (x, n) => x.add(n * 12))`
    * plays each degree three times, climbing an octave per hit. Omit it for a plain retrigger
    * (`s("bd").ply(2)`). The transform is sampled at the original event's onset.
+   *
+   * `reps` may itself be patterned - `.ply("<2 4>")`, `.ply("2 4")` - and is read at each source
+   * event's onset, so the count can change through the cycle or bar by bar.
    */
   ply(reps, fn) {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .ply() needs a step pattern, e.g. n("0 2").ply(3)');
     }
-    const count = Math.max(1, Math.round(Number(reps)));
-    const variants = Array.from({ length: count }, (_, i) => (fn ? toSignal(fn(this, i)) : this));
+    // `reps` is a control like any other, so it may be patterned: it's read at each source event's
+    // ONSET, which makes `.ply("<2 4>")` alternate bar by bar and `.ply("2 4")` ply the two halves
+    // differently. A resting or non-numeric count means "don't subdivide" (1) rather than dropping
+    // the event. Variants are built lazily now that the count isn't known up front.
+    const repsSig = toSignal(reps);
+    const variants = new Map();
+    const variantAt = (i) => {
+      if (!variants.has(i)) variants.set(i, fn ? toSignal(fn(this, i)) : this);
+      return variants.get(i);
+    };
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) => {
       const out = [];
       for (const s of base(cycle)) {
         if (s.value == null || s.cont) { out.push(s); continue; } // rests/ties don't subdivide
+        const mid = cycle + (s.start + s.end) / 2; // read the count + the transform at the source onset
+        const ev = readEvent(repsSig, mid);
+        const rounded = Math.round(Number(ev.value));
+        const count = Number.isFinite(rounded) ? Math.max(1, rounded) : 1;
         const w = (s.end - s.start) / count;
-        const mid = cycle + (s.start + s.end) / 2; // sample the transform at the source onset
+        // The count's own atom lights with the notes it multiplied (the live pick of a "<2 4>").
+        const locs = ev.locs.length ? [...stepLocs(s), ...ev.locs] : null;
         for (let i = 0; i < count; i++) {
-          const v = variants[i].sample(mid, 1);
-          out.push({ ...s, start: s.start + i * w, end: s.start + (i + 1) * w, value: v == null ? null : v });
+          const v = variantAt(i).sample(mid, 1);
+          out.push({
+            ...s,
+            start: s.start + i * w,
+            end: s.start + (i + 1) * w,
+            value: v == null ? null : v,
+            ...(locs ? { locs } : {}),
+          });
         }
       }
       return out;
@@ -937,12 +1046,30 @@ export class Sig {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .echo() needs a step pattern, e.g. s("bd").echo(3, 1/8)');
     }
-    const count = Math.max(1, Math.round(Number(reps)));
-    const dt = Number(time);
-    const variants = Array.from({ length: count }, (_, i) => (fn ? toSignal(fn(this, i)) : this));
+    // Both arguments may be patterned. Unlike ply's per-event count these are read once per OUTPUT
+    // cycle (at its start): the copy layout has to hold still across a cycle for the tails spilling
+    // in from the previous one to line up, so `.echo("<2 4>", 1/8)` changes bar by bar rather than
+    // event by event. Variants are built lazily, since the count isn't known up front.
+    const repsSig = toSignal(reps);
+    const timeSig = toSignal(time);
+    const countAt = (cycle) => {
+      const v = Math.round(Number(repsSig.sample(cycle, 1, cycle)));
+      return Number.isFinite(v) ? Math.max(1, v) : 1;
+    };
+    const dtAt = (cycle) => {
+      const v = Number(timeSig.sample(cycle, 1, cycle));
+      return Number.isFinite(v) ? v : 0;
+    };
+    const variants = new Map();
+    const variantAt = (i) => {
+      if (!variants.has(i)) variants.set(i, fn ? toSignal(fn(this, i)) : this);
+      return variants.get(i);
+    };
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) => {
       const out = [];
+      const count = countAt(cycle);
+      const dt = dtAt(cycle);
       for (let n = 0; n < count; n++) {
         const shift = n * dt;
         // Copies land `shift` cycles later, so this cycle's events can originate up to a cycle
@@ -954,7 +1081,7 @@ export class Sig {
             const start = src + s.start + shift - cycle;
             const end = src + s.end + shift - cycle;
             if (end <= 0 || start >= 1) continue;
-            const v = variants[n].sample(src + (s.start + s.end) / 2, 1);
+            const v = variantAt(n).sample(src + (s.start + s.end) / 2, 1);
             const value = v == null ? null : v;
             // Onset before this cycle -> a ringing tail, not a fresh trigger (cont), same as a tie.
             if (start < 0) out.push({ ...s, start: 0, end, value, cont: true });
@@ -1339,7 +1466,8 @@ function mapEventAt(sig, fn) {
 // rebuilt without source spans: mini('1') is synthesized here, not written by the user, and its
 // atom's [0,1] span would otherwise light the first character of their document.
 function segTrigger(n) {
-  const factor = n instanceof Sig && n.constVal !== undefined ? n.constVal : n;
+  const sig = n instanceof Sig ? n : null;
+  const factor = sig && sig.constVal !== undefined ? sig.constVal : n;
   if (typeof factor === 'number' && !(factor > 0)) {
     throw new Error('[signal] .seg(n) takes a positive number of steps per cycle, e.g. .seg(8) or .seg("<8 16>")');
   }
@@ -1554,6 +1682,34 @@ function applyNoteChannels(baseStepsForCycle, noteChannels) {
   return out;
 }
 
+const CLIP_ONLY = new Set(['clip']);
+
+// Merges two maps of per-onset control signals (Sig#sampler, Sig#noteChannels) across a .when():
+// where the two sides differ, the key becomes ONE signal that follows the condition - the
+// callback's version where it's truthy, the original where it isn't. A side that doesn't have the
+// key rests (null) there, which every reader of these already treats as "unset" and resolves to the
+// engine/scheduler default. Keys in `skip`, and any non-signal value (fit's 'auto'), can't be
+// switched, so the callback's version stands as it always did.
+function condSwitchMap(before, after, condAt, truthy, skip = new Set()) {
+  const out = {};
+  for (const key of new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])) {
+    const off = before?.[key] ?? null;
+    const on = after?.[key] ?? null;
+    const switchable =
+      off !== on && !skip.has(key) && (off === null || off instanceof Sig) && (on === null || on instanceof Sig);
+    if (!switchable) {
+      const kept = on ?? off;
+      if (kept != null) out[key] = kept;
+      continue;
+    }
+    out[key] = new Sig((t, cps, pos) => {
+      const branch = truthy(condAt(pos ?? t * cps)) ? on : off;
+      return branch ? branch.sample(t, cps, pos) : null;
+    });
+  }
+  return out;
+}
+
 // Rests/gaps in a condition pattern count as falsy regions, not holes - without this, a cond
 // like "1 ~" would silence the second half of the cycle instead of playing the original.
 function fillCondGaps(steps) {
@@ -1716,6 +1872,114 @@ export function s(value) {
   return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Sampler controls as top-level builders (Strudel's "control patterns")
+// ---------------------------------------------------------------------------------------------
+
+// What a note-less synth("X") plays: C2 (MIDI 24 in this package's c5 = 60 convention), one
+// whole-cycle note per cycle - the same note at which a sample plays back at native speed.
+const DEFAULT_SYNTH_NOTE = 24;
+
+// Every sampler channel, by the name of the method that sets it: which key it lives under in
+// Sig#sampler, and what it's worth when nobody has set it - the value a combinator has to combine
+// AGAINST. These are the engine's own defaults (see osc-engine's playSample), written down here
+// because `x.mul(speed("-1"))` has to know that an unset speed means 1.
+const SAMPLER_CONTROLS = {
+  i: { key: 'index', unset: 0 },
+  begin: { key: 'begin', unset: 0 },
+  end: { key: 'end', unset: 1 },
+  loop: { key: 'loop', unset: 0 },
+  speed: { key: 'speed', unset: 1 },
+  stretch: { key: 'stretch', unset: 1 },
+  fit: { key: 'fit', unset: 1 },
+  slice: { key: 'slice', unset: 0 },
+  attack: { key: 'attack', unset: 0 },
+  decay: { key: 'decay', unset: 0 },
+  sustain: { key: 'sustain', unset: 1 },
+  release: { key: 'release', unset: 0 },
+  note: { key: 'note', unset: DEFAULT_SYNTH_NOTE }, // reached by bare arithmetic, not a builder
+};
+
+// A signal's VALUES with no track metadata and no control tag attached - what a channel signal is.
+// Combining controls goes through this so a merge can't drag an instrument/sampler along with it,
+// and so a control operand's own tag can't re-route the merge back into itself. pitchKind is a
+// property of the values (note vs degree), not of the track, so it stays.
+function bareSig(sig) {
+  const out = new Sig(sig.sample, {
+    stepsForCycle: sig.stepsForCycle,
+    eventAt: sig.eventAt,
+    lfoIR: sig.lfoIR,
+    envIR: sig.envIR,
+    ccIR: sig.ccIR,
+    pitchKind: sig.pitchKind,
+  });
+  if (sig.constVal !== undefined) out.constVal = sig.constVal;
+  return out;
+}
+
+/**
+ * The sampler config methods, also available as TOP-LEVEL builders - Strudel's control patterns.
+ * `speed("-1")` isn't a pattern whose values are -1; it's the *speed channel* carrying -1. On its
+ * own that's just the longer way to write `s("bd").speed("-1")`, but as an OPERAND it lets a
+ * combinator reach into one channel of a pattern it was handed, exactly as `x.add(note(3))`
+ * reaches into pitch:
+ *
+ *   tops: s("breaks:19").fit()
+ *     .when(rand().gte(0.7), x => x.mul(speed("-1")))   // ~30% of bars play backwards
+ *     .when(rand().gte(0.5), x => x.ply("4"))
+ *
+ * The channel's current value is the left operand (its resting default where it isn't set yet -
+ * see SAMPLER_CONTROLS), so `.mul(speed("-1"))` flips whatever speed is in force rather than
+ * replacing it, and it composes with `.fit()` the way an explicit `.speed()` does. Values take
+ * anything a signal takes: numbers, mini strings, LFOs, `choose()`/`irand()`.
+ *
+ * Using one on a non-sampler pattern is an error (there's no channel to aim at) - the same message
+ * the method form gives.
+ */
+function samplerControl(name) {
+  return (value) => {
+    // fit() alone means "nearest power of two", which is a mode rather than a number - flag it so
+    // a combinator sets the channel instead of trying to do arithmetic with it.
+    if (name === 'fit' && value === undefined) {
+      const auto = new Sig(() => null);
+      auto.ctl = name;
+      auto.ctlAuto = true;
+      return auto;
+    }
+    const out = bareSig(toSignal(value === undefined ? 1 : value));
+    out.ctl = name;
+    return out;
+  };
+}
+
+/** Which sample of the pack to play, 0-based - the top-level form of `.i()`. */
+export const i = samplerControl('i');
+/** Playback start position within the sample, 0..1 - the top-level form of `.begin()`. */
+export const begin = samplerControl('begin');
+/** Playback end position within the sample, 0..1 - the top-level form of `.end()`. */
+export const end = samplerControl('end');
+/** Loop the begin..end region instead of one-shot - the top-level form of `.loop()`. */
+export const loop = samplerControl('loop');
+/** Playback rate; negative plays backward - the top-level form of `.speed()`. */
+export const speed = samplerControl('speed');
+/** Granular timestretch factor - the top-level form of `.stretch()`. */
+export const stretch = samplerControl('stretch');
+/** Repitch the sample to last this many cycles - the top-level form of `.fit()`. */
+export const fit = samplerControl('fit');
+/** Play the nth detected transient slice - the top-level form of `.slice()`. */
+export const slice = samplerControl('slice');
+/** Attack, as a multiple of the played duration - the top-level form of `.attack()`. */
+export const attack = samplerControl('attack');
+/** Decay, as a multiple of the played duration - the top-level form of `.decay()`. */
+export const decay = samplerControl('decay');
+/** Sustain level, 0..1 - the top-level form of `.sustain()`. */
+export const sustain = samplerControl('sustain');
+/** Release, as a multiple of the played duration - the top-level form of `.release()`. */
+export const release = samplerControl('release');
+
+/** Every top-level sampler control, by name - what the host puts in userland scope. */
+export const SAMPLER_CONTROL_NAMES = Object.keys(SAMPLER_CONTROLS).filter((k) => k !== 'note');
+
 // Build-time seeds for the randomised builders (choose/irand/.degrade()). Independent calls must
 // draw independently, so each takes the next seed off ONE shared counter. A counter per builder
 // would hand the first choose() and the first irand() the same seed, and since both read the same
@@ -1863,10 +2127,6 @@ export function irand(n) {
   return new Sig((t, cps, pos) => eventAt(pos ?? t * cps).value, { stepsForCycle, eventAt });
 }
 
-// What a note-less synth("X") plays: C2 (MIDI 24 in this package's c5 = 60 convention), one
-// whole-cycle note per cycle - the same note at which a sample plays back at native speed.
-const DEFAULT_SYNTH_NOTE = 24;
-
 // The pitch a .midi() injection fires for a note-less (drum) source, when no { note } is given:
 // middle C (c5 = 60 here). A MIDI-triggered ducker (Kickstart, LFOTool) ignores the note, so any
 // fixed pitch works; a melodic source passes its own pitch through instead.
@@ -1957,8 +2217,13 @@ export function pianoroll(str = '', opts = {}) {
 // Deterministic hash noise for rand()'s JS-side sampling, so Tier-1 values are reproducible.
 // The Tier-2 native version uses scsynth's own noise UGen, so JS values and engine values
 // differ - both are random, only the rate/range contract is shared.
-function hash01(i) {
-  const s = Math.sin(i * 127.1 + 311.7) * 43758.5453123;
+// Deterministic 0..1 hash of a noise-grid index, keyed on the signal's build-time seed so two
+// independent rand()/perlin() calls draw different noise (see shapeSignal). The seed enters
+// through its own irrational multiplier rather than as an offset on `i`, which would only shift
+// one stream along the other's timeline - "decorrelated" has to mean uncorrelated, not delayed.
+// Seed 0 (the default) reproduces the original single-stream hash exactly.
+function hash01(i, seed = 0) {
+  const s = Math.sin(i * 127.1 + seed * 78.233 + 311.7) * 43758.5453123;
   return s - Math.floor(s);
 }
 
@@ -2015,17 +2280,20 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
       break;
     case 'rand': {
       // continuous random: smoothstep-interpolated hash noise, one new target per period
-      // (stepped random is rand().hold("1*8") - see Sig#hold)
+      // (stepped random is rand().hold("1*8") - see Sig#hold). `seed` is what makes two
+      // independent rand() calls independent streams rather than the same one twice.
+      const seed = ir.seed ?? 0;
       const i = Math.floor(total);
       const u = total - i;
       const su = u * u * (3 - 2 * u);
-      unipolar = hash01(i) * (1 - su) + hash01(i + 1) * su;
+      unipolar = hash01(i, seed) * (1 - su) + hash01(i + 1, seed) * su;
       break;
     }
     case 'perlin': {
       // Fractal value noise (fBm): rand's smoothstep hash noise summed over a few octaves, each
       // double the frequency and half the amplitude. Reads as a smoother, more organic drift than
-      // plain rand. Deterministic in `total`, so JS and any highlighter agree.
+      // plain rand. Deterministic in `total` and the seed, so JS and any highlighter agree.
+      const seed = ir.seed ?? 0;
       let sum = 0;
       let amp = 1;
       let norm = 0;
@@ -2035,7 +2303,7 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
         const i = Math.floor(x);
         const u = x - i;
         const su = u * u * (3 - 2 * u);
-        sum += amp * (hash01(i) * (1 - su) + hash01(i + 1) * su);
+        sum += amp * (hash01(i, seed) * (1 - su) + hash01(i + 1, seed) * su);
         norm += amp;
         amp *= 0.5;
         freq *= 2;
@@ -2062,10 +2330,20 @@ function withLfoIR(ir) {
   return new Sig((t, cps, pos) => sampleLfoIR(ir, t, cps, pos), { lfoIR: ir });
 }
 
+const NOISE_SHAPES = new Set(['rand', 'perlin']);
+
 function shapeSignal(shape) {
   return (opts = {}) => {
-    const { rate = 1, phase = 0 } = typeof opts === 'number' ? { rate: opts } : opts;
-    return withLfoIR({ shape, rateHz: rate, phaseCycles: phase, min: 0, max: 1 });
+    const o = typeof opts === 'number' ? { rate: opts } : opts;
+    const { rate = 1, phase = 0 } = o;
+    const ir = { shape, rateHz: rate, phaseCycles: phase, min: 0, max: 1 };
+    // The noise shapes are the only ones with a stream to decorrelate, and they take a build-time
+    // seed off the SAME shared counter choose()/irand()/.degrade() draw from - so independent
+    // rand() calls are independent noise, positionally seeded, and re-evaluating the document
+    // replays the identical take (see nextAutoSeed / resetRandomSeeds). Deterministic shapes take
+    // no seed, so they can't shift that counter out from under the random builders.
+    if (NOISE_SHAPES.has(shape)) ir.seed = o.seed == null ? nextAutoSeed() : Number(o.seed) + 1;
+    return withLfoIR(ir);
   };
 }
 
@@ -2075,8 +2353,22 @@ export const saw = shapeSignal('saw');
 export const tri = shapeSignal('tri');
 export const square = shapeSignal('square');
 export const ramp = shapeSignal('ramp'); // rising 0->1 each period (alias shape of saw)
-export const rand = shapeSignal('rand'); // continuous random; step it with .hold("1*8")
-export const perlin = shapeSignal('perlin'); // fractal value noise - smoother, organic drift
+/**
+ * Continuous random - smoothed noise, one new target per period. Step it with `.hold("1*8")` or
+ * `.seg(8)`.
+ *
+ * Every rand() is its OWN noise stream: two of them in a document decorrelate on their own, the
+ * way choose()/irand()/.degrade() do, so `.when(rand().gte(0.7), …).when(rand().gte(0.7), …)`
+ * really is two independent coins. Pass `{ seed }` only to pin a particular one - two rand()s
+ * given the same explicit seed deliberately move together, which is how you gate two things off
+ * one random. `{ rate }`/`{ phase }` as usual; `rand(0.5)` is the rate shorthand.
+ *
+ * The native (engine-side) noise a `.param(rand())` runs is a different stream from this JS one -
+ * only the rate and range contract is shared, as it always has been.
+ */
+export const rand = shapeSignal('rand');
+/** Fractal value noise (fBm) - smoother, organic drift. Independently seeded like rand(). */
+export const perlin = shapeSignal('perlin');
 
 const DEFAULT_LFO_SHAPE = '0,0 0.5,1 1,0'; // triangle - what a bare lfo() starts as
 

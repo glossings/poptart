@@ -633,6 +633,27 @@
             <em>structural</em> — each fresh step retriggers, a <code>~</code> drops the event — so you
             can carve a melody or a beat out of a single sample.
           </p>
+          <p>
+            Every one of those methods is also a <strong>top-level builder</strong>:
+            <code>speed("-1")</code> is the <em>speed channel</em> carrying −1, the way
+            <code>note(3)</code> is the pitch channel carrying 3. On its own that's just the long way
+            round, but as an operand it lets a combinator reach into one channel of a pattern it was
+            handed — which is the only way to say “reverse <em>this</em>” inside a
+            <code>.when()</code>:
+          </p>
+          <pre><code>tops: s(<span class="s">"breaks:19"</span>).fit()
+  .begin(irand(<span class="s">"8"</span>).seg(8).div(8))
+  .when(rand().gte(0.7), x =&gt; x.mul(speed(<span class="s">"-1"</span>)))   <span class="c">// ~30% of bars backwards</span>
+  .when(rand().gte(0.5), x =&gt; x.ply(<span class="s">"4"</span>))</code></pre>
+          <p>
+            The channel's current value is the left operand — its resting default where nothing has
+            set it (speed 1, begin 0, the repitch note 24) — so <code>.mul(speed("-1"))</code>
+            <em>flips</em> whatever speed is in force rather than replacing it, and composes with
+            <code>.fit()</code> exactly as an explicit <code>.speed()</code> would. Plain arithmetic on
+            a sampler pattern aims at the repitch note, since the values themselves are pack names:
+            <code>s("rave").add(7)</code> and <code>s("rave").add(note(7))</code> are the same seven
+            semitones up.
+          </p>
         </section>
 
         <!-- ================================================================= -->
@@ -734,14 +755,20 @@ n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scal
           <table>
             <tr><th>Method</th><th>Does</th></tr>
             <tr><td><code>.fast(f)</code> / <code>.slow(f)</code></td><td>Playback rate: <code>.fast(2)</code> fits two cycles into one, <code>.slow(2)</code> spreads one over two. A <em>negative</em> factor plays the pattern in reverse — <code>.fast(-1)</code> is straight reverse playback. On an LFO, <code>.fast()</code> multiplies its rate (<code>.rate()</code> sets it absolutely).</td></tr>
-            <tr><td><code>.when(cond, fn)</code></td><td>Apply <code>fn</code> to this pattern wherever <code>cond</code> is truthy, on cond's own grid. <code>n("0 1 2 3").when("1 0".gte(1), x =&gt; x.add(12))</code>.</td></tr>
+            <tr><td><code>.when(cond, fn)</code></td><td>Apply <code>fn</code> to this pattern wherever <code>cond</code> is truthy, on cond's own grid. <code>n("0 1 2 3").when("1 0".gte(1), x =&gt; x.add(12))</code>. Per-onset controls the callback set (sampler config, <code>.vel()</code>) switch with the condition too; the chain and the streamed channel strip stay on throughout.</td></tr>
             <tr><td><code>.degrade(p)</code></td><td>Randomly drop each event with probability <code>p</code> (default 0.5). The <code>?</code> in mini-notation, as a method.</td></tr>
-            <tr><td><code>.ply(n, fn?)</code></td><td>Retrigger each event <code>n</code> times; optional <code>(x, i) =&gt; …</code> transforms each repeat.</td></tr>
+            <tr><td><code>.ply(n, fn?)</code></td><td>Retrigger each event <code>n</code> times; optional <code>(x, i) =&gt; …</code> transforms each repeat. <code>n</code> is read per event, so <code>.ply("2 4")</code> plies the two halves differently.</td></tr>
             <tr><td><code>.echo(n, dt, fn?)</code></td><td>Overlay <code>n</code> delayed copies, each <code>dt</code> cycles further along — a pattern-level tape echo.</td></tr>
             <tr><td><code>.arp(pat)</code></td><td>Arpeggiate chords — the notes sounding together become a ladder, and <code>pat</code>'s numbers pick them off: <code>note("[c3,e3,g3]").arp("0 1 2 3")</code>. <code>0</code> is the lowest tone, and an index past the top wraps back to the bottom an octave up (<code>3</code> = c3+12), negatives off the top an octave down (<code>-1</code> = g3−12). The chord is whatever is ringing at each onset — a stack, or a drawn <code>pianoroll()</code> chord whose notes are all different lengths — so the arpeggio is one note at a time; one full pass of <code>pat</code> is squeezed into each chord.</td></tr>
             <tr><td><code>.hold(trig)</code></td><td>Sample-and-hold: freeze this signal at each onset of <code>trig</code>. <code>rand().hold("1*8")</code> is stepped random.</td></tr>
-            <tr><td><code>.seg(n)</code></td><td>Sample-and-hold on an even grid of <code>n</code> steps per cycle — the shorthand for <code>.hold("1*n")</code>, and the way to give a structureless signal structure. <code>rand().seg(8)</code> is eighth-note stepped random; <code>s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code> fires eight random slice starts a bar. <code>n</code> may be patterned (<code>.seg("&lt;8 16&gt;")</code>).</td></tr>
+            <tr><td><code>.seg(n)</code></td><td>Sample-and-hold on an even grid of <code>n</code> steps per cycle — the shorthand for <code>.hold("1*n")</code>, and the way to give a structureless signal structure. <code>rand().seg(8)</code> is eighth-note stepped random; <code>s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code> fires eight random slice starts a bar. <code>n</code> may be patterned (<code>.seg("&lt;8 16&gt;")</code>) — or any signal at all, read once per cycle.</td></tr>
           </table>
+          <p>
+            Every numeric argument above takes a <strong>pattern</strong>, not just a number —
+            <code>.ply("&lt;2 4&gt;")</code>, <code>.degrade("&lt;0 .4&gt;")</code>,
+            <code>.seg("4 8")</code>, <code>.fast(macro1.range(1, 4))</code>. If you find one that
+            doesn't, it's a bug.
+          </p>
           <p>
             And <code>choose("0", "3", "5")</code> is a signal that randomly picks one option per cycle
             — weight a pick with a <code>[value, weight]</code> pair. It drops in anywhere a signal goes:
@@ -756,6 +783,17 @@ n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scal
             <code>.begin(irand("8!8").div(8))</code> retriggers eight times — the same thing
             <code>.begin(irand(8).seg(8).div(8))</code> says the other way round.
           </p>
+          <div class="callout">
+            <span class="tag">independence</span>
+            Every random builder — <code>rand()</code>, <code>perlin()</code>, <code>choose()</code>,
+            <code>irand()</code>, <code>.degrade()</code> — is its <strong>own stream</strong>. Two
+            <code>rand()</code>s in a document are two independent coins, so
+            <code>.when(rand().gte(0.7), …).when(rand().gte(0.7), …)</code> picks two different sets
+            of bars. Seeds are <em>positional</em> (the nth random call in the buffer), so a document
+            replays identically every time you hit play — and a re-evaluation doesn't reshuffle it.
+            Pass <code>{ seed }</code> / a seed argument only when you <em>want</em> two randoms to
+            move together: <code>rand({ seed: 1 })</code> twice is one coin gating two things.
+          </div>
         </section>
 
         <!-- ================================================================= -->

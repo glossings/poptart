@@ -86,6 +86,8 @@ let knownPlugins = [];
 const BUILDERS = [
   'Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'setbpm',
   'choose', 'irand', 'keyboard', 'tap', 'pianoroll',
+  // The sampler config methods double as top-level control builders (x.mul(speed("-1"))).
+  'i', 'begin', 'end', 'loop', 'speed', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release',
   'macro', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`),
 ];
 const METHODS = [
