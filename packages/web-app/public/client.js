@@ -20,6 +20,7 @@ const paramList = document.getElementById('paramList');
 const paramsCount = document.getElementById('paramsCount');
 const pluginList = document.getElementById('pluginList');
 const log = document.getElementById('log');
+const LOG_MAX_LINES = 500; // in-app console scrollback (see logLine) - .log() can fill it fast
 
 // pattern-core modules, loaded async at startup; highlighting/label/shape-editor features just
 // stay off until they arrive (or if the import fails).
@@ -65,6 +66,9 @@ function logLine(text, isError = false) {
   if (isError) line.className = 'error';
   line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
   log.prepend(line);
+  // Newest first, so the tail is what gets dropped. A .log()'d track writes a line per event -
+  // tens a second - and this panel is a scrollback, not a record: devtools below keeps the lot.
+  while (log.childElementCount > LOG_MAX_LINES) log.lastElementChild.remove();
   // Mirror everything to the devtools console too, so the log is still there when the in-app
   // console is minimized (and gets devtools' filtering/timestamps).
   (isError ? console.error : console.log)(`[poptart] ${text}`);
@@ -374,8 +378,10 @@ function writePluginState(trackLabel, slot, state) {
 // Deliberately does NOT re-evaluate: the state is already live in the plugin (it came from
 // there), so an eval would only push it back and make the plugin reload what it already has.
 async function pollPluginEdits() {
-  const { edits } = await api('POST', '/api/pluginEdits');
+  const { edits, logs } = await api('POST', '/api/pluginEdits');
   for (const e of edits ?? []) writePluginState(e.trackId, e.slot, e.state);
+  // .log() event lines from the scheduler, which runs server-side - same drain, same 500ms.
+  for (const line of logs ?? []) logLine(line);
 }
 
 setInterval(() => pollPluginEdits().catch(() => {}), 500);

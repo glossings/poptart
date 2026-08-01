@@ -262,7 +262,7 @@ const API_DOCS = {
   i: { kind: 'both', sig: 'i(index)', desc: 'Which sample of the pack to play, 0-based (the same thing as the ":n" suffix).', eg: 's("breaks").i("<0 2>")' },
   begin: { kind: 'both', sig: 'begin(pos)', desc: 'Playback start position within the sample, 0..1.', eg: '.begin(irand(16).div(16))' },
   end: { kind: 'both', sig: 'end(pos)', desc: 'Playback end position within the sample, 0..1.', eg: '.end(0.25)' },
-  loop: { kind: 'both', sig: 'loop(on)', desc: 'Loops the begin..end region instead of playing it as a one-shot; loop(0) also opts a negative speed out of looping.', eg: '.loop(1)' },
+  loop: { kind: 'both', sig: 'loop(on, { wrap, dir })', desc: 'Loops the sample for the event instead of one-shot: playback always enters at begin(), then wrap "file" (default) runs off the end and carries on from 0, wrap "window" loops the begin..end region, and dir "pingpong" turns around at each edge instead of jumping back - so begin(0.99) reverses almost immediately. loop(0) also opts a negative speed out of looping.', eg: '.loop(1, { wrap: "window" })' },
   speed: { kind: 'both', sig: 'speed(rate)', desc: 'Playback rate off begin() - 2 is an octave up and half as long, 0 is silent, negative walks backwards and wraps round to end(), so it loops unless you say loop(0).', eg: '.speed("<1 -1>")' },
   flip: { kind: 'both', sig: 'flip(on)', desc: 'Plays the region backwards into the beat: over 0.5 it reverses speed() as one pass and delays the voice so it lands on begin() at the step\'s end.', eg: '.flip("<0 1>*2")' },
   stretch: { kind: 'both', sig: 'stretch(factor)', desc: 'Granular timestretch (2 = twice as long at the same pitch). Best on rhythmic material.', eg: '.stretch(2)' },
@@ -273,6 +273,14 @@ const API_DOCS = {
   sustain: { kind: 'both', sig: 'sustain(level)', desc: 'Sampler envelope sustain level, 0..1 (a level, not a time).', eg: '.sustain(0.5)' },
   release: { kind: 'both', sig: 'release(mult)', desc: 'Sampler envelope release, as a multiple of the played duration.', eg: '.release(0.5)' },
   adsr: { kind: 'method', sig: 'adsr(a, d, s, r)', desc: 'Sets all four sampler envelope controls at once.', eg: '.adsr(0.05, 0.2, 0.6, 0.4)' },
+
+  // ----------------------------------------------------------------- debugging
+  log: {
+    kind: 'method',
+    sig: 'log()',
+    desc: 'Prints every event this track fires to the console - onset and end in cycles, plus the config the engine resolved (a sampler line shows the begin/end window, the real rate, and how much audio the window holds against the event\'s length).',
+    eg: 's("breaks:35").fit().begin("<0 0.75>").log()',
+  },
 };
 
 // The Macros panel's knobs, pre-bound as ready-made signals (macro1..macro8 = macro(1)..macro(8)).

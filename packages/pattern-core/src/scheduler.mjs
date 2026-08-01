@@ -54,6 +54,83 @@ const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clea
 // Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
 const MAX_CHAIN_SLOTS = 8;
 
+// ---------------------------------------------------------------------------------------------
+// Sig#log() - one console line per event a flagged pattern fires.
+// ---------------------------------------------------------------------------------------------
+
+// Where those lines go. The default is this process's console (all a standalone host has);
+// web-app replaces it with a sink that ships them to the browser instead, so they land in the
+// editor's own console and in devtools rather than in the server's stdout (see server.js).
+// eslint-disable-next-line no-console
+let eventLogger = (line) => console.log(line);
+
+/** @param {(line: string) => void | null} fn - null restores the plain console sink. */
+export function setEventLogger(fn) {
+  // eslint-disable-next-line no-console
+  eventLogger = typeof fn === 'function' ? fn : (line) => console.log(line);
+}
+
+// Numbers a human is going to read off a moving log: enough precision to see a fit rate is 1.006
+// rather than 1, no float dust.
+const num = (v, digits = 4) =>
+  typeof v === 'number' && Number.isFinite(v) ? String(Number(v.toFixed(digits))) : String(v);
+const cyc = (v) => v.toFixed(3);
+
+/**
+ * One sampler event, as read by a human hunting silence. `cfg` is what the pattern asked for
+ * (see _sampleConfigAt); `info` is what the engine resolved it to (see OscEngine#playSample) -
+ * the fit rate and the window's length in seconds live only there, since they depend on the
+ * sample file. An engine that reports nothing back just logs the requested config.
+ *
+ * The last field is the point of the whole thing: `dur=<audio>c/<event>c` is how much audio the
+ * begin..end window holds against how long the event is. `gap=` means the window ran out early
+ * and the rest of the event is silence; `cut` means the opposite - the window outlasts the event
+ * and gets gated off at its end.
+ */
+function formatSampleEvent(pack, cfg, info, eventCycles) {
+  // Resolved values where the engine reported them, the pattern's request (and the engine-side
+  // defaults it would apply) otherwise - an engine that returns nothing still logs a full line,
+  // just without the fields only it can know.
+  const res = info && !info.skipped ? info : {};
+  const idx = res.index ?? cfg.index ?? 0;
+  const begin = res.begin ?? cfg.begin ?? 0;
+  const end = res.end ?? cfg.end ?? 1;
+  const speed = res.speed ?? cfg.speed ?? 1;
+  const loop = res.loop ?? cfg.loop ?? 0;
+  const stretch = res.stretch ?? cfg.stretch ?? 1;
+  const bits = [`s=${pack}`, `i=${num(idx)}`, `begin=${num(begin)}`, `end=${num(end)}`, `speed=${num(speed)}`];
+  if (loop) {
+    // Which region it loops round and how it turns over - the modes are half of what a loop
+    // sounds like, so a bare "loop" would leave the line ambiguous.
+    const wrap = res.loopWrap ?? cfg.loopWrap ?? 'file';
+    const dir = res.loopDir ?? cfg.loopDir ?? 'forward';
+    bits.push(`loop=${wrap}${dir === 'pingpong' ? '+pingpong' : ''}`);
+  }
+  if (stretch !== 1) bits.push(`stretch=${num(stretch)}`);
+  if (cfg.vel !== undefined) bits.push(`vel=${num(cfg.vel)}`);
+  if (cfg.note !== undefined) bits.push(`note=${num(cfg.note)}`);
+  if (cfg.slice !== undefined) bits.push(`slice=${num(cfg.slice)}`);
+  for (const [key, dflt] of [['attack', 0], ['decay', 0], ['sustain', 1], ['release', 0]]) {
+    if (cfg[key] !== undefined && cfg[key] !== dflt) bits.push(`${key}=${num(cfg[key])}`);
+  }
+  if (info?.skipped) {
+    bits.push(`SILENT (${info.skipped})`);
+    return bits.join(' ');
+  }
+  if (res.durSec !== undefined && cfg.secPerCycle > 0) {
+    const audioCycles = res.durSec / cfg.secPerCycle;
+    bits.push(`dur=${num(audioCycles, 3)}c/${num(eventCycles, 3)}c`);
+    if (res.cut) bits.push('cut');
+    else if (!loop && audioCycles < eventCycles - 1e-4) bits.push(`gap=${num(eventCycles - audioCycles, 3)}c`);
+  }
+  return bits.join(' ');
+}
+
+/** One synth note event. Params/LFOs/fx aren't here - they're streams, not per-event values. */
+function formatNoteEvent(midiNote, vel) {
+  return `note=${midiNote} vel=${num(vel)}${vel <= 0 ? ' SILENT (vel 0)' : ''}`;
+}
+
 /**
  * The shared clock: one Transport is owned by the host (web-app server) and read by every
  * Scheduler, so all tracks agree on where in the cycle grid "now" is. Tempo changes rebase
@@ -468,16 +545,31 @@ export class Scheduler {
             pack = m[1];
             if (cfg.index === undefined) cfg.index = Number(m[2]);
           }
-          this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
+          // The engine reports back what it resolved the config down to (fit -> rate, slice ->
+          // window, and the window's length in seconds) - that's what .log() prints, since none
+          // of it can be known here: it depends on the sample file's own length.
+          const info = this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
+          if (this.pattern.logging) {
+            this._logEvent(stepStartCycle, stepEndCycle, formatSampleEvent(pack, cfg, info, step.end - step.start));
+          }
         } else {
           const midiNote = Math.round(step.value);
           const vel = velocity ?? 1.0; // unset velocity on a synth note is full
+          if (this.pattern.logging) {
+            this._logEvent(stepStartCycle, stepEndCycle, formatNoteEvent(midiNote, vel));
+          }
           if (vel <= 0) continue;
           this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec);
           this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC));
         }
       }
     }
+  }
+
+  // One .log() line: which track, the event's onset and end as absolute cycle positions (so it
+  // lines up with the transport and with the other tracks), then the event itself.
+  _logEvent(fromCycle, toCycle, body) {
+    eventLogger(`[${this.trackId}] ${cyc(fromCycle)} -> ${cyc(toCycle)}  ${body}`);
   }
 
   // The velocity of one note event, read uniformly (all-signals model): the value merged onto the
@@ -522,6 +614,10 @@ export class Scheduler {
         if (v !== undefined && !Number.isNaN(v)) cfg[key] = v;
       }
     }
+    // .loop()'s modes (see Sig#loop): plain strings, chosen once for the track rather than per
+    // event, so they ride through as-is like fit's 'auto' does.
+    if (src.loopWrap) cfg.loopWrap = src.loopWrap;
+    if (src.loopDir) cfg.loopDir = src.loopDir;
     if (src.fit === 'auto') {
       cfg.fit = 'auto';
     } else if (merged && merged.fit !== undefined) {

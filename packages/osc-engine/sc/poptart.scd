@@ -536,11 +536,26 @@ server.waitForBoot {
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
-        SynthDef(("poptart_sample_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0|
+        // Looping voice. Node decides WHERE the loop runs (loopLo..loopHi - the whole file or just
+        // the begin..end window, see .loop()'s wrap option) and where it enters (entry); this only
+        // has to walk it. pingpong swaps the wrap-around for a bounce off each edge.
+        SynthDef(("poptart_sample_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0|
             var frames = BufFrames.ir(buf);
-            var startF = begin * frames, endF = max((begin * frames) + 1, (end * frames) - 1);
-            var reset = Select.kr(rate < 0, [startF, endF]);
-            var idx = Phasor.ar(0, rate * BufRateScale.ir(buf), startF, endF, reset);
+            var startF = loopLo * frames, endF = max((loopLo * frames) + 1, (loopHi * frames) - 1);
+            var span = endF - startF;
+            var from = (entry * frames).clip(startF, endF);
+            var step = rate * BufRateScale.ir(buf);
+            // Phasor's resetPos is ONLY applied on a trigger - its initial value is `start`, so a
+            // never-triggered phasor cannot be made to begin anywhere else. Every phasor here
+            // therefore runs from zero and the entry point is added in and wrapped.
+            var walk = (Phasor.ar(0, step, 0, span, 0) + (from - startF)) % span;
+            // Ping-pong is a phasor over TWICE the span, folded back on itself: 0 -> span -> 0 is
+            // one period, so each edge turns the playhead round instead of jumping it. Direction
+            // is which half of that period it enters, which is why the rate here is unsigned.
+            var bounceFrom = Select.kr(rate < 0, [from - startF, (2 * span) - (from - startF)]);
+            var bouncePh = (Phasor.ar(0, step.abs, 0, 2 * span, 0) + bounceFrom) % (2 * span);
+            var bounced = startF + span - absdif(bouncePh, span);
+            var idx = Select.ar(pingpong, [startF + walk, bounced]);
             var sig = BufRd.ar(nc, buf, idx, loop: 1, interpolation: 4);
             // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
             // the loop's gate-off, then released. Floors preserve the original declick fade.
@@ -561,11 +576,22 @@ server.waitForBoot {
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
-        SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0|
+        // Timestretched loop - same loopLo/loopHi/entry/pingpong contract as the plain loop above,
+        // on Warp1's normalized 0..1 pointer. The step comes from the begin..end window and its
+        // play time, which cancel down to "normalized units per second" - independent of where the
+        // loop bounds are, so a file-wrapping loop still moves at the rate .speed()/.fit() asked for.
+        SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0|
             var span = max(0.001, end - begin);
             var step = (span / max(0.001, dur)) * rate.sign / ControlRate.ir;
-            var reset = Select.kr(rate < 0, [begin, end]);
-            var ptr = Phasor.kr(0, step, begin, end, reset);
+            var lo = loopLo, hi = max(loopLo + 0.001, loopHi);
+            var loopSpan = hi - lo;
+            var from = entry.clip(lo, hi);
+            // Same as the plain loop: resetPos never fires, so entry is added in and wrapped.
+            var walk = (Phasor.kr(0, step, 0, loopSpan, 0) + (from - lo)) % loopSpan;
+            var bounceFrom = Select.kr(rate < 0, [from - lo, (2 * loopSpan) - (from - lo)]);
+            var bouncePh = (Phasor.kr(0, step.abs, 0, 2 * loopSpan, 0) + bounceFrom) % (2 * loopSpan);
+            var bounced = lo + loopSpan - absdif(bouncePh, loopSpan);
+            var ptr = Select.kr(pingpong, [lo + walk, bounced]);
             var sig = Warp1.ar(nc, buf, ptr, rate.abs, 0.1, -1, 8, 0.1, 2);
             // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
             // the loop's gate-off, then released. Floors preserve the original declick fade.
@@ -1515,6 +1541,11 @@ OSCdef(\poptartPlaySample, { |msg|
     // Defaults of 0/0/1/0 floor down to the old declick env inside the synthdef.
     var atk = (msg[14] ? 0).asFloat, dec = (msg[15] ? 0).asFloat;
     var sus = (msg[16] ? 1).asFloat, rel = (msg[17] ? 0).asFloat;
+    // Loop shape (only read by the loop defs): the region it runs round, where it enters, and
+    // whether it bounces off the edges instead of wrapping. See .loop()'s wrap/dir options.
+    var loopLo = (msg[18] ? 0).asFloat, loopHi = (msg[19] ? 1).asFloat;
+    var entry = (msg[20] ? 0).asFloat, pingpong = (msg[21] ? 0).asInteger;
+    var args;
     var track = tracks[key];
     var bufs = samplePacks[pack];
     var buf = bufs !? { bufs.wrapAt(idx) };
@@ -1525,12 +1556,16 @@ OSCdef(\poptartPlaySample, { |msg|
         defName = ("poptart_sample_" ++ (if (warp) { "warp_" } { "" })
             ++ (if (loop == 1) { "loop_" } { "" }) ++ buf.numChannels).asSymbol;
         track[\held] = track[\held] + 1;
+        args = [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
+                \rate, rate, \dur, dur, \gate, 1, \amp, amp,
+                \atk, atk, \dec, dec, \sus, sus, \rel, rel];
+        // Only the loop defs have these controls - appended just for them rather than sent to a
+        // one-shot def that would ignore them (and log a "control not found" for each).
+        if (loop == 1) {
+            args = args ++ [\loopLo, loopLo, \loopHi, loopHi, \entry, entry, \pingpong, pingpong];
+        };
         server.makeBundle(latency, {
-            synth = Synth(defName,
-                [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
-                 \rate, rate, \dur, dur, \gate, 1, \amp, amp,
-                 \atk, atk, \dec, dec, \sus, sus, \rel, rel],
-                target: track[\group], addAction: \addToHead);
+            synth = Synth(defName, args, target: track[\group], addAction: \addToHead);
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
             track[\lfos].do { |e|
                 if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };

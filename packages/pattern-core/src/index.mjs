@@ -4,7 +4,7 @@ export { Sig, Signal, n, note, mini, s, synth, sine, saw, tri, square, ramp, ran
 export { i, begin, end, loop, speed, flip, stretch, fit, slice, attack, decay, sustain, release, SAMPLER_CONTROL_NAMES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';
-export { Scheduler, Transport } from './scheduler.mjs';
+export { Scheduler, Transport, setEventLogger } from './scheduler.mjs';
 export { parseScaleName, degreeToMidi, noteToMidi } from './notes.mjs';
 export { recordingToMini, UNQUANTIZED_GRID } from './record.mjs';
 export { parseMini, getStepsForCycle, stepLocs } from './mini.mjs';

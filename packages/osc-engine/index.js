@@ -647,11 +647,17 @@ class OscEngine {
    * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
    * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, flip,
    * stretch, fit ('auto' | measures), slice, note, vel, attack, decay, sustain, release,
-   * secPerCycle }. Resolves pack/index/slice/fit
+   * loopWrap ('file' | 'window'), loopDir ('forward' | 'pingpong'), secPerCycle }.
+   * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
    * whole sample lasts exactly the target number of cycles, `note` a further multiplier that
    * repitches around MIDI 24 ("c2" = as recorded), `flip` a sign flip plus a re-anchored onset.
    * `vel` scales volume linearly.
+   *
+   * Returns what it resolved - { index, begin, end, loop, loopWrap, loopDir, speed, stretch,
+   * durSec, cut, amp, fileSec }, or { skipped } for an event that makes no sound. Nothing in playback reads it;
+   * it exists so .log() can report the numbers the synth is really getting (the fit rate and
+   * the window's length in particular are computed here and nowhere else).
    */
   playSample(trackId, pack, cfg, onsetSec, offsetSec) {
     // A sampler source has no pitch, so any MIDI route off this track fires its fixed note on the
@@ -659,10 +665,10 @@ class OscEngine {
     // the pack finishes loading (when the sample itself would still be silent).
     this._fanoutMidiSample(trackId, cfg.vel ?? 1, onsetSec, offsetSec);
     const entry = this._ensurePack(pack);
-    if (entry.status !== 'ready' || entry.files.length === 0) return;
+    if (entry.status !== 'ready' || entry.files.length === 0) return { skipped: `pack "${pack}" ${entry.status}` };
 
     const amp = cfg.vel ?? 1;
-    if (amp <= 0) return;
+    if (amp <= 0) return { skipped: 'vel 0' };
 
     const idx = wrap(Math.round(cfg.index ?? 0), entry.files.length);
     const file = entry.files[idx];
@@ -688,7 +694,7 @@ class OscEngine {
     if (flip) speed *= -1;
     const stretch = cfg.stretch > 0 ? cfg.stretch : 1;
     const spanSec = file.duration * (end - begin);
-    if (speed === 0 || spanSec <= 0) return;
+    if (speed === 0 || spanSec <= 0) return { skipped: speed === 0 ? 'speed 0' : 'empty begin..end window' };
 
     if (cfg.fit != null) {
       // Fit is a property of the whole sample, not the begin..end window: the rate is set so
@@ -710,7 +716,21 @@ class OscEngine {
     // explicit .loop(0) opts out: one backwards pass from `end`, then silence. .flip() is a
     // single anchored pass by definition, so it never picks up the auto-loop.
     const loop = (cfg.loop ?? (speed < 0 && !flip ? 1 : 0)) ? 1 : 0;
-    // Natural playback length in seconds - what the one-shot synths' Line runs over.
+    // Where a loop runs and where it enters it (the SC loop defs take the three as arguments, so
+    // one def covers both wrap modes). "file" - the default - makes the loop the whole sample and
+    // `begin` only the entry point, so .begin(0.9).loop() runs out the end and carries on from the
+    // top instead of repeating that last tenth; "window" keeps it inside begin..end, which is what
+    // a .slice() loop wants. Backwards through a WINDOW enters at its far edge, as it always has;
+    // wrapping through the file has somewhere to go from `begin` in either direction, so it starts
+    // there and reaches the file's edge in its own time.
+    const windowed = cfg.loopWrap === 'window';
+    const pingpong = cfg.loopDir === 'pingpong' ? 1 : 0;
+    const loopLo = windowed ? begin : 0;
+    const loopHi = windowed ? end : 1;
+    const loopEntry = windowed && speed < 0 ? end : begin;
+    // Natural playback length in seconds - what the one-shot synths' Line runs over. Also for a
+    // loop: it's the begin..end window's own length, which is what the ADSR times scale by (a
+    // loop's audio has no length of its own - it runs until the event's gate-off).
     let durSec = (spanSec * stretch) / Math.abs(speed);
     const eventSec = offsetSec - onsetSec;
     // .flip() reverses the window AND re-anchors it: playback runs from one step's worth of audio
@@ -758,7 +778,15 @@ class OscEngine {
       cfg.decay ?? 0,
       cfg.sustain ?? 1,
       cfg.release ?? 0,
+      loopLo,
+      loopHi,
+      loopEntry,
+      pingpong,
     ]);
+    return {
+      index: idx, begin, end, loop, speed, stretch, durSec, cut, amp, fileSec: file.duration,
+      loopWrap: windowed ? 'window' : 'file', loopDir: pingpong ? 'pingpong' : 'forward',
+    };
   }
 
   // --- events (targetTime is seconds, from OscEngine#getTime()'s clock) ---

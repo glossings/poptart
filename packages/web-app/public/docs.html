@@ -621,7 +621,8 @@
           <pre><code>drums: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)   <span class="c">// "bd:4" picks a file inline = s("bd").i(4)</span>
   .i(<span class="s">"&lt;0 1 2&gt;"</span>)          <span class="c">// which file of the pack (Strudel's n, renamed)</span>
   .begin(0).end(1)          <span class="c">// play region, 0..1</span>
-  .loop()                   <span class="c">// loop the region instead of one-shot</span>
+  .loop()                   <span class="c">// loop: run off the end of the file and carry on from 0</span>
+  .loop(1, { wrap: <span class="s">"window"</span> })  <span class="c">// ...or loop begin..end; dir: "pingpong" bounces</span>
   .speed(<span class="s">"1 -1"</span>)           <span class="c">// playback rate; negative = reversed</span>
   .stretch(2)               <span class="c">// granular timestretch (pitch preserved)</span>
   .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// play the nth transient (WAV only)</span>
@@ -635,6 +636,26 @@
             always <strong>gated</strong>: a sample rings for exactly its event length and is cut there,
             so a bare <code>s("longsample")</code> chops at each cycle rather than piling up. To let it
             ring longer, make the event longer: <code>s("long/2")</code>, <code>"long@2"</code>, or ties.
+          </p>
+          <p>
+            <code>.fit()</code> repitches the <strong>whole file</strong> to last a given number of
+            cycles — bare <code>.fit()</code> picks the nearest power of two — and
+            <code>.begin()</code> then chooses a start position inside it. That pair is the usual
+            source of a track that drops out: <code>begin</code> moves the start, but nothing moves
+            the end, so a start at 0.75 of a break fitted to two cycles leaves only half a cycle of
+            audio, and an event longer than that ends in silence. Fire events short enough to be
+            filled (<code>.seg(8)</code>, as below), <code>.loop()</code> the region, or draw
+            <code>begin</code> from earlier in the file. <code>.log()</code> on the track prints
+            that arithmetic per event — how much audio the region holds against how long the event
+            is, flagged <code>gap=</code> when it comes up short.
+          </p>
+          <p>
+            Which is also the only time <code>.loop()</code> is audible at all: a loop only shows
+            itself once the playhead <em>reaches</em> the end of its region inside one event — which
+            depends on <code>begin</code>, not just on how short the events are. <code>.seg(8)</code>
+            on a fitted break has audio to spare at <code>begin(0)</code> and runs dry a third of the
+            way through each step at <code>begin(0.9)</code>. Look for <code>gap=</code> on the
+            <code>.log()</code> line: no gap, no loop.
           </p>
           <p>
             Patterned <code>.note()</code>/<code>.vel()</code>/<code>.slice()</code> are
@@ -928,6 +949,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>_name:</code> / <code>Sname:</code></td><td>mute / solo</td></tr>
             <tr><td><code>$:</code> / bare lines</td><td>setup blocks</td></tr>
             <tr><td><code>setbpm(120)</code></td><td>tempo (4 beats/cycle)</td></tr>
+            <tr><td><code>.log()</code></td><td>print this track's events to the console</td></tr>
             <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code></td><td>eval · stop</td></tr>
           </table>
         </section>

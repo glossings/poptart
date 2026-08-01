@@ -198,6 +198,14 @@ function wireEngine() {
 async function init() {
   patternCore = await import('@poptart/pattern-core');
   extendStringPrototype(patternCore);
+  // Sig#log() event lines go to the browser, not this terminal: the editor drains the queue on
+  // its existing 500ms poll (see POST /api/pluginEdits) and prints each line in the in-app
+  // console, which mirrors it to devtools. Livecoding happens in the browser, so that's where a
+  // debug line is actually read - and the server's stdout stays a log of the server.
+  patternCore.setEventLogger((line) => {
+    eventLogQueue.push(line);
+    if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
+  });
   // First-run setup: SC detection, VSTPlugin auto-install, preflight warnings (see
   // PACKAGING.md Stage 1). Logs what it finds; never throws, never blocks the boot -
   // loadEngine()'s own diagnostics remain the backstop if something is still wrong.
@@ -758,6 +766,11 @@ const AUTOPIN_DEBOUNCE_MS = 400;
 
 const autoPinDirty = new Map(); // "trackId|slot" -> { trackId, slot } - edited, not yet captured
 const autoPinReady = new Map(); // "trackId|slot" -> { trackId, slot, state } - drained by the editor
+// Sig#log() lines waiting for the editor to drain them (see init's setEventLogger). Capped, so a
+// .log() left running with no browser attached can't grow without bound: the oldest lines go,
+// which is the right end to lose - the interesting one is what just played.
+const EVENT_LOG_MAX = 500;
+const eventLogQueue = [];
 let autoPinTimer = null;
 let autoPinCapturing = false;
 
@@ -1123,11 +1136,13 @@ const routes = {
   // Auto-pin drain (see captureDirtyPlugins): the plugin states captured since the last poll,
   // for the editor to write into their synth/fx calls as `{ state }`. Draining on read means a
   // slot the editor already wrote isn't written again; a slot edited since is still pending
-  // capture and arrives on a later poll.
+  // capture and arrives on a later poll. `logs` rides along on the same drain - the .log() event
+  // lines fired since the last poll, in order, for the in-app console.
   'POST /api/pluginEdits': async () => {
+    const logs = eventLogQueue.splice(0, eventLogQueue.length);
     const edits = [...autoPinReady.values()];
     autoPinReady.clear();
-    return { status: 200, body: { edits } };
+    return { status: 200, body: { edits, logs } };
   },
 
   // Pop open the native editor window of the plugin in a chain slot (design your supersaw in

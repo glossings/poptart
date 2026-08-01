@@ -207,3 +207,115 @@ test('a flipped loop is untouched - it wraps from end and fills the step itself'
   assert.ok(Math.abs(args[ARG.dur] - 4.8) < 1e-9);
   assert.strictEqual(args[ARG.onset], 0);
 });
+
+// ---------------------------------------------------------------------------------------------
+// What playSample reports back - the numbers .log() prints (see Scheduler#_logEvent). Nothing in
+// playback reads them; they exist because the fit rate and the region's length in seconds are
+// computed here, out of the sample file's own duration, and are unknowable to the scheduler.
+// ---------------------------------------------------------------------------------------------
+
+test('playSample reports what it resolved the config down to', () => {
+  // The case that started this: a 2-cycle break, started three quarters in, inside a 1-cycle
+  // event - only half a cycle of audio, so half the event is silence.
+  const { engine } = engineWithFile(4);
+  const info = engine.playSample('t1', 'breaks', { begin: 0.75, fit: 'auto', secPerCycle: 2 }, 0, 2);
+  assert.strictEqual(info.index, 0);
+  assert.strictEqual(info.begin, 0.75);
+  assert.strictEqual(info.end, 1);
+  assert.strictEqual(info.loop, 0);
+  assert.strictEqual(info.cut, 0, 'the region ends before the event does - nothing to gate off');
+  assert.ok(Math.abs(info.speed - 1) < 1e-9);
+  assert.ok(Math.abs(info.durSec - 1) < 1e-9, 'a quarter of a 4s file at rate 1');
+  assert.strictEqual(info.fileSec, 4);
+});
+
+test('a resolved slice reports the window it chose, not the slice number', () => {
+  const { engine } = engineWithFile(4);
+  engine._packs.get('breaks').files[0].slices = [0, 0.5];
+  const info = engine.playSample('t1', 'breaks', { slice: 1, secPerCycle: 2 }, 0, 2);
+  assert.strictEqual(info.begin, 0.5);
+  assert.strictEqual(info.end, 1);
+});
+
+test('an event that makes no sound reports why instead', () => {
+  const { engine } = engineWithFile(4);
+  assert.match(engine.playSample('t1', 'nosuchpack', { secPerCycle: 2 }, 0, 2).skipped, /nosuchpack/);
+  assert.match(engine.playSample('t1', 'breaks', { vel: 0, secPerCycle: 2 }, 0, 2).skipped, /vel 0/);
+  assert.match(engine.playSample('t1', 'breaks', { speed: 0, secPerCycle: 2 }, 0, 2).skipped, /speed 0/);
+  assert.match(
+    engine.playSample('t1', 'breaks', { begin: 0.5, end: 0.5, secPerCycle: 2 }, 0, 2).skipped,
+    /window/,
+  );
+});
+
+// ---------------------------------------------------------------------------------------------
+// Loop shape (.loop()'s wrap/dir options). Node resolves the region the loop runs round, where it
+// enters, and whether it bounces; the SC loop defs just walk what they're given, so this is where
+// the behavior actually lives.
+// ---------------------------------------------------------------------------------------------
+
+const LOOP_ARG = { loopLo: 17, loopHi: 18, entry: 19, pingpong: 20 };
+
+test('a loop wraps through the whole file by default, entering at begin', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { begin: 0.9, loop: 1, secPerCycle: 2 }, 0, 2);
+  const args = sent.pop().args;
+  assert.strictEqual(args[LOOP_ARG.loopLo], 0, 'the loop is the file...');
+  assert.strictEqual(args[LOOP_ARG.loopHi], 1);
+  assert.strictEqual(args[LOOP_ARG.entry], 0.9, '...and begin only says where to come in');
+  assert.strictEqual(args[LOOP_ARG.pingpong], 0);
+});
+
+test('wrap "window" keeps the loop inside begin..end', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { begin: 0.9, loop: 1, loopWrap: 'window', secPerCycle: 2 }, 0, 2);
+  const args = sent.pop().args;
+  assert.strictEqual(args[LOOP_ARG.loopLo], 0.9);
+  assert.strictEqual(args[LOOP_ARG.loopHi], 1);
+  assert.strictEqual(args[LOOP_ARG.entry], 0.9);
+});
+
+test('a slice loops its own window when asked, and the whole file when not', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine._packs.get('breaks').files[0].slices = [0, 0.25, 0.5];
+  engine.playSample('t1', 'breaks', { slice: 1, loop: 1, loopWrap: 'window', secPerCycle: 2 }, 0, 2);
+  const windowed = sent.pop().args;
+  assert.deepStrictEqual(
+    [windowed[LOOP_ARG.loopLo], windowed[LOOP_ARG.loopHi]], [0.25, 0.5],
+    'the slice is the loop',
+  );
+  engine.playSample('t1', 'breaks', { slice: 1, loop: 1, secPerCycle: 2 }, 0, 2);
+  const wrapped = sent.pop().args;
+  assert.deepStrictEqual([wrapped[LOOP_ARG.loopLo], wrapped[LOOP_ARG.loopHi]], [0, 1]);
+  assert.strictEqual(wrapped[LOOP_ARG.entry], 0.25, 'it starts on the slice and runs on past it');
+});
+
+test('backwards enters a window at its far edge, but a file wrap at begin', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { begin: 0.2, end: 0.6, speed: -1, loopWrap: 'window', secPerCycle: 2 }, 0, 2);
+  assert.strictEqual(sent.pop().args[LOOP_ARG.entry], 0.6, 'as a windowed backwards loop always has');
+  engine.playSample('t1', 'breaks', { begin: 0.2, end: 0.6, speed: -1, secPerCycle: 2 }, 0, 2);
+  const args = sent.pop().args;
+  assert.strictEqual(args[LOOP_ARG.entry], 0.2, 'wrapping through the file, backwards out of begin');
+  assert.strictEqual(args[LOOP_ARG.loopLo], 0);
+  assert.strictEqual(args[LOOP_ARG.loopHi], 1);
+});
+
+test('dir "pingpong" is a flag on top of either wrap mode', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { begin: 0.4, loop: 1, loopDir: 'pingpong', secPerCycle: 2 }, 0, 2);
+  const args = sent.pop().args;
+  assert.strictEqual(args[LOOP_ARG.pingpong], 1);
+  assert.deepStrictEqual([args[LOOP_ARG.loopLo], args[LOOP_ARG.loopHi]], [0, 1]);
+  engine.playSample('t1', 'breaks', { begin: 0.4, loop: 1, loopWrap: 'window', loopDir: 'pingpong', secPerCycle: 2 }, 0, 2);
+  assert.strictEqual(sent.pop().args[LOOP_ARG.loopLo], 0.4);
+});
+
+test('a one-shot is unaffected - the loop args go out but nothing reads them', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { begin: 0.9, secPerCycle: 2 }, 0, 2);
+  const args = sent.pop().args;
+  assert.strictEqual(args[ARG.loop], 0);
+  assert.strictEqual(args[ARG.begin], 0.9, 'still starts at begin and stops at the end of the file');
+  assert.strictEqual(args[ARG.end], 1);
+});

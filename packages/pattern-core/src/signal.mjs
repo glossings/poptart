@@ -105,6 +105,10 @@ export class Sig {
     // n()/note()/synth() builders and threaded through arithmetic/track metadata so
     // note("c4 e4").add(12).scale(...) still knows it's holding notes.
     this.pitchKind = opts.pitchKind ?? null;
+    // Debug flag from Sig#log(): the scheduler prints one line per event this pattern fires.
+    // Metadata like everything above, so it survives the rest of the chain (.log() can go
+    // anywhere in it) - see _meta().
+    this.logging = opts.logging ?? false;
   }
 
   _clone(overrides) {
@@ -137,6 +141,7 @@ export class Sig {
       midiNotes: this.midiNotes,
       keyboardRoute: this.keyboardRoute,
       pitchKind: this.pitchKind,
+      logging: this.logging,
     };
   }
 
@@ -1222,9 +1227,30 @@ export class Sig {
   begin(v) { return this._samplerOpt('begin', 'begin', toSignal(v)); }
   /** Playback end position within the sample, 0..1. */
   end(v) { return this._samplerOpt('end', 'end', toSignal(v)); }
-  /** Loop the begin..end region for the event's duration (instead of one-shot). Truthy/falsy - and
-   *  .loop(0) is also how a negative .speed() opts out of its default backwards loop. */
-  loop(v = 1) { return this._samplerOpt('loop', 'loop', toSignal(v)); }
+  /**
+   * Loop the sample for the event's duration instead of playing it as a one-shot. Truthy/falsy and
+   * patternable like any channel - and `.loop(0)` is also how a negative .speed() opts out of its
+   * default backwards loop.
+   *
+   * The second argument picks HOW it loops. These are modes rather than values, so they're a
+   * static choice per track (like lfo()'s mode), not a channel that can be patterned:
+   *
+   *   wrap: "file" (default) - the loop is the whole FILE and .begin() is only where it enters, so
+   *                            .begin(0.9).loop() runs out the end and carries on from 0 instead of
+   *                            repeating that last tenth over and over.
+   *         "window"         - loop the .begin()..end() region itself. What a .slice() wants, and
+   *                            what loop did before this option existed.
+   *   dir:  "forward" (default) - reaching the far edge jumps back to the near one.
+   *         "pingpong"          - reaching the far edge turns round, so it bounces back and forth.
+   *
+   *   s("breaks:35").fit().begin(0.9).loop()                              // ...0.9 -> 1 -> 0 -> 1 -> 0
+   *   s("breaks:35").fit().slice(3).loop(1, { wrap: "window" })           // just that slice
+   *   s("breaks:35").fit().begin(0.4).loop(1, { dir: "pingpong" })        // 0.4 -> 1 -> 0 -> 1 ...
+   */
+  loop(v = 1, opts = {}) {
+    const out = this._samplerOpt('loop', 'loop', toSignal(v));
+    return out._clone({ sampler: { ...out.sampler, ...loopModes(opts) } });
+  }
   /**
    * Playback rate (repitches) - the speed the playhead leaves .begin() at. Positive runs up to
    * .end(), 0 plays nothing, negative walks backwards out of .begin(), which wraps round to .end() - so a
@@ -1380,6 +1406,24 @@ export class Sig {
     // needs no relocation - the walker maps step.vel / the channel to sample gain on the sampler
     // path exactly as it maps it to MIDI velocity on the synth path.
     return this.mapValue(() => name)._clone({ sampler });
+  }
+
+  /**
+   * Prints every event this track fires to the editor's console (and devtools with it - see the
+   * scheduler's setEventLogger). A debugging aid for "why is this silent / why does it drop
+   * out": each line carries the onset and end of the event in cycles plus the
+   * config the engine actually resolved, so a sampler line shows the begin/end window, the rate
+   * .fit()/.speed()/.note() worked out to, and how much audio that window holds against how long
+   * the event is - a window shorter than its event is a hole in the sound.
+   *
+   *   tops: s("breaks:35").fit().begin("<0 0.75>").log()
+   *   [tops] 1.000 -> 2.000  s breaks i=35 begin=0.75 end=1 speed=1.006 audio=0.50c/1.00c gap=0.50c
+   *
+   * Anywhere in the chain does the same thing - it's a flag on the track, not a step in the
+   * pattern. Remove it to stop logging; it costs nothing when it isn't there.
+   */
+  log(on = true) {
+    return this._clone({ logging: !!on });
   }
 
   _noteLike(sig) {
@@ -1794,6 +1838,31 @@ function applyNoteChannels(baseStepsForCycle, noteChannels) {
 
 const CLIP_ONLY = new Set(['clip']);
 
+// .loop()'s second argument (see Sig#loop). Plain strings on Sig#sampler rather than signals, like
+// fit's 'auto' - every reader of that map passes a non-Sig value through untouched. Unknown keys
+// and unknown words throw at eval time: a mistyped mode that silently did nothing would show up as
+// "my loop sounds wrong" hours later.
+const LOOP_MODES = { wrap: ['file', 'window'], dir: ['forward', 'pingpong'] };
+const LOOP_MODE_KEYS = { wrap: 'loopWrap', dir: 'loopDir' };
+
+function loopModes(opts) {
+  if (opts === null || typeof opts !== 'object' || Array.isArray(opts)) {
+    throw new Error('[signal] .loop()\'s second argument is an options object - .loop(1, { wrap: "window", dir: "pingpong" })');
+  }
+  const out = {};
+  for (const [key, value] of Object.entries(opts)) {
+    const allowed = LOOP_MODES[key];
+    if (!allowed) {
+      throw new Error(`[signal] .loop() has no "${key}" option - it takes ${Object.keys(LOOP_MODES).join(' and ')}`);
+    }
+    if (!allowed.includes(value)) {
+      throw new Error(`[signal] .loop()'s ${key} is ${allowed.map((a) => `"${a}"`).join(' or ')}, not "${value}"`);
+    }
+    out[LOOP_MODE_KEYS[key]] = value;
+  }
+  return out;
+}
+
 // Merges two maps of per-onset control signals (Sig#sampler, Sig#noteChannels) across a .when():
 // where the two sides differ, the key becomes ONE signal that follows the condition - the
 // callback's version where it's truthy, the original where it isn't. A side that doesn't have the
@@ -2048,7 +2117,13 @@ function bareSig(sig) {
  * the method form gives.
  */
 function samplerControl(name) {
-  return (value) => {
+  return (value, opts) => {
+    // A control builder carries a channel VALUE for an operator to merge; .loop()'s modes are
+    // track metadata with nothing to merge into, so they only exist on the method. Saying so
+    // beats accepting the object and quietly dropping it.
+    if (name === 'loop' && opts !== undefined) {
+      throw new Error('[signal] loop()\'s options are method-only - s("...").loop(1, { wrap: "window" }), not loop(1, {...}) as an operand');
+    }
     // fit() alone means "nearest power of two", which is a mode rather than a number - flag it so
     // a combinator sets the channel instead of trying to do arithmetic with it.
     if (name === 'fit' && value === undefined) {
