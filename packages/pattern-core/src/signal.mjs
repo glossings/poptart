@@ -40,6 +40,12 @@ export class Sig {
     this.lfoIR = opts.lfoIR ?? null; // present only for the sine/saw/tri/square builders below
     this.envIR = opts.envIR ?? null; // present only for the env() builder below
     this.ccIR = opts.ccIR ?? null; // present only for midicc() signals (see midicc below)
+    // Reads this signal as one EVENT - value plus the highlight spans of the atom that produced
+    // it - at an exact cycle position (see readEvent). Present ONLY on signals whose value varies
+    // WITHIN a cycle (choose/irand): their stepsForCycle can only report the phase-0 draw, so as a
+    // control they must be read per onset rather than imposing that grid. Everything else is read
+    // off the step covering the position, where value and spans already travel together.
+    this.eventAt = opts.eventAt ?? null;
 
     // Track-building metadata, threaded through by .synth()/.fx()/.param() etc. Every control
     // method returns a NEW Sig (same sample/stepsForCycle) with this metadata carried forward -
@@ -107,6 +113,7 @@ export class Sig {
       lfoIR: this.lfoIR,
       envIR: this.envIR,
       ccIR: this.ccIR,
+      eventAt: this.eventAt,
       ...this._meta(),
       ...overrides,
     });
@@ -735,6 +742,11 @@ export class Sig {
    * A FRACTIONAL length loops a sub-cycle window: `.rib(14, 0.5)` plays the first half of cycle 14
    * twice per measure. The grid is remapped phase-aware (not floored to a whole source cycle) so the
    * notes the scheduler triggers stay in lock-step with sample()'s continuous remap.
+   *
+   * Every control set BEFORE the .rib() loops with it - sampler config, vel/clip, gain/pan/dry,
+   * .param() signals - so `.begin(irand(16).div(16)).rib(29, 1)` freezes cycle 29's random begins
+   * into a repeating bar. Controls chained after the .rib() stay outside the loop and keep
+   * evolving. Native engine-side modulators (lfo()/env()/cc()) can't be remapped and run free.
    */
   rib(time, length) {
     const timeSig = toSignal(time);
@@ -777,7 +789,35 @@ export class Sig {
       const rc = remap(c);
       return this.sample(rc / cps, cps, rc);
     };
-    return new Sig(sample, { stepsForCycle, ...this._meta() });
+    // rib re-times WHICH cycle sounds, and the scheduler samples sampler config, note channels,
+    // the channel strip and generic params at OUTPUT positions - so every carried control signal
+    // must loop with the notes, or .begin(irand(16)).rib(29, 1) would keep drawing fresh begins
+    // while the note grid repeats. Constants are position-independent, and engine-side IR signals
+    // (native LFO/env/CC) run on the server's clock where a cycle remap can't reach - both pass
+    // through untouched. Controls chained AFTER the .rib() stay outside the loop as before.
+    const remapSig = (sig) => {
+      if (!(sig instanceof Sig) || sig.constVal !== undefined || sig.lfoIR || sig.envIR || sig.ccIR) return sig;
+      return new Sig(
+        (t, cps, pos) => {
+          const c = pos ?? t * cps;
+          const rc = remap(c);
+          return sig.sample(rc / cps, cps, rc);
+        },
+        {
+          ...(sig.stepsForCycle ? { stepsForCycle: (cycle) => remapGrid(cycle, sig.stepsForCycle, timeSig, lenSig) } : {}),
+          ...(sig.eventAt ? { eventAt: (cyclePos) => sig.eventAt(remap(cyclePos)) } : {}),
+        },
+      );
+    };
+    const remapObj = (obj) => obj && Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, remapSig(v)]));
+    return new Sig(sample, {
+      stepsForCycle,
+      ...this._meta(),
+      sampler: remapObj(this.sampler),
+      noteChannels: remapObj(this.noteChannels),
+      channel: remapObj(this.channel),
+      paramSignals: remapObj(this.paramSignals),
+    });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -791,16 +831,21 @@ export class Sig {
    * 0.5, Strudel's `.degradeBy`). The choice is deterministic per cycle+onset, so the scheduler
    * and the editor's highlighter agree and a bar replays the same each time it comes round. The
    * mini-notation `?` postfix (`"4?0.3"`) is the same operation written inside a pattern string.
-   * `seed` decorrelates independent .degrade()s that would otherwise flip together.
+   * Independent .degrade()s decorrelate on their own (each takes its own build-time seed, like
+   * choose()/irand()); pass `seed` only to pin a particular one - two .degrade()s given the same
+   * explicit seed deliberately drop the same events, which is how you gate two patterns together.
    */
-  degrade(prob = 0.5, seed = 0) {
+  degrade(prob = 0.5, seed = null) {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .degrade() needs a step pattern, e.g. n("0 1 2 3").degrade(0.3)');
     }
     const p = Number(prob);
+    // An explicit seed keeps its historical hash (seed + 1, so the default 0 isn't the bare 0);
+    // omitted, it comes off the shared counter, out of reach of anything hand-written.
+    const hashSeed = seed == null ? nextAutoSeed() : Number(seed) + 1;
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) =>
-      base(cycle).map((s) => (s.value != null && rngAtPos(cycle, s.start, seed + 1) < p ? { ...s, value: null } : s));
+      base(cycle).map((s) => (s.value != null && rngAtPos(cycle, s.start, hashSeed) < p ? { ...s, value: null } : s));
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
@@ -908,9 +953,10 @@ export class Sig {
   /** Timestretch factor (2 = twice as long at the same pitch). Granular, so best on rhythmic material. */
   stretch(v) { return this._samplerOpt('stretch', 'stretch', toSignal(v)); }
   /**
-   * Repitch so the played region lasts exactly `measures` cycles at the current tempo -
+   * Repitch so the whole sample lasts exactly `measures` cycles at the current tempo -
    * `.fit()` with no argument picks the nearest power of 2 of its natural length (2.4 measures
-   * -> 2, 3.6 -> 4).
+   * -> 2, 3.6 -> 4). The rate is set from the full file regardless of .begin()/.end()/.slice(),
+   * so those select a window within the fitted sample without changing its pitch.
    */
   fit(measures = 'auto') {
     return this._samplerOpt('fit', 'fit', measures === 'auto' ? 'auto' : toSignal(measures));
@@ -1142,6 +1188,26 @@ function coveringStep(steps, phase) {
   return found;
 }
 
+// Reads a signal as one event at an exact cycle position: `{ value, locs }`, the value together
+// with the highlight spans of the source atom that produced it. Keeping the two on one read is
+// what makes highlighting follow the audio automatically - whoever samples a control gets the
+// spans of the atom that actually sounded, with no per-builder wiring. A signal that varies
+// within the cycle supplies its own reader (Sig#eventAt); anything else resolves through the step
+// covering that position (last covering step wins, as sampleViaSteps does), or is sampled bare.
+function readEvent(sig, cyclePos) {
+  if (sig.eventAt) return sig.eventAt(cyclePos);
+  if (sig.stepsForCycle) {
+    const cycle = Math.floor(cyclePos);
+    const phase = cyclePos - cycle;
+    let found = null;
+    for (const s of sig.stepsForCycle(cycle)) {
+      if (s.value != null && phase >= s.start && phase < s.end) found = s;
+    }
+    return { value: found ? found.value : null, locs: found ? stepLocs(found) : [] };
+  }
+  return { value: sig.sample(cyclePos, 1, cyclePos), locs: [] };
+}
+
 // The bundle trigger cross-product (Step 2 of the all-signals rewrite). Cross-products a base
 // trigger grid with a control pattern's grid: each overlap becomes one event and control rests
 // drop events, so a patterned control (.vel()/.note()/sampler config) subdivides the events it
@@ -1156,6 +1222,29 @@ function coveringStep(steps, phase) {
 // base grid passes through untouched and that channel is instead sampled continuously at each onset.
 function crossMerge(baseStepsForCycle, ctlSig, channel = null, coerce = (v) => v) {
   if (!baseStepsForCycle || !ctlSig.stepsForCycle) return baseStepsForCycle;
+  // A control that varies within the cycle (choose/irand) has no honest grid to cross-product -
+  // its stepsForCycle is only the phase-0 draw - so the base keeps its own structure and the
+  // control is read at each onset instead, exactly as a continuous control is. Both the merged
+  // value and the lit atom then come from the same read, and so match what the scheduler plays.
+  if (ctlSig.eventAt) {
+    return (cycle) => {
+      const out = [];
+      for (const s of baseStepsForCycle(cycle)) {
+        if (s.value == null) continue;
+        const ev = readEvent(ctlSig, cycle + s.start);
+        if (ev.value == null) continue; // a rest in the control drops the event, as below
+        const step = { ...s };
+        const locs = [...stepLocs(s), ...ev.locs];
+        if (locs.length) step.locs = locs;
+        if (channel) {
+          const v = coerce(ev.value);
+          if (typeof v !== 'number' || !Number.isNaN(v)) step[channel] = v;
+        }
+        out.push(step);
+      }
+      return out;
+    };
+  }
   return (cycle) => {
     const ctlSteps = ctlSig.stepsForCycle(cycle).filter((c) => c.value != null);
     const out = [];
@@ -1438,18 +1527,41 @@ export function s(value) {
   return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
 }
 
-// Independent choose() calls need to draw independently - a per-call seed decorrelates them.
-// Assigned at build time (eval), so it's stable across every cycle the resulting Sig plays.
-let chooseSeedCounter = 0;
+// Build-time seeds for the randomised builders (choose/irand/.degrade()). Independent calls must
+// draw independently, so each takes the next seed off ONE shared counter. A counter per builder
+// would hand the first choose() and the first irand() the same seed, and since both read the same
+// uniform hash at the same position they'd be perfectly correlated - .begin(irand(16).div(16))
+// would decide .speed(choose("1","-1")).
+//
+// The counter only climbs, so the host must reset it before each evaluation (resetRandomSeeds):
+// otherwise re-evaluating the same document re-seeds every random stream, and stop-then-play
+// silently plays a different take. Seeds are therefore positional - the Nth randomised call in
+// the buffer - which is what makes a document sound the same every time it's played.
+//
+// They start high so they can't collide with a seed a human passes explicitly (.degrade(0.3, 3)):
+// those are a separate, stable namespace living down at 0, 1, 2…
+const AUTO_SEED_BASE = 100000;
+let randomSeedCounter = 0;
+const nextAutoSeed = () => AUTO_SEED_BASE + ++randomSeedCounter;
 
 /**
- * `choose("0", "3", "5")` - a signal that randomly picks one of its options each cycle (uniform
- * by default). Options are anything toSignal accepts (mini strings, numbers, other signals), and
+ * Rewind the build-time seed counter, so evaluating the same source builds the same random
+ * streams. The host calls this once at the start of an evaluation, before any block is built.
+ */
+export function resetRandomSeeds() {
+  randomSeedCounter = 0;
+}
+
+/**
+ * `choose("0", "3", "5")` - a signal that randomly picks one of its options (uniform by
+ * default). Options are anything toSignal accepts (mini strings, numbers, other signals), and
  * a `[option, weight]` pair biases the draw: `choose(["0", 3], ["3", 1], ["5", 1])` picks "0"
- * three times as often as the others. The pick is deterministic per cycle (stable across
- * re-queries and re-triggers within a take), so it drops in anywhere a signal goes -
- * `n(choose("0", "3", "7"))`, `.speed(choose(0.5, 1, 2))`, `s(choose("bd", "hh"))`. A chosen
- * option that is itself a pattern plays in full for that cycle (mini `|` is the in-string form).
+ * three times as often as the others. Like irand() the draw is a deterministic hash of the
+ * cycle position (stable across re-queries and re-triggers within a take): as a pattern it
+ * picks once per cycle, so a chosen option that is itself a pattern plays in full for that
+ * cycle (mini `|` is the in-string form); sampled by an outside pattern's structure
+ * (`.speed(choose(1, -1))` under a 16-step grid) it draws fresh at every onset. Drops in
+ * anywhere a signal goes - `n(choose("0", "3", "7"))`, `s(choose("bd", "hh"))`.
  */
 export function choose(...options) {
   if (options.length === 0) throw new Error('[signal] choose() needs at least one option');
@@ -1459,9 +1571,13 @@ export function choose(...options) {
   });
   const total = entries.reduce((sum, e) => sum + e.weight, 0);
   if (!(total > 0)) throw new Error('[signal] choose() needs at least one positive weight');
-  const seed = ++chooseSeedCounter;
-  const pick = (cycle) => {
-    let r = rng2(cycle, seed) * total;
+  const seed = nextAutoSeed();
+  // Keyed on the exact cycle position like irand()'s valueAt: at an integer cycle
+  // (stepsForCycle) rngAtPos(cycle, 0, seed) === rng2(cycle, seed), so the per-cycle pattern
+  // pick is unchanged, while sampling at an onset mid-cycle draws independently per position.
+  const pick = (cyclePos) => {
+    const cycle = Math.floor(cyclePos);
+    let r = rngAtPos(cycle, cyclePos - cycle, seed) * total;
     for (const e of entries) {
       r -= e.weight;
       if (r < 0) return e;
@@ -1474,12 +1590,14 @@ export function choose(...options) {
     const v = e.sig.sample(cycle + 0.5, 1); // a constant/continuous option becomes one whole-cycle step
     return v == null ? [] : [{ start: 0, end: 1, value: v }];
   };
-  const sample = (t, cps, pos) => pick(Math.floor(pos ?? t * cps)).sig.sample(t, cps, pos);
-  return new Sig(sample, { stepsForCycle });
+  const sample = (t, cps, pos) => pick(pos ?? t * cps).sig.sample(t, cps, pos);
+  // The draw varies within the cycle, so as a control this is read per onset (see readEvent):
+  // the option drawn at that exact position supplies both the value and its spans, which is what
+  // lets `.speed(choose("1", "-1"))` light the option each hit actually plays. Reading through
+  // readEvent means a chosen option that is itself a mini pattern reports the atom sounding
+  // there, and a nested choose() resolves the same way.
+  return new Sig(sample, { stepsForCycle, eventAt: (cyclePos) => readEvent(pick(cyclePos).sig, cyclePos) });
 }
-
-// Independent irand() calls decorrelate the same way choose() does - a per-call build-time seed.
-let irandSeedCounter = 0;
 
 /**
  * `irand(8)` - a deterministic random integer in 0..n-1, one value per cycle. Like choose() the
@@ -1492,7 +1610,7 @@ let irandSeedCounter = 0;
  */
 export function irand(n) {
   const count = Math.max(1, Math.round(Number(n)));
-  const seed = ++irandSeedCounter;
+  const seed = nextAutoSeed();
   // Keyed on the exact cycle position (integer cycle + Frac-snapped phase) so two float paths to the
   // same moment - or a rib()/hold() remap onto it - draw the identical integer.
   const valueAt = (cyclePos) => {
@@ -1501,7 +1619,10 @@ export function irand(n) {
   };
   const stepsForCycle = (cycle) => [{ start: 0, end: 1, value: valueAt(cycle) }];
   const sample = (t, cps, pos) => valueAt(pos ?? t * cps);
-  return new Sig(sample, { stepsForCycle });
+  // Varies within the cycle like choose(), so as a control it is drawn per onset rather than
+  // holding the cycle's first draw: .vel(irand(2)) is a fresh coin at every note. No source atom
+  // of its own to light (irand is written as code, not mini notation), so no spans.
+  return new Sig(sample, { stepsForCycle, eventAt: (cyclePos) => ({ value: valueAt(cyclePos), locs: [] }) });
 }
 
 // What a note-less synth("X") plays: C2 (MIDI 24 in this package's c5 = 60 convention), one

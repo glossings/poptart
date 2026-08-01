@@ -44,6 +44,56 @@ test('injectLocations wraps a string that immediately chains a method', () => {
   assert.equal(injectLocations('"0 1 2".gte(1)'), 'mini("0 1 2", 1).gte(1)');
 });
 
+test('injectLocations wraps every choose() option, first argument included', () => {
+  const out = injectLocations('s("x").speed(choose("1", "-1"))');
+  assert.match(out, /choose\(mini\("1", \d+\), mini\("-1", \d+\)\)/, out);
+  // …including the option in a weighted [option, weight] pair
+  const weighted = injectLocations('n(choose(["0", 3], ["3", 1]))');
+  assert.match(weighted, /choose\(\[mini\("0", \d+\), 3\], \[mini\("3", \d+\), 1\]\)/, weighted);
+});
+
+test('a call with no entry in either list patterns its arguments by default', () => {
+  // The point of denying from a closed list rather than allowing from an open one: a builder
+  // nobody has told the transpile about still highlights. If this ever needs an entry to pass,
+  // the predicate has been inverted back.
+  assert.match(injectLocations('someNewCombinator("0 1 2")'), /someNewCombinator\(mini\("0 1 2", \d+\)\)/);
+});
+
+test('injectLocations leaves every name-lookup argument a plain string', () => {
+  // These name things outside the pattern language; wrapping one changes what the code computes.
+  const cases = [
+    ['x.synth("Serum 2")', '.synth("Serum 2")'],
+    ['x.fx("Pro-Q 3")', '.fx("Pro-Q 3")'],
+    ['x.scale("F minor")', '.scale("F minor")'],
+    ['x.bus("reverb")', '.bus("reverb")'],
+    ['x.bsend("delay")', '.bsend("delay")'],
+    ['x.as("note:vel:clip")', '.as("note:vel:clip")'],
+    ['midicc("dev:Keystep")', 'midicc("dev:Keystep")'],
+    ['midikeys("dev:Keystep")', 'midikeys("dev:Keystep")'],
+    ['midi("track")', 'midi("track")'],
+    ['audio("track")', 'audio("track")'],
+    ['lfo("0 1 0")', 'lfo("0 1 0")'],
+    ['pianoroll("60,0,4")', 'pianoroll("60,0,4")'],
+    ['x.param("Filter Freq", 0.5)', '.param("Filter Freq", 0.5)'],
+    // a name-only call's LATER arguments too - a captured plugin-state blob is not mini notation
+    ['synth("Serum 2", "STATEBLOB")', 'synth("Serum 2", "STATEBLOB")'],
+  ];
+  for (const [code, expected] of cases) {
+    assert.ok(injectLocations(code).includes(expected), `${code} -> ${injectLocations(code)}`);
+  }
+});
+
+test('injectLocations still patterns a .param() VALUE while leaving its name alone', () => {
+  const out = injectLocations('x.param("Filter Freq", "0.2 0.8")');
+  assert.ok(out.includes('.param("Filter Freq", mini("0.2 0.8'), out);
+});
+
+test('injectLocations leaves a bare (non-argument) literal alone', () => {
+  // Outside argument position there is no callee to check, and the string may well be a name
+  // held in a variable for later - so the conservative default applies.
+  assert.equal(injectLocations('const p = "Serum 2";'), 'const p = "Serum 2";');
+});
+
 test('injectLocations leaves literals inside comments alone', () => {
   const out = injectLocations('// n("0 1")\nn("2 3")');
   assert.ok(out.startsWith('// n("0 1")\n'), 'commented literal untouched');

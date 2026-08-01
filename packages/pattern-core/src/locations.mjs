@@ -45,15 +45,31 @@ export function injectLocations(code, base = 0) {
   return out;
 }
 
+// Calls whose string arguments NAME something outside the pattern language - a plugin, a MIDI or
+// audio device, a bus, a scale, a channel-strip field spec - rather than carrying mini notation.
+// This is the closed set: it's fixed by what the API talks to in the outside world, whereas
+// pattern positions grow with every new combinator. So the predicate below denies from this list
+// and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
+// highlights its arguments with no entry here. Add a call only when its string is a lookup key.
+const NAME_ARG_CALLS = new Set([
+  'synth', 'fx', 'scale', 'bus', 'bsend', 'as', 'midi', 'audio', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
+]);
+// Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
+// (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid. param() is excluded:
+// its second argument is the value pattern.
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'midicc', 'midikeys']);
+
 // Is a string literal here used as a mini-notation pattern (vs a plugin/scale/param-name lookup)?
 // `before` is the code up to the opening quote, `after` the code from just past the closing quote.
-// Ported verbatim from the client's old isPatternContext so the set of highlighted strings is
-// unchanged - only where the decision is made moved (once, at eval, instead of per frame):
-//   - a direct argument to n()/note()/mini()/s()
-//   - the argument to a chain method whose first arg can be mini (.when/.add/.vel/.i/.gain/…)
-//   - a second-position argument (`.param("name", "0.2 0.8")`)
+// In argument position the default is "pattern" (as in Strudel, where mini notation is what a
+// string in a pattern expression means) and NAME_ARG_CALLS is what pulls a literal back out:
+//   - a first argument, to a builder or a chain method - n("0 1"), .speed("2 1"), choose("1", "-1"),
+//     including the option in a [option, weight] pair
+//   - a later argument - .param("Filter Freq", "0.2 0.8") - unless the call is name-only
 //   - a string that immediately chains a method (`"0 0.5 1".gte(0.5)`)
-// Deliberately NOT: .synth("…")/.fx("…")/.scale("…"), or a .param() name string.
+// OUTSIDE argument position the default flips to conservative: a bare literal (`const p = "…"`)
+// is left alone, since there's no callee to check and it may well be a name held in a variable.
 export function isPatternPosition(before, after) {
   // Guard: the literal must be a COMPLETE argument/expression - immediately closed by ) , ; ] }
   // or end of input, or chaining a method (`"0 1".fast(2)`). If an operator follows (`n("0 1" + x)`)
@@ -64,9 +80,17 @@ export function isPatternPosition(before, after) {
   const method = /^\s*\.\s*[A-Za-z_$]/.test(after);
   const complete = method || /^\s*[).,;\]}]/.test(after) || /^\s*$/.test(after);
   if (!complete) return false;
-  if (/(?<!\.)\b(?:n|note|mini|s)\s*\(\s*$/.test(before)) return true;
-  if (/\.\s*(?:when|hold|i|n|note|vel|clip|fast|slow|rib|begin|end|loop|speed|stretch|fit|slice|gain|pan|add|sub|mul|div|mod|gte|gt|lte|lt|eq|neq)\s*\(\s*$/.test(before)) return true;
-  if (/,\s*$/.test(before)) return true;
+  // First argument: the callee sits immediately before the open paren (an optional `[` allows the
+  // option in choose(["0", 3], …)). Its name decides.
+  const first = before.match(/([A-Za-z_$][\w$]*)\s*\(\s*\[?\s*$/);
+  if (first) return !NAME_ARG_CALLS.has(first[1]);
+  // Later argument: a name-only call's arguments are never patterns. Matching requires no
+  // parenthesis between that callee's `(` and here, so we only reject while still inside ITS
+  // argument list - a nested call (fx("Reverb").speed("1 2")) has its own first-argument rule.
+  if (/,\s*\[?\s*$/.test(before)) {
+    const enclosing = before.match(/\b([A-Za-z_$][\w$]*)\s*\(\s*[^()]*$/);
+    return !(enclosing && NAME_ONLY_CALLS.has(enclosing[1]));
+  }
   if (method) return true;
   return false;
 }

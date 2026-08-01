@@ -464,13 +464,11 @@ const DRY_RUN_CYCLES = 8;
 // no step grid and fall out where callers check `.stepsForCycle`. Shared by the eval-time dry run
 // and the highlight grid so BOTH see the whole track, not just its note pattern.
 function patternSigs(sig) {
-  return [
-    sig,
-    ...Object.values(sig.paramSignals),
-    ...Object.values(sig.channel),
-    ...(sig.velSig ? [sig.velSig] : []),
-    ...Object.values(sig.sampler ?? {}).filter((v) => v instanceof patternCore.Sig),
-  ];
+  // Sampler config and note channels are NOT listed: a patterned one is cross-merged into the
+  // main grid at build time (structure + locs union, see pattern-core crossMerge), so the main
+  // sig already lights them - and for a per-position control (choose) the config sig's own grid
+  // only knows the phase-0 pick, which would wrongly light one option for the whole cycle.
+  return [sig, ...Object.values(sig.paramSignals), ...Object.values(sig.channel)];
 }
 
 function dryRunPattern(sig) {
@@ -849,6 +847,13 @@ const routes = {
 
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
+
+    // Rewind the random builders' seed counter before building anything, so choose()/irand()
+    // seeds are a function of position in the buffer rather than of how many times this server
+    // has evaluated. Without it every re-eval re-rolls the take, and since /api/stop rewinds the
+    // clock to cycle 0, stop-then-play would come back as a different performance of the same
+    // code. Blocks are built below in document order, which is what makes the seeds stable.
+    patternCore.resetRandomSeeds();
 
     // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
     // and a redeclared name in the buffer overrides the copy without clobbering the original.

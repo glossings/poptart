@@ -642,7 +642,7 @@ class OscEngine {
    * fit ('auto' | measures), slice, note, vel, attack, decay, sustain, release, secPerCycle }.
    * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
-   * played region lasts exactly the target number of cycles, `note` a further multiplier that
+   * whole sample lasts exactly the target number of cycles, `note` a further multiplier that
    * repitches around MIDI 24 ("c2" = as recorded). `vel` scales volume linearly.
    */
   playSample(trackId, pack, cfg, onsetSec, offsetSec) {
@@ -678,7 +678,11 @@ class OscEngine {
     if (speed === 0 || spanSec <= 0) return;
 
     if (cfg.fit != null) {
-      const measures = spanSec / cfg.secPerCycle;
+      // Fit is a property of the whole sample, not the begin..end window: the rate is set so
+      // the FULL file lasts the target number of cycles, and begin/end/slice then select a
+      // window at that fixed rate. Basing it on the window instead would make a randomized
+      // .begin() (s("breaks").fit().vel("1!16").begin(irand(16).div(16))) repitch every hit.
+      const measures = file.duration / cfg.secPerCycle;
       const target = cfg.fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : cfg.fit;
       if (target > 0) speed *= measures / target;
     }

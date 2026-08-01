@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, note, mini, sine, irand } from './src/signal.mjs';
+import { n, note, mini, sine, irand, s, choose } from './src/signal.mjs';
 
 const valuesAt = (sig, cycle) => sig.stepsForCycle(cycle).filter((s) => s.value != null).map((s) => s.value);
 
@@ -31,6 +31,20 @@ test('irand is deterministic in time - same cycle draws the same value on every 
     assert.equal(a, b, `cycle ${c} stable across re-queries`);
     // sample() (what arithmetic/onset reads) agrees with the step grid at the cycle boundary.
     assert.equal(r.sample(c, 1, c), a, `cycle ${c} sample() agrees with the grid`);
+  }
+});
+
+test('irand as a control draws per event, not once per cycle', () => {
+  // irand varies WITHIN the cycle, so its whole-cycle step is only the phase-0 draw - as a
+  // control it has to be read at each onset (the same contract choose() reads by).
+  const sig = n('0!8').vel(irand(2));
+  const vels = [0, 1, 2].flatMap((c) => sig.stepsForCycle(c).map((s) => s.vel));
+  assert.ok(vels.every((v) => v === 0 || v === 1), 'every vel is a draw in range');
+  assert.ok(new Set(vels).size > 1, 'events within the window draw independently');
+  // and each merged value is the draw the scheduler will sample at that same onset
+  const vel = sig.noteChannels.vel;
+  for (const st of sig.stepsForCycle(0)) {
+    assert.equal(st.vel, vel.sample(st.start, 1, st.start), `onset ${st.start} agrees with sample()`);
   }
 });
 
@@ -164,4 +178,36 @@ test('naked .hold() on a continuous signal takes one value per cycle', () => {
 test('naked .hold() borrows a pattern its own onsets', () => {
   const held = mini('1 2 3').hold();
   assert.deepEqual(valuesAt(held, 0), [1, 2, 3], 'one held value per onset, its own values');
+});
+
+// ---------------------------------------------------------------------------------------------
+// .rib() loops the per-onset controls set before it, not just the note grid
+// ---------------------------------------------------------------------------------------------
+
+test('.rib(29, 1) freezes sampler-config randomness into a repeating bar', () => {
+  const sig = s('breaks').vel('1!16').begin(irand(16).div(16)).speed(choose(1, -1)).rib(29, 1);
+  for (let k = 0; k < 16; k++) {
+    const p = k / 16;
+    const begin29 = sig.sampler.begin.sample(29 + p, 1, 29 + p);
+    // every output cycle remaps into the band, so cycles 0, 30 and 41 draw cycle 29's values
+    for (const c of [0, 30, 41]) {
+      assert.equal(sig.sampler.begin.sample(c + p, 1, c + p), begin29, `begin onset ${k} loops (cycle ${c})`);
+      assert.equal(
+        sig.sampler.speed.sample(c + p, 1, c + p),
+        sig.sampler.speed.sample(29 + p, 1, 29 + p),
+        `speed onset ${k} loops (cycle ${c})`,
+      );
+    }
+  }
+});
+
+test('.rib() remaps channel-strip signals and their highlight grid', () => {
+  const sig = n('0').gain('<0 1 2 3>').rib(2, 1);
+  assert.equal(Number(sig.channel.gain.sample(5, 1, 5)), 2, 'polled gain reads the looped cycle');
+  assert.equal(Number(sig.channel.gain.stepsForCycle(5)[0].value), 2, 'gain grid loops with it');
+});
+
+test('controls chained AFTER .rib() stay outside the loop', () => {
+  const sig = n('0').rib(2, 1).gain('<0 1 2 3>');
+  assert.equal(Number(sig.channel.gain.sample(5, 1, 5)), 1, 'post-rib gain keeps evolving (cycle 5 mod 4)');
 });
