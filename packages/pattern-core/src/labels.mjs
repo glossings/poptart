@@ -6,9 +6,11 @@
 //   Sbass: ...  /  bassS: ...   leading or trailing capital S solos it (if anything is
 //                               soloed, only soloed patterns play; mute still wins)
 //
-// A label must start at column 0 (identifier followed by ':'). Continuation lines - `.param(…)`
-// chains, the body of a `function () { … }`, a multi-line `` `<…>` `` template - stay with the
-// block they continue, so they're never mistaken for a new block. A **column-0 statement that
+// A label must start at column 0 (identifier followed by ':') *and* be in code: a `name:` inside
+// an open `/*…*/` comment or a multi-line `` `…` `` template is only text there, so it doesn't
+// start a block - see `endsUnparsed`. Continuation lines - `.param(…)` chains, the body of a
+// `function () { … }`, a multi-line `` `<…>` `` template - stay with the block they continue, so
+// they're never mistaken for a new block either. A **column-0 statement that
 // isn't a label** (e.g. `Signal.prototype.co = …`, a bare `const x = …`) starts its own
 // anonymous block, so language extensions and shared declarations can sit anywhere in the
 // buffer, between tracks, not just at the top - see `continuesBlock` for how continuation is
@@ -21,7 +23,7 @@ const LABEL_RE = /^([A-Za-z_$][\w$]*)\s*:(?!:)/;
 
 // Does `line` continue the expression `code` has open so far, rather than start a new one?
 // Two ways to continue: (1) `code` ends mid-expression - unbalanced (){}[], an unclosed
-// backtick template, or an open block comment (scanned by `endsOpen`, which is string/comment/
+// backtick template, or an open block comment (scanned by `scanOpen`, which is string/comment/
 // template aware so brackets inside `"…"`/`` `…` `` don't count); (2) `line` begins with `.`,
 // which JS's automatic-semicolon-insertion joins to the previous line (`x\n.foo()` is one
 // method chain). Everything else at column 0 is a fresh statement. Regex literals aren't
@@ -30,10 +32,27 @@ function continuesBlock(code, line) {
   return endsOpen(code) || /^\s*\./.test(line);
 }
 
+// True if `code` ends somewhere a following line can't be read as code at all: inside a `/*…*/`
+// comment or a `` `…` `` template. Text there only looks like a label - `/* $: broken? */` is a
+// comment, not a block - so `splitLabeledBlocks` suppresses label matching while it's true. An
+// unclosed bracket deliberately doesn't count: a stray `(` is a typo, and swallowing every
+// label below it would hide the rest of the patch instead of just the broken line.
+function endsUnparsed(code) {
+  const { inBlockComment, inTemplate } = scanOpen(code);
+  return inBlockComment || inTemplate;
+}
+
 // True if `code` ends inside an unclosed bracket, backtick template, or block comment - i.e. a
-// following line is part of the same expression. Single/double-quoted strings are treated as
-// line-local (JS forbids a raw newline inside them), so only `` ` `` templates span lines.
+// following line is part of the same expression.
 function endsOpen(code) {
+  const { depth, inBlockComment } = scanOpen(code);
+  return depth > 0 || inBlockComment;
+}
+
+// Lex `code` far enough to know what's still open at its end. Single/double-quoted strings are
+// treated as line-local (JS forbids a raw newline inside them), so only `` ` `` templates span
+// lines.
+function scanOpen(code) {
   const stack = []; // '(' '[' '{' for brackets, '`' for template contexts (typed so `${}` nests)
   let inBlockComment = false;
   let inLineComment = false;
@@ -69,7 +88,9 @@ function endsOpen(code) {
     else if (c === '(' || c === '[' || c === '{') stack.push(c);
     else if (c === ')' || c === ']' || c === '}') stack.pop();
   }
-  return stack.length > 0 || inBlockComment;
+  // `inTemplate` covers `${…}` interpolations too, not just literal template text: a column-0
+  // label inside one would split the template's own closing line off into a block of its own.
+  return { depth: stack.length, inBlockComment, inTemplate: stack.includes('`') };
 }
 
 /**
@@ -94,7 +115,9 @@ export function splitLabeledBlocks(source) {
   };
 
   for (const line of lines) {
-    const m = LABEL_RE.exec(line);
+    // Only look for a label where the previous lines have left us in code - inside an open
+    // `/*…*/` or `` `…` ``, `$: …` is prose, not a new block.
+    const m = current && endsUnparsed(current.code) ? null : LABEL_RE.exec(line);
     if (m) {
       push();
       const meta = parseLabel(m[1], () => `$${++anonCount}`);
