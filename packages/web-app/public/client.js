@@ -642,9 +642,11 @@ function poptartHint(cm) {
   m = before.match(/\b(?:midicc|midikeys)\s*\(\s*["']([^"']*)$/);
   if (m) return midiDeviceHints(cur, m[1]);
 
-  // After a dot → chain methods; bare word → top-level builders.
-  m = before.match(/\.([A-Za-z_]*)$/);
-  if (m) return wordHints(cur, m[1], METHODS, 'method');
+  // After a dot → chain methods; bare word → top-level builders. A dot straight after a digit is
+  // the decimal point of a number being typed (`begin(0.3`), not a chain - offering the whole
+  // method list there pops a menu over every float you type.
+  m = before.match(/(\d?)\.([A-Za-z_]*)$/);
+  if (m && !m[1]) return wordHints(cur, m[2], METHODS, 'method');
   m = before.match(/(?:^|[^.\w"'])([A-Za-z_]+)$/);
   if (m) return wordHints(cur, m[1], BUILDERS, 'builder');
 
@@ -740,6 +742,11 @@ function withDocPanel(hintFn) {
         else hideHintDoc();
       });
       CodeMirror.on(res, 'close', hideHintDoc);
+      // show-hint only signals "close" when a list is on screen: if the next keystroke narrows the
+      // list to nothing it drops the popup silently, and the panel would hang around describing a
+      // completion that is no longer offered. "update" fires on the outgoing result either way, and
+      // the replacement's "select" re-shows the panel in the same frame, so there's no flicker.
+      CodeMirror.on(res, 'update', hideHintDoc);
       return res;
     };
     return result && typeof result.then === 'function' ? result.then(attach) : attach(result);
@@ -749,6 +756,10 @@ function withDocPanel(hintFn) {
 function showPoptartHint() {
   cm.showHint({ hint: withDocPanel(poptartHint), completeSingle: false });
 }
+
+// Backstop for the same asymmetry: a completion session that already lost its popup closes without
+// signalling its result, so hang the panel's last word on the editor-level event instead.
+cm.on('endCompletion', hideHintDoc);
 
 // --- ctrl-hover over a name in the buffer ---
 

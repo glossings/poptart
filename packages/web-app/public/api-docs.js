@@ -137,7 +137,7 @@ const API_DOCS = {
     kind: 'builder',
     sig: 'choose(...options)',
     desc: 'Picks one option per draw; pass [value, weight] pairs to bias it. Deterministic per cycle position, so replays match.',
-    eg: 'speed(choose("1", ["-1", 0.3]))',
+    eg: 'flip(choose("0", ["1", 0.3]))',
   },
   irand: {
     kind: 'builder',
@@ -225,7 +225,7 @@ const API_DOCS = {
     kind: 'method',
     sig: 'when(condition, fn)',
     desc: 'Applies fn to the pattern wherever condition is nonzero, on the condition\'s own step grid.',
-    eg: '.when(rand().gte(0.7), x => x.mul(speed("-1")))',
+    eg: '.when(rand().gte(0.7), x => x.add(flip(1)))',
   },
   as: {
     kind: 'method',
@@ -241,7 +241,7 @@ const API_DOCS = {
   // ----------------------------------------------------------------- arithmetic
   add: { kind: 'method', sig: 'add(x)', desc: 'Adds, keeping the left side\'s structure. On a control pattern it reaches into that channel.', eg: '.add("<0 12>")' },
   sub: { kind: 'method', sig: 'sub(x)', desc: 'Subtracts, keeping the left side\'s structure.', eg: '.sub(12)' },
-  mul: { kind: 'method', sig: 'mul(x)', desc: 'Multiplies, keeping the left side\'s structure.', eg: '.mul(speed("-1"))' },
+  mul: { kind: 'method', sig: 'mul(x)', desc: 'Multiplies, keeping the left side\'s structure.', eg: '.mul(speed(2))' },
   div: { kind: 'method', sig: 'div(x)', desc: 'Divides, keeping the left side\'s structure.', eg: 'irand(8).div(8)' },
   mod: { kind: 'method', sig: 'mod(x)', desc: 'Modulo (always positive), keeping the left side\'s structure.', eg: '.mod(12)' },
   round: { kind: 'method', sig: 'round()', desc: 'Rounds each value to the nearest integer.', eg: 'rand().range(0, 7).round()' },
@@ -262,8 +262,9 @@ const API_DOCS = {
   i: { kind: 'both', sig: 'i(index)', desc: 'Which sample of the pack to play, 0-based (the same thing as the ":n" suffix).', eg: 's("breaks").i("<0 2>")' },
   begin: { kind: 'both', sig: 'begin(pos)', desc: 'Playback start position within the sample, 0..1.', eg: '.begin(irand(16).div(16))' },
   end: { kind: 'both', sig: 'end(pos)', desc: 'Playback end position within the sample, 0..1.', eg: '.end(0.25)' },
-  loop: { kind: 'both', sig: 'loop(on)', desc: 'Loops the begin..end region instead of playing it as a one-shot.', eg: '.loop(1)' },
-  speed: { kind: 'both', sig: 'speed(rate)', desc: 'Playback rate - 2 is an octave up and half as long, negative plays backwards.', eg: '.speed("<1 -1>")' },
+  loop: { kind: 'both', sig: 'loop(on)', desc: 'Loops the begin..end region instead of playing it as a one-shot; loop(0) also opts a negative speed out of looping.', eg: '.loop(1)' },
+  speed: { kind: 'both', sig: 'speed(rate)', desc: 'Playback rate off begin() - 2 is an octave up and half as long, 0 is silent, negative walks backwards and wraps round to end(), so it loops unless you say loop(0).', eg: '.speed("<1 -1>")' },
+  flip: { kind: 'both', sig: 'flip(on)', desc: 'Plays the region backwards into the beat: over 0.5 it reverses speed() as one pass and delays the voice so it lands on begin() at the step\'s end.', eg: '.flip("<0 1>*2")' },
   stretch: { kind: 'both', sig: 'stretch(factor)', desc: 'Granular timestretch (2 = twice as long at the same pitch). Best on rhythmic material.', eg: '.stretch(2)' },
   fit: { kind: 'both', sig: 'fit(measures)', desc: 'Repitches the sample to last exactly this many cycles; bare .fit() picks the nearest power of two.', eg: 's("breaks:19").fit()' },
   slice: { kind: 'both', sig: 'slice(n)', desc: 'Plays the nth detected transient slice, wrapping past the last. WAV samples only.', eg: '.slice(irand(8))' },

@@ -558,9 +558,9 @@ export class Sig {
   _binop(op, other, fn, linear) {
     // A CONTROL operand - one of the top-level sampler builders, `speed("-1")`/`begin(0.5)`/… -
     // names a CHANNEL rather than a value stream, so the operation lands on that channel instead
-    // of on this pattern's own values: `x.mul(speed("-1"))` reverses playback and leaves the
-    // notes alone. This is what lets a combinator reach into a pattern it was handed
-    // (`.when(c, x => x.mul(speed("-1")))`), the same way `x.add(note(3))` reaches into pitch.
+    // of on this pattern's own values: `x.mul(speed("-1"))` lands on the speed channel and leaves
+    // the notes alone. This is what lets a combinator reach into a pattern it was handed
+    // (`.when(c, x => x.add(flip(1)))`), the same way `x.add(note(3))` reaches into pitch.
     if (other instanceof Sig && other.ctl) return this._ctlBinop(other.ctl, other, fn);
     // On a sampler pattern the values are PACK NAMES, so plain arithmetic can only sensibly mean
     // the repitch note (24 = "c2" = as recorded): `s("rave").add(7)` is seven semitones up, the
@@ -675,7 +675,7 @@ export class Sig {
    * is falsy (including rests) the original pattern plays.
    *
    * Per-onset controls the callback set switch WITH the condition - sampler config and velocity -
-   * so `.when(rand().gte(0.7), x => x.mul(speed("-1")))` reverses only the bars the condition
+   * so `.when(rand().gte(0.7), x => x.add(flip(1)))` reverses only the bars the condition
    * picks. Everything the callback did that can't be turned on and off per event stays
    * unconditional: the chain (.synth()/.fx()), the streamed channel strip (.gain()/.pan()) and
    * .param() signals, whose "off" state would be an unknown value to revert to rather than an
@@ -1188,10 +1188,25 @@ export class Sig {
   begin(v) { return this._samplerOpt('begin', 'begin', toSignal(v)); }
   /** Playback end position within the sample, 0..1. */
   end(v) { return this._samplerOpt('end', 'end', toSignal(v)); }
-  /** Loop the begin..end region for the event's duration (instead of one-shot). Truthy/falsy. */
+  /** Loop the begin..end region for the event's duration (instead of one-shot). Truthy/falsy - and
+   *  .loop(0) is also how a negative .speed() opts out of its default backwards loop. */
   loop(v = 1) { return this._samplerOpt('loop', 'loop', toSignal(v)); }
-  /** Playback rate (repitches). Negative plays backward. */
+  /**
+   * Playback rate (repitches) - the speed the playhead leaves .begin() at. Positive runs up to
+   * .end(), 0 plays nothing, negative walks backwards out of .begin(), which wraps round to .end() - so a
+   * negative speed loops by default and `.speed(-1)` plays the sample backwards from the end,
+   * repeating for the event. `.loop(0)` opts out (one backwards pass). To reverse the region as a
+   * single pass that lands on the beat, use .flip().
+   */
   speed(v) { return this._samplerOpt('speed', 'speed', toSignal(v)); }
+  /**
+   * Play the window backwards INTO the beat: over 0.5 it reverses .speed() over the .begin()..
+   * .end() region and delays the voice so it finishes on .begin() exactly at the step's end - a
+   * flipped snare sweeps into the next hit (`s("sd").flip("<1 0>*2")`). Unlike .speed(-1) it is
+   * one pass, not a backwards loop, and its timing is anchored to the step rather than the onset.
+   * A switch, not a rate, so any 0..1 signal drives it: .flip(rand()).
+   */
+  flip(v = 1) { return this._samplerOpt('flip', 'flip', toSignal(v)); }
   /** Timestretch factor (2 = twice as long at the same pitch). Granular, so best on rhythmic material. */
   stretch(v) { return this._samplerOpt('stretch', 'stretch', toSignal(v)); }
   /**
@@ -1862,7 +1877,7 @@ export function n(value) {
  * Sampler pattern - values are sample-pack names (folders under the samples directory), one
  * event per step: `s("bd hh bd hh")`. A `:n` suffix picks the pack's nth file, strudel-style:
  * `s("bd:4")` = `s("bd").i(4)` (an explicit .i() overrides the suffix). Configure with
- * .i()/.begin()/.end()/.loop()/.speed()/.stretch()/.fit()/.slice()/.attack()/.decay()/
+ * .i()/.begin()/.end()/.loop()/.speed()/.flip()/.stretch()/.fit()/.slice()/.attack()/.decay()/
  * .sustain()/.release() (or .adsr()); route through effects with .fx()/.param() as usual.
  */
 export function s(value) {
@@ -1890,6 +1905,7 @@ const SAMPLER_CONTROLS = {
   end: { key: 'end', unset: 1 },
   loop: { key: 'loop', unset: 0 },
   speed: { key: 'speed', unset: 1 },
+  flip: { key: 'flip', unset: 0 },
   stretch: { key: 'stretch', unset: 1 },
   fit: { key: 'fit', unset: 1 },
   slice: { key: 'slice', unset: 0 },
@@ -1925,7 +1941,7 @@ function bareSig(sig) {
  * reaches into pitch:
  *
  *   tops: s("breaks:19").fit()
- *     .when(rand().gte(0.7), x => x.mul(speed("-1")))   // ~30% of bars play backwards
+ *     .when(rand().gte(0.7), x => x.add(flip(1)))       // ~30% of bars play backwards
  *     .when(rand().gte(0.5), x => x.ply("4"))
  *
  * The channel's current value is the left operand (its resting default where it isn't set yet -
@@ -1960,8 +1976,10 @@ export const begin = samplerControl('begin');
 export const end = samplerControl('end');
 /** Loop the begin..end region instead of one-shot - the top-level form of `.loop()`. */
 export const loop = samplerControl('loop');
-/** Playback rate; negative plays backward - the top-level form of `.speed()`. */
+/** Playback rate off begin(); negative wraps backwards round the region - the top-level form of `.speed()`. */
 export const speed = samplerControl('speed');
+/** Reverse the window into the beat (over 0.5 = on) - the top-level form of `.flip()`. */
+export const flip = samplerControl('flip');
 /** Granular timestretch factor - the top-level form of `.stretch()`. */
 export const stretch = samplerControl('stretch');
 /** Repitch the sample to last this many cycles - the top-level form of `.fit()`. */

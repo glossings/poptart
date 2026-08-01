@@ -506,7 +506,7 @@ export class Scheduler {
     };
     const src = this.pattern.sampler;
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
-    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'stretch', 'slice', 'note',
+    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'flip', 'stretch', 'slice', 'note',
       'attack', 'decay', 'sustain', 'release']) {
       if (src[key]) {
         const v = at(src[key]);

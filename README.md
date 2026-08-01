@@ -319,7 +319,8 @@ drums: s("bd*4 hh*8")    // "bd:4" picks a file inline, Strudel-style: = s("bd")
   .i("<0 1 2>")          // which file of the pack (Strudel's `n`, renamed to avoid our n())
   .begin(0).end(1)       // play region, 0..1
   .loop()                // loop the region for the event's length instead of one-shot
-  .speed("1 -1")         // playback rate; negative = reversed
+  .speed("1 -1")         // playback rate off .begin(); negative wraps backwards (and loops)
+  .flip("<0 1>")         // reverse the region INTO the beat: lands on .begin() at the step's end
   .stretch(2)            // timestretch (granular; pitch preserved)
   .fit()                 // repitch to the nearest power-of-2 measures (.fit(3) = exactly 3)
   .slice("0 1 2 3")      // play the nth detected transient (WAV files only; wraps)
@@ -335,6 +336,16 @@ ramps for twice the note's length and so never reaches full before it ends. `sus
 level. Attack → decay → sustain play across the note; once its duration ends the envelope releases
 from wherever it is (a `.loop()` or cut one-shot releases at its gate-off instead). Left unset,
 playback is unchanged.
+
+`speed` is a *rate*, read continuously off `.begin()`: the playhead leaves `begin` at that speed,
+so positive runs up to `.end()` and `0` plays nothing. Going the other way it walks **backwards out
+of `begin`**, which wraps round to `.end()` — the region is a circle, so a negative speed **loops
+by default** and `.speed(-1)` is the familiar "play it backwards from the end", repeating for as
+long as the event lasts. `.loop(0)` opts out and gives you a single backwards pass.
+
+`.flip()` is the other way to go backwards: over `0.5` it plays `begin..end` backwards **once**
+and delays the voice so it lands on `begin` exactly at the step's end, which is what makes a
+flipped hit sweep *into* the next one — `s("sd").flip("<0 1>*2")`.
 
 The sample library root defaults to `~/.poptart/samples` — drop or symlink your sample folders in
 and they appear. You can change it in the **settings** tab (type a path or click **browse…** to

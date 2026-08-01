@@ -645,12 +645,13 @@ class OscEngine {
 
   /**
    * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
-   * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, stretch,
-   * fit ('auto' | measures), slice, note, vel, attack, decay, sustain, release, secPerCycle }.
-   * Resolves pack/index/slice/fit
+   * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, flip,
+   * stretch, fit ('auto' | measures), slice, note, vel, attack, decay, sustain, release,
+   * secPerCycle }. Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
    * whole sample lasts exactly the target number of cycles, `note` a further multiplier that
-   * repitches around MIDI 24 ("c2" = as recorded). `vel` scales volume linearly.
+   * repitches around MIDI 24 ("c2" = as recorded), `flip` a sign flip plus a re-anchored onset.
+   * `vel` scales volume linearly.
    */
   playSample(trackId, pack, cfg, onsetSec, offsetSec) {
     // A sampler source has no pitch, so any MIDI route off this track fires its fixed note on the
@@ -680,6 +681,11 @@ class OscEngine {
     if (end < begin) [begin, end] = [end, begin];
 
     let speed = cfg.speed ?? 1;
+    // .flip() is a switch, not a rate: over 0.5 it negates whatever speed is in force (so it
+    // toggles cleanly off any 0..1 signal - .flip(rand()), .flip("<1 0>")) and re-anchors the
+    // voice to the step's end below. Sign is all it touches; fit/note keep scaling the magnitude.
+    const flip = (cfg.flip ?? 0) > 0.5;
+    if (flip) speed *= -1;
     const stretch = cfg.stretch > 0 ? cfg.stretch : 1;
     const spanSec = file.duration * (end - begin);
     if (speed === 0 || spanSec <= 0) return;
@@ -695,9 +701,34 @@ class OscEngine {
     }
     if (cfg.note != null) speed *= 2 ** ((cfg.note - 24) / 12); // repitch: MIDI 24 ("c2") = as recorded
 
-    const loop = cfg.loop ? 1 : 0;
+    // Speed is a continuous rate read off `begin`: the playhead leaves `begin` at `speed`, so
+    // positive runs up to `end` and 0 holds still. Going the other way it walks BACKWARDS out of
+    // `begin`, which only has anywhere to go if the window is a circle - so a negative speed
+    // loops by default, wrapping `begin` round to `end`. That makes the rate continuous through
+    // zero (begin and end are the same point on the circle) and means .speed(-1) on a plain
+    // sample is the familiar "play it backwards from the end", repeating for the event. An
+    // explicit .loop(0) opts out: one backwards pass from `end`, then silence. .flip() is a
+    // single anchored pass by definition, so it never picks up the auto-loop.
+    const loop = (cfg.loop ?? (speed < 0 && !flip ? 1 : 0)) ? 1 : 0;
     // Natural playback length in seconds - what the one-shot synths' Line runs over.
-    const durSec = (spanSec * stretch) / Math.abs(speed);
+    let durSec = (spanSec * stretch) / Math.abs(speed);
+    const eventSec = offsetSec - onsetSec;
+    // .flip() reverses the window AND re-anchors it: playback runs from one step's worth of audio
+    // past `begin` back down to `begin`, landing on `begin` exactly at the step's end, so a
+    // flipped hit sweeps *into* the next one (s("sd").flip("<1 0>*2")).
+    if (flip && speed < 0 && !loop) {
+      if (durSec > eventSec + 0.005) {
+        // Window longer than the step: the start position lands inside it, so trim to that head.
+        end = begin + (eventSec * Math.abs(speed)) / stretch / file.duration;
+        durSec = eventSec;
+      } else {
+        // Window shorter than the step: the start position is past `end`, i.e. silence. Rather
+        // than read past the window, just delay the voice - unspawned is the same silence - so
+        // the whole window still finishes on `begin` at the step's end. Only the audio moves:
+        // the MIDI fanout above already fired on the pattern's grid.
+        onsetSec = offsetSec - durSec;
+      }
+    }
     // Sampler events are always gated to their event: a one-shot that would outlast its step
     // gets a gate-off at the step's end instead of ringing its natural length ("gate mode",
     // like Ableton Sampler's). The event length is whatever the pattern's step grid computed -
@@ -705,7 +736,7 @@ class OscEngine {
     // (.vel()/.note()/.slice()/.i()...) subdivides it further. To let a sample ring longer, make its *event* longer
     // ("long/2", "long@2", "long _"). Loops already gate there; the small margin avoids
     // cutting a voice that ends naturally anyway.
-    const cut = !loop && durSec > offsetSec - onsetSec + 0.005 ? 1 : 0;
+    const cut = !loop && durSec > eventSec + 0.005 ? 1 : 0;
     this._send('/poptart/playSample', [
       trackId,
       pack,

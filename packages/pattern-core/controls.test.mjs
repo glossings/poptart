@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, s, note, rand, speed, begin, fit, i, sine } from './src/signal.mjs';
+import { n, s, note, rand, speed, flip, begin, fit, i, sine } from './src/signal.mjs';
 
 // What the scheduler would read off a sampler channel at a given cycle position.
 const cfgAt = (sig, key, cyclePos) => sig.sampler[key].sample(cyclePos, 1, cyclePos);
@@ -42,6 +42,15 @@ test('controls take whatever a signal takes - numbers, mini strings, LFOs', () =
   assert.equal(cfgAt(s('bd').mul(speed('2')), 'speed', 0), 2);
   const swept = s('bd').mul(speed(sine(0.25).range(1, 3)));
   assert.ok(cfgAt(swept, 'speed', 0) >= 1 && cfgAt(swept, 'speed', 0) <= 3);
+});
+
+test('flip is a channel like any other - bare, patterned, or as an operand', () => {
+  assert.equal(cfgAt(s('sd').flip(), 'flip', 0), 1, 'bare .flip() means on');
+  const alternating = s('sd').flip('<1 0>');
+  assert.equal(cfgAt(alternating, 'flip', 0), 1);
+  assert.equal(cfgAt(alternating, 'flip', 1), 0);
+  // Unset is 0 (off), so an operand can switch it on from outside the chain.
+  assert.equal(cfgAt(s('sd').add(flip(1)), 'flip', 0), 1);
 });
 
 test('fit() with no argument sets the auto mode rather than doing arithmetic', () => {
