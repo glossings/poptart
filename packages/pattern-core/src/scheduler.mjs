@@ -196,6 +196,16 @@ export class Scheduler {
     ];
   }
 
+  // Records a state as already live in the plugin, without sending it. Auto-pin captures a state
+  // *from* a plugin and writes it into the code; when that code is next evaluated the `{ state }`
+  // argument looks new to setPattern, which would send it straight back and make the plugin
+  // reload a state it already has. Only a just-captured state may be marked this way - anything
+  // the user typed, pasted, or loaded from a URL still has to be sent.
+  markStateApplied(slot, pluginId, state) {
+    if (pluginId == null) return;
+    this._appliedStates.set(`${slot}:${pluginId}`, state);
+  }
+
   setPattern(sig) {
     this.pattern = sig;
     this.engine.createTrack(this.trackId);

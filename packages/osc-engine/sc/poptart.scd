@@ -73,7 +73,7 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 // '/poptart/setTempo' and applied to plugins as they open (see loadInstrument/loadEffect).
 var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
-var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex;
+var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing;
 // Audio sidechain routing (Sig#sidechain / '/poptart/setSidechain'). silentBus is the read-only
@@ -628,11 +628,44 @@ OSCdef(\poptartCreateTrack, { |msg|
                 lfos: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, shape:, index:)
                 envs: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, index:)
                 ccs: IdentityDictionary.new,      // \slotN_param -> (bus:, index:, lo:, hi:, last:, binding:, defKey:)
+                editWatch: Array.newClear(maxSlots), // slot -> [OSCFunc] watching for plugin edits
                 held: 0                           // active-note count, drives env gates
             );
         };
     };
 }, '/poptart/createTrack');
+
+// Auto-pin + "conf" capture: everything we watch on a freshly opened plugin. Called once per
+// successful open, for both instrument and effect slots.
+//
+// The auto-pin half tells Node "this slot's plugin no longer matches the code" so it can
+// re-capture the state and write it back into synth("…", { state }). It takes THREE signals
+// because no single one covers every plugin:
+//   - parameterAutomated: a control moved in the plugin's own GUI (the common case).
+//   - /vst_program_index: a program switch, for plugins that expose presets as VST programs.
+//   - /vst_update: the VST "updateDisplay" host callback - what a plugin with its own preset
+//     browser (Serum) fires when loading a preset changes every parameter at once without
+//     touching a single VST program. Without this, picking a preset would go unnoticed.
+// Node debounces, so a preset load reporting all three costs one capture. Deliberately NOT
+// listening to /vst_param: that also fires for parameters *we* modulate, which would have a
+// running lfo() re-capturing the state forever.
+watchPluginEdits = { |track, key, slot, ctl|
+    var notify = { nodeAddr.sendMsg("/poptart/pluginEdited", key, slot) };
+    ctl.parameterAutomated = { |index, value|
+        if (track[\confMode] == true) {
+            ctl.info.parameters[index] !? { |p|
+                nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, index, value.asFloat);
+            };
+        };
+        notify.value;
+    };
+    // A re-open into the same controller must not stack a second set of watchers.
+    track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free } };
+    track[\editWatch][slot] = ['/vst_update', '/vst_program_index'].collect { |path|
+        OSCFunc(notify, path, ctl.synth.server.addr,
+            argTemplate: [ctl.synth.nodeID, ctl.synthIndex]);
+    };
+};
 
 OSCdef(\poptartLoadInstrument, { |msg|
     var key = msg[1].asSymbol;
@@ -654,14 +687,7 @@ OSCdef(\poptartLoadInstrument, { |msg|
                         // at the current tempo (position re-syncs via '/poptart/setTempo').
                         self.setPlaying(true);
                         self.setTempo(currentTempo);
-                        // "conf" capture: forward GUI knob moves to Node while conf mode is on.
-                        self.parameterAutomated = { |index, value|
-                            if (track[\confMode] == true) {
-                                self.info.parameters[index] !? { |p|
-                                    nodeAddr.sendMsg("/poptart/paramAutomated", key, 0, p.name.asString, index, value.asFloat);
-                                };
-                            };
-                        };
+                        watchPluginEdits.(track, key, 0, self);
                         ("poptart: loaded instrument " ++ pluginId).postln;
                     } {
                         ("poptart: FAILED to load instrument '" ++ pluginId
@@ -705,14 +731,7 @@ OSCdef(\poptartLoadEffect, { |msg|
                             self.setPlaying(true); // see loadInstrument
                             self.setTempo(currentTempo);
                             track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
-                            // "conf" capture: forward GUI knob moves to Node (see loadInstrument).
-                            self.parameterAutomated = { |index, value|
-                                if (track[\confMode] == true) {
-                                    self.info.parameters[index] !? { |p|
-                                        nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, index, value.asFloat);
-                                    };
-                                };
-                            };
+                            watchPluginEdits.(track, key, slot, self);
                             ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
                         };
                     } {
@@ -743,6 +762,10 @@ OSCdef(\poptartUnloadEffect, { |msg|
                 if (track[\loaded][slot].notNil or: { ctl.notNil }) {
                     track[\synth].set(("active" ++ slot).asSymbol, 0); // bypass before the close
                     ctl !? { ctl.close };
+                    // A closed plugin can't be edited - drop its auto-pin watchers (see
+                    // watchPluginEdits) so they don't outlive it or fire on a reused node id.
+                    track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free } };
+                    track[\editWatch][slot] = nil;
                     track[\loaded][slot] !? { |id|
                         ("poptart: unloaded effect " ++ id ++ " from slot " ++ slot).postln;
                     };

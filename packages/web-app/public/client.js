@@ -353,26 +353,40 @@ function findParamCall(code, from, to, name) {
   return null;
 }
 
-// The "pin" button: capture the live plugin's full state and write it into the code as the
-// synth/fx call's second argument (replacing any previous one), then fold it. The state then
-// restores on every load/eval and shares via the URL like the rest of the code.
-async function pinPluginState(trackLabel, blockStart, blockEnd, slot) {
-  try {
-    const { state } = await api('POST', '/api/pluginState', { trackId: trackLabel, slot });
-    const code = cm.getValue();
-    const end = Math.min(blockEnd, code.length);
-    const call = findChainCall(code, Math.min(blockStart, end), end, slot);
-    if (!call) {
-      logLine(`could not find the ${slot === 0 ? 'synth(...)' : '.fx(...)'} call for track "${trackLabel}" slot ${slot} - re-eval and try again`, true);
-      return;
-    }
-    cm.replaceRange(`, { state: "${state}" }`, cm.posFromIndex(call.afterFirstArg), cm.posFromIndex(call.closeParen));
-    foldConfigBlobs();
-    logLine(`pinned plugin state into the code (track "${trackLabel}", slot ${slot})`);
-  } catch (e) {
-    logLine(e.message ?? String(e), true);
+// ---------------------------------------------------------------------------------------------
+// Auto-pin: `synth("Serum 2")` with no state argument means "however the plugin defaults", but
+// the moment you touch anything in the plugin's own window that stops being true. The server
+// notices the edit, captures the state (debounced - see captureDirtyPlugins), and we write it
+// into that slot's synth/fx call as `{ state }`. So the code always describes what you're
+// hearing, and it restores on load and shares via the URL like everything else.
+// ---------------------------------------------------------------------------------------------
+
+function writePluginState(trackLabel, slot, state) {
+  if (!labelsMod) return;
+  const code = cm.getValue();
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === trackLabel);
+  const call = block && findChainCall(code, block.start, block.end, slot);
+  if (!call) {
+    // The call was renamed or deleted between the gesture and the capture. Nothing to write to;
+    // the next edit in that plugin captures again.
+    logLine(`auto-pin: no ${slot === 0 ? 'synth(...)' : '.fx(...)'} call for track "${trackLabel}" slot ${slot} - state not written`, true);
+    return;
   }
+  // Tagged with a single `+`-prefixed origin so CodeMirror merges consecutive writes into one
+  // undo step (same trick as the copy-line edits). Each state is multi-KB, and without this a
+  // knob drag would bury your last real edit under a run of blobs in the undo history.
+  cm.replaceRange(`, { state: "${state}" }`, cm.posFromIndex(call.afterFirstArg), cm.posFromIndex(call.closeParen), '+autopin');
+  foldConfigBlobs();
 }
+
+// Deliberately does NOT re-evaluate: the state is already live in the plugin (it came from
+// there), so an eval would only push it back and make the plugin reload what it already has.
+async function pollPluginEdits() {
+  const { edits } = await api('POST', '/api/pluginEdits');
+  for (const e of edits ?? []) writePluginState(e.trackId, e.slot, e.state);
+}
+
+setInterval(() => pollPluginEdits().catch(() => {}), 500);
 
 // ---------------------------------------------------------------------------------------------
 // "conf" (configure) capture, Ableton-style: toggle it on for a track, then every knob you move
@@ -2334,12 +2348,6 @@ function renderTracks(result) {
         uiBtn.onclick = () =>
           api('POST', '/api/showEditor', { trackId: t.label, slot }).catch((e) => logLine(e.message, true));
         row.appendChild(uiBtn);
-        const pinBtn = document.createElement('button');
-        pinBtn.className = 'small';
-        pinBtn.textContent = 'pin';
-        pinBtn.title = 'capture the plugin state into the code, so it restores on load and shares via the URL';
-        pinBtn.onclick = () => pinPluginState(t.label, t.start, t.end, slot);
-        row.appendChild(pinBtn);
       }
       trackInfo.appendChild(row);
     });

@@ -106,8 +106,11 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - **Fixed 8-slot chain per track (1 instrument + 7 effects).** `VSTPlugin~` instances live inside a
   `SynthDef`'s UGen graph and can't be added to a running `Synth`, so chain length is baked in.
   Swapping which plugin occupies a slot is fine; growing past 8 is not handled yet.
-- **Plugin state pinned into the code (gzip+base64 in the URL hash).** Sharing a link shares the
-  exact sound. Opaque by design; the editor folds the blob into a pill.
+- **Plugin state captured into the code automatically (gzip+base64 in the URL hash).** Editing a
+  plugin in its own window writes its state back into the `synth()`/`fx()` call, so the code always
+  describes the sound and sharing a link shares it exactly. Debounced: a capture is a disk write in
+  sclang plus a synchronous gzip on the scheduler's event loop, so it runs once per gesture, not
+  per knob sample. Opaque by design; the editor folds the blob into a pill.
 - **Plain HTTP + browser, no Electron.** Open the served page in any browser; keeps the footprint
   small.
 

@@ -250,6 +250,13 @@ class OscEngine {
     // web-app's conf feature, which writes the touched parameter into the code as .param(name,
     // value); the index lets it disambiguate plugins that reuse a name (see server's conf code).
     this.onParamAutomated = null;
+    // Plugin-edited feed, (trackId, slot) - fired whenever the plugin in a chain slot reports
+    // that the user changed something in its own editor window: a knob, a program switch, or a
+    // preset loaded from the plugin's internal browser (see watchPluginEdits in poptart.scd).
+    // Means "this slot's live state no longer matches the code"; drives web-app's auto-pin,
+    // which re-captures the state and writes it back into the synth/fx call. Fires per gesture,
+    // so consumers must debounce - capturing a state is a disk write plus a gzip.
+    this.onPluginEdited = null;
     // Track->track MIDI routes for the midi() source builder / .midi() injector when the source
     // is another track (not a device): each { name, targetTrackId, slot, note }. Resolved lazily
     // at note time (see _fanoutMidi) so it doesn't matter which track was evaluated first. slot 0
@@ -950,6 +957,12 @@ class OscEngine {
       // A parameter moved in a plugin's own editor GUI: [trackId, slot, paramName, paramIndex, value 0..1].
       const [track, slot, name, index, value] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onParamAutomated === 'function') this.onParamAutomated(String(track), Number(slot), String(name), Number(index), Number(value));
+      return;
+    }
+    if (msg.address === '/poptart/pluginEdited') {
+      // The user changed something in a plugin's own editor window: [trackId, slot].
+      const [track, slot] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onPluginEdited === 'function') this.onPluginEdited(String(track), Number(slot));
       return;
     }
     if (!msg.address.endsWith('.reply')) return;

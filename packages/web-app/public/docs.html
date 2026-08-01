@@ -503,11 +503,14 @@
             them by hand — then keep livecoding everything else.
           </p>
 
-          <h4>Pin a sound, share a link</h4>
+          <h4>Design a sound, share a link</h4>
           <p>
-            Click <strong>pin</strong> next to a plugin in the track panel to capture its complete state
-            — preset, every knob, wavetables — into the code as the call's second argument:
-            <code>synth("Serum 2", { state: "H4sI…" })</code>. On every load that state is restored, so
+            Change anything in a plugin's own window — a knob, a preset from its browser — and its
+            complete state is captured into the code for you, as the call's second argument:
+            <code>synth("Serum 2", { state: "H4sI…" })</code>. Nothing to press, and until you touch
+            it the bare <code>synth("Serum 2")</code> means "however the plugin defaults". Writes are
+            debounced, so a knob sweep lands once when you let go, as one undo step.
+            On every load that state is restored, so
             the patch sounds identical on a cold start. Because the whole buffer lives in the URL hash,
             <strong>sharing the link shares the exact sound</strong>. The editor folds the blob into a
             small <code>{⋯}</code> pill — click it to expand. <code>lfo()</code> shape strings and

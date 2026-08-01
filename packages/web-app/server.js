@@ -191,6 +191,8 @@ function wireEngine() {
   engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
   // Plugin-GUI knob gestures - what conf capture writes into the code.
   engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackId, slot, name, index, value);
+  // Any edit inside a plugin's own window - what auto-pin captures back into the code.
+  engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackId, slot);
 }
 
 async function init() {
@@ -736,6 +738,60 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Auto-pin. `synth("Serum 2")` with no state argument means "however the plugin defaults" - but
+// the moment you touch anything in the plugin's own window, that's no longer true, so we capture
+// the full state and hand it to the editor to write into the call as `{ state }`. No pin button:
+// the code always describes what you're hearing.
+//
+// Debounced, because a capture is expensive in the one place that hurts: sclang writes the whole
+// program (wavetables and all) to disk, then getPluginState reads it and gzips it SYNCHRONOUSLY,
+// on the same event loop that runs the pattern schedulers and the OSC clock. sclang reports every
+// gesture, so an undebounced capture would run that disk+gzip round trip dozens of times a second
+// during a knob drag and audibly jitter note timing. One capture per gesture is enough anyway -
+// the state is a full snapshot, so intermediate ones are pure waste.
+// ---------------------------------------------------------------------------------------------
+
+const AUTOPIN_DEBOUNCE_MS = 400;
+
+const autoPinDirty = new Map(); // "trackId|slot" -> { trackId, slot } - edited, not yet captured
+const autoPinReady = new Map(); // "trackId|slot" -> { trackId, slot, state } - drained by the editor
+let autoPinTimer = null;
+let autoPinCapturing = false;
+
+function handlePluginEdited(trackId, slot) {
+  autoPinDirty.set(`${trackId}|${slot}`, { trackId, slot });
+  clearTimeout(autoPinTimer);
+  autoPinTimer = setTimeout(() => captureDirtyPlugins().catch(() => {}), AUTOPIN_DEBOUNCE_MS);
+}
+
+async function captureDirtyPlugins() {
+  // Captures are serialized: each one is a disk write in sclang, and a second gesture landing
+  // mid-capture must not have two writeProgram calls racing for the same slot's temp file.
+  if (autoPinCapturing || !engine) return;
+  autoPinCapturing = true;
+  try {
+    while (autoPinDirty.size) {
+      const [key, { trackId, slot }] = autoPinDirty.entries().next().value;
+      autoPinDirty.delete(key);
+      try {
+        const state = await engine.getPluginState(trackId, slot);
+        autoPinReady.set(key, { trackId, slot, state });
+        // The state came *from* the plugin, so the next eval must not push it straight back:
+        // tell the track's scheduler it's already applied. Without this, every eval would have
+        // the plugin re-chew a state it already has (a reload, and an audible one on some).
+        schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(trackId)?.[slot], state);
+      } catch (e) {
+        // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
+        // all self-correcting on the next edit. Log once per slot so it's diagnosable.
+        console.log(`[auto-pin] could not capture ${trackId} slot ${slot}: ${e.message ?? e}`);
+      }
+    }
+  } finally {
+    autoPinCapturing = false;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // API handlers, keyed "METHOD /path" and dispatched by the plumbing at the bottom of the file.
 // ---------------------------------------------------------------------------------------------
 
@@ -1061,11 +1117,14 @@ const routes = {
     return { status: 200, body: { slots } };
   },
 
-  // Capture the full state of the plugin in a chain slot as an opaque string, for the editor's
-  // "pin" button to write into the code as synth/fx's `{ state }` argument. Body: { trackId, slot }.
-  'POST /api/pluginState': async (body) => {
-    if (!engine) throw new Error(engineError ?? 'engine not loaded');
-    return { status: 200, body: { state: await engine.getPluginState(body.trackId ?? 'default', body.slot ?? 0) } };
+  // Auto-pin drain (see captureDirtyPlugins): the plugin states captured since the last poll,
+  // for the editor to write into their synth/fx calls as `{ state }`. Draining on read means a
+  // slot the editor already wrote isn't written again; a slot edited since is still pending
+  // capture and arrives on a later poll.
+  'POST /api/pluginEdits': async () => {
+    const edits = [...autoPinReady.values()];
+    autoPinReady.clear();
+    return { status: 200, body: { edits } };
   },
 
   // Pop open the native editor window of the plugin in a chain slot (design your supersaw in

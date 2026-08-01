@@ -288,15 +288,22 @@ prebake file that throws is logged and skipped — it never blocks startup, and 
 surfaces the error on save. One caveat: *removing* a `Signal.prototype` extension needs a restart,
 since the prototype keeps methods already added to it.
 
-### Pinning plugin state into the code
+### Plugin state in the code
 
-Click **pin** next to a plugin in the track panel to capture its complete current state (preset,
-every knob, wavetables — whatever the plugin serializes) into the code as the call's second
-argument: `synth("Serum 2", { state: "H4sI…" })`, same for `.fx(...)`. On every load or eval that
-state is restored into the plugin, Ableton-style: the patch sounds identical on a cold start, and
-because the whole buffer lives in the URL hash, sharing the link shares the sound. The blob is
-gzip+base64 (opaque by design) and the editor folds it — and long `lfo()` shape strings — into a
-small `{⋯}` pill; click the pill to see the raw text. Re-pin after tweaking to update it.
+`synth("Serum 2")` leaves the sound to the plugin's own default. The moment you change anything in
+the plugin's own window — a knob, a preset from its browser — that state is captured and written
+into the code for you, as the call's second argument: `synth("Serum 2", { state: "H4sI…" })`, same
+for `.fx(...)`. Nothing to press; the code keeps describing what you're hearing.
+
+On every load or eval that state is restored into the plugin, Ableton-style: the patch sounds
+identical on a cold start, and because the whole buffer lives in the URL hash, sharing the link
+shares the sound. The blob is gzip+base64 (opaque by design) and the editor folds it — and long
+`lfo()` shape strings — into a small `{⋯}` pill; click the pill to see the raw text.
+
+Capture is debounced, so a knob sweep writes once when you let go rather than continuously, and
+the writes collapse into a single undo step. Delete the `{ state }` argument and the call goes back
+to meaning "however the plugin defaults" — on the next eval, not retroactively: the plugin keeps
+sounding how it sounds until something reloads it.
 
 ### Sampler
 
