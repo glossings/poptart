@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { rand, perlin, s, sine, saw, tri, square, ramp, resetRandomSeeds } from './src/signal.mjs';
+import { rand, perlin, s, sine, saw, tri, square, ramp, resetRandomSeeds, setPatternWarn } from './src/signal.mjs';
 
 const SPAN = Array.from({ length: 64 }, (_, k) => k * 0.25);
 const readAt = (sig) => SPAN.map((t) => sig.sample(t, 1, t));
@@ -46,17 +46,29 @@ test('an explicit seed pins a stream - the way to gate two things off ONE random
   assert.notDeepEqual(readAt(rand({ seed: 0 })), readAt(rand()));
 });
 
-test('rand() has no rate at all - asking for one is an error, not a no-op', () => {
+test('rand() has no rate - asking for one warns, and still plays', () => {
   resetRandomSeeds();
   // Unsmoothed noise has no speed of its own, so a rate could only re-index the stream. Every
-  // spelling of "make it faster" says so instead of quietly changing nothing.
-  assert.throws(() => rand(0.5), /no rate/);
-  assert.throws(() => rand({ rate: 2 }), /no rate/);
-  assert.throws(() => rand({ phase: 0.25 }), /no rate/);
-  assert.throws(() => rand().rate(3), /no rate/);
-  assert.throws(() => rand().phase(0.25), /no rate/);
-  assert.throws(() => rand().fast(2), /no rate/);
-  assert.throws(() => rand({ nope: 1 }), /takes only \{ seed \}/);
+  // spelling of "make it faster" says so on the console - and hands back a working rand(), because
+  // a livecoding instrument does not go quiet over an argument it can't use.
+  const warnings = [];
+  setPatternWarn((line) => warnings.push(line));
+  try {
+    for (const build of [() => rand(0.5), () => rand({ rate: 2 }), () => rand({ phase: 0.25 }),
+      () => rand().rate(3), () => rand().phase(0.25), () => rand().fast(2)]) {
+      const sig = build();
+      assert.equal(sig.lfoIR.shape, 'rand', 'still a rand');
+      assert.equal(sig.lfoIR.rateHz, 1, 'and still unpaced - the argument changed nothing');
+      assert.ok(typeof sig.sample(0.3, 1, 0.3) === 'number', 'and it still makes values');
+    }
+    assert.equal(warnings.length, 6, 'each one said so exactly once');
+    assert.ok(warnings.every((w) => /no rate/.test(w)));
+    warnings.length = 0;
+    assert.equal(rand({ nope: 1 }).lfoIR.shape, 'rand');
+    assert.match(warnings[0], /takes only \{ seed \}/);
+  } finally {
+    setPatternWarn(null);
+  }
   // perlin keeps its rate - it is the one with a period to set.
   assert.equal(perlin(0.5).lfoIR.rateHz, 0.5, 'the number shorthand is still the rate');
   assert.equal(perlin({ rate: 2, phase: 0.25 }).lfoIR.phaseCycles, 0.25);

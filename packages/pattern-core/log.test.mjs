@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, note, sine } from './src/signal.mjs';
+import { s, note, sine, setPatternWarn } from './src/signal.mjs';
 import { Scheduler, setEventLogger } from './src/scheduler.mjs';
 
 // Engine that plays nothing and answers playSample with whatever `resolve` says the numbers came
@@ -168,8 +168,19 @@ test('the modes are patterns like any other channel', () => {
   assert.equal(cfgOf(s('breaks').loopdir(1).loop().fit().begin(0.5).fast(2).rib(3, 2)).loopDir, 1);
 });
 
-test('the old options object is an error, not a silently dropped argument', () => {
-  assert.throws(() => s('breaks').loop(1, { wrap: 'window' }), /their own controls now/);
+test('the old options object warns, and the loop still plays', () => {
+  // A document written against the old spelling must not go silent: the loop runs on the default
+  // modes and the console says where wrap/dir went.
+  const warnings = [];
+  setPatternWarn((line) => warnings.push(line));
+  try {
+    const cfg = cfgOf(s('breaks').loop(1, { wrap: 'window' }));
+    assert.equal(cfg.loop, 1, 'still looping');
+    assert.equal(cfg.loopWrap, undefined, 'just not on the mode it asked for');
+  } finally {
+    setPatternWarn(null);
+  }
+  assert.match(warnings[0], /their own controls now/);
 });
 
 test('the loop line names the region and the direction', () => {

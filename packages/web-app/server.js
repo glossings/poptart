@@ -206,6 +206,13 @@ async function init() {
     eventLogQueue.push(line);
     if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
   });
+  // Userland warnings ride the same queue for the same reason: a pattern that asks for something
+  // that no longer exists keeps playing (see pattern-core's "Warnings, not exceptions"), so the
+  // only way the player learns about it is a line in the console they're already watching.
+  patternCore.setPatternWarn((line) => {
+    eventLogQueue.push(line);
+    if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
+  });
   // First-run setup: SC detection, VSTPlugin auto-install, preflight warnings (see
   // PACKAGING.md Stage 1). Logs what it finds; never throws, never blocks the boot -
   // loadEngine()'s own diagnostics remain the backstop if something is still wrong.

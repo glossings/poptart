@@ -23,6 +23,42 @@ import { Frac } from './frac.mjs';
  * @property {*} value       - null means "rest" (gate off)
  */
 
+// ---------------------------------------------------------------------------------------------
+// Warnings, not exceptions.
+//
+// This is an instrument. A block that throws is a block that stops making sound, and stopping the
+// music is a far worse outcome than doing something slightly different from what was asked - the
+// audience hears the silence, and the player has to fix it under the lights. So a userland mistake
+// that HAS a sane reading (an option that no longer exists, a rate on something with no rate, a
+// value out of range) says so on the console and carries on with the rest of the call honoured.
+// Throwing is for what can't be played at all: a chain built on a pattern that doesn't exist, a
+// callback that returned something that isn't a signal.
+//
+// Warnings land in the editor's own console, where a livecoder is actually looking (the host wires
+// this to the same queue Sig#log() uses - see setPatternWarn / web-app's server.js); the default
+// sink is this process's console, all a standalone host has. Builders run once per evaluation, so
+// a warning is printed once per evaluation, not once per event.
+// ---------------------------------------------------------------------------------------------
+
+// eslint-disable-next-line no-console
+let warnSink = (line) => console.warn(line);
+
+/** @param {(line: string) => void | null} fn - null restores the plain console sink. */
+export function setPatternWarn(fn) {
+  // eslint-disable-next-line no-console
+  warnSink = typeof fn === 'function' ? fn : (line) => console.warn(line);
+}
+
+function warnUser(message) {
+  warnSink(message);
+}
+
+/** Warn, then carry on with `sig` untouched - the shape most "that argument does nothing" cases take. */
+function warnAndKeep(sig, message) {
+  warnUser(message);
+  return sig;
+}
+
 export class Sig {
   /**
    * @param {(tSeconds: number, cps: number, cyclePos?: number) => *} sampleFn - `cyclePos` is
@@ -268,7 +304,7 @@ export class Sig {
       throw new Error('[signal] .fast() takes a nonzero factor, e.g. .fast(2) - negative plays in reverse');
     }
     // On an LFO, "faster" is its rate - except rand(), which has no pace to scale (see rand()).
-    if (this.lfoIR?.shape === 'rand') throw new Error(NO_RAND_RATE);
+    if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz: this.lfoIR.rateHz * f });
     if (this.envIR) {
       throw new Error("[signal] .fast() on an env() isn't supported - envelope times are set in its options");
@@ -340,13 +376,13 @@ export class Sig {
   /** Sets an LFO's rate in Hz, absolutely (unlike .fast(), which multiplies the current rate). */
   rate(rateHz) {
     // rand() is the one shape with nothing to pace: it draws afresh at every read, so a rate would
-    // only re-index the stream (see rand()). Say so rather than accept it and change nothing.
-    if (this.lfoIR?.shape === 'rand') throw new Error(NO_RAND_RATE);
+    // only re-index the stream (see rand()). Say so, and play on with the rand unchanged.
+    if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz });
     throw new Error('[signal] .rate() only applies to LFO signals - on a pattern use .fast()/.slow()');
   }
   phase(phaseCycles) {
-    if (this.lfoIR?.shape === 'rand') throw new Error(NO_RAND_RATE);
+    if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, phaseCycles });
     throw new Error('.phase() on a non-LFO signal is not supported yet');
   }
@@ -1287,9 +1323,10 @@ export class Sig {
    *   s("breaks:35").fit().begin(0.4).loop().loopdir(1)          // 0.4 -> 1 -> 0.4 -> 1 ...
    */
   loop(v = 1, opts) {
-    if (opts !== undefined) {
-      throw new Error('[signal] .loop()\'s wrap/dir options are their own controls now - .loop().loopwrap(1).loopdir(1)');
-    }
+    // The old options object still loops - it just no longer says HOW, so the modes fall back to
+    // their defaults and the console explains where they went. A document written against the old
+    // spelling keeps playing.
+    if (opts !== undefined) warnUser(LOOP_OPTS_MOVED);
     return this._samplerOpt('loop', 'loop', toSignal(v));
   }
   /**
@@ -1905,6 +1942,10 @@ const CLIP_ONLY = new Set(['clip']);
 // index IS the number the control carries. They're ordinary patternable channels - the point of
 // numbering them rather than naming them - so a value can arrive from anywhere a signal can:
 // mini strings, LFOs, rand(). loopModeAt turns whatever arrives into one of these.
+// Said when a document still passes .loop()'s old { wrap, dir } object. The loop plays either way;
+// the modes are their own controls now (see Sig#loopwrap / Sig#loopdir).
+const LOOP_OPTS_MOVED = '[signal] loop()\'s wrap/dir options are their own controls now - ignoring them. Use .loopwrap(1) (0 file, 1 window) and .loopdir(1) (0 forward, 1 pingpong).';
+
 export const LOOP_MODES = {
   loopWrap: ['file', 'window'],
   loopDir: ['forward', 'pingpong'],
@@ -2180,11 +2221,9 @@ function bareSig(sig) {
 function samplerControl(name) {
   return (value, opts) => {
     // .loop()'s old options object is gone: wrap/dir are their own controls now, and both forms
-    // of those work as operands like any other channel. Saying so beats accepting the object and
-    // quietly dropping it.
-    if (name === 'loop' && opts !== undefined) {
-      throw new Error('[signal] loop()\'s wrap/dir options are their own controls now - loopwrap(1) / loopdir(1)');
-    }
+    // of those work as operands like any other channel. Warned rather than thrown, and rather than
+    // quietly dropped - the loop still plays, on the default modes.
+    if (name === 'loop' && opts !== undefined) warnUser(LOOP_OPTS_MOVED);
     // fit() alone means "nearest power of two", which is a mode rather than a number - flag it so
     // a combinator sets the channel instead of trying to do arithmetic with it.
     if (name === 'fit' && value === undefined) {
@@ -2637,12 +2676,15 @@ const NO_RAND_RATE = '[signal] rand() has no rate - every read is already an ind
  * lfo() draws.
  */
 export function rand(opts = {}) {
-  if (typeof opts !== 'object' || opts === null || Array.isArray(opts)) throw new Error(NO_RAND_RATE);
-  const stray = Object.keys(opts).find((k) => k !== 'seed');
-  if (stray) {
-    if (stray === 'rate' || stray === 'phase') throw new Error(NO_RAND_RATE);
-    throw new Error(`[signal] rand() takes only { seed } - "${stray}" is not an option.`);
+  // A rate here is a misunderstanding, not a catastrophe: say so and hand back a working rand()
+  // rather than silencing the track over it (see "Warnings, not exceptions" above).
+  if (typeof opts !== 'object' || opts === null || Array.isArray(opts)) {
+    warnUser(NO_RAND_RATE);
+    opts = {};
   }
+  const stray = Object.keys(opts).find((k) => k !== 'seed');
+  if (stray === 'rate' || stray === 'phase') warnUser(NO_RAND_RATE);
+  else if (stray) warnUser(`[signal] rand() takes only { seed } - ignoring "${stray}".`);
   // Same shared build-time counter every randomised builder draws from, so independent rand()s are
   // independent streams and re-evaluating the document replays the identical take.
   const seed = opts.seed == null ? nextAutoSeed() : Number(opts.seed) + 1;
