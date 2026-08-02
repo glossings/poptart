@@ -125,10 +125,15 @@
             <section id="filesSection">
               <h2>pattern files <button id="fileNewBtn" class="small" title="clear the editor and start a new pattern">＋ new</button></h2>
               <div class="file-save-row">
-                <input id="fileNameInput" type="text" placeholder="pattern name…" spellcheck="false" />
+                <input id="fileNameInput" type="text" placeholder="name to save as…" spellcheck="false"
+                  title="the file name the current editor buffer is saved under" />
                 <button id="fileSaveBtn" title="save the current editor buffer under this name">save</button>
               </div>
+              <input id="fileSearchInput" type="search" spellcheck="false" placeholder="🔍 search everything below…"
+                title="matches the file name, its @title / @by / @tags, and the code itself — tag:techno and by:aria narrow a term to one field" />
               <div id="fileList" class="panel list">loading…</div>
+              <h2 id="wipHeading">work in progress</h2>
+              <div id="wipList" class="panel list"></div>
             </section>
           </div>
 
@@ -276,6 +281,7 @@
     <script src="/vendor/codemirror/addon/search/searchcursor.js"></script>
     <script src="/vendor/codemirror/keymap/sublime.js"></script>
     <script src="api-docs.js"></script>
+    <script src="pattern-meta.js"></script>
     <script src="client.js"></script>
   </body>
 </html>

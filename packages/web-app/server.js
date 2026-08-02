@@ -556,22 +556,17 @@ function currentGridCycle() {
   return Math.max(0, Math.floor(transport.cycleAt(transport.getTime())));
 }
 
-// ---------------------------------------------------------------------------------------------
-// Pattern files - the editor's "files" tab saves/loads whole editor buffers as plain .js files
-// under ~/.poptart/patterns (overridable via POPTART_PATTERNS_DIR), so they're ordinary files
-// the user can also back up / edit / version outside poptart.
-// ---------------------------------------------------------------------------------------------
-
-const PATTERNS_DIR = process.env.POPTART_PATTERNS_DIR || path.join(os.homedir(), '.poptart', 'patterns');
-
-// Names are used as filenames directly, so keep them to a single path segment.
-function patternFilePath(name) {
-  const clean = String(name ?? '').trim();
-  if (!clean || clean.length > 128 || clean.startsWith('.') || /[/\\]/.test(clean)) {
-    throw new Error('pattern name must be a plain file name (no slashes, not starting with ".")');
-  }
-  return path.join(PATTERNS_DIR, `${clean}.js`);
-}
+// Pattern files - named saves and work-in-progress sessions under ~/.poptart/patterns, plus the
+// metadata (`@title`/`@by`/`@tags`) the files tab lists and searches on. All the filesystem work
+// lives in pattern-files.js / public/pattern-meta.js; the routes below are the HTTP face of it.
+const {
+  PATTERNS_DIR,
+  patternFilePath,
+  wipFilePath,
+  listSavedPatterns,
+  listWipPatterns,
+} = require('./pattern-files');
+const { matchesQuery } = require('./public/pattern-meta.js');
 
 // ---------------------------------------------------------------------------------------------
 // MIDI record - capture a midikeys() performance as mini-notation. sclang forwards every note
@@ -1185,17 +1180,17 @@ const routes = {
 
   // --- pattern files (the editor's "files" tab) ---
 
-  'GET /api/patterns': async () => {
-    let names = [];
-    try {
-      names = fs.readdirSync(PATTERNS_DIR).filter((f) => f.endsWith('.js'));
-    } catch {
-      // directory doesn't exist yet - nothing saved
-    }
-    const patterns = names
-      .map((f) => ({ name: f.slice(0, -3), mtime: fs.statSync(path.join(PATTERNS_DIR, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    return { status: 200, body: { patterns } };
+  // Query: { q } - free text matched against name, @title, @by, @tags and the code itself
+  // (`tag:techno`, `by:aria` restrict a term to one field). Returns named saves and
+  // work-in-progress sessions separately, newest first. Searching happens here rather than in
+  // the browser because it reads file contents.
+  'GET /api/patterns': async (query) => {
+    const q = query?.q ?? '';
+    const keep = (entries) => entries
+      .filter((e) => matchesQuery(e, q))
+      .sort((a, b) => b.mtime - a.mtime)
+      .map(({ code, ...rest }) => rest); // the buffer was only needed for searching
+    return { status: 200, body: { patterns: keep(listSavedPatterns()), wip: keep(listWipPatterns()) } };
   },
 
   // Body: { name, code }. Overwrites silently - "save" in a livecoding tool means "keep this".
@@ -1228,6 +1223,38 @@ const routes = {
     if (!fs.existsSync(from)) throw new Error(`no saved pattern named "${body.from}"`);
     if (fs.existsSync(to)) throw new Error(`a pattern named "${body.to}" already exists`);
     fs.renameSync(from, to);
+    return { status: 200, body: {} };
+  },
+
+  // --- work in progress (the editor autosaves the live buffer here; see wipFilePath) ---
+
+  // Body: { id, code }. Called on a debounce while typing, so it must stay cheap and must never
+  // be the thing that interrupts a jam - a blank buffer deletes the session file instead of
+  // leaving an empty one behind, and that's the only way a WIP file is removed automatically.
+  'POST /api/patterns/wip/save': async (body) => {
+    const file = wipFilePath(body.id);
+    const code = String(body.code ?? '');
+    if (!code.trim()) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+      return { status: 200, body: { saved: false } };
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, code, 'utf8');
+    return { status: 200, body: { saved: true } };
+  },
+
+  // Body: { id } -> { code }.
+  'POST /api/patterns/wip/load': async (body) => {
+    const file = wipFilePath(body.id);
+    if (!fs.existsSync(file)) throw new Error(`no work-in-progress session "${body.id}"`);
+    return { status: 200, body: { code: fs.readFileSync(file, 'utf8') } };
+  },
+
+  // Body: { id }.
+  'POST /api/patterns/wip/delete': async (body) => {
+    const file = wipFilePath(body.id);
+    if (!fs.existsSync(file)) throw new Error(`no work-in-progress session "${body.id}"`);
+    fs.unlinkSync(file);
     return { status: 200, body: {} };
   },
 

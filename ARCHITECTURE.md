@@ -79,6 +79,12 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   tooltip; `api-docs.test.js` checks it against the real builders and `Sig.prototype`.
 - `param-mapping.js` — loads `mappings/*.json` unit files that turn normalized `0..1` VST
   parameters into real-world units (Hz, etc.) with min/max/curve; hot-reloads per eval.
+- `pattern-files.js` — the two kinds of file under `~/.poptart/patterns`: named saves, and the
+  work-in-progress session files (`wip/<YYYY-MM>/…`) the editor writes as you type. Owns all
+  path building, so a request names a pattern or a session, never a path.
+- `public/pattern-meta.js` — parses the `@title`/`@by`/`@tags` a pattern carries in its own
+  comments, and the files tab's search. Loaded in the browser *and* required by the server, so
+  the tab title and the file list agree on what a pattern is called.
 
 ## How a pattern becomes sound (data flow)
 

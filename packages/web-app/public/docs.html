@@ -155,6 +155,8 @@
         font-size: 15px;
       }
       .callout.new { border-left-color: var(--ok); }
+      /* a snippet inside a callout sits tighter than a standalone one */
+      .callout pre { margin: 10px 0 4px; padding: 10px 12px; }
       .callout .tag {
         display: inline-block;
         font-size: 11px;
@@ -273,6 +275,21 @@
             samples; <strong>files</strong> saves and loads whole buffers (hit <strong>＋ new</strong>
             to start a blank one); <strong>settings</strong> holds the audio device, sample folder,
             editor options, and the startup <em>prebake</em> file.
+          </div>
+          <div class="callout">
+            <span class="tag">nothing gets lost</span>
+            You never have to save to keep something. Whatever is in the editor is written to disk as
+            you type, as a <strong>work in progress</strong> session filed under the month you played
+            it — listed at the bottom of the <strong>files</strong> tab, where <strong>⤓</strong> keeps
+            one under a real name. Give a pattern a title and it names itself everywhere; write these
+            anywhere in your comments and the search box finds them:
+            <pre><code class="c">// @title kick drift
+// @by aria  @tags techno, generative</code></pre>
+            The search box matches the file name, those tags, and the code itself —
+            <code>tag:techno</code> or <code>by:aria</code> narrows a word to one field. As a last
+            resort, your browser history works too: every time you hit play or save, the URL (which
+            carries the whole buffer) is recorded under the pattern's title, so searching your history
+            for it brings the code back.
           </div>
           <div class="callout">
             <span class="tag">help as you type</span>

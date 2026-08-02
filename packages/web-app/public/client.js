@@ -183,9 +183,15 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Code-in-URL sharing (Strudel-style): the buffer is kept base64url-encoded in location.hash
-// (replaceState, so typing doesn't spam history) - copy the URL to share the patch; opening a
-// link restores the code instead of the default snippet.
+// Code-in-URL sharing (Strudel-style) + browser history as a recovery net. The buffer is kept
+// base64url-encoded in location.hash - copy the URL to share the patch; opening a link restores
+// the code instead of the default snippet.
+//
+// Typing only *replaces* the current history entry (no spam), but evaluating, saving and loading
+// push a real one, so the browser's own history becomes a list of every state you cared about -
+// searchable, because the tab title carries the pattern's @title (see updateDocTitle). Lose the
+// file and the buffer both and the code is still sitting in your history, in full. Hitting Back
+// loads that state into the editor rather than doing nothing.
 // ---------------------------------------------------------------------------------------------
 
 function encodeCodeHash(code) {
@@ -200,14 +206,92 @@ function decodeCodeHash(hash) {
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
 }
 
-if (location.hash.length > 1) {
-  try {
-    cm.setValue(decodeCodeHash(location.hash.slice(1)));
-    foldConfigBlobs();
-  } catch {
-    logLine('could not decode code from the URL - keeping the default snippet', true);
+let atCheckpoint = false; // the current history entry is one we pushed - don't overwrite it
+let lastCheckpointCode = null;
+let restoringFromHistory = false;
+
+// The name field, looked up lazily - this section runs before the sidebar's `const`s exist.
+function currentFileName() {
+  return document.getElementById('fileNameInput')?.value.trim() ?? '';
+}
+
+// What the browser tab (and therefore every history entry) is called: the pattern's own @title,
+// else the name it's saved under, else a block label out of the code. This is the whole reason a
+// history entry is findable later - "poptart" ten times over would not be.
+function updateDocTitle(code) {
+  const label = displayLabel({
+    title: parseMeta(code).title,
+    name: currentFileName(),
+    code,
+    borrowBlockLabel: true, // an unsaved buffer has no name to go by
+  });
+  document.title = code.trim() ? `${label} · poptart` : 'poptart';
+}
+
+// Keep the URL in step with the buffer while typing.
+function syncUrlToBuffer() {
+  const code = cm.getValue();
+  if (atCheckpoint && code === lastCheckpointCode) return; // the URL already is this state
+  updateDocTitle(code);
+  const url = '#' + encodeCodeHash(code);
+  if (atCheckpoint) {
+    // The current entry *is* the checkpoint we just pushed (or navigated to) - replacing it
+    // would erase exactly what we meant to keep. Push a fresh working entry, then reuse that.
+    history.pushState(null, '', url);
+    atCheckpoint = false;
+  } else {
+    history.replaceState(null, '', url);
   }
 }
+
+// Pin the current buffer as a history entry. Called at the moments worth returning to - eval,
+// save, load - and deduped, so repeatedly hitting play doesn't pile up identical entries.
+function checkpointUrl() {
+  const code = cm.getValue();
+  if (!code.trim() || code === lastCheckpointCode) return;
+  lastCheckpointCode = code;
+  updateDocTitle(code);
+  history.pushState(null, '', '#' + encodeCodeHash(code));
+  atCheckpoint = true;
+}
+
+function loadCodeFromHash() {
+  if (location.hash.length <= 1) return null;
+  try {
+    return decodeCodeHash(location.hash.slice(1));
+  } catch {
+    return null;
+  }
+}
+
+const hashCode = loadCodeFromHash();
+if (location.hash.length > 1 && hashCode === null) {
+  logLine('could not decode code from the URL - keeping the default snippet', true);
+} else if (hashCode !== null) {
+  cm.setValue(hashCode);
+  foldConfigBlobs();
+}
+updateDocTitle(cm.getValue());
+
+// Back/Forward: put that state back in the editor. No confirm needed - the buffer being replaced
+// keeps its own work-in-progress file on the way out (rollWipSession), so navigating away from
+// something you never named still can't lose it.
+window.addEventListener('popstate', async () => {
+  const code = loadCodeFromHash();
+  if (code === null || code === cm.getValue()) return;
+  await rollWipSession();
+  restoringFromHistory = true; // CodeMirror fires 'change' synchronously from setValue
+  try {
+    cm.setValue(code);
+  } finally {
+    restoringFromHistory = false;
+  }
+  foldConfigBlobs();
+  lastCheckpointCode = code;
+  atCheckpoint = true; // the entry we landed on is history - the next edit pushes past it
+  updateDocTitle(code);
+  logLine('restored code from browser history - Cmd/Ctrl+Enter to play it');
+});
 
 // ---------------------------------------------------------------------------------------------
 // Config folding: captured plugin-state blobs (`synth("Serum 2", { state: "..." })`) and long
@@ -459,11 +543,100 @@ function upsertParam(trackLabel, slot, name, value) {
 let hashTimer = null;
 cm.on('change', () => {
   clearTimeout(hashTimer);
-  hashTimer = setTimeout(() => {
-    history.replaceState(null, '', '#' + encodeCodeHash(cm.getValue()));
-  }, 400);
+  // A history restore already set the URL - re-syncing it would push past the entry the user
+  // just navigated to and drop everything forward of it.
+  if (!restoringFromHistory) hashTimer = setTimeout(syncUrlToBuffer, 400);
   clearTimeout(mutedDimTimer);
   mutedDimTimer = setTimeout(updateMutedDim, 150);
+  scheduleWipSave();
+});
+
+// ---------------------------------------------------------------------------------------------
+// Work-in-progress autosave. Everything you type goes to a file on disk whether or not you ever
+// name it: one file per editing session, filed by month, under ~/.poptart/patterns/wip/. So a
+// closed tab, a crash, or a "＋ new" you didn't mean to hit costs you nothing - the session is
+// in the files tab under "work in progress", ready to load and, if it turned out good, keep
+// under a real name. Blanking the buffer deletes the file (see the wip/save route).
+// ---------------------------------------------------------------------------------------------
+
+// "2026-08/2026-08-02-143205" - the month folder plus a session stamp, which is also the file's
+// path under wip/. `after` forces a later stamp, so rolling twice in one second can't collide.
+function newWipSessionId(after = '') {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = () => {
+    const month = `${d.getFullYear()}-${p(d.getMonth() + 1)}`;
+    return `${month}/${month}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  };
+  let id = stamp();
+  while (id <= after) {
+    d.setSeconds(d.getSeconds() + 1);
+    id = stamp();
+  }
+  return id;
+}
+
+let wipSessionId = newWipSessionId();
+let wipTimer = null;
+let wipLastSent = null;
+let wipWarned = false;
+
+function scheduleWipSave() {
+  clearTimeout(wipTimer);
+  wipTimer = setTimeout(saveWip, 1200);
+}
+
+// The row this session would show as in the files tab. Autosaving fires every second or so and
+// almost never changes what the list *says* - so compare this and re-render only when it does
+// (a session's first write, a new @title, a renamed first block, an emptied buffer), which is
+// what makes a brand new session appear the moment it lands on disk.
+function wipRowKey(code) {
+  if (!code.trim()) return `${wipSessionId}\n(gone)`;
+  const label = displayLabel({ title: parseMeta(code).title, code, borrowBlockLabel: true });
+  return `${wipSessionId}\n${label}`;
+}
+
+let wipListedRow = null;
+
+async function saveWip() {
+  clearTimeout(wipTimer);
+  const code = cm.getValue();
+  const id = wipSessionId;
+  if (code === wipLastSent) return;
+  wipLastSent = code;
+  try {
+    await api('POST', '/api/patterns/wip/save', { id, code });
+    const row = wipRowKey(code);
+    if (row !== wipListedRow) {
+      wipListedRow = row;
+      if (!filesTab.classList.contains('hidden')) refreshPatternFiles();
+    }
+  } catch (e) {
+    if (id === wipSessionId) wipLastSent = null; // let the next keystroke retry
+    if (!wipWarned) {
+      wipWarned = true; // once per session - this must never nag over a performance
+      logLine(`autosave failed (${e.message ?? e}) - your work isn't being written to disk`, true);
+    }
+  }
+}
+
+// Leaving the current buffer behind (＋ new, or loading another pattern): flush it, then start a
+// new session file. Without the roll, clearing the editor would blank - and so delete - the very
+// file that was holding the work.
+async function rollWipSession() {
+  await saveWip();
+  wipSessionId = newWipSessionId(wipSessionId);
+  wipLastSent = null;
+  wipListedRow = null; // the next write is a new session's first - always worth showing
+}
+
+// Closing the tab inside the debounce window would otherwise lose the last seconds of typing.
+// sendBeacon survives teardown, which fetch() does not.
+window.addEventListener('pagehide', () => {
+  const code = cm.getValue();
+  if (code === wipLastSent) return;
+  const body = new Blob([JSON.stringify({ id: wipSessionId, code })], { type: 'application/json' });
+  navigator.sendBeacon('/api/patterns/wip/save', body);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -2588,6 +2761,8 @@ function updateTransportButtons() {
 // way the params panel, autocomplete, and highlighting regions refresh.
 async function evaluate(start) {
   const code = cm.getValue();
+  checkpointUrl(); // a state you played is a state worth finding again in browser history
+  saveWip();       // ...and worth having on disk right now, not a debounce from now
   try {
     const result = await api('POST', '/api/evaluate', { code, start });
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
@@ -3241,6 +3416,8 @@ const fileNameInput = document.getElementById('fileNameInput');
 const fileSaveBtn = document.getElementById('fileSaveBtn');
 const fileNewBtn = document.getElementById('fileNewBtn');
 const fileList = document.getElementById('fileList');
+const fileSearchInput = document.getElementById('fileSearchInput');
+const wipList = document.getElementById('wipList');
 const consoleFooter = document.getElementById('console');
 const consoleToggle = document.getElementById('consoleToggle');
 
@@ -3515,61 +3692,131 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !prebakeBackdrop.classList.contains('hidden')) closePrebake();
 });
 
-function renderPatternFiles(patterns) {
+// One row: what the pattern calls itself on the first line, everything else dim underneath, and
+// the actions revealed on hover. `label` is the @title / first block label / file name, worked
+// out server-side (see displayLabel) so the list reads the way the pattern names itself.
+function fileRow(entry, buttons) {
+  const row = document.createElement('div');
+  row.className = 'file-row';
+  row.title = 'click to load into the editor';
+
+  const main = document.createElement('span');
+  main.className = 'file-main';
+
+  const label = document.createElement('span');
+  label.className = 'file-label';
+  label.textContent = entry.label;
+  main.appendChild(label);
+
+  const bits = [];
+  if (entry.kind === 'saved' && entry.name !== entry.label) bits.push(entry.name);
+  if (entry.by) bits.push(`by ${entry.by}`);
+  for (const t of entry.tags) bits.push(`#${t}`);
+  bits.push(new Date(entry.mtime).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }));
+  const meta = document.createElement('span');
+  meta.className = 'file-meta';
+  meta.textContent = bits.join(' · ');
+  main.appendChild(meta);
+  row.appendChild(main);
+
+  for (const [glyph, title, onClick] of buttons) {
+    const btn = document.createElement('button');
+    btn.className = 'small';
+    btn.textContent = glyph;
+    btn.title = title;
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      onClick();
+    };
+    row.appendChild(btn);
+  }
+  return row;
+}
+
+function renderSavedPatterns(patterns, searching) {
   fileList.innerHTML = '';
   if (!patterns.length) {
-    fileList.textContent = 'no saved patterns yet - name the current buffer above and hit save';
+    fileList.textContent = searching
+      ? 'no saved patterns match'
+      : 'no saved patterns yet - name the current buffer above and hit save';
     return;
   }
   for (const p of patterns) {
-    const row = document.createElement('div');
-    row.className = 'file-row';
-    row.title = 'click to load into the editor';
-
-    const name = document.createElement('span');
-    name.className = 'file-name';
-    name.textContent = p.name;
-    row.appendChild(name);
-
-    const when = document.createElement('span');
-    when.className = 'dim';
-    when.textContent = new Date(p.mtime).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-    row.appendChild(when);
-
-    const renameBtn = document.createElement('button');
-    renameBtn.className = 'small';
-    renameBtn.textContent = '✎';
-    renameBtn.title = 'rename';
-    renameBtn.onclick = (e) => {
-      e.stopPropagation();
-      renamePatternFile(p.name);
-    };
-    row.appendChild(renameBtn);
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'small';
-    deleteBtn.textContent = '✕';
-    deleteBtn.title = 'delete';
-    deleteBtn.onclick = (e) => {
-      e.stopPropagation();
-      deletePatternFile(p.name);
-    };
-    row.appendChild(deleteBtn);
-
+    const row = fileRow(p, [
+      ['✎', 'rename', () => renamePatternFile(p.name)],
+      ['✕', 'delete', () => deletePatternFile(p.name)],
+    ]);
     row.onclick = () => loadPatternFile(p.name);
     fileList.appendChild(row);
   }
 }
 
+// "2026-08" -> "August 2026", the heading each month's sessions collapse under.
+function monthHeading(month) {
+  const [y, m] = month.split('-');
+  const d = new Date(Number(y), Number(m) - 1, 1);
+  return d.toLocaleDateString([], { month: 'long', year: 'numeric' });
+}
+
+// Which months are expanded - remembered across re-renders (autosaving re-renders this list
+// whenever a session's row changes), so an old month you opened doesn't snap shut under you.
+// Null until the first render, which opens the newest month and leaves the rest collapsed.
+let wipOpenMonths = null;
+
+// Sessions grouped by the month they were played, newest month first, so a year of jamming
+// doesn't bury the last week of it.
+function renderWipPatterns(wip, searching) {
+  wipList.innerHTML = '';
+  if (!wip.length) {
+    wipList.textContent = searching
+      ? 'no sessions match'
+      : 'nothing here yet - whatever you type is autosaved to this month';
+    return;
+  }
+  const months = [...new Set(wip.map((w) => w.month))].sort().reverse();
+  if (!wipOpenMonths) wipOpenMonths = new Set(months.slice(0, 1));
+  for (const month of months) {
+    const group = document.createElement('details');
+    group.className = 'wip-month';
+    group.open = searching || wipOpenMonths.has(month); // a search never hides its own results
+    const summary = document.createElement('summary');
+    summary.textContent = monthHeading(month);
+    // Recorded from the click rather than the toggle event, so opening every month to show
+    // search results isn't mistaken for the user having opened them.
+    summary.addEventListener('click', () => {
+      if (group.open) wipOpenMonths.delete(month);
+      else wipOpenMonths.add(month);
+    });
+    group.appendChild(summary);
+    for (const w of wip.filter((x) => x.month === month)) {
+      const row = fileRow(w, [
+        ['⤓', 'keep this session as a named pattern', () => keepWipFile(w)],
+        ['✕', 'delete this session', () => deleteWipFile(w)],
+      ]);
+      row.onclick = () => loadWipFile(w);
+      group.appendChild(row);
+    }
+    wipList.appendChild(group);
+  }
+}
+
 async function refreshPatternFiles() {
+  const q = fileSearchInput.value.trim();
   try {
-    const { patterns } = await api('GET', '/api/patterns');
-    renderPatternFiles(patterns);
+    const { patterns, wip } = await api('GET', `/api/patterns?q=${encodeURIComponent(q)}`);
+    renderSavedPatterns(patterns, !!q);
+    renderWipPatterns(wip ?? [], !!q);
   } catch (e) {
     fileList.textContent = 'failed to list patterns';
     logLine(e.message ?? String(e), true);
   }
 }
+
+let fileSearchTimer = null;
+fileSearchInput.addEventListener('input', () => {
+  clearTimeout(fileSearchTimer);
+  fileSearchTimer = setTimeout(refreshPatternFiles, 200);
+});
 
 async function savePatternFile() {
   const name = fileNameInput.value.trim();
@@ -3580,6 +3827,8 @@ async function savePatternFile() {
   }
   try {
     await api('POST', '/api/patterns/save', { name, code: cm.getValue() });
+    updateDocTitle(cm.getValue()); // the name may be new even if the code isn't
+    checkpointUrl(); // findable in browser history under the name you just gave it
     logLine(`saved pattern "${name}"`);
     refreshPatternFiles();
   } catch (e) {
@@ -3587,13 +3836,58 @@ async function savePatternFile() {
   }
 }
 
+// Put `code` in the editor as the thing now being worked on: the outgoing buffer gets its own
+// autosave file to sit in, and the incoming one becomes a history checkpoint.
+async function openInEditor(code, name) {
+  await rollWipSession();
+  cm.setValue(code);
+  foldConfigBlobs();
+  fileNameInput.value = name; // so re-saving after edits goes to the same file
+  checkpointUrl();
+}
+
 async function loadPatternFile(name) {
   try {
     const { code } = await api('POST', '/api/patterns/load', { name });
-    cm.setValue(code);
-    foldConfigBlobs();
-    fileNameInput.value = name; // so re-saving after edits goes to the same file
+    await openInEditor(code, name);
     logLine(`loaded pattern "${name}" - Cmd/Ctrl+Enter to play it`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function loadWipFile(entry) {
+  try {
+    const { code } = await api('POST', '/api/patterns/wip/load', { id: entry.id });
+    await openInEditor(code, ''); // an unnamed session stays unnamed until you keep it
+    logLine(`loaded session "${entry.label}" - name it above and save to keep it`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// Promote a session to a named pattern. The session file stays put - this copies out of the
+// scratch pile rather than moving, so nothing is lost if the name was a mistake.
+async function keepWipFile(entry) {
+  const suggested = entry.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const name = prompt('keep this session as:', suggested)?.trim();
+  if (!name) return;
+  try {
+    const { code } = await api('POST', '/api/patterns/wip/load', { id: entry.id });
+    await api('POST', '/api/patterns/save', { name, code });
+    logLine(`kept session "${entry.label}" as pattern "${name}"`);
+    refreshPatternFiles();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function deleteWipFile(entry) {
+  if (!confirm(`delete the session "${entry.label}"?`)) return;
+  try {
+    await api('POST', '/api/patterns/wip/delete', { id: entry.id });
+    logLine(`deleted session "${entry.label}"`);
+    refreshPatternFiles();
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -3604,7 +3898,10 @@ async function renamePatternFile(name) {
   if (!to || to === name) return;
   try {
     await api('POST', '/api/patterns/rename', { from: name, to });
-    if (fileNameInput.value.trim() === name) fileNameInput.value = to;
+    if (fileNameInput.value.trim() === name) {
+      fileNameInput.value = to;
+      updateDocTitle(cm.getValue());
+    }
     logLine(`renamed pattern "${name}" to "${to}"`);
     refreshPatternFiles();
   } catch (e) {
@@ -3624,13 +3921,17 @@ async function deletePatternFile(name) {
 }
 
 // Start a fresh buffer. Clears the editor and the name field (so the next save creates a new
-// file rather than overwriting whatever was last loaded); guarded by a confirm when the current
-// buffer has content, since that content isn't saved anywhere yet.
-function newPatternFile() {
-  if (cm.getValue().trim() && !confirm('start a new pattern? the current editor buffer will be cleared')) return;
+// file rather than overwriting whatever was last loaded). No confirm needed: the buffer being
+// cleared was autosaved to its own work-in-progress file on the way out.
+async function newPatternFile() {
+  const had = cm.getValue().trim();
+  await rollWipSession();
   cm.setValue('');
   fileNameInput.value = '';
-  logLine('new pattern - write it, then name it above and hit save to keep it');
+  updateDocTitle('');
+  logLine(had
+    ? 'new pattern - the previous buffer is under "work in progress" below'
+    : 'new pattern - write it, then name it above and hit save to keep it');
   cm.focus();
 }
 
@@ -3639,6 +3940,8 @@ fileNewBtn.addEventListener('click', newPatternFile);
 fileNameInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') savePatternFile();
 });
+// The name is the tab title's fallback when the pattern has no @title of its own.
+fileNameInput.addEventListener('input', () => updateDocTitle(cm.getValue()));
 
 // ---------------------------------------------------------------------------------------------
 // Minimizable sidebar + console - collapsed state persists per browser.

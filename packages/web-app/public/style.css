@@ -546,6 +546,7 @@ aside h2 {
 
 #paramSearch,
 #sampleSearch,
+#fileSearchInput,
 #fileNameInput {
   width: 100%;
   margin-bottom: 6px;
@@ -561,6 +562,7 @@ aside h2 {
 
 #paramSearch:focus,
 #sampleSearch:focus,
+#fileSearchInput:focus,
 #fileNameInput:focus {
   border-color: var(--accent);
 }
@@ -604,11 +606,27 @@ aside h2 {
   background: var(--accent-soft);
 }
 
-.file-row .file-name {
+/* Two lines per row: what the pattern calls itself, then its file name / @by / @tags / date,
+   dim underneath. Stacking them keeps a long tag list from squeezing the name in a narrow
+   sidebar - both lines ellipsize instead of wrapping. */
+.file-row .file-main {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.file-row .file-label,
+.file-row .file-meta {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-row .file-meta {
+  color: var(--text-dim);
+  font-size: 10px;
 }
 
 .file-row button {
@@ -618,6 +636,36 @@ aside h2 {
 
 .file-row:hover button {
   visibility: visible;
+}
+
+/* the search box belongs to the lists below it, not to the save row above it */
+#fileSearchInput {
+  margin-top: 2px;
+}
+
+/* saved patterns get the larger share; work-in-progress sessions scroll in their own panel */
+#fileList {
+  flex: 3;
+}
+
+#wipList {
+  flex: 2;
+}
+
+#wipHeading {
+  margin-top: 10px;
+}
+
+.wip-month > summary {
+  padding: 3px 6px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wip-month > summary:hover {
+  color: var(--text);
 }
 
 .files-note {

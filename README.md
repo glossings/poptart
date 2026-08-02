@@ -389,7 +389,7 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Audio output device | **settings** tab | system default |
 | Plugin scan directories | `POPTART_VST_DIRS` (colon-separated) | `~/.poptart/plugins` if it exists, else the standard VST locations |
 | Plugins to skip when scanning | `POPTART_VST_EXCLUDE` (colon-separated paths) | none |
-| Saved patterns | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |
+| Saved patterns (and autosaved sessions, under `wip/`) | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |
 | Startup setup file / folder | `POPTART_PREBAKE_FILE`, `POPTART_PREBAKE_DIR` | `~/.poptart/prebake.js`, `~/.poptart/prebake/` |
 | Persisted settings | `POPTART_SETTINGS_FILE` | `~/.poptart/settings.json` |
 | OSC / scsynth ports | `POPTART_OSC_NODE_PORT`, `POPTART_OSC_SC_PORT`, `POPTART_SCSYNTH_PORT` | `57140` / `57150` / `57110` |
