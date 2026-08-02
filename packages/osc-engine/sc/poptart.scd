@@ -472,7 +472,8 @@ server.options.numOutputBusChannels = max(2, outChannels);
 server.waitForBoot {
     // rand = uniform random, unsmoothed: a fresh independent value `freq` times a second, held in
     // between (phase ignored). It matches what pattern-core's rand() is - an independent draw per
-    // read - as closely as a continuous control stream can; the smoothed one is perlin, fractal
+    // read - as closely as a continuous control stream can; freq always arrives as 1 Hz, since
+    // rand() has no rate to ask for pattern-side. The smoothed one is perlin, fractal
     // (fBm) value noise layered over a few octaves for organic drift. Like rand, the native and JS
     // samplings differ (both random, only the rate/range contract is shared - see signal.mjs).
     // ramp is a rising saw, same shape as \saw here.

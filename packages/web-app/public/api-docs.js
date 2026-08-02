@@ -114,8 +114,8 @@ const API_DOCS = {
   ramp: { kind: 'builder', sig: 'ramp({ rate, phase })', desc: 'Rising 0→1 each period. Same options as sine().', eg: 'param("Sweep", ramp(0.1))' },
   rand: {
     kind: 'builder',
-    sig: 'rand({ rate, seed })',
-    desc: 'Uniform random 0..1 - an independent draw at every position it is read, so each event sampling it gets its own coin. Each rand() is its own stream; hold a value across a span with .seg(8) or .hold("1*8"), and use perlin() for smooth drift instead.',
+    sig: 'rand({ seed })',
+    desc: 'Uniform random 0..1 - an independent draw at every position it is read, so each event sampling it gets its own coin. No rate: unsmoothed noise has no speed of its own, only the rhythm you read it on, so pace it with .seg(8) or .hold("1*8") - or use perlin() for smooth drift with a rate. Each rand() is its own stream.',
     eg: 'begin(rand().seg(8))',
   },
   perlin: { kind: 'builder', sig: 'perlin({ rate, seed })', desc: 'Fractal value noise (fBm) - the smooth one: organic drift with one new target per period, where rand() draws afresh every read. Independently seeded like rand().', eg: 'pan(perlin(0.1).range(-0.6, 0.6))' },

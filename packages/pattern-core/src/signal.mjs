@@ -267,6 +267,8 @@ export class Sig {
     if (!Number.isFinite(f) || f === 0) {
       throw new Error('[signal] .fast() takes a nonzero factor, e.g. .fast(2) - negative plays in reverse');
     }
+    // On an LFO, "faster" is its rate - except rand(), which has no pace to scale (see rand()).
+    if (this.lfoIR?.shape === 'rand') throw new Error(NO_RAND_RATE);
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz: this.lfoIR.rateHz * f });
     if (this.envIR) {
       throw new Error("[signal] .fast() on an env() isn't supported - envelope times are set in its options");
@@ -337,10 +339,14 @@ export class Sig {
 
   /** Sets an LFO's rate in Hz, absolutely (unlike .fast(), which multiplies the current rate). */
   rate(rateHz) {
+    // rand() is the one shape with nothing to pace: it draws afresh at every read, so a rate would
+    // only re-index the stream (see rand()). Say so rather than accept it and change nothing.
+    if (this.lfoIR?.shape === 'rand') throw new Error(NO_RAND_RATE);
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz });
     throw new Error('[signal] .rate() only applies to LFO signals - on a pattern use .fast()/.slow()');
   }
   phase(phaseCycles) {
+    if (this.lfoIR?.shape === 'rand') throw new Error(NO_RAND_RATE);
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, phaseCycles });
     throw new Error('.phase() on a non-LFO signal is not supported yet');
   }
@@ -829,7 +835,7 @@ export class Sig {
   }
 
   /**
-   * Sample-and-hold: `rand(4).hold("1*8")` samples this signal at each truthy onset of the
+   * Sample-and-hold: `rand().hold("1*8")` samples this signal at each truthy onset of the
    * trigger pattern and holds the value until the next one - the stepped-random ("sandy") use
    * case, but synced to any rhythm you like. Works on any sampleable signal.
    *
@@ -2579,19 +2585,18 @@ function withLfoIR(ir) {
   return new Sig((t, cps, pos) => sampleLfoIR(ir, t, cps, pos), { lfoIR: ir });
 }
 
-const NOISE_SHAPES = new Set(['rand', 'perlin']);
-
 function shapeSignal(shape) {
   return (opts = {}) => {
     const o = typeof opts === 'number' ? { rate: opts } : opts;
     const { rate = 1, phase = 0 } = o;
     const ir = { shape, rateHz: rate, phaseCycles: phase, min: 0, max: 1 };
-    // The noise shapes are the only ones with a stream to decorrelate, and they take a build-time
-    // seed off the SAME shared counter choose()/irand()/.degrade() draw from - so independent
-    // rand() calls are independent noise, positionally seeded, and re-evaluating the document
-    // replays the identical take (see nextAutoSeed / resetRandomSeeds). Deterministic shapes take
-    // no seed, so they can't shift that counter out from under the random builders.
-    if (NOISE_SHAPES.has(shape)) ir.seed = o.seed == null ? nextAutoSeed() : Number(o.seed) + 1;
+    // perlin is the only shape built here with a stream to decorrelate (rand() has its own builder
+    // below), and it takes a build-time seed off the SAME shared counter choose()/irand()/
+    // .degrade() draw from - so independent perlin() calls are independent noise, positionally
+    // seeded, and re-evaluating the document replays the identical take (see nextAutoSeed /
+    // resetRandomSeeds). Deterministic shapes take no seed, so they can't shift that counter out
+    // from under the random builders.
+    if (shape === 'perlin') ir.seed = o.seed == null ? nextAutoSeed() : Number(o.seed) + 1;
     return withLfoIR(ir);
   };
 }
@@ -2602,6 +2607,17 @@ export const saw = shapeSignal('saw');
 export const tri = shapeSignal('tri');
 export const square = shapeSignal('square');
 export const ramp = shapeSignal('ramp'); // rising 0->1 each period (alias shape of saw)
+// What a `.param("Cutoff", rand())` runs on the server: LFDNoise0 needs SOME pace, and rand()
+// itself no longer carries one (see below), so every native rand steps at this fixed rate. Only
+// the Tier-2 path reads it; pattern-side sampling never does.
+const NATIVE_RAND_RATE_HZ = 1;
+
+// Said by rand() itself and by every method that would set a rate on one (.rate()/.phase()/
+// .fast()). Uniform noise has no speed of its own - only the rhythm it's read on - so a rate here
+// could only re-index the stream, and silently doing nothing is how "my random isn't random"
+// starts.
+const NO_RAND_RATE = '[signal] rand() has no rate - every read is already an independent draw. Pace it on a rhythm instead: rand().seg(8) / rand().hold("1*8"). Noise with a rate is perlin().';
+
 /**
  * Uniform random, 0..1 - an independent draw at every position it is read at, the same hash
  * choose()/irand()/.degrade() draw from. Every event that samples it gets its own coin, so
@@ -2609,19 +2625,34 @@ export const ramp = shapeSignal('ramp'); // rising 0->1 each period (alias shape
  * value across a span with `.seg(8)`/`.hold("1*8")`, and reach for perlin() when you want smooth
  * drift instead of noise.
  *
- * Every rand() is its OWN stream: two of them in a document decorrelate on their own, so
- * `.when(rand().gte(0.7), …).when(rand().gte(0.7), …)` really is two independent coins. Pass
- * `{ seed }` only to pin a particular one - two rand()s given the same explicit seed deliberately
- * move together, which is how you gate two things off one random. `{ rate }`/`{ phase }` shift the
- * stream's own timeline (`rand(0.5)` is the rate shorthand); since every position is already an
- * independent draw, they pick WHICH draws you land on rather than how fast the value changes.
+ * There is no rate: unsmoothed noise has no speed of its own, only the rhythm you read it on, and
+ * a rate argument that quietly did nothing would be worse than none. rand() takes `{ seed }` and
+ * nothing else - two rand()s in a document decorrelate on their own, so
+ * `.when(rand().gte(0.7), …).when(rand().gte(0.7), …)` really is two independent coins, and an
+ * explicit seed is how you deliberately gate two things off ONE random.
  *
  * The native (engine-side) noise a `.param(rand())` runs is a different stream from this JS one -
- * only the rate and range contract is shared, as it always has been. There the rate does set the
- * pace: it steps to a new uniform value `rate` times a second.
+ * only the range contract is shared, as it always has been - and steps at a fixed 1 Hz, since
+ * there is no rate to ask for. For paced modulation of a plugin parameter, perlin(rate) drifts and
+ * lfo() draws.
  */
-export const rand = shapeSignal('rand');
-/** Fractal value noise (fBm) - smoother, organic drift. Independently seeded like rand(). */
+export function rand(opts = {}) {
+  if (typeof opts !== 'object' || opts === null || Array.isArray(opts)) throw new Error(NO_RAND_RATE);
+  const stray = Object.keys(opts).find((k) => k !== 'seed');
+  if (stray) {
+    if (stray === 'rate' || stray === 'phase') throw new Error(NO_RAND_RATE);
+    throw new Error(`[signal] rand() takes only { seed } - "${stray}" is not an option.`);
+  }
+  // Same shared build-time counter every randomised builder draws from, so independent rand()s are
+  // independent streams and re-evaluating the document replays the identical take.
+  const seed = opts.seed == null ? nextAutoSeed() : Number(opts.seed) + 1;
+  return withLfoIR({ shape: 'rand', rateHz: NATIVE_RAND_RATE_HZ, phaseCycles: 0, min: 0, max: 1, seed });
+}
+/**
+ * Fractal value noise (fBm) - the smooth one: organic drift with a new target per period, where
+ * rand() draws afresh at every read. Takes `{ rate, phase, seed }` (perlin(0.1) is the rate
+ * shorthand) and is independently seeded like rand().
+ */
 export const perlin = shapeSignal('perlin');
 
 const DEFAULT_LFO_SHAPE = '0,0 0.5,1 1,0'; // triangle - what a bare lfo() starts as

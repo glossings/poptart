@@ -46,14 +46,31 @@ test('an explicit seed pins a stream - the way to gate two things off ONE random
   assert.notDeepEqual(readAt(rand({ seed: 0 })), readAt(rand()));
 });
 
-test('rate and phase still work, alongside the seed', () => {
+test('rand() has no rate at all - asking for one is an error, not a no-op', () => {
   resetRandomSeeds();
-  assert.equal(rand(0.5).lfoIR.rateHz, 0.5, 'the number shorthand is still the rate');
-  assert.equal(rand({ rate: 2, phase: 0.25 }).lfoIR.phaseCycles, 0.25);
-  // The seed survives every transform that rebuilds the IR.
+  // Unsmoothed noise has no speed of its own, so a rate could only re-index the stream. Every
+  // spelling of "make it faster" says so instead of quietly changing nothing.
+  assert.throws(() => rand(0.5), /no rate/);
+  assert.throws(() => rand({ rate: 2 }), /no rate/);
+  assert.throws(() => rand({ phase: 0.25 }), /no rate/);
+  assert.throws(() => rand().rate(3), /no rate/);
+  assert.throws(() => rand().phase(0.25), /no rate/);
+  assert.throws(() => rand().fast(2), /no rate/);
+  assert.throws(() => rand({ nope: 1 }), /takes only \{ seed \}/);
+  // perlin keeps its rate - it is the one with a period to set.
+  assert.equal(perlin(0.5).lfoIR.rateHz, 0.5, 'the number shorthand is still the rate');
+  assert.equal(perlin({ rate: 2, phase: 0.25 }).lfoIR.phaseCycles, 0.25);
+});
+
+test('the seed survives every transform that rebuilds the IR', () => {
+  resetRandomSeeds();
   const seeded = rand({ seed: 7 });
-  for (const derived of [seeded.range(2, 5), seeded.fast(2), seeded.rate(3), seeded.mul(2)]) {
+  for (const derived of [seeded.range(2, 5), seeded.mul(2)]) {
     assert.equal(derived.lfoIR.seed, seeded.lfoIR.seed);
+  }
+  const p = perlin({ seed: 7 });
+  for (const derived of [p.range(2, 5), p.fast(2), p.rate(3), p.mul(2)]) {
+    assert.equal(derived.lfoIR.seed, p.lfoIR.seed);
   }
 });
 
