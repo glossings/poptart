@@ -707,9 +707,18 @@ export class Sig {
   neq(x) { return this._binop('neq', x, (a, b) => (a !== b ? 1 : 0), false); }
 
   /**
-   * `n("0 1 2 3").when("1 0".gte(1), x => x.add(12))` - applies `fn` to this pattern wherever
-   * `cond` is truthy (nonzero), switching on cond's own step grid within the cycle. Where cond
-   * is falsy (including rests) the original pattern plays.
+   * `n("0 1 2 3").when("1 0", x => x.add(12))` - applies `fn` to this pattern wherever `cond` is
+   * truthy (nonzero). Where cond is falsy (including rests) the original pattern plays.
+   *
+   * The condition is READ BY THE INCOMING EVENTS: it is sampled at the onsets the pattern
+   * already has, and never contributes triggers of its own, whether or not it has a grid.
+   * So the events decide how finely it can change -
+   *
+   *   s("breaks:197").fit().seg(8).when(rand().gte(0.5), x => x.flip(1))  // eight coins a bar
+   *   s("breaks:197").fit().when(rand().gte(0.5), x => x.flip(1))         // one a bar
+   *   s("bd").when("1 0 1 0", x => x.mul(speed(-1)))                      // ONE hit, decided once
+   *
+   * (Structure the callback adds is still structure - `x => x.ply(4)` retriggers as it says.)
    *
    * Per-onset controls the callback set switch WITH the condition - sampler config and velocity -
    * so `.when(rand().gte(0.7), x => x.add(flip(1)))` reverses only the bars the condition
@@ -726,24 +735,58 @@ export class Sig {
 
     const sample = (t, cps, pos) => (truthy(condSig.sample(t, cps, pos)) ? transformed : this).sample(t, cps, pos);
 
+    // Where the condition is READ, in cycle time: at the incoming events, always. The pattern
+    // arriving from OUTSIDE the .when() owns the structure, and the condition is sampled on its
+    // onsets even when the condition has a grid of its own - nothing written inside a .when() can
+    // introduce a trigger the pattern didn't already have. So .seg(8).when(rand().gte(0.5), ...)
+    // reads a fresh coin per eighth because the eighths are there to read it on, and
+    // s("bd").when("1 0 1 0", ...) is still ONE hit, deciding once, rather than four.
+    //
+    // Spans run onset to onset (with a filler from 0 to the first), and neighbours that agree -
+    // same truthiness, same condition atom - merge rather than split, so a callback that lengthens
+    // events (.slow(2)) isn't chopped back up at boundaries where nothing changed. The atom read at
+    // each onset rides along on the span, so the "<0 1>" currently choosing lights up in the editor
+    // alongside the notes it gates.
+    const locKey = (locs) => locs.map((l) => (Array.isArray(l) ? l.join(':') : String(l))).join('|');
+    const condStepsAt = (cycle) => {
+      const own = this.stepsForCycle ? this.stepsForCycle(cycle) : null;
+      // Real onsets only: a rest is not an event, and a continuation ("_", "@") is the same event
+      // still sounding, so neither is an instant at which the condition gets to change its mind.
+      const onsets = [
+        ...new Set([0, ...(own ?? []).filter((s) => s.value != null && !s.cont).map((s) => s.start)]),
+      ]
+        .filter((x) => x >= 0 && x < 1)
+        .sort((a, b) => a - b);
+      const out = [];
+      for (let k = 0; k < onsets.length; k++) {
+        const start = onsets[k];
+        const end = onsets[k + 1] ?? 1;
+        const ev = readEvent(condSig, cycle + start);
+        const key = locKey(ev.locs);
+        const prev = out[out.length - 1];
+        if (prev && truthy(prev.value) === truthy(ev.value) && prev.key === key) {
+          prev.end = end;
+          continue;
+        }
+        out.push({ start, end, value: ev.value, key, ...(ev.locs.length ? { locs: ev.locs } : {}) });
+      }
+      return out;
+    };
+
     // The condition read in CYCLE time, exactly the way the step grid below reads it: the per-onset
     // controls have to flip on the same events the notes do, and an LFO/rand condition sampled in
     // real seconds (as sample() above does) would disagree with the grid it just gated.
     const condAtCycle = (cyclePos) => {
       const cycle = Math.floor(cyclePos);
-      if (!condSig.stepsForCycle) return condSig.sample(cycle + 0.5, 1);
       const phase = cyclePos - cycle;
-      const c = fillCondGaps(condSig.stepsForCycle(cycle)).find((x) => phase >= x.start && phase < x.end);
+      const c = fillCondGaps(condStepsAt(cycle)).find((x) => phase >= x.start && phase < x.end);
       return c ? c.value : null;
     };
 
     const stepsForCycle = this.stepsForCycle
       ? (cycle) => {
-          const raw = condSig.stepsForCycle
-            ? condSig.stepsForCycle(cycle)
-            : [{ start: 0, end: 1, value: condSig.sample(cycle + 0.5, 1) }];
           const out = [];
-          for (const c of fillCondGaps(raw)) {
+          for (const c of fillCondGaps(condStepsAt(cycle))) {
             const branch = truthy(c.value) ? transformed : this;
             if (!branch.stepsForCycle) continue;
             // The condition atom currently selecting here (a "<0 1>" pick) lights up alongside the
@@ -1230,27 +1273,41 @@ export class Sig {
   /**
    * Loop the sample for the event's duration instead of playing it as a one-shot. Truthy/falsy and
    * patternable like any channel - and `.loop(0)` is also how a negative .speed() opts out of its
-   * default backwards loop.
+   * default backwards loop. HOW it loops is .loopwrap() (which region) and .loopdir() (how it
+   * turns over), each its own channel:
    *
-   * The second argument picks HOW it loops. These are modes rather than values, so they're a
-   * static choice per track (like lfo()'s mode), not a channel that can be patterned:
-   *
-   *   wrap: "file" (default) - the loop is the whole FILE and .begin() is only where it enters, so
-   *                            .begin(0.9).loop() runs out the end and carries on from 0 instead of
-   *                            repeating that last tenth over and over.
-   *         "window"         - loop the .begin()..end() region itself. What a .slice() wants, and
-   *                            what loop did before this option existed.
-   *   dir:  "forward" (default) - reaching the far edge jumps back to the near one.
-   *         "pingpong"          - reaching the far edge turns round, so it bounces back and forth.
-   *
-   *   s("breaks:35").fit().begin(0.9).loop()                              // ...0.9 -> 1 -> 0 -> 1 -> 0
-   *   s("breaks:35").fit().slice(3).loop(1, { wrap: "window" })           // just that slice
-   *   s("breaks:35").fit().begin(0.4).loop(1, { dir: "pingpong" })        // 0.4 -> 1 -> 0 -> 1 ...
+   *   s("breaks:35").fit().begin(0.9).loop()                     // ...0.9 -> 1 -> 0 -> 1 -> 0
+   *   s("breaks:35").fit().slice(3).loop().loopwrap(1)           // just that slice
+   *   s("breaks:35").fit().begin(0.4).loop().loopdir(1)          // 0.4 -> 1 -> 0.4 -> 1 ...
    */
-  loop(v = 1, opts = {}) {
-    const out = this._samplerOpt('loop', 'loop', toSignal(v));
-    return out._clone({ sampler: { ...out.sampler, ...loopModes(opts) } });
+  loop(v = 1, opts) {
+    if (opts !== undefined) {
+      throw new Error('[signal] .loop()\'s wrap/dir options are their own controls now - .loop().loopwrap(1).loopdir(1)');
+    }
+    return this._samplerOpt('loop', 'loop', toSignal(v));
   }
+  /**
+   * Which region a .loop() runs round, as a mode number (bare `.loopwrap()` means 1):
+   *
+   *   0 "file" (default) - the loop is the whole FILE and .begin() is only where it enters, so
+   *                        .begin(0.9).loop() runs out the end and carries on from 0 instead of
+   *                        repeating that last tenth over and over.
+   *   1 "window"         - loop the .begin()..end() region itself. What a .slice() wants.
+   *
+   * A channel like any other, so it takes patterns and continuous signals: the value is rounded to
+   * the nearest integer and wrapped into the mode count, so .loopwrap(rand().range(0, 2)) picks a
+   * real mode per event rather than falling off the end (see LOOP_MODES).
+   */
+  loopwrap(v = 1) { return this._samplerOpt('loopwrap', 'loopWrap', toSignal(v)); }
+  /**
+   * How a .loop() turns over at the edge of its region, as a mode number (bare `.loopdir()` is 1):
+   *
+   *   0 "forward" (default) - reaching the far edge jumps back to the near one.
+   *   1 "pingpong"          - reaching the far edge turns round, so it bounces back and forth.
+   *
+   * Rounds and wraps exactly like .loopwrap(), so any signal drives it: .loopdir(irand(2)).
+   */
+  loopdir(v = 1) { return this._samplerOpt('loopdir', 'loopDir', toSignal(v)); }
   /**
    * Playback rate (repitches) - the speed the playhead leaves .begin() at. Positive runs up to
    * .end(), 0 plays nothing, negative walks backwards out of .begin(), which wraps round to .end() - so a
@@ -1838,29 +1895,25 @@ function applyNoteChannels(baseStepsForCycle, noteChannels) {
 
 const CLIP_ONLY = new Set(['clip']);
 
-// .loop()'s second argument (see Sig#loop). Plain strings on Sig#sampler rather than signals, like
-// fit's 'auto' - every reader of that map passes a non-Sig value through untouched. Unknown keys
-// and unknown words throw at eval time: a mistyped mode that silently did nothing would show up as
-// "my loop sounds wrong" hours later.
-const LOOP_MODES = { wrap: ['file', 'window'], dir: ['forward', 'pingpong'] };
-const LOOP_MODE_KEYS = { wrap: 'loopWrap', dir: 'loopDir' };
+// The enum controls (Sig#loopwrap, Sig#loopdir), by sampler key: the mode names in order, so the
+// index IS the number the control carries. They're ordinary patternable channels - the point of
+// numbering them rather than naming them - so a value can arrive from anywhere a signal can:
+// mini strings, LFOs, rand(). loopModeAt turns whatever arrives into one of these.
+export const LOOP_MODES = {
+  loopWrap: ['file', 'window'],
+  loopDir: ['forward', 'pingpong'],
+};
 
-function loopModes(opts) {
-  if (opts === null || typeof opts !== 'object' || Array.isArray(opts)) {
-    throw new Error('[signal] .loop()\'s second argument is an options object - .loop(1, { wrap: "window", dir: "pingpong" })');
-  }
-  const out = {};
-  for (const [key, value] of Object.entries(opts)) {
-    const allowed = LOOP_MODES[key];
-    if (!allowed) {
-      throw new Error(`[signal] .loop() has no "${key}" option - it takes ${Object.keys(LOOP_MODES).join(' and ')}`);
-    }
-    if (!allowed.includes(value)) {
-      throw new Error(`[signal] .loop()'s ${key} is ${allowed.map((a) => `"${a}"`).join(' or ')}, not "${value}"`);
-    }
-    out[LOOP_MODE_KEYS[key]] = value;
-  }
-  return out;
+/**
+ * The mode index a raw control value selects: rounded to the nearest integer and wrapped into the
+ * mode count, so 0.3 -> 0, 0.7 -> 1, and 2 -> 0 again on a two-mode control. That's what makes a
+ * continuous source usable directly - .loopdir(rand().range(0, 2)) is an even coin flip per event,
+ * with no clamping pile-up at either end. Junk (a rest, NaN) falls back to mode 0, the default.
+ */
+export function loopModeAt(key, value) {
+  const n = LOOP_MODES[key].length;
+  const i = Math.round(Number(value));
+  return Number.isFinite(i) ? ((i % n) + n) % n : 0;
 }
 
 // Merges two maps of per-onset control signals (Sig#sampler, Sig#noteChannels) across a .when():
@@ -2068,6 +2121,8 @@ const SAMPLER_CONTROLS = {
   begin: { key: 'begin', unset: 0 },
   end: { key: 'end', unset: 1 },
   loop: { key: 'loop', unset: 0 },
+  loopwrap: { key: 'loopWrap', unset: 0 },
+  loopdir: { key: 'loopDir', unset: 0 },
   speed: { key: 'speed', unset: 1 },
   flip: { key: 'flip', unset: 0 },
   stretch: { key: 'stretch', unset: 1 },
@@ -2118,11 +2173,11 @@ function bareSig(sig) {
  */
 function samplerControl(name) {
   return (value, opts) => {
-    // A control builder carries a channel VALUE for an operator to merge; .loop()'s modes are
-    // track metadata with nothing to merge into, so they only exist on the method. Saying so
-    // beats accepting the object and quietly dropping it.
+    // .loop()'s old options object is gone: wrap/dir are their own controls now, and both forms
+    // of those work as operands like any other channel. Saying so beats accepting the object and
+    // quietly dropping it.
     if (name === 'loop' && opts !== undefined) {
-      throw new Error('[signal] loop()\'s options are method-only - s("...").loop(1, { wrap: "window" }), not loop(1, {...}) as an operand');
+      throw new Error('[signal] loop()\'s wrap/dir options are their own controls now - loopwrap(1) / loopdir(1)');
     }
     // fit() alone means "nearest power of two", which is a mode rather than a number - flag it so
     // a combinator sets the channel instead of trying to do arithmetic with it.
@@ -2144,8 +2199,12 @@ export const i = samplerControl('i');
 export const begin = samplerControl('begin');
 /** Playback end position within the sample, 0..1 - the top-level form of `.end()`. */
 export const end = samplerControl('end');
-/** Loop the begin..end region instead of one-shot - the top-level form of `.loop()`. */
+/** Loop the sample for the event instead of one-shot - the top-level form of `.loop()`. */
 export const loop = samplerControl('loop');
+/** Which region a loop runs round: 0 = the whole file, 1 = the begin..end window. Top-level `.loopwrap()`. */
+export const loopwrap = samplerControl('loopwrap');
+/** How a loop turns over: 0 = jump back, 1 = pingpong. Top-level `.loopdir()`. */
+export const loopdir = samplerControl('loopdir');
 /** Playback rate off begin(); negative wraps backwards round the region - the top-level form of `.speed()`. */
 export const speed = samplerControl('speed');
 /** Reverse the window into the beat (over 0.5 = on) - the top-level form of `.flip()`. */
@@ -2402,11 +2461,11 @@ export function pianoroll(str = '', opts = {}) {
 // "Tier 2") instead of sampling them from JS at all.
 // ---------------------------------------------------------------------------------------------
 
-// Deterministic hash noise for rand()'s JS-side sampling, so Tier-1 values are reproducible.
+// Deterministic hash noise for perlin()'s JS-side sampling, so Tier-1 values are reproducible.
 // The Tier-2 native version uses scsynth's own noise UGen, so JS values and engine values
 // differ - both are random, only the rate/range contract is shared.
 // Deterministic 0..1 hash of a noise-grid index, keyed on the signal's build-time seed so two
-// independent rand()/perlin() calls draw different noise (see shapeSignal). The seed enters
+// independent perlin() calls draw different noise (see shapeSignal). The seed enters
 // through its own irrational multiplier rather than as an offset on `i`, which would only shift
 // one stream along the other's timeline - "decorrelated" has to mean uncorrelated, not delayed.
 // Seed 0 (the default) reproduces the original single-stream hash exactly.
@@ -2467,20 +2526,22 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
       unipolar = phase < 0.5 ? 1 : 0;
       break;
     case 'rand': {
-      // continuous random: smoothstep-interpolated hash noise, one new target per period
-      // (stepped random is rand().hold("1*8") - see Sig#hold). `seed` is what makes two
-      // independent rand() calls independent streams rather than the same one twice.
-      const seed = ir.seed ?? 0;
+      // True uniform noise: an INDEPENDENT draw at every position, off the same rngAtPos hash
+      // choose()/irand()/.degrade()/mini's `?` draw from - so every read is its own coin and two
+      // reads a step apart are uncorrelated. That's what makes .seg(8) eight real flips a bar
+      // rather than eight points along one curve. Smoothed drift is perlin(); freezing a value
+      // across a span is .seg()/.hold(). Position is snapped to its exact rational inside
+      // rngAtPos, so two float paths to the same moment (a rib()/hold() remap, the highlighter
+      // re-querying) draw identically - deterministic, not merely repeatable.
       const i = Math.floor(total);
-      const u = total - i;
-      const su = u * u * (3 - 2 * u);
-      unipolar = hash01(i, seed) * (1 - su) + hash01(i + 1, seed) * su;
+      unipolar = rngAtPos(i, total - i, ir.seed ?? 0);
       break;
     }
     case 'perlin': {
-      // Fractal value noise (fBm): rand's smoothstep hash noise summed over a few octaves, each
-      // double the frequency and half the amplitude. Reads as a smoother, more organic drift than
-      // plain rand. Deterministic in `total` and the seed, so JS and any highlighter agree.
+      // Fractal value noise (fBm): smoothstep-interpolated hash noise summed over a few octaves,
+      // each double the frequency and half the amplitude. This is the SMOOTH one - where rand()
+      // draws afresh at every position, perlin drifts, one new target per period per octave.
+      // Deterministic in `total` and the seed, so JS and any highlighter agree.
       const seed = ir.seed ?? 0;
       let sum = 0;
       let amp = 1;
@@ -2542,17 +2603,22 @@ export const tri = shapeSignal('tri');
 export const square = shapeSignal('square');
 export const ramp = shapeSignal('ramp'); // rising 0->1 each period (alias shape of saw)
 /**
- * Continuous random - smoothed noise, one new target per period. Step it with `.hold("1*8")` or
- * `.seg(8)`.
+ * Uniform random, 0..1 - an independent draw at every position it is read at, the same hash
+ * choose()/irand()/.degrade() draw from. Every event that samples it gets its own coin, so
+ * `s("breaks").seg(8).when(rand().gte(0.5), x => x.flip(1))` is eight flips a bar, not one; hold a
+ * value across a span with `.seg(8)`/`.hold("1*8")`, and reach for perlin() when you want smooth
+ * drift instead of noise.
  *
- * Every rand() is its OWN noise stream: two of them in a document decorrelate on their own, the
- * way choose()/irand()/.degrade() do, so `.when(rand().gte(0.7), …).when(rand().gte(0.7), …)`
- * really is two independent coins. Pass `{ seed }` only to pin a particular one - two rand()s
- * given the same explicit seed deliberately move together, which is how you gate two things off
- * one random. `{ rate }`/`{ phase }` as usual; `rand(0.5)` is the rate shorthand.
+ * Every rand() is its OWN stream: two of them in a document decorrelate on their own, so
+ * `.when(rand().gte(0.7), …).when(rand().gte(0.7), …)` really is two independent coins. Pass
+ * `{ seed }` only to pin a particular one - two rand()s given the same explicit seed deliberately
+ * move together, which is how you gate two things off one random. `{ rate }`/`{ phase }` shift the
+ * stream's own timeline (`rand(0.5)` is the rate shorthand); since every position is already an
+ * independent draw, they pick WHICH draws you land on rather than how fast the value changes.
  *
  * The native (engine-side) noise a `.param(rand())` runs is a different stream from this JS one -
- * only the rate and range contract is shared, as it always has been.
+ * only the rate and range contract is shared, as it always has been. There the rate does set the
+ * pace: it steps to a new uniform value `rate` times a second.
  */
 export const rand = shapeSignal('rand');
 /** Fractal value noise (fBm) - smoother, organic drift. Independently seeded like rand(). */

@@ -20,7 +20,7 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound } from './signal.mjs';
+import { sampleBound, LOOP_MODES, loopModeAt } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
@@ -101,10 +101,15 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
   const bits = [`s=${pack}`, `i=${num(idx)}`, `begin=${num(begin)}`, `end=${num(end)}`, `speed=${num(speed)}`];
   if (loop) {
     // Which region it loops round and how it turns over - the modes are half of what a loop
-    // sounds like, so a bare "loop" would leave the line ambiguous.
-    const wrap = res.loopWrap ?? cfg.loopWrap ?? 'file';
-    const dir = res.loopDir ?? cfg.loopDir ?? 'forward';
-    bits.push(`loop=${wrap}${dir === 'pingpong' ? '+pingpong' : ''}`);
+    // sounds like, so a bare "loop" would leave the line ambiguous. Named rather than numbered
+    // here: the engine reports names, and a mode number in a log line says nothing on its own.
+    const mode = (key) => {
+      const v = res[key] ?? cfg[key];
+      if (v == null) return LOOP_MODES[key][0];
+      return typeof v === 'string' ? v : LOOP_MODES[key][loopModeAt(key, v)];
+    };
+    const dir = mode('loopDir');
+    bits.push(`loop=${mode('loopWrap')}${dir === 'pingpong' ? '+pingpong' : ''}`);
   }
   if (stretch !== 1) bits.push(`stretch=${num(stretch)}`);
   if (cfg.vel !== undefined) bits.push(`vel=${num(cfg.vel)}`);
@@ -605,8 +610,8 @@ export class Scheduler {
     const src = this.pattern.sampler;
     const merged = step.cfg;
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
-    for (const key of ['index', 'begin', 'end', 'loop', 'speed', 'flip', 'stretch', 'slice', 'note',
-      'attack', 'decay', 'sustain', 'release']) {
+    for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch',
+      'slice', 'note', 'attack', 'decay', 'sustain', 'release']) {
       if (merged && merged[key] !== undefined) {
         cfg[key] = merged[key];
       } else if (src[key]) {
@@ -614,10 +619,12 @@ export class Scheduler {
         if (v !== undefined && !Number.isNaN(v)) cfg[key] = v;
       }
     }
-    // .loop()'s modes (see Sig#loop): plain strings, chosen once for the track rather than per
-    // event, so they ride through as-is like fit's 'auto' does.
-    if (src.loopWrap) cfg.loopWrap = src.loopWrap;
-    if (src.loopDir) cfg.loopDir = src.loopDir;
+    // .loopwrap()/.loopdir() carry mode NUMBERS rather than amounts, so whatever the channel
+    // produced picks a mode by rounding and wrapping (see loopModeAt) - that's what lets a
+    // continuous signal drive them. Done here so the engine and the .log() line agree.
+    for (const key of ['loopWrap', 'loopDir']) {
+      if (cfg[key] !== undefined) cfg[key] = loopModeAt(key, cfg[key]);
+    }
     if (src.fit === 'auto') {
       cfg.fit = 'auto';
     } else if (merged && merged.fit !== undefined) {

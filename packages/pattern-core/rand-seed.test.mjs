@@ -57,6 +57,21 @@ test('rate and phase still work, alongside the seed', () => {
   }
 });
 
+test('rand() is unsmoothed - neighbouring reads are independent draws', () => {
+  resetRandomSeeds();
+  // The distinguishing property, and the whole point of the control: reading rand() twice a
+  // 64th apart gives two unrelated numbers, so per-event sampling is a fresh coin every event.
+  // Smoothed noise would creep between neighbours instead (see perlin below).
+  const jumpiness = (sig) => {
+    const vals = Array.from({ length: 64 }, (_, k) => Number(sig.sample(k / 64, 1, k / 64)));
+    const gaps = vals.slice(1).map((v, k) => Math.abs(v - vals[k]));
+    return gaps.reduce((sum, g) => sum + g, 0) / gaps.length;
+  };
+  // Independent uniforms average |a - b| = 1/3; interpolated noise crawls a fraction of that.
+  assert.ok(jumpiness(rand()) > 0.2, 'rand jumps');
+  assert.ok(jumpiness(perlin()) < 0.05, 'perlin drifts - it is the smooth one');
+});
+
 test('perlin() is independently seeded too', () => {
   resetRandomSeeds();
   assert.notDeepEqual(readAt(perlin()), readAt(perlin()));
@@ -77,11 +92,11 @@ test('the deterministic shapes take no seed, so they cannot shift the random cou
 
 test('the two .when(rand()) conditions in the reported pattern pick different bars', () => {
   resetRandomSeeds();
-  // Both conditions are built the way the pattern builds them, and read the way .when() reads a
-  // gridless condition: once per cycle, at the midpoint.
+  // Both conditions are built the way the pattern builds them, and read the way .when() reads
+  // one on a bar-long pattern: once per cycle, at the event's onset.
   const condA = rand().gte(0.7);
   const condB = rand().gte(0.7);
-  const at = (cond) => Array.from({ length: 48 }, (_, c) => Number(cond.sample(c + 0.5, 1)));
+  const at = (cond) => Array.from({ length: 48 }, (_, c) => Number(cond.sample(c, 1)));
   const a = at(condA);
   const b = at(condB);
   assert.notDeepEqual(a, b, 'the two conditions no longer fire on identical bars');

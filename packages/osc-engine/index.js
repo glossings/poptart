@@ -647,14 +647,15 @@ class OscEngine {
    * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
    * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, flip,
    * stretch, fit ('auto' | measures), slice, note, vel, attack, decay, sustain, release,
-   * loopWrap ('file' | 'window'), loopDir ('forward' | 'pingpong'), secPerCycle }.
+   * loopWrap (0 file | 1 window), loopDir (0 forward | 1 pingpong), secPerCycle }.
    * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
    * whole sample lasts exactly the target number of cycles, `note` a further multiplier that
    * repitches around MIDI 24 ("c2" = as recorded), `flip` a sign flip plus a re-anchored onset.
    * `vel` scales volume linearly.
    *
-   * Returns what it resolved - { index, begin, end, loop, loopWrap, loopDir, speed, stretch,
+   * Returns what it resolved (the loop modes as their names, for the log line) - { index, begin,
+   * end, loop, loopWrap, loopDir, speed, stretch,
    * durSec, cut, amp, fileSec }, or { skipped } for an event that makes no sound. Nothing in playback reads it;
    * it exists so .log() can report the numbers the synth is really getting (the fit rate and
    * the window's length in particular are computed here and nowhere else).
@@ -717,14 +718,22 @@ class OscEngine {
     // single anchored pass by definition, so it never picks up the auto-loop.
     const loop = (cfg.loop ?? (speed < 0 && !flip ? 1 : 0)) ? 1 : 0;
     // Where a loop runs and where it enters it (the SC loop defs take the three as arguments, so
-    // one def covers both wrap modes). "file" - the default - makes the loop the whole sample and
-    // `begin` only the entry point, so .begin(0.9).loop() runs out the end and carries on from the
-    // top instead of repeating that last tenth; "window" keeps it inside begin..end, which is what
-    // a .slice() loop wants. Backwards through a WINDOW enters at its far edge, as it always has;
+    // one def covers both wrap modes). "file" - mode 0, the default - makes the loop the whole
+    // sample and `begin` only the entry point, so .begin(0.9).loop() runs out the end and carries
+    // on from the top instead of repeating that last tenth; "window" (mode 1) keeps it inside
+    // begin..end, which is what a .slice() loop wants. Backwards through a WINDOW enters at its far edge, as it always has;
     // wrapping through the file has somewhere to go from `begin` in either direction, so it starts
     // there and reaches the file's edge in its own time.
-    const windowed = cfg.loopWrap === 'window';
-    const pingpong = cfg.loopDir === 'pingpong' ? 1 : 0;
+    // The two modes arrive as NUMBERS (.loopwrap()/.loopdir() are ordinary patternable channels):
+    // 0 = file/forward, 1 = window/pingpong. Rounded and wrapped here as well as in the scheduler,
+    // so a direct engine call - or any raw value that reached here unnormalised - still names a
+    // real mode instead of silently reading as the default.
+    const mode = (v, count) => {
+      const idx = Math.round(Number(v));
+      return Number.isFinite(idx) ? wrap(idx, count) : 0;
+    };
+    const windowed = mode(cfg.loopWrap ?? 0, 2) === 1;
+    const pingpong = mode(cfg.loopDir ?? 0, 2);
     const loopLo = windowed ? begin : 0;
     const loopHi = windowed ? end : 1;
     const loopEntry = windowed && speed < 0 ? end : begin;

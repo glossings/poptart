@@ -119,15 +119,42 @@ test('.when() keeps a control that both sides share', () => {
   assert.equal(cfgAt(track, 'begin', 1.5), null);
 });
 
-test('.when() reads a gridless condition on the same cycles its note grid does', () => {
-  // rand() has no step grid, so both the grid and the switched control read it once per cycle at
-  // the midpoint - they must never disagree about which bars are reversed.
-  const cond = rand().gte(0.5);
-  const track = s('breaks:19').fit().when(cond, (x) => x.mul(speed('-1')));
-  for (let cycle = 0; cycle < 12; cycle++) {
-    const on = Number(cond.sample(cycle + 0.5, 1)) !== 0;
-    assert.equal(cfgAt(track, 'speed', cycle + 0.5), on ? -1 : null, `cycle ${cycle}`);
-  }
+test('the incoming events read the condition - .seg(8) means eight reads a bar', () => {
+  // The pattern arriving from outside the .when() owns the structure, so eight steps means eight
+  // reads and the switch can flip several times within one cycle.
+  const cond = sine(1).gte(0.5); // deterministic, and crosses the threshold mid-bar
+  const track = s('breaks:19').fit().seg(8).when(cond, (x) => x.mul(speed('-1')));
+  const speeds = Array.from({ length: 8 }, (_, k) => cfgAt(track, 'speed', (k + 0.5) / 8));
+  assert.deepEqual(
+    speeds,
+    Array.from({ length: 8 }, (_, k) => (Number(cond.sample(k / 8, 1)) ? -1 : null)),
+    'each eighth follows the condition read at its own onset',
+  );
+  assert.ok(speeds.includes(-1) && speeds.includes(null), 'and it switches within the bar');
+  // The note grid agrees with the controls - eight events either way, none split by the switch.
+  assert.equal(track.stepsForCycle(0).length, 8);
+});
+
+test('a condition with its own triggers adds none of them to the pattern', () => {
+  // "1 0 1 0" would once have chopped a single hit into four. The condition is read, never
+  // played: one incoming event, one read, one event out.
+  const track = s('bd').when('1 0 1 0', (x) => x.mul(speed('-1')));
+  assert.equal(track.stepsForCycle(0).length, 1, 'still one hit');
+  assert.equal(cfgAt(track, 'speed', 0), -1, 'decided once, at the hit');
+  // Same condition under eight incoming events: now it has eight instants to be read at.
+  const eighths = s('bd*8').when('1 0 1 0', (x) => x.mul(speed('-1')));
+  assert.deepEqual(
+    Array.from({ length: 8 }, (_, k) => cfgAt(eighths, 'speed', k / 8)),
+    [-1, -1, null, null, -1, -1, null, null],
+  );
+  assert.equal(eighths.stepsForCycle(0).length, 8);
+});
+
+test('a run of agreeing steps leaves the callback\'s own longer notes whole', () => {
+  // The condition spans coalesce where their truthiness agrees, so a callback that lengthens
+  // events (.slow(2) here) is not chopped back into one event per step of the source grid.
+  const track = n('0 1 2 3').when(1, (x) => x.slow(2));
+  assert.deepEqual(track.stepsForCycle(0).map((x) => [x.start, x.end]), [[0, 0.5], [0.5, 1]]);
 });
 
 test('the chain and streamed channel strip stay unconditional, as documented', () => {

@@ -115,10 +115,10 @@ const API_DOCS = {
   rand: {
     kind: 'builder',
     sig: 'rand({ rate, seed })',
-    desc: 'Continuous smoothed noise, one new target per period. Each rand() is its own stream; step it with .seg(8) or .hold("1*8").',
+    desc: 'Uniform random 0..1 - an independent draw at every position it is read, so each event sampling it gets its own coin. Each rand() is its own stream; hold a value across a span with .seg(8) or .hold("1*8"), and use perlin() for smooth drift instead.',
     eg: 'begin(rand().seg(8))',
   },
-  perlin: { kind: 'builder', sig: 'perlin({ rate, seed })', desc: 'Fractal value noise (fBm) - smoother, organic drift. Independently seeded like rand().', eg: 'pan(perlin(0.1).range(-0.6, 0.6))' },
+  perlin: { kind: 'builder', sig: 'perlin({ rate, seed })', desc: 'Fractal value noise (fBm) - the smooth one: organic drift with one new target per period, where rand() draws afresh every read. Independently seeded like rand().', eg: 'pan(perlin(0.1).range(-0.6, 0.6))' },
   lfo: {
     kind: 'builder',
     sig: 'lfo(shape, { rate, mode, phase })',
@@ -224,7 +224,7 @@ const API_DOCS = {
   when: {
     kind: 'method',
     sig: 'when(condition, fn)',
-    desc: 'Applies fn to the pattern wherever condition is nonzero, on the condition\'s own step grid.',
+    desc: 'Applies fn to the pattern wherever condition is nonzero. The condition is read by the incoming events - sampled at the onsets the pattern already has, never adding triggers of its own - so seg(8) before it means eight reads a bar, and one hit a bar means one.',
     eg: '.when(rand().gte(0.7), x => x.add(flip(1)))',
   },
   as: {
@@ -262,7 +262,9 @@ const API_DOCS = {
   i: { kind: 'both', sig: 'i(index)', desc: 'Which sample of the pack to play, 0-based (the same thing as the ":n" suffix).', eg: 's("breaks").i("<0 2>")' },
   begin: { kind: 'both', sig: 'begin(pos)', desc: 'Playback start position within the sample, 0..1.', eg: '.begin(irand(16).div(16))' },
   end: { kind: 'both', sig: 'end(pos)', desc: 'Playback end position within the sample, 0..1.', eg: '.end(0.25)' },
-  loop: { kind: 'both', sig: 'loop(on, { wrap, dir })', desc: 'Loops the sample for the event instead of one-shot: playback always enters at begin(), then wrap "file" (default) runs off the end and carries on from 0, wrap "window" loops the begin..end region, and dir "pingpong" turns around at each edge instead of jumping back - so begin(0.99) reverses almost immediately. loop(0) also opts a negative speed out of looping.', eg: '.loop(1, { wrap: "window" })' },
+  loop: { kind: 'both', sig: 'loop(on)', desc: 'Loops the sample for the event instead of one-shot, entering at begin(); loopwrap() picks the region and loopdir() how it turns over. loop(0) also opts a negative speed out of looping.', eg: '.loop()' },
+  loopwrap: { kind: 'both', sig: 'loopwrap(mode)', desc: 'Which region a loop() runs round - 0 = the whole file, so begin() is only where playback enters and it carries on past the end from 0; 1 = the begin..end window itself (what a slice() loop wants). Values round to the nearest mode and wrap, so any signal works: loopwrap(rand().range(0, 2)).', eg: '.loop().loopwrap(1)' },
+  loopdir: { kind: 'both', sig: 'loopdir(mode)', desc: 'How a loop() turns over at the edge of its region - 0 = jump back to the near edge, 1 = pingpong, turning around so it bounces back and forth. Values round to the nearest mode and wrap, so any signal works: loopdir(irand(2)).', eg: '.loop().loopdir(1)' },
   speed: { kind: 'both', sig: 'speed(rate)', desc: 'Playback rate off begin() - 2 is an octave up and half as long, 0 is silent, negative walks backwards and wraps round to end(), so it loops unless you say loop(0).', eg: '.speed("<1 -1>")' },
   flip: { kind: 'both', sig: 'flip(on)', desc: 'Plays the region backwards into the beat: over 0.5 it reverses speed() as one pass and delays the voice so it lands on begin() at the step\'s end.', eg: '.flip("<0 1>*2")' },
   stretch: { kind: 'both', sig: 'stretch(factor)', desc: 'Granular timestretch (2 = twice as long at the same pitch). Best on rhythmic material.', eg: '.stretch(2)' },

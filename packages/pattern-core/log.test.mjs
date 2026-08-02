@@ -116,9 +116,9 @@ test('an engine that reports nothing back still logs the requested config', () =
 });
 
 // ---------------------------------------------------------------------------------------------
-// .loop()'s wrap/dir options. They're modes, not channels: plain strings on Sig#sampler that ride
-// through the chain (and .when()/.rib()/.fast()) untouched, exactly as fit's 'auto' does, and
-// reach the engine on each event's config.
+// .loopwrap()/.loopdir(). Ordinary patternable channels carrying a mode NUMBER: whatever they
+// produce per event is rounded to the nearest mode and wrapped into range, so a continuous source
+// (rand(), an LFO) selects a real mode rather than falling off the end.
 // ---------------------------------------------------------------------------------------------
 
 // The sampler config the scheduler hands the engine for the first event of `sig`.
@@ -142,29 +142,34 @@ test('an unadorned loop carries no modes - the engine applies its own defaults',
 });
 
 test('the modes reach the engine on each event', () => {
-  const cfg = cfgOf(s('breaks').loop(1, { wrap: 'window', dir: 'pingpong' }));
-  assert.equal(cfg.loopWrap, 'window');
-  assert.equal(cfg.loopDir, 'pingpong');
+  const cfg = cfgOf(s('breaks').loop().loopwrap(1).loopdir(1));
+  assert.equal(cfg.loopWrap, 1);
+  assert.equal(cfg.loopDir, 1);
+  // Bare calls mean "the non-default mode", like .loop()/.flip().
+  assert.equal(cfgOf(s('breaks').loop().loopwrap()).loopWrap, 1);
+  assert.equal(cfgOf(s('breaks').loop().loopdir()).loopDir, 1);
 });
 
-test('the on/off value stays a patternable channel underneath the modes', () => {
-  const track = s('bd*2').loop('1 0', { wrap: 'window' });
-  assert.equal(cfgOf(track).loop, 1);
-  assert.equal(track.sampler.loop.sample(0.75, 1, 0.75), 0, 'second half of the cycle: off');
-  assert.equal(track.sampler.loopWrap, 'window', 'and the mode is not part of that channel');
+test('a mode value rounds to the nearest mode and wraps past the last', () => {
+  // Two modes each, so: 0.3 -> 0, 0.7 -> 1, 1.7 -> 2 -> 0 again. What lets a continuous source
+  // drive the control - a clamp would pile every high value onto the last mode instead.
+  assert.equal(cfgOf(s('breaks').loop().loopdir(0.3)).loopDir, 0);
+  assert.equal(cfgOf(s('breaks').loop().loopdir(0.7)).loopDir, 1);
+  assert.equal(cfgOf(s('breaks').loop().loopdir(1.7)).loopDir, 0);
+  assert.equal(cfgOf(s('breaks').loop().loopwrap(-1)).loopWrap, 1, 'negatives wrap round too');
+  assert.equal(cfgOf(s('breaks').loop().loopwrap(5)).loopWrap, 1);
 });
 
-test('the modes survive the rest of the chain', () => {
-  // Same reasoning as fit's 'auto': every reader of the sampler map passes a non-signal through.
-  const cfg = cfgOf(s('breaks').loop(1, { dir: 'pingpong' }).fit().begin(0.5).fast(2).rib(3, 2));
-  assert.equal(cfg.loopDir, 'pingpong');
+test('the modes are patterns like any other channel', () => {
+  const track = s('bd*2').loop().loopwrap('0 1');
+  assert.equal(cfgOf(track).loopWrap, 0, 'first half of the cycle: the whole file');
+  assert.equal(track.sampler.loopWrap.sample(0.75, 1, 0.75), 1, 'second half: the window');
+  // And they survive the rest of the chain, like every other sampler channel.
+  assert.equal(cfgOf(s('breaks').loopdir(1).loop().fit().begin(0.5).fast(2).rib(3, 2)).loopDir, 1);
 });
 
-test('a mistyped mode is an error at eval time, not silence at playback', () => {
-  assert.throws(() => s('breaks').loop(1, { wrap: 'whole' }), /wrap is "file" or "window"/);
-  assert.throws(() => s('breaks').loop(1, { dir: 'pingpong ' }), /dir is "forward" or "pingpong"/);
-  assert.throws(() => s('breaks').loop(1, { mode: 'pingpong' }), /no "mode" option/);
-  assert.throws(() => s('breaks').loop(1, 'window'), /options object/);
+test('the old options object is an error, not a silently dropped argument', () => {
+  assert.throws(() => s('breaks').loop(1, { wrap: 'window' }), /their own controls now/);
 });
 
 test('the loop line names the region and the direction', () => {
@@ -172,7 +177,12 @@ test('the loop line names the region and the direction', () => {
     index: 0, begin: 0.9, end: 1, loop: 1, loopWrap: 'file', loopDir: 'pingpong',
     speed: 1, stretch: 1, durSec: 0.1, cut: 0, amp: 1,
   });
-  const [line] = linesOf(s('breaks').begin(0.9).loop(1, { dir: 'pingpong' }).log(), { resolve });
+  const [line] = linesOf(s('breaks').begin(0.9).loop().loopdir(1).log(), { resolve });
   assert.match(line, /loop=file\+pingpong/);
   assert.doesNotMatch(line, /gap/, 'a loop plays for the whole event whatever its region holds');
+});
+
+test('the loop line names the modes from the numbers when the engine reports nothing', () => {
+  const [line] = linesOf(s('breaks').loop().loopwrap(1).loopdir(1).log());
+  assert.match(line, /loop=window\+pingpong/, 'a mode number in a log line would say nothing');
 });

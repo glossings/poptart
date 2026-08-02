@@ -264,7 +264,7 @@ function syncUserStringMethods() {
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll',
   // Every sampler config method also as a top-level control builder - speed("-1"), begin(0.5) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too

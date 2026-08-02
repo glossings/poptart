@@ -266,9 +266,9 @@ test('a loop wraps through the whole file by default, entering at begin', () => 
   assert.strictEqual(args[LOOP_ARG.pingpong], 0);
 });
 
-test('wrap "window" keeps the loop inside begin..end', () => {
+test('loopwrap 1 (window) keeps the loop inside begin..end', () => {
   const { engine, sent } = engineWithFile(4);
-  engine.playSample('t1', 'breaks', { begin: 0.9, loop: 1, loopWrap: 'window', secPerCycle: 2 }, 0, 2);
+  engine.playSample('t1', 'breaks', { begin: 0.9, loop: 1, loopWrap: 1, secPerCycle: 2 }, 0, 2);
   const args = sent.pop().args;
   assert.strictEqual(args[LOOP_ARG.loopLo], 0.9);
   assert.strictEqual(args[LOOP_ARG.loopHi], 1);
@@ -278,7 +278,7 @@ test('wrap "window" keeps the loop inside begin..end', () => {
 test('a slice loops its own window when asked, and the whole file when not', () => {
   const { engine, sent } = engineWithFile(4);
   engine._packs.get('breaks').files[0].slices = [0, 0.25, 0.5];
-  engine.playSample('t1', 'breaks', { slice: 1, loop: 1, loopWrap: 'window', secPerCycle: 2 }, 0, 2);
+  engine.playSample('t1', 'breaks', { slice: 1, loop: 1, loopWrap: 1, secPerCycle: 2 }, 0, 2);
   const windowed = sent.pop().args;
   assert.deepStrictEqual(
     [windowed[LOOP_ARG.loopLo], windowed[LOOP_ARG.loopHi]], [0.25, 0.5],
@@ -292,7 +292,7 @@ test('a slice loops its own window when asked, and the whole file when not', () 
 
 test('backwards enters a window at its far edge, but a file wrap at begin', () => {
   const { engine, sent } = engineWithFile(4);
-  engine.playSample('t1', 'breaks', { begin: 0.2, end: 0.6, speed: -1, loopWrap: 'window', secPerCycle: 2 }, 0, 2);
+  engine.playSample('t1', 'breaks', { begin: 0.2, end: 0.6, speed: -1, loopWrap: 1, secPerCycle: 2 }, 0, 2);
   assert.strictEqual(sent.pop().args[LOOP_ARG.entry], 0.6, 'as a windowed backwards loop always has');
   engine.playSample('t1', 'breaks', { begin: 0.2, end: 0.6, speed: -1, secPerCycle: 2 }, 0, 2);
   const args = sent.pop().args;
@@ -301,14 +301,28 @@ test('backwards enters a window at its far edge, but a file wrap at begin', () =
   assert.strictEqual(args[LOOP_ARG.loopHi], 1);
 });
 
-test('dir "pingpong" is a flag on top of either wrap mode', () => {
+test('loopdir 1 (pingpong) is a flag on top of either wrap mode', () => {
   const { engine, sent } = engineWithFile(4);
-  engine.playSample('t1', 'breaks', { begin: 0.4, loop: 1, loopDir: 'pingpong', secPerCycle: 2 }, 0, 2);
+  engine.playSample('t1', 'breaks', { begin: 0.4, loop: 1, loopDir: 1, secPerCycle: 2 }, 0, 2);
   const args = sent.pop().args;
   assert.strictEqual(args[LOOP_ARG.pingpong], 1);
   assert.deepStrictEqual([args[LOOP_ARG.loopLo], args[LOOP_ARG.loopHi]], [0, 1]);
-  engine.playSample('t1', 'breaks', { begin: 0.4, loop: 1, loopWrap: 'window', loopDir: 'pingpong', secPerCycle: 2 }, 0, 2);
+  engine.playSample('t1', 'breaks', { begin: 0.4, loop: 1, loopWrap: 1, loopDir: 1, secPerCycle: 2 }, 0, 2);
   assert.strictEqual(sent.pop().args[LOOP_ARG.loopLo], 0.4);
+});
+
+test('a raw mode value is rounded and wrapped into a real mode', () => {
+  // The scheduler normalises too, but the engine takes whatever it is handed - a continuous value
+  // straight off a signal must still name a mode rather than reading as the default by accident.
+  const { engine, sent } = engineWithFile(4);
+  const pingpongOf = (loopDir) => {
+    engine.playSample('t1', 'breaks', { begin: 0.4, loop: 1, loopDir, secPerCycle: 2 }, 0, 2);
+    return sent.pop().args[LOOP_ARG.pingpong];
+  };
+  assert.strictEqual(pingpongOf(0.7), 1);
+  assert.strictEqual(pingpongOf(1.7), 0, 'past the last mode wraps round to the first');
+  assert.strictEqual(pingpongOf(-1), 1);
+  assert.strictEqual(pingpongOf(NaN), 0);
 });
 
 test('a one-shot is unaffected - the loop args go out but nothing reads them', () => {
