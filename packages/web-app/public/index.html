@@ -211,18 +211,18 @@
     <div id="pianorollPanel" class="pianoroll-panel hidden">
       <div class="pianoroll-panel-head">
         <span>piano roll</span>
+        <span id="pianorollScale" class="pianoroll-scale" title="the key setscale() set — the roll is coloured by it. Click to snap every note into it"></span>
         <label class="pianoroll-ctl">grid <select id="pianorollGrid" title="granularity — cells per cycle"></select></label>
         <label class="pianoroll-ctl">len <input id="pianorollLen" type="number" step="1" min="1" value="16" title="loop length in cells (or drag the loop bar)" /></label>
         <button id="pianorollTool" class="small" title="tool">✏️</button>
         <button id="pianorollCmdMode" class="small pr-text-btn" title="cmd-drag sets velocity — click to switch">vel</button>
+        <button id="pianorollFold" class="small pr-text-btn" title="fold to the scale set by setscale()">fold</button>
         <span class="spacer"></span>
-        <button id="pianorollZoomOut" class="small" title="zoom out (⌘−)">−</button>
-        <button id="pianorollZoomIn" class="small" title="zoom in (⌘+)">+</button>
         <button id="pianorollPreview" class="small" title="preview notes as you draw (needs a loaded synth)">🎧</button>
         <button id="pianorollToMini" class="small" title="convert to mini-notation">→♪</button>
         <button id="pianorollClose" class="small">✕</button>
       </div>
-      <canvas id="pianorollCanvas" width="560" height="400"></canvas>
+      <canvas id="pianorollCanvas" width="660" height="400"></canvas>
     </div>
 
     <div id="themePanel" class="theme-panel hidden">

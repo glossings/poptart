@@ -92,6 +92,58 @@ export function parseScaleName(scaleName) {
   return { rootMidi, intervals };
 }
 
+/** The octave a scale name with no octave of its own sits in (this module's c5 = 60 convention). */
+export const DEFAULT_SCALE_OCTAVE = 5;
+
+/**
+ * Splits a scale name into `{ root, octave, mode }` exactly the way parseScaleName reads it: the
+ * root's letter + accidentals, the octave it named (null if it didn't), and the mode word. Lets a
+ * caller rebuild the same scale somewhere else on the keyboard - see scaleAtOctave / Sig#sc.
+ */
+export function scaleParts(scaleName) {
+  const parts = String(scaleName).trim().replace(/:/g, ' ').split(/\s+/).filter(Boolean);
+  const [rootPart, modePart] = parts.length >= 2 ? parts : ['c', parts[0] ?? ''];
+  const m = NOTE_NAME_RE.exec(rootPart);
+  return {
+    root: m ? `${m[1]}${m[2]}` : rootPart,
+    octave: m && m[3] !== undefined ? Number(m[3]) : null,
+    mode: modePart,
+  };
+}
+
+/** The same scale with its root moved to `octave`: scaleAtOctave("F minor", 3) -> "f3 minor". */
+export function scaleAtOctave(scaleName, octave) {
+  const { root, mode } = scaleParts(scaleName);
+  return `${root}${Math.round(Number(octave))} ${mode}`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The global scale. A patch is nearly always in ONE key, so the key is a property of the document
+// rather than of each pattern: `setscale("F minor")` sets it (the host binds that builder - see
+// web-app's server.js, which also HOISTS it so the last one in a buffer wins for the whole buffer)
+// and `.sc()` reads it. Re-keying a patch is then a single edit instead of one per `.scale()`.
+// ---------------------------------------------------------------------------------------------
+
+/** What .sc() falls back to when nothing has called setscale() yet. */
+export const DEFAULT_SCALE = 'c major';
+
+let currentScale = null;
+
+/**
+ * Sets the global scale, validating the name now so a typo is reported at the setscale() call
+ * rather than silently at the first note. Returns the name as stored.
+ */
+export function setGlobalScale(scaleName) {
+  parseScaleName(scaleName); // throws on an unknown mode/root
+  currentScale = String(scaleName).trim();
+  return currentScale;
+}
+
+/** The global scale name, or null if setscale() has never run in this process. */
+export function globalScale() {
+  return currentScale;
+}
+
 /** The scale's allowed pitch classes (0-11, sorted) - what live-note quantization snaps to. */
 export function scalePitchClasses(scaleName) {
   const { rootMidi, intervals } = parseScaleName(scaleName);

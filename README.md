@@ -369,6 +369,35 @@ Sample tracks run through the same `.fx()`/`.param()` chain as instruments, and 
 accepts signals too — `setbpm("120 140")`, `setbpm(sine(0.01).range(100, 160))` — polled and
 applied as continuous, phase-preserving tempo changes shared by every track.
 
+### Key
+
+A patch is nearly always in one key, so the key is a property of the *document* rather than of
+each pattern. `setscale("F minor")` sets it and `.sc()` reads it — `n("0 2 4").sc()` is
+`n("0 2 4").scale("F minor")`, on notes as on degrees:
+
+```js
+setscale("C minor")
+
+bass: n("0 3 5").sc(3).synth("Serum 2")
+lead: n("0 2 4 7").sc(5).synth("Diva")
+```
+
+`.sc(3)` puts the scale's **root** in octave 3, exactly like writing `.scale("c3 minor")` by hand;
+bare `.sc()` leaves it where `setscale` put it (octave 5 unless the name said otherwise). A
+patterned octave works too — `.sc("<3 4>")` alternates octaves per cycle.
+
+`setscale` is **hoisted**: whichever one comes last in the buffer is the key the whole buffer plays
+in, including the patterns written *above* it. So re-keying a patch mid-set is one edit wherever
+it's convenient to make it — drop a new `setscale("F minor")` at the bottom and everything follows.
+(Only a line that is nothing but a `setscale(...)` call hoists; one tangled up with other code runs
+in its place, in document order.) Like the tempo, the key persists until something changes it.
+
+The piano roll follows the key: in-key keys and lanes are tinted with the accent colour (the tonic
+hardest), out-of-key ones are dimmed, and the **fold** button collapses the roll to the scale's
+notes alone — plus any pitch the roll actually uses, so folding never hides a note you drew.
+Clicking the key chip in the roll's header snaps every note into the key. Roll edits have their own
+undo: **cmd-Z** / **cmd-shift-Z** while the grid has focus.
+
 ### Audio output
 
 The **settings** tab picks the audio output device (the list shows each device's output channel

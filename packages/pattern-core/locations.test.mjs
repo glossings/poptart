@@ -65,6 +65,7 @@ test('injectLocations leaves every name-lookup argument a plain string', () => {
     ['x.synth("Serum 2")', '.synth("Serum 2")'],
     ['x.fx("Pro-Q 3")', '.fx("Pro-Q 3")'],
     ['x.scale("F minor")', '.scale("F minor")'],
+    ['setscale("F minor")', 'setscale("F minor")'],
     ['x.bus("reverb")', '.bus("reverb")'],
     ['x.bsend("delay")', '.bsend("delay")'],
     ['x.as("note:vel:clip")', '.as("note:vel:clip")'],
@@ -192,4 +193,10 @@ test('.add() unions both operands\' spans onto the sounding note', () => {
   assert.equal(first.value, 7); // 0 + 7
   // Both the "0" (from the left literal at 100) and the "7" (right literal at 200) light up.
   assert.deepEqual(stepLocs(first), [[100, 101], [200, 201]]);
+});
+
+test('.sc()\'s octave IS a pattern position - a patterned octave is a real feature', () => {
+  // setscale names a scale (excluded above); .sc() takes an octave, which may be patterned:
+  // `.sc("<3 4>")` alternates octaves per cycle, so its literal must still become a mini().
+  assert.match(injectLocations('n("0 2").sc("<3 4>")'), /\.sc\(mini\("<3 4>", \d+\)\)/);
 });

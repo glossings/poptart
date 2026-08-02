@@ -437,6 +437,32 @@
           </p>
 
           <div class="callout new">
+            <span class="tag">one key, one edit</span>
+            <p style="margin:0 0 8px">
+              A patch is nearly always in one key, so the key can live in the <em>document</em> instead
+              of in every pattern. <code>setscale("F minor")</code> sets it and <code>.sc()</code> reads
+              it — <code>n("0 2 4").sc()</code> is <code>n("0 2 4").scale("F minor")</code>, and it
+              quantizes note patterns just the same.
+            </p>
+            <pre style="margin:0 0 8px"><code><span class="f">setscale</span>(<span class="s">"C minor"</span>)
+
+bass: <span class="f">n</span>(<span class="s">"0 3 5"</span>).<span class="f">sc</span>(3).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)
+lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f">sc</span>(5).<span class="f">synth</span>(<span class="s">"Diva"</span>)</code></pre>
+            <p style="margin:0 0 8px">
+              <code>.sc(3)</code> puts the scale's <strong>root</strong> in octave 3, exactly like
+              writing <code>.scale("c3 minor")</code> by hand; bare <code>.sc()</code> leaves it where
+              <code>setscale</code> put it. A patterned octave works too — <code>.sc("&lt;3 4&gt;")</code>.
+            </p>
+            <p style="margin:0">
+              <code>setscale</code> is <strong>hoisted</strong>: whichever one comes last in the buffer
+              is the key the whole buffer plays in, <em>including the patterns above it</em>. Re-keying
+              mid-set is one edit, wherever it's convenient to make it. The piano roll follows along —
+              the tonic's lanes are tinted, out-of-key ones dimmed, and <strong>fold</strong> collapses
+              the grid to the scale's notes alone.
+            </p>
+          </div>
+
+          <div class="callout new">
             <span class="tag">draw it</span>
             <p style="margin:0 0 8px">
               <code>pianoroll("…", { grid, len })</code> is the same absolute-note pattern as
@@ -462,6 +488,17 @@
               top loop bar) size it; <strong>cmd −/+</strong> zoom; <strong>🎧</strong> auditions each
               note through the track's synth; and <strong>→♪</strong> converts the whole roll to the
               equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation.
+            </p>
+            <p style="margin:0 0 8px">
+              <strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> step back and forward through the
+              roll's own edit history while the grid has focus — one drag is one step, however many
+              notes it moved. (With the cursor in the code, cmd-Z is the editor's, as always.)
+            </p>
+            <p style="margin:0 0 8px">
+              With a key in force (<code>setscale</code>), the roll colours its keyboard and lanes by
+              it, <strong>fold</strong> hides everything out of the key, and clicking the
+              <strong>key chip</strong> in the header snaps every note in the roll to the nearest tone
+              in it — the same quantize <code>.sc()</code> applies to a written note pattern.
             </p>
             <pre style="margin:0"><code><span class="f">pianoroll</span>(<span class="s">"60,0,4 64,0,4 67,8,8"</span>, { steps: <span class="s">16</span> }).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)
 <span class="c">// each note is midi,start,len[,vel] over a `steps`-cell cycle. Chains like note(): .scale(), .add(), …</span></code></pre>
@@ -941,6 +978,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
             <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity &amp; note length</td></tr>
             <tr><td><code>.scale("…")</code></td><td>map degrees / snap notes to key</td></tr>
+            <tr><td><code>.sc(oct)</code></td><td>the same, in the setscale key</td></tr>
           </table>
           <table>
             <tr><th>Modulators</th><th></th></tr>
@@ -966,6 +1004,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>_name:</code> / <code>Sname:</code></td><td>mute / solo</td></tr>
             <tr><td><code>$:</code> / bare lines</td><td>setup blocks</td></tr>
             <tr><td><code>setbpm(120)</code></td><td>tempo (4 beats/cycle)</td></tr>
+            <tr><td><code>setscale("F minor")</code></td><td>the key <code>.sc()</code> reads (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print this track's events to the console</td></tr>
             <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code></td><td>eval · stop</td></tr>
           </table>

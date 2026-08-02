@@ -151,6 +151,30 @@ export function splitLabeledBlocks(source) {
   return blocks.filter((b) => hasCode(b.code));
 }
 
+/**
+ * Is this block nothing but a call to `name(...)` - `setscale("F minor")` on its own line and
+ * nothing else? Global setup calls that the host HOISTS have to be recognizable *before* anything
+ * is evaluated (see web-app's server.js: the last setscale in a buffer sets the key for the whole
+ * buffer, patterns above it included), and a hoistable one is exactly this shape. Deliberately
+ * narrow: anything mixed in with other code keeps its place and runs in document order. Parens
+ * inside string literals aren't lexed - a scale name has none - so at worst an exotic argument
+ * isn't hoisted and behaves as it did before.
+ */
+export function isBareCallBlock(code, name) {
+  const bare = String(code)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .trim();
+  const head = new RegExp(`^${name}\\s*\\(`).exec(bare);
+  if (!head) return false;
+  let depth = 0;
+  for (let i = head[0].length - 1; i < bare.length; i++) {
+    if (bare[i] === '(') depth++;
+    else if (bare[i] === ')' && --depth === 0) return /^\s*;?\s*$/.test(bare.slice(i + 1));
+  }
+  return false;
+}
+
 function hasCode(text) {
   return text.split('\n').some((line) => {
     const t = line.trim();

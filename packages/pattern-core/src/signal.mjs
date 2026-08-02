@@ -9,7 +9,10 @@
 // over time, sometimes with edges." Everything below is plain data + closures.
 
 import { parseMini, getStepsForCycle, warpSteps, stepLocs } from './mini.mjs';
-import { parseNoteValue, degreeToMidi, parseScaleName, quantizeToScale } from './notes.mjs';
+import {
+  parseNoteValue, degreeToMidi, parseScaleName, quantizeToScale,
+  globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
+} from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps } from './pianoroll.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
@@ -58,6 +61,10 @@ function warnAndKeep(sig, message) {
   warnUser(message);
   return sig;
 }
+
+// Said by .sc() when no setscale() has run. Falling back to C major keeps the pattern audible (a
+// silent track mid-set is the worse failure) while naming the one line that's missing.
+const NO_GLOBAL_SCALE = `[signal] .sc() has no scale yet - put setscale("F minor") anywhere in the buffer. Playing in ${DEFAULT_SCALE} until then.`;
 
 export class Sig {
   /**
@@ -250,6 +257,34 @@ export class Sig {
     }
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     return out;
+  }
+
+  /**
+   * The GLOBAL scale - whatever `setscale("F minor")` last set for the buffer - applied exactly
+   * like `.scale()`: degrees are read against it, an absolute note pattern is quantized into it.
+   * `n("0 2 4").sc()` and `n("0 2 4").scale("F minor")` play the same thing; the difference is
+   * that re-keying the patch is then one edit to the setscale line, wherever in the buffer it
+   * sits (the host hoists it - see web-app's server.js).
+   *
+   * The optional argument is the octave to put the scale's ROOT in, like writing the octave into
+   * a scale name by hand: with `setscale("F minor")` in force, `.sc(3)` is `.scale("f3 minor")`
+   * and bare `.sc()` leaves the root where setscale put it (octave 5 unless it said otherwise).
+   * A PATTERNED octave - `.sc("<3 4>")` - can't name a scale, so it becomes what it means
+   * musically instead: the scale at its own root, transposed by whole octaves per cycle.
+   */
+  sc(octave) {
+    let name = globalScale();
+    if (!name) {
+      warnUser(NO_GLOBAL_SCALE);
+      name = DEFAULT_SCALE;
+    }
+    if (octave === undefined || octave === null) return this.scale(name);
+    // A `"3"` literal in pattern position arrives as a constant Sig (the editor's mini() transpile),
+    // so read through to the constant rather than NaN-ing on the object.
+    const fixed = octave instanceof Sig ? octave.constVal : octave;
+    if (fixed !== undefined && Number.isFinite(Number(fixed))) return this.scale(scaleAtOctave(name, Number(fixed)));
+    const base = scaleParts(name).octave ?? DEFAULT_SCALE_OCTAVE;
+    return this.scale(name).add(toSignal(octave).mapValue((v) => (Number(v) - base) * 12));
   }
 
   /**

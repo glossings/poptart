@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { splitLabeledBlocks } from './src/labels.mjs';
+import { splitLabeledBlocks, isBareCallBlock } from './src/labels.mjs';
 
 const labels = (src) => splitLabeledBlocks(src).map((b) => b.label);
 
@@ -73,4 +73,29 @@ test('an unclosed bracket does not swallow the labels below it', () => {
 test('line comments never start or end a block', () => {
   const src = ['// a note', 'bass: n("0")', '// another', 'lead: n("7")'].join('\n');
   assert.deepEqual(labels(src), ['bass', 'lead']);
+});
+
+// isBareCallBlock: which blocks the host may HOIST (see web-app's server.js - a bare setscale is
+// run before every pattern, so the last one in the buffer re-keys the whole buffer). Anything
+// mixed in with other code must NOT qualify: hoisting it would move that code too.
+test('a bare setscale call is hoistable, whatever surrounds it in whitespace and comments', () => {
+  assert.ok(isBareCallBlock('setscale("F minor")', 'setscale'));
+  assert.ok(isBareCallBlock('  setscale("F minor");  ', 'setscale'));
+  assert.ok(isBareCallBlock('// key change\nsetscale("F minor")\n', 'setscale'));
+  assert.ok(isBareCallBlock('setscale(myKey)', 'setscale'), 'the argument needn\'t be a literal');
+  assert.ok(isBareCallBlock('setscale(pick(1, 2))', 'setscale'), 'nested parens close correctly');
+});
+
+test('a setscale mixed in with other code is not hoistable', () => {
+  assert.ok(!isBareCallBlock('setscale("F minor"); n("0").synth("x")', 'setscale'));
+  assert.ok(!isBareCallBlock('const k = setscale("F minor")', 'setscale'));
+  assert.ok(!isBareCallBlock('n("0").sc()', 'setscale'));
+  assert.ok(!isBareCallBlock('setscaleish("F minor")', 'setscale'));
+  assert.ok(!isBareCallBlock('setscale("F minor"', 'setscale'), 'an unclosed call is a typo, not a hoist');
+});
+
+test('a labeled setscale block still reads as a bare call', () => {
+  // splitLabeledBlocks blanks the label out with spaces, so the block code keeps its offsets.
+  const [block] = splitLabeledBlocks('key: setscale("F minor")');
+  assert.ok(isBareCallBlock(block.code, 'setscale'));
 });

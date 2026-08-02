@@ -52,7 +52,7 @@ export function injectLocations(code, base = 0) {
 // and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
-  'synth', 'fx', 'scale', 'bus', 'bsend', 'as', 'midi', 'audio', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'lfo', 'midicc', 'midikeys', 'pianoroll',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob

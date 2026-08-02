@@ -151,6 +151,12 @@ const API_DOCS = {
     desc: 'Sets the global tempo, read as 4 beats per cycle. Takes a pattern or signal, not just a number.',
     eg: 'setbpm(140)',
   },
+  setscale: {
+    kind: 'builder',
+    sig: 'setscale(name)',
+    desc: 'Sets the key every .sc() reads. Hoisted, so the last one in the buffer re-keys the whole buffer.',
+    eg: 'setscale("F minor")',
+  },
 
   // ----------------------------------------------------------------- music-theory helpers
   noteToMidi: { kind: 'builder', sig: 'noteToMidi(name)', desc: 'Note name → MIDI number ("c4" → 48), the c5 = 60 convention. Plain helper, handy inside your own methods.', eg: 'noteToMidi("f#3")' },
@@ -175,6 +181,12 @@ const API_DOCS = {
     sig: 'scale(name)',
     desc: 'Reads degrees as a scale ("<root> <mode>"), or quantizes an absolute note pattern into it. Also snaps live MIDI notes.',
     eg: '.scale("F minor")',
+  },
+  sc: {
+    kind: 'method',
+    sig: 'sc(octave)',
+    desc: 'The setscale() key, applied like .scale(). The optional octave places the scale\'s root; patterns welcome.',
+    eg: 'n("0 2 4").sc(3)',
   },
   gain: { kind: 'method', sig: 'gain(value)', desc: 'Track output gain after the whole chain, 1 = unity. Chains multiply, so a level and a modulator compose.', eg: '.gain(0.5).gain(env())' },
   pan: { kind: 'method', sig: 'pan(value)', desc: 'Stereo pan, -1 (left) .. 1 (right), 0 = center.', eg: '.pan(sine(0.2).range(-1, 1))' },

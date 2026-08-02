@@ -1411,6 +1411,33 @@ li.CodeMirror-hint-active {
   letter-spacing: 0;
 }
 
+/* The key setScale() set, next to the panel title - what the grid's tonic/in-key shading means.
+   Empty (and so invisible) until a scale is in force. */
+.pianoroll-scale {
+  font-family: var(--mono);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.pianoroll-scale:not(:empty) {
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  cursor: pointer; /* it's a button: clicking snaps every note into the key */
+}
+
+.pianoroll-scale:not(:empty):hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.pianoroll-scale:not(:empty):active {
+  transform: translateY(1px);
+}
+
 .pianoroll-ctl {
   display: flex;
   align-items: center;
@@ -1444,10 +1471,13 @@ li.CodeMirror-hint-active {
   border-color: var(--accent);
 }
 
-#pianorollPreview.active {
+/* An engaged toggle in the roll's header (preview on, folded to the scale) lights up, so its
+   state is readable without hovering for the tooltip. */
+.pianoroll-panel-head button.active {
   background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--accent);
+  font-weight: 700;
 }
 
 #pianorollCanvas {

@@ -24,8 +24,17 @@ function serverBuilderNames() {
   return [...withoutComments.matchAll(/'([^']+)'/g)].map((m) => m[1]);
 }
 
-// setbpm and the macro knobs are bound alongside BUILDER_NAMES (see evalBlock / macroSigNames).
-const HOST_BUILDERS = ['setbpm', ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`)];
+// The host's own builders (setbpm/setscale) and the macro knobs are bound alongside BUILDER_NAMES
+// (see evalBlock / macroSigNames). The host ones are read out of server.js for the same reason
+// BUILDER_NAMES is: adding one there is what should drive this test.
+function serverHostBuilderNames() {
+  const src = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+  const decl = src.match(/const HOST_BUILDERS = \{([\s\S]*?)\};/);
+  assert.ok(decl, 'HOST_BUILDERS not found in server.js - this test needs updating');
+  return [...decl[1].matchAll(/([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+}
+
+const HOST_BUILDERS = [...serverHostBuilderNames(), ...Array.from({ length: 8 }, (_, i) => `macro${i + 1}`)];
 
 test('every builder in scope is documented', () => {
   for (const name of [...serverBuilderNames(), ...HOST_BUILDERS]) {

@@ -5,7 +5,6 @@ no completion notes.
 
 ---
 
-[ ] Introduce QoL scale commands like `setScale` (globally) and `sc(num)` as well as having pianoroll be scale aware (if desired)
 [ ] Visualize velocity and probability in pianoroll
 [ ] Double check what's going on with `arp`. It seems to have some weird `squeeze`-like behavior
 [ ] see if we can get highlighting to work with string templates

@@ -230,7 +230,7 @@ function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
     'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'seg', 'segment', 'scale', 'range', 'synth', 'fx', 'param',
-    'gain', 'pan', 'o', 'vel', 'clip', 'as',
+    'gain', 'pan', 'o', 'vel', 'clip', 'as', 'sc',
   ];
   for (const m of METHODS) {
     Object.defineProperty(String.prototype, m, {
@@ -298,6 +298,24 @@ function setbpm(value) {
   return TEMPO_BLOCK;
 }
 
+// The setscale equivalent of TEMPO_BLOCK.
+const SCALE_BLOCK = Object.freeze({ poptartScaleBlock: true });
+
+// setscale sets the buffer's key, which every `.sc()` then reads (see pattern-core's notes.mjs).
+// Global like setbpm - a patch is in one key at a time - and HOISTED by /api/evaluate below, so
+// the LAST setscale in the buffer is the key the whole buffer plays in, patterns written above it
+// included. That's the point: re-keying a patch mid-set is one edit wherever you make it, not an
+// edit that only takes effect downwards. Like the tempo, it persists until something changes it.
+function setscale(name) {
+  patternCore.setGlobalScale(name);
+  return SCALE_BLOCK;
+}
+
+// The builders the HOST provides (as opposed to pattern-core's), bound alongside BUILDER_NAMES in
+// every evaluated block. Read out of this source by api-docs.test.js, so adding one here is what
+// makes the editor's reference cover it.
+const HOST_BUILDERS = { setbpm, setscale };
+
 // One block of editor code (see labels.mjs) -> its value, evaluated with the builders in
 // scope. Evaluated via direct eval rather than wrapping the code in `return (...)` so a block
 // may contain *statements*, not just one expression. eval's completion value (the last
@@ -364,9 +382,9 @@ function makeBlockEvaluator(defs = new Map()) {
     const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase) : code;
     const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
     const macroNames = macroSigNames();
-    const baseNames = [...BUILDER_NAMES, ...macroNames, 'setbpm'].filter((n) => !defs.has(n)); // defs may shadow builders
+    const baseNames = [...BUILDER_NAMES, ...macroNames, ...Object.keys(HOST_BUILDERS)].filter((n) => !defs.has(n)); // defs may shadow builders
     const baseValues = baseNames.map((n) => {
-      if (n === 'setbpm') return setbpm;
+      if (n in HOST_BUILDERS) return HOST_BUILDERS[n];
       if (macroNames.includes(n)) return patternCore.macro(Number(n.slice(5)));
       return patternCore[n];
     });
@@ -816,7 +834,9 @@ async function captureDirtyPlugins() {
 const routes = {
   'GET /api/status': async () => ({
     status: 200,
-    body: { loaded: !!engine, error: engineError },
+    // `scale` is whatever setscale() last set (the prebake may have, before any eval), so a fresh
+    // page load already knows the key its piano roll should be drawing.
+    body: { loaded: !!engine, error: engineError, scale: patternCore ? patternCore.globalScale() : null },
   }),
 
   'POST /api/scanPlugins': async (body) => {
@@ -932,12 +952,29 @@ const routes = {
     // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
     // and a redeclared name in the buffer overrides the copy without clobbering the original.
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs));
+
+    // setscale is HOISTED: every block that is nothing but a `setscale(...)` call runs here, in
+    // document order, before any pattern is built - so the LAST one in the buffer is the key the
+    // whole buffer plays in, and a `.sc()` pattern written ABOVE it follows it too. A hoisted call
+    // that can't run out of order (its argument comes from a `const` declared further up) is left
+    // alone and simply runs in its own position, where it always did.
+    const hoisted = new Map(); // block -> its value, so the in-order pass below doesn't run it twice
+    for (const b of blocks) {
+      if (!patternCore.isBareCallBlock(b.code, 'setscale')) continue;
+      try {
+        evalBlock(b.code, b.start);
+        hoisted.set(b, SCALE_BLOCK);
+      } catch {
+        // not evaluable up here - it keeps its place in the pass below (and reports errors there)
+      }
+    }
+
     const evaluated = blocks.map((b) => {
       try {
-        const value = evalBlock(b.code, b.start);
+        const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
         if (value instanceof patternCore.Sig) {
           dryRunPattern(value);
-        } else if (value !== TEMPO_BLOCK && !b.label.startsWith('$')) {
+        } else if (value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !b.label.startsWith('$')) {
           // Only an explicitly *named* block promises sound. Anything anonymous (bare code
           // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
           // style: declarations shared with the blocks below (const kb = midikeys("...")),
@@ -1008,6 +1045,7 @@ const routes = {
       body: {
         cps: transport.cps,
         transport: transport.snapshot(),
+        scale: patternCore.globalScale(), // what setscale() left in force - the piano roll colours by it
         keyboardTracks,
         gridFrom,
         gridCount: HL_WINDOW,
