@@ -149,6 +149,14 @@
               <label class="settings-row">output device
                 <select id="audioDeviceSelect" title="which audio device the engine plays to"></select>
               </label>
+              <div class="settings-row settings-row-block">
+                <span title="extra input-capable devices to combine with the output device, so input() can reach all of their channels at once">extra inputs</span>
+                <div id="audioInputList" class="check-list">loading…</div>
+              </div>
+              <div class="settings-actions">
+                <span id="audioInputLayout" class="settings-note"></span>
+                <button id="audioInputApply" class="small" disabled>apply</button>
+              </div>
             </section>
             <section id="editorSection">
               <h2>editor</h2>

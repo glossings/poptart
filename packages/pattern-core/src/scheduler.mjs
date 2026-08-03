@@ -20,8 +20,21 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd } from './signal.mjs';
+import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, warnPattern } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
+import { resolveInputChannels } from './audio-inputs.mjs';
+
+// Resolves an input()'s channel request against the booted device's live layout (see
+// audio-inputs.mjs). Done here, per eval, rather than when input() is called: the layout changes
+// when the audio device is rebuilt in settings, and a pattern built before that must pick up the
+// new offsets on its next eval. Returns null for every other kind of audio source (a track, a bus,
+// a legacy "dev:" string), which the engine keeps handling by name.
+function hwChannels(hw) {
+  if (!hw) return null;
+  const { chans, warning } = resolveInputChannels(hw);
+  if (warning) warnPattern(warning);
+  return chans;
+}
 
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
 const POLL_INTERVAL_MS = 30;
@@ -360,7 +373,7 @@ export class Scheduler {
       const src = sig.inputSource;
       if (src) {
         const pcs = src.scale ? scalePitchClasses(src.scale) : null;
-        this.engine.setInputSource(this.trackId, src.io, src.name, src.channel ?? 0, pcs);
+        this.engine.setInputSource(this.trackId, src.io, src.name, src.channel ?? 0, pcs, hwChannels(src.hw));
       } else if (this._prevInputSource) {
         this.engine.clearInputSource(this.trackId);
       }
@@ -389,7 +402,7 @@ export class Scheduler {
       const nextSlots = new Set();
       for (const inj of sig.audioInjects ?? []) {
         nextSlots.add(inj.slot);
-        this.engine.injectAudio(this.trackId, inj.slot, inj.name, inj.gain ?? 1);
+        this.engine.injectAudio(this.trackId, inj.slot, inj.name, inj.gain ?? 1, hwChannels(inj.hw));
       }
       for (const slot of this._prevAudioInjectSlots) {
         if (!nextSlots.has(slot)) this.engine.clearAudioInject(this.trackId, slot);

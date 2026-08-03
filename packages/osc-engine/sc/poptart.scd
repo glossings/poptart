@@ -255,7 +255,10 @@ releaseBus = { |name|
 // ahead of the target; a device source runs a SoundIn feeder at the head writing that bus. The fx
 // aux gets a freshly allocated bus (pointed at via \scBusN); the chain input reuses the track's
 // own inBus. Idempotent: an existing route on the same sink is torn down first.
-wireAudio = { |targetKey, slot, rawName, gain|
+// `inA`/`inB` are the hardware channels a device source reads, absolute and 0-indexed (inB -1 =
+// mono, duplicated to both sides); ignored for a track/bus source. pattern-core resolves them from
+// input()'s 1-indexed, optionally device-relative form before they get here.
+wireAudio = { |targetKey, slot, rawName, gain, inA = 0, inB = 1|
     fork {
         var target = awaitTrack.(targetKey);
         var str = rawName.asString;
@@ -283,15 +286,33 @@ wireAudio = { |targetKey, slot, rawName, gain|
             };
             case
             { isDev } {
-                var feeder;
-                if (server.options.numInputBusChannels < 2) {
-                    ("poptart: audio(\"dev:...\"): the audio device exposes < 2 input channels - "
-                        ++ "no hardware input to read (pick an input-capable device in settings)").warn;
+                var feeder, mono = inB < 0, inChans = server.options.numInputBusChannels;
+                var last = max(0, inChans - 1);
+                var wanted = if (mono) { [inA] } { [inA, inB] };
+                // Clamp here rather than in the SynthDef: the channel count is a plain integer in
+                // sclang, so the feeder gets a bus index and no Clip UGen on In.ar's index input.
+                var readA = inA.clip(0, last), readB = inB.clip(0, last);
+                if (inChans < 1) {
+                    ("poptart: input(): the audio device exposes no input channels - nothing to read "
+                        ++ "(pick an input-capable device in settings)").warn;
                 };
-                feeder = Synth(\poptart_soundin, [\out, destBus.index, \in, 0, \gain, gain],
-                    target: server.defaultGroup, addAction: \addToHead);
+                // Out-of-range reads the last real channel, so this warning is the only way the
+                // user learns they asked for a channel the device hasn't got.
+                if ((inChans > 0) and: { wanted.any { |c| c >= inChans } }) {
+                    ("poptart: input(): channel " ++ (wanted.collect { |c| c + 1 }.join("/"))
+                        ++ " is past the device's " ++ inChans ++ " input channels - reading the last one").warn;
+                };
+                feeder = if (mono) {
+                    Synth(\poptart_soundin_mono, [\out, destBus.index, \inA, readA, \gain, gain],
+                        target: server.defaultGroup, addAction: \addToHead);
+                } {
+                    Synth(\poptart_soundin, [\out, destBus.index, \inA, readA, \inB, readB, \gain, gain],
+                        target: server.defaultGroup, addAction: \addToHead);
+                };
                 sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nil, feeder: feeder, busName: nil, owns: ownsBus);
-                ("poptart: audio input: dev '" ++ name ++ "' -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
+                ("poptart: audio input: ch " ++ (wanted.collect { |c| c + 1 }.join("+"))
+                    ++ if (name.isEmpty) { "" } { " of '" ++ name ++ "'" }
+                    ++ " -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
             }
             { true } {
                 // Resolve a bare / "track:" / "bus:" name. Both a source track and a bus writer may
@@ -602,10 +623,21 @@ server.waitForBoot {
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
     };
-    // Feeder for a hardware audio input as a sidechain/chain source (audio("dev:...")): reads a
-    // stereo pair off the booted device's inputs (SoundIn, 0-indexed) and writes it to a bus.
-    SynthDef(\poptart_soundin, { |out, in = 0, gain = 1|
-        Out.ar(out, SoundIn.ar([in, in + 1]) * gain);
+    // Feeder for a hardware audio input as a sidechain/chain source (input(...) / audio("dev:...")):
+    // reads two channels off the booted device's inputs (SoundIn, 0-indexed) and writes them to a
+    // bus. The two are read independently, so a pair need not be adjacent - input(1, 5) is as valid
+    // as input(1, 2). Two separate SoundIn.ar calls rather than SoundIn.ar([inA, inB]): the array
+    // form tests its elements for consecutiveness with ==, which is meaningless on controls (it
+    // compares UGen identity, so it silently takes the multichannel-expand branch). Reading each
+    // channel explicitly says what we mean and doesn't rest on that. Channel numbers arrive already
+    // resolved to absolute and clamped to the device (wireAudio), so these are plain bus indices.
+    SynthDef(\poptart_soundin, { |out, inA = 0, inB = 1, gain = 1|
+        Out.ar(out, [SoundIn.ar(inA), SoundIn.ar(inB)] * gain);
+    }).add;
+    // Mono form (input(3) - one channel): the same source lands on BOTH sides, so a mic sits
+    // centred rather than hard left.
+    SynthDef(\poptart_soundin_mono, { |out, inA = 0, gain = 1|
+        Out.ar(out, SoundIn.ar(inA).dup * gain);
     }).add;
     // Feeder for a named audio bus read as a chain source (audio("busName")): copies the summed
     // bus into the sink's input bus. Runs at the sink group's head, after the bus's writer tracks
@@ -1400,7 +1432,8 @@ OSCdef(\poptartClearMidiRoute, { |msg|
 // Audio into an fx aux (Sig#audio injector): wireAudio handles both a track source (cross-track
 // bus + send + ordering) and a device source (SoundIn feeder). See wireAudio for the mechanics.
 OSCdef(\poptartInjectAudio, { |msg|
-    wireAudio.(msg[1].asSymbol, msg[2].asInteger, msg[3].asString, msg[4].asFloat);
+    wireAudio.(msg[1].asSymbol, msg[2].asInteger, msg[3].asString, msg[4].asFloat,
+        (msg[5] ? 0).asInteger, (msg[6] ? 1).asInteger);
 }, '/poptart/injectAudio');
 
 OSCdef(\poptartClearAudioInject, { |msg|
@@ -1410,7 +1443,8 @@ OSCdef(\poptartClearAudioInject, { |msg|
 // Audio into a track's chain input (the audio() head source): same wiring, sink slot 0 (the
 // track's inBus, already mixed into its instrument slot).
 OSCdef(\poptartSetAudioInput, { |msg|
-    wireAudio.(msg[1].asSymbol, 0, msg[2].asString, 1.0);
+    wireAudio.(msg[1].asSymbol, 0, msg[2].asString, 1.0,
+        (msg[3] ? 0).asInteger, (msg[4] ? 1).asInteger);
 }, '/poptart/setAudioInput');
 
 OSCdef(\poptartClearAudioInput, { |msg|

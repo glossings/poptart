@@ -67,6 +67,13 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - `sc/poptart.scd` — the SuperCollider class/def code: hosts plugins via the `VSTPlugin~` server
   extension, builds one `SynthDef` per track (fixed 8-slot chain: 1 instrument + 7 effects), and
   runs the native LFOs/envelopes sample-accurately inside the audio graph.
+- `audio-devices.js` + `native/` — device enumeration and the aggregate device that lets `input()`
+  reach several interfaces. scsynth opens exactly **one** audio device, so combining a mic and an
+  interface means building a real CoreAudio aggregate: `native/poptart-audio.swift` (committed
+  **prebuilt**, so installing poptart needs no Swift toolchain — rebuild with `native/build.sh`)
+  creates it with drift compensation on every non-master member and reads the subdevice order back,
+  which is what turns `input("Scarlett", 1)` into an absolute channel. Everything degrades to
+  `system_profiler` and a single device if the helper is unavailable.
 
 ### `packages/web-app` — the server and editor
 - `server.js` — a plain Node HTTP server (no Electron). Serves the page, exposes plugin scan /

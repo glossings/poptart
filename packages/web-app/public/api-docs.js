@@ -99,6 +99,12 @@ const API_DOCS = {
     desc: 'As a source: run a hardware input, another track, or a .bus() sum through this chain. As a method after an .fx(): feed that plugin\'s sidechain.',
     eg: 'audio("drums").fx("Saturn 2")',
   },
+  input: {
+    kind: 'builder',
+    sig: 'input(device?, ch, ch2?)',
+    desc: 'A hardware audio input as a track source. Channels are numbered from 1, as on the interface; one is mono and lands centred, two make a stereo pair. The optional device name picks which interface\'s channels those are (only meaningful with a poptart aggregate - see settings). Pass it to .audio() after an .fx() to sidechain off a live input.',
+    eg: 'input("Scarlett", 1).fx("Pro-Q 4")',
+  },
   macro: {
     kind: 'builder',
     sig: 'macro(index)',

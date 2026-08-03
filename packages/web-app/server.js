@@ -8,7 +8,6 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const { execFileSync } = require('node:child_process');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname } = require('./request-guard');
 const { putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
@@ -88,46 +87,67 @@ const settings = loadSettings();
 // - see samples.js). Chosen in the "settings" tab; null/absent means the default ~/.poptart/samples.
 require('@poptart/osc-engine/samples').setSamplesRoot(settings.samplesDir ?? null);
 
-// CoreAudio output devices with channel counts, via system_profiler (macOS - the platform the
-// audio/MIDI plumbing already assumes). Channel counts are why this isn't sclang's
+// Audio devices with channel counts and UIDs, via the poptart-audio CoreAudio helper (with a
+// system_profiler fallback - see audio-devices.js). Channel counts are why this isn't sclang's
 // ServerOptions.outDevices: scsynth needs numOutputBusChannels at boot, and .o(n)'s
 // stereo-pair wraparound has to match the hardware.
+const audioDevices = require('@poptart/osc-engine/audio-devices');
+
+// Output-capable devices in the shape the settings tab and loadEngine expect. `channels` is the
+// output count (what .o(n) wraps at); `inChannels` is the same device's input count, which is what
+// numInputBusChannels gets sized from - scsynth opens this ONE device for both directions.
 function audioOutputDevices() {
-  try {
-    const raw = execFileSync('system_profiler', ['SPAudioDataType', '-json'], { encoding: 'utf8', timeout: 15000 });
-    const groups = JSON.parse(raw).SPAudioDataType ?? [];
-    return groups
-      .flatMap((g) => g._items ?? [])
-      .filter((d) => Number(d.coreaudio_device_output) > 0)
-      .map((d) => ({
-        name: d._name,
-        channels: Number(d.coreaudio_device_output),
-        // The device's input channel count (0 for output-only devices). scsynth opens this one
-        // device for both in and out (see poptart.scd), so it must not be asked for more input
-        // channels than the device has - this is what numInputBusChannels gets sized from.
-        inChannels: Number(d.coreaudio_device_input) || 0,
-        isDefault: d.coreaudio_default_audio_output_device === 'spaudio_yes',
-      }));
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(`[poptart] could not list audio output devices: ${err.message}`);
-    return [];
-  }
+  return audioDevices.listOutputDevices().map((d) => ({
+    uid: d.uid,
+    name: d.name,
+    channels: d.outChannels,
+    inChannels: d.inChannels,
+    isDefault: d.isDefaultOutput,
+    isAggregate: d.isAggregate,
+  }));
 }
+
+// The plain output device the user picked (or the system default) - never the aggregate. This is
+// what playback is bound to, and what becomes the aggregate's clock master when inputs are added.
+function plainOutputDevice(devices) {
+  const candidates = devices.filter((d) => d.uid !== audioDevices.AGGREGATE_UID);
+  const wanted = settings.audioOutputDevice;
+  const chosen = wanted ? candidates.find((d) => d.name === wanted) : null;
+  if (wanted && !chosen) {
+    // eslint-disable-next-line no-console
+    console.warn(`[poptart] saved audio output device "${wanted}" is not connected - using the system default`);
+  }
+  return chosen ?? candidates.find((d) => d.isDefault) ?? null;
+}
+
+// Which device scsynth should actually open. Normally the plain output device - but when extra
+// input devices have been aggregated in, it's poptart's aggregate, since that's the single device
+// carrying all of their channels.
+function deviceToOpen(devices) {
+  if ((settings.audioInputDevices ?? []).length > 0) {
+    const aggregate = devices.find((d) => d.uid === audioDevices.AGGREGATE_UID);
+    if (aggregate) return aggregate;
+    // eslint-disable-next-line no-console
+    console.warn('[poptart] the poptart aggregate device is configured but missing - falling back to the plain output device');
+  }
+  return plainOutputDevice(devices);
+}
+
+// The device scsynth actually opened, as reported by audioOutputDevices() - set by loadEngine on
+// every start and read by wireEngine to tell pattern-core which input channels input() can address.
+let activeAudioDevice = null;
 
 async function loadEngine() {
   try {
     const { OscEngine } = require('@poptart/osc-engine');
-    const devices = audioOutputDevices();
-    const wanted = settings.audioOutputDevice;
-    const chosen = wanted ? devices.find((d) => d.name === wanted) : null;
-    if (wanted && !chosen) {
-      // eslint-disable-next-line no-console
-      console.warn(`[poptart] saved audio output device "${wanted}" is not connected - using the system default`);
-    }
-    // Whichever device scsynth will actually open decides the channel count .o(n) wraps at.
-    const active = chosen ?? devices.find((d) => d.isDefault);
-    const e = new OscEngine({ outDevice: chosen?.name ?? null, outChannels: active?.channels ?? 2, inChannels: active?.inChannels ?? 0 });
+    // Whichever device scsynth will actually open decides the channel count .o(n) wraps at, and
+    // whose input channels input() addresses (wireEngine feeds the layout to pattern-core).
+    const active = deviceToOpen(audioOutputDevices());
+    activeAudioDevice = active ?? null;
+    // Pass the device name only when it isn't the system default: naming it pins inDevice too
+    // (see poptart.scd), which is exactly what we want for a chosen device or the aggregate.
+    const pinned = active && !active.isDefault ? active.name : null;
+    const e = new OscEngine({ outDevice: pinned, outChannels: active?.channels ?? 2, inChannels: active?.inChannels ?? 0 });
     await e.start(48000, 256);
     engineError = null;
     return e;
@@ -194,6 +214,27 @@ function wireEngine() {
   engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackId, slot, name, index, value);
   // Any edit inside a plugin's own window - what auto-pin captures back into the code.
   engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackId, slot);
+  // Which input channels input() can address, and what a device-relative input("name", n) resolves
+  // against. Only the booted device has any, so this is re-fed on every start (a device change is
+  // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
+  patternCore.setAudioInputLayout(audioInputLayout());
+}
+
+// The booted device's input channels, split per subdevice when it's an aggregate - which is what
+// makes input("Scarlett", 1) resolve to the right absolute channel across several interfaces. The
+// order is read back from CoreAudio rather than assumed, and only ACTIVE subdevices are counted,
+// since an unplugged one contributes no channels and renumbers everything after it.
+function audioInputLayout() {
+  if (!activeAudioDevice || !activeAudioDevice.inChannels) return [];
+  const layout = audioDevices.deviceLayout(activeAudioDevice.uid);
+  const subs = (layout?.subDevices ?? []).filter((d) => d.inChannels > 0);
+  if (layout?.missing?.length) {
+    // eslint-disable-next-line no-console
+    console.warn(`[poptart] the audio device is missing ${layout.missing.length} configured `
+      + 'sub-device(s) - input() channel numbers have shifted accordingly');
+  }
+  if (!subs.length) return [{ name: activeAudioDevice.name, inChannels: activeAudioDevice.inChannels }];
+  return subs.map((d) => ({ name: d.name, inChannels: d.inChannels }));
 }
 
 async function init() {
@@ -269,7 +310,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip',
@@ -1537,6 +1578,55 @@ const routes = {
     await restartEngine();
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
     return { status: 200, body: { device } };
+  },
+
+  // Input-capable devices, the saved extra-input selection, and the live channel layout input()
+  // resolves against. `available: false` means no poptart-audio helper, so only the booted device's
+  // own inputs can be used (absolute channel numbers still work).
+  'GET /api/audioInputs': async () => ({
+    status: 200,
+    body: {
+      available: audioDevices.helperAvailable(),
+      devices: audioDevices.listInputDevices(),
+      selected: settings.audioInputDevices ?? [],
+      layout: audioInputLayout(),
+      active: activeAudioDevice?.name ?? null,
+    },
+  }),
+
+  // Body: { uids } - the extra input devices to aggregate with the output device, in the order
+  // their channels should appear. An empty list tears the aggregate down and goes back to opening
+  // the output device directly.
+  //
+  // This MUTATES the machine's audio configuration (the aggregate shows up in Audio MIDI Setup)
+  // and then restarts the engine, so any playing tracks stop - which is exactly why it's an
+  // explicit settings action and never something an eval can trigger.
+  'POST /api/audioInputs': async (body) => {
+    const uids = Array.isArray(body.uids) ? body.uids.map(String) : [];
+    if (uids.length && !audioDevices.helperAvailable()) {
+      throw new Error('combining several input devices needs the poptart-audio helper, which is not available on this system');
+    }
+    const known = audioDevices.listDevices();
+    for (const uid of uids) {
+      if (!known.some((d) => d.uid === uid)) throw new Error(`no audio device with UID ${uid}`);
+    }
+
+    if (uids.length) {
+      // The output device is the clock master: it's the one whose timing playback is bound to, and
+      // every other member gets drift compensation against it.
+      const out = plainOutputDevice(audioOutputDevices());
+      if (!out?.uid) throw new Error('could not determine the output device to build the aggregate around');
+      const members = [out.uid, ...uids.filter((u) => u !== out.uid)];
+      audioDevices.rebuildAggregate(members, out.uid);
+    } else {
+      audioDevices.destroyAggregate();
+    }
+
+    settings.audioInputDevices = uids;
+    saveSettings();
+    await restartEngine();
+    if (!engine) throw new Error(engineError ?? 'engine failed to restart');
+    return { status: 200, body: { selected: uids, layout: audioInputLayout() } };
   },
 };
 

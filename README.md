@@ -428,6 +428,36 @@ On a multichannel device, `.o(n)` routes a track's stereo output to a channel pa
 channels 1/2 (the default), `.o(2)` is 3/4, and so on, wrapping past the device's last pair. It's
 a channel-strip control like `.gain()`/`.pan()`, so patterns and signals work too.
 
+### Audio input
+
+`input()` runs a hardware input through a chain. Channels are numbered from **1**, as labelled on
+the interface; one channel is mono and lands centred, two make a stereo pair (they need not be
+adjacent):
+
+```js
+gtr:  input(3).fx("Amp Room").fx("ValhallaRoom")
+room: input(5, 6).fx("Pro-C 2")
+bass: note("c2*8").synth("Serum 2").fx("Pro-C 2").audio(input(1))   // ducked by a live mic
+```
+
+SuperCollider opens exactly **one** audio device, so by default those are the channels of whatever
+device you're playing through. To use several interfaces at once — a mic *and* an interface — tick
+them under **extra inputs** in the settings tab: poptart builds a single combined (aggregate) audio
+device from them, with drift correction so independent clocks don't slide apart, and opens that
+instead. Applying restarts the engine, like an output device change.
+
+Once several devices are combined, the optional leading name says *whose* channels you mean, so
+you don't have to count offsets by hand (autocomplete inside `input("` lists what's available and
+the channel range each one occupies):
+
+```js
+vox: input("Scarlett", 1).fx("Pro-Q 4")   // channel 1 of that interface, wherever it landed
+```
+
+A name that isn't there warns in the console and falls back to plain channel numbering rather than
+stopping playback. Unplugging a combined interface renumbers the channels after it — poptart says
+so in its log when that happens.
+
 ## Configuration
 
 Most things work out of the box; a few can be pointed elsewhere.
@@ -436,6 +466,7 @@ Most things work out of the box; a few can be pointed elsewhere.
 | --- | --- | --- |
 | Sample library folder | **settings** tab, or `POPTART_SAMPLES_DIR` | `~/.poptart/samples` |
 | Audio output device | **settings** tab | system default |
+| Extra audio **inputs** (combined into one device, so `input()` can reach several interfaces) | **settings** tab | none |
 | Plugin scan directories | `POPTART_VST_DIRS` (colon-separated) | `~/.poptart/plugins` if it exists, else the standard VST locations |
 | Plugins to skip when scanning | `POPTART_VST_EXCLUDE` (colon-separated paths) | none |
 | Saved patterns (and autosaved sessions, under `wip/`) | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |

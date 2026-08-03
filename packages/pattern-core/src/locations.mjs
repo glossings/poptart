@@ -52,13 +52,14 @@ export function injectLocations(code, base = 0) {
 // and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
-  'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'input', 'lfo', 'midicc', 'midikeys', 'pianoroll',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
-// (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid. param() is excluded:
-// its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'midicc', 'midikeys']);
+// (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, input()'s channel
+// numbers (a hardware channel is wiring, not something that can vary per step). param() is
+// excluded: its second argument is the value pattern.
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'midicc', 'midikeys', 'input']);
 
 // Is a string literal here used as a mini-notation pattern (vs a plugin/scale/param-name lookup)?
 // `before` is the code up to the opening quote, `after` the code from just past the closing quote.

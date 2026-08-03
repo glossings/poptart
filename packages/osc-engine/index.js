@@ -963,12 +963,17 @@ class OscEngine {
   // Live head input from the midi()/audio() source builders. io 'midi': play the source's notes
   // on this track's instrument (slot 0) - a track source fans out in Node, a device reuses the
   // midikeys note-route. io 'audio': feed the source's audio into the chain input (sclang).
-  setInputSource(trackId, io, name, channel = 0, scalePcs = null) {
+  //
+  // `hwChans` is [left, right] absolute 0-indexed hardware channels for an input() source (right
+  // -1 = mono, centred engine-side), already resolved against the device layout in pattern-core;
+  // null for a track/bus source or a legacy audio("dev:...") string, which default to channels 0+1.
+  setInputSource(trackId, io, name, channel = 0, scalePcs = null, hwChans = null) {
     if (io === 'midi') {
       if (this._isDevice(name)) this.setMidiNotes(trackId, this._deviceName(name), channel, scalePcs);
       else this._addMidiRoute(name, trackId, 0, null); // slot 0 = instrument, null note = pass source pitch
     } else if (io === 'audio') {
-      this._send('/poptart/setAudioInput', [trackId, name]);
+      const [chA, chB] = hwChans ?? [0, 1];
+      this._send('/poptart/setAudioInput', [trackId, name, chA, chB]);
     }
   }
   clearInputSource(trackId) {
@@ -994,8 +999,10 @@ class OscEngine {
   // track source: sclang allocates a cross-track bus, maps it into that slot's VSTPlugin aux bus,
   // adds a send from the source track's output, and orders the source ahead so the send lands the
   // same block. A "dev:" source: sclang feeds SoundIn into the aux bus. gain scales the send.
-  injectAudio(trackId, slot, name, gain = 1) {
-    this._send('/poptart/injectAudio', [trackId, slot, name, gain]);
+  // `hwChans` is as in setInputSource - the resolved channels of an .audio(input(n)) sidechain.
+  injectAudio(trackId, slot, name, gain = 1, hwChans = null) {
+    const [chA, chB] = hwChans ?? [0, 1];
+    this._send('/poptart/injectAudio', [trackId, slot, name, gain, chA, chB]);
   }
   clearAudioInject(trackId, slot) {
     this._send('/poptart/clearAudioInject', [trackId, slot]);

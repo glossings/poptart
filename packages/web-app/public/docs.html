@@ -819,6 +819,32 @@ kick: s(<span class="s">"bd*4"</span>)</code></pre>
             same instant. Hardware <em>audio</em> input depends on your audio device actually exposing
             inputs (many output devices have none) — pick an input-capable device in settings.
           </div>
+
+          <h4>Live audio in: <code>input()</code></h4>
+          <p>
+            <code>audio()</code> names a source; <code>input()</code> names <strong>channels</strong> on
+            your audio interface. Channels are numbered from <strong>1</strong>, the way they're labelled
+            on the hardware. One channel is mono and lands centred; two make a stereo pair, in the order
+            given — and they need not be adjacent.
+          </p>
+          <pre><code>gtr:  input(3).fx(<span class="s">"Amp Room"</span>)              <span class="c">// channel 3, mono, through an amp sim</span>
+room: input(5, 6).fx(<span class="s">"Pro-C 2"</span>)            <span class="c">// a stereo pair</span>
+vox:  input(<span class="s">"Scarlett"</span>, 1).fx(<span class="s">"Pro-Q 4"</span>)     <span class="c">// channel 1 of that interface</span>
+bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Pro-C 2"</span>).audio(input(1))  <span class="c">// ducked by a live mic</span></code></pre>
+          <p>
+            The audio flows into the same chain input a synth would, so the whole
+            <code>.fx()</code>/<code>.param()</code> chain and channel strip apply. It schedules no notes
+            of its own. Pass an <code>input()</code> to <code>.audio()</code> after an <code>.fx(...)</code>
+            to feed that plugin's sidechain from a live input instead.
+          </p>
+          <div class="callout">
+            <span class="tag">note</span>
+            The optional leading <strong>device name</strong> only matters when your audio device is a
+            poptart aggregate built from several interfaces (settings → audio device). SuperCollider opens
+            exactly one device, so with a plain interface the numbers are already that interface's
+            channels and the name can be left off. A name that isn't in the aggregate warns in the console
+            and falls back to plain channel numbering — it won't stop your set.
+          </div>
         </section>
 
         <!-- ================================================================= -->
@@ -969,6 +995,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>s("bd hh")</code></td><td>sampler pack</td></tr>
             <tr><td><code>midikeys("…")(ch)</code> · <code>keyboard()</code> · <code>tap()</code></td><td>live input</td></tr>
             <tr><td><code>midi("kick")</code> · <code>audio("mic")</code></td><td>source: play/route an input</td></tr>
+            <tr><td><code>input(3)</code> · <code>input("Scarlett", 1, 2)</code></td><td>source: hardware input channels (numbered from 1)</td></tr>
             <tr><td><code>choose(a, b, c)</code></td><td>random pick per cycle</td></tr>
           </table>
           <table>

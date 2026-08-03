@@ -712,6 +712,51 @@ aside h2 {
   margin-top: 6px;
 }
 
+/* a settings row whose control is a block (a list) rather than a single inline field */
+.settings-row-block {
+  display: block;
+  margin-top: 10px;
+}
+
+/* the extra-inputs device list: checkboxes stacked under their label, scrolling once there are
+   more devices than fit rather than pushing the rest of the panel down */
+.check-list {
+  margin-top: 4px;
+  max-height: 132px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  color: var(--text-dim);
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.check-row input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* the resolved channel-range line under the device list - live state, not hint text */
+.settings-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  align-self: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #editorSection,
 #librarySection {
   margin-top: 14px;

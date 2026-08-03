@@ -56,6 +56,11 @@ function warnUser(message) {
   warnSink(message);
 }
 
+/** warnUser for other modules in the package (the scheduler's per-eval routing warnings). */
+export function warnPattern(message) {
+  warnUser(message);
+}
+
 /** Warn, then carry on with `sig` untouched - the shape most "that argument does nothing" cases take. */
 function warnAndKeep(sig, message) {
   warnUser(message);
@@ -610,7 +615,8 @@ export class Sig {
    *   kick: s("bd*4")
    *
    * `source` is another track's label, or a hardware audio input (resolved track-first, same as
-   * .midi(); prefix "track:"/"dev:" to force). `{ gain }` scales the amount sent (default 1). Put
+   * .midi(); prefix "track:"/"dev:" to force). It may also be an input(...) - `.audio(input(1))`
+   * sidechains off a live mic on channel 1. `{ gain }` scales the amount sent (default 1). Put
    * .audio() right after the .fx(...) whose sidechain input it should feed - it needs an effect,
    * since the instrument has no audio input. The engine routes the cross-track audio and orders
    * the source ahead of this track so the send lands the same block. As a *source* at the head of
@@ -621,8 +627,17 @@ export class Sig {
     if (slot < 1) {
       throw new Error('[signal] .audio() feeds an effect\'s aux input - put it after an .fx(...), e.g. .fx("Pro-C 2").audio("kick")');
     }
+    // An input(...) carries its channel request on inputSource.hw; unwrap it so the injector and
+    // the head source resolve through the same path (the scheduler, per eval).
+    const hw = source instanceof Sig ? source.inputSource : null;
+    if (hw) {
+      if (hw.io !== 'audio') {
+        throw new Error('[signal] .audio() takes an audio source - midi(...) routes notes, not audio');
+      }
+      return this._clone({ audioInjects: [...this.audioInjects, { slot, name: hw.name, hw: hw.hw ?? null, gain: opts.gain ?? 1 }] });
+    }
     if (typeof source !== 'string' || !source.trim()) {
-      throw new Error('[signal] .audio() takes a source name (track or audio input), e.g. .audio("kick")');
+      throw new Error('[signal] .audio() takes a source name (track or audio input) or an input(...), e.g. .audio("kick") / .audio(input(1))');
     }
     return this._clone({ audioInjects: [...this.audioInjects, { slot, name: source.trim(), gain: opts.gain ?? 1 }] });
   }
@@ -3028,4 +3043,47 @@ export function midi(name, channel = null) {
 export function audio(name) {
   assertInputName('audio', name);
   return new Sig(() => null, { inputSource: { io: 'audio', name: String(name).trim() } });
+}
+
+/**
+ * A hardware audio INPUT as a track source - the live-input counterpart to midi():
+ *
+ *   gtr:  input(3).fx("Amp Room").fx("ValhallaRoom")            // channel 3 through an amp sim
+ *   vox:  input("Scarlett", 1).fx("Pro-Q 4")                     // channel 1 OF that device
+ *   room: input(5, 6).fx("Pro-C 2")                              // a stereo pair
+ *   bass: note("c2*8").synth("Serum 2").fx("Pro-C 2").audio(input(1))   // ducked by a live mic
+ *
+ * Channels are numbered from 1, matching the numbers on the interface. One channel is mono and
+ * lands centred (duplicated to both sides); two make a stereo pair, in the order given - they need
+ * not be adjacent. Omit them for channels 1 and 2.
+ *
+ * The optional leading device name picks which device's channels those are, matched
+ * case-insensitively by substring. It's only meaningful when the booted audio device is a poptart
+ * aggregate built from several interfaces (settings -> audio device): scsynth opens exactly one
+ * device, so with a plain interface the numbers are already that interface's channels. A name that
+ * isn't in the aggregate warns on the console and falls back to absolute numbering rather than
+ * stopping playback.
+ *
+ * The audio flows into the same chain input a synth would, so the whole .fx()/.param() chain and
+ * channel strip apply; it schedules no notes of its own. Pass an input() to `.audio(...)` after an
+ * .fx(...) to feed that plugin's sidechain instead. (For another track's output or a named bus,
+ * that's audio() - this builder is only ever hardware.)
+ */
+export function input(...args) {
+  const device = typeof args[0] === 'string' ? args.shift().trim() : null;
+  if (device === '') {
+    throw new Error('[signal] input(): the device name can\'t be empty - use input(1) for channel 1 of the booted device');
+  }
+  const chans = args.map((c) => Number(c));
+  if (chans.length > 2) {
+    throw new Error(`[signal] input() takes at most two channels (a stereo pair) - got ${chans.length}`);
+  }
+  if (chans.some((c) => !Number.isFinite(c) || c < 1)) {
+    throw new Error('[signal] input() channels are numbers from 1, as labelled on the interface, e.g. input(1) or input(3, 4)');
+  }
+  // Resolution to absolute channels is deliberately NOT done here: the device layout is a runtime
+  // fact that changes when the aggregate is rebuilt, so the scheduler resolves it per eval.
+  return new Sig(() => null, {
+    inputSource: { io: 'audio', name: `dev:${device ?? ''}`, hw: { device, chans: chans.length ? chans : [1, 2] } },
+  });
 }

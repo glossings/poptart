@@ -977,6 +977,53 @@ function midiDeviceHints(cur, typed) {
   return fetchMidiDevices().then(toResult);
 }
 
+// Addressable audio inputs for the device string of input(". Deliberately the booted device's
+// LAYOUT rather than every input device on the system: SuperCollider opens one device, so a name
+// only resolves if its channels are part of that one (see the settings tab's extra inputs). Same
+// lazy-fetch-then-cache shape as the MIDI device list above.
+let audioInputs = null;
+
+async function fetchAudioInputs() {
+  const firstFetch = audioInputs == null;
+  try {
+    const { layout } = await api('GET', '/api/audioInputs');
+    audioInputs = layout ?? [];
+    if (firstFetch && audioInputs.length === 0) {
+      logLine('input(): the current audio device exposes no inputs - pick an input-capable device in settings', true);
+    }
+  } catch (err) {
+    if (firstFetch) logLine(`input(): audio input list unavailable (${err.message})`, true);
+    audioInputs = audioInputs ?? []; // engine not up yet - background refreshes will self-heal
+  }
+  return audioInputs;
+}
+
+function audioInputHints(cur, typed) {
+  const toResult = (layout) => {
+    // The running offsets here are the same arithmetic the server resolves with, so the popup
+    // shows exactly which channel numbers each name makes available.
+    let offset = 0;
+    const pool = layout.map((d) => {
+      const first = offset + 1;
+      offset += d.inChannels;
+      return { key: d.name, range: d.inChannels === 1 ? `ch ${first}` : `ch ${first}–${offset}` };
+    });
+    let matches = rankedMatches(pool, typed, 24);
+    // The string must name a device that's actually there, so when nothing matches the useful
+    // popup is the full list rather than silence.
+    if (matches.length === 0) matches = pool.slice(0, 24);
+    return hintResult(cur, typed, matches.map((item) => ({
+      text: item.key,
+      displayText: `${item.key} · ${item.range}`,
+    })));
+  };
+  if (audioInputs) {
+    fetchAudioInputs();
+    return toResult(audioInputs);
+  }
+  return fetchAudioInputs().then(toResult);
+}
+
 function wordHints(cur, typed, words, context) {
   const pool = words.map((w) => ({ key: w }));
   const completions = rankedMatches(pool, typed, 24).map((item) => {
@@ -1020,6 +1067,10 @@ function poptartHint(cm) {
   // Inside the device string of midicc(" or midikeys(" → connected MIDI device names.
   m = before.match(/\b(?:midicc|midikeys)\s*\(\s*["']([^"']*)$/);
   if (m) return midiDeviceHints(cur, m[1]);
+
+  // Inside the device string of input(" → the audio inputs the booted device actually exposes.
+  m = before.match(/\binput\s*\(\s*["']([^"']*)$/);
+  if (m) return audioInputHints(cur, m[1]);
 
   // After a dot → chain methods; bare word → top-level builders. A dot straight after a digit is
   // the decimal point of a number being typed (`begin(0.3`), not a chain - offering the whole
@@ -3873,6 +3924,9 @@ const soundsTab = document.getElementById('soundsTab');
 const filesTab = document.getElementById('filesTab');
 const settingsTab = document.getElementById('settingsTab');
 const audioDeviceSelect = document.getElementById('audioDeviceSelect');
+const audioInputList = document.getElementById('audioInputList');
+const audioInputLayoutNote = document.getElementById('audioInputLayout');
+const audioInputApply = document.getElementById('audioInputApply');
 const fileNameInput = document.getElementById('fileNameInput');
 const fileSaveBtn = document.getElementById('fileSaveBtn');
 const fileShareBtn = document.getElementById('fileShareBtn');
@@ -3895,7 +3949,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshSamplesDir(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -3935,6 +3989,7 @@ async function refreshAudioDevices() {
 audioDeviceSelect.addEventListener('change', async () => {
   const device = audioDeviceSelect.value || null;
   const label = device ?? 'the system default';
+  audioInputs = null; // a different device exposes different inputs - refetch on the next popup
   audioDeviceSelect.disabled = true;
   engineStatus.textContent = 'restarting engine…';
   engineStatus.className = 'status';
@@ -3950,6 +4005,111 @@ audioDeviceSelect.addEventListener('change', async () => {
     logLine(e.message ?? String(e), true);
   } finally {
     audioDeviceSelect.disabled = false;
+    refreshStatus().catch(() => {});
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Settings tab - extra audio INPUTS. SuperCollider opens exactly one audio device, so reaching
+// several interfaces at once means combining them into one aggregate device, which poptart builds
+// and maintains (drift-compensated, in a fixed order). Applying rebuilds that device and restarts
+// the engine, so it's a deliberate button press, never automatic.
+//
+// The layout line under the list is what makes input("name", n) legible: it shows the channel
+// ranges each interface actually occupies in the combined device.
+// ---------------------------------------------------------------------------------------------
+
+let audioInputSelection = new Set();
+let audioInputSaved = '';
+
+function renderAudioInputLayout(layout, activeName) {
+  if (!layout?.length) {
+    audioInputLayoutNote.textContent = activeName ? `${activeName} has no inputs` : '';
+    return;
+  }
+  // Running channel offsets - exactly the arithmetic input("name", n) does server-side.
+  let offset = 0;
+  const parts = layout.map((d) => {
+    const first = offset + 1;
+    offset += d.inChannels;
+    return d.inChannels === 1 ? `${d.name} ch ${first}` : `${d.name} ch ${first}–${offset}`;
+  });
+  audioInputLayoutNote.textContent = parts.join(' · ');
+}
+
+function syncAudioInputApply() {
+  const current = [...audioInputSelection].sort().join(',');
+  audioInputApply.disabled = current === audioInputSaved;
+}
+
+async function refreshAudioInputs() {
+  try {
+    const { available, devices, selected, layout, active } = await api('GET', '/api/audioInputs');
+    audioInputSelection = new Set(selected);
+    audioInputSaved = [...audioInputSelection].sort().join(',');
+    audioInputList.innerHTML = '';
+
+    if (!available) {
+      // No helper (non-macOS, or a checkout without the built binary): the booted device's own
+      // inputs still work with absolute channel numbers, there just can't be more than one device.
+      audioInputList.textContent = 'combining several input devices is unavailable on this system';
+      audioInputApply.disabled = true;
+      renderAudioInputLayout(layout, active);
+      return;
+    }
+    if (!devices.length) {
+      audioInputList.textContent = 'no input-capable devices found';
+      audioInputApply.disabled = true;
+      renderAudioInputLayout(layout, active);
+      return;
+    }
+
+    for (const d of devices) {
+      const row = document.createElement('label');
+      row.className = 'check-row';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = audioInputSelection.has(d.uid);
+      box.addEventListener('change', () => {
+        if (box.checked) audioInputSelection.add(d.uid); else audioInputSelection.delete(d.uid);
+        syncAudioInputApply();
+      });
+      const text = document.createElement('span');
+      text.textContent = `${d.name} · ${d.inChannels} in`;
+      row.append(box, text);
+      audioInputList.appendChild(row);
+    }
+    renderAudioInputLayout(layout, active);
+    syncAudioInputApply();
+  } catch (e) {
+    audioInputList.textContent = 'could not list input devices';
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+audioInputApply.addEventListener('click', async () => {
+  const uids = [...audioInputSelection];
+  audioInputApply.disabled = true;
+  engineStatus.textContent = 'restarting engine…';
+  engineStatus.className = 'status';
+  logLine(uids.length
+    ? `combining ${uids.length} input device(s) with the output device - rebuilding the audio device and restarting the engine…`
+    : 'removing the combined audio device - restarting the engine…');
+  try {
+    const { layout } = await api('POST', '/api/audioInputs', { uids });
+    stopHighlighting();
+    playing = false;
+    updateTransportButtons();
+    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
+    audioInputSaved = [...uids].sort().join(',');
+    audioInputs = layout ?? null; // the input(" popup's channel ranges just changed
+    renderAudioInputLayout(layout, null);
+    logLine('audio inputs updated - re-evaluate (Cmd/Ctrl+Enter) to resume playback');
+    refreshAudioDevices().catch(() => {});
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    syncAudioInputApply();
     refreshStatus().catch(() => {});
   }
 });
