@@ -542,21 +542,23 @@ export class Sig {
   }
 
   /**
-   * Multiplies each event's duration, sampled per onset: `.clip(2)` makes every note ring for
-   * twice its step width; `.clip("<1 4 1>*4")` reads the control at each event (structure
-   * stays with the pattern, unlike .vel()). Same knob as the `clip` field in
-   * .as("note:vel:clip") - the noteOff just lands later (possibly in a following cycle), like
-   * a mini-notation tie's ringing tail. Non-positive or missing control values fall back to 1.
+   * Multiplies each event's duration, read per onset: `.clip(2)` makes every note ring for twice
+   * its step width; `.clip("<1 4 1>*4")` reads the control at each event. Same knob as the `clip`
+   * field in .as("note:vel:clip") - the noteOff just lands later (possibly in a following cycle),
+   * like a mini-notation tie's ringing tail. Non-positive or missing values fall back to 1.
+   *
+   * clip is a key on the event bundle like any other (see Sig#noteChannels): setting it replaces
+   * whatever clip was in force, and arithmetic composes with it - `.mul(clip(2))` doubles the
+   * ringing of a pattern that already carries its own, `"0:2".as("n:clip").mul(clip(2))` rings 4
+   * steps. Nothing about the pattern's STRUCTURE changes - the step stays its own width, and the
+   * multiplication happens where the event is emitted (see soundingEnd).
    */
   clip(value) {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .clip() needs a step pattern, e.g. n("0 3 5").clip(2)');
     }
     const sig = toSignal(value);
-    // clip is a note channel (see Sig#noteChannels) so it survives a later pitch swap. Unlike vel it
-    // doesn't carry a merged value - it stretches each event's END (its ringing duration) - so it's
-    // applied by applyClip rather than crossMerge.
-    const stepsForCycle = applyClip(this.stepsForCycle, sig);
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('clip'));
     return this._clone({ noteChannels: { ...this.noteChannels, clip: sig }, stepsForCycle });
   }
 
@@ -736,15 +738,28 @@ export class Sig {
   }
 
   /**
-   * Arithmetic aimed at one sampler CHANNEL rather than at the pattern's values (see _binop and
-   * the control builders below). The channel's current signal is the left operand; where it isn't
-   * set yet the channel's resting default stands in - 1 for speed/stretch, 0 for begin, 24 for the
+   * Arithmetic aimed at one CHANNEL rather than at the pattern's values (see _binop and the control
+   * builders below). The channel's current signal is the left operand; where it isn't set yet the
+   * channel's resting default stands in - 1 for speed/stretch/vel/clip, 0 for begin, 24 for the
    * repitch note - so `x.mul(speed("-1"))` on a pattern with no explicit speed is 1 * -1, and
    * `s("rave").add(7)` is "as recorded, seven semitones up". With the channel unset the OPERAND
    * supplies the step structure (via mapValue), so `x.mul(speed("1 -1"))` subdivides exactly as
    * `.speed("1 -1")` does.
+   *
+   * Note channels work identically - `"0:2".as("n:clip").mul(clip(2))` rings each note for four
+   * steps instead of two - which is the whole point of them being ordinary keys.
    */
   _ctlBinop(ctl, other, fn) {
+    const note = NOTE_CONTROLS[ctl];
+    if (note) {
+      const otherSig = bareSig(toSignal(other));
+      const current = this.noteChannels[note.key];
+      const combined =
+        current instanceof Sig
+          ? bareSig(current)._binop(ctl, otherSig, fn, false)
+          : otherSig.mapValue((v) => fn(note.unset, Number(v)));
+      return this[ctl](combined);
+    }
     const spec = SAMPLER_CONTROLS[ctl];
     if (!this.sampler) {
       throw new Error(`[signal] ${ctl}() only applies to a sampler pattern - start with s("pack")`);
@@ -890,9 +905,7 @@ export class Sig {
     return new Sig(sample, {
       stepsForCycle,
       ...transformed._meta(),
-      // clip is left out: it has already been baked into both grids (applyClip), so switching the
-      // channel too would stretch a re-merged grid twice.
-      noteChannels: switched(this.noteChannels, transformed.noteChannels, CLIP_ONLY),
+      noteChannels: switched(this.noteChannels, transformed.noteChannels),
       // Only when the callback's result is still a sampler pattern - a callback that swapped the
       // track for a synth one has no channels to switch, and must not be handed a sampler back.
       ...(transformed.sampler ? { sampler: switched(this.sampler, transformed.sampler) } : {}),
@@ -1287,9 +1300,14 @@ export class Sig {
     }
     const idxSig = toSignal(indices);
     const base = this.stepsForCycle;
+    const channels = this.noteChannels;
     const stepsForCycle = (cycle) => {
       const out = [];
-      for (const seg of chordSegments(base(cycle))) {
+      // "The chord is everything ringing" is a question about SOUNDING time, so clip is resolved
+      // here (withSoundingSpan) before the chord is read - a drawn chord whose notes have different
+      // lengths rings exactly as long as its longest note. The arp notes it emits carry their own
+      // spans, so the key is consumed rather than passed on for the scheduler to apply again.
+      for (const seg of chordSegments(base(cycle).map((st) => withSoundingSpan(st, channels, cycle)))) {
         const span = seg.end - seg.start;
         // The chord's tones, low to high - the ladder the indices climb. Values are already MIDI
         // numbers on a note()/n() pattern; a bare mini string ("[c3,e3,g3]".arp(...)) still holds
@@ -1336,8 +1354,9 @@ export class Sig {
     // s("breaks2").slice("0 1 2 3") plays four quarter-cycle events, not one, and a `,`-stacked
     // value plays its layers at once - `.speed("1.1,0.9")` is two hits, detuned apart. Each event
     // carries the layer's own value (stampCfg), which is what the scheduler reads back. 'auto'
-    // (fit) and plain-number Sigs have no stepsForCycle, so crossMerge leaves the grid alone.
-    const stepsForCycle = sig instanceof Sig ? crossMerge(this.stepsForCycle, sig, stampCfg(key)) : this.stepsForCycle;
+    // (fit) and plain-number Sigs have no stepsForCycle, so crossMerge only clears the channel and
+    // leaves the structure alone - the value is then sampled per onset instead.
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampCfg(key));
     return this._clone({ sampler: { ...this.sampler, [key]: sig }, stepsForCycle });
   }
 
@@ -1492,31 +1511,52 @@ export class Sig {
     if (!this.stepsForCycle) {
       throw new Error('[signal] .as() needs a step pattern, e.g. "<36:1:4 ~>*8".as("note:vel:clip")');
     }
-    // Pull field `f` out of each "a:b:c" token as its own sub-signal, keeping this pattern's step
-    // grid so every field's values line up with the same onsets. A token missing that field (or
-    // rests) yields null there - a gate-off for the pitch stream, "use the default" for vel/clip.
-    const fieldSig = (f, coerce) => {
-      const i = fields.indexOf(f);
-      return this.mapValue((raw) => {
-        const p = String(raw).split(':')[i];
-        return p === undefined || p === '' ? null : coerce(p);
-      });
+    // Pull field `f` out of one "a:b:c" token. A token missing that field (or a rest) yields null -
+    // a gate-off for the pitch stream, "use the default" for vel/clip.
+    const fieldOf = (raw, f, coerce) => {
+      const p = String(raw).split(':')[fields.indexOf(f)];
+      return p === undefined || p === '' ? null : coerce(p);
     };
+    // The same field pulled out as its own sub-signal over this pattern's step grid.
+    const fieldSig = (f, coerce) => this.mapValue((raw) => fieldOf(raw, f, coerce));
+    const hasVel = fields.includes('vel');
+    const hasClip = fields.includes('clip');
+    // vel/clip are split off PER STEP rather than by sampling a parallel signal at each onset,
+    // because every field here comes off the same token: a chord cell - `[57:0.8,59:10]`, what the
+    // piano roll writes for a chord whose notes differ in length or velocity - puts two steps at the
+    // SAME onset, and a point sample there can only return one of the two values (both notes would
+    // take the first layer's clip). Walking the steps keeps each token's fields with its own note.
+    // Both land as plain keys on the event, the same ones .vel()/.clip() merge.
+    let base = this;
+    if (hasVel || hasClip) {
+      const split = (s) => {
+        if (s.value == null) return s;
+        const step = { ...s };
+        for (const f of ['vel', 'clip']) {
+          if (!fields.includes(f)) continue;
+          const v = fieldOf(s.value, f, Number);
+          if (v != null && !Number.isNaN(v)) step[f] = v; // absent -> unset, i.e. the default
+        }
+        return step;
+      };
+      base = this._clone({ stepsForCycle: (cycle) => this.stepsForCycle(cycle).map(split) });
+    }
     // The value stream is the pitch tokens (note = absolute MIDI, n = scale degree). With no pitch
     // field every present token fires the default note, so a vel/clip-only spec still triggers
-    // (and a later .note()/.n() can replace this placeholder pitch).
+    // (and a later .note()/.n() can replace this placeholder pitch). mapValue keeps each step's
+    // other fields, so the vel/end stamped above ride through onto the pitch grid.
     let out;
-    if (fields.includes('note')) out = withPitchKind(fieldSig('note', parseNoteValue), 'note');
-    else if (fields.includes('n')) out = withPitchKind(fieldSig('n', (p) => Number(p)), 'degree');
-    else out = withPitchKind(this.mapValue(() => DEFAULT_SYNTH_NOTE), 'note');
-    // vel becomes a note channel (same one .vel() sets), sampled per onset - not cross-merged here
-    // because .as()'s vel shares the note grid (no subdivision to do) and a token missing its vel
-    // field must default to 1 at the walker, not drop the note. clip stretches each event's duration
-    // (same channel .clip() sets). Both survive a later .note()/.n()/.s() (they ride in noteChannels
-    // and re-merge onto the new trigger), which is what lets .as("vel").note("f3") work.
-    if (fields.includes('vel')) out = out._clone({ noteChannels: { ...out.noteChannels, vel: fieldSig('vel', (p) => Number(p)) } });
-    if (fields.includes('clip')) out = out.clip(fieldSig('clip', (p) => Number(p)));
-    return out;
+    if (fields.includes('note')) out = withPitchKind(base.mapValue((raw) => fieldOf(raw, 'note', parseNoteValue)), 'note');
+    else if (fields.includes('n')) out = withPitchKind(base.mapValue((raw) => fieldOf(raw, 'n', Number)), 'degree');
+    else out = withPitchKind(base.mapValue(() => DEFAULT_SYNTH_NOTE), 'note');
+    // The two also ride as note channels (the same ones .vel()/.clip() set) so they survive a later
+    // .note()/.n()/.s() replacing the trigger grid - that's what lets .as("vel").note("f3") work.
+    // They are NOT merged onto THIS grid (no .vel()/.clip() call here): the per-step split above
+    // already put each token's own value on its own event, which a merge would overwrite.
+    const noteChannels = { ...out.noteChannels };
+    if (hasVel) noteChannels.vel = fieldSig('vel', Number);
+    if (hasClip) noteChannels.clip = fieldSig('clip', Number);
+    return hasVel || hasClip ? out._clone({ noteChannels }) : out;
   }
 
   /**
@@ -1771,17 +1811,34 @@ function squeezeSteps(sig, cycle, start, span) {
 // control value (a pack name, a junk token) leaves the field unset so the reader falls back to its
 // default. `vel` sits directly on the step (see Sig#noteChannels); sampler config values go under
 // `cfg`, keyed by their Sig#sampler key, which is where the scheduler reads them per event.
+//
+// Each stamp also carries the `clear` that takes its channel's value back OFF an event, which is
+// what makes setting a control twice mean the second one - see crossMerge.
 function stampField(name) {
-  return (step, value) => {
+  const stamp = (step, value) => {
     const v = Number(value);
     if (!Number.isNaN(v)) step[name] = v;
   };
+  stamp.clear = (step) => {
+    if (!(name in step)) return step;
+    const { [name]: _old, ...rest } = step;
+    return rest;
+  };
+  return stamp;
 }
 function stampCfg(key) {
-  return (step, value) => {
+  const stamp = (step, value) => {
     const v = Number(value);
     if (!Number.isNaN(v)) step.cfg = { ...step.cfg, [key]: v };
   };
+  stamp.clear = (step) => {
+    if (step.cfg?.[key] === undefined) return step;
+    const { [key]: _old, ...cfg } = step.cfg;
+    const out = { ...step, cfg };
+    if (!Object.keys(cfg).length) delete out.cfg; // the last channel off leaves no cfg at all
+    return out;
+  };
+  return stamp;
 }
 
 // Everything about a merged step that the scheduler can actually hear: when it sounds, what it
@@ -1828,7 +1885,15 @@ function collapseRestamped(steps, keys, baseKeys) {
 }
 
 function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
-  if (!baseStepsForCycle || !ctlSig.stepsForCycle) return baseStepsForCycle;
+  if (!baseStepsForCycle) return baseStepsForCycle;
+  // Setting a control REPLACES that channel, so the first thing this does is take the previous
+  // control's value back off the events. Without it the stale merged value would keep winning at
+  // read time (readers prefer what's on the event - see the scheduler's _velAt / _sampleConfigAt) whenever
+  // the new control merges nothing over it: a control with no grid of its own (a plain number, an
+  // LFO) has nothing to cross-product, and even a patterned one leaves an event untouched where its
+  // own value is a rest or non-numeric. `.speed("1 2").speed(0.5)` is 0.5 twice, not 1 then 2.
+  const clear = stamp?.clear ?? ((step) => step);
+  if (!ctlSig?.stepsForCycle) return (cycle) => baseStepsForCycle(cycle).map(clear);
   // A control that varies within the cycle (choose/irand) has no honest grid to cross-product -
   // its stepsForCycle is only the phase-0 draw - so the base keeps its own structure and the
   // control is read at each onset instead, exactly as a continuous control is. Both the merged
@@ -1840,7 +1905,7 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
         if (s.value == null) continue;
         const ev = readEvent(ctlSig, cycle + s.start);
         if (ev.value == null) continue; // a rest in the control drops the event, as below
-        const step = { ...s };
+        const step = clear({ ...s });
         const locs = [...stepLocs(s), ...ev.locs];
         if (locs.length) step.locs = locs;
         if (stamp) stamp(step, ev.value);
@@ -1856,13 +1921,18 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
     const baseKeys = [];
     for (const s of baseStepsForCycle(cycle)) {
       if (s.value == null) continue;
+      // Identity BEFORE this channel is cleared off: what tells the collapse below apart from a
+      // genuine stack. `.n("0,7").add(12)` re-merges a rebuilt 2-layer note channel onto 2 events
+      // that already carry note 0 and note 7 - those old values are what say "same event, restamped"
+      // rather than "two events". The cleared copy is what the new value lands on.
       const baseKey = stepKey(s);
+      const cleared = clear(s);
       for (const c of ctlSteps) {
         const start = Math.max(s.start, c.start);
         const end = Math.min(s.end, c.end);
         if (start >= end) continue;
         const cont = (start > s.start || s.cont) && (start > c.start || c.cont);
-        const step = { ...s, start, end, cont: cont || undefined };
+        const step = { ...cleared, start, end, cont: cont || undefined };
         // Union both sides' highlight spans so the control's live atom lights alongside the note's:
         // note("c e g").vel("1 0.5 0.2") lights each velocity with its note, and s("x").note("0 2")
         // lights the repitch degrees. Same union _binop/.when() do for their operands.
@@ -1945,33 +2015,60 @@ function ribMergeArg(baseStepsForCycle, argSig) {
   };
 }
 
-// Stretches each event's ringing duration by the clip factor (see Sig#clip): sampled per event at
-// its midpoint in cycle-time (cps=1), same convention as _binop's patterned operands. A non-positive
-// or missing factor falls back to 1. Factored out of Sig#clip so pitch-setting can re-apply it (see
-// applyNoteChannels).
-function applyClip(baseStepsForCycle, sig) {
-  return (cycle) =>
-    baseStepsForCycle(cycle).map((s) => {
-      if (s.value == null) return s;
-      const raw = Number(sig.sample(cycle + (s.start + s.end) / 2, 1));
-      const clip = raw > 0 && !Number.isNaN(raw) ? raw : 1;
-      return { ...s, end: s.start + (s.end - s.start) * clip };
-    });
+/**
+ * One channel's value for one event, read the same way for every channel: the value merged onto the
+ * event wins (a control with a grid of its own - `.vel("1 .5")`, a chord token's `57:0.8`), else the
+ * channel signal is sampled at the onset (a control with no grid - `vel(0.6)`, `clip(sine)`), else
+ * the channel is unset and the caller's default stands. `time`/`cps`/`pos` are the onset, in
+ * whatever clock the caller reads in - real seconds under the transport, cycles (cps 1) off-line.
+ */
+export function channelAt(name, step, channels, time, cps = 1, pos = undefined) {
+  const merged = step[name];
+  if (typeof merged === 'number' && !Number.isNaN(merged)) return merged;
+  const ch = channels?.[name];
+  if (ch) {
+    const v = Number(ch.sample(time, cps, pos));
+    if (!Number.isNaN(v)) return v;
+  }
+  return undefined;
+}
+
+/**
+ * Where an event actually stops sounding: its own step width times its `clip` (see Sig#clip).
+ *
+ * clip is carried as a plain key on the event and applied HERE, at the point of emission - by the
+ * scheduler when it places the noteOff, by the highlighter, by .arp() when it reads how long a chord
+ * rings. That's what keeps it an ordinary control: setting it just overwrites a key and arithmetic
+ * just composes, with no structure to unpick. A non-positive or missing clip is 1 (ring for exactly
+ * the step). The returned end is in the step's own cycle-relative coordinates, like step.end.
+ */
+export function soundingEnd(step, channels, time, cps = 1, pos = undefined) {
+  const raw = channelAt('clip', step, channels, time, cps, pos);
+  const clip = raw > 0 && !Number.isNaN(raw) ? raw : 1;
+  return step.start + (step.end - step.start) * clip;
+}
+
+// One event with its clip CONSUMED: the ringing span is now the step's own, and the key is gone so a
+// later emitter can't apply it twice. For readers that re-emit events rather than play them (.arp()).
+export function withSoundingSpan(step, channels, cycle) {
+  if (step.value == null) return step;
+  const at = cycle + step.start;
+  const { clip: _applied, ...rest } = step;
+  return { ...rest, end: soundingEnd(step, channels, at, 1, at) };
 }
 
 // Re-merges the persistent note channels (vel, clip) onto a freshly (re)established trigger grid.
 // Called by the pitch-setting builders (_noteLike) so a channel attached BEFORE the pitch survives
 // the grid being replaced - "<0 1 0.5>".as("vel").note("f3") keeps its velocities. In the ordinary
 // order (pitch first, then .vel()/.clip()) the channels are already merged in and noteChannels is
-// empty at pitch-set time, so this is a no-op. vel before clip, matching .as()'s field order.
+// empty at pitch-set time, so this is a no-op. Every channel re-merges the same way.
 function applyNoteChannels(baseStepsForCycle, noteChannels) {
   let out = baseStepsForCycle;
-  if (noteChannels.vel) out = crossMerge(out, noteChannels.vel, stampField('vel'));
-  if (noteChannels.clip) out = applyClip(out, noteChannels.clip);
+  for (const name of Object.keys(NOTE_CONTROLS)) {
+    if (noteChannels[name]) out = crossMerge(out, noteChannels[name], stampField(name));
+  }
   return out;
 }
-
-const CLIP_ONLY = new Set(['clip']);
 
 // The enum controls (Sig#loopwrap, Sig#loopdir), by sampler key: the mode names in order, so the
 // index IS the number the control carries. They're ordinary patternable channels - the point of
@@ -2217,6 +2314,16 @@ const SAMPLER_CONTROLS = {
   note: { key: 'note', unset: DEFAULT_SYNTH_NOTE }, // reached by bare arithmetic, not a builder
 };
 
+// The note channels (Sig#noteChannels) - the same kind of thing as the sampler controls above, but
+// carried on the event itself rather than under `cfg`, and read on BOTH track kinds: vel is MIDI
+// velocity or sample gain, clip multiplies the ringing duration. `unset` is the resting value an
+// operand combines with where the channel isn't set yet, so `.mul(clip(2))` on a pattern with no
+// clip of its own is 1 * 2.
+const NOTE_CONTROLS = {
+  vel: { key: 'vel', unset: 1 },
+  clip: { key: 'clip', unset: 1 },
+};
+
 // A signal's VALUES with no track metadata and no control tag attached - what a channel signal is.
 // Combining controls goes through this so a merge can't drag an instrument/sampler along with it,
 // and so a control operand's own tag can't re-route the merge back into itself. pitchKind is a
@@ -2235,7 +2342,7 @@ function bareSig(sig) {
 }
 
 /**
- * The sampler config methods, also available as TOP-LEVEL builders - Strudel's control patterns.
+ * The control methods, also available as TOP-LEVEL builders - Strudel's control patterns.
  * `speed("-1")` isn't a pattern whose values are -1; it's the *speed channel* carrying -1. On its
  * own that's just the longer way to write `s("bd").speed("-1")`, but as an OPERAND it lets a
  * combinator reach into one channel of a pattern it was handed, exactly as `x.add(note(3))`
@@ -2245,15 +2352,15 @@ function bareSig(sig) {
  *     .when(rand().gte(0.7), x => x.add(flip(1)))       // ~30% of bars play backwards
  *     .when(rand().gte(0.5), x => x.ply("4"))
  *
- * The channel's current value is the left operand (its resting default where it isn't set yet -
- * see SAMPLER_CONTROLS), so `.mul(speed("-1"))` flips whatever speed is in force rather than
- * replacing it, and it composes with `.fit()` the way an explicit `.speed()` does. Values take
- * anything a signal takes: numbers, mini strings, LFOs, `choose()`/`irand()`.
+ * The channel's current value is the left operand (its resting default where it isn't set yet - see
+ * SAMPLER_CONTROLS / NOTE_CONTROLS), so `.mul(speed("-1"))` flips whatever speed is in force rather
+ * than replacing it, and `.mul(clip(2))` doubles whatever ringing is in force. Values take anything
+ * a signal takes: numbers, mini strings, LFOs, `choose()`/`irand()`.
  *
- * Using one on a non-sampler pattern is an error (there's no channel to aim at) - the same message
- * the method form gives.
+ * The note channels (vel, clip) work on any pattern; aiming a SAMPLER control at a non-sampler
+ * pattern is an error (there's no channel there) - the same message the method form gives.
  */
-function samplerControl(name) {
+function controlBuilder(name) {
   return (value, opts) => {
     // .loop()'s old options object is gone: wrap/dir are their own controls now, and both forms
     // of those work as operands like any other channel. Warned rather than thrown, and rather than
@@ -2274,38 +2381,46 @@ function samplerControl(name) {
 }
 
 /** Which sample of the pack to play, 0-based - the top-level form of `.i()`. */
-export const i = samplerControl('i');
+export const i = controlBuilder('i');
 /** Playback start position within the sample, 0..1 - the top-level form of `.begin()`. */
-export const begin = samplerControl('begin');
+export const begin = controlBuilder('begin');
 /** Playback end position within the sample, 0..1 - the top-level form of `.end()`. */
-export const end = samplerControl('end');
+export const end = controlBuilder('end');
 /** Loop the sample for the event instead of one-shot - the top-level form of `.loop()`. */
-export const loop = samplerControl('loop');
+export const loop = controlBuilder('loop');
 /** Which region a loop runs round: 0 = the whole file, 1 = the begin..end window. Top-level `.loopwrap()`. */
-export const loopwrap = samplerControl('loopwrap');
+export const loopwrap = controlBuilder('loopwrap');
 /** How a loop turns over: 0 = jump back, 1 = pingpong. Top-level `.loopdir()`. */
-export const loopdir = samplerControl('loopdir');
+export const loopdir = controlBuilder('loopdir');
 /** Playback rate off begin(); negative wraps backwards round the region - the top-level form of `.speed()`. */
-export const speed = samplerControl('speed');
+export const speed = controlBuilder('speed');
 /** Reverse the window into the beat (over 0.5 = on) - the top-level form of `.flip()`. */
-export const flip = samplerControl('flip');
+export const flip = controlBuilder('flip');
 /** Granular timestretch factor - the top-level form of `.stretch()`. */
-export const stretch = samplerControl('stretch');
+export const stretch = controlBuilder('stretch');
 /** Repitch the sample to last this many cycles - the top-level form of `.fit()`. */
-export const fit = samplerControl('fit');
+export const fit = controlBuilder('fit');
 /** Play the nth detected transient slice - the top-level form of `.slice()`. */
-export const slice = samplerControl('slice');
+export const slice = controlBuilder('slice');
 /** Attack, as a multiple of the played duration - the top-level form of `.attack()`. */
-export const attack = samplerControl('attack');
+export const attack = controlBuilder('attack');
 /** Decay, as a multiple of the played duration - the top-level form of `.decay()`. */
-export const decay = samplerControl('decay');
+export const decay = controlBuilder('decay');
 /** Sustain level, 0..1 - the top-level form of `.sustain()`. */
-export const sustain = samplerControl('sustain');
+export const sustain = controlBuilder('sustain');
 /** Release, as a multiple of the played duration - the top-level form of `.release()`. */
-export const release = samplerControl('release');
+export const release = controlBuilder('release');
 
-/** Every top-level sampler control, by name - what the host puts in userland scope. */
-export const SAMPLER_CONTROL_NAMES = Object.keys(SAMPLER_CONTROLS).filter((k) => k !== 'note');
+/** Per-note velocity as an operand - the top-level form of `.vel()`. */
+export const vel = controlBuilder('vel');
+/** Duration multiplier as an operand - the top-level form of `.clip()`. */
+export const clip = controlBuilder('clip');
+
+/** Every top-level control, by name - what the host puts in userland scope. */
+export const SAMPLER_CONTROL_NAMES = [
+  ...Object.keys(SAMPLER_CONTROLS).filter((k) => k !== 'note'),
+  ...Object.keys(NOTE_CONTROLS),
+];
 
 // Build-time seeds for the randomised builders (choose/irand/.degrade()). Independent calls must
 // draw independently, so each takes the next seed off ONE shared counter. A counter per builder

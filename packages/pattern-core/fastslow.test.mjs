@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { parseMini, getStepsForCycle, warpSteps } from './src/mini.mjs';
-import { n, note, s, sine, env } from './src/signal.mjs';
+import { n, note, s, sine, env, soundingEnd } from './src/signal.mjs';
 
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, msg ?? `${a} !~ ${b}`);
 
@@ -115,12 +115,26 @@ test('.fast() continuous sample() agrees with the warped step grid', () => {
 });
 
 test('a ringing tail crossing a cycle under .slow() becomes a cont step', () => {
-  const sig = n('0 1').clip(2).slow(2);
+  // A tie is real structure - the step itself is long - so slowing it across the cycle line leaves a
+  // cont tail in the next cycle. (A .clip() does NOT: it's a key the emitter reads, so the note
+  // rings past the line without any step being there - see the next test.)
+  const sig = n('0 _ _ 1').slow(2);
   const c1 = sig.stepsForCycle(1).sort((a, b) => a.start - b.start);
   const tail = c1.find((st) => st.cont);
   assert.ok(tail, 'expected the held "0" to report a cont tail in cycle 1');
   assert.equal(tail.value, 0);
   assert.deepEqual(onsets(sig, 1).map((st) => st.value), [1]);
+});
+
+test('.clip() rings past the cycle without inventing a step there', () => {
+  const sig = n('0 1').clip(2).slow(2);
+  // Each note's own step is a whole cycle after .slow(2); clip 2 makes it SOUND for two.
+  const c0 = onsets(sig, 0);
+  assert.deepEqual(c0.map((st) => [st.start, st.end]), [[0, 1]]);
+  close(soundingEnd(c0[0], sig.noteChannels, 0, 1, 0), 2);
+  // Cycle 1 holds the next note's own onset - no phantom tail, and nothing dropped.
+  assert.deepEqual(onsets(sig, 1).map((st) => st.value), [1]);
+  assert.equal(sig.stepsForCycle(1).some((st) => st.cont), false);
 });
 
 test('.vel() attached before .fast() warps with its events', () => {

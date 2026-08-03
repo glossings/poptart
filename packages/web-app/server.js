@@ -269,9 +269,9 @@ function syncUserStringMethods() {
 }
 
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'pianoroll',
-  // Every sampler config method also as a top-level control builder - speed("-1"), begin(0.5) -
+  // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
@@ -559,7 +559,14 @@ function highlightGrid(sig, start, end, from, count) {
           .stepLocs(s)
           .filter((l) => l[0] >= start && l[1] <= end)
           .map((l) => [l[0] - start, l[1] - start]);
-        if (locs.length) out.push({ start: s.start, end: s.end, ...(s.cont ? { cont: true } : {}), locs });
+        // A lit atom stays lit for as long as its note SOUNDS, so clip is applied here exactly as
+        // the scheduler applies it when placing the noteOff (see pattern-core soundingEnd) - the
+        // highlighter is just another emitter of the same event.
+        if (locs.length) {
+          const at = c + s.start;
+          const soundsTo = patternCore.soundingEnd(s, sub.noteChannels, at, 1, at);
+          out.push({ start: s.start, end: soundsTo, ...(s.cont ? { cont: true } : {}), locs });
+        }
       }
     }
     grid.push({ cycle: c, steps: out });

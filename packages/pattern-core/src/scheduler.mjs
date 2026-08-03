@@ -20,7 +20,7 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound, LOOP_MODES, loopModeAt } from './signal.mjs';
+import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
@@ -529,12 +529,15 @@ export class Scheduler {
         if (step.cont) continue; // tie/hold: the sounding event's onset was in an earlier step
 
         const stepStartCycle = cycle + step.start;
-        const stepEndCycle = cycle + step.end;
         // Only trigger onsets newly entering the lookahead window - each tick advances
         // `fromCycle` to the previous tick's `toCycle`, so this never double-fires.
         if (stepStartCycle < fromCycle || stepStartCycle >= toCycle) continue;
 
         const onsetSec = this.transport.secAt(stepStartCycle);
+        // How long it rings: the step's own width times its clip channel. This is where clip is
+        // applied - it's a key on the event like any other (see soundingEnd), so the noteOff simply
+        // lands later, possibly cycles later, with nothing about the pattern's structure changed.
+        const stepEndCycle = cycle + this._soundingEnd(step, onsetSec, stepStartCycle);
         const offsetSec = this.transport.secAt(stepEndCycle);
 
         // Velocity is one note channel now, read uniformly for both track kinds (see _velAt): the
@@ -555,7 +558,7 @@ export class Scheduler {
           // of it can be known here: it depends on the sample file's own length.
           const info = this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
           if (this.pattern.logging) {
-            this._logEvent(stepStartCycle, stepEndCycle, formatSampleEvent(pack, cfg, info, step.end - step.start));
+            this._logEvent(stepStartCycle, stepEndCycle, formatSampleEvent(pack, cfg, info, stepEndCycle - stepStartCycle));
           }
         } else {
           const midiNote = Math.round(step.value);
@@ -583,13 +586,14 @@ export class Scheduler {
   // unset (undefined) and the caller supplies the default (full on a synth, engine default gain on a
   // sampler). Maps to MIDI velocity or sample gain depending on the track kind - one read either way.
   _velAt(step, onsetSec, onsetCycle) {
-    if (typeof step.vel === 'number' && !Number.isNaN(step.vel)) return step.vel;
-    const ch = this.pattern.noteChannels?.vel;
-    if (ch) {
-      const v = ch.sample(onsetSec, this.transport.cps, onsetCycle);
-      if (typeof v === 'number' && !Number.isNaN(v)) return v;
-    }
-    return undefined;
+    return channelAt('vel', step, this.pattern.noteChannels, onsetSec, this.transport.cps, onsetCycle);
+  }
+
+  // Where this event stops sounding, in cycle-relative coordinates (see soundingEnd): the step's own
+  // width times its clip channel. Read in transport time, so a continuous clip lines up with the
+  // clock the note is actually played against.
+  _soundingEnd(step, onsetSec, onsetCycle) {
+    return soundingEnd(step, this.pattern.noteChannels, onsetSec, this.transport.cps, onsetCycle);
   }
 
   // Sampler config signals evaluated at one event's onset. `fit: 'auto'` passes through as-is

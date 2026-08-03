@@ -14,7 +14,7 @@ import {
   normalizePianoRollSteps,
   PIANOROLL_DEFAULT_STEPS,
 } from './src/pianoroll.mjs';
-import { pianoroll, note, mini } from './src/signal.mjs';
+import { pianoroll, note, mini, channelAt, soundingEnd } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 test('parsePianoRoll: fields, defaults, and empty input', () => {
@@ -81,22 +81,22 @@ test('pianoroll(): playback matches its own mini-notation conversion', () => {
   const asM = /^`([\s\S]*)`\.as\("([^"]*)"\)$/.exec(expr);
   const noteM = /^note\(`([\s\S]*)`\)$/.exec(expr);
   const rebuilt = asM ? mini(asM[1]).as(asM[2]) : note(noteM[1]);
-  // Effective velocity the way the scheduler reads it (matching scheduler.mjs's _velAt): the step's
-  // own merged vel wins (what the pianoroll builder bakes in), else the vel note channel (what .as()
-  // sets) is sampled at the onset, else 1. Both paths must land on the same value for playback to match.
-  const effVel = (sig, s, cycle) => {
-    if (typeof s.vel === 'number' && !Number.isNaN(s.vel)) return s.vel;
-    const ch = sig.noteChannels?.vel;
-    if (ch) {
-      const v = ch.sample(cycle + s.start, 1, cycle + s.start);
-      if (typeof v === 'number' && !Number.isNaN(v)) return v;
-    }
-    return 1;
-  };
+  // Compared as the scheduler hears them, through the shared channel readers: velocity, and the span
+  // the note SOUNDS for. The two forms carry a note's length differently - the builder gives the step
+  // its real width, the mini round-trip a fixed-width cell plus a `clip` key (the `<…>*grid` cells
+  // can't be any other width) - and it's the sounding span, not the step, that has to agree.
   const norm = (sig, cycle) =>
     sig
       .stepsForCycle(cycle)
-      .map((s) => ({ s: +s.start.toFixed(4), e: +s.end.toFixed(4), v: s.value, vel: effVel(sig, s, cycle) }))
+      .map((s) => {
+        const at = cycle + s.start;
+        return {
+          s: +s.start.toFixed(4),
+          e: +soundingEnd(s, sig.noteChannels, at, 1, at).toFixed(4),
+          v: s.value,
+          vel: channelAt('vel', s, sig.noteChannels, at, 1, at) ?? 1,
+        };
+      })
       .sort((a, b) => a.s - b.s || a.v - b.v);
   for (const c of [0, 1, 2, 3]) assert.deepEqual(norm(pr, c), norm(rebuilt, c));
 });

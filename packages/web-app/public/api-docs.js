@@ -200,12 +200,17 @@ const API_DOCS = {
   dry: { kind: 'method', sig: 'dry(value)', desc: 'How much dry signal still reaches the track\'s own output, 1 by default. .dry(0) leaves only the bus sends.', eg: '.dry(0)' },
   bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Bus send with the dry killed - exactly .bus(name, amount).dry(0).', eg: '.bsend("reverb")' },
   vel: {
-    kind: 'method',
+    kind: 'both',
     sig: 'vel(value)',
-    desc: 'Per-note velocity (MIDI velocity, or sample volume). A patterned vel also gives the track structure - each step retriggers and gates.',
+    desc: 'Per-note velocity (MIDI velocity, or sample volume). A patterned vel also gives the track structure - each step retriggers and gates. As an operand it aims at that channel: .mul(vel(0.5)) halves whatever velocity is in force.',
     eg: '.vel("1 0.6 ~ 0.8")',
   },
-  clip: { kind: 'method', sig: 'clip(value)', desc: 'Multiplies each note\'s ringing duration - .clip(2) holds every note for twice its step.', eg: '.clip("<1 4 1>*4")' },
+  clip: {
+    kind: 'both',
+    sig: 'clip(value)',
+    desc: 'Multiplies each note\'s ringing duration - .clip(2) holds every note for twice its step. Setting it replaces whatever clip was in force; as an operand it composes, so "0:2".as("n:clip").mul(clip(2)) rings for four steps.',
+    eg: '.clip("<1 4 1>*4")',
+  },
 
   // ----------------------------------------------------------------- shaping
   range: { kind: 'method', sig: 'range(min, max)', desc: 'Rescales a 0..1 signal into [min, max]. Bounds may themselves be patterns or signals.', eg: '.range(200, 5000)' },

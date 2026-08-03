@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, note, mini } from './src/signal.mjs';
+import { n, note, mini, s, sine, soundingEnd } from './src/signal.mjs';
 
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, msg ?? `${a} !~ ${b}`);
 
@@ -115,4 +115,43 @@ test('a vel edge landing on a held tie retriggers it', () => {
   assert.equal(g.length, 1);
   assert.ok(!g[0].cont, 'the vel edge turns the held tail into a fresh strike');
   close(g[0].vel, 0.5);
+});
+
+// ---------------------------------------------------------------------------------------------
+// setting a control REPLACES the one set before it, on every channel
+// ---------------------------------------------------------------------------------------------
+// The merged per-step value is what readers prefer (the scheduler's _velAt / _sampleConfigAt), so the
+// previous control's value has to come OFF the events when a new one is set. Otherwise a control
+// that merges nothing over it - one with no grid of its own, or one whose value is a rest there -
+// would leave the old value winning, and `.speed("1 2").speed(0.5)` would still play 1 then 2.
+
+test('a later continuous control replaces a merged one, rather than losing to it', () => {
+  const g = grid(n('0 2').vel('1 0.5').vel(0.7));
+  assert.deepEqual(g.map((x) => x.vel), [undefined, undefined], 'the old per-step vel is off the steps');
+  assert.equal(n('0 2').vel('1 0.5').vel(0.7).noteChannels.vel.sample(0, 1), 0.7);
+  // Same for an LFO - it has no grid either, so it too must clear what came before.
+  assert.deepEqual(grid(n('0 2').vel('1 0.5').vel(sine())).map((x) => x.vel), [undefined, undefined]);
+});
+
+test('a later sampler control replaces the values the previous one merged', () => {
+  assert.deepEqual(grid(s('bd').speed('1 2').speed(0.5)).map((x) => x.cfg), [undefined, undefined]);
+  assert.deepEqual(grid(s('bd').i('0 3').i(7)).map((x) => x.cfg), [undefined, undefined]);
+  // Only that channel is cleared - the others keep what they merged.
+  assert.deepEqual(grid(s('bd').speed('1 2').i('4 5').speed(0.5)).map((x) => x.cfg), [{ index: 4 }, { index: 5 }]);
+});
+
+test('a patterned replacement still wins everywhere, including where it rests', () => {
+  // The `~` merges no speed on the second half; without the clear the old 2 would ring on there.
+  const g = grid(s('bd*2').speed('1 2').speed('3 ~'));
+  assert.deepEqual(g.map((x) => x.cfg), [{ speed: 3 }]);
+});
+
+test('a later .clip() replaces the earlier one instead of compounding it', () => {
+  // Two half-cycle notes at clip 4, then clip 2: they ring 2 x 0.5, not 8 x 0.5.
+  for (const sig of [mini('36:4 47:4').as('note:clip').clip(2), n('0 2').clip(4).clip(2)]) {
+    const rings = grid(sig).map((x) => soundingEnd(x, sig.noteChannels, x.start, 1, x.start) - x.start);
+    assert.deepEqual(rings, [1, 1]);
+    // ...and the grid itself is untouched - clip is a key on the event, not a change of structure.
+    assert.deepEqual(grid(sig).map((x) => [x.start, x.end]), [[0, 0.5], [0.5, 1]]);
+  }
 });
