@@ -200,3 +200,55 @@ test('.sc()\'s octave IS a pattern position - a patterned octave is a real featu
   // `.sc("<3 4>")` alternates octaves per cycle, so its literal must still become a mini().
   assert.match(injectLocations('n("0 2").sc("<3 4>")'), /\.sc\(mini\("<3 4>", \d+\)\)/);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Prefix independence. isPatternPosition's `before` patterns are all anchored to its end, so it
+// only ever looks at the code immediately around the literal - and tailWindow exploits that to
+// avoid rescanning the whole buffer per literal (which cost ~75ms an eval on a patch carrying a
+// captured plugin state, against the scheduler's 150ms lookahead). These pin the equivalence
+// that shortcut depends on: whatever sits further left must not change the verdict.
+// ---------------------------------------------------------------------------------------------
+
+const BLOB = 'QUJD'.repeat(60 * 1024); // ~240kb, like a captured Serum state
+
+test('a literal is judged the same however much code precedes it', () => {
+  const cases = [
+    ['n(', '")'],                              // first argument to a builder
+    ['synth(', '")'],                          // ...to a name-only call
+    ['.speed(', '")'],                         // chain method
+    ['.param("Filter Freq", ', ')'],           // later argument that IS a pattern
+    ['synth("Serum 2", ', ')'],                // later argument of a name-only call
+    ['choose([', ', 3])'],                     // the option in an [option, weight] pair
+    ['const p = ', ';'],                       // outside argument position
+    ['n("0" + ', ')'],                         // part of a larger expression
+    ['', '.fast(2)'],                          // a string that chains a method
+    ['f(g(), ', ')'],                          // nearest paren going left is a close paren
+  ];
+  for (const [before, after] of cases) {
+    const bare = isPatternPosition(before, after);
+    for (const prefix of [`x = "${BLOB}"; `, `synth("S", { state: "${BLOB}" })\n`, '  \n\t']) {
+      assert.equal(isPatternPosition(prefix + before, after), bare, `"${before}" ~ "${after}" after ${prefix.length}b`);
+    }
+  }
+});
+
+test('a state blob neither gets wrapped nor hides the literals after it', () => {
+  const code = `n("0 3").synth("Serum 2", { state: "${BLOB}" }).param("Cutoff", "0.2 0.8").speed("1 2")`;
+  const out = injectLocations(code, 0);
+  assert.ok(!out.includes(`mini("${BLOB}"`), 'the blob is data, not a pattern');
+  assert.match(out, /n\(mini\("0 3", \d+\)\)/);
+  assert.ok(!/mini\("Serum 2"/.test(out) && !/mini\("Cutoff"/.test(out), 'names stay names');
+  assert.match(out, /\.param\("Cutoff", mini\("0\.2 0\.8", \d+\)\)/);
+  assert.match(out, /\.speed\(mini\("1 2", \d+\)\)/);
+});
+
+test('transpiling a buffer with a big blob stays off the scheduler\'s critical path', () => {
+  const code = `n("0 3").synth("Serum 2", { state: "${BLOB}" }).param("Cutoff", "0.2 0.8").speed("1 2")`;
+  injectLocations(code, 0); // warm
+  const t0 = performance.now();
+  for (let i = 0; i < 5; i++) injectLocations(code, 0);
+  const ms = (performance.now() - t0) / 5;
+  // Was ~30ms for this size before tailWindow, and grew linearly with the blob. The bound is
+  // deliberately loose - it's here to catch a return to scanning the buffer per literal.
+  assert.ok(ms < 5, `injectLocations took ${ms.toFixed(1)}ms on a ${(code.length / 1024) | 0}kb buffer`);
+});

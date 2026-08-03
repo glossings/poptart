@@ -70,6 +70,35 @@ const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'midicc', 'm
 //   - a string that immediately chains a method (`"0 0.5 1".gte(0.5)`)
 // OUTSIDE argument position the default flips to conservative: a bare literal (`const p = "…"`)
 // is left alone, since there's no callee to check and it may well be a name held in a variable.
+// The three `before` patterns below are all anchored to its END, but a regex search still tries
+// every start position - so testing them against the whole prefix costs a scan of the entire
+// buffer PER LITERAL, which on a patch carrying captured plugin state is tens of milliseconds an
+// eval, taken out of the scheduler's 150ms lookahead. This returns the shortest suffix of
+// `before` that can still contain any of their matches, which makes the cost proportional to the
+// code around the literal instead of to the buffer.
+//
+// It's a superset of every match, not a guess: each pattern's match either contains an unmatched
+// `(` - which, since nothing but whitespace, `[`, `,` or non-paren filler may follow it, is
+// necessarily the LAST paren in `before` - or contains no paren at all and sits at the very end.
+// So cutting at the last paren keeps them all. The cut then extends left over whitespace and an
+// identifier, since the callee name is part of two of the matches, and stopping on a non-word
+// character leaves the window starting on a real word boundary, so `\b` still means what it did.
+function tailWindow(before) {
+  let i = before.length;
+  while (i > 0 && before[i - 1] !== '(' && before[i - 1] !== ')') i--;
+  if (i === 0) {
+    // No paren at all, so the two patterns that need one can't match either way; only the
+    // later-argument comma test survives, and it's made of nothing but `,`, `[` and whitespace.
+    let j = before.length;
+    while (j > 0 && /[\s[,]/.test(before[j - 1])) j--;
+    return before.slice(j);
+  }
+  i--; // include the paren itself
+  while (i > 0 && /\s/.test(before[i - 1])) i--;
+  while (i > 0 && /[\w$]/.test(before[i - 1])) i--;
+  return before.slice(i);
+}
+
 export function isPatternPosition(before, after) {
   // Guard: the literal must be a COMPLETE argument/expression - immediately closed by ) , ; ] }
   // or end of input, or chaining a method (`"0 1".fast(2)`). If an operator follows (`n("0 1" + x)`)
@@ -80,15 +109,16 @@ export function isPatternPosition(before, after) {
   const method = /^\s*\.\s*[A-Za-z_$]/.test(after);
   const complete = method || /^\s*[).,;\]}]/.test(after) || /^\s*$/.test(after);
   if (!complete) return false;
+  const near = tailWindow(before); // same matches as `before`, without rescanning the buffer
   // First argument: the callee sits immediately before the open paren (an optional `[` allows the
   // option in choose(["0", 3], …)). Its name decides.
-  const first = before.match(/([A-Za-z_$][\w$]*)\s*\(\s*\[?\s*$/);
+  const first = near.match(/([A-Za-z_$][\w$]*)\s*\(\s*\[?\s*$/);
   if (first) return !NAME_ARG_CALLS.has(first[1]);
   // Later argument: a name-only call's arguments are never patterns. Matching requires no
   // parenthesis between that callee's `(` and here, so we only reject while still inside ITS
   // argument list - a nested call (fx("Reverb").speed("1 2")) has its own first-argument rule.
-  if (/,\s*\[?\s*$/.test(before)) {
-    const enclosing = before.match(/\b([A-Za-z_$][\w$]*)\s*\(\s*[^()]*$/);
+  if (/,\s*\[?\s*$/.test(near)) {
+    const enclosing = near.match(/\b([A-Za-z_$][\w$]*)\s*\(\s*[^()]*$/);
     return !(enclosing && NAME_ONLY_CALLS.has(enclosing[1]));
   }
   if (method) return true;

@@ -115,11 +115,42 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - **Fixed 8-slot chain per track (1 instrument + 7 effects).** `VSTPlugin~` instances live inside a
   `SynthDef`'s UGen graph and can't be added to a running `Synth`, so chain length is baked in.
   Swapping which plugin occupies a slot is fine; growing past 8 is not handled yet.
-- **Plugin state captured into the code automatically (gzip+base64 in the URL hash).** Editing a
-  plugin in its own window writes its state back into the `synth()`/`fx()` call, so the code always
-  describes the sound and sharing a link shares it exactly. Debounced: a capture is a disk write in
-  sclang plus a synchronous gzip on the scheduler's event loop, so it runs once per gesture, not
-  per knob sample. Opaque by design; the editor folds the blob into a pill.
+- **Plugin state lives in the code, not in a store the code points at.** Editing a plugin in its
+  own window writes its whole program back into the call — `synth("Serum 2", { state: "H4sIA…" })`,
+  gzip+base64, megabytes and all — so a patch is self-contained: the file is the sound. It briefly
+  worked the other way, with a content-addressed store under `~/.poptart/states` and a short `st_…`
+  chip in the code. That made buffers small, but it made a patch a *pointer*, and pointers dangle:
+  states went missing, and a patch that can lose its own sound is worse than a big one. The reason
+  big buffers hurt was never the bytes anyway — it was the label splitter re-lexing an accumulating
+  block once per line, which put megabytes of quadratic work in front of every eval on the same
+  event loop as the note scheduler. Fixing that (labels.mjs, 2MB: 225ms → 11ms) left inline state
+  costing ~23ms per eval for one pinned Serum and ~55ms for three, which buys a great deal.
+- **Captures are debounced per gesture, and there is no cheap one.** Asking a plugin for its
+  program is `writeProgram`, and VSTPlugin's docs are explicit that plugin processing is
+  *suspended* while it serializes — a couple of megabytes for a Serum patch, and audible. (The
+  `async: false` alternative moves the same work onto the audio thread, which is worse.)
+  Compression at both ends runs on the threadpool, so the scheduler's loop never sees our half.
+  The default is to spend that suspension immediately, one per gesture: the buffer then always
+  describes what you hear, and no sound design exists anywhere but the code. `POPTART_AUTOPIN=
+  deferred` trades that for an uninterrupted performance — captures made while the clock runs are
+  held until the next eval/stop/save/export/link — at the cost of a window where the plugin and the
+  buffer disagree and a closed tab loses the difference. "Capture when the editor window closes"
+  would be the signal worth waiting for and isn't available: VSTPlugin's events are `/vst_param`,
+  `/vst_auto`, `/vst_program*`, `/vst_latency`, `/vst_midi`, `/vst_sysex`, `/vst_update` and
+  `/vst_crash` — nothing reports an editor being closed.
+- **A pending capture is bound to a plugin, not just a slot.** A chain slot is a position, and
+  reordering `.fx(...)` calls moves which plugin sits at one. A capture records what occupied the
+  slot when the gesture happened, and both ends check it — the server drops a capture whose slot
+  changed hands, and the editor refuses to write a state into a call naming a different plugin —
+  so a reorder mid-tweak can't put one plugin's program in another's call.
+- **The URL carries a snapshot id, not the buffer.** Checkpoints (eval/save/load) store the code
+  server-side under `~/.poptart/snapshots` and put a short `#s=…` in the address bar. Keeping the
+  whole buffer there was the obvious design and was wrong twice over: `pushState` with a
+  megabyte-long URL costs real main-thread time in front of every eval, and Chrome's history
+  database drops URLs past a couple of kilobytes, so the states never became findable in
+  `chrome://history` — the one thing the encoding was for. Snapshots are pruned to the most recent
+  500, so history is a recovery net, not an archive. Sharing still builds a self-contained base64
+  URL, on demand, because an id means nothing on another machine.
 - **Plain HTTP + browser, no Electron.** Open the served page in any browser; keeps the footprint
   small.
 

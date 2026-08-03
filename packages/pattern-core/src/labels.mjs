@@ -21,76 +21,90 @@
 
 const LABEL_RE = /^([A-Za-z_$][\w$]*)\s*:(?!:)/;
 
-// Does `line` continue the expression `code` has open so far, rather than start a new one?
-// Two ways to continue: (1) `code` ends mid-expression - unbalanced (){}[], an unclosed
-// backtick template, or an open block comment (scanned by `scanOpen`, which is string/comment/
-// template aware so brackets inside `"…"`/`` `…` `` don't count); (2) `line` begins with `.`,
-// which JS's automatic-semicolon-insertion joins to the previous line (`x\n.foo()` is one
+// Does the state a block is in continue into `line`, rather than `line` starting a new
+// expression? Two ways to continue: (1) the block ends mid-expression - unbalanced (){}[], an
+// unclosed backtick template, or an open block comment (tracked by `scan`, which is string/
+// comment/template aware so brackets inside `"…"`/`` `…` `` don't count); (2) `line` begins with
+// `.`, which JS's automatic-semicolon-insertion joins to the previous line (`x\n.foo()` is one
 // method chain). Everything else at column 0 is a fresh statement. Regex literals aren't
 // lexed (rare in patch code); an unbalanced bracket inside one would read as still-open.
-function continuesBlock(code, line) {
-  return endsOpen(code) || /^\s*\./.test(line);
+function continuesBlock(state, line) {
+  return endsOpen(state) || /^\s*\./.test(line);
 }
 
-// True if `code` ends somewhere a following line can't be read as code at all: inside a `/*…*/`
-// comment or a `` `…` `` template. Text there only looks like a label - `/* $: broken? */` is a
-// comment, not a block - so `splitLabeledBlocks` suppresses label matching while it's true. An
+// True if the block so far ends somewhere a following line can't be read as code at all: inside
+// a `/*…*/` comment or a `` `…` `` template. Text there only looks like a label - `/* $: broken? */`
+// is a comment, not a block - so `splitLabeledBlocks` suppresses label matching while it's true. An
 // unclosed bracket deliberately doesn't count: a stray `(` is a typo, and swallowing every
 // label below it would hide the rest of the patch instead of just the broken line.
-function endsUnparsed(code) {
-  const { inBlockComment, inTemplate } = scanOpen(code);
-  return inBlockComment || inTemplate;
+//
+// `inTemplate` covers `${…}` interpolations too, not just literal template text: a column-0
+// label inside one would split the template's own closing line off into a block of its own.
+function endsUnparsed(state) {
+  return state.inBlockComment || state.stack.includes('`');
 }
 
-// True if `code` ends inside an unclosed bracket, backtick template, or block comment - i.e. a
-// following line is part of the same expression.
-function endsOpen(code) {
-  const { depth, inBlockComment } = scanOpen(code);
-  return depth > 0 || inBlockComment;
+// True if the block so far ends inside an unclosed bracket, backtick template, or block comment -
+// i.e. a following line is part of the same expression.
+function endsOpen(state) {
+  return state.stack.length > 0 || state.inBlockComment;
 }
 
-// Lex `code` far enough to know what's still open at its end. Single/double-quoted strings are
-// treated as line-local (JS forbids a raw newline inside them), so only `` ` `` templates span
-// lines.
-function scanOpen(code) {
-  const stack = []; // '(' '[' '{' for brackets, '`' for template contexts (typed so `${}` nests)
-  let inBlockComment = false;
-  let inLineComment = false;
-  let inString = null; // "'" or '"' while inside a quoted string (reset at newline)
-  for (let i = 0; i < code.length; i++) {
-    const c = code[i];
-    const d = code[i + 1];
-    if (inLineComment) {
-      if (c === '\n') inLineComment = false;
+// What a partly-lexed block has left open. Single/double-quoted strings are line-local (JS forbids
+// a raw newline inside one), but they're still carried here rather than reset per line, so that
+// feeding the text in chunks lexes exactly as feeding it whole would.
+function newScan() {
+  return {
+    stack: [], // '(' '[' '{' for brackets, '`' for template contexts (typed so `${}` nests)
+    inBlockComment: false,
+    inLineComment: false,
+    inString: null, // "'" or '"' while inside a quoted string
+    skipNext: false, // a backslash escape at the very end of the last chunk eats this char
+  };
+}
+
+// Lex `text` forward from `state`, in place. Called once per line as the block grows, NEVER on the
+// block's accumulated text: re-lexing from the start each line made splitting a buffer quadratic in
+// its length, which is exactly the buffer a pinned plugin state produces - and this runs in the same
+// event loop as the note scheduler, so those milliseconds came straight out of the audio. Splitting
+// text into chunks and advancing over each in turn gives the same result as one pass over the whole
+// (see the `skipNext` carry, and note that the two-character lookaheads below can't straddle a
+// newline), which is what lets the line loop reuse one state.
+function scan(state, text) {
+  for (let i = 0; i < text.length; i++) {
+    if (state.skipNext) { state.skipNext = false; continue; }
+    const c = text[i];
+    const d = text[i + 1];
+    if (state.inLineComment) {
+      if (c === '\n') state.inLineComment = false;
       continue;
     }
-    if (inBlockComment) {
-      if (c === '*' && d === '/') { inBlockComment = false; i++; }
+    if (state.inBlockComment) {
+      if (c === '*' && d === '/') { state.inBlockComment = false; i++; }
       continue;
     }
-    if (inString) {
-      if (c === '\\') i++; // skip the escaped char
-      else if (c === inString || c === '\n') inString = null;
+    if (state.inString) {
+      // A backslash escape whose escaped character lands in the next chunk carries as skipNext.
+      if (c === '\\') { if (i + 1 < text.length) i++; else state.skipNext = true; }
+      else if (c === state.inString || c === '\n') state.inString = null;
       continue;
     }
-    if (stack[stack.length - 1] === '`') {
+    if (state.stack[state.stack.length - 1] === '`') {
       // inside a template literal: only ` (close) and ${ (interpolation) change state
-      if (c === '\\') i++;
-      else if (c === '`') stack.pop();
-      else if (c === '$' && d === '{') { stack.push('{'); i++; }
+      if (c === '\\') { if (i + 1 < text.length) i++; else state.skipNext = true; }
+      else if (c === '`') state.stack.pop();
+      else if (c === '$' && d === '{') { state.stack.push('{'); i++; }
       continue;
     }
     // ordinary code context
-    if (c === '/' && d === '/') { inLineComment = true; i++; }
-    else if (c === '/' && d === '*') { inBlockComment = true; i++; }
-    else if (c === '"' || c === "'") inString = c;
-    else if (c === '`') stack.push('`');
-    else if (c === '(' || c === '[' || c === '{') stack.push(c);
-    else if (c === ')' || c === ']' || c === '}') stack.pop();
+    if (c === '/' && d === '/') { state.inLineComment = true; i++; }
+    else if (c === '/' && d === '*') { state.inBlockComment = true; i++; }
+    else if (c === '"' || c === "'") state.inString = c;
+    else if (c === '`') state.stack.push('`');
+    else if (c === '(' || c === '[' || c === '{') state.stack.push(c);
+    else if (c === ')' || c === ']' || c === '}') state.stack.pop();
   }
-  // `inTemplate` covers `${…}` interpolations too, not just literal template text: a column-0
-  // label inside one would split the template's own closing line off into a block of its own.
-  return { depth: stack.length, inBlockComment, inTemplate: stack.includes('`') };
+  return state;
 }
 
 /**
@@ -104,6 +118,7 @@ export function splitLabeledBlocks(source) {
   const lines = source.split('\n');
   const blocks = [];
   let current = null;
+  let state = null; // what `current`'s text so far has left open (see scan)
   let offset = 0;
   let anonCount = 0;
 
@@ -117,7 +132,7 @@ export function splitLabeledBlocks(source) {
   for (const line of lines) {
     // Only look for a label where the previous lines have left us in code - inside an open
     // `/*…*/` or `` `…` ``, `$: …` is prose, not a new block.
-    const m = current && endsUnparsed(current.code) ? null : LABEL_RE.exec(line);
+    const m = current && endsUnparsed(state) ? null : LABEL_RE.exec(line);
     if (m) {
       push();
       const meta = parseLabel(m[1], () => `$${++anonCount}`);
@@ -129,20 +144,24 @@ export function splitLabeledBlocks(source) {
         start: offset,
         end: offset,
       };
-    } else if (current && continuesBlock(current.code, line)) {
+      state = scan(newScan(), current.code);
+    } else if (current && continuesBlock(state, line)) {
       // Part of the current block's still-open expression (a chain, a brace body, a multi-line
       // template) - stays with it.
       current.code += '\n' + line;
+      scan(state, '\n' + line);
     } else if (hasCode(line)) {
       // A column-0 statement that isn't a label (or the first code before any label): its own
       // anonymous block. A pattern here plays; anything else (a `Signal.prototype` extension, a
       // shared `const`) is a setup block that binds/acts for the blocks below - see server.js.
       push();
       current = { label: `$${++anonCount}`, muted: false, soloed: false, code: line, start: offset, end: offset };
+      state = scan(newScan(), line);
     } else if (current) {
       // A blank or comment-only line that isn't continuing anything - keep it with the current
       // block so line offsets stay aligned; it doesn't start a block of its own.
       current.code += '\n' + line;
+      scan(state, '\n' + line);
     }
     offset += line.length + 1; // +1 for the newline
   }
@@ -175,11 +194,20 @@ export function isBareCallBlock(code, name) {
   return false;
 }
 
+// Is any line of `text` more than whitespace and not a `//` comment? Walks the lines and stops at
+// the first one that is, rather than splitting the whole text into an array first: this is asked
+// of entire blocks, which a pinned plugin state makes megabytes long, and the answer is almost
+// always on the first line.
 function hasCode(text) {
-  return text.split('\n').some((line) => {
-    const t = line.trim();
-    return t !== '' && !t.startsWith('//');
-  });
+  let i = 0;
+  while (i <= text.length) {
+    let nl = text.indexOf('\n', i);
+    if (nl === -1) nl = text.length;
+    const t = text.slice(i, nl).trim();
+    if (t !== '' && !t.startsWith('//')) return true;
+    i = nl + 1;
+  }
+  return false;
 }
 
 function parseLabel(raw, nextAnonName) {

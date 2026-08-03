@@ -183,15 +183,30 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Code-in-URL sharing (Strudel-style) + browser history as a recovery net. The buffer is kept
-// base64url-encoded in location.hash - copy the URL to share the patch; opening a link restores
-// the code instead of the default snippet.
+// Browser history as a recovery net, + sharing.
 //
-// Typing only *replaces* the current history entry (no spam), but evaluating, saving and loading
-// push a real one, so the browser's own history becomes a list of every state you cared about -
-// searchable, because the tab title carries the pattern's @title (see updateDocTitle). Lose the
-// file and the buffer both and the code is still sitting in your history, in full. Hitting Back
-// loads that state into the editor rather than doing nothing.
+// Evaluating, saving and loading each pin the buffer as a real history entry, so the browser's
+// own history becomes a list of every state you cared about - searchable, because the tab title
+// carries the pattern's @title (see updateDocTitle). Lose the file and the buffer both and the
+// code is still reachable through Back, which loads that state into the editor rather than doing
+// nothing.
+//
+// The URL holds a short SNAPSHOT ID (#s=…), not the code. It used to hold the whole buffer,
+// base64'd - which broke both halves of the idea once a patch carried captured plugin state:
+//
+//   - pushState with a megabyte-long URL is slow (Chrome canonicalizes it, repaints the omnibox
+//     and writes the session-history entry to disk, on the main thread), and checkpointing ran
+//     *before* the eval request - so every Cmd+Enter paid that delay before the sound changed.
+//   - Chrome's history database drops URLs past a couple of kilobytes, so the states never
+//     appeared in chrome://history at all. The very thing the encoding was for didn't work.
+//
+// Typing no longer touches the URL either: the recovery net for un-checkpointed work is the wip
+// autosave (on disk) plus restoreBuffer below (for a reload of this tab), neither of which costs
+// a navigation.
+//
+// Sharing stays self-contained, because a snapshot id means nothing on another machine: the
+// share action builds the old-style base64 URL on demand (see copyShareLink), and opening one
+// still restores the code.
 // ---------------------------------------------------------------------------------------------
 
 function encodeCodeHash(code) {
@@ -206,9 +221,9 @@ function decodeCodeHash(hash) {
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
 }
 
-let atCheckpoint = false; // the current history entry is one we pushed - don't overwrite it
 let lastCheckpointCode = null;
 let restoringFromHistory = false;
+let checkpointSeq = 0; // checkpoints store asynchronously; only the newest may touch the URL
 
 // The name field, looked up lazily - this section runs before the sidebar's `const`s exist.
 function currentFileName() {
@@ -228,58 +243,145 @@ function updateDocTitle(code) {
   document.title = code.trim() ? `${label} · poptart` : 'poptart';
 }
 
-// Keep the URL in step with the buffer while typing.
-function syncUrlToBuffer() {
-  const code = cm.getValue();
-  if (atCheckpoint && code === lastCheckpointCode) return; // the URL already is this state
-  updateDocTitle(code);
-  const url = '#' + encodeCodeHash(code);
-  if (atCheckpoint) {
-    // The current entry *is* the checkpoint we just pushed (or navigated to) - replacing it
-    // would erase exactly what we meant to keep. Push a fresh working entry, then reuse that.
-    history.pushState(null, '', url);
-    atCheckpoint = false;
-  } else {
-    history.replaceState(null, '', url);
+// Survives a reload of THIS tab (and nothing else), which is what the URL used to cover for work
+// typed since the last checkpoint. Per-tab by nature, so a shared link opened in a new tab still
+// gets the code from its own hash. Kept best-effort: a buffer too big for the quota just isn't
+// restorable this way, and the wip file on disk still has it.
+const RESTORE_KEY = 'poptart.restoreBuffer';
+
+function saveRestoreBuffer(code) {
+  try {
+    sessionStorage.setItem(RESTORE_KEY, code);
+  } catch {
+    sessionStorage.removeItem(RESTORE_KEY); // over quota - a stale buffer would be worse
   }
+}
+
+// Called on the typing debounce. The URL is deliberately left alone here.
+function syncBufferState() {
+  const code = cm.getValue();
+  updateDocTitle(code);
+  saveRestoreBuffer(code);
 }
 
 // Pin the current buffer as a history entry. Called at the moments worth returning to - eval,
 // save, load - and deduped, so repeatedly hitting play doesn't pile up identical entries.
+//
+// Deliberately NOT awaited by its callers: storing the snapshot is a round trip, and the whole
+// point of the id-in-URL design is that the recovery net never sits in front of the sound. The
+// title is set synchronously, though, since that's what the history entry is named after.
 function checkpointUrl() {
   const code = cm.getValue();
   if (!code.trim() || code === lastCheckpointCode) return;
   lastCheckpointCode = code;
   updateDocTitle(code);
-  history.pushState(null, '', '#' + encodeCodeHash(code));
-  atCheckpoint = true;
+  saveRestoreBuffer(code);
+  const seq = ++checkpointSeq;
+  api('POST', '/api/snapshot', { code })
+    .then(({ id }) => {
+      // A later checkpoint (or a Back) already moved the URL - this one is stale, and pushing it
+      // now would reorder history behind the user's back.
+      if (seq !== checkpointSeq) return;
+      if (location.hash === `#s=${id}`) return; // this entry already is that state
+      history.pushState(null, '', `#s=${id}`);
+    })
+    .catch((e) => logLine(`could not add this state to browser history (${e.message ?? e})`, true));
 }
 
-function loadCodeFromHash() {
-  if (location.hash.length <= 1) return null;
+// A hash is either `s=<id>` (a snapshot on this machine) or, for a shared link and for history
+// entries made before snapshots existed, the whole buffer base64'd. The two ways this can come
+// back empty are told apart by the caller, because they mean opposite things to the user: a
+// pruned snapshot is expected housekeeping, a link that won't decode is a damaged link.
+const HASH_EMPTY = { reason: 'empty' };
+const HASH_PRUNED = { reason: 'pruned' };
+const hashDamaged = (len) => ({ reason: 'damaged', len });
+
+async function loadCodeFromHash() {
+  const hash = location.hash.slice(1);
+  if (!hash) return HASH_EMPTY;
+  if (hash.startsWith('s=')) {
+    const { code } = await api('GET', `/api/snapshot?id=${encodeURIComponent(hash.slice(2))}`);
+    return code === null ? HASH_PRUNED : code;
+  }
   try {
-    return decodeCodeHash(location.hash.slice(1));
+    return decodeCodeHash(hash);
   } catch {
-    return null;
+    return hashDamaged(hash.length);
   }
 }
 
-const hashCode = loadCodeFromHash();
-if (location.hash.length > 1 && hashCode === null) {
-  logLine('could not decode code from the URL - keeping the default snippet', true);
-} else if (hashCode !== null) {
-  cm.setValue(hashCode);
-  foldConfigBlobs();
-}
-updateDocTitle(cm.getValue());
+// Anything past this is asking to be truncated: a link is normally pasted through an address
+// bar, and browsers cap how much they'll take there (Chrome silently cuts very long input, and
+// half a base64 string doesn't decode). Comfortably above a patch of plain code, and far below a
+// patch carrying a pinned plugin state - which is what "export" is for.
+const SAFE_SHARE_URL_CHARS = 16 * 1024;
 
-// Back/Forward: put that state back in the editor. No confirm needed - the buffer being replaced
-// keeps its own work-in-progress file on the way out (rollWipSession), so navigating away from
-// something you never named still can't lose it.
-window.addEventListener('popstate', async () => {
-  const code = loadCodeFromHash();
-  if (code === null || code === cm.getValue()) return;
-  await rollWipSession();
+// Builds the self-contained link for sharing - the whole buffer in the URL, captured plugin states
+// and all. Built on demand, so its cost is never in the way of playing. A patch with a pinned
+// plugin blows past what an address bar will carry; that's the warning below, and "export" is the
+// way to send one.
+async function copyShareLink() {
+  await settlePluginState(); // the link is a snapshot of the buffer - settle it before reading it
+  const code = cm.getValue();
+  if (!code.trim()) {
+    logLine('nothing to share - the buffer is empty', true);
+    return;
+  }
+  const url = `${location.origin}${location.pathname}#${encodeCodeHash(code)}`;
+  const kb = (url.length / 1024).toFixed(1);
+  navigator.clipboard.writeText(url);
+  if (url.length > SAFE_SHARE_URL_CHARS) {
+    logLine(
+      `copied, but this link is ${kb}kb - too long to paste into an address bar, which will cut it ` +
+        'short and leave the other end with a link that will not open. Use "export" instead and ' +
+        'send the file.',
+      true,
+    );
+    return;
+  }
+  logLine(`copied a share link for the whole pattern (${kb}kb)`);
+}
+
+// The share path that has no size limit: the patch as a file. It is exactly the code - captured
+// plugin states included, since those live in the code - so it is also just what the patterns
+// folder holds, and the other end can import it or drop it straight into ~/.poptart/patterns.
+async function exportPatch() {
+  await settlePluginState(); // the file has to carry the sound as it is right now
+  const code = cm.getValue();
+  if (!code.trim()) {
+    logLine('nothing to export - the buffer is empty', true);
+    return;
+  }
+  const label = displayLabel({ title: parseMeta(code).title, name: currentFileName(), code, borrowBlockLabel: true });
+  const stem = (label || 'patch').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'patch';
+  try {
+    const name = `${stem}.js`;
+    const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+    logLine(`exported ${name} (${(code.length / 1024).toFixed(1)}kb) - send that file to share the patch`);
+  } catch (e) {
+    logLine(`could not export: ${e.message ?? e}`, true);
+  }
+}
+
+async function importPatch(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    if (!text.trim()) throw new Error('the file is empty');
+    await openInEditor(text, file.name.replace(/\.js$/i, ''));
+    logLine(`imported ${file.name} - Cmd/Ctrl+Enter to play it`);
+  } catch (e) {
+    logLine(`could not import ${file.name}: ${e.message ?? e}`, true);
+  }
+}
+
+// Put `code` in the editor without letting the change handler push the URL around.
+function setBufferQuietly(code) {
   restoringFromHistory = true; // CodeMirror fires 'change' synchronously from setValue
   try {
     cm.setValue(code);
@@ -288,8 +390,74 @@ window.addEventListener('popstate', async () => {
   }
   foldConfigBlobs();
   lastCheckpointCode = code;
-  atCheckpoint = true; // the entry we landed on is history - the next edit pushes past it
   updateDocTitle(code);
+}
+
+// Opening the app: a reload of this tab keeps whatever was in the buffer, otherwise the hash
+// decides (a shared link, a history entry, or nothing - the default snippet).
+(async () => {
+  const restored = sessionStorage.getItem(RESTORE_KEY);
+  if (restored !== null && restored !== cm.getValue()) {
+    setBufferQuietly(restored);
+    return;
+  }
+  updateDocTitle(cm.getValue());
+  if (!location.hash) return;
+  let code = null;
+  try {
+    code = await loadCodeFromHash();
+  } catch (e) {
+    logLine(`could not read the code this URL points at (${e.message ?? e})`, true);
+    return;
+  }
+  if (code === HASH_EMPTY) return; // a bare "#" - nothing was being pointed at
+  if (code === HASH_PRUNED) {
+    logLine('the URL points at a state that is no longer stored - keeping the default snippet', true);
+    return;
+  }
+  if (code.reason === 'damaged') {
+    logLine(
+      `this share link is incomplete (${(code.len / 1024).toFixed(1)}kb of code in it, which did not decode) - ` +
+        'a link this long is usually cut short by the address bar it was pasted into. Ask for the ' +
+        'patch as an exported file instead.',
+      true,
+    );
+    return;
+  }
+  setBufferQuietly(code);
+  saveRestoreBuffer(code);
+  // An incoming share link carries the whole buffer. Trade it for a snapshot id in place (no new
+  // history entry - this IS that entry), so the address bar stops being a megabyte long and the
+  // rest of the session behaves like any other. The link that was shared still works; it just
+  // isn't what this tab keeps navigating with.
+  if (!location.hash.startsWith('#s=')) {
+    api('POST', '/api/snapshot', { code })
+      .then(({ id }) => history.replaceState(null, '', `#s=${id}`))
+      .catch(() => {}); // the long hash keeps working - nothing to tell the user
+  }
+})();
+
+// Back/Forward: put that state back in the editor. No confirm needed - the buffer being replaced
+// keeps its own work-in-progress file on the way out (rollWipSession), so navigating away from
+// something you never named still can't lose it.
+window.addEventListener('popstate', async () => {
+  let code = null;
+  try {
+    code = await loadCodeFromHash();
+  } catch (e) {
+    logLine(`could not read that history entry (${e.message ?? e})`, true);
+    return;
+  }
+  if (code === HASH_EMPTY) return;
+  if (code === HASH_PRUNED || code.reason === 'damaged') {
+    logLine('that state has been pruned from the snapshot store - nothing to restore', true);
+    return;
+  }
+  if (code === cm.getValue()) return;
+  await rollWipSession();
+  setBufferQuietly(code);
+  saveRestoreBuffer(code);
+  checkpointSeq++; // an in-flight checkpoint must not push its URL over where we just landed
   logLine('restored code from browser history - Cmd/Ctrl+Enter to play it');
 });
 
@@ -316,11 +484,12 @@ function foldSpan(fromIdx, toIdx, label, title) {
 function foldConfigBlobs() {
   const code = cm.getValue();
   let m;
-  // Captured plugin state objects - base64ish payload, so a simple regex is safe.
+  // Captured plugin state - megabytes of base64, so a simple regex is safe. The text stays in the
+  // buffer (it *is* the patch); only the display folds, to a chip showing what it weighs.
   const stateRe = /\{\s*state:\s*"[A-Za-z0-9+/=]+"\s*\}/g;
   while ((m = stateRe.exec(code))) {
     const kb = Math.max(1, Math.round(m[0].length / 1024));
-    foldSpan(m.index, m.index + m[0].length, `{⋯${kb}kb}`, 'captured plugin state — click to expand');
+    foldSpan(m.index, m.index + m[0].length, `{◆ ${kb}kb}`, 'captured plugin state — click to expand');
   }
   // lfo() shape strings and pianoroll() note strings: editor-written data, not code to read, so
   // they always fold - length doesn't matter. An empty string is left alone: there's nothing to
@@ -361,20 +530,6 @@ function matchParen(code, openIdx) {
   return -1;
 }
 
-// Index just past the closing quote of the first string literal in [from, to); -1 if none.
-function endOfFirstString(code, from, to) {
-  for (let i = from; i < to; i++) {
-    const q = code[i];
-    if (q !== '"' && q !== "'") continue;
-    for (let j = i + 1; j < to; j++) {
-      if (code[j] === '\\') j++;
-      else if (code[j] === q) return j + 1;
-    }
-    return -1;
-  }
-  return -1;
-}
-
 // Locates the synth(...) call (slot 0) or the slot-th .fx(...) call inside a track's block and
 // returns where its `{ state }` argument goes: [afterFirstArg, closeParen).
 function findChainCall(code, from, to, slot) {
@@ -388,9 +543,9 @@ function findChainCall(code, from, to, slot) {
     const open = m.index + m[0].length - 1;
     const closeParen = matchParen(code, open);
     if (closeParen < 0 || closeParen > to) return null;
-    const afterFirstArg = endOfFirstString(code, open + 1, closeParen);
-    if (afterFirstArg < 0) return null;
-    return { afterFirstArg, closeParen };
+    const lit = firstStringLiteral(code, open + 1, closeParen);
+    if (!lit) return null;
+    return { afterFirstArg: lit.end, closeParen, plugin: lit.content };
   }
   return null;
 }
@@ -437,11 +592,21 @@ function findParamCall(code, from, to, name) {
 // Auto-pin: `synth("Serum 2")` with no state argument means "however the plugin defaults", but
 // the moment you touch anything in the plugin's own window that stops being true. The server
 // notices the edit, captures the state (debounced - see captureDirtyPlugins), and we write it
-// into that slot's synth/fx call as `{ state }`. So the code always describes what you're
-// hearing, and it restores on load and shares via the URL like everything else.
+// into that slot's synth/fx call as `{ state }`. So the code always describes what you're hearing.
+//
+// What gets written is the state itself - the plugin's whole program, gzipped and base64'd, often
+// megabytes of it. The buffer carries the sound, which is what lets you duplicate a line, change
+// the preset on one copy, and swap between them by commenting: both states are right there in the
+// text. It folds to a chip on screen (foldConfigBlobs), so what you read stays short.
+//
+// The state lands about half a second after you let go of the knob. Asking a plugin for its program
+// suspends it briefly, which you can hear, so there is a second mode (POPTART_AUTOPIN=deferred)
+// that holds captures during a performance and takes them at the next eval/stop/save instead -
+// quieter, but your sound design sits outside the buffer until then. settlePluginState below is
+// what the actions that write the buffer out use to make sure nothing is still being held.
 // ---------------------------------------------------------------------------------------------
 
-function writePluginState(trackLabel, slot, state) {
+function writePluginState(trackLabel, slot, state, plugin) {
   if (!labelsMod) return;
   const code = cm.getValue();
   const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === trackLabel);
@@ -452,23 +617,59 @@ function writePluginState(trackLabel, slot, state) {
     logLine(`auto-pin: no ${slot === 0 ? 'synth(...)' : '.fx(...)'} call for track "${trackLabel}" slot ${slot} - state not written`, true);
     return;
   }
+  // A slot is a position, and positions move: reorder two .fx(...) calls between the gesture and
+  // the capture and slot 2 is a different plugin than the one this state came out of. Writing it
+  // there would put a reverb's program in a chorus's call - the state is only ever written to a
+  // call naming the plugin it was captured from.
+  if (plugin && call.plugin !== plugin) {
+    logLine(`auto-pin: "${trackLabel}" slot ${slot} is ${call.plugin || 'something else'} now, not ${plugin} - state not written (re-touch the plugin to capture it again)`, true);
+    return;
+  }
+  const replacement = `, { state: "${state}" }`;
+  const from = cm.posFromIndex(call.afterFirstArg);
+  const to = cm.posFromIndex(call.closeParen);
+  // Identical text means the plugin came back exactly as the code already describes it - a gesture
+  // that landed back where it started, or a capture racing an edit elsewhere. Writing it anyway
+  // would spend an undo step, a change event and a megabyte-scale buffer edit on nothing.
+  if (cm.getRange(from, to) === replacement) return;
   // Tagged with a single `+`-prefixed origin so CodeMirror merges consecutive writes into one
-  // undo step (same trick as the copy-line edits). Each state is multi-KB, and without this a
-  // knob drag would bury your last real edit under a run of blobs in the undo history.
-  cm.replaceRange(`, { state: "${state}" }`, cm.posFromIndex(call.afterFirstArg), cm.posFromIndex(call.closeParen), '+autopin');
+  // undo step (same trick as the copy-line edits), so a knob drag can't bury your last real edit
+  // under a run of captures in the undo history.
+  cm.replaceRange(replacement, from, to, '+autopin');
   foldConfigBlobs();
 }
 
 // Deliberately does NOT re-evaluate: the state is already live in the plugin (it came from
 // there), so an eval would only push it back and make the plugin reload what it already has.
-async function pollPluginEdits() {
-  const { edits, logs } = await api('POST', '/api/pluginEdits');
-  for (const e of edits ?? []) writePluginState(e.trackId, e.slot, e.state);
+let pinsPending = 0; // slots the server is holding uncaptured, so we mention it once, not per poll
+
+async function pollPluginEdits({ flush = false } = {}) {
+  const { edits, logs, pending } = await api('POST', '/api/pluginEdits', { flush });
+  for (const e of edits ?? []) writePluginState(e.trackId, e.slot, e.state, e.plugin);
   // .log() event lines from the scheduler, which runs server-side - same drain, same 500ms.
   for (const line of logs ?? []) logLine(line);
+  // Said once when edits start being held, so a plugin tweak that hasn't reached the code yet
+  // doesn't look like auto-pin missed it.
+  if (pending && !pinsPending) {
+    logLine('plugin edited - writing its state into the code on the next play, stop or save (capturing it now would interrupt the plugin)');
+  }
+  pinsPending = pending ?? 0;
 }
 
 setInterval(() => pollPluginEdits().catch(() => {}), 500);
+
+// Before writing the buffer out anywhere it has to be true - saving, exporting, sharing - settle
+// any plugin edit the server is still holding (it defers captures while the clock runs, because
+// each one briefly suspends the plugin: see the auto-pin section of server.js). The states land in
+// the buffer first, so what gets written is the sound you can actually hear.
+async function settlePluginState() {
+  try {
+    await pollPluginEdits({ flush: true });
+  } catch {
+    // The engine is down or the capture failed - already logged server-side. Writing the buffer
+    // out with the states it has beats refusing to save over it.
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // "conf" (configure) capture, Ableton-style: toggle it on for a track, then every knob you move
@@ -543,9 +744,9 @@ function upsertParam(trackLabel, slot, name, value) {
 let hashTimer = null;
 cm.on('change', () => {
   clearTimeout(hashTimer);
-  // A history restore already set the URL - re-syncing it would push past the entry the user
-  // just navigated to and drop everything forward of it.
-  if (!restoringFromHistory) hashTimer = setTimeout(syncUrlToBuffer, 400);
+  // A history restore already put this state on screen - re-titling and re-storing it is just
+  // work, and the entry the user navigated to is already what the URL says.
+  if (!restoringFromHistory) hashTimer = setTimeout(syncBufferState, 400);
   clearTimeout(mutedDimTimer);
   mutedDimTimer = setTimeout(updateMutedDim, 150);
   scheduleWipSave();
@@ -624,6 +825,9 @@ async function saveWip() {
 // new session file. Without the roll, clearing the editor would blank - and so delete - the very
 // file that was holding the work.
 async function rollWipSession() {
+  // The buffer is about to be replaced, so this is the last chance for a held plugin edit to
+  // reach the session file it belongs to.
+  await settlePluginState();
   await saveWip();
   wipSessionId = newWipSessionId(wipSessionId);
   wipLastSent = null;
@@ -3014,10 +3218,13 @@ function updateTransportButtons() {
 // way the params panel, autocomplete, and highlighting regions refresh.
 async function evaluate(start) {
   const code = cm.getValue();
+  // The eval request goes out FIRST and everything else follows it. Nothing about recording this
+  // state - the history entry, the autosave - may sit between the keystroke and the sound.
+  const pending = api('POST', '/api/evaluate', { code, start });
   checkpointUrl(); // a state you played is a state worth finding again in browser history
   saveWip();       // ...and worth having on disk right now, not a debounce from now
   try {
-    const result = await api('POST', '/api/evaluate', { code, start });
+    const result = await pending;
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     setPatchScale(result.scale); // a setscale() in the buffer re-colours (and re-folds) the roll
     renderTracks(result);
@@ -3668,6 +3875,10 @@ const settingsTab = document.getElementById('settingsTab');
 const audioDeviceSelect = document.getElementById('audioDeviceSelect');
 const fileNameInput = document.getElementById('fileNameInput');
 const fileSaveBtn = document.getElementById('fileSaveBtn');
+const fileShareBtn = document.getElementById('fileShareBtn');
+const fileExportBtn = document.getElementById('fileExportBtn');
+const fileImportBtn = document.getElementById('fileImportBtn');
+const fileImportInput = document.getElementById('fileImportInput');
 const fileNewBtn = document.getElementById('fileNewBtn');
 const fileList = document.getElementById('fileList');
 const fileSearchInput = document.getElementById('fileSearchInput');
@@ -4080,6 +4291,7 @@ async function savePatternFile() {
     return;
   }
   try {
+    await settlePluginState(); // a saved pattern must name the states it actually sounds like
     await api('POST', '/api/patterns/save', { name, code: cm.getValue() });
     updateDocTitle(cm.getValue()); // the name may be new even if the code isn't
     checkpointUrl(); // findable in browser history under the name you just gave it
@@ -4190,6 +4402,13 @@ async function newPatternFile() {
 }
 
 fileSaveBtn.addEventListener('click', savePatternFile);
+fileShareBtn.addEventListener('click', copyShareLink);
+fileExportBtn.addEventListener('click', exportPatch);
+fileImportBtn.addEventListener('click', () => fileImportInput.click());
+fileImportInput.addEventListener('change', () => {
+  importPatch(fileImportInput.files?.[0]);
+  fileImportInput.value = ''; // so re-picking the same file fires 'change' again
+});
 fileNewBtn.addEventListener('click', newPatternFile);
 fileNameInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') savePatternFile();

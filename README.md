@@ -39,8 +39,9 @@ That's a synth line in F minor played through Serum, with its filter cutoff swep
   alternation, euclidean rhythms, fast/slow, replicate, weight, ties, and per-cycle rates.
 - **A sampler alongside the synths.** `s("pack")` plays folders of audio files with slicing,
   timestretch, repitch, per-event velocity, and the same effects chain as instrument tracks.
-- **Shareable patches.** Pin a plugin's full state (preset, every knob, wavetables) into the
-  code; because the whole buffer lives in the URL hash, sharing the link shares the exact sound.
+- **Shareable patches.** A plugin's full state (preset, every knob, wavetables) is written into the
+  code automatically, so the patch *is* the sound — **export** hands someone a single file that
+  plays exactly what you hear, and **link** puts a whole plain-code patch in the clipboard.
 - **Extensible from the editor.** Extend `Signal.prototype` live, define shared constants, and
   build your own vocabulary the same way you would in Strudel.
 
@@ -296,13 +297,32 @@ since the prototype keeps methods already added to it.
 
 `synth("Serum 2")` leaves the sound to the plugin's own default. The moment you change anything in
 the plugin's own window — a knob, a preset from its browser — that state is captured and written
-into the code for you, as the call's second argument: `synth("Serum 2", { state: "H4sI…" })`, same
-for `.fx(...)`. Nothing to press; the code keeps describing what you're hearing.
+into the code for you, as the call's second argument: `synth("Serum 2", { state: "H4sIAAAA…" })`,
+same for `.fx(...)`. Nothing to press; the code keeps describing what you're hearing.
 
-On every load or eval that state is restored into the plugin, Ableton-style: the patch sounds
-identical on a cold start, and because the whole buffer lives in the URL hash, sharing the link
-shares the sound. The blob is gzip+base64 (opaque by design) and the editor folds it — and long
-`lfo()` shape strings — into a small `{⋯}` pill; click the pill to see the raw text.
+That string is the plugin's whole program — every knob, the preset, the wavetables — gzipped and
+base64'd, often megabytes of it. It folds on screen to a `{◆ 2184kb}` chip you can click open, so
+it takes one line of reading space. **The patch is the file**: what you save, export or paste
+carries its own sound, with nothing to resolve and nothing that can go missing behind it. That's
+also what makes the obvious workflow work — duplicate a line, change the preset on one copy, and
+switch between them by commenting one out. Both states are right there in the text.
+
+The state lands about half a second after you let go of the knob, so the code is never behind what
+you're hearing and closing the tab can't cost you a preset. Asking a plugin for its program does
+suspend it while it serializes — on a big instrument that's a brief interruption you can hear — so
+there's a quieter mode for performing: start the server with `POPTART_AUTOPIN=deferred` and captures
+made while the clock is running are held until the next moment the code has to be true about the
+sound (play, stop, save, export, copy a link), leaving a jam uninterrupted. The trade is that your
+sound design lives only inside the plugin until one of those happens; the editor says so once when
+it starts holding one.
+
+To share a patch, use **export** and send the file; the other end opens it with **import**, or just
+drops it in `~/.poptart/patterns`. The **link** button copies a self-contained URL of the buffer,
+which is the quickest way to pass around a patch with no pinned plugins — with one, the URL runs to
+megabytes and the address bar will truncate it, so the editor tells you to export instead.
+
+(The address bar itself holds a short `#s=…` snapshot id rather than the buffer — see
+ARCHITECTURE.md. Back/Forward walk your evals.)
 
 Capture is debounced, so a knob sweep writes once when you let go rather than continuously, and
 the writes collapse into a single undo step. Delete the `{ state }` argument and the call goes back

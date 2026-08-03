@@ -99,3 +99,37 @@ test('a labeled setscale block still reads as a bare call', () => {
   const [block] = splitLabeledBlocks('key: setscale("F minor")');
   assert.ok(isBareCallBlock(block.code, 'setscale'));
 });
+
+// The lexer that decides all of the above runs once over the buffer, carrying its state from line
+// to line, rather than re-reading the block from the start each time (which made splitting cost
+// O(lines x block size) - ruinous for a buffer holding a pinned plugin state, and it runs in the
+// same event loop as the note scheduler). These two lock that in: the state really does carry
+// across the line boundary, and the cost stays linear.
+
+test('a backslash at end of line keeps a string open into the next line', () => {
+  // The escaped newline means the ` and ) on line 2 are string contents, not a template opening
+  // one - so `b:` on line 3 is still read as a label. Re-lexing from the start got this right by
+  // construction; carrying the state has to get it right by remembering the pending escape.
+  const src = ['a: n("x \\', '` )', 'b: n("0")'].join('\n');
+  assert.deepEqual(labels(src), ['a', 'b']);
+});
+
+test('splitting stays linear in buffer size', () => {
+  // A pinned plugin state, with the rest of the method chain below it - every one of those lines
+  // used to re-lex the whole state string.
+  const blob = 'QUJD'.repeat(512 * 1024); // 2 MB
+  const src = [
+    'lead: n("0 3 5 7")',
+    `  .synth("Serum 2", { state: "${blob}" })`,
+    ...Array.from({ length: 12 }, (_, i) => `  .gain(${(i % 9) / 10 + 0.1})`),
+    '',
+    'drums: s("bd*4")',
+  ].join('\n');
+
+  const t0 = performance.now();
+  const blocks = splitLabeledBlocks(src);
+  const ms = performance.now() - t0;
+
+  assert.deepEqual(blocks.map((b) => b.label), ['lead', 'drums']);
+  assert.ok(ms < 100, `splitting a ${(src.length / 1024 / 1024).toFixed(0)}MB buffer took ${ms.toFixed(0)}ms`);
+});

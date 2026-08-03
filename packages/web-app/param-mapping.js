@@ -17,10 +17,13 @@
 // 0..1.
 //
 // MappedEngine wraps any engine implementing pattern-core's engine interface and applies that
-// rule to setParam/setParamLFO, passing everything else straight through.
+// rule to setParam/setParamLFO. It also resolves plugin-state chips to files (see setPluginState
+// and states.js), because that translation is the same kind of job: turning what the code says
+// into what the engine takes. Everything else passes straight through.
 
 const fs = require('node:fs');
 const path = require('node:path');
+
 
 const MAPPINGS_DIR = path.join(__dirname, '..', '..', 'mappings');
 
@@ -151,6 +154,8 @@ class MappedEngine {
   unloadEffect(...a) { return this.engine.unloadEffect(...a); }
   getParams(...a) { return this.engine.getParams(...a); }
   getPluginState(...a) { return this.engine.getPluginState(...a); }
+  setPluginStateFile(...a) { return this.engine.setPluginStateFile(...a); }
+
   setPluginState(...a) { return this.engine.setPluginState(...a); }
   showPluginEditor(...a) { return this.engine.showPluginEditor(...a); }
   setTempo(...a) { return this.engine.setTempo(...a); }

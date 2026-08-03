@@ -577,6 +577,7 @@ aside h2 {
 .file-save-row {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap; /* name field + save/link/export, in a sidebar that can be narrow */
 }
 
 .file-save-row input {
@@ -588,6 +589,10 @@ aside h2 {
   margin-bottom: 6px;
   padding: 4px 12px;
   font-size: 12px;
+}
+
+.file-save-row button.small {
+  padding: 4px 8px;
 }
 
 .file-row {

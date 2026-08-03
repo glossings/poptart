@@ -13,10 +13,18 @@
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const zlib = require('node:zlib');
+const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { samplesRoot, listPackFiles, detectSlices } = require('./samples');
+
+// Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
+// this process also runs the note scheduler against a 150ms lookahead - gzipSync of that is
+// ~35ms the scheduler spends not sending notes. zlib's async form does it on the threadpool.
+const gzip = promisify(zlib.gzip);
+const gunzip = promisify(zlib.gunzip);
 
 const SC_SCRIPT_PATH = path.join(__dirname, 'sc', 'poptart.scd');
 
@@ -236,6 +244,7 @@ class OscEngine {
     // pack name -> { status: 'loading'|'ready'|'error', files: [{ path, duration, channels, slices }] }
     this._packs = new Map();
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
+    this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     // Live CC feed callback, (device, channel 1-16, cc, value 0..1) - set by the host (web-app
     // points it at pattern-core's live-value store). Fired for every /poptart/midiIn message
     // once MIDI is enabled engine-side.
@@ -565,33 +574,56 @@ class OscEngine {
   }
 
   // --- plugin state (the synth("Serum 2", { state }) round-trip) ---
-  // The state string is gzip+base64 of VSTPlugin's own program-file format, so it's compact
-  // enough to live inside code / a URL hash and opaque by design. Both directions travel via
-  // temp file - a Serum state is far beyond any UDP datagram.
+  // A state is VSTPlugin's own program-file format, and always travels between here and sclang as
+  // a file - a Serum state is far beyond any UDP datagram.
+  //
+  // The string form is what the editor buffer carries (gzip+base64), so a patch describes its own
+  // sound with nothing to resolve. The compression at both ends is asynchronous for the reason in
+  // the gzip/gunzip comment at the top of this file: it shares an event loop with the scheduler.
+
+  /** Restores a state from a file on disk. Fire-and-forget, like the other chain calls. */
+  setPluginStateFile(trackId, slotIndex, stateFile) {
+    this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile]);
+  }
 
   /** Captures the current full state of the plugin in a chain slot as an opaque string. */
   async getPluginState(trackId, slotIndex) {
     const reply = await this._request('/poptart/getPluginState', [trackId, slotIndex]);
-    const data = fs.readFileSync(reply.path);
-    fs.unlinkSync(reply.path);
-    return zlib.gzipSync(data).toString('base64');
+    const data = await fsp.readFile(reply.path);
+    await fsp.unlink(reply.path).catch(() => {}); // sclang's temp copy; already gone is fine
+    return (await gzip(data)).toString('base64');
   }
 
   /**
    * Restores a state captured by getPluginState. Fire-and-forget like the other chain calls;
    * the .scd side waits for the slot's plugin to finish loading before applying.
+   *
+   * Decompressing off the loop makes this asynchronous, so two states landing on one slot in
+   * quick succession (an eval while an earlier one is still inflating) could otherwise arrive
+   * out of order and leave the plugin on the older program. `_stateSeq` drops any restore a newer
+   * one has already superseded.
    */
   setPluginState(trackId, slotIndex, state) {
-    let data;
-    try {
-      data = zlib.gunzipSync(Buffer.from(String(state), 'base64'));
-    } catch (e) {
-      this._warnOnce(`state:${trackId}:${slotIndex}`, `[poptart] plugin state for ${trackId}/slot ${slotIndex} is not a valid captured state string (${e.message}) - ignoring`);
-      return;
-    }
-    const stateFile = path.join(os.tmpdir(), `poptart-state-${trackId}-${slotIndex}-${Date.now()}.fxp`);
-    fs.writeFileSync(stateFile, data);
-    this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile]);
+    const key = `${trackId}|${slotIndex}`;
+    const seq = (this._stateSeq.get(key) ?? 0) + 1;
+    this._stateSeq.set(key, seq);
+    const superseded = () => this._stateSeq.get(key) !== seq;
+    (async () => {
+      let data;
+      try {
+        data = await gunzip(Buffer.from(String(state), 'base64'));
+      } catch (e) {
+        this._warnOnce(`state:${trackId}:${slotIndex}`, `[poptart] plugin state for ${trackId}/slot ${slotIndex} is not a valid captured state string (${e.message}) - ignoring`);
+        return;
+      }
+      if (superseded()) return;
+      const stateFile = path.join(os.tmpdir(), `poptart-state-${trackId}-${slotIndex}-${Date.now()}.fxp`);
+      await fsp.writeFile(stateFile, data);
+      if (superseded()) return;
+      this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile]);
+    })().catch((e) => {
+      this._warnOnce(`state-write:${trackId}:${slotIndex}`, `[poptart] could not restore plugin state for ${trackId}/slot ${slotIndex}: ${e.message ?? e}`);
+    });
   }
 
   // --- sampler ---

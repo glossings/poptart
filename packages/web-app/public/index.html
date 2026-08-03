@@ -123,11 +123,17 @@
 
           <div id="filesTab" class="tab-body hidden">
             <section id="filesSection">
-              <h2>pattern files <button id="fileNewBtn" class="small" title="clear the editor and start a new pattern">＋ new</button></h2>
+              <h2>pattern files
+                <button id="fileNewBtn" class="small" title="clear the editor and start a new pattern">＋ new</button>
+                <button id="fileImportBtn" class="small" title="open a patch file someone sent you">import</button>
+              </h2>
+              <input id="fileImportInput" type="file" accept=".js,text/javascript" hidden />
               <div class="file-save-row">
                 <input id="fileNameInput" type="text" placeholder="name to save as…" spellcheck="false"
                   title="the file name the current editor buffer is saved under" />
                 <button id="fileSaveBtn" title="save the current editor buffer under this name">save</button>
+                <button id="fileShareBtn" class="small" title="copy a link with the whole pattern encoded in it — only practical for patches without captured plugin state">link</button>
+                <button id="fileExportBtn" class="small" title="download the buffer as a file — the way to share a patch that carries captured plugin state">export</button>
               </div>
               <input id="fileSearchInput" type="search" spellcheck="false" placeholder="🔍 search everything below…"
                 title="matches the file name, its @title / @by / @tags, and the code itself — tag:techno and by:aria narrow a term to one field" />

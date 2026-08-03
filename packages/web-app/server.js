@@ -11,6 +11,7 @@ const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname } = require('./request-guard');
+const { putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 // Loopback-only by default: this server evals arbitrary JS (/api/evaluate), so binding
@@ -781,57 +782,146 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
 // the full state and hand it to the editor to write into the call as `{ state }`. No pin button:
 // the code always describes what you're hearing.
 //
-// Debounced, because a capture is expensive in the one place that hurts: sclang writes the whole
-// program (wavetables and all) to disk, then getPluginState reads it and gzips it SYNCHRONOUSLY,
-// on the same event loop that runs the pattern schedulers and the OSC clock. sclang reports every
-// gesture, so an undebounced capture would run that disk+gzip round trip dozens of times a second
-// during a knob drag and audibly jitter note timing. One capture per gesture is enough anyway -
-// the state is a full snapshot, so intermediate ones are pure waste.
+// The state itself goes in, gzipped and base64'd, megabytes and all - not a reference to it. A
+// patch is then the whole sound: what you save, paste or send needs nothing else to exist, and
+// commenting one line out and another in swaps presets, because both are right there. It was
+// briefly a short id into a side store instead; that made buffers small but made a patch a pointer,
+// and pointers dangle. What made big buffers expensive was never the bytes - it was the label
+// splitter re-lexing a block per line (fixed in labels.mjs: 2MB went 225ms -> 11ms). An 8.5MB
+// buffer with three pinned Serums now costs ~55ms an eval, and that is worth paying for a patch
+// that can't lose its own sound.
+//
+// WHEN we capture is an audio decision, not a bookkeeping one, and it has two settings. A capture
+// is VSTPlugin's `writeProgram`, and its docs are explicit about the cost: with `async: true` (the
+// default)
+// "plugin processing is temporarily suspended" while the plugin serializes itself - a couple of
+// megabytes of wavetables for a Serum program, and an audible interruption of that track.
+// `async: false` is not an escape: it moves the same work onto the audio thread, where it stalls
+// the whole server rather than one plugin. Our own share is off the event loop (the gzip runs on
+// the threadpool - see osc-engine), so there is no faster capture to write - only a better moment
+// to spend one:
+//
+// `immediate` (the default) spends one as soon as each gesture settles, whatever the clock is
+// doing: one brief suspension per tweak, and a buffer that always matches what you hear.
+// `deferred` (POPTART_AUTOPIN=deferred) spends it only where it costs least:
+//
+//   - clock frozen -> capture as soon as the gesture settles. Nothing is playing to interrupt.
+//   - clock running -> hold the slot dirty, and capture at the next moment the code has to be
+//     true about the sound: an eval, a stop, a save, an export, a share link (the callers of
+//     flushPluginCaptures). Those are moments you are already changing or leaving the sound, and
+//     all of them are far rarer than knob moves. It also keeps a megabyte-scale rewrite of the
+//     buffer out of the middle of a performance.
+//
+// Deferring buys an uninterrupted jam, and pays for it in the gap between the plugin and the
+// buffer: sound design that exists only inside the plugin is lost if the tab or the server goes
+// away, and anything reading the buffer meanwhile (an autosave, a snapshot) is describing a sound
+// that has moved on. flushPluginCaptures closes the gap wherever the code is about to be written
+// out, but not everything is one of those moments - which is why it isn't the default.
+//
+// The signal actually worth waiting for would be the plugin's own window closing, and VSTPlugin
+// doesn't offer it: its events are /vst_param, /vst_auto, /vst_program*, /vst_latency, /vst_midi,
+// /vst_sysex, /vst_update and /vst_crash (see the UGen reference). Nothing reports a closed editor.
+//
+// Debounced either way: sclang reports every gesture, so an undebounced capture would run that
+// round trip dozens of times a second during a knob drag. One capture per gesture is enough
+// anyway - the state is a full snapshot, so intermediate ones are pure waste.
 // ---------------------------------------------------------------------------------------------
 
 const AUTOPIN_DEBOUNCE_MS = 400;
+// A capture slower than this is worth a log line: it is time the plugin spent suspended, which is
+// the only part of a capture anyone can hear.
+const AUTOPIN_SLOW_MS = 50;
 
-const autoPinDirty = new Map(); // "trackId|slot" -> { trackId, slot } - edited, not yet captured
-const autoPinReady = new Map(); // "trackId|slot" -> { trackId, slot, state } - drained by the editor
+// See the section header for what these two cost each other.
+const AUTOPIN_MODE = process.env.POPTART_AUTOPIN === 'deferred' ? 'deferred' : 'immediate';
+
+// "trackId|slot" -> { trackId, slot, plugin } - edited, not yet captured. `plugin` is what sat in
+// that slot when the gesture happened; a capture that finds something else there has been overtaken
+// by a chain edit and is dropped rather than written to the wrong plugin.
+const autoPinDirty = new Map();
+const autoPinReady = new Map(); // same key -> { trackId, slot, plugin, state } - editor drains it
 // Sig#log() lines waiting for the editor to drain them (see init's setEventLogger). Capped, so a
 // .log() left running with no browser attached can't grow without bound: the oldest lines go,
 // which is the right end to lose - the interesting one is what just played.
 const EVENT_LOG_MAX = 500;
 const eventLogQueue = [];
 let autoPinTimer = null;
-let autoPinCapturing = false;
+let autoPinRun = null; // the capture pass in flight, so a flush can wait for it instead of racing
 
 function handlePluginEdited(trackId, slot) {
-  autoPinDirty.set(`${trackId}|${slot}`, { trackId, slot });
+  autoPinDirty.set(`${trackId}|${slot}`, { trackId, slot, plugin: pluginInSlot(trackId, slot) });
   clearTimeout(autoPinTimer);
-  autoPinTimer = setTimeout(() => captureDirtyPlugins().catch(() => {}), AUTOPIN_DEBOUNCE_MS);
+  // In deferred mode, capture on the gesture only while the clock is frozen - nothing to interrupt.
+  // A running clock leaves the slot dirty until something flushes it.
+  if (AUTOPIN_MODE === 'immediate' || (transport?.paused ?? true)) {
+    autoPinTimer = setTimeout(flushPluginCaptures, AUTOPIN_DEBOUNCE_MS);
+  }
+}
+
+function pluginInSlot(trackId, slot) {
+  return mappedEngine?.chains.get(trackId)?.[slot] ?? null;
+}
+
+/**
+ * Capture every slot edited since the last flush. Safe to call at any time and from anywhere:
+ * concurrent callers share the one pass (captures are serialized - each is a disk write in sclang,
+ * and two writeProgram calls must not race for the same slot's temp file), and a slot that can't
+ * be captured is logged rather than thrown, so a flush never fails the request it rides on.
+ */
+function flushPluginCaptures() {
+  if (!autoPinRun) {
+    autoPinRun = captureDirtyPlugins().finally(() => {
+      autoPinRun = null;
+    });
+  }
+  return autoPinRun;
 }
 
 async function captureDirtyPlugins() {
-  // Captures are serialized: each one is a disk write in sclang, and a second gesture landing
-  // mid-capture must not have two writeProgram calls racing for the same slot's temp file.
-  if (autoPinCapturing || !engine) return;
-  autoPinCapturing = true;
-  try {
-    while (autoPinDirty.size) {
-      const [key, { trackId, slot }] = autoPinDirty.entries().next().value;
-      autoPinDirty.delete(key);
-      try {
-        const state = await engine.getPluginState(trackId, slot);
-        autoPinReady.set(key, { trackId, slot, state });
-        // The state came *from* the plugin, so the next eval must not push it straight back:
-        // tell the track's scheduler it's already applied. Without this, every eval would have
-        // the plugin re-chew a state it already has (a reload, and an audible one on some).
-        schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(trackId)?.[slot], state);
-      } catch (e) {
-        // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
-        // all self-correcting on the next edit. Log once per slot so it's diagnosable.
-        console.log(`[auto-pin] could not capture ${trackId} slot ${slot}: ${e.message ?? e}`);
-      }
+  if (!engine) return;
+  while (autoPinDirty.size) {
+    const [key, { trackId, slot, plugin }] = autoPinDirty.entries().next().value;
+    autoPinDirty.delete(key);
+    // Reordering a chain moves which plugin a slot holds. A pending capture for slot 2 would then
+    // read - and the editor would write - the wrong plugin's program, so drop it instead. The
+    // plugin still holds the edit; touching it again captures it where it now lives.
+    const now = pluginInSlot(trackId, slot);
+    if (plugin && now !== plugin) {
+      console.log(`[auto-pin] skipped ${trackId} slot ${slot}: it held ${plugin} when it was edited and holds ${now ?? 'nothing'} now`);
+      continue;
     }
-  } finally {
-    autoPinCapturing = false;
+    try {
+      const t0 = performance.now();
+      const state = await engine.getPluginState(trackId, slot);
+      const ms = performance.now() - t0;
+      // Nearly all of this is the plugin serializing itself with its processing suspended - the
+      // gzip on our side is off the event loop (see osc-engine). Worth logging when it's slow:
+      // it's the only part of a capture anyone can hear.
+      if (ms > AUTOPIN_SLOW_MS) {
+        console.log(`[auto-pin] ${trackId} slot ${slot}: plugin took ${Math.round(ms)}ms to hand over its program`);
+      }
+      autoPinReady.set(key, { trackId, slot, plugin, state });
+      // The state came *from* the plugin, so the next eval must not push it straight back:
+      // tell the track's scheduler it's already applied. Without this, every eval would have
+      // the plugin re-chew a state it already has (a reload, and an audible one on some).
+      schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(trackId)?.[slot], state);
+    } catch (e) {
+      // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
+      // all self-correcting on the next edit. Log once per slot so it's diagnosable.
+      console.log(`[auto-pin] could not capture ${trackId} slot ${slot}: ${e.message ?? e}`);
+    }
   }
+}
+
+// Pruning is housekeeping, not part of answering the request: it runs after a delay, coalesced,
+// so a burst of evals prunes once and never between the notes of one.
+let pruneTimer = null;
+function schedulePrune() {
+  if (pruneTimer) return;
+  pruneTimer = setTimeout(() => {
+    pruneTimer = null;
+    pruneSnapshots().catch((e) => console.error(`[poptart] snapshot prune failed: ${e.message ?? e}`));
+  }, 30000).unref();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -945,6 +1035,11 @@ const routes = {
   // works.
   'POST /api/evaluate': async (body) => {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+
+    // Whatever you last moved in a plugin's own window is captured here, before anything else:
+    // this eval may reload the very plugin holding the only copy of that tweak, and it is the
+    // moment the code has to describe the sound anyway (see the auto-pin section).
+    await flushPluginCaptures();
 
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
@@ -1095,6 +1190,9 @@ const routes = {
     for (const id of kbTracks.keys()) releaseKbNotes(id);
     // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top.
     transport?.stop();
+    // Now that nothing is playing, any plugin edit held back during the performance is free to
+    // capture (the suspension it costs has nothing left to interrupt).
+    flushPluginCaptures();
     return { status: 200, body: { transport: transport?.snapshot() ?? null } };
   },
 
@@ -1185,11 +1283,19 @@ const routes = {
   // slot the editor already wrote isn't written again; a slot edited since is still pending
   // capture and arrives on a later poll. `logs` rides along on the same drain - the .log() event
   // lines fired since the last poll, in order, for the in-app console.
-  'POST /api/pluginEdits': async () => {
+  'POST /api/pluginEdits': async (body) => {
+    // `flush: true` means the editor is about to write the buffer out somewhere it matters -
+    // saving, exporting, copying a share link - so a plugin edit still held back gets captured
+    // now rather than writing out a stale state. The 500ms poll never asks for this.
+    if (body?.flush) await flushPluginCaptures();
     const logs = eventLogQueue.splice(0, eventLogQueue.length);
     const edits = [...autoPinReady.values()];
     autoPinReady.clear();
-    return { status: 200, body: { edits, logs } };
+    // Slots deliberately left uncaptured (deferred mode, mid-performance), so the editor can say so
+    // once rather than leave a plugin tweak looking like it went unnoticed. In immediate mode a
+    // dirty slot is merely one whose debounce hasn't fired yet - nothing worth announcing.
+    const holding = AUTOPIN_MODE === 'deferred' && !(transport?.paused ?? true) ? autoPinDirty.size : 0;
+    return { status: 200, body: { edits, logs, pending: holding } };
   },
 
   // Pop open the native editor window of the plugin in a chain slot (design your supersaw in
@@ -1246,7 +1352,8 @@ const routes = {
     return { status: 200, body: {} };
   },
 
-  // Body: { name } -> { code }.
+  // Body: { name } -> { code }. A saved pattern is the whole patch, captured plugin states and
+  // all, so what comes back is exactly what was written.
   'POST /api/patterns/load': async (body) => {
     const file = patternFilePath(body.name);
     if (!fs.existsSync(file)) throw new Error(`no saved pattern named "${body.name}"`);
@@ -1276,17 +1383,34 @@ const routes = {
   // Body: { id, code }. Called on a debounce while typing, so it must stay cheap and must never
   // be the thing that interrupts a jam - a blank buffer deletes the session file instead of
   // leaving an empty one behind, and that's the only way a WIP file is removed automatically.
+  // Autosave fires every second or so while the user types, and this process also runs the
+  // pattern scheduler - so the write is async. Synchronously writing a buffer carrying captured
+  // plugin state is milliseconds the scheduler spends not sending notes, against a 150ms
+  // lookahead, several times a minute.
   'POST /api/patterns/wip/save': async (body) => {
     const file = wipFilePath(body.id);
     const code = String(body.code ?? '');
     if (!code.trim()) {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
+      await fs.promises.unlink(file).catch(() => {}); // already gone is the wanted state
       return { status: 200, body: { saved: false } };
     }
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, code, 'utf8');
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    await fs.promises.writeFile(file, code, 'utf8');
     return { status: 200, body: { saved: true } };
   },
+
+  // Code snapshots - what the editor's URL points at (see snapshots.js). The buffer used to be
+  // base64'd into the hash itself, which put a megabyte-URL pushState in front of every eval.
+  // Body: { code } -> { id }.
+  'POST /api/snapshot': async (body) => {
+    const id = await putSnapshot(String(body.code ?? ''));
+    schedulePrune();
+    return { status: 200, body: { id } };
+  },
+
+  // Query: { id } -> { code } - or { code: null } for a state pruned away or from another
+  // machine, which the editor reports rather than treating as an empty buffer.
+  'GET /api/snapshot': async (q) => ({ status: 200, body: { code: await getSnapshot(q.id) } }),
 
   // Body: { id } -> { code }.
   'POST /api/patterns/wip/load': async (body) => {
@@ -1515,11 +1639,16 @@ function serveSampleAudio(query, res) {
   });
 }
 
+// Chunks are concatenated as BYTES and decoded once. Decoding each chunk on arrival (`raw +=
+// chunk`) splits any multi-byte character that happens to straddle a chunk boundary into two
+// replacement characters - which, on a buffer big enough to arrive in several chunks, silently
+// corrupts the code being evaluated wherever it holds an accent or an emoji.
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
-    let raw = '';
-    req.on('data', (chunk) => (raw += chunk));
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) return resolve({});
       try {
         resolve(JSON.parse(raw));
