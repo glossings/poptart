@@ -62,8 +62,12 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   command set to it: load plugin into a track slot, set parameters, trigger notes, start/stop
   native LFOs and envelopes, tempo, routing. Implements the plain-object engine interface the
   scheduler expects.
-- `samples.js` — the sampler side: reads audio folders, transient/slice analysis (Node-side,
-  WAV-only), and sample event handling.
+- `samples.js` — the sampler side: reads audio folders, resolves one exact file for `se()`,
+  transient/slice analysis (Node-side, WAV-only), and sample event handling.
+- `recordings.js` — where bounced tracks live (`~/.poptart/recordings/<YYYY-MM>/<name>.wav`) and
+  how they're named. Owns all path building, like web-app's `pattern-files.js`.
+- `wav.js` — WAV read/write plus the recorder's trim pass (see the per-track recording decision
+  below). The RIFF parsing all tracks live here; `samples.js` mixes down from it.
 - `sc/poptart.scd` — the SuperCollider class/def code: hosts plugins via the `VSTPlugin~` server
   extension, builds one `SynthDef` per track (fixed 8-slot chain: 1 instrument + 7 effects), and
   runs the native LFOs/envelopes sample-accurately inside the audio graph.
@@ -158,6 +162,35 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   `chrome://history` — the one thing the encoding was for. Snapshots are pruned to the most recent
   500, so history is a recovery net, not an archive. Sharing still builds a self-contained base64
   URL, on demand, because an id means nothing on another machine.
+- **A bounce is recorded wide and trimmed in Node.** Per-track recording (`.record()` / ctrl+b)
+  taps the track's post-fader output to a private bus and runs a `DiskOut` synth on it, started and
+  stopped by *timestamped bundles* — the same mechanism note events use — so the window's edges are
+  sample-accurate rather than however long an OSC message took to arrive. But freeing a `DiskOut`
+  drops whatever is still in its realtime buffer (up to ~1.4s), so a synth run for exactly the
+  wanted window comes back short by an unpredictable amount. What gets written is instead
+  `[pre-roll][window][post-roll]`, and `wav.js` cuts the exact window back out. The post-roll that
+  exists to cover that buffer doubles as the release tail, which is what makes the optional
+  tail-wrap possible at no extra cost.
+- **The tail is NOT wrapped by default.** Folding a bounce's release tail over its head is the
+  obvious way to make a loop seamless, and it is wrong for the usual case: you bounce a pattern
+  that is *already looping*, so at the window's start the previous iteration's tail is still
+  sounding and gets recorded into the head. For a pattern whose period divides the window, that
+  incoming tail is the same audio the outgoing one would be — adding it again plays it twice. The
+  wrap is there for the other case (a track silent going in) and is off unless asked for.
+- **A recording is addressed by name, not by path.** Names are minted globally unique across every
+  month folder when the bounce is made, so `sr("bass")` resolves to the same file forever and a
+  second bounce of the same label becomes `bass-2` rather than quietly changing what existing code
+  plays. The `YYYY-MM` folders are filing, never addressing. That also keeps the reference
+  spellable as a bare mini-notation atom: `/` is the slow operator, so a month-qualified
+  `2026-08/bass` couldn't be written without quoting.
+- **Quoted atoms in mini-notation exist for exact file paths.** `se()` genuinely needs paths, and a
+  path holds `/` (slow), spaces (the sequence separator), and dots that would read as value
+  methods. Rather than special-case one builder, the tokenizer grew `'…'` — one literal value,
+  operators suspended — which works in any mini string and also covers sample names with spaces.
+  Postfix operators still apply outside the quotes, so nothing else about the notation changed.
+- **`.record()` is a marker, not a mechanism.** It carries the panel's settings in the code and
+  gives the editor something to hang the panel off, and changes nothing about playback. The actual
+  bounce is keyed on the *block label*, which is why ctrl+b works on any block without it.
 - **Plain HTTP + browser, no Electron.** Open the served page in any browser; keeps the footprint
   small.
 
@@ -178,6 +211,10 @@ hand.
 - **Mini-notation gaps.** Polymeter (`{a b, c d}`) and cycle-internal rate patterns (`a*[2 3]`)
   aren't implemented yet. Degrade (`?`) and random choice (`|`) now are.
 - **Slice analysis is WAV-only** and Node-side; other formats play but have no transient slices.
+- **Bouncing doesn't free the plugin.** A bounced track keeps its VST loaded in its slot (ready for
+  the un-mute), so `.record()` is a bounce, not yet a freeze — it doesn't buy back CPU.
+- **A bounce assumes a steady tempo.** The window's edges are converted from cycles to seconds when
+  the recording is armed, so a tempo change mid-window desyncs the result from the grid.
 
 ---
 

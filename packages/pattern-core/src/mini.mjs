@@ -43,6 +43,12 @@
 //   "round/floor/ceil(x)"  rounding, e.g. "(floor(r*12))". Notes are already rounded for MIDI by
 //                  the scheduler; these matter for sample indices and explicit floor-vs-round.
 //                  r/i/p/round/floor/ceil are reserved names - they can't be used as atoms.
+//   "'a b/c.wav'"  quoted atom: one literal value, whatever it contains. Quoting suspends the
+//                  tokenizer's operator reading, which is what lets a name hold a "/" (otherwise
+//                  slow), a space (otherwise the sequence separator), a leading "-", or a ".wav"
+//                  that would otherwise read as a value method. Exists for se()/sr()'s exact file
+//                  paths, but works in any mini string. Postfix operators still apply OUTSIDE the
+//                  quotes: "'a.wav'*2", "['a.wav' 'b.wav']", "'a.wav'.e(3,8)".
 //
 // All randomness is DETERMINISTIC per (cycle, source-character-offset): the scheduler and the
 // editor's highlighter query getStepsForCycle independently and must agree, and a bar replays
@@ -163,6 +169,18 @@ const NULLARY = new Set(['r', 'p']);
 // atoms: note names, numbers, words, sample names - anything not whitespace/punctuation above
 const ATOM_RE = /^[A-Za-z0-9#.\-_:]+/;
 
+// A quoted atom - 'kick 01.wav' - is one literal value whatever it contains. Quoting is about
+// LEXING, not typing: it suspends every operator the tokenizer would otherwise find inside the
+// text, which is the only way to name a file whose path has a "/" (the slow operator), a space
+// (the sequence separator), or a leading "-". Nothing else changes - a quoted atom is an ordinary
+// atom to the rest of the parser, so "'a.wav'*2" and "['a.wav' 'b.wav']" work as they read.
+// Single quotes only: mini strings are written inside JS double quotes or backticks.
+function readQuoted(str, i) {
+  const close = str.indexOf("'", i + 1);
+  if (close < 0) throw new Error(`[mini] unterminated '...' quoted name in "${str}"`);
+  return { text: str.slice(i + 1, close), end: close + 1 };
+}
+
 function tokenize(str) {
   const tokens = [];
   let i = 0;
@@ -170,6 +188,12 @@ function tokenize(str) {
     const ch = str[i];
     if (/\s/.test(ch)) {
       i++;
+      continue;
+    }
+    if (ch === "'") {
+      const q = readQuoted(str, i);
+      tokens.push({ type: 'quoted', text: q.text, start: i, end: q.end });
+      i = q.end;
       continue;
     }
     if (SINGLE_CHAR_TOKENS.has(ch)) {
@@ -211,7 +235,8 @@ function tokenize(str) {
 // weight at parse time, so "a _ _" is exactly "a@3" - one onset, three slices wide. Inside
 // "<...>" the widened weight instead holds the item across extra cycles (see the alt case).
 function isTie(element) {
-  return element.node.type === 'atom' && element.node.value === '_';
+  // A quoted "'_'" is a value named "_", not a tie - quoting suspends the operator reading.
+  return element.node.type === 'atom' && !element.node.quoted && element.node.value === '_';
 }
 
 function pushElement(items, element) {
@@ -355,6 +380,13 @@ function parseElement(tokens, arith = false) {
     } else {
       throw new Error(`[mini] "${t.text}" needs arguments, e.g. ${t.text}(0,7)`);
     }
+  } else if (t.type === 'quoted') {
+    // `quoted` marks it as a literal for the two places that read INTO an atom's text: the "_"
+    // tie and the `value.method(...)` split. 'kick.wav' must stay a filename, not `kick` with a
+    // ".wav" method on it.
+    node = { type: 'atom', value: t.text, quoted: true, loc: [t.start, t.end] };
+    rest = rest.slice(1);
+    lastEnd = t.end;
   } else if (t.type === 'atom') {
     node = { type: 'atom', value: t.text, loc: [t.start, t.end] };
     rest = rest.slice(1);
@@ -462,7 +494,9 @@ function parseElement(tokens, arith = false) {
 
     if (op.type === '(') {
       if (op.start !== lastEnd) break; // spaced "(" -> a separate expression element
-      const m = node.type === 'atom' && typeof node.value === 'string' ? /^(.+)\.([a-z]+)$/.exec(node.value) : null;
+      // A quoted name is never split on its dots - 'kick.wav' is a filename, not `kick` with a
+      // ".wav" method. Write the euclid outside the quotes instead: 'kick.wav'.e(3,8).
+      const m = node.type === 'atom' && !node.quoted && typeof node.value === 'string' ? /^(.+)\.([a-z]+)$/.exec(node.value) : null;
       if (!m) {
         throw new Error(`[mini] "(...)" after "${node.value ?? '...'}" - a value method is written value.method(...), e.g. 1.e(3,8) for euclid`);
       }

@@ -559,12 +559,20 @@ export class Scheduler {
         if (this.pattern.sampler) {
           const cfg = this._sampleConfigAt(step, onsetSec, stepStartCycle);
           if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
+          // What the engine resolves to files: a bare name is a pack, "file:"/"rec:" name one
+          // exact file (se/sr). Only a pack takes the index suffix - the other two address a
+          // single file, so a ":" in one of those values belongs to the name.
+          const kind = this.pattern.samplerKind ?? 'pack';
           let pack = String(step.value);
-          // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
-          const m = /^(.+):(-?\d+)$/.exec(pack);
-          if (m) {
-            pack = m[1];
-            if (cfg.index === undefined) cfg.index = Number(m[2]);
+          if (kind === 'pack') {
+            // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
+            const m = /^(.+):(-?\d+)$/.exec(pack);
+            if (m) {
+              pack = m[1];
+              if (cfg.index === undefined) cfg.index = Number(m[2]);
+            }
+          } else {
+            pack = `${kind === 'rec' ? 'rec' : 'file'}:${pack}`;
           }
           // The engine reports back what it resolved the config down to (fit -> rate, slice ->
           // window, and the window's length in seconds) - that's what .log() prints, since none

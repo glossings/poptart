@@ -11,6 +11,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
+const { readWavRaw } = require('./wav');
+
 const AUDIO_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac']);
 
 // Sample library location, in priority order:
@@ -46,63 +48,74 @@ function listPackFiles(pack) {
     .map((f) => path.join(dir, f));
 }
 
+/**
+ * Absolute path of ONE audio file addressed by its path relative to the samples root - what se()
+ * plays, as opposed to s()'s pack-plus-index. Returns null if it isn't there or isn't audio.
+ *
+ * The resolved path is checked to still be inside the root afterwards, so a "../.." in a pattern
+ * can't turn the sampler into a file browser for the rest of the disk.
+ */
+function resolveSampleFile(relPath) {
+  const rel = String(relPath ?? '').trim();
+  if (!rel || path.isAbsolute(rel)) return null;
+  const root = path.resolve(samplesRoot());
+  const abs = path.resolve(root, rel);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  if (!AUDIO_EXTS.has(path.extname(abs).toLowerCase())) return null;
+  try {
+    return fs.statSync(abs).isFile() ? abs : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One directory under the samples root, for the editor's se() autocomplete: its immediate
+ * subfolders and its audio files, both in filename order. `rel` is root-relative ("" = the root).
+ */
+function browseSamples(rel = '') {
+  const root = path.resolve(samplesRoot());
+  const dir = path.resolve(root, String(rel ?? '').trim());
+  if (dir !== root && !dir.startsWith(root + path.sep)) return null;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const isDir = (e) => {
+    if (e.isDirectory()) return true;
+    if (!e.isSymbolicLink()) return false;
+    try {
+      return fs.statSync(path.join(dir, e.name)).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  return {
+    path: path.relative(root, dir),
+    dirs: entries.filter(isDir).map((e) => e.name).sort((a, b) => a.localeCompare(b)),
+    files: entries
+      .filter((e) => !isDir(e) && AUDIO_EXTS.has(path.extname(e.name).toLowerCase()))
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
-// Minimal WAV reader - enough of RIFF to get mono float samples out of the PCM/float encodings
-// sample packs actually use (16/24/32-bit int, 32/64-bit float, plain or EXTENSIBLE header).
+// Mono mixdown for the transient analysis below. The RIFF parsing itself lives in wav.js (the
+// recorder's trim pass needs the channels kept); this only flattens what it returns.
 // Returns { sampleRate, samples: Float32Array (mono mixdown) } or null for anything else.
 // ---------------------------------------------------------------------------------------------
 
 function readWav(filePath) {
-  let buf;
-  try {
-    buf = fs.readFileSync(filePath);
-  } catch {
-    return null;
-  }
-  if (buf.length < 44 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') {
-    return null;
-  }
-
-  let fmt = null;
-  let data = null;
-  for (let off = 12; off + 8 <= buf.length; ) {
-    const id = buf.toString('ascii', off, off + 4);
-    const size = buf.readUInt32LE(off + 4);
-    const body = off + 8;
-    if (id === 'fmt ') fmt = { off: body, size };
-    if (id === 'data') data = { off: body, size: Math.min(size, buf.length - body) };
-    off = body + size + (size % 2); // chunks are word-aligned
-  }
-  if (!fmt || !data || fmt.size < 16) return null;
-
-  let format = buf.readUInt16LE(fmt.off);
-  const channels = buf.readUInt16LE(fmt.off + 2);
-  const sampleRate = buf.readUInt32LE(fmt.off + 4);
-  const bits = buf.readUInt16LE(fmt.off + 14);
-  if (format === 0xfffe && fmt.size >= 40) format = buf.readUInt16LE(fmt.off + 24); // EXTENSIBLE: real format is in the GUID
-  if (!channels || !sampleRate) return null;
-
-  const bytesPer = bits / 8;
-  const frames = Math.floor(data.size / (bytesPer * channels));
-  if (!frames) return null;
-
-  const readSample = (() => {
-    if (format === 1 && bits === 16) return (o) => buf.readInt16LE(o) / 0x8000;
-    if (format === 1 && bits === 24) return (o) => ((buf.readIntLE(o, 3) << 8) >> 8) / 0x800000;
-    if (format === 1 && bits === 32) return (o) => buf.readInt32LE(o) / 0x80000000;
-    if (format === 1 && bits === 8) return (o) => (buf.readUInt8(o) - 128) / 128;
-    if (format === 3 && bits === 32) return (o) => buf.readFloatLE(o);
-    if (format === 3 && bits === 64) return (o) => buf.readDoubleLE(o);
-    return null;
-  })();
-  if (!readSample) return null;
-
+  const raw = readWavRaw(filePath);
+  if (!raw) return null;
+  const { sampleRate, channels, frames, data } = raw;
   const samples = new Float32Array(frames);
   for (let i = 0; i < frames; i++) {
     let sum = 0;
-    for (let ch = 0; ch < channels; ch++) {
-      sum += readSample(data.off + (i * channels + ch) * bytesPer);
-    }
+    for (let ch = 0; ch < channels; ch++) sum += data[i * channels + ch];
     samples[i] = sum / channels;
   }
   return { sampleRate, samples };
@@ -166,4 +179,12 @@ function detectSlices(filePath) {
   return detectOnsets(wav.samples, wav.sampleRate);
 }
 
-module.exports = { samplesRoot, setSamplesRoot, listPackFiles, detectSlices, readWav };
+module.exports = {
+  samplesRoot,
+  setSamplesRoot,
+  listPackFiles,
+  resolveSampleFile,
+  browseSamples,
+  detectSlices,
+  readWav,
+};

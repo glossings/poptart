@@ -11,6 +11,8 @@ const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname } = require('./request-guard');
 const { putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
+const recordings = require('@poptart/osc-engine/recordings');
+const wav = require('@poptart/osc-engine/wav');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 // Loopback-only by default: this server evals arbitrary JS (/api/evaluate), so binding
@@ -178,6 +180,13 @@ async function restartEngine() {
     // so a stale held note isn't "released" against the new engine on the next eval.
     kbTracks.clear();
     kbHeld.clear();
+    // The taps and any in-flight bounce died with the old scsynth. Dropping the state here is what
+    // stops the editor from polling a recording that can never finish; the panel re-taps on its
+    // next poll.
+    if (trackRec?.timer) clearInterval(trackRec.timer);
+    trackRec = null;
+    recTapped.clear();
+    recLevels.clear();
     transport?.stop(); // playback is over - freeze the clock at cycle 0 until the next eval
     if (engine) {
       await engine.stop();
@@ -214,6 +223,8 @@ function wireEngine() {
   engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackId, slot, name, index, value);
   // Any edit inside a plugin's own window - what auto-pin captures back into the code.
   engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackId, slot);
+  // Peak level of a track tapped for recording - what the record panel's meter draws.
+  engine.onRecLevel = (trackId, left, right) => handleRecLevel(trackId, left, right);
   // Which input channels input() can address, and what a device-relative input("name", n) resolves
   // against. Only the booted device has any, so this is re-fed on every start (a device change is
   // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
@@ -310,7 +321,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip',
@@ -765,6 +776,153 @@ function finalizeMidiRec() {
   }
   midiRec.results = results;
   midiRec.phase = 'done';
+}
+
+// ---------------------------------------------------------------------------------------------
+// Track record - bounce one labeled block's audio to a file it can then play back with sr().
+//
+// Same shape as the MIDI recorder above (arm at the next phrase boundary, poll for status, write
+// the result into the code), but the payload is audio and the window's edges are decided by the
+// audio clock rather than by this timer: engine.recordTrack schedules them as timestamped bundles,
+// so the file's length is sample-exact whatever the event loop is doing.
+//
+// What lands on disk is wider than the window - [pre-roll][window][post-roll] - because freeing a
+// DiskOut synth drops whatever is still in its realtime buffer. The post-roll covers that buffer
+// and carries the release tail; trimRecording (wav.js) cuts the exact window back out, and only
+// then does the take get a name and a home under ~/.poptart/recordings.
+// ---------------------------------------------------------------------------------------------
+
+// Insurance either side of the window. The pre-roll absorbs any rounding between this clock and
+// the audio one; the post-roll MUST exceed DiskOut's buffer (65536 frames, ~1.4s at 48k) or the
+// window's own last moments are what gets dropped.
+const REC_PRE_ROLL_SEC = 0.25;
+const REC_POST_ROLL_SEC = 3;
+// A recording has to be armed far enough ahead that its pre-roll still lies in the future; when
+// the next phrase is closer than this, arm for the one after it instead.
+const REC_MIN_LEAD_SEC = REC_PRE_ROLL_SEC + 0.3;
+
+let trackRec = null; // { phase: 'armed'|'recording'|'done', label, cycles, startCycle, endCycle, name, wrapTail, capture, result, error, timer }
+const recTapped = new Set(); // labels currently tapped (a record panel is open on them)
+const recLevels = new Map(); // label -> { peak, at } - latest meter reading, for the panel
+
+// The engine meters ~20x/sec but the panel polls at ~10 - so readings QUEUE rather than overwrite,
+// and a poll drains the lot. Throwing away every other reading would halve the live waveform's
+// resolution and lose whichever transients landed in the gaps. Capped so a panel left open with
+// nothing polling it can't grow without bound.
+const REC_LEVEL_QUEUE_MAX = 64;
+
+function handleRecLevel(trackId, peak, rms) {
+  let queue = recLevels.get(trackId);
+  if (!queue) recLevels.set(trackId, (queue = []));
+  queue.push({ peak, rms, at: Date.now() });
+  while (queue.length > REC_LEVEL_QUEUE_MAX) queue.shift();
+}
+
+// Drain every meter reading for one track since the last poll, oldest first, and clear the queue.
+// Empty means the engine has stopped reporting (tap dropped, engine restarted) - the panel draws
+// silence rather than freezing at whatever it last said.
+function recLevelsOf(label) {
+  const queue = recLevels.get(label);
+  if (!queue?.length) return [];
+  const cutoff = Date.now() - 1000;
+  const out = queue.filter((r) => r.at >= cutoff).map((r) => ({ peak: r.peak, rms: r.rms }));
+  queue.length = 0;
+  return out;
+}
+
+// `levels` covers every tapped track, not just a recording one: an open panel meters its block
+// from the moment it opens, which is most of what makes the panel worth opening. Each entry is
+// every reading since the last poll, oldest first. Recording state rides alongside and is simply
+// absent when nothing is armed.
+function trackRecStatus() {
+  const levels = Object.fromEntries([...recTapped].map((label) => [label, recLevelsOf(label)]));
+  if (!trackRec) {
+    return { phase: 'idle', tapped: [...recTapped], levels, transport: transport?.snapshot() };
+  }
+  const { phase, label, cycles, startCycle, endCycle, name, result, error } = trackRec;
+  return {
+    phase,
+    label,
+    cycles,
+    startCycle,
+    endCycle,
+    name,
+    result,
+    error,
+    tapped: [...recTapped],
+    // A recording keeps its own tap even with the panel closed, so its readings may not be in
+    // `levels` yet - drain them too.
+    levels: recTapped.has(label) ? levels : { ...levels, [label]: recLevelsOf(label) },
+    transport: transport.snapshot(),
+  };
+}
+
+/** Open or close a track's meter tap - what the record panel being open costs. */
+function setRecTap(label, on) {
+  if (!engine) throw new Error(engineError ?? 'engine not loaded');
+  if (on) recTapped.add(label);
+  else if (trackRec?.label !== label) recTapped.delete(label); // a running bounce keeps its own tap
+  else return; // don't pull the tap out from under a recording
+  engine.tapTrack(label, on);
+  if (!on) recLevels.delete(label);
+}
+
+function trackRecTick() {
+  if (!trackRec || trackRec.phase === 'done') return;
+  const pos = transport.cycleAt(engine.getTime());
+  if (trackRec.phase === 'armed' && pos >= trackRec.startCycle) trackRec.phase = 'recording';
+}
+
+// The engine has closed the capture file: cut the window out of it, file it under a name nothing
+// else has used, and hand the editor what it needs to write the sr() call. `wrote` is the engine's
+// own report of what reached the disk ({ frames }), which is what tells an empty capture apart
+// from an unreadable one.
+function finalizeTrackRec(wrote = {}) {
+  const rec = trackRec;
+  clearInterval(rec.timer);
+  rec.timer = null;
+  try {
+    if (wrote.frames === 0) {
+      throw new Error(
+        `the engine recorded nothing from "${rec.label}" - the track's recorder tap never carried audio ` +
+        '(is the block still playing, and not soloed away?)',
+      );
+    }
+    const name = recordings.mintName(rec.name || rec.label);
+    const dest = recordings.newRecordingFile(name);
+    const info = wav.trimRecording(rec.capture, dest, {
+      startSec: REC_PRE_ROLL_SEC,
+      lengthSec: rec.endSec - rec.startSec,
+      wrapTail: rec.wrapTail,
+    });
+    if (!info) throw new Error(`couldn't read the capture the engine wrote (${rec.capture})`);
+    rec.result = { name, file: dest, cycles: rec.cycles, ...info };
+  } catch (err) {
+    rec.error = err.message ?? String(err);
+    console.error(`[poptart] track record (${rec.label}): ${rec.error}`);
+  }
+  // A failed capture is LEFT on disk: it's the only evidence of what went wrong, and the path is
+  // in the error message. A good one has been trimmed into the recordings folder and is just a
+  // temp file at this point.
+  if (!rec.error) {
+    try {
+      fs.unlinkSync(rec.capture);
+    } catch {
+      // already gone - nothing to clean up
+    }
+  }
+  rec.phase = 'done';
+}
+
+// Drop a recording's engine-side tap unless a panel is still open on that track.
+function releaseRecTap(label) {
+  if (recTapped.has(label)) return;
+  try {
+    engine.tapTrack(label, false);
+  } catch {
+    // engine already down - the tap went with it
+  }
+  recLevels.delete(label);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1520,6 +1678,111 @@ const routes = {
   'POST /api/record': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     return { status: 200, body: await engine.record(body.path, body.seconds ?? 4) };
+  },
+
+  // --- track record (see the "Track record" section above) ---
+
+  // Open/close a track's meter tap. Body: { label, on }. The editor calls this when a .record()
+  // panel opens and closes; it's what makes the panel's meter live before anything is armed.
+  'POST /api/trackRecord/tap': async (body) => {
+    const label = String(body.label ?? '').trim();
+    if (!label) throw new Error('trackRecord/tap needs a block label');
+    setRecTap(label, body.on !== false);
+    return { status: 200, body: trackRecStatus() };
+  },
+
+  // Arm a bounce of one labeled block. Body: { label, cycles, name, wrapTail }. Starts at the next
+  // phrase boundary that leaves room for the pre-roll; the response carries the start/end cycles so
+  // the editor can draw the count-in against its own copy of the transport.
+  'POST /api/trackRecord/start': async (body) => {
+    if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
+    if (trackRec && trackRec.phase !== 'done') throw new Error('a bounce is already armed or running - cancel it first');
+    const label = String(body.label ?? '').trim();
+    if (!label) throw new Error('trackRecord/start needs a block label');
+    if (!schedulers.has(label)) throw new Error(`"${label}" isn't playing - only a live block can be bounced`);
+    const cycles = Math.min(128, Math.max(1, Math.round(Number(body.cycles) || 4)));
+
+    // Arm for the next phrase boundary far enough out that the pre-roll is still in the future -
+    // otherwise the engine would clamp the start to "now" and the trim would cut in the wrong place.
+    const now = engine.getTime();
+    let startCycle = (Math.floor(transport.cycleAt(now) / PHRASE_CYCLES) + 1) * PHRASE_CYCLES;
+    while (transport.secAt(startCycle) - now < REC_MIN_LEAD_SEC) startCycle += PHRASE_CYCLES;
+    const startSec = transport.secAt(startCycle);
+    const endSec = transport.secAt(startCycle + cycles);
+
+    if (trackRec?.timer) clearInterval(trackRec.timer);
+    trackRec = {
+      phase: 'armed',
+      label,
+      cycles,
+      startCycle,
+      endCycle: startCycle + cycles,
+      startSec,
+      endSec,
+      name: String(body.name ?? '').trim(),
+      wrapTail: body.wrapTail === true,
+      capture: recordings.captureFile(label),
+      result: null,
+      error: null,
+      timer: setInterval(trackRecTick, 50),
+    };
+
+    // The capture path identifies THIS bounce: a reply that arrives after the user cancelled and
+    // started another must not finalize (or clobber) the newer one.
+    const capture = trackRec.capture;
+    // The tap has to be up before the window opens; a panel may already have opened it.
+    engine.tapTrack(label, true);
+    engine
+      .recordTrack(label, trackRec.capture, startSec - REC_PRE_ROLL_SEC, endSec + REC_POST_ROLL_SEC)
+      .then((wrote) => {
+        if (trackRec?.capture === capture) finalizeTrackRec(wrote);
+      })
+      .catch((err) => {
+        if (trackRec?.capture !== capture) return; // superseded by a newer bounce
+        clearInterval(trackRec.timer);
+        trackRec.timer = null;
+        trackRec.error = err.message ?? String(err);
+        trackRec.phase = 'done';
+      })
+      .finally(() => releaseRecTap(label));
+    return { status: 200, body: trackRecStatus() };
+  },
+
+  'GET /api/trackRecord/status': async () => ({ status: 200, body: trackRecStatus() }),
+
+  // Abort an armed/running bounce, or acknowledge a finished one (clears its result). The engine
+  // side stops with the tap; a cancelled capture is simply never trimmed.
+  'POST /api/trackRecord/cancel': async () => {
+    if (!trackRec) return { status: 200, body: {} };
+    const { label, phase, capture, timer } = trackRec;
+    if (timer) clearInterval(timer);
+    trackRec = null;
+    if (phase !== 'done' && engine) {
+      engine.tapTrack(label, false); // frees the DiskOut synth and closes the file mid-flight
+      recTapped.delete(label);
+      try {
+        fs.unlinkSync(capture);
+      } catch {
+        // the engine may not have created it yet
+      }
+    }
+    return { status: 200, body: {} };
+  },
+
+  // Every bounce on disk, newest first - the sr() autocomplete's word list and the recordings
+  // browser. Reads the filesystem directly, so it works with the engine down.
+  'GET /api/recordings': async () => ({
+    status: 200,
+    body: { root: recordings.recordingsRoot(), items: recordings.listRecordings() },
+  }),
+
+  // One folder of the sample library, for se()'s autocomplete: subfolders first, then audio files.
+  // Query `dir` is root-relative ("" = the root itself).
+  'GET /api/sampleFiles': async (query) => {
+    const { browseSamples, samplesRoot } = require('@poptart/osc-engine/samples');
+    const listing = browseSamples(query.dir ?? '');
+    if (!listing) throw new Error(`can't read ${path.join(samplesRoot(), query.dir ?? '')}`);
+    return { status: 200, body: { root: samplesRoot(), ...listing } };
   },
 
   // --- macros (the editor's "macros" knob bank) ---

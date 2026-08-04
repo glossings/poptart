@@ -89,6 +89,12 @@ var sidechainByTarget, sidechainBySource;
 // writers would only see silence). acquire/releaseBus refcount the buses so they live exactly as
 // long as some writer or reader references them.
 var namedBuses, busGroup, acquireBus, releaseBus;
+// Per-track recording ('/poptart/tapTrack' + '/poptart/recordTrack'). A tapped track copies its
+// post-fader output to a private bus; a meter synth on that bus streams peaks back to Node so the
+// editor's record panel can show the signal, and a DiskOut synth writes the bounce itself. recGroup
+// sits at the TAIL of the node tree, so both read a bus the track synth has already written this
+// block. recTaps holds one entry per tapped track: (bus:, meter:, disk:, buf:, path:).
+var recGroup, recTaps, startTap, stopTap;
 
 // Boot-progress checkpoint ("poptart: booting scsynth" below is the other one):
 // diagnoseSclangOutput in ../index.js matches these exact strings to localize a boot that
@@ -166,6 +172,7 @@ buildTrackDef = { |key|
     // route is set up - see scArgsFor and the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, out = 1, dry = 1, scSend, scSendGain = 1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
+        recOut, recSend = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
         var sig = Silent.ar(2);
         var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
@@ -204,6 +211,13 @@ buildTrackDef = { |key|
         [busOut1, busOut2, busOut3, busOut4].do { |b, i|
             Out.ar(b, sig * [busSend1, busSend2, busSend3, busSend4][i].lag(0.02));
         };
+        // Recorder tap (see the record section below): a copy of the post-fader output for the
+        // meter and DiskOut synths, parked at trashBus with recSend 0 until a bounce taps it.
+        // Taken BEFORE the `dry` scaling deliberately - bouncing a track means bouncing what the
+        // track makes, and a .bsend() track with dry(0) still has to record something. NOT lagged:
+        // the tap is switched between phrases, never mid-window, and a lag would ramp the first
+        // 20ms of every recording up from silence.
+        Out.ar(recOut, sig * recSend);
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
         // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by
         // `dry` (Sig#dry, channel control, default 1) so .dry(0)/.bsend() can mute the dry path
@@ -223,6 +237,7 @@ channelDefault = { |name|
 // trash bus. setSidechain repoints the relevant args when a route is set up.
 scArgsFor = {
     [\scSend, trashBus.index, \scSendGain, 1,
+     \recOut, trashBus.index, \recSend, 0,
      \busOut1, trashBus.index, \busOut2, trashBus.index, \busOut3, trashBus.index, \busOut4, trashBus.index,
      \scBus1, silentBus.index, \scBus2, silentBus.index, \scBus3, silentBus.index,
      \scBus4, silentBus.index, \scBus5, silentBus.index, \scBus6, silentBus.index,
@@ -645,6 +660,24 @@ server.waitForBoot {
     SynthDef(\poptart_busread, { |out, in, gain = 1|
         Out.ar(out, In.ar(in, 2) * gain);
     }).add;
+    // Recorder meter: streams the tapped track's peak level to Node while the record panel is
+    // open, which is what the panel draws. Peak-hold over the reply interval rather than an
+    // instantaneous read, so a transient between two replies can't go unseen - the panel would
+    // otherwise show a kick drum as silence about half the time. Runs whether or not a bounce is
+    // in progress; it is the only cost of an open panel.
+    // SendPeakRMS is the built-in meter feed: it replies 20x/sec with [peak, rms] per channel,
+    // the peak being a held maximum over the interval rather than an instantaneous read - so a
+    // transient between two replies can't go unseen (the panel would otherwise show a kick drum
+    // as silence about half the time).
+    SynthDef(\poptart_rec_meter, { |bus|
+        SendPeakRMS.kr(In.ar(bus, 2), 20, 3, '/poptart/recLevel');
+    }).add;
+    // The bounce itself. Nothing but a DiskOut: everything about WHEN it runs is decided by the
+    // timestamped bundles that start and free it (see the recordTrack OSCdef), so the file's
+    // length is sample-accurate rather than however long the messages took to arrive.
+    SynthDef(\poptart_rec_disk, { |bus, buf|
+        DiskOut.ar(buf, In.ar(bus, 2));
+    }).add;
     // Parked buses + route bookkeeping for audio sidechains (see Sig#sidechain). Allocated once,
     // here, so every track synth's sc* args have a valid default (silence in, send to nowhere).
     silentBus = Bus.audio(server, 2);
@@ -654,6 +687,9 @@ server.waitForBoot {
     // Named-bus registry + the head group its writer tracks live in (see the var declaration).
     namedBuses = IdentityDictionary.new; // busName (Symbol) -> (bus: Bus, refs: Int)
     busGroup = Group.new(server, \addToHead);
+    // Recorder taps read what the track synths wrote this block, so their group goes at the tail.
+    recTaps = IdentityDictionary.new; // trackId (Symbol) -> (bus:, meter:, disk:, buf:, path:)
+    recGroup = Group.new(server, \addToTail);
     server.sync;
     "poptart: server booted, ready".postln;
     nodeAddr.sendMsg("/poptart/ready");
@@ -1718,6 +1754,149 @@ OSCdef(\poptartScanPlugins, { |msg|
         replyOk.("/poptart/scanPlugins", requestId, toJson.((plugins: pluginList.(), crashed: [])));
     });
 }, '/poptart/scanPlugins');
+
+// --- per-track recording (see wav.js and web-app's track-record section) ---
+
+// Tap a track's post-fader output: a private bus, the track synth's rec send pointed at it, and a
+// meter synth streaming peaks to Node for the editor's record panel. Idempotent - opening the
+// panel, arming, and recording all call it, and only the first does anything.
+startTap = { |key|
+    var track = tracks[key];
+    var entry = recTaps[key];
+    if (entry.isNil and: { track.isKindOf(Event) }) {
+        var bus = Bus.audio(server, 2);
+        entry = (bus: bus, meter: nil, disk: nil, buf: nil, path: nil, meterFunc: nil);
+        recTaps[key] = entry;
+        track[\synth].set(\recOut, bus.index, \recSend, 1);
+        entry[\meter] = Synth(\poptart_rec_meter, [\bus, bus.index],
+            target: recGroup, addAction: \addToTail);
+        // The reply answers to sclang, not to Node - forward it on, tagged with the track it came
+        // from (the message itself only carries the node id). SendPeakRMS lays its values out as
+        // [nodeID, replyID, peakL, rmsL, peakR, rmsR]. Both peak AND rms go on: their ratio is the
+        // crest factor, which is what lets the editor colour a transient differently from a pad.
+        entry[\meterFunc] = OSCFunc({ |m|
+            nodeAddr.sendMsg('/poptart/recLevel', key,
+                max(m[3].asFloat, m[5].asFloat), max(m[4].asFloat, m[6].asFloat));
+        }, '/poptart/recLevel', server.addr, argTemplate: [entry[\meter].nodeID]);
+    };
+    entry;
+};
+
+// Undo startTap. Frees an in-flight bounce too: a cancelled recording's file is closed (so it
+// isn't left open on disk) and simply never trimmed.
+stopTap = { |key|
+    recTaps[key] !? { |entry|
+        var track = tracks[key];
+        if (track.isKindOf(Event)) { track[\synth].set(\recSend, 0, \recOut, trashBus.index) };
+        entry[\meterFunc] !? { |f| f.free };
+        entry[\meter] !? { |m| m.free };
+        entry[\disk] !? { |d| d.free };
+        // Same close-then-free ordering as the record path (see there for why it can't be nested).
+        // No sync here: a cancelled capture's file is never read, so the two just go out in order.
+        entry[\buf] !? { |b| b.close; b.free };
+        entry[\bus].free;
+        recTaps[key] = nil;
+    };
+};
+
+OSCdef(\poptartTapTrack, { |msg|
+    var key = msg[1].asSymbol, on = msg[2].asInteger;
+    fork {
+        if (on == 1) { awaitTrack.(key); startTap.(key) } { stopTap.(key) };
+    };
+}, '/poptart/tapTrack');
+
+// Bounce one track to a WAV. The window's edges are timestamped bundles, so the file is
+// sample-accurate rather than however long the messages took to arrive - but DiskOut drops
+// whatever is still in its realtime buffer when the synth is freed, so what gets written is
+// [pre-roll][window][post-roll] and Node cuts the exact window out of it afterwards (wav.js).
+// The post-roll Node asks for is what covers that unflushed buffer, and doubles as the release
+// tail. `startLatency`/`stopLatency` are seconds from now, like every other timed message here.
+OSCdef(\poptartRecordTrack, { |msg|
+    var requestId = msg[1], key = msg[2].asSymbol, path = msg[3].asString;
+    var startLatency = msg[4].asFloat, stopLatency = msg[5].asFloat;
+    // `stage` is a breadcrumb: every step updates it, and the watchdog below reports whichever one
+    // we died on. An exception inside a Routine only posts and kills the thread - without this,
+    // any failure in here reaches Node as an unexplained request timeout (and `try` is no help:
+    // yielding inside a protected frame is not reliable in sclang).
+    var stage = "starting", replied = false;
+    var finish = { |ok, detail|
+        if (replied.not) {
+            replied = true;
+            if (ok) { replyOk.("/poptart/recordTrack", requestId, detail) }
+                   { replyErr.("/poptart/recordTrack", requestId, detail) };
+        };
+    };
+    // Fires only if the normal path never got there. Generous: the recording itself is as long as
+    // the caller asked for, and this is the backstop, not the schedule.
+    SystemClock.sched(stopLatency + 10, {
+        if (replied.not) {
+            ("poptart: record " ++ key ++ " never finished (stuck at: " ++ stage ++ ")").warn;
+            finish.(false, "the engine stalled while recording (last step: " ++ stage ++ ")");
+        };
+        nil
+    });
+    fork {
+        var entry, t0 = Main.elapsedTime, setupSec;
+        awaitTrack.(key);
+        stage = "tapping the track";
+        entry = startTap.(key);
+        if (entry.isNil) {
+            finish.(false, "no track " ++ key);
+        } {
+            var buf, sf, frames = 0;
+            stage = "allocating the record buffer";
+            buf = Buffer.alloc(server, 65536, 2);
+            server.sync;
+            stage = "opening " ++ path;
+            buf.write(path, "wav", "int24", 0, 0, true); // leaveOpen: DiskOut streams into it
+            server.sync;
+            entry[\buf] = buf;
+            entry[\path] = path;
+            // Both latencies were measured by Node against the moment it SENT this message, but
+            // makeBundle schedules from the moment it is CALLED - and allocating the buffer and
+            // opening the file above took a couple of server round trips to get here. Subtract
+            // that, or the whole window lands late by however long the setup took while Node trims
+            // assuming an exact pre-roll.
+            setupSec = Main.elapsedTime - t0;
+            stage = "scheduling the window";
+            server.makeBundle(max(0, startLatency - setupSec), {
+                entry[\disk] = Synth(\poptart_rec_disk, [\bus, entry[\bus].index, \buf, buf],
+                    target: recGroup, addAction: \addToTail);
+            });
+            server.makeBundle(max(0, stopLatency - setupSec), { entry[\disk].free });
+            stage = "recording";
+            // Closing the file is what flushes DiskOut's last block and writes the real data size
+            // into the WAV header, so it waits until after the synth is actually gone. freeMsg -
+            // not a function - is the completion MESSAGE: freeing the buffer before the close has
+            // been processed truncates the file to a bare header.
+            (stopLatency - setupSec + 0.5).max(0.5).wait;
+            // Closing is what flushes DiskOut's last block and writes the real data size into the
+            // WAV header, so it has to happen after the synth is gone and BEFORE Node reads the
+            // file. Close, sync, then free - as three steps, because neither nesting works:
+            // `close(freeMsg)` evaluates freeMsg first, and freeMsg deallocates the buffer as a
+            // side effect rather than just describing one, so close then throws on a freed buffer;
+            // passing a function instead frees it midway through building the close message, which
+            // is what leaves a bare header on disk.
+            stage = "closing the file";
+            buf.close;
+            server.sync; // the header is only correct once the close has been processed
+            buf.free;
+            entry[\buf] = nil;
+            entry[\disk] = nil;
+            // Report what actually reached the disk, so a silent or empty capture says so here
+            // rather than as an unexplained "no readable audio" on the Node side.
+            stage = "reading back " ++ path;
+            sf = SoundFile.new;
+            if (sf.openRead(path)) { frames = sf.numFrames; sf.close };
+            if (frames == 0) {
+                ("poptart: record " ++ key ++ " wrote an empty file - is the track's rec tap up?").warn;
+            };
+            stage = "done";
+            finish.(true, toJson.((path: path, frames: frames)));
+        };
+    };
+}, '/poptart/recordTrack');
 
 // Record the master bus to a WAV file for `seconds` - bounce/export, and how automated tests
 // verify actual audio comes out the other end.

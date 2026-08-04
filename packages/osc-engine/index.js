@@ -18,7 +18,8 @@ const zlib = require('node:zlib');
 const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
-const { samplesRoot, listPackFiles, detectSlices } = require('./samples');
+const { samplesRoot, listPackFiles, resolveSampleFile, detectSlices } = require('./samples');
+const { recordingsRoot, resolveRecording } = require('./recordings');
 
 // Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
 // this process also runs the note scheduler against a 150ms lookahead - gzipSync of that is
@@ -207,6 +208,10 @@ const SCAN_TIMEOUT_MS = 600000;
 // Reading a whole pack into buffers is disk-bound - a gigabyte-scale folder of full-length
 // WAVs can legitimately take a minute-plus. The .scd's own read-wait cap stays just under this.
 const PACK_LOAD_TIMEOUT_MS = 120000;
+// How long a missing exact file / recording stays missing before the sampler looks again. An
+// `sr("bass")` written before its bounce exists has to start playing once it does, without an
+// eval - but not at the cost of a filesystem look per sample event. See _ensurePack.
+const MISSING_SOURCE_RETRY_MS = 2000;
 
 // The osc package with `metadata: true` requires args as { type, value } objects - raw JS
 // values would throw. Integers map to 'i', other numbers 'f', strings 's'.
@@ -562,6 +567,30 @@ class OscEngine {
   record(filePath, seconds) {
     return this._request('/poptart/record', [filePath, seconds], (seconds + 5) * 1000);
   }
+
+  // Tap one track's post-fader output for the recorder: while on, the engine streams its peak
+  // level back through onRecLevel (what the editor's record panel draws) and the track is ready
+  // to bounce. Idempotent; turning it off frees the tap and cancels any bounce still running.
+  tapTrack(trackId, on) {
+    this._send('/poptart/tapTrack', [trackId, on ? 1 : 0]);
+  }
+
+  /**
+   * Bounce one track to `filePath`. `startTime`/`stopTime` are absolute times on getTime()'s
+   * clock - the same clock note events are scheduled against - so the window lands exactly where
+   * the transport says it should. What lands on disk is the whole span between them, pre- and
+   * post-roll included: it's the CALLER's job to have asked for a span wider than the wanted
+   * window and to trim it (see wav.js's trimRecording, and web-app's track-record flow).
+   * Resolves once the file is closed.
+   */
+  recordTrack(trackId, filePath, startTime, stopTime) {
+    const untilStop = this._latency(stopTime);
+    return this._request(
+      '/poptart/recordTrack',
+      [trackId, filePath, this._latency(startTime), untilStop],
+      (untilStop + 15) * 1000, // the reply comes after the file is closed, half a second past stop
+    );
+  }
   showPluginEditor(trackId, slotIndex) {
     this._send('/poptart/showPluginEditor', [trackId, slotIndex]);
   }
@@ -635,28 +664,61 @@ class OscEngine {
     console.warn(message);
   }
 
-  // Kicks off (once) the async load of a pack: enumerate its files, have sclang read them into
-  // buffers, then analyze WAVs for transient slices. Events that arrive while the pack is still
-  // loading are dropped - a beat of silence on first eval, then everything plays.
-  _ensurePack(pack) {
-    let entry = this._packs.get(pack);
-    if (entry) return entry;
-    entry = { status: 'loading', files: [] };
-    this._packs.set(pack, entry);
+  /**
+   * What a sampler source ref names on disk. A ref is the mini-notation value with a namespace in
+   * front: a bare name is a PACK (s("bd") - a folder, addressed further by index), "file:<rel>" is
+   * one exact file under the samples root (se()), "rec:<name>" is one bounce from the recordings
+   * folder (sr()). All three come back as a plain list of paths, so everything downstream - the
+   * buffer load, slices, begin/end, fit - is identical for all of them; a one-file source is just
+   * a pack of one, whose index wraps to 0.
+   */
+  _resolveSource(ref) {
+    if (ref.startsWith('file:')) {
+      const rel = ref.slice(5);
+      const file = resolveSampleFile(rel);
+      return { paths: file ? [file] : null, what: `sample file "${rel}"`, where: samplesRoot(), stable: false };
+    }
+    if (ref.startsWith('rec:')) {
+      const name = ref.slice(4);
+      const file = resolveRecording(name);
+      return { paths: file ? [file] : null, what: `recording "${name}"`, where: recordingsRoot(), stable: false };
+    }
+    return { paths: listPackFiles(ref), what: `sample pack "${ref}"`, where: `${samplesRoot()}/${ref}`, stable: true };
+  }
 
-    const paths = listPackFiles(pack);
+  // Kicks off (once) the async load of a source: enumerate its files, have sclang read them into
+  // buffers, then analyze WAVs for transient slices. Events that arrive while it's still loading
+  // are dropped - a beat of silence on first eval, then everything plays.
+  //
+  // A failed PACK stays failed (a missing folder doesn't appear mid-session), but a failed exact
+  // file or recording is retried on a timer: `sr("bass")` is routinely evaluated before the bounce
+  // that creates bass.wav exists, and caching that miss forever would mean the recording never
+  // plays until the next restart. The retry is throttled so a miss costs one filesystem look per
+  // couple of seconds rather than one per event, and _warnOnce keeps the console quiet either way.
+  _ensurePack(ref) {
+    const entry0 = this._packs.get(ref);
+    if (entry0) {
+      const retryable = entry0.status === 'error' && !entry0.stable;
+      if (!retryable || Date.now() - (entry0.triedAt ?? 0) < MISSING_SOURCE_RETRY_MS) return entry0;
+      this._packs.delete(ref); // fall through and look again
+    }
+    const entry = { status: 'loading', files: [], stable: true, triedAt: Date.now() };
+    this._packs.set(ref, entry);
+
+    const { paths, what, where, stable } = this._resolveSource(ref);
+    entry.stable = stable;
     if (!paths || paths.length === 0) {
       entry.status = 'error';
-      this._warnOnce(`pack:${pack}`, `[poptart] sample pack "${pack}" has no audio files (looked in ${samplesRoot()}/${pack})`);
+      this._warnOnce(`source:${ref}`, `[poptart] ${what} not found (looked in ${where})`);
       return entry;
     }
 
     // The paths JSON can be far bigger than one UDP datagram (macOS caps sends at ~9KB and a
     // 700-file pack is ~70KB), so mirror the .scd's replyOk temp-file scheme in this direction
     // too: send only a file path, sclang reads and deletes the file.
-    const pathsFile = path.join(os.tmpdir(), `poptart-pack-${pack.replace(/[^\w-]/g, '_')}-${Date.now()}.json`);
+    const pathsFile = path.join(os.tmpdir(), `poptart-pack-${ref.replace(/[^\w-]/g, '_')}-${Date.now()}.json`);
     fs.writeFileSync(pathsFile, JSON.stringify(paths));
-    this._request('/poptart/loadSamplePack', [pack, pathsFile], PACK_LOAD_TIMEOUT_MS)
+    this._request('/poptart/loadSamplePack', [ref, pathsFile], PACK_LOAD_TIMEOUT_MS)
       .then((metas) => {
         entry.files = metas.map((m, i) => ({
           path: paths[i],
@@ -666,11 +728,11 @@ class OscEngine {
         }));
         entry.status = 'ready';
         // eslint-disable-next-line no-console
-        console.log(`[poptart] sample pack "${pack}": ${entry.files.length} file(s) loaded`);
+        console.log(`[poptart] ${what}: ${entry.files.length} file(s) loaded`);
       })
       .catch((err) => {
         entry.status = 'error';
-        this._warnOnce(`pack:${pack}`, `[poptart] sample pack "${pack}" failed to load: ${err.message}`);
+        this._warnOnce(`source:${ref}`, `[poptart] ${what} failed to load: ${err.message}`);
       });
     return entry;
   }
@@ -692,13 +754,13 @@ class OscEngine {
    * it exists so .log() can report the numbers the synth is really getting (the fit rate and
    * the window's length in particular are computed here and nowhere else).
    */
-  playSample(trackId, pack, cfg, onsetSec, offsetSec) {
+  playSample(trackId, ref, cfg, onsetSec, offsetSec) {
     // A sampler source has no pitch, so any MIDI route off this track fires its fixed note on the
     // sample's rhythm. Done first, so a ducker/arp keyed off a drum pattern triggers even before
     // the pack finishes loading (when the sample itself would still be silent).
     this._fanoutMidiSample(trackId, cfg.vel ?? 1, onsetSec, offsetSec);
-    const entry = this._ensurePack(pack);
-    if (entry.status !== 'ready' || entry.files.length === 0) return { skipped: `pack "${pack}" ${entry.status}` };
+    const entry = this._ensurePack(ref);
+    if (entry.status !== 'ready' || entry.files.length === 0) return { skipped: `source "${ref}" ${entry.status}` };
 
     const amp = cfg.vel ?? 1;
     if (amp <= 0) return { skipped: 'vel 0' };
@@ -800,7 +862,7 @@ class OscEngine {
     const cut = !loop && durSec > eventSec + 0.005 ? 1 : 0;
     this._send('/poptart/playSample', [
       trackId,
-      pack,
+      ref,
       idx,
       begin,
       end,
@@ -1052,6 +1114,13 @@ class OscEngine {
       // Live CC feed for Tier-1 signal sampling: [deviceName, channel (1-16), cc, value 0..1].
       const [device, channel, cc, value] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onMidiIn === 'function') this.onMidiIn(String(device), Number(channel), Number(cc), Number(value));
+      return;
+    }
+    if (msg.address === '/poptart/recLevel') {
+      // Meter feed for a tapped track, ~20/sec while a record panel is open: [trackId, peak, rms],
+      // both already reduced across the two channels engine-side.
+      const [track, peak, rms] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onRecLevel === 'function') this.onRecLevel(String(track), Number(peak), Number(rms));
       return;
     }
     if (msg.address === '/poptart/midiNoteIn') {

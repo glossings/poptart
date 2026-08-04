@@ -37,6 +37,24 @@ const API_DOCS = {
     desc: 'Sampler pattern - values are sample-pack names; a ":n" suffix picks the pack\'s nth file.',
     eg: 's("bd*4, ~ hh ~ hh")',
   },
+  se: {
+    kind: 'both',
+    sig: 'se(path)',
+    desc: 'Sampler pattern playing one exact file, by its path under the samples folder. Quote anything with a "/" or a space.',
+    eg: 'se("\'drums/kick 01.wav\'")',
+  },
+  sr: {
+    kind: 'both',
+    sig: 'sr(name)',
+    desc: 'Sampler pattern playing a bounce from the recordings folder by name. Pair with .slow(n) to play the whole loop.',
+    eg: 'sr("bass").slow(8)',
+  },
+  record: {
+    kind: 'method',
+    sig: 'record({ cycles, name, wrapTail })',
+    desc: 'Marks a track for bouncing and opens the recorder panel when you click the name - or press ctrl+b in any block.',
+    eg: 'note("c2 eb2").synth("Serum 2").record({ cycles: 8 })',
+  },
   mini: {
     kind: 'builder',
     sig: 'mini(str)',

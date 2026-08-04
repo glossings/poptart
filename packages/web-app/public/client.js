@@ -46,6 +46,7 @@ const coreReady = Promise.all([
     notesMod = nt;
     initLfoEditor();
     initPianorollEditor();
+    initRecordPanel();
     updateMutedDim();
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
@@ -1024,6 +1025,84 @@ function audioInputHints(cur, typed) {
   return fetchAudioInputs().then(toResult);
 }
 
+// Exact sample files for se(". Completes a folder at a time - pick a folder, the popup then lists
+// what's inside it - which is what keeps a deep library navigable from the keyboard. Each listing
+// is fetched once and cached; the sample root doesn't change under a session (changing it in
+// settings reloads the page).
+const sampleDirCache = new Map(); // root-relative dir -> { dirs, files }
+
+async function fetchSampleDir(dir) {
+  if (sampleDirCache.has(dir)) return sampleDirCache.get(dir);
+  let listing;
+  try {
+    listing = await api('GET', `/api/sampleFiles?dir=${encodeURIComponent(dir)}`);
+  } catch {
+    listing = { dirs: [], files: [] }; // missing folder / engine down - popup just stays empty
+  }
+  sampleDirCache.set(dir, listing);
+  return listing;
+}
+
+function sampleFileHints(cur, typed) {
+  // The reference is written inside single quotes because a path holds characters mini-notation
+  // reads as operators ("/" is slow). Completions supply the quotes, so the user never has to
+  // remember them - they just type the name.
+  const body = typed.startsWith("'") ? typed.slice(1) : typed;
+  const cut = body.lastIndexOf('/');
+  const dir = cut < 0 ? '' : body.slice(0, cut);
+  const partial = cut < 0 ? body : body.slice(cut + 1);
+  return fetchSampleDir(dir).then((listing) => {
+    const pool = [
+      ...(listing.dirs ?? []).map((d) => ({ key: d, isDir: true })),
+      ...(listing.files ?? []).map((f) => ({ key: f, isDir: false })),
+    ];
+    let matches = rankedMatches(pool, partial, 40);
+    // The path has to name something real, so when nothing matches the useful popup is the
+    // folder's whole contents rather than silence.
+    if (matches.length === 0) matches = pool.slice(0, 40);
+    return hintResult(cur, typed, matches.map((item) => {
+      const full = dir ? `${dir}/${item.key}` : item.key;
+      // A folder completes to itself plus a "/" so the next popup lists inside it; a file
+      // completes to the finished, quoted reference.
+      return {
+        text: item.isDir ? `'${full}/` : `'${full}'`,
+        displayText: item.isDir ? `${item.key}/` : item.key,
+      };
+    }));
+  });
+}
+
+// Recording names for sr(". A flat list on purpose - names are minted unique across every month
+// folder, so the name IS the address (see osc-engine/recordings.js).
+let recordingList = null;
+
+async function fetchRecordings() {
+  try {
+    const { items } = await api('GET', '/api/recordings');
+    recordingList = items ?? [];
+  } catch {
+    recordingList = recordingList ?? []; // engine/server hiccup - background refreshes self-heal
+  }
+  return recordingList;
+}
+
+function recordingHints(cur, typed) {
+  const toResult = (items) => {
+    const pool = items.map((r) => ({ key: r.name, month: r.month }));
+    let matches = rankedMatches(pool, typed, 40);
+    if (matches.length === 0) matches = pool.slice(0, 40);
+    return hintResult(cur, typed, matches.map((item) => ({
+      text: item.key,
+      displayText: `${item.key}  (${item.month})`,
+    })));
+  };
+  if (recordingList) {
+    fetchRecordings(); // refresh in the background - a bounce made this session should show up
+    return toResult(recordingList);
+  }
+  return fetchRecordings().then(toResult);
+}
+
 function wordHints(cur, typed, words, context) {
   const pool = words.map((w) => ({ key: w }));
   const completions = rankedMatches(pool, typed, 24).map((item) => {
@@ -1071,6 +1150,15 @@ function poptartHint(cm) {
   // Inside the device string of input(" → the audio inputs the booted device actually exposes.
   m = before.match(/\binput\s*\(\s*["']([^"']*)$/);
   if (m) return audioInputHints(cur, m[1]);
+
+  // Inside se(" → sample files, a folder at a time. The typed text may already carry the opening
+  // single quote a path needs, so it's captured too and the completion replaces the lot.
+  m = before.match(/(?<![.\w$])se\s*\(\s*"('?[^"]*)$/);
+  if (m) return sampleFileHints(cur, m[1]);
+
+  // Inside sr(" → recording names.
+  m = before.match(/(?<![.\w$])sr\s*\(\s*["']([^"']*)$/);
+  if (m) return recordingHints(cur, m[1]);
 
   // After a dot → chain methods; bare word → top-level builders. A dot straight after a digit is
   // the decimal point of a number being typed (`begin(0.3`), not a chain - offering the whole
@@ -2934,6 +3022,7 @@ setInterval(() => {
   highlightTick();
   updatePhraseViz();
   updateRecButton();
+  updateRecordButton();
 }, 33);
 
 function stopHighlighting() {
@@ -3182,6 +3271,611 @@ function removeChainedScale(idx) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Track record - bounce one block's audio to a file and play it back with sr().
+//
+// Two ways in, one mechanism. `.record({ cycles })` in a chain is a handle: click the `record`
+// name (same rule as lfo/pianoroll - its arguments stay ordinary code) and a panel opens showing
+// that track's live level, with the length and name to record under. ctrl+b skips all of it and
+// bounces whichever block the cursor is in. Either way the server owns the window
+// (/api/trackRecord/*): it arms at the next phrase boundary, records exactly `cycles` cycles of
+// that track's post-fader output, trims and files the result, and hands back a name.
+//
+// What comes back is written into the buffer the way a freeze reads: the source block is muted
+// (`bass:` -> `_bass:`) and a new block with the SAME label goes in under it playing the bounce,
+// so the track keeps its place in the mix and unmuting one line puts the original back. Note this
+// does not free the plugin - it stays loaded in the track's slot, ready for that unmute.
+// ---------------------------------------------------------------------------------------------
+
+const recordPanel = document.getElementById('recordPanel');
+const recordCanvas = document.getElementById('recordCanvas');
+const recordLabelEl = document.getElementById('recordLabel');
+const recordCycles = document.getElementById('recordCycles');
+const recordName = document.getElementById('recordName');
+const recordWrapTail = document.getElementById('recordWrapTail');
+const recordGo = document.getElementById('recordGo');
+const recordAgain = document.getElementById('recordAgain');
+const recordStatus = document.getElementById('recordStatus');
+const recordClose = document.getElementById('recordClose');
+
+let recordState = null; // { marker, callStart, label, cycles, name, wrapTail } while a panel is open
+let recordSuppressCursor = false;
+let trackRecState = null; // latest /api/trackRecord status while armed/recording, else null
+let trackRecPoll = null;
+// Rolling meter history, newest last - what the panel draws while idle/armed. Each entry is
+// { v: peak, rms, rec: true while it fell inside the recording window }, so the live view can
+// show WHICH part of what you're watching is the take.
+let recordScope = [];
+let recordWave = null; // peaks of the finished bounce, drawn instead of the meter once there is one
+let recordWaveRms = null; // matching rms per bucket - the body drawn inside the peak envelope
+let recordWaveBands = null; // matching [low, mid, high] balance per bucket - what colours it
+let recordWaveCycles = 0; // how many cycles that finished take spans, for its gridlines
+// The engine meters 20x/sec and every reading is kept, so this is the last ~30 seconds of the
+// track - long enough that a whole phrase plus its count-in is on screen at once.
+const RECORD_SCOPE_LEN = 600;
+const RECORD_EVAL_DEBOUNCE_MS = 150;
+
+// The .record(...) call containing idx, plus whether idx is on the *handle* that opens the panel:
+// the `record` name itself, or anywhere inside a still-empty `.record()` so the panel appears as
+// soon as the call is typed. Same rule as lfo's and pianoroll's - the options are code you may
+// want to edit by hand, so the cursor sitting in them opens nothing.
+function findRecordCallAt(code, idx) {
+  const re = /\.\s*record\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    if (idx < m.index || idx > close + 1) continue;
+    const onName = idx <= m.index + m[0].indexOf('(') || !code.slice(open + 1, close).trim();
+    return { start: m.index, open, close, onName };
+  }
+  return null;
+}
+
+// The options as the panel holds them. Deliberately forgiving: this reads code the user may be
+// halfway through typing, so anything unparseable falls back to the default rather than throwing.
+function parseRecordCall(inner) {
+  const cycles = Math.max(1, Math.round(Number((/cycles\s*:\s*(\d+)/.exec(inner) ?? [])[1] ?? 4) || 4));
+  const name = (/name\s*:\s*['"]([^'"]*)['"]/.exec(inner) ?? [])[1] ?? '';
+  return { cycles, name, wrapTail: /wrapTail\s*:\s*true/.test(inner) };
+}
+
+function serializeRecordCall({ cycles, name, wrapTail }) {
+  const parts = [`cycles: ${cycles}`];
+  if (name) parts.push(`name: "${name}"`);
+  if (wrapTail) parts.push('wrapTail: true');
+  return `.record({ ${parts.join(', ')} })`;
+}
+
+// The label of the block a call lives in - the engine track the panel meters and bounces.
+function blockLabelAt(idx) {
+  if (!labelsMod) return null;
+  return labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => idx >= b.start && idx <= b.end)?.label ?? null;
+}
+
+function openRecordPanel(call) {
+  const code = cm.getValue();
+  const label = blockLabelAt(call.start);
+  if (!label) return;
+  showRecordPanel(label, parseRecordCall(code.slice(call.open + 1, call.close)), {
+    marker: cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {}),
+    callStart: call.start,
+  });
+}
+
+/**
+ * Show the panel on `label`. `anchor` is the `.record(...)` call the panel writes its settings back
+ * into - absent for a ctrl+b bounce, which has no call to write to. Without one the panel is
+ * read-only about the code and exists to show the count-in, the meter, and the result: the visible
+ * confirmation a hotkey otherwise wouldn't get.
+ */
+function showRecordPanel(label, opts, anchor = null) {
+  if (recordState?.marker) recordState.marker.clear();
+  if (recordState && recordState.label !== label) setRecordTap(recordState.label, false);
+  recordState = { marker: null, callStart: null, ...anchor, label, ...opts };
+  recordLabelEl.textContent = label;
+  syncRecordControls();
+  recordCycles.value = recordState.cycles;
+  recordName.value = recordState.name;
+  recordWrapTail.checked = recordState.wrapTail;
+  showLiveMeter();
+  recordPanel.classList.remove('hidden');
+  setRecordTap(label, true);
+  startRecordPoll();
+  drawRecordScope();
+}
+
+// Put the canvas back on the live signal, dropping whatever finished take it was showing.
+function showLiveMeter() {
+  recordScope = [];
+  recordWave = null;
+  recordWaveRms = null;
+  recordWaveBands = null;
+  recordWaveCycles = 0;
+  recordAgain.classList.add('hidden');
+  setRecordStatus('');
+  drawRecordScope();
+}
+
+function closeRecordPanel() {
+  if (recordState?.marker) recordState.marker.clear();
+  // A bounce in flight keeps its own tap and its own polling - closing the panel must not cancel
+  // the recording, only stop metering for it.
+  if (recordState && trackRecState?.label !== recordState.label) setRecordTap(recordState.label, false);
+  recordState = null;
+  recordPanel.classList.add('hidden');
+  if (!trackRecState) stopRecordPoll();
+}
+
+function setRecordTap(label, on) {
+  api('POST', '/api/trackRecord/tap', { label, on }).catch(() => {
+    // engine down, or the track isn't up yet - the meter just stays flat
+  });
+}
+
+// Writing the options back into the code is what makes the code the source of truth, exactly as
+// the lfo and piano roll panels do it. Re-evaluated on a debounce so a bounce started right after
+// a length change records the length that's in the buffer.
+function writeRecordCall() {
+  if (!recordState?.marker) return; // a ctrl+b panel has no call to write into
+  const range = recordState.marker.find();
+  if (!range) return;
+  const text = serializeRecordCall(recordState);
+  recordSuppressCursor = true;
+  try {
+    cm.replaceRange(text, range.from, range.to);
+    recordState.marker.clear(); // replaceRange collapses it - re-pin over the fresh text
+    const startIdx = cm.indexFromPos(range.from);
+    recordState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    recordState.callStart = startIdx;
+  } finally {
+    recordSuppressCursor = false; // never leave it latched: that wedges the panel shut for good
+  }
+  clearTimeout(recordEvalTimer);
+  recordEvalTimer = setTimeout(() => { recordEvalTimer = null; evaluate(false); }, RECORD_EVAL_DEBOUNCE_MS);
+}
+let recordEvalTimer = null;
+
+// Hand edits to the open call flow back into the panel, so tweaking `cycles:` in the code updates
+// it instead of being silently reverted by the next click.
+function syncRecordFromCode() {
+  if (!recordState?.marker || recordSuppressCursor) return;
+  const range = recordState.marker.find();
+  if (!range) return;
+  const text = cm.getRange(range.from, range.to);
+  const open = text.indexOf('(');
+  const close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return; // mid-edit, not a whole call right now
+  const parsed = parseRecordCall(text.slice(open + 1, close));
+  recordState.callStart = cm.indexFromPos(range.from);
+  Object.assign(recordState, parsed);
+  recordCycles.value = parsed.cycles;
+  recordName.value = parsed.name;
+  recordWrapTail.checked = parsed.wrapTail;
+}
+
+// --- the bounce itself ---
+
+async function startTrackRecord(label, { cycles, name, wrapTail } = {}) {
+  if (trackRecState) return cancelTrackRecord(true);
+  try {
+    trackRecState = await api('POST', '/api/trackRecord/start', {
+      label,
+      cycles: cycles ?? (Number(recordCycles.value) || 4),
+      name: name ?? '',
+      wrapTail: !!wrapTail,
+    });
+    if (trackRecState.transport) transport = trackRecState.transport;
+    showLiveMeter(); // watch the signal go in, not the last take
+    startRecordPoll();
+    logLine(`bounce armed on "${label}": ${trackRecState.cycles} cycle(s) - starts when the phrase ends`);
+  } catch (e) {
+    trackRecState = null;
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function cancelTrackRecord(log = false) {
+  trackRecState = null;
+  if (!recordState) stopRecordPoll();
+  try {
+    await api('POST', '/api/trackRecord/cancel');
+  } catch {
+    // server may already be idle - nothing to clean up
+  }
+  if (log) logLine('bounce cancelled');
+}
+
+function startRecordPoll() {
+  if (trackRecPoll) return;
+  trackRecPoll = setInterval(pollTrackRecord, 100);
+}
+
+function stopRecordPoll() {
+  clearInterval(trackRecPoll);
+  trackRecPoll = null;
+  recordScope = [];
+}
+
+async function pollTrackRecord() {
+  let s;
+  try {
+    s = await api('GET', '/api/trackRecord/status');
+  } catch {
+    return; // transient fetch error - keep polling
+  }
+  if (s.transport) transport = s.transport;
+  // The meter runs whether or not anything is armed - that's what makes an open panel show the
+  // signal coming into it. `levels` covers every tapped track, so an idle panel meters too.
+  if (recordState) {
+    // Every reading the engine took since the last poll, not just the newest - the queue is what
+    // keeps the live waveform at the engine's resolution instead of the poll's.
+    const readings = s.levels?.[recordState.label] ?? [];
+    for (const r of readings.length ? readings : [{ peak: 0, rms: 0 }]) {
+      recordScope.push({
+        v: r.peak ?? 0,
+        rms: r.rms ?? 0,
+        // Only what actually landed inside the window is the take - the count-in and everything
+        // before it is just the track playing.
+        rec: s.phase === 'recording',
+      });
+    }
+    while (recordScope.length > RECORD_SCOPE_LEN) recordScope.shift();
+    if (!recordWave) drawRecordScope();
+  }
+  if (s.phase === 'idle') {
+    if (trackRecState) {
+      trackRecState = null;
+      logLine('bounce: the server dropped the recording', true);
+      if (!recordState) stopRecordPoll();
+    }
+    return;
+  }
+  if (s.phase === 'done') {
+    trackRecState = null;
+    api('POST', '/api/trackRecord/cancel').catch(() => {}); // ack: clears the served result
+    if (!recordState) stopRecordPoll();
+    if (s.error) {
+      setRecordStatus(`✕ ${s.error}`, 'bad');
+      logLine(`bounce (${s.label}): ${s.error}`, true);
+    } else if (s.result) {
+      applyBounce(s.label, s.result);
+    }
+    return;
+  }
+  trackRecState = s;
+  updateRecordButton();
+}
+
+// The settings are locked in the moment a bounce is armed - the window's length and where it
+// starts are already decided by then, so an edit during the count-in would describe a take that
+// isn't the one being made. Also inert when the panel has no `.record()` call to write back into
+// (a ctrl+b panel), where a change would silently vanish. CSS greys them either way.
+function syncRecordControls() {
+  const locked = !recordState?.marker || !!trackRecState;
+  for (const el of [recordCycles, recordName, recordWrapTail]) {
+    if (el.disabled !== locked) el.disabled = locked;
+  }
+}
+
+function updateRecordButton() {
+  syncRecordControls();
+  if (!trackRecState) {
+    recordGo.textContent = '● bounce';
+    recordGo.classList.remove('rec-armed', 'rec-live');
+    return;
+  }
+  const pos = currentCyclePos();
+  if (pos < trackRecState.startCycle) {
+    recordGo.textContent = `● in ${Math.max(0, trackRecState.startCycle - pos).toFixed(1)}`;
+    recordGo.classList.add('rec-armed');
+    recordGo.classList.remove('rec-live');
+  } else {
+    recordGo.textContent = `● ${Math.min(trackRecState.cycles, pos - trackRecState.startCycle).toFixed(1)}/${trackRecState.cycles}`;
+    recordGo.classList.add('rec-live');
+    recordGo.classList.remove('rec-armed');
+  }
+}
+
+// --- writing the result into the buffer ---
+
+// Mute the block that was bounced and add one below it playing the recording. Both carry the same
+// label on purpose: the bounce takes the original's place on that engine track. Only one of the
+// two may be live at a time - two active blocks sharing a label would collide on one scheduler -
+// which is exactly what the mute guarantees.
+function applyBounce(label, result) {
+  if (!labelsMod) return;
+  const code = cm.getValue();
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label && !b.muted);
+  if (!block) {
+    logLine(`bounce: recorded "${result.name}" but couldn't find the "${label}" block to replace - play it with sr("${result.name}").slow(${result.cycles})`, true);
+    return;
+  }
+  if (result.silent) {
+    logLine(`bounce (${label}): recorded ${result.cycles} cycle(s) of silence - check the track wasn't muted or its output routed away`, true);
+  }
+
+  // The label lives at the very start of the block; muting is one character in front of it.
+  const labelIdx = code.indexOf(`${label}:`, block.start);
+  if (labelIdx < 0 || labelIdx > block.end) return;
+  const blockEnd = trimmedBlockEnd(code, block);
+  const indent = /^[^\S\n]*/.exec(code.slice(block.start))[0];
+  const replacement = `\n${indent}${label}: sr("${result.name}").slow(${result.cycles})`;
+
+  // End first, so inserting below doesn't shift the label's own offset out from under the mute.
+  cm.replaceRange(replacement, cm.posFromIndex(blockEnd), cm.posFromIndex(blockEnd));
+  cm.replaceRange('_', cm.posFromIndex(labelIdx), cm.posFromIndex(labelIdx));
+
+  const summary = `saved as "${result.name}" · ${result.cycles} cycles · ${result.seconds.toFixed(2)}s`;
+  setRecordStatus(`✓ ${summary}`, result.silent ? 'bad' : 'ok');
+  logLine(`bounce: "${label}" ${summary} - muted the source and added sr("${result.name}").slow(${result.cycles})`);
+  // Swap the panel to the finished take: what it captured is the thing you now want to look at,
+  // and it stays there until you record again or reopen the panel.
+  recordWave = result.peaks ?? null;
+  recordWaveRms = result.rms ?? null;
+  recordWaveBands = result.bands ?? null;
+  recordWaveCycles = result.cycles;
+  recordAgain.classList.remove('hidden');
+  drawRecordScope();
+  evaluate(true);
+}
+
+// The panel's one-line outcome. Empty clears it (the row collapses via :empty), so nothing
+// permanent sits under the controls.
+function setRecordStatus(text, kind) {
+  recordStatus.textContent = text ?? '';
+  recordStatus.classList.toggle('ok', kind === 'ok');
+  recordStatus.classList.toggle('bad', kind === 'bad');
+}
+
+// Where the new block goes: after the bounced block's last line of actual content, not after the
+// blank lines that happen to be filed with it (splitLabeledBlocks keeps trailing blanks with the
+// block above so offsets stay aligned). Otherwise the bounce lands a paragraph away from what it
+// replaces.
+function trimmedBlockEnd(code, block) {
+  let end = Math.min(block.end, code.length);
+  while (end > block.start && /\s/.test(code[end - 1])) end--;
+  return end;
+}
+
+// --- the meter / waveform canvas ---
+
+// A theme colour at a given alpha. Canvas gradients don't take `color-mix`, and the theme's
+// --accent may be a hex or an rgb(), so let the canvas itself normalize it and rebuild from the
+// channels. Falls back to the colour as given if it normalized to something unexpected.
+function rgbaFrom(ctx, color, alpha) {
+  const prev = ctx.fillStyle;
+  ctx.fillStyle = color;
+  const norm = ctx.fillStyle;
+  ctx.fillStyle = prev;
+  if (/^#[0-9a-f]{6}$/i.test(norm)) {
+    const n = parseInt(norm.slice(1), 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+  }
+  const m = /^rgba?\(([^)]+)\)$/.exec(norm);
+  if (m) {
+    const [r, g, b] = m[1].split(',').map((v) => parseFloat(v));
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return norm;
+}
+
+// A rekordbox-style mirrored envelope: one filled shape around the centre line rather than a
+// picket fence of bars, with the loud part of the range shaded brighter, so the panel reads as a
+// waveform at a glance. Drawn from a plain peak-per-bucket array either way - live (a scrolling
+// meter history, newest at the right) or finished (the whole take, left to right).
+function drawRecordScope() {
+  const ctx = recordCanvas.getContext('2d');
+  const { width: w, height: h } = recordCanvas;
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue('--accent').trim() || '#6cf';
+  const hot = css.getPropertyValue('--err').trim() || accent;
+  const dim = css.getPropertyValue('--border').trim() || '#444';
+  const mid = h / 2;
+  const maxAmp = mid - 6;
+  ctx.clearRect(0, 0, w, h);
+
+  // Once a bounce has finished the panel shows what it captured rather than what is playing now:
+  // the whole take at a glance is the answer to "did that record what I meant?".
+  const data = recordWave ?? recordScope;
+  const live = !recordWave;
+
+  // Cycle gridlines behind the wave - a bounce is a loop, so where the bars fall is the first
+  // thing worth checking about it. Only for a finished take, whose x axis IS the cycle count.
+  if (!live && recordWaveCycles > 1) {
+    ctx.strokeStyle = dim;
+    ctx.lineWidth = 1;
+    const cycles = recordWaveCycles;
+    for (let c = 1; c < cycles; c++) {
+      const x = Math.round((c / cycles) * w) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 6);
+      ctx.lineTo(x, h - 6);
+      ctx.stroke();
+    }
+  }
+
+  ctx.strokeStyle = dim;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, mid + 0.5);
+  ctx.lineTo(w, mid + 0.5);
+  ctx.stroke();
+
+  if (!data.length) return;
+
+  const clamp01 = (v) => Math.min(1, Math.max(0, v ?? 0));
+  // Two envelopes: the peak (outer, translucent) and the rms body inside it. Peak alone saturates
+  // on anything busy and reads as a solid block - the rms is where the dynamics actually show.
+  const at = (i) => clamp01(live ? data[i]?.v : data[i]);
+  const rmsAt = (i) => clamp01(live ? data[i]?.rms : recordWaveRms?.[i]);
+  const colW = w / data.length;
+  const x = (i) => i * colW;
+
+  // While live, shade the stretch that is actually being captured, so the part of what you're
+  // watching that is the take is obvious - the panel shows the signal well before and after it.
+  // ONE rect across the whole run, not one per column: translucent fills compound where they
+  // overlap, which turned a flat wash into a picket fence of brighter seams.
+  if (live) {
+    const from = data.findIndex((d) => d?.rec);
+    if (from >= 0) {
+      let to = data.length - 1;
+      while (to > from && !data[to]?.rec) to--;
+      ctx.fillStyle = rgbaFrom(ctx, hot, 0.16);
+      ctx.fillRect(x(from), 0, x(to + 1) - x(from), h);
+    }
+  }
+
+  // One column per bucket, coloured by what's IN it rather than a flat accent - the reason a DJ
+  // waveform is readable at a glance. A finished take colours by its low/mid/high energy balance;
+  // a live meter has no spectrum, so it uses crest factor (peak against rms) instead, which
+  // separates a transient from a sustained sound in much the same way.
+  for (let i = 0; i < data.length; i++) {
+    const [r, g, b] = live ? crestColor(data[i]) : bandColor(recordWaveBands?.[i]);
+    const peakAmp = at(i) * maxAmp;
+    const rmsAmp = Math.min(peakAmp, rmsAt(i) * maxAmp);
+    const cw = colW + 0.6; // a hair of overlap, so neighbouring columns leave no seam
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.32)`;
+    ctx.fillRect(x(i), mid - peakAmp, cw, peakAmp * 2 || 1);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.95)`;
+    ctx.fillRect(x(i), mid - rmsAmp, cw, rmsAmp * 2 || 1);
+  }
+
+  // A crisp edge along the top and bottom of the peak envelope, so a quiet passage still reads as
+  // a shape instead of fading out into the background.
+  ctx.strokeStyle = rgbaFrom(ctx, accent, 0.55);
+  ctx.lineWidth = 2;
+  for (const sign of [-1, 1]) {
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) {
+      const y = mid + sign * at(i) * maxAmp;
+      if (i === 0) ctx.moveTo(x(i), y);
+      else ctx.lineTo(x(i), y);
+    }
+    ctx.stroke();
+  }
+
+  // Anything at full scale is marked in the error colour - a bounce that clipped is worth seeing
+  // before it goes into the code, not after.
+  ctx.fillStyle = hot;
+  for (let i = 0; i < data.length; i++) {
+    if (at(i) < 0.99) continue;
+    ctx.fillRect(x(i), mid - maxAmp, Math.max(2, colW), maxAmp * 2);
+  }
+
+  // A live meter reads as "now" at the right edge; mark it so the scroll direction is obvious.
+  if (live && data.length > 1) {
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(w - 1, 8);
+    ctx.lineTo(w - 1, h - 8);
+    ctx.stroke();
+  }
+}
+
+// The three colours a bucket is mixed from, by where its energy sits. Chosen to stay legible on
+// both a light and a dark panel, and to read in the same order a DJ waveform does: deep for bass,
+// through the middle, to bright for the top end.
+const BAND_COLORS = [
+  [74, 124, 245], // low
+  [86, 200, 170], // mid
+  [246, 205, 122], // high
+];
+
+function bandColor(balance) {
+  if (!balance) return BAND_COLORS[1];
+  // Weight by energy share, but lift the top end: a hat carries little energy next to a kick and
+  // would otherwise never show its colour at all.
+  const w = [balance[0] ?? 0, (balance[1] ?? 0) * 1.4, (balance[2] ?? 0) * 2.6];
+  const total = w[0] + w[1] + w[2] || 1;
+  return [0, 1, 2].map((c) =>
+    Math.round((BAND_COLORS[0][c] * w[0] + BAND_COLORS[1][c] * w[1] + BAND_COLORS[2][c] * w[2]) / total),
+  );
+}
+
+// Crest factor: peak well above rms means a transient (bright), peak near rms means something
+// sustained (deep). Same visual axis as the band colours, from what a live meter can actually see.
+function crestColor(point) {
+  const peak = point?.v ?? 0;
+  const rms = point?.rms ?? 0;
+  if (peak <= 0.0005) return BAND_COLORS[0];
+  const crest = rms > 0 ? Math.min(1, Math.max(0, (peak / rms - 1.4) / 4)) : 1;
+  const lo = BAND_COLORS[0];
+  const hi = BAND_COLORS[2];
+  return [0, 1, 2].map((c) => Math.round(lo[c] + (hi[c] - lo[c]) * crest));
+}
+
+// --- wiring ---
+
+function initRecordPanel() {
+  cm.on('cursorActivity', () => {
+    if (recordSuppressCursor) return;
+    const call = findRecordCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
+    if (!call || !call.onName) {
+      // Only a panel that came from a call follows the cursor out of it. A ctrl+b panel has no
+      // call to sit in, so moving the cursor must not dismiss the result it's showing.
+      if (recordState?.marker && !call) closeRecordPanel();
+      return;
+    }
+    if (recordState && call.start === recordState.callStart) return; // already on this call
+    openRecordPanel(call);
+  });
+
+  // Clicking the name opens the panel even when the cursor is already there - an unchanged
+  // selection fires no cursorActivity, which is what made reopening after ✕ feel stuck.
+  cm.on('mousedown', (_cm, e) => {
+    const call = findRecordCallAt(cm.getValue(), cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window')));
+    if (!call?.onName) return;
+    if (recordState && call.start === recordState.callStart) return;
+    openRecordPanel(call);
+  });
+
+  cm.on('change', syncRecordFromCode);
+
+  const fromPanel = () => {
+    if (!recordState) return;
+    recordState.cycles = Math.max(1, Math.round(Number(recordCycles.value) || 4));
+    recordState.name = recordName.value.trim();
+    recordState.wrapTail = recordWrapTail.checked;
+    writeRecordCall();
+  };
+  recordCycles.addEventListener('change', fromPanel);
+  recordName.addEventListener('change', fromPanel);
+  recordWrapTail.addEventListener('change', fromPanel);
+
+  recordGo.addEventListener('click', () => {
+    if (trackRecState) return cancelTrackRecord(true);
+    if (!recordState) return;
+    startTrackRecord(recordState.label, recordState);
+  });
+  // Back to the live signal without recording - for looking at the track again after a take.
+  recordAgain.addEventListener('click', showLiveMeter);
+  recordClose.addEventListener('click', closeRecordPanel);
+}
+
+// ctrl+b - bounce the block the cursor is in, with no .record() call needed. Uses that block's
+// .record() options if it has them, so the hotkey and the panel agree on the length.
+function bounceBlockAtCursor() {
+  const code = cm.getValue();
+  const idx = cm.indexFromPos(cm.getCursor());
+  const label = blockLabelAt(idx);
+  if (!label || label.startsWith('$')) {
+    logLine('ctrl+b: put the cursor in a named block to bounce it', true);
+    return;
+  }
+  if (trackRecState) return cancelTrackRecord(true);
+  const call = findRecordCallAt(code, idx);
+  const opts = call ? parseRecordCall(code.slice(call.open + 1, call.close)) : { cycles: 4, name: '', wrapTail: false };
+  // Open the panel on the way in, so a hotkey bounce still shows its count-in, its meter, and -
+  // the point of it - what actually got recorded when it lands.
+  if (!recordState || recordState.label !== label) {
+    showRecordPanel(label, opts, call ? { marker: cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {}), callStart: call.start } : null);
+  }
+  startTrackRecord(label, opts);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------------------------
 
@@ -3300,6 +3994,9 @@ function togglePlay() {
 
 async function doStop() {
   if (recState) cancelMidiRecord(true);
+  // Stopping the clock strands an armed bounce: its window is measured in cycles that will never
+  // come round. The panel (and its meter) stays open.
+  if (trackRecState) cancelTrackRecord(true);
   const result = await api('POST', '/api/stop');
   if (result.transport) transport = result.transport; // frozen at cycle 0
   stopHighlighting();
@@ -4929,6 +5626,9 @@ addHotkey(builtinHotkeys, 'ctrl+p', () => {
 
 // ctrl+r - arm/stop MIDI recording (mirrors the ● rec button).
 addHotkey(builtinHotkeys, 'ctrl+r', () => (recState ? cancelMidiRecord(true) : startMidiRecord()), 'toggle record');
+
+// ctrl+b - bounce the block the cursor is in to audio (mirrors the record panel's button).
+addHotkey(builtinHotkeys, 'ctrl+b', () => bounceBlockAtCursor(), 'bounce block to audio');
 
 // ctrl+m - toggle the keyboard/tap instrument between off and midi.
 addHotkey(builtinHotkeys, 'ctrl+m', () => setKbMode(kbMode === 'normal' ? 'midi' : 'normal'), 'toggle midi keyboard');

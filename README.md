@@ -38,7 +38,11 @@ That's a synth line in F minor played through Serum, with its filter cutoff swep
 - **Strudel-style mini-notation.** `n`/`note`/`scale`, sequences, rests, brackets and stacks,
   alternation, euclidean rhythms, fast/slow, replicate, weight, ties, and per-cycle rates.
 - **A sampler alongside the synths.** `s("pack")` plays folders of audio files with slicing,
-  timestretch, repitch, per-event velocity, and the same effects chain as instrument tracks.
+  timestretch, repitch, per-event velocity, and the same effects chain as instrument tracks;
+  `se("path")` and `sr("name")` play one exact file, or one of your own bounces.
+- **Bounce a track from the keyboard.** ctrl+b records the block the cursor is in — starting on the
+  next phrase, for as many cycles as you asked — files the audio, mutes the source, and writes the
+  playback line in below it. `.record()` gives you the same thing with a panel and a live meter.
 - **Shareable patches.** A plugin's full state (preset, every knob, wavetables) is written into the
   code automatically, so the patch *is* the sound — **export** hands someone a single file that
   plays exactly what you hear, and **link** puts a whole plain-code patch in the clipboard.
@@ -350,6 +354,20 @@ drums: s("bd*4 hh*8")    // "bd:4" picks a file inline, Strudel-style: = s("bd")
   .attack(0.1).decay(0.2).sustain(0.6).release(0.2) // amplitude ADSR (or .adsr(a,d,s,r))
 ```
 
+To play one *exact* file rather than a folder, `se("path")` names it relative to the sample
+library root, and `sr("name")` names one of your own bounces (see **Bouncing** below). Both are
+the same sampler — everything above applies unchanged:
+
+```js
+stab: se("'hits/stab 01.wav'").slice("0 2")   // quoted: a path holds mini-notation operators
+loop: sr("bass").slow(8)                       // an 8-cycle bounce, played whole
+```
+
+A path contains characters mini-notation reads as operators — `/` is slow, a space separates
+steps — so anything beyond a bare filename goes in **single quotes**, which make it one literal
+value. Quoting works in any mini string, not just `se`. Recording names never need it. The editor
+autocompletes both: `se("` offers a folder at a time, `sr("` offers every take you've made.
+
 The ADSR shapes the voice's amplitude. `attack`/`decay`/`release` are **multiples of the played
 duration**: `.decay(0.5)` reaches the sustain level halfway through the note, while `.attack(2)`
 ramps for twice the note's length and so never reaches full before it ends. `sustain` is a `0..1`
@@ -382,6 +400,38 @@ from the exact overlaps). To let a sample ring *longer*, make its event longer: 
 
 Sample tracks run through the same `.fx()`/`.param()` chain as instruments, and their onsets gate
 `env()` modulators and retrigger note-synced `lfo()` shapes just like notes.
+
+### Bouncing a track
+
+Put the cursor in any named block and press **ctrl+b**. Recording starts at the next phrase
+boundary and runs for the chosen number of cycles, capturing that track's own post-fader audio.
+The take is filed under `~/.poptart/recordings/<YYYY-MM>/`, the source block is **muted**, and the
+bounce goes in below it under the same label:
+
+```js
+// before
+bass: note("c2 eb2 g2 _").synth("Serum 2").record({ cycles: 8 })
+
+// after ctrl+b
+_bass: note("c2 eb2 g2 _").synth("Serum 2").record({ cycles: 8 })
+bass: sr("bass").slow(8)
+```
+
+Sharing a label is the point: the bounce takes the original's place on that engine track, so the
+mix doesn't move and un-muting one line puts the synth back. Only one of the two may be live at a
+time, which is what the mute guarantees. This is a bounce, not a freeze — the plugin stays loaded,
+ready for that un-mute, so it doesn't buy back CPU.
+
+`.record({ cycles })` anywhere in a chain adds a panel: click the `record` name and it opens on
+that block showing its **live level**, with the length and the name to file under, each change
+written straight back into the call the way `lfo()` and `pianoroll()` work. It changes nothing
+about the sound. Names are minted unique across every month folder when the recording is made, so
+`sr("bass")` means the same file forever and a second bounce of the same label becomes `bass-2`.
+
+`wrapTail: true` folds the release tail back over the head, for a track that was **silent** going
+in. It's off by default because the usual case is bouncing a pattern that is *already* looping:
+the previous pass's tail is still sounding at the window's start and gets recorded into the head,
+so adding the outgoing tail would play it twice.
 
 ### Tempo
 
@@ -470,6 +520,7 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Plugin scan directories | `POPTART_VST_DIRS` (colon-separated) | `~/.poptart/plugins` if it exists, else the standard VST locations |
 | Plugins to skip when scanning | `POPTART_VST_EXCLUDE` (colon-separated paths) | none |
 | Saved patterns (and autosaved sessions, under `wip/`) | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |
+| Bounced tracks (filed by month, played with `sr()`) | `POPTART_RECORDINGS_DIR` | `~/.poptart/recordings` |
 | Startup setup file / folder | `POPTART_PREBAKE_FILE`, `POPTART_PREBAKE_DIR` | `~/.poptart/prebake.js`, `~/.poptart/prebake/` |
 | Persisted settings | `POPTART_SETTINGS_FILE` | `~/.poptart/settings.json` |
 | OSC / scsynth ports | `POPTART_OSC_NODE_PORT`, `POPTART_OSC_SC_PORT`, `POPTART_SCSYNTH_PORT` | `57140` / `57150` / `57110` |
@@ -514,6 +565,10 @@ Two knobs help:
   aren't implemented yet.
 - `.slice()` transient analysis is Node-side and WAV-only; other formats play fine but have no
   slices.
+- Bouncing a track (ctrl+b / `.record()`) doesn't free its plugin — it stays loaded in the track's
+  slot, ready for the un-mute — so it's a bounce, not a freeze, and doesn't buy back CPU. The
+  window is also converted from cycles to seconds when the recording is armed, so a tempo change
+  mid-bounce puts the result out of step with the grid.
 
 ## License
 

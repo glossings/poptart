@@ -1416,6 +1416,155 @@ li.CodeMirror-hint-active {
   color: var(--text-dim);
 }
 
+/* --------------------------------------------- record panel (.record() / ctrl+b) */
+
+.record-panel {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: fit-content;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px var(--shadow), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  z-index: 30;
+  overflow: hidden;
+}
+
+/* Scoped, like every other panel here - there is no global .hidden utility, so a bare
+   class="hidden" on a child would do nothing at all. */
+.record-panel.hidden,
+.record-panel .hidden {
+  display: none;
+}
+
+.record-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 6%, var(--bg-panel)), var(--bg-panel));
+  border-bottom: 1px solid var(--border);
+}
+
+.record-track {
+  font-family: var(--mono);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--accent);
+}
+
+/* The bitmap is twice the display size (see index.html): the waveform is drawn at ~2 buckets per
+   screen pixel, which is what keeps a busy track from reading as one solid block. */
+#recordCanvas {
+  display: block;
+  width: 760px;
+  height: 200px;
+  max-width: calc(100vw - 56px);
+  margin: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.record-controls,
+.record-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.record-actions {
+  padding-bottom: 14px;
+}
+
+/* The one line that says what happened. Empty (and invisible) until a bounce lands, so nothing
+   permanent sits under the controls. */
+.record-status {
+  padding: 0 14px 12px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+
+.record-status:empty {
+  display: none;
+}
+
+.record-status.ok {
+  color: var(--accent);
+}
+
+.record-status.bad {
+  color: var(--err);
+}
+
+.record-controls label,
+.record-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.record-controls input:not([type='checkbox']) {
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+}
+
+.record-controls input[type='number'] {
+  width: 56px;
+}
+
+.record-controls input[type='text'] {
+  width: 140px;
+}
+
+.record-controls input:focus {
+  border-color: var(--accent);
+}
+
+/* A ctrl+b panel has no .record() call to write settings back into, so its fields are shown but
+   inert rather than hidden - what it recorded with still reads. */
+.record-controls input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.record-controls label:has(input:disabled) {
+  opacity: 0.6;
+}
+
+/* Armed counts the take in, live is the take itself - the same two states the transport's
+   record button uses, so one glance reads the same in both places. */
+#recordGo.rec-armed {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+#recordGo.rec-live {
+  color: var(--err);
+  border-color: var(--err);
+}
+
 /* --------------------------------------------- piano roll editor (Ableton-style, centered) */
 
 .pianoroll-panel {

@@ -134,11 +134,20 @@ export class Sig {
     // Captured plugin state per chain slot (0 = instrument, 1.. = fx), from synth/fx's second
     // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load.
     this.slotStates = opts.slotStates ?? {};
-    // Sampler config, present only for s("pack") patterns: { index, begin, end, loop, speed,
+    // Sampler config, present only for sampler patterns: { index, begin, end, loop, speed,
     // stretch, fit, slice, attack, decay, sustain, release }, each a Sig (sampled per event
     // onset) or absent for its default.
     // Patterned values also merge their step grid into the pattern's (see _samplerOpt).
     this.sampler = opts.sampler ?? null;
+    // Which namespace this sampler's step values address: 'pack' (s - a folder, plus an index),
+    // 'file' (se - one exact path under the samples root), or 'rec' (sr - a bounce, by name). Held
+    // OUTSIDE `sampler` on purpose: that object is walked generically wherever a pattern is
+    // time-warped or condition-switched, and everything in it has to be a signal.
+    this.samplerKind = opts.samplerKind ?? null;
+    // .record()'s settings: { cycles, name, wrapTail }, or null. Nothing in playback reads this -
+    // it's a marker for the editor's recorder panel, which finds the call in the code (see
+    // client.js's findRecordCallAt) and bounces the block by its label.
+    this.recordOpts = opts.recordOpts ?? null;
     // Live MIDI note routing, from midikeys(): { device, channel (null = all) }. The scheduler
     // hands this to the engine, which plays the device's note stream on this track directly.
     this.midiNotes = opts.midiNotes ?? null;
@@ -185,6 +194,8 @@ export class Sig {
       channel: this.channel,
       noteChannels: this.noteChannels,
       sampler: this.sampler,
+      samplerKind: this.samplerKind,
+      recordOpts: this.recordOpts,
       slotStates: this.slotStates,
       midiNotes: this.midiNotes,
       keyboardRoute: this.keyboardRoute,
@@ -1582,20 +1593,50 @@ export class Sig {
    * Configure it with .i()/.begin()/.speed()/etc. exactly like the s("...") builder.
    */
   s(pack) {
-    if (typeof pack !== 'string' || !pack.trim()) {
-      throw new Error('[signal] .s() takes a sample pack name, e.g. note("c e g").s("rave")');
+    return this._asSampler('s', pack, 'pack', 'a sample pack name, e.g. note("c e g").s("rave")');
+  }
+
+  /**
+   * The method form of se() - play this pattern's notes with one exact file as the sound, by its
+   * path under the samples folder: `note("c e g").se("hits/stab.wav")`. Everything .s() does about
+   * pitch and velocity applies unchanged; only how the file is named differs.
+   *
+   * The argument is a plain path, NOT a mini string - so unlike the se("…") builder it needs no
+   * single quotes around a path with a "/" in it. Quotes here would be part of the filename, so
+   * they're rejected rather than silently looked up.
+   */
+  se(file) {
+    return this._asSampler('se', file, 'file', 'a sample file path, e.g. note("c e g").se("hits/stab.wav")');
+  }
+
+  /**
+   * The method form of sr() - play this pattern's notes with a bounce as the sound, by name.
+   * A plain name, not a mini string (see .se()).
+   */
+  sr(name) {
+    return this._asSampler('sr', name, 'rec', 'a recording name, e.g. note("c e g").sr("stab")');
+  }
+
+  _asSampler(method, value, kind, expected) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new Error(`[signal] .${method}() takes ${expected}`);
     }
-    const name = pack.trim();
+    // A quoted-looking argument is the mini-string spelling leaking into the method form, where
+    // the value is literal - fail loudly instead of hunting for a file whose name has quotes in it.
+    if (kind !== 'pack' && /^['"]|['"]$/.test(value.trim())) {
+      throw new Error(`[signal] .${method}() takes ${expected} - drop the quotes (they're only needed inside a ${method}("…") pattern)`);
+    }
+    const name = value.trim();
     // This pattern's values are the pitch: keep them as the sampler's repitch note and swap the
-    // value stream for the constant pack name over the same grid. An existing sampler keeps its
-    // note (re-.s()-ing just changes the pack).
+    // value stream for the constant source name over the same grid. An existing sampler keeps its
+    // note (re-.s()-ing just changes what plays).
     const noteSig = this.sampler?.note ?? this;
     const sampler = { ...(this.sampler ?? {}), note: noteSig };
     // Velocity carries through untouched: it's a note channel now (Sig#noteChannels), read the same
     // way on synth and sampler tracks, so a vel set while this was a synth track (.vel()/.as("vel"))
     // needs no relocation - the walker maps step.vel / the channel to sample gain on the sampler
     // path exactly as it maps it to MIDI velocity on the synth path.
-    return this.mapValue(() => name)._clone({ sampler });
+    return this.mapValue(() => name)._clone({ sampler, samplerKind: kind });
   }
 
   /**
@@ -1614,6 +1655,42 @@ export class Sig {
    */
   log(on = true) {
     return this._clone({ logging: !!on });
+  }
+
+  /**
+   * Marks this track as one you bounce to audio, and gives the editor a handle to hang the
+   * recorder panel off: click the `record` name and the panel opens on this block, showing its
+   * live level. Press its button (or ctrl+b anywhere in the block) and it records from the next
+   * phrase boundary for `cycles` cycles, files the result under ~/.poptart/recordings, mutes this
+   * block and writes `label: sr("name").slow(cycles)` in below it.
+   *
+   *   bass: note("c2 eb2").synth("Serum 2").record({ cycles: 8 })
+   *
+   * It changes nothing about the sound - like .log(), it's a flag on the track, not a step in the
+   * pattern, and anywhere in the chain does the same thing. `name` is what the recording will be
+   * called (the block's label if you leave it out; either way a name already in use gets a "-2"),
+   * and `wrapTail` folds the release tail back over the head for a track that was silent going in
+   * - leave it off when bouncing a loop that's already running, whose head already carries the
+   * previous pass's tail.
+   *
+   * ctrl+b needs none of this: it bounces whichever block the cursor is in. .record() is for
+   * seeing the signal and setting the length up front.
+   */
+  record(opts = {}) {
+    if (typeof opts === 'number') return this.record({ cycles: opts }); // .record(8) shorthand
+    if (typeof opts !== 'object' || opts === null) {
+      throw new Error('[signal] .record(...) takes options, e.g. .record({ cycles: 8, name: "bass" })');
+    }
+    const cycles = opts.cycles ?? 4;
+    if (!Number.isFinite(Number(cycles)) || Number(cycles) < 1) {
+      throw new Error(`[signal] .record() cycles must be a positive number of cycles (got ${JSON.stringify(opts.cycles)})`);
+    }
+    if (opts.name != null && typeof opts.name !== 'string') {
+      throw new Error('[signal] .record() name must be a string, e.g. .record({ name: "bassline" })');
+    }
+    return this._clone({
+      recordOpts: { cycles: Math.round(Number(cycles)), name: opts.name ?? null, wrapTail: opts.wrapTail === true },
+    });
   }
 
   _noteLike(sig) {
@@ -2292,10 +2369,47 @@ export function n(value) {
  * .sustain()/.release() (or .adsr()); route through effects with .fx()/.param() as usual.
  */
 export function s(value) {
-  assertBuilderInput('s', value);
-  if (value instanceof Sig) return value._clone({ sampler: {} });
+  return samplerPattern('s', value, 'pack');
+}
+
+/**
+ * Sampler pattern addressing ONE exact file, by its path relative to the samples folder:
+ * `se("drums/kick.wav")`. Where `s("drums")` plays a folder and picks by index, `se` plays the
+ * file you name - the same thing the editor's sample browser shows you.
+ *
+ * A path holds characters mini-notation reads as operators ("/" is slow, a space separates steps),
+ * so anything beyond a bare filename goes in single quotes: `se("'drums/kick 01.wav'")`. Quoting is
+ * per-atom, so a sequence still works: `se("'drums/kick.wav' 'drums/snare.wav'")`. Everything the
+ * sampler can do (.begin/.slice/.speed/.fit/.loop/…) applies exactly as it does to `s`.
+ */
+export function se(value) {
+  return samplerPattern('se', value, 'file');
+}
+
+/**
+ * Sampler pattern playing a bounce from the recordings folder by name: `sr("bass")`. Names are
+ * minted unique when the recording is made (see .record() and ctrl+b), so one always means one
+ * file - the YYYY-MM folders on disk are filing, not part of the name. Needs no quoting.
+ *
+ * A bounce is a whole loop, so it wants an event as long as it is: `sr("bass").slow(8)` for eight
+ * cycles - which is what the recorder writes into the buffer for you.
+ */
+export function sr(value) {
+  return samplerPattern('sr', value, 'rec');
+}
+
+// The three sampler sources differ only in how the engine turns a step's value into files (see
+// OscEngine#_resolveSource); `kind` rides on Sig#samplerKind and the scheduler stamps it onto the
+// ref it sends.
+function samplerPattern(builder, value, kind) {
+  assertBuilderInput(builder, value);
+  if (value instanceof Sig) return value._clone({ sampler: {}, samplerKind: kind });
   const ast = parseMini(String(value));
-  return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast), sampler: {} });
+  return new Sig(miniStepSampler(ast), {
+    stepsForCycle: miniStepsForCycle(ast),
+    sampler: {},
+    samplerKind: kind,
+  });
 }
 
 // ---------------------------------------------------------------------------------------------

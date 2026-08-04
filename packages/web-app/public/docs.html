@@ -737,6 +737,51 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <code>s("rave").add(7)</code> and <code>s("rave").add(note(7))</code> are the same seven
             semitones up.
           </p>
+          <h3>Naming one exact file: <code>se()</code> and <code>sr()</code></h3>
+          <p>
+            <code>s()</code> plays a <em>folder</em> and picks by index. When you want a particular
+            file, <code>se("path")</code> names it directly, relative to the samples folder — and
+            <code>sr("name")</code> does the same for a bounce in your recordings folder. Both are the
+            same sampler: every method above applies unchanged.
+          </p>
+          <pre><code>stab: se(<span class="s">"'hits/stab 01.wav'"</span>).slice(<span class="s">"0 2"</span>)
+loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8-cycle bounce, played whole</span></code></pre>
+          <p>
+            A path holds characters mini-notation reads as operators — <code>/</code> is slow, a space
+            separates steps — so anything beyond a bare filename goes in <strong>single quotes</strong>,
+            which suspend that reading for one value:
+            <code>se("'a/b.wav' 'c/d.wav'")</code>. Quoting works in any mini string, not just
+            <code>se</code>. Recording names never need it: they're minted from letters, digits,
+            <code>-</code> and <code>_</code> only. The editor autocompletes both — <code>se("</code>
+            offers a folder at a time, <code>sr("</code> offers every take you've made.
+          </p>
+          <h3>Bouncing a track: <code>.record()</code> and ctrl+b</h3>
+          <p>
+            Put the cursor in any named block and press <strong>ctrl+b</strong> to record that track's
+            own audio. It starts at the next phrase boundary, runs for the chosen number of cycles,
+            files the result under <code>~/.poptart/recordings/YYYY-MM/</code>, then <em>mutes</em> the
+            block and writes the bounce in below it under the same label:
+          </p>
+          <pre><code><span class="c">// before</span>
+bass: note(<span class="s">"c2 eb2 g2 _"</span>).synth(<span class="s">"Serum 2"</span>).record({ cycles: 8 })
+
+<span class="c">// after ctrl+b</span>
+_bass: note(<span class="s">"c2 eb2 g2 _"</span>).synth(<span class="s">"Serum 2"</span>).record({ cycles: 8 })
+bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
+          <p>
+            The two share a label on purpose — the bounce takes the original's place on that engine
+            track, so the mix doesn't move and un-commenting one line puts the synth back. Only one of
+            them may be live at a time, which is what the mute guarantees. Note this <em>doesn't</em>
+            free the plugin: it stays loaded, ready for that un-mute.
+          </p>
+          <p>
+            Adding <code>.record({ cycles })</code> to a chain gives you the same thing with a panel:
+            click the <code>record</code> name and it opens showing that track's live level, the length,
+            and the name to file it under — every change written straight back into the call, the way
+            <code>lfo()</code> and <code>pianoroll()</code> work. <code>wrapTail</code> folds the release
+            tail back over the head, for a track that was <em>silent</em> going in; a loop that's
+            already running records the previous pass's tail into its own head and doesn't want it.
+          </p>
         </section>
 
         <!-- ================================================================= -->

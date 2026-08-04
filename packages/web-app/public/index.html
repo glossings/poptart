@@ -222,6 +222,29 @@
       <div class="lfo-help">drag points · drag a segment to bend it · double-click adds/removes · esc closes</div>
     </div>
 
+    <div id="recordPanel" class="record-panel hidden">
+      <div class="record-panel-head">
+        <span>record</span>
+        <span id="recordLabel" class="record-track"></span>
+        <span class="spacer"></span>
+        <button id="recordClose" class="small">✕</button>
+      </div>
+      <canvas id="recordCanvas" width="1520" height="400"></canvas>
+      <div class="record-controls">
+        <label>cycles <input id="recordCycles" type="number" step="1" min="1" max="128" value="4" title="How many cycles to record. Recording starts at the next phrase boundary." /></label>
+        <label>name <input id="recordName" type="text" placeholder="label" title="What to call the recording. Defaults to the block's label; a name already in use gets a -2." /></label>
+        <label class="record-check" title="Fold the release tail back over the head. For a track that was silent going in - a loop already playing records the previous pass's tail into its own head, and would double it.">
+          <input id="recordWrapTail" type="checkbox" /> wrap tail
+        </label>
+      </div>
+      <div class="record-actions">
+        <button id="recordGo" class="small" title="Bounce this block (ctrl+b)">● bounce</button>
+        <span class="spacer"></span>
+        <button id="recordAgain" class="small hidden" title="Record another take over this one">↺ again</button>
+      </div>
+      <div id="recordStatus" class="record-status"></div>
+    </div>
+
     <div id="pianorollPanel" class="pianoroll-panel hidden">
       <div class="pianoroll-panel-head">
         <span>piano roll</span>
