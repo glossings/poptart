@@ -496,6 +496,11 @@ if (outDevice.notNil and: { outDevice.isEmpty.not }) {
 };
 // At least stereo; more when the selected device has it, so .o(n) can address every pair.
 server.options.numOutputBusChannels = max(2, outChannels);
+// One buffer per file in a sample pack, and packs stay loaded for the session - scsynth's default
+// table of 1024 is exhausted by a single big drum library ("No more buffer numbers" on the first
+// s("...")). The table itself is only a few hundred bytes per slot (the audio lives in separate
+// allocations made at read time), so size it for a whole library rather than one pack.
+server.options.numBuffers = 16384;
 
 // Second boot-progress checkpoint (see "engine script running" above) - also puts the exact
 // boot config into the log, so a failure report carries it and the README's IDE-replay
@@ -1581,19 +1586,36 @@ OSCdef(\poptartLoadSamplePack, { |msg|
     var requestId = msg[1], pack = msg[2].asSymbol, pathsFile = msg[3].asString;
     fork {
         var paths = File.use(pathsFile, "r", { |f| f.readAllString }).parseJSON;
-        var done = 0, tries = 0, bufs;
+        var done = 0, tries = 0, bufs = [], starved = false;
         File.delete(pathsFile);
         samplePacks[pack] !? { |old| old.do { |b| b.free } };
-        bufs = paths.collect { |p|
-            Buffer.read(server, p.asString, action: { done = done + 1 })
+        // Buffer.read THROWS once the buffer allocator is empty, which would kill this routine and
+        // leave Node waiting out its whole 2-minute timeout for a reply that never comes. Catch it,
+        // and turn a library too big for numBuffers above into an immediate, explicable failure.
+        paths.do { |p|
+            if (starved.not) {
+                try {
+                    bufs = bufs.add(Buffer.read(server, p.asString, action: { done = done + 1 }));
+                } { starved = true };
+            };
         };
         // Cap just under Node's PACK_LOAD_TIMEOUT_MS so a partial read still replies in time.
         while { (done < bufs.size) and: { tries < 2200 } } { 0.05.wait; tries = tries + 1 };
-        samplePacks[pack] = bufs;
-        ("poptart: sample pack '" ++ pack ++ "': " ++ done ++ "/" ++ bufs.size ++ " file(s) read").postln;
-        replyOk.("/poptart/loadSamplePack", requestId, toJson.(bufs.collect { |b|
-            (frames: b.numFrames ? 0, sampleRate: b.sampleRate ? 0, channels: b.numChannels ? 0)
-        }));
+        if (starved) {
+            // Waited for the in-flight reads above first, so freeing here can't race their /done.
+            bufs.do { |b| b.free };
+            samplePacks[pack] = nil;
+            replyErr.("/poptart/loadSamplePack", requestId,
+                "the audio server ran out of buffers loading " ++ paths.size ++ " file(s) ("
+                ++ bufs.size ++ " read before it gave out) - other packs already loaded this "
+                ++ "session hold the rest. Restart the engine, or raise numBuffers in poptart.scd.");
+        } {
+            samplePacks[pack] = bufs;
+            ("poptart: sample pack '" ++ pack ++ "': " ++ done ++ "/" ++ bufs.size ++ " file(s) read").postln;
+            replyOk.("/poptart/loadSamplePack", requestId, toJson.(bufs.collect { |b|
+                (frames: b.numFrames ? 0, sampleRate: b.sampleRate ? 0, channels: b.numChannels ? 0)
+            }));
+        };
     };
 }, '/poptart/loadSamplePack');
 
