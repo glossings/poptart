@@ -1,7 +1,8 @@
 // Drawn note grids for pianoroll() - the textual format, its parser/serializer, the mini-notation
 // converter, and the small helpers the editor and the builder share. Like shape.mjs (the lfo()
-// shapes) this is dependency-free and served verbatim to the browser, so the interactive editor
-// draws exactly the notes the scheduler plays.
+// shapes) this is served verbatim to the browser - so the interactive editor draws exactly the
+// notes the scheduler plays - and depends on nothing outside this package (notes.mjs, its one
+// import, is served the same way and is itself dependency-free).
 //
 // Format: space-separated note events `midi,start,len[,vel[,prob]]`, e.g. "60,0,4 64,0,4,0.7 67,8,8".
 //   midi  - MIDI note number, 0..127 (this package's c5 = 60 convention)
@@ -14,6 +15,8 @@
 //           present, vel is written too (it holds the field's place), even if it is the default.
 // The grid width (`steps`, how many cells span one cycle) lives in the pianoroll() call's options,
 // not the string - the same split shape.mjs uses for lfo()'s rate/mode.
+
+import { DEFAULT_SCALE_OCTAVE, midiToDegree, noteToMidi, scaleAtOctave, scaleParts } from './notes.mjs';
 
 export const PIANOROLL_DEFAULT_STEPS = 16;
 
@@ -73,17 +76,30 @@ export function serializePianoRoll(notes) {
  * as any velocity or multi-cell length appears it switches to the bare-string `.as("note[:vel][:clip]")`
  * form - because note() would eagerly parse a `60:0.5:2` token as a pitch and choke; .as() is what
  * splits the fields apart. A template literal keeps it readable across lines.
+ *
+ * Given a `scale` (a name like "F minor" - the roll passes the buffer's key when it's folded to
+ * it), the pitches come out as SCALE DEGREES instead: the `n` field, with a `.sc(octave)` tacked on
+ * the end. Same notes, but re-keying the patch by editing its `setscale(...)` line moves them,
+ * where written-out MIDI numbers would sit where they were drawn. The octave is chosen to put the
+ * scale's root at or below the lowest note drawn, so no degree comes out negative. Degrees can only
+ * name notes in the key, so an out-of-key one is written as its nearest degree (see midiToDegree) -
+ * the one lossy part of this conversion.
  */
-export function pianoRollToMini(notes, { grid, len, indent = '' } = {}) {
+export function pianoRollToMini(notes, { grid, len, indent = '', scale = null } = {}) {
   const g = normalizePianoRollSteps(grid);
   const total = Math.max(1, Math.round(len ?? g));
   const onsets = Array.from({ length: total }, () => []);
   for (const nt of notes) if (nt.start < total) onsets[nt.start].push(nt);
   const anyVel = notes.some((nt) => nt.vel < 1);
   const anyClip = notes.some((nt) => nt.len > 1);
-  const fields = ['note', ...(anyVel ? ['vel'] : []), ...(anyClip ? ['clip'] : [])];
+  const octave = scale ? rollOctave(notes, scale) : null;
+  // Degrees are read against the scale AS .sc(octave) will build it, so the two agree exactly.
+  const keyed = scale ? scaleAtOctave(scale, octave) : null;
+  const pitchField = scale ? 'n' : 'note';
+  const fields = [pitchField, ...(anyVel ? ['vel'] : []), ...(anyClip ? ['clip'] : [])];
 
-  const fieldStr = (nt, f) => (f === 'note' ? String(Math.round(nt.midi)) : f === 'vel' ? fmt(nt.vel) : String(Math.round(nt.len)));
+  const pitchStr = (nt) => String(keyed ? midiToDegree(nt.midi, keyed) : Math.round(nt.midi));
+  const fieldStr = (nt, f) => (f === pitchField ? pitchStr(nt) : f === 'vel' ? fmt(nt.vel) : String(Math.round(nt.len)));
   const isDefault = (nt, f) => (f === 'vel' && nt.vel === 1) || (f === 'clip' && nt.len === 1);
   const tok = (nt) => {
     const parts = fields.map((f) => fieldStr(nt, f));
@@ -107,7 +123,21 @@ export function pianoRollToMini(notes, { grid, len, indent = '' } = {}) {
   for (let i = 0; i < total; i += perLine) lines.push(cells.slice(i, i + perLine).join(' '));
   const body = lines.map((l) => `${indent}  ${l}`).join('\n');
   const seq = `\`<\n${body}\n${indent}>*${g}\``;
-  return fields.length > 1 ? `${seq}.as("${fields.join(':')}")` : `note(${seq})`;
+  const tail = scale ? `.sc(${octave})` : '';
+  return `${fields.length > 1 ? `${seq}.as("${fields.join(':')}")` : `${pitchField}(${seq})`}${tail}`;
+}
+
+/**
+ * The octave to hand `.sc()`: the one that puts the scale's root at or just below the lowest note
+ * in the roll, so every degree written out is >= 0 and the numbers read as "steps up from the
+ * bottom of what I drew". An empty roll keeps the scale where it already is.
+ */
+function rollOctave(notes, scale) {
+  const { root, octave } = scaleParts(scale);
+  if (!notes.length) return octave ?? DEFAULT_SCALE_OCTAVE;
+  const rootPc = ((noteToMidi(`${root}0`) ?? 0) % 12 + 12) % 12;
+  const lowest = Math.min(...notes.map((nt) => Math.round(nt.midi)));
+  return Math.floor((lowest - rootPc) / 12);
 }
 
 function fmt(v) {

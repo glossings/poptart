@@ -94,6 +94,7 @@ require('@poptart/osc-engine/samples').setSamplesRoot(settings.samplesDir ?? nul
 // ServerOptions.outDevices: scsynth needs numOutputBusChannels at boot, and .o(n)'s
 // stereo-pair wraparound has to match the hardware.
 const audioDevices = require('@poptart/osc-engine/audio-devices');
+const audioSelection = require('./audio-selection.js');
 
 // Output-capable devices in the shape the settings tab and loadEngine expect. `channels` is the
 // output count (what .o(n) wraps at); `inChannels` is the same device's input count, which is what
@@ -109,30 +110,66 @@ function audioOutputDevices() {
   }));
 }
 
-// The plain output device the user picked (or the system default) - never the aggregate. This is
-// what playback is bound to, and what becomes the aggregate's clock master when inputs are added.
+// The device-selection policy lives in audio-selection.js (pure, unit-tested); these two wire it
+// to the settings and turn its warnings into log lines.
 function plainOutputDevice(devices) {
-  const candidates = devices.filter((d) => d.uid !== audioDevices.AGGREGATE_UID);
-  const wanted = settings.audioOutputDevice;
-  const chosen = wanted ? candidates.find((d) => d.name === wanted) : null;
-  if (wanted && !chosen) {
-    // eslint-disable-next-line no-console
-    console.warn(`[poptart] saved audio output device "${wanted}" is not connected - using the system default`);
-  }
-  return chosen ?? candidates.find((d) => d.isDefault) ?? null;
+  const { device, warning } = audioSelection.plainOutputDevice(
+    devices, settings.audioOutputDevice ?? null, audioDevices.AGGREGATE_UID,
+  );
+  // eslint-disable-next-line no-console
+  if (warning) console.warn(`[poptart] ${warning}`);
+  return device;
 }
 
-// Which device scsynth should actually open. Normally the plain output device - but when extra
-// input devices have been aggregated in, it's poptart's aggregate, since that's the single device
-// carrying all of their channels.
+// Which device scsynth should actually open - the plain output device, or poptart's aggregate when
+// extra inputs have been combined in. Reading the aggregate's live membership is the point: an
+// aggregate that has lost the device we play through is not a playback path, however happily it
+// opens (see audio-selection.js).
 function deviceToOpen(devices) {
-  if ((settings.audioInputDevices ?? []).length > 0) {
-    const aggregate = devices.find((d) => d.uid === audioDevices.AGGREGATE_UID);
-    if (aggregate) return aggregate;
-    // eslint-disable-next-line no-console
-    console.warn('[poptart] the poptart aggregate device is configured but missing - falling back to the plain output device');
+  const inputUids = settings.audioInputDevices ?? [];
+  const { device, warning } = audioSelection.deviceToOpen({
+    devices,
+    wanted: settings.audioOutputDevice ?? null,
+    inputUids,
+    aggregateUid: audioDevices.AGGREGATE_UID,
+    // Only worth a helper round-trip when there IS an aggregate in play.
+    layout: inputUids.length ? audioDevices.deviceLayout(audioDevices.AGGREGATE_UID) : null,
+  });
+  // eslint-disable-next-line no-console
+  if (warning) console.warn(`[poptart] ${warning}`);
+  return device;
+}
+
+/**
+ * Make poptart's aggregate match `uids` (the extra input devices), built around whatever the
+ * output device currently is - it goes in first and is the clock master. An empty list tears the
+ * aggregate down. Returns the members it built, or null.
+ *
+ * MUTATES the machine's audio configuration, so every caller is an explicit settings action.
+ */
+function syncAggregate(uids) {
+  if (!uids.length) {
+    audioDevices.destroyAggregate();
+    return null;
   }
-  return plainOutputDevice(devices);
+  const out = plainOutputDevice(audioOutputDevices());
+  if (!out?.uid) throw new Error('could not determine the output device to build the aggregate around');
+  const members = audioSelection.aggregateMembers(out.uid, uids);
+  audioDevices.rebuildAggregate(members, out.uid);
+  return members;
+}
+
+// What's wrong with the audio device setup right now, as one line for the settings tab, or null.
+// The whole reason this is surfaced: both failures are inaudible in the one way that matters -
+// they leave the meters moving.
+function audioDeviceWarning() {
+  const uids = settings.audioInputDevices ?? [];
+  if (!uids.length) return null;
+  const problem = audioSelection.aggregateProblem({
+    layout: audioDevices.deviceLayout(audioDevices.AGGREGATE_UID),
+    outDevice: plainOutputDevice(audioOutputDevices()),
+  });
+  return problem?.message ?? null;
 }
 
 // The device scsynth actually opened, as reported by audioOutputDevices() - set by loadEngine on
@@ -1837,10 +1874,27 @@ const routes = {
       throw new Error(`no audio output device named "${device}"`);
     }
     settings.audioOutputDevice = device;
+    // The aggregate is built AROUND the output device - it's the clock master and its channels are
+    // the ones playback lands on - so a new output device means a new aggregate. Without this the
+    // choice is silently inert: deviceToOpen keeps opening an aggregate built around the device you
+    // just stopped using, and picking your speakers changes nothing you can hear.
+    let rebuildWarning = null;
+    if ((settings.audioInputDevices ?? []).length) {
+      try {
+        syncAggregate(settings.audioInputDevices);
+      } catch (err) {
+        // Not fatal, and not a reason to refuse the device the user just asked for: deviceToOpen
+        // sees an aggregate that no longer holds it and opens it directly instead. Say so, though -
+        // input() loses the extra devices until the aggregate is rebuilt.
+        rebuildWarning = `the combined audio device could not be rebuilt (${err.message}) - playing through "${device ?? 'the system default'}" directly`;
+        // eslint-disable-next-line no-console
+        console.warn(`[poptart] ${rebuildWarning}`);
+      }
+    }
     saveSettings();
     await restartEngine();
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
-    return { status: 200, body: { device } };
+    return { status: 200, body: { device, warning: rebuildWarning ?? audioDeviceWarning() } };
   },
 
   // Input-capable devices, the saved extra-input selection, and the live channel layout input()
@@ -1854,6 +1908,9 @@ const routes = {
       selected: settings.audioInputDevices ?? [],
       layout: audioInputLayout(),
       active: activeAudioDevice?.name ?? null,
+      // Non-null when the combined device has degraded under us - the settings tab is the only
+      // place this is visible, because the audio itself gives nothing away.
+      warning: audioDeviceWarning(),
     },
   }),
 
@@ -1874,22 +1931,15 @@ const routes = {
       if (!known.some((d) => d.uid === uid)) throw new Error(`no audio device with UID ${uid}`);
     }
 
-    if (uids.length) {
-      // The output device is the clock master: it's the one whose timing playback is bound to, and
-      // every other member gets drift compensation against it.
-      const out = plainOutputDevice(audioOutputDevices());
-      if (!out?.uid) throw new Error('could not determine the output device to build the aggregate around');
-      const members = [out.uid, ...uids.filter((u) => u !== out.uid)];
-      audioDevices.rebuildAggregate(members, out.uid);
-    } else {
-      audioDevices.destroyAggregate();
-    }
+    // The output device goes in as the clock master: it's the one whose timing playback is bound
+    // to, and every other member gets drift compensation against it.
+    syncAggregate(uids);
 
     settings.audioInputDevices = uids;
     saveSettings();
     await restartEngine();
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
-    return { status: 200, body: { selected: uids, layout: audioInputLayout() } };
+    return { status: 200, body: { selected: uids, layout: audioInputLayout(), warning: audioDeviceWarning() } };
   },
 };
 

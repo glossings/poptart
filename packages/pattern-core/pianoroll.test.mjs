@@ -67,6 +67,36 @@ test('pianoRollToMini: velocity + probability fields', () => {
   );
 });
 
+// In a key the roll converts to DEGREES, so re-keying the patch moves the notes. The octave rides
+// on `.sc()` rather than on the numbers, which keeps every degree non-negative.
+test('pianoRollToMini: scale mode writes n degrees plus .sc(octave)', () => {
+  // f3 = 41 is the root of "F minor" at octave 3, so the lowest note drawn is degree 0; ab3 (44)
+  // is the minor third, degree 2; c4 (48) the fifth, degree 4.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('41,0,1 44,1,1 48,2,1'), { grid: 4, len: 3, scale: 'F minor' }),
+    'n(`<\n  0 2 4\n>*4`).sc(3)',
+  );
+  // ...and with the other fields in play it's the same `.as()` form with `n` in the pitch slot.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('41,0,2,0.5 48,2,1'), { grid: 4, len: 4, scale: 'F minor' }),
+    '`<\n  0:0.5:2 ~ 4 ~\n>*4`.as("n:vel:clip").sc(3)',
+  );
+  // No scale: unchanged, absolute MIDI numbers.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('41,0,1'), { grid: 4, len: 1 }),
+    'note(`<\n  41\n>*4`)',
+  );
+});
+
+test('pianoRollToMini: scale mode rounds out-of-key notes to the nearest degree', () => {
+  // 42 (f#3) is not in F minor, and sits a semitone above degree 0 and a semitone below degree 1;
+  // the tie resolves downward, exactly as quantizeToScale rounds.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('41,0,1 42,1,1'), { grid: 4, len: 2, scale: 'F minor' }),
+    'n(`<\n  0 0\n>*4`).sc(3)',
+  );
+});
+
 // The whole point of the converter is that what it emits plays the same notes the editor did.
 // Rebuild it the way the eval sandbox would (bare string -> mini(); note() -> note()) and compare
 // the step grids across several cycles - this exercises the loop threading (len < grid here) and

@@ -52,7 +52,7 @@ const API_DOCS = {
   record: {
     kind: 'method',
     sig: 'record({ cycles, name, wrapTail })',
-    desc: 'Marks a track for bouncing and opens the recorder panel when you click the name - or press ctrl+b in any block.',
+    desc: 'Marks a track for bouncing and opens the recorder panel when you double-click the name - or press ctrl+b in any block.',
     eg: 'note("c2 eb2").synth("Serum 2").record({ cycles: 8 })',
   },
   mini: {
@@ -70,13 +70,13 @@ const API_DOCS = {
   synth: {
     kind: 'both',
     sig: 'synth(plugin, { state })',
-    desc: 'The track\'s instrument plugin, by name. Optional captured state restores its saved patch (the track panel\'s pin button writes it).',
+    desc: 'The track\'s instrument plugin, by name. Double-click the synth name to open its own editor window. Optional captured state restores its saved patch (the track panel\'s pin button writes it).',
     eg: 'note("c2*4").synth("Serum 2")',
   },
   pianoroll: {
     kind: 'builder',
     sig: 'pianoroll(notes, { grid, len })',
-    desc: 'A note pattern drawn on an interactive roll - click the name to open it; every edit writes back into the string.',
+    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it; every edit writes back into the string.',
     eg: 'pianoroll("60,0,4 64,0,4", { grid: 16, len: 16 })',
   },
 
@@ -146,7 +146,7 @@ const API_DOCS = {
   lfo: {
     kind: 'builder',
     sig: 'lfo(shape, { rate, mode, phase })',
-    desc: 'A hand-drawn modulator - click the lfo name to open the shape editor. Modes: free, retrigger (per note), envelope (once per note).',
+    desc: 'A hand-drawn modulator - double-click the lfo name to open the shape editor. Modes: free, retrigger (per note), envelope (once per note).',
     eg: 'lfo("0,0 0.5,1,-3 1,0", { rate: 0.3 }).range(200, 5000)',
   },
   env: {
@@ -191,7 +191,7 @@ const API_DOCS = {
   fx: {
     kind: 'method',
     sig: 'fx(plugin, { state })',
-    desc: 'Appends an effect to the track\'s chain, after the instrument and any earlier .fx(). Later .param() calls target it.',
+    desc: 'Appends an effect to the track\'s chain, after the instrument and any earlier .fx(). Double-click the fx name to open its own editor window. Later .param() calls target it.',
     eg: '.fx("ValhallaRoom").param("Mix", 0.3)',
   },
   param: {

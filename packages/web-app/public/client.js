@@ -47,6 +47,7 @@ const coreReady = Promise.all([
     initLfoEditor();
     initPianorollEditor();
     initRecordPanel();
+    initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
@@ -1370,10 +1371,106 @@ document.addEventListener('keyup', (e) => {
 cm.on('scroll', hideHoverDoc); // the code moved out from under the pointer
 
 // ---------------------------------------------------------------------------------------------
-// Interactive LFO shape editor - click the `lfo` name in any `lfo(...)` call (just the name: its
-// arguments are code you may want to edit by hand) and a Serum-style panel opens: drag breakpoints,
-// drag a segment to bend it (curvature), double-click to add/remove points, pick presets, set rate
-// + free/retrigger/envelope mode. Every change is serialized straight back into the code as
+// Widget handles - DOUBLE-CLICK a call's name to open its editor.
+//
+// `lfo`, `pianoroll`, `record`, `synth` and `fx` all work the same way: the NAME is a handle, and
+// double-clicking it opens that call's editor (the plugin's own window, for synth/fx). A single
+// click - or the text cursor merely landing on the name while you edit - deliberately does
+// nothing. Those happen all day by accident, and a panel that opens on its own takes the screen
+// and, for the roll, the keyboard, right in the middle of a line you were typing. Nothing but the
+// name is a handle either way: the arguments are ordinary code, so double-clicking a word inside
+// them still selects the word.
+//
+// This hangs off CodeMirror's `mousedown` rather than its `dblclick` because only mousedown fires
+// early enough to preventDefault the word-selection the second click would otherwise make.
+// ---------------------------------------------------------------------------------------------
+
+function initWidgetHandles() {
+  cm.on('mousedown', (_cm, e) => {
+    if (e.detail !== 2 || e.button !== 0) return;
+    const idx = cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+    if (openWidgetAt(cm.getValue(), idx)) e.preventDefault(); // the double-click WAS the gesture
+  });
+}
+
+/** Opens whichever editor `idx` is the handle for. True if one of them took it. */
+function openWidgetAt(code, idx) {
+  const lfo = shapeMod && findLfoCallAt(code, idx);
+  if (lfo?.onName) {
+    if (!lfoState || lfo.start !== lfoState.callStart) openLfoEditor(lfo);
+    return true;
+  }
+  const roll = pianorollMod && findPianorollCallAt(code, idx);
+  if (roll?.onName) {
+    if (!prState || roll.start !== prState.callStart) openPianorollEditor(roll);
+    // Opening the roll on purpose hands it the keyboard: cmd-A, the arrows and delete belong to
+    // the notes now, not to the code buffer.
+    prCanvas.focus({ preventScroll: true });
+    return true;
+  }
+  const rec = findRecordCallAt(code, idx);
+  if (rec?.onName) {
+    if (!recordState || rec.start !== recordState.callStart) openRecordPanel(rec);
+    return true;
+  }
+  const chain = findChainHandleAt(code, idx);
+  if (chain) {
+    showPluginEditor(chain.label, chain.slot);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The `name(...)` call containing idx, plus whether idx is on its name - the handle. `re` must be
+ * a /g regex matching the name and its opening paren; `name` is the word inside it that counts as
+ * the handle (`.record(` matches with a leading dot, but only `record` is the handle).
+ */
+function findNamedCallAt(code, idx, re, name) {
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    if (idx < m.index || idx > close + 1) continue;
+    const nameStart = m.index + m[0].indexOf(name);
+    return { start: m.index, open, close, onName: idx >= nameStart && idx <= nameStart + name.length };
+  }
+  return null;
+}
+
+/**
+ * The synth(...) / .fx(...) call whose name `idx` sits on, as the { label, slot } pair that
+ * addresses one plugin - exactly what the track panel's `ui` button sends. Slot 0 is the
+ * instrument; .fx() calls number from 1 in the order they appear, which is how a chain is
+ * addressed everywhere else (see findChainCall).
+ */
+function findChainHandleAt(code, idx) {
+  if (!labelsMod) return null;
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  if (!block) return null;
+  const re = /\b(synth|fx)\s*\(/g;
+  re.lastIndex = block.start;
+  let m;
+  let fxSeen = 0;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    const slot = m[1] === 'synth' ? 0 : ++fxSeen;
+    if (idx >= m.index && idx <= m.index + m[1].length) return { label: block.label, slot };
+  }
+  return null;
+}
+
+/** Open a plugin's own editor window - the engine owns it, so this is a request, not a panel. */
+function showPluginEditor(trackId, slot) {
+  api('POST', '/api/showEditor', { trackId, slot }).catch((e) => logLine(e.message, true));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Interactive LFO shape editor - double-click the `lfo` name in any `lfo(...)` call (just the
+// name: its arguments are code you may want to edit by hand) and a Serum-style panel opens: drag
+// breakpoints, drag a segment to bend it (curvature), double-click to add/remove points, pick
+// presets, set rate + free/retrigger/envelope mode. Every change is serialized back into the code as
 // `lfo("x,y,c …", { rate, mode })` and re-evaluated (debounced), so the modulation follows the
 // shape without a manual ⏎; hand edits to the call flow the other way, back into the open panel.
 // The code stays the single source of truth (and shares via the URL hash like everything else).
@@ -1391,22 +1488,11 @@ let lfoState = null; // { marker, callStart, points, rate, mode }
 let lfoSuppressCursor = false;
 const LFO_EVAL_DEBOUNCE_MS = 150; // quiet time after the last shape edit before it re-evaluates
 
-// The lfo(...) call containing idx, plus whether idx is on the *handle* that opens the editor: the
-// `lfo` name itself (or anywhere inside a still-empty `lfo()`, so the panel appears as soon as you
-// type the call). Its arguments - the shape string, rate:, mode: - are ordinary code you may want
-// to edit by hand, so putting the cursor in them opens nothing. Same rule as pianoroll's.
+// The lfo(...) call containing idx, plus whether idx is on the *handle* that opens the editor -
+// the `lfo` name itself. Its arguments - the shape string, rate:, mode: - are ordinary code you may
+// want to edit by hand, so they are never a handle. Same rule as pianoroll's and record's.
 function findLfoCallAt(code, idx) {
-  const re = /\blfo\s*\(/g;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    const open = m.index + m[0].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0) continue;
-    if (idx < m.index || idx > close + 1) continue;
-    const onName = idx <= m.index + 'lfo'.length || !code.slice(open + 1, close).trim();
-    return { start: m.index, open, close, onName };
-  }
-  return null;
+  return findNamedCallAt(code, idx, /\blfo\s*\(/g, 'lfo');
 }
 
 function parseLfoCall(inner) {
@@ -1481,8 +1567,12 @@ function lfoScheduleEval() {
 function syncLfoFromCode() {
   if (!lfoState || lfoSuppressCursor || !shapeMod) return;
   const range = lfoState.marker.find();
-  if (!range) return;
+  // The call the panel is anchored to was deleted (or typed into something that is no longer an
+  // lfo call) - there is nothing left to edit, so the panel goes with it. This is the only thing
+  // that closes it by itself now that opening is an explicit double-click.
+  if (!range) { closeLfoEditor(); return; }
   const text = cm.getRange(range.from, range.to);
+  if (!/^\s*lfo\s*\(/.test(text)) { closeLfoEditor(); return; }
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
@@ -1499,36 +1589,9 @@ function syncLfoFromCode() {
 function initLfoEditor() {
   for (const name of Object.keys(shapeMod.SHAPE_PRESETS)) lfoPreset.add(new Option(name, name));
 
-  cm.on('cursorActivity', () => {
-    if (lfoSuppressCursor || !shapeMod) return;
-    const call = findLfoCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
-    if (!call) {
-      if (lfoState) closeLfoEditor();
-      return;
-    }
-    if (lfoState && call.start === lfoState.callStart) return; // already editing this call (args included)
-    // Inside some other call's arguments - that's plain editing, not a request for the shape editor.
-    if (!call.onName) {
-      if (lfoState) closeLfoEditor();
-      return;
-    }
-    // No "don't reopen what I dismissed" guard: the name is an explicit handle, so landing on it is
-    // always a request to open, and leaving the cursor in the arguments after a ✕ reopens nothing.
-    openLfoEditor(call);
-  });
-
-  // Clicking the name opens the panel even when the cursor is *already* there: re-clicking the same
-  // spot leaves the selection unchanged, and an unchanged selection fires no cursorActivity - which
-  // is what made reopening after ✕ feel stuck. (No focus grab, unlike the piano roll: the shape
-  // editor has no keyboard shortcuts of its own, so the keys stay where they're useful - the code.)
-  cm.on('mousedown', (_cm, e) => {
-    if (!shapeMod) return;
-    const call = findLfoCallAt(cm.getValue(), cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window')));
-    if (!call?.onName) return;
-    if (lfoState && call.start === lfoState.callStart) return;
-    openLfoEditor(call);
-  });
-
+  // Opening is initWidgetHandles' job (double-click the name). Closing is the ✕, Escape, or the
+  // call itself leaving the buffer - see syncLfoFromCode. Nothing about where the text cursor
+  // happens to be: a panel you asked for stays put while you edit around it.
   cm.on('change', syncLfoFromCode); // hand edits to the open call flow back into the panel
 
   lfoPreset.addEventListener('change', () => {
@@ -1710,8 +1773,8 @@ function initLfoCanvas() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Interactive piano roll editor - click the `pianoroll` name in any `pianoroll(...)` call (just the
-// name: its arguments are code the user may want to edit by hand) and an Ableton-style grid opens
+// Interactive piano roll editor - double-click the `pianoroll` name in any `pianoroll(...)` call
+// (just the name: its arguments are code you may want to edit by hand) and an Ableton-style grid opens
 // over the editor, with a real piano keyboard down the left edge and a playhead that sweeps the
 // steps as it plays. Two tools (pencil draws, arrow marquee-selects); click a note
 // to select it (shift-click extends, ctrl/cmd-A selects all), drag to move, drag a note's right
@@ -1861,21 +1924,10 @@ const prMidiOf = (pos, m) =>
     : Math.min(127, Math.max(0, Math.round(pos)));
 
 // The pianoroll(...) call containing idx, plus whether idx is on the *handle* that opens the
-// editor: the `pianoroll` name itself (or anywhere inside a still-empty `pianoroll()`, so the
-// panel appears as soon as you type the call). The arguments - the note string, grid:, len: -
-// are ordinary code the user may want to edit, so putting the cursor in them opens nothing.
+// editor - the `pianoroll` name itself. The arguments - the note string, grid:, len: - are
+// ordinary code you may want to edit, so they are never a handle.
 function findPianorollCallAt(code, idx) {
-  const re = /\bpianoroll\s*\(/g;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    const open = m.index + m[0].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0) continue;
-    if (idx < m.index || idx > close + 1) continue;
-    const onName = idx <= m.index + 'pianoroll'.length || !code.slice(open + 1, close).trim();
-    return { start: m.index, open, close, onName };
-  }
-  return null;
+  return findNamedCallAt(code, idx, /\bpianoroll\s*\(/g, 'pianoroll');
 }
 
 // The label of the block a `pianoroll(...)` call lives in - the engine track we preview through.
@@ -1978,9 +2030,8 @@ function openPianorollEditor(call) {
   prPanel.classList.remove('hidden');
   drawPianoroll();
   if (!prRaf) prRaf = requestAnimationFrame(prPlayheadLoop); // sweep a playhead while it plays
-  // Focus isn't taken here: opening by clicking the name hands it to the canvas from the mousedown
-  // handler, while opening because the cursor drifted onto the name (arrow keys, or typing a fresh
-  // `pianoroll()`) leaves the keyboard in the code, so the panel never steals keys mid-type.
+  // Focus isn't taken here - openWidgetAt hands it to the canvas, because the double-click that
+  // got us here says the notes are what the keyboard is for now.
 }
 
 function closePianorollEditor() {
@@ -2077,8 +2128,12 @@ function prScheduleEval() {
 function syncPianorollFromCode() {
   if (!prState || prSuppressCursor || !pianorollMod) return;
   const range = prState.marker.find();
-  if (!range) return;
+  // The call the roll is anchored to was deleted (or edited into something that is no longer a
+  // pianoroll call) - nothing left to draw on, so the roll goes with it. This is the only thing
+  // that closes it by itself now that opening is an explicit double-click.
+  if (!range) { closePianorollEditor(); return; }
   const text = cm.getRange(range.from, range.to);
+  if (!/^\s*pianoroll\s*\(/.test(text)) { closePianorollEditor(); return; }
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
@@ -2714,43 +2769,15 @@ function initPianorollCanvas() {
   prCanvas.addEventListener('pointerleave', () => { prPointer = { px: -1, py: -1 }; });
 }
 
+// The panel's own controls hand the keyboard straight back to the grid. Clicking `len` (or a
+// toolbar button) moves focus into that widget, and every one of the roll's keys - cmd-A for all
+// notes, the arrows, delete, B - lives on the canvas; without this, editing the loop length quietly
+// turned cmd-A back into "select the whole buffer".
+const prRefocus = () => { if (prState) prCanvas.focus({ preventScroll: true }); };
+
 function initPianorollEditor() {
-  cm.on('cursorActivity', () => {
-    if (prSuppressCursor || !pianorollMod) return;
-    const call = findPianorollCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
-    if (!call) {
-      if (prState) closePianorollEditor();
-      return;
-    }
-    if (prState && call.start === prState.callStart) return; // already editing this call (args included)
-    // Inside some other call's arguments - that's plain editing, not a request for the roll.
-    if (!call.onName) {
-      if (prState) closePianorollEditor();
-      return;
-    }
-    // No "don't reopen what I dismissed" guard here (unlike the lfo editor): the name is now an
-    // explicit handle, so landing on it is always a request to open, and merely leaving the cursor
-    // in the arguments after a ✕ can't reopen anything.
-    openPianorollEditor(call);
-  });
-
-  // Clicking the name opens the roll even when the cursor is *already* there: re-clicking the same
-  // spot leaves the selection unchanged, and an unchanged selection fires no cursorActivity - which
-  // is what made reopening after ✕ feel stuck (click elsewhere, then back, to wake it up).
-  cm.on('mousedown', (_cm, e) => {
-    if (!pianorollMod) return;
-    const call = findPianorollCallAt(cm.getValue(), cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window')));
-    if (!call?.onName) return;
-    if (!prState || call.start !== prState.callStart) openPianorollEditor(call);
-    // Clicking the name is a deliberate "I want the roll now", so give it the keyboard: cmd-A, the
-    // arrow keys and delete belong to the notes, not the code buffer. On mouseup, because
-    // CodeMirror focuses its own input while handling this mousedown - and only for a plain click,
-    // so dragging out from the name to select code still leaves the selection where it belongs.
-    window.addEventListener('mouseup', () => {
-      if (prState && !cm.somethingSelected()) prCanvas.focus({ preventScroll: true });
-    }, { once: true });
-  });
-
+  // Opening is initWidgetHandles' job (double-click the name). Closing is the ✕, Escape, or the
+  // call itself leaving the buffer - see syncPianorollFromCode.
   cm.on('change', syncPianorollFromCode); // hand edits to the open call flow back into the panel
 
   // grid (granularity) and len (loop length in cells) are independent - changing the grid just
@@ -2760,6 +2787,7 @@ function initPianorollEditor() {
     prState.grid = Math.max(1, Math.round(Number(prGridSelect.value) || 16));
     writePianorollCall();
     drawPianoroll();
+    prRefocus();
   });
   prLenInput.addEventListener('change', () => {
     if (!prState) return;
@@ -2767,6 +2795,7 @@ function initPianorollEditor() {
     prLenInput.value = prState.len;
     writePianorollCall();
     drawPianoroll();
+    prRefocus();
   });
 
   const reflectTool = () => { prToolBtn.textContent = prTool === 'draw' ? '✏️' : '⬚'; prToolBtn.title = `tool: ${prTool} — click or press B to switch (draw = pencil, select = marquee)`; };
@@ -2777,7 +2806,9 @@ function initPianorollEditor() {
     prRefreshCursor(); // pencil ⇄ crosshair right away, without waiting for the pointer to move
   };
   reflectTool();
-  prToolBtn.addEventListener('click', toggleTool);
+  // The button click, not toggleTool itself: B is also handled document-wide (below), and that
+  // path must leave the caret wherever it was.
+  prToolBtn.addEventListener('click', () => { toggleTool(); prRefocus(); });
 
   const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `cmd-drag sets ${prCmdMode === 'vel' ? 'velocity' : 'probability'} — click to switch`; };
   reflectCmdMode();
@@ -2785,6 +2816,7 @@ function initPianorollEditor() {
     prCmdMode = prCmdMode === 'vel' ? 'prob' : 'vel';
     localStorage.setItem('poptartPianorollCmd', prCmdMode);
     reflectCmdMode();
+    prRefocus();
   });
 
   // Clicking the scale chip snaps every note in the roll into the key - the same nearest-tone
@@ -2792,6 +2824,7 @@ function initPianorollEditor() {
   // the same pitches. One history entry, so cmd-Z puts the out-of-key notes back.
   prScaleLabel.addEventListener('click', () => {
     if (!prState || !prScaleInfo()) return;
+    prRefocus();
     const snapped = prState.notes.map((nt) => notesMod.quantizeToScale(nt.midi, patchScale));
     const moved = snapped.filter((midi, i) => midi !== prState.notes[i].midi).length;
     if (!moved) { logLine(`every note is already in ${patchScale}`); return; }
@@ -2819,6 +2852,7 @@ function initPianorollEditor() {
     localStorage.setItem('poptartPianorollFold', prFold ? '1' : '0');
     reflectFold();
     if (prState) prSetFold(prFold);
+    prRefocus();
   });
 
   const reflectPreview = () => prPreviewBtn.classList.toggle('active', prPreviewEnabled);
@@ -2828,6 +2862,7 @@ function initPianorollEditor() {
     localStorage.setItem('poptartPianorollPreview', prPreviewEnabled ? '1' : '0');
     if (!prPreviewEnabled) prPreviewOff();
     reflectPreview();
+    prRefocus();
   });
 
   prToMiniBtn.addEventListener('click', () => {
@@ -2835,13 +2870,24 @@ function initPianorollEditor() {
     const range = prState.marker.find();
     if (!range) return;
     const indent = (cm.getLine(range.from.line).match(/^\s*/)?.[0]) ?? ''; // align continuation lines
-    const expr = pianorollMod.pianoRollToMini(prState.notes, { grid: prState.grid, len: prState.len, indent });
+    // Folded to the key, the roll is being drawn IN that key, so it's written out in it: scale
+    // degrees plus a `.sc(octave)`, which re-keys with the setscale line instead of freezing the
+    // pitches that happened to be under the pencil. Unfolded, the roll is chromatic and so is what
+    // it converts to.
+    const scale = prState.fold && prScaleInfo() ? patchScale : null;
+    const expr = pianorollMod.pianoRollToMini(prState.notes, { grid: prState.grid, len: prState.len, indent, scale });
+    // Degrees can only name notes that are IN the key, so anything out of it lands on its nearest
+    // neighbour - a real pitch change, and the one thing about this rewrite that isn't lossless.
+    // Counted before the close, which drops the notes.
+    const off = scale ? prState.notes.filter((nt) => notesMod.quantizeToScale(nt.midi, scale) !== nt.midi).length : 0;
     prSuppressCursor = true;
     cm.replaceRange(expr, range.from, range.to);
     closePianorollEditor(); // the pianoroll() call is gone now
     prSuppressCursor = false;
     prScheduleEval(); // the rewrite plays the same notes - keep the running track in step with it
-    logLine('piano roll → mini-notation');
+    if (!scale) logLine('piano roll → mini-notation');
+    else if (!off) logLine(`piano roll → mini-notation (degrees in ${scale})`);
+    else logLine(`piano roll → mini-notation (degrees in ${scale}) - ${off} out-of-key note${off === 1 ? '' : 's'} moved to the nearest degree`, true);
   });
 
   prCloseBtn.addEventListener('click', () => closePianorollEditor());
@@ -3313,23 +3359,16 @@ let recordWaveCycles = 0; // how many cycles that finished take spans, for its g
 // track - long enough that a whole phrase plus its count-in is on screen at once.
 const RECORD_SCOPE_LEN = 600;
 const RECORD_EVAL_DEBOUNCE_MS = 150;
+// Ceiling on the display gain a finished take is drawn with (see drawRecordScope). Past this a
+// take is quiet enough that magnifying it further just draws the noise floor as a waveform.
+const RECORD_MAX_NORM = 24;
 
-// The .record(...) call containing idx, plus whether idx is on the *handle* that opens the panel:
-// the `record` name itself, or anywhere inside a still-empty `.record()` so the panel appears as
-// soon as the call is typed. Same rule as lfo's and pianoroll's - the options are code you may
-// want to edit by hand, so the cursor sitting in them opens nothing.
+// The .record(...) call containing idx, plus whether idx is on the *handle* that opens the panel -
+// the `record` name itself. Same rule as lfo's and pianoroll's: the options are code you may want
+// to edit by hand, so they are never a handle. (ctrl+b uses the containing call regardless of the
+// handle, to pick up the options of whatever block the cursor is in.)
 function findRecordCallAt(code, idx) {
-  const re = /\.\s*record\s*\(/g;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    const open = m.index + m[0].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0) continue;
-    if (idx < m.index || idx > close + 1) continue;
-    const onName = idx <= m.index + m[0].indexOf('(') || !code.slice(open + 1, close).trim();
-    return { start: m.index, open, close, onName };
-  }
-  return null;
+  return findNamedCallAt(code, idx, /\.\s*record\s*\(/g, 'record');
 }
 
 // The options as the panel holds them. Deliberately forgiving: this reads code the user may be
@@ -3441,8 +3480,11 @@ let recordEvalTimer = null;
 function syncRecordFromCode() {
   if (!recordState?.marker || recordSuppressCursor) return;
   const range = recordState.marker.find();
-  if (!range) return;
+  // The call went out of the buffer under the panel (deleted, or edited into something that is no
+  // longer a .record call) - there is nothing to write settings back into, so the panel goes too.
+  if (!range) { closeRecordPanel(); return; }
   const text = cm.getRange(range.from, range.to);
+  if (!/^\s*\.\s*record\s*\(/.test(text)) { closeRecordPanel(); return; }
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now
@@ -3712,6 +3754,15 @@ function drawRecordScope() {
   const colW = w / data.length;
   const x = (i) => i * colW;
 
+  // A finished take is drawn NORMALIZED - its own loudest moment reaches the top of the panel -
+  // with the true peak printed in the corner. A bounce that peaked at -18 dBFS is a perfectly good
+  // take, and drawn to absolute scale it's a flat line two pixels tall that says nothing about
+  // what's in it; the dB readout is what says how loud it actually was. The live meter is left
+  // alone: that one IS a level meter, and a level meter that rescales itself tells you no level.
+  const truePeak = live ? 1 : data.reduce((mx, v) => Math.max(mx, v ?? 0), 0);
+  const norm = live || truePeak < 0.0005 ? 1 : Math.min(RECORD_MAX_NORM, 1 / truePeak);
+  const ampOf = (v) => Math.min(1, v * norm) * maxAmp;
+
   // While live, shade the stretch that is actually being captured, so the part of what you're
   // watching that is the take is obvious - the panel shows the signal well before and after it.
   // ONE rect across the whole run, not one per column: translucent fills compound where they
@@ -3732,8 +3783,8 @@ function drawRecordScope() {
   // separates a transient from a sustained sound in much the same way.
   for (let i = 0; i < data.length; i++) {
     const [r, g, b] = live ? crestColor(data[i]) : bandColor(recordWaveBands?.[i]);
-    const peakAmp = at(i) * maxAmp;
-    const rmsAmp = Math.min(peakAmp, rmsAt(i) * maxAmp);
+    const peakAmp = ampOf(at(i));
+    const rmsAmp = Math.min(peakAmp, ampOf(rmsAt(i)));
     const cw = colW + 0.6; // a hair of overlap, so neighbouring columns leave no seam
     ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.32)`;
     ctx.fillRect(x(i), mid - peakAmp, cw, peakAmp * 2 || 1);
@@ -3748,7 +3799,7 @@ function drawRecordScope() {
   for (const sign of [-1, 1]) {
     ctx.beginPath();
     for (let i = 0; i < data.length; i++) {
-      const y = mid + sign * at(i) * maxAmp;
+      const y = mid + sign * ampOf(at(i));
       if (i === 0) ctx.moveTo(x(i), y);
       else ctx.lineTo(x(i), y);
     }
@@ -3756,11 +3807,23 @@ function drawRecordScope() {
   }
 
   // Anything at full scale is marked in the error colour - a bounce that clipped is worth seeing
-  // before it goes into the code, not after.
+  // before it goes into the code, not after. Against the TRUE value, not the normalized one:
+  // "this hit 0 dBFS" is a fact about the file, not about how it's being drawn.
   ctx.fillStyle = hot;
   for (let i = 0; i < data.length; i++) {
     if (at(i) < 0.99) continue;
     ctx.fillRect(x(i), mid - maxAmp, Math.max(2, colW), maxAmp * 2);
+  }
+
+  // ...and the honest number for everything below full scale, since the shape above is scaled.
+  if (!live && truePeak > 0) {
+    const db = 20 * Math.log10(truePeak);
+    ctx.fillStyle = rgbaFrom(ctx, accent, 0.75);
+    ctx.font = '22px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`peak ${db.toFixed(1)} dB${norm > 1.02 ? `  ×${norm.toFixed(1)}` : ''}`, w - 12, 10);
+    ctx.textAlign = 'left';
   }
 
   // A live meter reads as "now" at the right edge; mark it so the scroll direction is obvious.
@@ -3809,28 +3872,9 @@ function crestColor(point) {
 // --- wiring ---
 
 function initRecordPanel() {
-  cm.on('cursorActivity', () => {
-    if (recordSuppressCursor) return;
-    const call = findRecordCallAt(cm.getValue(), cm.indexFromPos(cm.getCursor()));
-    if (!call || !call.onName) {
-      // Only a panel that came from a call follows the cursor out of it. A ctrl+b panel has no
-      // call to sit in, so moving the cursor must not dismiss the result it's showing.
-      if (recordState?.marker && !call) closeRecordPanel();
-      return;
-    }
-    if (recordState && call.start === recordState.callStart) return; // already on this call
-    openRecordPanel(call);
-  });
-
-  // Clicking the name opens the panel even when the cursor is already there - an unchanged
-  // selection fires no cursorActivity, which is what made reopening after ✕ feel stuck.
-  cm.on('mousedown', (_cm, e) => {
-    const call = findRecordCallAt(cm.getValue(), cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window')));
-    if (!call?.onName) return;
-    if (recordState && call.start === recordState.callStart) return;
-    openRecordPanel(call);
-  });
-
+  // Opening is initWidgetHandles' job (double-click the name). Closing is the ✕ or the call itself
+  // leaving the buffer - see syncRecordFromCode. A ctrl+b panel, which has no call at all, closes
+  // only on the ✕.
   cm.on('change', syncRecordFromCode);
 
   const fromPanel = () => {
@@ -3926,9 +3970,8 @@ function renderTracks(result) {
         const uiBtn = document.createElement('button');
         uiBtn.className = 'small';
         uiBtn.textContent = 'ui';
-        uiBtn.title = "open the plugin's own editor window";
-        uiBtn.onclick = () =>
-          api('POST', '/api/showEditor', { trackId: t.label, slot }).catch((e) => logLine(e.message, true));
+        uiBtn.title = "open the plugin's own editor window (or double-click synth/fx in the code)";
+        uiBtn.onclick = () => showPluginEditor(t.label, slot);
         row.appendChild(uiBtn);
       }
       trackInfo.appendChild(row);
@@ -4624,6 +4667,7 @@ const audioDeviceSelect = document.getElementById('audioDeviceSelect');
 const audioInputList = document.getElementById('audioInputList');
 const audioInputLayoutNote = document.getElementById('audioInputLayout');
 const audioInputApply = document.getElementById('audioInputApply');
+const audioDeviceWarningEl = document.getElementById('audioDeviceWarning');
 const fileNameInput = document.getElementById('fileNameInput');
 const fileSaveBtn = document.getElementById('fileSaveBtn');
 const fileShareBtn = document.getElementById('fileShareBtn');
@@ -4692,12 +4736,17 @@ audioDeviceSelect.addEventListener('change', async () => {
   engineStatus.className = 'status';
   logLine(`switching audio output to ${label} - restarting the engine…`);
   try {
-    await api('POST', '/api/audioDevice', { device });
+    // The server rebuilds the combined device around the new output device on the way through, so
+    // the input layout can change here too - and its warning is the one thing that says whether
+    // playback actually landed where you asked.
+    const { warning } = await api('POST', '/api/audioDevice', { device });
     stopHighlighting();
     playing = false;
     updateTransportButtons();
     transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
     logLine(`audio output is now ${label} - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
+    setAudioDeviceWarning(warning);
+    refreshAudioInputs().catch(() => {});
   } catch (e) {
     logLine(e.message ?? String(e), true);
   } finally {
@@ -4739,12 +4788,26 @@ function syncAudioInputApply() {
   audioInputApply.disabled = current === audioInputSaved;
 }
 
+// The one place a degraded combined device is visible. It also goes to the console the first time,
+// because the failure it reports - an unplugged member, or an aggregate that has lost the device
+// you play through - sounds exactly like everything working, right down to the meters. Only on a
+// change, though: this refreshes every time the settings tab opens, and a warning that reprints
+// itself is one you stop reading.
+let lastAudioDeviceWarning = '';
+function setAudioDeviceWarning(warning) {
+  const text = warning ?? '';
+  audioDeviceWarningEl.textContent = text;
+  if (text && text !== lastAudioDeviceWarning) logLine(text, true);
+  lastAudioDeviceWarning = text;
+}
+
 async function refreshAudioInputs() {
   try {
-    const { available, devices, selected, layout, active } = await api('GET', '/api/audioInputs');
+    const { available, devices, selected, layout, active, warning } = await api('GET', '/api/audioInputs');
     audioInputSelection = new Set(selected);
     audioInputSaved = [...audioInputSelection].sort().join(',');
     audioInputList.innerHTML = '';
+    setAudioDeviceWarning(warning);
 
     if (!available) {
       // No helper (non-macOS, or a checkout without the built binary): the booted device's own
@@ -4793,7 +4856,7 @@ audioInputApply.addEventListener('click', async () => {
     ? `combining ${uids.length} input device(s) with the output device - rebuilding the audio device and restarting the engine…`
     : 'removing the combined audio device - restarting the engine…');
   try {
-    const { layout } = await api('POST', '/api/audioInputs', { uids });
+    const { layout, warning } = await api('POST', '/api/audioInputs', { uids });
     stopHighlighting();
     playing = false;
     updateTransportButtons();
@@ -4801,6 +4864,7 @@ audioInputApply.addEventListener('click', async () => {
     audioInputSaved = [...uids].sort().join(',');
     audioInputs = layout ?? null; // the input(" popup's channel ranges just changed
     renderAudioInputLayout(layout, null);
+    setAudioDeviceWarning(warning);
     logLine('audio inputs updated - re-evaluate (Cmd/Ctrl+Enter) to resume playback');
     refreshAudioDevices().catch(() => {});
   } catch (e) {

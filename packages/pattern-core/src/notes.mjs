@@ -177,3 +177,25 @@ export function degreeToMidi(degree, scaleName) {
   const indexInScale = ((degree % len) + len) % len;
   return rootMidi + intervals[indexInScale] + 12 * octaveOffset;
 }
+
+/**
+ * The inverse of degreeToMidi: which degree of `scaleName` lands on `midi`. A note that isn't IN
+ * the scale has no degree of its own and takes the nearest one (ties resolve downward, like
+ * quantizeToScale) - so `midiToDegree(degreeToMidi(d, s), s) === d`, but the round trip the other
+ * way quantizes. This is what lets a drawn roll be written out as `n(...)` degrees.
+ */
+export function midiToDegree(midi, scaleName) {
+  const { rootMidi, intervals } = parseScaleName(scaleName);
+  const len = intervals.length;
+  const note = Math.round(midi);
+  const at = (d) => rootMidi + intervals[((d % len) + len) % len] + 12 * Math.floor(d / len);
+  // Degrees rise monotonically with pitch, so the answer is within an octave of this estimate.
+  const guess = Math.round(((note - rootMidi) / 12) * len);
+  let best = guess;
+  let bestDist = Infinity;
+  for (let d = guess - len - 1; d <= guess + len + 1; d++) {
+    const dist = Math.abs(at(d) - note);
+    if (dist < bestDist) { best = d; bestDist = dist; } // strict: a tie keeps the lower degree
+  }
+  return best;
+}

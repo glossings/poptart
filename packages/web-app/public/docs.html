@@ -469,11 +469,11 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               <code>note(…)</code>, but <strong>drawn</strong>. <code>grid</code> is the granularity
               (cells per cycle — the <code>*grid</code> of the equivalent mini-notation) and
               <code>len</code> is the loop length in cells, so <code>{ grid: 16, len: 3 }</code> is a
-              three-1/16-note loop. Click the word <code>pianoroll</code> and an Ableton-style grid
-              opens over the editor, with a real piano keyboard down the side, a draggable loop bar
-              along the top, and a playhead that sweeps the loop as it plays. (Only the name opens
-              it — the arguments stay ordinary code you can edit by hand, and the roll follows along
-              when you do.) Every change you draw is written back into the call <em>and</em>
+              three-1/16-note loop. <strong>Double-click</strong> the word <code>pianoroll</code>
+              and an Ableton-style grid opens over the editor, with a real piano keyboard down the
+              side, a draggable loop bar along the top, and a playhead that sweeps the loop as it
+              plays. (Only the name opens it — the arguments stay ordinary code you can edit by
+              hand, and the roll follows along when you do.) Every change you draw is written back into the call <em>and</em>
               re-evaluated, so what you hear is always what's on screen. An empty
               <code>pianoroll()</code> is a valid empty roll — start there and draw.
             </p>
@@ -499,6 +499,10 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               it, <strong>fold</strong> hides everything out of the key, and clicking the
               <strong>key chip</strong> in the header snaps every note in the roll to the nearest tone
               in it — the same quantize <code>.sc()</code> applies to a written note pattern.
+              Folded, <strong>→♪</strong> also converts <em>in</em> the key: scale degrees and a
+              <code>.sc(octave)</code> — <code>n(`&lt;0 2 4 ~&gt;*16`).sc(3)</code> — so re-keying the
+              patch later moves the notes with it. (An out-of-key note has no degree of its own and is
+              written as the nearest one; the log says how many.)
             </p>
             <pre style="margin:0"><code><span class="f">pianoroll</span>(<span class="s">"60,0,4 64,0,4 67,8,8"</span>, { steps: <span class="s">16</span> }).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)
 <span class="c">// each note is midi,start,len[,vel] over a `steps`-cell cycle. Chains like note(): .scale(), .add(), …</span></code></pre>
@@ -600,7 +604,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, sine({ rate: 0.3 }).range(200, 5000))
 .param(<span class="s">"Filter 1 Freq"</span>, sine(0.3).range(200, 5000))  <span class="c">// rate shorthand</span></code></pre>
           <p>
-            <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape. Click the
+            <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape.
+            <strong>Double-click</strong> the
             word <code>lfo</code> in the editor and an interactive shape editor opens — drag points,
             bend segments — writing the breakpoint string for you and re-evaluating as you go, so the
             modulation follows the curve. (Only the name opens it; the arguments stay ordinary code,
@@ -776,9 +781,12 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
           </p>
           <p>
             Adding <code>.record({ cycles })</code> to a chain gives you the same thing with a panel:
-            click the <code>record</code> name and it opens showing that track's live level, the length,
+            <strong>double-click</strong> the <code>record</code> name and it opens showing that track's
+            live level, the length,
             and the name to file it under — every change written straight back into the call, the way
-            <code>lfo()</code> and <code>pianoroll()</code> work. <code>wrapTail</code> folds the release
+            <code>lfo()</code> and <code>pianoroll()</code> work. A finished take is drawn normalized to
+            its own peak, with that peak's true level in dBFS in the corner.
+            <code>wrapTail</code> folds the release
             tail back over the head, for a track that was <em>silent</em> going in; a loop that's
             already running records the previous pass's tail into its own head and doesn't want it.
           </p>

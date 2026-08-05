@@ -757,6 +757,24 @@ aside h2 {
   white-space: nowrap;
 }
 
+/* A fault light for the audio device, not a hint: it only ever has text when the combined device
+   has actually degraded, and :empty collapses it away entirely the rest of the time. Wraps, unlike
+   .settings-note - this one is a sentence you have to be able to read all of. */
+.settings-warning {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--err) 40%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+
+.settings-warning:empty {
+  display: none;
+}
+
 #editorSection,
 #librarySection {
   margin-top: 14px;

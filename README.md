@@ -239,8 +239,9 @@ stepped floor (signal bounds move that modulator from the native path to the pol
 the engine-side oscillator takes only fixed lo/hi).
 
 For static sound-design settings that are fiddly as normalized numbers (unison voices, detune),
-click **ui** next to a plugin in the track panel to open the plugin's own editor window, set them
-by hand, and keep livecoding the rest.
+click **ui** next to a plugin in the track panel — or double-click the `synth` / `fx` name in the
+code itself — to open that plugin's own editor window, set them by hand, and keep livecoding the
+rest.
 
 ### Constants and extending the language
 
@@ -422,10 +423,12 @@ mix doesn't move and un-muting one line puts the synth back. Only one of the two
 time, which is what the mute guarantees. This is a bounce, not a freeze — the plugin stays loaded,
 ready for that un-mute, so it doesn't buy back CPU.
 
-`.record({ cycles })` anywhere in a chain adds a panel: click the `record` name and it opens on
-that block showing its **live level**, with the length and the name to file under, each change
-written straight back into the call the way `lfo()` and `pianoroll()` work. It changes nothing
-about the sound. Names are minted unique across every month folder when the recording is made, so
+`.record({ cycles })` anywhere in a chain adds a panel: double-click the `record` name and it opens
+on that block showing its **live level**, with the length and the name to file under, each change
+written straight back into the call the way `lfo()` and `pianoroll()` work. (Double-click is the
+rule for every in-code panel — `lfo`, `pianoroll`, `record`, `synth`, `fx` — so none of them can
+open under a stray click while you edit.) A finished take is drawn normalized to its own peak, with
+that peak's true level in dBFS printed in the corner. It changes nothing about the sound. Names are minted unique across every month folder when the recording is made, so
 `sr("bass")` means the same file forever and a second bounce of the same label becomes `bass-2`.
 
 `wrapTail: true` folds the release tail back over the head, for a track that was **silent** going
@@ -468,6 +471,12 @@ notes alone — plus any pitch the roll actually uses, so folding never hides a 
 Clicking the key chip in the roll's header snaps every note into the key. Roll edits have their own
 undo: **cmd-Z** / **cmd-shift-Z** while the grid has focus.
 
+Folded, the roll also converts *in the key*: **→♪** writes the drawn notes out as scale degrees —
+`n(\`<0 2 4 ~>*16\`).sc(3)` rather than raw MIDI numbers — so re-keying the patch afterwards moves
+them with it. The octave goes in `.sc()`, chosen so no degree comes out negative. (Unfolded, the
+roll is chromatic and so is what it converts to. A note that's out of key has no degree of its own
+and is written as the nearest one, which the log says out loud.)
+
 ### Audio output
 
 The **settings** tab picks the audio output device (the list shows each device's output channel
@@ -507,6 +516,14 @@ vox: input("Scarlett", 1).fx("Pro-Q 4")   // channel 1 of that interface, wherev
 A name that isn't there warns in the console and falls back to plain channel numbering rather than
 stopping playback. Unplugging a combined interface renumbers the channels after it — poptart says
 so in its log when that happens.
+
+The combined device is built **around the output device** (it's the clock master, and its channels
+are the ones playback lands on), so changing the output device rebuilds it. If it degrades anyway —
+you unplug the interface it was built around, and CoreAudio quietly drops that member — poptart
+will *not* keep playing into whatever is left. It falls back to the output device directly and says
+what happened, in the console and as a warning under **extra inputs**. This matters because that
+particular failure is inaudible in the worst way: with the engine feeding, say, a BlackHole
+loopback, every meter in the app keeps moving and nothing comes out of the speakers.
 
 ## Configuration
 

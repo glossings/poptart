@@ -157,6 +157,10 @@
                 <span id="audioInputLayout" class="settings-note"></span>
                 <button id="audioInputApply" class="small" disabled>apply</button>
               </div>
+              <!-- Only ever populated when the combined device has actually degraded (a member
+                   unplugged, or the output device no longer in it). Empty the rest of the time,
+                   and collapsed by :empty - this is a fault light, not a hint. -->
+              <div id="audioDeviceWarning" class="settings-warning"></div>
             </section>
             <section id="editorSection">
               <h2>editor</h2>

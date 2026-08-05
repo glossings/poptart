@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import { n, note, mini, setPatternWarn } from './src/signal.mjs';
 import {
-  setGlobalScale, globalScale, scaleParts, scaleAtOctave, degreeToMidi, DEFAULT_SCALE,
+  setGlobalScale, globalScale, scaleParts, scaleAtOctave, degreeToMidi, midiToDegree, DEFAULT_SCALE,
 } from './src/notes.mjs';
 
 const values = (sig, cycle = 0) => sig.stepsForCycle(cycle).filter((st) => st.value != null).map((st) => st.value);
@@ -80,4 +80,17 @@ test('scaleParts / scaleAtOctave split and rebuild a scale name', () => {
   assert.deepEqual(scaleParts('dorian'), { root: 'c', octave: null, mode: 'dorian' }); // rootless -> C
   assert.equal(scaleAtOctave('F minor', 3), 'F3 minor');
   assert.equal(scaleAtOctave('bb3 mixolydian', 6), 'bb6 mixolydian');
+});
+
+// midiToDegree is what lets a drawn piano roll be written out as n(...) degrees, so what it must
+// guarantee is that degreeToMidi puts every note back where it was.
+test('midiToDegree inverts degreeToMidi, and rounds an out-of-key note to the nearest degree', () => {
+  for (const scale of ['F3 minor', 'c5 major', 'bb2 mixolydian']) {
+    for (let d = -9; d <= 20; d++) assert.equal(midiToDegree(degreeToMidi(d, scale), scale), d, `${scale} degree ${d}`);
+  }
+  // f#3 (42) is not in F minor: degree 0 (f3 = 41) and degree 1 (g3 = 43) are equally close, and
+  // the tie resolves downward the way quantizeToScale rounds.
+  assert.equal(midiToDegree(42, 'F3 minor'), 0);
+  // eb4 (51) in C major sits between d4 (50) and e4 (52); the lower one wins the tie.
+  assert.equal(degreeToMidi(midiToDegree(51, 'c4 major'), 'c4 major'), 50);
 });
