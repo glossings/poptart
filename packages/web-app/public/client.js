@@ -4788,22 +4788,26 @@ function syncAudioInputApply() {
   audioInputApply.disabled = current === audioInputSaved;
 }
 
-// The one place a degraded combined device is visible. It also goes to the console the first time,
-// because the failure it reports - an unplugged member, or an aggregate that has lost the device
-// you play through - sounds exactly like everything working, right down to the meters. Only on a
-// change, though: this refreshes every time the settings tab opens, and a warning that reprints
-// itself is one you stop reading.
+// The one place a degraded combined device is visible. `warning` is { message, detail }: the panel
+// gets the one line that says what to press, the console gets the paragraph explaining it, and the
+// row's tooltip carries it too for anyone who reads that instead of scrolling back.
+//
+// The console copy matters because this failure - an unplugged member, or a combined device that
+// has lost the device you play through - sounds exactly like everything working, right down to the
+// meters. Only on a change, though: this refreshes every time the settings tab opens, and a warning
+// that reprints itself is one you stop reading.
 let lastAudioDeviceWarning = '';
 function setAudioDeviceWarning(warning) {
-  const text = warning ?? '';
-  audioDeviceWarningEl.textContent = text;
-  if (text && text !== lastAudioDeviceWarning) logLine(text, true);
-  lastAudioDeviceWarning = text;
+  const message = warning?.message ?? '';
+  audioDeviceWarningEl.textContent = message;
+  audioDeviceWarningEl.title = warning?.detail ?? '';
+  if (message && message !== lastAudioDeviceWarning) logLine(warning.detail ?? message, true);
+  lastAudioDeviceWarning = message;
 }
 
 async function refreshAudioInputs() {
   try {
-    const { available, devices, selected, layout, active, warning } = await api('GET', '/api/audioInputs');
+    const { available, devices, selected, names, layout, active, warning } = await api('GET', '/api/audioInputs');
     audioInputSelection = new Set(selected);
     audioInputSaved = [...audioInputSelection].sort().join(',');
     audioInputList.innerHTML = '';
@@ -4824,21 +4828,37 @@ async function refreshAudioInputs() {
       return;
     }
 
-    for (const d of devices) {
+    const addRow = (uid, label, { title = '' } = {}) => {
       const row = document.createElement('label');
       row.className = 'check-row';
+      if (title) row.title = title;
       const box = document.createElement('input');
       box.type = 'checkbox';
-      box.checked = audioInputSelection.has(d.uid);
+      box.checked = audioInputSelection.has(uid);
       box.addEventListener('change', () => {
-        if (box.checked) audioInputSelection.add(d.uid); else audioInputSelection.delete(d.uid);
+        if (box.checked) audioInputSelection.add(uid); else audioInputSelection.delete(uid);
         syncAudioInputApply();
       });
       const text = document.createElement('span');
-      text.textContent = `${d.name} · ${d.inChannels} in`;
+      text.textContent = label;
       row.append(box, text);
       audioInputList.appendChild(row);
+    };
+
+    // Selected devices that aren't connected go FIRST, named. They need a row at all because
+    // otherwise they're invisible and unremovable - they stay in the selection with no checkbox
+    // anywhere to turn them off - and they need to be at the top because the one time you want one
+    // is the time you've decided to forget it, and hunting for it below a scroll is the whole
+    // annoyance. The engine rebuilds around them on its own, so this is only ever a "forget it"
+    // control, never a step you're required to take.
+    for (const uid of selected.filter((u) => !devices.some((d) => d.uid === u))) {
+      addRow(uid, `${names?.[uid] ?? uid} · not plugged in`, {
+        title: `${uid}\n\nsaved, but not connected right now. The combined device is rebuilt without `
+          + 'it automatically - untick and apply only if you want it forgotten.',
+      });
     }
+
+    for (const d of devices) addRow(d.uid, `${d.name} · ${d.inChannels} in`);
     renderAudioInputLayout(layout, active);
     syncAudioInputApply();
   } catch (e) {

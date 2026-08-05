@@ -159,17 +159,63 @@ function syncAggregate(uids) {
   return members;
 }
 
-// What's wrong with the audio device setup right now, as one line for the settings tab, or null.
-// The whole reason this is surfaced: both failures are inaudible in the one way that matters -
-// they leave the meters moving.
+// Which of the selected input devices are plugged in right now, and which aren't.
+function splitSelectedInputs() {
+  const uids = settings.audioInputDevices ?? [];
+  return audioSelection.splitConnected(uids, audioDevices.listDevices().map((d) => d.uid));
+}
+
+// A selected device's name, remembered when it was applied - so one that is unplugged later reads
+// as "EarPods" rather than as the raw CoreAudio UID, which is unreadable and, when it turned up in
+// a checkbox list, unidentifiable.
+function inputDeviceName(uid) {
+  return settings.audioInputNames?.[uid] ?? uid;
+}
+
+/**
+ * Bring the combined device back in line with what is selected AND connected, before the engine
+ * opens it. This is what makes an unplugged interface a non-event: restart and the aggregate is
+ * rebuilt from whatever is actually there, rather than the engine opening a stale one - or falling
+ * back and leaving input() dead until somebody finds the settings tab and presses a button.
+ *
+ * The SELECTION is deliberately left alone. Auto-unticking would be the destructive reading of the
+ * same idea: USB devices can take a second or two to enumerate after a wake, "absent right now"
+ * is not "gone", and the order of that list is what input()'s channel offsets are computed from.
+ * So the aggregate follows the hardware and the selection keeps the intent.
+ */
+function healAggregate() {
+  const uids = settings.audioInputDevices ?? [];
+  if (!uids.length || !audioDevices.helperAvailable()) return;
+  const { present } = splitSelectedInputs();
+  const reason = audioSelection.aggregateStaleReason({
+    layout: audioDevices.deviceLayout(audioDevices.AGGREGATE_UID),
+    outUid: plainOutputDevice(audioOutputDevices())?.uid ?? null,
+    wantUids: present,
+  });
+  if (!reason) return;
+  try {
+    syncAggregate(present);
+    // eslint-disable-next-line no-console
+    console.warn(`[poptart] rebuilt the combined audio device: ${reason}`);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[poptart] could not rebuild the combined audio device (${err.message})`);
+  }
+}
+
+// What's wrong with the audio device setup right now, as { message, detail } - one line for the
+// settings tab, the paragraph behind it for the console - or null. The whole reason this is
+// surfaced at all: both failures are inaudible in the one way that matters, they leave the meters
+// moving.
 function audioDeviceWarning() {
   const uids = settings.audioInputDevices ?? [];
   if (!uids.length) return null;
   const problem = audioSelection.aggregateProblem({
     layout: audioDevices.deviceLayout(audioDevices.AGGREGATE_UID),
     outDevice: plainOutputDevice(audioOutputDevices()),
+    absent: splitSelectedInputs().absent.map(inputDeviceName),
   });
-  return problem?.message ?? null;
+  return problem ? { message: problem.message, detail: problem.detail } : null;
 }
 
 // The device scsynth actually opened, as reported by audioOutputDevices() - set by loadEngine on
@@ -178,6 +224,10 @@ let activeAudioDevice = null;
 
 async function loadEngine() {
   try {
+    // Before anything decides which device to open: make the combined device match reality. The
+    // old scsynth is already stopped and the device released by here (see restartEngine), so this
+    // is the one moment a rebuild can't collide with playback.
+    healAggregate();
     const { OscEngine } = require('@poptart/osc-engine');
     // Whichever device scsynth will actually open decides the channel count .o(n) wraps at, and
     // whose input channels input() addresses (wireEngine feeds the layout to pattern-core).
@@ -1886,9 +1936,13 @@ const routes = {
         // Not fatal, and not a reason to refuse the device the user just asked for: deviceToOpen
         // sees an aggregate that no longer holds it and opens it directly instead. Say so, though -
         // input() loses the extra devices until the aggregate is rebuilt.
-        rebuildWarning = `the combined audio device could not be rebuilt (${err.message}) - playing through "${device ?? 'the system default'}" directly`;
+        rebuildWarning = {
+          message: 'the combined audio device could not be rebuilt - press apply to retry',
+          detail: `the combined audio device could not be rebuilt (${err.message}) - playing through `
+            + `"${device ?? 'the system default'}" directly, so input() cannot reach the extra devices.`,
+        };
         // eslint-disable-next-line no-console
-        console.warn(`[poptart] ${rebuildWarning}`);
+        console.warn(`[poptart] ${rebuildWarning.detail}`);
       }
     }
     saveSettings();
@@ -1904,8 +1958,13 @@ const routes = {
     status: 200,
     body: {
       available: audioDevices.helperAvailable(),
-      devices: audioDevices.listInputDevices(),
+      // Never poptart's own aggregate: it's assembled FROM these, so offering it as one of them
+      // is offering to make it a member of itself.
+      devices: audioDevices.listInputDevices().filter((d) => d.uid !== audioDevices.AGGREGATE_UID),
       selected: settings.audioInputDevices ?? [],
+      // uid -> the name it had when it was applied, so a device that has since been unplugged can
+      // still be shown as itself.
+      names: settings.audioInputNames ?? {},
       layout: audioInputLayout(),
       active: activeAudioDevice?.name ?? null,
       // Non-null when the combined device has degraded under us - the settings tab is the only
@@ -1926,20 +1985,41 @@ const routes = {
     if (uids.length && !audioDevices.helperAvailable()) {
       throw new Error('combining several input devices needs the poptart-audio helper, which is not available on this system');
     }
-    const known = audioDevices.listDevices();
-    for (const uid of uids) {
-      if (!known.some((d) => d.uid === uid)) throw new Error(`no audio device with UID ${uid}`);
-    }
+    // A device that isn't plugged in right now must NOT fail the whole request - see
+    // splitConnected. Build from what's actually here; keep the rest saved, so plugging an
+    // interface back in and pressing apply brings it straight back.
+    const knownDevices = audioDevices.listDevices();
+    const { present, absent } = audioSelection.splitConnected(uids, knownDevices.map((d) => d.uid));
 
     // The output device goes in as the clock master: it's the one whose timing playback is bound
     // to, and every other member gets drift compensation against it.
-    syncAggregate(uids);
+    syncAggregate(present);
 
     settings.audioInputDevices = uids;
+    // Remember what each one is CALLED while it's here to ask. A UID is all that survives an
+    // unplug, and on its own it's unreadable - the difference between "EarPods · not plugged in"
+    // and "AppleUSBAudioEngine:Apple, Inc.:EarPods:DHK4XW9QTV:2 · not plugged in".
+    const nameOf = new Map(knownDevices.map((d) => [d.uid, d.name]));
+    settings.audioInputNames = Object.fromEntries(
+      uids.map((uid) => [uid, nameOf.get(uid) ?? inputDeviceName(uid)]),
+    );
     saveSettings();
     await restartEngine();
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
-    return { status: 200, body: { selected: uids, layout: audioInputLayout(), warning: audioDeviceWarning() } };
+    const skipped = absent.length
+      ? {
+        message: `${absent.length} selected ${absent.length === 1 ? 'device was' : 'devices were'} `
+          + 'not plugged in and got left out',
+        detail: `${absent.length} selected ${absent.length === 1 ? 'device is' : 'devices are'} not `
+          + `plugged in and were left out of the combined device (${absent.map(inputDeviceName).join(', ')}). `
+          + 'They stay selected - plug them back in and the next engine start brings them in by '
+          + 'itself, or untick them to forget them.',
+      }
+      : null;
+    return {
+      status: 200,
+      body: { selected: uids, layout: audioInputLayout(), warning: skipped ?? audioDeviceWarning() },
+    };
   },
 };
 

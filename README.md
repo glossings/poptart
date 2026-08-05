@@ -518,12 +518,18 @@ stopping playback. Unplugging a combined interface renumbers the channels after 
 so in its log when that happens.
 
 The combined device is built **around the output device** (it's the clock master, and its channels
-are the ones playback lands on), so changing the output device rebuilds it. If it degrades anyway —
-you unplug the interface it was built around, and CoreAudio quietly drops that member — poptart
-will *not* keep playing into whatever is left. It falls back to the output device directly and says
-what happened, in the console and as a warning under **extra inputs**. This matters because that
-particular failure is inaudible in the worst way: with the engine feeding, say, a BlackHole
-loopback, every meter in the app keeps moving and nothing comes out of the speakers.
+are the ones playback lands on), so changing the output device rebuilds it — and so does every
+engine start, from whatever is connected at the time. Unplug an interface and the next restart
+simply rebuilds without it; plug it back in and the next restart brings it back. Your selection is
+never edited behind your back: a device that's merely slow to enumerate after a wake would be the
+one thing an auto-untick would silently throw away, along with the ordering that sets `input()`'s
+channel numbers. It stays ticked, marked *not plugged in*, and unticking it is how you forget it.
+
+If the combined device is somehow wrong anyway, poptart will *not* keep playing into whatever is
+left of it: it falls back to the output device directly and says so, in the console and as a
+warning under **extra inputs**. That safety net matters because this failure is inaudible in the
+worst way — with the engine feeding, say, a BlackHole loopback, every meter in the app keeps moving
+and nothing comes out of the speakers.
 
 ## Configuration
 

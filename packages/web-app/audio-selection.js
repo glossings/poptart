@@ -59,37 +59,59 @@ function deviceToOpen({ devices, wanted = null, inputUids = [], aggregateUid, la
   }
   const problem = aggregateProblem({ layout, outDevice: plain.device });
   if (problem?.kind === 'no-output-member') {
-    return { device: plain.device, warning: problem.message };
+    // The console/server log is where the long version belongs - it's a log, not a sidebar.
+    return { device: plain.device, warning: problem.detail };
   }
   return { device: aggregate, warning: plain.warning };
 }
 
 /**
- * What's wrong with the aggregate as it currently stands, or null when nothing is. Two kinds:
+ * What's wrong with the aggregate as it currently stands, or null when nothing is. Returns both a
+ * one-line `message` (the UI's - what is wrong and what to press) and the `detail` behind it (the
+ * console's and the tooltip's). Two kinds:
  *
  *   no-output-member - the device we play through isn't in it any more. Playback has to leave the
- *     aggregate entirely (deviceToOpen does), so input() loses the extra devices' channels.
+ *     aggregate entirely (deviceToOpen does), so input() loses the extra devices' channels. Note
+ *     this is about MEMBERSHIP, not inputs: the output device belongs to the aggregate as its clock
+ *     master and its playback destination, whether or not it has a single input channel.
  *   missing-members - it's still a valid playback path, but configured members aren't plugged in,
  *     and their absence renumbers every input channel after them.
  *
  * Both are invisible from the audio itself, which is exactly why they get said out loud.
  */
-function aggregateProblem({ layout, outDevice }) {
-  if (!layout) return null;
-  const members = layout.subDevices ?? [];
-  const missing = layout.missing ?? [];
+function aggregateProblem({ layout, outDevice, absent = [] }) {
+  const members = layout?.subDevices ?? [];
+  // Selected but not plugged in, from whichever source knows: what the caller compared against
+  // connected hardware, or - before a heal has run - what the aggregate itself still has
+  // configured and cannot see.
+  const missing = absent.length ? absent : (layout?.missing ?? []);
   if (outDevice?.uid && members.length && !members.some((m) => m.uid === outDevice.uid)) {
+    // The detail says WHY, and says what the output device is doing in there at all: read cold,
+    // under a heading called "extra inputs" and next to a sentence about input(), "the combined
+    // device doesn't contain your speakers" sounds like a claim that your speakers ought to be an
+    // input. They oughtn't; they're in there as the clock master and the thing playback comes out
+    // of. But that's a paragraph, and the UI gets the one line that says what to do about it.
+    const cause = missing.length
+      ? 'it was built around hardware that is no longer connected'
+      : 'it was built around a different output device';
     return {
       kind: 'no-output-member',
-      message: `the combined audio device no longer contains "${outDevice.name}" `
-        + `- playing through "${outDevice.name}" directly instead, so input() cannot reach the extra `
-        + 'devices. Press apply under "extra inputs" to rebuild it.',
+      message: 'the combined audio device is out of date - press apply to rebuild it',
+      detail: `the combined audio device does not include "${outDevice.name}" - ${cause}. Playback `
+        + `has fallen back to "${outDevice.name}" on its own, so input() cannot reach the extra `
+        + 'devices. Press apply under "extra inputs" to rebuild it. (Your output device is always a '
+        + 'member of the combined device - it is the clock master everything else drift-corrects '
+        + 'against, not an input.)',
     };
   }
   if (missing.length) {
+    const one = missing.length === 1;
     return {
       kind: 'missing-members',
-      message: `the combined audio device is missing ${missing.length} configured device(s) `
+      message: `${missing.length} selected ${one ? 'device is' : 'devices are'} not plugged in `
+        + `- press apply to rebuild without ${one ? 'it' : 'them'}`,
+      detail: `the combined audio device is missing ${missing.length} `
+        + `${one ? 'device that is' : 'devices that are'} configured but not plugged in `
         + `(${missing.join(', ')}) - input() channel numbers have shifted. Press apply under `
         + '"extra inputs" to rebuild it without them.',
     };
@@ -106,4 +128,50 @@ function aggregateMembers(outUid, inputUids) {
   return [outUid, ...inputUids.filter((u) => u !== outUid)];
 }
 
-module.exports = { plainOutputDevice, deviceToOpen, aggregateProblem, aggregateMembers };
+/**
+ * Why the aggregate has to be rebuilt before the engine opens it, as a short reason, or null when
+ * it is already exactly what it should be. Called on every engine start, which is what makes an
+ * unplugged interface a non-event: you restart, the aggregate is rebuilt around the output device
+ * from whatever is actually connected, and nobody has to find a settings tab.
+ *
+ * Order is compared, not just membership - the member order IS the channel numbering input()
+ * resolves against, so a reordered aggregate is a wrong one.
+ *
+ * @param wantUids - the selected input devices that are currently CONNECTED (see splitConnected)
+ */
+function aggregateStaleReason({ layout, outUid, wantUids }) {
+  if (!outUid) return null; // nothing to build around; deviceToOpen falls back on its own
+  const have = (layout?.subDevices ?? []).map((d) => d.uid);
+  if (!wantUids.length) {
+    // Everything selected is unplugged: an aggregate of the output device alone buys nothing over
+    // opening that device directly, so the right move is not to have one.
+    return have.length ? 'nothing selected is plugged in' : null;
+  }
+  if (!layout) return 'it does not exist yet';
+  if (!have.includes(outUid)) return 'it does not include the output device';
+  const want = aggregateMembers(outUid, wantUids);
+  if (have.length !== want.length || have.some((uid, i) => uid !== want[i])) {
+    return 'its devices no longer match what is selected and connected';
+  }
+  return null;
+}
+
+/**
+ * Split a requested input selection into what can be aggregated right now and what isn't plugged
+ * in. Absent devices must not fail the request: the settings tab can only draw a checkbox for a
+ * device that's connected, so a saved-but-unplugged one is unremovable from the UI - and if it also
+ * rejects the request, every future apply fails on it and the aggregate can never be rebuilt. That
+ * is a dead end you can only escape by editing settings.json by hand, which is not a UI.
+ */
+function splitConnected(uids, knownUids) {
+  const known = new Set(knownUids);
+  return {
+    present: uids.filter((u) => known.has(u)),
+    absent: uids.filter((u) => !known.has(u)),
+  };
+}
+
+module.exports = {
+  plainOutputDevice, deviceToOpen, aggregateProblem, aggregateMembers, splitConnected,
+  aggregateStaleReason,
+};
