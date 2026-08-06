@@ -697,7 +697,10 @@ server.waitForBoot {
     recGroup = Group.new(server, \addToTail);
     server.sync;
     "poptart: server booted, ready".postln;
-    nodeAddr.sendMsg("/poptart/ready");
+    // scsynth's pid rides along with the ready: node spawned US, not scsynth, so this is its only
+    // handle on the process that actually holds the audio device and scsynth's UDP port. It uses
+    // it to clean up after a stack that didn't shut down properly - see osc-engine/orphans.js.
+    nodeAddr.sendMsg("/poptart/ready", server.pid ? -1);
     // Populate the plugin dict in the background so .synth("Name") can resolve names. Cached
     // plugins re-verify instantly; only new/changed ones get probed (out-of-process, with a
     // per-plugin timeout so a hang skips that plugin instead of stalling the scan).
@@ -1942,7 +1945,22 @@ OSCdef(\poptartGetKnownPlugins, { |msg|
 // the audio device and its UDP port - wedging the next engine start (an output-device change
 // from the settings tab restarts the whole stack through this path).
 OSCdef(\poptartQuit, { |msg|
-    fork { 3.wait; 0.exit }; // fallback if the server never answers the quit
+    var pid = server.pid;
+    fork {
+        // Fallback if the server never answers the quit. Exiting on our own here is what used to
+        // orphan it: a scsynth whose audio device was yanked out from under it sits wedged in
+        // CoreAudio and never processes /quit, so the 3s timer fired, sclang left, and scsynth
+        // stayed - holding the device and the UDP port until the next boot died on "failed to
+        // open UDP socket: address in use". So take it with us. prOnServerProcessExit clears
+        // server.pid, so a nil pid here means it did quit and there is nothing left to kill.
+        3.wait;
+        if (server.pid.notNil) {
+            ("poptart: scsynth (pid " ++ pid ++ ") did not answer the quit - killing it").warn;
+            thisProcess.platform.killProcessByID(pid);
+            0.3.wait; // let the kill land before we stop being able to report on it
+        };
+        0.exit;
+    };
     server.quit(onComplete: { 0.exit }, onFailure: { 0.exit }, watchShutDown: false);
 }, '/poptart/quit');
 )

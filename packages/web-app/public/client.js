@@ -3923,11 +3923,22 @@ function bounceBlockAtCursor() {
 // Transport
 // ---------------------------------------------------------------------------------------------
 
+// The last engine error we printed, so a failure that persists across several status refreshes
+// doesn't reprint itself each time.
+let lastEngineError = null;
+
 async function refreshStatus() {
   const { loaded, error, scale } = await api('GET', '/api/status');
   setPatchScale(scale); // the prebake may have called setscale() before anything was evaluated
-  engineStatus.textContent = loaded ? 'engine ready' : `engine not loaded: ${error}`;
+  // Two words, because this is a status indicator in the header and it has room for two words.
+  // A boot failure's error is a diagnosis plus a tail of sclang's output - paragraphs of it - and
+  // putting that in here turned the indicator into a wall of text and shoved the header around.
+  // It goes to the console instead, which is where a message that long can actually be read.
+  engineStatus.textContent = loaded ? 'engine ready' : 'engine down';
   engineStatus.className = `status ${loaded ? 'ok' : 'error'}`;
+  engineStatus.title = loaded ? '' : 'the audio engine is not running - see the console for why';
+  if (!loaded && error && error !== lastEngineError) logLine(`engine down: ${error}`, true);
+  lastEngineError = loaded ? null : error;
   return loaded;
 }
 

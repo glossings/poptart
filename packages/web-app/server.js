@@ -272,17 +272,32 @@ async function restartEngine() {
     // next poll.
     if (trackRec?.timer) clearInterval(trackRec.timer);
     trackRec = null;
+    // The MIDI recorder's tick reads engine.getTime() every 50ms and its window is measured in
+    // cycles of a transport that is about to be frozen - neither survives the restart, so the
+    // timer has to go with them. Leaving it running was a crash: it outlived the engine it was
+    // ticking against and threw on a null one, in a bare interval callback with nothing to catch it.
+    if (midiRec?.timer) clearInterval(midiRec.timer);
+    midiRec = null;
     recTapped.clear();
     recLevels.clear();
     transport?.stop(); // playback is over - freeze the clock at cycle 0 until the next eval
-    if (engine) {
-      await engine.stop();
+    // Drop the shared references BEFORE the teardown, not after it. Everything that reaches for
+    // `engine` outside a request - the VST transport re-sync on its 4s timer, the recorder ticks -
+    // tests it for null and does nothing when it is null, and that test has to be true for the
+    // WHOLE window in which the engine is unusable. Nulling these afterwards left a real one open:
+    // OscEngine#stop closes its OSC port partway through, so a timer firing in the seconds between
+    // that and the assignment found a non-null engine whose every send throws "OscEngine not
+    // started". Thrown from a timer, that is an uncaught exception, and an uncaught exception is
+    // the whole app - the crash you get for changing your audio device while something is playing.
+    const dying = engine;
+    engine = null;
+    mappedEngine = null;
+    if (dying) {
+      await dying.stop();
       // Let the OS actually release the OSC UDP port and the audio device before the
       // replacement sclang/scsynth try to grab them - both frees complete asynchronously.
       await new Promise((r) => setTimeout(r, 300));
     }
-    engine = null;
-    mappedEngine = null;
     engine = await loadEngine();
     if (engine) wireEngine();
   } finally {
@@ -2207,3 +2222,22 @@ process.on('SIGINT', () => {
   setTimeout(() => process.exit(0), 4000).unref();
   Promise.resolve(engine?.stop()).finally(() => process.exit(0));
 });
+
+// Last line of defence: an error thrown where nobody can catch it - a timer callback, an OSC reply
+// handler, a stray rejected promise - must not take the server down. Node's default for both of
+// these is to print the stack and exit, and exiting is the worst thing that can happen here: the
+// browser keeps its code but loses the engine, sclang and scsynth are orphaned holding the audio
+// device, and whatever was playing stops mid-set. Staying up is recoverable; the engine can be
+// restarted from the settings tab, and the pattern re-evaluated. So log it loudly - to the editor's
+// own console as well as this terminal, since the terminal is not what a player is looking at - and
+// keep going. This is a backstop, not a licence: the bug it caught first (a VST transport re-sync
+// firing at an engine that was being torn down for an audio-device change) got fixed where it was.
+for (const [event, label] of [['uncaughtException', 'uncaught error'], ['unhandledRejection', 'unhandled rejection']]) {
+  process.on(event, (err) => {
+    const detail = err?.stack ?? String(err);
+    // eslint-disable-next-line no-console
+    console.error(`[poptart] ${label} (the server is staying up):\n${detail}`);
+    eventLogQueue.push(`${label}: ${err?.message ?? String(err)} - see the terminal for the full trace`);
+    if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
+  });
+}

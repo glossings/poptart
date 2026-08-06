@@ -18,6 +18,7 @@ const zlib = require('node:zlib');
 const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
+const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
 const { samplesRoot, listPackFiles, resolveSampleFile, detectSlices } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 
@@ -243,6 +244,12 @@ class OscEngine {
     this.outChannels = outChannels;
     this.inChannels = inChannels;
     this._sclangProcess = null;
+    // scsynth's pid, as reported by sclang at /poptart/ready. sclang spawns scsynth, so this is
+    // the only handle we get on the process that actually holds the audio device and UDP 57110 -
+    // see orphans.js for why we need one.
+    this._scsynthPid = null;
+    // Per-stack, so a second poptart on other ports reaps its own leftovers and not this one's.
+    this._pidfile = pidfilePath(this.nodePort);
     this._port = null;
     this._pending = new Map(); // requestId -> { resolve, reject, timer }
     this._nextRequestId = 1;
@@ -416,6 +423,15 @@ class OscEngine {
       }, READY_TIMEOUT_MS);
 
       this._port.once('ready', () => {
+        // Nothing of ours should be running at this instant. If something is, it is a leftover
+        // from a run that didn't get to shut down - and it is holding the audio device and the
+        // port this boot is about to ask for. Kill it here rather than letting scsynth fail with
+        // "address in use" and telling the user to run pkill (see orphans.js).
+        const reaped = reapOrphanedEngine({ file: this._pidfile });
+        if (reaped.length) {
+          // eslint-disable-next-line no-console
+          console.warn(`[poptart] killed leftover engine processes from an earlier run: ${reaped.join(', ')}`);
+        }
         this._sclangProcess = spawn(
           this.sclangPath,
           // -u makes sclang listen for our commands on scPort (its default 57120 would clash
@@ -472,6 +488,12 @@ class OscEngine {
             settled = true;
             clearTimeout(readyTimer);
             this._port.off('message', onReady);
+            // sclang sends scsynth's pid along with the ready. Remember it, and write both pids
+            // down: this run kills scsynth with it if sclang dies without taking it along, and
+            // the NEXT run reaps whatever this one leaves behind if it never reaches stop().
+            const pid = Number(msg.args?.[0]?.value ?? msg.args?.[0]);
+            this._scsynthPid = Number.isInteger(pid) && pid > 1 ? pid : null;
+            recordEnginePids({ sclang: this._sclangProcess?.pid ?? null, scsynth: this._scsynthPid }, { file: this._pidfile });
             resolve();
           }
         };
@@ -509,6 +531,19 @@ class OscEngine {
         });
       });
     }
+    // sclang is gone; scsynth should have gone with it. When it hasn't, sclang either got
+    // SIGKILLed above or gave up waiting on a scsynth wedged in CoreAudio - which is exactly what
+    // an audio device disappearing mid-session does. Either way what's left holds the device and
+    // UDP 57110, and leaving it there is what makes the NEXT boot fail (see orphans.js).
+    if (this._scsynthPid != null) {
+      const pid = this._scsynthPid;
+      this._scsynthPid = null;
+      if (killIfOurs(pid)) {
+        // eslint-disable-next-line no-console
+        console.warn(`[poptart] scsynth (pid ${pid}) outlived sclang - killed it so the next engine start can open the audio device`);
+      }
+    }
+    clearEnginePids({ file: this._pidfile });
     if (this._port) {
       this._port.close();
       this._port = null;
