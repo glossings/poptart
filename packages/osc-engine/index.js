@@ -111,6 +111,20 @@ function vstPluginExtensionInstalled() {
   return vstPluginExtensionDirs().some((d) => fs.existsSync(d));
 }
 
+// VSTPlugin skips plugins whose probe crashed on a previous scan (its cache file keeps them in an
+// `[ignore]` section) and logs that as "'<path>' is black-listed." Both the wording and the
+// information content are poor: the line reads as a verdict on the plugin rather than what it is -
+// a plugin that failed to load out-of-process and is being skipped until it's re-probed. Rewrite it
+// on the way through, since this log is the only place a missing plugin ever explains itself.
+function clarifySclangLine(text) {
+  return String(text)
+    .replace(
+      /'([^']*)' is black-?listed\./gi,
+      "'$1' skipped - a previous probe of it crashed (delete it from VSTPlugin's cache file to retry).",
+    )
+    .replace(/Black-?listed plugin /gi, 'Skipped plugin (a previous probe crashed) ');
+}
+
 // Map sclang's boot log to a human diagnosis of why /poptart/ready never arrived. The log is
 // the only place the real cause appears, and users hitting this are exactly the ones not reading
 // it - so pattern-match the handful of failure modes we've actually seen and say what to do.
@@ -456,11 +470,11 @@ class OscEngine {
         // main debugging surface for plugin problems anyway.
         this._sclangProcess.stdout.on('data', (d) => {
           logBoot(d);
-          process.stdout.write(`[sclang] ${d}`);
+          process.stdout.write(`[sclang] ${clarifySclangLine(d)}`);
         });
         this._sclangProcess.stderr.on('data', (d) => {
           logBoot(d);
-          process.stderr.write(`[sclang] ${d}`);
+          process.stderr.write(`[sclang] ${clarifySclangLine(d)}`);
         });
 
         this._sclangProcess.on('error', (err) => {
@@ -1210,6 +1224,7 @@ module.exports = {
   knownSclangLocations,
   onPath,
   diagnoseSclangOutput,
+  clarifySclangLine,
   vstPluginExtensionDirs,
   vstPluginExtensionInstalled,
 };

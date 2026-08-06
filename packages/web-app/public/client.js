@@ -1140,8 +1140,9 @@ function poptartHint(cm) {
   let m = before.match(/\.param\s*\(\s*["']([^"']*)$/);
   if (m) return paramHints(cur, m[1], before);
 
-  // Inside .synth(" or .fx(" → scanned plugin names.
-  m = before.match(/\.(?:synth|fx)\s*\(\s*["']([^"']*)$/);
+  // Inside the name string of synth(" or .fx(" → scanned plugin names. \b instead of a literal
+  // dot: chains can *start* with synth(...), so the call isn't always in method position.
+  m = before.match(/\b(?:synth|fx)\s*\(\s*["']([^"']*)$/);
   if (m) return pluginHints(cur, m[1]);
 
   // Inside the device string of midicc(" or midikeys(" → connected MIDI device names.
@@ -4701,7 +4702,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir(); refreshPreferVst3(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -4950,6 +4951,29 @@ samplesDirSave.addEventListener('click', () => saveSamplesDir(samplesDirInput.va
 samplesDirReset.addEventListener('click', () => saveSamplesDir(null));
 samplesDirInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); saveSamplesDir(samplesDirInput.value.trim() || null); }
+});
+
+// Prefer-VST3 toggle. The filter lives on the server's plugin-list endpoints, so applying a
+// change is just re-fetching the list - no rescan.
+const preferVst3Toggle = document.getElementById('preferVst3Toggle');
+
+async function refreshPreferVst3() {
+  try {
+    const { enabled } = await api('GET', '/api/preferVst3');
+    preferVst3Toggle.checked = enabled;
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+preferVst3Toggle.addEventListener('change', async () => {
+  try {
+    const { enabled } = await api('POST', '/api/preferVst3', { enabled: preferVst3Toggle.checked });
+    logLine(`prefer VST3 over VST2: ${enabled ? 'on' : 'off'}`);
+    loadKnownPlugins().catch(() => {}); // refresh the browser + autocomplete pool
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
 });
 
 // Folder picker - a server-side directory browser (the server and browser are the same machine,

@@ -79,9 +79,13 @@ pattern language is its own small implementation.
   with `POPTART_SCLANG=/full/path/to/sclang`.
 - **The VSTPlugin server extension — installed for you.** On first run poptart detects it's
   missing, downloads the pinned build for your platform (checksum-verified), and unzips it
-  into your SuperCollider `Extensions` directory. Manual fallback, should the auto-install
-  fail (it's a compiled binary extension, *not* a Quark): download your platform's build from
-  <https://git.iem.at/pd/vstplugin/-/releases> and unzip its `sc/VSTPlugin` folder into the
+  into your SuperCollider `Extensions` directory. On macOS the pinned build comes from
+  [poptart's vstplugin fork](https://github.com/glossings/vstplugin/releases): upstream v0.6.2
+  with a fix for a probe crash that wrongly puts some plugins (Auto-Tune Pro, sforzando,
+  Arturia V Collection, …) on the scan cache's ignore list. Manual fallback, should the
+  auto-install fail (it's a compiled binary extension, *not* a Quark): download the macOS zip
+  from the fork releases page (other platforms:
+  <https://git.iem.at/pd/vstplugin/-/releases>) and unzip its `sc/VSTPlugin` folder into the
   `Extensions` directory (on macOS, `~/Library/Application Support/SuperCollider/Extensions/`).
 
 > **Troubleshooting "engine did not finish booting":** the error message includes the last lines
@@ -542,6 +546,8 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Extra audio **inputs** (combined into one device, so `input()` can reach several interfaces) | **settings** tab | none |
 | Plugin scan directories | `POPTART_VST_DIRS` (colon-separated) | `~/.poptart/plugins` if it exists, else the standard VST locations |
 | Plugins to skip when scanning | `POPTART_VST_EXCLUDE` (colon-separated paths) | none |
+| Prefer VST3 over VST2 (hide VST2 builds whose name also exists as VST3) | **settings** tab | on |
+| Probe plugins in parallel while scanning | `POPTART_VST_PARALLEL=1` | off (one plugin at a time) |
 | Saved patterns (and autosaved sessions, under `wip/`) | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |
 | Bounced tracks (filed by month, played with `sr()`) | `POPTART_RECORDINGS_DIR` | `~/.poptart/recordings` |
 | Startup setup file / folder | `POPTART_PREBAKE_FILE`, `POPTART_PREBAKE_DIR` | `~/.poptart/prebake.js`, `~/.poptart/prebake/` |
@@ -570,6 +576,22 @@ Two knobs help:
 - `POPTART_VST_EXCLUDE` skips individual plugins by absolute path (VSTPlugin prunes them from the
   traversal so they're never probed). Use it for copy-protection, metering, or analysis plugins
   that fail to probe headlessly.
+
+Plugins are probed one at a time. VSTPlugin's default is to probe in parallel, which is faster but
+segfaults scsynth partway through a large scan on at least one machine (a null dereference inside
+`VSTPlugin.scx` on scsynth's audio thread — VSTPlugin's own result handling, reached regardless of
+which plugins are in the folder). Set `POPTART_VST_PARALLEL=1` if you want the fast path back; it
+only affects plugins that actually need probing, since cached entries re-verify without a probe.
+
+A probe that fails is not fatal — it is reported as `error!` in the scan log and that plugin is
+simply absent from the list. Plugins with copy protection or their own startup dialogs commonly
+fail to probe headlessly while working fine in a DAW.
+
+Many plugins install both a VST2 and a VST3 build. By default poptart lists only the VST3 when
+both exist (the **prefer VST3 over VST2** toggle in the settings tab), and `.synth("Name")` /
+`.fx("Name")` resolve name collisions to the VST3. Both builds are still scanned, and the VST2
+stays loadable by its exact id (e.g. `.synth("Mangle")` vs `.synth("Mangle.vst3")` — VST2 dict
+ids carry no extension).
 
 ## Limitations
 

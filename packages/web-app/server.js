@@ -10,6 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname } = require('./request-guard');
+const { preferVst3 } = require('./plugin-filter');
 const { putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const recordings = require('@poptart/osc-engine/recordings');
 const wav = require('@poptart/osc-engine/wav');
@@ -1237,14 +1238,21 @@ const routes = {
     body: { loaded: !!engine, error: engineError, scale: patternCore ? patternCore.globalScale() : null },
   }),
 
+  // Both plugin-list endpoints run through the prefer-VST3 filter (settings tab, default on):
+  // a VST2 entry is hidden when a VST3 with the same name exists. The scan itself still probes
+  // everything, and an exact `.synth("Name.vst")` id still loads - this only shapes the list
+  // the browser and autocomplete see.
   'POST /api/scanPlugins': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
-    return { status: 200, body: await engine.scanPlugins(body.extraPaths ?? []) };
+    const result = await engine.scanPlugins(body.extraPaths ?? []);
+    if (settings.preferVst3 !== false) result.plugins = preferVst3(result.plugins);
+    return { status: 200, body: result };
   },
 
   'GET /api/knownPlugins': async () => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
-    return { status: 200, body: await engine.getKnownPlugins() };
+    const plugins = await engine.getKnownPlugins();
+    return { status: 200, body: settings.preferVst3 !== false ? preferVst3(plugins) : plugins };
   },
 
   'GET /api/midiDevices': async () => {
@@ -1316,6 +1324,19 @@ const routes = {
     if (!dirs) throw new Error(`can't read ${path.resolve(expanded)}`);
     const parent = path.dirname(dir);
     return { status: 200, body: { path: dir, parent: parent === dir ? null : parent, dirs } };
+  },
+
+  // Prefer-VST3 toggle (settings tab). Default on; body: { enabled }. Applied on the next
+  // plugin-list fetch - no rescan needed, the filter sits on the endpoints above.
+  'GET /api/preferVst3': async () => ({
+    status: 200,
+    body: { enabled: settings.preferVst3 !== false },
+  }),
+
+  'POST /api/preferVst3': async (body) => {
+    settings.preferVst3 = !!body.enabled;
+    saveSettings();
+    return { status: 200, body: { enabled: settings.preferVst3 } };
   },
 
   // Body: { dir } - a folder path, or null/"" to reset to the default (~/.poptart/samples).

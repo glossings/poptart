@@ -42,11 +42,10 @@ var outChannels = ("POPTART_OUT_CHANNELS".getenv ? "2").asInteger;
 var inChannels = ("POPTART_IN_CHANNELS".getenv ? "0").asInteger;
 // Plugin directories to scan. Priority: POPTART_VST_DIRS (colon-separated) if set, else
 // ~/.poptart/plugins if it exists (a folder of symlinks to just the plugins being played),
-// else VSTPlugin's standard locations. The curated folder is the default on purpose: a full
-// default-location scan reproducibly kills scsynth on the dev machine (exit 0, pre-probe -
-// looks like a VSTPlugin scan bug worth reporting upstream, not one bad plugin: the usual
-// crashers probe fine individually), and relying on an env var meant any launch without it
-// silently fell back to the scsynth-killing full scan.
+// else VSTPlugin's standard locations. The curated folder stays the default because it keeps
+// first-scan time down and sidesteps plugins that won't probe headlessly; it is no longer load-
+// bearing for stability, though - the full-scan crash it was working around was VSTPlugin's
+// parallel probing, now off by default (see parallelScan below).
 var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split($:) }
     ?? { var d = "~/.poptart/plugins".standardizePath; if (File.exists(d)) { [d] } };
 // Plugins skipped explicitly during scans (VSTPlugin's exclude option, which prunes these
@@ -54,6 +53,16 @@ var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split($:) }
 // (colon-separated absolute paths) to skip plugins that crash or spam errors on your machine
 // during a scan, e.g. copy-protection or analysis plugins that fail to probe headlessly.
 var excludePaths = ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
+// Probe one plugin at a time. VSTPlugin's default is parallel probing (one worker per core), and
+// on this machine a parallel scan of a full plugin folder reliably segfaults scsynth partway
+// through - always the same null deref inside VSTPlugin.scx, reached from SC_AudioDriver::RunThread
+// (i.e. in VSTPlugin's own poll/result handling, not in any plugin), which reads like a race in the
+// shared search state rather than one bad plugin. Serial probing costs first-scan wall time only:
+// probes are cached, and a re-scan re-verifies cached entries without re-probing. Set
+// POPTART_VST_PARALLEL=1 to opt back into the fast path.
+var parallelScan = ("POPTART_VST_PARALLEL".getenv ? "0") == "1";
+// Shared by the boot scan and the /poptart/scanPlugins rescan, so the two can't drift.
+var searchOptions = (timeout: 20, exclude: excludePaths, parallel: parallelScan);
 var maxSlots = 8; // slot 0 = instrument, 1..7 = effects
 var maxBusSends = 4; // a track can send to this many named buses at once (Sig#bus); must match the
                      // busOut1..N / busSend1..N controls hardcoded in the track SynthDef below
@@ -415,7 +424,14 @@ awaitLoaded = { |track, slot, timeoutSec = 10|
 // ('Serum 2.vst3') - accept exact key, display name, or a literal file path.
 resolvePlugin = { |pluginId|
     var dict = VSTPlugin.plugins(server);
-    var desc = dict[pluginId.asSymbol] ?? { dict.values.detect { |d| d.name == pluginId } };
+    var desc = dict[pluginId.asSymbol] ?? {
+        // Display-name lookup. A name can exist as both VST2 and VST3 ("Mangle" + "Mangle.vst3");
+        // prefer the VST3 so resolution is deterministic instead of dict-order luck, matching the
+        // browser/autocomplete (which hide shadowed VST2s when the prefer-VST3 setting is on).
+        // The VST2 build stays reachable by its exact dict key.
+        var matches = dict.values.select { |d| d.name == pluginId };
+        matches.detect { |d| d.key.asString.endsWith(".vst3") } ?? { matches.first };
+    };
     desc !? { desc.key } ? pluginId;
 };
 
@@ -704,7 +720,7 @@ server.waitForBoot {
     // Populate the plugin dict in the background so .synth("Name") can resolve names. Cached
     // plugins re-verify instantly; only new/changed ones get probed (out-of-process, with a
     // per-plugin timeout so a hang skips that plugin instead of stalling the scan).
-    VSTPlugin.search(server, dir: searchDirs, options: (timeout: 20, exclude: excludePaths), verbose: true, action: {
+    VSTPlugin.search(server, dir: searchDirs, options: searchOptions, verbose: true, action: {
         "poptart: initial plugin search done (% plugins)".format(VSTPlugin.plugins(server).size).postln;
     });
 };
@@ -1775,7 +1791,7 @@ OSCdef(\poptartScanPlugins, { |msg|
     var requestId = msg[1];
     // extraPaths (msg[2], JSON array) not wired through yet; POPTART_VST_DIRS covers the
     // custom-directory need for now.
-    VSTPlugin.search(server, dir: searchDirs, options: (timeout: 20, exclude: excludePaths), verbose: true, action: {
+    VSTPlugin.search(server, dir: searchDirs, options: searchOptions, verbose: true, action: {
         replyOk.("/poptart/scanPlugins", requestId, toJson.((plugins: pluginList.(), crashed: [])));
     });
 }, '/poptart/scanPlugins');

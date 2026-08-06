@@ -13,6 +13,8 @@ const path = require('node:path');
 const {
   pickAsset,
   assetUrl,
+  stockHostDir,
+  STOCK_MACOS_HOST_SHA256,
   sha256File,
   sclangStatus,
   findSclangSymlinkOnPath,
@@ -26,7 +28,13 @@ test('release table covers the supported platforms and pins full checksums', () 
   }
   for (const [key, asset] of Object.entries(VSTPLUGIN_RELEASE.assets)) {
     assert.match(asset.sha256, /^[0-9a-f]{64}$/, `${key}: sha256 must be a full lowercase hex digest`);
-    assert.match(asset.upload, /^[0-9a-f]{32}$/, `${key}: upload segment should be a 32-hex gitlab id`);
+    if (asset.url) {
+      // Forked asset (the patched macOS build): pinned by full https URL instead of an
+      // upload id, still hash-checked like the rest.
+      assert.match(asset.url, /^https:\/\/.+\.zip$/, `${key}: url should be a full https zip link`);
+    } else {
+      assert.match(asset.upload, /^[0-9a-f]{32}$/, `${key}: upload segment should be a 32-hex gitlab id`);
+    }
     assert.ok(asset.file.includes(VSTPLUGIN_RELEASE.version), `${key}: filename should carry the pinned version`);
   }
 });
@@ -45,6 +53,14 @@ test('assetUrl uses the /-/project/485/uploads form, not the release-page path',
   // only this shape works (see the memory note baked into setup.js's header comment).
   const url = assetUrl(pickAsset('linux', 'x64'));
   assert.match(url, /^https:\/\/git\.iem\.at\/-\/project\/485\/uploads\/[0-9a-f]{32}\/vstplugin_.+\.zip$/);
+});
+
+test('the macOS asset points at the patched fork release, hash-pinned', () => {
+  // macOS installs poptart's probe-crash-fixed build (see setup.js header); an explicit url
+  // must win over the git.iem.at upload path so the two can never silently disagree.
+  const asset = pickAsset('darwin', 'arm64');
+  assert.match(assetUrl(asset), /^https:\/\/github\.com\/glossings\/vstplugin\/releases\/download\/.+\.zip$/);
+  assert.ok(!asset.upload, 'forked asset should not also carry an upstream upload id');
 });
 
 test('sha256File matches a known digest', () => {
@@ -84,4 +100,33 @@ test('sclangStatus trusts a POPTART_SCLANG override', () => {
     if (saved === undefined) delete process.env.POPTART_SCLANG;
     else process.env.POPTART_SCLANG = saved;
   }
+});
+
+test('stockHostDir finds the dir whose prober matches the stock hash, in order', () => {
+  // Real hashing over fixture files; the stock sha is injected so the test controls it.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-stockhost-'));
+  try {
+    const mk = (name, content) => {
+      const dir = path.join(base, name);
+      fs.mkdirSync(path.join(dir, 'plugins'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'plugins', 'host'), content);
+      return dir;
+    };
+    const stock = mk('user', 'stock bytes');
+    const patched = mk('system', 'patched bytes');
+    const stockSha = sha256File(path.join(stock, 'plugins', 'host'));
+    // stock prober found; non-matching and missing dirs skipped
+    assert.strictEqual(stockHostDir({ dirs: [patched, stock], stockSha }), stock);
+    assert.strictEqual(stockHostDir({ dirs: [patched, path.join(base, 'nope')], stockSha }), null);
+    // earlier dir wins when both match (user dir is listed first in production)
+    const stock2 = mk('user2', 'stock bytes');
+    assert.strictEqual(stockHostDir({ dirs: [stock, stock2], stockSha }), stock);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('the pinned stock-host hash is a full digest and differs from the patched asset hash', () => {
+  assert.match(STOCK_MACOS_HOST_SHA256, /^[0-9a-f]{64}$/);
+  assert.notStrictEqual(STOCK_MACOS_HOST_SHA256, pickAsset('darwin', 'arm64').sha256);
 });

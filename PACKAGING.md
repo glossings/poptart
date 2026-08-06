@@ -141,7 +141,7 @@ mostly moot — file under "nice someday", not part of the packaging effort.
   Kellogg's trademark — low practical risk for an unmonetized niche tool, but a registry is
   more visible than a repo; know the name sits on someone's mark.
 - **Publishing is ~permanent**: free unpublish only within 72h, then versions live forever
-  and get mirrored. Needs a `files` whitelist first so `tmp/`, personal mappings, or local
+  and get mirrored. Needs a `files` allowlist first so `tmp/`, personal mappings, or local
   paths don't ship; the workspace layout needs a package to own the `bin` that npx runs.
 - **Supply-chain obligations**: 2FA on the npm account, ideally provenance publishing from
   CI. (Checksum-pinned VSTPlugin downloads: already done in Stage 1.)

@@ -7,7 +7,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { diagnoseSclangOutput, vstPluginExtensionDirs } = require('./index.js');
+const { diagnoseSclangOutput, clarifySclangLine, vstPluginExtensionDirs } = require('./index.js');
 
 test('broken class library -> points at the SuperCollider user directory and the symlink trap', () => {
   const d = diagnoseSclangOutput('ERROR: duplicate Class found: \'Foo\'\nLibrary has not been compiled successfully.\n', true);
@@ -95,4 +95,29 @@ test('an explicit error beats silence localization (root cause first)', () => {
 test('unrecognized output -> null (raw log tail still shown by the caller)', () => {
   // No Welcome banner and no checkpoints: not enough signal to localize anything.
   assert.strictEqual(diagnoseSclangOutput('compiling class library...\n', true), null);
+});
+
+// --- forwarded sclang output ---
+
+test("VSTPlugin's skip notice is rewritten into what actually happened", () => {
+  const out = clarifySclangLine("'/Library/Audio/Plug-Ins/VST3/Auto-Tune Pro.vst3' is black-listed.\n");
+  assert.match(out, /Auto-Tune Pro\.vst3' skipped - a previous probe of it crashed/);
+  assert.doesNotMatch(out, /black-?listed/i);
+});
+
+test('the other upstream phrasing is rewritten too, and a Buffer chunk is accepted', () => {
+  const out = clarifySclangLine(Buffer.from('Black-listed plugin /path/Foo.vst3\n'));
+  assert.match(out, /^Skipped plugin \(a previous probe crashed\) \/path\/Foo\.vst3/);
+  assert.doesNotMatch(out, /black-?listed/i);
+});
+
+test('every occurrence in a multi-line chunk is rewritten', () => {
+  const out = clarifySclangLine("'/a/One.vst3' is blacklisted.\nprobing /a/Two.vst3... ok!\n'/a/Three.vst3' is black-listed.\n");
+  assert.doesNotMatch(out, /black-?listed/i);
+  assert.match(out, /probing \/a\/Two\.vst3\.\.\. ok!/); // unrelated lines pass through untouched
+});
+
+test('ordinary scan output is left exactly as it came', () => {
+  const line = 'probing /Library/Audio/Plug-Ins/VST3/Diva.vst3... ok!\n';
+  assert.strictEqual(clarifySclangLine(line), line);
 });
