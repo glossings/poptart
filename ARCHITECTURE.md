@@ -53,6 +53,9 @@ the most unit-testable part.
   code and `$:` blocks run as setup (shared `const`s, `Signal.prototype` extensions, statements).
 - `macros.mjs`, `midi.mjs`, `shape.mjs`, `record.mjs` — macro controls, MIDI CC input, LFO/envelope
   shape encoding, and recording helpers.
+- `midifile.mjs` — reading a dropped `.mid` into lanes, guessing the grid its rhythm sits on and
+  the key it's in, and writing it out through `record.mjs` so an import and a live recording are
+  written in the same form.
 - `index.mjs` — the public surface that stitches these together.
 
 ### `packages/osc-engine` — the engine adapter

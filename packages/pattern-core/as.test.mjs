@@ -49,6 +49,19 @@ test('as("note:vel:clip") rings an event for its clip field', () => {
   close(rings(sig, st[1]), 1 * 0.5);
 });
 
+// A token may simply not carry every field the spec names - recordingToMini (and the midi file
+// import through it) writes a bare `36` whenever vel and clip are both the default. The missing
+// field has to read as UNSET so the caller's default stands: coerced instead, `Number(null)` made
+// it a velocity of 0 and every full-velocity note came out silent.
+test('as("note:vel:clip") leaves a field the token omitted unset, not zero', () => {
+  const sig = mini('36 47:0.5:3').as('note:vel:clip');
+  const st = stepsAt(sig).sort((a, b) => a.start - b.start);
+  close(velAt(sig, st[0]), 1); // no vel field -> the default, full velocity
+  close(rings(sig, st[0]), 0.5); // no clip field -> rings for exactly its step
+  close(velAt(sig, st[1]), 0.5);
+  close(rings(sig, st[1]), 3 * 0.5);
+});
+
 // A chord cell stacks several tokens on ONE onset - the form the piano roll writes for a chord
 // whose notes differ in length or velocity. Each note has to keep its OWN clip/vel; reading the
 // fields as a signal sampled at the onset gave every layer the first one's values.

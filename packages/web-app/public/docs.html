@@ -817,6 +817,19 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
             it arms now and starts on the next 4-cycle phrase, quantizing to the grid you pick. What it
             writes is an ordinary pattern string you can then edit by hand.
           </div>
+          <div class="callout">
+            <span class="tag">importing</span>
+            <strong>Drop a <code>.mid</code> file</strong> anywhere on the window and it becomes lanes
+            in the buffer — one per track the file plays, named after its own track names, written in
+            exactly the form <strong>● rec</strong> writes. The dialog picks the grid (auto-detected per
+            lane; a hand-played file that fits no grid keeps its timing) and offers to write the notes
+            as <strong>scale degrees</strong> instead: poptart guesses the key from the notes, and
+            saying yes writes <code>n</code> plus a <code>.sc()</code> under a <code>setscale(…)</code>
+            line, so the import re-keys with the rest of the patch. Percussion — MIDI channel 10, or a
+            track the file named for a kit — always stays on absolute note numbers and is kept out of
+            the key guess: a drum map's pitches are kit slots, not a key. Nothing plays until you add a
+            <code>.synth(…)</code> and evaluate.
+          </div>
         </section>
 
         <!-- ================================================================= -->

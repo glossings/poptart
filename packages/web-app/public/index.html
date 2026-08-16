@@ -321,6 +321,40 @@
       </div>
     </div>
 
+    <div id="midiImportBackdrop" class="dir-picker-backdrop hidden">
+      <div class="dir-picker midi-import" role="dialog" aria-label="import midi file">
+        <div class="dir-picker-head">
+          <span>import midi</span>
+          <span class="spacer"></span>
+          <button id="midiImportClose" class="small">✕</button>
+        </div>
+        <div class="midi-import-body">
+          <div id="midiImportSummary" class="midi-import-summary"></div>
+          <label class="midi-import-row">
+            <span>quantize</span>
+            <select id="midiImportGrid" title="Steps per cycle to snap the notes onto. Auto picks the coarsest grid each part actually sits on."></select>
+          </label>
+          <label class="midi-import-row">
+            <input id="midiImportScale" type="checkbox" />
+            <span>write as scale degrees</span>
+          </label>
+          <label class="midi-import-row" id="midiImportKeyRow">
+            <span>key</span>
+            <input id="midiImportKey" type="text" list="midiImportKeys" spellcheck="false"
+              placeholder="F minor" title="The key to write the degrees in — a setscale() line goes in above the lanes. Suggestions are ranked by how well they fit the notes." />
+            <datalist id="midiImportKeys"></datalist>
+          </label>
+        </div>
+        <div class="dir-picker-foot">
+          <span id="midiImportNote" class="dir-picker-note"></span>
+          <span class="spacer"></span>
+          <button id="midiImportGo" class="small primary">import</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="fileDropOverlay" class="file-drop-overlay hidden"><span>drop a .mid file to import it</span></div>
+
     <script src="/vendor/codemirror/lib/codemirror.js"></script>
     <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
     <script src="/vendor/codemirror/addon/edit/matchbrackets.js"></script>

@@ -2119,8 +2119,15 @@ export function channelAt(name, step, channels, time, cps = 1, pos = undefined) 
   if (typeof merged === 'number' && !Number.isNaN(merged)) return merged;
   const ch = channels?.[name];
   if (ch) {
-    const v = Number(ch.sample(time, cps, pos));
-    if (!Number.isNaN(v)) return v;
+    // A channel built by .as() yields null where the token had no such field - `36` in a
+    // `.as("note:vel:clip")` pattern, which recordingToMini writes whenever vel and clip are both
+    // the default. That's "unset", not zero, so the null is checked BEFORE coercing: Number(null)
+    // is 0, and letting it through played every full-velocity note silently.
+    const raw = ch.sample(time, cps, pos);
+    if (raw != null) {
+      const v = Number(raw);
+      if (!Number.isNaN(v)) return v;
+    }
   }
   return undefined;
 }

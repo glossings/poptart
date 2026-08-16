@@ -5393,6 +5393,329 @@ fileNameInput.addEventListener('keydown', (e) => {
 fileNameInput.addEventListener('input', () => updateDocTitle(cm.getValue()));
 
 // ---------------------------------------------------------------------------------------------
+// MIDI file import - drop a .mid anywhere on the window and it becomes lanes in the buffer.
+//
+// The file is read in the browser and written out by the same recordingToMini() a live MIDI
+// recording goes through, so an imported part and a recorded one read identically:
+//
+//   bass: `<
+//     36:1:4 ~ ~ ~ ~ ~ ~ ~
+//     ~ 47:0.5:3 ~ ~ ~ ~ ~ ~
+//   >*8`.as("note:vel:clip")
+//
+// One lane per (track, channel) the file plays, named after the file's own track names where it
+// has them. The dialog settles the two things the file can't say: which grid to write the rhythm
+// on (auto-detected per lane - see midifile.mjs's pickGrid - and overridable when the detection
+// falls back to unquantized), and whether to write absolute MIDI notes or SCALE DEGREES. Degrees
+// are `n` plus a `.sc(octave)` under a `setscale(...)` line, exactly what the piano roll writes
+// when it's folded to the key, and what makes an imported part re-key with the rest of the patch
+// instead of staying on the pitches it was exported at. The key is guessed from the notes and
+// offered; it's never imposed, and out-of-key notes are counted before you commit to it.
+//
+// Nothing is evaluated by the import: the new lanes have no instrument on them yet, so they start
+// playing at the next Cmd/Ctrl+Enter, once there's a .synth() on the end.
+// ---------------------------------------------------------------------------------------------
+
+const midiImportBackdrop = document.getElementById('midiImportBackdrop');
+const midiImportSummary = document.getElementById('midiImportSummary');
+const midiImportGridSel = document.getElementById('midiImportGrid');
+const midiImportScaleBox = document.getElementById('midiImportScale');
+const midiImportScaleRow = midiImportScaleBox.closest('.midi-import-row');
+const midiImportKeyRow = document.getElementById('midiImportKeyRow');
+const midiImportKeyInput = document.getElementById('midiImportKey');
+const midiImportKeyList = document.getElementById('midiImportKeys');
+const midiImportNote = document.getElementById('midiImportNote');
+const midiImportGo = document.getElementById('midiImportGo');
+const fileDropOverlay = document.getElementById('fileDropOverlay');
+
+// value -> label. The values are steps per cycle (a cycle is 4 beats, so 4 = quarter notes);
+// 'auto' lets each lane keep its own detected grid, and 0 is recordingToMini's unquantized mode.
+const MIDI_IMPORT_GRIDS = [
+  ['auto', 'auto'],
+  ['4', '4 · quarters'],
+  ['8', '8 · eighths'],
+  ['12', '12 · eighth triplets'],
+  ['16', '16 · sixteenths'],
+  ['24', '24 · sixteenth triplets'],
+  ['32', '32 · thirty-seconds'],
+  ['0', 'off · keep the timing'],
+];
+
+// The fraction of out-of-key notes below which scale notation is offered pre-ticked. Degrees can
+// only name notes that are IN the key, so a part that mostly isn't shouldn't default to losing
+// them - see the count in the dialog's footer.
+const MIDI_IMPORT_SCALE_FIT = 0.05;
+
+let midiImportState = null; // { file, midifile, parsed, guess, existing } while the dialog is open
+let midiImportModsPromise = null;
+
+// midifile.mjs isn't part of the startup import - nothing needs it until a file is dropped.
+function midiImportMods() {
+  if (!midiImportModsPromise) midiImportModsPromise = import('/pattern-core/midifile.mjs');
+  return midiImportModsPromise;
+}
+
+const MIDI_FILE_RE = /\.midi?$/i;
+const MIDI_MIME_RE = /^audio\/(x-)?midi$/i;
+
+const dragHasFiles = (e) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
+
+const midiFileIn = (dt) =>
+  Array.from(dt?.files ?? []).find((f) => MIDI_FILE_RE.test(f.name) || MIDI_MIME_RE.test(f.type)) ?? null;
+
+// dragenter/dragleave fire once per element the pointer crosses, so the overlay is refcounted -
+// toggling it directly makes it flicker every time the drag passes over a child.
+let fileDragDepth = 0;
+
+function endFileDrag() {
+  fileDragDepth = 0;
+  fileDropOverlay.classList.add('hidden');
+}
+
+document.addEventListener('dragenter', (e) => {
+  if (!dragHasFiles(e)) return;
+  fileDragDepth++;
+  fileDropOverlay.classList.remove('hidden');
+});
+document.addEventListener('dragleave', (e) => {
+  if (dragHasFiles(e) && --fileDragDepth <= 0) endFileDrag();
+});
+document.addEventListener('dragend', endFileDrag); // a drag abandoned mid-flight leaves no leave
+document.addEventListener('dragover', (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault(); // a drop target that never says so leaves the browser to open the file
+  e.dataTransfer.dropEffect = 'copy';
+}, true);
+document.addEventListener('drop', (e) => {
+  endFileDrag();
+  const file = midiFileIn(e.dataTransfer);
+  if (!file) {
+    // Not ours: CodeMirror inserts a dropped text file itself, so leave drops on the editor to it.
+    // Elsewhere, swallow the drop rather than letting the browser navigate away from the patch.
+    if (!cm.getWrapperElement().contains(e.target)) e.preventDefault();
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  openMidiImport(file);
+}, true);
+
+const midiErr = (e) => String(e?.message ?? e).replace(/^\[[\w-]+\]\s*/, '');
+
+async function openMidiImport(file) {
+  let midifile;
+  let parsed;
+  try {
+    midifile = await midiImportMods();
+    parsed = midifile.midiFileToLanes(await file.arrayBuffer());
+  } catch (e) {
+    logLine(`midi import (${file.name}): ${midiErr(e)}`, true);
+    return;
+  }
+
+  const pitched = parsed.lanes.filter((l) => !l.drums).flatMap((l) => l.events);
+  midiImportState = {
+    file,
+    midifile,
+    parsed,
+    guess: midifile.detectKey(pitched),
+    existing: bufferSetscale(),
+  };
+
+  const { bpm, timeSig, cycles, noteCount, lanes } = parsed;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const summary = [
+    file.name,
+    plural(noteCount, 'note'),
+    plural(lanes.length, 'lane'),
+    plural(cycles, 'cycle'),
+    `${Math.round(bpm)} bpm`,
+  ];
+  if (timeSig.num !== 4 || timeSig.den !== 4) {
+    summary.push(`${timeSig.num}/${timeSig.den} — a cycle is 4 beats, so its bars land off the grid`);
+  }
+  if (midiImportState.guess) summary.push(`sounds like ${midiImportState.guess.scale}`);
+  midiImportSummary.textContent = summary.join(' · ');
+
+  if (!midiImportGridSel.options.length) {
+    for (const [value, label] of MIDI_IMPORT_GRIDS) {
+      midiImportGridSel.appendChild(new Option(label, value));
+    }
+  }
+  midiImportGridSel.value = 'auto';
+
+  // The field shows what was DETECTED, best fit first. It deliberately does not default to the key
+  // the buffer is already in: that made every import after the first suggest the first import's
+  // key forever, whatever the new file actually was. The buffer's key is still offered in the list
+  // (and reflectMidiImportKey warns that picking something else re-keys the patch).
+  const suggestions = [];
+  for (const name of [...(midiImportState.guess?.ranked ?? []).slice(0, 6).map((r) => r.scale), midiImportState.existing?.key]) {
+    if (name && !suggestions.includes(name)) suggestions.push(name);
+  }
+  midiImportKeyList.innerHTML = '';
+  for (const name of suggestions) midiImportKeyList.appendChild(new Option(name, name));
+  midiImportKeyInput.value = midiImportState.guess?.scale ?? midiImportState.existing?.key ?? '';
+
+  const fit = midiImportOffKey(midiImportKeyInput.value);
+  const canScale = !!(pitched.length && suggestions.length && notesMod);
+  midiImportScaleBox.disabled = !canScale;
+  midiImportScaleBox.checked = canScale && !!fit && !fit.bad && fit.off <= fit.total * MIDI_IMPORT_SCALE_FIT;
+  midiImportScaleRow.classList.toggle('disabled', !canScale);
+
+  reflectMidiImportKey();
+  midiImportBackdrop.classList.remove('hidden');
+  midiImportGo.focus();
+}
+
+function closeMidiImport() {
+  midiImportBackdrop.classList.add('hidden');
+  midiImportState = null;
+}
+
+/**
+ * The `setscale("…")` call the buffer already carries, or null. The LAST one wins (the server
+ * hoists it - see its evaluate route), so that's the one reported and the one an import edits.
+ */
+function bufferSetscale() {
+  const code = cm.getValue();
+  const re = /^[^\S\n]*setscale\s*\(\s*(['"])([^'"]*)\1\s*\)/gm;
+  let last = null;
+  let m;
+  while ((m = re.exec(code))) last = { key: m[2], from: m.index, to: m.index + m[0].length };
+  return last;
+}
+
+/** How many of the file's pitched notes fall outside `keyName`, or `{ bad: true }` if it isn't one. */
+function midiImportOffKey(keyName) {
+  if (!midiImportState || !notesMod) return null;
+  const name = String(keyName ?? '').trim();
+  try {
+    notesMod.parseScaleName(name);
+  } catch {
+    return { bad: true };
+  }
+  let off = 0;
+  let total = 0;
+  for (const lane of midiImportState.parsed.lanes) {
+    if (lane.drums) continue; // percussion "pitches" are drum slots - no key to be in or out of
+    for (const ev of lane.events) {
+      total++;
+      if (notesMod.quantizeToScale(ev.note, name) !== ev.note) off++;
+    }
+  }
+  return { off, total };
+}
+
+// Grey the key row out when degrees are off, and say what the chosen key would cost.
+function reflectMidiImportKey() {
+  const on = midiImportScaleBox.checked && !midiImportScaleBox.disabled;
+  midiImportKeyRow.classList.toggle('disabled', !on);
+  midiImportNote.textContent = '';
+  if (!on) return;
+  const key = midiImportKeyInput.value.trim();
+  const fit = midiImportOffKey(key);
+  if (!fit) return;
+  if (fit.bad) {
+    midiImportNote.textContent = `"${key}" isn't a scale name`;
+  } else if (fit.off) {
+    midiImportNote.textContent = `${fit.off} of ${fit.total} notes aren't in this key — they'll move to the nearest degree`;
+  } else if (midiImportState?.existing && midiImportState.existing.key !== key) {
+    // setscale is global and hoisted, so importing in another key moves the whole patch.
+    midiImportNote.textContent = `the buffer is in ${midiImportState.existing.key} — importing in ${key} re-keys all of it`;
+  }
+}
+
+midiImportScaleBox.addEventListener('change', reflectMidiImportKey);
+midiImportKeyInput.addEventListener('input', reflectMidiImportKey);
+midiImportGo.addEventListener('click', runMidiImport);
+midiImportKeyInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); runMidiImport(); }
+});
+document.getElementById('midiImportClose').addEventListener('click', closeMidiImport);
+midiImportBackdrop.addEventListener('click', (e) => { if (e.target === midiImportBackdrop) closeMidiImport(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !midiImportBackdrop.classList.contains('hidden')) closeMidiImport();
+});
+
+/** A MIDI track name -> a label the buffer can carry, unique against `taken` (which it joins). */
+function midiLaneLabel(name, taken) {
+  const base = String(name ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_$]+/g, '_')
+    .replace(/^[^a-z$]+/, '') // a leading digit is invalid; a leading _ would mute the lane
+    .replace(/_+$/, '');
+  if (!base) return '$'; // anonymous: the server numbers these $1, $2, … by position
+  let label = base;
+  for (let n = 2; taken.has(label); n++) label = `${base}${n}`;
+  taken.add(label);
+  return label;
+}
+
+function runMidiImport() {
+  const st = midiImportState;
+  if (!st) return;
+  const useScale = midiImportScaleBox.checked && !midiImportScaleBox.disabled;
+  const key = midiImportKeyInput.value.trim();
+  if (useScale && midiImportOffKey(key)?.bad) {
+    reflectMidiImportKey(); // the footer already says why the key doesn't parse
+    return;
+  }
+
+  const chosen = midiImportGridSel.value;
+  const taken = new Set(labelsMod ? labelsMod.splitLabeledBlocks(cm.getValue()).map((b) => b.label) : []);
+  const lines = [];
+  const names = [];
+  try {
+    const { entries } = st.midifile.midiLanesToMini(st.parsed, {
+      grid: chosen === 'auto' ? 'auto' : Number(chosen),
+      scale: useScale ? key : null,
+    });
+    for (const entry of entries) {
+      const label = midiLaneLabel(entry.name, taken);
+      names.push(label);
+      lines.push(`${label}: ${entry.code}`);
+    }
+  } catch (e) {
+    midiImportNote.textContent = midiErr(e);
+    return;
+  }
+
+  // The key line, if the buffer doesn't already say it. setscale is hoisted and global, so a
+  // second one would silently re-key every other lane - the existing call is edited instead.
+  // Re-read rather than trusting what the dialog opened on: the buffer is editable behind it.
+  const existing = bufferSetscale();
+  let reKeyed = null;
+  if (useScale && existing && existing.key !== key) {
+    cm.replaceRange(`setscale("${key}")`, cm.posFromIndex(existing.from), cm.posFromIndex(existing.to));
+    reKeyed = existing.key;
+  } else if (useScale && !existing) {
+    lines.unshift(`setscale("${key}")`);
+  }
+
+  const code = cm.getValue();
+  const at = cm.posFromIndex(code.length);
+  // Exactly one blank line between the buffer and the import, counting whatever newlines the
+  // buffer already ends with.
+  const trailing = /\n*$/.exec(code)[0].length;
+  const gap = code.trim() ? '\n'.repeat(Math.max(0, 2 - trailing)) : '';
+  const text = gap + lines.join('\n\n') + '\n';
+  cm.replaceRange(text, at, at);
+  // Park the cursor on the end of the last lane rather than the blank line under it - that's
+  // where the `.synth("…")` it still needs goes.
+  const caret = cm.posFromIndex(code.length + text.replace(/\n+$/, '').length);
+  cm.setCursor(caret);
+  cm.scrollIntoView(caret, 80);
+  cm.focus();
+
+  closeMidiImport();
+  logLine(
+    `midi import: ${st.file.name} → ${names.length} lane${names.length === 1 ? '' : 's'} (${names.join(', ')})` +
+      `${useScale ? ` as degrees in ${key}` : ''} - add a .synth() and Cmd/Ctrl+Enter to play`,
+  );
+  if (reKeyed) logLine(`midi import: re-keyed the buffer from ${reKeyed} to ${key} (setscale is global)`, true);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Minimizable sidebar + console - collapsed state persists per browser.
 // ---------------------------------------------------------------------------------------------
 
@@ -5717,9 +6040,10 @@ async function runHotkey(hk, e) {
   }
 }
 
-// A blocking modal (prebake editor, folder picker) is open - don't let chords reach through it.
+// A blocking modal (prebake editor, folder picker, midi import) is open - don't let chords reach
+// through it.
 function anyModalOpen() {
-  return !prebakeBackdrop.classList.contains('hidden') || !dirPickerBackdrop.classList.contains('hidden');
+  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop].some((el) => !el.classList.contains('hidden'));
 }
 
 window.addEventListener(
