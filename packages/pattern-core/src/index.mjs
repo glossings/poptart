@@ -11,7 +11,7 @@ export { Scheduler, Transport, setEventLogger } from './scheduler.mjs';
 export { parseScaleName, degreeToMidi, midiToDegree, noteToMidi } from './notes.mjs';
 export { setGlobalScale, globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE } from './notes.mjs';
 export { recordingToMini, UNQUANTIZED_GRID } from './record.mjs';
-export { parseMidiFile, midiFileToLanes, midiLanesToMini, pickGrid, detectKey, scaleOctaveFor, GRID_CANDIDATES, BEATS_PER_CYCLE } from './midifile.mjs';
+export { parseMidiFile, midiFileToLanes, midiLanesToPianoroll, pickGrid, detectKey, GRID_CANDIDATES, BEATS_PER_CYCLE } from './midifile.mjs';
 export { parseMini, getStepsForCycle, stepLocs } from './mini.mjs';
 export { splitLabeledBlocks, isBareCallBlock } from './labels.mjs';
 export { injectLocations, isPatternPosition } from './locations.mjs';

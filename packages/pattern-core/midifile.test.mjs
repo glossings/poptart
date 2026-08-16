@@ -9,15 +9,14 @@ import assert from 'node:assert/strict';
 import {
   parseMidiFile,
   midiFileToLanes,
-  midiLanesToMini,
+  midiLanesToPianoroll,
   pickGrid,
   detectKey,
-  scaleOctaveFor,
   GRID_CANDIDATES,
 } from './src/midifile.mjs';
-import { recordingToMini } from './src/record.mjs';
-import { mini, channelAt } from './src/signal.mjs';
-import { degreeToMidi } from './src/notes.mjs';
+import { recordingToMini, UNQUANTIZED_GRID } from './src/record.mjs';
+import { pianoroll } from './src/signal.mjs';
+import { parsePianoRoll } from './src/pianoroll.mjs';
 
 // --- building test files -----------------------------------------------------------------------
 
@@ -232,7 +231,7 @@ test('midiFileToLanes: a file with no notes is refused', () => {
   assert.throws(() => midiFileToLanes(midiFile([track([tempo(120)])])), /no notes/);
 });
 
-test('midiFileToLanes: the events feed recordingToMini directly', () => {
+test('midiFileToLanes: the events feed a live recording as well as an import', () => {
   const file = midiFile([track([trackName('bass'), ...scaleTrack(4, 36)])]);
   const { lanes, cycles } = midiFileToLanes(file);
   const grid = pickGrid(lanes[0].events.map((e) => e.start));
@@ -268,31 +267,38 @@ test('pickGrid: small timing errors are absorbed rather than forced onto a finer
 
 // --- lanes -> code -----------------------------------------------------------------------------
 
-/** The mini-notation out of an emitted `` `<…>*R`.as(…) `` expression, ready to hand to mini(). */
-const patternOf = (code) => code.slice(1, code.lastIndexOf('`'));
+/** The pieces of an emitted `pianoroll("…", { grid: G, len: L })` call. */
+function rollCall(code) {
+  const m = /^pianoroll\("([^"]*)", \{ grid: (\d+), len: (\d+) \}\)$/.exec(code);
+  assert.ok(m, `not a pianoroll call: ${code}`);
+  return { notes: m[1], grid: Number(m[2]), len: Number(m[3]) };
+}
 
-const playedSteps = (code, spec) =>
-  mini(patternOf(code))
-    .as(spec)
-    .stepsForCycle(0)
-    .filter((st) => st.value != null)
-    .sort((a, b) => a.start - b.start);
+/** What an emitted call plays on `cycle` - the roll built from the text, exactly as the buffer would. */
+function playedSteps(code, cycle = 0) {
+  const { notes, grid, len } = rollCall(code);
+  return pianoroll(notes, { grid, len })
+    .stepsForCycle(cycle)
+    .sort((a, b) => a.start - b.start || a.value - b.value);
+}
 
-test('midiLanesToMini: absolute MIDI notes, in the shape a live recording is written in', () => {
+test('midiLanesToPianoroll: a lane becomes a drawn roll on the grid its rhythm sits on', () => {
   const parsed = midiFileToLanes(midiFile([track([trackName('bass'), ...scaleTrack(4, 36)])]));
-  const { octave, keyed, entries } = midiLanesToMini(parsed);
-  assert.equal(octave, null);
-  assert.equal(keyed, null);
+  const { entries } = midiLanesToPianoroll(parsed);
   assert.equal(entries.length, 1);
   assert.deepEqual(
-    { name: entries[0].name, drums: entries[0].drums, grid: entries[0].grid, degrees: entries[0].degrees },
-    { name: 'bass', drums: false, grid: 4, degrees: false },
+    { name: entries[0].name, drums: entries[0].drums, grid: entries[0].grid, len: entries[0].len },
+    { name: 'bass', drums: false, grid: 4, len: 4 }, // four quarter notes, one cycle of them
   );
-  assert.match(entries[0].code, /^`<\n/);
-  assert.match(entries[0].code, />\*4`\.as\("note:vel:clip"\)$/);
+  // The string in the call is the note list, so the editor reopens exactly what was written.
+  assert.deepEqual(parsePianoRoll(rollCall(entries[0].code).notes), entries[0].notes);
+  assert.deepEqual(
+    playedSteps(entries[0].code).map((st) => [st.value, st.start]),
+    [[36, 0], [37, 0.25], [38, 0.5], [39, 0.75]],
+  );
 });
 
-test('midiLanesToMini: what it writes plays back the notes, velocities and lengths of the file', () => {
+test('midiLanesToPianoroll: what it writes plays back the notes, velocities and lengths of the file', () => {
   const parsed = midiFileToLanes(
     midiFile([
       track([
@@ -301,75 +307,67 @@ test('midiLanesToMini: what it writes plays back the notes, velocities and lengt
       ]),
     ]),
   );
-  const [entry] = midiLanesToMini(parsed).entries;
-  assert.match(entry.code, /\b60\b/); // one grid step at full velocity: both fields are the default
-  assert.match(entry.code, /67:0.5:2/); // half velocity, two of the four steps long
-
-  const sig = mini(patternOf(entry.code)).as('note:vel:clip');
-  const steps = playedSteps(entry.code, 'note:vel:clip');
-  assert.deepEqual(steps.map((st) => [st.value, st.start]), [[60, 0], [67, 0.5]]);
-  const velOf = (st) => channelAt('vel', st, sig.noteChannels, st.start, 1, st.start) ?? 1;
-  assert.deepEqual(steps.map(velOf), [1, 0.5]);
+  const [entry] = midiLanesToPianoroll(parsed).entries;
+  assert.equal(rollCall(entry.code).notes, '60,0,1 67,2,2,0.5'); // full velocity is left implicit
+  const steps = playedSteps(entry.code);
+  assert.deepEqual(steps.map((st) => [st.value, st.start, st.end]), [[60, 0, 0.25], [67, 0.5, 1]]);
+  assert.deepEqual(steps.map((st) => st.vel), [1, 0.5]);
 });
 
-test('midiLanesToMini: a key writes degrees plus .sc(octave), naming the same pitches', () => {
-  const midis = [48, 51, 55, 60]; // a c minor arpeggio, c3 up to c4
-  const evs = midis.flatMap((m, i) => [noteOn(i * PPQ, m), noteOff((i + 1) * PPQ, m)]);
-  const { octave, keyed, entries } = midiLanesToMini(midiFileToLanes(midiFile([track(evs)])), {
-    scale: 'C minor',
-  });
-  assert.equal(octave, 4); // the root placed on the lowest note in the file
-  assert.equal(keyed, 'C4 minor');
-  assert.equal(entries[0].degrees, true);
-  assert.match(entries[0].code, /`\.as\("n:vel:clip"\)\.sc\(4\)$/);
-
-  const degrees = playedSteps(entries[0].code, 'n:vel:clip').map((st) => st.value);
-  assert.deepEqual(degrees, [0, 2, 4, 7]);
-  assert.deepEqual(degrees.map((d) => degreeToMidi(d, keyed)), midis);
-});
-
-test('midiLanesToMini: percussion keeps absolute notes even when the rest goes to degrees', () => {
+test('midiLanesToPianoroll: percussion is a lane like any other, on its GM slot numbers', () => {
   const file = midiFile([
     track([trackName('keys'), noteOn(0, 60), noteOff(PPQ, 60)]),
     track([noteOn(0, 36, 100, 9), noteOff(PPQ, 36, 9)]),
   ]);
-  const { entries } = midiLanesToMini(midiFileToLanes(file), { scale: 'C major' });
-  assert.deepEqual(entries.map((e) => e.degrees), [true, false]);
-  assert.match(entries[1].code, /\.as\("note:vel:clip"\)$/);
-  assert.match(entries[1].code, /\b36\b/); // the kick's GM slot, not a scale degree
+  const { entries } = midiLanesToPianoroll(midiFileToLanes(file));
+  assert.deepEqual(entries.map((e) => e.drums), [false, true]);
+  assert.equal(playedSteps(entries[1].code)[0].value, 36); // the kick's slot, drawn as a note
 });
 
-test('midiLanesToMini: every lane shares one octave, so their degrees mean the same thing', () => {
+test('midiLanesToPianoroll: a file longer than a cycle is one roll that loops with the file', () => {
   const file = midiFile([
-    track([trackName('bass'), noteOn(0, 36), noteOff(PPQ, 36)]),
-    track([trackName('lead'), noteOn(0, 72), noteOff(PPQ, 72)]),
+    track([
+      noteOn(0, 60), noteOff(PPQ, 60),
+      noteOn(4 * PPQ, 67), noteOff(5 * PPQ, 67), // the second cycle
+    ]),
   ]);
-  const { octave, keyed, entries } = midiLanesToMini(midiFileToLanes(file), { scale: 'C major' });
-  assert.equal(octave, 3); // the bass note, the lowest in the file
-  for (const entry of entries) assert.match(entry.code, /\.sc\(3\)$/);
-  const pitches = entries.map((e) => degreeToMidi(playedSteps(e.code, 'n:vel:clip')[0].value, keyed));
-  assert.deepEqual(pitches, [36, 72]);
+  const [entry] = midiLanesToPianoroll(midiFileToLanes(file)).entries;
+  assert.deepEqual([entry.grid, entry.len], [4, 8]); // two cycles of quarter-note cells
+  assert.deepEqual(playedSteps(entry.code, 0).map((st) => [st.value, st.start]), [[60, 0]]);
+  assert.deepEqual(playedSteps(entry.code, 1).map((st) => [st.value, st.start]), [[67, 0]]);
+  assert.deepEqual(playedSteps(entry.code, 2).map((st) => [st.value, st.start]), [[60, 0]]); // and round again
 });
 
-test('midiLanesToMini: a fixed grid overrides the per-lane detection', () => {
+test('midiLanesToPianoroll: a hand-played lane keeps its feel on the fine grid rather than a coarse one', () => {
+  // 110 ticks sits far enough off every candidate grid that pickGrid gives up (see its own tests).
+  const file = midiFile([track([noteOn(0, 60), noteOff(90, 60), noteOn(110, 62), noteOff(200, 62)])]);
+  const [entry] = midiLanesToPianoroll(midiFileToLanes(file)).entries;
+  assert.equal(entry.grid, UNQUANTIZED_GRID);
+  assert.equal(entry.len, UNQUANTIZED_GRID); // one cycle of it
+  const cellOf = (tick) => Math.round((tick / PPQ / 4) * UNQUANTIZED_GRID);
+  assert.deepEqual(entry.notes.map((nt) => nt.start), [cellOf(0), cellOf(110)]);
+});
+
+test('midiLanesToPianoroll: a fixed grid overrides the per-lane detection', () => {
   const parsed = midiFileToLanes(midiFile([track(scaleTrack(4))]));
-  assert.equal(midiLanesToMini(parsed).entries[0].grid, 4);
-  const forced = midiLanesToMini(parsed, { grid: 16 }).entries[0];
-  assert.equal(forced.grid, 16);
-  assert.match(forced.code, />\*16`/);
-  assert.deepEqual(playedSteps(forced.code, 'note:vel:clip').map((st) => st.start), [0, 0.25, 0.5, 0.75]);
+  assert.equal(midiLanesToPianoroll(parsed).entries[0].grid, 4);
+  const forced = midiLanesToPianoroll(parsed, { grid: 16 }).entries[0];
+  assert.deepEqual([forced.grid, forced.len], [16, 16]);
+  assert.deepEqual(playedSteps(forced.code).map((st) => st.start), [0, 0.25, 0.5, 0.75]);
+  // "off" is the fine grid, not no grid at all - a roll's cells are whole numbers.
+  assert.equal(midiLanesToPianoroll(parsed, { grid: 0 }).entries[0].grid, UNQUANTIZED_GRID);
 });
 
-test('midiLanesToMini: a key it cannot read is refused before any lane is written', () => {
-  const parsed = midiFileToLanes(midiFile([track(scaleTrack(2))]));
-  assert.throws(() => midiLanesToMini(parsed, { scale: 'H spooky' }), /unknown scale/);
-});
-
-test('scaleOctaveFor: the root lands at or below the lowest note, so no degree goes negative', () => {
-  assert.equal(scaleOctaveFor(48, 'C minor'), 4);
-  assert.equal(scaleOctaveFor(47, 'C minor'), 3); // b3 sits under c4, so the root drops an octave
-  assert.equal(scaleOctaveFor(65, 'F minor'), 5);
-  assert.equal(scaleOctaveFor(NaN, 'F minor'), 5); // nothing to place it against
+test('midiLanesToPianoroll: one pitch retriggered inside a cell merges instead of stacking onsets', () => {
+  const file = midiFile([
+    track([
+      noteOn(0, 60, 60), noteOff(PPQ / 8, 60), // a short quiet hit...
+      noteOn(PPQ / 8 + 1, 60, 100), noteOff(2 * PPQ, 60), // ...and a louder, longer one in the same cell
+    ]),
+  ]);
+  const [entry] = midiLanesToPianoroll(midiFileToLanes(file), { grid: 4 }).entries;
+  assert.deepEqual(entry.notes, [{ midi: 60, start: 0, len: 2, vel: 0.79, prob: 1 }]);
+  assert.equal(playedSteps(entry.code).length, 1); // one onset, not two of the same note at once
 });
 
 // --- key ---------------------------------------------------------------------------------------

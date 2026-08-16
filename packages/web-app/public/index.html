@@ -332,16 +332,16 @@
           <div id="midiImportSummary" class="midi-import-summary"></div>
           <label class="midi-import-row">
             <span>quantize</span>
-            <select id="midiImportGrid" title="Steps per cycle to snap the notes onto. Auto picks the coarsest grid each part actually sits on."></select>
+            <select id="midiImportGrid" title="Cells per cycle to snap the notes onto — the piano roll's grid. Auto picks the coarsest grid each part actually sits on; off draws a hand-played part on fine cells instead."></select>
           </label>
           <label class="midi-import-row">
-            <input id="midiImportScale" type="checkbox" />
-            <span>write as scale degrees</span>
+            <input id="midiImportSetKey" type="checkbox" />
+            <span>set the patch key</span>
           </label>
           <label class="midi-import-row" id="midiImportKeyRow">
             <span>key</span>
             <input id="midiImportKey" type="text" list="midiImportKeys" spellcheck="false"
-              placeholder="F minor" title="The key to write the degrees in — a setscale() line goes in above the lanes. Suggestions are ranked by how well they fit the notes." />
+              placeholder="F minor" title="Writes the buffer's setscale() line, so the rolls open in this key and convert to scale degrees. Suggestions are ranked by how well they fit the notes." />
             <datalist id="midiImportKeys"></datalist>
           </label>
         </div>

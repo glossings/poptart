@@ -1,31 +1,25 @@
-// Standard MIDI Files -> the same note lists `recordingToMini` turns into house-style
-// mini-notation, so a .mid dragged into the editor lands as a lane that reads exactly like a
-// live-recorded one:
+// Standard MIDI Files -> drawn note grids, so a .mid dragged into the editor lands as a lane you
+// can open the piano roll on:
 //
-//   bass: `<
-//     36:1:4 ~ ~ ~ ~ ~ ~ ~
-//     ~ 47:0.5:3 ~ ~ ~ ~ ~ ~
-//   >*8`.as("note:vel:clip")
+//   bass: pianoroll("36,0,4 47,9,3,0.5", { grid: 8, len: 16 })
+//
+// A roll rather than mini-notation because it's the form that stays editable: the notes are on a
+// grid you can see, drag and audition, and the roll's own →♪ writes the mini-notation whenever
+// it's wanted (in the key, if the roll is folded to one) - so nothing is lost by landing here
+// first, and everything the pencil can do is gained.
 //
 // Three jobs live here, and nothing else: parse the file (a small SMF reader - no dependency, in
 // keeping with the rest of this package), decide what grid the music is actually on, and guess
-// what key it's in. Turning the result into text is `recordingToMini`'s job, and placing that text
-// in the buffer is the editor's - see client.js's midi import.
+// what key it's in. Placing the result in the buffer is the editor's job - see client.js's midi
+// import.
 //
 // Time is reported in CYCLES throughout, because that's the unit patterns are written in: a cycle
 // is 4 beats (the Transport's cps = bpm/240), so a 4/4 bar is one cycle. A file in another metre
 // still imports - its bars just don't line up with cycle boundaries, which `midiFileToLanes`
 // reports as `timeSig` so the caller can say so.
 
-import { recordingToMini } from './record.mjs';
-import {
-  midiToDegree,
-  noteToMidi,
-  parseScaleName,
-  scaleAtOctave,
-  scaleParts,
-  DEFAULT_SCALE_OCTAVE,
-} from './notes.mjs';
+import { UNQUANTIZED_GRID } from './record.mjs';
+import { serializePianoRoll } from './pianoroll.mjs';
 
 // ---------------------------------------------------------------------------------------------
 // Reading the file
@@ -331,57 +325,66 @@ export function pickGrid(starts, { candidates = GRID_CANDIDATES, tolerance = GRI
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The octave to hand `.sc()`: the one that puts the key's root at or just below `lowestMidi`, so
- * no degree comes out negative and the numbers read as steps up from the bottom of the part. Same
- * rule the piano roll's mini-notation conversion uses, so a drawn part and an imported one in the
- * same key are written the same way.
- */
-export function scaleOctaveFor(lowestMidi, scaleName) {
-  const { root, octave } = scaleParts(scaleName);
-  if (!Number.isFinite(lowestMidi)) return octave ?? DEFAULT_SCALE_OCTAVE;
-  const rootPc = (((noteToMidi(`${root}0`) ?? 0) % 12) + 12) % 12;
-  return Math.floor((lowestMidi - rootPc) / 12);
-}
-
-/**
- * Each lane as the pattern expression that plays it - what the editor writes after `label:`.
+ * Each lane as the `pianoroll(...)` call that plays it - what the editor writes after `label:`.
  *
- * With no `scale` the notes are written as absolute MIDI, `.as("note:vel:clip")`. Given one they
- * come out as SCALE DEGREES instead - `.as("n:vel:clip").sc(octave)` under a `setscale(...)` line -
- * so re-keying the patch moves the imported part with everything else. One octave is chosen for
- * all the lanes at once: they're parts of one piece and have to agree about where degree 0 is.
- * Percussion is never converted whatever the option says: a GM drum map's "pitches" are kit slots,
- * and reading them as degrees of a key would scramble the kit.
+ * The notes stay absolute MIDI: a roll holds pitches, and the key only enters when the roll is
+ * folded to one or converted to mini-notation, both of which are the roll's own business (and both
+ * of which read the buffer's `setscale`). That also means percussion needs no special case here -
+ * a GM slot number is just a lane of the roll.
+ *
+ * Cells are integers, so a lane that fits no grid is drawn on the same fine grid the recorder
+ * falls back to (`UNQUANTIZED_GRID`) rather than losing its feel to a coarse one. The loop length
+ * is the file's whole length in cells, so a multi-cycle file plays through and repeats as one roll
+ * - `len` past `grid` is exactly what `<…>*grid` does over several cycles.
  *
  * @param {{lanes: Array, cycles: number}} parsed - straight from `midiFileToLanes`.
  * @param {object} [opts]
- * @param {'auto'|number} [opts.grid] - steps per cycle; 'auto' detects one per lane, 0 = keep the
- *   timing (see `recordingToMini`'s unquantized mode).
- * @param {string|null} [opts.scale] - a `setscale()`-style key name, or null for absolute notes.
- * @returns {{ octave: number|null, keyed: string|null,
- *   entries: Array<{ name: string|null, drums: boolean, grid: number, degrees: boolean, code: string }> }}
+ * @param {'auto'|number} [opts.grid] - cells per cycle; 'auto' detects one per lane, 0 = keep the
+ *   timing (the fine grid above).
+ * @returns {{ entries: Array<{ name: string|null, drums: boolean, grid: number, len: number,
+ *   quantized: boolean, notes: Array<{midi: number, start: number, len: number, vel: number,
+ *   prob: number}>, code: string }> }} - `quantized` is false for a lane that fit no grid and was
+ *   drawn on the fine one, which is worth saying out loud to whoever dropped the file.
  */
-export function midiLanesToMini({ lanes, cycles }, { grid = 'auto', scale = null } = {}) {
-  if (scale) parseScaleName(scale); // fail on the name, not on a lane full of nonsense degrees
-  const pitched = lanes.filter((l) => !l.drums).flatMap((l) => l.events);
-  const lowest = pitched.length ? Math.min(...pitched.map((e) => e.note)) : NaN;
-  const octave = scale ? scaleOctaveFor(lowest, scale) : null;
-  // Degrees are read against the scale as `.sc(octave)` will rebuild it, so the two agree exactly.
-  const keyed = scale ? scaleAtOctave(scale, octave) : null;
-
+export function midiLanesToPianoroll({ lanes, cycles }, { grid = 'auto' } = {}) {
   const fixed = grid === 'auto' ? null : Math.max(0, Math.round(Number(grid) || 0));
   const entries = lanes.map((lane) => {
-    const R = fixed ?? pickGrid(lane.events.map((e) => e.start));
-    const degrees = !!keyed && !lane.drums;
-    const events = degrees
-      ? lane.events.map((e) => ({ ...e, note: midiToDegree(e.note, keyed) }))
-      : lane.events;
-    const { pattern } = recordingToMini(events, { cycles, grid: R });
-    const code = `\`${pattern}\`.as("${degrees ? 'n' : 'note'}:vel:clip")${degrees ? `.sc(${octave})` : ''}`;
-    return { name: lane.name, drums: lane.drums, grid: R, degrees, code };
+    const detected = fixed ?? pickGrid(lane.events.map((e) => e.start));
+    const R = detected > 0 ? detected : UNQUANTIZED_GRID;
+    const len = Math.max(1, Math.round(cycles * R));
+    const notes = laneToRollNotes(lane.events, R, len);
+    const code = `pianoroll("${serializePianoRoll(notes)}", { grid: ${R}, len: ${len} })`;
+    return { name: lane.name, drums: lane.drums, grid: R, len, quantized: detected > 0, notes, code };
   });
+  return { entries };
+}
 
-  return { octave, keyed, entries };
+/**
+ * A lane's events snapped onto an `R`-cell grid. One pitch can only start once in a cell (the roll
+ * would otherwise stack two identical onsets and double-trigger the note), so a repeat that lands
+ * in a cell already taken merges into it, keeping the stronger and longer of the two - the same
+ * rule `recordingToMini` applies to a key retriggered inside one slot.
+ */
+function laneToRollNotes(events, R, len) {
+  const byCell = new Map(); // `${cell}:${midi}` -> the note object drawn there
+  const notes = [];
+  for (const ev of events) {
+    const start = Math.round(ev.start * R);
+    if (start < 0 || start >= len) continue; // outside the loop window - it would never sound
+    const midi = Math.min(127, Math.max(0, Math.round(ev.note)));
+    const length = Math.max(1, Math.round((ev.end - ev.start) * R));
+    const key = `${start}:${midi}`;
+    const existing = byCell.get(key);
+    if (existing) {
+      existing.vel = Math.max(existing.vel, ev.vel);
+      existing.len = Math.max(existing.len, length);
+      continue;
+    }
+    const note = { midi, start, len: length, vel: ev.vel, prob: 1 };
+    byCell.set(key, note);
+    notes.push(note);
+  }
+  return notes;
 }
 
 // ---------------------------------------------------------------------------------------------

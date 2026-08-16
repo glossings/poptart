@@ -5395,22 +5395,22 @@ fileNameInput.addEventListener('input', () => updateDocTitle(cm.getValue()));
 // ---------------------------------------------------------------------------------------------
 // MIDI file import - drop a .mid anywhere on the window and it becomes lanes in the buffer.
 //
-// The file is read in the browser and written out by the same recordingToMini() a live MIDI
-// recording goes through, so an imported part and a recorded one read identically:
+// The file is read in the browser and written out as DRAWN ROLLS, one per lane:
 //
-//   bass: `<
-//     36:1:4 ~ ~ ~ ~ ~ ~ ~
-//     ~ 47:0.5:3 ~ ~ ~ ~ ~ ~
-//   >*8`.as("note:vel:clip")
+//   bass: pianoroll("36,0,4 47,9,3,0.5", { grid: 8, len: 16 })
+//
+// A roll rather than mini-notation because it's the form that stays editable - double-click the
+// `pianoroll` name and the notes are there on a grid to drag, retime and audition - and because
+// nothing is given up by landing here: the roll's own →♪ writes the mini-notation whenever it's
+// wanted, in scale degrees if the roll is folded to the key, which is the same rewrite an import
+// straight to text used to do in one shot.
 //
 // One lane per (track, channel) the file plays, named after the file's own track names where it
-// has them. The dialog settles the two things the file can't say: which grid to write the rhythm
-// on (auto-detected per lane - see midifile.mjs's pickGrid - and overridable when the detection
-// falls back to unquantized), and whether to write absolute MIDI notes or SCALE DEGREES. Degrees
-// are `n` plus a `.sc(octave)` under a `setscale(...)` line, exactly what the piano roll writes
-// when it's folded to the key, and what makes an imported part re-key with the rest of the patch
-// instead of staying on the pitches it was exported at. The key is guessed from the notes and
-// offered; it's never imposed, and out-of-key notes are counted before you commit to it.
+// has them. The dialog settles the two things the file can't say: which grid to snap the rhythm to
+// (auto-detected per lane - see midifile.mjs's pickGrid) and what KEY the music is in. The key is
+// guessed from the notes and only ever offered - taking it writes the buffer's `setscale(...)`, so
+// the rolls open coloured and foldable in that key and convert to degrees later; out-of-key notes
+// are counted first, since that count is how good the guess looks.
 //
 // Nothing is evaluated by the import: the new lanes have no instrument on them yet, so they start
 // playing at the next Cmd/Ctrl+Enter, once there's a .synth() on the end.
@@ -5419,8 +5419,8 @@ fileNameInput.addEventListener('input', () => updateDocTitle(cm.getValue()));
 const midiImportBackdrop = document.getElementById('midiImportBackdrop');
 const midiImportSummary = document.getElementById('midiImportSummary');
 const midiImportGridSel = document.getElementById('midiImportGrid');
-const midiImportScaleBox = document.getElementById('midiImportScale');
-const midiImportScaleRow = midiImportScaleBox.closest('.midi-import-row');
+const midiImportKeyBox = document.getElementById('midiImportSetKey');
+const midiImportKeyBoxRow = midiImportKeyBox.closest('.midi-import-row');
 const midiImportKeyRow = document.getElementById('midiImportKeyRow');
 const midiImportKeyInput = document.getElementById('midiImportKey');
 const midiImportKeyList = document.getElementById('midiImportKeys');
@@ -5428,8 +5428,9 @@ const midiImportNote = document.getElementById('midiImportNote');
 const midiImportGo = document.getElementById('midiImportGo');
 const fileDropOverlay = document.getElementById('fileDropOverlay');
 
-// value -> label. The values are steps per cycle (a cycle is 4 beats, so 4 = quarter notes);
-// 'auto' lets each lane keep its own detected grid, and 0 is recordingToMini's unquantized mode.
+// value -> label. The values are cells per cycle (a cycle is 4 beats, so 4 = quarter notes);
+// 'auto' lets each lane keep its own detected grid, and 0 is the recorder's unquantized fallback -
+// a roll's cells are whole numbers, so "off" means the fine 1/96 grid that keeps the feel.
 const MIDI_IMPORT_GRIDS = [
   ['auto', 'auto'],
   ['4', '4 · quarters'],
@@ -5441,9 +5442,8 @@ const MIDI_IMPORT_GRIDS = [
   ['0', 'off · keep the timing'],
 ];
 
-// The fraction of out-of-key notes below which scale notation is offered pre-ticked. Degrees can
-// only name notes that are IN the key, so a part that mostly isn't shouldn't default to losing
-// them - see the count in the dialog's footer.
+// The fraction of out-of-key notes below which the guessed key is offered pre-ticked. A key the
+// file mostly doesn't sit in is a bad guess, and setscale is global - see the dialog's footer.
 const MIDI_IMPORT_SCALE_FIT = 0.05;
 
 let midiImportState = null; // { file, midifile, parsed, guess, existing } while the dialog is open
@@ -5556,11 +5556,15 @@ async function openMidiImport(file) {
   for (const name of suggestions) midiImportKeyList.appendChild(new Option(name, name));
   midiImportKeyInput.value = midiImportState.guess?.scale ?? midiImportState.existing?.key ?? '';
 
+  // Pre-ticked only when the guess fits well AND the buffer has no key of its own: setscale is
+  // global, so re-keying a patch that already says what key it's in is never something to do by
+  // default. It stays one click away, with the warning in the footer.
   const fit = midiImportOffKey(midiImportKeyInput.value);
   const canScale = !!(pitched.length && suggestions.length && notesMod);
-  midiImportScaleBox.disabled = !canScale;
-  midiImportScaleBox.checked = canScale && !!fit && !fit.bad && fit.off <= fit.total * MIDI_IMPORT_SCALE_FIT;
-  midiImportScaleRow.classList.toggle('disabled', !canScale);
+  midiImportKeyBox.disabled = !canScale;
+  midiImportKeyBox.checked =
+    canScale && !midiImportState.existing && !!fit && !fit.bad && fit.off <= fit.total * MIDI_IMPORT_SCALE_FIT;
+  midiImportKeyBoxRow.classList.toggle('disabled', !canScale);
 
   reflectMidiImportKey();
   midiImportBackdrop.classList.remove('hidden');
@@ -5606,9 +5610,11 @@ function midiImportOffKey(keyName) {
   return { off, total };
 }
 
-// Grey the key row out when degrees are off, and say what the chosen key would cost.
+// Grey the key row out when the key is being left alone, and say what taking it would mean. The
+// notes themselves are unaffected either way - a roll holds pitches - so what's reported is how
+// well the key fits them, and whether it moves a patch that was already in another one.
 function reflectMidiImportKey() {
-  const on = midiImportScaleBox.checked && !midiImportScaleBox.disabled;
+  const on = midiImportKeyBox.checked && !midiImportKeyBox.disabled;
   midiImportKeyRow.classList.toggle('disabled', !on);
   midiImportNote.textContent = '';
   if (!on) return;
@@ -5617,15 +5623,15 @@ function reflectMidiImportKey() {
   if (!fit) return;
   if (fit.bad) {
     midiImportNote.textContent = `"${key}" isn't a scale name`;
-  } else if (fit.off) {
-    midiImportNote.textContent = `${fit.off} of ${fit.total} notes aren't in this key — they'll move to the nearest degree`;
   } else if (midiImportState?.existing && midiImportState.existing.key !== key) {
-    // setscale is global and hoisted, so importing in another key moves the whole patch.
-    midiImportNote.textContent = `the buffer is in ${midiImportState.existing.key} — importing in ${key} re-keys all of it`;
+    // setscale is global and hoisted, so taking another key moves the whole patch.
+    midiImportNote.textContent = `the buffer is in ${midiImportState.existing.key} — this re-keys all of it`;
+  } else if (fit.off) {
+    midiImportNote.textContent = `${fit.off} of ${fit.total} notes aren't in this key`;
   }
 }
 
-midiImportScaleBox.addEventListener('change', reflectMidiImportKey);
+midiImportKeyBox.addEventListener('change', reflectMidiImportKey);
 midiImportKeyInput.addEventListener('input', reflectMidiImportKey);
 midiImportGo.addEventListener('click', runMidiImport);
 midiImportKeyInput.addEventListener('keydown', (e) => {
@@ -5654,9 +5660,9 @@ function midiLaneLabel(name, taken) {
 function runMidiImport() {
   const st = midiImportState;
   if (!st) return;
-  const useScale = midiImportScaleBox.checked && !midiImportScaleBox.disabled;
+  const takeKey = midiImportKeyBox.checked && !midiImportKeyBox.disabled;
   const key = midiImportKeyInput.value.trim();
-  if (useScale && midiImportOffKey(key)?.bad) {
+  if (takeKey && midiImportOffKey(key)?.bad) {
     reflectMidiImportKey(); // the footer already says why the key doesn't parse
     return;
   }
@@ -5665,15 +5671,18 @@ function runMidiImport() {
   const taken = new Set(labelsMod ? labelsMod.splitLabeledBlocks(cm.getValue()).map((b) => b.label) : []);
   const lines = [];
   const names = [];
+  let unquantized = 0;
   try {
-    const { entries } = st.midifile.midiLanesToMini(st.parsed, {
+    const { entries } = st.midifile.midiLanesToPianoroll(st.parsed, {
       grid: chosen === 'auto' ? 'auto' : Number(chosen),
-      scale: useScale ? key : null,
     });
     for (const entry of entries) {
       const label = midiLaneLabel(entry.name, taken);
       names.push(label);
       lines.push(`${label}: ${entry.code}`);
+      // Only worth saying when the grid was left to the detector - asking for "off" is asking for
+      // exactly this.
+      if (!entry.quantized && chosen === 'auto') unquantized++;
     }
   } catch (e) {
     midiImportNote.textContent = midiErr(e);
@@ -5685,10 +5694,10 @@ function runMidiImport() {
   // Re-read rather than trusting what the dialog opened on: the buffer is editable behind it.
   const existing = bufferSetscale();
   let reKeyed = null;
-  if (useScale && existing && existing.key !== key) {
+  if (takeKey && existing && existing.key !== key) {
     cm.replaceRange(`setscale("${key}")`, cm.posFromIndex(existing.from), cm.posFromIndex(existing.to));
     reKeyed = existing.key;
-  } else if (useScale && !existing) {
+  } else if (takeKey && !existing) {
     lines.unshift(`setscale("${key}")`);
   }
 
@@ -5709,9 +5718,16 @@ function runMidiImport() {
 
   closeMidiImport();
   logLine(
-    `midi import: ${st.file.name} → ${names.length} lane${names.length === 1 ? '' : 's'} (${names.join(', ')})` +
-      `${useScale ? ` as degrees in ${key}` : ''} - add a .synth() and Cmd/Ctrl+Enter to play`,
+    `midi import: ${st.file.name} → ${names.length} piano roll${names.length === 1 ? '' : 's'} (${names.join(', ')})` +
+      `${takeKey ? ` in ${key}` : ''} - double-click a pianoroll name to edit or convert it, and add a` +
+      ' .synth() then Cmd/Ctrl+Enter to play',
   );
+  if (unquantized) {
+    logLine(
+      `midi import: ${unquantized} lane${unquantized === 1 ? '' : 's'} sat on no grid, so ` +
+        `${unquantized === 1 ? 'it was' : 'they were'} drawn on fine cells to keep the timing`,
+    );
+  }
   if (reKeyed) logLine(`midi import: re-keyed the buffer from ${reKeyed} to ${key} (setscale is global)`, true);
 }
 
