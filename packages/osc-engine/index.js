@@ -19,8 +19,9 @@ const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
-const { samplesRoot, listPackFiles, resolveSampleFile, detectSlices } = require('./samples');
+const { samplesRoot, listPackFiles, resolveSampleFile } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
+const { analyzeSlices } = require('./analysis');
 
 // Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
 // this process also runs the note scheduler against a 150ms lookahead - gzipSync of that is
@@ -267,7 +268,10 @@ class OscEngine {
     this._port = null;
     this._pending = new Map(); // requestId -> { resolve, reject, timer }
     this._nextRequestId = 1;
-    // pack name -> { status: 'loading'|'ready'|'error', files: [{ path, duration, channels, slices }] }
+    // pack name -> { status: 'loading'|'ready'|'error', files: [{ path, duration, channels,
+    // slices }] }. A file's `slices` has three states, because the transient analysis is lazy
+    // (see _slicesFor): undefined = not analyzed, an array = its slice points, null = analyzed
+    // and there are none to have (a non-WAV, or the analysis failed).
     this._packs = new Map();
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
@@ -562,6 +566,10 @@ class OscEngine {
       this._port.close();
       this._port = null;
     }
+    // The analysis worker is deliberately NOT torn down here. It is one process-wide singleton
+    // shared by every engine instance (a restart builds a fresh OscEngine - see web-app's
+    // loadEngine), so stopping this engine must not cancel work the next one queued; it unrefs
+    // itself while idle, so it never holds the process open either.
   }
 
   // Node's own wall clock is the scheduling authority (Scheduler computes lookahead deadlines
@@ -773,7 +781,10 @@ class OscEngine {
           path: paths[i],
           duration: m.sampleRate > 0 ? m.frames / m.sampleRate : 0,
           channels: m.channels,
-          slices: detectSlices(paths[i]), // null for non-WAV - .slice() then warns instead of failing
+          // `slices` is deliberately absent: transient analysis reads the whole file, so it waits
+          // until a .slice() actually asks for that one file (_slicesFor). Analyzing the pack
+          // here is what used to stall the scheduler for seconds on a big break folder, and most
+          // packs are never sliced at all.
         }));
         entry.status = 'ready';
         // eslint-disable-next-line no-console
@@ -784,6 +795,29 @@ class OscEngine {
         this._warnOnce(`source:${ref}`, `[poptart] ${what} failed to load: ${err.message}`);
       });
     return entry;
+  }
+
+  /**
+   * A file's transient slice points, analyzed on first ask. Returns undefined while the analysis
+   * is still running - the caller skips the event rather than guessing a window, the same way an
+   * event arriving during the pack's own load is dropped. Detection runs on a worker thread
+   * (analysis.js), so a long file can't cost the scheduler a tick.
+   */
+  _slicesFor(file) {
+    if (file.slices !== undefined) return file.slices; // an array, or null for "there are none"
+    if (!file.slicesJob) {
+      file.slicesJob = analyzeSlices(file.path)
+        .then((slices) => {
+          file.slices = slices;
+        })
+        .catch((err) => {
+          // Record the failure as "no slices" rather than leaving it undefined, or every
+          // subsequent event would queue the analysis again and the sound would never play.
+          file.slices = null;
+          this._warnOnce(`slices:${file.path}`, `[poptart] .slice(): could not analyze ${file.path} (${err.message ?? err}) - playing the whole sample`);
+        });
+    }
+    return undefined;
   }
 
   /**
@@ -820,10 +854,12 @@ class OscEngine {
     let begin = clamp01(cfg.begin ?? 0);
     let end = clamp01(cfg.end ?? 1);
     if (cfg.slice != null) {
-      if (file.slices?.length) {
-        const k = wrap(Math.round(cfg.slice), file.slices.length);
-        begin = file.slices[k];
-        end = file.slices[k + 1] ?? 1;
+      const slices = this._slicesFor(file);
+      if (slices === undefined) return { skipped: 'analyzing slices' };
+      if (slices?.length) {
+        const k = wrap(Math.round(cfg.slice), slices.length);
+        begin = slices[k];
+        end = slices[k + 1] ?? 1;
       } else {
         this._warnOnce(`slices:${file.path}`, `[poptart] .slice(): no transient analysis for ${file.path} (only WAV files are analyzed) - playing the whole sample`);
       }

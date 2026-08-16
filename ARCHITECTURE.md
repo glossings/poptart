@@ -71,6 +71,8 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   how they're named. Owns all path building, like web-app's `pattern-files.js`.
 - `wav.js` — WAV read/write plus the recorder's trim pass (see the per-track recording decision
   below). The RIFF parsing all tracks live here; `samples.js` mixes down from it.
+- `analysis.js` + `analysis-worker.js` — the above two functions, off the event loop (see the
+  nothing-blocks-the-music decision below).
 - `sc/poptart.scd` — the SuperCollider class/def code: hosts plugins via the `VSTPlugin~` server
   extension, builds one `SynthDef` per track (fixed 8-slot chain: 1 instrument + 7 effects), and
   runs the native LFOs/envelopes sample-accurately inside the audio graph.
@@ -165,6 +167,17 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   `chrome://history` — the one thing the encoding was for. Snapshots are pruned to the most recent
   500, so history is a recovery net, not an archive. Sharing still builds a self-contained base64
   URL, on demand, because an id means nothing on another machine.
+- **Nothing that reads a whole audio file runs on the main thread.** The Node process that hosts
+  the scheduler is single-threaded, and the scheduler works a 150ms lookahead ahead of the audio —
+  so any synchronous block longer than that is not slow, it is *silence*, and livecoding has no
+  moment where that is acceptable. The two analyses that read whole files (transient detection for
+  `.slice()`, the recorder's trim pass) therefore run on a worker thread via `analysis.js`; the
+  functions themselves stay plain and synchronous in `samples.js`/`wav.js`, so they remain directly
+  unit-testable and the worker is only a hop. Slice detection is *also* lazy, per file rather than
+  per pack: analyzing a pack up front cost ~2.8s in one tick on a 775-file break folder — the whole
+  bug this rule exists for — and most packs are never sliced at all. A `.slice()` on a file whose
+  analysis hasn't landed skips that one event, matching the rule the sampler already followed for
+  events arriving during a pack load: don't stall the music, just don't play *that sound* yet.
 - **A bounce is recorded wide and trimmed in Node.** Per-track recording (`.record()` / ctrl+b)
   taps the track's post-fader output to a private bus and runs a `DiskOut` synth on it, started and
   stopped by *timestamped bundles* — the same mechanism note events use — so the window's edges are

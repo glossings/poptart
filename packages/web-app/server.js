@@ -13,7 +13,7 @@ const { blockReason, isLoopbackHostname } = require('./request-guard');
 const { preferVst3 } = require('./plugin-filter');
 const { putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const recordings = require('@poptart/osc-engine/recordings');
-const wav = require('@poptart/osc-engine/wav');
+const analysis = require('@poptart/osc-engine/analysis');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 // Loopback-only by default: this server evals arbitrary JS (/api/evaluate), so binding
@@ -891,8 +891,9 @@ function finalizeMidiRec() {
 //
 // What lands on disk is wider than the window - [pre-roll][window][post-roll] - because freeing a
 // DiskOut synth drops whatever is still in its realtime buffer. The post-roll covers that buffer
-// and carries the release tail; trimRecording (wav.js) cuts the exact window back out, and only
-// then does the take get a name and a home under ~/.poptart/recordings.
+// and carries the release tail; trimRecording (wav.js, run on the analysis worker because it
+// rewrites the whole capture) cuts the exact window back out, and only then does the take get a
+// name and a home under ~/.poptart/recordings.
 // ---------------------------------------------------------------------------------------------
 
 // Insurance either side of the window. The pre-roll absorbs any rounding between this clock and
@@ -980,7 +981,10 @@ function trackRecTick() {
 // else has used, and hand the editor what it needs to write the sr() call. `wrote` is the engine's
 // own report of what reached the disk ({ frames }), which is what tells an empty capture apart
 // from an unreadable one.
-function finalizeTrackRec(wrote = {}) {
+// The trim itself runs on the analysis worker (it reads and rewrites the whole capture, which is
+// seconds of audio and well over the scheduler's lookahead), so this is async and the bounce stays
+// in phase 'recording' until it lands - which is exactly what the editor's status poll expects.
+async function finalizeTrackRec(wrote = {}) {
   const rec = trackRec;
   clearInterval(rec.timer);
   rec.timer = null;
@@ -993,7 +997,7 @@ function finalizeTrackRec(wrote = {}) {
     }
     const name = recordings.mintName(rec.name || rec.label);
     const dest = recordings.newRecordingFile(name);
-    const info = wav.trimRecording(rec.capture, dest, {
+    const info = await analysis.trimRecording(rec.capture, dest, {
       startSec: REC_PRE_ROLL_SEC,
       lengthSec: rec.endSec - rec.startSec,
       wrapTail: rec.wrapTail,
