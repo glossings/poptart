@@ -1,0 +1,14 @@
+<!-- Tab icon: the header's .logo chip, nothing on it. Gradient runs the glossing theme's accent
+     into its warn (red into amber) along the same 135deg diagonal the chip uses. At 16px a mark
+     inside the tile gets about 8px to live in, which is not enough to say anything - the colour
+     is what makes the tab findable. Colours are hard-coded rather than themed: a favicon paints
+     on whatever background the browser chrome has, not on ours. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="chip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff3040" />
+      <stop offset="1" stop-color="#d8a24a" />
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="9" fill="url(#chip)" />
+</svg>

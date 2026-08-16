@@ -29,6 +29,7 @@ const MIME_TYPES = {
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
 };
 
 // CodeMirror (v5: plain script files, no build step) is served under /vendor/codemirror/
