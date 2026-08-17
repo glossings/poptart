@@ -11,6 +11,7 @@ import {
   parsePianoRoll,
   serializePianoRoll,
   pianoRollToMini,
+  clipOverlaps,
   normalizePianoRollSteps,
   PIANOROLL_DEFAULT_STEPS,
 } from './src/pianoroll.mjs';
@@ -46,6 +47,79 @@ test('normalizePianoRollSteps: default, rounding, and rejection', () => {
   assert.equal(normalizePianoRollSteps(15.6), 16);
   assert.throws(() => normalizePianoRollSteps(0), /positive integer/);
   assert.throws(() => normalizePianoRollSteps(-4), /positive integer/);
+});
+
+const nt = (midi, start, len, extra = {}) => ({ midi, start, len, vel: 1, prob: 1, ...extra });
+// what the roll would write out: hidden notes are held in the editor only, never in the code
+const sounding = (notes) => serializePianoRoll(notes.filter((n) => !n.hidden));
+
+test('clipOverlaps: the note on top keeps its length; the one under it gives way', () => {
+  // short note dropped into the middle of a long one (so it is later in the array): the long one
+  // ends exactly where the short one starts
+  const long = nt(60, 0, 8);
+  const short = nt(60, 4, 1);
+  assert.equal(sounding(clipOverlaps([long, short])), '60,0,4 60,4,1');
+  assert.equal(long.full, 8); // ...but it still knows how long it was drawn
+
+  // the other way round - a long note moved on top of a short one - the long note is NOT shortened;
+  // the short one is buried and drops out of the roll
+  const under = nt(60, 5, 2);
+  const over = nt(60, 4, 4);
+  clipOverlaps([under, over]);
+  assert.equal(over.len, 4);
+  assert.equal(under.hidden, true);
+  assert.equal(sounding([under, over]), '60,4,4');
+
+  // other lanes are chords, not clashes; a note butting up against the next is already fine
+  const held = nt(60, 0, 8);
+  const chord = nt(64, 4, 1);
+  const after = nt(60, 8, 1);
+  clipOverlaps([held, chord, after]);
+  assert.equal(held.len, 8);
+  assert.deepEqual([held.hidden, chord.hidden, after.hidden], [false, false, false]);
+});
+
+test('clipOverlaps: everything comes back when the note on top moves away', () => {
+  const long = nt(60, 0, 8);
+  const short = nt(60, 4, 1);
+  const roll = [long, short];
+  clipOverlaps(roll);
+  assert.equal(long.len, 4);
+
+  short.start = 6; // nudged right - the long note reclaims the cells it lost
+  clipOverlaps(roll);
+  assert.equal(long.len, 6);
+
+  short.midi = 67; // dragged off the lane entirely - back to its full drawn length
+  clipOverlaps(roll);
+  assert.equal(long.len, 8);
+
+  // a note buried under a moved one is only hidden, so it returns intact when that one leaves
+  const buried = nt(60, 4, 2);
+  const mover = nt(60, 3, 6);
+  const roll2 = [buried, mover];
+  clipOverlaps(roll2);
+  assert.equal(buried.hidden, true);
+  mover.midi = 72;
+  clipOverlaps(roll2);
+  assert.equal(buried.hidden, false);
+  assert.equal(sounding(roll2), '72,3,6 60,4,2'); // (serialize sorts by onset)
+});
+
+test('clipOverlaps: two notes on one cell - the later one takes it, the other hides', () => {
+  const oldOne = nt(60, 0, 4);
+  const newOne = nt(60, 0, 1);
+  clipOverlaps([oldOne, newOne]);
+  assert.equal(sounding([oldOne, newOne]), '60,0,1');
+  assert.equal(oldOne.hidden, true);
+  assert.equal(oldOne.full, 4); // still whole underneath - move the new one off and it returns
+});
+
+test('clipOverlaps: a parsed roll adopts its written lengths, and re-clipping is idempotent', () => {
+  const roll = parsePianoRoll('60,0,4 60,4,1');
+  assert.equal(sounding(clipOverlaps(roll)), '60,0,4 60,4,1');
+  assert.equal(sounding(clipOverlaps(clipOverlaps(roll))), '60,0,4 60,4,1');
+  assert.deepEqual(roll.map((n) => n.full), [4, 1]);
 });
 
 test('pianoRollToMini: multi-line <len cells>*grid, clip lengths, chords', () => {

@@ -66,6 +66,52 @@ export function serializePianoRoll(notes) {
 }
 
 /**
+ * Ableton-style overlap resolution, one pitch lane at a time: two notes at the same pitch are
+ * never left ringing together, so a long note with a short one dropped into its middle stops where
+ * the short one starts instead of carrying on invisibly behind it.
+ *
+ * Priority is ARRAY ORDER - later notes win, which is also the order they are drawn in and the
+ * order hit-testing scans, so "the note on top" means one thing everywhere. The winner keeps the
+ * length it was drawn with, in full; the notes under it give way:
+ *
+ *   - a note whose own onset falls inside a winner's span is HIDDEN (`hidden: true`) - there is no
+ *     room left to sound it, so it drops out of the roll and out of the code
+ *   - a note that merely runs into a winner is clipped, ending exactly at the winner's onset
+ *
+ * Nothing is destroyed either way. The length the note was DRAWN with is kept on `full` and `len`
+ * is only ever the clipped, playable length, so moving the note on top out of the way lets the one
+ * underneath spring straight back - clipped notes to their old length, hidden notes back into
+ * existence. (A note without `full` - one just parsed out of the string, which already holds
+ * clipped lengths - adopts its current `len` as its authored length.)
+ *
+ * Notes are updated IN PLACE and the same array comes back, hidden ones included: a caller keeps
+ * them so they can return, and filters `hidden` out when it draws, hit-tests or serializes.
+ */
+export function clipOverlaps(notes) {
+  for (const nt of notes) if (!Number.isFinite(nt.full)) nt.full = nt.len;
+
+  const lanes = new Map();
+  notes.forEach((nt, i) => {
+    if (!lanes.has(nt.midi)) lanes.set(nt.midi, []);
+    lanes.get(nt.midi).push({ nt, i });
+  });
+
+  for (const lane of lanes.values()) {
+    lane.sort((a, b) => b.i - a.i); // highest priority (last in the array) resolves first
+    const claimed = []; // [start, end) of every note already given its room in this lane
+    for (const { nt } of lane) {
+      nt.hidden = claimed.some(([s, e]) => nt.start >= s && nt.start < e);
+      if (nt.hidden) continue; // buried - claims nothing, so it can't clip anyone either
+      let end = nt.start + nt.full;
+      for (const [s] of claimed) if (s > nt.start && s < end) end = s;
+      nt.len = Math.max(1, end - nt.start);
+      claimed.push([nt.start, nt.start + nt.len]);
+    }
+  }
+  return notes;
+}
+
+/**
  * Convert a drawn roll to the equivalent mini-notation, in the same multi-line `<…>*grid` form the
  * MIDI recorder writes: `len` cells (one per grid column) between `<` and `>`, multiplied by `grid`,
  * so the whole thing loops every `len` grid-th notes. Each cell is a rest `~`, a note, or a chord

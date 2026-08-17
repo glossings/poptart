@@ -484,11 +484,17 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               drag the right edge to resize, <strong>cmd-drag</strong> up/down to set velocity (or
               flip the <code>vel</code>/<code>prob</code> toggle to set per-note probability, which
               becomes a <code>?</code> degrade). <strong>cmd-D</strong> duplicates, arrow keys nudge
-              (shift = octave / bar), delete removes, double-click erases one. Overlapping notes play
-              as chords; the <strong>grid</strong> and <strong>len</strong> fields (or dragging the
+              (<strong>shift</strong> + up/down = octave, <strong>shift</strong> + right/left lengthen
+              and shorten), delete removes, double-click erases one. Drop a note on top of one
+              already sounding at that pitch and the note on top keeps its length while the one
+              underneath gives way — cut short at the new note's onset, or hidden if it was landed
+              on square, the way Live does it. Nothing is really lost: move the note on top away and
+              whatever was under it comes straight back. Notes at different pitches
+              still play as chords; the <strong>grid</strong> and <strong>len</strong> fields (or dragging the
               top loop bar) size it; <strong>cmd −/+</strong> zoom; <strong>🎧</strong> auditions each
               note through the track's synth; and <strong>→♪</strong> converts the whole roll to the
-              equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation.
+              equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation. Clicking anywhere
+              outside the panel closes it (so does <strong>Escape</strong>, or <strong>✕</strong>).
             </p>
             <p style="margin:0 0 8px">
               <strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> step back and forward through the
