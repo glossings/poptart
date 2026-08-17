@@ -32,6 +32,41 @@ test('continuation lines stay with their block', () => {
   assert.match(blocks[0].code, /\.s\("sine"\)/);
 });
 
+test('a label whose expression starts on the next line still owns it', () => {
+  // `pluck:` alone is a labeled statement waiting for its statement - the indented pattern below
+  // is that statement, however far down the commented-out lines push it. Splitting them apart
+  // left the pluck block with no code at all (so it vanished, taking its `_`/`S` with it) and the
+  // pattern in an anonymous block of its own.
+  const src = ['pluck:', '  // pianoroll("a")', '  pianoroll("b")', '    .gain(1)', 'lead: n("7")'].join('\n');
+  const blocks = splitLabeledBlocks(src);
+  assert.deepEqual(blocks.map((b) => b.label), ['pluck', 'lead']);
+  assert.match(blocks[0].code, /pianoroll\("b"\)/);
+  assert.match(blocks[0].code, /\.gain\(1\)/);
+  assert.equal(blocks[0].start, 0, 'the label line belongs to the block, so it greys out with it');
+});
+
+test('mute and solo markers work on a label that stands on its own line', () => {
+  const src = ['_bass:', '  n("0")', 'Slead:', '  n("7")'].join('\n');
+  const blocks = splitLabeledBlocks(src);
+  assert.deepEqual(blocks.map((b) => [b.label, b.muted, b.soloed]), [
+    ['bass', true, false],
+    ['lead', false, true],
+  ]);
+});
+
+test('a bare label with no body at all is not a block', () => {
+  assert.deepEqual(labels(['bass: n("0")', 'lead:'].join('\n')), ['bass']);
+  // ...and a label that only ever gets another label is left behind, not handed the block below.
+  assert.deepEqual(labels(['pluck:', 'lead: n("7")'].join('\n')), ['lead']);
+});
+
+test('an unlabeled statement after a labeled block is still its own block', () => {
+  // Only a label *waiting* for its body adopts an un-indented line; a block that already has its
+  // expression leaves the next column-0 statement alone.
+  const src = ['bass: n("0")', 'Signal.prototype.co = () => 1'].join('\n');
+  assert.deepEqual(labels(src), ['bass', '$1']);
+});
+
 test('a label inside a block comment is comment text, not a block', () => {
   const src = ['/*', '', '$: broken?', '', '*/', 'bass: n("0")'].join('\n');
   assert.deepEqual(labels(src), ['$1', 'bass']);

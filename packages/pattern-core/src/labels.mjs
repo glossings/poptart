@@ -16,6 +16,11 @@
 // buffer, between tracks, not just at the top - see `continuesBlock` for how continuation is
 // told apart from a fresh statement without a full JS parse.
 //
+// A label's expression may start on a line *below* it - `pluck:` on its own, the pattern
+// indented underneath - which is what JS means by a labeled statement anyway. Until that
+// expression turns up, the label is still waiting for its body, so the next line of code joins
+// it however it's indented; see `awaitingBody`.
+//
 // Kept dependency-free on purpose: the browser imports this file directly (served as ESM by
 // web-app/server.js) to know block boundaries and muted regions for playback highlighting.
 
@@ -121,6 +126,7 @@ export function splitLabeledBlocks(source) {
   let state = null; // what `current`'s text so far has left open (see scan)
   let offset = 0;
   let anonCount = 0;
+  let awaitingBody = false; // `current` is a label whose expression hasn't appeared yet
 
   const push = () => {
     if (current) {
@@ -145,11 +151,13 @@ export function splitLabeledBlocks(source) {
         end: offset,
       };
       state = scan(newScan(), current.code);
-    } else if (current && continuesBlock(state, line)) {
+      awaitingBody = !hasCode(current.code);
+    } else if (current && (continuesBlock(state, line) || (awaitingBody && hasCode(line)))) {
       // Part of the current block's still-open expression (a chain, a brace body, a multi-line
-      // template) - stays with it.
+      // template), or the body a bare `name:` line is still waiting for - stays with it either way.
       current.code += '\n' + line;
       scan(state, '\n' + line);
+      if (hasCode(line)) awaitingBody = false;
     } else if (hasCode(line)) {
       // A column-0 statement that isn't a label (or the first code before any label): its own
       // anonymous block. A pattern here plays; anything else (a `Signal.prototype` extension, a
@@ -157,6 +165,7 @@ export function splitLabeledBlocks(source) {
       push();
       current = { label: `$${++anonCount}`, muted: false, soloed: false, code: line, start: offset, end: offset };
       state = scan(newScan(), line);
+      awaitingBody = false;
     } else if (current) {
       // A blank or comment-only line that isn't continuing anything - keep it with the current
       // block so line offsets stay aligned; it doesn't start a block of its own.
