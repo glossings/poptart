@@ -1832,7 +1832,10 @@ function initLfoCanvas() {
 // duplicates, cmd-Z / cmd-shift-Z walk the roll's own undo history. Arrow keys nudge the
 // selection (shift-up/down = octave, shift-right/left lengthen/shorten), delete removes
 // it, double-click erases one, and 0 mutes it - greyed out and silent, still there to switch back
-// on with another 0 (Live's deactivate). A note dropped on one already sounding at that pitch keeps its own
+// on with another 0 (Live's deactivate). A value lane along the bottom shows every note's velocity
+// or probability (the vel/prob toggle, also reachable from the lane's own gutter label) as an
+// Ableton-style marker - a dot at the onset, a line running right for the duration, dashed for
+// probability - which drags up and down, whole selection at once. A note dropped on one already sounding at that pitch keeps its own
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
 // gets everything back the moment the note on top moves away (see prClipOverlaps). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
@@ -1861,7 +1864,9 @@ const prCloseBtn = document.getElementById('pianorollClose');
 const PR_W = 660; // logical canvas size (backing store is scaled by devicePixelRatio for crispness)
 const PR_TOPBAR = 16; // loop-ruler strip along the top (drag it to set the loop length)
 const PR_GRIDH = 384; // piano-grid height below the ruler
-const PR_CH = PR_TOPBAR + PR_GRIDH; // full canvas height
+const PR_LANEH = 64; // value lane below the grid (per-note velocity / probability markers)
+const PR_CH = PR_TOPBAR + PR_GRIDH + PR_LANEH; // full canvas height
+const PR_LANE_PAD = 5; // lane inset above 1.0 / below 0.0, so end-stop markers stay visible
 const PR_ROWS = 24; // visible semitone rows (2 octaves)
 const PR_GUTTER = 54; // left piano-keyboard gutter, px
 const PR_DEFAULT_TOP = 72; // top row when a fresh/empty roll opens (c5 = 60 here, so 72 = c6)
@@ -2250,7 +2255,7 @@ function prMetrics() {
   // Clamp the pitch window the same way scrollCells is clamped, so toggling fold (or deleting the
   // notes that were holding a lane open) can't leave the view parked past the end of the axis.
   prState.pitchTop = Math.max(Math.min(PR_ROWS - 1, laneMax), Math.min(laneMax, prState.pitchTop));
-  return { W: PR_W, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, gridW, cols, cellW, rowH, visibleCells, maxScroll, scroll, lanes, laneOf, laneMax, bottomPos: prState.pitchTop - PR_ROWS };
+  return { W: PR_W, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, laneTop: PR_TOPBAR + PR_GRIDH, laneH: PR_LANEH, gridW, cols, cellW, rowH, visibleCells, maxScroll, scroll, lanes, laneOf, laneMax, bottomPos: prState.pitchTop - PR_ROWS };
 }
 
 const prCellToX = (cell, m) => PR_GUTTER + (cell - m.scroll) * m.cellW;
@@ -2303,15 +2308,15 @@ function prRoundRect(ctx, x, y, w, h, r) {
 // off the note names. Black and white keys both take the tint, over their own base colour, so
 // the piano still reads as a piano underneath.
 function drawPianoKeys(ctx, col, m, info) {
-  const { H, gridTop, rowH } = m;
+  const { H, gridTop, rowH, laneTop } = m;
   const accent = col('--accent');
   ctx.textBaseline = 'middle';
   ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.fillStyle = '#ececed';
-  ctx.fillRect(0, gridTop, PR_GUTTER, H - gridTop);
+  ctx.fillRect(0, gridTop, PR_GUTTER, laneTop - gridTop);
 
-  ctx.save(); // clip keys/labels to the grid area so partial edge lanes don't spill into the ruler
-  ctx.beginPath(); ctx.rect(0, gridTop, PR_GUTTER, H - gridTop); ctx.clip();
+  ctx.save(); // clip keys/labels to the grid area so partial edge lanes don't spill into the ruler or the value lane
+  ctx.beginPath(); ctx.rect(0, gridTop, PR_GUTTER, laneTop - gridTop); ctx.clip();
   const topP = Math.ceil(prState.pitchTop);
   const botP = Math.floor(prState.pitchTop - PR_ROWS) - 1;
 
@@ -2402,6 +2407,108 @@ function drawLoopBar(ctx, col, m) {
   return loopEndX;
 }
 
+// --- value lane ---
+// Ableton's velocity/chance editor, along the bottom: every note gets a marker at its value's
+// height - a dot at its onset with a line running right for its duration, drawn dashed when the
+// lane is showing probability (Live's chance style). Drag a marker up or down to set the value; a
+// marker in the selection drags the whole selection together, keeping their differences. The label
+// in the lane's gutter names the channel on show and clicks through to the same vel/prob switch as
+// the header button.
+
+/** Which note channel the lane (and cmd-drag) is editing right now. */
+const prLaneKey = () => (prCmdMode === 'prob' ? 'prob' : 'vel');
+
+/** value (0..1) -> lane y, inset so the end-stop dots at 0 and 1 stay fully visible. */
+const prLaneY = (v, m) => m.laneTop + PR_LANE_PAD + (1 - v) * (m.laneH - 2 * PR_LANE_PAD);
+
+// The note whose lane column contains px - grabbing anywhere under a note works, like Live. When
+// several share the column (a chord), the marker nearest the pointer wins; ties go to the topmost
+// note, matching the grid's hit order.
+function prLaneNoteAt(px, py, m) {
+  const key = prLaneKey();
+  let best = null, bestDy = Infinity;
+  for (let i = prState.notes.length - 1; i >= 0; i--) {
+    const nt = prState.notes[i];
+    if (nt.hidden) continue;
+    if (px < prCellToX(nt.start, m) - 4 || px >= prCellToX(nt.start + nt.len, m)) continue;
+    const dy = Math.abs(prLaneY(nt[key], m) - py);
+    if (dy < bestDy) { bestDy = dy; best = nt; }
+  }
+  return best;
+}
+
+function drawValueLane(ctx, col, m) {
+  const { W, laneTop, laneH } = m;
+  const accent = col('--accent');
+  const key = prLaneKey();
+  ctx.fillStyle = col('--bg');
+  ctx.fillRect(PR_GUTTER, laneTop, W - PR_GUTTER, laneH);
+
+  // bar lines carry on through the lane, so the markers stay locatable in time
+  const c0 = Math.max(0, Math.floor(m.scroll));
+  const c1 = Math.min(m.cols, Math.ceil(m.scroll + m.visibleCells));
+  for (let c = Math.ceil(c0 / prState.grid) * prState.grid; c <= c1; c += prState.grid) {
+    const x = prCellToX(c, m);
+    if (x < PR_GUTTER - 0.5 || x > W + 0.5) continue;
+    ctx.strokeStyle = col('--border');
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, laneTop); ctx.lineTo(x, laneTop + laneH); ctx.stroke();
+  }
+  // dim past the loop end, matching the grid above
+  const dimX = Math.max(PR_GUTTER, prCellToX(prState.len, m));
+  if (dimX < W) {
+    ctx.fillStyle = 'rgba(120,120,130,0.22)';
+    ctx.fillRect(dimX, laneTop, W - dimX, laneH);
+  }
+
+  // markers - selected ones drawn last so a chord's dragged marker stays visible on top
+  const selCol = col('--text');
+  const muteCol = col('--text-dim');
+  const marker = (nt) => {
+    const x = prCellToX(nt.start, m);
+    const x2 = prCellToX(nt.start + nt.len, m);
+    if (x2 <= PR_GUTTER || x >= W) return;
+    const y = prLaneY(nt[key], m);
+    const selected = prState.sel.has(nt);
+    ctx.strokeStyle = ctx.fillStyle = nt.mute ? muteCol : selected ? selCol : accent;
+    ctx.globalAlpha = nt.mute ? 0.35 : 0.9;
+    ctx.lineWidth = selected ? 2 : 1.4;
+    ctx.setLineDash(key === 'prob' ? [2, 3] : []);
+    ctx.beginPath(); ctx.moveTo(Math.max(PR_GUTTER, x) + 1, y); ctx.lineTo(Math.min(W, x2) - 1, y); ctx.stroke();
+    ctx.setLineDash([]);
+    if (x >= PR_GUTTER - 0.5) { ctx.beginPath(); ctx.arc(x + 1, y, selected ? 3.5 : 3, 0, Math.PI * 2); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  };
+  const live = prLiveNotes(prState.notes);
+  for (const nt of live) if (!prState.sel.has(nt)) marker(nt);
+  for (const nt of live) if (prState.sel.has(nt)) marker(nt);
+
+  // live readout on the marker being dragged, so the number lands where the eye already is
+  const dragNt = prState._laneDrag;
+  if (dragNt && !dragNt.hidden) {
+    const x = prCellToX(dragNt.start, m);
+    const y = prLaneY(dragNt[key], m);
+    ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = col('--text');
+    ctx.fillText(String(Math.round(dragNt[key] * 100) / 100), Math.max(PR_GUTTER + 3, x + 7), Math.min(laneTop + laneH - 6, Math.max(laneTop + 7, y - 9)));
+  }
+
+  // gutter: the channel on show; clicking it flips to the other one (the header button's switch)
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, laneTop, PR_GUTTER, laneH);
+  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = accent;
+  ctx.fillText(key, PR_GUTTER / 2, laneTop + laneH / 2);
+
+  ctx.strokeStyle = col('--border-strong');
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, laneTop + 0.5); ctx.lineTo(W, laneTop + 0.5); ctx.stroke();
+}
+
 function drawPianoroll() {
   if (!prState || !pianorollMod) return;
   const css = getComputedStyle(document.documentElement);
@@ -2409,7 +2516,7 @@ function drawPianoroll() {
   const ctx = prCanvas.getContext('2d');
   ctx.setTransform(prCanvas._dpr || 1, 0, 0, prCanvas._dpr || 1, 0, 0);
   const m = prMetrics();
-  const { W, H, gridTop, gridH, rowH } = m;
+  const { W, H, gridTop, gridH, rowH, laneTop } = m;
   ctx.clearRect(0, 0, W, H);
 
   // grid background + per-note lanes. Iterating integer lanes (not fixed rows) lets a fractional
@@ -2429,7 +2536,7 @@ function drawPianoroll() {
     const M = prMidiOf(p, m);
     const rank = prScaleRank(M, info);
     const y = prPosToY(p, m);
-    const y0 = Math.max(gridTop, y), y1 = Math.min(H, y + rowH);
+    const y0 = Math.max(gridTop, y), y1 = Math.min(laneTop, y + rowH);
     if (y1 > y0) {
       // In key: an accent wash, stronger on the tonic. Out of key (or a black key with no scale
       // set): the same dim the roll has always used.
@@ -2443,7 +2550,7 @@ function drawPianoroll() {
         ctx.fillRect(PR_GUTTER, y0, W - PR_GUTTER, y1 - y0);
       }
     }
-    if (y >= gridTop - 0.5 && y <= H + 0.5) {
+    if (y >= gridTop - 0.5 && y <= laneTop + 0.5) {
       ctx.strokeStyle = col('--border');
       // heavier at each octave boundary - the tonic's when there's a scale, otherwise each C
       ctx.lineWidth = (info ? rank === 2 : M % 12 === 0) ? 1.2 : 0.5;
@@ -2459,7 +2566,7 @@ function drawPianoroll() {
     if (x < PR_GUTTER - 0.5 || x > W + 0.5) continue;
     ctx.strokeStyle = c % prState.grid === 0 ? col('--border-strong') : col('--border');
     ctx.lineWidth = c % prState.grid === 0 ? 1.4 : c % beat === 0 ? 1.1 : 0.5;
-    ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, laneTop); ctx.stroke();
   }
   // dim the region past the loop end (cells >= len are outside the loop)
   const dimX = prCellToX(prState.len, m);
@@ -2508,6 +2615,8 @@ function drawPianoroll() {
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
   }
 
+  drawValueLane(ctx, col, m);
+
   // playhead: sweeps the loop (position = absolute cell mod len) while the transport runs
   prPlayheadOn = false;
   if (!transport.paused) {
@@ -2542,6 +2651,10 @@ function prScrollTo(notes) {
 // Which cursor the pointer should show at (px,py), given whether a velocity/prob modifier is held.
 function prCursorFor(px, py, m, velMod) {
   if (py < PR_TOPBAR) return px >= PR_GUTTER ? 'ew-resize' : 'default'; // loop ruler (drag its end)
+  if (py >= m.laneTop) { // value lane: markers drag up/down, the gutter label is the vel/prob switch
+    if (px < PR_GUTTER) return 'pointer';
+    return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
+  }
   if (px < PR_GUTTER) return 'pointer'; // over the piano keyboard
   const cell = prCellAt(px, m);
   const emptyCursor = prTool === 'draw' ? CUR_PENCIL : 'crosshair'; // pencil draws, arrow marquees
@@ -2650,7 +2763,7 @@ function initPianorollCanvas() {
   prCanvas.style.height = PR_CH + 'px';
   prCanvas.tabIndex = 0; // focusable, so arrow keys / delete / ctrl-a reach it
 
-  let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'marquee'|'loop'|'audition', ... }
+  let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'lane'|'marquee'|'loop'|'audition', ... }
   const snapshotPos = () => [...prState.sel].map((n) => ({ n, start: n.start, midi: n.midi }));
   const snapshotLen = () => [...prState.sel].map((n) => ({ n, len: n.len }));
   // Raise the dragged notes over whatever they land on - but only once the drag has actually moved
@@ -2658,7 +2771,7 @@ function initPianorollCanvas() {
   const raiseOnce = (d) => { if (!d.raised) { d.raised = true; prTouch(prState.sel); } };
   const setCursor = (c) => { if (prCanvas.style.cursor !== c) prCanvas.style.cursor = c; };
   const dragCursor = (d) =>
-    ({ vel: CUR_UPDOWN, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', loop: 'ew-resize', audition: 'pointer' }[d.kind] ?? 'default');
+    ({ vel: CUR_UPDOWN, lane: CUR_UPDOWN, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', loop: 'ew-resize', audition: 'pointer' }[d.kind] ?? 'default');
 
   prCanvas.addEventListener('contextmenu', (e) => { if (prState) e.preventDefault(); }); // ctrl-drag (mac) = velocity, not a menu
 
@@ -2671,6 +2784,21 @@ function initPianorollCanvas() {
     prPointer = { px, py };
     if (py < PR_TOPBAR) { // loop ruler - drag to set the loop length (written on pointerup)
       if (px >= PR_GUTTER) { drag = { kind: 'loop' }; prState._dragCols = m.cols; prState.len = Math.max(1, Math.round(prCellFloat(px, m))); prLenInput.value = prState.len; drawPianoroll(); }
+      return;
+    }
+    if (py >= m.laneTop) { // value lane - drag a marker to set velocity/probability (see drawValueLane)
+      if (px < PR_GUTTER) { prCmdModeBtn.click(); return; } // the vel/prob label (the button redraws)
+      const nt = prLaneNoteAt(px, py, m);
+      if (!nt) { prState.sel = new Set(); drawPianoroll(); return; }
+      if (e.shiftKey) { // shift-click toggles selection, same as on the note itself
+        if (prState.sel.has(nt)) prState.sel.delete(nt); else prState.sel.add(nt);
+        drawPianoroll();
+        return;
+      }
+      if (!prState.sel.has(nt)) prState.sel = new Set([nt]);
+      drag = { kind: 'lane', lastPy: py };
+      prState._laneDrag = nt; // the marker the readout follows
+      drawPianoroll();
       return;
     }
     const pos = prPosAt(py, m);
@@ -2700,7 +2828,9 @@ function initPianorollCanvas() {
         prPreviewNotes([nt]);
       }
     } else if (prTool === 'select') {
-      // rubber-band select (shift keeps the existing selection as a base)
+      // rubber-band select (shift keeps the existing selection as a base). Without shift the click
+      // deselects right away, so a click that never becomes a drag still lands on empty space empty-handed.
+      if (!e.shiftKey) prState.sel = new Set();
       drag = { kind: 'marquee', x0: px, y0: py, base: e.shiftKey ? new Set(prState.sel) : new Set() };
       prState.marquee = { x: px, y: py, w: 0, h: 0 };
     } else if (cell < prState.len) { // draw a note (only inside the loop)
@@ -2753,9 +2883,16 @@ function initPianorollCanvas() {
         if (prCmdMode === 'prob') n.prob = Math.min(1, Math.max(0, n.prob - d));
         else n.vel = Math.min(1, Math.max(0, n.vel - d));
       }
+    } else if (drag.kind === 'lane') {
+      // The lane's full height is the full 0..1 range; the delta is relative, so a multi-note drag
+      // keeps the selection's differences until a note reaches an end stop.
+      const d = (py - drag.lastPy) / (m.laneH - 2 * PR_LANE_PAD);
+      drag.lastPy = py;
+      const key = prLaneKey();
+      for (const n of prState.sel) n[key] = Math.min(1, Math.max(0, n[key] - d));
     } else if (drag.kind === 'marquee') {
       const xa = Math.min(Math.max(px, PR_GUTTER), PR_W), xb = Math.min(Math.max(drag.x0, PR_GUTTER), PR_W);
-      const ya = Math.min(Math.max(py, PR_TOPBAR), PR_CH), yb = Math.min(Math.max(drag.y0, PR_TOPBAR), PR_CH);
+      const ya = Math.min(Math.max(py, PR_TOPBAR), m.laneTop), yb = Math.min(Math.max(drag.y0, PR_TOPBAR), m.laneTop);
       const rx = Math.min(xa, xb), rw = Math.abs(xa - xb), ry = Math.min(ya, yb), rh = Math.abs(ya - yb);
       prState.marquee = { x: rx, y: ry, w: rw, h: rh };
       const c0 = prCellFloat(rx, m), c1 = prCellFloat(rx + rw, m);
@@ -2775,6 +2912,7 @@ function initPianorollCanvas() {
         writePianorollCall();
       }
       prState._dragCols = null; // unfreeze the loop-drag column width
+      prState._laneDrag = null; // the lane readout only follows an active drag
     }
     prPreviewOff();
     drag = null;
@@ -2786,6 +2924,7 @@ function initPianorollCanvas() {
     if (!prState) return;
     const m = prMetrics();
     const { px, py } = prCanvasPos(e);
+    if (py >= m.laneTop) return; // the value lane edits values, never the notes themselves
     const cell = prCellAt(px, m);
     if (cell == null) return;
     const hit = prNoteAt(cell, prMidiAt(py, m));
@@ -2960,12 +3099,13 @@ function initPianorollEditor() {
   // path must leave the caret wherever it was.
   prToolBtn.addEventListener('click', () => { toggleTool(); prRefocus(); });
 
-  const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `cmd-drag sets ${prCmdMode === 'vel' ? 'velocity' : 'probability'} — click to switch`; };
+  const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `the value lane and cmd-drag set ${prCmdMode === 'vel' ? 'velocity' : 'probability'} — click to switch`; };
   reflectCmdMode();
   prCmdModeBtn.addEventListener('click', () => {
     prCmdMode = prCmdMode === 'vel' ? 'prob' : 'vel';
     localStorage.setItem('poptartPianorollCmd', prCmdMode);
     reflectCmdMode();
+    if (prState) drawPianoroll(); // the value lane shows the newly chosen channel
     prRefocus();
   });
 
