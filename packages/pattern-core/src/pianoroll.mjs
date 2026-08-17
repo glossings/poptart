@@ -4,7 +4,11 @@
 // notes the scheduler plays - and depends on nothing outside this package (notes.mjs, its one
 // import, is served the same way and is itself dependency-free).
 //
-// Format: space-separated note events `midi,start,len[,vel[,prob]]`, e.g. "60,0,4 64,0,4,0.7 67,8,8".
+// Format: space-separated note events `[!]midi,start,len[,vel[,prob]]`, e.g. "60,0,4 64,0,4,0.7 67,8,8".
+//   !     - optional MUTE marker: the note is deactivated (Live's `0` key). It stays in the roll -
+//           drawn greyed out, still movable, still holding its lane against the overlap rule - but
+//           it never sounds and it isn't converted to mini-notation. Unmuting it is one keypress,
+//           which is the point of keeping it in the string rather than deleting it.
 //   midi  - MIDI note number, 0..127 (this package's c5 = 60 convention)
 //   start - onset cell, integer 0..steps-1 (a cell is one column of the grid)
 //   len   - length in cells, integer >= 1 (may run past the last cell: the note rings on, like a
@@ -33,7 +37,8 @@ export function parsePianoRoll(str) {
   const trimmed = String(str).trim();
   if (!trimmed) return [];
   return trimmed.split(/\s+/).map((tok) => {
-    const parts = tok.split(',');
+    const mute = tok.startsWith('!');
+    const parts = (mute ? tok.slice(1) : tok).split(',');
     if (parts.length < 3 || parts.length > 5) {
       throw new Error(`[pianoroll] bad note "${tok}" (want "midi,start,len" .. "midi,start,len,vel,prob")`);
     }
@@ -47,6 +52,7 @@ export function parsePianoRoll(str) {
       len: Math.max(1, Math.round(len)),
       vel: clamp01(vel),
       prob: clamp01(prob),
+      mute,
     };
   });
 }
@@ -56,7 +62,7 @@ export function serializePianoRoll(notes) {
     // Left-to-right, low-to-high: stable output so re-serializing an unchanged roll is a no-op.
     .sort((a, b) => a.start - b.start || a.midi - b.midi)
     .map((nt) => {
-      let s = `${Math.round(nt.midi)},${Math.round(nt.start)},${Math.round(nt.len)}`;
+      let s = `${nt.mute ? '!' : ''}${Math.round(nt.midi)},${Math.round(nt.start)},${Math.round(nt.len)}`;
       // vel holds prob's field slot, so a sub-unity prob forces vel to be written even when it's 1.
       if (nt.prob < 1) s += `,${fmt(nt.vel)},${fmt(nt.prob)}`;
       else if (nt.vel < 1) s += `,${fmt(nt.vel)}`;
@@ -86,6 +92,11 @@ export function serializePianoRoll(notes) {
  *
  * Notes are updated IN PLACE and the same array comes back, hidden ones included: a caller keeps
  * them so they can return, and filters `hidden` out when it draws, hit-tests or serializes.
+ *
+ * A MUTED note takes part exactly like any other: it is still drawn, so it still owns its cells and
+ * still clips what runs into it. Muting is a switch on one note, not an edit to the notes around it
+ * - unmuting has to put the roll back the way it was, and it can't do that if the lane rearranged
+ * itself underneath while the note was off.
  */
 export function clipOverlaps(notes) {
   for (const nt of notes) if (!Number.isFinite(nt.full)) nt.full = nt.len;
@@ -130,8 +141,12 @@ export function clipOverlaps(notes) {
  * scale's root at or below the lowest note drawn, so no degree comes out negative. Degrees can only
  * name notes in the key, so an out-of-key one is written as its nearest degree (see midiToDegree) -
  * the one lossy part of this conversion.
+ *
+ * Muted notes are left out entirely: this writes down what the roll PLAYS, and mini-notation has no
+ * spelling for a note that's there but switched off.
  */
-export function pianoRollToMini(notes, { grid, len, indent = '', scale = null } = {}) {
+export function pianoRollToMini(allNotes, { grid, len, indent = '', scale = null } = {}) {
+  const notes = allNotes.filter((nt) => !nt.mute);
   const g = normalizePianoRollSteps(grid);
   const total = Math.max(1, Math.round(len ?? g));
   const onsets = Array.from({ length: total }, () => []);

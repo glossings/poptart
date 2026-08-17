@@ -343,7 +343,7 @@ export function pickGrid(starts, { candidates = GRID_CANDIDATES, tolerance = GRI
  *   timing (the fine grid above).
  * @returns {{ entries: Array<{ name: string|null, drums: boolean, grid: number, len: number,
  *   quantized: boolean, notes: Array<{midi: number, start: number, len: number, vel: number,
- *   prob: number}>, code: string }> }} - `quantized` is false for a lane that fit no grid and was
+ *   prob: number, mute: boolean}>, code: string }> }} - `quantized` is false for a lane that fit no grid and was
  *   drawn on the fine one, which is worth saying out loud to whoever dropped the file.
  */
 export function midiLanesToPianoroll({ lanes, cycles }, { grid = 'auto' } = {}) {
@@ -380,7 +380,7 @@ function laneToRollNotes(events, R, len) {
       existing.len = Math.max(existing.len, length);
       continue;
     }
-    const note = { midi, start, len: length, vel: ev.vel, prob: 1 };
+    const note = { midi, start, len: length, vel: ev.vel, prob: 1, mute: false }; // an imported note always plays
     byCell.set(key, note);
     notes.push(note);
   }

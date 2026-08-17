@@ -21,16 +21,28 @@ import { Scheduler } from './src/scheduler.mjs';
 test('parsePianoRoll: fields, defaults, and empty input', () => {
   assert.deepEqual(parsePianoRoll(''), []);
   assert.deepEqual(parsePianoRoll('   '), []);
-  assert.deepEqual(parsePianoRoll('60,0,4'), [{ midi: 60, start: 0, len: 4, vel: 1, prob: 1 }]);
-  assert.deepEqual(parsePianoRoll('60,0,4,0.5'), [{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 1 }]);
-  assert.deepEqual(parsePianoRoll('60,0,4,0.5,0.25'), [{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 0.25 }]);
+  assert.deepEqual(parsePianoRoll('60,0,4'), [{ midi: 60, start: 0, len: 4, vel: 1, prob: 1, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4,0.5'), [{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 1, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4,0.5,0.25'), [{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 0.25, mute: false }]);
 });
 
 test('parsePianoRoll: clamps out-of-range fields, rejects malformed tokens', () => {
-  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, start: 0, len: 1, vel: 1, prob: 1 }]);
+  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, start: 0, len: 1, vel: 1, prob: 1, mute: false }]);
   assert.throws(() => parsePianoRoll('60,0'), /bad note/);
   assert.throws(() => parsePianoRoll('60,0,4,0.5,0.5,7'), /bad note/);
   assert.throws(() => parsePianoRoll('c,0,4'), /non-numeric/);
+});
+
+// The `!` marker is the muted (Live-deactivated) note: still in the roll, never sounding.
+test('parsePianoRoll / serializePianoRoll: the ! mute marker round-trips', () => {
+  assert.deepEqual(parsePianoRoll('!60,0,4'), [{ midi: 60, start: 0, len: 4, vel: 1, prob: 1, mute: true }]);
+  // it rides in front of every other field, and the rest of the token parses exactly as it would
+  assert.deepEqual(parsePianoRoll('!60,0,4,0.5,0.25'), [{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 0.25, mute: true }]);
+  assert.equal(serializePianoRoll([{ midi: 60, start: 0, len: 4, vel: 1, prob: 1, mute: true }]), '!60,0,4');
+  assert.equal(serializePianoRoll([{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 1, mute: true }]), '!60,0,4,0.5');
+  const str = '!60,0,4 64,0,4,0.5 !67,8,8,1,0.3';
+  assert.equal(serializePianoRoll(parsePianoRoll(str)), str);
+  assert.throws(() => parsePianoRoll('!60,0'), /bad note/);
 });
 
 test('serializePianoRoll: omits defaults, prob forces the vel slot, sorts, round-trips', () => {
@@ -120,6 +132,19 @@ test('clipOverlaps: a parsed roll adopts its written lengths, and re-clipping is
   assert.equal(sounding(clipOverlaps(roll)), '60,0,4 60,4,1');
   assert.equal(sounding(clipOverlaps(clipOverlaps(roll))), '60,0,4 60,4,1');
   assert.deepEqual(roll.map((n) => n.full), [4, 1]);
+});
+
+// Muting is a switch on one note, not an edit to the ones around it: the lane has to look exactly
+// the same afterwards, or unmuting couldn't put it back.
+test('clipOverlaps: a muted note still holds its lane', () => {
+  const long = nt(60, 0, 8);
+  const short = nt(60, 4, 1, { mute: true });
+  clipOverlaps([long, short]);
+  assert.equal(long.len, 4); // clipped by the muted note, exactly as by a sounding one
+  const buried = nt(60, 4, 2);
+  const cover = nt(60, 3, 6, { mute: true });
+  clipOverlaps([buried, cover]);
+  assert.equal(buried.hidden, true);
 });
 
 test('pianoRollToMini: multi-line <len cells>*grid, clip lengths, chords', () => {
@@ -231,6 +256,33 @@ test('pianoroll(): overlapping notes stay distinct steps (polyphony)', () => {
   assert.equal(steps.length, 3);
   assert.deepEqual(steps.map((s) => s.value).sort((a, b) => a - b), [60, 64, 67]);
   assert.ok(steps.every((s) => s.start === 0 && s.end === 0.25));
+});
+
+// A muted note is drawn but switched off: it never reaches the step grid, and the notes around it
+// play as if it weren't there. Unmuting is only ever a `!` coming off the token.
+test('pianoroll(): a muted note is silent, and the rest of the roll is unchanged', () => {
+  const steps = pianoroll('!60,0,4 64,0,4 67,8,8', { grid: 16, len: 16 }).stepsForCycle(0);
+  assert.deepEqual(steps.map((s) => s.value), [64, 67]);
+  // muting every note is silence, not an error - the panel can write this state
+  assert.deepEqual(pianoroll('!60,0,4 !64,0,4', { grid: 16, len: 16 }).stepsForCycle(0), []);
+  // and it plays identically to the same roll with the muted note simply removed
+  assert.deepEqual(
+    pianoroll('!60,0,4 64,0,4 67,8,8', { grid: 16, len: 16 }).stepsForCycle(2),
+    pianoroll('64,0,4 67,8,8', { grid: 16, len: 16 }).stepsForCycle(2),
+  );
+});
+
+// →♪ writes down what the roll PLAYS, and mini-notation has no spelling for a switched-off note.
+test('pianoRollToMini: muted notes are left out', () => {
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60,0,1 !64,1,1 67,2,1'), { grid: 16, len: 3 }),
+    'note(`<\n  60 ~ 67\n>*16`)',
+  );
+  // a muted note is also not a reason to emit the vel/clip fields, nor to pick the octave
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('!41,0,2,0.5 48,2,1'), { grid: 4, len: 4, scale: 'F minor' }),
+    'n(`<\n  ~ ~ 4 ~\n>*4`).sc(3)',
+  );
 });
 
 test('pianoroll(): probability gates a note deterministically per cycle', () => {

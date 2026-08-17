@@ -1782,7 +1782,8 @@ function initLfoCanvas() {
 // edge to resize, cmd-drag vertically to set velocity or probability (the vel/prob toggle), cmd-D
 // duplicates, cmd-Z / cmd-shift-Z walk the roll's own undo history. Arrow keys nudge the
 // selection (shift-up/down = octave, shift-right/left lengthen/shorten), delete removes
-// it, double-click erases one. A note dropped on one already sounding at that pitch keeps its own
+// it, double-click erases one, and 0 mutes it - greyed out and silent, still there to switch back
+// on with another 0 (Live's deactivate). A note dropped on one already sounding at that pitch keeps its own
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
 // gets everything back the moment the note on top moves away (see prClipOverlaps). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
@@ -1957,6 +1958,12 @@ function prPreviewOff() {
   if (prSounding == null) return;
   prPreviewSend(prSounding, false);
   prSounding = null;
+}
+// Audition the top note of a group being dragged or nudged. Muted notes are skipped: one is
+// switched off, and moving it around is no reason to hear it.
+function prPreviewNotes(notes) {
+  const live = notes.filter((n) => !n.mute);
+  if (live.length) prPreview(Math.max(...live.map((n) => n.midi)));
 }
 
 function parsePianorollCall(inner) {
@@ -2413,8 +2420,11 @@ function drawPianoroll() {
   }
 
   // notes: fill opacity encodes velocity; a dashed outline marks a sub-unity probability; selected
-  // notes get a bright solid outline. Rectangles are clipped to the grid when scrolled.
+  // notes get a bright solid outline. A muted note drops out of the accent entirely and is drawn in
+  // flat grey - it's still on the grid, and still selectable, but it reads as switched off.
+  // Rectangles are clipped to the grid when scrolled.
   const selCol = col('--text');
+  const muteCol = col('--text-dim');
   for (const nt of prLiveNotes(prState.notes)) {
     const pos = prPosOf(nt.midi, m);
     if (pos > prState.pitchTop + 1 || pos < m.bottomPos) continue; // +1: keep a partial top lane
@@ -2426,12 +2436,14 @@ function drawPianoroll() {
     const y = prMidiToY(nt.midi, m);
     const w = Math.max(2, dx2 - dx - 1);
     const selected = prState.sel.has(nt);
-    ctx.globalAlpha = 0.4 + 0.6 * nt.vel;
-    ctx.fillStyle = accent;
+    // Muted notes ignore velocity too - a fixed wash, since the loudness of a note that doesn't
+    // play is nothing to read off the grid.
+    ctx.globalAlpha = nt.mute ? 0.3 : 0.4 + 0.6 * nt.vel;
+    ctx.fillStyle = nt.mute ? muteCol : accent;
     prRoundRect(ctx, dx + 1, y + 1.5, w, rowH - 3, 3); ctx.fill();
     ctx.globalAlpha = 1;
     ctx.lineWidth = selected ? 2 : 1;
-    ctx.strokeStyle = selected ? selCol : accent;
+    ctx.strokeStyle = selected ? selCol : nt.mute ? muteCol : accent;
     ctx.setLineDash(nt.prob < 1 && !selected ? [3, 2] : []);
     prRoundRect(ctx, dx + 1, y + 1.5, w, rowH - 3, 3); ctx.stroke();
     ctx.setLineDash([]);
@@ -2516,6 +2528,30 @@ function prTouch(notes) {
   const raised = new Set(notes);
   if (!raised.size) return;
   prState.notes = [...prState.notes.filter((n) => !raised.has(n)), ...prState.notes.filter((n) => raised.has(n))];
+}
+
+// Live's `0`: switch notes off without deleting them. They stay on the grid greyed out - still
+// selectable, still draggable, still holding their lane against the overlap rule - and simply don't
+// sound, which is a `!` on their token in the code. One key does both directions: a group with any
+// note still playing is muted whole, and a group that's already all muted comes back on, so
+// tapping 0 twice over a phrase is exactly where you started.
+//
+// It acts on the selection, or - with nothing selected - on the note under the pointer, so the key
+// works the same whether you marquee'd a phrase or are just hovering one note with the pencil.
+function prToggleMute() {
+  let notes = [...prState.sel];
+  if (!notes.length) {
+    const m = prMetrics();
+    const cell = prCellAt(prPointer.px, m);
+    const hit = cell == null ? null : prNoteAt(cell, prMidiAt(prPointer.py, m));
+    if (hit == null) return;
+    notes = [prState.notes[hit]];
+  }
+  const mute = notes.some((n) => !n.mute);
+  for (const n of notes) n.mute = mute;
+  if (mute) prPreviewOff(); // a note that just went silent shouldn't be left ringing
+  writePianorollCall();
+  drawPianoroll();
 }
 
 // Duplicate the selection one block-length to the right (Ableton's cmd-D), selecting the copies.
@@ -2612,7 +2648,7 @@ function initPianorollCanvas() {
         drag = { kind: 'resize', grabCell: cell, orig: snapshotLen() };
       } else {
         drag = { kind: 'move', grabCell: cell, grabPos: pos, orig: snapshotPos() };
-        prPreview(nt.midi);
+        prPreviewNotes([nt]);
       }
     } else if (prTool === 'select') {
       // rubber-band select (shift keeps the existing selection as a base)
@@ -2620,7 +2656,7 @@ function initPianorollCanvas() {
       prState.marquee = { x: px, y: py, w: 0, h: 0 };
     } else if (cell < prState.len) { // draw a note (only inside the loop)
       if (!e.shiftKey) prState.sel = new Set();
-      const nt = { midi, start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1 };
+      const nt = { midi, start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1, mute: false };
       prState.notes.push(nt);
       prState.sel.add(nt);
       drag = { kind: 'create', note: nt };
@@ -2661,7 +2697,7 @@ function initPianorollCanvas() {
         o.n.midi = prMidiOf(prPosOf(o.midi, m) + dPos, m);
       }
       prClipOverlaps(); // notes it passes over give way, and come back behind it
-      if (drag.orig[0]) prPreview(drag.orig[0].n.midi);
+      if (drag.orig[0]) prPreviewNotes([drag.orig[0].n]);
     } else if (drag.kind === 'vel') {
       const d = (e.movementY ?? 0) * 0.01;
       for (const n of prState.sel) {
@@ -2711,7 +2747,7 @@ function initPianorollCanvas() {
       writePianorollCall();
       drawPianoroll();
     } else if (prTool === 'select' && cell < prState.len) { // double-click empty in the arrow tool draws a note
-      const nt = { midi: prMidiAt(py, m), start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1 };
+      const nt = { midi: prMidiAt(py, m), start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1, mute: false };
       prState.notes.push(nt);
       prState.sel = new Set([nt]);
       prClipOverlaps();
@@ -2764,6 +2800,9 @@ function initPianorollCanvas() {
     } else if (mod && (e.key === 'd' || e.key === 'D')) {
       e.preventDefault();
       prDuplicate();
+    } else if (e.key === '0' && !mod && !e.altKey) {
+      e.preventDefault();
+      prToggleMute();
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       if (!sel.length) return;
       e.preventDefault();
@@ -2789,7 +2828,7 @@ function initPianorollCanvas() {
           : prMidiOf(prPosOf(n.midi, m) + dir, m);
       }
       prScrollTo(sel);
-      prPreview(Math.max(...sel.map((n) => n.midi)));
+      prPreviewNotes(sel);
       prClipOverlaps();
       writePianorollCall();
       drawPianoroll();
@@ -2943,7 +2982,8 @@ function initPianorollEditor() {
     // Degrees can only name notes that are IN the key, so anything out of it lands on its nearest
     // neighbour - a real pitch change, and the one thing about this rewrite that isn't lossless.
     // Counted before the close, which drops the notes.
-    const off = scale ? prLiveNotes(prState.notes).filter((nt) => notesMod.quantizeToScale(nt.midi, scale) !== nt.midi).length : 0;
+    // Muted notes aren't written out at all, so they can't be moved by the rounding either.
+    const off = scale ? prLiveNotes(prState.notes).filter((nt) => !nt.mute && notesMod.quantizeToScale(nt.midi, scale) !== nt.midi).length : 0;
     prSuppressCursor = true;
     cm.replaceRange(expr, range.from, range.to);
     closePianorollEditor(); // the pianoroll() call is gone now

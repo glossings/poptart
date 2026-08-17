@@ -2746,6 +2746,9 @@ export function note(value) {
  * fraction of the time, like a `?` degrade), and overlapping notes play as chords. Holds absolute
  * MIDI notes, so it chains with .synth()/.scale()/.add()/etc. just like note().
  *
+ * A note written with a leading `!` - `"!60,0,4"` - is MUTED: the roll still shows it (greyed out,
+ * and pressing `0` over it switches it back on) but it doesn't sound.
+ *
  * A bare `pianoroll()` (or `pianoroll("")`) is a valid empty roll - silence - so typing the call to
  * open the editor and drawing into it never has to pass through an error state.
  */
@@ -2763,6 +2766,7 @@ export function pianoroll(str = '', opts = {}) {
   // independent yet a given pass replays identically).
   const byStart = new Map();
   notes.forEach((nt, i) => {
+    if (nt.mute) return; // deactivated in the roll (a `!` token) - drawn, but silent
     if (nt.start >= len) return; // outside the loop window - never sounds
     const list = byStart.get(nt.start) ?? [];
     list.push({ value: nt.midi, vel: nt.vel, dur: nt.len / grid, prob: nt.prob, seed: i + 1 });
