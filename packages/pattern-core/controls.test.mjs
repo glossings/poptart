@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, s, note, rand, speed, flip, begin, fit, i, sine } from './src/signal.mjs';
+import { n, s, note, rand, speed, flip, begin, fit, i, sine, vel, clip } from './src/signal.mjs';
 
 // What the scheduler would read off a sampler channel at a given cycle position.
 const cfgAt = (sig, key, cyclePos) => sig.sampler[key].sample(cyclePos, 1, cyclePos);
@@ -179,4 +179,80 @@ test('the reported pattern builds and reverses only the bars the condition picks
   // .ply("4") took its count from the pattern (a mini signal), not from a NaN coerced to 1.
   const counts = new Set(Array.from({ length: 16 }, (_, c) => track.stepsForCycle(c).length));
   assert.ok(counts.has(4), 'the plied bars have four events');
+});
+
+// ---------------------------------------------------------------------------------------------
+// A control at the HEAD of the chain (vel("1!4").s("bd")) - a channel plus a trigger grid
+// ---------------------------------------------------------------------------------------------
+
+// The grid + channel shape a head-position control has to produce, read the way the scheduler
+// reads it: one entry per event, with its velocity and its repitch note.
+const eventsOf = (sig) =>
+  sig.stepsForCycle(0).filter((x) => x.value != null).map((x) => ({ at: x.start, value: x.value, vel: x.vel, note: x.cfg?.note }));
+
+test('a head-position vel triggers the pattern and keeps its velocities', () => {
+  // The reported bug: the velocities were read as the pattern's own values, so each kick played at
+  // MIDI note 1 (23 semitones below native speed) with the velocity dropped.
+  const track = vel('1!4').s('bd');
+  assert.deepEqual(eventsOf(track), eventsOf(note('C2').vel('1!4').s('bd')), 'exactly s("bd").vel("1!4")');
+  assert.deepEqual(eventsOf(track), [
+    { at: 0, value: 'bd', vel: 1, note: 24 },
+    { at: 0.25, value: 'bd', vel: 1, note: 24 },
+    { at: 0.5, value: 'bd', vel: 1, note: 24 },
+    { at: 0.75, value: 'bd', vel: 1, note: 24 },
+  ]);
+  assert.equal(track.noteChannels.vel.sample(0, 1, 0), 1, 'and the channel is set, not just the steps');
+});
+
+test('a pitch after a head-position vel keeps both grids', () => {
+  // The second reported bug: .note() replaced the trigger grid and the velocities went with it,
+  // leaving one kick per bar instead of four.
+  const track = vel('1!4').note('C2').s('bd');
+  assert.deepEqual(eventsOf(track), eventsOf(note('C2').vel('1!4').s('bd')));
+  assert.equal(track.stepsForCycle(0).length, 4, 'four kicks, not one');
+  // An explicit pitch is the pitch that plays - the default only stands in when none is given.
+  assert.deepEqual(eventsOf(vel('1!4').note('C3').s('bd')).map((e) => e.note), [36, 36, 36, 36]);
+});
+
+test('a head-position control with no pitch plays at native speed', () => {
+  // 24 ("c2") is the note a sample plays back as recorded, the same default a note-less synth("X")
+  // gets - so a drum hit with no note is a drum hit, not a pitched-down one.
+  for (const track of [vel('1!4').s('bd'), vel(0.6).s('bd'), speed('2').s('bd'), clip('1 2').note('c2').s('bd')]) {
+    assert.deepEqual(new Set(eventsOf(track).map((e) => e.note)), new Set([24]));
+  }
+});
+
+test('a head-position sampler control lands on its channel, like the method form', () => {
+  assert.equal(cfgAt(speed('2').s('bd'), 'speed', 0), 2);
+  assert.equal(cfgAt(begin(0.5).s('bd'), 'begin', 0), 0.5);
+  assert.equal(cfgAt(i('3').s('bd'), 'index', 0), 3);
+  assert.equal(fit().s('breaks').sampler.fit, 'auto', 'bare fit() sets the auto mode, as .fit() does');
+  // A patterned control gives structure the same way .speed("1 -1") does.
+  const swept = speed('1 -1').s('bd');
+  assert.deepEqual(swept.stepsForCycle(0).map((x) => x.start), [0, 0.5]);
+  assert.equal(cfgAt(swept, 'speed', 0.75), -1);
+});
+
+test('a continuous head-position control gets one event per cycle', () => {
+  // vel(0.6) has no grid to trigger from, so it takes the whole-cycle note a note-less synth("X")
+  // takes and the channel is sampled at that onset.
+  const track = vel(0.6).s('bd');
+  assert.deepEqual(track.stepsForCycle(0).map((x) => [x.start, x.end]), [[0, 1]]);
+  assert.equal(track.noteChannels.vel.sample(0, 1, 0), 0.6);
+});
+
+test('rests in a head-position control stay rests', () => {
+  assert.deepEqual(eventsOf(vel('1 ~ 1 1').s('bd')).map((e) => e.at), [0, 0.5, 0.75]);
+});
+
+test('a head-position vel on a synth track plays the default note at those velocities', () => {
+  const track = vel('1 0.5').synth('Serum 2');
+  assert.equal(track.instrument, 'Serum 2');
+  assert.deepEqual(track.stepsForCycle(0).map((x) => [x.value, x.vel]), [[24, 1], [24, 0.5]]);
+});
+
+test('a control is still an operand, not a head - both readings stay available', () => {
+  // The tag means "this names a channel"; which channel it lands on is decided by where it appears.
+  assert.equal(cfgAt(s('bd').mul(speed('-1')), 'speed', 0), -1, 'as an operand it reaches into the pattern');
+  assert.equal(cfgAt(speed('-1').s('bd'), 'speed', 0), -1, 'at the head it sets its own');
 });

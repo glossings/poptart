@@ -445,6 +445,9 @@ export class Sig {
    * load, Ableton-style, so a shared/reloaded session sounds identical.
    */
   synth(pluginId, config) {
+    // vel("1 0.5").synth("X") plays the default note at those velocities, the same thing
+    // "1 0.5".as("vel").synth("X") means - not MIDI notes 1 and 0.5 (see _fromHeadCtl).
+    if (this.ctl) return this._fromHeadCtl((trigger) => trigger.synth(pluginId, config));
     return this._clone({
       instrument: pluginId,
       ...(config?.state ? { slotStates: { ...this.slotStates, 0: config.state } } : {}),
@@ -801,6 +804,33 @@ export class Sig {
     // The repitch channel keeps its note/degree kind, so a later .scale() still reads it right.
     if (spec.key === 'note') combined.pitchKind = current?.pitchKind ?? otherSig.pitchKind ?? 'note';
     return this._samplerOpt(ctl, spec.key, combined);
+  }
+
+  /**
+   * Consumes a control tag in HEAD position - `vel("1!4").s("bd")`, `speed("2").s("bd")`. A control
+   * names a CHANNEL and carries no pitch of its own, so its values must not become the pattern's
+   * own values: read as notes they'd play MIDI 1 instead of a kick at native speed, and the channel
+   * would be dropped entirely. The control's grid is the TRIGGER instead, at the default note, and
+   * its values go to the channel it named - so `vel("1!4").s("bd")` is exactly `s("bd").vel("1!4")`.
+   *
+   * `attach` adds the sound (.s()/.note()/.synth()) in between, because a sampler channel can only
+   * be set once the sampler exists; aimed at a synth track it still errors, as .speed() does.
+   */
+  _fromHeadCtl(attach) {
+    const { ctl, ctlAuto } = this;
+    // The channel takes the VALUES alone: no tag (one here would route the setter below straight
+    // back into this method) and no track metadata.
+    const values = bareSig(this);
+    // The trigger takes the grid, at the default note, keeping anything else already chained on -
+    // and dropping the tag, which no derived Sig carries. A control with no grid of its own
+    // (vel(0.6), speed(sine(…)), bare fit()) has nothing to trigger from, so it takes the
+    // one-note-per-cycle grid a note-less synth("X") takes and the channel is sampled at that
+    // onset; with a grid, its own steps are the trigger - rests included, like .as("vel").
+    const trigger = this.stepsForCycle
+      ? withPitchKind(this.mapValue(() => DEFAULT_SYNTH_NOTE), 'note')
+      : withPitchKind(note(DEFAULT_SYNTH_NOTE)._clone(this._meta()), 'note');
+    const out = attach(trigger);
+    return ctlAuto ? out[ctl]() : out[ctl](values);
   }
 
   add(x) { return this._binop('add', x, (a, b) => a + b, true); }
@@ -1618,6 +1648,9 @@ export class Sig {
   }
 
   _asSampler(method, value, kind, expected) {
+    // A control in head position - vel("1!4").s("bd") - is a channel plus a trigger grid, never a
+    // pitch: without this its velocities would be read as the repitch note (see _fromHeadCtl).
+    if (this.ctl) return this._fromHeadCtl((trigger) => trigger._asSampler(method, value, kind, expected));
     // A Sig argument is a patterned source name - both what the editor's transpile hands us for
     // ANY string (it wraps every pattern-position literal in mini(), so .s("bd") arrives as a
     // one-atom Sig) and the Strudel spelling note("c e g").s("<bd sd>"). It's sampled at each
@@ -1736,6 +1769,11 @@ export class Sig {
   }
 
   _noteLike(sig) {
+    // A control in head position carries no pitch, so the pitch arriving now is the trigger and the
+    // control keeps its own channel: vel("1!4").note("c2") is note("c2").vel("1!4"), four events.
+    // Without this the tag is simply dropped (it isn't track metadata) and with it the velocities -
+    // leaving the note pattern's bare grid, one event per cycle.
+    if (this.ctl) return this._fromHeadCtl((trigger) => trigger._noteLike(sig));
     // A live keyboard()/tap() route schedules no notes of its own - the keys are the trigger. So
     // .note()/.n() here just set the fixed pitch a key strikes (tap()'s pad note, or the base
     // pitch), stored on the route for the browser to play; the track stays unscheduled (this
@@ -2534,6 +2572,10 @@ function bareSig(sig) {
  * SAMPLER_CONTROLS / NOTE_CONTROLS), so `.mul(speed("-1"))` flips whatever speed is in force rather
  * than replacing it, and `.mul(clip(2))` doubles whatever ringing is in force. Values take anything
  * a signal takes: numbers, mini strings, LFOs, `choose()`/`irand()`.
+ *
+ * At the HEAD of a chain a control is that same channel plus a trigger: its steps become the events
+ * and its values stay on the channel, so `vel("1!4").s("bd")` is `s("bd").vel("1!4")` - four kicks
+ * at velocity 1, at the default note (24, where a sample plays as recorded). See _fromHeadCtl.
  *
  * The note channels (vel, clip) work on any pattern; aiming a SAMPLER control at a non-sampler
  * pattern is an error (there's no channel there) - the same message the method form gives.

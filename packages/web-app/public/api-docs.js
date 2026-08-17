@@ -226,7 +226,7 @@ const API_DOCS = {
   vel: {
     kind: 'both',
     sig: 'vel(value)',
-    desc: 'Per-note velocity (MIDI velocity, or sample volume). A patterned vel also gives the track structure - each step retriggers and gates. As an operand it aims at that channel: .mul(vel(0.5)) halves whatever velocity is in force.',
+    desc: 'Per-note velocity (MIDI velocity, or sample volume). A patterned vel also gives the track structure - each step retriggers and gates. As an operand it aims at that channel: .mul(vel(0.5)) halves whatever velocity is in force. At the head of a chain it triggers too - vel("1!4").s("bd") is s("bd").vel("1!4").',
     eg: '.vel("1 0.6 ~ 0.8")',
   },
   clip: {
@@ -299,7 +299,9 @@ const API_DOCS = {
 
   // ----------------------------------------------------------------- sampler controls
   // Each is both a method on a sampler pattern and a top-level control builder, so a combinator
-  // can aim at one channel of a pattern it was handed (x.mul(speed("-1"))).
+  // can aim at one channel of a pattern it was handed (x.mul(speed("-1"))). At the head of a chain
+  // the builder sets its own channel and supplies the trigger grid: speed("2").s("bd") is
+  // s("bd").speed("2").
   i: { kind: 'both', sig: 'i(index)', desc: 'Which sample of the pack to play, 0-based (the same thing as the ":n" suffix).', eg: 's("breaks").i("<0 2>")' },
   begin: { kind: 'both', sig: 'begin(pos)', desc: 'Playback start position within the sample, 0..1.', eg: '.begin(irand(16).div(16))' },
   end: { kind: 'both', sig: 'end(pos)', desc: 'Playback end position within the sample, 0..1.', eg: '.end(0.25)' },
