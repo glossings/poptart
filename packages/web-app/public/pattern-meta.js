@@ -173,6 +173,19 @@ function matchesQuery(entry, query) {
   });
 }
 
+// A pattern's name is used as its file name directly (see patternFilePath), so it has to stay a
+// single path segment. Returns why the name can't be used, or null when it can - which is how the
+// editor's naming dialog can disable its own button with a reason on it, saying exactly what the
+// server would have refused.
+function patternNameProblem(name) {
+  const clean = String(name ?? '').trim();
+  if (!clean) return 'give it a name';
+  if (clean.length > 128) return 'that name is too long';
+  if (clean.startsWith('.')) return 'a name cannot start with "."';
+  if (/[/\\]/.test(clean)) return 'a name cannot contain slashes';
+  return null;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseMeta, deriveLabel, displayLabel, matchesQuery, scanComments };
+  module.exports = { parseMeta, deriveLabel, displayLabel, matchesQuery, scanComments, patternNameProblem };
 }

@@ -326,6 +326,7 @@ main {
 }
 
 #editorPane {
+  position: relative; /* the save flash overlays it */
   flex: 1;
   display: flex;
   overflow: hidden;
@@ -546,8 +547,7 @@ aside h2 {
 
 #paramSearch,
 #sampleSearch,
-#fileSearchInput,
-#fileNameInput {
+#fileSearchInput {
   width: 100%;
   margin-bottom: 6px;
   padding: 6px 10px;
@@ -562,8 +562,7 @@ aside h2 {
 
 #paramSearch:focus,
 #sampleSearch:focus,
-#fileSearchInput:focus,
-#fileNameInput:focus {
+#fileSearchInput:focus {
   border-color: var(--accent);
 }
 
@@ -576,13 +575,9 @@ aside h2 {
 
 .file-save-row {
   display: flex;
+  align-items: center;
   gap: 6px;
-  flex-wrap: wrap; /* name field + save/link/export, in a sidebar that can be narrow */
-}
-
-.file-save-row input {
-  flex: 1;
-  min-width: 0;
+  flex-wrap: wrap; /* save / save as / export, in a sidebar that can be narrow */
 }
 
 .file-save-row button {
@@ -609,6 +604,63 @@ aside h2 {
 
 .file-row:hover {
   background: var(--accent-soft);
+}
+
+/* The row the editor's buffer came out of: the pattern `save` writes to, or - while the buffer
+   has no name yet - the session autosaving it. A bar down the side rather than a fill, so it
+   still reads as the current one while some other row is hovered. */
+.file-row.current {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.file-row.current .file-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* A save landed on this row. Outline rather than border so nothing reflows, and the green melts
+   straight into the accent tint the current row already sits on - animating to `transparent`
+   instead would dip the row to the panel background and then snap it back up to the accent. */
+@keyframes saved-flash {
+  from {
+    outline-color: var(--ok);
+    background-color: color-mix(in srgb, var(--ok) 28%, transparent);
+  }
+
+  to {
+    outline-color: transparent;
+    background-color: var(--accent-soft);
+  }
+}
+
+.file-row.saved-flash {
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+  animation: saved-flash 600ms ease-out;
+}
+
+/* The same confirmation for the buffer itself - the one that's on screen whether the sidebar is
+   showing the files tab, showing something else, or collapsed altogether. Mostly a green frame:
+   this fires on every Cmd+S, so it has to register without washing out the code. */
+.save-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  opacity: 0;
+  pointer-events: none;
+  outline: 2px solid var(--ok);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+}
+
+.save-flash.saved-flash {
+  animation: saved-flash-fade 600ms ease-out;
+}
+
+@keyframes saved-flash-fade {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 /* Two lines per row: what the pattern calls itself, then its file name / @by / @tags / date,
@@ -1303,6 +1355,37 @@ li.CodeMirror-hint-active {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.name-dialog-input {
+  margin: 12px 12px 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--mono); /* it's a file name - show it in the font it will be listed in */
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.name-dialog-input:focus {
+  border-color: var(--accent);
+}
+
+/* The name dialog's note is ordinary information ("that name is taken, save will replace it"),
+   not the failure .dir-picker-note reports - dim by default, and only amber when it's warning
+   that confirming would overwrite something. */
+.name-dialog-note {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.name-dialog-note.warn {
+  color: var(--warn);
 }
 
 /* --------------------------------------------------------------- prebake editor */

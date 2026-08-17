@@ -23,7 +23,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { parseMeta, displayLabel } = require('./public/pattern-meta.js');
+const { parseMeta, displayLabel, patternNameProblem } = require('./public/pattern-meta.js');
 
 const PATTERNS_DIR = process.env.POPTART_PATTERNS_DIR || path.join(os.homedir(), '.poptart', 'patterns');
 const WIP_DIR = path.join(PATTERNS_DIR, 'wip');
@@ -31,13 +31,14 @@ const WIP_DIR = path.join(PATTERNS_DIR, 'wip');
 // Don't slurp something enormous that wandered into the folder just to search it.
 const MAX_INDEXED_BYTES = 512 * 1024;
 
-// Names are used as filenames directly, so keep them to a single path segment.
+// Names are used as filenames directly, so keep them to a single path segment. The rule itself
+// lives in pattern-meta.js, which the editor also loads - so the naming dialog can refuse a name
+// for the same reason, before it gets this far.
 function patternFilePath(name) {
-  const clean = String(name ?? '').trim();
-  if (!clean || clean.length > 128 || clean.startsWith('.') || /[/\\]/.test(clean)) {
+  if (patternNameProblem(name)) {
     throw new Error('pattern name must be a plain file name (no slashes, not starting with ".")');
   }
-  return path.join(PATTERNS_DIR, `${clean}.js`);
+  return path.join(PATTERNS_DIR, `${String(name).trim()}.js`);
 }
 
 // A WIP id is "<month>/<session>" - "2026-08/2026-08-02-143205" - which is also its path under

@@ -163,6 +163,10 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Ctrl-Enter': () => evaluate(true),
     'Cmd-.': doStop,
     'Ctrl-.': doStop,
+    'Cmd-S': () => savePatternFile(),
+    'Ctrl-S': () => savePatternFile(),
+    'Shift-Cmd-S': () => savePatternFileAs(),
+    'Shift-Ctrl-S': () => savePatternFileAs(),
     'Shift-Alt-Down': (cm) => copyLines(cm, 'down'),
     'Shift-Alt-Up': (cm) => copyLines(cm, 'up'),
     'Alt-Up': 'swapLineUp',
@@ -171,16 +175,23 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   },
 });
 
-// Transport hotkeys work no matter what has focus (params search, plugin list, …). When the
-// editor has focus CodeMirror handles these first and preventDefaults, so no double-fire.
+// Transport and save hotkeys work no matter what has focus (params search, plugin list, …). When
+// the editor has focus CodeMirror handles these first and preventDefaults, so no double-fire.
+// A dialog on screen owns the keyboard, though - not least because Cmd+S inside the prebake editor
+// means "save the prebake".
 document.addEventListener('keydown', (e) => {
   if (e.defaultPrevented || !(e.metaKey || e.ctrlKey)) return;
+  if (document.querySelector('.dir-picker-backdrop:not(.hidden)')) return;
   if (e.key === 'Enter') {
     e.preventDefault();
     evaluate(true);
   } else if (e.key === '.') {
     e.preventDefault();
     doStop();
+  } else if (e.key.toLowerCase() === 's') {
+    e.preventDefault(); // the browser's own "save page" is never what's wanted here
+    if (e.shiftKey) savePatternFileAs();
+    else savePatternFile();
   }
 });
 
@@ -206,17 +217,10 @@ document.addEventListener('keydown', (e) => {
 // autosave (on disk) plus restoreBuffer below (for a reload of this tab), neither of which costs
 // a navigation.
 //
-// Sharing stays self-contained, because a snapshot id means nothing on another machine: the
-// share action builds the old-style base64 URL on demand (see copyShareLink), and opening one
-// still restores the code.
+// Sharing a patch is "export" - the file, which carries captured plugin state at any size. Links
+// are only read here, never written: a base64 hash still decodes, so a link made back when the
+// app minted them, and any history entry from before snapshots, both still open.
 // ---------------------------------------------------------------------------------------------
-
-function encodeCodeHash(code) {
-  const bytes = new TextEncoder().encode(code);
-  let bin = '';
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
 
 function decodeCodeHash(hash) {
   const bin = atob(hash.replace(/-/g, '+').replace(/_/g, '/'));
@@ -227,9 +231,15 @@ let lastCheckpointCode = null;
 let restoringFromHistory = false;
 let checkpointSeq = 0; // checkpoints store asynchronously; only the newest may touch the URL
 
-// The name field, looked up lazily - this section runs before the sidebar's `const`s exist.
+// The pattern file this buffer IS: the row lit up in the files tab, and what `save` writes over
+// without asking. Null when the buffer has never been kept under a name (a fresh ＋ new, a loaded
+// session, an import) - `save` then asks for one, the same as `save as`. Kept here rather than in
+// a text field so it can only ever say a file that exists: everything that changes which pattern
+// is open goes through setCurrentSavedName.
+let currentSavedName = null;
+
 function currentFileName() {
-  return document.getElementById('fileNameInput')?.value.trim() ?? '';
+  return currentSavedName ?? '';
 }
 
 // What the browser tab (and therefore every history entry) is called: the pattern's own @title,
@@ -250,12 +260,37 @@ function updateDocTitle(code) {
 // gets the code from its own hash. Kept best-effort: a buffer too big for the quota just isn't
 // restorable this way, and the wip file on disk still has it.
 const RESTORE_KEY = 'poptart.restoreBuffer';
+// Restored alongside it, so a reload doesn't quietly cut the buffer loose from its file and turn
+// the next save into a naming prompt.
+const DOC_NAME_KEY = 'poptart.docName';
 
 function saveRestoreBuffer(code) {
   try {
     sessionStorage.setItem(RESTORE_KEY, code);
   } catch {
     sessionStorage.removeItem(RESTORE_KEY); // over quota - a stale buffer would be worse
+  }
+}
+
+// The one way the open pattern changes. `name` is a saved pattern's file name, or null for a
+// buffer that isn't one yet.
+function setCurrentSavedName(name) {
+  currentSavedName = name || null;
+  try {
+    if (currentSavedName) sessionStorage.setItem(DOC_NAME_KEY, currentSavedName);
+    else sessionStorage.removeItem(DOC_NAME_KEY);
+  } catch {
+    // no persistence across a reload, which is a smaller loss than failing the save
+  }
+  updateDocTitle(cm.getValue());
+  markCurrentFileRow();
+  // With no name field on screen, the button is where "which file does save write to?" gets
+  // answered when the files tab isn't open.
+  const saveBtn = document.getElementById('fileSaveBtn');
+  if (saveBtn) {
+    saveBtn.title = currentSavedName
+      ? `save the buffer over "${currentSavedName}" (⌘/Ctrl+S)`
+      : 'name this pattern and save it (⌘/Ctrl+S)';
   }
 }
 
@@ -312,39 +347,7 @@ async function loadCodeFromHash() {
   }
 }
 
-// Anything past this is asking to be truncated: a link is normally pasted through an address
-// bar, and browsers cap how much they'll take there (Chrome silently cuts very long input, and
-// half a base64 string doesn't decode). Comfortably above a patch of plain code, and far below a
-// patch carrying a pinned plugin state - which is what "export" is for.
-const SAFE_SHARE_URL_CHARS = 16 * 1024;
-
-// Builds the self-contained link for sharing - the whole buffer in the URL, captured plugin states
-// and all. Built on demand, so its cost is never in the way of playing. A patch with a pinned
-// plugin blows past what an address bar will carry; that's the warning below, and "export" is the
-// way to send one.
-async function copyShareLink() {
-  await settlePluginState(); // the link is a snapshot of the buffer - settle it before reading it
-  const code = cm.getValue();
-  if (!code.trim()) {
-    logLine('nothing to share - the buffer is empty', true);
-    return;
-  }
-  const url = `${location.origin}${location.pathname}#${encodeCodeHash(code)}`;
-  const kb = (url.length / 1024).toFixed(1);
-  navigator.clipboard.writeText(url);
-  if (url.length > SAFE_SHARE_URL_CHARS) {
-    logLine(
-      `copied, but this link is ${kb}kb - too long to paste into an address bar, which will cut it ` +
-        'short and leave the other end with a link that will not open. Use "export" instead and ' +
-        'send the file.',
-      true,
-    );
-    return;
-  }
-  logLine(`copied a share link for the whole pattern (${kb}kb)`);
-}
-
-// The share path that has no size limit: the patch as a file. It is exactly the code - captured
+// How a patch is shared: as a file. It is exactly the code - captured
 // plugin states included, since those live in the code - so it is also just what the patterns
 // folder holds, and the other end can import it or drop it straight into ~/.poptart/patterns.
 async function exportPatch() {
@@ -375,7 +378,11 @@ async function importPatch(file) {
   try {
     const text = await file.text();
     if (!text.trim()) throw new Error('the file is empty');
-    await openInEditor(text, file.name.replace(/\.js$/i, ''));
+    // Deliberately not opened *as* a saved pattern: nothing of that name is in the folder yet, and
+    // save must never write to a file the user hasn't been shown. The file name is only a
+    // suggestion for when they do save it.
+    await openInEditor(text, null);
+    saveNameHint = file.name.replace(/\.js$/i, '');
     logLine(`imported ${file.name} - Cmd/Ctrl+Enter to play it`);
   } catch (e) {
     logLine(`could not import ${file.name}: ${e.message ?? e}`, true);
@@ -399,9 +406,14 @@ function setBufferQuietly(code) {
 // decides (a shared link, a history entry, or nothing - the default snippet).
 (async () => {
   const restored = sessionStorage.getItem(RESTORE_KEY);
-  if (restored !== null && restored !== cm.getValue()) {
-    setBufferQuietly(restored);
-    return;
+  if (restored !== null) {
+    // The name goes back with the buffer it belongs to, even when the buffer itself is already
+    // what's in the editor - otherwise a reload leaves the pattern open but nameless.
+    currentSavedName = sessionStorage.getItem(DOC_NAME_KEY) || null;
+    if (restored !== cm.getValue()) {
+      setBufferQuietly(restored);
+      return;
+    }
   }
   updateDocTitle(cm.getValue());
   if (!location.hash) return;
@@ -834,6 +846,7 @@ async function rollWipSession() {
   wipSessionId = newWipSessionId(wipSessionId);
   wipLastSent = null;
   wipListedRow = null; // the next write is a new session's first - always worth showing
+  markCurrentFileRow(); // the session that was the live one no longer is
 }
 
 // Closing the tab inside the debounce window would otherwise lose the last seconds of typing.
@@ -4792,9 +4805,8 @@ const audioInputList = document.getElementById('audioInputList');
 const audioInputLayoutNote = document.getElementById('audioInputLayout');
 const audioInputApply = document.getElementById('audioInputApply');
 const audioDeviceWarningEl = document.getElementById('audioDeviceWarning');
-const fileNameInput = document.getElementById('fileNameInput');
 const fileSaveBtn = document.getElementById('fileSaveBtn');
-const fileShareBtn = document.getElementById('fileShareBtn');
+const fileSaveAsBtn = document.getElementById('fileSaveAsBtn');
 const fileExportBtn = document.getElementById('fileExportBtn');
 const fileImportBtn = document.getElementById('fileImportBtn');
 const fileImportInput = document.getElementById('fileImportInput');
@@ -5286,12 +5298,28 @@ function fileRow(entry, buttons) {
   return row;
 }
 
+// Which row the buffer in the editor came from - the saved pattern it was last kept as, or, while
+// it has no name of its own, the work-in-progress session recording it right now. Marking it is
+// what makes `save` legible: the highlighted row is the file it will write to.
+function markCurrentFileRow() {
+  for (const row of document.querySelectorAll('.file-row.current')) row.classList.remove('current');
+  const sel = currentSavedName
+    ? `.file-row[data-name="${CSS.escape(currentSavedName)}"]`
+    : `.file-row[data-wip="${CSS.escape(wipSessionId)}"]`;
+  const row = document.querySelector(sel);
+  if (!row) return;
+  row.classList.add('current');
+  row.title = currentSavedName
+    ? 'the pattern open in the editor - save writes here'
+    : 'this session is the buffer in the editor';
+}
+
 function renderSavedPatterns(patterns, searching) {
   fileList.innerHTML = '';
   if (!patterns.length) {
     fileList.textContent = searching
       ? 'no saved patterns match'
-      : 'no saved patterns yet - name the current buffer above and hit save';
+      : 'no saved patterns yet - hit save to keep the current buffer as one';
     return;
   }
   for (const p of patterns) {
@@ -5299,6 +5327,7 @@ function renderSavedPatterns(patterns, searching) {
       ['✎', 'rename', () => renamePatternFile(p.name)],
       ['✕', 'delete', () => deletePatternFile(p.name)],
     ]);
+    row.dataset.name = p.name;
     row.onclick = () => loadPatternFile(p.name);
     fileList.appendChild(row);
   }
@@ -5346,6 +5375,7 @@ function renderWipPatterns(wip, searching) {
         ['⤓', 'keep this session as a named pattern', () => keepWipFile(w)],
         ['✕', 'delete this session', () => deleteWipFile(w)],
       ]);
+      row.dataset.wip = w.id;
       row.onclick = () => loadWipFile(w);
       group.appendChild(row);
     }
@@ -5359,6 +5389,7 @@ async function refreshPatternFiles() {
     const { patterns, wip } = await api('GET', `/api/patterns?q=${encodeURIComponent(q)}`);
     renderSavedPatterns(patterns, !!q);
     renderWipPatterns(wip ?? [], !!q);
+    markCurrentFileRow();
   } catch (e) {
     fileList.textContent = 'failed to list patterns';
     logLine(e.message ?? String(e), true);
@@ -5371,32 +5402,156 @@ fileSearchInput.addEventListener('input', () => {
   fileSearchTimer = setTimeout(refreshPatternFiles, 200);
 });
 
-async function savePatternFile() {
-  const name = fileNameInput.value.trim();
-  if (!name) {
-    logLine('give the pattern a name before saving', true);
-    fileNameInput.focus();
-    return;
+// ------------------------------------------------------------------------------ naming a pattern
+//
+// The one dialog that puts a name on a buffer - "save as", and the two list actions that also
+// have to name a file (keep a session, rename a pattern). It knows what's already in the folder,
+// so a collision is something you're told about *while typing it*, on the button you're about to
+// press, rather than after the fact: saving over an existing pattern says so and reads "overwrite",
+// and renaming onto one is refused outright (the server won't clobber on a rename either).
+
+const nameDialogBackdrop = document.getElementById('nameDialogBackdrop');
+const nameDialogTitle = document.getElementById('nameDialogTitle');
+const nameDialogInput = document.getElementById('nameDialogInput');
+const nameDialogNote = document.getElementById('nameDialogNote');
+const nameDialogConfirm = document.getElementById('nameDialogConfirm');
+
+let nameDialogResolve = null;
+let nameDialogState = { names: new Set(), allow: null, blockExisting: false, confirmLabel: 'save' };
+
+// patternNameProblem comes from pattern-meta.js - the same rule the server rejects on, so a bad
+// name is a disabled button with a reason on it rather than a failed request.
+function updateNameDialogState() {
+  const name = nameDialogInput.value.trim();
+  const { names, allow, blockExisting, confirmLabel } = nameDialogState;
+  const problem = patternNameProblem(name);
+  const collides = !problem && name !== allow && names.has(name);
+  nameDialogNote.textContent = problem
+    || (collides
+      ? (blockExisting ? `"${name}" already exists` : `"${name}" already exists - saving replaces it`)
+      : '');
+  nameDialogNote.classList.toggle('warn', !problem && collides && !blockExisting);
+  nameDialogConfirm.disabled = !!problem || (collides && blockExisting);
+  nameDialogConfirm.textContent = collides && !blockExisting ? 'overwrite' : confirmLabel;
+}
+
+function closeNameDialog(result) {
+  if (!nameDialogResolve) return;
+  const done = nameDialogResolve;
+  nameDialogResolve = null;
+  nameDialogBackdrop.classList.add('hidden');
+  done(result);
+}
+
+// Resolves to a name, or null if the user backed out.
+async function askPatternName({ title, value = '', confirmLabel = 'save', allow = null, blockExisting = false }) {
+  let resolveThis;
+  const answer = new Promise((resolve) => { resolveThis = resolve; });
+  // Registered before the round trip below, so a second opener arriving mid-fetch resolves this
+  // one instead of leaving its caller waiting on a dialog it no longer owns.
+  closeNameDialog(null);
+  nameDialogResolve = resolveThis;
+  let names = new Set();
+  try {
+    const { patterns } = await api('GET', '/api/patterns?q=');
+    names = new Set(patterns.map((p) => p.name));
+  } catch {
+    // no live collision warning this time - the save itself still works, and rename still refuses
+    // to clobber server-side
   }
+  if (nameDialogResolve !== resolveThis) return answer; // superseded, and already resolved null
+  nameDialogState = { names, allow, blockExisting, confirmLabel };
+  nameDialogTitle.textContent = title;
+  nameDialogInput.value = value;
+  nameDialogBackdrop.classList.remove('hidden');
+  updateNameDialogState();
+  nameDialogInput.focus();
+  nameDialogInput.select();
+  return answer;
+}
+
+nameDialogInput.addEventListener('input', updateNameDialogState);
+// On the dialog rather than the input, so Enter and Escape still work once focus has tabbed onto
+// one of the buttons.
+nameDialogBackdrop.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !nameDialogConfirm.disabled) closeNameDialog(nameDialogInput.value.trim());
+  else if (e.key === 'Escape') closeNameDialog(null);
+  e.stopPropagation(); // the editor's hotkeys have no business firing from inside a dialog
+});
+nameDialogConfirm.addEventListener('click', () => closeNameDialog(nameDialogInput.value.trim()));
+document.getElementById('nameDialogClose').addEventListener('click', () => closeNameDialog(null));
+nameDialogBackdrop.addEventListener('click', (e) => {
+  if (e.target === nameDialogBackdrop) closeNameDialog(null);
+});
+
+// ----------------------------------------------------------------------------- saving and loading
+
+// A name to offer when the buffer has never been saved: what an import came in as, else the
+// pattern's own @title / first block label, slugged into a file name.
+let saveNameHint = null;
+
+function suggestedPatternName() {
+  const code = cm.getValue();
+  const label = saveNameHint
+    || displayLabel({ title: parseMeta(code).title, code, borrowBlockLabel: true, fallback: '' });
+  return String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+// A save is otherwise silent - Cmd+S writes a file that is usually on a tab you aren't looking at,
+// and the console line confirming it may be collapsed. So pulse both the row it wrote to and the
+// buffer it wrote: between them, one of the two is on screen whatever the sidebar is doing.
+function flashSaved() {
+  for (const el of [document.getElementById('saveFlash'), document.querySelector('.file-row.current')]) {
+    if (!el) continue;
+    el.classList.remove('saved-flash');
+    void el.offsetWidth; // restart the animation rather than ignore a second save mid-pulse
+    el.classList.add('saved-flash');
+    el.addEventListener('animationend', () => el.classList.remove('saved-flash'), { once: true });
+  }
+}
+
+async function writePatternFile(name) {
   try {
     await settlePluginState(); // a saved pattern must name the states it actually sounds like
     await api('POST', '/api/patterns/save', { name, code: cm.getValue() });
-    updateDocTitle(cm.getValue()); // the name may be new even if the code isn't
+    saveNameHint = null;
+    setCurrentSavedName(name); // this buffer is that file now - later saves go straight here
     checkpointUrl(); // findable in browser history under the name you just gave it
     logLine(`saved pattern "${name}"`);
-    refreshPatternFiles();
+    await refreshPatternFiles(); // re-rendering the list would blow away a flash started before it
+    flashSaved();
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
 }
 
+// Keep the buffer where it already lives. Silent by design: overwriting the pattern you have open
+// is what saving *is*, and a confirm on every one would only teach you to click through the
+// dialog that matters (naming a save onto some *other* pattern - see savePatternFileAs).
+async function savePatternFile() {
+  if (!currentSavedName) return savePatternFileAs();
+  await writePatternFile(currentSavedName);
+}
+
+async function savePatternFileAs() {
+  const name = await askPatternName({
+    title: 'save pattern as',
+    value: currentSavedName || suggestedPatternName(),
+    allow: currentSavedName,
+  });
+  if (name) await writePatternFile(name);
+}
+
 // Put `code` in the editor as the thing now being worked on: the outgoing buffer gets its own
-// autosave file to sit in, and the incoming one becomes a history checkpoint.
+// autosave file to sit in, and the incoming one becomes a history checkpoint. `name` is the saved
+// pattern this code came out of, or null when it came from anywhere else - a session, an imported
+// file - which leaves the buffer nameless until the user saves it under one.
 async function openInEditor(code, name) {
   await rollWipSession();
   cm.setValue(code);
   foldConfigBlobs();
-  fileNameInput.value = name; // so re-saving after edits goes to the same file
+  saveNameHint = null;
+  setCurrentSavedName(name);
   checkpointUrl();
 }
 
@@ -5413,8 +5568,8 @@ async function loadPatternFile(name) {
 async function loadWipFile(entry) {
   try {
     const { code } = await api('POST', '/api/patterns/wip/load', { id: entry.id });
-    await openInEditor(code, ''); // an unnamed session stays unnamed until you keep it
-    logLine(`loaded session "${entry.label}" - name it above and save to keep it`);
+    await openInEditor(code, null); // an unnamed session stays unnamed until you keep it
+    logLine(`loaded session "${entry.label}" - hit save to keep it under a name`);
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -5423,12 +5578,19 @@ async function loadWipFile(entry) {
 // Promote a session to a named pattern. The session file stays put - this copies out of the
 // scratch pile rather than moving, so nothing is lost if the name was a mistake.
 async function keepWipFile(entry) {
-  const suggested = entry.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const name = prompt('keep this session as:', suggested)?.trim();
+  const name = await askPatternName({
+    title: 'keep this session as',
+    value: entry.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+    confirmLabel: 'keep',
+  });
   if (!name) return;
   try {
     const { code } = await api('POST', '/api/patterns/wip/load', { id: entry.id });
     await api('POST', '/api/patterns/save', { name, code });
+    // Keeping the session you're playing right now is the same act as saving the buffer under a
+    // name, so the editor comes away pointed at that pattern. Keeping any *other* session only
+    // files it away and leaves the buffer where it was.
+    if (entry.id === wipSessionId && !currentSavedName) setCurrentSavedName(name);
     logLine(`kept session "${entry.label}" as pattern "${name}"`);
     refreshPatternFiles();
   } catch (e) {
@@ -5448,14 +5610,17 @@ async function deleteWipFile(entry) {
 }
 
 async function renamePatternFile(name) {
-  const to = prompt(`rename "${name}" to:`, name)?.trim();
+  const to = await askPatternName({
+    title: `rename "${name}"`,
+    value: name,
+    confirmLabel: 'rename',
+    allow: name,
+    blockExisting: true, // renaming never overwrites - the server refuses it too
+  });
   if (!to || to === name) return;
   try {
     await api('POST', '/api/patterns/rename', { from: name, to });
-    if (fileNameInput.value.trim() === name) {
-      fileNameInput.value = to;
-      updateDocTitle(cm.getValue());
-    }
+    if (currentSavedName === name) setCurrentSavedName(to); // the open pattern followed its file
     logLine(`renamed pattern "${name}" to "${to}"`);
     refreshPatternFiles();
   } catch (e) {
@@ -5467,6 +5632,9 @@ async function deletePatternFile(name) {
   if (!confirm(`delete pattern "${name}"?`)) return;
   try {
     await api('POST', '/api/patterns/delete', { name });
+    // Deleting the pattern you have open cuts the buffer loose rather than leaving save pointed at
+    // a file that isn't there - the code is still in the editor, it just needs a name again.
+    if (currentSavedName === name) setCurrentSavedName(null);
     logLine(`deleted pattern "${name}"`);
     refreshPatternFiles();
   } catch (e) {
@@ -5474,23 +5642,23 @@ async function deletePatternFile(name) {
   }
 }
 
-// Start a fresh buffer. Clears the editor and the name field (so the next save creates a new
-// file rather than overwriting whatever was last loaded). No confirm needed: the buffer being
-// cleared was autosaved to its own work-in-progress file on the way out.
+// Start a fresh buffer. Clears the editor and cuts it loose from whatever file was open (so the
+// next save asks for a name rather than overwriting the last pattern). No confirm needed: the
+// buffer being cleared was autosaved to its own work-in-progress file on the way out.
 async function newPatternFile() {
   const had = cm.getValue().trim();
   await rollWipSession();
   cm.setValue('');
-  fileNameInput.value = '';
-  updateDocTitle('');
+  saveNameHint = null;
+  setCurrentSavedName(null);
   logLine(had
     ? 'new pattern - the previous buffer is under "work in progress" below'
-    : 'new pattern - write it, then name it above and hit save to keep it');
+    : 'new pattern - write it, then hit save to keep it under a name');
   cm.focus();
 }
 
 fileSaveBtn.addEventListener('click', savePatternFile);
-fileShareBtn.addEventListener('click', copyShareLink);
+fileSaveAsBtn.addEventListener('click', savePatternFileAs);
 fileExportBtn.addEventListener('click', exportPatch);
 fileImportBtn.addEventListener('click', () => fileImportInput.click());
 fileImportInput.addEventListener('change', () => {
@@ -5498,11 +5666,6 @@ fileImportInput.addEventListener('change', () => {
   fileImportInput.value = ''; // so re-picking the same file fires 'change' again
 });
 fileNewBtn.addEventListener('click', newPatternFile);
-fileNameInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') savePatternFile();
-});
-// The name is the tab title's fallback when the pattern has no @title of its own.
-fileNameInput.addEventListener('input', () => updateDocTitle(cm.getValue()));
 
 // ---------------------------------------------------------------------------------------------
 // MIDI file import - drop a .mid anywhere on the window and it becomes lanes in the buffer.

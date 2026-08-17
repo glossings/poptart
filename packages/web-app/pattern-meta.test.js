@@ -8,7 +8,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseMeta, deriveLabel, displayLabel, matchesQuery } = require('./public/pattern-meta.js');
+const {
+  parseMeta, deriveLabel, displayLabel, matchesQuery, patternNameProblem,
+} = require('./public/pattern-meta.js');
 
 test('reads @title / @by / @tags from line comments', () => {
   const meta = parseMeta([
@@ -161,4 +163,22 @@ test('a half-typed tag: does not blank the list', () => {
 test('missing fields are tolerated', () => {
   assert.equal(matchesQuery({ name: 'x' }, 'x'), true);
   assert.equal(matchesQuery({}, 'x'), false);
+});
+
+// The naming dialog disables its button on whatever this returns, and patternFilePath throws on
+// it - so a name the editor accepts has to be one the server will take.
+test('a usable pattern name has no problem to report', () => {
+  assert.equal(patternNameProblem('acid-3'), null);
+  assert.equal(patternNameProblem('  spaced out  '), null); // trimmed, like the save route does
+  assert.equal(patternNameProblem('dots.in.the.middle'), null);
+});
+
+test('names that cannot be file names are refused with a reason', () => {
+  assert.match(patternNameProblem(''), /give it a name/);
+  assert.match(patternNameProblem('   '), /give it a name/);
+  assert.match(patternNameProblem(null), /give it a name/);
+  assert.match(patternNameProblem('.hidden'), /cannot start/);
+  assert.match(patternNameProblem('sub/dir'), /slashes/);
+  assert.match(patternNameProblem('back\\slash'), /slashes/);
+  assert.match(patternNameProblem('x'.repeat(129)), /too long/);
 });

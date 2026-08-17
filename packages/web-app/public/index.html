@@ -79,6 +79,9 @@
   .synth("Serum 2")
   .param("Filter 1 On", 1)
   .param("Filter 1 Freq", lfo("0,0 0.5,1,-3 1,0", { rate: 0.3 }).range(200, 5000))</textarea>
+          <!-- Pulsed on save. An overlay rather than a style on the pane itself, because
+               CodeMirror's own background paints over anything drawn underneath it. -->
+          <div id="saveFlash" class="save-flash" aria-hidden="true"></div>
         </div>
 
         <aside id="sidebar">
@@ -130,10 +133,9 @@
               </h2>
               <input id="fileImportInput" type="file" accept=".js,text/javascript" hidden />
               <div class="file-save-row">
-                <input id="fileNameInput" type="text" placeholder="name to save as…" spellcheck="false"
-                  title="the file name the current editor buffer is saved under" />
-                <button id="fileSaveBtn" title="save the current editor buffer under this name">save</button>
-                <button id="fileShareBtn" class="small" title="copy a link with the whole pattern encoded in it — only practical for patches without captured plugin state">link</button>
+                <button id="fileSaveBtn" title="name this pattern and save it (⌘/Ctrl+S)">save</button>
+                <button id="fileSaveAsBtn" class="small" title="save the buffer under a new name (⇧⌘/Ctrl+Shift+S)">save as…</button>
+                <span class="spacer"></span>
                 <button id="fileExportBtn" class="small" title="download the buffer as a file — the way to share a patch that carries captured plugin state">export</button>
               </div>
               <input id="fileSearchInput" type="search" spellcheck="false" placeholder="🔍 search everything below…"
@@ -318,6 +320,23 @@
         <textarea id="prebakeEditor" spellcheck="false"></textarea>
         <div class="dir-picker-foot">
           <span id="prebakeNote" class="prebake-note"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="nameDialogBackdrop" class="dir-picker-backdrop hidden">
+      <div class="dir-picker name-dialog" role="dialog" aria-label="name this pattern">
+        <div class="dir-picker-head">
+          <span id="nameDialogTitle">save pattern as</span>
+          <span class="spacer"></span>
+          <button id="nameDialogClose" class="small">✕</button>
+        </div>
+        <input id="nameDialogInput" class="name-dialog-input" type="text" spellcheck="false"
+          placeholder="pattern name…" autocomplete="off" />
+        <div class="dir-picker-foot">
+          <span id="nameDialogNote" class="name-dialog-note"></span>
+          <span class="spacer"></span>
+          <button id="nameDialogConfirm" class="small primary">save</button>
         </div>
       </div>
     </div>
