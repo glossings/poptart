@@ -35,6 +35,18 @@ test('injectLocations wraps chain-method pattern args but not plugin/scale looku
   assert.ok(out.includes('.scale("F minor")'), 'scale name stays a plain string');
 });
 
+test('injectLocations leaves method-form .se()/.sr() names plain but wraps the builders', () => {
+  // The method forms take a literal path/recording name ("/" is a mini operator, so wrapping
+  // .se("hits/stab.wav") would throw before .se() ever ran); the same-named builders take mini.
+  assert.equal(injectLocations('x.se("hits/stab.wav")'), 'x.se("hits/stab.wav")');
+  assert.equal(injectLocations('x.sr("stab")'), 'x.sr("stab")');
+  assert.equal(injectLocations('note("c")\n  .se("hits/stab.wav")').includes('mini("hits'), false);
+  assert.match(injectLocations('se("\'hits/stab.wav\'")'), /se\(mini\(/);
+  assert.match(injectLocations('sr("stab*2")'), /sr\(mini\(/);
+  // .s() is NOT name-form: a pack name is a valid one-atom pattern, and .s() samples the Sig.
+  assert.match(injectLocations('x.s("bd")'), /\.s\(mini\("bd", \d+\)\)/);
+});
+
 test('injectLocations wraps a second-position .param() value but not its name', () => {
   const out = injectLocations('x.param("Filter Freq", "0.2 0.8")');
   assert.ok(out.includes('.param("Filter Freq", mini("0.2 0.8"'), out);

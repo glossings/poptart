@@ -2124,6 +2124,52 @@ function serveStatic(req, res) {
   });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Live-reload: the browser holds one SSE stream open (GET /api/devReload) and reloads itself
+// when told to. Two signals cover the two kinds of edit:
+//   - a change under public/ broadcasts `reload` with the server still running - the engine and
+//     the sound are untouched, only the page refreshes;
+//   - an edit to server-side code (server.js, pattern-core, osc-engine) restarts the process
+//     (npm run dev is `node --watch`), the stream drops, and the reconnecting client sees a new
+//     boot id and reloads then. The changed ID - not the dropped connection - is the trigger, so
+//     a transient hiccup reconnects without a spurious reload.
+// pattern-core's src/ is served to the browser but not watched here on purpose: the server loads
+// those same files, so --watch already answers with a restart, and the boot id covers it.
+// ---------------------------------------------------------------------------------------------
+
+const BOOT_ID = `${process.pid}:${Date.now()}`;
+const reloadClients = new Set();
+
+function serveDevReload(res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(`event: boot\ndata: ${BOOT_ID}\n\n`);
+  reloadClients.add(res);
+  res.on('close', () => reloadClients.delete(res));
+}
+
+// One save can land as several fs events (write + rename, an editor's temp-file dance); the
+// browser needs one reload, so broadcasts settle for a beat first.
+let reloadTimer = null;
+function broadcastReload() {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    for (const res of reloadClients) res.write('event: reload\ndata: 1\n\n');
+  }, 80);
+}
+
+try {
+  fs.watch(PUBLIC_DIR, { recursive: true }, (_event, file) => {
+    if (file && path.basename(file).startsWith('.')) return; // editor swap files, .DS_Store
+    broadcastReload();
+  });
+} catch {
+  // watching is a convenience - a platform without recursive fs.watch just loses auto-reload
+}
+
 // Streams a single sample file's raw bytes for the sounds-browser preview (the client decodes
 // it with Web Audio). Addressed the same way `s("pack:i")` is - by the file's index in its
 // pack's filename-sorted list - so what you preview is exactly what that pattern plays. Kept out
@@ -2203,6 +2249,11 @@ const server = http.createServer(async (req, res) => {
   // Binary sample preview - answered outside the JSON route table (see serveSampleAudio).
   if (req.method === 'GET' && url.pathname === '/api/sampleAudio') {
     return serveSampleAudio(Object.fromEntries(url.searchParams), res);
+  }
+
+  // Live-reload stream - long-lived SSE, so also outside the JSON route table.
+  if (req.method === 'GET' && url.pathname === '/api/devReload') {
+    return serveDevReload(res);
   }
 
   const handler = routes[`${req.method} ${url.pathname}`];

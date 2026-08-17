@@ -61,6 +61,14 @@ const NAME_ARG_CALLS = new Set([
 // excluded: its second argument is the value pattern.
 const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'midicc', 'midikeys', 'input']);
 
+// Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
+// .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain
+// recording name, but se("'hits/stab.wav'")/sr("stab*2") are patterns. The dot before the callee
+// is what tells the two apart. .s() is NOT here: a pack name is a valid one-atom mini pattern,
+// so the method form takes patterns too (note("c e g").s("<bd sd>")) and Sig#_asSampler samples
+// the wrapped argument per onset.
+const METHOD_NAME_ARG_CALLS = new Set(['se', 'sr']);
+
 // Is a string literal here used as a mini-notation pattern (vs a plugin/scale/param-name lookup)?
 // `before` is the code up to the opening quote, `after` the code from just past the closing quote.
 // In argument position the default is "pattern" (as in Strudel, where mini notation is what a
@@ -114,7 +122,17 @@ export function isPatternPosition(before, after) {
   // First argument: the callee sits immediately before the open paren (an optional `[` allows the
   // option in choose(["0", 3], …)). Its name decides.
   const first = near.match(/([A-Za-z_$][\w$]*)\s*\(\s*\[?\s*$/);
-  if (first) return !NAME_ARG_CALLS.has(first[1]);
+  if (first) {
+    if (NAME_ARG_CALLS.has(first[1])) return false;
+    if (METHOD_NAME_ARG_CALLS.has(first[1])) {
+      // Method form only: scan left from the callee (a suffix of `before` starting inside `near`)
+      // over whitespace for the chaining dot; the bare builder of the same name stays a pattern.
+      let j = before.length - near.length + first.index;
+      while (j > 0 && /\s/.test(before[j - 1])) j--;
+      if (j > 0 && before[j - 1] === '.') return false;
+    }
+    return true;
+  }
   // Later argument: a name-only call's arguments are never patterns. Matching requires no
   // parenthesis between that callee's `(` and here, so we only reject while still inside ITS
   // argument list - a nested call (fx("Reverb").speed("1 2")) has its own first-argument rule.

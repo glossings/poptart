@@ -476,6 +476,42 @@ window.addEventListener('popstate', async () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// Live-reload (see server.js serveDevReload): a `reload` event means a public/ file changed under
+// a running server; a `boot` id different from the one this page connected with means the server
+// restarted (node --watch picked up a server-side edit) while the stream was down. Either way the
+// page refreshes itself - the buffer rides sessionStorage back in (saveRestoreBuffer), so work
+// typed since the last debounce tick is carried along explicitly before reloading.
+// ---------------------------------------------------------------------------------------------
+
+(() => {
+  const es = new EventSource('/api/devReload');
+  let bootId = null;
+  // An edit to a file the server ALSO loads (public/pattern-meta.js) both broadcasts a reload and
+  // restarts the process - reloading into the gap would strand the tab on a browser error page
+  // with no EventSource left to recover it. So the reload waits until the server answers again.
+  let reloading = false;
+  async function reloadWhenUp() {
+    if (reloading) return;
+    reloading = true;
+    saveRestoreBuffer(cm.getValue());
+    for (let i = 0; i < 40; i++) {
+      try {
+        await fetch('/', { method: 'HEAD', cache: 'no-store' });
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    location.reload(); // after the retry budget, reload anyway and let the browser say what's wrong
+  }
+  es.addEventListener('boot', (e) => {
+    if (bootId !== null && e.data !== bootId) return reloadWhenUp();
+    bootId = e.data;
+  });
+  es.addEventListener('reload', reloadWhenUp);
+})();
+
+// ---------------------------------------------------------------------------------------------
 // Config folding: captured plugin-state blobs (`synth("Serum 2", { state: "..." })`) and long
 // lfo() shape strings collapse to a small clickable widget so they don't drown the code. The
 // full text stays in the buffer - and therefore in the URL hash - only the *display* folds.

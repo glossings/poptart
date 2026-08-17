@@ -1618,25 +1618,67 @@ export class Sig {
   }
 
   _asSampler(method, value, kind, expected) {
-    if (typeof value !== 'string' || !value.trim()) {
+    // A Sig argument is a patterned source name - both what the editor's transpile hands us for
+    // ANY string (it wraps every pattern-position literal in mini(), so .s("bd") arrives as a
+    // one-atom Sig) and the Strudel spelling note("c e g").s("<bd sd>"). It's sampled at each
+    // onset: the notes own the structure, the name pattern adds no triggers of its own.
+    const nameSig = value instanceof Sig ? value : null;
+    if (!nameSig && (typeof value !== 'string' || !value.trim())) {
       throw new Error(`[signal] .${method}() takes ${expected}`);
     }
     // A quoted-looking argument is the mini-string spelling leaking into the method form, where
     // the value is literal - fail loudly instead of hunting for a file whose name has quotes in it.
-    if (kind !== 'pack' && /^['"]|['"]$/.test(value.trim())) {
+    if (!nameSig && kind !== 'pack' && /^['"]|['"]$/.test(value.trim())) {
       throw new Error(`[signal] .${method}() takes ${expected} - drop the quotes (they're only needed inside a ${method}("…") pattern)`);
     }
-    const name = value.trim();
+    const name = nameSig ? null : value.trim();
     // This pattern's values are the pitch: keep them as the sampler's repitch note and swap the
-    // value stream for the constant source name over the same grid. An existing sampler keeps its
+    // value stream for the source name over the same grid. An existing sampler keeps its
     // note (re-.s()-ing just changes what plays).
     const noteSig = this.sampler?.note ?? this;
     const sampler = { ...(this.sampler ?? {}), note: noteSig };
+    // Each step's own pitch also rides as its repitch note (step.cfg.note, where the scheduler
+    // reads merged values first): a chord - two steps at ONE onset, what pianoroll() draws - can't
+    // be told apart by sampling the note channel at that shared onset, the same reason .as() walks
+    // steps for vel/clip. Only on the synth->sampler conversion: an existing sampler's step values
+    // are pack names, not pitches. Later .note()/.add() replace it per event (stampCfg's clear).
+    const wasSampler = !!this.sampler;
+    const stepsForCycle = this.stepsForCycle
+      ? (cycle) => {
+          const out = [];
+          for (const s of this.stepsForCycle(cycle)) {
+            if (s.value == null) {
+              out.push(s);
+              continue;
+            }
+            const step = { ...s };
+            if (nameSig) {
+              const ev = readEvent(nameSig, cycle + s.start);
+              if (ev.value == null) continue; // a rest in the name pattern silences the event
+              step.value = String(ev.value);
+              const locs = [...stepLocs(s), ...ev.locs];
+              if (locs.length) step.locs = locs;
+            } else {
+              step.value = name;
+            }
+            if (!wasSampler && typeof s.value === 'number') step.cfg = { ...step.cfg, note: s.value };
+            out.push(step);
+          }
+          return out;
+        }
+      : null;
     // Velocity carries through untouched: it's a note channel now (Sig#noteChannels), read the same
     // way on synth and sampler tracks, so a vel set while this was a synth track (.vel()/.as("vel"))
     // needs no relocation - the walker maps step.vel / the channel to sample gain on the sampler
     // path exactly as it maps it to MIDI velocity on the synth path.
-    return this.mapValue(() => name)._clone({ sampler, samplerKind: kind });
+    const sample = nameSig
+      ? (t, cps, pos) => {
+          const v = nameSig.sample(t, cps, pos);
+          return v == null ? null : String(v);
+        }
+      : (t, cps, pos) => (this.sample(t, cps, pos) == null ? null : name);
+    const eventAt = nameSig ? mapEventAt(nameSig, (v) => String(v)) : mapEventAt(this, () => name);
+    return new Sig(sample, { stepsForCycle, eventAt, ...this._meta(), sampler, samplerKind: kind });
   }
 
   /**
