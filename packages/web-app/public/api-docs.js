@@ -79,6 +79,12 @@ const API_DOCS = {
     desc: 'A note pattern drawn on an interactive roll - double-click the name to open it; every edit writes back into the string. grid is the granularity in cells per cycle, and the loop window is len cells from cell start (drag either end of the roll\'s loop bar).',
     eg: 'pianoroll("60,0,4 64,0,4", { grid: 16, len: 16 })',
   },
+  roll: {
+    kind: 'builder',
+    sig: 'roll(id, notes, { grid, len, start })',
+    desc: 'Keeps a drawn roll under an id (a number or a name) so patterns can name it - pianoroll("<0 chorus>") plays them in turn. Redefined on every evaluation; ids defined in prebake are shared by every patch.',
+    eg: 'roll(0, "60,0,4 64,0,4", { grid: 16 })',
+  },
 
   // ----------------------------------------------------------------- live input
   keyboard: {
@@ -156,6 +162,19 @@ const API_DOCS = {
     eg: 'gain(env({ attack: 0.01, release: 0.3 }))',
   },
 
+  // ----------------------------------------------------------------- pattern-of-patterns
+  cat: {
+    kind: 'builder',
+    sig: 'cat(...patterns)',
+    desc: 'Alternates whole patterns, one per cycle. They keep running underneath - cat only picks which you hear.',
+    eg: 'cat(n("0 2 3"), n("<5 7>")).synth("Serum 2")',
+  },
+  seq: {
+    kind: 'builder',
+    sig: 'seq(...patterns)',
+    desc: 'Splits each cycle evenly between whole patterns. Like cat but within the cycle; they are not squeezed to fit.',
+    eg: 'seq(s("bd*4"), s("hh*8"))',
+  },
   // ----------------------------------------------------------------- randomness / tempo
   choose: {
     kind: 'builder',

@@ -15,6 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps } from './pianoroll.mjs';
+import { lookupRoll, registerRoll } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
@@ -2798,6 +2799,134 @@ export function choose(...options) {
   return new Sig(sample, { stepsForCycle, eventAt: (cyclePos) => readEvent(pick(cyclePos).sig, cyclePos) });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Pattern-of-patterns: signals whose value at a position comes from whichever CHILD pattern is
+// active there. cat() and seq() are the userland forms - one child per cycle, and children
+// sharing a cycle - and both are the same join under a different slot grid (selectorJoin below,
+// which a patterned pianoroll("<a b>") id list resolves through the same way).
+//
+// The join deliberately does NOT remap time: a child is sampled at the position the outside world
+// asked for, exactly as choose() samples the option it drew. Every child runs on the transport all
+// the time and the selector only decides which one you HEAR - so cat(a, b) on cycle 3 plays what
+// `b` does on cycle 3, not b's own second cycle. Switching is a cut between running patterns, not
+// a re-cut of them into their turns; mini's `[a b]` is what compresses.
+// ---------------------------------------------------------------------------------------------
+
+/** The selector slot covering a cycle phase - the last one covering it, as sampleStepAt does. */
+function slotAt(slots, phase) {
+  let found = null;
+  for (const sl of slots) if (sl.value != null && phase >= sl.start && phase < sl.end) found = sl;
+  return found;
+}
+
+/**
+ * A Sig that delegates to whichever child `resolve` maps the active selector slot to.
+ *
+ * `slotsForCycle(cycle)` supplies the selector's own grid (ordinary steps: 0..1 cycle-relative
+ * spans, a null value being a rest). `resolve(value)` returns that slot's child, or null for a
+ * slot naming nothing - an unknown id plays silence for its turn, so a typo costs one slot rather
+ * than stopping the track.
+ *
+ * The result carries an HONEST step grid - each child's own steps, inside the slots that child
+ * holds - rather than a per-onset reader. Unlike choose()/irand() the picks are known ahead of
+ * time, so the scheduler sees the real onsets and an operator can still mix its triggers in (see
+ * mixableSteps, which skips anything carrying `eventAt`).
+ *
+ * Two rules at a slot edge, both saying "the switch is a cut":
+ *   - a child step whose ONSET is outside the slot doesn't sound. A note already ringing when its
+ *     slot opens is not restarted mid-flight, and one that started in the slot before is not
+ *     adopted by the slot after.
+ *   - a child step running past its slot's end is clipped to it, so the outgoing child stops
+ *     being heard the instant the next one takes over.
+ */
+function selectorJoin(slotsForCycle, resolve) {
+  const sample = (t, cps, pos) => {
+    const cyclePos = pos ?? t * cps;
+    const cycle = Math.floor(cyclePos);
+    const slot = slotAt(slotsForCycle(cycle), cyclePos - cycle);
+    const child = slot ? resolve(slot.value) : null;
+    return child ? child.sample(t, cps, cyclePos) : null;
+  };
+  const stepsForCycle = (cycle) => {
+    const out = [];
+    for (const slot of slotsForCycle(cycle)) {
+      if (slot.value == null) continue;
+      const child = resolve(slot.value);
+      if (!child) continue;
+      if (!child.stepsForCycle) {
+        // A child with no grid of its own (a constant, an lfo()) holds one value across the slot.
+        const v = child.sample(cycle + slot.start, 1, cycle + slot.start);
+        if (v != null) out.push({ start: slot.start, end: slot.end, value: v, locs: stepLocs(slot) });
+        continue;
+      }
+      for (const s of child.stepsForCycle(cycle)) {
+        if (s.value == null || s.start < slot.start || s.start >= slot.end) continue;
+        out.push(s.end > slot.end ? { ...s, end: slot.end } : s);
+      }
+    }
+    return out;
+  };
+  return new Sig(sample, { stepsForCycle });
+}
+
+// Shared tail of cat()/seq(): validate, coerce, and carry across the metadata a join can honestly
+// keep. Kept in one place because the two builders differ only in how the cycle is divided up.
+function buildJoin(builder, options, slotsForCycle) {
+  if (options.length === 0) throw new Error(`[signal] ${builder}() needs at least one pattern`);
+  const sigs = options.map(toSignal);
+  const joined = selectorJoin(slotsForCycle(sigs.length), (i) => sigs[i]);
+  // A unanimous pitch kind survives the join, so cat(note(...), note(...)).scale(...) still knows
+  // it is holding notes. A mixed set doesn't: there is no one answer, and picking one would
+  // silently requantize half the options.
+  const kinds = new Set(sigs.map((sg) => sg.pitchKind));
+  if (kinds.size === 1) joined.pitchKind = [...kinds][0];
+  // Per-option instruments are the patterned-plugin feature - one loaded instance per option -
+  // which isn't built yet. Warn and keep the first chain seen so the track still sounds, rather
+  // than going silent on a metadata detail nothing in the code looks wrong about.
+  const chained = sigs.find((sg) => sg.instrument || sg.fxChain.length);
+  if (chained) {
+    warnUser(`[signal] ${builder}() options carrying their own synth()/fx() aren't patterned yet - every option plays through the first one's chain. Put the chain after ${builder}(...) instead.`);
+    joined.instrument = chained.instrument;
+    joined.fxChain = chained.fxChain;
+    joined.slotStates = chained.slotStates;
+  }
+  return joined;
+}
+
+/**
+ * `cat(a, b, c)` - alternate whole patterns, one per cycle: cycle 0 plays `a`, cycle 1 `b`, cycle
+ * 2 `c`, cycle 3 `a` again. What `<a b c>` does for atoms inside a string, cat() does for patterns
+ * already built - which is what lets a drawn roll, a sampler line and a chord take turns without
+ * being flattened into one piece of mini-notation.
+ *
+ * The options are not re-cut to fit their turn: they keep running on the transport and cat() only
+ * decides which one you hear, so on cycle 3 `cat(a, b)` plays what `b` itself does on cycle 3 -
+ * an option that varies per cycle goes on varying while it waits. A note still ringing when the
+ * turn changes is cut at the cycle line.
+ *
+ * Options are anything toSignal accepts - mini strings, numbers, other signals. For a random pick
+ * instead of a rotation, see choose(); to hear them all at once, stack them with `,`.
+ */
+export function cat(...options) {
+  return buildJoin('cat', options, () => (cycle) => [
+    { start: 0, end: 1, value: ((cycle % options.length) + options.length) % options.length },
+  ]);
+}
+
+/**
+ * `seq(a, b)` - the within-a-cycle sibling of cat(): the options split each cycle evenly, `a` over
+ * its first half and `b` over its second. Like cat() (and unlike mini's `[a b]`) the options are
+ * not squeezed to fit - each keeps its own tempo and you hear whichever one holds the slot, so
+ * `seq(n("0 1 2 3"), n("4 5 6 7"))` plays 0 and 1 from the first, then 6 and 7 from the second.
+ *
+ * Only onsets inside a slot sound, and a note running past its slot is cut there: the boundary is
+ * a switch between running patterns, the same cut cat() makes at the cycle line.
+ */
+export function seq(...options) {
+  return buildJoin('seq', options, (count) => () =>
+    Array.from({ length: count }, (_, i) => ({ start: i / count, end: (i + 1) / count, value: i })));
+}
+
 /**
  * `irand(8)` - a deterministic random integer in 0..n-1, one value per cycle. Like choose() the
  * draw is a hash of the cycle position (via rngAtPos), so it's stable across re-queries and replays
@@ -2921,11 +3050,18 @@ export function note(value) {
  *
  * A bare `pianoroll()` (or `pianoroll("")`) is a valid empty roll - silence - so typing the call to
  * open the editor and drawing into it never has to pass through an error state.
+ *
+ * The argument may instead be a pattern of roll IDS - `pianoroll("<0 chorus>")` - naming rolls
+ * defined by roll() (see below). Drawn notes and an id pattern are told apart by shape: a note
+ * always reads "midi,start,len", so anything whose first token isn't a number followed by a comma
+ * is a pattern of names. Each named roll brings its own grid/len/start, so the options here belong
+ * on the definitions, not on this call.
  */
 export function pianoroll(str = '', opts = {}) {
   if (typeof str !== 'string') {
     throw new Error('[signal] pianoroll(...) takes a note string from the piano roll editor, e.g. pianoroll("60,0,4 64,0,4")');
   }
+  if (str.trim() && !looksLikeNoteString(str)) return rollPattern(str, opts);
   const grid = normalizePianoRollSteps(typeof opts === 'number' ? opts : (opts.grid ?? opts.steps));
   const len = Math.max(1, Math.round(opts.len ?? grid));
   const from = Math.max(0, Math.round(opts.start ?? 0));
@@ -2960,6 +3096,66 @@ export function pianoroll(str = '', opts = {}) {
   };
   const sample = (t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos);
   return new Sig(sample, { stepsForCycle, pitchKind: 'note' });
+}
+
+// Does this pianoroll() argument hold DRAWN NOTES rather than a pattern of roll ids? A note token
+// is "midi,start,len[,vel[,prob]]" with an optional leading mute `!`, so it always begins with a
+// number and carries a comma - which nothing naming a roll can look like (`0`, `chorus`, `<0 1>`
+// and even a `[0,chorus]` stack all fail one half of the test or the other).
+function looksLikeNoteString(str) {
+  const first = str.trim().split(/\s+/)[0] ?? '';
+  return /^!?-?\d/.test(first) && first.includes(',');
+}
+
+// pianoroll("<0 chorus>") - the argument names rolls instead of drawing them. The ids are ordinary
+// mini-notation, so the whole language applies: `<a b>` takes a roll per cycle, `a b` splits the
+// cycle between two, `~` is a bar of silence. Resolution is LAZY - the registry is read when a
+// cycle is built, not when the call is evaluated - so the definitions may sit anywhere in the
+// buffer, above or below the pattern that names them.
+function rollPattern(str, opts) {
+  if (typeof opts === 'number' || (opts && Object.keys(opts).length > 0)) {
+    warnUser('[signal] pianoroll("<ids>") takes grid/len/start from each roll() definition - the options on this call are ignored.');
+  }
+  const selector = mini(str);
+  const warned = new Set(); // one line per unknown id, not one per cycle
+  const resolve = (id) => {
+    const key = String(id);
+    const found = lookupRoll(key);
+    if (!found && !warned.has(key)) {
+      warned.add(key);
+      warnUser(`[signal] pianoroll(): no roll called ${JSON.stringify(key)} - it plays silence until a roll(${JSON.stringify(id)}, ...) defines it.`);
+    }
+    return found;
+  };
+  const joined = selectorJoin((cycle) => selector.stepsForCycle(cycle), resolve);
+  joined.pitchKind = 'note'; // every option is a roll, so this one is never in doubt
+  return joined;
+}
+
+/**
+ * `roll(0, "60,0,4 64,0,4", { grid: 16 })` - a drawn piano roll kept under an id, so patterns can
+ * name it rather than carry its notes: `pianoroll("<0 chorus>")` alternates two of them, and any
+ * number of patterns can play the same roll at once. Ids are numbers or names, whichever you can
+ * type fastest mid-set, and each definition carries its own grid/len/start (the arguments are
+ * pianoroll's, and the value is that same roll - so `roll(...)` can also be played directly).
+ *
+ * Definitions are ordinary code and live wherever you put them, though the editor keeps them in
+ * one folded block by convention. They last until the next evaluation, which redefines them from
+ * the buffer; ids defined in ~/.poptart/prebake.js are a library shared by every patch, and a
+ * buffer definition of the same id wins for that buffer.
+ */
+export function roll(id, str = '', opts = {}) {
+  if (typeof id !== 'number' && typeof id !== 'string') {
+    throw new Error('[signal] roll(id, notes) takes a number or a name as its id - roll(0, "60,0,4") or roll("chorus", "60,0,4")');
+  }
+  const key = String(id).trim();
+  if (!key || /\s/.test(key) || /[<>[\]{}(),*!?~@]/.test(key)) {
+    throw new Error(`[signal] a roll id has to be one plain word - ${JSON.stringify(String(id))} can't be written inside pianoroll("<...>")`);
+  }
+  const sig = pianoroll(str, opts);
+  const replaced = registerRoll(key, sig);
+  if (replaced) warnUser(replaced);
+  return sig;
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -555,6 +555,15 @@ function foldConfigBlobs() {
     const start = m.index + m[0].length - str.length;
     foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]]);
   }
+  // roll(id, "notes", …) - the same note data, one argument further along. The id stays visible:
+  // it is the name the patterns say, and the whole point of a definitions block is reading it.
+  const rollArgRe = /\broll\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|[^,()\n]*?)\s*,\s*("(?:[^"\\\n]|\\.)*")/g;
+  while ((m = rollArgRe.exec(code))) {
+    const str = m[1];
+    if (str.length <= 2) continue;
+    const start = m.index + m[0].length - str.length;
+    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES.pianoroll);
+  }
 }
 
 // String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced. The one
@@ -1469,6 +1478,13 @@ function openWidgetAt(code, idx) {
   }
   const roll = pianorollMod && findPianorollCallAt(code, idx);
   if (roll?.onName) {
+    // pianoroll("<0 chorus>") NAMES rolls rather than drawing them, and the note editor writes a
+    // note string back into the call it opened - which would serialize drawn notes straight over
+    // the id pattern. Refuse until the picker that opens the roll an id names is built.
+    if (isRollIdCall(code.slice(roll.open + 1, roll.close))) {
+      logLine('this pianoroll names rolls by id - edit the notes in that roll(...) definition', true);
+      return true;
+    }
     if (!prState || roll.start !== prState.callStart) openPianorollEditor(roll);
     // Opening the roll on purpose hands it the keyboard: cmd-A, the arrows and delete belong to
     // the notes now, not to the code buffer.
@@ -2059,6 +2075,15 @@ function prPreviewNotes(notes) {
   if (live.length) prPreview(Math.max(...live.map((n) => n.midi)));
 }
 
+// Does this pianoroll(...) argument name rolls by id (`"<0 chorus>"`) rather than draw notes?
+// Same shape test the builder makes (see signal.mjs's looksLikeNoteString): a drawn note always
+// reads "midi,start,len", so a first token that isn't a number followed by a comma is a name.
+function isRollIdCall(inner) {
+  const str = /(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner)?.[2] ?? '';
+  const first = str.trim().split(/\s+/)[0] ?? '';
+  return !!str.trim() && !(/^!?-?\d/.test(first) && first.includes(','));
+}
+
 function parsePianorollCall(inner) {
   const strMatch = /(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner);
   const noteStr = strMatch?.[2] ?? '';
@@ -2248,6 +2273,10 @@ function syncPianorollFromCode() {
   const text = cm.getRange(range.from, range.to);
   if (!/^\s*pianoroll\s*\(/.test(text)) { closePianorollEditor(); return; }
   const open = text.indexOf('(');
+  // Hand-edited into the id form while open: the roll on screen no longer describes this call, and
+  // the next edit would write its notes over the ids. Let it go, the same as any other call the
+  // roll is no longer anchored to.
+  if (isRollIdCall(text.slice(open + 1, text.lastIndexOf(')')))) { closePianorollEditor(); return; }
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
   const parsed = parsePianorollCall(text.slice(open + 1, close));

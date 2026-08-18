@@ -425,7 +425,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll', 'roll',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip',
@@ -615,17 +615,26 @@ function runPrebake() {
   const sources = prebakeSources();
   const errors = [];
   const evalBlock = makeBlockEvaluator();
-  for (const src of sources) {
-    for (const b of patternCore.splitLabeledBlocks(src.code)) {
-      try {
-        evalBlock(b.code); // value ignored - prebake is setup, not a track
-      } catch (err) {
-        const where = b.label && !b.label.startsWith('$') ? ` (${b.label})` : '';
-        const msg = `${src.name}${where}: ${err.message ?? err}`;
-        errors.push(msg);
-        console.error(`[poptart] prebake ${msg}`);
+  // roll() definitions from prebake are a library shared by every patch, so they go to their own
+  // layer: a buffer evaluation clears only its own rolls and leaves these standing. Re-running
+  // prebake (the browser saved the file) replaces the layer wholesale, the same as prebakeDefs.
+  patternCore.setRollLayer('prebake');
+  patternCore.clearRolls('prebake');
+  try {
+    for (const src of sources) {
+      for (const b of patternCore.splitLabeledBlocks(src.code)) {
+        try {
+          evalBlock(b.code); // value ignored - prebake is setup, not a track
+        } catch (err) {
+          const where = b.label && !b.label.startsWith('$') ? ` (${b.label})` : '';
+          const msg = `${src.name}${where}: ${err.message ?? err}`;
+          errors.push(msg);
+          console.error(`[poptart] prebake ${msg}`);
+        }
       }
     }
+  } finally {
+    patternCore.setRollLayer('buffer');
   }
   prebakeDefs = evalBlock.defs; // replaces the previous set - a cleared prebake clears its defs
   if (sources.length) {
@@ -1377,6 +1386,11 @@ const routes = {
     // clock to cycle 0, stop-then-play would come back as a different performance of the same
     // code. Blocks are built below in document order, which is what makes the seeds stable.
     patternCore.resetRandomSeeds();
+
+    // Roll definitions are rebuilt from the buffer every time, for the reason the track teardown
+    // below exists: a roll(...) call you just deleted has to stop being playable. Prebake's layer
+    // is untouched - it is a library, not part of this buffer.
+    patternCore.clearRolls();
 
     // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
     // and a redeclared name in the buffer overrides the copy without clobbering the original.
