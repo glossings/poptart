@@ -36,6 +36,21 @@ export function normalizePianoRollSteps(steps) {
   return n;
 }
 
+/**
+ * Does this string hold DRAWN NOTES rather than a pattern of roll ids? A note token always reads
+ * "midi,start,len[,vel[,prob]]" behind an optional mute `!`, so it begins with a number and
+ * carries a comma - which nothing naming a roll can look like (`0`, `chorus`, `<0 1>`, and even a
+ * `[0,chorus]` stack each fail one half of the test or the other). An empty string is neither.
+ *
+ * This is the one place the two forms of pianoroll(...) are told apart: the builder routes on it,
+ * the location transpile decides whether to tag the literal for highlighting by it, and the editor
+ * uses it to know whether a call's argument is data it may write notes back into.
+ */
+export function looksLikeNoteString(str) {
+  const first = String(str).trim().split(/\s+/)[0] ?? '';
+  return /^!?-?\d/.test(first) && first.includes(',');
+}
+
 export function parsePianoRoll(str) {
   const trimmed = String(str).trim();
   if (!trimmed) return [];

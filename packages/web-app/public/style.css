@@ -1689,6 +1689,121 @@ li.CodeMirror-hint-active {
   display: none;
 }
 
+/* Scoped, like every other panel here - there is no global .hidden utility, so a bare
+   class="hidden" on a child (the roll picker, the follow lock) would do nothing at all. */
+.pianoroll-panel .hidden {
+  display: none;
+}
+
+#pianorollTitle {
+  white-space: nowrap;
+}
+
+/* The roll picker doubles as the panel's title while a named roll is on screen, so its width is
+   FIXED. Sized to its content it reflowed the whole header - and, once the buttons wrapped to a
+   second line, resized the panel - every time the pattern moved from `0` to `chorus`, which is
+   exactly when you are trying to read it. A longer name is clipped; the tooltip carries it whole. */
+#pianorollPickWrap {
+  position: relative; /* the find-or-create popover hangs off the name, wherever the head wraps to */
+}
+
+/* The roll's name is a plain title until you touch it, and an input once you do - so reading it
+   costs nothing and renaming is one click. Its width is FIXED: sized to its content, the header
+   reflowed (and, once the buttons wrapped, resized the panel) every time the pattern moved from
+   `lead` to `chorus`, which is exactly when you are trying to read it. */
+#pianorollName {
+  width: 7.5em;
+  padding: 3px 7px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  outline: none;
+  text-overflow: ellipsis;
+}
+
+#pianorollName:hover {
+  border-color: var(--border);
+}
+
+#pianorollName:focus {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+
+.pianoroll-picker {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  width: 15em;
+  padding: 5px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px var(--shadow);
+}
+
+.pianoroll-picker input {
+  width: 100%;
+  padding: 4px 7px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+}
+
+.pianoroll-picker input:focus {
+  border-color: var(--accent);
+}
+
+.pianoroll-pick-list {
+  max-height: 14em;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.pianoroll-pick-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-family: var(--mono);
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+
+/* One highlight for both ways of getting here - the arrow keys and the pointer. */
+.pianoroll-pick-row.on,
+.pianoroll-pick-row:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pianoroll-pick-row .pianoroll-pick-note {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.pianoroll-pick-empty {
+  padding: 4px 7px;
+  font-size: 11px;
+  font-family: var(--mono);
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+
 .pianoroll-panel-head {
   display: flex;
   align-items: center;

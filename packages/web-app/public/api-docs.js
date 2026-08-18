@@ -76,13 +76,13 @@ const API_DOCS = {
   pianoroll: {
     kind: 'builder',
     sig: 'pianoroll(notes, { grid, len, start })',
-    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it; every edit writes back into the string. grid is the granularity in cells per cycle, and the loop window is len cells from cell start (drag either end of the roll\'s loop bar).',
-    eg: 'pianoroll("60,0,4 64,0,4", { grid: 16, len: 16 })',
+    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it; every edit writes back into the string. An empty pianoroll() names itself after its track and gets a definition of its own, so notes can also be kept under an id: pianoroll("<lead alt>") plays those in turn, and an id nothing has defined yet is created empty. grid is the granularity in cells per cycle, and the loop window is len cells from cell start (drag either end of the roll\'s loop bar).',
+    eg: 'lead: pianoroll().synth("Serum 2")',
   },
   roll: {
     kind: 'builder',
     sig: 'roll(id, notes, { grid, len, start })',
-    desc: 'Keeps a drawn roll under an id (a number or a name) so patterns can name it - pianoroll("<0 chorus>") plays them in turn. Redefined on every evaluation; ids defined in prebake are shared by every patch.',
+    desc: 'Keeps a drawn roll under an id (a number or a name) so patterns can name it - pianoroll("<0 chorus>") plays them in turn. Written for you: an empty pianoroll() creates one, and the piano roll panel renames it. Definitions are hidden from the editor (settings: hide roll definitions) since they are note data rather than code. Redefined on every evaluation; ids defined in prebake are shared by every patch.',
     eg: 'roll(0, "60,0,4 64,0,4", { grid: 16 })',
   },
 

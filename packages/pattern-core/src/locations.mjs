@@ -23,6 +23,8 @@
 // the number 3 rather than the string "3". Sample packs aren't bare numbers in practice, so this is
 // noted rather than special-cased.
 
+import { looksLikeNoteString } from './pianoroll.mjs';
+
 // Rewrites `code` so each pattern-position string/template literal is wrapped in mini(str, START),
 // where START = `base` + the literal's first-content-char offset within `code`. Pass the block's
 // document `start` as `base` to get document-absolute spans; the caller can then keep only spans
@@ -36,7 +38,7 @@ export function injectLocations(code, base = 0) {
   for (const lit of lits) {
     const before = code.slice(0, lit.fullStart);
     const after = code.slice(lit.fullEnd);
-    if (lit.hasInterp || !isPatternPosition(before, after)) continue;
+    if (lit.hasInterp || !isPatternPosition(before, after, code.slice(lit.contentStart, lit.fullEnd - 1))) continue;
     out += code.slice(prev, lit.fullStart);
     out += `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart})`;
     prev = lit.fullEnd;
@@ -53,13 +55,14 @@ export function injectLocations(code, base = 0) {
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
   'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'input', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  'roll', // roll(id, "<drawn notes>", …): an id to look a roll up by, then the same note data pianoroll() takes
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
-// (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, input()'s channel
-// numbers (a hardware channel is wiring, not something that can vary per step). param() is
-// excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'midicc', 'midikeys', 'input']);
+// (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
+// notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
+// step). param() is excluded: its second argument is the value pattern.
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'roll', 'midicc', 'midikeys', 'input']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain
@@ -108,7 +111,7 @@ function tailWindow(before) {
   return before.slice(i);
 }
 
-export function isPatternPosition(before, after) {
+export function isPatternPosition(before, after, text = '') {
   // Guard: the literal must be a COMPLETE argument/expression - immediately closed by ) , ; ] }
   // or end of input, or chaining a method (`"0 1".fast(2)`). If an operator follows (`n("0 1" + x)`)
   // the literal is only part of a larger expression, and wrapping it in mini() would change what
@@ -123,6 +126,10 @@ export function isPatternPosition(before, after) {
   // option in choose(["0", 3], …)). Its name decides.
   const first = near.match(/([A-Za-z_$][\w$]*)\s*\(\s*\[?\s*$/);
   if (first) {
+    // pianoroll() takes either drawn notes or a pattern of roll ids, and only the ids are mini
+    // notation worth tagging. This is the one call whose argument is judged by what it SAYS rather
+    // than by which call it is - the two forms are the same position (see looksLikeNoteString).
+    if (first[1] === 'pianoroll') return !!text.trim() && !looksLikeNoteString(text);
     if (NAME_ARG_CALLS.has(first[1])) return false;
     if (METHOD_NAME_ARG_CALLS.has(first[1])) {
       // Method form only: scan left from the callee (a suffix of `before` starting inside `near`)

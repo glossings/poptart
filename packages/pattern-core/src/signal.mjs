@@ -14,7 +14,7 @@ import {
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
-import { parsePianoRoll, normalizePianoRollSteps } from './pianoroll.mjs';
+import { parsePianoRoll, normalizePianoRollSteps, looksLikeNoteString } from './pianoroll.mjs';
 import { lookupRoll, registerRoll } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
@@ -2859,9 +2859,14 @@ function selectorJoin(slotsForCycle, resolve) {
         if (v != null) out.push({ start: slot.start, end: slot.end, value: v, locs: stepLocs(slot) });
         continue;
       }
+      // The slot's own span rides along with every step the child contributes, so whatever named
+      // this child - the `chorus` of pianoroll("<0 chorus>") - lights up while it plays, the same
+      // union an operator makes of its operands' spans. Synthesized slots (cat/seq) have none.
+      const slotLocs = stepLocs(slot);
       for (const s of child.stepsForCycle(cycle)) {
         if (s.value == null || s.start < slot.start || s.start >= slot.end) continue;
-        out.push(s.end > slot.end ? { ...s, end: slot.end } : s);
+        const clipped = s.end > slot.end ? { ...s, end: slot.end } : s;
+        out.push(slotLocs.length ? { ...clipped, locs: [...stepLocs(s), ...slotLocs] } : clipped);
       }
     }
     return out;
@@ -3058,6 +3063,9 @@ export function note(value) {
  * on the definitions, not on this call.
  */
 export function pianoroll(str = '', opts = {}) {
+  // A Sig here is an id pattern the location transpile already tagged for highlighting (see
+  // locations.mjs) - drawn notes are only ever a bare string.
+  if (str instanceof Sig) return rollPattern(str, opts);
   if (typeof str !== 'string') {
     throw new Error('[signal] pianoroll(...) takes a note string from the piano roll editor, e.g. pianoroll("60,0,4 64,0,4")');
   }
@@ -3096,15 +3104,6 @@ export function pianoroll(str = '', opts = {}) {
   };
   const sample = (t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos);
   return new Sig(sample, { stepsForCycle, pitchKind: 'note' });
-}
-
-// Does this pianoroll() argument hold DRAWN NOTES rather than a pattern of roll ids? A note token
-// is "midi,start,len[,vel[,prob]]" with an optional leading mute `!`, so it always begins with a
-// number and carries a comma - which nothing naming a roll can look like (`0`, `chorus`, `<0 1>`
-// and even a `[0,chorus]` stack all fail one half of the test or the other).
-function looksLikeNoteString(str) {
-  const first = str.trim().split(/\s+/)[0] ?? '';
-  return /^!?-?\d/.test(first) && first.includes(',');
 }
 
 // pianoroll("<0 chorus>") - the argument names rolls instead of drawing them. The ids are ordinary
@@ -3153,6 +3152,11 @@ export function roll(id, str = '', opts = {}) {
     throw new Error(`[signal] a roll id has to be one plain word - ${JSON.stringify(String(id))} can't be written inside pianoroll("<...>")`);
   }
   const sig = pianoroll(str, opts);
+  // Marks this Sig as a DEFINITION rather than a track. A block of roll(...) calls evaluates to
+  // its last one, and without this the host would take that value as a pattern to play - a
+  // definitions block would quietly become an extra voice. Cleared by _clone(), so deliberately
+  // playing a definition (`lead: roll(0, "…").synth("Serum 2")`) still works.
+  sig.rollDef = key;
   const replaced = registerRoll(key, sig);
   if (replaced) warnUser(replaced);
   return sig;

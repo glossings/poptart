@@ -4,8 +4,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { roll, pianoroll, mini, setPatternWarn } from './src/signal.mjs';
+import { roll, pianoroll, cat, mini, setPatternWarn } from './src/signal.mjs';
+import { stepLocs } from './src/mini.mjs';
 import { clearRolls, setRollLayer, rollIds, lookupRoll } from './src/rolls.mjs';
+import { injectLocations } from './src/locations.mjs';
 
 // Each test owns the store: the buffer layer is rebuilt per evaluation in the real host too.
 const fresh = () => {
@@ -155,4 +157,51 @@ test('roll() returns the roll, so a definition can also be played directly', () 
   const r = roll(0, '60,0,4', { grid: 16 });
   assert.deepEqual(values(r, 0), [60]);
   assert.equal(lookupRoll('0'), r);
+});
+
+// The eval-time location transpile rewrites pattern-position string literals into mini("…", off).
+// roll()'s arguments are an id and drawn note data - neither is mini notation, and wrapping either
+// hands pianoroll() a Sig where it wants a string.
+test('the location transpile leaves roll() arguments alone', () => {
+  for (const code of [
+    'roll(0, "60,0,4 64,0,4", { grid: 16 })',
+    "roll('chorus', \"72,0,8\", { grid: 32 })",
+    'pianoroll("60,0,4", { grid: 16 })',
+    'pianoroll("")',
+  ]) {
+    assert.equal(injectLocations(code, 0), code, code);
+  }
+});
+
+test('an id pattern IS tagged - the ids are mini notation, and they highlight', () => {
+  assert.equal(injectLocations('pianoroll("<0 chorus>")', 0), 'pianoroll(mini("<0 chorus>", 11))');
+});
+
+test('a tagged id pattern still resolves, and its steps carry the id that sounded', () => {
+  fresh();
+  roll(0, '60,0,4', { grid: 16 });
+  roll('chorus', '72,0,4', { grid: 16 });
+  // What the host actually evaluates after the transpile: the selector arrives as a Sig.
+  const p = pianoroll(mini('<0 chorus>', 11));
+  assert.deepEqual(values(p, 0), [60]);
+  assert.deepEqual(values(p, 1), [72]);
+  // Offsets into `pianoroll("<0 chorus>")`: the `0` at 12, then `chorus` at 14..20.
+  assert.deepEqual(stepLocs(p.stepsForCycle(0)[0]), [[12, 13]]);
+  assert.deepEqual(stepLocs(p.stepsForCycle(1)[0]), [[14, 20]]);
+});
+
+test('a synthesized slot adds no spans of its own', () => {
+  // cat()/seq() slots are not written by the user, so there is nothing there to light up - the
+  // step keeps only the span of the atom inside the option that played.
+  fresh();
+  const step = cat(mini('10', 0), mini('99', 0)).stepsForCycle(0)[0];
+  assert.deepEqual(stepLocs(step), [[0, 2]]);
+});
+
+test('a roll definition is marked as one, and stops being marked once it is built on', () => {
+  fresh();
+  const def = roll(0, '60,0,4', { grid: 16 });
+  assert.equal(def.rollDef, '0', 'the host filters definition blocks out of the track list');
+  assert.equal(def.fast(2).rollDef, undefined, 'deliberately playing a definition still works');
+  assert.equal(pianoroll('<0>').rollDef, undefined, 'a pattern naming rolls is a track like any other');
 });

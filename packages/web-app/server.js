@@ -1431,7 +1431,11 @@ const routes = {
       }
     });
     // Tempo-only and definitions-only blocks act at eval time and don't become tracks.
-    const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig);
+    // A block of roll(...) definitions evaluates to its last definition, which is a real Sig but
+    // not a track - playing it would turn the definitions block into an extra voice (see
+    // signal.mjs's rollDef). Anything derived from one (`roll(0, "…").synth(…)`) has lost the mark
+    // and plays as normal.
+    const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.rollDef);
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
     const anySolo = built.some((b) => b.soloed && !b.muted);
@@ -1513,6 +1517,10 @@ const routes = {
   // the window shipped with /api/evaluate; the browser requests the next window as its clock nears
   // the end of what it has. Query: { from, count? }. Returns the same per-track grid shape, for the
   // still-active tracks of the last eval - deterministic, so it matches what /api/evaluate sent.
+  // What roll ids are playable right now. The buffer's own definitions the editor can read for
+  // itself; this is how it learns about the prebake library, which is nowhere in the buffer.
+  'GET /api/rolls': async () => ({ rolls: patternCore.rollIds() }),
+
   'GET /api/highlight': async (q) => {
     const from = Math.max(0, Math.floor(Number(q.from)) || 0);
     const count = Math.min(HL_WINDOW * 4, Math.max(1, Math.floor(Number(q.count)) || HL_WINDOW));
