@@ -75,8 +75,8 @@ const API_DOCS = {
   },
   pianoroll: {
     kind: 'builder',
-    sig: 'pianoroll(notes, { grid, len })',
-    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it; every edit writes back into the string.',
+    sig: 'pianoroll(notes, { grid, len, start })',
+    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it; every edit writes back into the string. grid is the granularity in cells per cycle, and the loop window is len cells from cell start (drag either end of the roll\'s loop bar).',
     eg: 'pianoroll("60,0,4 64,0,4", { grid: 16, len: 16 })',
   },
 

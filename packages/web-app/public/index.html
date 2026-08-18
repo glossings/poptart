@@ -265,7 +265,10 @@
         <span>piano roll</span>
         <span id="pianorollScale" class="pianoroll-scale" title="the key setscale() set — the roll is coloured by it. Click to snap every note into it"></span>
         <label class="pianoroll-ctl">grid <select id="pianorollGrid" title="granularity — cells per cycle"></select></label>
-        <label class="pianoroll-ctl">len <input id="pianorollLen" type="number" step="1" min="1" value="16" title="loop length in cells (or drag the loop bar)" /></label>
+        <label class="pianoroll-ctl">len <input id="pianorollLen" type="number" step="1" min="1" value="16" title="loop length in cells (drag either end of the loop bar to move the playing window — it snaps to bar lines, shift for exact cells)" /></label>
+        <button id="pianorollHalve" class="small pr-text-btn" title="halve the length of the selected notes — or of the whole pattern when nothing is selected">÷2</button>
+        <button id="pianorollDouble" class="small pr-text-btn" title="double the length of the selected notes — or of the whole pattern when nothing is selected">×2</button>
+        <button id="pianorollDupLoop" class="small" title="repeat the loop after itself — twice the length, same notes again">⧉</button>
         <button id="pianorollTool" class="small" title="tool">✏️</button>
         <button id="pianorollCmdMode" class="small pr-text-btn" title="cmd-drag sets velocity — click to switch">vel</button>
         <button id="pianorollFold" class="small pr-text-btn" title="fold to the scale set by setscale()">fold</button>

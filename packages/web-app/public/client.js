@@ -1848,8 +1848,8 @@ function initLfoCanvas() {
 // steps as it plays. Two tools (pencil draws, arrow marquee-selects); click a note
 // to select it (shift-click extends, ctrl/cmd-A selects all), drag to move, drag a note's right
 // edge to resize, cmd-drag vertically to set velocity or probability (the vel/prob toggle), cmd-D
-// duplicates, cmd-Z / cmd-shift-Z walk the roll's own undo history. Arrow keys nudge the
-// selection (shift-up/down = octave, shift-right/left lengthen/shorten), delete removes
+// duplicates, option-drag drags a copy, cmd-Z / cmd-shift-Z walk the roll's own undo history.
+// Arrow keys nudge the selection (shift-up/down = octave, shift-right/left lengthen/shorten), delete removes
 // it, double-click erases one, and 0 mutes it - greyed out and silent, still there to switch back
 // on with another 0 (Live's deactivate). A value lane along the bottom shows every note's velocity
 // or probability (the vel/prob toggle, also reachable from the lane's own gutter label) as an
@@ -1858,11 +1858,17 @@ function initLfoCanvas() {
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
 // gets everything back the moment the note on top moves away (see prClipOverlaps). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
-// zooms in on fine grids. Clicking the scale chip snaps every note into the key. Clicking
-// anywhere outside the panel closes it - the roll is a tool you reach past to get back to the code.
+// zooms in on fine grids. The loop bar along the top carries the playing window: drag either end
+// anywhere on the timeline - so a loop can open half way through bar 1 and close half way through
+// bar 2, the note it opens on being the pattern's first beat - or drag its body to slide the whole
+// window over the notes (its ends snap to bar lines and their halves - hold shift for exact cells),
+// and ⧉ repeats the window after itself at twice the length. The grid menu re-meshes the roll
+// keeping the music where it is (a 1/4-grid quarter note becomes four 1/16 cells), while ÷2 / ×2
+// stretch the music itself - the selected notes, or the whole roll when nothing is selected. Clicking the scale chip snaps every note into
+// the key. Clicking anywhere outside the panel closes it - the roll is a tool you reach past to get back to the code.
 // With 🎧 on, drawing/dragging previews the note through the track's own
 // synth; →♪ rewrites the whole roll as an equivalent mini-notation note("…"). Every change is
-// serialized straight back into `pianoroll("midi,start,len[,vel[,prob]] …", { steps })` and
+// serialized straight back into `pianoroll("midi,start,len[,vel[,prob]] …", { grid, len, start })` and
 // re-evaluated (debounced), so the track plays what's drawn without a manual ⏎; hand edits to the
 // call flow the other way, back into the open panel. The code stays the single source of truth,
 // exactly like the lfo() shape editor.
@@ -1872,6 +1878,9 @@ const prPanel = document.getElementById('pianorollPanel');
 const prCanvas = document.getElementById('pianorollCanvas');
 const prGridSelect = document.getElementById('pianorollGrid');
 const prLenInput = document.getElementById('pianorollLen');
+const prHalveBtn = document.getElementById('pianorollHalve');
+const prDoubleBtn = document.getElementById('pianorollDouble');
+const prDupLoopBtn = document.getElementById('pianorollDupLoop');
 const prToolBtn = document.getElementById('pianorollTool');
 const prCmdModeBtn = document.getElementById('pianorollCmdMode');
 const prFoldBtn = document.getElementById('pianorollFold');
@@ -1897,6 +1906,17 @@ const PR_PITCH_WHEEL = 0.013; // wheel pitch-scroll sensitivity, rows per deltaY
 const PR_BTN_ZOOM = 1.4; // per-keypress zoom step for cmd ± (the wheel zooms proportionally)
 const PR_EVAL_DEBOUNCE_MS = 150; // quiet time after the last roll edit before it re-evaluates
 const PR_GRID_DIVS = [['1/4', 4], ['1/8', 8], ['1/8T', 12], ['1/16', 16], ['1/16T', 24], ['1/32', 32], ['1/64', 64]];
+// Vertical time lines, by how coarse a division they land on (0 = a bar line, 1 = its halves, …):
+// how wide they are drawn and how solid. Past the end of the arrays every deeper level draws like
+// the last one.
+const PR_DIV_W = [1.4, 1.1, 0.9, 0.7, 0.55];
+const PR_DIV_A = [1, 0.95, 0.75, 0.55, 0.4];
+const PR_DIV_MIN_PX = 5; // a division whose lines crowd closer than this drops out until you zoom in
+// How hard the loop bar's ends are pulled onto a bar line, its half-way point and its quarters (by
+// division level, in screen px). Anything the pointer isn't that close to lands on a plain cell,
+// and holding shift turns the magnet off entirely. Levels past the end of the array aren't magnetic
+// - they're already reachable by cell.
+const PR_SNAP_PX = [18, 12, 8];
 
 // Cursors that echo the tool under the pointer (Ableton's pencil / bracket / up-down), as inline
 // SVGs so no asset files are needed. The trailing two numbers are the hotspot.
@@ -2048,19 +2068,23 @@ function parsePianorollCall(inner) {
   if (grid == null) { const bare = /["'`]\s*,\s*(\d+)\s*$/.exec(inner.trim()); if (bare) grid = Math.max(1, Number(bare[1])); }
   if (grid == null) grid = 16;
   const len = int(/\blen\s*:\s*(\d+)/) ?? grid;
+  // start: where the loop window opens, in cells. 0 (the default) is left out of the code entirely.
+  const startM = /\bstart\s*:\s*(\d+)/.exec(inner);
+  const start = startM ? Math.max(0, Math.round(Number(startM[1]))) : 0;
   let notes = [];
   try {
     notes = pianorollMod.parsePianoRoll(noteStr);
   } catch {
     // unparseable note string - start from an empty roll
   }
-  return { notes, grid, len };
+  return { notes, grid, len, start };
 }
 
 // Hidden notes (buried under another - see prClipOverlaps) are left out: the code holds what
 // actually sounds, and they are only kept around in the panel so they can come back.
-function serializePianorollCall({ notes, grid, len }) {
-  return `pianoroll("${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { grid: ${grid}, len: ${len} })`;
+function serializePianorollCall({ notes, grid, len, start }) {
+  const from = start ? `, start: ${start}` : ''; // a window that opens at 0 is the default - don't write it
+  return `pianoroll("${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { grid: ${grid}, len: ${len}${from} })`;
 }
 
 // Frame the pitch window so the drawn notes sit centered; default to PR_DEFAULT_TOP for an empty
@@ -2095,13 +2119,14 @@ function openPianorollEditor(call) {
   const to = cm.posFromIndex(call.close + 1);
   const inner = cm.getValue().slice(call.open + 1, call.close);
   if (prState?.marker) prState.marker.clear();
-  const { notes, grid, len } = parsePianorollCall(inner);
+  const { notes, grid, len, start } = parsePianorollCall(inner);
   prState = {
     marker: cm.markText(from, to, {}),
     callStart: call.start,
     notes,
     grid, // granularity: cells per cycle (the *grid multiplier)
     len, // loop length in cells (grid-th notes)
+    start, // where the loop window opens, in cells - drag either end of the loop bar to move it
     pitchTop: PR_DEFAULT_TOP, // replaced by prFramePitch below, which needs prState to exist
     fold: prFold, // show only the scale's lanes (sticky across rolls, like the tool and cmd mode)
     zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
@@ -2148,8 +2173,8 @@ function prPlayheadLoop() {
 
 const PR_HISTORY_MAX = 200; // snapshots kept; the oldest are dropped past this
 
-const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len });
-const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}`;
+const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start });
+const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}`;
 
 // Record the roll's current state, unless it's identical to the entry we're already sitting on -
 // which makes this safe to call from anywhere, including the code-sync path that fires on every
@@ -2173,6 +2198,7 @@ function prHistoryStep(delta) {
   prState.notes = snap.notes.map((nt) => ({ ...nt }));
   prState.grid = snap.grid;
   prState.len = snap.len;
+  prState.start = snap.start;
   prState.sel.clear(); // the restored notes are new objects; the old selection means nothing
   prSyncGridLenInputs();
   writePianorollCall(false); // restoring is not itself an edit to record
@@ -2228,6 +2254,7 @@ function syncPianorollFromCode() {
   prState.callStart = cm.indexFromPos(range.from);
   prState.grid = parsed.grid;
   prState.len = parsed.len;
+  prState.start = parsed.start;
   if (pianorollMod.serializePianoRoll(parsed.notes) !== pianorollMod.serializePianoRoll(prLiveNotes(prState.notes))) {
     prState.notes = parsed.notes;
     prState.sel.clear(); // the old note objects are gone
@@ -2244,10 +2271,61 @@ function syncPianorollFromCode() {
 // cycle (grid) for context. Horizontal zoom widens each cell past the "fit" width and scrolls; the
 // pitch axis never zooms. A loop ruler occupies the top PR_TOPBAR px; note rows sit below it.
 
-// Rendered columns: the loop rounded up to its next whole bar, plus a little headroom to drag into.
-// Frozen (prState._dragCols) during a loop drag so the cell width - and thus the drag mapping -
-// stays put instead of feeding back on itself as len changes.
-const prRenderCols = () => (Math.floor(prState.len / prState.grid) + 1) * prState.grid + 4;
+// Rendered columns: the loop window's end rounded up to its next whole bar, plus a little headroom
+// to drag into. Frozen (prState._dragCols) during a loop drag so the cell width - and thus the drag
+// mapping - stays put instead of feeding back on itself as the window changes.
+const prRenderCols = () => (Math.floor(prLoopEnd() / prState.grid) + 1) * prState.grid + 4;
+
+// The loop window: `len` cells from `start`. Notes outside it are drawn (dimmed) but never sound,
+// and the editing gestures - drawing, dragging, nudging - keep notes inside it.
+const prLoopEnd = () => prState.start + prState.len;
+const prInLoop = (cell) => cell >= prState.start && cell < prLoopEnd();
+const prClampToLoop = (cell) => Math.min(prLoopEnd() - 1, Math.max(prState.start, cell));
+
+// The bar's divisions, coarsest first: the bar itself (`grid` cells), then its halves, quarters,
+// … down to a single cell - thirds where a triplet grid can't be halved. A vertical line's weight
+// is the coarsest division it lands on, which is what makes the half-way point of a bar readable
+// at a glance the way Live's does.
+function prBarDivisions(grid) {
+  const divs = [];
+  let d = grid;
+  while (d > 1) {
+    divs.push(d);
+    d = d % 2 === 0 ? d / 2 : d % 3 === 0 ? d / 3 : 1;
+  }
+  divs.push(1);
+  return divs;
+}
+
+// The visible vertical lines as [x, level] pairs (level 0 = a bar line, 1 = its halves, …). Levels
+// finer than `maxDepth`, and levels whose lines would crowd closer than PR_DIV_MIN_PX, are left
+// out - so zooming in reveals the subdivisions rather than smearing them together. Shared by the
+// grid and the value lane, so the two read as one timeline.
+function prTimeLines(m, maxDepth = Infinity) {
+  const divs = prBarDivisions(prState.grid);
+  const crowded = divs.findIndex((d) => d * m.cellW < PR_DIV_MIN_PX);
+  const deepest = Math.min(maxDepth, crowded === -1 ? divs.length - 1 : Math.max(0, crowded - 1));
+  const out = [];
+  const c0 = Math.max(0, Math.floor(m.scroll));
+  const c1 = Math.min(m.cols, Math.ceil(m.scroll + m.visibleCells));
+  for (let c = c0; c <= c1; c++) {
+    const level = divs.findIndex((d) => c % d === 0);
+    if (level > deepest) continue;
+    const x = prCellToX(c, m);
+    if (x >= PR_GUTTER - 0.5 && x <= m.W + 0.5) out.push([x, level]);
+  }
+  return out;
+}
+
+// Everything outside the loop window - the cells before it opens and the ones after it closes - is
+// dimmed wherever the timeline is drawn: you can still draw there, it just doesn't play.
+function prDimOutside(ctx, m, top, h) {
+  const x0 = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prState.start, m)));
+  const x1 = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prLoopEnd(), m)));
+  ctx.fillStyle = 'rgba(120,120,130,0.22)';
+  if (x0 > PR_GUTTER) ctx.fillRect(PR_GUTTER, top, x0 - PR_GUTTER, h);
+  if (x1 < m.W) ctx.fillRect(x1, top, m.W - x1, h);
+}
 
 function prMetrics() {
   const gridW = PR_W - PR_GUTTER;
@@ -2387,15 +2465,16 @@ function drawPianoKeys(ctx, col, m, info) {
   ctx.beginPath(); ctx.moveTo(PR_GUTTER + 0.5, 0); ctx.lineTo(PR_GUTTER + 0.5, H); ctx.stroke();
 }
 
-// The loop ruler across the top: bar ticks, the loop region [0,len] highlighted, and a grab handle
-// at the loop end. Returns the loop-end x so the interaction code can hit-test the handle.
+// The loop ruler across the top: bar ticks, the loop window [start, start+len) highlighted, and a
+// grab handle at each of its ends - drag either one to move that boundary anywhere on the timeline,
+// or the highlighted body to slide the whole window over the notes.
 function drawLoopBar(ctx, col, m) {
   const accent = col('--accent');
   ctx.fillStyle = col('--bg-panel');
   ctx.fillRect(0, 0, m.W, PR_TOPBAR);
 
-  const loopEndX = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prState.len, m)));
-  const loopStartX = Math.max(PR_GUTTER, prCellToX(0, m));
+  const loopEndX = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prLoopEnd(), m)));
+  const loopStartX = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prState.start, m)));
   ctx.fillStyle = col('--accent-soft');
   ctx.fillRect(loopStartX, 0, Math.max(0, loopEndX - loopStartX), PR_TOPBAR);
 
@@ -2413,9 +2492,14 @@ function drawLoopBar(ctx, col, m) {
     ctx.fillText(String(c / prState.grid + 1), x + 3, PR_TOPBAR / 2);
   }
 
-  // grab handle at the loop end
-  if (loopEndX <= m.W) {
-    ctx.fillStyle = accent;
+  // a grab handle at each end, pointing into the window
+  ctx.fillStyle = accent;
+  if (prCellToX(prState.start, m) >= PR_GUTTER) {
+    ctx.beginPath();
+    ctx.moveTo(loopStartX, 0); ctx.lineTo(loopStartX, PR_TOPBAR); ctx.lineTo(loopStartX + 6, PR_TOPBAR / 2);
+    ctx.closePath(); ctx.fill();
+  }
+  if (prCellToX(prLoopEnd(), m) <= m.W) {
     ctx.beginPath();
     ctx.moveTo(loopEndX, 0); ctx.lineTo(loopEndX, PR_TOPBAR); ctx.lineTo(loopEndX - 6, PR_TOPBAR / 2);
     ctx.closePath(); ctx.fill();
@@ -2423,7 +2507,47 @@ function drawLoopBar(ctx, col, m) {
   ctx.strokeStyle = col('--border');
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(PR_GUTTER, PR_TOPBAR + 0.5); ctx.lineTo(m.W, PR_TOPBAR + 0.5); ctx.stroke();
-  return loopEndX;
+}
+
+// Which part of the loop bar the pointer is on: either end handle (within a grab zone), the window
+// body between them, or - outside the window entirely - the end nearest to it, so a click out on
+// the ruler still throws that boundary where you clicked.
+function prLoopEdgeAt(px, m) {
+  const x0 = prCellToX(prState.start, m);
+  const x1 = prCellToX(prLoopEnd(), m);
+  if (Math.abs(px - x0) <= PR_EDGE_PX) return 'start';
+  if (Math.abs(px - x1) <= PR_EDGE_PX) return 'end';
+  if (px > x0 && px < x1) return 'move';
+  return px < x0 ? 'start' : 'end';
+}
+
+// Where a loop-bar drag lands, given the fractional cell under the pointer. The ends are magnetic:
+// near a bar line they snap to the bar, a little nearer the half-bar to that, then its quarters -
+// because "the top of the measure" is what you're almost always reaching for, and on a 1/32 grid
+// that line is otherwise a couple of pixels wide. Further out than any magnet reaches, the drag is
+// exact to the cell; `fine` (shift) skips the magnets altogether and is always exact.
+function prSnapCell(cellF, m, fine) {
+  if (fine) return Math.round(cellF);
+  const divs = prBarDivisions(prState.grid);
+  for (let level = 0; level < Math.min(divs.length, PR_SNAP_PX.length); level++) {
+    const cand = Math.round(cellF / divs[level]) * divs[level];
+    if (Math.abs(cand - cellF) * m.cellW <= PR_SNAP_PX[level]) return cand;
+  }
+  return Math.round(cellF);
+}
+
+// Put one end of the window at `cell`, keeping the other where it is (so either end can be
+// dragged anywhere on the timeline, and the window never closes below one cell).
+function prSetLoopEdge(edge, cell0) {
+  const cell = Math.max(0, cell0);
+  if (edge === 'start') {
+    const end = prLoopEnd();
+    prState.start = Math.min(cell, end - 1);
+    prState.len = end - prState.start;
+  } else {
+    prState.len = Math.max(1, cell - prState.start);
+  }
+  prLenInput.value = prState.len;
 }
 
 // --- value lane ---
@@ -2463,22 +2587,17 @@ function drawValueLane(ctx, col, m) {
   ctx.fillStyle = col('--bg');
   ctx.fillRect(PR_GUTTER, laneTop, W - PR_GUTTER, laneH);
 
-  // bar lines carry on through the lane, so the markers stay locatable in time
-  const c0 = Math.max(0, Math.floor(m.scroll));
-  const c1 = Math.min(m.cols, Math.ceil(m.scroll + m.visibleCells));
-  for (let c = Math.ceil(c0 / prState.grid) * prState.grid; c <= c1; c += prState.grid) {
-    const x = prCellToX(c, m);
-    if (x < PR_GUTTER - 0.5 || x > W + 0.5) continue;
-    ctx.strokeStyle = col('--border');
+  // the timeline carries on through the lane - bars and their halves only, so the markers stay
+  // locatable without the lane turning into a picket fence
+  for (const [x, level] of prTimeLines(m, 1)) {
+    ctx.strokeStyle = level === 0 ? col('--border-strong') : col('--border');
     ctx.lineWidth = 1;
+    ctx.globalAlpha = PR_DIV_A[Math.min(level, PR_DIV_A.length - 1)];
     ctx.beginPath(); ctx.moveTo(x, laneTop); ctx.lineTo(x, laneTop + laneH); ctx.stroke();
   }
-  // dim past the loop end, matching the grid above
-  const dimX = Math.max(PR_GUTTER, prCellToX(prState.len, m));
-  if (dimX < W) {
-    ctx.fillStyle = 'rgba(120,120,130,0.22)';
-    ctx.fillRect(dimX, laneTop, W - dimX, laneH);
-  }
+  ctx.globalAlpha = 1;
+  // dim outside the loop window, matching the grid above
+  prDimOutside(ctx, m, laneTop, laneH);
 
   // markers - selected ones drawn last so a chord's dragged marker stays visible on top
   const selCol = col('--text');
@@ -2576,23 +2695,18 @@ function drawPianoroll() {
       ctx.beginPath(); ctx.moveTo(PR_GUTTER, y); ctx.lineTo(W, y); ctx.stroke();
     }
   }
-  // vertical lines (visible span only): heaviest at each bar (a cycle = grid cells), medium at beats
-  const beat = prState.grid % 4 === 0 ? prState.grid / 4 : prState.grid;
-  const c0 = Math.max(0, Math.floor(m.scroll));
-  const c1 = Math.min(m.cols, Math.ceil(m.scroll + m.visibleCells));
-  for (let c = c0; c <= c1; c++) {
-    const x = prCellToX(c, m);
-    if (x < PR_GUTTER - 0.5 || x > W + 0.5) continue;
-    ctx.strokeStyle = c % prState.grid === 0 ? col('--border-strong') : col('--border');
-    ctx.lineWidth = c % prState.grid === 0 ? 1.4 : c % beat === 0 ? 1.1 : 0.5;
+  // vertical lines (visible span only), by division: heaviest at each bar (a cycle = grid cells),
+  // then its halves, quarters and so on, each a little lighter than the last - so where you are in
+  // the bar reads off the grid itself, and zooming in brings the finer levels in (see prTimeLines).
+  for (const [x, level] of prTimeLines(m)) {
+    ctx.strokeStyle = level === 0 ? col('--border-strong') : col('--border');
+    ctx.lineWidth = PR_DIV_W[Math.min(level, PR_DIV_W.length - 1)];
+    ctx.globalAlpha = PR_DIV_A[Math.min(level, PR_DIV_A.length - 1)];
     ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, laneTop); ctx.stroke();
   }
-  // dim the region past the loop end (cells >= len are outside the loop)
-  const dimX = prCellToX(prState.len, m);
-  if (dimX < W) {
-    ctx.fillStyle = 'rgba(120,120,130,0.22)';
-    ctx.fillRect(Math.max(PR_GUTTER, dimX), gridTop, W - Math.max(PR_GUTTER, dimX), gridH);
-  }
+  ctx.globalAlpha = 1;
+  // dim everything outside the loop window - before it opens as well as after it closes
+  prDimOutside(ctx, m, gridTop, gridH);
 
   // notes: fill opacity encodes velocity; a dashed outline marks a sub-unity probability; selected
   // notes get a bright solid outline. A muted note drops out of the accent entirely and is drawn in
@@ -2640,7 +2754,7 @@ function drawPianoroll() {
   prPlayheadOn = false;
   if (!transport.paused) {
     const abs = currentCyclePos() * prState.grid;
-    const x = prCellToX(((abs % prState.len) + prState.len) % prState.len, m);
+    const x = prCellToX(prState.start + (((abs % prState.len) + prState.len) % prState.len), m);
     if (x >= PR_GUTTER && x <= W) {
       ctx.strokeStyle = col('--accent');
       ctx.lineWidth = 1.5;
@@ -2669,7 +2783,10 @@ function prScrollTo(notes) {
 
 // Which cursor the pointer should show at (px,py), given whether a velocity/prob modifier is held.
 function prCursorFor(px, py, m, velMod) {
-  if (py < PR_TOPBAR) return px >= PR_GUTTER ? 'ew-resize' : 'default'; // loop ruler (drag its end)
+  if (py < PR_TOPBAR) { // loop ruler: the ends resize the window, its body slides it
+    if (px < PR_GUTTER) return 'default';
+    return prLoopEdgeAt(px, m) === 'move' ? 'grab' : 'ew-resize';
+  }
   if (py >= m.laneTop) { // value lane: markers drag up/down, the gutter label is the vel/prob switch
     if (px < PR_GUTTER) return 'pointer';
     return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
@@ -2740,7 +2857,7 @@ function prDuplicate() {
   if (!prState.sel.size) return;
   const sel = [...prState.sel];
   const shift = Math.max(1, Math.max(...sel.map((n) => n.start + n.len)) - Math.min(...sel.map((n) => n.start)));
-  const copies = sel.map((n) => ({ ...n, start: Math.min(prState.len - 1, n.start + shift) }));
+  const copies = sel.map((n) => ({ ...n, start: prClampToLoop(n.start + shift) }));
   prState.notes.push(...copies);
   prState.sel = new Set(copies);
   prClipOverlaps(); // the copies were pushed last, so they land on top of anything already there
@@ -2788,9 +2905,23 @@ function initPianorollCanvas() {
   // Raise the dragged notes over whatever they land on - but only once the drag has actually moved
   // something, so a click that merely selects a note never reshuffles the lane it sits in.
   const raiseOnce = (d) => { if (!d.raised) { d.raised = true; prTouch(prState.sel); } };
+  // Option-drag duplicates, Live's copy-drag: a copy of the selection is left behind at the position
+  // it started from and the drag carries the copies instead. Like raiseOnce this waits for the drag
+  // to actually move something, so an option-CLICK that never travels is just a click - not a note
+  // stacked exactly on itself (which the overlap rule would resolve by burying the original).
+  const altCopy = (d) => {
+    if (!d.alt || d.copied) return;
+    d.copied = true;
+    const copies = d.orig.map((o) => ({ ...o.n })); // still at their original cells - nothing has moved yet
+    prState.notes.push(...copies); // last, so the copies win the overlap rule wherever they land
+    prState.sel = new Set(copies);
+    d.orig = copies.map((n, i) => ({ n, start: d.orig[i].start, midi: d.orig[i].midi }));
+  };
   const setCursor = (c) => { if (prCanvas.style.cursor !== c) prCanvas.style.cursor = c; };
   const dragCursor = (d) =>
-    ({ vel: CUR_UPDOWN, lane: CUR_UPDOWN, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', loop: 'ew-resize', audition: 'pointer' }[d.kind] ?? 'default');
+    (d.kind === 'loop'
+      ? (d.edge === 'move' ? 'grabbing' : 'ew-resize')
+      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
 
   prCanvas.addEventListener('contextmenu', (e) => { if (prState) e.preventDefault(); }); // ctrl-drag (mac) = velocity, not a menu
 
@@ -2801,8 +2932,16 @@ function initPianorollCanvas() {
     const m = prMetrics();
     const { px, py } = prCanvasPos(e);
     prPointer = { px, py };
-    if (py < PR_TOPBAR) { // loop ruler - drag to set the loop length (written on pointerup)
-      if (px >= PR_GUTTER) { drag = { kind: 'loop' }; prState._dragCols = m.cols; prState.len = Math.max(1, Math.round(prCellFloat(px, m))); prLenInput.value = prState.len; drawPianoroll(); }
+    if (py < PR_TOPBAR) { // loop ruler - drag either end, or the window itself (written on pointerup)
+      if (px >= PR_GUTTER) {
+        const edge = prLoopEdgeAt(px, m);
+        drag = { kind: 'loop', edge, grabCell: prCellFloat(px, m), start0: prState.start };
+        prState._dragCols = m.cols;
+        // Grabbing an end throws it straight to the pointer (clicking out on the ruler is still
+        // "put the near boundary here"); grabbing the body only moves once the pointer does.
+        if (edge !== 'move') prSetLoopEdge(edge, prSnapCell(prCellFloat(px, m), m, e.shiftKey));
+        drawPianoroll();
+      }
       return;
     }
     if (py >= m.laneTop) { // value lane - drag a marker to set velocity/probability (see drawValueLane)
@@ -2843,7 +2982,8 @@ function initPianorollCanvas() {
       } else if (px >= prCellToX(nt.start + nt.len, m) - PR_EDGE_PX) {
         drag = { kind: 'resize', grabCell: cell, orig: snapshotLen() };
       } else {
-        drag = { kind: 'move', grabCell: cell, grabPos: pos, orig: snapshotPos() };
+        // alt: option-drag duplicates - see altCopy, which does it on the first movement
+        drag = { kind: 'move', grabCell: cell, grabPos: pos, orig: snapshotPos(), alt: e.altKey };
         prPreviewNotes([nt]);
       }
     } else if (prTool === 'select') {
@@ -2852,7 +2992,7 @@ function initPianorollCanvas() {
       if (!e.shiftKey) prState.sel = new Set();
       drag = { kind: 'marquee', x0: px, y0: py, base: e.shiftKey ? new Set(prState.sel) : new Set() };
       prState.marquee = { x: px, y: py, w: 0, h: 0 };
-    } else if (cell < prState.len) { // draw a note (only inside the loop)
+    } else if (prInLoop(cell)) { // draw a note (only inside the loop window)
       if (!e.shiftKey) prState.sel = new Set();
       const nt = { midi, start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1, mute: false };
       prState.notes.push(nt);
@@ -2861,7 +3001,7 @@ function initPianorollCanvas() {
       prClipOverlaps(); // pushed last, so it takes the lane from whatever was under the pencil
       prPreview(midi);
     } else {
-      prState.sel = new Set(); // click in the dimmed area past the loop end - just clear selection
+      prState.sel = new Set(); // click in the dimmed area outside the loop window - just clear selection
     }
     drawPianoroll();
   });
@@ -2873,8 +3013,11 @@ function initPianorollCanvas() {
     prPointer = { px, py };
     if (!drag) { setCursor(prCursorFor(px, py, m, e.metaKey || e.ctrlKey)); return; }
     if (drag.kind === 'loop') {
-      prState.len = Math.max(1, Math.round(prCellFloat(px, m)));
-      prLenInput.value = prState.len;
+      // The window's ends - and its start when the whole thing is being slid - snap to the bar and
+      // its halves unless shift is held (see prSnapCell).
+      const at = prSnapCell(drag.edge === 'move' ? drag.start0 + prCellFloat(px, m) - drag.grabCell : prCellFloat(px, m), m, e.shiftKey);
+      if (drag.edge === 'move') prState.start = Math.max(0, at);
+      else prSetLoopEdge(drag.edge, at);
     } else if (drag.kind === 'create') {
       drag.note.full = Math.max(1, prClampCell(px, m) - drag.note.start + 1); // what you drew...
       prClipOverlaps(); // ...and what the lane leaves room for
@@ -2889,9 +3032,9 @@ function initPianorollCanvas() {
       if (cell == null) return;
       const dCell = cell - drag.grabCell;
       const dPos = prPosAt(py, m) - drag.grabPos; // lanes, so a folded drag steps through the scale
-      if (dCell || dPos) raiseOnce(drag);
+      if (dCell || dPos) { altCopy(drag); raiseOnce(drag); }
       for (const o of drag.orig) {
-        o.n.start = Math.min(prState.len - 1, Math.max(0, o.start + dCell));
+        o.n.start = prClampToLoop(o.start + dCell);
         o.n.midi = prMidiOf(prPosOf(o.midi, m) + dPos, m);
       }
       prClipOverlaps(); // notes it passes over give way, and come back behind it
@@ -2953,7 +3096,7 @@ function initPianorollCanvas() {
       prClipOverlaps(); // whatever it was covering comes back
       writePianorollCall();
       drawPianoroll();
-    } else if (prTool === 'select' && cell < prState.len) { // double-click empty in the arrow tool draws a note
+    } else if (prTool === 'select' && prInLoop(cell)) { // double-click empty in the arrow tool draws a note
       const nt = { midi: prMidiAt(py, m), start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1, mute: false };
       prState.notes.push(nt);
       prState.sel = new Set([nt]);
@@ -3051,7 +3194,7 @@ function initPianorollCanvas() {
         const cols = prMetrics().cols;
         for (const n of sel) n.full = Math.max(1, Math.min(n.len + dir, cols - n.start));
       } else {
-        for (const n of sel) n.start = Math.min(prState.len - 1, Math.max(0, n.start + dir));
+        for (const n of sel) n.start = prClampToLoop(n.start + dir);
       }
       prClipOverlaps();
       writePianorollCall();
@@ -3088,11 +3231,60 @@ function initPianorollEditor() {
   // call itself leaving the buffer - see syncPianorollFromCode.
   cm.on('change', syncPianorollFromCode); // hand edits to the open call flow back into the panel
 
-  // grid (granularity) and len (loop length in cells) are independent - changing the grid just
-  // reinterprets each cell as a coarser/finer note; it doesn't move notes or resize the loop.
+  // grid is the GRANULARITY, and changing it re-draws the same music on a finer or coarser mesh:
+  // every note and the loop window are rescaled so they span the time they did before, so a quarter
+  // note on the 1/4 grid becomes four cells of the 1/16 grid rather than a sixteenth. (Coarsening
+  // rounds - that's the "do our best" part - and the overlap rule settles anything that rounds onto
+  // a neighbour.) The ×2 / ÷2 buttons are the other axis: same cells, different amount of time.
   prGridSelect.addEventListener('change', () => {
     if (!prState) return;
-    prState.grid = Math.max(1, Math.round(Number(prGridSelect.value) || 16));
+    const grid = Math.max(1, Math.round(Number(prGridSelect.value) || 16));
+    Object.assign(prState, pianorollMod.regridPianoRoll(prState, grid));
+    prClipOverlaps();
+    prSyncGridLenInputs();
+    writePianorollCall();
+    drawPianoroll();
+    prRefocus();
+  });
+
+  // ÷2 / ×2: stretch in time. With notes SELECTED it's just those notes - they spread out from (or
+  // pull in towards) the first of them, so the phrase keeps its starting beat while its rhythm
+  // halves or doubles, and everything else in the roll stays exactly where it is. Stretching a
+  // phrase past the loop end doesn't move the loop: those notes go quiet in the dimmed area, still
+  // drawn and still in the code, and ÷2 (or dragging the loop end out) brings them back.
+  //
+  // With nothing selected it's the whole roll - a bar-long arpeggio becomes half a bar, or two.
+  // There the cells stay exactly where they are and the GRID moves under them (which is why `len`
+  // doesn't change), so nothing is rounded unless the grid can't take it (see retimePianoRoll).
+  const prRetime = (factor) => {
+    if (!prState) return;
+    const sel = [...prState.sel];
+    if (sel.length) {
+      prTouch(sel); // a stretched note lands on top of whatever it now runs into, like a dragged one
+      pianorollMod.rescalePianoRoll(sel, factor, Math.min(...sel.map((n) => n.start)));
+    } else {
+      Object.assign(prState, pianorollMod.retimePianoRoll(prState, factor));
+    }
+    prClipOverlaps();
+    prSyncGridLenInputs();
+    writePianorollCall();
+    drawPianoroll();
+    prRefocus();
+  };
+  prHalveBtn.addEventListener('click', () => prRetime(0.5));
+  prDoubleBtn.addEventListener('click', () => prRetime(2));
+
+  // ⧉: repeat the loop window after itself - the window doubles in length and everything in it is
+  // copied one window along, so a one-bar arpeggio becomes that arpeggio over two bars. The copies
+  // land selected, ready to be edited into a variation.
+  prDupLoopBtn.addEventListener('click', () => {
+    if (!prState) return;
+    const { copies, len } = pianorollMod.duplicatePianoRollLoop(prState);
+    prState.notes.push(...copies); // last, so the copies win the overlap rule where they land
+    prState.len = len;
+    prState.sel = new Set(copies);
+    prClipOverlaps();
+    prSyncGridLenInputs();
     writePianorollCall();
     drawPianoroll();
     prRefocus();
@@ -3186,12 +3378,14 @@ function initPianorollEditor() {
     // pitches that happened to be under the pencil. Unfolded, the roll is chromatic and so is what
     // it converts to.
     const scale = prState.fold && prScaleInfo() ? patchScale : null;
-    const expr = pianorollMod.pianoRollToMini(prLiveNotes(prState.notes), { grid: prState.grid, len: prState.len, indent, scale });
+    const expr = pianorollMod.pianoRollToMini(prLiveNotes(prState.notes), { grid: prState.grid, len: prState.len, start: prState.start, indent, scale });
     // Degrees can only name notes that are IN the key, so anything out of it lands on its nearest
     // neighbour - a real pitch change, and the one thing about this rewrite that isn't lossless.
     // Counted before the close, which drops the notes.
     // Muted notes aren't written out at all, so they can't be moved by the rounding either.
-    const off = scale ? prLiveNotes(prState.notes).filter((nt) => !nt.mute && notesMod.quantizeToScale(nt.midi, scale) !== nt.midi).length : 0;
+    const off = scale
+      ? prLiveNotes(prState.notes).filter((nt) => !nt.mute && prInLoop(nt.start) && notesMod.quantizeToScale(nt.midi, scale) !== nt.midi).length
+      : 0;
     prSuppressCursor = true;
     cm.replaceRange(expr, range.from, range.to);
     closePianorollEditor(); // the pianoroll() call is gone now

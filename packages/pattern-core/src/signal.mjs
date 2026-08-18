@@ -2907,8 +2907,10 @@ export function note(value) {
  *
  * Two independent dimensions: `grid` is the granularity - cells per cycle, so grid 16 is a 1/16
  * grid (this is the `*grid` multiplier of the equivalent mini-notation). `len` is the loop length
- * measured in cells (grid-th notes), so `{ grid: 16, len: 3 }` is a three-1/16-note loop. Notes
- * live in cells 0..len-1; the loop repeats every `len` cells, exactly like `<…len cells…>*grid`.
+ * measured in cells (grid-th notes), so `{ grid: 16, len: 3 }` is a three-1/16-note loop. The loop
+ * WINDOW is `len` cells from cell `start` (0 by default, and draggable at both ends in the editor):
+ * cell `start` is the pattern's first beat, and the window repeats every `len` cells, exactly like
+ * `<…len cells…>*grid`. Notes drawn outside the window stay in the roll but never sound.
  * `grid` may also be given as a bare number shorthand, `pianoroll(str, 32)` (len then defaults to a
  * full cycle). Each note carries its own velocity and probability (a note with prob < 1 fires that
  * fraction of the time, like a `?` degrade), and overlapping notes play as chords. Holds absolute
@@ -2926,19 +2928,21 @@ export function pianoroll(str = '', opts = {}) {
   }
   const grid = normalizePianoRollSteps(typeof opts === 'number' ? opts : (opts.grid ?? opts.steps));
   const len = Math.max(1, Math.round(opts.len ?? grid));
+  const from = Math.max(0, Math.round(opts.start ?? 0));
   const notes = parsePianoRoll(str);
-  // Index onsets by their loop cell. Playback walks absolute cells m = cycle*grid + j; the cell
-  // sounding is (m mod len), so a len-cell loop threads seamlessly across cycles - identical to
-  // `<len cells>*grid`. dur is the note's length in cycles; _prob/_seed drive the per-onset random
-  // gate (the same rng2 the `?` degrade uses, keyed on the absolute cell so each loop pass is
-  // independent yet a given pass replays identically).
+  // Index onsets by their position WITHIN the loop window, cell `from` being position 0. Playback
+  // walks absolute cells m = cycle*grid + j; the cell sounding is (m mod len), so a len-cell loop
+  // threads seamlessly across cycles - identical to `<len cells>*grid`. dur is the note's length in
+  // cycles; _prob/_seed drive the per-onset random gate (the same rng2 the `?` degrade uses, keyed
+  // on the absolute cell so each loop pass is independent yet a given pass replays identically).
   const byStart = new Map();
   notes.forEach((nt, i) => {
     if (nt.mute) return; // deactivated in the roll (a `!` token) - drawn, but silent
-    if (nt.start >= len) return; // outside the loop window - never sounds
-    const list = byStart.get(nt.start) ?? [];
+    const cell = nt.start - from;
+    if (cell < 0 || cell >= len) return; // outside the loop window - never sounds
+    const list = byStart.get(cell) ?? [];
     list.push({ value: nt.midi, vel: nt.vel, dur: nt.len / grid, prob: nt.prob, seed: i + 1 });
-    byStart.set(nt.start, list);
+    byStart.set(cell, list);
   });
   const stepsForCycle = (cycle) => {
     const out = [];

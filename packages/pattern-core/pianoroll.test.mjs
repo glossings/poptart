@@ -13,6 +13,10 @@ import {
   pianoRollToMini,
   clipOverlaps,
   normalizePianoRollSteps,
+  rescalePianoRoll,
+  regridPianoRoll,
+  retimePianoRoll,
+  duplicatePianoRollLoop,
   PIANOROLL_DEFAULT_STEPS,
 } from './src/pianoroll.mjs';
 import { pianoroll, note, mini, channelAt, soundingEnd } from './src/signal.mjs';
@@ -346,4 +350,120 @@ test('pianoroll(): an empty roll schedules no notes', () => {
   sch.setPattern(pianoroll().synth('Serum 2'));
   sch._scheduleNoteEdges(0, 4);
   assert.equal(calls.filter((c) => c.method === 'noteOn').length, 0);
+});
+
+
+// ------------------------------------------------------------------ the loop window ({ start })
+// The playing window is `len` cells from `start`, and cell `start` is the pattern's first beat -
+// so a window dragged half way into the roll plays the notes it covers, from its own left edge.
+
+test('pianoroll(): start opens the loop window part way into the roll', () => {
+  const str = '60,0,1 64,2,1 67,3,1';
+  const steps = pianoroll(str, { grid: 4, len: 2, start: 2 }).stepsForCycle(0);
+  // cells 2,3 are the window; cell 2 sounds first, and the note at cell 0 is outside it
+  assert.deepEqual(steps.map((s) => ({ start: s.start, value: s.value })), [
+    { start: 0, value: 64 },
+    { start: 0.25, value: 67 },
+    { start: 0.5, value: 64 },
+    { start: 0.75, value: 67 },
+  ]);
+  // and it is exactly the same music as the same two notes drawn at the top of the roll
+  assert.deepEqual(steps, pianoroll('64,0,1 67,1,1', { grid: 4, len: 2 }).stepsForCycle(0));
+});
+
+test('pianoroll(): a window that starts mid-bar threads across the cycle like any other', () => {
+  const p = pianoroll('60,2,1 64,3,1 67,4,1', { grid: 4, len: 3, start: 2 });
+  assert.deepEqual(p.stepsForCycle(0).map((s) => s.value), [60, 64, 67, 60]);
+  // cell 4 of cycle 1 is window cell (4 mod 3) = 1 -> the note drawn at roll cell 3
+  assert.equal(p.stepsForCycle(1)[0].value, 64);
+});
+
+test('pianoRollToMini: the window is what gets written, from its own left edge', () => {
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60,0,1 64,2,1 67,3,1'), { grid: 4, len: 2, start: 2 }),
+    'note(`<\n  64 67\n>*4`)',
+  );
+  // a note outside the window doesn't sound, so it isn't written - not even as a rest's worth of length
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60,0,4 72,6,1'), { grid: 4, len: 4, start: 2 }),
+    'note(`<\n  ~ ~ ~ ~\n>*4`)',
+  );
+});
+
+// ------------------------------------------------------------------ the editor's roll-wide edits
+
+test('rescalePianoRoll: notes keep their span in time, rounding when it must', () => {
+  const notes = parsePianoRoll('60,0,4 64,4,2');
+  rescalePianoRoll(notes, 4); // a 1/4 grid re-meshed as 1/16: every cell becomes four
+  assert.equal(serializePianoRoll(notes), '60,0,16 64,16,8');
+  rescalePianoRoll(notes, 1 / 4); // and back
+  assert.equal(serializePianoRoll(notes), '60,0,4 64,4,2');
+  // coarsening can't take a note below a single cell
+  const short = parsePianoRoll('60,3,1');
+  rescalePianoRoll(short, 1 / 4);
+  assert.equal(serializePianoRoll(short), '60,1,1');
+});
+
+// ×2 / ÷2 with a selection: only those notes move, and they spread from the first of them, so the
+// phrase keeps the beat it starts on.
+test('rescalePianoRoll: an anchor holds one cell still while the rest spread from it', () => {
+  const phrase = parsePianoRoll('60,4,1 64,6,1 67,8,2');
+  rescalePianoRoll(phrase, 2, 4); // stretched about its own first onset
+  assert.equal(serializePianoRoll(phrase), '60,4,2 64,8,2 67,12,4');
+  rescalePianoRoll(phrase, 0.5, 4);
+  assert.equal(serializePianoRoll(phrase), '60,4,1 64,6,1 67,8,2');
+  // halving a phrase that is already all single cells can only round them together - the caller's
+  // clipOverlaps settles that, it isn't an error here
+  const tight = parsePianoRoll('60,4,1 60,5,1 60,6,1');
+  rescalePianoRoll(tight, 0.5, 4);
+  assert.deepEqual(tight.map((n) => n.start), [4, 5, 5]);
+});
+
+test('regridPianoRoll: a finer grid plays the same music', () => {
+  const roll = { notes: parsePianoRoll('60,0,1 64,1,1'), grid: 4, len: 4, start: 1 };
+  const next = regridPianoRoll(roll, 16);
+  assert.deepEqual(next, { grid: 16, len: 16, start: 4 });
+  assert.equal(serializePianoRoll(roll.notes), '60,0,4 64,4,4');
+  // the drawn (unclipped) length moves with it, so the overlap rule resolves the same way
+  assert.deepEqual(roll.notes.map((n) => n.full), [4, 4]);
+  // the notes sound at the same times as before
+  const before = pianoroll('60,0,1 64,1,1', { grid: 4, len: 4, start: 1 }).stepsForCycle(0);
+  const after = pianoroll(serializePianoRoll(roll.notes), { ...next }).stepsForCycle(0);
+  assert.deepEqual(after, before);
+});
+
+test('retimePianoRoll: the grid carries the stretch, leaving the cells (and len) alone', () => {
+  const roll = { notes: parsePianoRoll('60,0,4'), grid: 16, len: 16, start: 0 };
+  assert.deepEqual(retimePianoRoll(roll, 0.5), { grid: 32, len: 16, start: 0 }); // half as long
+  assert.equal(serializePianoRoll(roll.notes), '60,0,4'); // ...losslessly: nothing moved
+  assert.deepEqual(retimePianoRoll({ ...roll, grid: 32 }, 2), { grid: 16, len: 16, start: 0 }); // and back
+  // one bar of 1/16 notes really does become half a bar
+  const whole = pianoroll('60,0,16', { grid: 16, len: 16 }).stepsForCycle(0)[0];
+  const half = pianoroll('60,0,16', { grid: 32, len: 16 }).stepsForCycle(0)[0];
+  assert.equal(whole.end - whole.start, 1);
+  assert.equal(half.end - half.start, 0.5);
+});
+
+test('retimePianoRoll: a grid that cannot take it moves the notes instead', () => {
+  const roll = { notes: parsePianoRoll('60,1,1 64,3,2'), grid: 3, len: 3, start: 1 };
+  assert.deepEqual(retimePianoRoll(roll, 2), { grid: 3, len: 6, start: 2 }); // 3/2 is not a grid
+  assert.equal(serializePianoRoll(roll.notes), '60,2,2 64,6,4');
+});
+
+test('duplicatePianoRollLoop: the window repeats after itself at twice the length', () => {
+  const roll = { notes: parsePianoRoll('60,0,2 64,2,2'), grid: 4, len: 4, start: 0 };
+  const { copies, len } = duplicatePianoRollLoop(roll);
+  assert.equal(len, 8);
+  assert.equal(serializePianoRoll(copies), '60,4,2 64,6,2');
+  // the doubled roll plays the one-bar phrase twice
+  const doubled = pianoroll(serializePianoRoll([...roll.notes, ...copies]), { grid: 4, len: 8 });
+  assert.deepEqual(doubled.stepsForCycle(0).map((s) => s.value), [60, 64]);
+  assert.deepEqual(doubled.stepsForCycle(1).map((s) => s.value), [60, 64]);
+});
+
+test('duplicatePianoRollLoop: only what the window plays is repeated', () => {
+  const roll = { notes: parsePianoRoll('60,0,1 64,4,1 67,9,1'), grid: 4, len: 4, start: 4 };
+  const { copies, len } = duplicatePianoRollLoop(roll);
+  assert.equal(len, 8);
+  assert.equal(serializePianoRoll(copies), '64,8,1'); // the notes outside the window stay put
 });

@@ -17,12 +17,15 @@
 //   prob  - optional probability the note plays, 0..1 (omitted when 1). Drives a per-cycle random
 //           gate in the builder, and becomes a `?` degrade when converted to mini-notation. When
 //           present, vel is written too (it holds the field's place), even if it is the default.
-// The grid width (`steps`, how many cells span one cycle) lives in the pianoroll() call's options,
-// not the string - the same split shape.mjs uses for lfo()'s rate/mode.
+// The grid width (`grid`, how many cells span one cycle) lives in the pianoroll() call's options,
+// not the string - the same split shape.mjs uses for lfo()'s rate/mode - and so does the loop
+// window it plays: `len` cells starting at cell `start`. Notes are written at their drawn cell
+// either way, so sliding the window over them never rewrites a single note.
 
 import { DEFAULT_SCALE_OCTAVE, midiToDegree, noteToMidi, scaleAtOctave, scaleParts } from './notes.mjs';
 
 export const PIANOROLL_DEFAULT_STEPS = 16;
+export const PIANOROLL_MAX_GRID = 512; // finest grid the retime buttons will push a roll to
 
 /** Clamp/validate a grid width into a positive integer number of cells per cycle. */
 export function normalizePianoRollSteps(steps) {
@@ -125,7 +128,9 @@ export function clipOverlaps(notes) {
 /**
  * Convert a drawn roll to the equivalent mini-notation, in the same multi-line `<…>*grid` form the
  * MIDI recorder writes: `len` cells (one per grid column) between `<` and `>`, multiplied by `grid`,
- * so the whole thing loops every `len` grid-th notes. Each cell is a rest `~`, a note, or a chord
+ * so the whole thing loops every `len` grid-th notes. The cells are the loop WINDOW - `len` of them
+ * from cell `start` - so a window that begins half way through the first bar writes the note it
+ * begins on as the first cell, exactly as playback sounds it. Each cell is a rest `~`, a note, or a chord
  * `[a,b]`. Note length is carried by the `clip` field (a `_` tie misbehaves inside `<…>`), velocity
  * by the `vel` field, and probability by a `?amount` degrade (amount = 1 - prob).
  *
@@ -145,12 +150,15 @@ export function clipOverlaps(notes) {
  * Muted notes are left out entirely: this writes down what the roll PLAYS, and mini-notation has no
  * spelling for a note that's there but switched off.
  */
-export function pianoRollToMini(allNotes, { grid, len, indent = '', scale = null } = {}) {
-  const notes = allNotes.filter((nt) => !nt.mute);
+export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', scale = null } = {}) {
   const g = normalizePianoRollSteps(grid);
   const total = Math.max(1, Math.round(len ?? g));
+  const from = Math.max(0, Math.round(start));
+  // Only what the window plays is written down - and at its offset within the window, so cell
+  // `from` is the pattern's first beat.
+  const notes = allNotes.filter((nt) => !nt.mute && nt.start >= from && nt.start < from + total);
   const onsets = Array.from({ length: total }, () => []);
-  for (const nt of notes) if (nt.start < total) onsets[nt.start].push(nt);
+  for (const nt of notes) onsets[nt.start - from].push(nt);
   const anyVel = notes.some((nt) => nt.vel < 1);
   const anyClip = notes.some((nt) => nt.len > 1);
   const octave = scale ? rollOctave(notes, scale) : null;
@@ -186,6 +194,78 @@ export function pianoRollToMini(allNotes, { grid, len, indent = '', scale = null
   const seq = `\`<\n${body}\n${indent}>*${g}\``;
   const tail = scale ? `.sc(${octave})` : '';
   return `${fields.length > 1 ? `${seq}.as("${fields.join(':')}")` : `${pitchField}(${seq})`}${tail}`;
+}
+
+/**
+ * Rescale every note in place by `ratio` cells per cell, about `anchor` (the cell that stays put) -
+ * the retiming behind a grid change (a 1/4-grid quarter note becomes four cells on a 1/16 grid),
+ * behind the ×2/÷2 buttons when the grid itself can't carry the change, and behind ×2/÷2 applied to
+ * a SELECTION, which stretches about its own first onset so the phrase grows to the right from
+ * where it already starts. Both the drawn length (`full`) and the clipped one (`len`) move, so a
+ * later clipOverlaps resolves the rescaled roll exactly as the drawn one resolved. Coarsening
+ * rounds, and can round two notes onto one cell - which is a real collision the caller's
+ * clipOverlaps then settles, not a bug in the arithmetic.
+ */
+export function rescalePianoRoll(notes, ratio, anchor = 0) {
+  for (const nt of notes) {
+    const full = Number.isFinite(nt.full) ? nt.full : nt.len;
+    nt.start = Math.max(0, Math.round(anchor + (nt.start - anchor) * ratio));
+    nt.full = Math.max(1, Math.round(full * ratio));
+    nt.len = Math.max(1, Math.round(nt.len * ratio));
+  }
+  return notes;
+}
+
+/**
+ * Change a roll's GRANULARITY while it keeps playing the same music: the cells get finer or
+ * coarser and every note (and the loop window) is rescaled to span the same time as before. Notes
+ * are mutated in place; the new `{ grid, len, start }` comes back.
+ */
+export function regridPianoRoll(roll, grid) {
+  const next = normalizePianoRollSteps(grid);
+  const cur = normalizePianoRollSteps(roll.grid);
+  const ratio = next / cur;
+  if (ratio !== 1) rescalePianoRoll(roll.notes ?? [], ratio);
+  return {
+    grid: next,
+    len: Math.max(1, Math.round(Math.max(1, Math.round(roll.len ?? cur)) * ratio)),
+    start: Math.max(0, Math.round(Math.max(0, Math.round(roll.start ?? 0)) * ratio)),
+  };
+}
+
+/**
+ * Stretch a WHOLE roll in TIME by `factor` (2 = it takes twice as long, 0.5 = half) - what the
+ * ×2/÷2 buttons do when nothing is selected (with a selection they rescale just those notes, about
+ * the first of them; see rescalePianoRoll).
+ * The cheap direction is the grid: keeping the cells exactly where they are and making each one
+ * twice as long (or half) retimes every note and the loop at once, losslessly, which is why `len`
+ * comes out unchanged. Only when the grid can't take it - halving an odd one, or a grid already at
+ * PIANOROLL_MAX_GRID - do the notes themselves move, which rounds. Returns the new
+ * `{ grid, len, start }`; notes are mutated in place on that second path only.
+ */
+export function retimePianoRoll(roll, factor) {
+  const grid = normalizePianoRollSteps(roll.grid);
+  const len = Math.max(1, Math.round(roll.len ?? grid));
+  const start = Math.max(0, Math.round(roll.start ?? 0));
+  const scaled = grid / factor;
+  if (Number.isInteger(scaled) && scaled >= 1 && scaled <= PIANOROLL_MAX_GRID) return { grid: scaled, len, start };
+  rescalePianoRoll(roll.notes ?? [], factor);
+  return { grid, len: Math.max(1, Math.round(len * factor)), start: Math.max(0, Math.round(start * factor)) };
+}
+
+/**
+ * Repeat the loop window once more after itself: the window doubles in length and everything in it
+ * is copied one window-length to the right, so a one-bar arpeggio becomes the same arpeggio over
+ * two bars. Returns the copies to add (fresh objects - the caller pushes them last, so the overlap
+ * rule resolves in their favour) and the new `len`.
+ */
+export function duplicatePianoRollLoop({ notes = [], len, start = 0 }) {
+  const from = Math.max(0, Math.round(start));
+  const span = Math.max(1, Math.round(len));
+  const copies = notes
+    .filter((nt) => nt.start >= from && nt.start < from + span)
+    .map((nt) => ({ ...nt, start: nt.start + span }));
+  return { copies, len: span * 2 };
 }
 
 /**

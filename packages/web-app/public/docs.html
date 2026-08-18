@@ -466,11 +466,15 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <div class="callout new">
             <span class="tag">draw it</span>
             <p style="margin:0 0 8px">
-              <code>pianoroll("…", { grid, len })</code> is the same absolute-note pattern as
+              <code>pianoroll("…", { grid, len, start })</code> is the same absolute-note pattern as
               <code>note(…)</code>, but <strong>drawn</strong>. <code>grid</code> is the granularity
               (cells per cycle — the <code>*grid</code> of the equivalent mini-notation) and
               <code>len</code> is the loop length in cells, so <code>{ grid: 16, len: 3 }</code> is a
-              three-1/16-note loop. <strong>Double-click</strong> the word <code>pianoroll</code>
+              three-1/16-note loop. The loop <em>window</em> is those <code>len</code> cells counted
+              from cell <code>start</code> (0 unless you drag it): whatever cell the window opens on
+              is the pattern's first beat, so a loop can begin half way through the first bar and end
+              half way through the second. Notes outside the window stay drawn — dimmed — and never
+              sound. <strong>Double-click</strong> the word <code>pianoroll</code>
               and an Ableton-style grid opens over the editor, with a real piano keyboard down the
               side, a draggable loop bar along the top, and a playhead that sweeps the loop as it
               plays. (Only the name opens it — the arguments stay ordinary code you can edit by
@@ -487,7 +491,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               channel the toggle picks (its gutter label switches too) as one marker per note —
               a dot at the onset with a line running right for the duration, dashed when it's
               probability — and dragging a marker up or down sets the value, for the whole
-              selection at once. <strong>cmd-D</strong> duplicates, arrow keys nudge
+              selection at once. <strong>cmd-D</strong> duplicates, <strong>option-drag</strong>
+              drags a copy (the original stays where it was), arrow keys nudge
               (<strong>shift</strong> + up/down = octave, <strong>shift</strong> + right/left lengthen
               and shorten), delete removes, double-click erases one. <strong>0</strong> mutes the
               selected notes (or the one under the pointer) the way Live deactivates them: they grey
@@ -497,11 +502,29 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               underneath gives way — cut short at the new note's onset, or hidden if it was landed
               on square, the way Live does it. Nothing is really lost: move the note on top away and
               whatever was under it comes straight back. Notes at different pitches
-              still play as chords; the <strong>grid</strong> and <strong>len</strong> fields (or dragging the
-              top loop bar) size it; <strong>cmd −/+</strong> zoom; <strong>🎧</strong> auditions each
+              still play as chords; the <strong>grid</strong> and <strong>len</strong> fields (or dragging either
+              end of the top loop bar — it snaps to bar lines and their halves, <strong>shift</strong> for exact
+              cells — or its middle to slide the whole window) size and place it;
+              <strong>cmd −/+</strong> zoom; <strong>🎧</strong> auditions each
               note through the track's synth; and <strong>→♪</strong> converts the whole roll to the
               equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation. Clicking anywhere
               outside the panel closes it (so does <strong>Escape</strong>, or <strong>✕</strong>).
+            </p>
+            <p style="margin:0 0 8px">
+              The header's three shape buttons work on the <em>whole</em> roll.
+              <strong>⧉</strong> repeats the loop after itself — twice the length, the same notes
+              again, so a one-bar arpeggio becomes that arpeggio over two bars (the copies land
+              selected, ready to be varied). <strong>÷2</strong> and <strong>×2</strong> stretch the
+              music in time. With notes selected they stretch just those, out from (or in towards) the
+              first of them, so the phrase keeps its starting beat while its rhythm halves or doubles.
+              With nothing selected they stretch the whole roll: a pattern spanning one measure becomes
+              half a measure, or two, with every note's duration halved or doubled to match —
+              <code>len</code> stays put and the <code>grid</code> moves under the cells, so nothing is
+              rounded. Changing
+              <strong>grid</strong> itself does the opposite: it re-meshes the roll while the music
+              stays where it is, so a quarter note drawn on the 1/4 grid becomes four cells on the
+              1/16 grid rather than a sixteenth. (Going coarser rounds — it does its best, and the
+              overlap rule settles anything that lands on a neighbour.)
             </p>
             <p style="margin:0 0 8px">
               <strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> step back and forward through the
