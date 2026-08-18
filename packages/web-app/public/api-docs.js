@@ -82,7 +82,7 @@ const API_DOCS = {
   roll: {
     kind: 'builder',
     sig: 'roll(id, notes, { grid, len, start })',
-    desc: 'Keeps a drawn roll under an id (a number or a name) so patterns can name it - pianoroll("<0 chorus>") plays them in turn. Written for you: an empty pianoroll() creates one, and the piano roll panel renames it. Definitions are hidden from the editor (settings: hide roll definitions) since they are note data rather than code. Redefined on every evaluation; ids defined in prebake are shared by every patch.',
+    desc: 'Keeps a drawn roll under an id (a number or a name) so patterns can name it - pianoroll("<0 chorus>") plays them in turn. Written for you: an empty pianoroll() creates one, and the piano roll panel renames it - renaming a roll two patterns share splits it, so the pattern you renamed from gets a copy under the new name and the other keeps the original. Definitions are hidden from the editor (settings: hide roll definitions) since they are note data rather than code. Redefined on every evaluation; ids defined in prebake are shared by every patch.',
     eg: 'roll(0, "60,0,4 64,0,4", { grid: 16 })',
   },
 

@@ -49,7 +49,10 @@ const coreReady = Promise.all([
     initRecordPanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
-    foldConfigBlobs(); // which spans are data depends on pianorollMod - re-derive now that it is here
+    // Which spans are DATA (rather than roll ids) is a question only pianoroll.mjs can answer, so
+    // the folds made before it landed have to be dropped and worked out again - re-running
+    // foldConfigBlobs alone would find every span already marked and leave the wrong chips up.
+    refoldAll();
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
 
@@ -587,8 +590,9 @@ function foldConfigBlobs() {
     const str = m[2];
     if (str.length <= 2) continue; // "" - already as small as it gets
     // pianoroll("<0 chorus>") names rolls, and those names ARE the code to read - the whole point
-    // of the id form. Only drawn note data folds.
-    if (m[1] === 'pianoroll' && isRollIdString(str.slice(1, -1))) continue;
+    // of the id form. Only drawn note data folds. Until pianoroll.mjs has loaded the two can't be
+    // told apart, so nothing folds rather than the wrong thing; coreReady refolds once it can.
+    if (m[1] === 'pianoroll' && (!pianorollMod || isRollIdString(str.slice(1, -1)))) continue;
     const start = m.index + m[0].length - str.length;
     foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]]);
   }
@@ -2459,9 +2463,61 @@ function createRoll(id) {
   prScheduleEval();
 }
 
+// The word-boundary form of a roll id, for finding it inside a pianoroll("<lead pad>") string:
+// `lead` must not match the `lead` of `leader`, nor the one in a comment about it.
+function rollIdWordRe(id, flags = 'g') {
+  return new RegExp(`(?<![\\w$])${String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`, flags);
+}
+
+/** Every pianoroll(...) call in `code` that names `id` - the patterns that play this roll. */
+function rollRefCalls(code, id) {
+  const word = rollIdWordRe(id, '');
+  return pianorollIdCalls(code).filter((call) => word.test(call.str));
+}
+
+// Renaming inside one call's id string, occurrence by occurrence rather than by replacing the whole
+// string. A change strictly INSIDE a marker leaves that marker in place, which is what keeps the
+// panel's `source` (and the highlighter's spans) pointing where they were.
+function idOccurrenceEdits(call, from, to) {
+  const out = [];
+  const word = rollIdWordRe(from);
+  let m;
+  while ((m = word.exec(call.str)) !== null) out.push([call.from + m.index, call.from + m.index + m[0].length, to]);
+  return out;
+}
+
+// The span of the id literal inside a roll(...) definition - the `"lead"` of roll("lead", "…").
+function defIdLiteralRange(code, def) {
+  const inner = code.slice(def.open + 1, def.close);
+  const [idLiteral] = splitFirstArg(inner);
+  const at = def.open + 1 + inner.indexOf(idLiteral);
+  return [at, at + idLiteral.length];
+}
+
+/** Applies [from, to, text] edits as one undoable step. Sorted here, so callers needn't be. */
+function applyEdits(edits) {
+  const sorted = [...edits].sort((a, b) => a[0] - b[0]);
+  cm.operation(() => {
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      cm.replaceRange(sorted[i][2], cm.posFromIndex(sorted[i][0]), cm.posFromIndex(sorted[i][1]));
+    }
+  });
+}
+
+/** The pianoroll(...) call the panel is looking THROUGH, when it is one of `refs`. */
+function prSourceCall(refs) {
+  const range = prState?.source?.find();
+  if (!range) return null;
+  const a = cm.indexFromPos(range.from);
+  const b = cm.indexFromPos(range.to);
+  return refs.find((call) => call.from <= a && call.to >= b) ?? null;
+}
+
 // Renaming from the panel, which is the only place a roll HAS a visible name. The definition and
 // every pattern that names it move together - a rename that left `pianoroll("<lead>")` pointing at
-// nothing would silently swap the part for silence.
+// nothing would silently swap the part for silence. Unless the roll is SHARED and you are looking
+// at it through one of the patterns playing it, which asks for something else entirely: see
+// forkRoll.
 function renameRoll(from, to) {
   const code = cm.getValue();
   const defs = rollDefsInBuffer(code);
@@ -2471,21 +2527,14 @@ function renameRoll(from, to) {
   const def = defs.find((d) => d.id === from);
   if (!def) return refuse('its definition is not in this buffer');
 
-  const inner = code.slice(def.open + 1, def.close);
-  const [idLiteral] = splitFirstArg(inner);
-  const litStart = def.open + 1 + inner.indexOf(idLiteral);
-  const edits = [[litStart, litStart + idLiteral.length, JSON.stringify(to)]];
-  const word = new RegExp(`(?<![\\w$])${from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`, 'g');
-  for (const call of pianorollIdCalls(code)) {
-    const next = call.str.replace(word, to);
-    if (next !== call.str) edits.push([call.from, call.to, next]);
-  }
-  cm.operation(() => {
-    for (let i = edits.length - 1; i >= 0; i--) {
-      const [a, b, text] = edits[i];
-      cm.replaceRange(text, cm.posFromIndex(a), cm.posFromIndex(b));
-    }
-  });
+  const refs = rollRefCalls(code, from);
+  const here = prSourceCall(refs);
+  if (here && refs.length > 1) return forkRoll(code, def, from, to, here, refs.length - 1);
+
+  const [litStart, litEnd] = defIdLiteralRange(code, def);
+  const edits = [[litStart, litEnd, JSON.stringify(to)]];
+  for (const call of refs) edits.push(...idOccurrenceEdits(call, from, to));
+  applyEdits(edits);
   if (prState?.rollId === from) {
     prState.rollId = to;
     prState.idLiteral = JSON.stringify(to);
@@ -2493,7 +2542,47 @@ function renameRoll(from, to) {
   refoldAll();
   prSyncRollHead();
   prScheduleEval();
-  logLine(`renamed roll "${from}" to "${to}"${edits.length > 1 ? ` (${edits.length - 1} pattern(s) updated)` : ''}`);
+  logLine(`renamed roll "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}`);
+}
+
+// Two patterns playing one roll, renamed from inside one of them. Renaming both is the move you
+// can't take back by hand: the other pattern's part loses the name you knew it by, and no roll
+// called `lead` exists any more. So the pattern you renamed FROM gets a roll of its own - a copy of
+// the notes under the new name, pointed at from that call and nowhere else - and every other
+// pattern goes on playing `lead` exactly as before. The two are identical the moment they split and
+// diverge from there, which is the only thing "unlink" can mean for drawn notes.
+//
+// A roll opened straight from the picker isn't being looked at THROUGH any one pattern (there is no
+// `source` call), so there is nothing to unlink it from and a rename there stays a plain rename.
+function forkRoll(code, def, from, to, call, others) {
+  const [litStart, litEnd] = defIdLiteralRange(code, def);
+  const text = code.slice(def.start, def.close + 1);
+  const copy = text.slice(0, litStart - def.start) + JSON.stringify(to) + text.slice(litEnd - def.start);
+  const lineStart = code.lastIndexOf('\n', def.start - 1) + 1;
+  const indent = /^[ \t]*/.exec(code.slice(lineStart, def.start))[0];
+
+  // The quotes are never part of an edit, so a mark that takes them IN survives having the whole
+  // string body replaced - which is what renaming a `pianoroll("lead")` does - and comes back
+  // sitting over the new name, ready to go on being followed.
+  const quoted = cm.markText(cm.posFromIndex(call.from - 1), cm.posFromIndex(call.to + 1), {});
+  const view = prCarry();
+  const oldSource = prState?.source ?? null;
+  applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`], ...idOccurrenceEdits(call, from, to)]);
+  const span = quoted.find();
+  quoted.clear();
+  oldSource?.clear();
+  if (view) {
+    view.source = span
+      ? cm.markText({ line: span.from.line, ch: span.from.ch + 1 }, { line: span.to.line, ch: span.to.ch - 1 }, {})
+      : null;
+  }
+  refoldAll();
+  openRollById(to, view); // the same notes stay on screen, now under the name just given them
+  prScheduleEval();
+  logLine(
+    `roll "${to}" is this pattern's own copy of "${from}" - ${others} other pattern${others === 1 ? '' : 's'} ` +
+      `still play${others === 1 ? 's' : ''} "${from}", which is unchanged`
+  );
 }
 
 // Frame the pitch window so the drawn notes sit centered; default to PR_DEFAULT_TOP for an empty
@@ -2673,8 +2762,13 @@ function prSyncRollHead() {
   if (!named) return prClosePicker();
   // Never type over someone mid-rename - the box is theirs until they leave it.
   if (document.activeElement !== prName) prName.value = prState.rollId;
-  // Fixed width, so a long name is clipped on screen; the tooltip is where it stays whole.
-  prName.title = `roll ${prState.rollId} — type over it to rename it everywhere it is played`;
+  // Fixed width, so a long name is clipped on screen; the tooltip is where it stays whole - and
+  // where a shared roll says what renaming it from here is actually going to do.
+  const shared = prState.source ? rollRefCalls(cm.getValue(), prState.rollId).length : 0;
+  prName.title = shared > 1
+    ? `roll ${prState.rollId} — played by ${shared} patterns; renaming it here gives THIS one its own copy `
+      + `under the new name and leaves the others on "${prState.rollId}"`
+    : `roll ${prState.rollId} — type over it to rename it everywhere it is played`;
   if (!prPicker.classList.contains('hidden')) prRenderPickList();
 }
 
