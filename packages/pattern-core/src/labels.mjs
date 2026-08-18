@@ -68,14 +68,19 @@ function newScan() {
   };
 }
 
-// Lex `text` forward from `state`, in place. Called once per line as the block grows, NEVER on the
-// block's accumulated text: re-lexing from the start each line made splitting a buffer quadratic in
-// its length, which is exactly the buffer a pinned plugin state produces - and this runs in the same
-// event loop as the note scheduler, so those milliseconds came straight out of the audio. Splitting
-// text into chunks and advancing over each in turn gives the same result as one pass over the whole
+// Lex `text` forward from `state`, in place, optionally recording which characters were live code.
+// Called once per line as the block grows, NEVER on the block's accumulated text: re-lexing from
+// the start each line made splitting a buffer quadratic in its length, which is exactly the buffer
+// a pinned plugin state produces - and this runs in the same event loop as the note scheduler, so
+// those milliseconds came straight out of the audio. Splitting text into chunks and advancing over
+// each in turn gives the same result as one pass over the whole
 // (see the `skipNext` carry, and note that the two-character lookaheads below can't straddle a
 // newline), which is what lets the line loop reuse one state.
-function scan(state, text) {
+//
+// `mask`, when given, is a Uint8Array parallel to the whole source into which a 1 is written at
+// `base + i` for every character that is live code - see codeMask, the one caller that passes it.
+// Nothing else is marked, so a comment's, string's or template's characters keep the array's 0.
+function scan(state, text, mask = null, base = 0) {
   for (let i = 0; i < text.length; i++) {
     if (state.skipNext) { state.skipNext = false; continue; }
     const c = text[i];
@@ -101,13 +106,17 @@ function scan(state, text) {
       else if (c === '$' && d === '{') { state.stack.push('{'); i++; }
       continue;
     }
-    // ordinary code context
+    // ordinary code context. The characters that OPEN a comment, string or template count as
+    // not-code themselves, so a mask query never lands "in code" on a `//` or a quote.
     if (c === '/' && d === '/') { state.inLineComment = true; i++; }
     else if (c === '/' && d === '*') { state.inBlockComment = true; i++; }
     else if (c === '"' || c === "'") state.inString = c;
     else if (c === '`') state.stack.push('`');
-    else if (c === '(' || c === '[' || c === '{') state.stack.push(c);
-    else if (c === ')' || c === ']' || c === '}') state.stack.pop();
+    else {
+      if (mask) mask[base + i] = 1;
+      if (c === '(' || c === '[' || c === '{') state.stack.push(c);
+      else if (c === ')' || c === ']' || c === '}') state.stack.pop();
+    }
   }
   return state;
 }
@@ -177,6 +186,32 @@ export function splitLabeledBlocks(source) {
   push();
 
   return blocks.filter((b) => hasCode(b.code));
+}
+
+/**
+ * Which characters of `source` are live code, as a Uint8Array parallel to it: 1 for code, 0 for
+ * everything inside a line or block comment, a quoted string, or a template literal's text
+ * (`${…}` interpolations are code again).
+ *
+ * This exists for the editor tools that find a call with a regex and then rewrite it - auto-pin's
+ * `{ state }` write, conf's `.param()` upsert, the plugin-window handles. A commented-out line is a
+ * sound you are NOT hearing, and it is idiomatic here to keep one:
+ *
+ *     // .synth("Serum 2", { state: "…A…" })
+ *     .synth("Serum 2", { state: "…B…" })
+ *
+ * so a regex that can't tell code from comment writes the running plugin's state onto the parked
+ * copy, and counts a commented `.fx(` when numbering slots - which addresses a different plugin
+ * than the one the server is holding. Asking this first is what keeps a rewrite on the line that
+ * is actually playing. Same lexer the block splitter runs, so both agree about what is code.
+ *
+ * @returns {Uint8Array} length === source.length
+ */
+export function codeMask(source) {
+  const text = String(source);
+  const mask = new Uint8Array(text.length);
+  scan(newScan(), text, mask);
+  return mask;
 }
 
 /**

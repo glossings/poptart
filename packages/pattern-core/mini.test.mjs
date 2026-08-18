@@ -86,19 +86,95 @@ test('euclid: <a b> item stays one value per cycle (salt only touches randoms)',
   assert.deepEqual(new Set(c1.map((s) => s.value)), new Set(['b']));
 });
 
-test('euclid: the value can be a group, "[a b].e(2,4)"', () => {
+test('euclid: the value can be a group, sampled at each hit - "[a b].e(2,4)"', () => {
   const steps = getStepsForCycle(parseMini('[a b].e(2,4)'), 0).filter((s) => s.value != null);
-  // 2 pulses over 4, each pulse holds the sub-sequence "a b"
-  assert.deepEqual(steps.map((s) => s.value), ['a', 'b', 'a', 'b']);
+  // The euclid gives the rhythm (2 hits, at 0 and 1/2) and the group keeps its own timeline over the
+  // whole cycle, so the first hit lands in "a"'s half and the second in "b"'s: two events, not the
+  // sub-sequence crammed into each hit.
+  assert.deepEqual(steps.map((s) => [s.value, s.start, s.end]), [['a', 0, 0.5], ['b', 0.5, 1]]);
 });
 
-test('euclid: args must be numbers', () => {
-  assert.throws(() => parseMini('1.e(i(2),8)'), /expected number inside euclid/);
+test('euclid: the item runs over the cycle and mixes its triggers into the rhythm', () => {
+  // The reported case: "<0.5 [1 2]>.e(7,16)" is 0.5 across a whole cycle, then 1 until the item
+  // turns over halfway through the next - which retriggers as 2. Never the 14 flickering events the
+  // item used to be squeezed into.
+  const ast = parseMini('<0.5 [1 2]>.e(7,16)');
+  const steps = (c) => getStepsForCycle(ast, c).filter((s) => s.value != null);
+  assert.deepEqual(steps(0).map((s) => s.value), ['0.5', '0.5', '0.5', '0.5', '0.5', '0.5', '0.5']);
+  // Seven euclid hits plus the item's own trigger at 1/2, which splits the hit spanning it.
+  assert.deepEqual(steps(1).map((s) => s.value), ['1', '1', '1', '1', '2', '2', '2', '2']);
+  assert.deepEqual(steps(1).map((s) => s.start), [0, 3 / 16, 5 / 16, 7 / 16, 0.5, 10 / 16, 12 / 16, 14 / 16]);
+  assert.equal(steps(1)[3].end, 0.5, 'the split hit ends where the item turns over');
+  assert.ok(steps(1).every((s) => !s.cont), 'every hit is a fresh attack, the split one included');
+});
+
+test('euclid: a rest at the sampled moment means that hit does not sound', () => {
+  const steps = getStepsForCycle(parseMini('[a ~].e(4,8)'), 0).filter((s) => s.value != null);
+  assert.deepEqual(steps.map((s) => s.start), [0, 0.25]); // the two hits in "a"'s half
+});
+
+test('euclid: a stacked item sounds every layer at each hit (a chord)', () => {
+  const steps = getStepsForCycle(parseMini('[a,b].e(2,4)'), 0).filter((s) => s.value != null);
+  assert.deepEqual(steps.map((s) => [s.value, s.start]), [['a', 0], ['b', 0], ['a', 0.5], ['b', 0.5]]);
+});
+
+test('euclid: a rotation pattern alternates the grid per cycle, "1.e(7,16,<0 1>)"', () => {
+  const ast = parseMini('1.e(7,16,<0 1>)');
+  const onsets = (c) => getStepsForCycle(ast, c).filter((s) => s.value != null).map((s) => s.start);
+  const plain = getStepsForCycle(parseMini('1.e(7,16)'), 0).filter((s) => s.value != null).map((s) => s.start);
+  const rot1 = getStepsForCycle(parseMini('1.e(7,16,1)'), 0).filter((s) => s.value != null).map((s) => s.start);
+  assert.deepEqual(onsets(0), plain); // <0 1> -> 0 on even cycles
+  assert.deepEqual(onsets(1), rot1); //          -> 1 on odd ones
+  assert.equal(onsets(2).length, 7);
+});
+
+test('euclid: pulses and steps take patterns too, "1.e(<3 5>,8)"', () => {
+  const ast = parseMini('1.e(<3 5>,8)');
+  assert.equal(getStepsForCycle(ast, 0).filter((s) => s.value != null).length, 3);
+  assert.equal(getStepsForCycle(ast, 1).filter((s) => s.value != null).length, 5);
+  const stepped = parseMini('1.e(3,<8 4>)');
+  assert.deepEqual(
+    getStepsForCycle(stepped, 1).filter((s) => s.value != null).map((s) => s.start),
+    getStepsForCycle(parseMini('1.e(3,4)'), 1).filter((s) => s.value != null).map((s) => s.start),
+  );
+});
+
+test('euclid: an argument may be any expression, "1.e((2 + <0 1>),8)"', () => {
+  const ast = parseMini('1.e((2 + <0 1>),8)');
+  assert.equal(getStepsForCycle(ast, 0).filter((s) => s.value != null).length, 2);
+  assert.equal(getStepsForCycle(ast, 1).filter((s) => s.value != null).length, 3);
+});
+
+test('euclid: a rest as an argument is a silent cycle, "1.e(<3 ~>,8)"', () => {
+  const ast = parseMini('1.e(<3 ~>,8)');
+  assert.equal(getStepsForCycle(ast, 0).filter((s) => s.value != null).length, 3);
+  assert.deepEqual(getStepsForCycle(ast, 1), []);
+});
+
+test('euclid: a non-numeric argument is a clear error', () => {
+  assert.throws(() => getStepsForCycle(parseMini('1.e(bd,8)'), 0), /arguments must be numeric/);
+});
+
+test('euclid: a patterned argument holds for the whole cycle, not per hit', () => {
+  // The per-hit salt decorrelates the VALUE being placed, never the grid placing it: "i(3,3)" is
+  // pinned to 3 so the count is checkable, but the grid must be laid out once per cycle regardless.
+  const steps = getStepsForCycle(parseMini('1.e(i(3,3),8)'), 0).filter((s) => s.value != null);
+  assert.equal(steps.length, 3);
 });
 
 // ---------------------------------------------------------------------------------------------
 // Expressions: arithmetic, precedence, spacing
 // ---------------------------------------------------------------------------------------------
+
+test('expr: a note name is arithmetic\'s number, so "(c2 + 12)" transposes', () => {
+  // c5 = 60 here, so c2 = 24 and c2 + 12 = c3. Without the coercion the "+" quietly did nothing
+  // (the value stayed "c2") and note() then played the untransposed note.
+  assert.deepEqual(values('(c2 + 12)'), ['36']);
+  assert.deepEqual(values('(c2 + <0 12>)', 1), ['36']);
+  assert.deepEqual(values('(C#2 + 1)'), ['26']);
+  // A value that is neither a number nor a note name still passes through untouched.
+  assert.deepEqual(values('(bd + 1)'), ['bd']);
+});
 
 test('expr: precedence - * binds tighter than +', () => {
   assert.equal(num('(2 + 3 * 4)'), 14);

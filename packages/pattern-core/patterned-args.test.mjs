@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, s, mini, Signal, sine, saw, irand } from './src/signal.mjs';
+import { n, note, s, mini, Signal, sine, saw, irand } from './src/signal.mjs';
 
 const starts = (sig, cycle) => sig.stepsForCycle(cycle).map((x) => x.start);
 const values = (sig, cycle) => sig.stepsForCycle(cycle).filter((x) => x.value != null).map((x) => x.value);
@@ -115,4 +115,61 @@ test('irand("8").seg(8) still drives eight fresh sampler starts a bar', () => {
   const drawn = starts(track, 0).map((p) => track.sampler.begin.sample(p, 1, p));
   for (const v of drawn) assert.ok(v >= 0 && v < 1, `${v} is a real 0..1 position`);
   assert.ok(new Set(drawn).size > 1, 'the eight draws are not one frozen value');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Triggers mix
+// ---------------------------------------------------------------------------------------------
+// An operator's pattern argument keeps its own timeline and mixes its own onsets into the events it
+// lands on. It is never squeezed into them (mini's euclid used to do that), and never collapsed to
+// one value per event either. An argument with no grid of its own - a number, an LFO, a within-cycle
+// signal like irand() - has no triggers to contribute, so those events are untouched.
+
+const closeAll = (got, want, msg = 'starts') => {
+  assert.equal(got.length, want.length, `${msg}: ${JSON.stringify(got)} vs ${JSON.stringify(want)}`);
+  got.forEach((g, i) => assert.ok(Math.abs(g - want[i]) < 1e-9, `${msg}[${i}]: ${g} !~ ${want[i]}`));
+};
+
+test('arithmetic mixes its right operand\'s triggers in', () => {
+  const sig = n('0').add('1 2');
+  assert.deepEqual(values(sig, 0), [1, 2], 'two events, one per half of "1 2"');
+  closeAll(starts(sig, 0), [0, 0.5]);
+  assert.ok(sig.stepsForCycle(0).every((st) => !st.cont), 'each is an attack, not a tie');
+  // Aligned grids are unchanged, and an operand with no triggers of its own adds none.
+  assert.deepEqual(values(n('0 1').add('7 0'), 0), [7, 1]);
+  assert.deepEqual(values(n('0 1 2 3').add(12), 0), [12, 13, 14, 15]);
+  assert.equal(n('0').add(sine(1).range(0, 12)).stepsForCycle(0).length, 1, 'an LFO has no triggers to mix');
+  assert.equal(n('0').add(irand(12)).stepsForCycle(0).length, 1, 'nor does a within-cycle random');
+});
+
+test('a `,`-stacked operand fans the event out instead of cutting it', () => {
+  const sig = n('0').add('0,7');
+  assert.deepEqual(values(sig, 0), [0, 7]);
+  assert.deepEqual(sig.stepsForCycle(0).map((st) => [st.start, st.end]), [[0, 1], [0, 1]]);
+});
+
+test('each mixed event lights both operands - its own half of the argument', () => {
+  const sig = n(mini('0', 100)).add(mini('1 2', 0));
+  assert.deepEqual(sig.stepsForCycle(0).map((st) => st.locs), [
+    [[100, 101], [0, 1]],
+    [[100, 101], [2, 3]],
+  ]);
+});
+
+test('.ply() switches count at the mixed triggers - n("0").ply("4 3")', () => {
+  // ply(4) is quarter notes, ply(3) triplets. Two quarters, then the triplet grid takes over
+  // halfway through the bar and its last note (2/3) is the one that lands there.
+  closeAll(starts(n('0').ply('4 3'), 0), [0, 0.25, 2 / 3]);
+  closeAll(starts(n('0').ply('3 4'), 0), [0, 1 / 3, 0.5, 0.75]);
+  // A count that doesn't change mid-event is unaffected.
+  closeAll(starts(n('0').ply('4'), 0), [0, 0.25, 0.5, 0.75]);
+});
+
+test('arithmetic reads a note name as its MIDI number', () => {
+  // `note("C2".add("0 12"))`: after the string shim the add happens before note() ever sees the
+  // value, so the operator has to know that "C2" is 24 - otherwise the note came out NaN.
+  assert.deepEqual(values(note(mini('C2').add('0 12')), 0), [24, 36]);
+  assert.deepEqual(values(mini('c2 e2').add(12), 0), [36, 40]);
+  // Converting first, the long way round, gives the same thing.
+  assert.deepEqual(values(note('C2').add('0 12'), 0), [24, 36]);
 });

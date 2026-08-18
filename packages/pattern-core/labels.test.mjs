@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { splitLabeledBlocks, isBareCallBlock } from './src/labels.mjs';
+import { splitLabeledBlocks, isBareCallBlock, codeMask } from './src/labels.mjs';
 
 const labels = (src) => splitLabeledBlocks(src).map((b) => b.label);
 
@@ -167,4 +167,61 @@ test('splitting stays linear in buffer size', () => {
 
   assert.deepEqual(blocks.map((b) => b.label), ['lead', 'drums']);
   assert.ok(ms < 100, `splitting a ${(src.length / 1024 / 1024).toFixed(0)}MB buffer took ${ms.toFixed(0)}ms`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// codeMask: which characters are live code. The editor's rewriting tools (auto-pin, conf) find
+// calls with regexes and must not write to a commented-out one - see the codeMask doc comment.
+// ---------------------------------------------------------------------------------------------
+
+// The offsets of every occurrence of `needle` in `src` that codeMask says is live code.
+const codeHits = (src, needle) => {
+  const mask = codeMask(src);
+  const hits = [];
+  for (let i = src.indexOf(needle); i !== -1; i = src.indexOf(needle, i + 1)) if (mask[i]) hits.push(i);
+  return hits;
+};
+
+test('codeMask: a commented-out call is not code, the live one below it is', () => {
+  const src = [
+    'lead: n("0 3")',
+    '  // .synth("Serum 2", { state: "AAA" })',
+    '  .synth("Serum 2", { state: "BBB" })',
+  ].join('\n');
+  const hits = codeHits(src, 'synth(');
+  assert.equal(hits.length, 1);
+  assert.ok(src.slice(hits[0]).startsWith('synth("Serum 2", { state: "BBB"'));
+});
+
+test('codeMask: block comments, including multi-line ones', () => {
+  const src = ['a: n("0")', '/* .fx("Valhalla")', '   .fx("Pro-Q") */', '  .fx("Ozone")'].join('\n');
+  assert.deepEqual(codeHits(src, 'fx(').map((i) => src.slice(i, i + 14)), ['fx("Ozone")']);
+});
+
+test('codeMask: text inside a string is not code either', () => {
+  const src = 'a: s("bd").param("fx(1)", 2)';
+  assert.deepEqual(codeHits(src, 'fx('), []);
+  assert.equal(codeHits(src, 'param(').length, 1);
+});
+
+test('codeMask: a template literal is text, but its ${} interpolation is code', () => {
+  const src = 'const t = `a .fx("x") ${fx(1)} b`;';
+  const hits = codeHits(src, 'fx(');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0], src.indexOf('${fx(') + 2);
+});
+
+test('codeMask: the characters opening a comment or string are not code', () => {
+  const src = 'a: n("0") // c';
+  const mask = codeMask(src);
+  assert.equal(mask[src.indexOf('//')], 0);
+  assert.equal(mask[src.indexOf('"')], 0);
+  assert.equal(mask[src.indexOf('n(')], 1);
+  assert.equal(mask.length, src.length);
+});
+
+test('codeMask: an apostrophe inside a comment does not open a string', () => {
+  // The lexer reads the comment first, so "don't" can't swallow the code on the next line.
+  const src = ["// don't touch", 'lead: n("0").synth("Serum 2")'].join('\n');
+  assert.equal(codeHits(src, 'synth(').length, 1);
 });

@@ -10,7 +10,7 @@
 
 import { parseMini, getStepsForCycle, warpSteps, stepLocs } from './mini.mjs';
 import {
-  parseNoteValue, degreeToMidi, parseScaleName, quantizeToScale,
+  parseNoteValue, noteToMidi, degreeToMidi, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
 import { parseShapePoints, sampleShape } from './shape.mjs';
@@ -705,36 +705,54 @@ export class Sig {
     // real time, so param-signal math is always exact.
     const stepsForCycle = this.stepsForCycle
       ? (cycle) => {
-          const otherSteps = otherSig.stepsForCycle ? otherSig.stepsForCycle(cycle) : null;
+          const otherSteps = mixableSteps(otherSig, cycle);
           const out = [];
           for (const s of this.stepsForCycle(cycle)) {
             if (s.value == null) {
               out.push(s);
               continue;
             }
-            const mid = (s.start + s.end) / 2;
-            // A `,`-stack on the right is several values sounding AT ONCE, so it fans each event
-            // out into one event per layer instead of collapsing to whichever layer sample() picks:
-            // `.add(note("0,7"))` keeps the note and sounds its fifth alongside it, `.add("-0.3,0.3")`
-            // detunes two ways at once. Layers cross-product with the left's own stack, so a chord
-            // plus a stacked offset gives every combination - which is what "both at the same time"
-            // means either side of the operator.
-            const layers = otherSteps ? coveringSteps(otherSteps, mid) : [];
-            if (layers.length > 1) {
-              for (const b of layers) {
-                out.push({ ...s, value: fn(Number(s.value), Number(b.value)), locs: [...stepLocs(s), ...stepLocs(b)] });
+            // The right operand MIXES its triggers in: it keeps its own timeline and cuts each left
+            // event where it changes, so `n("0").add("1 2")` is two events (1, then 2) rather than one
+            // event reading whichever half it happened to look at. An operand with no grid of its own
+            // adds no edges, so it is still one event in, one out.
+            const edges = mixEdges(s, otherSteps);
+            for (let e = 0; e + 1 < edges.length; e++) {
+              const start = edges[e];
+              const end = edges[e + 1];
+              const at = (start + end) / 2; // read INSIDE the segment - never on a boundary
+              // A `,`-stack on the right is several values sounding AT ONCE, so it fans each event
+              // out into one event per layer instead of collapsing to whichever layer sample() picks:
+              // `.add(note("0,7"))` keeps the note and sounds its fifth alongside it, `.add("-0.3,0.3")`
+              // detunes two ways at once. Layers cross-product with the left's own stack, so a chord
+              // plus a stacked offset gives every combination - which is what "both at the same time"
+              // means either side of the operator.
+              const layers = otherSteps ? coveringSteps(otherSteps, at) : [];
+              if (layers.length > 1) {
+                for (const b of layers) {
+                  out.push({
+                    ...s,
+                    start,
+                    end,
+                    cont: mixedCont(s, b, start),
+                    value: fn(numericValue(s.value), numericValue(b.value)),
+                    locs: [...stepLocs(s), ...stepLocs(b)],
+                  });
+                }
+                continue;
               }
-              continue;
+              const b = otherSig.sample(cycle + at, 1);
+              if (b == null) {
+                // A rest on the right silences the segment it covers, rather than dropping the event
+                // outright - the grid keeps its shape for the highlighter.
+                out.push({ ...s, start, end, value: null });
+                continue;
+              }
+              // Union the highlight spans of both operands, so `n("0 1").add("7 0")` lights the
+              // live atom in each literal - the value that sounds genuinely propagated from both.
+              const locs = layers.length === 1 ? [...stepLocs(s), ...stepLocs(layers[0])] : stepLocs(s);
+              out.push({ ...s, start, end, cont: mixedCont(s, layers[0], start), value: fn(numericValue(s.value), numericValue(b)), locs });
             }
-            const b = otherSig.sample(cycle + mid, 1);
-            if (b == null) {
-              out.push({ ...s, value: null });
-              continue;
-            }
-            // Union the highlight spans of both operands, so `n("0 1").add("7 0")` lights the
-            // live atom in each literal - the value that sounds genuinely propagated from both.
-            const locs = layers.length === 1 ? [...stepLocs(s), ...stepLocs(layers[0])] : stepLocs(s);
-            out.push({ ...s, value: fn(Number(s.value), Number(b)), locs });
           }
           return out;
         }
@@ -752,7 +770,7 @@ export class Sig {
           if (a.value == null) return { value: null, locs: a.locs };
           const b = readEvent(otherSig, cyclePos);
           if (b.value == null) return { value: null, locs: [...a.locs, ...b.locs] };
-          return { value: fn(Number(a.value), Number(b.value)), locs: [...a.locs, ...b.locs] };
+          return { value: fn(numericValue(a.value), numericValue(b.value)), locs: [...a.locs, ...b.locs] };
         }
       : null;
     return new Sig(
@@ -760,7 +778,7 @@ export class Sig {
         const a = this.sample(t, cps, pos);
         if (a == null) return null;
         const b = otherSig.sample(t, cps, pos);
-        return b == null ? null : fn(Number(a), Number(b));
+        return b == null ? null : fn(numericValue(a), numericValue(b));
       },
       { stepsForCycle, eventAt, ...this._meta() },
     );
@@ -1215,8 +1233,11 @@ export class Sig {
    * plays each degree three times, climbing an octave per hit. Omit it for a plain retrigger
    * (`s("bd").ply(2)`). The transform is sampled at the original event's onset.
    *
-   * `reps` may itself be patterned - `.ply("<2 4>")`, `.ply("2 4")` - and is read at each source
-   * event's onset, so the count can change through the cycle or bar by bar.
+   * `reps` may itself be patterned - `.ply("<2 4>")`, `.ply("2 4")` - and MIXES its own triggers in:
+   * it cuts each event where the count changes, and inside each piece the subdivision is laid over
+   * the whole event, so only the retriggers landing in that piece sound. `n("0").ply("4 3")` plays
+   * the first two of four quarter-notes, then switches to the triplet grid and picks up its last
+   * note at 2/3 - the reading mini's patterned `"*[1 2]"` rate already has.
    */
   ply(reps, fn) {
     if (!this.stepsForCycle) {
@@ -1235,24 +1256,37 @@ export class Sig {
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) => {
       const out = [];
+      const repSteps = mixableSteps(repsSig, cycle);
       for (const s of base(cycle)) {
         if (s.value == null || s.cont) { out.push(s); continue; } // rests/ties don't subdivide
-        const mid = cycle + (s.start + s.end) / 2; // read the count + the transform at the source onset
-        const ev = readEvent(repsSig, mid);
-        const rounded = Math.round(Number(ev.value));
-        const count = Number.isFinite(rounded) ? Math.max(1, rounded) : 1;
-        const w = (s.end - s.start) / count;
-        // The count's own atom lights with the notes it multiplied (the live pick of a "<2 4>").
-        const locs = ev.locs.length ? [...stepLocs(s), ...ev.locs] : null;
-        for (let i = 0; i < count; i++) {
-          const v = variantAt(i).sample(mid, 1);
-          out.push({
-            ...s,
-            start: s.start + i * w,
-            end: s.start + (i + 1) * w,
-            value: v == null ? null : v,
-            ...(locs ? { locs } : {}),
-          });
+        // The count pattern MIXES its triggers in: it keeps its own timeline and cuts the event
+        // wherever it changes. Within each piece the subdivision it asks for is laid over the WHOLE
+        // event, and only the retriggers whose onset falls inside that piece sound - so
+        // `n("0").ply("4 3")` plays the first two of four quarter-notes, then switches to the triplet
+        // grid and picks up its last note at 2/3. Mini's patterned "*[1 2]" rate reads the same way.
+        const edges = mixEdges(s, repSteps);
+        for (let e = 0; e + 1 < edges.length; e++) {
+          const from = edges[e];
+          const to = edges[e + 1];
+          const at = cycle + (from + to) / 2; // the count and the transform are read inside the piece
+          const ev = readEvent(repsSig, at);
+          const rounded = Math.round(Number(ev.value));
+          const count = Number.isFinite(rounded) ? Math.max(1, rounded) : 1;
+          const w = (s.end - s.start) / count;
+          // The count's own atom lights with the notes it multiplied (the live pick of a "<2 4>").
+          const locs = ev.locs.length ? [...stepLocs(s), ...ev.locs] : null;
+          for (let i = 0; i < count; i++) {
+            const start = s.start + i * w;
+            if (start < from - MIX_EPS || start >= to - MIX_EPS) continue; // its onset is in another piece
+            const v = variantAt(i).sample(at, 1);
+            out.push({
+              ...s,
+              start,
+              end: start + w,
+              value: v == null ? null : v,
+              ...(locs ? { locs } : {}),
+            });
+          }
         }
       }
       return out;
@@ -1327,13 +1361,14 @@ export class Sig {
    * down. On a C-E-G triad that makes 0=c, 1=e, 2=g, 3=c+12, 4=e+12, -1=g-12, -2=e-12 - so
    * `note("[c3,e3,g3]").arp("0 1 2 3")` climbs the triad and lands on the octave.
    *
-   * The index pattern is SQUEEZED into each chord's own span, mini-notation's "[...]" applied to a
-   * whole signal: one full pass fits each chord however long the chord is, so `.arp("0 1 2")`
-   * triplets a whole-cycle chord and puts three notes in each half of
-   * `note("[c3,e3,g3] [f3,a3,c4]")`. Anything that makes a signal works as the index - a mini
-   * string, `irand(3)` (a random chord tone per chord), an alternation like `"<0 1> 2"` (which
-   * advances chord by chord, since each chord sees the next of the squeezed pattern's cycles) -
-   * and a rest (`~`) leaves its slot silent.
+   * The index pattern runs at its OWN rate and MIXES its triggers with the chord's - it is not
+   * squeezed into each chord. `.arp("0 1 2")` is thirds of a cycle whatever is underneath, so
+   * `note("[c3,e3,g3] [f3,a3,c4]").arp("0 1")` plays the low note of the first chord and the middle
+   * note of the second (two notes, at 0 and 1/2); write `.arp("0 1 0 1")` for a pass per chord. A
+   * chord change part-way through an index step retriggers it on the new chord. Anything that makes
+   * a signal works as the index - a mini string, `irand(3)` (no grid of its own, so one draw per
+   * chord), an alternation like `"<0 1> 2"` (per cycle, as everywhere else) - and a rest (`~`)
+   * leaves its slot silent.
    *
    * The chord at any moment is simply everything RINGING then, so the arpeggio is always one note
    * at a time (only the index pattern can stack it: `.arp("0 1 [2,3]")`). It re-reads at every
@@ -1364,25 +1399,31 @@ export class Sig {
       // lengths rings exactly as long as its longest note. The arp notes it emits carry their own
       // spans, so the key is consumed rather than passed on for the scheduler to apply again.
       for (const seg of chordSegments(base(cycle).map((st) => withSoundingSpan(st, channels, cycle)))) {
-        const span = seg.end - seg.start;
         // The chord's tones, low to high - the ladder the indices climb. Values are already MIDI
         // numbers on a note()/n() pattern; a bare mini string ("[c3,e3,g3]".arp(...)) still holds
         // note-name strings, so parse the same way the note() builder would.
         const tones = seg.members
           .map((m) => ({ midi: parseNoteValue(m.value), step: m }))
           .sort((a, b) => a.midi - b.midi);
-        for (const idx of squeezeSteps(idxSig, cycle, seg.start, span)) {
+        for (const idx of arpIndexSteps(idxSig, cycle, seg)) {
           if (idx.value == null) continue; // a rest in the index pattern = a gap in the arpeggio
           const i = Math.round(Number(idx.value));
           if (!Number.isFinite(i)) continue;
           const len = tones.length;
           const tone = tones[((i % len) + len) % len];
-          const start = seg.start + idx.start * span;
-          const end = seg.start + Math.min(1, idx.end) * span; // a tie past the arp pattern's own cycle stops at the chord's end
-          if (end <= start) continue;
-          // Each arp note is a fresh attack even when the chord it came from was a held tail
-          // (cont) - only a tie WITHIN the index pattern ("0 _ 1") stays a continuation.
-          const step = { ...tone.step, start, end, value: tone.midi + 12 * Math.floor(i / len), cont: idx.cont || undefined };
+          // The index pattern is NOT squeezed into the chord: it runs at its own rate and MIXES its
+          // triggers with the chord's, so every overlap of an index step with the chord is one arp
+          // note. "0 1 2" is thirds of a cycle whether the chord under it lasts a whole cycle or
+          // half of one, and a chord change part-way through an index step retriggers it on the new
+          // chord.
+          const start = Math.max(idx.start, seg.start);
+          const end = Math.min(idx.end, seg.end);
+          if (end - start <= CHORD_EPS) continue; // merely touching at a boundary, not overlapping
+          // A note is a fresh attack wherever the chord begins - a new chord retriggers, and so does
+          // one ringing in from an earlier cycle. Only a tie the INDEX pattern itself carries stays a
+          // continuation.
+          const cont = idx.cont && start > seg.start + CHORD_EPS ? true : undefined;
+          const step = { ...tone.step, start, end, value: tone.midi + 12 * Math.floor(i / len), cont };
           // Light the chord tone that sounded and the index that chose it, as crossMerge does.
           const locs = [...stepLocs(tone.step), ...stepLocs(idx)];
           if (locs.length) step.locs = locs;
@@ -1859,6 +1900,52 @@ function factorWindows(factorSig, cycle) {
   return [{ start: 0, end: 1, rate: Number(factorSig.sample(cycle + 0.5, 1)), locs: [] }];
 }
 
+// A value as arithmetic sees it: a number, a numeric string, or a NOTE NAME - "C2" is MIDI 24, so
+// `note("C2".add("0 12"))` transposes instead of producing NaN. The operand is a pattern of notes
+// before note()/n() has had a chance to convert it, and "add 12 to a note" is the same operation
+// either side of that builder. Anything else - a sound like "bd", a sample pack name - stays NaN, and
+// the operators leave those values alone (see _binop).
+function numericValue(value) {
+  if (typeof value === 'number') return value;
+  const num = Number(value);
+  if (!Number.isNaN(num) && value !== '' && value !== null) return num;
+  const midi = noteToMidi(value);
+  return midi == null ? NaN : midi;
+}
+
+// Where two grids meet. `otherSteps` is another pattern's steps for this cycle; the returned edges
+// cut `step` at every instant that pattern changes, first edge = step.start, last = step.end. This is
+// what "the triggers mix" means mechanically: an operator's argument keeps its own timeline and adds
+// its own onsets to the events it lands on, rather than being squeezed into them. Shared by _binop
+// and .ply(); crossMerge does the same job inline for controls, and mini's euclid/rate windows for
+// the notation.
+const MIX_EPS = 1e-9;
+function mixEdges(step, otherSteps) {
+  const edges = [step.start];
+  for (const o of otherSteps ?? []) {
+    for (const e of [o.start, o.end]) {
+      if (e <= step.start + MIX_EPS || e >= step.end - MIX_EPS) continue;
+      if (!edges.some((x) => Math.abs(x - e) < MIX_EPS)) edges.push(e);
+    }
+  }
+  edges.sort((a, b) => a - b);
+  edges.push(step.end);
+  return edges;
+}
+
+// A merged event continues only where BOTH sides continue: a fresh step on either side is an attack.
+// Same rule crossMerge applies to controls.
+function mixedCont(step, other, start) {
+  return ((start > step.start + MIX_EPS || step.cont) && (!other || start > other.start + MIX_EPS || other.cont)) || undefined;
+}
+
+// The steps of an operator's argument that can mix their triggers in: a pattern with an honest grid.
+// A number, an LFO, or a within-cycle signal like irand()/choose() (whose stepsForCycle is only the
+// phase-0 draw, hence `eventAt`) has no triggers of its own - it is read per event instead.
+function mixableSteps(sig, cycle) {
+  return sig.stepsForCycle && !sig.eventAt ? sig.stepsForCycle(cycle) : null;
+}
+
 // Every step of `steps` sounding at cycle-phase `phase` (fraction of a cycle) - one for an ordinary
 // sequence, several for a `,`-stack, none over a rest. _binop reads the right operand this way so a
 // stacked operand fans the event out per layer (and so both operands' highlight spans survive the
@@ -1947,20 +2034,17 @@ function chordSegments(steps) {
   return segments;
 }
 
-// One full pass of `sig` compressed into the span [start, start+span) of `cycle` - mini-notation's
-// "[...]" applied to a signal, in the signal's OWN step coordinates (0..1 across the span; the
-// caller rescales). Which of the signal's cycles plays follows the span's position on the grid it
-// tiles, so a half-cycle chord steps through two of them per cycle and an alternation inside the
-// pattern advances chord by chord. A signal with no honest grid - a number, an LFO, or a
-// within-cycle one like irand()/choose() - has no pass to squeeze, so it contributes one value,
-// read (with its highlight spans) at the span's onset.
-function squeezeSteps(sig, cycle, start, span) {
-  const from = cycle + start;
+// The index steps .arp() reads for one cycle. The pattern runs at its OWN rate over the cycle - it
+// is NOT squeezed into the chord; the caller intersects the two, so the chord's triggers and the
+// index pattern's mix. A signal with no honest grid - a number, an LFO, or a within-cycle one like
+// irand()/choose() - has no steps to run, so it contributes one value covering the chord, read (with
+// its highlight spans) at the chord's onset: one draw per chord.
+function arpIndexSteps(sig, cycle, seg) {
   if (!sig.stepsForCycle || sig.eventAt) {
-    const ev = readEvent(sig, from);
-    return [{ start: 0, end: 1, value: ev.value, locs: ev.locs }];
+    const ev = readEvent(sig, cycle + seg.start);
+    return [{ start: seg.start, end: seg.end, value: ev.value, locs: ev.locs }];
   }
-  return sig.stepsForCycle(Math.floor(from / span + CHORD_EPS));
+  return sig.stepsForCycle(cycle);
 }
 
 // The bundle trigger cross-product (Step 2 of the all-signals rewrite). Cross-products a base

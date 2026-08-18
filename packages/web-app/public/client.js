@@ -580,14 +580,29 @@ function matchParen(code, openIdx) {
   return -1;
 }
 
+// Tells whether a character offset in `code` is live code rather than text inside a comment or a
+// string (labels.mjs's own lexer, so this agrees with the block splitter). Every regex below that
+// hunts for a call to rewrite asks this about its match: a commented-out `.synth("Serum 2", …)` is
+// a preset you are not hearing, and it must not receive the running plugin's state or take up a
+// slot number. Falls back to "everything is code" before pattern-core has loaded, which is also
+// when none of these rewrites can run anyway.
+function codeOnly(code) {
+  const mask = labelsMod?.codeMask ? labelsMod.codeMask(code) : null;
+  return (idx) => !mask || mask[idx] === 1;
+}
+
 // Locates the synth(...) call (slot 0) or the slot-th .fx(...) call inside a track's block and
-// returns where its `{ state }` argument goes: [afterFirstArg, closeParen).
+// returns where its `{ state }` argument goes: [afterFirstArg, closeParen). Commented-out calls
+// are skipped entirely - they neither match nor count towards the .fx() numbering, so the slots
+// here are the slots the evaluated chain has.
 function findChainCall(code, from, to, slot) {
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = from;
+  const isCode = codeOnly(code);
   let m;
   let fxSeen = 0;
   while ((m = re.exec(code)) && m.index < to) {
+    if (!isCode(m.index)) continue;
     const isTarget = m[1] === 'synth' ? slot === 0 : ++fxSeen === slot;
     if (!isTarget) continue;
     const open = m.index + m[0].length - 1;
@@ -623,8 +638,10 @@ function firstStringLiteral(code, from, to) {
 function findParamCall(code, from, to, name) {
   const re = /\.param\s*\(/g;
   re.lastIndex = from;
+  const isCode = codeOnly(code);
   let m;
   while ((m = re.exec(code)) && m.index < to) {
+    if (!isCode(m.index)) continue; // a commented-out .param() keeps its value; write a live one
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0 || close > to) continue;
@@ -1502,9 +1519,11 @@ function findChainHandleAt(code, idx) {
   if (!block) return null;
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = block.start;
+  const isCode = codeOnly(code);
   let m;
   let fxSeen = 0;
   while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue; // commented-out calls aren't in the chain, so they hold no slot
     const slot = m[1] === 'synth' ? 0 : ++fxSeen;
     if (idx >= m.index && idx <= m.index + m[1].length) return { label: block.label, slot };
   }

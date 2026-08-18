@@ -1,6 +1,8 @@
 // .arp() - chords (notes sharing a span) read as a ladder of simultaneous tones, sequenced by an
-// index pattern squeezed into each chord, wrapping by octaves past either end. Pure pattern math,
-// no scheduler/engine boot (see the package's testing notes).
+// index pattern, wrapping by octaves past either end. The index pattern runs at its OWN rate and
+// mixes its triggers with the chord's - it is not squeezed into each chord - so a pass per chord is
+// spelled by writing one ("0 1 0 1", "[0 1]*2"). Pure pattern math, no scheduler/engine boot (see
+// the package's testing notes).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -44,8 +46,17 @@ test('arp: the chord is sorted by pitch, whatever order it was written in', () =
   assert.deepEqual(values(note('[g3,c3,e3]').arp('0 1 2')), [C3, E3, G3]);
 });
 
-test('arp: each chord gets its own full pass of the index pattern (squeezed into its span)', () => {
+test('arp: the index pattern is not squeezed into the chord - it keeps its own rate', () => {
+  // "0 1" is halves of a cycle, so it picks the low note of the first chord and the middle note of
+  // the second: two notes, not a full pass crammed into each chord.
   const sig = note('[c3,e3,g3] [f3,a3,c4]').arp('0 1');
+  assert.deepEqual(values(sig), [C3, A3]);
+  const starts = onsets(sig).map((st) => st.start);
+  [0, 0.5].forEach((want, i) => close(starts[i], want));
+});
+
+test('arp: a pass per chord is spelled by writing one', () => {
+  const sig = note('[c3,e3,g3] [f3,a3,c4]').arp('0 1 0 1');
   assert.deepEqual(values(sig), [C3, E3, F3, A3]);
   const starts = onsets(sig).map((st) => st.start);
   [0, 0.25, 0.5, 0.75].forEach((want, i) => close(starts[i], want));
@@ -53,8 +64,10 @@ test('arp: each chord gets its own full pass of the index pattern (squeezed into
 
 test('arp: a lone note is a one-note chord - every index is an octave transposition', () => {
   assert.deepEqual(values(note('c3').arp('0 1 2 -1')), [C3, C3 + 12, C3 + 24, C3 - 12]);
-  // ...and a two-note melody arps each of its notes separately (they share no span).
-  assert.deepEqual(values(note('c3 e3').arp('0 1')), [C3, C3 + 12, E3, E3 + 12]);
+  // ...and a two-note melody arps each of its notes separately (they share no span): at the index
+  // pattern's own rate that is one index per note, or two apiece written as "0 1 0 1".
+  assert.deepEqual(values(note('c3 e3').arp('0 1')), [C3, E3 + 12]);
+  assert.deepEqual(values(note('c3 e3').arp('0 1 0 1')), [C3, C3 + 12, E3, E3 + 12]);
 });
 
 test('arp: a rest in the index pattern leaves a gap', () => {
@@ -72,15 +85,15 @@ test('arp: a tie in the index pattern holds instead of retriggering', () => {
   close(onsets(sig)[0].end, 2 / 3);
 });
 
-test('arp: an alternation in the index pattern advances chord by chord', () => {
+test('arp: an alternation in the index pattern advances per cycle, as everywhere else', () => {
+  // One pick per cycle - it does not advance chord by chord (that was the squeezed reading). Each
+  // chord under it retriggers the pick, because a chord change is a trigger of its own.
   const twoChords = note('[c3,e3,g3] [c3,e3,g3]').arp('<0 1>');
-  assert.deepEqual(values(twoChords), [C3, E3]);
-  // A whole-cycle chord sees one pick per cycle instead.
+  assert.deepEqual(values(twoChords, 0), [C3, C3]);
+  assert.deepEqual(values(twoChords, 1), [E3, E3]);
   const wholeCycle = note('[c3,e3,g3]').arp('<0 1>');
   assert.deepEqual(values(wholeCycle, 0), [C3]);
   assert.deepEqual(values(wholeCycle, 1), [E3]);
-  // ...and the two-chord case keeps stepping across the cycle line (picks 2 and 3 = 0 and 1 again).
-  assert.deepEqual(values(twoChords, 1), [C3, E3]);
 });
 
 test('arp: a chord held across cycles re-arpeggiates in each, with fresh onsets', () => {
@@ -97,25 +110,28 @@ test('arp: a chord held across cycles re-arpeggiates in each, with fresh onsets'
 test('arp: a chord of unequal-length notes is ONE chord, not overlapping arpeggios', () => {
   const ragged = pianoroll('60,0,4 64,0,3 67,0,6', { grid: 16, len: 16 });
   const sig = ragged.arp('0 1 2 3');
-  assert.deepEqual(values(sig), [60, 64, 67, 72]);
+  // One ladder, read at the index pattern's own rate: the chord rings until its longest note dies
+  // (the 6-cell note = 0.375 of a cycle), which covers the first two index steps. Three separate
+  // one-note chords would instead sound three notes at once here.
+  assert.deepEqual(values(sig), [60, 64]);
   // Monophonic: no two steps overlap in time.
   const steps = onsets(sig);
   steps.forEach((st, i) => i && assert.ok(st.start >= steps[i - 1].end - 1e-9, 'arp notes overlap'));
-  // The pass spans the chord as long as any of it rings (the 6-cell note = 0.375 of a cycle).
   close(steps[0].start, 0);
-  close(steps[3].end, 0.375);
+  close(steps[steps.length - 1].end, 0.375); // the arpeggio stops when the chord does
 });
 
 test('arp: an equal-length pianoroll chord arps exactly as a stack does', () => {
   const roll = pianoroll('60,0,4 64,0,4 67,0,4', { grid: 16, len: 16 });
-  const steps = onsets(roll.arp('0 1 2 3'));
+  // A 4-cell chord rings a quarter of a cycle, so a 16th-note index fits four notes inside it.
+  const steps = onsets(roll.arp('[0 1 2 3]*4'));
   assert.deepEqual(steps.map((st) => st.value), [60, 64, 67, 72]);
   [0, 0.0625, 0.125, 0.1875].forEach((want, i) => close(steps[i].start, want));
 });
 
 test('arp: a note joining a held one re-reads the chord at that onset', () => {
   // A pedal c3 rings the whole cycle; e3 and g3 join halfway.
-  const sig = note('[c3, ~ e3, ~ g3]').arp('0 1');
+  const sig = note('[c3, ~ e3, ~ g3]').arp('[0 1]*2');
   const steps = onsets(sig);
   // First half: c3 alone (index 1 = its octave). Second half: the full triad is sounding.
   assert.deepEqual(steps.map((st) => st.value), [C3, C3 + 12, C3, E3]);
@@ -126,7 +142,7 @@ test('arp: a note joining a held one re-reads the chord at that onset', () => {
 test('arp: the pass stops when the chord does, leaving the rest of the span silent', () => {
   // c3 rings for the first quarter of the cycle only - the arpeggio fits there, it doesn't
   // stretch over the silence that follows.
-  const steps = onsets(note('c3@1 ~@3').arp('0 1'));
+  const steps = onsets(note('c3@1 ~@3').arp('[0 1]*4'));
   assert.deepEqual(steps.map((st) => st.value), [C3, C3 + 12]);
   [0, 0.125].forEach((want, i) => close(steps[i].start, want));
   close(steps[1].end, 0.25);

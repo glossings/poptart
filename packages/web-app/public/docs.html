@@ -355,7 +355,7 @@
             <tr><td><code>a!3</code></td><td>Replicate: three separate <code>a</code> steps.</td></tr>
             <tr><td><code>a@3 b</code></td><td>Weight: <code>a</code> takes 3× the room of <code>b</code>.</td></tr>
             <tr><td><code>a _ _</code></td><td>Tie: <code>_</code> extends the previous note, so it holds.</td></tr>
-            <tr><td><code>1.e(3,8)</code></td><td>Euclidean: 3 hits over 8 steps, as a <code>value.method(...)</code> postfix (on a sample: <code>bd.e(3,8)</code>). Each hit is <em>legato</em> — held until the next onset.</td></tr>
+            <tr><td><code>1.e(3,8)</code></td><td>Euclidean: 3 hits over 8 steps, as a <code>value.method(...)</code> postfix (on a sample: <code>bd.e(3,8)</code>). Each hit is <em>legato</em> — held until the next onset. The euclid supplies the rhythm; a patterned value keeps its own timeline over the cycle and mixes its own triggers in, so <code>&lt;0.5 [1 2]&gt;.e(7,16)</code> plays 0.5 across a cycle, then 1 until the value turns over halfway through the next — which retriggers as 2. Every argument takes a pattern too, resolved once per cycle: <code>1.e(7,16,&lt;0 1&gt;)</code> rotates every other cycle, <code>1.e(&lt;3 5&gt;,8)</code> alternates the hit count.</td></tr>
             <tr><td><code>a?</code> / <code>a?0.3</code></td><td>Degrade: randomly drop the step (30% here).</td></tr>
             <tr><td><code>a|b|c</code></td><td>Random choice: pick one per cycle.</td></tr>
             <tr><td><code>(&lt;12 13&gt;*4 + 5 * i(0,5))</code></td><td>Expression: full mini-notation combined with <code>+ - * /</code>. See below.</td></tr>
@@ -370,7 +370,7 @@
             operators bind tighter than the space that separates sequence steps, and each operator
             takes the left pattern's structure. Crucially <code>*</code>/<code>/</code> stay fast/slow
             when glued to a value (<code>2*4</code>) but mean multiply/divide when spaced
-            (<code>2 * 4</code>); put a space before a <code>-</code>. <code>r i p round floor ceil</code>
+            (<code>2 * 4</code>); put a space before a <code>-</code>. A note name is its MIDI number to arithmetic, so <code>"(c2 + 12)"</code> — and <code>note("c2".add(12))</code> — transpose. <code>r i p round floor ceil</code>
             are reserved names. One Strudel feature isn't in yet — polymeter
             <code>{a b, c d}</code>.
           </p>

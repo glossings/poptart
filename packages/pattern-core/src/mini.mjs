@@ -22,7 +22,17 @@
 //                  which keeps plain "name(...)" free for function calls and leaves room for more
 //                  methods later. LEGATO: each hit sustains until the next onset (so "1.e(3,8)" is
 //                  dotted-8th, dotted-8th, 8th - not three clipped gates). The value can be any
-//                  node: "i(0,5).e(5,8)" (a random note that re-rolls per hit) or "[a b].e(3,8)".
+//                  node - "i(0,5).e(5,8)" (a random note that re-rolls per hit), "[a b].e(3,8)",
+//                  "<0.5 [1 2]>.e(7,16)" - and the euclid contributes the RHYTHM while the value
+//                  pattern keeps its own timeline over the whole cycle and MIXES its triggers in
+//                  (every overlap of a hit with an item step is one event). It is never squeezed
+//                  into each hit. So "<0.5 [1 2]>.e(7,16)" plays 0.5 across a cycle, then 1 until
+//                  the item turns over halfway through the next, which retriggers as 2: eight
+//                  events for seven hits. A rest overlaps as silence; a "," stack overlaps as
+//                  every layer at once (a chord).
+//                  The ARGUMENTS are patterns too, resolved to one number per cycle, so
+//                  "1.e(7,16,<0 1>)" rotates every other cycle and "1.e(<3 5>,8)" alternates the
+//                  pulse count. A rest as an argument ("1.e(<3 ~>,8)") is a silent cycle.
 //   "<a b>:x"      field suffix on a group: distributes onto every atom inside, so
 //                  "<18 16>:3" is exactly "<18:3 16:3>" (pairs with .as("n:clip") etc.)
 //   "a?"  "a?0.3"  degrade: drop this event with 50% (bare) or the given probability. The coin
@@ -35,7 +45,9 @@
 //                  functions below. `*`/`/` are arithmetic *only* inside "(...)"; everywhere else
 //                  they still mean fast/slow. Put a space before a "-" ("3 - 1", not "3-1"), since
 //                  "-" is also an atom character (negative literals, hyphenated names). Example:
-//                  "<1 2 (3 + i(4,5))>".
+//                  "<1 2 (3 + i(4,5))>". A NOTE NAME counts as its MIDI number here, so
+//                  "(c2 + 12)" transposes to c3; anything that is neither a number nor a note name
+//                  passes through untouched ("(bd + 1)" is "bd").
 //   "r r(a) r(a,b)"  random float in [0,1] / [0,a] / [a,b]. Bare "r" works as a step of its own.
 //   "i(a) i(a,b)"    random integer, inclusive of both ends: i(0,12) can return 0..12.
 //   "p p(a) p(a,b)"  perlin-ish drift: smoothstep value-noise that changes gradually across cycles
@@ -56,15 +68,16 @@
 // two `r`s in one pattern decorrelate because they sit at different character offsets.
 //
 // NOT supported yet (will throw a clear parse error rather than silently doing the wrong
-// thing): polymeter `{a b, c d}`, dot-groups `a . b c`, and pattern-valued euclid `(...)`
-// arguments.
+// thing): polymeter `{a b, c d}` and dot-groups `a . b c`.
 //
 // The whole interpreter works in terms of one function: getStepsForCycle(ast, cycleNumber),
 // which returns this cycle's flat step list as plain objects - never anything Strudel-shaped.
 //
-// The one dependency is frac.mjs (our own, dependency-free) - exact rational time, so a
-// fractional onset draws the same coin however its float was computed. See rngAtPos below.
+// The dependencies are two of our own dependency-free files: frac.mjs for exact rational time (so a
+// fractional onset draws the same coin however its float was computed - see rngAtPos below), and
+// notes.mjs for reading a note name as a number, which is what lets "(c2 + 12)" transpose.
 import { Frac } from './frac.mjs';
+import { noteToMidi } from './notes.mjs';
 
 // `offset` shifts every source span (`loc`/`subLocs`, derived from token positions) by a fixed
 // amount, so the atom spans a step reports resolve against the ORIGINAL document rather than the
@@ -92,8 +105,12 @@ function offsetLocs(node, offset) {
   if (node.a) offsetLocs(node.a, offset);
   if (node.b) offsetLocs(node.b, offset);
   if (node.args) for (const a of node.args) offsetLocs(a, offset);
-  // Pattern-valued fast/slow rates carry their own sub-AST (loc spans to highlight the rate).
+  // Pattern-valued fast/slow rates and euclid counts carry their own sub-AST (loc spans to
+  // highlight the rate/count); a literal one is a plain number, with no spans to move.
   if (node.amount && typeof node.amount === 'object') offsetLocs(node.amount, offset);
+  for (const key of ['pulses', 'steps', 'rotation']) {
+    if (node[key] && typeof node[key] === 'object') offsetLocs(node[key], offset);
+  }
 }
 
 // The source spans to highlight for one emitted step, newest convention first: an explicit
@@ -223,7 +240,8 @@ function tokenize(str) {
 //   { type: 'seq'|'stack'|'alt'|'choice', items: [{ weight, reps, node }] }
 //   { type: 'atom', value: string }
 //   { type: 'fast'|'slow', item, amount }
-//   { type: 'euclid', item, pulses, steps, rotation }
+//   { type: 'euclid', item, pulses, steps, rotation }   pulses/steps/rotation are each a number
+//                                          (a literal) or a node resolved to one per cycle
 //   { type: 'degrade', item, prob, seed }
 //   { type: 'func', name, args:[node], seed, loc, suffix? }   a function call (r/i/p/round/...),
 //                                          evaluated to one value per cycle; args are themselves nodes
@@ -505,7 +523,11 @@ function parseElement(tokens, arith = false) {
         throw new Error(`[mini] unknown method ".${name}(...)" on "${base}" - only ".e" (euclid) exists so far`);
       }
       const { pulses, steps, rotation, rest: r2, end } = parseEuclidArgs(rest);
-      node = { type: 'euclid', item: { ...node, value: base }, pulses, steps, rotation };
+      // The ".e" was swallowed into the atom's token, so its `loc` covers it too ("1.e"). Trim the
+      // span back to the value itself: what plays - and so what lights up while it plays - is the
+      // "1", not the method spelling that placed it.
+      const item = { ...node, value: base, loc: node.loc ? [node.loc[0], node.loc[0] + base.length] : node.loc };
+      node = { type: 'euclid', item, pulses, steps, rotation };
       rest = r2;
       lastEnd = end;
       continue;
@@ -517,20 +539,30 @@ function parseElement(tokens, arith = false) {
   return { element: { weight, reps, node }, rest, end: lastEnd };
 }
 
-// Parses a euclid argument list "(pulses,steps[,rotation])" of plain numbers. tokens[0] is "(".
+// Parses a euclid argument list "(pulses,steps[,rotation])". tokens[0] is "(". Each argument is a
+// full arithmetic expression, exactly like a function call's (parseCall) - so "<3 5>", "i(2,5)" or
+// "(2 + <0 1>)" are all legal rhythm arguments, resolved to one number per cycle at eval time
+// (euclidArg). A literal number folds to a number here, which is what the AST used to carry
+// everywhere and what bjorklund wants in the common case.
 function parseEuclidArgs(tokens) {
   let rest = tokens.slice(1);
   const args = [];
-  while (rest[0]?.type !== ')') {
-    if (rest[0]?.type === ',') {
-      rest = rest.slice(1);
-      continue;
+  if (rest[0]?.type !== ')') {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const r = parseArithExpr(rest);
+      args.push(foldNumericNode(r.node));
+      rest = r.rest;
+      if (rest[0]?.type === ',') {
+        rest = rest.slice(1);
+        continue;
+      }
+      break;
     }
-    if (rest[0]?.type !== 'atom' || Number.isNaN(Number(rest[0].text))) throw new Error('[mini] expected number inside euclid "(...)"');
-    args.push(Number(rest[0].text));
-    rest = rest.slice(1);
   }
-  if (rest[0]?.type !== ')') throw new Error('[mini] expected ")" to close euclid "(...)"');
+  if (rest[0]?.type !== ')') {
+    throw new Error(`[mini] expected "," or ")" in euclid "(...)", got "${rest[0]?.text ?? 'end of pattern'}" - arguments are comma-separated, e.g. 1.e(3,8)`);
+  }
   const end = rest[0].end;
   rest = rest.slice(1); // consume ')'
   const [pulses, steps, rotation = 0] = args;
@@ -538,6 +570,13 @@ function parseEuclidArgs(tokens) {
     throw new Error('[mini] euclid "(...)" needs at least (pulses,steps)');
   }
   return { pulses, steps, rotation, rest, end };
+}
+
+// A node that is just a literal number, as that number; otherwise the node untouched.
+function foldNumericNode(node) {
+  if (node.type !== 'atom' || node.quoted || node.value == null) return node;
+  const n = Number(node.value);
+  return Number.isNaN(n) ? node : n;
 }
 
 // Distributes a group field suffix onto every atom inside the node, so "<18 16>:3" parses as
@@ -682,6 +721,36 @@ function scalarOf(node, cycle, salt) {
   return Number(steps[0]?.value);
 }
 
+// One euclid argument, resolved to this cycle's whole number, as `{ n, locs }`. A literal is
+// already a number and has no `locs` - there is no pattern to follow, so nothing to light. A
+// pattern ("<0 1>", "i(2,5)") gives its first sounding step's value, like a function argument does,
+// plus that value's own source spans: an argument that shapes the rhythm is a value derived from a
+// pattern, so it highlights with every hit it places (see the euclid case). `n` is null when the
+// pattern rested this cycle - the caller falls silent rather than inventing a grid. Counts of pulses
+// and steps are integers by nature, so a fractional draw (a bare "r*8") rounds instead of quietly
+// landing between grids.
+function euclidArg(arg, cycle, salt) {
+  if (typeof arg === 'number') return { n: Math.round(arg), locs: [] };
+  const steps = astToSteps(arg, cycle, salt).filter((s) => s.value != null);
+  if (steps.length === 0) return { n: null, locs: [] };
+  const n = Number(steps[0].value);
+  if (Number.isNaN(n)) {
+    throw new Error(`[mini] euclid "(...)" arguments must be numeric - got "${steps[0].value}"`);
+  }
+  return { n: Math.round(n), locs: stepLocs(steps[0]) };
+}
+
+// A step plus the source spans of the pattern-valued ARGUMENT that shaped it - a euclid count or
+// rotation, a fast/slow rate. Highlighting has one rule: a value derived from a pattern lights up
+// when its trigger fires, and an argument that decides where the triggers go is such a value. So
+// the spans accumulate - the step's own first, then the argument's - and "1.e(7,16,<0 1>)" lights
+// the "1" and this cycle's rotation pick together. A literal argument has no span and changes
+// nothing (`locs` stays absent, and stepLocs falls back to the atom's own `loc` as before).
+function withArgLocs(step, argLocs) {
+  if (!argLocs || argLocs.length === 0) return step;
+  return { ...step, locs: [...stepLocs(step), ...argLocs] };
+}
+
 // A [lo, hi] range from evaluated args: [] -> [0,1], [a] -> [0,a], [a,b] -> [a,b].
 function rangeOf(vals) {
   if (vals.length === 0) return [0, 1];
@@ -742,12 +811,15 @@ function stepsAt(steps, phase) {
 // The source span [start, end) a node covers. Only atom/func/alt/arith carry their own `loc`;
 // structural nodes (seq, fast, euclid, ...) don't, so derive theirs from their children. Used to
 // tell whether an active leaf is a proper *sub-selection* of an operand (a narrower span) or is
-// the operand in full.
+// the operand in full. Walks the same child shapes as offsetLocs, operator arguments included: a
+// patterned rate or euclid count is part of what its operator covers, so the value it placed reads
+// as a sub-selection of the pair rather than as the whole operand.
 function spanOf(node) {
   if (!node) return null;
   if (node.loc) return node.loc;
   const spans = [];
   const add = (n) => {
+    if (!n || typeof n !== 'object') return;
     const s = spanOf(n);
     if (s) spans.push(s);
   };
@@ -755,6 +827,10 @@ function spanOf(node) {
   if (node.item) add(node.item);
   if (node.a) add(node.a);
   if (node.b) add(node.b);
+  add(node.amount);
+  add(node.pulses);
+  add(node.steps);
+  add(node.rotation);
   if (spans.length === 0) return null;
   return [Math.min(...spans.map((s) => s[0])), Math.max(...spans.map((s) => s[1]))];
 }
@@ -763,11 +839,12 @@ function spanOf(node) {
 // `operand` at this step - an alternation pick, a sequence element: any active leaf whose span is
 // narrower than the operand's own. A plain atom/func operand has no such leaf (its leaf IS the
 // whole operand), so it contributes nothing. This is what lets arith highlighting light just the
-// live "<3 0>" pick rather than the entire "(... + <3 0>)" expression.
+// live "<3 0>" pick rather than the entire "(... + <3 0>)" expression. Reads the step through
+// stepLocs, so spans an operator argument accumulated (a euclid count, a fast/slow rate - see
+// withArgLocs) come along as sub-selections too.
 function collectSubLocs(operand, step, out) {
   const span = spanOf(operand);
-  const locs = step.subLocs && step.subLocs.length ? step.subLocs : step.loc ? [step.loc] : [];
-  for (const l of locs) {
+  for (const l of stepLocs(step)) {
     if (!span || l[0] > span[0] || l[1] < span[1]) out.push(l);
   }
 }
@@ -820,7 +897,7 @@ function astToSteps(node, cycle, salt = 0) {
           out.push(s);
           continue;
         }
-        const av = Number(s.value);
+        const av = numericValue(s.value);
         const loc = node.loc ?? s.loc;
         // A `,`-stacked right operand is several values at once, so the step fans out into one
         // event per layer; anything else resolves to the single step sounding there (last wins).
@@ -829,11 +906,14 @@ function astToSteps(node, cycle, salt = 0) {
         // differ in - keep it one event rather than N copies of the same pass-through.
         const bSteps = layers.length > 1 && !Number.isNaN(av) ? layers : [sampleStepAt(B, s.start)];
         for (const bStep of bSteps) {
-          const bv = bStep ? Number(bStep.value) : NaN;
+          const bv = bStep ? numericValue(bStep.value) : NaN;
           const subLocs = [];
           collectSubLocs(node.a, s, subLocs);
           if (bStep) collectSubLocs(node.b, bStep, subLocs);
-          const extra = subLocs.length ? { subLocs } : null;
+          // `locs: undefined` clears any set an operand accumulated (a euclid count, a rate): those
+          // spans have just been folded into `subLocs` by collectSubLocs, and a leftover `locs`
+          // would shadow them - stepLocs prefers it. The expression's own `loc` still backs it up.
+          const extra = { locs: undefined, ...(subLocs.length ? { subLocs } : null) };
           if (Number.isNaN(av) || Number.isNaN(bv)) {
             out.push({ ...s, loc, ...extra });
             continue;
@@ -896,7 +976,7 @@ function astToSteps(node, cycle, salt = 0) {
           for (const s of astToSteps(node.item, innerCycle, salt)) {
             const start = (i + s.start) / n;
             if (start < w.start - RATE_EPS || start >= w.end - RATE_EPS) continue;
-            out.push({ ...s, start, end: (i + s.end) / n });
+            out.push(withArgLocs({ ...s, start, end: (i + s.end) / n }, w.locs));
           }
         }
       }
@@ -911,14 +991,26 @@ function astToSteps(node, cycle, salt = 0) {
         const phase = ((cycle % n) + n) % n;
         for (const s of clipAndRescale(astToSteps(node.item, innerCycle, salt), phase / n, (phase + 1) / n)) {
           if (s.start < w.start - RATE_EPS || s.start >= w.end - RATE_EPS) continue;
-          out.push(s);
+          out.push(withArgLocs(s, w.locs));
         }
       }
       return out;
     }
 
     case 'euclid': {
-      const hits = rotateArray(bjorklund(node.pulses, node.steps), node.rotation ?? 0);
+      // The rhythm arguments are patterns in their own right ("1.e(7,16,<0 1>)"), so resolve this
+      // cycle's grid first. They are read at the OUTER salt, once per cycle - the per-hit salt
+      // below decorrelates the value being placed, not the shape placing it.
+      const pulses = euclidArg(node.pulses, cycle, salt);
+      const steps = euclidArg(node.steps, cycle, salt);
+      const rotation = euclidArg(node.rotation ?? 0, cycle, salt);
+      // A rest in an argument pattern means "no rhythm this cycle" - silence, rather than a guess
+      // at what grid was meant (same reading as a rest in a "*<2 ~>" rate: nothing plays there).
+      if (pulses.n == null || steps.n == null || rotation.n == null || steps.n < 1) return [];
+      // Whichever arguments were patterns light up with every hit they place, alongside the value
+      // being placed - a rhythm argument is a value derived from a pattern like any other.
+      const argLocs = [...pulses.locs, ...steps.locs, ...rotation.locs];
+      const hits = rotateArray(bjorklund(pulses.n, steps.n), rotation.n);
       const len = hits.length;
       const onsets = [];
       for (let i = 0; i < len; i++) if (hits[i]) onsets.push(i);
@@ -926,15 +1018,28 @@ function astToSteps(node, cycle, salt = 0) {
       for (let k = 0; k < onsets.length; k++) {
         const i = onsets[k];
         // Legato: each hit sustains until the NEXT onset (the last to the cycle end) - so "1.e(3,8)"
-        // rings as dotted-8th, dotted-8th, 8th rather than three clipped 1/8 gates. The item is
-        // rendered across that whole span, with a per-hit `salt` so a random value re-rolls each hit
-        // (an alternation stays per-cycle - salt only touches func seeds).
+        // rings as dotted-8th, dotted-8th, 8th rather than three clipped 1/8 gates.
         const slotStart = i / len;
         const slotEnd = (onsets[k + 1] ?? len) / len;
-        const span = slotEnd - slotStart;
+        // The euclid sets the RHYTHM, and the item MIXES its own triggers into it: every overlap of
+        // a hit with an item step is one event. So the item keeps its own timeline across the whole
+        // cycle - it is never squeezed into each hit (7 hits x a 2-step item was the old flicker,
+        // 14 events) and never held past a change either. "<0.5 [1 2]>.e(7,16)" plays 0.5 across a
+        // cycle; the next one plays 1 until the item turns over at the half-way point, which
+        // retriggers as 2: eight events for seven hits. A `,`-stack overlaps as several layers at
+        // once (a chord), a rest overlaps as nothing, and the per-hit `salt` still re-rolls a random
+        // item every hit ("i(0,5).e(5,8)") - an alternation stays per-cycle, salt only touches func
+        // seeds.
         const childSalt = salt * 131 + i + 1;
         for (const s of astToSteps(node.item, cycle, childSalt)) {
-          out.push({ ...s, start: slotStart + s.start * span, end: slotStart + s.end * span });
+          if (s.value == null) continue; // a rest overlapping a hit is silence, not an event
+          const start = Math.max(s.start, slotStart);
+          const end = Math.min(s.end, slotEnd);
+          if (end - start <= OVERLAP_EPS) continue; // merely touching at a boundary, not overlapping
+          // An overlap always begins where one side or the other begins a fresh step, and a euclid
+          // hit is always a fresh attack - so no overlap is ever a tie, not even one carried in on
+          // the item's own `cont` from an earlier cycle.
+          out.push(withArgLocs({ ...s, start, end, cont: false }, argLocs));
         }
       }
       return out;
@@ -958,6 +1063,18 @@ function astToSteps(node, cycle, salt = 0) {
     default:
       throw new Error(`[mini] unknown node type "${node.type}"`);
   }
+}
+
+// A value as arithmetic sees it: a number, a numeric string, or a NOTE NAME - "c2" is MIDI 24, so
+// "(c2 + 12)" transposes to c3 instead of quietly staying c2. Anything else - a sound like "bd", a
+// sample pack - stays NaN, and the operator passes such a value through untouched (see the arith
+// case). Mirrors signal.mjs's numericValue so both spellings of "+" agree.
+function numericValue(value) {
+  if (typeof value === 'number') return value;
+  const num = Number(value);
+  if (!Number.isNaN(num) && value !== '' && value !== null) return num;
+  const midi = noteToMidi(value);
+  return midi == null ? NaN : midi;
 }
 
 function applyArith(op, a, b) {
@@ -984,15 +1101,21 @@ function applyArith(op, a, b) {
 // A rest in the rate pattern is a window with no rate: nothing plays there. The epsilon keeps
 // float error at window boundaries from dropping or double-placing a boundary onset.
 const RATE_EPS = 1e-9;
+
+// Two step edges landing on the same instant must not produce a zero-width event between them (a
+// euclid hit boundary meeting an item boundary, say) - see the euclid case.
+const OVERLAP_EPS = 1e-9;
 function rateWindows(amount, cycle) {
-  if (typeof amount === 'number') return [{ start: 0, end: 1, rate: amount }];
+  if (typeof amount === 'number') return [{ start: 0, end: 1, rate: amount, locs: [] }];
   const steps = astToSteps(amount, cycle, 0).filter((s) => s.value != null);
   return steps.map((s) => {
     const rate = Number(s.value);
     if (Number.isNaN(rate)) {
       throw new Error(`[mini] a pattern-valued rate must be numeric - got "${s.value}"`);
     }
-    return { start: s.start, end: s.end, rate };
+    // `locs` carries the live rate value's own span, so the "<2 3>" of "a*<2 3>" lights up with
+    // the steps it placed - the same rule euclid's arguments follow (see withArgLocs).
+    return { start: s.start, end: s.end, rate, locs: stepLocs(s) };
   });
 }
 

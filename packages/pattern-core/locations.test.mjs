@@ -156,6 +156,61 @@ test('stepLocs prefers accumulated locs, then subLocs, then the single loc', () 
 });
 
 // ---------------------------------------------------------------------------------------------
+// Operator arguments: one rule - a value derived from a pattern lights when its trigger fires, so
+// a patterned euclid count/rotation or fast/slow rate highlights with every step it places, and
+// nothing else does (the ".e" method spelling is not a value).
+// ---------------------------------------------------------------------------------------------
+
+// What each of `src`'s sounding steps lights up, as the text of its spans.
+const lit = (src, cycle = 0) =>
+  getStepsForCycle(parseMini(src), cycle)
+    .filter((s) => s.value != null)
+    .map((s) => stepLocs(s).map(([a, b]) => src.slice(a, b)).join('+'));
+
+test('the euclid method spelling is never highlighted - only the value it places', () => {
+  // The tokenizer swallows ".e" into the atom ("1.e"), so the span has to be trimmed back.
+  assert.deepEqual(lit('1.e(3,8)'), ['1', '1', '1']);
+  assert.deepEqual(lit('bd.e(3,8)'), ['bd', 'bd', 'bd']);
+  // The value keeps its own dots and field suffix - only the trailing ".e" comes off.
+  assert.deepEqual(lit('0.5.e(3,8)'), ['0.5', '0.5', '0.5']);
+  assert.deepEqual(lit('bd:3.e(3,8)'), ['bd:3', 'bd:3', 'bd:3']);
+  // A group/alternation value was already right, and stays so: the live pick, nothing more.
+  assert.deepEqual(lit('<0.5 1>.e(3,8)'), ['0.5', '0.5', '0.5']);
+  assert.deepEqual(lit('<0.5 1>.e(3,8)', 1), ['1', '1', '1']);
+});
+
+test('a patterned euclid argument lights with the hits it places', () => {
+  assert.deepEqual(lit('1.e(7,16,<0 1>)').slice(0, 2), ['1+0', '1+0']);
+  assert.deepEqual(lit('1.e(7,16,<0 1>)', 1).slice(0, 2), ['1+1', '1+1']);
+  // The pulse count too, and it is the live alternation pick that lights, not the whole "<3 5>".
+  assert.deepEqual(lit('1.e(<3 5>,8)'), ['1+3', '1+3', '1+3']);
+  // Literal arguments have no pattern to follow, so they light nothing.
+  assert.deepEqual(lit('1.e(3,8)'), ['1', '1', '1']);
+});
+
+test('a patterned fast/slow rate lights with the steps it placed', () => {
+  assert.deepEqual(lit('a*<2 3>'), ['a+2', 'a+2']);
+  assert.deepEqual(lit('a*<2 3>', 1), ['a+3', 'a+3', 'a+3']);
+  // A rate that changes within the cycle lights whichever window each step landed in.
+  assert.deepEqual(lit('a*[1 2]'), ['a+1', 'a+2']);
+  assert.deepEqual(lit('a*2'), ['a', 'a']); // a literal rate: nothing extra
+});
+
+test('inside an expression, an operator argument is a sub-selection like an alternation pick', () => {
+  // "(1.e(3,<8 4>) + <5 7>)": the value, the live step count, and the live right operand.
+  assert.deepEqual(lit('(1.e(3,<8 4>) + <5 7>)'), ['1+8+5', '1+8+5', '1+8+5']);
+  assert.deepEqual(lit('(a*<2 3> + 1)'), ['a+2', 'a+2']);
+});
+
+test('a euclid argument span is document-absolute under parseMini(str, offset)', () => {
+  // Highlighting places these in the buffer, so an argument's span must move with the offset too.
+  const src = '1.e(3,<8 4>)';
+  const at = (offset) => stepLocs(getStepsForCycle(parseMini(src, offset), 0)[0]);
+  assert.deepEqual(at(0), [[0, 1], [7, 8]]); // the "1", and the "8" inside "<8 4>"
+  assert.deepEqual(at(100), [[100, 101], [107, 108]]);
+});
+
+// ---------------------------------------------------------------------------------------------
 // End-to-end: locations follow the whole chain
 // ---------------------------------------------------------------------------------------------
 
