@@ -1873,7 +1873,10 @@ li.CodeMirror-hint-active {
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: fit-content;
+  /* Fixed, not fit-content: minimizing the control column must not resize the panel around the
+     grid - the grid takes the freed space instead (see #pianorollCanvas). 92 column + 660 grid +
+     its 12px margins + the panel's own border, all border-box. */
+  width: 778px;
   max-width: calc(100vw - 32px);
   display: flex;
   flex-direction: column;
@@ -2104,6 +2107,33 @@ li.CodeMirror-hint-active {
   border-right: 1px solid var(--border);
 }
 
+/* Minimized to a rail holding just the restore button: the controls go, the panel keeps its size,
+   and the grid widens into what the column gives up. */
+.pianoroll-side.collapsed {
+  width: 28px;
+  padding: 12px 4px;
+}
+
+.pianoroll-side.collapsed .pr-side-ctl,
+.pianoroll-side.collapsed .pr-side-row {
+  display: none;
+}
+
+/* Sits in the column's bottom-right corner: `margin-top: auto` takes up whatever slack is left
+   below the controls, so the toggle is out of their way rather than pushing GRID and the rest of
+   them down a row. It keeps that spot in both states, so the button doesn't move out from under
+   the pointer when it's clicked. Narrow padding so it still fits the rail once the column shuts. */
+.pr-side-toggle {
+  margin-top: auto;
+  align-self: flex-end;
+  padding: 2px 4px;
+}
+
+.pianoroll-side.collapsed .pr-side-toggle {
+  align-self: stretch;
+  padding: 2px 0;
+}
+
 /* Stacked in the side panel, a control's label sits above it and reads as a section heading. */
 .pianoroll-side .pr-side-ctl {
   flex-direction: column;
@@ -2217,10 +2247,15 @@ li.CodeMirror-hint-active {
   font-weight: 700;
 }
 
+/* Takes whatever the control column isn't using - flex-basis 0 so the backing store's pixel size
+   (dpr-scaled, and set from the width this lands on) never feeds back into the layout. prSizeCanvas
+   watches it and re-sizes/redraws the roll to match. */
 #pianorollCanvas {
   display: block;
   margin: 12px;
-  flex: 0 0 auto;
+  flex: 1 1 0;
+  min-width: 240px;
+  height: 464px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);

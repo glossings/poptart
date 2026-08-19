@@ -260,8 +260,8 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   autoCloseBrackets: true,
   viewportMargin: Infinity,
   extraKeys: {
-    'Cmd-Enter': () => evaluate(true),
-    'Ctrl-Enter': () => evaluate(true),
+    'Cmd-Enter': () => evaluate(true, { byHand: true }),
+    'Ctrl-Enter': () => evaluate(true, { byHand: true }),
     'Cmd-.': doStop,
     'Ctrl-.': doStop,
     'Cmd-S': () => savePatternFile(),
@@ -291,7 +291,7 @@ document.addEventListener('keydown', (e) => {
   if (document.querySelector('.dir-picker-backdrop:not(.hidden)')) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    evaluate(true);
+    evaluate(true, { byHand: true });
   } else if (e.key === '.') {
     e.preventDefault();
     doStop();
@@ -522,7 +522,8 @@ function setBufferQuietly(code) {
   } finally {
     restoringFromHistory = false;
   }
-  foldConfigBlobs();
+  forgetExpandedFolds();
+  refoldAll();
   lastCheckpointCode = code;
   updateDocTitle(code);
 }
@@ -659,19 +660,23 @@ window.addEventListener('popstate', async () => {
 // Click a widget to expand it; everything re-folds on load and after each eval.
 // ---------------------------------------------------------------------------------------------
 
-// Definitions are hidden outright by default - see foldDefRuns. Off, they come back as
-// ordinary code (still chipped, so the note data itself stays out of the way).
-const HIDE_ROLL_DEFS_KEY = 'poptart-hide-roll-defs';
-let hideRollDefs = localStorage.getItem(HIDE_ROLL_DEFS_KEY) !== '0'; // default on
+// A chip the player opened by hand stays open. Folds are otherwise re-derived from the buffer
+// after every write, so a note drawn into a roll would slam its own definitions block shut again -
+// which is what "expand it and keep working" used to do. The choice isn't in the text, so it is
+// remembered here, by what the fold is OF rather than where it is: an edit moves the offsets.
+const expandedFolds = new Set();
 
-function setHideRollDefs(on) {
-  hideRollDefs = on;
-  localStorage.setItem(HIDE_ROLL_DEFS_KEY, on ? '1' : '0');
-  refoldAll();
+// A buffer being swapped out wholesale takes its folds - and the choices made about them - with
+// it. Whatever the next patch holds, nobody has opened any of it yet.
+function forgetExpandedFolds() {
+  expandedFolds.clear();
 }
 
 // Every fold this file makes is re-derivable from the buffer, so switching one off is "drop them
-// all and work them out again" rather than a hunt for the marks that have to go.
+// all and work them out again" rather than a hunt for the marks that have to go. This is also the
+// only form that is safe to run over a buffer that already has folds: foldConfigBlobs alone is
+// additive, and an edit that half-clears a mark can leave it laying a second widget beside the
+// first - a chip and the text it was standing in for, both on screen.
 function refoldAll() {
   cm.operation(() => {
     for (const mk of cm.getAllMarks()) if (mk.poptartFold) mk.clear();
@@ -679,20 +684,15 @@ function refoldAll() {
   });
 }
 
-// Hides a span outright - no chip, no gap, nothing left on screen. The text is untouched in the
-// document, so the buffer you export, share, undo through and commit is the whole patch; only the
-// display drops it. Refuses to collapse the entire document, which CodeMirror cannot render.
-function hideSpan(fromIdx, toIdx) {
-  const from = cm.posFromIndex(fromIdx);
-  const to = cm.posFromIndex(toIdx);
-  if (cm.findMarks(from, to).some((mk) => mk.poptartFold)) return true; // already hidden or folded
-  if (fromIdx <= 0 && toIdx >= cm.getValue().length) return false;
-  const mk = cm.markText(from, to, { collapsed: true, atomic: true });
-  mk.poptartFold = true;
-  return true;
-}
+// Spans of the definition runs the player has opened, rebuilt at the top of each foldConfigBlobs
+// pass. Opening a run is a request to READ it, so the folds that would otherwise chip what is
+// inside one - a roll's note string, a preset's captured program - stand down within it. While the
+// run is folded they never come up: its own chip already covers them.
+let openDefRunSpans = [];
 
-function foldSpan(fromIdx, toIdx, label, title) {
+function foldSpan(fromIdx, toIdx, label, title, key = null) {
+  if (key !== null && expandedFolds.has(key)) return; // opened by hand - leave it open
+  if (openDefRunSpans.some(([a, b]) => fromIdx >= a && toIdx <= b)) return; // inside one that was
   const from = cm.posFromIndex(fromIdx);
   const to = cm.posFromIndex(toIdx);
   if (cm.findMarks(from, to).some((mk) => mk.poptartFold)) return; // already folded
@@ -702,19 +702,27 @@ function foldSpan(fromIdx, toIdx, label, title) {
   widget.title = title;
   const mk = cm.markText(from, to, { replacedWith: widget, atomic: true });
   mk.poptartFold = true;
-  widget.onclick = () => mk.clear();
+  widget.onclick = () => {
+    if (key !== null) expandedFolds.add(key);
+    mk.clear();
+  };
 }
 
 function foldConfigBlobs() {
   const code = cm.getValue();
   let m;
+  // Runs first, so every pass below knows where they are: a folded one covers its contents with a
+  // single chip that they find already marked and leave alone, and an opened one holds them off
+  // entirely (see openDefRunSpans).
+  openDefRunSpans = [];
+  for (const reg of DEF_REGISTRIES) foldDefRuns(code, reg);
   // Captured plugin state written out in full - a patch pasted in from outside, or a definition
   // typed by hand. What the editor writes is a handle into the store (see blobs.js), which is
   // short and stays on screen; this is for the ones that aren't.
   const stateRe = /\{\s*state:\s*"[A-Za-z0-9+/=]+"\s*\}/g;
   while ((m = stateRe.exec(code))) {
     const kb = Math.max(1, Math.round(m[0].length / 1024));
-    foldSpan(m.index, m.index + m[0].length, `{◆ ${kb}kb}`, 'captured plugin state — click to expand');
+    foldSpan(m.index, m.index + m[0].length, `{◆ ${kb}kb}`, 'captured plugin state — click to expand', `state@${m.index}`);
   }
   // lfo() shape strings and pianoroll() note strings: editor-written data, not code to read, so
   // they always fold - length doesn't matter. An empty string is left alone: there's nothing to
@@ -734,31 +742,31 @@ function foldConfigBlobs() {
     if (m[1] === 'pianoroll' && (!pianorollMod || rollDefs.isIdString(str.slice(1, -1)))) continue;
     if (m[1] === 'lfo' && !shapeMod?.looksLikeShapeData(str.slice(1, -1))) continue;
     const start = m.index + m[0].length - str.length;
-    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]]);
+    // Keyed by where the CALL starts: drawing into a roll rewrites what is inside it and leaves
+    // its own offset alone, which is exactly the run of edits this has to hold across.
+    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]], `data@${m.index}`);
   }
-  // A whole run of definitions collapses first, so the data-string folds below find its chip
-  // already covering them and leave well alone.
-  for (const reg of DEF_REGISTRIES) foldDefRuns(code, reg);
-  // The same blob one call along, as a named preset's third argument, and for the same reason as
-  // the roll fold below: it has to come AFTER the run fold, or the chip left inside the run would
-  // make hideSpan take the run for one already hidden and leave the whole thing on screen. With
-  // `hide definitions` on there is nothing here to do; with it off, the id and the plugin
-  // stay visible - they are what the definition is FOR - and only the program folds.
+  // The same blob one call along, as a named preset's third argument. This is for the definitions
+  // no run covers - one that chains, or shares its line with code - since inside a folded run the
+  // run's own chip stands in for the lot. The id and the plugin stay visible: they are what the
+  // definition is FOR, and only the program folds.
   const presetStateRe = /\b_preset\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|-?[\d.]+)\s*,\s*(?:"[^"\n]*"|'[^'\n]*')\s*,\s*("[A-Za-z0-9+/=]+")/g;
   while ((m = presetStateRe.exec(code))) {
     const str = m[1];
     const start = m.index + m[0].length - str.length;
     const kb = Math.max(1, Math.round(str.length / 1024));
-    foldSpan(start, start + str.length, `"◆ ${kb}kb"`, 'captured plugin state — click to expand');
+    foldSpan(start, start + str.length, `"◆ ${kb}kb"`, 'captured plugin state — click to expand', `preset@${m.index}`);
   }
-  // roll(id, "notes", …) - the same note data, one argument further along. The id stays visible:
+  // _roll(id, "notes", …) - the same note data, one argument further along. The id stays visible:
   // it is the name the patterns say, and the whole point of a definitions block is reading it.
-  const rollArgRe = /\broll\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|[^,()\n]*?)\s*,\s*("(?:[^"\\\n]|\\.)*")/g;
+  // The underscore is optional so a patch old enough to still say `roll(` folds too; the lookbehind
+  // is what keeps `pianoroll(` (handled above, where names are told from data) out of it.
+  const rollArgRe = /(?<![\w$])_?roll\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|[^,()\n]*?)\s*,\s*("(?:[^"\\\n]|\\.)*")/g;
   while ((m = rollArgRe.exec(code))) {
     const str = m[1];
     if (str.length <= 2) continue;
     const start = m.index + m[0].length - str.length;
-    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES.pianoroll);
+    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES.pianoroll, `rollarg@${m.index}`);
   }
 }
 
@@ -767,32 +775,43 @@ const ROLL_CHIP_IDS = 6;
 
 // A run of consecutive definitions is a library rather than music: it plays nothing (the server
 // drops every definition sig) and what it holds is editor-written data that no one - least of all
-// an audience - wants to read. So the whole run, its `rolls:`/`shapes:` label and the blank line
-// after it, is hidden outright: the buffer keeps every character, the screen shows none of them.
-// They are named, opened, renamed and drawn from their own editor panel, which is where they are
-// actually worked on. Turn `hide definitions` off in settings to get them all back as
-// ordinary code, folded to a chip that names what each run holds.
+// an audience - wants to read. So it folds to one chip naming what the run holds, and is worked on
+// from its own editor panel instead.
+//
+// It folds rather than HIDES, which it used to. CodeMirror renders a collapsed multi-line mark as
+// one visual line and there is no way down from there to none - so hiding a run never removed it
+// from the buffer so much as disguised it as a blank line, which is precisely the line a tidy
+// player selects and deletes, losing the roll with it. A chip you can see is safer than a gap you
+// can't, and it costs one line at the bottom of the buffer, below everything that is played.
 function foldDefRuns(code, reg) {
   for (const run of reg.runs(code)) {
-    const [from, to] = runLineRange(code, run);
-    if (hideRollDefs && hideSpan(from, to)) continue;
     const ids = run.map((d) => d.id);
+    const from = run[0].start;
+    const to = run[run.length - 1].close + 1;
+    // Keyed by the names it holds, not its offset: the block sits at the bottom of the buffer, so
+    // anything typed above it moves it, and an offset key would forget the moment you typed.
+    const key = `defs:${reg.kind}:${ids.join(',')}`;
+    if (expandedFolds.has(key)) {
+      openDefRunSpans.push([from, to]);
+      continue; // opened to be read - and everything in it is part of what there is to read
+    }
     const shown =
       ids.length > ROLL_CHIP_IDS
         ? [...ids.slice(0, ROLL_CHIP_IDS), `+${ids.length - ROLL_CHIP_IDS} more`]
         : ids;
     foldSpan(
-      run[0].start,
-      run[run.length - 1].close + 1,
+      from,
+      to,
       `⋯ ${reg.kind}${ids.length === 1 ? '' : 's'}: ${shown.join(', ')}`,
-      `${ids.length} ${reg.kind} definition${ids.length === 1 ? '' : 's'} — click to expand`
+      `${ids.length} ${reg.kind} definition${ids.length === 1 ? '' : 's'} — click to expand`,
+      key
     );
   }
 }
 
 // The span a run occupies once its scaffolding is counted in: back over a `rolls:` label to the
 // start of the line, and forward over the rest of the last line, its newline and any blank lines
-// after it - so hiding the run closes the hole up rather than leaving an empty line behind. Either
+// after it - so folding the run closes the hole up rather than leaving an empty line behind. Either
 // end stays put if real code shares the line, which can only lose the chip a little precision.
 function runLineRange(code, run) {
   const first = run[0];
@@ -817,7 +836,7 @@ function runLineRange(code, run) {
 // leave a definitions block sitting on screen. Re-derive the folds whenever one lands - which is
 // rare, unlike the per-keystroke changes this deliberately ignores.
 cm.on('changes', (_, changes) => {
-  if (changes.some((c) => c.origin === 'undo' || c.origin === 'redo')) foldConfigBlobs();
+  if (changes.some((c) => c.origin === 'undo' || c.origin === 'redo')) refoldAll();
 });
 
 // String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced. The one
@@ -2023,6 +2042,7 @@ function writeLfoOptions() {
   } finally {
     lfoSuppressCursor = false;
   }
+  refoldAll(); // rate/mode rewrite the call too, taking the shape's fold with it - see writeLfoCall
   lfoScheduleEval();
 }
 
@@ -2117,6 +2137,10 @@ function writeLfoCall() {
   } finally {
     lfoSuppressCursor = false; // never leave it latched: that would wedge the panel shut for good
   }
+  // Rewriting the call clears any fold covering it, so dragging a breakpoint would flick the shape
+  // open and (an eval later) shut again. Re-fold now, in the same frame - as writePianorollCall
+  // does, and for the same reason.
+  refoldAll();
   lfoScheduleEval();
 }
 
@@ -2760,9 +2784,11 @@ const prFoldBtn = document.getElementById('pianorollFold');
 const prScaleLabel = document.getElementById('pianorollScale');
 const prPreviewBtn = document.getElementById('pianorollPreview');
 const prToMiniBtn = document.getElementById('pianorollToMini');
+const prSide = document.querySelector('.pianoroll-side');
+const prSideToggle = document.getElementById('pianorollSideToggle');
 const prCloseBtn = document.getElementById('pianorollClose');
 
-const PR_W = 660; // logical canvas size (backing store is scaled by devicePixelRatio for crispness)
+const PR_W = 660; // grid width with the control column open; the CSS owns it from there (see prW)
 const PR_TOPBAR = 16; // loop-ruler strip along the top (drag it to set the loop length)
 const PR_GRIDH = 384; // piano-grid height below the ruler
 const PR_LANEH = 64; // value lane below the grid (per-note velocity / probability markers)
@@ -2818,6 +2844,11 @@ let prSounding = null; // midi note currently ringing from a preview (so we can 
 let prTool = localStorage.getItem('poptartPianorollTool') === 'select' ? 'select' : 'draw'; // pencil vs arrow
 let prCmdMode = localStorage.getItem('poptartPianorollCmd') === 'prob' ? 'prob' : 'vel'; // what cmd-drag sets
 let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // fold the roll to the scale's notes
+let prSideMin = localStorage.getItem('poptartPianorollSide') === '1'; // timing controls column minimized
+// The grid's logical width in CSS px. PR_W to start with, but the canvas is a flex child now: it
+// takes whatever the control column isn't using, so minimizing the column widens the roll instead
+// of resizing the panel. prSizeCanvas keeps this, the backing store and the drawing in step.
+let prW = PR_W;
 // Whether the panel STOPS following the pattern. Opened from a pianoroll("<0 chorus>") the roll on
 // screen is whichever one is sounding, which is what you want when you're reading along and the
 // last thing you want when you're drawing into one mid-set - so it pins, and the pattern goes on
@@ -3006,9 +3037,15 @@ function serializePianorollCall({ notes, grid, len, start, idLiteral }) {
   const from = start ? `, start: ${start}` : ''; // a window that opens at 0 is the default - don't write it
   const body = `"${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { grid: ${grid}, len: ${len}${from} }`;
   // The roll being edited is either drawn inline or kept under an id - same notes, same options,
-  // one argument apart. The id is written back exactly as it was found, so roll(0, …) doesn't
-  // become roll("0", …) the first time you move a note.
-  return idLiteral ? `roll(${idLiteral}, ${body})` : `pianoroll(${body})`;
+  // one argument apart. The id is written back exactly as it was found, so _roll(0, …) doesn't
+  // become _roll("0", …) the first time you move a note.
+  //
+  // rollDefs.defCall, not the bare `roll(` this used to write. The marker being replaced covers
+  // the leading underscore, so writing the legacy name dropped it - and for the moment before the
+  // next eval put it back, the buffer held no definition the editor could recognise: the run's
+  // chip fell off, and the data argument got chipped on its own instead. Every write is now the
+  // same shape the definition already had, so a note drawn into a roll changes only the notes.
+  return idLiteral ? `${rollDefs.defCall}(${idLiteral}, ${body})` : `pianoroll(${body})`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3018,7 +3055,7 @@ function serializePianorollCall({ notes, grid, len, start, idLiteral }) {
 // a request for a new one, so it is given an id (its track's name, or `roll2`, `roll3`… when that
 // is spoken for) and a definition; and an id a pattern NAMES but nothing defines - the second half
 // of `pianoroll("<lead alt>")` - gets an empty definition too, which is how a second roll comes
-// into being. The definitions go in a block at the top of the buffer and are hidden from the screen
+// into being. The definitions go in a block at the foot of the buffer, folded to one chip
 // (see foldDefRuns), so `roll(` is a word the user need never read or write. The console says what
 // was created, so a typo makes an empty roll you can SEE rather than silence you have to work out.
 // ---------------------------------------------------------------------------------------------
@@ -3221,8 +3258,15 @@ function makeDefRegistry(opts) {
     return out;
   }
 
-  // Where a new definition goes: appended to the buffer's first run of them, or a fresh run at the
-  // very top. Returns the edit as [from, to, text] against `code`.
+  // Where a new definition goes: appended to the buffer's first run of them, or - when the buffer
+  // has no run yet - a fresh one at the END. Returns the edit as [from, to, text] against `code`.
+  //
+  // The end rather than the top, because of line numbers. A run is hidden by default, and
+  // CodeMirror draws a collapsed multi-line mark as ONE visual line - so a block of five
+  // definitions at the top of the buffer numbered the player's first real line 6. Below their
+  // code, the same merge happens where nothing is counting. Nothing else minds the move:
+  // resolution is lazy (see rollPattern in signal.mjs), so a definition reads the same either side
+  // of the pattern that names it. An older patch's block is brought down by sinkDefRuns.
   //
   // Deliberately NOT under a `rolls:` label. A label is a track NAME - it would collide with one
   // the player might reasonably want, and, being the first label in the buffer, it was what named
@@ -3236,7 +3280,10 @@ function makeDefRegistry(opts) {
       const at = found[0][found[0].length - 1].close + 1;
       return [at, at, `\n${lines.join('\n')}`];
     }
-    return [0, 0, `${lines.join('\n')}\n\n`];
+    // A blank line between the player's code and the block, without stacking up another one each
+    // time a buffer that already ends in one gets its first definition.
+    const gap = code.trim() ? '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length)) : '';
+    return [code.length, code.length, `${gap}${lines.join('\n')}`];
   }
 
   /** Every id the editor knows: this buffer's definitions, then the shared library. */
@@ -3424,26 +3471,29 @@ function makeDefRegistry(opts) {
 // evaluated, which is the only moment it matters. Only calls that actually look like DEFINITIONS
 // (a literal id first) are touched, so someone's own `const roll = …` is left alone.
 function migrateDefNames() {
-  // Three passes, each reading what the last wrote: runs() looks for the private names, so the
-  // labels above them can only be found once the calls have been renamed - and the indentation
-  // those labels left behind can only be squared up once they are gone.
+  // Four passes, each reading what the last wrote: runs() looks for the private names, so the
+  // labels above them can only be found once the calls have been renamed - the indentation those
+  // labels left behind can only be squared up once they are gone - and only then is the block in
+  // the shape sinkDefRuns will agree to move.
   const renamed = renameLegacyDefCalls();
   const labels = legacyLabelLines(cm.getValue());
   if (labels.length) applyEdits(labels.map(([from, to]) => [from, to, '']));
   const dedented = dedentDefRuns();
-  if (!renamed && !labels.length && !dedented) return;
+  const sunk = sinkDefRuns();
+  if (!renamed && !labels.length && !dedented && !sunk) return;
   refoldAll();
   const parts = [];
   if (renamed) parts.push(`${renamed} definition${renamed === 1 ? '' : 's'} renamed to the editor's private form`);
   if (labels.length) parts.push(`${labels.length} leftover label${labels.length === 1 ? '' : 's'} removed`);
   if (dedented) parts.push(`${dedented} definition${dedented === 1 ? '' : 's'} un-indented`);
+  if (sunk) parts.push(`${sunk} definition${sunk === 1 ? '' : 's'} moved below the code, so the line numbers read straight`);
   logLine(`tidied the definitions block: ${parts.join(', ')}`);
 }
 
 // Pass three: definitions written under a `rolls:`/`shapes:` label were indented to sit beneath it.
 // The label is gone (pass two, or an earlier session), but its indentation stayed - so a buffer can
-// hold two-space `_roll`/`_shape` definitions next to flush-left `_preset` ones, which is visible
-// the moment you turn `hide definitions` off. Returns how many lines were squared up.
+// hold two-space `_roll`/`_shape` definitions next to flush-left `_preset` ones - visible now that
+// the runs are chipped rather than hidden. Returns how many lines were squared up.
 //
 // Only TOP-LEVEL runs are touched. A definition indented inside a function body is indented on
 // purpose, and while re-indenting it would cost nothing but looks, code the editor did not write is
@@ -3465,6 +3515,42 @@ function dedentDefRuns() {
   }
   if (edits.length) applyEdits(edits);
   return edits.length;
+}
+
+// Definitions used to be written at the TOP of the buffer. A run is hidden by default, and
+// CodeMirror draws a collapsed multi-line mark as ONE visual line - so a block up there made the
+// player's first real line read as line 6. New ones are written at the end now (see defsEdit);
+// this brings an older patch's block down to join them, once, the first time it is evaluated.
+//
+// Nothing about playback minds: resolution is lazy (see rollPattern in signal.mjs), so a
+// definition reads the same either side of the pattern that names it.
+function sinkDefRuns() {
+  const code = cm.getValue();
+  const isCode = codeOnly(code);
+  const found = [];
+  for (const reg of DEF_REGISTRIES) {
+    for (const run of reg.runs(code)) {
+      // A run nested in a function body is scoped to it - hoisting that one to the bottom would
+      // move it out of the scope it was written in, so one of those stops the whole pass.
+      if (!atTopLevel(code, isCode, run[0].start)) return 0;
+      found.push({ run, span: runLineRange(code, run) });
+    }
+  }
+  if (!found.length) return 0;
+  found.sort((a, b) => a.span[0] - b.span[0]);
+  // Whole lines only. runs() already refuses a definition sharing the start of its line, but a run
+  // whose last line carries code after the closing paren would strand that code - so leave it.
+  const partial = ([a, b]) => (a > 0 && code[a - 1] !== '\n') || (b < code.length && code[b - 1] !== '\n');
+  if (found.some((f) => partial(f.span))) return 0;
+  // Already at the bottom: nothing but blank space follows the last block.
+  if (!code.slice(found[found.length - 1].span[1]).trim()) return 0;
+  // Each span carries the newline (and any blank lines) that followed it, which is what separates
+  // them once they are stacked up - but the last one would leave a blank line under the block, and
+  // an empty line at the bottom of the buffer is the one thing that looks like a mistake.
+  const block = found.map((f) => code.slice(...f.span)).join('').replace(/\n+$/, '');
+  const gap = '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length));
+  applyEdits([...found.map((f) => [...f.span, '']), [code.length, code.length, `${gap}${block}`]]);
+  return found.reduce((n, f) => n + f.run.length, 0);
 }
 
 /** Is `at` outside every bracket - i.e. a statement of the buffer itself rather than of some block? */
@@ -3623,6 +3709,7 @@ function openPianorollEditor(call, carry = null) {
   prSyncRollHead();
   if (call.id && !wasOpen) prRefreshRollList(); // the prebake half of the picker, asked for once
   prPanel.classList.remove('hidden');
+  prSizeCanvas(); // the width the layout gives it now, so the first frame is already right
   drawPianoroll();
   if (!prRaf) prRaf = requestAnimationFrame(prPlayheadLoop); // sweep a playhead while it plays
   // Focus isn't taken here - openWidgetAt hands it to the canvas, because the double-click that
@@ -3984,8 +4071,9 @@ function writePianorollCall(record = true) {
     prSuppressCursor = false; // never leave it latched: that would wedge the panel shut for good
   }
   // Rewriting the call clears any fold covering it, so a note drawn into a roll would flick its
-  // whole definitions block open and (an eval later) shut again. Re-fold now, in the same frame.
-  foldConfigBlobs();
+  // whole definitions block open and (an eval later) shut again. Re-fold now, in the same frame -
+  // all of them, since the half-cleared mark this edit just left behind has to go with them.
+  refoldAll();
   prScheduleEval();
 }
 
@@ -4103,7 +4191,7 @@ function prDimOutside(ctx, m, top, h) {
 }
 
 function prMetrics() {
-  const gridW = PR_W - PR_GUTTER;
+  const gridW = prW - PR_GUTTER;
   const rowH = PR_GRIDH / PR_ROWS;
   const cols = prState._dragCols ?? prRenderCols();
   const cellW = (gridW / cols) * prState.zoom;
@@ -4127,7 +4215,7 @@ function prMetrics() {
   // Clamp the pitch window the same way scrollCells is clamped, so toggling fold (or deleting the
   // notes that were holding a lane open) can't leave the view parked past the end of the axis.
   prState.pitchTop = Math.max(Math.min(PR_ROWS - 1, laneMax), Math.min(laneMax, prState.pitchTop));
-  return { W: PR_W, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, laneTop: PR_TOPBAR + PR_GRIDH, laneH: PR_LANEH, gridW, cols, cellW, rowH, visibleCells, maxScroll, scroll, lanes, laneOf, laneMax, bottomPos: prState.pitchTop - PR_ROWS };
+  return { W: prW, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, laneTop: PR_TOPBAR + PR_GRIDH, laneH: PR_LANEH, gridW, cols, cellW, rowH, visibleCells, maxScroll, scroll, lanes, laneOf, laneMax, bottomPos: prState.pitchTop - PR_ROWS };
 }
 
 const prCellToX = (cell, m) => PR_GUTTER + (cell - m.scroll) * m.cellW;
@@ -4137,7 +4225,7 @@ const prCellFloat = (px, m) => m.scroll + (px - PR_GUTTER) / m.cellW; // fractio
 
 function prCanvasPos(e) {
   const r = prCanvas.getBoundingClientRect();
-  return { px: (e.clientX - r.left) * (PR_W / r.width), py: (e.clientY - r.top) * (PR_CH / r.height) };
+  return { px: (e.clientX - r.left) * (prW / r.width), py: (e.clientY - r.top) * (PR_CH / r.height) };
 }
 
 function prCellAt(px, m) {
@@ -4685,14 +4773,25 @@ function prZoomBy(factor, anchorPx) {
   drawPianoroll();
 }
 
-function initPianorollCanvas() {
+// Match the backing store to the width the layout has landed on (the column minimizing, the panel
+// squeezed by a narrow window) and redraw at it. The CSS sizes the element; nothing here writes a
+// style width back, so this can never drive the layout it is reading.
+function prSizeCanvas() {
+  const w = prCanvas.clientWidth;
+  if (!w) return; // laid out at zero - the panel is hidden, and it will resize again on the way in
   const dpr = Math.min(3, window.devicePixelRatio || 1);
+  prW = w;
   prCanvas._dpr = dpr;
-  prCanvas.width = PR_W * dpr;
+  prCanvas.width = w * dpr;
   prCanvas.height = PR_CH * dpr;
-  prCanvas.style.width = PR_W + 'px';
-  prCanvas.style.height = PR_CH + 'px';
+  if (prState) drawPianoroll();
+}
+
+function initPianorollCanvas() {
   prCanvas.tabIndex = 0; // focusable, so arrow keys / delete / ctrl-a reach it
+  // Every width change lands here: the column minimizing, a narrow window squeezing the panel, or
+  // the panel simply being shown. (While it's hidden the callback sees zero and waits.)
+  new ResizeObserver(prSizeCanvas).observe(prCanvas);
 
   let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'lane'|'marquee'|'loop'|'audition', ... }
   const snapshotPos = () => [...prState.sel].map((n) => ({ n, start: n.start, midi: n.midi }));
@@ -4848,7 +4947,7 @@ function initPianorollCanvas() {
       const key = prLaneKey();
       for (const n of prState.sel) n[key] = Math.min(1, Math.max(0, n[key] - d));
     } else if (drag.kind === 'marquee') {
-      const xa = Math.min(Math.max(px, PR_GUTTER), PR_W), xb = Math.min(Math.max(drag.x0, PR_GUTTER), PR_W);
+      const xa = Math.min(Math.max(px, PR_GUTTER), prW), xb = Math.min(Math.max(drag.x0, PR_GUTTER), prW);
       const ya = Math.min(Math.max(py, PR_TOPBAR), m.laneTop), yb = Math.min(Math.max(drag.y0, PR_TOPBAR), m.laneTop);
       const rx = Math.min(xa, xb), rw = Math.abs(xa - xb), ry = Math.min(ya, yb), rh = Math.abs(ya - yb);
       prState.marquee = { x: rx, y: ry, w: rw, h: rh };
@@ -5191,6 +5290,21 @@ function initPianorollEditor() {
     localStorage.setItem('poptartPianorollPreview', prPreviewEnabled ? '1' : '0');
     if (!prPreviewEnabled) prPreviewOff();
     reflectPreview();
+    prRefocus();
+  });
+
+  // The timing controls fold away, like the main sidebar - the grid is what you are working in,
+  // and grid/len/÷2/×2/⧉ are set once and then left alone. Sticky, like the tool and fold.
+  const reflectSide = () => {
+    prSide.classList.toggle('collapsed', prSideMin);
+    prSideToggle.textContent = prSideMin ? '»' : '«';
+    prSideToggle.title = prSideMin ? 'show the timing controls' : 'hide the timing controls';
+  };
+  reflectSide();
+  prSideToggle.addEventListener('click', () => {
+    prSideMin = !prSideMin;
+    localStorage.setItem('poptartPianorollSide', prSideMin ? '1' : '');
+    reflectSide();
     prRefocus();
   });
 
@@ -6375,7 +6489,16 @@ function updateTransportButtons() {
 // from cycle 0; `start: false` (Update) leaves the clock alone - a running performance is
 // re-patched seamlessly, a stopped one just reloads the patterns without making sound. Either
 // way the params panel, autocomplete, and highlighting regions refresh.
-async function evaluate(start) {
+async function evaluate(start, { byHand = false } = {}) {
+  // Running the buffer yourself is the "tidy it up and play it" gesture, so it puts back every
+  // chip you had opened. The panels' own debounced evals don't pass byHand and so leave them be:
+  // snapping a definitions run shut halfway through drawing into it is the whole reason folds are
+  // remembered at all. Defaulting to false keeps that the safe way round - a call site that
+  // forgets to say so leaves a chip open, rather than closing one under the player's hands.
+  if (byHand) {
+    forgetExpandedFolds();
+    refoldAll();
+  }
   migrateDefNames(); // a patch saved before the builders were privatised still says roll(...)
   for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset() gets its definition first
   const code = cm.getValue();
@@ -6391,7 +6514,7 @@ async function evaluate(start) {
     renderTracks(result);
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
     setKeyboardRoutes(result.keyboardTracks ?? []);
-    foldConfigBlobs();
+    refoldAll();
     if (start) playing = true; // Update keeps the current play state; Play begins it
     const nActive = result.tracks.filter((t) => t.active).length;
     logLine(`${start ? 'playing' : 'updated'} (${nActive}/${result.tracks.length} pattern(s))`);
@@ -6405,7 +6528,7 @@ async function evaluate(start) {
 // Play button: state-aware. Playing -> stop; stopped -> evaluate and start.
 function togglePlay() {
   if (playing) doStop();
-  else evaluate(true);
+  else evaluate(true, { byHand: true });
 }
 
 async function doStop() {
@@ -7271,9 +7394,6 @@ const docTooltipsToggle = document.getElementById('docTooltipsToggle');
 docTooltipsToggle.checked = docTooltipsEnabled;
 docTooltipsToggle.addEventListener('change', () => setDocTooltips(docTooltipsToggle.checked));
 
-const hideRollDefsToggle = document.getElementById('hideRollDefsToggle');
-hideRollDefsToggle.checked = hideRollDefs;
-hideRollDefsToggle.addEventListener('change', () => setHideRollDefs(hideRollDefsToggle.checked));
 
 // Sample-library folder. The saved folder is what `s(...)` reads packs from; when
 // POPTART_SAMPLES_DIR is set in the environment it overrides this, so the field goes read-only
@@ -7832,7 +7952,8 @@ async function savePatternFileAs() {
 async function openInEditor(code, name) {
   await rollWipSession();
   cm.setValue(code);
-  foldConfigBlobs();
+  forgetExpandedFolds();
+  refoldAll();
   saveNameHint = null;
   setCurrentSavedName(name);
   checkpointUrl();
@@ -8539,7 +8660,7 @@ rebuildThemeOptions();
 // ---------------------------------------------------------------------------------------------
 
 playBtn.addEventListener('click', togglePlay);
-updateBtn.addEventListener('click', () => evaluate(false));
+updateBtn.addEventListener('click', () => evaluate(false, { byHand: true }));
 scanBtn.addEventListener('click', doScan);
 
 refreshStatus().then((loaded) => {
