@@ -298,7 +298,12 @@ button.small.conf-active {
   color: #1a1a1a;
 }
 
+/* Wide enough for the longest thing it says ("restarting engine…"), and centred inside that, so
+   the engine going from checking to ready never resizes the pill - which used to shove every
+   header control along with it. */
 .status {
+  min-width: 124px;
+  text-align: center;
   font-size: 11px;
   padding: 3px 10px;
   border-radius: 99px;
@@ -386,19 +391,40 @@ aside {
   display: none;
 }
 
-/* minimized sidebar: a narrow rail with just the restore button */
-aside.collapsed {
+/* Minimized sidebar: a narrow rail with just the restore button.
+   Keyed off <html>, not a class on the panel, because index.html stamps these attributes from
+   localStorage before the first paint - client.js runs far too late to decide it without the
+   panel visibly opening and then shutting on every reload. */
+[data-sidebar-collapsed] aside {
   width: 40px;
 }
 
-aside.collapsed .tab-body,
-aside.collapsed .side-tab {
+[data-sidebar-collapsed] aside .tab-body,
+[data-sidebar-collapsed] aside .side-tab {
   display: none;
 }
 
-aside.collapsed .side-tabs {
+[data-sidebar-collapsed] aside .side-tabs {
   padding: 8px 0 0;
   justify-content: center;
+}
+
+/* The arrows belong to the same pre-paint state, so they are drawn from it rather than written in
+   by script - otherwise a minimized panel still paints its toggle pointing the wrong way. */
+#sidebarToggle::after {
+  content: '»';
+}
+
+[data-sidebar-collapsed] #sidebarToggle::after {
+  content: '«';
+}
+
+#consoleToggle::after {
+  content: '▾';
+}
+
+[data-console-collapsed] #consoleToggle::after {
+  content: '▴';
 }
 
 /* Sections are flex children that may be squeezed on short windows; overflow: hidden makes a
@@ -982,7 +1008,7 @@ footer#console {
   color: var(--err);
 }
 
-footer#console.collapsed #log {
+[data-console-collapsed] #log {
   display: none;
 }
 
@@ -1006,10 +1032,13 @@ footer#console.collapsed #log {
   resize: none;
 }
 
-/* Even in the right colours, that first frame showed the pattern as flat unhighlighted text and
-   then repainted it in colour a moment later. The pane keeps its space and its background while
-   the boot flag is up, and the code appears once - already highlighted. */
-[data-booting] #editor {
+/* Even in the right colours, that first frame showed the pattern as flat unhighlighted text, then
+   repainted it in colour, then - on a share/history URL, whose buffer arrives over the network -
+   replaced it outright with the file actually being opened. The pane keeps its space and its
+   background until all of that has settled, and the code appears once, already highlighted and
+   already the right file. */
+[data-booting] #editor,
+[data-booting] #editorPane .CodeMirror {
   visibility: hidden;
 }
 
@@ -2186,10 +2215,20 @@ li.CodeMirror-hint-active {
 
 /* --------------------------------------------- phrase position + midi record (header) */
 
+/* Its options are added by script (presets, saved themes, an unsaved draft), so it starts out
+   empty and narrow. A floor wide enough for the longest of them keeps the controls beside it from
+   sliding along when they arrive. */
+#themeSelect {
+  min-width: 132px;
+}
+
+/* Its circles are built by script, so the box holds their space from the first paint instead of
+   growing into it: PHRASE_CYCLES (4) circles of 15px with 4px between them. */
 #phraseViz {
   display: flex;
   align-items: center;
   gap: 4px;
+  width: 72px;
   margin-right: 4px;
 }
 

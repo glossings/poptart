@@ -23,11 +23,17 @@
         } catch (e) {}
         root.dataset.theme = base;
         if (vars) for (var k in vars) root.style.setProperty(k, vars[k]);
-        // Marks the window between first paint and CodeMirror taking over the editor, so the raw
-        // textarea can stay out of sight rather than flashing up as unhighlighted plain text (see
-        // #editor in style.css). Set here rather than on the element so it costs nothing when
-        // scripting is off: no script, no attribute, and the textarea shows normally.
+        // Marks the window between first paint and the editor being ready - CodeMirror up AND the
+        // buffer this URL asks for in it. Until then the pane stays blank rather than flashing the
+        // raw textarea as unhighlighted text and then the default snippet in place of the real
+        // file (see #editor in style.css; client.js clears the flag). Set from script, so with
+        // scripting off there is no attribute and the textarea shows normally.
         root.dataset.booting = '1';
+        // Which panels are minimized, decided BEFORE the first paint. client.js is a long way from
+        // running at this point, so applying it there meant every reload painted both panels open
+        // and then snapped them shut. Same storage keys initCollapsible writes.
+        if (localStorage.getItem('poptart-sidebar-collapsed')) root.setAttribute('data-sidebar-collapsed', '');
+        if (localStorage.getItem('poptart-console-collapsed')) root.setAttribute('data-console-collapsed', '');
       })();
     </script>
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
@@ -96,7 +102,7 @@
             <button class="side-tab" data-tab="files">files</button>
             <button class="side-tab" data-tab="settings">settings</button>
             <span class="spacer"></span>
-            <button id="sidebarToggle" class="small" title="minimize panel">»</button>
+            <button id="sidebarToggle" class="small" title="minimize panel"></button>
           </div>
 
           <div id="sessionTab" class="tab-body">
@@ -219,7 +225,7 @@
         <div class="console-head">
           <span>console</span>
           <span class="spacer"></span>
-          <button id="consoleToggle" class="small" title="minimize console">▾</button>
+          <button id="consoleToggle" class="small" title="minimize console"></button>
         </div>
         <div id="log"></div>
       </footer>

@@ -275,9 +275,12 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Ctrl-Space': () => showPoptartHint(),
   },
 });
-// The editor is up and highlighting, so the raw textarea no longer has to be kept out of sight
-// (index.html sets the flag; style.css hides #editor while it's there).
-delete document.documentElement.dataset.booting;
+// Show the editor pane: CodeMirror is up and the buffer this URL opens with is in it. Called from
+// every exit of the boot handler below (index.html sets the flag, style.css hides the pane while
+// it's there) and, as a backstop, on a timer - a request that never comes back must not leave the
+// editor invisible.
+const editorReady = () => delete document.documentElement.dataset.booting;
+setTimeout(editorReady, 2000);
 
 // Transport and save hotkeys work no matter what has focus (params search, plugin list, …). When
 // the editor has focus CodeMirror handles these first and preventDefaults, so no double-fire.
@@ -515,6 +518,16 @@ function setBufferQuietly(code) {
 // throws rather than reading undefined. A microtask drains as soon as evaluation finishes, which is
 // still before the first paint, so nothing flashes; it just happens after everything exists.
 queueMicrotask(async () => {
+  try {
+    await openingBuffer();
+  } finally {
+    editorReady();
+  }
+});
+
+// The buffer this tab opens with. Everything that can put code in the editor before the user sees
+// it happens in here, so the pane can be held blank until it returns.
+async function openingBuffer() {
   const restored = sessionStorage.getItem(RESTORE_KEY);
   if (restored !== null) {
     // The name goes back with the buffer it belongs to, even when the buffer itself is already
@@ -559,7 +572,7 @@ queueMicrotask(async () => {
       .then(({ id }) => history.replaceState(null, '', `#s=${id}`))
       .catch(() => {}); // the long hash keeps working - nothing to tell the user
   }
-});
+}
 
 // Back/Forward: put that state back in the editor. No confirm needed - the buffer being replaced
 // keeps its own work-in-progress file on the way out (rollWipSession), so navigating away from
@@ -6970,7 +6983,6 @@ sampleSearch.addEventListener('input', renderSamples);
 // organize.
 // ---------------------------------------------------------------------------------------------
 
-const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const sessionTab = document.getElementById('sessionTab');
 const soundsTab = document.getElementById('soundsTab');
@@ -6990,7 +7002,6 @@ const fileNewBtn = document.getElementById('fileNewBtn');
 const fileList = document.getElementById('fileList');
 const fileSearchInput = document.getElementById('fileSearchInput');
 const wipList = document.getElementById('wipList');
-const consoleFooter = document.getElementById('console');
 const consoleToggle = document.getElementById('consoleToggle');
 
 // Switch the sidebar to a named tab (also invoked by the ctrl+p hotkey, see the hotkeys section).
@@ -8190,19 +8201,22 @@ function runMidiImport() {
 // Minimizable sidebar + console - collapsed state persists per browser.
 // ---------------------------------------------------------------------------------------------
 
-function initCollapsible(el, toggleBtn, storageKey, labels) {
+// The state lives in one attribute on <html>, which index.html has already stamped from the same
+// storage key before the first paint - so nothing here has to run early to keep a minimized panel
+// minimized. The panel's width and its toggle's arrow are both drawn from that attribute (see
+// style.css); this only flips it and remembers the flip.
+function initCollapsible(attr, toggleBtn, storageKey) {
+  const root = document.documentElement;
   const apply = (collapsed) => {
-    el.classList.toggle('collapsed', collapsed);
-    toggleBtn.textContent = collapsed ? labels.collapsed : labels.open;
+    root.toggleAttribute(attr, collapsed);
     localStorage.setItem(storageKey, collapsed ? '1' : '');
   };
-  toggleBtn.addEventListener('click', () => apply(!el.classList.contains('collapsed')));
-  apply(!!localStorage.getItem(storageKey));
+  toggleBtn.addEventListener('click', () => apply(!root.hasAttribute(attr)));
   return apply; // so callers (e.g. the ctrl+p hotkey) can drive the collapse programmatically
 }
 
-const setSidebarCollapsed = initCollapsible(sidebar, sidebarToggle, 'poptart-sidebar-collapsed', { open: '»', collapsed: '«' });
-initCollapsible(consoleFooter, consoleToggle, 'poptart-console-collapsed', { open: '▾', collapsed: '▴' });
+const setSidebarCollapsed = initCollapsible('data-sidebar-collapsed', sidebarToggle, 'poptart-sidebar-collapsed');
+initCollapsible('data-console-collapsed', consoleToggle, 'poptart-console-collapsed');
 
 // ---------------------------------------------------------------------------------------------
 // Themes: presets are palette blocks in style.css (`:root[data-theme="…"]`); the theme editor
@@ -8535,7 +8549,7 @@ window.addEventListener(
 
 // ctrl+p - minimize/restore the RHS panel, keeping whatever tab was open.
 addHotkey(builtinHotkeys, 'ctrl+p', () => {
-  setSidebarCollapsed(!sidebar.classList.contains('collapsed'));
+  setSidebarCollapsed(!document.documentElement.hasAttribute('data-sidebar-collapsed'));
 }, 'toggle sidebar');
 
 // ctrl+r - arm/stop MIDI recording (mirrors the ● rec button).
