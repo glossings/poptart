@@ -15,7 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, looksLikeNoteString } from './pianoroll.mjs';
-import { lookupRoll, registerRoll, lookupShape, registerShape } from './rolls.mjs';
+import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
@@ -149,8 +149,15 @@ export class Sig {
     // has no grid, so it's sampled at each onset by the scheduler instead.
     this.noteChannels = opts.noteChannels ?? {}; // 'vel'|'clip' -> Sig
     // Captured plugin state per chain slot (0 = instrument, 1.. = fx), from synth/fx's second
-    // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load.
+    // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load. Legacy:
+    // still read so older patches sound right, but nothing writes one any more - a captured sound
+    // is a named preset now (see presetPatterns below, and Sig#preset).
     this.slotStates = opts.slotStates ?? {};
+    // Patterned plugin state (Sig#preset): { [slot]: Sig of preset NAMES }. Where slotStates pins
+    // one state per slot for the life of the pattern, this swaps between named ones as it plays -
+    // the scheduler reads the pattern on its own step grid and pushes each state at the step's
+    // onset. Which plugin is in the slot never varies; only what it is set to.
+    this.presetPatterns = opts.presetPatterns ?? {};
     // Sampler config, present only for sampler patterns: { index, begin, end, loop, speed,
     // stretch, fit, slice, attack, decay, sustain, release }, each a Sig (sampled per event
     // onset) or absent for its default.
@@ -214,6 +221,7 @@ export class Sig {
       samplerKind: this.samplerKind,
       recordOpts: this.recordOpts,
       slotStates: this.slotStates,
+      presetPatterns: this.presetPatterns,
       midiNotes: this.midiNotes,
       keyboardRoute: this.keyboardRoute,
       pitchKind: this.pitchKind,
@@ -464,10 +472,13 @@ export class Sig {
   }
 
   /**
-   * Sets which plugin (by id, from native-engine's scanned plugin list) is this track's
-   * instrument. `config.state` (an opaque captured-state string - use the "pin" button in the
-   * editor's track panel to write it into the code) restores the plugin's full saved state on
-   * load, Ableton-style, so a shared/reloaded session sounds identical.
+   * Sets which plugin (by id, from native-engine's scanned plugin list) is this track's instrument.
+   *
+   * `config.state` is an opaque captured-state string that restores the plugin's full saved state
+   * on load, Ableton-style. It is READ but no longer written: a captured sound now lives under a
+   * name, as a preset (see Sig#preset), so that storing one and patterning between several are the
+   * same thing rather than two. Patches that carry a `{ state }` go on sounding exactly as they
+   * did; the first time the editor captures that slot, the preset replaces it.
    */
   synth(pluginId, config) {
     // vel("1 0.5").synth("X") plays the default note at those velocities, the same thing
@@ -482,7 +493,7 @@ export class Sig {
 
   /**
    * Appends an effect plugin to this track's chain, after the instrument and any prior .fx()
-   * calls. Takes the same optional `{ state }` second argument as synth().
+   * calls. Takes the same optional (and equally legacy) `{ state }` second argument as synth().
    */
   fx(pluginId, config) {
     assertPluginName('fx', pluginId);
@@ -619,6 +630,38 @@ export class Sig {
       paramSignals: { ...this.paramSignals, [name]: sig },
       paramSlots: { ...this.paramSlots, [name]: slotIndex },
     });
+  }
+
+  /**
+   * Patterns the plugin's whole STATE - every knob at once - between named presets:
+   *
+   *   lead: note("c e g").synth("Serum 2").preset("<init growl>")
+   *
+   * Which plugin is in the slot never varies (that stays a name, see synth()); what varies is what
+   * it is set to. Like .param() it aims at whatever is last in the chain, so put it after the
+   * .synth(...) or .fx(...) it belongs to. The names are ordinary mini notation, so the whole
+   * language applies - `<a b>` takes one per cycle, `a b` splits the cycle, `~` holds whatever is
+   * already loaded.
+   *
+   * You don't write the presets: name one here, evaluate, and the editor files an empty definition
+   * under that name. Double-click `preset` to open the picker on one - which HOLDS the slot on it,
+   * since a preset is edited by turning the plugin's own knobs and this pattern would otherwise
+   * swap the sound out from under you - and anything you touch in the plugin's own window is saved
+   * into that preset (the same auto-pin that writes `{ state }`). Pick the other name, shape that
+   * one, close the panel, and `<a b>` is two sounds you built by ear.
+   *
+   * A state is the plugin's own program, so a swap costs it a program load - fine at cycle rate,
+   * audible as a click if you swap every sixteenth of a heavy synth. Nothing stops you.
+   */
+  preset(names) {
+    const slot = this.fxChain.length; // 0 = instrument, 1..n = effects, in call order
+    if (names == null || (typeof names === 'string' && !names.trim())) {
+      // Warn rather than throw: the editor names a bare .preset() for you on the next evaluation
+      // (see materialize), and a buffer that goes silent in the meantime is the worse failure.
+      warnUser('[signal] .preset() names no preset - .preset("<a b>") swaps between named ones.');
+      return this;
+    }
+    return this._clone({ presetPatterns: { ...this.presetPatterns, [slot]: toSignal(names) } });
   }
 
   /**
@@ -2920,6 +2963,7 @@ function buildJoin(builder, options, slotsForCycle) {
     joined.instrument = chained.instrument;
     joined.fxChain = chained.fxChain;
     joined.slotStates = chained.slotStates;
+    joined.presetPatterns = chained.presetPatterns; // travels with the chain it sets, like slotStates
   }
   return joined;
 }
@@ -3212,6 +3256,50 @@ export function _shape(id, str = '') {
   const sig = lfo(serializeShapePoints(points));
   sig.isDef = key; // see _roll(): a definitions block must not become an extra voice
   return sig;
+}
+
+/**
+ * `_preset("growl", "Serum 2", "<captured state>")` - files a plugin's whole program under a name,
+ * so `.preset("<init growl>")` can swap the plugin between them as it plays. The editor writes
+ * these: naming one in a pattern creates it empty, and auto-pin fills in the plugin and the state
+ * from whatever you touch while that name is the one sounding.
+ *
+ * `plugin` is the plugin the state came out of. It travels with the state because a program is only
+ * meaningful to the plugin that wrote it - handing Serum's program to Diva is not a quiet no-op but
+ * a plugin reading someone else's file format - so the scheduler checks it before pushing one.
+ * An empty `state` is a name with nothing captured yet: playing it leaves the plugin as it is.
+ */
+export function _preset(id, plugin = '', state = '') {
+  if (typeof id !== 'number' && typeof id !== 'string') {
+    throw new Error('[signal] a preset definition takes a number or a name as its id - name one in .preset("<...>") rather than writing it by hand');
+  }
+  const key = String(id).trim();
+  if (!key || /\s/.test(key) || /[<>[\]{}(),*!?~@]/.test(key)) {
+    throw new Error(`[signal] a preset id has to be one plain word - ${JSON.stringify(String(id))} can't be written inside .preset("<...>")`);
+  }
+  const replaced = registerPreset(key, { plugin: String(plugin ?? '').trim(), state: String(state ?? '') });
+  if (replaced) warnUser(replaced);
+  // A preset makes no sound of its own - it is a setting for a plugin, not a pattern - so this is
+  // a silent Sig whose only job is to be marked as a definition (see _roll) and carry the id.
+  const sig = new Sig(() => null);
+  sig.isDef = key;
+  return sig;
+}
+
+/**
+ * What the scheduler needs to know about one step of a .preset() pattern: the state to push and
+ * whether it belongs to the plugin in that slot. Warns once per bad name rather than throwing -
+ * a mistyped preset should cost you the sound change, not the track.
+ */
+export function resolvePreset(name, pluginInSlot) {
+  const key = String(name).trim();
+  const found = lookupPreset(key);
+  if (!found) return { state: null, why: `no preset called ${JSON.stringify(key)} - name it and it is created empty on the next evaluation` };
+  if (!found.state) return { state: null, why: null }; // named, nothing captured yet: hold what's loaded
+  if (found.plugin && pluginInSlot && found.plugin !== pluginInSlot) {
+    return { state: null, why: `preset ${JSON.stringify(key)} was captured from ${found.plugin}, but that slot holds ${pluginInSlot}` };
+  }
+  return { state: found.state, why: null };
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -20,7 +20,7 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, warnPattern, lfoRateHz } from './signal.mjs';
+import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, warnPattern, lfoRateHz, resolvePreset } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -281,6 +281,55 @@ export class Scheduler {
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
     this._busRouted = false; // track output currently diverted to a named bus (see Sig#bus)
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
+    this._livePresets = new Map(); // slot -> preset name currently sounding (auto-pin writes into it)
+    this._presetWarned = new Set(); // "slot name" already complained about, so a bad name says it once
+    this._presetHold = new Map(); // slot -> preset the editor is holding it on (see holdPreset)
+  }
+
+  /**
+   * Holds one chain slot on a named preset - and loads it now, so you hear what you are editing.
+   * `name` null releases the slot back to its pattern.
+   *
+   * This is what makes editing a patterned preset possible at all. A preset is edited by turning
+   * the plugin's own knobs while it is loaded, and `.preset("<a b>")` changes which one is loaded
+   * every cycle - so without a hold, "pick a, turn a knob" lands the knob in whichever preset the
+   * pattern happened to be on, and a and b drift together instead of apart. The editor holds the
+   * slot for as long as its preset panel is open. Only this slot stops swapping: the notes, the
+   * other slots and every other track carry on.
+   */
+  holdPreset(slot, name) {
+    if (name == null) {
+      this._presetHold.delete(slot);
+      return null;
+    }
+    this._presetHold.set(slot, name);
+    return this._applyPreset(slot, name, this.engine.getTime());
+  }
+
+  /**
+   * Which named preset is loaded in a chain slot right now, or null. Auto-pin asks: a state
+   * captured out of a plugin that a .preset() pattern is driving belongs in THAT preset's
+   * definition, not in the slot's `{ state }` argument - where the next swap would overwrite it.
+   */
+  livePreset(slot) {
+    // A held slot is on its preset no matter what the pattern would be playing - which is the
+    // point: a knob turned while the panel holds `a` belongs to `a`.
+    if (this._presetHold.has(slot)) return this._presetHold.get(slot);
+    const queue = this._presetQueue(slot);
+    return queue[0] && queue[0].atSec <= this.engine.getTime() ? queue[0].name : null;
+  }
+
+  // One slot's queue of scheduled swaps, with everything now in the past dropped except the one
+  // still sounding. Swaps are SCHEDULED up to a lookahead ahead of the sound, so "which one is
+  // playing" can't be the last one queued - for ~150ms that is the next one - and the queue has to
+  // be walked rather than replaced. Pruned on BOTH sides, because the only reader is a plugin-edit
+  // gesture: a set that plays for an hour and is never touched would otherwise pile up a swap per
+  // cycle per slot with nothing ever taking them off.
+  _presetQueue(slot) {
+    const queue = this._livePresets.get(slot) ?? [];
+    const nowSec = this.engine.getTime();
+    while (queue.length > 1 && queue[1].atSec <= nowSec) queue.shift();
+    return queue;
   }
 
   /** Every control signal the pattern carries: plugin params by slot, channel strip as slot -1. */
@@ -337,7 +386,8 @@ export class Scheduler {
     }
     this._midiRouted = !!sig.midiNotes;
 
-    // Captured plugin state (synth/fx's `{ state }` argument). Sent only when the state string
+    // Captured plugin state (synth/fx's legacy `{ state }` argument - the editor writes named
+    // presets now, but old patches carry these and must sound the same). Sent only when the string
     // (or the plugin occupying the slot) actually changed - a livecoding re-eval must not make
     // the plugin re-chew a megabyte state blob every keystroke. Removing the state from the
     // code deliberately resets nothing: the plugin just keeps sounding how it sounds.
@@ -345,12 +395,30 @@ export class Scheduler {
       const chain = [sig.instrument, ...sig.fxChain];
       for (const [slotStr, state] of Object.entries(sig.slotStates ?? {})) {
         const slot = Number(slotStr);
+        // A slot a .preset(...) drives belongs to the pattern, so its pinned `{ state }` is dead
+        // code - and sending it would be audible: the blob loads at eval time and the pattern
+        // loads over it at the next onset, two program changes for one keystroke. Said once per
+        // evaluation, because a leftover blob is megabytes of buffer that no longer does anything.
+        if (slot in (sig.presetPatterns ?? {})) {
+          warnPattern(`[scheduler] track "${this.trackId}" slot ${slot}: .preset(...) drives this plugin, so its pinned { state } is ignored - delete it.`);
+          continue;
+        }
         const key = `${slot}:${chain[slot]}`;
         if (this._appliedStates.get(key) === state) continue;
         this._appliedStates.set(key, state);
         this.engine.setPluginState(this.trackId, slot, state);
       }
     }
+
+    // Patterned plugin state (Sig#preset). Dropping the .preset(...) from a slot deliberately
+    // resets nothing - the plugin keeps sounding how it sounds, exactly as removing a `{ state }`
+    // does - but the slot stops being a preset's, so auto-pin goes back to writing `{ state }`
+    // there instead of into a definition. Warnings are re-armed per eval, so a name you have just
+    // fixed is not still being complained about from the last one.
+    for (const slot of [...this._livePresets.keys()]) {
+      if (!(slot in (sig.presetPatterns ?? {}))) this._livePresets.delete(slot);
+    }
+    this._presetWarned.clear();
 
     // A channel control the new pattern dropped (`.gain(...)` deleted mid-session, or `.bsend()`
     // removed - which drops dry) snaps back to its default. Schedule the reset at the lookahead
@@ -513,6 +581,10 @@ export class Scheduler {
       this.engine[MODULATOR_CLEARS[m.kind]](this.trackId, m.slot, m.name);
     }
     this._activeModulators = new Map();
+    // Nothing is sounding, so no slot is "on" a preset any more: a capture off one of these
+    // plugins now belongs in its `{ state }` argument, not in a definition (see livePreset).
+    this._livePresets.clear();
+    this._presetHold.clear();
   }
 
   _tick() {
@@ -523,6 +595,7 @@ export class Scheduler {
 
       this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle);
       this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
+      this._schedulePresetSwaps(this._scheduledUntilCycle, targetCycle);
       this._scheduledUntilCycle = targetCycle;
 
       this._pollGenericParams(nowSec);
@@ -644,6 +717,62 @@ export class Scheduler {
         }
       }
     }
+  }
+
+  // Patterned plugin state (Sig#preset): `.preset("<init growl>")` reads its names on their own
+  // step grid and pushes each preset's captured program into the slot at that step's onset,
+  // timestamped like a note. A rest holds whatever is loaded - a slot with nothing in it would be
+  // a plugin reset to its defaults, which is not what a gap in a pattern has ever meant.
+  //
+  // Whether anything is actually sent is decided by the same _appliedStates cache the `{ state }`
+  // argument uses, so a state the plugin already holds costs nothing: a re-eval that changed no
+  // preset sends nothing, and neither does the eval right after auto-pin captured a state OUT of
+  // the plugin (see markStateApplied) - which would otherwise make it reload what it just gave us.
+  _schedulePresetSwaps(fromCycle, toCycle) {
+    if (typeof this.engine.setPluginState !== 'function') return;
+    for (const [slotStr, sig] of Object.entries(this.pattern.presetPatterns ?? {})) {
+      if (!sig.stepsForCycle) continue; // a preset name has to come from a step grid to have an onset
+      const slot = Number(slotStr);
+      // Held by the editor: the panel owns this slot until it closes (see holdPreset).
+      if (this._presetHold.has(slot)) continue;
+      for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
+        for (const step of sig.stepsForCycle(cycle)) {
+          const at = cycle + step.start;
+          if (at < fromCycle || at >= toCycle) continue;
+          if (step.value == null || step.cont) continue;
+          const name = String(step.value).trim();
+          if (!name) continue;
+          const atSec = this.transport.secAt(at);
+          // Recorded whether or not a state is pushed: this name IS the one sounding from here,
+          // so it is where a capture off that plugin belongs even if nothing has been captured
+          // into it yet. That empty case is the whole authoring loop - see Sig#preset.
+          const queue = this._presetQueue(slot);
+          queue.push({ atSec, name });
+          this._livePresets.set(slot, queue);
+          const why = this._applyPreset(slot, name, atSec);
+          if (why && !this._presetWarned.has(`${slot} ${name}`)) {
+            this._presetWarned.add(`${slot} ${name}`);
+            warnPattern(`[scheduler] track "${this.trackId}" slot ${slot}: ${why}`);
+          }
+        }
+      }
+    }
+  }
+
+  // Puts one named preset into a slot at `atSec`, unless the plugin already holds exactly that
+  // program (see _appliedStates) or the preset has nothing to say. Returns the reason it didn't,
+  // or null - the caller decides whether that is worth a line, since the pattern's swaps come
+  // round every cycle and the editor's hold happens once.
+  _applyPreset(slot, name, atSec) {
+    if (typeof this.engine.setPluginState !== 'function') return null;
+    const plugin = [this.pattern?.instrument, ...(this.pattern?.fxChain ?? [])][slot] ?? null;
+    const { state, why } = resolvePreset(name, plugin);
+    if (!state) return why;
+    const key = `${slot}:${plugin}`;
+    if (this._appliedStates.get(key) === state) return null;
+    this._appliedStates.set(key, state);
+    this.engine.setPluginState(this.trackId, slot, state, atSec);
+    return null;
   }
 
   _velAt(step, onsetSec, onsetCycle) {

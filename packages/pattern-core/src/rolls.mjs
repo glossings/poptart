@@ -1,9 +1,11 @@
-// Named definitions - drawn data kept under a name so a pattern can say the name instead of
-// carrying the data: `roll(0, "60,0,4 …")` defines a piano roll and `pianoroll("<0 chorus>")` plays
-// them in turn; `shape("swell", "0,0 0.7,1 1,0")` defines an LFO shape and `lfo("<swell pluck>")`
-// runs them in turn. The definitions are still ordinary code in the buffer (the editor folds them
-// out of the way rather than hiding them), so export, snapshots and undo are untouched; these
-// stores are only how a call finds what a name means at playback time.
+// Named definitions - data kept under a name so a pattern can say the name instead of carrying
+// the data: `roll(0, "60,0,4 …")` defines a piano roll and `pianoroll("<0 chorus>")` plays them in
+// turn; `shape("swell", "0,0 0.7,1 1,0")` defines an LFO shape and `lfo("<swell pluck>")` runs them
+// in turn; `_preset("wob", "Serum 2", "<blob>")` files a captured plugin STATE and
+// .preset("<init wob>") swaps the plugin between them. The definitions are still ordinary code in
+// the buffer (the editor folds them out of the way rather than hiding them), so export, snapshots
+// and undo are untouched; these stores are only how a call finds what a name means at playback
+// time.
 //
 // Like macros.mjs and midi.mjs this lives apart from signal.mjs so both stay dependency-free: the
 // browser imports the same signal code against its own copy of the store.
@@ -63,7 +65,7 @@ function makeStore(what) {
   };
 }
 
-const stores = { roll: makeStore('roll'), shape: makeStore('shape') };
+const stores = { roll: makeStore('roll'), shape: makeStore('shape'), preset: makeStore('preset') };
 
 /** Both stores, for the host passes that treat them alike (clearing per eval, listing). */
 export const DEF_KINDS = Object.keys(stores);
@@ -83,3 +85,11 @@ export const rollIds = () => stores.roll.ids();
 export const registerShape = (id, points) => stores.shape.register(id, points);
 export const lookupShape = (id) => stores.shape.lookup(id);
 export const shapeIds = () => stores.shape.ids();
+
+// A preset's value is { plugin, state }, not a Sig: `state` is the plugin's own program (gzip +
+// base64, often megabytes) and `plugin` is the name it was captured from, which is what lets a
+// swap refuse to push a Serum program into a Diva. An empty `state` is a named-but-not-yet-captured
+// preset - the editor writes those the moment a pattern says a name, and auto-pin fills them in.
+export const registerPreset = (id, entry) => stores.preset.register(id, entry);
+export const lookupPreset = (id) => stores.preset.lookup(id);
+export const presetIds = () => stores.preset.ids();

@@ -1428,6 +1428,126 @@ li.CodeMirror-hint-active {
 /* Centred and sized like the piano roll panel, deliberately: they are the same kind of thing -
    a drawing surface you open over the code - and one of them appearing somewhere else each time
    is the sort of small inconsistency that costs a beat to re-find mid-set. */
+/* The preset panel: the same centered chrome as the lfo/record panels, but with nothing to draw -
+   a preset is a plugin's own program, so all this holds is the picker, what the preset is for, and
+   the button that captures one. */
+.preset-panel {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px var(--shadow), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  z-index: 30;
+  overflow: hidden;
+}
+
+/* Scoped, like every other panel here - there is no global .hidden utility. */
+.preset-panel.hidden,
+.preset-panel .hidden {
+  display: none;
+}
+
+.preset-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.preset-body {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px 12px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+}
+
+/* Which plugin, on which track, this preset is pointed at - the one thing a program needs said
+   about it, since it means nothing anywhere else. */
+.preset-target {
+  color: var(--accent);
+}
+
+/* Opening this panel stops the pattern swapping this one slot, so that the preset you picked is
+   the one you can hear and edit. That is a change to what is coming out of the speakers, so it is
+   stated in the head rather than left to be inferred from the sound not changing. */
+.preset-held {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* The search box and the list ARE the panel: finding, picking, naming and throwing away presets is
+   what anyone opens this for, so none of it sits behind a disclosure. */
+.preset-search {
+  margin: 12px 14px 0;
+  padding: 6px 9px;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.preset-search:focus {
+  border-color: var(--accent);
+}
+
+.preset-list {
+  max-height: 20em;
+  margin: 6px 8px 0;
+  padding: 0 6px;
+}
+
+/* The one being edited, marked so it stays findable while the arrow keys move the highlight
+   somewhere else. */
+.preset-list .def-pick-row.current .def-pick-name::after {
+  content: ' ●';
+  color: var(--accent);
+}
+
+.preset-status {
+  padding: 0 14px 12px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+
+.preset-status:empty {
+  display: none;
+}
+
+.preset-status.ok {
+  color: var(--accent);
+}
+
+.preset-status.bad {
+  color: var(--err);
+}
+
 .lfo-panel {
   position: fixed;
   left: 50%;

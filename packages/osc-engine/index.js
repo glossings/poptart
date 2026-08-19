@@ -29,6 +29,10 @@ const { analyzeSlices } = require('./analysis');
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
+// How many inflated plugin programs to keep around (see _inflateState). A patterned .preset()
+// cycles through a small set; each entry is a whole program, so this is deliberately a handful.
+const STATE_CACHE_ENTRIES = 8;
+
 const SC_SCRIPT_PATH = path.join(__dirname, 'sc', 'poptart.scd');
 
 // Standard SuperCollider install locations to fall back on when `sclang` isn't on PATH - the
@@ -275,6 +279,7 @@ class OscEngine {
     this._packs = new Map();
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
+    this._stateCache = new Map(); // captured state -> inflated program, LRU (see _inflateState)
     // Live CC feed callback, (device, channel 1-16, cc, value 0..1) - set by the host (web-app
     // points it at pattern-core's live-value store). Fired for every /poptart/midiIn message
     // once MIDI is enabled engine-side.
@@ -684,32 +689,64 @@ class OscEngine {
    * Restores a state captured by getPluginState. Fire-and-forget like the other chain calls;
    * the .scd side waits for the slot's plugin to finish loading before applying.
    *
+   * `targetTime` (optional, same clock as getTime()) is when the program should be IN the plugin -
+   * that's what a patterned .preset("<a b>") needs, since a swap scheduled a lookahead early would
+   * otherwise land a lookahead early. Omitted, it means now, which is what a `{ state }` restore
+   * wants. The wait happens sclang-side: the latency has to be measured from the moment the
+   * message is sent, and inflating and writing a megabyte program takes some of it.
+   *
    * Decompressing off the loop makes this asynchronous, so two states landing on one slot in
    * quick succession (an eval while an earlier one is still inflating) could otherwise arrive
    * out of order and leave the plugin on the older program. `_stateSeq` drops any restore a newer
-   * one has already superseded.
+   * one has already superseded - before it is sent here, and after it, on the .scd side, where a
+   * timestamped one waits for its onset.
    */
-  setPluginState(trackId, slotIndex, state) {
+  setPluginState(trackId, slotIndex, state, targetTime) {
     const key = `${trackId}|${slotIndex}`;
     const seq = (this._stateSeq.get(key) ?? 0) + 1;
     this._stateSeq.set(key, seq);
     const superseded = () => this._stateSeq.get(key) !== seq;
     (async () => {
-      let data;
-      try {
-        data = await gunzip(Buffer.from(String(state), 'base64'));
-      } catch (e) {
-        this._warnOnce(`state:${trackId}:${slotIndex}`, `[poptart] plugin state for ${trackId}/slot ${slotIndex} is not a valid captured state string (${e.message}) - ignoring`);
-        return;
-      }
-      if (superseded()) return;
+      const data = await this._inflateState(String(state), trackId, slotIndex);
+      if (!data || superseded()) return;
       const stateFile = path.join(os.tmpdir(), `poptart-state-${trackId}-${slotIndex}-${Date.now()}.fxp`);
       await fsp.writeFile(stateFile, data);
       if (superseded()) return;
-      this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile]);
+      const latency = targetTime == null ? 0 : this._latency(targetTime);
+      // `seq` travels on so the WAIT is cancellable too. A scheduled swap is sent up to a lookahead
+      // early and sits on sclang's clock until its onset; anything that changes what the slot should
+      // be holding in the meantime - the editor taking a hold, a re-eval, a faster swap - has to be
+      // able to drop it, or the older program lands on top of the newer one. Superseding it here
+      // only covers the part before it is sent.
+      this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile, latency, seq]);
     })().catch((e) => {
       this._warnOnce(`state-write:${trackId}:${slotIndex}`, `[poptart] could not restore plugin state for ${trackId}/slot ${slotIndex}: ${e.message ?? e}`);
     });
+  }
+
+  // Un-gzips a captured state, remembering the last few. A patterned .preset() comes back around
+  // to the same handful of programs every cycle, and re-inflating a couple of megabytes each time
+  // is the one avoidable cost in a swap. Small and fixed rather than clever: the cache holds whole
+  // programs, so its ceiling matters more than its hit rate.
+  async _inflateState(state, trackId, slotIndex) {
+    const hit = this._stateCache.get(state);
+    if (hit) {
+      this._stateCache.delete(state); // re-insert so the map's order is least-recently-used first
+      this._stateCache.set(state, hit);
+      return hit;
+    }
+    let data;
+    try {
+      data = await gunzip(Buffer.from(state, 'base64'));
+    } catch (e) {
+      this._warnOnce(`state:${trackId}:${slotIndex}`, `[poptart] plugin state for ${trackId}/slot ${slotIndex} is not a valid captured state string (${e.message}) - ignoring`);
+      return null;
+    }
+    this._stateCache.set(state, data);
+    while (this._stateCache.size > STATE_CACHE_ENTRIES) {
+      this._stateCache.delete(this._stateCache.keys().next().value);
+    }
+    return data;
   }
 
   // --- sampler ---

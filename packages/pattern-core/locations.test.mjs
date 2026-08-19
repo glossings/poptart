@@ -333,6 +333,8 @@ test('a definition the editor writes is never rewritten by the transpile', () =>
     '_roll(0, "60,0,4", { grid: 16 })',
     '_shape("swell", "0,0,2 0.7,1 1,0")',
     '_shape("swell", "0,0 0.5,1 1,0")',
+    '_preset("growl", "Serum 2", "H4sIAAAAAAAA")',
+    '_preset("growl", "", "")',
   ]) {
     assert.equal(injectLocations(src, 0), src, `${src} carries a name and data, not patterns`);
   }
@@ -347,4 +349,7 @@ test('a pattern of NAMES is tagged for highlighting; the drawn data beside it is
   // ...and the drawn data is left exactly alone, in either call.
   assert.equal(injectLocations('pianoroll("60,0,4 62,1,2")', 0), 'pianoroll("60,0,4 62,1,2")');
   assert.equal(injectLocations('lfo("0,0 0.5,1 1,0")', 0), 'lfo("0,0 0.5,1 1,0")');
+  // .preset() has only the one form - its argument is always names - so it needs no entry in
+  // NAME_ARG_CALLS at all, and the default (everything is a pattern) is already right.
+  assert.equal(injectLocations('.preset("<init growl>")', 0), '.preset(mini("<init growl>", 9))');
 });

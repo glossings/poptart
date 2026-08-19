@@ -47,6 +47,7 @@ const coreReady = Promise.all([
     initLfoEditor();
     initPianorollEditor();
     initRecordPanel();
+    initPresetPanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
     // Which spans are DATA (rather than roll ids) is a question only pianoroll.mjs can answer, so
@@ -69,6 +70,7 @@ const rollDefs = makeDefRegistry({
   kind: 'roll',
   defCall: '_roll',
   useCall: 'pianoroll',
+  legacyCall: 'roll',
   emptyBody: '""',
   isData: (str) => (pianorollMod ? pianorollMod.looksLikeNoteString(str) : null),
   library: () => prPrebakeRolls,
@@ -97,6 +99,7 @@ const shapeDefs = makeDefRegistry({
   kind: 'shape',
   defCall: '_shape',
   useCall: 'lfo',
+  legacyCall: 'shape',
   emptyBody: '"0,0 0.5,1 1,0"',
   isData: (str) => (shapeMod ? shapeMod.looksLikeShapeData(str) : null),
   library: () => [...Object.keys(shapeMod?.SHAPE_PRESETS ?? {}), ...prPrebakeShapes],
@@ -118,8 +121,37 @@ const shapeDefs = makeDefRegistry({
   },
 });
 
+// Captured plugin state under a name, so `.preset("<init growl>")` can swap a plugin between
+// whole programs as it plays. Unlike a roll or a shape there is nothing to DRAW - a preset is made
+// by playing it and turning the plugin's own knobs, and auto-pin files what you touched into
+// whichever name was sounding (see writePluginState) - so its panel is the picker and nothing
+// else. Its argument is always names, never data, which is the one thing that needs saying here.
+const presetDefs = makeDefRegistry({
+  kind: 'preset',
+  defCall: '_preset',
+  useCall: 'preset',
+  emptyBody: '"", ""', // plugin, state - both filled in by the first capture
+  isData: () => false,
+  library: () => prPrebakePresets,
+  libraryNote: 'prebake',
+  panel: {
+    current: () => presetState?.id ?? null,
+    open: (id) => openPresetById(id, presetCarry()),
+    close: () => closePresetPanel(),
+    carry: () => presetCarry(),
+    sourceCall: (refs) => sourceCallAmong(refs, presetState?.source),
+    setCurrent: (from, to) => {
+      if (presetState?.id !== from) return;
+      presetState.id = to;
+      presetHold(to); // the slot is held on a name, and the name just changed
+    },
+    syncHead: () => presetSyncHead(),
+    scheduleEval: () => presetScheduleEval(),
+  },
+});
+
 // Every registry, for the passes that have to run over all of them (folding, auto-naming).
-const DEF_REGISTRIES = [rollDefs, shapeDefs];
+const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs];
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -672,6 +704,18 @@ function foldConfigBlobs() {
   // A whole run of definitions collapses first, so the data-string folds below find its chip
   // already covering them and leave well alone.
   for (const reg of DEF_REGISTRIES) foldDefRuns(code, reg);
+  // The same blob one call along, as a named preset's third argument, and for the same reason as
+  // the roll fold below: it has to come AFTER the run fold, or the chip left inside the run would
+  // make hideSpan take the run for one already hidden and leave the whole thing on screen. With
+  // `hide definitions` on there is nothing here to do; with it off, the id and the plugin
+  // stay visible - they are what the definition is FOR - and only the program folds.
+  const presetStateRe = /\b_preset\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|-?[\d.]+)\s*,\s*(?:"[^"\n]*"|'[^'\n]*')\s*,\s*("[A-Za-z0-9+/=]+")/g;
+  while ((m = presetStateRe.exec(code))) {
+    const str = m[1];
+    const start = m.index + m[0].length - str.length;
+    const kb = Math.max(1, Math.round(str.length / 1024));
+    foldSpan(start, start + str.length, `"◆ ${kb}kb"`, 'captured plugin state — click to expand');
+  }
   // roll(id, "notes", …) - the same note data, one argument further along. The id stays visible:
   // it is the name the patterns say, and the whole point of a definitions block is reading it.
   const rollArgRe = /\broll\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|[^,()\n]*?)\s*,\s*("(?:[^"\\\n]|\\.)*")/g;
@@ -691,7 +735,7 @@ const ROLL_CHIP_IDS = 6;
 // an audience - wants to read. So the whole run, its `rolls:`/`shapes:` label and the blank line
 // after it, is hidden outright: the buffer keeps every character, the screen shows none of them.
 // They are named, opened, renamed and drawn from their own editor panel, which is where they are
-// actually worked on. Turn `hide drawn definitions` off in settings to get them all back as
+// actually worked on. Turn `hide definitions` off in settings to get them all back as
 // ordinary code, folded to a chip that names what each run holds.
 function foldDefRuns(code, reg) {
   for (const run of reg.runs(code)) {
@@ -840,10 +884,17 @@ function findParamCall(code, from, to, name) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Auto-pin: `synth("Serum 2")` with no state argument means "however the plugin defaults", but
+// Auto-pin: `synth("Serum 2")` with no state of its own means "however the plugin defaults", but
 // the moment you touch anything in the plugin's own window that stops being true. The server
-// notices the edit, captures the state (debounced - see captureDirtyPlugins), and we write it
-// into that slot's synth/fx call as `{ state }`. So the code always describes what you're hearing.
+// notices the edit, captures the state (debounced - see captureDirtyPlugins), and we file it under
+// a NAME - a `_preset(...)` definition, with a `.preset("name")` on the chain right after the
+// plugin it came from. So the code always describes what you're hearing.
+//
+// A named preset is the only way a captured state enters a patch. `synth("X", { state })` is still
+// READ, so patches written before this sound exactly as they did, but nothing writes one any more:
+// one way for a sound to be stored, and patterning it is then just naming a second one
+// (.preset("<a b>")) rather than a different kind of thing. A slot that still carries a legacy
+// `{ state }` sheds it the first time it is captured into - the preset replaces it.
 //
 // What gets written is the state itself - the plugin's whole program, gzipped and base64'd, often
 // megabytes of it. The buffer carries the sound, which is what lets you duplicate a line, change
@@ -857,9 +908,67 @@ function findParamCall(code, from, to, name) {
 // what the actions that write the buffer out use to make sure nothing is still being held.
 // ---------------------------------------------------------------------------------------------
 
-function writePluginState(trackLabel, slot, state, plugin) {
+// A slot driven by a .preset(...) pattern: the state goes into the DEFINITION of whichever preset
+// was sounding when the knob moved, not into the slot's `{ state }` argument - which the next swap
+// would overwrite anyway. This is the whole authoring loop for presets: name two in a pattern, play,
+// and shape each one by ear while it is the one you can hear.
+function writePresetState(trackLabel, slot, state, plugin, preset) {
+  const code = cm.getValue();
+  const def = presetDefs.defsInBuffer(code).find((d) => d.id === preset);
+  const body = `${JSON.stringify(plugin ?? '')}, ${JSON.stringify(state)}`;
+  if (!def) {
+    // A pattern names this preset but nothing defines it - its definition deleted, or the name
+    // typed in and not yet evaluated (materialize writes them at eval time). Write one rather than
+    // drop the program on the floor: a captured sound is the one thing here that can't be redone.
+    const [from, to, text] = presetDefs.defsEdit(code, [preset], () => body);
+    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), '+autopin');
+    refoldAll();
+    logLine(`captured ${plugin ?? 'plugin'} into preset "${preset}" (which had no definition)`);
+    presetScheduleEval();
+    return;
+  }
+  const [, idEnd] = defIdLiteralRange(code, def);
+  const replacement = `, ${body}`;
+  const from = cm.posFromIndex(idEnd);
+  const to = cm.posFromIndex(def.close);
+  // Identical text means the plugin came back exactly as the code already describes it - a gesture
+  // that landed back where it started, or a capture racing an edit elsewhere. Writing it anyway
+  // would spend an undo step, a change event and a megabyte-scale buffer edit on nothing.
+  if (cm.getRange(from, to) === replacement) return;
+  cm.replaceRange(replacement, from, to, '+autopin'); // one merged undo step, as in createPresetForSlot
+  refoldAll();
+  logLine(`captured ${plugin ?? 'plugin'} into preset "${preset}"`);
+  presetScheduleEval();
+}
+
+// The `.preset(...)` call driving one chain slot, if the buffer already has one. Found by asking
+// every preset call in the block which slot it aims at (Sig#preset's own rule) rather than by
+// assuming it sits immediately after its synth()/.fx() - a .param() may well be in between.
+function presetCallForSlot(code, trackLabel, slot) {
+  for (const call of presetDefs.idCalls(code)) {
+    const target = presetTargetAt(code, call.start);
+    if (target && target.label === trackLabel && target.slot === slot) return call;
+  }
+  return null;
+}
+
+function writePluginState(trackLabel, slot, state, plugin, preset) {
   if (!labelsMod) return;
   const code = cm.getValue();
+  // Which preset this belongs in, most reliable first: the one the server says was loaded when the
+  // knob moved (a hold, or whatever the pattern had reached), then whatever the buffer's own
+  // .preset(...) for this slot names. The second is what covers a capture landing before the eval
+  // that would have told the server about a preset this function itself just wrote.
+  const named = preset ?? idsNamedIn(presetCallForSlot(code, trackLabel, slot)?.str ?? '')[0] ?? null;
+  if (named) return writePresetState(trackLabel, slot, state, plugin, named);
+  createPresetForSlot(code, trackLabel, slot, plugin, state);
+}
+
+// Nothing names this slot's sound yet, so auto-pin gives it a name: a definition holding the
+// program, and a `.preset("name")` on the chain right after the plugin it came from. Any legacy
+// `{ state }` on that call goes at the same time - the preset replaces it, and leaving both would
+// be two descriptions of one sound, the pinned one silently ignored (see Scheduler#setPattern).
+function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === trackLabel);
   const call = block && findChainCall(code, block.start, block.end, slot);
   if (!call) {
@@ -870,24 +979,32 @@ function writePluginState(trackLabel, slot, state, plugin) {
   }
   // A slot is a position, and positions move: reorder two .fx(...) calls between the gesture and
   // the capture and slot 2 is a different plugin than the one this state came out of. Writing it
-  // there would put a reverb's program in a chorus's call - the state is only ever written to a
-  // call naming the plugin it was captured from.
+  // there would put a reverb's program in a chorus's call - the state is only ever written against
+  // a call naming the plugin it was captured from.
   if (plugin && call.plugin !== plugin) {
     logLine(`auto-pin: "${trackLabel}" slot ${slot} is ${call.plugin || 'something else'} now, not ${plugin} - state not written (re-touch the plugin to capture it again)`, true);
     return;
   }
-  const replacement = `, { state: "${state}" }`;
-  const from = cm.posFromIndex(call.afterFirstArg);
-  const to = cm.posFromIndex(call.closeParen);
-  // Identical text means the plugin came back exactly as the code already describes it - a gesture
-  // that landed back where it started, or a capture racing an edit elsewhere. Writing it anyway
-  // would spend an undo step, a change event and a megabyte-scale buffer edit on nothing.
-  if (cm.getRange(from, to) === replacement) return;
-  // Tagged with a single `+`-prefixed origin so CodeMirror merges consecutive writes into one
-  // undo step (same trick as the copy-line edits), so a knob drag can't bury your last real edit
-  // under a run of captures in the undo history.
-  cm.replaceRange(replacement, from, to, '+autopin');
-  foldConfigBlobs();
+  // Named after the track, since that is what you call the sound out loud; an effect slot adds its
+  // position, so `lead` and `lead1` are the synth's and the first effect's.
+  const taken = new Set([...presetDefs.allIds().map((r) => r.id)]);
+  const id = freshDefId(slot === 0 ? trackLabel : `${trackLabel}${slot}`, taken, 'preset');
+  const edits = [
+    [call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`],
+    presetDefs.defsEdit(code, [id], () => `${JSON.stringify(plugin ?? '')}, ${JSON.stringify(state)}`),
+  ];
+  // The legacy `{ state }` argument, if this call still carries one.
+  if (call.afterFirstArg < call.closeParen) edits.push([call.afterFirstArg, call.closeParen, '']);
+  // One `+`-prefixed origin so CodeMirror merges consecutive writes into a single undo step (same
+  // trick as the copy-line edits): a knob drag can't bury your last real edit under a run of them.
+  cm.operation(() => {
+    for (const [from, to, text] of [...edits].sort((a, b) => b[0] - a[0])) {
+      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), '+autopin');
+    }
+  });
+  refoldAll();
+  logLine(`captured ${plugin ?? 'plugin'} into new preset "${id}"`);
+  presetScheduleEval();
 }
 
 // Deliberately does NOT re-evaluate: the state is already live in the plugin (it came from
@@ -895,8 +1012,12 @@ function writePluginState(trackLabel, slot, state, plugin) {
 let pinsPending = 0; // slots the server is holding uncaptured, so we mention it once, not per poll
 
 async function pollPluginEdits({ flush = false } = {}) {
-  const { edits, logs, pending } = await api('POST', '/api/pluginEdits', { flush });
-  for (const e of edits ?? []) writePluginState(e.trackId, e.slot, e.state, e.plugin);
+  // The preset panel's hold is renewed here rather than on a timer of its own - the server treats
+  // it as a lease, so a tab that closes with the panel open releases the slot instead of leaving it
+  // frozen on one preset (see /api/presetHold).
+  const hold = presetState?.held ? { ...presetState.held, trackId: presetState.held.label, preset: presetState.id } : null;
+  const { edits, logs, pending } = await api('POST', '/api/pluginEdits', { flush, hold });
+  for (const e of edits ?? []) writePluginState(e.trackId, e.slot, e.state, e.plugin, e.preset);
   // .log() event lines from the scheduler, which runs server-side - same drain, same 500ms.
   for (const line of logs ?? []) logLine(line);
   // Said once when edits start being held, so a plugin tweak that hasn't reached the code yet
@@ -1693,6 +1814,21 @@ function openWidgetAt(code, idx) {
     prCanvas.focus({ preventScroll: true });
     return true;
   }
+  const preset = findPresetCallAt(code, idx);
+  if (preset?.onName) {
+    // An empty .preset() has no name yet. Give it one, then open whatever it became - a bookmark
+    // carries the handle's position across the rewrite, since a definitions block inserted above
+    // moves every offset below it along. Same dance as the roll's and the shape's.
+    if (!code.slice(preset.open + 1, preset.close).trim()) {
+      const at = cm.setBookmark(cm.posFromIndex(idx));
+      const named = presetDefs.materialize();
+      const back = at.find();
+      at.clear();
+      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+    }
+    openPresetFromCall(preset, code);
+    return true;
+  }
   const rec = findRecordCallAt(code, idx);
   if (rec?.onName) {
     if (!recordState || rec.start !== recordState.callStart) openRecordPanel(rec);
@@ -2247,6 +2383,267 @@ function initLfoCanvas() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Preset picker - double-click the `preset` name in any `.preset(...)` call (just the name: its
+// argument is code you may want to edit by hand) and the preset library opens on whichever one is
+// sounding.
+//
+// Unlike the roll and shape panels there is nothing to draw: a preset IS the plugin's own program,
+// and it is edited by turning the plugin's own knobs (auto-pin files what you touch into whichever
+// preset the slot is on - and while this panel is open, that is the one it is showing; see
+// presetHold). So finding, picking, naming and throwing away presets is the whole of what anyone
+// opens this for, and the search box and the list ARE the panel rather than sitting behind a ▾.
+// The name in the head is the one being edited; typing over it renames it everywhere it is played.
+// ---------------------------------------------------------------------------------------------
+
+const presetPanel = document.getElementById('presetPanel');
+const presetTitle = document.getElementById('presetTitle');
+const presetPickWrap = document.getElementById('presetPickWrap');
+const presetName = document.getElementById('presetName');
+const presetSearch = document.getElementById('presetSearch');
+const presetPickList = document.getElementById('presetPickList');
+const presetTargetEl = document.getElementById('presetTarget');
+const presetSizeEl = document.getElementById('presetSize');
+const presetHeldEl = document.getElementById('presetHeld');
+const presetStatusEl = document.getElementById('presetStatus');
+const presetCloseBtn = document.getElementById('presetClose');
+
+// { marker, id, source, held } - `marker` spans the _preset(...) definition on screen (gone from
+// the buffer = panel gone), `source` the id string of the call it was opened through, which is what
+// makes a rename of a SHARED preset fork instead (see makeDefRegistry's fork), and `held` the
+// { label, slot } this panel has asked the server to hold, remembered so the release doesn't have
+// to re-derive a target that may have moved.
+let presetState = null;
+
+const presetCarry = () => (presetState ? { source: presetState.source } : null);
+
+/** The `.preset(...)` call containing idx, plus whether idx is on its name - the handle. */
+function findPresetCallAt(code, idx) {
+  return findNamedCallAt(code, idx, /\.\s*preset\s*\(/g, 'preset');
+}
+
+// Which plugin a `.preset(...)` at `idx` aims at: the last synth()/.fx() before it in its block,
+// which is exactly the rule Sig#preset uses (the chain as it stood when the method was called).
+// Read from the code rather than remembered, so moving the call between two .fx()es re-aims it.
+function presetTargetAt(code, idx) {
+  if (!labelsMod) return null;
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  if (!block) return null;
+  const isCode = codeOnly(code);
+  const re = /\b(synth|fx)\s*\(/g;
+  re.lastIndex = block.start;
+  let m;
+  let fxSeen = 0;
+  let found = null;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue; // a commented-out call holds no slot
+    if (m.index > idx) break; // past the .preset(...) - a later .fx() is not what it aims at
+    const slot = m[1] === 'synth' ? 0 : ++fxSeen;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    const [lit] = splitFirstArg(code.slice(open + 1, close < 0 ? code.length : close));
+    found = { label: block.label, slot, plugin: idLiteralValue(lit.trim()) };
+  }
+  return found;
+}
+
+/** The plugin and the program out of a `_preset(id, plugin, state)` definition, read off the buffer. */
+function presetDefParts(code, def) {
+  const [, afterId] = splitFirstArg(code.slice(def.open + 1, def.close));
+  const [pluginLit, stateLit] = splitFirstArg(afterId);
+  return {
+    plugin: idLiteralValue(pluginLit.trim()) ?? '',
+    state: idLiteralValue(stateLit.trim()) ?? '',
+  };
+}
+
+// The call the panel is looking THROUGH, and the plugin at the end of it. Re-derived on every sync
+// rather than captured once: the call moves as you type around it, and which slot it addresses can
+// change under it (add an .fx() above and slot 1 is a different plugin).
+function presetTarget() {
+  if (!presetState) return null;
+  const code = cm.getValue();
+  const call = sourceCallAmong(presetDefs.idCalls(code), presetState.source);
+  return call ? presetTargetAt(code, call.start) : null;
+}
+
+const presetHead = makeNamePicker({
+  els: { wrap: presetPickWrap, title: presetTitle, name: presetName, search: presetSearch, list: presetPickList },
+  reg: presetDefs,
+  inline: true, // the list is the panel - see the section header
+  current: () => presetState?.id ?? null,
+  open: (id) => openPresetById(id, presetCarry()),
+  // Picking one leaves you in the search box rather than back in the code: browsing presets is a
+  // run of gestures, not a single one.
+  refocus: () => presetSearch.focus(),
+});
+
+function openPresetById(id, from = {}) {
+  const def = presetDefs.defsInBuffer().find((d) => d.id === String(id));
+  if (!def) {
+    logLine(
+      presetDefs.allIds().some((r) => r.id === String(id))
+        ? `preset "${id}" comes from the shared library - there is no definition here to edit. Capture one of your own and it will shadow it.`
+        : `no preset called "${id}" is defined in this buffer`,
+      true
+    );
+    return false;
+  }
+  showPresetPanel({ ...def, ...from });
+  return true;
+}
+
+// `.preset("<a b>")` names presets, so open the one you can HEAR - read off the playback
+// highlighter's own lit spans, the same grid the scheduler plays, so the panel can never disagree
+// with what is sounding. Stopped, it opens the first one named.
+function openPresetFromCall(call, code) {
+  const range = idStringRange(call, code);
+  if (!range) return false;
+  const [from, to] = range;
+  const id = activeRollIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  if (id == null) return false;
+  const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
+  if (openPresetById(id, { source })) return true;
+  source.clear();
+  return false;
+}
+
+// The panel holds its slot on the preset it is showing, for as long as it is open (see the server's
+// /api/presetHold and Scheduler#holdPreset). This is not a nicety: a preset is edited by turning
+// the plugin's own knobs, and `.preset("<a b>")` swaps which preset those knobs belong to every
+// cycle - so without a hold, picking `a` and turning a knob puts the turn in whichever preset
+// happened to be sounding, and a and b drift together instead of apart.
+function presetHold(id) {
+  const target = presetTarget();
+  const at = target ? { label: target.label, slot: target.slot } : null;
+  const was = presetState?.held ?? null;
+  // Release the old slot first when the panel has moved to a different one, or the abandoned slot
+  // would stay frozen with no panel left to unfreeze it.
+  if (was && (!at || was.label !== at.label || was.slot !== at.slot)) presetRelease(was);
+  if (presetState) presetState.held = at;
+  if (!at) return;
+  api('POST', '/api/presetHold', { trackId: at.label, slot: at.slot, preset: id })
+    .then((res) => {
+      if (!res?.why) return;
+      // Short in the panel, the whole reason on the console.
+      setPresetStatus("can't load this one here", 'bad');
+      logLine(`preset "${id}": ${res.why}`, true);
+    })
+    .catch((e) => logLine(e.message ?? String(e), true));
+}
+
+function presetRelease(at) {
+  if (!at) return;
+  api('POST', '/api/presetHold', { trackId: at.label, slot: at.slot, preset: null }).catch(() => {});
+}
+
+function showPresetPanel(next) {
+  // Only markers this panel is done with are cleared - switching presets in the picker carries the
+  // source along (see presetCarry), and clearing it would drop the call being looked through.
+  if (presetState?.marker && presetState.marker !== next.marker) presetState.marker.clear();
+  if (presetState?.source && presetState.source !== next.source) presetState.source.clear();
+  presetState = {
+    id: next.id,
+    source: next.source ?? null,
+    marker: cm.markText(cm.posFromIndex(next.start), cm.posFromIndex(next.close + 1), {}),
+  };
+  setPresetStatus('');
+  presetPanel.classList.remove('hidden');
+  presetSearch.value = '';
+  presetSyncHead();
+  presetHead.renderList(true);
+  presetSearch.focus();
+  presetHold(presetState.id);
+}
+
+function closePresetPanel() {
+  presetRelease(presetState?.held); // the pattern gets its slot back
+  if (presetState?.marker) presetState.marker.clear();
+  if (presetState?.source) presetState.source.clear();
+  presetState = null;
+  presetHead.closePicker(false);
+  presetPanel.classList.add('hidden');
+}
+
+function setPresetStatus(text, cls = '') {
+  presetStatusEl.textContent = text;
+  presetStatusEl.className = `preset-status${cls ? ` ${cls}` : ''}`;
+}
+
+// Everything the panel shows, re-read from the buffer: the name, how many patterns share it, what
+// it is pointed at, and what it weighs. Called on every buffer change, so a hand edit to the
+// definition shows up here instead of being quietly out of date.
+function presetSyncHead() {
+  if (!presetState) return;
+  const code = cm.getValue();
+  const def = presetDefs.defsInBuffer(code).find((d) => d.id === presetState.id);
+  presetHead.syncHead(presetDefs.refCalls(code, presetState.id).length);
+  const target = presetTarget();
+  presetTargetEl.textContent = target
+    ? `${target.label} · slot ${target.slot} · ${target.plugin ?? 'no plugin'}`
+    : '';
+  // Said in the head, not inferred from the sound: while this panel is open the slot plays the
+  // preset shown and the pattern does not swap it, which is the only way a preset can be edited by
+  // ear - but it is still a change to what you are hearing, so it is on screen the whole time.
+  presetHeldEl.classList.toggle('hidden', !presetState.held);
+  presetHeldEl.title = 'this slot plays the preset shown for as long as this panel is open, so what you hear is what you are editing — close the panel and the pattern swaps it again';
+  const state = def ? presetDefParts(code, def).state : '';
+  // Empty is a real state to be in - a name with nothing captured yet holds the plugin as it is -
+  // so it is reported as a size, not as a warning.
+  presetSizeEl.textContent = state ? `${(state.length / 1048576).toFixed(1)} mb` : 'empty';
+}
+
+// A captured program reaching the BUFFER is not enough: the scheduler swaps presets out of the
+// store, which only an evaluation refills - so a preset written and not evaluated would be replayed
+// from its old program the next time the pattern came back round to it. Every write here schedules
+// one, debounced like the shape editor's so a knob drag costs one request. evaluate(false) is the
+// "update" path: a stopped clock stays stopped, a running one keeps running. The plugin itself is
+// already holding what was captured, and markStateApplied stops the eval pushing it back.
+let presetEvalTimer = null;
+function presetScheduleEval() {
+  clearTimeout(presetEvalTimer);
+  presetEvalTimer = setTimeout(() => { presetEvalTimer = null; evaluate(false); }, LFO_EVAL_DEBOUNCE_MS);
+}
+
+// The definition the panel is anchored to left the buffer (deleted, or typed into something that
+// is no longer a preset definition) - there is nothing left to show, so the panel goes with it.
+// This is the only thing that closes it by itself, opening being an explicit double-click.
+function syncPresetFromCode() {
+  if (!presetState) return;
+  const range = presetState.marker.find();
+  if (!range) { closePresetPanel(); return; }
+  if (!/^\s*_preset\s*\(/.test(cm.getRange(range.from, range.to))) { closePresetPanel(); return; }
+  presetSyncHead();
+}
+
+function initPresetPanel() {
+  cm.on('change', syncPresetFromCode);
+
+  // The head: the same widget, the same gestures, as the roll's and the shape's (makeNamePicker).
+  presetName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); presetName.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); presetHead.revertName(); presetName.blur(); return; }
+    e.stopPropagation();
+  });
+  presetName.addEventListener('blur', () => presetHead.commitName());
+
+  presetSearch.addEventListener('input', () => presetHead.renderList(true));
+  presetSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); presetHead.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); presetHead.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); presetHead.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePresetPanel(); return; }
+    e.stopPropagation();
+  });
+
+  presetCloseBtn.addEventListener('click', () => closePresetPanel());
+  document.addEventListener('keydown', (e) => {
+    // There is no popover to unwind first - escape is the panel's. The name field stops the event
+    // itself, so a rename in progress reverts before this ever sees it.
+    if (e.key === 'Escape' && presetState) closePresetPanel();
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
 // Interactive piano roll editor - double-click the `pianoroll` name in any `pianoroll(...)` call
 // (just the name: its arguments are code you may want to edit by hand) and an Ableton-style grid opens
 // over the editor, with a real piano keyboard down the left edge and a playhead that sweeps the
@@ -2361,6 +2758,7 @@ let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // fold the r
 let prFollowLocked = localStorage.getItem('poptartPianorollLock') === '1';
 let prPrebakeRolls = []; // ids from ~/.poptart/prebake.js: listed in the picker, not editable here
 let prPrebakeShapes = []; // the same for shape(...) definitions
+let prPrebakePresets = []; // ...and for captured plugin presets, a sound library shared by every patch
 let prRaf = null; // requestAnimationFrame handle for the playhead sweep
 let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
 let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
@@ -2663,14 +3061,19 @@ function sourceCallAmong(refs, sourceMark) {
  *   kind        what the console calls one of these ("roll")
  *   defCall     the (private) builder that defines one ("_roll")
  *   useCall     the builder that NAMES them ("pianoroll")
- *   emptyBody   the rest of the argument list a new, empty definition is written with
+ *   legacyCall  what defCall was called back when it was public ("roll"), for the migration to
+ *               rename - and ONLY for that. A kind that was never public must leave this unset:
+ *               deriving it by dropping the underscore would have the migration rewrite
+ *               .preset("<a b>") into ._preset("<a b>"), destroying the calls it was meant to fix.
+ *   emptyBody   the rest of the argument list a new, empty definition is written with (defsEdit
+ *               takes a per-id override, for a caller that has real content to file)
  *   isData      (str) => true if the useCall's string is DATA rather than names; null when the
  *               module that can tell hasn't loaded yet, in which case nothing is assumed
  *   library     () => ids that exist without being defined here (prebake, built-in presets)
  *   panel       the editor panel's hooks - see the roll instance below for the full shape
  */
 function makeDefRegistry(opts) {
-  const { kind, defCall, useCall, emptyBody, isData, library, libraryNote, panel } = opts;
+  const { kind, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel } = opts;
   const say = (line, isError) => logLine(line, isError);
 
   // Is this string a list of NAMES rather than the data itself? The two share one argument
@@ -2759,8 +3162,8 @@ function makeDefRegistry(opts) {
   // the window and the entry in the files list (see deriveLabel). Bare statements evaluate exactly
   // as well: the definition Sig carries `isDef`, which is what keeps a definitions block from being
   // taken for a track, and that has never depended on the label.
-  function defsEdit(code, ids) {
-    const lines = ids.map((id) => `${defCall}(${JSON.stringify(id)}, ${emptyBody})`);
+  function defsEdit(code, ids, bodyFor = () => emptyBody) {
+    const lines = ids.map((id) => `${defCall}(${JSON.stringify(id)}, ${bodyFor(id)})`);
     const found = runs(code);
     if (found.length) {
       const at = found[0][found[0].length - 1].close + 1;
@@ -2943,7 +3346,7 @@ function makeDefRegistry(opts) {
     );
   }
 
-  return { kind, defCall, useCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, allIds, materialize, create, remove, rename };
+  return { kind, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, defsEdit, allIds, materialize, create, remove, rename };
 }
 
 
@@ -2954,17 +3357,59 @@ function makeDefRegistry(opts) {
 // evaluated, which is the only moment it matters. Only calls that actually look like DEFINITIONS
 // (a literal id first) are touched, so someone's own `const roll = …` is left alone.
 function migrateDefNames() {
-  // Two passes, because the second reads what the first wrote: runs() looks for the private names,
-  // so the labels above them can only be found once the calls have been renamed.
+  // Three passes, each reading what the last wrote: runs() looks for the private names, so the
+  // labels above them can only be found once the calls have been renamed - and the indentation
+  // those labels left behind can only be squared up once they are gone.
   const renamed = renameLegacyDefCalls();
   const labels = legacyLabelLines(cm.getValue());
   if (labels.length) applyEdits(labels.map(([from, to]) => [from, to, '']));
-  if (!renamed && !labels.length) return;
+  const dedented = dedentDefRuns();
+  if (!renamed && !labels.length && !dedented) return;
   refoldAll();
   const parts = [];
   if (renamed) parts.push(`${renamed} definition${renamed === 1 ? '' : 's'} renamed to the editor's private form`);
   if (labels.length) parts.push(`${labels.length} leftover label${labels.length === 1 ? '' : 's'} removed`);
+  if (dedented) parts.push(`${dedented} definition${dedented === 1 ? '' : 's'} un-indented`);
   logLine(`tidied the definitions block: ${parts.join(', ')}`);
+}
+
+// Pass three: definitions written under a `rolls:`/`shapes:` label were indented to sit beneath it.
+// The label is gone (pass two, or an earlier session), but its indentation stayed - so a buffer can
+// hold two-space `_roll`/`_shape` definitions next to flush-left `_preset` ones, which is visible
+// the moment you turn `hide definitions` off. Returns how many lines were squared up.
+//
+// Only TOP-LEVEL runs are touched. A definition indented inside a function body is indented on
+// purpose, and while re-indenting it would cost nothing but looks, code the editor did not write is
+// not code the editor should reformat.
+function dedentDefRuns() {
+  const code = cm.getValue();
+  const isCode = codeOnly(code);
+  const edits = [];
+  for (const reg of DEF_REGISTRIES) {
+    for (const run of reg.runs(code)) {
+      if (!atTopLevel(code, isCode, run[0].start)) continue;
+      for (const def of run) {
+        const lineStart = code.lastIndexOf('\n', def.start - 1) + 1;
+        const indent = code.slice(lineStart, def.start);
+        // runs() already guarantees nothing but blank space precedes a definition on its line.
+        if (indent) edits.push([lineStart, def.start, '']);
+      }
+    }
+  }
+  if (edits.length) applyEdits(edits);
+  return edits.length;
+}
+
+/** Is `at` outside every bracket - i.e. a statement of the buffer itself rather than of some block? */
+function atTopLevel(code, isCode, at) {
+  let depth = 0;
+  for (let i = 0; i < at; i++) {
+    if (!isCode(i)) continue; // brackets inside strings and comments nest nothing
+    const ch = code[i];
+    if (ch === '{' || ch === '(' || ch === '[') depth++;
+    else if (ch === '}' || ch === ')' || ch === ']') depth--;
+  }
+  return depth <= 0;
 }
 
 // Pass one: roll(...) / shape(...) -> _roll(...) / _shape(...). Only calls that actually look like
@@ -2975,7 +3420,11 @@ function renameLegacyDefCalls() {
   const isCode = codeOnly(code);
   const edits = [];
   for (const reg of DEF_REGISTRIES) {
-    const re = new RegExp(`\\b${reg.defCall.slice(1)}\\s*\\(`, 'g');
+    // Only a kind that WAS public has anything to rename. Dropping the underscore off every
+    // defCall would make `_preset` claim `preset(` - which is a real, current call - and rewrite
+    // every .preset("<a b>") in the buffer into ._preset("<a b>").
+    if (!reg.legacyCall) continue;
+    const re = new RegExp(`\\b${reg.legacyCall}\\s*\\(`, 'g');
     let m;
     while ((m = re.exec(code)) !== null) {
       if (!isCode(m.index)) continue;
@@ -3242,13 +3691,16 @@ const prPickChoose = () => rollPicker.choose();
  * refocus  () => hand focus back to the panel's own surface
  * onPick   () => called when the picker is used, before opening (the roll panel pins its lock)
  */
-function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {} }) {
+function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {}, inline = false }) {
   let rows = [];
   let idx = 0;
-  const isOpen = () => !els.picker.classList.contains('hidden');
+  // `inline`: there is no popover to open - the search box and the list are the panel itself, which
+  // is what a kind whose ONLY editing gesture is finding, naming and deleting wants (see the preset
+  // panel). Everything else about the widget is the same, so the two share one implementation.
+  const isOpen = () => inline || !els.picker.classList.contains('hidden');
 
   function openPicker() {
-    if (current() == null) return;
+    if (inline || current() == null) return;
     els.picker.classList.remove('hidden');
     els.search.value = '';
     renderList();
@@ -3256,7 +3708,7 @@ function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {} })
   }
 
   function closePicker(doRefocus = true) {
-    if (!isOpen()) return;
+    if (inline || !isOpen()) return;
     els.picker.classList.add('hidden');
     // Closing because the click landed somewhere else must not then take that click's focus away.
     if (doRefocus) refocus();
@@ -3284,7 +3736,7 @@ function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {} })
     }
     rows.forEach((row, i) => {
       const el = document.createElement('div');
-      el.className = `def-pick-row${i === idx ? ' on' : ''}`;
+      el.className = `def-pick-row${i === idx ? ' on' : ''}${row.id === current() && row.act === 'open' ? ' current' : ''}`;
       const name = document.createElement('span');
       name.className = 'def-pick-name';
       name.textContent = row.label;
@@ -3327,7 +3779,7 @@ function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {} })
   function choose() {
     const row = rows[idx];
     if (!row) return;
-    els.picker.classList.add('hidden');
+    if (!inline) els.picker.classList.add('hidden');
     onPick();
     if (row.act === 'create') reg.create(row.id);
     else open(row.id);
@@ -3376,6 +3828,7 @@ function prRefreshRollList() {
       const prebake = (list) => (list ?? []).filter((r) => r.layer === 'prebake').map((r) => String(r.id));
       prPrebakeRolls = prebake(res.rolls);
       prPrebakeShapes = prebake(res.shapes);
+      prPrebakePresets = prebake(res.presets);
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
     })
     .catch(() => {}); // the picker still lists this buffer's rolls without it
@@ -5844,7 +6297,7 @@ function updateTransportButtons() {
 // way the params panel, autocomplete, and highlighting regions refresh.
 async function evaluate(start) {
   migrateDefNames(); // a patch saved before the builders were privatised still says roll(...)
-  for (const reg of DEF_REGISTRIES) reg.materialize(); // a bare pianoroll()/lfo() gets its name and definition first
+  for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset() gets its definition first
   const code = cm.getValue();
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.

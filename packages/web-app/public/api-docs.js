@@ -213,6 +213,12 @@ const API_DOCS = {
     desc: 'Sets a plugin parameter by its real VST name (autocompletes inside the quotes) on whatever is last in the chain.',
     eg: '.param("Filter 1 Freq", sine(0.2).range(300, 6000))',
   },
+  preset: {
+    kind: 'method',
+    sig: 'preset(names)',
+    desc: 'Swaps the last plugin in the chain between named whole-state presets. Double-click `preset` to shape one by ear.',
+    eg: '.preset("<init growl>")',
+  },
   scale: {
     kind: 'method',
     sig: 'scale(name)',

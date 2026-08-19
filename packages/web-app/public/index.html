@@ -173,9 +173,9 @@
                 documentation tooltips
               </label>
               <label class="settings-row settings-check"
-                title="keep roll(...) and shape(...) definitions off the screen — the buffer still holds them">
+                title="keep roll, shape and preset definitions off the screen — the buffer still holds them">
                 <input id="hideRollDefsToggle" type="checkbox" checked />
-                hide drawn definitions
+                hide definitions
               </label>
             </section>
             <section id="librarySection">
@@ -218,6 +218,25 @@
         </div>
         <div id="log"></div>
       </footer>
+    </div>
+
+    <div id="presetPanel" class="preset-panel hidden">
+      <div class="preset-panel-head">
+        <span id="presetTitle">preset</span>
+        <div id="presetPickWrap" class="def-pick-wrap hidden">preset
+          <input id="presetName" class="def-name" type="text" spellcheck="false" title="preset name" />
+        </div>
+        <span id="presetHeld" class="preset-held hidden">pattern held</span>
+        <span class="spacer"></span>
+        <button id="presetClose" class="small">✕</button>
+      </div>
+      <input id="presetSearch" class="preset-search" type="text" spellcheck="false" placeholder="search, or type a new name" />
+      <div id="presetPickList" class="def-pick-list preset-list"></div>
+      <div class="preset-body">
+        <div id="presetTarget" class="preset-target"></div>
+        <div id="presetSize" class="preset-size"></div>
+      </div>
+      <div id="presetStatus" class="preset-status"></div>
     </div>
 
     <div id="lfoPanel" class="lfo-panel hidden">

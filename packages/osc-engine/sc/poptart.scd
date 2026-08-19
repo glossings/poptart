@@ -75,6 +75,11 @@ var nodeAddr = NetAddr("127.0.0.1", nodePort);
 // Symbol keys, NOT Strings: IdentityDictionary lookups are by identity, and two equal Strings
 // are distinct objects (incoming OSC string args arrive as Symbols anyway).
 var tracks = IdentityDictionary.new;
+// '<track>_<slot>' -> the newest plugin-state restore seen for that slot. A restore carrying a
+// timestamp waits here for its onset (see poptartSetPluginState), so anything sent afterwards has
+// to be able to cancel it - otherwise an older program lands on top of a newer one, which is what
+// a preset swap already in flight would do to the editor taking a hold on that slot.
+var stateSeqs = IdentityDictionary.new;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
 var confWant = IdentityDictionary.new; // trackId -> latest requested conf state (see setConfMode)
 // Host tempo (bpm) mirrored into every open VST as emulated DAW transport, so plugin-internal
@@ -1849,25 +1854,47 @@ OSCdef(\poptartGetPluginState, { |msg|
 // Restore: the state arrives as a program file path (Node already unpacked it). The slot's
 // plugin load is fire-and-forget and possibly still in flight, so wait for it before applying -
 // this is what makes `synth("Serum 2", { state })` deterministic on a cold start.
+//
+// msg[4] is an optional latency in seconds: a patterned .preset("<a b>") schedules its swaps a
+// lookahead early (like every other event), so the program has to be held until its onset. Not a
+// server bundle - readProgram is a call on the plugin, not a message to scsynth - so the wait is
+// a clock wait here, ahead of the load. Absent or 0 means now, which is what a `{ state }`
+// restore wants.
 OSCdef(\poptartSetPluginState, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, path = msg[3].asString;
-    fork {
-        var track = awaitTrack.(key);
-        var ctl;
-        if (track.notNil and: { awaitLoaded.(track, slot) }) {
-            ctl = track[\controllers][slot];
-            ctl.readProgram(path, action: { |self, ok|
-                if (ok) {
-                    ("poptart: restored plugin state for " ++ key ++ " slot " ++ slot).postln;
-                } {
-                    ("poptart: FAILED to restore plugin state for " ++ key ++ " slot " ++ slot).warn;
-                };
+    var latency = if (msg.size > 4) { msg[4].asFloat } { 0 };
+    var seq = if (msg.size > 5) { msg[5].asInteger } { 0 };
+    var seqKey = (key ++ "_" ++ slot).asSymbol;
+    var apply = {
+        // Superseded while it waited: a newer restore for this slot has been sent, so this program
+        // is no longer what the slot should be holding. Its file still has to go.
+        if (stateSeqs[seqKey] != seq) { File.delete(path) } {
+        fork {
+            var track = awaitTrack.(key);
+            var ctl;
+            if (track.notNil and: { awaitLoaded.(track, slot) }) {
+                ctl = track[\controllers][slot];
+                ctl.readProgram(path, action: { |self, ok|
+                    if (ok) {
+                        ("poptart: restored plugin state for " ++ key ++ " slot " ++ slot).postln;
+                    } {
+                        ("poptart: FAILED to restore plugin state for " ++ key ++ " slot " ++ slot).warn;
+                    };
+                    File.delete(path);
+                });
+            } {
+                ("poptart: setPluginState: no loaded plugin in " ++ key ++ " slot " ++ slot).warn;
                 File.delete(path);
-            });
-        } {
-            ("poptart: setPluginState: no loaded plugin in " ++ key ++ " slot " ++ slot).warn;
-            File.delete(path);
-        };
+            };
+        }};
+    };
+    // Recorded at RECEIPT, not at apply time: that is what lets a message sent later cancel one
+    // still waiting. A restore that is already stale on arrival (out of order) never runs at all.
+    if (seq >= (stateSeqs[seqKey] ? 0)) {
+        stateSeqs[seqKey] = seq;
+        if (latency > 0) { SystemClock.sched(latency, { apply.value; nil }) } { apply.value };
+    } {
+        File.delete(path);
     };
 }, '/poptart/setPluginState');
 
