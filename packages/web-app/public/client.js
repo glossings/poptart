@@ -275,6 +275,9 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Ctrl-Space': () => showPoptartHint(),
   },
 });
+// The editor is up and highlighting, so the raw textarea no longer has to be kept out of sight
+// (index.html sets the flag; style.css hides #editor while it's there).
+delete document.documentElement.dataset.booting;
 
 // Transport and save hotkeys work no matter what has focus (params search, plugin list, …). When
 // the editor has focus CodeMirror handles these first and preventDefaults, so no double-fire.
@@ -2649,12 +2652,13 @@ function initPresetPanel() {
 // over the editor, with a real piano keyboard down the left edge and a playhead that sweeps the
 // steps as it plays. Two tools (pencil draws, arrow marquee-selects); click a note
 // to select it (shift-click extends, ctrl/cmd-A selects all), drag to move, drag a note's right
-// edge to resize, cmd-drag vertically to set velocity or probability (the vel/prob toggle), cmd-D
+// edge to resize, cmd-drag vertically to set velocity or probability (whichever the value lane's gutter
+// label has picked), cmd-D
 // duplicates, option-drag drags a copy, cmd-Z / cmd-shift-Z walk the roll's own undo history.
 // Arrow keys nudge the selection (shift-up/down = octave, shift-right/left lengthen/shorten), delete removes
 // it, double-click erases one, and 0 mutes it - greyed out and silent, still there to switch back
 // on with another 0 (Live's deactivate). A value lane along the bottom shows every note's velocity
-// or probability (the vel/prob toggle, also reachable from the lane's own gutter label) as an
+// or probability (its gutter label names the channel and clicks through to the other one) as an
 // Ableton-style marker - a dot at the onset, a line running right for the duration, dashed for
 // probability - which drags up and down, whole selection at once. A note dropped on one already sounding at that pitch keeps its own
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
@@ -2692,7 +2696,6 @@ const prHalveBtn = document.getElementById('pianorollHalve');
 const prDoubleBtn = document.getElementById('pianorollDouble');
 const prDupLoopBtn = document.getElementById('pianorollDupLoop');
 const prToolBtn = document.getElementById('pianorollTool');
-const prCmdModeBtn = document.getElementById('pianorollCmdMode');
 const prFoldBtn = document.getElementById('pianorollFold');
 const prScaleLabel = document.getElementById('pianorollScale');
 const prPreviewBtn = document.getElementById('pianorollPreview');
@@ -2705,9 +2708,13 @@ const PR_GRIDH = 384; // piano-grid height below the ruler
 const PR_LANEH = 64; // value lane below the grid (per-note velocity / probability markers)
 const PR_CH = PR_TOPBAR + PR_GRIDH + PR_LANEH; // full canvas height
 const PR_LANE_PAD = 5; // lane inset above 1.0 / below 0.0, so end-stop markers stay visible
+const PR_LANE_CARET_W = 7; // solid caret after the lane's vel/prob label, marking it clickable
 const PR_ROWS = 24; // visible semitone rows (2 octaves)
 const PR_GUTTER = 54; // left piano-keyboard gutter, px
-const PR_DEFAULT_TOP = 72; // top row when a fresh/empty roll opens (c5 = 60 here, so 72 = c6)
+// Top row when a fresh/empty roll opens - a MIDI note, framed 24 rows down to 54, which puts 66 in
+// the middle of the window: Live's F#3, the register it splits the difference at. (This package
+// names middle C c5, so that centre reads f#5 on the keyboard down the side.)
+const PR_DEFAULT_TOP = 78;
 const PR_DEFAULT_VEL = 0.8; // velocity of a freshly drawn note
 const PR_EDGE_PX = 6; // right-edge grab zone for resizing
 const PR_MAX_ZOOM = 24; // deepest horizontal zoom (cells that many times wider than "fit")
@@ -3545,7 +3552,9 @@ function openPianorollEditor(call, carry = null) {
   prFramePitch();
   // Following the pattern from one roll to the next must not throw the view away: the notes are
   // different but you are still reading the same part, at the same zoom, in the same register.
-  if (carry) {
+  // Only a follow-switch carries a view, though - a first open keeps the frame prFramePitch just
+  // put around this roll's own notes.
+  if (carry?.pitchTop != null) {
     prState.pitchTop = carry.pitchTop;
     prState.zoom = carry.zoom;
     prState.scrollCells = carry.scrollCells;
@@ -3602,7 +3611,8 @@ function openRollFromIdCall(call, code) {
   const id = activeRollIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return;
   const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
-  if (openRollById(id, { source, pitchTop: PR_DEFAULT_TOP, zoom: 1, scrollCells: 0 })) {
+  // Just the source marker: no view to carry on a first open, so the roll frames its own notes.
+  if (openRollById(id, { source })) {
     prCanvas.focus({ preventScroll: true });
   } else {
     source.clear();
@@ -4260,11 +4270,20 @@ function prSetLoopEdge(edge, cell0) {
 // height - a dot at its onset with a line running right for its duration, drawn dashed when the
 // lane is showing probability (Live's chance style). Drag a marker up or down to set the value; a
 // marker in the selection drags the whole selection together, keeping their differences. The label
-// in the lane's gutter names the channel on show and clicks through to the same vel/prob switch as
-// the header button.
+// in the lane's gutter names the channel on show, carries a caret to say it's clickable, and
+// switches to the other channel when clicked - it's the only vel/prob switch there is.
 
 /** Which note channel the lane (and cmd-drag) is editing right now. */
 const prLaneKey = () => (prCmdMode === 'prob' ? 'prob' : 'vel');
+
+/** Flip the lane (and cmd-drag) between velocity and probability. The lane's own gutter label is
+    the only switch there is - it names the channel on show and carries a caret to say so. */
+function prToggleCmdMode() {
+  prCmdMode = prCmdMode === 'vel' ? 'prob' : 'vel';
+  localStorage.setItem('poptartPianorollCmd', prCmdMode);
+  if (prState) drawPianoroll(); // the lane redraws with the newly chosen channel
+  prRefocus();
+}
 
 /** value (0..1) -> lane y, inset so the end-stop dots at 0 and 1 stay fully visible. */
 const prLaneY = (v, m) => m.laneTop + PR_LANE_PAD + (1 - v) * (m.laneH - 2 * PR_LANE_PAD);
@@ -4338,14 +4357,25 @@ function drawValueLane(ctx, col, m) {
     ctx.fillText(String(Math.round(dragNt[key] * 100) / 100), Math.max(PR_GUTTER + 3, x + 7), Math.min(laneTop + laneH - 6, Math.max(laneTop + 7, y - 9)));
   }
 
-  // gutter: the channel on show; clicking it flips to the other one (the header button's switch)
+  // gutter: the channel on show; clicking it flips to the other one
   ctx.fillStyle = col('--bg-panel');
   ctx.fillRect(0, laneTop, PR_GUTTER, laneH);
   ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.textAlign = 'center';
+  ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = accent;
-  ctx.fillText(key, PR_GUTTER / 2, laneTop + laneH / 2);
+  // name + a solid caret, so the label reads as the switch it is (clicking flips vel ⇄ prob).
+  const cy = laneTop + laneH / 2;
+  const tw = ctx.measureText(key).width;
+  const x0 = (PR_GUTTER - (tw + PR_LANE_CARET_W + 4)) / 2;
+  ctx.fillText(key, x0, cy);
+  const cx = x0 + tw + 4;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 2);
+  ctx.lineTo(cx + PR_LANE_CARET_W, cy - 2);
+  ctx.lineTo(cx + PR_LANE_CARET_W / 2, cy + 3);
+  ctx.closePath();
+  ctx.fill();
 
   ctx.strokeStyle = col('--border-strong');
   ctx.lineWidth = 1;
@@ -4650,7 +4680,7 @@ function initPianorollCanvas() {
       return;
     }
     if (py >= m.laneTop) { // value lane - drag a marker to set velocity/probability (see drawValueLane)
-      if (px < PR_GUTTER) { prCmdModeBtn.click(); return; } // the vel/prob label (the button redraws)
+      if (px < PR_GUTTER) { prToggleCmdMode(); return; } // the vel/prob label - the lane's channel switch
       const nt = prLaneNoteAt(px, py, m);
       if (!nt) { prState.sel = new Set(); drawPianoroll(); return; }
       if (e.shiftKey) { // shift-click toggles selection, same as on the note itself
@@ -5057,16 +5087,6 @@ function initPianorollEditor() {
   // The button click, not toggleTool itself: B is also handled document-wide (below), and that
   // path must leave the caret wherever it was.
   prToolBtn.addEventListener('click', () => { toggleTool(); prRefocus(); });
-
-  const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `value lane: ${prCmdMode === 'vel' ? 'velocity' : 'probability'}`; };
-  reflectCmdMode();
-  prCmdModeBtn.addEventListener('click', () => {
-    prCmdMode = prCmdMode === 'vel' ? 'prob' : 'vel';
-    localStorage.setItem('poptartPianorollCmd', prCmdMode);
-    reflectCmdMode();
-    if (prState) drawPianoroll(); // the value lane shows the newly chosen channel
-    prRefocus();
-  });
 
   // Clicking the scale chip snaps every note in the roll into the key - the same nearest-tone
   // quantize `.scale()`/`.sc()` apply to a note pattern, so a drawn line and a written one land on

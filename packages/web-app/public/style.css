@@ -988,6 +988,31 @@ footer#console.collapsed #log {
 
 /* -------------------------------------------------- CodeMirror: poptart theme */
 
+/* The plain textarea CodeMirror upgrades on load. Until client.js runs - a handful of vendor
+   scripts later - this is what the editor pane paints, so it wears the editor's own colours;
+   left unstyled it flashed as a white sheet of black text on every refresh. CodeMirror hides it
+   once it's up, so this only ever shows for that first frame. */
+#editor {
+  flex: 1;
+  width: 100%;
+  padding: 10px 4px 10px 44px; /* roughly where the line-number gutter leaves the first column */
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  border: none;
+  outline: none;
+  resize: none;
+}
+
+/* Even in the right colours, that first frame showed the pattern as flat unhighlighted text and
+   then repainted it in colour a moment later. The pane keeps its space and its background while
+   the boot flag is up, and the code appears once - already highlighted. */
+[data-booting] #editor {
+  visibility: hidden;
+}
+
 .CodeMirror {
   flex: 1;
   height: 100%;
@@ -1834,7 +1859,7 @@ li.CodeMirror-hint-active {
    second line, resized the panel - every time the pattern moved from `0` to `chorus`, which is
    exactly when you are trying to read it. A longer name is clipped; the tooltip carries it whole. */
 .def-pick-wrap {
-  position: relative; /* the find-or-create popover hangs off the name, wherever the head wraps to */
+  position: relative; /* the find-or-create popover hangs off the name */
 }
 
 /* The roll's name is a plain title until you touch it, and an input once you do - so reading it
@@ -1963,10 +1988,13 @@ li.CodeMirror-hint-active {
   color: var(--text-dim);
 }
 
+/* One row, always: the close button belongs in the top-right corner at every zoom and window
+   size, so nothing here is allowed to wrap it onto a second line. The title/name/scale group
+   takes the slack and ellipsizes (see .pianoroll-head-main); the tool cluster never shrinks. */
 .pianoroll-panel-head {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
   padding: 9px 12px;
   font-size: 11px;
@@ -1976,6 +2004,96 @@ li.CodeMirror-hint-active {
   color: var(--text-dim);
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 6%, var(--bg-panel)), var(--bg-panel));
   border-bottom: 1px solid var(--border);
+}
+
+/* Never given `overflow: hidden` - the find-or-create popover hangs out of this group, and a
+   clipping ancestor would cut it off. The pieces inside shrink and ellipsize on their own. */
+.pianoroll-head-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0; /* so it gives way rather than pushing the tools off the edge */
+}
+
+.pianoroll-head-main > * {
+  min-width: 0;
+}
+
+.pianoroll-head-main #pianorollTitle,
+.pianoroll-head-main .pianoroll-scale {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Squeezed, the name gives up its fixed width before the buttons beside it give up anything. */
+.pianoroll-head-main .def-name {
+  flex: 0 1 7.5em;
+  min-width: 0;
+}
+
+.pianoroll-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto; /* the tools and the ✕ keep their size whatever else has to give */
+  margin-left: auto;
+}
+
+/* The roll and the controls that shape it sit side by side, Live-style: the timing controls in a
+   column down the left, the grid itself to their right. */
+.pianoroll-body {
+  display: flex;
+  align-items: stretch;
+}
+
+.pianoroll-side {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: 0 0 auto;
+  width: 92px;
+  padding: 12px 10px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-panel));
+  border-right: 1px solid var(--border);
+}
+
+/* Stacked in the side panel, a control's label sits above it and reads as a section heading. */
+.pianoroll-side .pr-side-ctl {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  /* The label is flush with its box's true left edge, but the box's rounded top-left corner reads
+     as starting further in, so the label looks like it hangs off. 2px puts it back optically. */
+  padding-left: 2px;
+}
+
+.pianoroll-side .pr-side-ctl input[type='number'],
+.pianoroll-side .pr-side-ctl select {
+  width: 100%;
+}
+
+.pianoroll-side .pr-side-row {
+  display: flex;
+  gap: 6px;
+}
+
+/* Buttons split their row evenly, whether the row holds two of them (÷2 ×2) or one (⧉). */
+.pianoroll-side .pr-side-row .small {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Same mono, un-uppercased face the head's text buttons wear - without the head's min-width,
+   which would fight the even split above. */
+.pianoroll-side .pr-text-btn {
+  font-family: var(--mono);
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .pianoroll-panel-head .pr-text-btn {
@@ -2057,6 +2175,7 @@ li.CodeMirror-hint-active {
 #pianorollCanvas {
   display: block;
   margin: 12px;
+  flex: 0 0 auto;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);

@@ -23,6 +23,11 @@
         } catch (e) {}
         root.dataset.theme = base;
         if (vars) for (var k in vars) root.style.setProperty(k, vars[k]);
+        // Marks the window between first paint and CodeMirror taking over the editor, so the raw
+        // textarea can stay out of sight rather than flashing up as unhighlighted plain text (see
+        // #editor in style.css). Set here rather than on the element so it costs nothing when
+        // scripting is off: no script, no attribute, and the textarea shows normally.
+        root.dataset.booting = '1';
       })();
     </script>
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
@@ -294,31 +299,42 @@
 
     <div id="pianorollPanel" class="pianoroll-panel hidden">
       <div class="pianoroll-panel-head">
-        <span id="pianorollTitle">piano roll</span>
-        <div id="pianorollPickWrap" class="pianoroll-ctl def-pick-wrap hidden">roll
-          <input id="pianorollName" class="def-name" type="text" spellcheck="false" title="roll name" />
-          <button id="pianorollPickBtn" class="small" title="find or create">▾</button>
-          <div id="pianorollPicker" class="def-picker hidden">
-            <input id="pianorollSearch" type="text" spellcheck="false" placeholder="roll name" />
-            <div id="pianorollPickList" class="def-pick-list"></div>
+        <div class="pianoroll-head-main">
+          <span id="pianorollTitle">piano roll</span>
+          <div id="pianorollPickWrap" class="pianoroll-ctl def-pick-wrap hidden">roll
+            <input id="pianorollName" class="def-name" type="text" spellcheck="false" title="roll name" />
+            <button id="pianorollPickBtn" class="small" title="find or create">▾</button>
+            <div id="pianorollPicker" class="def-picker hidden">
+              <input id="pianorollSearch" type="text" spellcheck="false" placeholder="roll name" />
+              <div id="pianorollPickList" class="def-pick-list"></div>
+            </div>
+          </div>
+          <button id="pianorollLock" class="small hidden" title="following the playing roll">🔓</button>
+          <span id="pianorollScale" class="pianoroll-scale" title="key — click to snap notes into it"></span>
+        </div>
+        <div class="pianoroll-head-tools">
+          <button id="pianorollTool" class="small" title="tool">✏️</button>
+          <button id="pianorollFold" class="small pr-text-btn" title="fold to the scale set by setscale()">fold</button>
+          <button id="pianorollPreview" class="small" title="preview notes as you draw">🎧</button>
+          <button id="pianorollToMini" class="small" title="convert to mini-notation">→♪</button>
+          <button id="pianorollClose" class="small">✕</button>
+        </div>
+      </div>
+      <div class="pianoroll-body">
+        <div class="pianoroll-side">
+          <label class="pianoroll-ctl pr-side-ctl">grid <select id="pianorollGrid" title="granularity — cells per cycle"></select></label>
+          <label class="pianoroll-ctl pr-side-ctl">len <input id="pianorollLen" type="number" step="1" min="1" value="16" title="loop length in cells" /></label>
+          <div class="pr-side-row">
+            <button id="pianorollHalve" class="small pr-text-btn" title="halve the length">÷2</button>
+            <button id="pianorollDouble" class="small pr-text-btn" title="double the length">×2</button>
+          </div>
+          <!-- a row of one, so it fills the column's width instead of sitting in half of it -->
+          <div class="pr-side-row">
+            <button id="pianorollDupLoop" class="small" title="repeat the loop after itself">⧉</button>
           </div>
         </div>
-        <button id="pianorollLock" class="small hidden" title="following the playing roll">🔓</button>
-        <span id="pianorollScale" class="pianoroll-scale" title="key — click to snap notes into it"></span>
-        <label class="pianoroll-ctl">grid <select id="pianorollGrid" title="granularity — cells per cycle"></select></label>
-        <label class="pianoroll-ctl">len <input id="pianorollLen" type="number" step="1" min="1" value="16" title="loop length in cells" /></label>
-        <button id="pianorollHalve" class="small pr-text-btn" title="halve the length">÷2</button>
-        <button id="pianorollDouble" class="small pr-text-btn" title="double the length">×2</button>
-        <button id="pianorollDupLoop" class="small" title="repeat the loop after itself">⧉</button>
-        <button id="pianorollTool" class="small" title="tool">✏️</button>
-        <button id="pianorollCmdMode" class="small pr-text-btn" title="value lane: velocity">vel</button>
-        <button id="pianorollFold" class="small pr-text-btn" title="fold to the scale set by setscale()">fold</button>
-        <span class="spacer"></span>
-        <button id="pianorollPreview" class="small" title="preview notes as you draw">🎧</button>
-        <button id="pianorollToMini" class="small" title="convert to mini-notation">→♪</button>
-        <button id="pianorollClose" class="small">✕</button>
+        <canvas id="pianorollCanvas" width="660" height="464"></canvas>
       </div>
-      <canvas id="pianorollCanvas" width="660" height="464"></canvas>
     </div>
 
     <div id="themePanel" class="theme-panel hidden">
