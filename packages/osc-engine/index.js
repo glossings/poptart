@@ -280,6 +280,11 @@ class OscEngine {
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateCache = new Map(); // captured state -> inflated program, LRU (see _inflateState)
+    // Resolves a "@id" handle to the state it stands for. A patch keeps its captured programs out
+    // of the code (see web-app's blobs.js), so what reaches setPluginState is usually a handle and
+    // not the program - but which store that is, and whether there is one at all, is the host's
+    // business. Unset, a handle is simply not a state, and says so once.
+    this._stateResolver = null;
     // Live CC feed callback, (device, channel 1-16, cc, value 0..1) - set by the host (web-app
     // points it at pattern-core's live-value store). Fired for every /poptart/midiIn message
     // once MIDI is enabled engine-side.
@@ -724,20 +729,41 @@ class OscEngine {
     });
   }
 
+  /**
+   * Teaches the engine how to look a "@id" state handle up. `fn` is (id) => Promise<string|null>,
+   * the string being the captured state the handle stands for.
+   */
+  setStateResolver(fn) {
+    this._stateResolver = typeof fn === 'function' ? fn : null;
+  }
+
   // Un-gzips a captured state, remembering the last few. A patterned .preset() comes back around
   // to the same handful of programs every cycle, and re-inflating a couple of megabytes each time
   // is the one avoidable cost in a swap. Small and fixed rather than clever: the cache holds whole
   // programs, so its ceiling matters more than its hit rate.
   async _inflateState(state, trackId, slotIndex) {
+    // Cached under whatever the code said - a handle is a shorter key for the same program, and
+    // the same handle every cycle, which is exactly what this cache is for.
     const hit = this._stateCache.get(state);
     if (hit) {
       this._stateCache.delete(state); // re-insert so the map's order is least-recently-used first
       this._stateCache.set(state, hit);
       return hit;
     }
+    let program = state;
+    if (state.startsWith('@')) {
+      program = this._stateResolver ? await this._stateResolver(state.slice(1)) : null;
+      if (program == null) {
+        this._warnOnce(
+          `state:${trackId}:${slotIndex}`,
+          `[poptart] plugin state ${state} for ${trackId}/slot ${slotIndex} isn't in the store - leaving the plugin as it is`,
+        );
+        return null;
+      }
+    }
     let data;
     try {
-      data = await gunzip(Buffer.from(state, 'base64'));
+      data = await gunzip(Buffer.from(program, 'base64'));
     } catch (e) {
       this._warnOnce(`state:${trackId}:${slotIndex}`, `[poptart] plugin state for ${trackId}/slot ${slotIndex} is not a valid captured state string (${e.message}) - ignoring`);
       return null;

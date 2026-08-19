@@ -11,7 +11,8 @@ const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname } = require('./request-guard');
 const { preferVst3 } = require('./plugin-filter');
-const { putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
+const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
+const blobs = require('./blobs');
 const recordings = require('@poptart/osc-engine/recordings');
 const analysis = require('@poptart/osc-engine/analysis');
 
@@ -313,6 +314,10 @@ async function restartEngine() {
 // first audio-device change. Any new engine callback goes here and nowhere else.
 function wireEngine() {
   mappedEngine = new MappedEngine(engine);
+  // Captured plugin programs live in the blob store, not in the code (see blobs.js), so what the
+  // scheduler hands the engine is usually a "@id" handle. This is the one place it is turned back
+  // into a program.
+  engine.setStateResolver((id) => blobs.getBlob(id));
   // Born paused at cycle 0: the clock only advances while something is playing (first eval
   // starts it, /api/stop freezes it back at 0). Survives engine restarts, hence the guard.
   if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
@@ -784,10 +789,13 @@ function currentGridCycle() {
 // lives in pattern-files.js / public/pattern-meta.js; the routes below are the HTTP face of it.
 const {
   PATTERNS_DIR,
+  WIP_DIR,
   patternFilePath,
   wipFilePath,
   listSavedPatterns,
   listWipPatterns,
+  wipOlderThan,
+  pruneWipSessions,
 } = require('./pattern-files');
 const { matchesQuery } = require('./public/pattern-meta.js');
 
@@ -1299,11 +1307,17 @@ async function captureDirtyPlugins() {
       if (ms > AUTOPIN_SLOW_MS) {
         console.log(`[auto-pin] ${trackId} slot ${slot}: plugin took ${Math.round(ms)}ms to hand over its program`);
       }
-      autoPinReady.set(key, { trackId, slot, plugin, preset, state });
+      // Into the store, and the editor is handed the handle: a program is megabytes, and the
+      // buffer it would be written into is copied on every autosave, checkpoint and eval (see
+      // blobs.js). Nothing downstream can tell the difference - the scheduler compares states as
+      // opaque strings, and the engine resolves the handle when it loads one.
+      const handle = await blobs.putBlob(state);
+      autoPinReady.set(key, { trackId, slot, plugin, preset, state: handle });
       // The state came *from* the plugin, so the next eval must not push it straight back:
       // tell the track's scheduler it's already applied. Without this, every eval would have
       // the plugin re-chew a state it already has (a reload, and an audible one on some).
-      schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(trackId)?.[slot], state);
+      // Marked under the handle, because that is what the code the next eval reads will say.
+      schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(trackId)?.[slot], handle);
     } catch (e) {
       // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
       // all self-correcting on the next edit. Log once per slot so it's diagnosable.
@@ -1319,8 +1333,38 @@ function schedulePrune() {
   if (pruneTimer) return;
   pruneTimer = setTimeout(() => {
     pruneTimer = null;
-    pruneSnapshots().catch((e) => console.error(`[poptart] snapshot prune failed: ${e.message ?? e}`));
+    // Oldest first, then the states they were holding alive: a knob held for a minute is a hundred
+    // captures and a hundred stored programs, and the ones no session and no history entry mentions
+    // any more are simply gone (see blobs.js). Ordered, not raced - a session or snapshot deleted
+    // after the sweep read it would leave its states behind until the next round, which is harmless
+    // but pointless.
+    Promise.resolve(expireWipSessions())
+      .then(() => pruneSnapshots())
+      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR], alsoKeep: [...liveStateIds] }))
+      .then(({ deleted, freed }) => {
+        if (deleted) console.log(`[poptart] released ${deleted} captured plugin state(s), ${(freed / 1048576).toFixed(1)}MB`);
+      })
+      .catch((e) => console.error(`[poptart] snapshot prune failed: ${e.message ?? e}`));
   }, 30000).unref();
+}
+
+// Handles the editor's live buffer mentions, held out of the sweep by name rather than by age.
+// Refreshed from both places the server sees that buffer - the eval request and the autosave - so
+// a state stays safe from the moment it is written into the code, whether or not it has reached a
+// file yet.
+let liveStateIds = new Set();
+
+// The retention policy, if the settings tab has been asked for one: session files older than
+// `wipRetentionMonths` go, which is also what lets the state store shrink (a session pins the
+// states it names). Off unless set, and off is the default - a session file is the recovery net
+// for work that was never named, and how long that is worth keeping isn't the app's call.
+function expireWipSessions() {
+  const months = Number(settings.wipRetentionMonths ?? 0);
+  if (!(months > 0)) return;
+  const { deleted, freed } = pruneWipSessions(months);
+  if (deleted) {
+    console.log(`[poptart] expired ${deleted} session(s) older than ${months} month(s), ${(freed / 1048576).toFixed(1)}MB`);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1462,6 +1506,7 @@ const routes = {
 
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
+    liveStateIds = blobs.referencedIds(body.code ?? ''); // this buffer's states are in use
 
     // Rewind the random builders' seed counter before building anything, so choose()/irand()
     // seeds are a function of position in the buffer rather than of how many times this server
@@ -1802,19 +1847,29 @@ const routes = {
   },
 
   // Body: { name, code }. Overwrites silently - "save" in a livecoding tool means "keep this".
+  //
+  // Written HYDRATED: a saved pattern is a file someone can hand to someone else, or drop into
+  // another machine's patterns folder, so it carries its captured plugin states in full rather
+  // than handles into a store that machine hasn't got (see blobs.js).
   'POST /api/patterns/save': async (body) => {
     const file = patternFilePath(body.name);
+    const { code, missing } = await blobs.hydrate(String(body.code ?? ''));
     fs.mkdirSync(PATTERNS_DIR, { recursive: true });
-    fs.writeFileSync(file, String(body.code ?? ''), 'utf8');
-    return { status: 200, body: {} };
+    fs.writeFileSync(file, code, 'utf8');
+    // Saved anyway: the patch is worth more than the states it couldn't fill in, and the handles
+    // are still in the file - if the store turns up, so do the sounds. But say so.
+    return { status: 200, body: { missingStates: missing.length } };
   },
 
-  // Body: { name } -> { code }. A saved pattern is the whole patch, captured plugin states and
-  // all, so what comes back is exactly what was written.
+  // Body: { name } -> { code }. The file holds its states in full; the editor is given handles in
+  // their place, so the buffer it copies on every keystroke stays kilobytes (see blobs.js). The
+  // states themselves are put in the store on the way past, which is also how a patch from another
+  // machine gets its programs in here.
   'POST /api/patterns/load': async (body) => {
     const file = patternFilePath(body.name);
     if (!fs.existsSync(file)) throw new Error(`no saved pattern named "${body.name}"`);
-    return { status: 200, body: { code: fs.readFileSync(file, 'utf8') } };
+    const { code } = await blobs.dehydrate(fs.readFileSync(file, 'utf8'));
+    return { status: 200, body: { code } };
   },
 
   // Body: { name }.
@@ -1846,7 +1901,15 @@ const routes = {
   // lookahead, several times a minute.
   'POST /api/patterns/wip/save': async (body) => {
     const file = wipFilePath(body.id);
-    const code = String(body.code ?? '');
+    // Machine-local scratch, so it keeps handles - and a buffer that somehow holds states in full
+    // (a pasted patch) gives them up here rather than being written out at that size every second
+    // or so. This is the write that left 519MB of autosaves on one month of playing.
+    const { code } = await blobs.dehydrate(String(body.code ?? ''));
+    // The freshest sighting of what the editor is holding, and a complete one - this is the whole
+    // buffer - so it replaces rather than adds. It fires a second after a capture is written into
+    // the code, where an eval can be an hour later, which is what makes it safe for the sweep's age
+    // floor to be short.
+    liveStateIds = blobs.referencedIds(code);
     if (!code.trim()) {
       await fs.promises.unlink(file).catch(() => {}); // already gone is the wanted state
       return { status: 200, body: { saved: false } };
@@ -1860,20 +1923,30 @@ const routes = {
   // base64'd into the hash itself, which put a megabyte-URL pushState in front of every eval.
   // Body: { code } -> { id }.
   'POST /api/snapshot': async (body) => {
-    const id = await putSnapshot(String(body.code ?? ''));
+    // Handles, like the wip autosave and for the same reason: a snapshot is one checkpoint of a
+    // buffer that is machine-local by definition (its id means nothing anywhere else).
+    const { code } = await blobs.dehydrate(String(body.code ?? ''));
+    const id = await putSnapshot(code);
     schedulePrune();
     return { status: 200, body: { id } };
   },
 
   // Query: { id } -> { code } - or { code: null } for a state pruned away or from another
   // machine, which the editor reports rather than treating as an empty buffer.
-  'GET /api/snapshot': async (q) => ({ status: 200, body: { code: await getSnapshot(q.id) } }),
+  'GET /api/snapshot': async (q) => {
+    const code = await getSnapshot(q.id);
+    // Snapshots written before the store existed hold their states in full - they are stored on the
+    // way back out, so walking Back through old history entries lightens them as it goes.
+    return { status: 200, body: { code: code == null ? null : (await blobs.dehydrate(code)).code } };
+  },
 
-  // Body: { id } -> { code }.
+  // Body: { id } -> { code }. Dehydrated like the saved-pattern load, for the sessions recorded
+  // before the store existed.
   'POST /api/patterns/wip/load': async (body) => {
     const file = wipFilePath(body.id);
     if (!fs.existsSync(file)) throw new Error(`no work-in-progress session "${body.id}"`);
-    return { status: 200, body: { code: fs.readFileSync(file, 'utf8') } };
+    const { code } = await blobs.dehydrate(fs.readFileSync(file, 'utf8'));
+    return { status: 200, body: { code } };
   },
 
   // Body: { id }.
@@ -1882,6 +1955,30 @@ const routes = {
     if (!fs.existsSync(file)) throw new Error(`no work-in-progress session "${body.id}"`);
     fs.unlinkSync(file);
     return { status: 200, body: {} };
+  },
+
+  // The editor's own two crossings of the same line the routes above handle for it.
+  //
+  // Body: { code } -> { code, missing } - captured states filled back in, for the file the export
+  // action hands to the browser. `missing` names handles this store hasn't got, which the editor
+  // reports rather than passing off a patch with silent holes in it as the whole thing.
+  'POST /api/blobs/hydrate': async (body) => {
+    const { code, missing } = await blobs.hydrate(String(body?.code ?? ''));
+    return { status: 200, body: { code, missing } };
+  },
+
+  // Body: { code } -> { code, stored } - the reverse, for a patch arriving from outside (an
+  // imported file, a pasted buffer): its states go into the store and the editor gets handles.
+  'POST /api/blobs/dehydrate': async (body) => {
+    const { code, stored } = await blobs.dehydrate(String(body?.code ?? ''));
+    return { status: 200, body: { code, stored } };
+  },
+
+  // Query: { id } -> { bytes } - what one stored state weighs, which the buffer can no longer say
+  // now that it only holds the handle. `bytes: null` for one this store hasn't got.
+  'GET /api/blobs/stat': async (q) => {
+    const state = await blobs.getBlob(q?.id);
+    return { status: 200, body: { bytes: state == null ? null : state.length } };
   },
 
   // --- prebake (the settings tab's "edit prebake" panel; see runPrebake) ---
@@ -2079,6 +2176,31 @@ const routes = {
   },
 
   // --- settings (the editor's "settings" tab) ---
+
+  // How long unnamed work-in-progress sessions are kept. Off by default (`months: 0` - keep them
+  // forever), because a session file is the recovery net for work that was never named.
+  //
+  // GET reports the policy and what applying it would cost right now, so the editor can ask before
+  // anything is deleted rather than after. `preview` months lets it price a policy that isn't in
+  // force yet - the number in the confirmation dialog.
+  'GET /api/patterns/wip/retention': async (q) => {
+    const months = Number(settings.wipRetentionMonths ?? 0);
+    const asked = q?.months == null ? months : Number(q.months);
+    const { ids, bytes } = wipOlderThan(asked);
+    return { status: 200, body: { months, preview: { months: asked, sessions: ids.length, bytes } } };
+  },
+
+  // Body: { months } - 0 to keep sessions forever. Applies the policy immediately, so what the
+  // dialog said would go, goes now rather than at some later sweep.
+  'POST /api/patterns/wip/retention': async (body) => {
+    const months = Math.max(0, Math.min(120, Number(body?.months ?? 0) || 0));
+    settings.wipRetentionMonths = months;
+    saveSettings();
+    const { deleted, freed } = months > 0 ? pruneWipSessions(months) : { deleted: 0, freed: 0 };
+    // The states those sessions were holding alive can go with them, if nothing else names them.
+    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR], alsoKeep: [...liveStateIds] });
+    return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
+  },
 
   // Output devices with channel counts, plus the saved selection (null = system default).
   'GET /api/audioDevices': async () => ({

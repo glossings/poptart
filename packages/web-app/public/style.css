@@ -438,6 +438,22 @@ aside section {
   overflow: hidden;
 }
 
+/* The settings tab is the exception to the rule above: it is a stack of fixed-size controls, not
+   panels that can give ground, so there is nothing in it that squeezing can do but clip one section
+   into the next. (A browser zoomed in is a short window - the viewport is the same screen in fewer
+   CSS pixels - which is how this shows up at any window size.) It scrolls as a whole instead, and
+   its sections keep the height their contents ask for. */
+#settingsTab {
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 12px;
+}
+
+#settingsTab section {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 /* session tab: tracks take whatever the macro bank doesn't need, scrolling inside the panel */
 #trackSection {
   flex: 1;

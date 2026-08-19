@@ -27,9 +27,9 @@ const crypto = require('node:crypto');
 
 const SNAPSHOT_DIR = process.env.POPTART_SNAPSHOT_DIR || path.join(os.homedir(), '.poptart', 'snapshots');
 
-// Roughly a long session's worth of evals. Each file is one buffer, so the folder's size is
-// bounded by this times the biggest patch you play - a few hundred MB in the worst case of
-// megabyte state blobs, and far less in practice because unchanged buffers dedupe to one file.
+// Roughly a long session's worth of evals. Each file is one buffer - and a buffer is kilobytes
+// now that captured plugin programs are stored once and referenced by handle (see blobs.js), so
+// this bounds the folder at a few megabytes rather than the few hundred it used to reach.
 const MAX_SNAPSHOTS = 500;
 
 const ID_RE = /^[0-9a-f]{12}$/;

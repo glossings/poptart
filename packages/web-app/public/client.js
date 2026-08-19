@@ -454,14 +454,28 @@ async function loadCodeFromHash() {
   }
 }
 
-// How a patch is shared: as a file. It is exactly the code - captured
-// plugin states included, since those live in the code - so it is also just what the patterns
-// folder holds, and the other end can import it or drop it straight into ~/.poptart/patterns.
+// How a patch is shared: as a file. Captured plugin states are filled back in on the way out (the
+// buffer only carries handles into this machine's store - see blobs.js), so the file is the whole
+// patch and nothing else: just what the patterns folder holds, and the other end can import it or
+// drop it straight into ~/.poptart/patterns.
 async function exportPatch() {
   await settlePluginState(); // the file has to carry the sound as it is right now
-  const code = cm.getValue();
-  if (!code.trim()) {
+  const buffer = cm.getValue();
+  if (!buffer.trim()) {
     logLine('nothing to export - the buffer is empty', true);
+    return;
+  }
+  let code = buffer;
+  try {
+    const filled = await api('POST', '/api/blobs/hydrate', { code: buffer });
+    code = filled.code;
+    // A patch with holes in it still exports - the missing ones are named in the file, so the
+    // sounds come back if their store ever does - but it must not go out looking complete.
+    if (filled.missing?.length) {
+      logLine(`export: ${filled.missing.length} captured plugin state(s) are not in this machine's store - the file names them but doesn't carry them`, true);
+    }
+  } catch (e) {
+    logLine(`could not read this patch's captured plugin states (${e.message ?? e}) - not exporting a patch without them`, true);
     return;
   }
   const label = displayLabel({ title: parseMeta(code).title, name: currentFileName(), code, borrowBlockLabel: true });
@@ -485,10 +499,14 @@ async function importPatch(file) {
   try {
     const text = await file.text();
     if (!text.trim()) throw new Error('the file is empty');
+    // Its captured plugin states go into this machine's store on the way in, so what lands in the
+    // editor is the patch and handles, not megabytes of base64 (see blobs.js). A file that has
+    // none - or a server too old to know the route - imports exactly as it stands.
+    const light = await api('POST', '/api/blobs/dehydrate', { code: text }).catch(() => null);
     // Deliberately not opened *as* a saved pattern: nothing of that name is in the folder yet, and
     // save must never write to a file the user hasn't been shown. The file name is only a
     // suggestion for when they do save it.
-    await openInEditor(text, null);
+    await openInEditor(light?.code ?? text, null);
     saveNameHint = file.name.replace(/\.js$/i, '');
     logLine(`imported ${file.name} - Cmd/Ctrl+Enter to play it`);
   } catch (e) {
@@ -690,8 +708,9 @@ function foldSpan(fromIdx, toIdx, label, title) {
 function foldConfigBlobs() {
   const code = cm.getValue();
   let m;
-  // Captured plugin state - megabytes of base64, so a simple regex is safe. The text stays in the
-  // buffer (it *is* the patch); only the display folds, to a chip showing what it weighs.
+  // Captured plugin state written out in full - a patch pasted in from outside, or a definition
+  // typed by hand. What the editor writes is a handle into the store (see blobs.js), which is
+  // short and stays on screen; this is for the ones that aren't.
   const stateRe = /\{\s*state:\s*"[A-Za-z0-9+/=]+"\s*\}/g;
   while ((m = stateRe.exec(code))) {
     const kb = Math.max(1, Math.round(m[0].length / 1024));
@@ -1165,7 +1184,14 @@ function newWipSessionId(after = '') {
   return id;
 }
 
-let wipSessionId = newWipSessionId();
+// The session a reload comes back to. A refresh is the same person still working on the same
+// buffer, so it continues the file it was already writing rather than opening another one - what
+// rolls a session is opening a DIFFERENT buffer (see rollWipSession). Minting one per page load
+// is what left 620 session files in a month, and each one pins the captured plugin states it
+// mentions for as long as it exists (see blobs.js).
+const WIP_SESSION_KEY = 'poptart.wipSession';
+let wipSessionId = sessionStorage.getItem(WIP_SESSION_KEY) || newWipSessionId();
+sessionStorage.setItem(WIP_SESSION_KEY, wipSessionId);
 let wipTimer = null;
 let wipLastSent = null;
 let wipWarned = false;
@@ -1218,6 +1244,7 @@ async function rollWipSession() {
   await settlePluginState();
   await saveWip();
   wipSessionId = newWipSessionId(wipSessionId);
+  sessionStorage.setItem(WIP_SESSION_KEY, wipSessionId);
   wipLastSent = null;
   wipListedRow = null; // the next write is a new session's first - always worth showing
   markCurrentFileRow(); // the session that was the live one no longer is
@@ -2602,10 +2629,30 @@ function presetSyncHead() {
   // ear - but it is still a change to what you are hearing, so it is on screen the whole time.
   presetHeldEl.classList.toggle('hidden', !presetState.held);
   presetHeldEl.title = 'this slot plays the preset shown for as long as this panel is open, so what you hear is what you are editing — close the panel and the pattern swaps it again';
-  const state = def ? presetDefParts(code, def).state : '';
   // Empty is a real state to be in - a name with nothing captured yet holds the plugin as it is -
   // so it is reported as a size, not as a warning.
-  presetSizeEl.textContent = state ? `${(state.length / 1048576).toFixed(1)} mb` : 'empty';
+  presetSizeEl.textContent = presetStateSize(def ? presetDefParts(code, def).state : '');
+}
+
+// What a captured program weighs. The definition holds a handle into the store rather than the
+// program itself (see blobs.js), so the number comes from the server - once per handle, cached,
+// because this runs on every buffer change. A state written in full (a patch pasted in from
+// somewhere, a definition typed by hand) is measured where it stands.
+const blobSizes = new Map(); // handle -> bytes, 'asking' while in flight, 'gone' if unstored
+function presetStateSize(state) {
+  if (!state) return 'empty';
+  if (!state.startsWith('@')) return `${(state.length / 1048576).toFixed(1)} mb`;
+  const known = blobSizes.get(state);
+  if (known === undefined) {
+    blobSizes.set(state, 'asking');
+    api('GET', `/api/blobs/stat?id=${encodeURIComponent(state.slice(1))}`)
+      .then(({ bytes }) => { blobSizes.set(state, bytes ?? 'gone'); presetSyncHead(); })
+      .catch(() => blobSizes.delete(state)); // a failed request asks again rather than sticking on "…"
+    return '…';
+  }
+  if (known === 'asking') return '…';
+  if (known === 'gone') return 'missing';
+  return `${(known / 1048576).toFixed(1)} mb`;
 }
 
 // A captured program reaching the BUFFER is not enough: the scheduler swaps presets out of the
@@ -7013,7 +7060,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir(); refreshPreferVst3(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir(); refreshPreferVst3(); refreshWipRetention(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -7266,6 +7313,51 @@ samplesDirSave.addEventListener('click', () => saveSamplesDir(samplesDirInput.va
 samplesDirReset.addEventListener('click', () => saveSamplesDir(null));
 samplesDirInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); saveSamplesDir(samplesDirInput.value.trim() || null); }
+});
+
+// How long unnamed sessions are kept. Off by default and deliberately so: a session file is the
+// only copy of work that was never given a name. It does cost something - each one pins the
+// captured plugin states it mentions, so the state store can only release what no session still
+// names (see blobs.js) - which is why it is offered at all, and why the note below says what
+// turning it on would delete BEFORE it deletes anything.
+const wipRetentionSelect = document.getElementById('wipRetentionSelect');
+const wipRetentionNote = document.getElementById('wipRetentionNote');
+
+const sessionCost = (n, bytes) => `${n} session${n === 1 ? '' : 's'} (${(bytes / 1048576).toFixed(0)}mb)`;
+
+async function refreshWipRetention() {
+  try {
+    const { months, preview } = await api('GET', '/api/patterns/wip/retention');
+    wipRetentionSelect.value = String(months);
+    wipRetentionNote.textContent = months
+      ? `sessions older than ${months} month${months === 1 ? '' : 's'} are deleted; ${sessionCost(preview.sessions, preview.bytes)} would go on the next sweep`
+      : 'every session is kept until you delete it in the files tab';
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+wipRetentionSelect.addEventListener('change', async () => {
+  const months = Number(wipRetentionSelect.value);
+  try {
+    if (months > 0) {
+      // Priced before it is agreed to: what this policy deletes depends on what is on disk right
+      // now, and "sessions older than 3 months" means nothing until you know it is 271 of them.
+      const { preview } = await api('GET', `/api/patterns/wip/retention?months=${months}`);
+      const ok = preview.sessions === 0
+        || confirm(`delete ${sessionCost(preview.sessions, preview.bytes)} older than ${months} month${months === 1 ? '' : 's'}?\n\nsaved patterns are not touched - only unnamed sessions. this keeps applying as sessions age.`);
+      if (!ok) return refreshWipRetention(); // put the select back to the policy in force
+    }
+    const res = await api('POST', '/api/patterns/wip/retention', { months });
+    logLine(months
+      ? `keeping sessions for ${months} month${months === 1 ? '' : 's'} - deleted ${res.deleted}, freed ${(res.freed / 1048576).toFixed(0)}mb`
+      : 'keeping every session until you delete it');
+    refreshPatternFiles();
+    refreshWipRetention();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    refreshWipRetention();
+  }
 });
 
 // Prefer-VST3 toggle. The filter lives on the server's plugin-list endpoints, so applying a

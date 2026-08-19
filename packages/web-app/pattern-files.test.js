@@ -20,6 +20,8 @@ const {
   listSavedPatterns,
   listWipPatterns,
   wipFallbackLabel,
+  wipOlderThan,
+  pruneWipSessions,
 } = require('./pattern-files');
 
 function write(rel, code) {
@@ -127,3 +129,49 @@ test('listings are empty, not an error, when nothing has been saved', () => {
 });
 
 test.after(() => fs.rmSync(DIR, { recursive: true, force: true }));
+
+// --- session retention ---
+// Off by default and only ever as long as the settings tab was told: a session file is the only
+// copy of work that was never given a name. What makes it worth offering at all is that each one
+// pins the captured plugin states it mentions (see blobs.js).
+
+const DAY = 24 * 60 * 60 * 1000;
+
+// A session file last touched `days` ago.
+function aged(id, days, code = 'lead: n("0 2")') {
+  write(`wip/${id}.js`, code);
+  const when = new Date(Date.now() - days * DAY);
+  fs.utimesSync(wipFilePath(id), when, when);
+  return id;
+}
+
+test('with no policy there is nothing old, whatever is on disk', () => {
+  aged('2020-01/2020-01-01-000000', 4000);
+  for (const months of [0, null, undefined, -3, 'nonsense']) {
+    assert.deepEqual(wipOlderThan(months).ids, [], `months=${months}`);
+  }
+});
+
+test('a policy names the sessions past it, and only those', () => {
+  const old = aged('2024-01/2024-01-01-000000', 400);
+  const recent = aged('2026-08/2026-08-18-120000', 1);
+  const { ids, bytes } = wipOlderThan(3);
+  assert.ok(ids.includes(old));
+  assert.ok(!ids.includes(recent), 'yesterday is not three months ago');
+  assert.ok(bytes > 0, 'and it says what they weigh, so the dialog can price it');
+});
+
+test('pruning deletes exactly those and leaves the rest', () => {
+  const old = aged('2023-05/2023-05-05-050505', 500);
+  const recent = aged('2026-08/2026-08-19-010101', 0);
+  const { deleted } = pruneWipSessions(1);
+  assert.ok(deleted >= 1);
+  assert.ok(!fs.existsSync(wipFilePath(old)));
+  assert.ok(fs.existsSync(wipFilePath(recent)));
+});
+
+test('pruning with no policy deletes nothing', () => {
+  const old = aged('2022-02/2022-02-02-020202', 900);
+  assert.deepEqual(pruneWipSessions(0), { deleted: 0, freed: 0 });
+  assert.ok(fs.existsSync(wipFilePath(old)));
+});

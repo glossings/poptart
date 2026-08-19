@@ -87,8 +87,9 @@ export const lookupShape = (id) => stores.shape.lookup(id);
 export const shapeIds = () => stores.shape.ids();
 
 // A preset's value is { plugin, state }, not a Sig: `state` is the plugin's own program (gzip +
-// base64, often megabytes) and `plugin` is the name it was captured from, which is what lets a
-// swap refuse to push a Serum program into a Diva. An empty `state` is a named-but-not-yet-captured
+// base64, often megabytes) or a "@id" handle standing for one the host has put away somewhere -
+// either way an opaque string, resolved at the point it is loaded into a plugin. `plugin` is the
+// name it was captured from, which is what lets a swap refuse to push a Serum program into a Diva. An empty `state` is a named-but-not-yet-captured
 // preset - the editor writes those the moment a pattern says a name, and auto-pin fills them in.
 export const registerPreset = (id, entry) => stores.preset.register(id, entry);
 export const lookupPreset = (id) => stores.preset.lookup(id);

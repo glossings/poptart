@@ -131,16 +131,44 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - **Fixed 8-slot chain per track (1 instrument + 7 effects).** `VSTPlugin~` instances live inside a
   `SynthDef`'s UGen graph and can't be added to a running `Synth`, so chain length is baked in.
   Swapping which plugin occupies a slot is fine; growing past 8 is not handled yet.
-- **Plugin state lives in the code, not in a store the code points at.** Editing a plugin in its
-  own window writes its whole program back into the call — `synth("Serum 2", { state: "H4sIA…" })`,
-  gzip+base64, megabytes and all — so a patch is self-contained: the file is the sound. It briefly
-  worked the other way, with a content-addressed store under `~/.poptart/states` and a short `st_…`
-  chip in the code. That made buffers small, but it made a patch a *pointer*, and pointers dangle:
-  states went missing, and a patch that can lose its own sound is worse than a big one. The reason
-  big buffers hurt was never the bytes anyway — it was the label splitter re-lexing an accumulating
-  block once per line, which put megabytes of quadratic work in front of every eval on the same
-  event loop as the note scheduler. Fixing that (labels.mjs, 2MB: 225ms → 11ms) left inline state
-  costing ~23ms per eval for one pinned Serum and ~55ms for three, which buys a great deal.
+- **A file carries its plugin state; a buffer carries a handle to it.** Editing a plugin in its own
+  window captures its whole program — gzip+base64, megabytes and all. Where that program *lives*
+  splits on one line: anything that can leave this machine carries it in full, and anything local
+  and transient carries a `@…` handle into the content-addressed store at `~/.poptart/blobs`
+  (`blobs.js`). Saved patterns and exports are hydrated on the way out, so a patch file is still
+  self-contained — the file is the sound. The live buffer, the wip autosave and history snapshots
+  keep handles, so `synth("Serum 2", { state: "@2f9a1c3d5e7b" })` is what CodeMirror holds, what the
+  1.2s autosave writes, what every checkpoint stores and what each eval ships.
+
+  An earlier attempt at a store (`~/.poptart/states`, `st_…` chips) was rolled back because it made
+  the *patch* a pointer, and pointers dangle: states went missing and a patch that can lose its own
+  sound is worse than a big one. The split above is the part that was wrong there — a file someone
+  can hand to someone else never points at anything. What remains pointing is what was already
+  machine-local and already disposable. The store is collected rather than capped: content
+  addressing stops a program being stored twice, but a knob held for a minute is a hundred
+  *different* programs, so what nothing can still name is released and everything else stays
+  however old it gets — a mark and sweep over the wip and snapshot folders, run after they are
+  pruned, with half an hour's grace for states too new to have been written down anywhere yet. So a
+  handle outlives every buffer that mentions it, which an LRU cap could not promise. Hydrating on
+  save reports any handle it can't resolve rather than writing a hole silently.
+- **What bounds the state store is session retention.** A sweep can only release what nothing
+  names, so every file that keeps a handle sets a floor. Snapshots cap themselves at 500. Sessions
+  did not, and there was one per *page load* — 620 files in a month, each pinning the programs that
+  were live when it was last written, forever. Two things fix the floor rather than the sweep: a
+  session now follows the buffer rather than the tab (its id rides `sessionStorage`, so a refresh
+  continues the same file and only opening a different buffer rolls a new one), and the settings tab
+  offers a retention policy in months. That policy is **off by default and priced before it is
+  agreed to** — the dialog says how many sessions and how many megabytes go — because a session file
+  is the only copy of work that was never given a name, and deleting it is not a decision the app
+  gets to make quietly.
+
+  Buffer size was not the *only* cost, and the earlier fix for it stands: the label splitter used to
+  re-lex an accumulating block once per line, putting megabytes of quadratic work in front of every
+  eval on the note scheduler's own event loop (labels.mjs, 2MB: 225ms → 11ms). What it left was
+  ~23ms per eval for one pinned Serum and ~55ms for three — plus a copy of those megabytes through
+  `getValue`, sessionStorage, the autosave and the snapshot on a loop while you type. Measured over
+  this machine's pattern folder: 56.8MB of patches become 109.5KB of editor buffers backed by 116
+  distinct programs, and one month of playing had left 519MB of autosaves and 448MB of snapshots.
 - **Captures are debounced per gesture, and there is no cheap one.** Asking a plugin for its
   program is `writeProgram`, and VSTPlugin's docs are explicit that plugin processing is
   *suspended* while it serializes — a couple of megabytes for a Serum patch, and audible. (The

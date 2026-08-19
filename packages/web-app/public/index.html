@@ -189,6 +189,20 @@
                 hide definitions
               </label>
             </section>
+            <section id="storageSection">
+              <h2>sessions</h2>
+              <label class="settings-row">keep unnamed sessions
+                <select id="wipRetentionSelect" title="every buffer you work in is autosaved as a session; saved patterns are separate and are never touched by this">
+                  <option value="0">forever</option>
+                  <option value="1">1 month</option>
+                  <option value="3">3 months</option>
+                  <option value="6">6 months</option>
+                  <option value="12">12 months</option>
+                  <option value="24">24 months</option>
+                </select>
+              </label>
+              <div id="wipRetentionNote" class="files-note"></div>
+            </section>
             <section id="librarySection">
               <h2>sample library</h2>
               <label class="settings-row">folder

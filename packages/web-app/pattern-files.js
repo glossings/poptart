@@ -154,8 +154,77 @@ function listWipPatterns() {
   return out;
 }
 
+// --- session retention (off unless the settings tab turns it on) ---
+//
+// A session file is never removed on its own: it is the recovery net for work that was never
+// given a name, and the app has no business deciding how long that is worth keeping. It does
+// cost something, though - each one pins the captured plugin states it mentions, so the state
+// store can only let go of what no session still names (see blobs.js) - so it can be bounded,
+// deliberately, by the person whose work it is.
+
+const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Session files last touched more than `months` ago, as { ids, bytes }. 0 (or anything that isn't
+ * a positive number) means the policy is off and nothing is old.
+ *
+ * Stats only - listWipPatterns reads every file to work out what its row should say, which is a
+ * lot of IO to answer a question about dates.
+ */
+function wipOlderThan(months) {
+  if (!(Number(months) > 0)) return { ids: [], bytes: 0 };
+  const cutoff = Date.now() - Number(months) * MONTH_MS;
+  const ids = [];
+  let bytes = 0;
+  let monthDirs = [];
+  try {
+    monthDirs = fs.readdirSync(WIP_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^\d{4}-\d{2}$/.test(e.name))
+      .map((e) => e.name);
+  } catch {
+    return { ids, bytes }; // nothing worked on yet
+  }
+  for (const month of monthDirs) {
+    let files = [];
+    try {
+      files = fs.readdirSync(path.join(WIP_DIR, month)).filter((f) => f.endsWith('.js'));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      let stat;
+      try {
+        stat = fs.statSync(path.join(WIP_DIR, month, f));
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs >= cutoff) continue;
+      ids.push(`${month}/${f.slice(0, -3)}`);
+      bytes += stat.size;
+    }
+  }
+  return { ids, bytes };
+}
+
+/** Deletes them. Returns what went, so the caller can say so rather than doing it silently. */
+function pruneWipSessions(months) {
+  const { ids, bytes } = wipOlderThan(months);
+  let deleted = 0;
+  for (const id of ids) {
+    try {
+      fs.unlinkSync(wipFilePath(id));
+      deleted += 1;
+    } catch {
+      // already gone, or not ours to delete - either way it isn't holding anything up
+    }
+  }
+  return { deleted, freed: bytes };
+}
+
 module.exports = {
   PATTERNS_DIR,
+  wipOlderThan,
+  pruneWipSessions,
   WIP_DIR,
   patternFilePath,
   wipFilePath,
