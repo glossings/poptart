@@ -1138,6 +1138,17 @@ footer#console {
   border-radius: 2px;
 }
 
+/* A slot that is NOT playing its `.preset(...)` pattern right now - its plugin's own window is
+   open, or the preset panel has it. What is marked is the preset actually loaded, and the playback
+   highlighter leaves the whole call alone while it is (see client.js's syncHeldPresets), so "held
+   on this one" and "cycling through these" can never look the same. Yellow rather than the
+   playing box: it is a different fact about the code, not a louder version of the same one. */
+.cm-held {
+  background: color-mix(in srgb, var(--warn) 25%, transparent);
+  box-shadow: 0 0 0 1.5px var(--warn);
+  border-radius: 2px;
+}
+
 /* folded config blobs (captured plugin state, long lfo shapes) - click to expand */
 .cm-config-fold {
   display: inline-block;

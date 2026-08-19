@@ -165,6 +165,7 @@ class MappedEngine {
 
   setPluginState(...a) { return this.engine.setPluginState(...a); }
   showPluginEditor(...a) { return this.engine.showPluginEditor(...a); }
+  cancelPluginState(...a) { return this.engine.cancelPluginState(...a); }
   setTempo(...a) { return this.engine.setTempo(...a); }
   noteOn(...a) { return this.engine.noteOn(...a); }
   noteOff(...a) { return this.engine.noteOff(...a); }

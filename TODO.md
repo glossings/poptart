@@ -34,8 +34,11 @@ $: `<
     synth underneath it; editing is unambiguous by construction, since `a`'s plugin window *is* `a`.
     And it deletes the machinery that only exists because one instance is time-shared —
     `Scheduler#holdPreset`/`_presetHold`, server.js's `presetHolds` lease + TTL + renewal on the
-    pluginEdits poll, `heldSlotsFor`'s highlight suppression, and the gesture-time preset
-    attribution in `handlePluginEdited`.
+    pluginEdits poll, `heldSlotsFor`'s highlight suppression, the gesture-time preset attribution
+    in `handlePluginEdited`, and the whole hand-editing freeze (`Scheduler#holdPluginState`,
+    server.js's `handTaken`/`uncaptured`, the editor's held marks and commit reporting, and
+    poptart.scd's `waitForLoad` note queue and the `/poptart/statePending` announce that arms it) —
+    all of which exists because a knob turn, a swap and a note fight over the one instance.
 
     What it costs, and why it lost: one live plugin per name — `<a b c d>` of a heavy synth is four
     of it, on the machine already running the whole stack. Adding a name to a pattern becomes a

@@ -966,6 +966,9 @@ function findParamCall(code, from, to, name) {
 // was sounding when the knob moved, not into the slot's `{ state }` argument - which the next swap
 // would overwrite anyway. This is the whole authoring loop for presets: name two in a pattern, play,
 // and shape each one by ear while it is the one you can hear.
+// Returns how the capture was filed, for the freeze on the slot it came from (see syncHeldPresets):
+// 'eval' - written, and an evaluation is on its way to put it where the scheduler reads it;
+// 'already' - the code said it word for word, so it is already there; null - nowhere to write it.
 function writePresetState(trackLabel, slot, state, plugin, preset) {
   const code = cm.getValue();
   const def = presetDefs.defsInBuffer(code).find((d) => d.id === preset);
@@ -979,7 +982,7 @@ function writePresetState(trackLabel, slot, state, plugin, preset) {
     refoldAll();
     logLine(`captured ${plugin ?? 'plugin'} into preset "${preset}" (which had no definition)`);
     presetScheduleEval();
-    return;
+    return 'eval';
   }
   const [, idEnd] = defIdLiteralRange(code, def);
   const replacement = `, ${body}`;
@@ -988,11 +991,12 @@ function writePresetState(trackLabel, slot, state, plugin, preset) {
   // Identical text means the plugin came back exactly as the code already describes it - a gesture
   // that landed back where it started, or a capture racing an edit elsewhere. Writing it anyway
   // would spend an undo step, a change event and a megabyte-scale buffer edit on nothing.
-  if (cm.getRange(from, to) === replacement) return;
+  if (cm.getRange(from, to) === replacement) return 'already';
   cm.replaceRange(replacement, from, to, '+autopin'); // one merged undo step, as in createPresetForSlot
   refoldAll();
   logLine(`captured ${plugin ?? 'plugin'} into preset "${preset}"`);
   presetScheduleEval();
+  return 'eval';
 }
 
 // The `.preset(...)` call driving one chain slot, if the buffer already has one. Found by asking
@@ -1007,7 +1011,7 @@ function presetCallForSlot(code, trackLabel, slot) {
 }
 
 function writePluginState(trackLabel, slot, state, plugin, preset) {
-  if (!labelsMod) return;
+  if (!labelsMod) return null;
   const code = cm.getValue();
   // Which preset this belongs in, most reliable first: the one the server says was loaded when the
   // knob moved (a hold, or whatever the pattern had reached), then whatever the buffer's own
@@ -1015,7 +1019,7 @@ function writePluginState(trackLabel, slot, state, plugin, preset) {
   // that would have told the server about a preset this function itself just wrote.
   const named = preset ?? idsNamedIn(presetCallForSlot(code, trackLabel, slot)?.str ?? '')[0] ?? null;
   if (named) return writePresetState(trackLabel, slot, state, plugin, named);
-  createPresetForSlot(code, trackLabel, slot, plugin, state);
+  return createPresetForSlot(code, trackLabel, slot, plugin, state);
 }
 
 // Nothing names this slot's sound yet, so auto-pin gives it a name: a definition holding the
@@ -1029,7 +1033,7 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
     // The call was renamed or deleted between the gesture and the capture. Nothing to write to;
     // the next edit in that plugin captures again.
     logLine(`auto-pin: no ${slot === 0 ? 'synth(...)' : '.fx(...)'} call for track "${trackLabel}" slot ${slot} - state not written`, true);
-    return;
+    return null;
   }
   // A slot is a position, and positions move: reorder two .fx(...) calls between the gesture and
   // the capture and slot 2 is a different plugin than the one this state came out of. Writing it
@@ -1037,7 +1041,7 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   // a call naming the plugin it was captured from.
   if (plugin && call.plugin !== plugin) {
     logLine(`auto-pin: "${trackLabel}" slot ${slot} is ${call.plugin || 'something else'} now, not ${plugin} - state not written (re-touch the plugin to capture it again)`, true);
-    return;
+    return null;
   }
   // Named after the track, since that is what you call the sound out loud; an effect slot adds its
   // position, so `lead` and `lead1` are the synth's and the first effect's.
@@ -1059,19 +1063,166 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   refoldAll();
   logLine(`captured ${plugin ?? 'plugin'} into new preset "${id}"`);
   presetScheduleEval();
+  return 'eval';
 }
 
 // Deliberately does NOT re-evaluate: the state is already live in the plugin (it came from
 // there), so an eval would only push it back and make the plugin reload what it already has.
 let pinsPending = 0; // slots the server is holding uncaptured, so we mention it once, not per poll
 
+// ---------------------------------------------------------------------------------------------
+// Hand editing. A plugin whose own window you are turning knobs in holds a sound the code doesn't
+// have yet, so the server freezes that slot's whole-program pushes - `.preset("<a b>")` stops
+// swapping it - until the sound is described where the scheduler reads it (see the server's
+// hand-editing section).
+//
+// The two ends of it are gestures, not states: opening a plugin's own window (the `ui` button, or
+// a double-click on the `synth`/`fx` name) takes that slot by hand, and a click anywhere in the
+// code hands every held slot back. Which is how it reads in use - you are either shaping a sound in
+// the plugin or writing code, and the click that returns you to the code is the one that says so.
+//
+// Inferring the end of it instead (the browser regaining focus, an idle timer) was tried first and
+// is what made this feel random: a plugin window that opens behind the browser never takes the
+// focus away, so holds ended a second after they started, mid-knob-turn.
+//
+// A hold is never silent: while one is on, the preset it is holding is marked in the code (see
+// syncHeldPresets), so "why has this stopped swapping" is answered on screen rather than from
+// memory - and the answer is one click away from being undone.
+// ---------------------------------------------------------------------------------------------
+
+// Hold changes go out in the order they were made. A double-click on `synth` fires a plain click
+// first (which hands the held slots back) and then the double-click (which takes this one), and two
+// requests in flight at once could otherwise land the wrong way round - leaving the slot you just
+// opened a window on unheld.
+let handOps = Promise.resolve();
+function queueHandOp(send) {
+  handOps = handOps.then(send, send);
+  return handOps;
+}
+
+// A release the server hasn't confirmed yet. The poll that answers while one is in flight was
+// computed before it arrived and still says those slots are held; taking its word would flash the
+// marks back on for half a second under the click that just cleared them.
+let releasesInFlight = 0;
+
+/**
+ * Back in the code: every slot being held by hand goes back to its pattern. Fires on any click in
+ * the buffer, so it costs nothing to be wrong about - the next double-click on a plugin name (or
+ * its `ui` button) takes its slot again.
+ */
+function releaseSlotsHeldByHand() {
+  if (!heldSlots.some((h) => h.why === 'hand')) return;
+  // Drawn as released at once rather than on the next poll: the click and the yellow going out are
+  // one gesture. A request that fails puts the marks back on the poll after it.
+  releasesInFlight += 1;
+  syncHeldPresets(heldSlots);
+  queueHandOp(() => api('POST', '/api/releaseEditors', {}).catch(() => {}).finally(() => {
+    releasesInFlight -= 1;
+  }));
+}
+
+cm.getWrapperElement().addEventListener('mousedown', releaseSlotsHeldByHand, true);
+
+// A held slot is a place where the code says one thing and the plugin is doing another, so it is
+// drawn ON the code: the preset name that is really loaded gets a held mark, and the playback
+// highlighter is told to leave that call alone - it would otherwise go on lighting `a`, `b`, `a`
+// while the plugin sat on one of them, which is the highlighter's one promise broken.
+//
+// Both kinds of hold are drawn the same way, because they are the same fact on screen: the preset
+// panel holding a slot it is editing, and a plugin window held open on one.
+let heldSlots = []; // [{ trackId, slot, preset, why }] as of the last poll
+let heldMarks = []; // the marks drawn for them
+let heldRanges = []; // document spans the playback highlighter must not light
+let heldPainted = ''; // the holds + buffer generation last drawn, so an unchanged poll costs nothing
+
+function heldTitle(h) {
+  const name = h.preset ? `"${h.preset}"` : 'this preset';
+  if (h.why === 'panel') return `playing ${name} while the preset panel is open on it`;
+  if (h.why === 'hand') return `playing ${name} while you work in its plugin - click anywhere in the code and the pattern swaps it again`;
+  return `playing ${name} until what you just changed in the plugin is written into the code`;
+}
+
+function syncHeldPresets(holds) {
+  // While a release is in flight, what the server says about by-hand holds is out of date by
+  // construction - it answered before the click reached it (see releaseSlotsHeldByHand).
+  heldSlots = releasesInFlight ? holds.filter((h) => h.why !== 'hand') : holds;
+  // Nothing held means nothing to redraw, however much the buffer changes - which matters, because
+  // this runs twice a second and typing changes the buffer generation on every keystroke.
+  const sig = heldSlots.length
+    ? `${heldSlots.map((h) => `${h.trackId}|${h.slot}|${h.preset ?? ''}|${h.why}`).sort().join(',')}@${cm.changeGeneration()}`
+    : '';
+  if (sig === heldPainted) return; // nothing held has moved, and neither has the buffer
+  heldPainted = sig;
+  paintHeldPresets();
+}
+
+function paintHeldPresets() {
+  const before = heldRanges.join(';');
+  for (const mk of heldMarks) mk.clear();
+  heldMarks = [];
+  heldRanges = [];
+  const code = heldSlots.length && labelsMod ? cm.getValue() : '';
+  for (const h of heldSlots) {
+    const call = presetCallForSlot(code, h.trackId, h.slot);
+    if (!call) continue;
+    // The whole name string is what the highlighter must leave alone: every name in `<a b>` is one
+    // this slot is not playing right now, including the one it is (its light would be a lie about
+    // the pattern rather than about the sound).
+    heldRanges.push([call.from, call.to]);
+    let from = call.from;
+    let to = call.to;
+    const m = h.preset ? idWordRe(h.preset).exec(call.str) : null;
+    if (m) {
+      from = call.from + m.index;
+      to = from + m[0].length;
+    }
+    heldMarks.push(cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {
+      className: 'cm-held',
+      title: heldTitle(h),
+    }));
+  }
+  // Only when what the highlighter may light actually moved: its dedupe is what keeps it from
+  // churning marks 30 times a second, and resetting that on every keystroke would undo it.
+  if (heldRanges.join(';') !== before) for (const r of patternRegions) r.lastKey = '';
+}
+
+/** Whether a document span sits inside a held `.preset(...)` name (see paintHeldPresets). */
+function inHeldRange(from, to) {
+  return heldRanges.some(([a, b]) => from >= a && to <= b);
+}
+
+// Captures written into the buffer whose slot is still frozen until the sound is where the
+// scheduler reads it. A preset's program only gets there through an evaluation, so those wait for
+// one; a capture the code already described word for word is there already. Each carries the
+// server's sequence number, so committing one can never release a knob turned after it.
+let commitQueue = []; // report on the next poll
+let commitOnEval = []; // ...once the evaluation carrying them has come back
+
 async function pollPluginEdits({ flush = false } = {}) {
   // The preset panel's hold is renewed here rather than on a timer of its own - the server treats
   // it as a lease, so a tab that closes with the panel open releases the slot instead of leaving it
   // frozen on one preset (see /api/presetHold).
   const hold = presetState?.held ? { ...presetState.held, trackId: presetState.held.label, preset: presetState.id } : null;
-  const { edits, logs, pending } = await api('POST', '/api/pluginEdits', { flush, hold });
-  for (const e of edits ?? []) writePluginState(e.trackId, e.slot, e.state, e.plugin, e.preset);
+  const committed = [...commitQueue];
+  const { edits, logs, pending, holds } = await api('POST', '/api/pluginEdits', {
+    flush,
+    hold,
+    committed,
+  });
+  // What is held right now, drawn on the code. Every poll, so a hold taken or dropped between two
+  // evaluations shows up within half a second instead of waiting for one.
+  syncHeldPresets(holds ?? []);
+  // Only what the server has now heard - a request that failed leaves them queued for the next poll
+  // rather than leaving a slot frozen until it times out.
+  commitQueue = commitQueue.filter((c) => !committed.includes(c));
+  for (const e of edits ?? []) {
+    const filed = writePluginState(e.trackId, e.slot, e.state, e.plugin, e.preset);
+    const commit = { trackId: e.trackId, slot: e.slot, seq: e.seq };
+    if (filed === 'already') commitQueue.push(commit);
+    else if (filed === 'eval') commitOnEval.push(commit);
+    // Written nowhere (no call left to write into): the freeze times out server-side, and the next
+    // touch of that plugin captures again.
+  }
   // .log() event lines from the scheduler, which runs server-side - same drain, same 500ms.
   for (const line of logs ?? []) logLine(line);
   // Said once when edits start being held, so a plugin tweak that hasn't reached the code yet
@@ -1946,9 +2097,24 @@ function findChainHandleAt(code, idx) {
   return null;
 }
 
-/** Open a plugin's own editor window - the engine owns it, so this is a request, not a panel. */
+/**
+ * Open a plugin's own editor window - the engine owns it, so this is a request, not a panel. It is
+ * also what takes the slot by hand: from here its program is yours to change, and the pattern stops
+ * swapping it until you click back in the code (see the hand-editing sections here and in
+ * server.js). Opening one already open is a fine thing to do - it brings the window back to the
+ * front, and takes the slot again if a click in the code had handed it back.
+ */
 function showPluginEditor(trackId, slot) {
-  api('POST', '/api/showEditor', { trackId, slot }).catch((e) => logLine(e.message, true));
+  queueHandOp(() => api('POST', '/api/showEditor', { trackId, slot })
+    .catch((e) => logLine(e.message, true))
+    // Ops are serialized, so by the time this one is answered any release before it has landed:
+    // the server's view of what is held by hand is current again, and the mark can come back.
+    .finally(() => { releasesInFlight = 0; }));
+  // Only worth saying where a pattern would otherwise be swapping this slot's whole program - and
+  // the marked name in the code says the rest.
+  if (labelsMod && presetCallForSlot(cm.getValue(), trackId, slot)) {
+    logLine(`${trackId} slot ${slot}: holding its preset while you work in the plugin - click in the code to hand it back`);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5522,16 +5688,24 @@ function highlightTick() {
       }
     }
 
-    const key = [...locs.keys()].sort().join(',');
+    const base = cm.indexFromPos(range.from);
+    // A held slot is not playing its `.preset(...)` names - its plugin window is open, or the panel
+    // has it - and the grid deliberately says nothing about that: a grid is computed in windows and
+    // shipped ahead of the sound, while a hold comes and goes between them (see server.js's
+    // patternSigs). Dropping those spans HERE is what lets a hold start and stop being drawn within
+    // half a second instead of surviving until the next evaluation.
+    const lit = heldRanges.length
+      ? [...locs.values()].filter((l) => !inHeldRange(base + l[0], base + l[1]))
+      : [...locs.values()];
+    const key = lit.map((l) => `${l[0]}-${l[1]}`).sort().join(',');
     if (key === r.lastKey) continue; // same atoms still sounding - don't churn marks
     r.lastKey = key;
     for (const mk of r.marks) mk.clear();
-    const base = cm.indexFromPos(range.from);
     // Document-absolute copies of what is lit, so anything that needs to know WHICH atom is
     // sounding (the roll panel, following a pianoroll("<0 chorus>")) can read it off here rather
     // than re-deriving the grid.
-    r.litSpans = [...locs.values()].map((loc) => [base + loc[0], base + loc[1]]);
-    r.marks = [...locs.values()].map((loc) =>
+    r.litSpans = lit.map((loc) => [base + loc[0], base + loc[1]]);
+    r.marks = lit.map((loc) =>
       cm.markText(cm.posFromIndex(base + loc[0]), cm.posFromIndex(base + loc[1]), {
         className: 'cm-playing',
       })
@@ -6455,7 +6629,7 @@ function renderTracks(result) {
         const uiBtn = document.createElement('button');
         uiBtn.className = 'small';
         uiBtn.textContent = 'ui';
-        uiBtn.title = "open the plugin's own window";
+        uiBtn.title = "open the plugin's own window (this slot holds its preset until you click back in the code)";
         uiBtn.onclick = () => showPluginEditor(t.label, slot);
         row.appendChild(uiBtn);
       }
@@ -6468,6 +6642,8 @@ function renderTracks(result) {
       trackInfo.appendChild(row);
     }
   }
+  // The marks in the code were just re-anchored by the eval that got us here - draw them again.
+  paintHeldPresets();
 }
 
 function badge(text, cls) {
@@ -6502,6 +6678,12 @@ async function evaluate(start, { byHand = false } = {}) {
   migrateDefNames(); // a patch saved before the builders were privatised still says roll(...)
   for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset() gets its definition first
   const code = cm.getValue();
+  // Whatever auto-pin has written into the buffer is in THIS code, so this is the evaluation that
+  // puts those programs where the scheduler reads them - and so the one that thaws their slots
+  // (see pollPluginEdits). Taken before the request goes out: a capture written after this point
+  // belongs to the next eval, not to this one.
+  const filed = commitOnEval;
+  commitOnEval = [];
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.
   const pending = api('POST', '/api/evaluate', { code, start });
@@ -6519,7 +6701,9 @@ async function evaluate(start, { byHand = false } = {}) {
     const nActive = result.tracks.filter((t) => t.active).length;
     logLine(`${start ? 'playing' : 'updated'} (${nActive}/${result.tracks.length} pattern(s))`);
     loadChainParams();
+    commitQueue.push(...filed); // the programs are in the store now; their slots can swap again
   } catch (e) {
+    commitOnEval.push(...filed); // nothing was filed, so nothing is thawed
     logLine(e.message ?? String(e), true);
   }
   updateTransportButtons();

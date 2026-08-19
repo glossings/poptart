@@ -270,6 +270,11 @@ async function restartEngine() {
     // so a stale held note isn't "released" against the new engine on the next eval.
     kbTracks.clear();
     kbHeld.clear();
+    // Every plugin window went with the old scsynth, and so did whatever was being edited in one.
+    // Left alone, these would hold slots still for windows that no longer exist and for captures
+    // nothing can take any more (see the hand-editing section).
+    handTaken.clear();
+    uncaptured.clear();
     // The taps and any in-flight bounce died with the old scsynth. Dropping the state here is what
     // stops the editor from polling a recording that can never finish; the panel re-taps on its
     // next poll.
@@ -680,7 +685,7 @@ const DRY_RUN_CYCLES = 8;
 // velocity signal (.vel), and each sampler config (.i/.speed/…). LFO/env/constant controls have
 // no step grid and fall out where callers check `.stepsForCycle`. Shared by the eval-time dry run
 // and the highlight grid so BOTH see the whole track, not just its note pattern.
-function patternSigs(sig, heldSlots = null) {
+function patternSigs(sig) {
   // Sampler config and note channels are NOT listed: a patterned one is cross-merged into the
   // main grid at build time (structure + locs union, see pattern-core crossMerge), so the main
   // sig already lights them - and for a per-position control (choose) the config sig's own grid
@@ -690,13 +695,14 @@ function patternSigs(sig, heldSlots = null) {
   // A .preset("<a b>") is the same case one level up: the names are a step pattern of their own,
   // and lighting them is what lets the preset panel open on the one you can hear.
   //
-  // ...except on a slot the editor is HOLDING, which is the one case where the pattern is not what
-  // is playing (see Scheduler#holdPreset). Lighting `a` then `b` there would have the code insisting
-  // it was cycling while the plugin sat on one preset - the highlighter's whole promise is that it
-  // shows what you are hearing, so a held slot's names light nothing at all.
-  const presets = Object.entries(sig.presetPatterns ?? {})
-    .filter(([slot]) => !heldSlots?.has(Number(slot)))
-    .map(([, s]) => s);
+  // A slot the editor is HOLDING (the preset panel, or a plugin window open on it) is not playing
+  // those names - but that is NOT decided here. A grid is computed in windows of many cycles and
+  // shipped ahead of the sound, while a hold is taken and released between two of them, so a grid
+  // with the hold baked in is wrong the moment the hold changes: it went on lighting names after a
+  // hold was taken, and left them dark after one was dropped, until the next evaluation rebuilt it.
+  // The grid says what the pattern says; the editor is told what is held on the poll it already
+  // runs and suppresses those spans live. See client.js's syncHeldPresets.
+  const presets = Object.values(sig.presetPatterns ?? {});
   return [sig, ...Object.values(sig.paramSignals), ...Object.values(sig.channel), ...presets]
     .flatMap((s) => (s?.lfoIR?.shapePattern ? [s, s.lfoIR.shapePattern] : [s]));
 }
@@ -724,16 +730,6 @@ function dryRunPattern(sig) {
 
 const HL_WINDOW = 32; // cycles of grid shipped per track (initial window and each top-up)
 
-/** Which of a track's chain slots the editor is currently holding on a preset, or null for none. */
-function heldSlotsFor(label) {
-  if (label == null || !presetHolds.size) return null;
-  const out = new Set();
-  for (const key of presetHolds.keys()) {
-    const at = key.lastIndexOf('|');
-    if (key.slice(0, at) === label) out.add(Number(key.slice(at + 1)));
-  }
-  return out.size ? out : null;
-}
 const hlTracks = new Map(); // label -> { sig, start, end } for the last eval's active tracks
 
 // The sounding steps of a track for cycles [from, from+count), each as { start, end, cont?, locs }.
@@ -743,8 +739,8 @@ const hlTracks = new Map(); // label -> { sig, start, end } for the last eval's 
 // own [start,end] document range - so a location that rode in from a prebake-defined pattern or a
 // dynamic string (which the client can't place in this block) is dropped - then rebased to
 // block-relative. Steps that end up with no in-range span are omitted (they light nothing).
-function highlightGrid(sig, start, end, from, count, label = null) {
-  const sigs = patternSigs(sig, heldSlotsFor(label)).filter((s) => s.stepsForCycle);
+function highlightGrid(sig, start, end, from, count) {
+  const sigs = patternSigs(sig).filter((s) => s.stepsForCycle);
   const grid = [];
   const base = Math.max(0, from);
   for (let c = base; c < base + count; c++) {
@@ -1211,8 +1207,11 @@ const autoPinDirty = new Map();
 const presetHolds = new Map();
 const PRESET_HOLD_TTL_MS = 3000; // ~6 missed polls (see the editor's 500ms pluginEdits loop)
 
-/** Takes or releases one slot's hold. Returns the reason the preset couldn't be loaded, or null. */
-function setPresetHold(trackId, slot, preset) {
+/**
+ * Takes or releases one slot's hold. Returns the reason the preset couldn't be loaded, or null.
+ * `force` is the panel picking a preset by hand - see the route, which captures first.
+ */
+function setPresetHold(trackId, slot, preset, { force = false } = {}) {
   const key = `${trackId}|${slot}`;
   if (preset == null) {
     presetHolds.delete(key);
@@ -1220,15 +1219,21 @@ function setPresetHold(trackId, slot, preset) {
     return null;
   }
   const prev = presetHolds.get(key);
-  presetHolds.set(key, { preset, at: Date.now() });
   // Renewing an unchanged lease is a HEARTBEAT and must do nothing else. holdPreset() LOADS the
   // preset, and between auto-pin capturing a program out of the plugin and the evaluation that
   // files it in the store, the store still holds the OLD program - so a renewal in that window
   // would push the old sound back into the plugin, and the eval a moment later would put the new
   // one in again. Which is precisely what "it jumps back to the previous preset and then returns"
   // was. Only a hold that is new, or has moved to a different preset, applies anything.
-  if (prev?.preset === preset) return null;
-  return schedulers.get(trackId)?.holdPreset(slot, preset) ?? null;
+  const renewal = prev?.preset === preset && prev.loaded;
+  // A hold taken while the slot is frozen by hand editing is a hold that hasn't LOADED anything -
+  // the plugin is sounding what your knobs made, which is the sound the panel is editing anyway.
+  // Recorded as such, so the poll that comes after the freeze lifts loads it rather than reading
+  // as a heartbeat and doing nothing for the rest of the session.
+  const loaded = renewal || force || !stateHeld(key);
+  presetHolds.set(key, { preset, at: Date.now(), loaded });
+  if (renewal || !loaded) return null;
+  return schedulers.get(trackId)?.holdPreset(slot, preset, { force }) ?? null;
 }
 
 /** Drops leases the editor has stopped renewing, handing those slots back to their patterns. */
@@ -1241,7 +1246,142 @@ function expirePresetHolds() {
     schedulers.get(key.slice(0, at))?.holdPreset(Number(key.slice(at + 1)), null);
   }
 }
-const autoPinReady = new Map(); // same key -> { trackId, slot, plugin, preset, state } - editor drains it
+// ---------------------------------------------------------------------------------------------
+// Hand editing. While you are turning a plugin's own knobs, that plugin holds a sound nothing else
+// has yet: not the preset store, not the buffer, not a `{ state }` argument. Anything that pushes a
+// STORED program into the slot meanwhile overwrites what you just did - and auto-pin's capture
+// lands a moment later and puts it back, so the slot audibly flips to the old sound for a cycle and
+// then to the new one. That is what "the preset keeps switching back and forth" is.
+//
+// So a slot being edited by hand is frozen: whole-program pushes are held off, and nothing else is
+// (see Scheduler#holdPluginState). Two things freeze one, and it stays frozen while either holds:
+//
+//   - the slot has been TAKEN BY HAND: you opened its plugin's own window (/api/showEditor), and
+//     have not been back to the code since. Opening a plugin window is the gesture that means "I am
+//     shaping this sound myself now", and clicking anywhere in the code (/api/releaseEditors) is
+//     the one that hands it back - the two ends of a session at the plugin, both of them things a
+//     person actually did rather than states we tried to infer.
+//
+//     Inference is what this replaced, and it is worth saying why. Nothing reports a plugin window
+//     CLOSING - VSTPlugin's events are params, programs, latency, midi, sysex and crash, and
+//     nothing else - so the first attempt guessed the end of a session from the browser regaining
+//     focus, and guessed wrong constantly: a window that opens behind the browser never takes the
+//     focus away, so holds ended a second or two after they started, in the middle of a knob turn.
+//
+//     Kept HERE rather than in the browser because it outlives a tab: reload the page and the
+//     plugin window is still up, still holding, and the editor is told so on its first poll.
+//   - a captured program hasn't reached the code yet. The round trip is capture -> poll -> write ->
+//     eval, comfortably a cycle or two of a running clock, and the store is stale for every one of
+//     them. The editor reports each capture it has filed BY SEQUENCE NUMBER, so a knob turned while
+//     the last capture was in flight isn't released by the report of that one; a capture that never
+//     lands (no chain call left to write into, a browser that went away) times out rather than
+//     freezing the slot for the rest of the set.
+// ---------------------------------------------------------------------------------------------
+
+const handTaken = new Set(); // "trackId|slot" of every slot taken over by hand (see above)
+const uncaptured = new Map(); // "trackId|slot" -> { seq, at } - edited, not yet filed into the code
+const UNCAPTURED_TTL_MS = 20000; // covers a capture, a poll, a write and the eval that files it
+let editSeq = 0;
+
+/** Whether either reason to leave a slot's plugin alone is in force (see the section header). */
+function stateHeld(key) {
+  return handTaken.has(key) || uncaptured.has(key);
+}
+
+/** Tells the track's scheduler whether one of its slots is being edited by hand right now. */
+function syncStateHold(key) {
+  const at = key.lastIndexOf('|'); // a label may contain a pipe; the slot never does
+  schedulers.get(key.slice(0, at))?.holdPluginState(Number(key.slice(at + 1)), stateHeld(key));
+}
+
+/** Every slot of one track frozen right now, for the eval that rebuilds its scheduler. */
+function stateHeldSlotsFor(label) {
+  const out = new Set();
+  for (const key of [...handTaken, ...uncaptured.keys()]) {
+    const at = key.lastIndexOf('|');
+    if (key.slice(0, at) === label) out.add(Number(key.slice(at + 1)));
+  }
+  return out;
+}
+
+/**
+ * Every chain slot that is NOT following its preset pattern right now, with the preset it is
+ * actually sitting on. The editor draws these (see its holds section): a held slot is a place where
+ * the code says one thing and the sound is another, and the only honest way to show that is on the
+ * code itself. Both kinds are in here - the preset panel's hold and the hand-editing freeze -
+ * because from the buffer's point of view they are one fact: this slot plays that preset for now.
+ */
+function currentHolds() {
+  const out = [];
+  const seen = new Set();
+  const add = (key, why) => {
+    if (seen.has(key)) return; // first reason wins, most deliberate first
+    seen.add(key);
+    const at = key.lastIndexOf('|');
+    const trackId = key.slice(0, at);
+    const slot = Number(key.slice(at + 1));
+    out.push({ trackId, slot, why, preset: schedulers.get(trackId)?.livePreset(slot) ?? null });
+  };
+  for (const key of presetHolds.keys()) add(key, 'panel');
+  for (const key of handTaken) add(key, 'hand');
+  for (const key of uncaptured.keys()) add(key, 'capture');
+  return out;
+}
+
+/** Opening a plugin's own window takes that slot by hand until the code is touched again. */
+function takeSlotByHand(trackId, slot) {
+  const key = `${trackId}|${slot}`;
+  if (handTaken.has(key)) return;
+  handTaken.add(key);
+  syncStateHold(key);
+}
+
+/**
+ * Hands every by-hand slot back to its pattern - one click in the code releases all of them, not
+ * just the one you were looking at. There is no per-slot release because there is no per-slot
+ * gesture: you are either working in the code or you are working in a plugin.
+ */
+function releaseSlotsHeldByHand() {
+  const keys = [...handTaken];
+  handTaken.clear();
+  for (const key of keys) syncStateHold(key);
+  return keys.length;
+}
+
+/** A gesture in a plugin's own window: its slot is frozen from here until the capture is filed. */
+function noteHandEdit(key) {
+  uncaptured.set(key, { seq: ++editSeq, at: Date.now() });
+  syncStateHold(key);
+  return editSeq;
+}
+
+/** The editor saying a captured program has reached the code, by the sequence number it came with. */
+function commitCapture(at) {
+  const key = `${String(at?.trackId ?? '')}|${Number(at?.slot ?? 0)}`;
+  // A knob turned while the last capture was being written left a NEWER one uncaptured, and the
+  // report of the old one must not release it - that edit is still only in the plugin.
+  if (uncaptured.get(key)?.seq !== Number(at?.seq)) return;
+  uncaptured.delete(key);
+  syncStateHold(key);
+}
+
+/** Drops captures that never made it into the code. Windows are not in here: one is closed, never
+ * expired - see the section header. */
+function expireStateHolds() {
+  const now = Date.now();
+  for (const [key, held] of uncaptured) {
+    // A slot still waiting to be captured is not late, however long it has waited: deferred mode
+    // holds captures for the whole of a performance on purpose, and thawing there would hand the
+    // pattern a plugin whose sound is still only in the plugin - the one thing this prevents.
+    if (autoPinDirty.has(key)) continue;
+    if (now - held.at < UNCAPTURED_TTL_MS) continue;
+    uncaptured.delete(key);
+    console.log(`[auto-pin] ${key.slice(0, key.lastIndexOf('|'))} slot ${key.slice(key.lastIndexOf('|') + 1)}: the capture never reached the code - the slot goes back to its pattern`);
+    syncStateHold(key);
+  }
+}
+
+const autoPinReady = new Map(); // same key -> { trackId, slot, plugin, preset, state, seq } - editor drains it
 // Sig#log() lines waiting for the editor to drain them (see init's setEventLogger). Capped, so a
 // .log() left running with no browser attached can't grow without bound: the oldest lines go,
 // which is the right end to lose - the interesting one is what just played.
@@ -1251,12 +1391,16 @@ let autoPinTimer = null;
 let autoPinRun = null; // the capture pass in flight, so a flush can wait for it instead of racing
 
 function handlePluginEdited(trackId, slot) {
-  autoPinDirty.set(`${trackId}|${slot}`, {
+  const key = `${trackId}|${slot}`;
+  autoPinDirty.set(key, {
     trackId,
     slot,
     plugin: pluginInSlot(trackId, slot),
     preset: schedulers.get(trackId)?.livePreset(slot) ?? null,
   });
+  // Frozen from the GESTURE, not from the capture: the swap that would overwrite this edit can come
+  // round long before the debounce below has even fired (see the hand-editing section).
+  noteHandEdit(key);
   clearTimeout(autoPinTimer);
   // In deferred mode, capture on the gesture only while the clock is frozen - nothing to interrupt.
   // A running clock leaves the slot dirty until something flushes it.
@@ -1312,7 +1456,11 @@ async function captureDirtyPlugins() {
       // blobs.js). Nothing downstream can tell the difference - the scheduler compares states as
       // opaque strings, and the engine resolves the handle when it loads one.
       const handle = await blobs.putBlob(state);
-      autoPinReady.set(key, { trackId, slot, plugin, preset, state: handle });
+      // The time the editor has to file this starts HERE, not at the gesture: in deferred mode the
+      // capture itself may have been held back for a whole performance.
+      const held = uncaptured.get(key);
+      if (held) held.at = Date.now();
+      autoPinReady.set(key, { trackId, slot, plugin, preset, state: handle, seq: held?.seq ?? 0 });
       // The state came *from* the plugin, so the next eval must not push it straight back:
       // tell the track's scheduler it's already applied. Without this, every eval would have
       // the plugin re-chew a state it already has (a reload, and an audible one on some).
@@ -1322,6 +1470,10 @@ async function captureDirtyPlugins() {
       // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
       // all self-correcting on the next edit. Log once per slot so it's diagnosable.
       console.log(`[auto-pin] could not capture ${trackId} slot ${slot}: ${e.message ?? e}`);
+      // Nothing will ever file this one, so it must not go on freezing the slot: the plugin's
+      // window being open is the only reason left to, and the next edit captures again.
+      uncaptured.delete(key);
+      syncStateHold(key);
     }
   }
 }
@@ -1592,6 +1744,11 @@ const routes = {
         sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: b.label });
         schedulers.set(b.label, sch);
       }
+      // Hand-edit freezes go on BEFORE the pattern does: setPattern pushes any pinned `{ state }`,
+      // and a slot whose plugin is being edited must not have a stored program pushed into it (see
+      // the hand-editing section). Re-asserted here because a Scheduler is rebuilt whenever its
+      // label comes back, and unlike a preset hold this sends nothing - it only holds things off.
+      for (const slot of stateHeldSlotsFor(b.label)) sch.holdPluginState(slot, true);
       sch.setPattern(b.sig);
       for (const [key, held] of presetHolds) {
         const at = key.lastIndexOf('|');
@@ -1639,7 +1796,7 @@ const routes = {
           fxChain: b.sig.fxChain,
           paramNames: Object.keys(b.sig.paramSignals),
           keyboard: b.sig.keyboardRoute?.kind ?? null,
-          grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.label) : null,
+          grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW) : null,
         })),
       },
     };
@@ -1663,7 +1820,7 @@ const routes = {
     const count = Math.min(HL_WINDOW * 4, Math.max(1, Math.floor(Number(q.count)) || HL_WINDOW));
     const tracks = [...hlTracks.entries()].map(([label, t]) => ({
       label,
-      grid: highlightGrid(t.sig, t.start, t.end, from, count, label),
+      grid: highlightGrid(t.sig, t.start, t.end, from, count),
     }));
     return { status: 200, body: { gridFrom: from, gridCount: count, tracks } };
   },
@@ -1780,6 +1937,12 @@ const routes = {
     // request either way, and a browser that stops polling releases what it was holding.
     if (body?.hold) setPresetHold(String(body.hold.trackId ?? ''), Number(body.hold.slot ?? 0), String(body.hold.preset ?? ''));
     expirePresetHolds();
+    // Hand editing, both halves, on the same poll and for the same reason (see that section):
+    // `editing` renews the lease on every plugin window the editor has open, and `committed` says
+    // which captures have reached the code - by sequence number, so the report of one capture can
+    // never release a knob turned after it.
+    for (const at of body?.committed ?? []) commitCapture(at);
+    expireStateHolds();
     const logs = eventLogQueue.splice(0, eventLogQueue.length);
     const edits = [...autoPinReady.values()];
     autoPinReady.clear();
@@ -1787,7 +1950,10 @@ const routes = {
     // once rather than leave a plugin tweak looking like it went unnoticed. In immediate mode a
     // dirty slot is merely one whose debounce hasn't fired yet - nothing worth announcing.
     const holding = AUTOPIN_MODE === 'deferred' && !(transport?.paused ?? true) ? autoPinDirty.size : 0;
-    return { status: 200, body: { edits, logs, pending: holding } };
+    // What is held right now, every poll, so the editor can draw it on the code and stop lighting
+    // names that are not playing. Sent whole rather than as changes: it is a handful of entries,
+    // and a poll that drops (or a tab that reloads) then costs nothing to recover from.
+    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds() } };
   },
 
   // Hold one chain slot on a named preset while the editor's preset panel is open on it, so what
@@ -1795,8 +1961,16 @@ const routes = {
   // preset null to release. A preset is edited by turning the plugin's own knobs, so this is not a
   // convenience: without it a `.preset("<a b>")` swaps the sound out from under the edit.
   'POST /api/presetHold': async (body) => {
+    const trackId = String(body?.trackId ?? '');
+    const slot = Number(body?.slot ?? 0);
     const name = body?.preset == null ? null : String(body.preset);
-    const why = setPresetHold(String(body?.trackId ?? ''), Number(body?.slot ?? 0), name);
+    // Picking one in the panel is a deliberate "let me hear this", so it loads even over a plugin
+    // you have been turning knobs in (see the hand-editing section) - but never before those knobs
+    // have been captured, or the capture would read the preset you switched TO and file it under
+    // the one you switched from. Only a real change pays for the capture; the poll's heartbeat
+    // goes through the same function without this route.
+    if (name != null && presetHolds.get(`${trackId}|${slot}`)?.preset !== name) await flushPluginCaptures();
+    const why = setPresetHold(trackId, slot, name, { force: true });
     return { status: 200, body: { held: name, why } };
   },
 
@@ -1804,9 +1978,20 @@ const routes = {
   // Serum's own UI, then livecode the modulation). Body: { trackId, slot }.
   'POST /api/showEditor': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
-    engine.showPluginEditor(body.trackId ?? 'default', body.slot ?? 0);
+    const trackId = body.trackId ?? 'default';
+    const slot = body.slot ?? 0;
+    engine.showPluginEditor(trackId, slot);
+    // The window is up, so the slot's program is yours to change from here: take it now rather than
+    // on the editor's next poll, or a swap in between would change the preset out from under the
+    // window you just opened - and a knob turned after that would land in the wrong preset.
+    takeSlotByHand(trackId, slot);
     return { status: 200, body: {} };
   },
+
+  // "I'm back in the code" - the editor sends this on a click in the buffer, and every slot being
+  // held by hand goes back to its pattern (see the hand-editing section). No body: a click is not
+  // about one slot, it is about which of the two places you are working in.
+  'POST /api/releaseEditors': async () => ({ status: 200, body: { released: releaseSlotsHeldByHand() } }),
 
   // Turn "conf" (configure) capture on/off for a track (see handleParamAutomated). Only one
   // track configures at a time; turning it on for a track supersedes any previous one. Body:

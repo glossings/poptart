@@ -80,6 +80,18 @@ var tracks = IdentityDictionary.new;
 // to be able to cancel it - otherwise an older program lands on top of a newer one, which is what
 // a preset swap already in flight would do to the editor taking a hold on that slot.
 var stateSeqs = IdentityDictionary.new;
+// '<track>_<slot>' -> (seq:, at:) for a program load that is coming or already running on that
+// slot, and the note events waiting for it. Loading a program suspends the plugin and resets its
+// voices, so a note that lands inside one is either swallowed or wiped a moment later by the reset
+// - the note written at the swap simply does not play. See waitForLoad.
+var statePending = IdentityDictionary.new;
+var noteQueues = IdentityDictionary.new;
+// The longest a note will ever wait for a program, and the furthest past a load's start a note is
+// considered to be "in" it. A swap on a plugin that is already open takes tens of milliseconds, so
+// this is slack, not a budget - what it bounds is the bad case: a restore sent while its plugin is
+// still opening (a cold start) would otherwise hold every note for as long as the open took and
+// then play them all at once, which is far worse than the one eaten note it was avoiding.
+var stateWaitMax = 0.3;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
 var confWant = IdentityDictionary.new; // trackId -> latest requested conf state (see setConfMode)
 // Host tempo (bpm) mirrored into every open VST as emulated DAW transport, so plugin-internal
@@ -88,6 +100,7 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
 var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
+var slotKey, waitForLoad, flushNotes, clearPending;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing;
 // Audio sidechain routing (Sig#sidechain / '/poptart/setSidechain'). silentBus is the read-only
@@ -423,6 +436,52 @@ awaitLoaded = { |track, slot, timeoutSec = 10|
     var tries = 0, max = (timeoutSec / 0.05).asInteger;
     while { track[\loaded][slot].isNil and: { tries < max } } { 0.05.wait; tries = tries + 1 };
     track[\loaded][slot].notNil;
+};
+
+slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
+
+// A note due at or after the start of a program load WAITS for that load instead of being bundled
+// through it. Loading suspends the plugin and resets its voices, so a note timestamped inside that
+// window is either swallowed or wiped by the reset a moment later: the note written at a
+// `.preset("<a b>")` boundary - the first of the cycle, usually - simply never sounds.
+//
+// The decision has to happen HERE, when the note MESSAGE arrives, not at its onset: a note goes to
+// scsynth as a timestamped bundle up to a lookahead early, and once it is there nothing in the
+// language can hold it back. Which is also why the scheduler now sends the swap for an onset before
+// the notes at it (see Scheduler#_tick) - so that by the time this is asked, the load is known to be
+// coming. Comparing TIMES rather than just "is one pending" is what keeps the notes before the swap
+// playing on time: only a note the load reaches waits for it.
+waitForLoad = { |key, slot, at, fire|
+    var seqKey = slotKey.(key, slot);
+    var pending = statePending[seqKey];
+    if (pending.notNil and: { pending[\at] <= at } and: { at <= (pending[\at] + stateWaitMax) }) {
+        noteQueues[seqKey] = (noteQueues[seqKey] ? []).add((at: at, fire: fire));
+        true
+    } { false };
+};
+
+// Everything waiting on one slot, in arrival order - a note-off must never overtake the note-on it
+// belongs to. Each keeps its ORIGINAL onset: a load that finished before it (the swap is applied a
+// little ahead of its onset for exactly this reason) leaves the note playing dead on time, and only
+// one that ran past the onset makes it late. The 2ms floor keeps the bundle just ahead of scsynth
+// rather than arriving stamped for a moment that has already gone.
+flushNotes = { |seqKey|
+    var waiting = noteQueues[seqKey];
+    noteQueues[seqKey] = nil;
+    waiting !? {
+        var now = Main.elapsedTime;
+        waiting.do { |e| e[\fire].value((e[\at] - now).max(0.002)) };
+    };
+};
+
+// Ends the wait for one load - finished, failed, superseded or cancelled, the notes must go either
+// way. Only for the load it names: a newer one may have taken the slot over in the meantime, and
+// its notes are still waiting for IT.
+clearPending = { |seqKey, seq|
+    if (statePending[seqKey].notNil and: { statePending[seqKey][\seq] == seq }) {
+        statePending[seqKey] = nil;
+        flushNotes.(seqKey);
+    };
 };
 
 // `.synth("Serum 2")` uses the display name, but VSTPlugin's dict keys carry the file extension
@@ -941,19 +1000,26 @@ OSCdef(\poptartNoteOn, { |msg|
     var veloc = msg[3].asFloat, latency = msg[4].asFloat;
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][0] };
+    var fire;
     if (ctl.notNil) {
+        fire = { |lat|
+            server.makeBundle(lat, {
+                ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger);
+                track[\envs].do { |e| e[\synth].set(\gate, 1) };
+                // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
+                // patterned shape's swap actually happens in those modes, just before the trigger, so
+                // the note gets the new shape from its beginning rather than halfway through the old.
+                track[\lfos].do { |e|
+                    e[\pending] !? { |f| f.value; e[\pending] = nil };
+                    if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
+                };
+            });
+        };
         track[\held] = track[\held] + 1;
-        server.makeBundle(latency, {
-            ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger);
-            track[\envs].do { |e| e[\synth].set(\gate, 1) };
-            // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
-            // patterned shape's swap actually happens in those modes, just before the trigger, so
-            // the note gets the new shape from its beginning rather than halfway through the old.
-            track[\lfos].do { |e|
-                e[\pending] !? { |f| f.value; e[\pending] = nil };
-                if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
-            };
-        });
+        // A swap due at or before this note's onset means the plugin will be mid-load when it would
+        // have sounded, so it waits for the program instead (see waitForLoad) - the note at a
+        // `.preset("<a b>")` boundary is the one that used to be eaten.
+        if (waitForLoad.(key, 0, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOn');
 
@@ -961,12 +1027,17 @@ OSCdef(\poptartNoteOff, { |msg|
     var key = msg[1].asSymbol, note = msg[2].asInteger, latency = msg[3].asFloat;
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][0] };
+    var fire;
     if (ctl.notNil) {
+        fire = { |lat|
+            server.makeBundle(lat, {
+                ctl.midi.noteOff(0, note, 0);
+                if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
+            });
+        };
         track[\held] = max(0, track[\held] - 1);
-        server.makeBundle(latency, {
-            ctl.midi.noteOff(0, note, 0);
-            if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
-        });
+        // Queued behind its own note-on when one is waiting, or the note would never be released.
+        if (waitForLoad.(key, 0, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOff');
 
@@ -981,7 +1052,8 @@ OSCdef(\poptartNoteOnSlot, { |msg|
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        server.makeBundle(latency, { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) });
+        var fire = { |lat| server.makeBundle(lat, { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) }) };
+        if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOnSlot');
 
@@ -990,7 +1062,8 @@ OSCdef(\poptartNoteOffSlot, { |msg|
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        server.makeBundle(latency, { ctl.midi.noteOff(0, note, 0) });
+        var fire = { |lat| server.makeBundle(lat, { ctl.midi.noteOff(0, note, 0) }) };
+        if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOffSlot');
 
@@ -1807,6 +1880,21 @@ OSCdef(\poptartShowPluginEditor, { |msg|
     if (ctl.notNil) { ctl.editor };
 }, '/poptart/showPluginEditor');
 
+// "stop changing this slot's program." A scheduled restore sits on the clock until its onset (see
+// \poptartSetPluginState), so a slot taken over by hand has to be able to drop the swap that was
+// already on its way. Raising the sequence is all it takes - the waiting restore checks it before
+// applying and deletes its file instead. Nothing is loaded in its place, on purpose: the plugin
+// goes on sounding exactly as whoever is turning its knobs left it.
+OSCdef(\poptartCancelPluginState, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, seq = msg[3].asInteger;
+    var seqKey = (key ++ "_" ++ slot).asSymbol;
+    if (seq > (stateSeqs[seqKey] ? 0)) {
+        stateSeqs[seqKey] = seq;
+        // The load is off, so anything waiting for it is waiting for nothing - play it now.
+        statePending[seqKey] !? { |p| clearPending.(seqKey, p[\seq]) };
+    };
+}, '/poptart/cancelPluginState');
+
 // "conf" (configure) capture on/off for a track. When on, each open plugin's parameterAutomated
 // hook (set in loadInstrument/loadEffect) forwards GUI knob moves to Node; off, they stay quiet.
 // The track may not exist yet (conf clicked after a restart but before the first eval), so wait
@@ -1880,10 +1968,12 @@ OSCdef(\poptartSetPluginState, { |msg|
                     } {
                         ("poptart: FAILED to restore plugin state for " ++ key ++ " slot " ++ slot).warn;
                     };
+                    clearPending.(seqKey, seq);
                     File.delete(path);
                 });
             } {
                 ("poptart: setPluginState: no loaded plugin in " ++ key ++ " slot " ++ slot).warn;
+                clearPending.(seqKey, seq); // nothing to load into: don't hold its notes back
                 File.delete(path);
             };
         }};
@@ -1892,11 +1982,39 @@ OSCdef(\poptartSetPluginState, { |msg|
     // still waiting. A restore that is already stale on arrival (out of order) never runs at all.
     if (seq >= (stateSeqs[seqKey] ? 0)) {
         stateSeqs[seqKey] = seq;
+        // Same reason, for the notes: a swap and the notes at its onset are sent together, a
+        // lookahead early, and a note is a timestamped bundle the moment it is handled - so "a load
+        // is coming at this time" has to be true HERE, not when the load starts (see waitForLoad).
+        statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency);
+        // The notes waiting on this load are released the moment the program is in - or by this,
+        // whatever the plugin does or fails to do. A late note is a bug; notes held for the length
+        // of a cold plugin open, and then all played at once, is a disaster.
+        SystemClock.sched(latency + stateWaitMax, { clearPending.(seqKey, seq); nil });
         if (latency > 0) { SystemClock.sched(latency, { apply.value; nil }) } { apply.value };
     } {
         File.delete(path);
     };
 }, '/poptart/setPluginState');
+
+// The swap's shadow, sent synchronously the moment Node's setPluginState is CALLED - the program
+// itself follows on '/poptart/setPluginState' only after Node has resolved, inflated and written
+// it, which is async, while the notes at the swap's onset are sent on the very stack that emitted
+// the swap. Without this, those notes always arrive first, find nothing pending, and are bundled
+// straight through the load that then wipes them. Carries no program: it just makes "a load is
+// coming at this time" true before the notes ask (see waitForLoad), under the same seq so a
+// cancel or a newer restore supersedes both halves together. If the program never follows (a
+// failed inflate, superseded mid-write), the timeout below releases the notes - late is a bug,
+// stuck is a disaster.
+OSCdef(\poptartStatePending, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger;
+    var latency = msg[3].asFloat, seq = msg[4].asInteger;
+    var seqKey = (key ++ "_" ++ slot).asSymbol;
+    if (seq >= (stateSeqs[seqKey] ? 0)) {
+        stateSeqs[seqKey] = seq;
+        statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency);
+        SystemClock.sched(latency + stateWaitMax, { clearPending.(seqKey, seq); nil });
+    };
+}, '/poptart/statePending');
 
 OSCdef(\poptartScanPlugins, { |msg|
     var requestId = msg[1];

@@ -711,6 +711,16 @@ class OscEngine {
     const seq = (this._stateSeq.get(key) ?? 0) + 1;
     this._stateSeq.set(key, seq);
     const superseded = () => this._stateSeq.get(key) !== seq;
+    // The program takes real time to reach sclang - resolving the handle, inflating and writing
+    // the file below are all async - but the notes at the swap's onset go out synchronously the
+    // moment the scheduler emits them, on this same stack. So announce the load NOW: a tiny
+    // message carrying no program, just "a load with this seq is coming at this time", so the
+    // note handlers already know to hold the notes at the onset when they arrive (see waitForLoad
+    // in poptart.scd). Without it the '/poptart/setPluginState' below always loses the race and
+    // the note at the swap is bundled through the load that then wipes it.
+    if (targetTime != null) {
+      this._send('/poptart/statePending', [trackId, slotIndex, this._latency(targetTime), seq]);
+    }
     (async () => {
       const data = await this._inflateState(String(state), trackId, slotIndex);
       if (!data || superseded()) return;
@@ -727,6 +737,21 @@ class OscEngine {
     })().catch((e) => {
       this._warnOnce(`state-write:${trackId}:${slotIndex}`, `[poptart] could not restore plugin state for ${trackId}/slot ${slotIndex}: ${e.message ?? e}`);
     });
+  }
+
+  /**
+   * Drops any state restore for a slot that hasn't landed yet. A patterned swap is sent up to a
+   * lookahead early and then sits on sclang's clock waiting for its onset (see setPluginState), so
+   * "stop changing this plugin's program" has to reach the ones already in flight - otherwise
+   * taking a plugin over by hand still gets one more swap in your face a moment later. Raising the
+   * sequence supersedes them at both ends: here, anything still inflating; there, anything still
+   * waiting. Nothing is loaded in their place - the plugin keeps sounding exactly as it is.
+   */
+  cancelPluginState(trackId, slotIndex) {
+    const key = `${trackId}|${slotIndex}`;
+    const seq = (this._stateSeq.get(key) ?? 0) + 1;
+    this._stateSeq.set(key, seq);
+    this._send('/poptart/cancelPluginState', [trackId, slotIndex, seq]);
   }
 
   /**

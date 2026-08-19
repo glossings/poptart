@@ -19,11 +19,17 @@ function mockEngine(now = 0) {
     { getTime: () => clock.now },
     { get: (t, p) => (p in t ? t[p] : (...args) => { calls.push({ method: p, args }); }) },
   );
-  return { engine, clock, argsTo: (m) => calls.filter((c) => c.method === m).map((c) => c.args) };
+  // `calls` in full, for the tests that care about the ORDER of two different methods.
+  return { engine, clock, calls, argsTo: (m) => calls.filter((c) => c.method === m).map((c) => c.args) };
 }
 
 // cps 0.5 (the Scheduler default): one cycle is two seconds, so cycle 1 is second 2.
 const track = (names) => note('c').synth('Serum 2').preset(names);
+// PRESET_SWAP_LEAD_SEC: a swap is applied this far BEFORE its onset, so the program is in by the
+// time the notes at that onset play - a load is neither instant nor sample-accurate, and the note
+// written at a swap used to be eaten by it (see the scheduler's constant, and poptart.scd).
+const LEAD = 0.03;
+const at = (sec) => sec - LEAD;
 
 function warnings(fn) {
   const seen = [];
@@ -116,8 +122,8 @@ test('each name pushes its state at its own onset', () => {
   sch._schedulePresetSwaps(0, 2);
 
   assert.deepEqual(argsTo('setPluginState'), [
-    ['lead', 0, 'H4sIa', 0], // cycle 0 -> second 0
-    ['lead', 0, 'H4sIb', 2], // cycle 1 -> second 2, at cps 0.5
+    ['lead', 0, 'H4sIa', at(0)], // cycle 0 -> second 0, less the swap lead
+    ['lead', 0, 'H4sIb', at(2)], // cycle 1 -> second 2, at cps 0.5
   ]);
 });
 
@@ -193,7 +199,7 @@ test('.preset() after an .fx() aims at that effect, not at the instrument', () =
   sch.setPattern(note('c').synth('Serum 2').fx('Pro-Q 3').preset('a'));
   sch._schedulePresetSwaps(0, 1);
 
-  assert.deepEqual(argsTo('setPluginState'), [['lead', 1, 'H4sIa', 0]]);
+  assert.deepEqual(argsTo('setPluginState'), [['lead', 1, 'H4sIa', at(0)]]);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -305,7 +311,7 @@ test('a pinned { state } on a slot a preset drives is ignored, and says so', () 
   assert.match(seen[0], /slot 0: \.preset\(\.\.\.\) drives this plugin/);
 
   sch._schedulePresetSwaps(0, 1);
-  assert.deepEqual(argsTo('setPluginState'), [['lead', 0, 'H4sIa', 0]], 'the pattern is what plays');
+  assert.deepEqual(argsTo('setPluginState'), [['lead', 0, 'H4sIa', at(0)]], 'the pattern is what plays');
 });
 
 test('a pinned { state } on a slot with no preset still works', () => {
@@ -365,8 +371,8 @@ test('a hold only takes the slot it names', () => {
   sch._schedulePresetSwaps(0, 1);
 
   assert.deepEqual(argsTo('setPluginState'), [
-    ['lead', 1, 'H4sIq', 0], // the hold
-    ['lead', 0, 'H4sIa', 0], // the instrument's own pattern, untouched by it
+    ['lead', 1, 'H4sIq', 0], // the hold - loaded now, so no lead to take off
+    ['lead', 0, 'H4sIa', at(0)], // the instrument's own pattern, untouched by it
   ]);
 });
 
@@ -421,4 +427,251 @@ test('stopping the track drops any hold', () => {
   sch.stop();
 
   assert.equal(sch.livePreset(0), null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Hand editing: the slot whose plugin you are turning knobs in
+// ---------------------------------------------------------------------------------------------
+
+test('a frozen slot is not swapped by its pattern', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch.holdPluginState(0, true);
+  sch._schedulePresetSwaps(0, 8);
+
+  assert.deepEqual(argsTo('setPluginState'), [], 'your hands are the only thing changing this sound');
+});
+
+test('the flip-flop: a stale store cannot overwrite what the knobs just did', () => {
+  // The bug this exists for. Auto-pin captures a program out of the plugin, and until the eval that
+  // files it, the STORE still holds the old one - so the next swap round pushed the pre-tweak sound
+  // back (one cycle of the old preset), and the eval put the tweak back a cycle later.
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIold');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('a'));
+
+  sch.holdPluginState(0, true); // a knob moved
+  sch.markStateApplied(0, 'Serum 2', 'H4sInew'); // ...captured, and now live in the plugin
+  sch._schedulePresetSwaps(0, 4); // four cycles of the pattern coming round with a stale store
+  assert.deepEqual(argsTo('setPluginState'), [], 'nothing pushed - the old program stays out of it');
+
+  clearRolls('buffer'); // the eval that files the capture
+  _preset('a', 'Serum 2', 'H4sInew');
+  sch.setPattern(track('a'));
+  sch.holdPluginState(0, false);
+  sch._schedulePresetSwaps(4, 8);
+  assert.deepEqual(argsTo('setPluginState'), [], 'and nothing to put back either - it never left');
+});
+
+test('thawing hands the slot back to its pattern', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, argsTo, clock } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch.holdPluginState(0, true);
+  sch._schedulePresetSwaps(0, 2);
+  assert.deepEqual(argsTo('setPluginState'), []);
+
+  sch.holdPluginState(0, false);
+  clock.now = 4;
+  sch._schedulePresetSwaps(2, 4);
+  assert.deepEqual(argsTo('setPluginState').map((c) => c[2]), ['H4sIa', 'H4sIb']);
+});
+
+test('freezing one slot leaves the rest of the chain swapping', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('q', 'Pro-Q 3', 'H4sIq');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(note('c').synth('Serum 2').preset('a').fx('Pro-Q 3').preset('q'));
+  sch.holdPluginState(0, true);
+  sch._schedulePresetSwaps(0, 1);
+
+  assert.deepEqual(argsTo('setPluginState'), [['lead', 1, 'H4sIq', at(0)]]);
+});
+
+test('a knob turned while frozen belongs to the preset that is really sounding', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, clock } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch._schedulePresetSwaps(0, 1); // cycle 0 is a, and it is what you can hear
+  sch.holdPluginState(0, true);
+  sch._schedulePresetSwaps(1, 4); // the cycles the pattern would have swapped in
+
+  clock.now = 6;
+  assert.equal(sch.livePreset(0), 'a', 'nothing was queued, so nothing has moved on');
+});
+
+test('an eval does not re-send a pinned { state } to a frozen slot', () => {
+  clearRolls('buffer');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.holdPluginState(0, true);
+  sch.setPattern(note('c').synth('Serum 2', { state: 'H4sIpinned' }));
+  assert.deepEqual(argsTo('setPluginState'), [], 'the plugin holds something newer than the code');
+
+  // ...and once the code has caught up, the same string is not owed a push either.
+  sch.markStateApplied(0, 'Serum 2', 'H4sIpinned');
+  sch.holdPluginState(0, false);
+  sch.setPattern(note('c').synth('Serum 2', { state: 'H4sIpinned' }));
+  assert.deepEqual(argsTo('setPluginState'), []);
+});
+
+test('the panel takes a frozen slot without loading over it, and a pick still loads', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch.holdPluginState(0, true);
+
+  assert.equal(sch.holdPreset(0, 'b'), null);
+  assert.deepEqual(argsTo('setPluginState'), [], 'the sound under your hands is the one being edited');
+  assert.equal(sch.livePreset(0), 'b', 'the panel still owns the slot');
+
+  // Picking one in the panel is deliberate: the server captures the knobs first, then asks for it.
+  assert.equal(sch.holdPreset(0, 'b', { force: true }), null);
+  assert.deepEqual(argsTo('setPluginState'), [['lead', 0, 'H4sIb', 0]]);
+});
+
+test('stopping the track thaws it - there is nothing left to protect', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('a'));
+  sch.holdPluginState(0, true);
+  sch.stop();
+  sch.setPattern(track('a'));
+  sch._schedulePresetSwaps(0, 1);
+
+  assert.deepEqual(argsTo('setPluginState').map((c) => c[2]), ['H4sIa']);
+});
+
+test('freezing cancels the swap already on its way to the engine', () => {
+  // Swaps are SENT a lookahead before their onset, so the one due next was queued before your hands
+  // reached the plugin. Without the cancel, freezing means "the pattern stops swapping after one
+  // more swap" - which is the same symptom, a moment later.
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch._schedulePresetSwaps(0, 2); // cycle 1's swap is sent now, to land later
+
+  sch.holdPluginState(0, true);
+  assert.deepEqual(argsTo('cancelPluginState'), [['lead', 0]]);
+});
+
+test('freezing an already-frozen slot cancels nothing new', () => {
+  clearRolls('buffer');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('a'));
+  sch.holdPluginState(0, true);
+  sch.holdPluginState(0, true); // every poll re-asserts the freeze
+  sch.holdPluginState(0, true);
+
+  assert.equal(argsTo('cancelPluginState').length, 1);
+});
+
+test('a cancelled swap is not remembered as loaded', () => {
+  // _appliedStates is a belief about what the plugin holds. Cancelling a push makes that belief
+  // false, and a false one is worse than none: the next time the pattern came round to that preset
+  // it would be skipped as "already there" and the slot would sit on the wrong sound.
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  const { engine, argsTo, clock } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('a'));
+  sch._schedulePresetSwaps(0, 1); // a is pushed, and believed loaded
+
+  sch.holdPluginState(0, true); // ...and cancelled: the plugin never got it
+  sch.holdPluginState(0, false);
+  clock.now = 2;
+  sch._schedulePresetSwaps(1, 2);
+
+  assert.deepEqual(argsTo('setPluginState').map((c) => c[2]), ['H4sIa', 'H4sIa'], 'it is sent again');
+});
+
+test('an engine with no cancel is driven exactly as before', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  // The mock answers every method; a real engine that predates cancelPluginState would not, and the
+  // scheduler feature-detects it like every other optional engine call.
+  const { engine: full, argsTo } = mockEngine();
+  const engine = new Proxy(full, {
+    get: (t, p) => (p === 'cancelPluginState' ? undefined : t[p]),
+  });
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('a'));
+  sch.holdPluginState(0, true);
+  sch._schedulePresetSwaps(0, 2);
+
+  assert.deepEqual(argsTo('setPluginState'), [], 'still frozen, just without the cancel');
+});
+
+test('a swap is applied a hair before its onset, so the note at that onset survives it', () => {
+  // Loading a program suspends the plugin and resets its voices, in the language, while the notes
+  // at the same onset are timestamped bundles the audio thread plays exactly on time. Applied AT
+  // the onset, the load landed on the note written at it and ate it.
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch._schedulePresetSwaps(1, 2); // cycle 1 is second 2 at cps 0.5
+
+  assert.deepEqual(argsTo('setPluginState').map((c) => c[3]), [2 - LEAD]);
+  assert.ok(LEAD > 0 && LEAD < 0.05, 'small: it is also how much earlier the outgoing preset stops');
+});
+
+test('the lead does not move which preset a knob you turn belongs to', () => {
+  // livePreset answers a question about the music ("what was sounding when I touched it"), not
+  // about how long a plugin takes to swallow a program, so the QUEUE keeps the true onset.
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, clock } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch._schedulePresetSwaps(0, 2);
+
+  clock.now = 2 - (LEAD / 2); // inside the lead: b's program is going in, but a is still sounding
+  assert.equal(sch.livePreset(0), 'a');
+  clock.now = 2;
+  assert.equal(sch.livePreset(0), 'b');
+});
+
+test('the swap for an onset is sent before the notes at it', () => {
+  // A note is a timestamped bundle from the moment the engine handles its message, so whether it
+  // can wait for a program load is decided then - which means the load has to have been announced
+  // by then (see poptart.scd's waitForLoad). Same tick, same window: the order they go out in is
+  // the whole of it, and getting it backwards is what ate the first note of every cycle.
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, calls } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch._tick();
+
+  const order = calls.map((c) => c.method).filter((m) => m === 'setPluginState' || m === 'noteOn');
+  assert.ok(order.length >= 2, `expected a swap and a note, got ${order.join(', ') || 'nothing'}`);
+  assert.equal(order[0], 'setPluginState', 'the swap is announced before the note it lands under');
 });

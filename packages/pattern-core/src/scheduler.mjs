@@ -37,6 +37,15 @@ function hwChannels(hw) {
 }
 
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
+// How far ahead of its onset a preset swap is APPLIED. Loading a program is not instant and not
+// sample-accurate: it suspends the plugin and resets its voices, in the language, while the notes
+// at that same onset arrive as timestamped bundles the audio thread plays exactly on time. A swap
+// applied at the onset therefore lands on top of the note written at it - which is why that note
+// used to disappear. Engine-side, notes for a slot mid-load wait for it and play a moment late
+// rather than not at all (see poptart.scd's waitForLoad); this head start is what usually leaves
+// nothing to wait for. Small on purpose: it is also how much earlier the OUTGOING preset
+// stops sounding, and 30ms is under a 64th note at any tempo anyone plays at.
+const PRESET_SWAP_LEAD_SEC = 0.03;
 const POLL_INTERVAL_MS = 30;
 
 // Free-running Tier-2 LFOs execute on the audio device's sample clock, which ticks at a
@@ -284,6 +293,7 @@ export class Scheduler {
     this._livePresets = new Map(); // slot -> preset name currently sounding (auto-pin writes into it)
     this._presetWarned = new Set(); // "slot name" already complained about, so a bad name says it once
     this._presetHold = new Map(); // slot -> preset the editor is holding it on (see holdPreset)
+    this._stateHold = new Set(); // slots being edited by hand right now (see holdPluginState)
   }
 
   /**
@@ -297,13 +307,57 @@ export class Scheduler {
    * slot for as long as its preset panel is open. Only this slot stops swapping: the notes, the
    * other slots and every other track carry on.
    */
-  holdPreset(slot, name) {
+  holdPreset(slot, name, { force = false } = {}) {
     if (name == null) {
       this._presetHold.delete(slot);
       return null;
     }
     this._presetHold.set(slot, name);
+    // A plugin being edited by hand holds a program nothing else has yet, so loading anything over
+    // it would throw that edit away (see holdPluginState). The panel still takes the slot - it is
+    // the preset the knobs belong to - it just doesn't reload it here. `force` is the one thing
+    // that gets through: picking a preset in the panel is a deliberate "let me hear this one", and
+    // the server captures what your hands did before it asks (see its /api/presetHold route).
+    if (this._stateHold.has(slot) && !force) return null;
     return this._applyPreset(slot, name, this.engine.getTime());
+  }
+
+  /**
+   * Freezes (or thaws) one chain slot's plugin PROGRAM while it is being edited by hand.
+   *
+   * A plugin whose own window you are turning knobs in holds a sound that nothing else has yet:
+   * not this pattern, not the preset store, not the buffer. Every whole-program push into that
+   * slot meanwhile - a `.preset("<a b>")` swap coming round, a pinned `{ state }` re-sent by an
+   * eval - overwrites what you just did with a program that is now out of date, and auto-pin's
+   * capture lands a moment later and puts yours back: the slot audibly flips to the old sound for
+   * a cycle and then to the new one. So while a slot is frozen, whole-program pushes are simply
+   * not made. Nothing else stops: the notes play, the params modulate, the rest of the chain and
+   * every other track carry on, and this slot keeps sounding exactly as your hands left it.
+   *
+   * Who freezes and what thaws them is the server's business (see its hand-editing section): a
+   * slot taken over by hand until the code is touched again, and a capture not yet in the code.
+   */
+  holdPluginState(slot, on) {
+    if (!on) {
+      this._stateHold.delete(slot);
+      return;
+    }
+    if (this._stateHold.has(slot)) return; // already frozen - freezing again cancels nothing new
+    this._stateHold.add(slot);
+    // Swaps are SENT up to a lookahead before their onset and wait engine-side, so the one due in
+    // the next moment was already on its way when your hands reached the plugin. Not cancelling it
+    // is the difference between "the pattern stops swapping" and "the pattern stops swapping after
+    // one more swap" - which is the whole symptom, just later (see OscEngine#cancelPluginState).
+    if (typeof this.engine.cancelPluginState === 'function') {
+      this.engine.cancelPluginState(this.trackId, slot);
+    }
+    // A cancelled swap never reached the plugin, so what _appliedStates believes about this slot is
+    // now a guess. Forget it: the plugin holds whatever the hands make of it from here, and the
+    // first push after the freeze lifts has to be unconditional or the slot can be left sounding a
+    // program the cache thinks it already loaded.
+    for (const key of this._appliedStates.keys()) {
+      if (key.startsWith(`${slot}:`)) this._appliedStates.delete(key);
+    }
   }
 
   /**
@@ -403,6 +457,10 @@ export class Scheduler {
           warnPattern(`[scheduler] track "${this.trackId}" slot ${slot}: .preset(...) drives this plugin, so its pinned { state } is ignored - delete it.`);
           continue;
         }
+        // Being edited by hand: the plugin holds a newer program than this string (see
+        // holdPluginState). Not cached either - when the freeze lifts, the captured program is
+        // what the code says, so this is a no-op then rather than a stale push now.
+        if (this._stateHold.has(slot)) continue;
         const key = `${slot}:${chain[slot]}`;
         if (this._appliedStates.get(key) === state) continue;
         this._appliedStates.set(key, state);
@@ -585,6 +643,9 @@ export class Scheduler {
     // plugins now belongs in its `{ state }` argument, not in a definition (see livePreset).
     this._livePresets.clear();
     this._presetHold.clear();
+    // A stopped track's plugins are no longer playing anything to protect; the server re-asserts
+    // any live hand edit on the evaluation that brings the track back (see its eval route).
+    this._stateHold.clear();
   }
 
   _tick() {
@@ -593,9 +654,15 @@ export class Scheduler {
       const nowSec = this.engine.getTime();
       const targetCycle = this.transport.cycleAt(nowSec + DEFAULT_LOOKAHEAD_SEC);
 
+      // Preset swaps go out FIRST, before the notes of the same window. A note is handed to the
+      // audio thread as a timestamped bundle the moment the engine handles its message - nothing
+      // can hold it back after that - so whether it should wait for a program load is decided
+      // then, from what the engine has already been told. Send the notes first and the swap is
+      // still news when the note at its onset has been committed to play straight through it,
+      // which is exactly the note that was being eaten (see poptart.scd's waitForLoad).
+      this._schedulePresetSwaps(this._scheduledUntilCycle, targetCycle);
       this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle);
       this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
-      this._schedulePresetSwaps(this._scheduledUntilCycle, targetCycle);
       this._scheduledUntilCycle = targetCycle;
 
       this._pollGenericParams(nowSec);
@@ -733,8 +800,11 @@ export class Scheduler {
     for (const [slotStr, sig] of Object.entries(this.pattern.presetPatterns ?? {})) {
       if (!sig.stepsForCycle) continue; // a preset name has to come from a step grid to have an onset
       const slot = Number(slotStr);
-      // Held by the editor: the panel owns this slot until it closes (see holdPreset).
-      if (this._presetHold.has(slot)) continue;
+      // Held by the editor: the panel owns this slot until it closes (see holdPreset), or its
+      // plugin is being edited by hand and holds a program no swap may overwrite (see
+      // holdPluginState). Nothing is queued either, so livePreset goes on naming the preset that
+      // is really sounding - which is the one a knob turned now belongs to.
+      if (this._presetHold.has(slot) || this._stateHold.has(slot)) continue;
       for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
         for (const step of sig.stepsForCycle(cycle)) {
           const at = cycle + step.start;
@@ -749,7 +819,11 @@ export class Scheduler {
           const queue = this._presetQueue(slot);
           queue.push({ atSec, name });
           this._livePresets.set(slot, queue);
-          const why = this._applyPreset(slot, name, atSec);
+          // Applied a hair before the onset it belongs to, so the program is in by the time the
+          // notes at that onset play (see PRESET_SWAP_LEAD_SEC). The QUEUE still carries the true
+          // onset: which preset a knob you turn belongs to is a question about the music, not
+          // about how long a plugin takes to swallow a program.
+          const why = this._applyPreset(slot, name, atSec - PRESET_SWAP_LEAD_SEC);
           if (why && !this._presetWarned.has(`${slot} ${name}`)) {
             this._presetWarned.add(`${slot} ${name}`);
             warnPattern(`[scheduler] track "${this.trackId}" slot ${slot}: ${why}`);
