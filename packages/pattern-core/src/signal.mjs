@@ -13,9 +13,9 @@ import {
   parseNoteValue, noteToMidi, degreeToMidi, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
-import { parseShapePoints, sampleShape } from './shape.mjs';
+import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, looksLikeNoteString } from './pianoroll.mjs';
-import { lookupRoll, registerRoll } from './rolls.mjs';
+import { lookupRoll, registerRoll, lookupShape, registerShape } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
@@ -71,6 +71,22 @@ function warnAndKeep(sig, message) {
 // Said by .sc() when no setscale() has run. Falling back to C major keeps the pattern audible (a
 // silent track mid-set is the worse failure) while naming the one line that's missing.
 const NO_GLOBAL_SCALE = `[signal] .sc() has no scale yet - put setscale("F minor") anywhere in the buffer. Playing in ${DEFAULT_SCALE} until then.`;
+
+// A plugin name is a name, not a pattern. Which plugin is in a slot is fixed for as long as the
+// slot exists - a plugin takes hundreds of milliseconds to open and throws its voices away when it
+// closes - so mini notation here can only mean a misunderstanding, and one that would otherwise
+// surface as "no plugin called <a b>" from the engine, several layers from the code that said it.
+// What CAN vary per step is the plugin's state and its parameters, which is what this points at.
+const PLUGIN_PATTERN_CHARS = /[<>[\]{}|]/;
+
+function assertPluginName(builder, pluginId) {
+  if (typeof pluginId === 'string' && PLUGIN_PATTERN_CHARS.test(pluginId)) {
+    throw new Error(
+      `[signal] ${builder}("${pluginId}") looks like a pattern, but which plugin is loaded can't vary per step. `
+        + 'Pattern its state or its parameters instead - .param("Cutoff", "<0.2 0.8>").',
+    );
+  }
+}
 
 export class Sig {
   /**
@@ -357,7 +373,12 @@ export class Sig {
     }
     // On an LFO, "faster" is its rate - except rand(), which has no pace to scale (see rand()).
     if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
-    if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz: this.lfoIR.rateHz * f });
+    if (this.lfoIR) {
+      const ir = this.lfoIR;
+      return withLfoIR(ir.rateHz != null
+        ? { ...ir, rateHz: ir.rateHz * f }
+        : { ...ir, rateCycles: (ir.rateCycles ?? 1) * f });
+    }
     if (this.envIR) {
       throw new Error("[signal] .fast() on an env() isn't supported - envelope times are set in its options");
     }
@@ -425,12 +446,15 @@ export class Sig {
     return out;
   }
 
-  /** Sets an LFO's rate in Hz, absolutely (unlike .fast(), which multiplies the current rate). */
-  rate(rateHz) {
+  /**
+   * Sets an LFO's rate absolutely (unlike .fast(), which multiplies it): a number of cycles per
+   * pass, or a string like "0.5hz" for a free-running rate that ignores the tempo.
+   */
+  rate(rate) {
     // rand() is the one shape with nothing to pace: it draws afresh at every read, so a rate would
     // only re-index the stream (see rand()). Say so, and play on with the rand unchanged.
     if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
-    if (this.lfoIR) return withLfoIR({ ...this.lfoIR, rateHz });
+    if (this.lfoIR) return withLfoIR(withRate(this.lfoIR, rate));
     throw new Error('[signal] .rate() only applies to LFO signals - on a pattern use .fast()/.slow()');
   }
   phase(phaseCycles) {
@@ -449,6 +473,7 @@ export class Sig {
     // vel("1 0.5").synth("X") plays the default note at those velocities, the same thing
     // "1 0.5".as("vel").synth("X") means - not MIDI notes 1 and 0.5 (see _fromHeadCtl).
     if (this.ctl) return this._fromHeadCtl((trigger) => trigger.synth(pluginId, config));
+    assertPluginName('synth', pluginId);
     return this._clone({
       instrument: pluginId,
       ...(config?.state ? { slotStates: { ...this.slotStates, 0: config.state } } : {}),
@@ -460,6 +485,7 @@ export class Sig {
    * calls. Takes the same optional `{ state }` second argument as synth().
    */
   fx(pluginId, config) {
+    assertPluginName('fx', pluginId);
     const slot = this.fxChain.length + 1; // this fx's chain slot (0 = instrument)
     return this._clone({
       fxChain: [...this.fxChain, pluginId],
@@ -3143,22 +3169,48 @@ function rollPattern(str, opts) {
  * the buffer; ids defined in ~/.poptart/prebake.js are a library shared by every patch, and a
  * buffer definition of the same id wins for that buffer.
  */
-export function roll(id, str = '', opts = {}) {
+export function _roll(id, str = '', opts = {}) {
   if (typeof id !== 'number' && typeof id !== 'string') {
-    throw new Error('[signal] roll(id, notes) takes a number or a name as its id - roll(0, "60,0,4") or roll("chorus", "60,0,4")');
+    throw new Error('[signal] a roll definition takes a number or a name as its id - draw one in the piano roll panel rather than writing it by hand');
   }
   const key = String(id).trim();
   if (!key || /\s/.test(key) || /[<>[\]{}(),*!?~@]/.test(key)) {
     throw new Error(`[signal] a roll id has to be one plain word - ${JSON.stringify(String(id))} can't be written inside pianoroll("<...>")`);
   }
   const sig = pianoroll(str, opts);
-  // Marks this Sig as a DEFINITION rather than a track. A block of roll(...) calls evaluates to
-  // its last one, and without this the host would take that value as a pattern to play - a
-  // definitions block would quietly become an extra voice. Cleared by _clone(), so deliberately
-  // playing a definition (`lead: roll(0, "…").synth("Serum 2")`) still works.
-  sig.rollDef = key;
+  // Marks this Sig as a DEFINITION rather than a track. A block of roll(...) (or shape(...))
+  // calls evaluates to its last one, and without this the host would take that value as a pattern
+  // to play - a definitions block would quietly become an extra voice. Cleared by _clone(), so
+  // deliberately playing a definition (`lead: roll(0, "…").synth("Serum 2")`) still works.
+  sig.isDef = key;
   const replaced = registerRoll(key, sig);
   if (replaced) warnUser(replaced);
+  return sig;
+}
+
+/**
+ * `shape("swell", "0,0,2 0.7,1 1,0")` - files a drawn LFO shape under a name, so a pattern can say
+ * the name instead of carrying the breakpoints: lfo("<swell pluck>"). The editor writes and folds
+ * these away exactly as it does roll(...) definitions; `shape(` is a word you need never type.
+ *
+ * Returns the shape as a plain lfo() signal, so a definition is usable on its own if you want it -
+ * but it is marked as a definition, so a block of them is never mistaken for a track to play.
+ */
+export function _shape(id, str = '') {
+  if (typeof id !== 'number' && typeof id !== 'string') {
+    throw new Error('[signal] a shape definition takes a number or a name as its id - draw one in the lfo panel rather than writing it by hand');
+  }
+  const key = String(id).trim();
+  if (!key || /\s/.test(key) || /[<>[\]{}(),*!?~@]/.test(key)) {
+    throw new Error(`[signal] a shape id has to be one plain word - ${JSON.stringify(String(id))} can't be written inside lfo("<...>")`);
+  }
+  // Parsed here rather than at use time so a typo in the breakpoints is reported against the line
+  // that has them, not against every lfo() that happens to name it.
+  const points = parseShapePoints(String(str).trim() || DEFAULT_LFO_SHAPE);
+  const replaced = registerShape(key, points);
+  if (replaced) warnUser(replaced);
+  const sig = lfo(serializeShapePoints(points));
+  sig.isDef = key; // see _roll(): a definitions block must not become an extra voice
   return sig;
 }
 
@@ -3217,8 +3269,34 @@ function sampleViaSteps(stepsForCycleFn, t, cps, pos) {
   return found ? found.value : null;
 }
 
+// A modulator's rate is in CYCLES by default - rate 1 is one pass per cycle, which is what a
+// pattern means by "once", and what makes lfo("<a b>") play each shape exactly once. Hz is still
+// there for a modulator that should ignore the tempo, written with the unit on it: rate: "0.5hz".
+// A synced rate follows setbpm (the scheduler re-sends it); a free one does not.
+export function parseRate(rate) {
+  if (typeof rate === 'string') {
+    const hz = /^\s*(-?[\d.]+)\s*hz\s*$/i.exec(rate);
+    if (hz && Number.isFinite(Number(hz[1]))) return { rateHz: Number(hz[1]) };
+  }
+  const n = Number(rate);
+  if (!Number.isFinite(n)) {
+    throw new Error(`[signal] rate takes a number of cycles, or a string with the unit for free-running - rate: 2 or rate: "0.5hz" (got ${JSON.stringify(rate)})`);
+  }
+  return { rateCycles: n };
+}
+
+/** What a rate is worth in Hz right now: a free one as written, a synced one against the tempo. */
+export function lfoRateHz(ir, cps = 1) {
+  return ir.rateHz ?? (ir.rateCycles ?? 1) * cps;
+}
+
+/** Replaces whichever rate an IR carries with a newly parsed one. */
+function withRate(ir, rate) {
+  return { ...ir, rateHz: undefined, rateCycles: undefined, ...parseRate(rate) };
+}
+
 function sampleLfoIR(ir, tSeconds, cps, pos) {
-  const total = tSeconds * ir.rateHz + ir.phaseCycles;
+  const total = tSeconds * lfoRateHz(ir, cps) + ir.phaseCycles;
   const phase = ((total % 1) + 1) % 1;
   let unipolar;
   switch (ir.shape) {
@@ -3288,9 +3366,9 @@ function withLfoIR(ir) {
 
 function shapeSignal(shape) {
   return (opts = {}) => {
-    const o = typeof opts === 'number' ? { rate: opts } : opts;
+    const o = typeof opts === 'number' || typeof opts === 'string' ? { rate: opts } : opts; // sine(2), sine("0.5hz")
     const { rate = 1, phase = 0 } = o;
-    const ir = { shape, rateHz: rate, phaseCycles: phase, min: 0, max: 1 };
+    const ir = { shape, ...parseRate(rate), phaseCycles: phase, min: 0, max: 1 };
     // perlin is the only shape built here with a stream to decorrelate (rand() has its own builder
     // below), and it takes a build-time seed off the SAME shared counter choose()/irand()/
     // .degrade() draw from - so independent perlin() calls are independent noise, positionally
@@ -3369,12 +3447,102 @@ const DEFAULT_LFO_SHAPE = '0,0 0.5,1 1,0'; // triangle - what a bare lfo() start
  * 'envelope' (plays once per note over 1/rate seconds, then holds its final level).
  */
 export function lfo(shape, opts = {}) {
-  const { rate = 1, phase = 0, mode = 'free' } = typeof opts === 'number' ? { rate: opts } : opts;
+  const { rate = 1, phase = 0, mode = 'free', glide = 0 } = typeof opts === 'number' || typeof opts === 'string' ? { rate: opts } : opts;
   if (!['free', 'retrigger', 'envelope'].includes(mode)) {
     throw new Error(`[signal] lfo() mode must be 'free', 'retrigger', or 'envelope' (got "${mode}")`);
   }
-  const points = parseShapePoints(typeof shape === 'string' && shape.trim() ? shape : DEFAULT_LFO_SHAPE);
-  return withLfoIR({ shape: 'custom', points, mode, rateHz: rate, phaseCycles: phase, min: 0, max: 1 });
+  const { shapes, names, pattern } = resolveShapeArg(shape);
+  return withLfoIR({
+    shape: 'custom',
+    points: shapes[0], // the shape it starts on; `shapes` is the whole set the engine compiles
+    shapes,
+    shapeNames: names, // what the pattern says, in the order `shapes` holds them
+    shapePattern: pattern, // null unless the argument named more than one
+    glide: Math.max(0, Number(glide) || 0),
+    mode,
+    ...parseRate(rate),
+    phaseCycles: phase,
+    min: 0,
+    max: 1,
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Patterned shapes: lfo("<pluck swell>")
+//
+// A shape is data, not a plugin - swapping one costs nothing but a phase reset, so unlike almost
+// everything else about a modulator it can genuinely change on the beat. The engine compiles every
+// shape the pattern can reach up front and holds one of them; the scheduler says which, timestamped
+// like a note (see _scheduleShapeSwaps).
+//
+// Grouping is what makes the argument a pattern - <>, [], {} or | - deliberately NOT the comma,
+// which is what a breakpoint is made of. So "0,0 0.5,1 1,0" is one hand-drawn shape and
+// "<pluck swell>" is two of them in turn; a drawn shape inside a pattern takes mini's quoting, as
+// any atom with a space in it does: lfo("<'0,0 1,1' pluck>").
+// ---------------------------------------------------------------------------------------------
+
+const SHAPE_PATTERN_CHARS = /[<>[\]{}|]/;
+
+// A name is looked for among the shapes this buffer defines first, then the built-in presets, and
+// is otherwise read as breakpoints - the same buffer-shadows-library rule the roll registry uses,
+// so redefining `pluck` in a patch means your pluck rather than the one that ships.
+function shapeNamed(str) {
+  const name = String(str).trim();
+  // Buffer first, then the built-in presets - the same shadowing rule the roll registry uses.
+  const defined = lookupShape(name);
+  if (defined) return defined;
+  // A comma is what a breakpoint is made of and what a NAME may never contain, so it settles which
+  // of the two this is: drawn data, typos and all, gets parsed and reports its own bad breakpoint.
+  if (name.includes(',') || SHAPE_PRESETS[name]) return parseShapePoints(name);
+  // A name nothing defines - its definition deleted, prebake not run, or simply mistyped. Warn and
+  // play the default shape: a modulator that throws takes the whole buffer down with it, and going
+  // silent over a modulation detail is the worse failure of the two.
+  warnUser(`[signal] no shape called ${JSON.stringify(name)} - playing the default shape until one is defined`);
+  return parseShapePoints(DEFAULT_LFO_SHAPE);
+}
+
+function resolveShapeArg(shape) {
+  // The editor's transpile hands us a Sig for a name pattern (it wraps it in mini() so the
+  // playing shape can be highlighted, exactly as it does a pianoroll's roll ids); a bare string is
+  // what the same code means when typed anywhere the transpile doesn't reach.
+  const sig = shape instanceof Sig ? shape : null;
+  if (!sig) {
+    const str = typeof shape === 'string' && shape.trim() ? shape : DEFAULT_LFO_SHAPE;
+    if (!SHAPE_PATTERN_CHARS.test(str)) return { shapes: [shapeNamed(str)], names: [str.trim()], pattern: null };
+    return namesFrom(mini(str));
+  }
+  return namesFrom(sig);
+}
+
+function namesFrom(sig) {
+  const names = patternNames(sig);
+  if (!names.length) throw new Error('[signal] lfo() names no shape - it patterns nothing to play');
+  const shapes = names.map(shapeNamed);
+  // One shape is not a pattern: nothing to swap to, so it runs as the plain single-shape LFO it
+  // effectively is. A rest changes nothing either - a modulator that stopped would just hold its
+  // value, which is exactly what not swapping already does.
+  return { shapes, names, pattern: shapes.length > 1 ? sig : null };
+}
+
+// How far ahead a name pattern is read. The shapes have to exist BEFORE the pattern reaches them
+// (they are compiled up front, not on the fly), so they are collected from the pattern rather than
+// discovered as it plays; a pattern that only reveals its third shape after 64 cycles is not
+// something to compile from.
+const NAME_SCAN_CYCLES = 64;
+
+/** The distinct values a name pattern names, in the order it first names them. */
+export function patternNames(sig, cycles = NAME_SCAN_CYCLES) {
+  const out = [];
+  for (let c = 0; c < cycles; c++) {
+    const add = (v) => {
+      if (v == null) return;
+      const name = String(v).trim();
+      if (name && !out.includes(name)) out.push(name);
+    };
+    if (sig.stepsForCycle) for (const step of sig.stepsForCycle(c)) add(step.value);
+    else add(readEvent(sig, c).value);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------

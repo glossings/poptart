@@ -56,6 +56,71 @@ const coreReady = Promise.all([
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
 
+// ---------------------------------------------------------------------------------------------
+// The definition registries live UP HERE, against every instinct about grouping, because the
+// session restore below folds the buffer before this file's top level has run past a few hundred
+// lines - and a `const` read inside its own temporal dead zone throws rather than reading
+// undefined. Everything they close over is a hoisted function or is read lazily inside a
+// callback, so nothing here depends on the rest of the file having been reached yet.
+// ---------------------------------------------------------------------------------------------
+
+// The piano roll's drawn notes.
+const rollDefs = makeDefRegistry({
+  kind: 'roll',
+  defCall: '_roll',
+  useCall: 'pianoroll',
+  emptyBody: '""',
+  isData: (str) => (pianorollMod ? pianorollMod.looksLikeNoteString(str) : null),
+  library: () => prPrebakeRolls,
+  libraryNote: 'prebake',
+  panel: {
+    current: () => prState?.rollId ?? null,
+    open: (id, carry) => openRollById(id, carry),
+    close: () => closePianorollEditor(),
+    carry: () => prCarry(),
+    sourceCall: (refs) => sourceCallAmong(refs, prState?.source),
+    setCurrent: (from, to) => {
+      if (prState?.rollId === from) {
+        prState.rollId = to;
+        prState.idLiteral = JSON.stringify(to);
+      }
+    },
+    syncHead: () => prSyncRollHead(),
+    scheduleEval: () => prScheduleEval(),
+  },
+});
+
+// The LFO's drawn shapes. Its "library" is the built-in presets plus prebake's, which is why a
+// buffer that defines its own `pluck` shadows the one that ships - the same buffer-first rule the
+// roll registry uses.
+const shapeDefs = makeDefRegistry({
+  kind: 'shape',
+  defCall: '_shape',
+  useCall: 'lfo',
+  emptyBody: '"0,0 0.5,1 1,0"',
+  isData: (str) => (shapeMod ? shapeMod.looksLikeShapeData(str) : null),
+  library: () => [...Object.keys(shapeMod?.SHAPE_PRESETS ?? {}), ...prPrebakeShapes],
+  libraryNote: 'preset',
+  panel: {
+    current: () => lfoState?.shapeId ?? null,
+    open: (id) => openShapeById(id),
+    close: () => closeLfoEditor(),
+    carry: () => null, // the shape panel has no view state to carry, and follows nothing
+    sourceCall: () => null, // ...so a rename here is always a plain rename, never a fork
+    setCurrent: (from, to) => {
+      if (lfoState?.shapeId === from) {
+        lfoState.shapeId = to;
+        lfoState.idLiteral = JSON.stringify(to);
+      }
+    },
+    syncHead: () => lfoSyncHead(),
+    scheduleEval: () => lfoScheduleEval(),
+  },
+});
+
+// Every registry, for the passes that have to run over all of them (folding, auto-naming).
+const DEF_REGISTRIES = [rollDefs, shapeDefs];
+
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
@@ -408,7 +473,13 @@ function setBufferQuietly(code) {
 
 // Opening the app: a reload of this tab keeps whatever was in the buffer, otherwise the hash
 // decides (a shared link, a history entry, or nothing - the default snippet).
-(async () => {
+//
+// Deferred by a microtask rather than run where it stands: restoring a buffer folds it, and folding
+// reads declarations from all over this file. Top-level code runs as the file is being evaluated,
+// so anything declared below here is still in its temporal dead zone - and a `const` read there
+// throws rather than reading undefined. A microtask drains as soon as evaluation finishes, which is
+// still before the first paint, so nothing flashes; it just happens after everything exists.
+queueMicrotask(async () => {
   const restored = sessionStorage.getItem(RESTORE_KEY);
   if (restored !== null) {
     // The name goes back with the buffer it belongs to, even when the buffer itself is already
@@ -453,7 +524,7 @@ function setBufferQuietly(code) {
       .then(({ id }) => history.replaceState(null, '', `#s=${id}`))
       .catch(() => {}); // the long hash keeps working - nothing to tell the user
   }
-})();
+});
 
 // Back/Forward: put that state back in the editor. No confirm needed - the buffer being replaced
 // keeps its own work-in-progress file on the way out (rollWipSession), so navigating away from
@@ -522,7 +593,7 @@ window.addEventListener('popstate', async () => {
 // Click a widget to expand it; everything re-folds on load and after each eval.
 // ---------------------------------------------------------------------------------------------
 
-// Roll definitions are hidden outright by default - see foldRollRuns. Off, they come back as
+// Definitions are hidden outright by default - see foldDefRuns. Off, they come back as
 // ordinary code (still chipped, so the note data itself stays out of the way).
 const HIDE_ROLL_DEFS_KEY = 'poptart-hide-roll-defs';
 let hideRollDefs = localStorage.getItem(HIDE_ROLL_DEFS_KEY) !== '0'; // default on
@@ -589,16 +660,18 @@ function foldConfigBlobs() {
   while ((m = dataArgRe.exec(code))) {
     const str = m[2];
     if (str.length <= 2) continue; // "" - already as small as it gets
-    // pianoroll("<0 chorus>") names rolls, and those names ARE the code to read - the whole point
-    // of the id form. Only drawn note data folds. Until pianoroll.mjs has loaded the two can't be
-    // told apart, so nothing folds rather than the wrong thing; coreReady refolds once it can.
-    if (m[1] === 'pianoroll' && (!pianorollMod || isRollIdString(str.slice(1, -1)))) continue;
+    // pianoroll("<0 chorus>") names rolls, and lfo("<pluck swell>") names shapes - those names ARE
+    // the code to read, the whole point of the named form. Only drawn data folds. Until the module
+    // that can tell them apart has loaded, nothing folds rather than the wrong thing; coreReady
+    // refolds once it can.
+    if (m[1] === 'pianoroll' && (!pianorollMod || rollDefs.isIdString(str.slice(1, -1)))) continue;
+    if (m[1] === 'lfo' && !shapeMod?.looksLikeShapeData(str.slice(1, -1))) continue;
     const start = m.index + m[0].length - str.length;
     foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]]);
   }
-  // A whole run of roll(...) definitions collapses first, so the note-string folds below find its
-  // chip already covering them and leave well alone.
-  foldRollRuns(code);
+  // A whole run of definitions collapses first, so the data-string folds below find its chip
+  // already covering them and leave well alone.
+  for (const reg of DEF_REGISTRIES) foldDefRuns(code, reg);
   // roll(id, "notes", …) - the same note data, one argument further along. The id stays visible:
   // it is the name the patterns say, and the whole point of a definitions block is reading it.
   const rollArgRe = /\broll\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|[^,()\n]*?)\s*,\s*("(?:[^"\\\n]|\\.)*")/g;
@@ -613,15 +686,15 @@ function foldConfigBlobs() {
 // How many ids a chip spells out before it starts counting instead.
 const ROLL_CHIP_IDS = 6;
 
-// A run of consecutive roll(...) definitions is a library rather than music: it plays nothing (the
-// server drops every rollDef sig) and what it holds is editor-written note data that no one - least
-// of all an audience - wants to read. So the whole run, its `rolls:` label and the blank line after
-// it, is hidden outright: the buffer keeps every character, the screen shows none of them. Rolls
-// are named, opened, renamed and drawn from the piano roll panel, which is where they are actually
-// worked on. Turn `hide roll definitions` off in settings to get them back as ordinary code, folded
-// to a chip that names what it holds.
-function foldRollRuns(code) {
-  for (const run of rollRuns(code)) {
+// A run of consecutive definitions is a library rather than music: it plays nothing (the server
+// drops every definition sig) and what it holds is editor-written data that no one - least of all
+// an audience - wants to read. So the whole run, its `rolls:`/`shapes:` label and the blank line
+// after it, is hidden outright: the buffer keeps every character, the screen shows none of them.
+// They are named, opened, renamed and drawn from their own editor panel, which is where they are
+// actually worked on. Turn `hide drawn definitions` off in settings to get them all back as
+// ordinary code, folded to a chip that names what each run holds.
+function foldDefRuns(code, reg) {
+  for (const run of reg.runs(code)) {
     const [from, to] = runLineRange(code, run);
     if (hideRollDefs && hideSpan(from, to)) continue;
     const ids = run.map((d) => d.id);
@@ -632,8 +705,8 @@ function foldRollRuns(code) {
     foldSpan(
       run[0].start,
       run[run.length - 1].close + 1,
-      `⋯ ${ids.length === 1 ? 'roll' : 'rolls'}: ${shown.join(', ')}`,
-      `${ids.length} roll definition${ids.length === 1 ? '' : 's'} — click to expand`
+      `⋯ ${reg.kind}${ids.length === 1 ? '' : 's'}: ${shown.join(', ')}`,
+      `${ids.length} ${reg.kind} definition${ids.length === 1 ? '' : 's'} — click to expand`
     );
   }
 }
@@ -659,35 +732,6 @@ function runLineRange(code, run) {
     if (/^\s*[A-Za-z_$][\w$]*\s*:\s*$/.test(code.slice(prevStart, lineStart - 1))) from = prevStart;
   }
   return [from, to];
-}
-
-// Groups the buffer's roll definitions into the runs that fold together. A definition joins a run
-// when it stands alone as a statement and nothing but blank space, a `;` or a comment separates it
-// from the one before. Two things drop out of runs entirely:
-//   - a definition that CHAINS (`lead: roll(0, "…").synth("Serum 2")`) - _clone() drops the rollDef
-//     mark, so that one is a playing track and its code is code to read
-//   - one that isn't the start of its own statement (`const a = roll(…)`), where folding from the
-//     `roll` token would leave a dangling `const a =`
-function rollRuns(code) {
-  const isCode = codeOnly(code);
-  const runs = [];
-  let prevEnd = -1;
-  for (const def of rollDefsInBuffer(code)) {
-    const after = code.slice(def.close + 1);
-    const head = code.slice(code.lastIndexOf('\n', def.start - 1) + 1, def.start);
-    const standalone = /^\s*$/.test(head) || /^\s*[A-Za-z_$][\w$]*\s*:\s*$/.test(head);
-    if (!standalone || /^\s*[.[(]/.test(after)) { prevEnd = -1; continue; }
-    // Only filler may sit between two definitions of the same run - and a comment there is filler
-    // whatever it says, so the mask decides which characters have to be blank.
-    const gap = prevEnd < 0 ? null : code.slice(prevEnd, def.start);
-    const joins =
-      gap !== null &&
-      [...gap].every((ch, i) => isCode(prevEnd + i) === false || /[\s;]/.test(ch));
-    if (joins) runs[runs.length - 1].push(def);
-    else runs.push([def]);
-    prevEnd = def.close + 1;
-  }
-  return runs;
 }
 
 // Undo and redo put the text back but not the marks an edit cleared along the way, so a cmd-Z can
@@ -1604,6 +1648,22 @@ function initWidgetHandles() {
 function openWidgetAt(code, idx) {
   const lfo = shapeMod && findLfoCallAt(code, idx);
   if (lfo?.onName) {
+    // An empty lfo() has neither a shape nor a name yet. Give it both, then open whatever it
+    // became - a bookmark carries the handle's position across the rewrite, since a definitions
+    // block inserted above moves every offset below it along. Same dance as pianoroll's.
+    if (!code.slice(lfo.open + 1, lfo.close).trim()) {
+      const at = cm.setBookmark(cm.posFromIndex(idx));
+      const named = shapeDefs.materialize();
+      const back = at.find();
+      at.clear();
+      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+    }
+    // lfo("<pluck swell>") NAMES shapes rather than drawing them, so open the definition instead:
+    // writing breakpoints back into this call would serialize them over the names.
+    if (shapeDefs.isIdCall(code.slice(lfo.open + 1, lfo.close))) {
+      openShapeFromIdCall(lfo, code);
+      return true;
+    }
     if (!lfoState || lfo.start !== lfoState.callStart) openLfoEditor(lfo);
     return true;
   }
@@ -1614,7 +1674,7 @@ function openWidgetAt(code, idx) {
     // block inserted above moves every offset below it along.
     if (!code.slice(roll.open + 1, roll.close).trim()) {
       const at = cm.setBookmark(cm.posFromIndex(idx));
-      const named = materializeRolls();
+      const named = rollDefs.materialize();
       const back = at.find();
       at.clear();
       if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
@@ -1623,7 +1683,7 @@ function openWidgetAt(code, idx) {
     // definitions, so open whichever one is playing and follow the call from there. Writing notes
     // back into this call would serialize them over the ids, which is why it is never opened
     // directly.
-    if (isRollIdCall(code.slice(roll.open + 1, roll.close))) {
+    if (rollDefs.isIdCall(code.slice(roll.open + 1, roll.close))) {
       openRollFromIdCall(roll, code);
       return true;
     }
@@ -1710,8 +1770,17 @@ const lfoRandom = document.getElementById('lfoRandom');
 const lfoCloseBtn = document.getElementById('lfoClose');
 const lfoRate = document.getElementById('lfoRate');
 const lfoMode = document.getElementById('lfoMode');
+const lfoTitle = document.getElementById('lfoTitle');
+const lfoPickWrap = document.getElementById('lfoPickWrap');
+const lfoName = document.getElementById('lfoName');
+const lfoPickBtn = document.getElementById('lfoPickBtn');
+const lfoPickBox = document.getElementById('lfoPicker');
+const lfoSearch = document.getElementById('lfoSearch');
+const lfoPickList = document.getElementById('lfoPickList');
+const lfoRateWrap = document.getElementById('lfoRateWrap');
+const lfoModeWrap = document.getElementById('lfoModeWrap');
 
-let lfoState = null; // { marker, callStart, points, rate, mode }
+let lfoState = null; // { marker, callStart, points, rate, mode, shapeId, idLiteral }
 let lfoSuppressCursor = false;
 const LFO_EVAL_DEBOUNCE_MS = 150; // quiet time after the last shape edit before it re-evaluates
 
@@ -1724,7 +1793,12 @@ function findLfoCallAt(code, idx) {
 
 function parseLfoCall(inner) {
   const shapeMatch = /(["'])((?:\\.|(?!\1).)*?)\1/.exec(inner);
-  const rate = Number((/rate\s*:\s*([\d.]+)/.exec(inner) ?? [])[1] ?? 1) || 1;
+  // rate: 2 is cycles (one pass per cycle at 1); rate: "0.5hz" is free-running - the same two
+  // spellings the builder takes, see parseRate in signal.mjs.
+  const rateM = /rate\s*:\s*(?:["']([^"']*)["']|([\d.]+))/.exec(inner);
+  const rateText = String(rateM ? rateM[1] ?? rateM[2] : '1');
+  const rateHz = /hz\s*$/i.test(rateText);
+  const rate = Number(rateText.replace(/hz\s*$/i, '')) || 1;
   const mode = (/mode\s*:\s*["'](\w+)["']/.exec(inner) ?? [])[1] ?? 'free';
   let points = null;
   try {
@@ -1733,12 +1807,50 @@ function parseLfoCall(inner) {
     // unparseable shape string - fall back to the default below
   }
   if (!points) points = shapeMod.parseShapePoints('0,0 0.5,1 1,0');
-  return { points, rate, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
+  return { points, rate, rateHz, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
 }
 
-function serializeLfoCall({ points, rate, mode }) {
-  const cfg = mode === 'free' ? `{ rate: ${rate} }` : `{ rate: ${rate}, mode: '${mode}' }`;
-  return `lfo("${shapeMod.serializeShapePoints(points)}", ${cfg})`;
+// The options an lfo() call carries - the half that belongs to the CALL rather than to the shape.
+function lfoCfgText({ rate, rateHz, mode }) {
+  const r = rateHz ? `"${rate}hz"` : String(rate);
+  return mode === 'free' ? `{ rate: ${r} }` : `{ rate: ${r}, mode: '${mode}' }`;
+}
+
+function serializeLfoCall(state) {
+  const pts = shapeMod.serializeShapePoints(state.points);
+  // A definition holds the shape and nothing else: rate and mode are how one lfo() PLAYS a shape,
+  // and two calls naming the same shape are free to play it at different rates.
+  if (state.idLiteral) return `_shape(${state.idLiteral}, "${pts}")`;
+  return `lfo("${pts}", ${lfoCfgText(state)})`;
+}
+
+// Rate and mode for a shape opened THROUGH an lfo() call go back into that call, since that is
+// where they live. Opened from the picker there is no call to write to, and the panel hides them.
+function writeLfoOptions() {
+  const range = lfoState?.callSource?.find();
+  if (!range) return;
+  const text = cm.getRange(range.from, range.to);
+  const open = text.indexOf('(');
+  const close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return;
+  const [first] = splitFirstArg(text.slice(open + 1, close));
+  const next = `lfo(${first}, ${lfoCfgText(lfoState)})`;
+  lfoSuppressCursor = true;
+  try {
+    cm.replaceRange(next, range.from, range.to);
+    lfoState.callSource.clear();
+    const startIdx = cm.indexFromPos(range.from);
+    lfoState.callSource = cm.markText(range.from, cm.posFromIndex(startIdx + next.length), {});
+  } finally {
+    lfoSuppressCursor = false;
+  }
+  lfoScheduleEval();
+}
+
+/** Whichever of the two the current state should write to. */
+function writeLfoRateMode() {
+  if (lfoState?.idLiteral) writeLfoOptions();
+  else writeLfoCall();
 }
 
 function openLfoEditor(call) {
@@ -1746,17 +1858,67 @@ function openLfoEditor(call) {
   const to = cm.posFromIndex(call.close + 1);
   const inner = cm.getValue().slice(call.open + 1, call.close);
   if (lfoState?.marker) lfoState.marker.clear();
-  lfoState = { marker: cm.markText(from, to, {}), callStart: call.start, ...parseLfoCall(inner) };
+  // A shape(...) definition is an lfo() with a name in front of it - drop the name and the rest
+  // reads identically, exactly as a roll(...) reads as a pianoroll().
+  lfoState = {
+    marker: cm.markText(from, to, {}),
+    callStart: call.start,
+    // Set when this is a shape(...) definition: the name it is filed under, and the literal to
+    // write back. Null for an inline lfo(...), which is the whole of its own modulator.
+    shapeId: call.id ?? null,
+    idLiteral: call.idLiteral ?? null,
+    // The lfo() a definition was opened THROUGH, if any: rate and mode belong to it, not to the
+    // shape, so that is where the panel's rate control writes. Null when opened from the picker.
+    callSource: call.callSource ?? null,
+    ...parseLfoCall(call.idLiteral ? splitFirstArg(inner)[1] : inner),
+    ...(call.options ?? {}),
+  };
   lfoRate.value = lfoState.rate;
   lfoMode.value = lfoState.mode;
   lfoPreset.value = '';
+  lfoSyncHead();
+  if (!lfoRaf) lfoRaf = requestAnimationFrame(lfoPlayheadLoop); // sweep the playhead while it runs
   lfoPanel.classList.remove('hidden');
   drawLfoShape();
 }
 
+/** Puts shape `id`'s definition under the editor. False (and a line) if this buffer hasn't got one. */
+function openShapeById(id, from = {}) {
+  const def = shapeDefs.defsInBuffer().find((d) => d.id === String(id));
+  if (!def) {
+    logLine(
+      shapeDefs.allIds().some((r) => r.id === String(id))
+        ? `shape "${id}" is a built-in preset - it has no definition here to edit. Make one of your own and it will shadow it.`
+        : `no shape(${JSON.stringify(String(id))}, …) in this buffer to open`,
+      true
+    );
+    return false;
+  }
+  openLfoEditor({ ...def, ...from });
+  return true;
+}
+
+// lfo("<pluck swell>") NAMES shapes rather than drawing them: the breakpoints live in the
+// shape(...) definitions, so open the first one it names. Unlike a roll there is no following from
+// here - a modulator has no note grid for the highlighter to light - so the panel stays put.
+function openShapeFromIdCall(call, code) {
+  const range = idStringRange(call, code);
+  const id = range && (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0];
+  if (id == null) return false;
+  // Marked so the panel's rate/mode controls can write back into this call while a definition of
+  // its own is on screen (see writeLfoOptions).
+  const callSource = cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {});
+  const { rate, rateHz, mode } = parseLfoCall(code.slice(call.open + 1, call.close));
+  if (openShapeById(id, { callSource, options: { rate, rateHz, mode } })) return true;
+  callSource.clear();
+  return false;
+}
+
 function closeLfoEditor() {
   if (lfoState?.marker) lfoState.marker.clear();
+  if (lfoState?.callSource) lfoState.callSource.clear();
   lfoState = null;
+  lfoHead.closePicker(false);
   lfoPanel.classList.add('hidden');
 }
 
@@ -1799,17 +1961,26 @@ function syncLfoFromCode() {
   // that closes it by itself now that opening is an explicit double-click.
   if (!range) { closeLfoEditor(); return; }
   const text = cm.getRange(range.from, range.to);
-  if (!/^\s*lfo\s*\(/.test(text)) { closeLfoEditor(); return; }
+  // The call must still be the KIND the panel opened: a definition edited back into a plain lfo()
+  // (or the other way round) is a different thing to be editing.
+  if (!(lfoState.idLiteral ? /^\s*shape\s*\(/ : /^\s*lfo\s*\(/).test(text)) { closeLfoEditor(); return; }
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
-  const parsed = parseLfoCall(text.slice(open + 1, close));
+  const body = text.slice(open + 1, close);
+  const parsed = parseLfoCall(lfoState.idLiteral ? splitFirstArg(body)[1] : body);
   lfoState.callStart = cm.indexFromPos(range.from);
   lfoState.points = parsed.points;
-  lfoState.rate = parsed.rate;
-  lfoState.mode = parsed.mode;
-  lfoRate.value = parsed.rate;
-  lfoMode.value = parsed.mode;
+  // A _shape(...) definition carries no rate or mode - those live on the lfo() that names it, so
+  // re-reading the definition must not reset them to the parse's defaults.
+  if (!lfoState.idLiteral) {
+    lfoState.rate = parsed.rate;
+    lfoState.rateHz = parsed.rateHz;
+    lfoState.mode = parsed.mode;
+  }
+  lfoRate.value = lfoState.rate;
+  lfoMode.value = lfoState.mode;
+  lfoSyncHead();
   drawLfoShape();
 }
 
@@ -1820,6 +1991,33 @@ function initLfoEditor() {
   // call itself leaving the buffer - see syncLfoFromCode. Nothing about where the text cursor
   // happens to be: a panel you asked for stays put while you edit around it.
   cm.on('change', syncLfoFromCode); // hand edits to the open call flow back into the panel
+
+  // The head: the name is the title and typing over it renames the shape everywhere it is played;
+  // the ▾ behind it searches every shape there is and offers to make one that matches nothing.
+  // Same gestures as the piano roll's, because it is the same widget (see makeNamePicker).
+  lfoName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); lfoName.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); lfoHead.revertName(); lfoName.blur(); return; }
+    e.stopPropagation();
+  });
+  lfoName.addEventListener('blur', () => lfoHead.commitName());
+
+  lfoPickBtn.addEventListener('click', () => {
+    if (lfoHead.isOpen()) lfoHead.closePicker();
+    else lfoHead.openPicker();
+  });
+  lfoSearch.addEventListener('input', () => lfoHead.renderList(true));
+  lfoSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); lfoHead.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); lfoHead.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); lfoHead.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); lfoHead.closePicker(); return; }
+    e.stopPropagation();
+  });
+  // Anywhere else is "never mind" - including the canvas, which is where you were headed anyway.
+  document.addEventListener('mousedown', (e) => {
+    if (lfoHead.isOpen() && !lfoPickWrap.contains(e.target)) lfoHead.closePicker(false);
+  });
 
   lfoPreset.addEventListener('change', () => {
     if (!lfoState || !lfoPreset.value) return;
@@ -1843,16 +2041,28 @@ function initLfoEditor() {
   lfoRate.addEventListener('change', () => {
     if (!lfoState) return;
     lfoState.rate = Math.max(0.01, Number(lfoRate.value) || 1);
-    writeLfoCall();
+    writeLfoRateMode();
   });
   lfoMode.addEventListener('change', () => {
     if (!lfoState) return;
     lfoState.mode = lfoMode.value;
-    writeLfoCall();
+    writeLfoRateMode();
+  });
+  // Cycles or hz. Same number, different unit - the value stays put so the toggle reads as "what
+  // does this 2 mean", not as a conversion.
+  lfoRateUnit.addEventListener('click', () => {
+    if (!lfoState) return;
+    lfoState.rateHz = !lfoState.rateHz;
+    lfoSyncHead();
+    writeLfoRateMode();
+    drawLfoShape();
   });
   lfoCloseBtn.addEventListener('click', () => closeLfoEditor());
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && lfoState) closeLfoEditor();
+    if (e.key !== 'Escape' || !lfoState) return;
+    // Innermost first: the dropdown, then the panel. The name field stops the event itself.
+    if (lfoHead.isOpen()) { e.preventDefault(); lfoHead.closePicker(); return; }
+    closeLfoEditor();
   });
 
   initLfoCanvas();
@@ -1875,6 +2085,27 @@ function canvasToLfo(px, py) {
     x: Math.min(1, Math.max(0, (px - LFO_PAD) / w)),
     y: Math.min(1, Math.max(0, 1 - (py - LFO_PAD) / h)),
   };
+}
+
+// The LFO's phase at this instant, 0..1, or null when there is nothing honest to draw: the panel
+// is closed, the transport is stopped, or the shape is note-gated (its phase belongs to the notes,
+// which the browser doesn't see). A synced rate counts in cycles, a free one in seconds - the same
+// two readings lfoRateHz makes of the same number.
+function lfoPhaseNow() {
+  if (!lfoState || transport.paused || lfoState.mode !== 'free') return null;
+  const cycles = lfoState.rateHz
+    ? (Date.now() / 1000 - transport.baseSec) * lfoState.rate
+    : currentCyclePos() * lfoState.rate;
+  return ((cycles % 1) + 1) % 1;
+}
+
+// One repaint per frame while the panel is open and the clock is running. Stops itself when the
+// panel closes, like the piano roll's own loop.
+let lfoRaf = null;
+function lfoPlayheadLoop() {
+  if (!lfoState) { lfoRaf = null; return; }
+  if (!transport.paused && lfoState.mode === 'free') drawLfoShape();
+  lfoRaf = requestAnimationFrame(lfoPlayheadLoop);
 }
 
 function drawLfoShape() {
@@ -1914,6 +2145,22 @@ function drawLfoShape() {
     ctx.strokeStyle = col('--accent');
     ctx.lineWidth = 1.5;
     ctx.stroke();
+  }
+
+  // Where the shape is right now, as a line down the canvas. Only in free mode: retrigger and
+  // envelope shapes are started by notes, and a line running on the transport's clock would be
+  // pointing at the wrong place in the shape for most of the bar.
+  const phase = lfoPhaseNow();
+  if (phase != null) {
+    const x = LFO_PAD + (W - 2 * LFO_PAD) * phase;
+    ctx.strokeStyle = col('--accent');
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, LFO_PAD);
+    ctx.lineTo(x, H - LFO_PAD);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -2113,6 +2360,7 @@ let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // fold the r
 // switching what you HEAR either way. Sticky, like the tool and fold settings.
 let prFollowLocked = localStorage.getItem('poptartPianorollLock') === '1';
 let prPrebakeRolls = []; // ids from ~/.poptart/prebake.js: listed in the picker, not editable here
+let prPrebakeShapes = []; // the same for shape(...) definitions
 let prRaf = null; // requestAnimationFrame handle for the playhead sweep
 let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
 let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
@@ -2235,19 +2483,6 @@ function prPreviewNotes(notes) {
   if (live.length) prPreview(Math.max(...live.map((n) => n.midi)));
 }
 
-// Does this string name rolls by id (`<0 chorus>`) rather than draw notes? The shape test itself
-// is pattern-core's (pianoroll.mjs's looksLikeNoteString), so the editor, the builder and the
-// location transpile can never disagree about which form a call is in. Before the module loads the
-// answer is "notes" - the safe one, since it only costs a fold, and coreReady re-derives those.
-function isRollIdString(str) {
-  return !!pianorollMod && !!String(str).trim() && !pianorollMod.looksLikeNoteString(str);
-}
-
-// The same question asked of a whole pianoroll(...) argument list.
-function isRollIdCall(inner) {
-  return isRollIdString(/(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner)?.[2] ?? '');
-}
-
 // Splits `roll(id, "notes", { … })`'s argument list at its first TOP-LEVEL comma - the id, then
 // exactly what pianoroll() itself takes. String- and bracket-aware, so a comma inside the note
 // string or the options object doesn't count.
@@ -2267,34 +2502,6 @@ function splitFirstArg(inner) {
     else if (ch === ',' && depth === 0) return [inner.slice(0, i).trim(), inner.slice(i + 1)];
   }
   return [inner.trim(), ''];
-}
-
-// The id a roll(...) files itself under, read off its first argument's literal - a quoted name or
-// a bare number, matching String(id) on the builder's side. Null for anything else (an id built
-// from a variable is real code, and not something the editor can rewrite).
-function rollIdOf(literal) {
-  const quoted = /^(["'])((?:\\.|(?!\1).)*)\1$/.exec(literal);
-  if (quoted) return quoted[2];
-  return /^-?\d+(?:\.\d+)?$/.test(literal) ? String(Number(literal)) : null;
-}
-
-// Every roll(...) definition in the buffer: { id, idLiteral, start, open, close }. Commented-out
-// ones are skipped - they define nothing, so there is nothing there to open.
-function rollDefsInBuffer(code = cm.getValue()) {
-  const isCode = codeOnly(code);
-  const re = /\broll\s*\(/g;
-  const out = [];
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    if (!isCode(m.index)) continue;
-    const open = m.index + m[0].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0) continue;
-    const [idLiteral] = splitFirstArg(code.slice(open + 1, close));
-    const id = rollIdOf(idLiteral);
-    if (id != null) out.push({ id, idLiteral, start: m.index, open, close });
-  }
-  return out;
 }
 
 // The document range of a pianoroll(...) call's id STRING content - what the playback highlighter
@@ -2347,151 +2554,80 @@ function serializePianorollCall({ notes, grid, len, start, idLiteral }) {
 // is spoken for) and a definition; and an id a pattern NAMES but nothing defines - the second half
 // of `pianoroll("<lead alt>")` - gets an empty definition too, which is how a second roll comes
 // into being. The definitions go in a block at the top of the buffer and are hidden from the screen
-// (see foldRollRuns), so `roll(` is a word the user need never read or write. The console says what
+// (see foldDefRuns), so `roll(` is a word the user need never read or write. The console says what
 // was created, so a typo makes an empty roll you can SEE rather than silence you have to work out.
 // ---------------------------------------------------------------------------------------------
 
-// Every pianoroll(...) call whose argument names rolls, with the span of the id string inside it.
-function pianorollIdCalls(code) {
-  const isCode = codeOnly(code);
-  const re = /\bpianoroll\s*\(/g;
-  const out = [];
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    if (!isCode(m.index)) continue;
-    const open = m.index + m[0].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0 || !isRollIdCall(code.slice(open + 1, close))) continue;
-    const range = idStringRange({ open, close }, code);
-    if (range) out.push({ start: m.index, open, close, from: range[0], to: range[1], str: code.slice(range[0], range[1]) });
-  }
-  return out;
+// ---------------------------------------------------------------------------------------------
+// Named definitions: one registry, three kinds of data
+//
+// `roll("lead", "…")` keeps drawn notes under a name so a pattern can say the name instead of
+// carrying the notes; `shape("swell", "…")` does the same for a drawn LFO shape. They are the same
+// idea applied to different data, and - more to the point - the same handful of fiddly text edits:
+// find the definitions, hide them, name a new one after its track, rename one everywhere it is
+// played, split one that two patterns share, delete one nothing plays any more. That is what this
+// factory holds. Each kind supplies the words (which call defines one, which call names them, what
+// an empty one looks like) and the hooks its editor panel needs; everything else is shared, which
+// is why a fix like "don't fold a name as if it were data" only has to be made once.
+//
+// The definitions are ordinary code in the buffer - export, undo, share links and git see the whole
+// patch - and the editor folds them out of the way rather than storing them anywhere else.
+// ---------------------------------------------------------------------------------------------
+
+// A name has to survive being written inside a mini pattern - pianoroll("<lead pad>") - so it is
+// one plain word: no whitespace and none of mini's own punctuation. Same rule the builders apply
+// on their own side (see signal.mjs).
+const DEF_ID_BAD = /[\s<>[\]{}(),*!?~@|:/"'`.]/;
+
+// The id a definition files itself under, read off its first argument's literal - a quoted name or
+// a bare number, matching String(id) on the builder's side. Null for anything else (an id built
+// from a variable is real code, and not something the editor can rewrite).
+function idLiteralValue(literal) {
+  const quoted = /^(["'])((?:\\.|(?!\1).)*)\1$/.exec(literal);
+  if (quoted) return quoted[2];
+  return /^-?\d+(?:\.\d+)?$/.test(literal) ? String(Number(literal)) : null;
 }
 
-// The ids a pianoroll("…") string names. Mini's own modifiers are stripped first so the `2` of
-// `<a b>*2` isn't read as a roll called 2, and `~` (a rest) and `_` (hold) are the notation's own
-// words rather than names.
+// The ids a "<a b>" string names. Mini's own modifiers are stripped first so the `2` of `<a b>*2`
+// isn't read as a name, and `~` (a rest) and `_` (hold) are the notation's own words.
 function idsNamedIn(str) {
   const bare = String(str).replace(/[*/!@:]\s*\d+(?:\.\d+)?/g, ' ');
   return [...new Set((bare.match(/[A-Za-z_$][\w$]*|\d+(?:\.\d+)?/g) ?? []).filter((w) => w !== '_'))];
 }
 
-// A new roll is named after the track it is in - `lead` reads far better in the picker than `1` -
-// and falls back to `roll` where the block has no name of its own. A number is appended only to
-// break a tie, so the common case is the plain track name.
-function freshRollId(label, taken) {
-  const base = /^[A-Za-z_][\w]*$/.test(label ?? '') ? label : 'roll';
-  if (!taken.has(base)) return base;
-  for (let i = 2; ; i++) if (!taken.has(`${base}${i}`)) return `${base}${i}`;
-}
-
-// Where a new definition goes: appended to the buffer's first run of them, or a fresh block at the
-// very top. Returns the edit as [from, to, text] against `code`.
-function rollDefsEdit(code, ids) {
-  const lines = ids.map((id) => `  roll(${JSON.stringify(id)}, "")`);
-  const runs = rollRuns(code);
-  if (runs.length) {
-    const at = runs[0][runs[0].length - 1].close + 1;
-    return [at, at, `\n${lines.join('\n')}`];
-  }
-  return [0, 0, `rolls:\n${lines.join('\n')}\n\n`];
-}
-
-/** Gives every un-named and un-defined roll in the buffer a definition. True if it wrote anything. */
-function materializeRolls() {
-  if (!pianorollMod || !labelsMod) return false;
-  const code = cm.getValue();
-  const taken = new Set([...rollDefsInBuffer(code).map((d) => d.id), ...prPrebakeRolls]);
-  const created = []; // in the order they were first named, which is the order they are written
-  const rewrites = []; // [from, to, text] against `code`, applied last-first so offsets hold
-
-  const isCode = codeOnly(code);
-  const bare = /\bpianoroll\s*\(\s*\)/g;
-  let m;
-  while ((m = bare.exec(code)) !== null) {
-    if (!isCode(m.index)) continue;
-    const id = freshRollId(prBlockLabelAt(m.index), taken);
-    taken.add(id);
-    created.push(id);
-    rewrites.push([m.index, m.index + m[0].length, `pianoroll(${JSON.stringify(id)})`]);
-  }
-  for (const call of pianorollIdCalls(code)) {
-    for (const id of idsNamedIn(call.str)) {
-      if (taken.has(id)) continue;
-      taken.add(id);
-      created.push(id);
-    }
-  }
-  if (!created.length) return false;
-
-  cm.operation(() => {
-    for (let i = rewrites.length - 1; i >= 0; i--) {
-      const [from, to, text] = rewrites[i];
-      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-    }
-    // Computed after the rewrites, since an inserted id moves everything below it along.
-    const [from, to, text] = rollDefsEdit(cm.getValue(), created);
-    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-  });
-  refoldAll(); // the new block starts life hidden, like every other one
-  logLine(`new roll${created.length === 1 ? '' : 's'}: ${created.join(', ')}`);
-  return true;
-}
-
-// A roll name has to survive being written inside pianoroll("<…>"), so it is one plain word: no
-// whitespace and none of mini's own punctuation. Same rule as roll()'s own check in signal.mjs.
-const ROLL_ID_BAD = /[\s<>[\]{}(),*!?~@|:/"'`.]/;
-
-// Making one from the panel's search box. A new roll is empty and named only - nothing plays it
-// until a pattern says its name, which is the point: you draw the variation first and swap it in
-// when you are ready.
-function createRoll(id) {
-  const code = cm.getValue();
-  if (!id || ROLL_ID_BAD.test(id)) {
-    logLine(`can't create a roll called "${id}": a roll name has to be one plain word`, true);
-    return;
-  }
-  if (rollDefsInBuffer(code).some((d) => d.id === id) || prPrebakeRolls.includes(id)) {
-    openRollById(id, prCarry()); // it already exists - showing it is what was meant anyway
-    return;
-  }
-  const [from, to, text] = rollDefsEdit(code, [id]);
-  cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-  refoldAll();
-  logLine(`new roll: ${id}`);
-  openRollById(id, prCarry());
-  prScheduleEval();
-}
-
-// The word-boundary form of a roll id, for finding it inside a pianoroll("<lead pad>") string:
-// `lead` must not match the `lead` of `leader`, nor the one in a comment about it.
-function rollIdWordRe(id, flags = 'g') {
+// The word-boundary form of an id, for finding it inside a "<lead pad>" string: `lead` must not
+// match the `lead` of `leader`.
+function idWordRe(id, flags = 'g') {
   return new RegExp(`(?<![\\w$])${String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`, flags);
 }
 
-/** Every pianoroll(...) call in `code` that names `id` - the patterns that play this roll. */
-function rollRefCalls(code, id) {
-  const word = rollIdWordRe(id, '');
-  return pianorollIdCalls(code).filter((call) => word.test(call.str));
-}
-
-// Renaming inside one call's id string, occurrence by occurrence rather than by replacing the whole
-// string. A change strictly INSIDE a marker leaves that marker in place, which is what keeps the
+// Renaming inside one call's string, occurrence by occurrence rather than by replacing the whole
+// string. A change strictly INSIDE a marker leaves that marker in place, which is what keeps a
 // panel's `source` (and the highlighter's spans) pointing where they were.
 function idOccurrenceEdits(call, from, to) {
   const out = [];
-  const word = rollIdWordRe(from);
+  const word = idWordRe(from);
   let m;
   while ((m = word.exec(call.str)) !== null) out.push([call.from + m.index, call.from + m.index + m[0].length, to]);
   return out;
 }
 
-// The span of the id literal inside a roll(...) definition - the `"lead"` of roll("lead", "…").
+// The span of the id literal inside a definition - the `"lead"` of roll("lead", "…").
 function defIdLiteralRange(code, def) {
   const inner = code.slice(def.open + 1, def.close);
   const [idLiteral] = splitFirstArg(inner);
   const at = def.open + 1 + inner.indexOf(idLiteral);
   return [at, at + idLiteral.length];
+}
+
+// The span a definition occupies when it is taken out: its whole LINE where it has one to itself
+// (which is how they are written), or just the call where it is sharing with other code.
+function defLineRange(code, def) {
+  const lineStart = code.lastIndexOf('\n', def.start - 1) + 1;
+  const end = def.close + 1;
+  const tail = /^[ \t;]*(?:\r?\n|$)/.exec(code.slice(end));
+  if (tail && /^\s*$/.test(code.slice(lineStart, def.start))) return [lineStart, end + tail[0].length];
+  return [def.start, end];
 }
 
 /** Applies [from, to, text] edits as one undoable step. Sorted here, so callers needn't be. */
@@ -2504,86 +2640,398 @@ function applyEdits(edits) {
   });
 }
 
-/** The pianoroll(...) call the panel is looking THROUGH, when it is one of `refs`. */
-function prSourceCall(refs) {
-  const range = prState?.source?.find();
+// A new definition is named after the track it is in - `lead` reads far better in a picker than
+// `1` - falling back to the kind's own word where the block has no name of its own. A number is
+// appended only to break a tie, so the common case is the plain track name.
+function freshDefId(label, taken, base) {
+  const name = /^[A-Za-z_][\w]*$/.test(label ?? '') ? label : base;
+  if (!taken.has(name)) return name;
+  for (let i = 2; ; i++) if (!taken.has(`${name}${i}`)) return `${name}${i}`;
+}
+
+/** Which of `refs` the panel is looking THROUGH, given the marker over its id string. */
+function sourceCallAmong(refs, sourceMark) {
+  const range = sourceMark?.find();
   if (!range) return null;
   const a = cm.indexFromPos(range.from);
   const b = cm.indexFromPos(range.to);
   return refs.find((call) => call.from <= a && call.to >= b) ?? null;
 }
 
-// Renaming from the panel, which is the only place a roll HAS a visible name. The definition and
-// every pattern that names it move together - a rename that left `pianoroll("<lead>")` pointing at
-// nothing would silently swap the part for silence. Unless the roll is SHARED and you are looking
-// at it through one of the patterns playing it, which asks for something else entirely: see
-// forkRoll.
-function renameRoll(from, to) {
+/**
+ * One kind of named definition. `opts`:
+ *   kind        what the console calls one of these ("roll")
+ *   defCall     the (private) builder that defines one ("_roll")
+ *   useCall     the builder that NAMES them ("pianoroll")
+ *   emptyBody   the rest of the argument list a new, empty definition is written with
+ *   isData      (str) => true if the useCall's string is DATA rather than names; null when the
+ *               module that can tell hasn't loaded yet, in which case nothing is assumed
+ *   library     () => ids that exist without being defined here (prebake, built-in presets)
+ *   panel       the editor panel's hooks - see the roll instance below for the full shape
+ */
+function makeDefRegistry(opts) {
+  const { kind, defCall, useCall, emptyBody, isData, library, libraryNote, panel } = opts;
+  const say = (line, isError) => logLine(line, isError);
+
+  // Is this string a list of NAMES rather than the data itself? The two share one argument
+  // position, so the question is answered by what the string says, not by which call it is.
+  const isIdString = (str) => {
+    if (!String(str).trim()) return false;
+    const data = isData(String(str));
+    return data === null ? false : !data;
+  };
+  const isIdCall = (inner) => isIdString(/(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner)?.[2] ?? '');
+
+  // Every definition in the buffer: { id, idLiteral, start, open, close }. Commented-out ones are
+  // skipped - they define nothing, so there is nothing there to open.
+  function defsInBuffer(code = cm.getValue()) {
+    const isCode = codeOnly(code);
+    const re = new RegExp(`\\b${defCall}\\s*\\(`, 'g');
+    const out = [];
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      if (!isCode(m.index)) continue;
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(code, open);
+      if (close < 0) continue;
+      const [idLiteral] = splitFirstArg(code.slice(open + 1, close));
+      const id = idLiteralValue(idLiteral);
+      if (id != null) out.push({ id, idLiteral, start: m.index, open, close });
+    }
+    return out;
+  }
+
+  // Every call that NAMES definitions, with the span of the id string inside it.
+  function idCalls(code) {
+    const isCode = codeOnly(code);
+    const re = new RegExp(`\\b${useCall}\\s*\\(`, 'g');
+    const out = [];
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      if (!isCode(m.index)) continue;
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(code, open);
+      if (close < 0 || !isIdCall(code.slice(open + 1, close))) continue;
+      const range = idStringRange({ open, close }, code);
+      if (range) out.push({ start: m.index, open, close, from: range[0], to: range[1], str: code.slice(range[0], range[1]) });
+    }
+    return out;
+  }
+
+  /** The calls that name `id` - the patterns that play it. */
+  function refCalls(code, id) {
+    const word = idWordRe(id, '');
+    return idCalls(code).filter((call) => word.test(call.str));
+  }
+
+  // Groups the buffer's definitions into the runs that fold together. A definition joins a run
+  // when it stands alone as a statement and nothing but blank space, a `;` or a comment separates
+  // it from the one before. Two things drop out of runs entirely:
+  //   - a definition that CHAINS (`lead: roll(0, "…").synth("Serum 2")`) - _clone() drops the
+  //     marker, so that one is a playing track and its code is code to read
+  //   - one that isn't the start of its own statement (`const a = roll(…)`), where folding from
+  //     the callee would leave a dangling `const a =`
+  function runs(code) {
+    const isCode = codeOnly(code);
+    const out = [];
+    let prevEnd = -1;
+    for (const def of defsInBuffer(code)) {
+      const after = code.slice(def.close + 1);
+      const head = code.slice(code.lastIndexOf('\n', def.start - 1) + 1, def.start);
+      const standalone = /^\s*$/.test(head) || /^\s*[A-Za-z_$][\w$]*\s*:\s*$/.test(head);
+      if (!standalone || /^\s*[.[(]/.test(after)) { prevEnd = -1; continue; }
+      // Only filler may sit between two definitions of the same run - and a comment there is
+      // filler whatever it says, so the mask decides which characters have to be blank.
+      const gap = prevEnd < 0 ? null : code.slice(prevEnd, def.start);
+      const joins = gap !== null && [...gap].every((ch, i) => isCode(prevEnd + i) === false || /[\s;]/.test(ch));
+      if (joins) out[out.length - 1].push(def);
+      else out.push([def]);
+      prevEnd = def.close + 1;
+    }
+    return out;
+  }
+
+  // Where a new definition goes: appended to the buffer's first run of them, or a fresh run at the
+  // very top. Returns the edit as [from, to, text] against `code`.
+  //
+  // Deliberately NOT under a `rolls:` label. A label is a track NAME - it would collide with one
+  // the player might reasonably want, and, being the first label in the buffer, it was what named
+  // the window and the entry in the files list (see deriveLabel). Bare statements evaluate exactly
+  // as well: the definition Sig carries `isDef`, which is what keeps a definitions block from being
+  // taken for a track, and that has never depended on the label.
+  function defsEdit(code, ids) {
+    const lines = ids.map((id) => `${defCall}(${JSON.stringify(id)}, ${emptyBody})`);
+    const found = runs(code);
+    if (found.length) {
+      const at = found[0][found[0].length - 1].close + 1;
+      return [at, at, `\n${lines.join('\n')}`];
+    }
+    return [0, 0, `${lines.join('\n')}\n\n`];
+  }
+
+  /** Every id the editor knows: this buffer's definitions, then the shared library. */
+  function allIds() {
+    const own = defsInBuffer().map((d) => d.id);
+    return [
+      ...own.map((id) => ({ id, note: '', own: true })),
+      ...library().filter((id) => !own.includes(id)).map((id) => ({ id, note: libraryNote, own: false })),
+    ];
+  }
+
+  /** Gives every un-named and un-defined one in the buffer a definition. True if it wrote. */
+  function materialize() {
+    if (isData('') === null || !labelsMod) return false; // can't yet tell a name from data
+    const code = cm.getValue();
+    const taken = new Set([...defsInBuffer(code).map((d) => d.id), ...library()]);
+    const created = []; // in the order they were first named, which is the order they are written
+    const rewrites = []; // [from, to, text] against `code`, applied last-first so offsets hold
+
+    const isCode = codeOnly(code);
+    const bare = new RegExp(`\\b${useCall}\\s*\\(\\s*\\)`, 'g');
+    let m;
+    while ((m = bare.exec(code)) !== null) {
+      if (!isCode(m.index)) continue;
+      const id = freshDefId(prBlockLabelAt(m.index), taken, kind);
+      taken.add(id);
+      created.push(id);
+      rewrites.push([m.index, m.index + m[0].length, `${useCall}(${JSON.stringify(id)})`]);
+    }
+    for (const call of idCalls(code)) {
+      for (const id of idsNamedIn(call.str)) {
+        if (taken.has(id)) continue;
+        taken.add(id);
+        created.push(id);
+      }
+    }
+    if (!created.length) return false;
+
+    cm.operation(() => {
+      for (let i = rewrites.length - 1; i >= 0; i--) {
+        const [from, to, text] = rewrites[i];
+        cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+      }
+      // Computed after the rewrites, since an inserted id moves everything below it along.
+      const [from, to, text] = defsEdit(cm.getValue(), created);
+      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+    });
+    refoldAll(); // the new block starts life hidden, like every other one
+    say(`new ${kind}${created.length === 1 ? '' : 's'}: ${created.join(', ')}`);
+    return true;
+  }
+
+  // Making one from the panel's search box. A new one is empty and named only - nothing plays it
+  // until a pattern says its name, which is the point: you draw the variation first and swap it in
+  // when you are ready.
+  function create(id) {
+    const code = cm.getValue();
+    if (!id || DEF_ID_BAD.test(id)) {
+      return say(`can't create a ${kind} called "${id}": a name has to be one plain word`, true);
+    }
+    if (defsInBuffer(code).some((d) => d.id === id) || library().includes(id)) {
+      panel.open(id, panel.carry()); // it already exists - showing it is what was meant anyway
+      return;
+    }
+    const [from, to, text] = defsEdit(code, [id]);
+    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+    refoldAll();
+    say(`new ${kind}: ${id}`);
+    panel.open(id, panel.carry());
+    panel.scheduleEval();
+  }
+
+  // Throwing one away from the picker. Refused while a pattern still names it - not out of
+  // caution, but because it wouldn't work: a name a pattern uses and nothing defines is given a
+  // fresh empty definition on the next evaluation (see materialize), so it would come straight
+  // back with its data gone. Take it out of the patterns first and the delete goes through.
+  function remove(id) {
+    const code = cm.getValue();
+    const def = defsInBuffer(code).find((d) => d.id === id);
+    const refuse = (why) => say(`can't delete ${kind} "${id}": ${why}`, true);
+    if (!def) {
+      return refuse(library().includes(id)
+        ? "it isn't defined in this buffer - it comes from the shared library"
+        : 'there is no definition for it in this buffer');
+    }
+    const refs = refCalls(code, id);
+    if (refs.length) {
+      return refuse(`${refs.length} pattern${refs.length === 1 ? '' : 's'} still play${refs.length === 1 ? 's' : ''} it `
+        + '- take the name out of them first, or it will be re-created empty on the next evaluation');
+    }
+    // The last definition of a run takes the run's label and its blank line with it, which is the
+    // same span the fold hides - otherwise deleting the only one leaves a bare label behind.
+    const run = runs(code).find((r) => r.some((d) => d.id === id));
+    const [from, to] = run && run.length === 1 ? runLineRange(code, run) : defLineRange(code, def);
+    const wasOpen = panel.current() === id;
+    cm.replaceRange('', cm.posFromIndex(from), cm.posFromIndex(to));
+    refoldAll();
+    say(`deleted ${kind} "${id}"`);
+    panel.scheduleEval();
+    // The panel was showing the one that just went: put another up rather than closing, since
+    // deleting from the picker is usually one of several tidying gestures.
+    if (wasOpen) {
+      const next = defsInBuffer().find((d) => d.id !== id);
+      if (next) panel.open(next.id, panel.carry());
+      else panel.close();
+    }
+  }
+
+  // Renaming from the panel, which is the only place one of these HAS a visible name. The
+  // definition and every pattern that names it move together - a rename that left a pattern
+  // pointing at nothing would silently swap the part for silence. Unless it is SHARED and you are
+  // looking at it through one of the patterns playing it, which asks for something else: see fork.
+  function rename(from, to) {
+    const code = cm.getValue();
+    const defs = defsInBuffer(code);
+    const refuse = (why) => { say(`can't rename ${kind} "${from}" to "${to}": ${why}`, true); panel.syncHead(); };
+    if (!to || DEF_ID_BAD.test(to)) return refuse('a name has to be one plain word');
+    if (defs.some((d) => d.id === to) || library().includes(to)) return refuse('that name is taken');
+    const def = defs.find((d) => d.id === from);
+    if (!def) return refuse('its definition is not in this buffer');
+
+    const refs = refCalls(code, from);
+    const here = panel.sourceCall(refs);
+    if (here && refs.length > 1) return fork(code, def, from, to, here, refs.length - 1);
+
+    const [litStart, litEnd] = defIdLiteralRange(code, def);
+    const edits = [[litStart, litEnd, JSON.stringify(to)]];
+    for (const call of refs) edits.push(...idOccurrenceEdits(call, from, to));
+    applyEdits(edits);
+    panel.setCurrent(from, to);
+    refoldAll();
+    panel.syncHead();
+    panel.scheduleEval();
+    say(`renamed ${kind} "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}`);
+  }
+
+  // Two patterns playing one of these, renamed from inside one of them. Renaming both is the move
+  // you can't take back by hand: the other pattern's part loses the name you knew it by, and
+  // nothing called `lead` exists any more. So the pattern you renamed FROM gets one of its own - a
+  // copy under the new name, pointed at from that call and nowhere else - and every other pattern
+  // goes on playing `lead` exactly as before. The two are identical the moment they split and
+  // diverge from there, which is the only thing "unlink" can mean for drawn data.
+  //
+  // Opened straight from the picker there is no `source` call, so there is nothing to unlink it
+  // from and a rename there stays a plain rename.
+  function fork(code, def, from, to, call, others) {
+    const [litStart, litEnd] = defIdLiteralRange(code, def);
+    const text = code.slice(def.start, def.close + 1);
+    const copy = text.slice(0, litStart - def.start) + JSON.stringify(to) + text.slice(litEnd - def.start);
+    const lineStart = code.lastIndexOf('\n', def.start - 1) + 1;
+    const indent = /^[ \t]*/.exec(code.slice(lineStart, def.start))[0];
+
+    // The quotes are never part of an edit, so a mark that takes them IN survives having the whole
+    // string body replaced - which is what renaming a one-name call does - and comes back sitting
+    // over the new name, ready to go on being followed.
+    const quoted = cm.markText(cm.posFromIndex(call.from - 1), cm.posFromIndex(call.to + 1), {});
+    const view = panel.carry();
+    const oldSource = view?.source ?? null;
+    applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`], ...idOccurrenceEdits(call, from, to)]);
+    const span = quoted.find();
+    quoted.clear();
+    oldSource?.clear();
+    if (view) {
+      view.source = span
+        ? cm.markText({ line: span.from.line, ch: span.from.ch + 1 }, { line: span.to.line, ch: span.to.ch - 1 }, {})
+        : null;
+    }
+    refoldAll();
+    panel.open(to, view); // the same data stays on screen, now under the name just given it
+    panel.scheduleEval();
+    say(
+      `${kind} "${to}" is this pattern's own copy of "${from}" - ${others} other pattern${others === 1 ? '' : 's'} `
+        + `still play${others === 1 ? 's' : ''} "${from}", which is unchanged`
+    );
+  }
+
+  return { kind, defCall, useCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, allIds, materialize, create, remove, rename };
+}
+
+
+
+// The definition builders were once plain roll(...) and shape(...); they are _roll/_shape now, so
+// those words stay free for whatever they should mean to a person later. A patch saved before that
+// still says the old ones, and they are no longer bound - so rewrite them the first time it is
+// evaluated, which is the only moment it matters. Only calls that actually look like DEFINITIONS
+// (a literal id first) are touched, so someone's own `const roll = …` is left alone.
+function migrateDefNames() {
+  // Two passes, because the second reads what the first wrote: runs() looks for the private names,
+  // so the labels above them can only be found once the calls have been renamed.
+  const renamed = renameLegacyDefCalls();
+  const labels = legacyLabelLines(cm.getValue());
+  if (labels.length) applyEdits(labels.map(([from, to]) => [from, to, '']));
+  if (!renamed && !labels.length) return;
+  refoldAll();
+  const parts = [];
+  if (renamed) parts.push(`${renamed} definition${renamed === 1 ? '' : 's'} renamed to the editor's private form`);
+  if (labels.length) parts.push(`${labels.length} leftover label${labels.length === 1 ? '' : 's'} removed`);
+  logLine(`tidied the definitions block: ${parts.join(', ')}`);
+}
+
+// Pass one: roll(...) / shape(...) -> _roll(...) / _shape(...). Only calls that actually look like
+// DEFINITIONS (a literal id first) are touched, so someone's own `const roll = …` is left alone.
+// Returns how many were rewritten.
+function renameLegacyDefCalls() {
   const code = cm.getValue();
-  const defs = rollDefsInBuffer(code);
-  const refuse = (why) => { logLine(`can't rename roll "${from}" to "${to}": ${why}`, true); prSyncRollHead(); };
-  if (!to || ROLL_ID_BAD.test(to)) return refuse('a roll name has to be one plain word');
-  if (defs.some((d) => d.id === to) || prPrebakeRolls.includes(to)) return refuse('that name is taken');
-  const def = defs.find((d) => d.id === from);
-  if (!def) return refuse('its definition is not in this buffer');
-
-  const refs = rollRefCalls(code, from);
-  const here = prSourceCall(refs);
-  if (here && refs.length > 1) return forkRoll(code, def, from, to, here, refs.length - 1);
-
-  const [litStart, litEnd] = defIdLiteralRange(code, def);
-  const edits = [[litStart, litEnd, JSON.stringify(to)]];
-  for (const call of refs) edits.push(...idOccurrenceEdits(call, from, to));
-  applyEdits(edits);
-  if (prState?.rollId === from) {
-    prState.rollId = to;
-    prState.idLiteral = JSON.stringify(to);
+  const isCode = codeOnly(code);
+  const edits = [];
+  for (const reg of DEF_REGISTRIES) {
+    const re = new RegExp(`\\b${reg.defCall.slice(1)}\\s*\\(`, 'g');
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      if (!isCode(m.index)) continue;
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(code, open);
+      if (close < 0) continue;
+      const [idLiteral] = splitFirstArg(code.slice(open + 1, close));
+      if (idLiteralValue(idLiteral) == null) continue;
+      edits.push([m.index, m.index, '_']);
+    }
   }
-  refoldAll();
-  prSyncRollHead();
-  prScheduleEval();
-  logLine(`renamed roll "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}`);
+  if (edits.length) applyEdits(edits);
+  return edits.length;
 }
 
-// Two patterns playing one roll, renamed from inside one of them. Renaming both is the move you
-// can't take back by hand: the other pattern's part loses the name you knew it by, and no roll
-// called `lead` exists any more. So the pattern you renamed FROM gets a roll of its own - a copy of
-// the notes under the new name, pointed at from that call and nowhere else - and every other
-// pattern goes on playing `lead` exactly as before. The two are identical the moment they split and
-// diverge from there, which is the only thing "unlink" can mean for drawn notes.
-//
-// A roll opened straight from the picker isn't being looked at THROUGH any one pattern (there is no
-// `source` call), so there is nothing to unlink it from and a rename there stays a plain rename.
-function forkRoll(code, def, from, to, call, others) {
-  const [litStart, litEnd] = defIdLiteralRange(code, def);
-  const text = code.slice(def.start, def.close + 1);
-  const copy = text.slice(0, litStart - def.start) + JSON.stringify(to) + text.slice(litEnd - def.start);
-  const lineStart = code.lastIndexOf('\n', def.start - 1) + 1;
-  const indent = /^[ \t]*/.exec(code.slice(lineStart, def.start))[0];
-
-  // The quotes are never part of an edit, so a mark that takes them IN survives having the whole
-  // string body replaced - which is what renaming a `pianoroll("lead")` does - and comes back
-  // sitting over the new name, ready to go on being followed.
-  const quoted = cm.markText(cm.posFromIndex(call.from - 1), cm.posFromIndex(call.to + 1), {});
-  const view = prCarry();
-  const oldSource = prState?.source ?? null;
-  applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`], ...idOccurrenceEdits(call, from, to)]);
-  const span = quoted.find();
-  quoted.clear();
-  oldSource?.clear();
-  if (view) {
-    view.source = span
-      ? cm.markText({ line: span.from.line, ch: span.from.ch + 1 }, { line: span.to.line, ch: span.to.ch - 1 }, {})
-      : null;
+// The `rolls:` / `shapes:` lines that label nothing but a run of definitions, as [from, to) spans
+// including the newline. Only those exact words, and only alone on their line directly above a run:
+// a real track called `rolls` has an expression after the colon, and is left alone.
+function legacyLabelLines(code) {
+  const out = [];
+  for (const reg of DEF_REGISTRIES) {
+    for (const run of reg.runs(code)) {
+      const lineStart = code.lastIndexOf('\n', run[0].start - 1) + 1;
+      if (lineStart === 0) continue;
+      const prevStart = code.lastIndexOf('\n', lineStart - 2) + 1;
+      if (!/^\s*(?:rolls|shapes)\s*:\s*$/.test(code.slice(prevStart, lineStart - 1))) continue;
+      out.push([prevStart, lineStart]);
+    }
   }
-  refoldAll();
-  openRollById(to, view); // the same notes stay on screen, now under the name just given them
-  prScheduleEval();
-  logLine(
-    `roll "${to}" is this pattern's own copy of "${from}" - ${others} other pattern${others === 1 ? '' : 's'} ` +
-      `still play${others === 1 ? 's' : ''} "${from}", which is unchanged`
-  );
+  return out;
 }
+
+// The head: the shape's name and the find-or-create popover behind it. rate and mode go with it
+// when a definition is open - they are the calling lfo()'s, not the shape's, and showing them here
+// would invite editing something this panel isn't looking at.
+const lfoHead = makeNamePicker({
+  els: { wrap: lfoPickWrap, title: lfoTitle, name: lfoName, btn: lfoPickBtn, picker: lfoPickBox, search: lfoSearch, list: lfoPickList },
+  reg: shapeDefs,
+  current: () => lfoState?.shapeId ?? null,
+  open: (id) => openShapeById(id),
+  refocus: () => lfoCanvas.focus({ preventScroll: true }),
+});
+
+function lfoSyncHead() {
+  const named = !!lfoState?.shapeId;
+  // rate and mode belong to the lfo() CALL. An inline one is the call; a definition has them only
+  // while the panel still knows which call it was opened through.
+  const editable = !named || !!lfoState?.callSource?.find();
+  lfoRateWrap.classList.toggle('hidden', !editable);
+  lfoModeWrap.classList.toggle('hidden', !editable);
+  lfoRateUnit.textContent = lfoState?.rateHz ? 'hz' : 'cyc';
+  lfoRateUnit.title = lfoState?.rateHz ? 'free-running — click for cycles' : 'synced to the cycle — click for hz';
+  lfoHead.syncHead(named ? shapeDefs.refCalls(cm.getValue(), lfoState.shapeId).length : 0);
+}
+
+
 
 // Frame the pitch window so the drawn notes sit centered; default to PR_DEFAULT_TOP for an empty
 // roll. Works in lane coordinates, so it frames a folded roll just as well; prMetrics clamps the
@@ -2681,7 +3129,7 @@ function prCarry() {
 
 /** Puts roll `id`'s definition under the editor. False (and a line) if this buffer hasn't got one. */
 function openRollById(id, carry = null) {
-  const def = rollDefsInBuffer().find((d) => d.id === String(id));
+  const def = rollDefs.defsInBuffer().find((d) => d.id === String(id));
   if (!def) {
     const known = prPrebakeRolls.includes(String(id));
     logLine(
@@ -2746,41 +3194,33 @@ function prSetFollowLock(locked) {
 // The head: the roll's name, the find-or-create popover behind it, and the follow lock. The lock
 // only appears when there is something to follow - a definition opened directly isn't following
 // anything, and an inline pianoroll() is the whole pattern.
+// The piano roll's head. The lock is the one part that isn't shared - only a roll opened THROUGH a
+// pattern has something to follow.
+const rollPicker = makeNamePicker({
+  els: { wrap: prPickWrap, title: prTitle, name: prName, btn: prPickBtn, picker: prPicker, search: prSearch, list: prPickList },
+  reg: rollDefs,
+  current: () => prState?.rollId ?? null,
+  open: (id) => { if (!openRollById(id, prCarry())) prSyncRollHead(); }, // refused - say so, stay put
+  refocus: () => prRefocus(),
+  onPick: () => prSetFollowLock(true), // reaching in here says you want THAT one, not the next bar's
+});
+
 function prSyncRollHead() {
-  const named = !!prState?.rollId;
-  // The name IS the title: a separate label beside it could only ever repeat what it says. `piano
-  // roll` is what's left when the call has no id at all - an inline pianoroll(), which is the whole
-  // of its own pattern and names nothing.
-  prTitle.classList.toggle('hidden', named);
-  prPickWrap.classList.toggle('hidden', !named);
   prLockBtn.classList.toggle('hidden', !prState?.source);
   prLockBtn.textContent = prFollowLocked ? '🔒' : '🔓';
   prLockBtn.classList.toggle('active', prFollowLocked);
-  prLockBtn.title = prFollowLocked
-    ? 'pinned to this roll — click to follow the playing one again'
-    : 'following the playing roll — click to pin this one on screen';
-  if (!named) return prClosePicker();
-  // Never type over someone mid-rename - the box is theirs until they leave it.
-  if (document.activeElement !== prName) prName.value = prState.rollId;
-  // Fixed width, so a long name is clipped on screen; the tooltip is where it stays whole - and
-  // where a shared roll says what renaming it from here is actually going to do.
-  const shared = prState.source ? rollRefCalls(cm.getValue(), prState.rollId).length : 0;
-  prName.title = shared > 1
-    ? `roll ${prState.rollId} — played by ${shared} patterns; renaming it here gives THIS one its own copy `
-      + `under the new name and leaves the others on "${prState.rollId}"`
-    : `roll ${prState.rollId} — type over it to rename it everywhere it is played`;
-  if (!prPicker.classList.contains('hidden')) prRenderPickList();
+  prLockBtn.title = prFollowLocked ? 'pinned to this roll' : 'following the playing roll';
+  // Only a roll being watched through a pattern can be shared in the sense the tooltip means.
+  const shared = prState?.source && prState.rollId ? rollDefs.refCalls(cm.getValue(), prState.rollId).length : 0;
+  rollPicker.syncHead(shared);
 }
 
-// Typing over the name renames the roll. Committing on blur (rather than only on enter) is what
-// makes it feel like a title rather than a form: click, type, look away. Escape puts it back, and
-// the whole rename is one cm.operation, so cmd-Z in the buffer is the other way out.
-function prCommitName() {
-  if (!prState?.rollId) return;
-  const to = prName.value.trim();
-  if (!to || to === prState.rollId) { prSyncRollHead(); return; } // nothing asked for
-  renameRoll(prState.rollId, to);
-}
+const prCommitName = () => rollPicker.commitName();
+const prOpenPicker = () => rollPicker.openPicker();
+const prClosePicker = (refocus = true) => rollPicker.closePicker(refocus);
+const prRenderPickList = (reset = false) => rollPicker.renderList(reset);
+const prPickMove = (delta) => rollPicker.move(delta);
+const prPickChoose = () => rollPicker.choose();
 
 // ---------------------------------------------------------------------------------------------
 // The find-or-create popover. Searching and renaming are separate gestures on purpose: while the
@@ -2789,93 +3229,153 @@ function prCommitName() {
 // here at all says you want to look at that roll rather than whatever the bar brings next.
 // ---------------------------------------------------------------------------------------------
 
-let prPickRows = []; // what the list is currently showing, in the order it shows it
-let prPickIdx = 0;   // the highlighted row - moved by the arrows, followed by the pointer
+/**
+ * The name-and-picker head a definition editor wears: the name IS the title, typing over it
+ * renames, and the ▾ behind it searches every name there is, offering to create one that matches
+ * nothing. One of these per panel (the piano roll's rolls, the LFO's shapes); everything specific
+ * to a kind comes in through `reg` and the hooks.
+ *
+ * els   { wrap, title, name, btn, picker, search, list }
+ * reg   the definition registry (see makeDefRegistry)
+ * current  () => the name on screen, or null when the call has no name at all
+ * open     (id) => put that one on screen
+ * refocus  () => hand focus back to the panel's own surface
+ * onPick   () => called when the picker is used, before opening (the roll panel pins its lock)
+ */
+function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {} }) {
+  let rows = [];
+  let idx = 0;
+  const isOpen = () => !els.picker.classList.contains('hidden');
 
-function prOpenPicker() {
-  if (!prState?.rollId) return;
-  prPicker.classList.remove('hidden');
-  prSearch.value = '';
-  prRenderPickList();
-  prSearch.focus();
-}
-
-function prClosePicker(refocus = true) {
-  if (prPicker.classList.contains('hidden')) return;
-  prPicker.classList.add('hidden');
-  // Closing because the click landed somewhere else must not then take that click's focus away.
-  if (refocus) prRefocus();
-}
-
-/** Every roll the editor knows about: this buffer's definitions, then prebake's shared library. */
-function prAllRolls() {
-  const own = rollDefsInBuffer().map((d) => d.id);
-  return [
-    ...own.map((id) => ({ id, note: '' })),
-    ...prPrebakeRolls.filter((id) => !own.includes(id)).map((id) => ({ id, note: 'prebake' })),
-  ];
-}
-
-function prRenderPickList() {
-  const typed = prSearch.value.trim();
-  const q = typed.toLowerCase();
-  const all = prAllRolls();
-  prPickRows = all
-    .filter((r) => r.id.toLowerCase().includes(q))
-    .map((r) => ({ ...r, label: r.id, act: 'open' }));
-  // A name that matches nothing is a roll you meant to have, so the search doubles as the way to
-  // make one - which is how you think about it live, rather than hunting for a + button.
-  if (typed && !all.some((r) => r.id.toLowerCase() === q)) {
-    prPickRows.push({ id: typed, label: `create “${typed}”`, note: 'new', act: 'create' });
+  function openPicker() {
+    if (current() == null) return;
+    els.picker.classList.remove('hidden');
+    els.search.value = '';
+    renderList();
+    els.search.focus();
   }
-  prPickIdx = Math.min(prPickIdx, Math.max(0, prPickRows.length - 1));
-  prPickList.innerHTML = '';
-  if (!prPickRows.length) {
-    const empty = document.createElement('div');
-    empty.className = 'pianoroll-pick-empty';
-    empty.textContent = 'no rolls yet';
-    prPickList.appendChild(empty);
-    return;
+
+  function closePicker(doRefocus = true) {
+    if (!isOpen()) return;
+    els.picker.classList.add('hidden');
+    // Closing because the click landed somewhere else must not then take that click's focus away.
+    if (doRefocus) refocus();
   }
-  prPickRows.forEach((row, i) => {
-    const el = document.createElement('div');
-    el.className = `pianoroll-pick-row${i === prPickIdx ? ' on' : ''}`;
-    const name = document.createElement('span');
-    name.textContent = row.label;
-    el.appendChild(name);
-    if (row.note) {
-      const note = document.createElement('span');
-      note.className = 'pianoroll-pick-note';
-      note.textContent = row.note;
-      el.appendChild(note);
+
+  function renderList(resetIdx = false) {
+    if (resetIdx) idx = 0;
+    const typed = els.search.value.trim();
+    const q = typed.toLowerCase();
+    const all = reg.allIds();
+    rows = all.filter((r) => r.id.toLowerCase().includes(q)).map((r) => ({ ...r, label: r.id, act: 'open' }));
+    // A name that matches nothing is one you meant to have, so the search doubles as the way to
+    // make it - which is how you think about it live, rather than hunting for a + button.
+    if (typed && !all.some((r) => r.id.toLowerCase() === q)) {
+      rows.push({ id: typed, label: `create “${typed}”`, note: 'new', act: 'create' });
     }
-    // mousedown, not click: the search field's blur would otherwise close the popover first.
-    el.addEventListener('mousedown', (e) => { e.preventDefault(); prPickIdx = i; prPickChoose(); });
-    prPickList.appendChild(el);
-  });
-}
+    idx = Math.min(idx, Math.max(0, rows.length - 1));
+    els.list.innerHTML = '';
+    if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'def-pick-empty';
+      empty.textContent = `no ${reg.kind}s yet`;
+      els.list.appendChild(empty);
+      return;
+    }
+    rows.forEach((row, i) => {
+      const el = document.createElement('div');
+      el.className = `def-pick-row${i === idx ? ' on' : ''}`;
+      const name = document.createElement('span');
+      name.className = 'def-pick-name';
+      name.textContent = row.label;
+      el.appendChild(name);
+      if (row.note) {
+        const note = document.createElement('span');
+        note.className = 'def-pick-note';
+        note.textContent = row.note;
+        el.appendChild(note);
+      }
+      // Only this buffer's own can be deleted - the shared library isn't ours, and there is
+      // nothing to delete about one the "create" row is offering to make.
+      if (row.act === 'open' && row.own) {
+        const del = document.createElement('span');
+        del.className = 'def-pick-del';
+        del.textContent = '×';
+        del.title = `delete ${row.id}`;
+        // Stops the row's own handler: the × is the one part of the row that doesn't open it. The
+        // popover stays up afterwards, since clearing these out is rarely one at a time.
+        del.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          reg.remove(row.id);
+          renderList();
+        });
+        el.appendChild(del);
+      }
+      // mousedown, not click: the search field's blur would otherwise close the popover first.
+      el.addEventListener('mousedown', (e) => { e.preventDefault(); idx = i; choose(); });
+      els.list.appendChild(el);
+    });
+  }
 
-function prPickMove(delta) {
-  if (!prPickRows.length) return;
-  prPickIdx = (prPickIdx + delta + prPickRows.length) % prPickRows.length;
-  prRenderPickList();
-}
+  function move(delta) {
+    if (!rows.length) return;
+    idx = (idx + delta + rows.length) % rows.length;
+    renderList();
+  }
 
-function prPickChoose() {
-  const row = prPickRows[prPickIdx];
-  if (!row) return;
-  prPicker.classList.add('hidden');
-  prSetFollowLock(true);
-  if (row.act === 'create') createRoll(row.id);
-  else if (!openRollById(row.id, prCarry())) prSyncRollHead(); // refused - say so and stay put
-  prRefocus();
+  function choose() {
+    const row = rows[idx];
+    if (!row) return;
+    els.picker.classList.add('hidden');
+    onPick();
+    if (row.act === 'create') reg.create(row.id);
+    else open(row.id);
+    refocus();
+  }
+
+  // The head, redrawn: the name IS the title, so a separate label beside it could only ever repeat
+  // what it says. The plain title is what's left when the call has no name at all - an inline
+  // pianoroll()/lfo(), which is the whole of its own pattern and names nothing.
+  function syncHead(sharedRefs = 0) {
+    const id = current();
+    els.title.classList.toggle('hidden', id != null);
+    els.wrap.classList.toggle('hidden', id == null);
+    if (id == null) return closePicker();
+    // Never type over someone mid-rename - the box is theirs until they leave it.
+    if (document.activeElement !== els.name) els.name.value = id;
+    // Fixed width, so a long name is clipped on screen; the tooltip is where it stays whole. A
+    // shared one says so, because renaming it here forks rather than renames - but it says it in a
+    // glance's worth of words, which is all a tooltip gets mid-set.
+    els.name.title = sharedRefs > 1 ? `${id} — shared by ${sharedRefs}; renaming forks` : id;
+    if (isOpen()) renderList();
+  }
+
+  // Typing over the name renames it. Committing on blur (rather than only on enter) is what makes
+  // it feel like a title rather than a form: click, type, look away. Escape puts it back, and the
+  // whole rename is one cm.operation, so cmd-Z in the buffer is the other way out.
+  function commitName() {
+    const id = current();
+    if (id == null) return;
+    const to = els.name.value.trim();
+    if (!to || to === id) return syncHead(); // nothing asked for
+    reg.rename(id, to);
+  }
+
+  function revertName() {
+    els.name.value = current() ?? '';
+  }
+
+  return { openPicker, closePicker, isOpen, renderList, move, choose, syncHead, commitName, revertName };
 }
 
 // The buffer's own definitions the editor can read; the prebake library it has to ask for.
 function prRefreshRollList() {
   api('GET', '/api/rolls')
     .then((res) => {
-      prPrebakeRolls = (res.rolls ?? []).filter((r) => r.layer === 'prebake').map((r) => String(r.id));
+      const prebake = (list) => (list ?? []).filter((r) => r.layer === 'prebake').map((r) => String(r.id));
+      prPrebakeRolls = prebake(res.rolls);
+      prPrebakeShapes = prebake(res.shapes);
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
     })
     .catch(() => {}); // the picker still lists this buffer's rolls without it
@@ -2995,7 +3495,7 @@ function syncPianorollFromCode() {
   // the next edit would write its notes over the ids. Let it go, the same as any other call the
   // roll is no longer anchored to. (A definition's own first argument is an id, not a pattern -
   // its notes are the argument after it, so the question is only asked of the inline form.)
-  if (!prState.idLiteral && isRollIdCall(text.slice(open + 1, text.lastIndexOf(')')))) {
+  if (!prState.idLiteral && rollDefs.isIdCall(text.slice(open + 1, text.lastIndexOf(')')))) {
     closePianorollEditor();
     return;
   }
@@ -4007,7 +4507,7 @@ function initPianorollEditor() {
     if (prPicker.classList.contains('hidden')) prOpenPicker();
     else prClosePicker();
   });
-  prSearch.addEventListener('input', () => { prPickIdx = 0; prRenderPickList(); });
+  prSearch.addEventListener('input', () => prRenderPickList(true));
   prSearch.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); prPickMove(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); prPickMove(-1); }
@@ -4093,7 +4593,7 @@ function initPianorollEditor() {
     prRefocus();
   });
 
-  const reflectTool = () => { prToolBtn.textContent = prTool === 'draw' ? '✏️' : '⬚'; prToolBtn.title = `tool: ${prTool} — click or press B to switch (draw = pencil, select = marquee)`; };
+  const reflectTool = () => { prToolBtn.textContent = prTool === 'draw' ? '✏️' : '⬚'; prToolBtn.title = `${prTool} (B)`; };
   const toggleTool = () => {
     prTool = prTool === 'draw' ? 'select' : 'draw';
     localStorage.setItem('poptartPianorollTool', prTool);
@@ -4105,7 +4605,7 @@ function initPianorollEditor() {
   // path must leave the caret wherever it was.
   prToolBtn.addEventListener('click', () => { toggleTool(); prRefocus(); });
 
-  const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `the value lane and cmd-drag set ${prCmdMode === 'vel' ? 'velocity' : 'probability'} — click to switch`; };
+  const reflectCmdMode = () => { prCmdModeBtn.textContent = prCmdMode; prCmdModeBtn.title = `value lane: ${prCmdMode === 'vel' ? 'velocity' : 'probability'}`; };
   reflectCmdMode();
   prCmdModeBtn.addEventListener('click', () => {
     prCmdMode = prCmdMode === 'vel' ? 'prob' : 'vel';
@@ -4136,9 +4636,7 @@ function initPianorollEditor() {
   // scale to fold to - without one the button says so rather than silently doing nothing.
   const reflectFold = () => {
     prFoldBtn.classList.toggle('active', prFold);
-    prFoldBtn.title = prFold
-      ? 'showing only the scale’s notes — click to show every semitone'
-      : 'fold to the scale set by setscale() — click to show only its notes';
+    prFoldBtn.title = prFold ? 'showing the scale’s notes' : 'showing every semitone';
   };
   reflectFold();
   prFoldBtn.addEventListener('click', () => {
@@ -5265,7 +5763,7 @@ async function refreshStatus() {
   // It goes to the console instead, which is where a message that long can actually be read.
   engineStatus.textContent = loaded ? 'engine ready' : 'engine down';
   engineStatus.className = `status ${loaded ? 'ok' : 'error'}`;
-  engineStatus.title = loaded ? '' : 'the audio engine is not running - see the console for why';
+  engineStatus.title = loaded ? '' : 'engine down — see the console';
   if (!loaded && error && error !== lastEngineError) logLine(`engine down: ${error}`, true);
   lastEngineError = loaded ? null : error;
   return loaded;
@@ -5293,7 +5791,7 @@ function renderTracks(result) {
     const confBtn = document.createElement('button');
     confBtn.className = 'small conf-btn';
     confBtn.textContent = 'conf';
-    confBtn.title = "configure: capture knobs you touch in this track's plugin (ui) windows into .param(...) calls in the code";
+    confBtn.title = 'capture knobs you touch into .param(...) calls';
     if (confSession && confSession.trackLabel === t.label) confBtn.classList.add('conf-active');
     confBtn.onclick = () => toggleConf(t.label, confBtn);
     head.appendChild(confBtn);
@@ -5310,7 +5808,7 @@ function renderTracks(result) {
         const uiBtn = document.createElement('button');
         uiBtn.className = 'small';
         uiBtn.textContent = 'ui';
-        uiBtn.title = "open the plugin's own editor window (or double-click synth/fx in the code)";
+        uiBtn.title = "open the plugin's own window";
         uiBtn.onclick = () => showPluginEditor(t.label, slot);
         row.appendChild(uiBtn);
       }
@@ -5345,7 +5843,8 @@ function updateTransportButtons() {
 // re-patched seamlessly, a stopped one just reloads the patterns without making sound. Either
 // way the params panel, autocomplete, and highlighting regions refresh.
 async function evaluate(start) {
-  materializeRolls(); // a bare pianoroll() gets its name and definition before the server sees it
+  migrateDefNames(); // a patch saved before the builders were privatised still says roll(...)
+  for (const reg of DEF_REGISTRIES) reg.materialize(); // a bare pianoroll()/lfo() gets its name and definition first
   const code = cm.getValue();
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.

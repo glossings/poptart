@@ -110,6 +110,13 @@ class MappedEngine {
     this.engine.clearParamLFO(trackId, slot, name);
   }
 
+  // Which shape a patterned lfo("<a b>") is on. An index, not a value, so there is nothing to
+  // convert - but like anchorParamLFO it has to be a real method here: the Scheduler
+  // feature-detects it on whatever engine it is given, and this wrapper is what it is given.
+  setParamShape(trackId, slot, name, index, targetTime) {
+    this.engine.setParamShape(trackId, slot, name, index, targetTime);
+  }
+
   // Phase-only, no unit conversion - but it must be a real method (not a missing one): the
   // Scheduler feature-detects anchorParamLFO on whatever engine it's given, and this wrapper
   // is what it's given in production.

@@ -85,7 +85,10 @@ test('injectLocations leaves every name-lookup argument a plain string', () => {
     ['midikeys("dev:Keystep")', 'midikeys("dev:Keystep")'],
     ['midi("track")', 'midi("track")'],
     ['audio("track")', 'audio("track")'],
-    ['lfo("0 1 0")', 'lfo("0 1 0")'],
+    // lfo() and pianoroll() are judged by CONTENT, not by the callee: drawn data stays plain,
+    // while a pattern of names is tagged so the running one can be highlighted (see the test
+    // below). "0 1 0" is neither a breakpoint list nor a note string, so it reads as names now.
+    ['lfo("0,0 0.5,1 1,0")', 'lfo("0,0 0.5,1 1,0")'],
     ['pianoroll("60,0,4")', 'pianoroll("60,0,4")'],
     ['x.param("Filter Freq", 0.5)', '.param("Filter Freq", 0.5)'],
     // a name-only call's LATER arguments too - a captured plugin-state blob is not mini notation
@@ -318,4 +321,30 @@ test('transpiling a buffer with a big blob stays off the scheduler\'s critical p
   // Was ~30ms for this size before tailWindow, and grew linearly with the blob. The bound is
   // deliberately loose - it's here to catch a return to scanning the buffer per literal.
   assert.ok(ms < 5, `injectLocations took ${ms.toFixed(1)}ms on a ${(code.length / 1024) | 0}kb buffer`);
+});
+
+// The editor WRITES definitions into the buffer by itself (a bare pianoroll()/lfo() gets a name and
+// a definition), and hides them - so a transpile that rewrites one is a break in code the player
+// cannot see to fix. Every definition builder's arguments are a name and drawn data, never a
+// pattern; this is the guard that a new one gets registered in NAME_ARG_CALLS before it ships.
+test('a definition the editor writes is never rewritten by the transpile', () => {
+  for (const src of [
+    '_roll("lead", "60,0,4 62,1,2")',
+    '_roll(0, "60,0,4", { grid: 16 })',
+    '_shape("swell", "0,0,2 0.7,1 1,0")',
+    '_shape("swell", "0,0 0.5,1 1,0")',
+  ]) {
+    assert.equal(injectLocations(src, 0), src, `${src} carries a name and data, not patterns`);
+  }
+});
+
+test('a pattern of NAMES is tagged for highlighting; the drawn data beside it is not', () => {
+  // pianoroll() and lfo() take either drawn data or a pattern of names in the same position, and
+  // the names are what is worth lighting up: it is how you see which roll or shape is running.
+  assert.equal(injectLocations('pianoroll("<lead pad>")', 0), 'pianoroll(mini("<lead pad>", 11))');
+  assert.equal(injectLocations('lfo("<pluck swell>")', 0), 'lfo(mini("<pluck swell>", 5))');
+  assert.equal(injectLocations('lfo("<a b>", { rate: 2 })', 0), 'lfo(mini("<a b>", 5), { rate: 2 })');
+  // ...and the drawn data is left exactly alone, in either call.
+  assert.equal(injectLocations('pianoroll("60,0,4 62,1,2")', 0), 'pianoroll("60,0,4 62,1,2")');
+  assert.equal(injectLocations('lfo("0,0 0.5,1 1,0")', 0), 'lfo("0,0 0.5,1 1,0")');
 });

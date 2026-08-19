@@ -24,6 +24,7 @@
 // noted rather than special-cased.
 
 import { looksLikeNoteString } from './pianoroll.mjs';
+import { looksLikeShapeData } from './shape.mjs';
 
 // Rewrites `code` so each pattern-position string/template literal is wrapped in mini(str, START),
 // where START = `base` + the literal's first-content-char offset within `code`. Pass the block's
@@ -55,14 +56,18 @@ export function injectLocations(code, base = 0) {
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
   'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'input', 'lfo', 'midicc', 'midikeys', 'pianoroll',
-  'roll', // roll(id, "<drawn notes>", …): an id to look a roll up by, then the same note data pianoroll() takes
+  // The editor's own definition calls: an id to look one up by, then the drawn data the matching
+  // builder takes. Underscored because nobody types them (see server.js's INTERNAL_BUILDERS); the
+  // bare spellings stay listed so a buffer written before the rename still transpiles correctly.
+  '_roll', 'roll',
+  '_shape', 'shape',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'roll', 'midicc', 'midikeys', 'input']);
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', '_roll', 'roll', '_shape', 'shape', 'midicc', 'midikeys', 'input']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain
@@ -126,10 +131,12 @@ export function isPatternPosition(before, after, text = '') {
   // option in choose(["0", 3], …)). Its name decides.
   const first = near.match(/([A-Za-z_$][\w$]*)\s*\(\s*\[?\s*$/);
   if (first) {
-    // pianoroll() takes either drawn notes or a pattern of roll ids, and only the ids are mini
-    // notation worth tagging. This is the one call whose argument is judged by what it SAYS rather
-    // than by which call it is - the two forms are the same position (see looksLikeNoteString).
+    // pianoroll() and lfo() each take either DRAWN DATA or a pattern of names, in the same
+    // argument position, and only the names are mini notation worth tagging. These are the two
+    // calls whose argument is judged by what it SAYS rather than by which call it is - see
+    // looksLikeNoteString / looksLikeShapeData.
     if (first[1] === 'pianoroll') return !!text.trim() && !looksLikeNoteString(text);
+    if (first[1] === 'lfo') return !!text.trim() && !looksLikeShapeData(text);
     if (NAME_ARG_CALLS.has(first[1])) return false;
     if (METHOD_NAME_ARG_CALLS.has(first[1])) {
       // Method form only: scan left from the callee (a suffix of `before` starting inside `near`)

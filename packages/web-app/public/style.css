@@ -1425,22 +1425,32 @@ li.CodeMirror-hint-active {
 
 /* --------------------------------------------------------------- lfo editor */
 
+/* Centred and sized like the piano roll panel, deliberately: they are the same kind of thing -
+   a drawing surface you open over the code - and one of them appearing somewhere else each time
+   is the sort of small inconsistency that costs a beat to re-find mid-set. */
 .lfo-panel {
   position: fixed;
-  left: 16px;
-  bottom: 128px;
-  width: 322px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: fit-content;
+  max-width: calc(100vw - 32px);
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  box-shadow: 0 12px 36px var(--shadow);
-  z-index: 20;
+  border-radius: 14px;
+  box-shadow: 0 24px 64px var(--shadow), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  z-index: 30;
   overflow: hidden;
 }
 
 .lfo-panel.hidden {
+  display: none;
+}
+
+/* Scoped, like the piano roll's - there is no global .hidden utility. */
+.lfo-panel .hidden {
   display: none;
 }
 
@@ -1703,7 +1713,7 @@ li.CodeMirror-hint-active {
    FIXED. Sized to its content it reflowed the whole header - and, once the buttons wrapped to a
    second line, resized the panel - every time the pattern moved from `0` to `chorus`, which is
    exactly when you are trying to read it. A longer name is clipped; the tooltip carries it whole. */
-#pianorollPickWrap {
+.def-pick-wrap {
   position: relative; /* the find-or-create popover hangs off the name, wherever the head wraps to */
 }
 
@@ -1711,7 +1721,7 @@ li.CodeMirror-hint-active {
    costs nothing and renaming is one click. Its width is FIXED: sized to its content, the header
    reflowed (and, once the buttons wrapped, resized the panel) every time the pattern moved from
    `lead` to `chorus`, which is exactly when you are trying to read it. */
-#pianorollName {
+.def-name {
   width: 7.5em;
   padding: 3px 7px;
   font-size: 12px;
@@ -1724,16 +1734,16 @@ li.CodeMirror-hint-active {
   text-overflow: ellipsis;
 }
 
-#pianorollName:hover {
+.def-name:hover {
   border-color: var(--border);
 }
 
-#pianorollName:focus {
+.def-name:focus {
   background: var(--bg);
   border-color: var(--accent);
 }
 
-.pianoroll-picker {
+.def-picker {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
@@ -1746,7 +1756,7 @@ li.CodeMirror-hint-active {
   box-shadow: 0 10px 28px var(--shadow);
 }
 
-.pianoroll-picker input {
+.def-picker input {
   width: 100%;
   padding: 4px 7px;
   font-size: 12px;
@@ -1758,17 +1768,17 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
-.pianoroll-picker input:focus {
+.def-picker input:focus {
   border-color: var(--accent);
 }
 
-.pianoroll-pick-list {
+.def-pick-list {
   max-height: 14em;
   overflow-y: auto;
   margin-top: 4px;
 }
 
-.pianoroll-pick-row {
+.def-pick-row {
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -1783,19 +1793,48 @@ li.CodeMirror-hint-active {
 }
 
 /* One highlight for both ways of getting here - the arrow keys and the pointer. */
-.pianoroll-pick-row.on,
-.pianoroll-pick-row:hover {
+.def-pick-row.on,
+.def-pick-row:hover {
   background: var(--accent-soft);
   color: var(--accent);
 }
 
-.pianoroll-pick-row .pianoroll-pick-note {
-  margin-left: auto;
+/* The name takes the slack, so the note and the delete button sit against the right edge
+   whether a row has one of them, both, or neither. */
+.def-pick-row .def-pick-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.def-pick-row .def-pick-note {
   font-size: 10px;
   color: var(--text-dim);
 }
 
-.pianoroll-pick-empty {
+/* Deleting is a real edit to the buffer, so it stays out of the way until you are on the row -
+   the list is mostly used for finding a roll, not for throwing one away. */
+.def-pick-row .def-pick-del {
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-dim);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.def-pick-row.on .def-pick-del,
+.def-pick-row:hover .def-pick-del {
+  opacity: 0.7;
+}
+
+.def-pick-row .def-pick-del:hover {
+  opacity: 1;
+  color: var(--err);
+}
+
+.def-pick-empty {
   padding: 4px 7px;
   font-size: 11px;
   font-family: var(--mono);

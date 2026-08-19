@@ -153,9 +153,9 @@ test('sampler configs attached before .fast() warp with their events', () => {
 });
 
 test('.fast() on an LFO multiplies the rate; .rate() sets it absolutely', () => {
-  assert.equal(sine(2).fast(2).lfoIR.rateHz, 4);
-  assert.equal(sine(2).slow(4).lfoIR.rateHz, 0.5);
-  assert.equal(sine(2).rate(3).lfoIR.rateHz, 3);
+  assert.equal(sine(2).fast(2).lfoIR.rateCycles, 4);
+  assert.equal(sine(2).slow(4).lfoIR.rateCycles, 0.5);
+  assert.equal(sine(2).rate(3).lfoIR.rateCycles, 3);
 });
 
 test('.fast()/.slow() reject zero and non-numbers, and .fast() rejects env()', () => {

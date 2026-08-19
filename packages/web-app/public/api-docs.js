@@ -76,14 +76,8 @@ const API_DOCS = {
   pianoroll: {
     kind: 'builder',
     sig: 'pianoroll(notes, { grid, len, start })',
-    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it; every edit writes back into the string. An empty pianoroll() names itself after its track and gets a definition of its own, so notes can also be kept under an id: pianoroll("<lead alt>") plays those in turn, and an id nothing has defined yet is created empty. grid is the granularity in cells per cycle, and the loop window is len cells from cell start (drag either end of the roll\'s loop bar).',
+    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it. Rolls can be named and patterned: pianoroll("<lead alt>"). grid is cells per cycle, and the loop window is len cells from start.',
     eg: 'lead: pianoroll().synth("Serum 2")',
-  },
-  roll: {
-    kind: 'builder',
-    sig: 'roll(id, notes, { grid, len, start })',
-    desc: 'Keeps a drawn roll under an id (a number or a name) so patterns can name it - pianoroll("<0 chorus>") plays them in turn. Written for you: an empty pianoroll() creates one, and the piano roll panel renames it - renaming a roll two patterns share splits it, so the pattern you renamed from gets a copy under the new name and the other keeps the original. Definitions are hidden from the editor (settings: hide roll definitions) since they are note data rather than code. Redefined on every evaluation; ids defined in prebake are shared by every patch.',
-    eg: 'roll(0, "60,0,4 64,0,4", { grid: 16 })',
   },
 
   // ----------------------------------------------------------------- live input
@@ -151,9 +145,9 @@ const API_DOCS = {
   perlin: { kind: 'builder', sig: 'perlin({ rate, seed })', desc: 'Fractal value noise (fBm) - the smooth one: organic drift with one new target per period, where rand() draws afresh every read. Independently seeded like rand().', eg: 'pan(perlin(0.1).range(-0.6, 0.6))' },
   lfo: {
     kind: 'builder',
-    sig: 'lfo(shape, { rate, mode, phase })',
-    desc: 'A hand-drawn modulator - double-click the lfo name to open the shape editor. Modes: free, retrigger (per note), envelope (once per note).',
-    eg: 'lfo("0,0 0.5,1,-3 1,0", { rate: 0.3 }).range(200, 5000)',
+    sig: 'lfo(shape, { rate, mode, phase, glide })',
+    desc: 'A hand-drawn modulator - double-click the lfo name to open the shape editor. Shapes can be named and patterned: lfo("<pluck swell>"). rate is passes per cycle, or "0.5hz" to run free of the tempo. Modes: free, retrigger (per note), envelope (once per note).',
+    eg: 'lfo("<pluck swell>", { rate: 0.3, glide: 0.2 }).range(200, 5000)',
   },
   env: {
     kind: 'builder',

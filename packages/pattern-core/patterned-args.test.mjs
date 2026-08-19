@@ -68,7 +68,7 @@ test('.fast()/.slow() take a constant-valued signal on the exact numeric path', 
   assert.deepEqual(starts(n('0 1').fast(Signal(2)), 0), starts(n('0 1').fast(2), 0));
   assert.deepEqual(starts(n('0 1').slow(Signal(2)), 0), starts(n('0 1').slow(2), 0));
   // An LFO's rate multiply is a constant-only fast path - a Signal(2) must reach it too.
-  assert.equal(sine(1).fast(Signal(2)).lfoIR.rateHz, 2);
+  assert.equal(sine(1).fast(Signal(2)).lfoIR.rateCycles, 2);
 });
 
 test('.fast() takes a gridless signal, held once per cycle', () => {

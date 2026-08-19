@@ -425,7 +425,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll', 'roll',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip',
@@ -434,6 +434,13 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
   // (see client.js), so they behave the same in patterns, setup blocks, and hotkey handlers.
   'noteToMidi', 'degreeToMidi', 'parseScaleName'];
+
+// Builders the EDITOR writes and nobody types: the definition calls behind a drawn roll or LFO
+// shape. Bound so the buffer they are written into evaluates, but deliberately kept out of
+// BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
+// `shape` stay free for whatever they should mean to a person later. See the underscore in
+// pattern-core: these are the editor's own calls, not part of the language.
+const INTERNAL_BUILDERS = ['_roll', '_shape'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -539,7 +546,7 @@ function makeBlockEvaluator(defs = new Map()) {
     const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase) : code;
     const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
     const macroNames = macroSigNames();
-    const baseNames = [...BUILDER_NAMES, ...macroNames, ...Object.keys(HOST_BUILDERS)].filter((n) => !defs.has(n)); // defs may shadow builders
+    const baseNames = [...BUILDER_NAMES, ...INTERNAL_BUILDERS, ...macroNames, ...Object.keys(HOST_BUILDERS)].filter((n) => !defs.has(n)); // defs may shadow builders
     const baseValues = baseNames.map((n) => {
       if (n in HOST_BUILDERS) return HOST_BUILDERS[n];
       if (macroNames.includes(n)) return patternCore.macro(Number(n.slice(5)));
@@ -672,7 +679,10 @@ function patternSigs(sig) {
   // main grid at build time (structure + locs union, see pattern-core crossMerge), so the main
   // sig already lights them - and for a per-position control (choose) the config sig's own grid
   // only knows the phase-0 pick, which would wrongly light one option for the whole cycle.
-  return [sig, ...Object.values(sig.paramSignals), ...Object.values(sig.channel)];
+  // A patterned lfo("<a b>") lights up too: the modulator itself has no step grid, but the shape
+  // NAMES do - that pattern is what says which shape is running, and it is the thing on screen.
+  return [sig, ...Object.values(sig.paramSignals), ...Object.values(sig.channel)]
+    .flatMap((s) => (s?.lfoIR?.shapePattern ? [s, s.lfoIR.shapePattern] : [s]));
 }
 
 function dryRunPattern(sig) {
@@ -1433,9 +1443,9 @@ const routes = {
     // Tempo-only and definitions-only blocks act at eval time and don't become tracks.
     // A block of roll(...) definitions evaluates to its last definition, which is a real Sig but
     // not a track - playing it would turn the definitions block into an extra voice (see
-    // signal.mjs's rollDef). Anything derived from one (`roll(0, "…").synth(…)`) has lost the mark
+    // signal.mjs's isDef). Anything derived from one (`roll(0, "…").synth(…)`) has lost the mark
     // and plays as normal.
-    const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.rollDef);
+    const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
     const anySolo = built.some((b) => b.soloed && !b.muted);
@@ -1519,7 +1529,12 @@ const routes = {
   // still-active tracks of the last eval - deterministic, so it matches what /api/evaluate sent.
   // What roll ids are playable right now. The buffer's own definitions the editor can read for
   // itself; this is how it learns about the prebake library, which is nowhere in the buffer.
-  'GET /api/rolls': async () => ({ rolls: patternCore.rollIds() }),
+  // Every handler returns { status, body } - this one didn't, so it 500'd on every call and the
+  // picker's library list was quietly always empty.
+  'GET /api/rolls': async () => ({
+    status: 200,
+    body: { rolls: patternCore.rollIds(), shapes: patternCore.shapeIds() },
+  }),
 
   'GET /api/highlight': async (q) => {
     const from = Math.max(0, Math.floor(Number(q.from)) || 0);

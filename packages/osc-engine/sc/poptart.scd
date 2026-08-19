@@ -941,8 +941,11 @@ OSCdef(\poptartNoteOn, { |msg|
         server.makeBundle(latency, {
             ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger);
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
-            // note-synced lfo() shapes: reset/replay on every note onset
+            // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
+            // patterned shape's swap actually happens in those modes, just before the trigger, so
+            // the note gets the new shape from its beginning rather than halfway through the old.
             track[\lfos].do { |e|
+                e[\pending] !? { |f| f.value; e[\pending] = nil };
                 if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
             };
         });
@@ -1101,10 +1104,14 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
     var mode = msg[4].asSymbol, rateHz = msg[5].asFloat, phaseCycles = msg[6].asFloat;
     var lo = msg[7].asFloat, hi = msg[8].asFloat, pointsJson = msg[9].asString;
+    // Every shape a patterned lfo("<pluck swell>") can reach, and how long a swap between them
+    // glides, as a fraction of one period. Older senders pass neither: one shape, no glide.
+    var shapesJson = (msg[10] ? pointsJson).asString;
+    var glide = (msg[11] ? 0).asFloat;
     fork {
         var track = awaitTrack.(key);
         var isChannel, ctl, index, lfoKey, existing, spec;
-        var points, xs, ys, cs, times, curves, defName, def, bus, shapeSynth;
+        var shapes, defNames, bus, shapeSynth;
         if (track.isNil) { ("poptart: setParamShapeLFO: no track " ++ key).warn } {
             isChannel = slot == -1;
             if (isChannel.not and: { awaitLoaded.(track, slot).not }) {
@@ -1123,32 +1130,58 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
                             ++ "' is outside the normalized 0..1 VST parameter range and will pin").warn;
                     };
                     // parseJSON yields string values - convert everything explicitly.
-                    points = pointsJson.parseJSON;
-                    xs = points.collect { |p| p["x"].asFloat };
-                    ys = points.collect { |p| p["y"].asFloat };
-                    cs = points.collect { |p| (p["c"] ? "0").asFloat };
-                    times = (1..xs.size - 1).collect { |i| max(0, xs[i] - xs[i - 1]) }; // normalized, sums to 1
-                    curves = cs.copyRange(0, cs.size - 2);
-                    spec = mode.asString ++ "|" ++ pointsJson;
+                    shapes = shapesJson.parseJSON;
+                    // Rate/range still update a running modulator in place (phase carries across a
+                    // livecoding edit); anything that changes the SHAPES rebuilds. glide is in the
+                    // spec because it is a def argument only - the swap reads it off the entry.
+                    spec = mode.asString ++ "|" ++ glide.asString ++ "|" ++ shapesJson;
                     lfoKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
                     existing = track[\lfos][lfoKey];
                     if (existing.notNil and: { existing[\spec] == spec }) {
                         existing[\synth].set(\rate, rateHz, \lo, lo, \hi, hi);
+                        // A swap has to start the next shape at this one's rate and range.
+                        existing[\rate] = rateHz; existing[\lo] = lo; existing[\hi] = hi;
                     } {
-                        defName = ("poptart_shape_" ++ key ++ "_" ++ lfoKey).asSymbol;
-                        def = SynthDef(defName, { |out, rate = 1, phase = 0, lo = 0, hi = 1, t_trig = 0|
-                            var env = Env(ys, times, curves);
-                            var idx = switch(mode,
-                                \retrigger, { (Sweep.kr(t_trig, rate) + phase) % 1 },
-                                \envelope, { Sweep.kr(t_trig, rate).min(1) },
-                                // free (default): t_trig is the anchor reset (only free mode
-                                // gets '/poptart/anchorParamLFO' corrections - in the gated
-                                // modes the trigger belongs to note onsets)
-                                { (Sweep.kr(t_trig, rate) + phase) % 1 }
-                            );
-                            Out.kr(out, lo + (IEnvGen.kr(env, idx) * (hi - lo)));
-                        });
-                        def.add;
+                        // One def per shape, all compiled now: a swap has to be a timestamped
+                        // switch between ready synths. Building a def at swap time is async and
+                        // would land whenever it landed, which is not what "on the beat" means.
+                        defNames = shapes.collect { |points, i|
+                            var xs = points.collect { |p| p["x"].asFloat };
+                            var ys = points.collect { |p| p["y"].asFloat };
+                            var cs = points.collect { |p| (p["c"] ? "0").asFloat };
+                            var times = (1..xs.size - 1).collect { |k| max(0, xs[k] - xs[k - 1]) }; // sums to 1
+                            var curves = cs.copyRange(0, cs.size - 2);
+                            var defName = ("poptart_shape_" ++ key ++ "_" ++ lfoKey ++ "_" ++ i).asSymbol;
+                            SynthDef(defName, { |out, rate = 1, phase = 0, lo = 0, hi = 1, t_trig = 0,
+                                glideSec = 0, glideOn = 0|
+                                var env = Env(ys, times, curves);
+                                var idx = switch(mode,
+                                    \retrigger, { (Sweep.kr(t_trig, rate) + phase) % 1 },
+                                    \envelope, { Sweep.kr(t_trig, rate).min(1) },
+                                    // free (default): t_trig is the anchor reset (only free mode
+                                    // gets '/poptart/anchorParamLFO' corrections - in the gated
+                                    // modes the trigger belongs to note onsets)
+                                    { (Sweep.kr(t_trig, rate) + phase) % 1 }
+                                );
+                                var shaped = lo + (IEnvGen.kr(env, idx) * (hi - lo));
+                                // Swap glide. A shape change restarts the new shape from its
+                                // beginning, which in general is nowhere near where the outgoing
+                                // one had got to - a step in a filter cutoff, audible as a click.
+                                // So the difference is measured once, at birth, and decays away
+                                // over glideSec: out = newShape(t) + (oldValue - newShape(0)) *
+                                // decay(t). In.kr reads the bus this synth is about to write, so
+                                // at its first block that is still the OUTGOING synth's last
+                                // value - the swap frees the old one in the same bundle, after
+                                // this one is made, so it never runs again to overwrite it.
+                                // glideOn is 0 for the first synth on a bus, which has no
+                                // predecessor and would otherwise glide up from whatever the bus
+                                // happened to be holding.
+                                var born = Impulse.kr(0);
+                                var offset = (Latch.kr(In.kr(out), born) - Latch.kr(shaped, born)) * glideOn;
+                                Out.kr(out, shaped + (offset * EnvGen.kr(Env([1, 0], [max(glideSec, 0.001)], -4))));
+                            }).add;
+                            defName;
+                        };
                         server.sync;
                         if (existing.notNil) {
                             existing[\synth].free;
@@ -1156,19 +1189,26 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
                         } {
                             bus = Bus.control(server, 1);
                         };
-                        shapeSynth = Synth(defName,
+                        shapeSynth = Synth(defNames[0],
                             [\out, bus, \rate, rateHz, \phase, phaseCycles, \lo, lo, \hi, hi,
                              \t_trig, if ((mode != \free) and: { track[\held] > 0 }) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
                         if (existing.isNil) {
                             if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                             track[\lfos][lfoKey] = (synth: shapeSynth, bus: bus, shape: \custom,
-                                index: index, mode: mode, spec: spec);
+                                index: index, mode: mode, spec: spec,
+                                defs: defNames, current: 0, glide: glide,
+                                rate: rateHz, lo: lo, hi: hi, group: track[\group]);
                         } {
                             existing[\synth] = shapeSynth;
                             existing[\shape] = \custom;
                             existing[\mode] = mode;
                             existing[\spec] = spec;
+                            existing[\defs] = defNames;
+                            existing[\current] = 0;
+                            existing[\glide] = glide;
+                            existing[\rate] = rateHz; existing[\lo] = lo; existing[\hi] = hi;
+                            existing[\pending] = nil; // a queued swap into shapes that are gone
                         };
                     };
                 };
@@ -1176,6 +1216,50 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
         };
     };
 }, '/poptart/setParamShapeLFO');
+
+// Which shape a patterned lfo("<pluck swell>") is playing from now on. Every shape is already
+// compiled (see setParamShapeLFO), so the swap is a timestamped exchange of one running synth for
+// another on the same bus: the mapping onto the plugin parameter is never touched, so the
+// parameter never sees a gap. The new shape starts from its beginning - a shape that carried on at
+// the outgoing one's phase would be neither shape - and the step that creates is glided away
+// inside the SynthDef.
+//
+// In the note-gated modes the swap WAITS for the next note instead. retrigger/envelope shapes are
+// played per note; cutting one off halfway to start a different one is not what "the next shape"
+// means, and the pattern's step boundary has no particular relationship to the note anyway.
+OSCdef(\poptartSetParamShape, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
+    var index = msg[4].asInteger, latency = msg[5].asFloat;
+    var track = tracks[key];
+    var lfoKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+    var existing = if (track.isKindOf(Event)) { track[\lfos][lfoKey] };
+    var swap;
+    if (existing.notNil and: { existing[\defs].notNil }
+        and: { index >= 0 } and: { index < existing[\defs].size }
+        and: { index != existing[\current] }) {
+        swap = {
+            var old = existing[\synth];
+            var rate = existing[\rate] ? 1;
+            // glide is a fraction of one LFO PERIOD, so what it is worth in seconds follows the
+            // rate: a slow modulator glides slowly, which is what makes it read as one gesture.
+            var glideSec = (existing[\glide] ? 0) / max(rate.abs, 0.001);
+            var next = Synth(existing[\defs][index],
+                [\out, existing[\bus], \rate, rate, \phase, 0,
+                 \lo, existing[\lo] ? 0, \hi, existing[\hi] ? 1,
+                 \t_trig, if (existing[\mode] == \free) { 0 } { 1 },
+                 \glideSec, glideSec, \glideOn, if (glideSec > 0) { 1 } { 0 }],
+                target: existing[\group], addAction: \addToHead);
+            existing[\synth] = next;
+            existing[\current] = index;
+            old.free; // after the new one is made, so its In.kr still sees this one's last value
+        };
+        if (existing[\mode] == \free) {
+            server.makeBundle(latency, swap);
+        } {
+            existing[\pending] = swap;
+        };
+    };
+}, '/poptart/setParamShape');
 
 // Tier 2, envelope flavor: same bus+map mechanism as setParamLFO, but the modulator is an
 // EnvGen gated by the track's note events (see noteOn/noteOff above). Re-eval updates the

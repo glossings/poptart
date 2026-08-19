@@ -1013,6 +1013,11 @@ class OscEngine {
         ir.min,
         ir.max,
         JSON.stringify(ir.points),
+        // Every shape the pattern can reach, compiled up front: a swap has to be a timestamped
+        // switch between ready synths, not a SynthDef build (which is async and would land late).
+        JSON.stringify(ir.shapes ?? [ir.points]),
+        // How long a swap takes to glide, as a fraction of one LFO period. 0 jumps.
+        ir.glide ?? 0,
       ]);
       return;
     }
@@ -1026,6 +1031,12 @@ class OscEngine {
       ir.min,
       ir.max,
     ]);
+  }
+  // Which of a patterned lfo("<a b>")'s shapes is in force from `targetTime`. The engine restarts
+  // the new shape from its beginning and glides across the step if the lfo() asked for one; in the
+  // note-gated modes it holds the change until the next note rather than cutting a shape short.
+  setParamShape(trackId, slotIndex, paramName, index, targetTime) {
+    this._send('/poptart/setParamShape', [trackId, slotIndex, paramName, index, this._latency(targetTime)]);
   }
   clearParamLFO(trackId, slotIndex, paramName) {
     this._send('/poptart/clearParamLFO', [trackId, slotIndex, paramName]);

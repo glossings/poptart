@@ -20,7 +20,7 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, warnPattern } from './signal.mjs';
+import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, warnPattern, lfoRateHz } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -454,18 +454,24 @@ export class Scheduler {
    */
   _sendModulator(m, nowSec, initial = false) {
     const ir = m.sig.lfoIR ?? m.sig.envIR ?? m.sig.ccIR;
-    m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number';
     const cps = this.transport.cps;
+    // A rate written in cycles is worth a different number of Hz at every tempo, so a synced LFO
+    // has to be re-sent when setbpm moves - the same in-place update a signal-valued bound gets,
+    // which keeps it native and phase-continuous rather than restarting it.
+    const rateHz = m.sig.lfoIR ? lfoRateHz(ir, cps) : null;
+    const synced = m.sig.lfoIR != null && ir.rateHz == null;
+    m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number' || synced;
     const pos = this.transport.cycleAt(nowSec);
     // A resting signal bound (a mini-string bound mid-`~`) holds the last sent value; on the
     // very first send there's nothing to hold, so fall back to the unipolar default.
     const lo = sampleBound(ir.min, nowSec, cps, pos) ?? (initial ? 0 : null);
     const hi = sampleBound(ir.max, nowSec, cps, pos) ?? (initial ? 1 : null);
     if (lo == null || hi == null) return;
-    if (!initial && lo === m.lastLo && hi === m.lastHi) return;
+    if (!initial && lo === m.lastLo && hi === m.lastHi && rateHz === m.lastRateHz) return;
     m.lastLo = lo;
     m.lastHi = hi;
-    const resolved = m.dynamic ? { ...ir, min: lo, max: hi } : ir;
+    m.lastRateHz = rateHz;
+    const resolved = m.dynamic ? { ...ir, min: lo, max: hi, ...(rateHz == null ? {} : { rateHz }) } : ir;
     if (m.kind === 'lfo') {
       this.engine.setParamLFO(this.trackId, m.slot, m.name, resolved);
     } else if (m.kind === 'env') {
@@ -516,6 +522,7 @@ export class Scheduler {
       const targetCycle = this.transport.cycleAt(nowSec + DEFAULT_LOOKAHEAD_SEC);
 
       this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle);
+      this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
       this._scheduledUntilCycle = targetCycle;
 
       this._pollGenericParams(nowSec);
@@ -606,6 +613,39 @@ export class Scheduler {
   // otherwise a continuous vel channel (vel(sine)/vel(0.6)) is sampled at the onset; otherwise it's
   // unset (undefined) and the caller supplies the default (full on a synth, engine default gain on a
   // sampler). Maps to MIDI velocity or sample gain depending on the track kind - one read either way.
+  // Patterned lfo("<pluck swell>"): the engine compiles every named shape up front and holds one
+  // of them; this schedules WHICH, on the shape pattern's own step grid, timestamped like a note.
+  // A swap restarts the new shape from its beginning - a modulator that changed shape mid-rise and
+  // carried on at the old phase would be neither shape - so the anchor clock (see _anchorLFOs) is
+  // re-based to the swap as well.
+  _scheduleShapeSwaps(fromCycle, toCycle) {
+    if (typeof this.engine.setParamShape !== 'function') return;
+    for (const m of this._activeModulators.values()) {
+      const ir = m.sig.lfoIR;
+      if (!ir?.shapePattern?.stepsForCycle) continue;
+      for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
+        for (const step of ir.shapePattern.stepsForCycle(cycle)) {
+          const at = cycle + step.start;
+          if (at < fromCycle || at >= toCycle) continue;
+          if (step.value == null || step.cont) continue; // a rest holds the shape that is playing
+          const index = ir.shapeNames.indexOf(String(step.value).trim());
+          // The first step of an eval asserts the shape rather than assuming it: an unchanged
+          // spec keeps the running synth, which may be holding any shape, and a scheduler that
+          // assumed the first would skip the message that puts it right. The engine no-ops when
+          // it already agrees.
+          if (index < 0 || index === m.shapeIndex) continue;
+          m.shapeIndex = index;
+          const atSec = this.transport.secAt(at);
+          this.engine.setParamShape(this.trackId, m.slot, m.name, index, atSec);
+          // Phase restarts at the swap, so that is where the anchor's phase formula counts from.
+          // In the note-gated modes the engine defers the swap to the next gate and keeps its own
+          // time anyway - those are never anchored (see _anchorLFOs).
+          m.phaseOriginSec = atSec;
+        }
+      }
+    }
+  }
+
   _velAt(step, onsetSec, onsetCycle) {
     return channelAt('vel', step, this.pattern.noteChannels, onsetSec, this.transport.cps, onsetCycle);
   }
@@ -673,7 +713,11 @@ export class Scheduler {
       if (ir.shape === 'custom' && ir.mode != null && ir.mode !== 'free') continue; // note-gated
       if (m.anchoredAtSec != null && nowSec - m.anchoredAtSec < LFO_ANCHOR_INTERVAL_SEC) continue;
       const targetSec = nowSec + DEFAULT_LOOKAHEAD_SEC;
-      const total = targetSec * ir.rateHz + (ir.phaseCycles ?? 0); // sampleLfoIR's phase formula
+      // sampleLfoIR's phase formula, counted from the last shape swap where there has been one:
+      // the swap restarted the shape, so anchoring to absolute time would immediately drag it back
+      // to a phase it never had.
+      const since = m.phaseOriginSec == null ? targetSec : targetSec - m.phaseOriginSec;
+      const total = since * lfoRateHz(ir, this.transport.cps) + (ir.phaseCycles ?? 0);
       this.engine.anchorParamLFO(this.trackId, m.slot, m.name, ((total % 1) + 1) % 1, targetSec);
       m.anchoredAtSec = nowSec;
     }

@@ -8,8 +8,23 @@
 //   c - optional curvature of the segment LEAVING this point (SC convention: 0 = linear,
 //       negative = fast-then-slow, positive = slow-then-fast); omitted when 0.
 
+// Is this string DRAWN DATA (a breakpoint list) rather than something to read? The editor folds
+// an lfo()'s first argument out of the way because a hand-drawn shape is a wall of numbers nobody
+// reads - but the same position now also takes a shape NAME and a pattern of them, which are the
+// code, and folding those would hide the only interesting part of the call. Same question, and the
+// same answer, as looksLikeNoteString does for pianoroll().
+export function looksLikeShapeData(str) {
+  const tokens = String(str).trim().split(/\s+/);
+  if (!tokens[0]) return false;
+  return tokens.every((t) => /^-?\d*\.?\d+,-?\d*\.?\d+(,-?\d*\.?\d+)?$/.test(t));
+}
+
 export function parseShapePoints(str) {
-  const points = String(str)
+  // A preset's NAME is a shape too - lfo("pluck") beside lfo("0,1,-4 1,0"), and the only readable
+  // way to write a pattern of them: lfo("<pluck swell>"). Checked before parsing, since a name is
+  // never a valid breakpoint list anyway.
+  const preset = SHAPE_PRESETS[String(str).trim()];
+  const points = String(preset ?? str)
     .trim()
     .split(/\s+/)
     .map((tok) => {

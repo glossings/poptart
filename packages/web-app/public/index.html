@@ -38,7 +38,7 @@
         <div class="spacer"></div>
         <div id="phraseViz" title="position in the 4-cycle phrase - one circle per cycle"></div>
         <div class="rec-wrap">
-          <button id="recBtn" title="record MIDI keys into the pattern - arms now, starts when the current 4-cycle phrase ends">● rec</button>
+          <button id="recBtn" title="record MIDI keys — starts at the next phrase">● rec</button>
           <button id="recOptsBtn" class="small" title="record options">▾</button>
           <div id="recPanel" class="rec-panel hidden">
             <label>cycles
@@ -60,7 +60,7 @@
             </label>
           </div>
         </div>
-        <select id="kbMode" title="computer-keyboard instrument (keyboard() / tap() tracks) — off types normally; midi plays notes and suppresses typing; both does each at once">
+        <select id="kbMode" title="keyboard() / tap() input — off types normally, midi plays notes, both does each">
           <option value="normal">⌨ off</option>
           <option value="midi">⌨ midi</option>
           <option value="both">⌨ both</option>
@@ -136,10 +136,10 @@
                 <button id="fileSaveBtn" title="name this pattern and save it (⌘/Ctrl+S)">save</button>
                 <button id="fileSaveAsBtn" class="small" title="save the buffer under a new name (⇧⌘/Ctrl+Shift+S)">save as…</button>
                 <span class="spacer"></span>
-                <button id="fileExportBtn" class="small" title="download the buffer as a file — the way to share a patch that carries captured plugin state">export</button>
+                <button id="fileExportBtn" class="small" title="download the buffer as a file">export</button>
               </div>
               <input id="fileSearchInput" type="search" spellcheck="false" placeholder="🔍 search everything below…"
-                title="matches the file name, its @title / @by / @tags, and the code itself — tag:techno and by:aria narrow a term to one field" />
+                title="searches names, @title/@by/@tags and the code — try tag:techno, by:aria" />
               <div id="fileList" class="panel list">loading…</div>
               <h2 id="wipHeading">work in progress</h2>
               <div id="wipList" class="panel list"></div>
@@ -153,7 +153,7 @@
                 <select id="audioDeviceSelect" title="which audio device the engine plays to"></select>
               </label>
               <div class="settings-row settings-row-block">
-                <span title="extra input-capable devices to combine with the output device, so input() can reach all of their channels at once">extra inputs</span>
+                <span title="extra input devices to combine, so input() reaches all their channels">extra inputs</span>
                 <div id="audioInputList" class="check-list">loading…</div>
               </div>
               <div class="settings-actions">
@@ -168,14 +168,14 @@
             <section id="editorSection">
               <h2>editor</h2>
               <label class="settings-row settings-check"
-                title="show a function's signature and description beside the autocomplete popup, and on ctrl+hover over a name in the code">
+                title="signatures beside autocomplete, and on ctrl+hover">
                 <input id="docTooltipsToggle" type="checkbox" checked />
                 documentation tooltips
               </label>
               <label class="settings-row settings-check"
-                title="keep roll(...) definitions off the screen entirely — they are note data, not code to read. The buffer still holds them, so exports and share links are unaffected">
+                title="keep roll(...) and shape(...) definitions off the screen — the buffer still holds them">
                 <input id="hideRollDefsToggle" type="checkbox" checked />
-                hide roll definitions
+                hide drawn definitions
               </label>
             </section>
             <section id="librarySection">
@@ -195,7 +195,7 @@
             <section>
               <h2>plugins</h2>
               <label class="settings-check"
-                title="when a plugin is installed as both VST2 and VST3, list only the VST3 in the browser and autocomplete">
+                title="list only the VST3 when a plugin has both">
                 <input id="preferVst3Toggle" type="checkbox" />
                 prefer VST3 over VST2
               </label>
@@ -222,16 +222,24 @@
 
     <div id="lfoPanel" class="lfo-panel hidden">
       <div class="lfo-panel-head">
-        <span>lfo shape</span>
+        <span id="lfoTitle">lfo shape</span>
+        <div id="lfoPickWrap" class="def-pick-wrap hidden">shape
+          <input id="lfoName" class="def-name" type="text" spellcheck="false" title="shape name" />
+          <button id="lfoPickBtn" class="small" title="find or create">▾</button>
+          <div id="lfoPicker" class="def-picker hidden">
+            <input id="lfoSearch" type="text" spellcheck="false" placeholder="shape name" />
+            <div id="lfoPickList" class="def-pick-list"></div>
+          </div>
+        </div>
         <span class="spacer"></span>
-        <select id="lfoPreset" title="load a preset shape"><option value="">preset…</option></select>
+        <select id="lfoPreset" title="preset shapes"><option value="">preset…</option></select>
         <button id="lfoRandom" class="small" title="random shape">🎲</button>
         <button id="lfoClose" class="small">✕</button>
       </div>
-      <canvas id="lfoCanvas" width="300" height="140"></canvas>
+      <canvas id="lfoCanvas" width="640" height="260"></canvas>
       <div class="lfo-controls">
-        <label>rate <input id="lfoRate" type="number" step="0.05" min="0.01" value="1" /></label>
-        <label>mode
+        <label id="lfoRateWrap">rate <input id="lfoRate" type="number" step="0.05" min="0.01" value="1" /><button id="lfoRateUnit" class="small" title="rate unit">cyc</button></label>
+        <label id="lfoModeWrap">mode
           <select id="lfoMode">
             <option value="free">free</option>
             <option value="retrigger">retrigger</option>
@@ -251,9 +259,9 @@
       </div>
       <canvas id="recordCanvas" width="1520" height="400"></canvas>
       <div class="record-controls">
-        <label>cycles <input id="recordCycles" type="number" step="1" min="1" max="128" value="4" title="How many cycles to record. Recording starts at the next phrase boundary." /></label>
-        <label>name <input id="recordName" type="text" placeholder="label" title="What to call the recording. Defaults to the block's label; a name already in use gets a -2." /></label>
-        <label class="record-check" title="Fold the release tail back over the head. For a track that was silent going in - a loop already playing records the previous pass's tail into its own head, and would double it.">
+        <label>cycles <input id="recordCycles" type="number" step="1" min="1" max="128" value="4" title="cycles to record — starts at the next phrase" /></label>
+        <label>name <input id="recordName" type="text" placeholder="label" title="name — defaults to the block's label" /></label>
+        <label class="record-check" title="fold the release tail over the head — for a track that starts silent">
           <input id="recordWrapTail" type="checkbox" /> wrap tail
         </label>
       </div>
@@ -268,26 +276,26 @@
     <div id="pianorollPanel" class="pianoroll-panel hidden">
       <div class="pianoroll-panel-head">
         <span id="pianorollTitle">piano roll</span>
-        <div id="pianorollPickWrap" class="pianoroll-ctl hidden">roll
-          <input id="pianorollName" type="text" spellcheck="false" title="this roll's name — type over it to rename it" />
-          <button id="pianorollPickBtn" class="small" title="find or create a roll">▾</button>
-          <div id="pianorollPicker" class="pianoroll-picker hidden">
+        <div id="pianorollPickWrap" class="pianoroll-ctl def-pick-wrap hidden">roll
+          <input id="pianorollName" class="def-name" type="text" spellcheck="false" title="roll name" />
+          <button id="pianorollPickBtn" class="small" title="find or create">▾</button>
+          <div id="pianorollPicker" class="def-picker hidden">
             <input id="pianorollSearch" type="text" spellcheck="false" placeholder="roll name" />
-            <div id="pianorollPickList" class="pianoroll-pick-list"></div>
+            <div id="pianorollPickList" class="def-pick-list"></div>
           </div>
         </div>
-        <button id="pianorollLock" class="small hidden" title="follow the playing roll — click to pin this one on screen">🔓</button>
-        <span id="pianorollScale" class="pianoroll-scale" title="the key setscale() set — the roll is coloured by it. Click to snap every note into it"></span>
+        <button id="pianorollLock" class="small hidden" title="following the playing roll">🔓</button>
+        <span id="pianorollScale" class="pianoroll-scale" title="key — click to snap notes into it"></span>
         <label class="pianoroll-ctl">grid <select id="pianorollGrid" title="granularity — cells per cycle"></select></label>
-        <label class="pianoroll-ctl">len <input id="pianorollLen" type="number" step="1" min="1" value="16" title="loop length in cells (drag either end of the loop bar to move the playing window — it snaps to bar lines, shift for exact cells)" /></label>
-        <button id="pianorollHalve" class="small pr-text-btn" title="halve the length of the selected notes — or of the whole pattern when nothing is selected">÷2</button>
-        <button id="pianorollDouble" class="small pr-text-btn" title="double the length of the selected notes — or of the whole pattern when nothing is selected">×2</button>
-        <button id="pianorollDupLoop" class="small" title="repeat the loop after itself — twice the length, same notes again">⧉</button>
+        <label class="pianoroll-ctl">len <input id="pianorollLen" type="number" step="1" min="1" value="16" title="loop length in cells" /></label>
+        <button id="pianorollHalve" class="small pr-text-btn" title="halve the length">÷2</button>
+        <button id="pianorollDouble" class="small pr-text-btn" title="double the length">×2</button>
+        <button id="pianorollDupLoop" class="small" title="repeat the loop after itself">⧉</button>
         <button id="pianorollTool" class="small" title="tool">✏️</button>
-        <button id="pianorollCmdMode" class="small pr-text-btn" title="cmd-drag sets velocity — click to switch">vel</button>
+        <button id="pianorollCmdMode" class="small pr-text-btn" title="value lane: velocity">vel</button>
         <button id="pianorollFold" class="small pr-text-btn" title="fold to the scale set by setscale()">fold</button>
         <span class="spacer"></span>
-        <button id="pianorollPreview" class="small" title="preview notes as you draw (needs a loaded synth)">🎧</button>
+        <button id="pianorollPreview" class="small" title="preview notes as you draw">🎧</button>
         <button id="pianorollToMini" class="small" title="convert to mini-notation">→♪</button>
         <button id="pianorollClose" class="small">✕</button>
       </div>
@@ -369,7 +377,7 @@
           <div id="midiImportSummary" class="midi-import-summary"></div>
           <label class="midi-import-row">
             <span>quantize</span>
-            <select id="midiImportGrid" title="Cells per cycle to snap the notes onto — the piano roll's grid. Auto picks the coarsest grid each part actually sits on; off draws a hand-played part on fine cells instead."></select>
+            <select id="midiImportGrid" title="cells per cycle to snap onto — auto fits each part"></select>
           </label>
           <label class="midi-import-row">
             <input id="midiImportSetKey" type="checkbox" />
@@ -378,7 +386,7 @@
           <label class="midi-import-row" id="midiImportKeyRow">
             <span>key</span>
             <input id="midiImportKey" type="text" list="midiImportKeys" spellcheck="false"
-              placeholder="F minor" title="Writes the buffer's setscale() line, so the rolls open in this key and convert to scale degrees. Suggestions are ranked by how well they fit the notes." />
+              placeholder="F minor" title="writes setscale() — ranked by fit" />
             <datalist id="midiImportKeys"></datalist>
           </label>
         </div>

@@ -70,7 +70,7 @@ test('rand() has no rate - asking for one warns, and still plays', () => {
     setPatternWarn(null);
   }
   // perlin keeps its rate - it is the one with a period to set.
-  assert.equal(perlin(0.5).lfoIR.rateHz, 0.5, 'the number shorthand is still the rate');
+  assert.equal(perlin(0.5).lfoIR.rateCycles, 0.5, 'the number shorthand is still the rate');
   assert.equal(perlin({ rate: 2, phase: 0.25 }).lfoIR.phaseCycles, 0.25);
 });
 
