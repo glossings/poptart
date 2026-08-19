@@ -232,14 +232,24 @@ async function loadEngine() {
     // is the one moment a rebuild can't collide with playback.
     healAggregate();
     const { OscEngine } = require('@poptart/osc-engine');
-    // Whichever device scsynth will actually open decides the channel count .o(n) wraps at, and
+    // Whichever device scsynth will actually open decides how many channels exist at all, and
     // whose input channels input() addresses (wireEngine feeds the layout to pattern-core).
-    const active = deviceToOpen(audioOutputDevices());
+    const devices = audioOutputDevices();
+    const active = deviceToOpen(devices);
     activeAudioDevice = active ?? null;
     // Pass the device name only when it isn't the system default: naming it pins inDevice too
     // (see poptart.scd), which is exactly what we want for a chosen device or the aggregate.
     const pinned = active && !active.isDefault ? active.name : null;
-    const e = new OscEngine({ outDevice: pinned, outChannels: active?.channels ?? 2, inChannels: active?.inChannels ?? 0 });
+    const e = new OscEngine({
+      outDevice: pinned,
+      outChannels: active?.channels ?? 2,
+      // What .o(n) wraps at: only the playback device's channels are somewhere anyone can hear,
+      // and an aggregate's are a prefix of its own (see audio-selection.js).
+      playChannels: audioSelection.playbackChannels({
+        devices, wanted: settings.audioOutputDevice ?? null, active, aggregateUid: audioDevices.AGGREGATE_UID,
+      }),
+      inChannels: active?.inChannels ?? 0,
+    });
     await e.start(48000, 256);
     engineError = null;
     return e;

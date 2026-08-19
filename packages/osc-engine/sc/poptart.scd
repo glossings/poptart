@@ -31,9 +31,14 @@ var sampleRate = ("POPTART_SAMPLE_RATE".getenv ? "48000").asInteger;
 var blockSize = ("POPTART_BLOCK_SIZE".getenv ? "256").asInteger;
 // Audio output device (empty/unset = system default) and its channel count, chosen in the
 // editor's settings tab and passed through by OscEngine. The channel count sizes
-// numOutputBusChannels so .o(n)'s stereo-pair wraparound matches the hardware.
+// numOutputBusChannels so the device's channels are all addressable.
 var outDevice = "POPTART_OUT_DEVICE".getenv;
 var outChannels = ("POPTART_OUT_CHANNELS".getenv ? "2").asInteger;
+// How many of those channels actually reach a speaker - what .o(n)'s stereo-pair wraparound folds
+// onto. Same as outChannels for a plain device; smaller for poptart's aggregate, whose trailing
+// channels belong to the input devices combined in behind the playback device and go nowhere
+// audible. Node works it out (audio-selection.js's playbackChannels) since it knows the membership.
+var playChannels = ("POPTART_PLAY_CHANNELS".getenv ? outChannels.asString).asInteger;
 // The chosen device's input channel count (0 for output-only devices). Currently poptart plays
 // out only, so this is 0 in practice, but it's the device's real input count so live-input
 // features can use it later without a boot-config change. It also has to match the device: when
@@ -190,9 +195,10 @@ pluginList = {
 trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 
 buildTrackDef = { |key|
-    // .o(n)'s wraparound: numOutputBusChannels was sized from the selected device's channel
-    // count at boot, so pair indices past the hardware's last pair fold back onto real outputs.
-    var numPairs = max(1, server.options.numOutputBusChannels div: 2);
+    // .o(n)'s wraparound: pair indices past the last AUDIBLE pair fold back onto real outputs.
+    // Audible, not merely allocated - wrapping at numOutputBusChannels sent .o(2) into the silent
+    // tail of poptart's aggregate whenever an extra input was combined in (see playChannels).
+    var numPairs = max(1, min(playChannels, server.options.numOutputBusChannels) div: 2);
     // scBus1..7 are per-fx-slot auxiliary (sidechain) input buses; scSend/scSendGain are this
     // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
@@ -574,7 +580,8 @@ if (outDevice.notNil and: { outDevice.isEmpty.not }) {
     server.options.inDevice = outDevice;
     server.options.outDevice = outDevice;
 };
-// At least stereo; more when the selected device has it, so .o(n) can address every pair.
+// At least stereo; more when the selected device has it, so input-side channel numbering and the
+// device's own outputs both line up. What .o(n) wraps at is playChannels, not this.
 server.options.numOutputBusChannels = max(2, outChannels);
 // One buffer per file in a sample pack, and packs stay loaded for the session - scsynth's default
 // table of 1024 is exhausted by a single big drum library ("No more buffer numbers" on the first
@@ -585,9 +592,11 @@ server.options.numBuffers = 16384;
 // Second boot-progress checkpoint (see "engine script running" above) - also puts the exact
 // boot config into the log, so a failure report carries it and the README's IDE-replay
 // procedure can copy the values straight out.
-"poptart: booting scsynth (device: %, sr: %, block: %, out: %ch, in: %ch)".format(
+// audible: what .o(n) wraps at, which is the whole device unless it's the aggregate (see playChannels).
+"poptart: booting scsynth (device: %, sr: %, block: %, out: %ch, audible: %ch, in: %ch)".format(
     if (outDevice.notNil and: { outDevice.isEmpty.not }) { outDevice } { "system default" },
-    sampleRate, blockSize, server.options.numOutputBusChannels, inChannels
+    sampleRate, blockSize, server.options.numOutputBusChannels,
+    max(2, min(playChannels, server.options.numOutputBusChannels)), inChannels
 ).postln;
 
 server.waitForBoot {

@@ -1356,9 +1356,10 @@ function newWipSessionId(after = '') {
 
 // The session a reload comes back to. A refresh is the same person still working on the same
 // buffer, so it continues the file it was already writing rather than opening another one - what
-// rolls a session is opening a DIFFERENT buffer (see rollWipSession). Minting one per page load
-// is what left 620 session files in a month, and each one pins the captured plugin states it
-// mentions for as long as it exists (see blobs.js).
+// changes it is opening a DIFFERENT buffer, which either adopts that buffer's own session or mints
+// a fresh one (see rollWipSession). Minting one per page load is what left 620 session files in a
+// month, and each one pins the captured plugin states it mentions for as long as it exists (see
+// blobs.js).
 const WIP_SESSION_KEY = 'poptart.wipSession';
 let wipSessionId = sessionStorage.getItem(WIP_SESSION_KEY) || newWipSessionId();
 sessionStorage.setItem(WIP_SESSION_KEY, wipSessionId);
@@ -1405,18 +1406,22 @@ async function saveWip() {
   }
 }
 
-// Leaving the current buffer behind (＋ new, or loading another pattern): flush it, then start a
-// new session file. Without the roll, clearing the editor would blank - and so delete - the very
-// file that was holding the work.
-async function rollWipSession() {
+// Leaving the current buffer behind (＋ new, or loading another pattern): flush it, then point the
+// autosave somewhere else. Without the flush, clearing the editor would blank - and so delete -
+// the very file that was holding the work.
+//
+// `id` is a session being REOPENED, which the buffer then goes on being: its file keeps recording
+// it, so it stays one session however many times it is put down and picked up again. Without an
+// id (a saved pattern, an import, a history entry) a fresh session file is minted to hold it.
+async function rollWipSession(id = null) {
   // The buffer is about to be replaced, so this is the last chance for a held plugin edit to
   // reach the session file it belongs to.
   await settlePluginState();
   await saveWip();
-  wipSessionId = newWipSessionId(wipSessionId);
+  wipSessionId = id ?? newWipSessionId(wipSessionId);
   sessionStorage.setItem(WIP_SESSION_KEY, wipSessionId);
   wipLastSent = null;
-  wipListedRow = null; // the next write is a new session's first - always worth showing
+  wipListedRow = null; // whatever this session's row says, the list hasn't heard it from us yet
   markCurrentFileRow(); // the session that was the live one no longer is
 }
 
@@ -8132,10 +8137,16 @@ async function savePatternFileAs() {
 // Put `code` in the editor as the thing now being worked on: the outgoing buffer gets its own
 // autosave file to sit in, and the incoming one becomes a history checkpoint. `name` is the saved
 // pattern this code came out of, or null when it came from anywhere else - a session, an imported
-// file - which leaves the buffer nameless until the user saves it under one.
-async function openInEditor(code, name) {
-  await rollWipSession();
+// file - which leaves the buffer nameless until the user saves it under one. `wipSession` is the
+// autosave file the incoming code IS, when it came out of one: the buffer goes back to being that
+// session rather than a copy of it.
+async function openInEditor(code, name, wipSession = null) {
+  await rollWipSession(wipSession);
   cm.setValue(code);
+  // A reopened session is already exactly what its file holds, so nothing is written until the
+  // code actually changes - which is what keeps the files tab, sorted by modified time, from
+  // reshuffling the moment you look at something.
+  if (wipSession) wipLastSent = code;
   forgetExpandedFolds();
   refoldAll();
   saveNameHint = null;
@@ -8156,7 +8167,9 @@ async function loadPatternFile(name) {
 async function loadWipFile(entry) {
   try {
     const { code } = await api('POST', '/api/patterns/wip/load', { id: entry.id });
-    await openInEditor(code, null); // an unnamed session stays unnamed until you keep it
+    // Reopened as itself: this session goes on recording the buffer, and reaches the top of the
+    // list on the first edit. An unnamed session stays unnamed until you keep it.
+    await openInEditor(code, null, entry.id);
     logLine(`loaded session "${entry.label}" - hit save to keep it under a name`);
   } catch (e) {
     logLine(e.message ?? String(e), true);

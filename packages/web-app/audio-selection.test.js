@@ -9,8 +9,8 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 
 const {
-  plainOutputDevice, deviceToOpen, aggregateProblem, aggregateMembers, splitConnected,
-  aggregateStaleReason,
+  plainOutputDevice, deviceToOpen, playbackChannels, aggregateProblem, aggregateMembers,
+  splitConnected, aggregateStaleReason,
 } = require('./audio-selection.js');
 
 const AGG = 'com.poptart.aggregate';
@@ -88,6 +88,37 @@ test('deviceToOpen: an unreadable layout leaves the aggregate trusted', () => {
     devices, wanted: 'MacBook Pro Speakers', inputUids: [blackhole.uid], aggregateUid: AGG, layout: null,
   });
   assert.strictEqual(device, aggregate);
+});
+
+test('playbackChannels: a plain device offers all of its own channels', () => {
+  assert.strictEqual(playbackChannels({ devices, wanted: null, active: speakers, aggregateUid: AGG }), 2);
+  assert.strictEqual(playbackChannels({
+    devices, wanted: null, active: { ...speakers, channels: 8 }, aggregateUid: AGG,
+  }), 8);
+});
+
+test('playbackChannels: the aggregate offers only the playback device\'s channels', () => {
+  // Stereo speakers plus a stereo loopback is a FOUR-channel aggregate, and .o(2) wrapping at four
+  // wrote pair 2 into the loopback - audible nowhere, meters moving. It has to wrap at two.
+  assert.strictEqual(playbackChannels({
+    devices, wanted: 'MacBook Pro Speakers', active: aggregate, aggregateUid: AGG,
+  }), 2);
+});
+
+test('playbackChannels: an aggregate around a wider device keeps that device\'s pairs', () => {
+  const scarlett = { uid: 'Scarlett:1', name: 'Scarlett 18i20', channels: 8, inChannels: 8, isDefault: false };
+  const wide = { uid: AGG, name: 'poptart', channels: 10, inChannels: 10, isDefault: false };
+  assert.strictEqual(playbackChannels({
+    devices: [speakers, blackhole, scarlett, wide], wanted: 'Scarlett 18i20', active: wide, aggregateUid: AGG,
+  }), 8);
+});
+
+test('playbackChannels: no device at all still leaves a stereo pair to wrap at', () => {
+  assert.strictEqual(playbackChannels({ devices: [], wanted: null, active: null, aggregateUid: AGG }), 2);
+  // An aggregate whose playback device has vanished from the list must not report zero pairs.
+  assert.strictEqual(playbackChannels({
+    devices: [aggregate], wanted: 'EarPods', active: aggregate, aggregateUid: AGG,
+  }), 4);
 });
 
 test('aggregateProblem: names the two failures, and is silent when healthy', () => {

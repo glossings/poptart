@@ -249,11 +249,13 @@ function toOscArgs(values) {
 
 class OscEngine {
   // outDevice: CoreAudio output device name (null = system default). outChannels: that
-  // device's output channel count - sclang sizes numOutputBusChannels from it so the .o(n)
-  // stereo-pair selector wraps at the hardware's real channel count. inChannels: that same
-  // device's input channel count (0 for output-only devices) - scsynth opens one device for
-  // both in and out, so numInputBusChannels must not exceed what the device offers.
-  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, inChannels = 0 } = {}) {
+  // device's output channel count - sclang sizes numOutputBusChannels from it. playChannels: how
+  // many of those channels reach a speaker, which is what the .o(n) stereo-pair selector wraps at.
+  // The two differ only for poptart's aggregate, whose trailing channels belong to the input
+  // devices combined in behind the playback device (see audio-selection.js's playbackChannels).
+  // inChannels: that same device's input channel count (0 for output-only devices) - scsynth opens
+  // one device for both in and out, so numInputBusChannels must not exceed what the device offers.
+  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0 } = {}) {
     this.nodePort = nodePort;
     this.scPort = scPort;
     // An explicit path wins (programmatic intent, e.g. tests); otherwise auto-detect, which
@@ -261,6 +263,7 @@ class OscEngine {
     this.sclangPath = sclangPath || resolveSclangPath();
     this.outDevice = outDevice;
     this.outChannels = outChannels;
+    this.playChannels = playChannels ?? outChannels;
     this.inChannels = inChannels;
     this._sclangProcess = null;
     // scsynth's pid, as reported by sclang at /poptart/ready. sclang spawns scsynth, so this is
@@ -473,6 +476,7 @@ class OscEngine {
               POPTART_BLOCK_SIZE: String(bufferSize),
               ...(this.outDevice ? { POPTART_OUT_DEVICE: String(this.outDevice) } : {}),
               POPTART_OUT_CHANNELS: String(this.outChannels),
+              POPTART_PLAY_CHANNELS: String(this.playChannels),
               POPTART_IN_CHANNELS: String(this.inChannels),
             },
             stdio: ['ignore', 'pipe', 'pipe'],

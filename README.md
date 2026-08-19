@@ -488,8 +488,11 @@ count; the choice persists). Applying a change restarts the audio engine — scs
 device at boot — so playing tracks stop; re-evaluate to resume.
 
 On a multichannel device, `.o(n)` routes a track's stereo output to a channel pair: `.o(1)` is
-channels 1/2 (the default), `.o(2)` is 3/4, and so on, wrapping past the device's last pair. It's
-a channel-strip control like `.gain()`/`.pan()`, so patterns and signals work too.
+channels 1/2 (the default), `.o(2)` is 3/4, and so on, wrapping past the device's last pair — on
+stereo speakers every `.o(n)` is channels 1/2, so nothing is ever routed somewhere silent. (Pairs
+are counted on the output device you picked, not on the combined device built for *extra inputs*
+below: those inputs' own outputs go nowhere you can hear.) It's a channel-strip control like
+`.gain()`/`.pan()`, so patterns and signals work too.
 
 ### Audio input
 

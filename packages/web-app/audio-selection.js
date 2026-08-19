@@ -120,6 +120,23 @@ function aggregateProblem({ layout, outDevice, absent = [] }) {
 }
 
 /**
+ * How many of the opened device's output channels actually reach a speaker - what .o(n) wraps at.
+ *
+ * Normally that is the whole device. But when the device scsynth opened is poptart's aggregate,
+ * only the playback device's channels do: the input devices combined in behind it bring output
+ * channels of their own, and those sit AFTER it in channel order (aggregateMembers puts the output
+ * device first), so they pad the count without adding anywhere audible. Wrapping at the aggregate's
+ * total is how .o(2) through stereo speakers with one loopback aggregated in became silence - pair
+ * 2 is the loopback's outputs, meters moving and all.
+ */
+function playbackChannels({ devices, wanted = null, active, aggregateUid }) {
+  if (!active) return 2;
+  if (active.uid !== aggregateUid) return active.channels;
+  const plain = plainOutputDevice(devices, wanted, aggregateUid).device;
+  return Math.min(active.channels, plain?.channels ?? active.channels);
+}
+
+/**
  * The aggregate's members in channel order: the output device first, because it's the clock master
  * and its channels are the ones playback lands on. Any input device that IS the output device is
  * already there and must not be added twice.
@@ -172,6 +189,6 @@ function splitConnected(uids, knownUids) {
 }
 
 module.exports = {
-  plainOutputDevice, deviceToOpen, aggregateProblem, aggregateMembers, splitConnected,
-  aggregateStaleReason,
+  plainOutputDevice, deviceToOpen, playbackChannels, aggregateProblem, aggregateMembers,
+  splitConnected, aggregateStaleReason,
 };
