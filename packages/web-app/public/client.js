@@ -133,12 +133,23 @@ const presetDefs = makeDefRegistry({
   section: 'presets',
   defCall: '_preset',
   useCall: 'preset',
-  emptyBody: '"", ""', // plugin, state - both filled in by the first capture
+  // plugin, state. The plugin is known before anything is captured - it is whatever the slot this
+  // preset was named on holds - so a new definition is written already owned rather than as an
+  // ownerless placeholder that two different plugins could each go on to claim.
+  emptyBody: (sc) => `${JSON.stringify(sc ?? '')}, ""`,
   isData: () => false,
   library: () => prPrebakePresets,
   libraryNote: 'prebake',
+  // A preset's names are unique per PLUGIN, not per buffer (see makeDefRegistry's scope): the
+  // definition says which plugin it was captured from, and a call belongs to whichever plugin its
+  // slot holds - the same last-in-chain rule Sig#preset itself uses.
+  scope: {
+    ofDef: (code, def) => presetDefParts(code, def).plugin,
+    ofCall: (code, call) => presetTargetAt(code, call.start)?.plugin ?? '',
+  },
   panel: {
     current: () => presetState?.id ?? null,
+    scope: () => presetState?.scope ?? null,
     open: (id) => openPresetById(id, presetCarry()),
     close: () => closePresetPanel(),
     carry: () => presetCarry(),
@@ -994,7 +1005,10 @@ function findParamCall(code, from, to, name) {
 // 'already' - the code said it word for word, so it is already there; null - nowhere to write it.
 function writePresetState(trackLabel, slot, state, plugin, preset) {
   const code = cm.getValue();
-  const def = presetDefs.defsInBuffer(code).find((d) => d.id === preset);
+  // Scoped to the plugin the state came OUT of: several presets in this buffer may be called
+  // `disco`, and the one being captured into is this plugin's (see makeDefRegistry's scope). An
+  // uncaptured placeholder matches too, and this capture is what gives it its owner.
+  const def = presetDefs.findDef(code, preset, plugin ?? null);
   const body = `${JSON.stringify(plugin ?? '')}, ${JSON.stringify(state)}`;
   if (!def) {
     // A pattern names this preset but nothing defines it - its definition deleted, or the name
@@ -1066,10 +1080,11 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
     logLine(`auto-pin: "${trackLabel}" slot ${slot} is ${call.plugin || 'something else'} now, not ${plugin} - state not written (re-touch the plugin to capture it again)`, true);
     return null;
   }
-  // Named after the track, since that is what you call the sound out loud; an effect slot adds its
-  // position, so `lead` and `lead1` are the synth's and the first effect's.
-  const taken = new Set([...presetDefs.allIds().map((r) => r.id)]);
-  const id = freshDefId(slot === 0 ? trackLabel : `${trackLabel}${slot}`, taken, 'preset');
+  // Named after the track, since that is what you call the sound out loud. No slot number: a preset
+  // belongs to its plugin (see makeDefRegistry's scope), so every slot in a chain can have one
+  // called `lead` and each means the one on that plugin. The suffix is only the fallback for a name
+  // already taken ON THIS PLUGIN - the same plugin twice in one chain.
+  const id = freshDefId(trackLabel, (name) => presetDefs.allIds(plugin ?? null).some((r) => r.id === name), 'preset');
   const edits = [
     [call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`],
     presetDefs.defsEdit(code, [id], () => `${JSON.stringify(plugin ?? '')}, ${JSON.stringify(state)}`),
@@ -2682,12 +2697,21 @@ function findPresetCallAt(code, idx) {
   return findNamedCallAt(code, idx, /\.\s*preset\s*\(/g, 'preset');
 }
 
+// splitLabeledBlocks over the whole buffer, remembered for the code it was computed from. Every
+// `.preset(...)` call is now asked which plugin it aims at (see presetDefs' scope), and that runs on
+// each buffer change - so the scan has to happen once per keystroke, not once per call.
+let presetBlocksCache = { code: null, blocks: [] };
+function labeledBlocksFor(code) {
+  if (presetBlocksCache.code !== code) presetBlocksCache = { code, blocks: labelsMod.splitLabeledBlocks(code) };
+  return presetBlocksCache.blocks;
+}
+
 // Which plugin a `.preset(...)` at `idx` aims at: the last synth()/.fx() before it in its block,
 // which is exactly the rule Sig#preset uses (the chain as it stood when the method was called).
 // Read from the code rather than remembered, so moving the call between two .fx()es re-aims it.
 function presetTargetAt(code, idx) {
   if (!labelsMod) return null;
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  const block = labeledBlocksFor(code).find((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
   const isCode = codeOnly(code);
   const re = /\b(synth|fx)\s*\(/g;
@@ -2732,19 +2756,56 @@ const presetHead = makeNamePicker({
   reg: presetDefs,
   inline: true, // the list is the panel - see the section header
   current: () => presetState?.id ?? null,
-  open: (id) => openPresetById(id, presetCarry()),
+  // What this SLOT can load, which is not quite the open preset's own owner: point the panel at a
+  // patch whose plugin has since changed and the list should offer what fits the plugin now there.
+  scope: () => presetTarget()?.plugin ?? null,
+  open: (id, sc) => openPresetById(id, presetCarry(), sc),
+  canUse: () => !!presetState?.source,
+  use: (id, sc) => presetUseInCall(id, sc),
   // Picking one leaves you in the search box rather than back in the code: browsing presets is a
   // run of gestures, not a single one.
   refocus: () => presetSearch.focus(),
 });
 
-function openPresetById(id, from = {}) {
-  const def = presetDefs.defsInBuffer().find((d) => d.id === String(id));
+// Puts `id` into the `.preset(...)` the panel is looking through, replacing whatever it names now,
+// and follows it there. This is the panel's other half: opening a row shapes that preset, this one
+// chooses it - so a patch with a library of presets and one call can be auditioned from the list
+// without touching the code, and a patterned `.preset("<a b>")` can be collapsed onto one name.
+//
+// The whole argument goes, pattern and all, which is why the line says what it replaced: it is one
+// undo away, but only if you can see that it happened.
+function presetUseInCall(id, sc = presetTarget()?.plugin ?? null) {
+  const span = presetState?.source?.find();
+  if (!span) return;
+  const was = cm.getRange(span.from, span.to);
+  if (was === id) return openPresetById(id, presetCarry(), sc); // already the one named
+  // A mark over just the string BODY collapses when the body is replaced wholesale, so take the
+  // quotes in for the duration of the edit and put the inner mark back over the new name - the
+  // same trick, and for the same reason, as makeDefRegistry's fork.
+  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  cm.replaceRange(id, span.from, span.to);
+  const after = quoted.find();
+  quoted.clear();
+  presetState.source?.clear();
+  presetState.source = after
+    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    : null;
+  logLine(`.preset("${was}") now plays "${id}"`);
+  // Follow it, but only where there is something to follow: a library preset has no definition in
+  // this buffer to edit, and the call naming it IS the whole gesture - reporting the missing
+  // definition as a failure right after a write that worked would read as if the write hadn't.
+  if (presetDefs.findDef(cm.getValue(), id, sc)) openPresetById(id, { source: presetState.source }, sc);
+  else presetSyncHead();
+  presetScheduleEval();
+}
+
+function openPresetById(id, from = {}, sc = presetTarget()?.plugin ?? null) {
+  const def = presetDefs.findDef(cm.getValue(), String(id), sc);
   if (!def) {
     logLine(
-      presetDefs.allIds().some((r) => r.id === String(id))
+      presetDefs.allIds(sc).some((r) => r.id === String(id))
         ? `preset "${id}" comes from the shared library - there is no definition here to edit. Capture one of your own and it will shadow it.`
-        : `no preset called "${id}" is defined in this buffer`,
+        : `no preset called "${id}"${sc ? ` for ${sc}` : ''} is defined in this buffer`,
       true
     );
     return false;
@@ -2763,7 +2824,9 @@ function openPresetFromCall(call, code) {
   const id = activeRollIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return false;
   const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
-  if (openPresetById(id, { source })) return true;
+  // Read from the call rather than from presetTarget(), which follows the panel - and the panel is
+  // either closed or still showing whatever was open before this double-click.
+  if (openPresetById(id, { source }, presetTargetAt(code, call.start)?.plugin ?? null)) return true;
   source.clear();
   return false;
 }
@@ -2784,12 +2847,30 @@ function presetHold(id) {
   if (!at) return;
   api('POST', '/api/presetHold', { trackId: at.label, slot: at.slot, preset: id })
     .then((res) => {
-      if (!res?.why) return;
+      if (!res?.why) return setPresetStatus('');
+      // A preset the BUFFER defines for this slot's plugin can always be loaded here - so a refusal
+      // means the scheduler hasn't been told about it yet, not that anything is wrong. That is the
+      // normal state of a preset created a moment ago: a definition reaches the store only on the
+      // next evaluation (see presetScheduleEval), and the panel's lease is retried on every poll
+      // until it does. Reporting "can't load this one here" for a preset just made here is simply
+      // wrong, and reporting "no preset called X" as an error for X we are in the middle of
+      // creating is worse.
+      if (presetLoadableHere(id)) return setPresetStatus('');
       // Short in the panel, the whole reason on the console.
       setPresetStatus("can't load this one here", 'bad');
       logLine(`preset "${id}": ${res.why}`, true);
     })
     .catch((e) => logLine(e.message ?? String(e), true));
+}
+
+// Whether the buffer defines `id` in a way this slot could load - the definition exists, and its
+// plugin is the one the slot holds. Used to tell a preset the scheduler merely hasn't caught up
+// with from one it will go on refusing however long you wait.
+function presetLoadableHere(id) {
+  const def = presetDefs.findDef(cm.getValue(), id, presetState?.scope ?? null);
+  if (!def) return false;
+  const plugin = presetTarget()?.plugin;
+  return !plugin || !def.scope || def.scope === plugin;
 }
 
 function presetRelease(at) {
@@ -2804,6 +2885,9 @@ function showPresetPanel(next) {
   if (presetState?.source && presetState.source !== next.source) presetState.source.clear();
   presetState = {
     id: next.id,
+    // The plugin this preset belongs to, so the panel's own gestures - rename, delete - act on the
+    // right one of however many presets share this name across the buffer's plugins.
+    scope: next.scope ?? '',
     source: next.source ?? null,
     marker: cm.markText(cm.posFromIndex(next.start), cm.posFromIndex(next.close + 1), {}),
   };
@@ -2836,8 +2920,10 @@ function setPresetStatus(text, cls = '') {
 function presetSyncHead() {
   if (!presetState) return;
   const code = cm.getValue();
-  const def = presetDefs.defsInBuffer(code).find((d) => d.id === presetState.id);
-  presetHead.syncHead(presetDefs.refCalls(code, presetState.id).length);
+  const def = presetDefs.findDef(code, presetState.id, presetState.scope);
+  // Only the calls aimed at this preset's own plugin count as sharing it - another plugin's
+  // .preset("disco") names a different preset, and a rename here leaves it alone.
+  presetHead.syncHead(presetDefs.refCalls(code, presetState.id, presetState.scope).length);
   const target = presetTarget();
   presetTargetEl.textContent = target
     ? `${target.label} · slot ${target.slot} · ${target.plugin ?? 'no plugin'}`
@@ -3452,10 +3538,13 @@ function applyEdits(edits) {
 // A new definition is named after the track it is in - `lead` reads far better in a picker than
 // `1` - falling back to the kind's own word where the block has no name of its own. A number is
 // appended only to break a tie, so the common case is the plain track name.
+// `taken` is a Set of names, or - where what counts as taken depends on more than the name (a
+// preset is only taken within its own plugin, see makeDefRegistry's scope) - a predicate.
 function freshDefId(label, taken, base) {
+  const isTaken = typeof taken === 'function' ? taken : (name) => taken.has(name);
   const name = /^[A-Za-z_][\w]*$/.test(label ?? '') ? label : base;
-  if (!taken.has(name)) return name;
-  for (let i = 2; ; i++) if (!taken.has(`${name}${i}`)) return `${name}${i}`;
+  if (!isTaken(name)) return name;
+  for (let i = 2; ; i++) if (!isTaken(`${name}${i}`)) return `${name}${i}`;
 }
 
 /** Which of `refs` the panel is looking THROUGH, given the marker over its id string. */
@@ -3487,8 +3576,29 @@ function sourceCallAmong(refs, sourceMark) {
  *   panel       the editor panel's hooks - see the roll instance below for the full shape
  */
 function makeDefRegistry(opts) {
-  const { kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel } = opts;
+  const { kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null } = opts;
   const say = (line, isError) => logLine(line, isError);
+
+  // A kind whose names are only unique WITHIN something else. A preset belongs to the plugin it was
+  // captured from - a program is meaningless to any other plugin - so `disco` on a delay and `disco`
+  // on a reverb are two unrelated presets that share a word, and a chain of three effects can carry
+  // three presets all called `disco` instead of disco1/disco2/disco3. `scope` reads that owner off a
+  // definition (its plugin argument) and off a call (the plugin its slot holds). A kind without one
+  // has a single flat namespace, and every scope question below answers trivially true.
+  const scopeOfDef = (code, def) => (scope ? scope.ofDef(code, def) ?? '' : '');
+  const scopeOfCall = (code, call) => (scope ? scope.ofCall(code, call) ?? '' : '');
+  // Two scopes match when they agree, or when either is UNKNOWN. An empty one is a definition named
+  // but never captured into, which belongs to whichever plugin claims it first, and a call the
+  // editor can't aim yet must not be filtered away from the name it uses. Same rule as lookupPreset.
+  const sameScope = (a, b) => !scope || !a || !b || a === b;
+  const scopedBody = (sc) => (typeof emptyBody === 'function' ? emptyBody(sc) : emptyBody);
+  // A library entry is a bare id for the flat kinds, { id, scope } for a scoped one.
+  const libId = (e) => (typeof e === 'string' ? e : e.id);
+  const libScope = (e) => (typeof e === 'string' ? '' : e.scope ?? '');
+  const inLibrary = (id, sc) => library().some((e) => libId(e) === id && sameScope(libScope(e), sc));
+  // Which owner the panel's gestures act in - the plugin the open preset belongs to. Null for a
+  // flat kind, and null is the scope that matches everything, so nothing narrows by accident.
+  const panelScope = () => (scope && panel.scope ? panel.scope() : null);
 
   // Is this string a list of NAMES rather than the data itself? The two share one argument
   // position, so the question is answered by what the string says, not by which call it is.
@@ -3513,9 +3623,17 @@ function makeDefRegistry(opts) {
       if (close < 0) continue;
       const [idLiteral] = splitFirstArg(code.slice(open + 1, close));
       const id = idLiteralValue(idLiteral);
-      if (id != null) out.push({ id, idLiteral, start: m.index, open, close });
+      if (id == null) continue;
+      const def = { id, idLiteral, start: m.index, open, close };
+      def.scope = scopeOfDef(code, def);
+      out.push(def);
     }
     return out;
+  }
+
+  /** This buffer's definition of `id` within `sc`, or null. */
+  function findDef(code, id, sc = null) {
+    return defsInBuffer(code).find((d) => d.id === id && sameScope(d.scope, sc)) ?? null;
   }
 
   // Every call that NAMES definitions, with the span of the id string inside it.
@@ -3530,15 +3648,22 @@ function makeDefRegistry(opts) {
       const close = matchParen(code, open);
       if (close < 0 || !isIdCall(code.slice(open + 1, close))) continue;
       const range = idStringRange({ open, close }, code);
-      if (range) out.push({ start: m.index, open, close, from: range[0], to: range[1], str: code.slice(range[0], range[1]) });
+      if (!range) continue;
+      const call = { start: m.index, open, close, from: range[0], to: range[1], str: code.slice(range[0], range[1]) };
+      call.scope = scopeOfCall(code, call);
+      out.push(call);
     }
     return out;
   }
 
-  /** The calls that name `id` - the patterns that play it. */
-  function refCalls(code, id) {
+  /**
+   * The calls that name `id` - the patterns that play it. Scoped kinds only count the calls aimed
+   * at the same owner: renaming ValhallaDelay's `disco` must not rewrite a Serum track's
+   * `.preset("disco")`, which names a different preset that merely spells the same.
+   */
+  function refCalls(code, id, sc = null) {
     const word = idWordRe(id, '');
-    return idCalls(code).filter((call) => word.test(call.str));
+    return idCalls(code).filter((call) => word.test(call.str) && sameScope(call.scope, sc));
   }
 
   // Groups the buffer's definitions into the runs that fold together. A definition joins a run
@@ -3583,8 +3708,15 @@ function makeDefRegistry(opts) {
   // the window and the entry in the files list (see deriveLabel). Bare statements evaluate exactly
   // as well: the definition Sig carries `isDef`, which is what keeps a definitions block from being
   // taken for a track, and that has never depended on the label.
-  function defsEdit(code, ids, bodyFor = () => emptyBody) {
-    const lines = ids.map((id) => `${defCall}(${JSON.stringify(id)}, ${bodyFor(id)})`);
+  // `ids` are bare names, or - for a scoped kind - { id, scope } so a new definition is written
+  // already owned by the plugin that will play it, rather than as an ownerless placeholder two
+  // different plugins could each end up claiming.
+  function defsEdit(code, ids, bodyFor = null) {
+    const lines = ids.map((entry) => {
+      const id = typeof entry === 'string' ? entry : entry.id;
+      const body = bodyFor ? bodyFor(id) : scopedBody(typeof entry === 'string' ? '' : entry.scope ?? '');
+      return `${defCall}(${JSON.stringify(id)}, ${body})`;
+    });
     const found = runs(code);
     if (found.length) {
       const at = found[0][found[0].length - 1].close + 1;
@@ -3602,20 +3734,34 @@ function makeDefRegistry(opts) {
     return [code.length, code.length, `${gap}${lines.join('\n')}`];
   }
 
-  /** Every id the editor knows: this buffer's definitions, then the shared library. */
-  function allIds() {
-    const own = defsInBuffer().map((d) => d.id);
-    return [
-      ...own.map((id) => ({ id, note: '', own: true })),
-      ...library().filter((id) => !own.includes(id)).map((id) => ({ id, note: libraryNote, own: false })),
+  /**
+   * Every id the editor knows: this buffer's definitions, then the shared library. `sc` narrows a
+   * scoped kind to one owner, which is what the preset picker lists - offering a slot the presets
+   * of some other plugin would only ever be offering it names it can't load.
+   */
+  function allIds(sc = null) {
+    const own = defsInBuffer().map((d) => ({ id: d.id, scope: d.scope, note: '', own: true }));
+    const rows = [
+      ...own,
+      ...library()
+        .filter((e) => !own.some((o) => o.id === libId(e) && sameScope(o.scope, libScope(e))))
+        .map((e) => ({ id: libId(e), scope: libScope(e), note: libraryNote, own: false })),
     ];
+    return sc === null ? rows : rows.filter((r) => sameScope(r.scope, sc));
   }
 
   /** Gives every un-named and un-defined one in the buffer a definition. True if it wrote. */
   function materialize() {
     if (isData('') === null || !labelsMod) return false; // can't yet tell a name from data
     const code = cm.getValue();
-    const taken = new Set([...defsInBuffer(code).map((d) => d.id), ...library()]);
+    // { id, scope } rather than a flat set of names: for a scoped kind the same name is free again
+    // under a different plugin, and the definition written for it records which one it belongs to.
+    const taken = [
+      ...defsInBuffer(code).map((d) => ({ id: d.id, scope: d.scope })),
+      ...library().map((e) => ({ id: libId(e), scope: libScope(e) })),
+    ];
+    const isTaken = (id, sc) => taken.some((t) => t.id === id && sameScope(t.scope, sc));
+    const claim = (id, sc) => { taken.push({ id, scope: sc }); };
     const created = []; // in the order they were first named, which is the order they are written
     const rewrites = []; // [from, to, text] against `code`, applied last-first so offsets hold
 
@@ -3624,16 +3770,17 @@ function makeDefRegistry(opts) {
     let m;
     while ((m = bare.exec(code)) !== null) {
       if (!isCode(m.index)) continue;
-      const id = freshDefId(prBlockLabelAt(m.index), taken, kind);
-      taken.add(id);
-      created.push(id);
+      const sc = scopeOfCall(code, { start: m.index });
+      const id = freshDefId(prBlockLabelAt(m.index), (name) => isTaken(name, sc), kind);
+      claim(id, sc);
+      created.push({ id, scope: sc });
       rewrites.push([m.index, m.index + m[0].length, `${useCall}(${JSON.stringify(id)})`]);
     }
     for (const call of idCalls(code)) {
       for (const id of idsNamedIn(call.str)) {
-        if (taken.has(id)) continue;
-        taken.add(id);
-        created.push(id);
+        if (isTaken(id, call.scope)) continue;
+        claim(id, call.scope);
+        created.push({ id, scope: call.scope });
       }
     }
     if (!created.length) return false;
@@ -3648,23 +3795,23 @@ function makeDefRegistry(opts) {
       cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
     });
     refoldAll(); // the new block starts life hidden, like every other one
-    say(`new ${kind}${created.length === 1 ? '' : 's'}: ${created.join(', ')}`);
+    say(`new ${kind}${created.length === 1 ? '' : 's'}: ${created.map((c) => c.id).join(', ')}`);
     return true;
   }
 
   // Making one from the panel's search box. A new one is empty and named only - nothing plays it
   // until a pattern says its name, which is the point: you draw the variation first and swap it in
   // when you are ready.
-  function create(id) {
+  function create(id, sc = panelScope()) {
     const code = cm.getValue();
     if (!id || DEF_ID_BAD.test(id)) {
       return say(`can't create a ${kind} called "${id}": a name has to be one plain word`, true);
     }
-    if (defsInBuffer(code).some((d) => d.id === id) || library().includes(id)) {
+    if (findDef(code, id, sc) || inLibrary(id, sc)) {
       panel.open(id, panel.carry()); // it already exists - showing it is what was meant anyway
       return;
     }
-    const [from, to, text] = defsEdit(code, [id]);
+    const [from, to, text] = defsEdit(code, [{ id, scope: sc ?? '' }]);
     cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
     refoldAll();
     say(`new ${kind}: ${id}`);
@@ -3676,16 +3823,16 @@ function makeDefRegistry(opts) {
   // caution, but because it wouldn't work: a name a pattern uses and nothing defines is given a
   // fresh empty definition on the next evaluation (see materialize), so it would come straight
   // back with its data gone. Take it out of the patterns first and the delete goes through.
-  function remove(id) {
+  function remove(id, sc = panelScope()) {
     const code = cm.getValue();
-    const def = defsInBuffer(code).find((d) => d.id === id);
+    const def = findDef(code, id, sc);
     const refuse = (why) => say(`can't delete ${kind} "${id}": ${why}`, true);
     if (!def) {
-      return refuse(library().includes(id)
+      return refuse(inLibrary(id, sc)
         ? "it isn't defined in this buffer - it comes from the shared library"
         : 'there is no definition for it in this buffer');
     }
-    const refs = refCalls(code, id);
+    const refs = refCalls(code, id, def.scope);
     if (refs.length) {
       return refuse(`${refs.length} pattern${refs.length === 1 ? '' : 's'} still play${refs.length === 1 ? 's' : ''} it `
         + '- take the name out of them first, or it will be re-created empty on the next evaluation');
@@ -3699,7 +3846,7 @@ function makeDefRegistry(opts) {
     // The panel was showing the one that just went: put another up rather than closing, since
     // deleting from the picker is usually one of several tidying gestures.
     if (wasOpen) {
-      const next = defsInBuffer().find((d) => d.id !== id);
+      const next = defsInBuffer().find((d) => d.id !== id && sameScope(d.scope, def.scope));
       if (next) panel.open(next.id, panel.carry());
       else panel.close();
     }
@@ -3720,16 +3867,19 @@ function makeDefRegistry(opts) {
   // definition and every pattern that names it move together - a rename that left a pattern
   // pointing at nothing would silently swap the part for silence. Unless it is SHARED and you are
   // looking at it through one of the patterns playing it, which asks for something else: see fork.
-  function rename(from, to) {
+  function rename(from, to, sc = panelScope()) {
     const code = cm.getValue();
-    const defs = defsInBuffer(code);
     const refuse = (why) => { say(`can't rename ${kind} "${from}" to "${to}": ${why}`, true); panel.syncHead(); };
     if (!to || DEF_ID_BAD.test(to)) return refuse('a name has to be one plain word');
-    if (defs.some((d) => d.id === to) || library().includes(to)) return refuse('that name is taken');
-    const def = defs.find((d) => d.id === from);
+    const def = findDef(code, from, sc);
     if (!def) return refuse('its definition is not in this buffer');
+    // Taken WITHIN this one's own scope. The same name under another plugin is another preset
+    // entirely and no obstacle - which is the whole point of scoping them.
+    if (findDef(code, to, def.scope) || inLibrary(to, def.scope)) {
+      return refuse(scope && def.scope ? `that name is taken for ${def.scope}` : 'that name is taken');
+    }
 
-    const refs = refCalls(code, from);
+    const refs = refCalls(code, from, def.scope);
     const here = panel.sourceCall(refs);
     if (here && refs.length > 1) return fork(code, def, from, to, here, refs.length - 1);
 
@@ -3784,7 +3934,7 @@ function makeDefRegistry(opts) {
     );
   }
 
-  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename };
+  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename };
 }
 
 
@@ -4257,7 +4407,13 @@ const prPickChoose = () => rollPicker.choose();
  * refocus  () => hand focus back to the panel's own surface
  * onPick   () => called when the picker is used, before opening (the roll panel pins its lock)
  */
-function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {}, inline = false }) {
+function makeNamePicker({
+  els, reg, current, open, refocus, onPick = () => {}, inline = false, scope = () => null,
+  // Optional second gesture per row: `use` writes that name into the call the panel is looking
+  // through, rather than opening it for editing. `canUse` is asked per render, since there is only
+  // something to write into when the panel was opened from a call (see makeDefRegistry's fork).
+  use = null, canUse = () => false,
+}) {
   let rows = [];
   let idx = 0;
   // `inline`: there is no popover to open - the search box and the list are the panel itself, which
@@ -4281,15 +4437,25 @@ function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {}, i
   }
 
   function renderList(resetIdx = false) {
-    if (resetIdx) idx = 0;
     const typed = els.search.value.trim();
     const q = typed.toLowerCase();
-    const all = reg.allIds();
+    // Only what could actually be used here: a preset belongs to the plugin it came from, so
+    // listing another plugin's would be offering names that can only fail to load (see
+    // makeDefRegistry's scope). Unscoped kinds pass null and see everything, as before.
+    const all = reg.allIds(scope());
     rows = all.filter((r) => r.id.toLowerCase().includes(q)).map((r) => ({ ...r, label: r.id, act: 'open' }));
     // A name that matches nothing is one you meant to have, so the search doubles as the way to
     // make it - which is how you think about it live, rather than hunting for a + button.
     if (typed && !all.some((r) => r.id.toLowerCase() === q)) {
       rows.push({ id: typed, label: `create “${typed}”`, note: 'new', act: 'create' });
+    }
+    // Reset means "go to the one that is open", not "go to the top". The list is rebuilt every time
+    // a pick opens one, so starting at row 0 would leave the highlight bar and the ● dot pointing at
+    // two different presets - and the highlight is where the keyboard would act next, which after a
+    // click ought to be the row that was clicked.
+    if (resetIdx) {
+      const at = rows.findIndex((r) => r.act === 'open' && r.id === current());
+      idx = at >= 0 ? at : 0;
     }
     idx = Math.min(idx, Math.max(0, rows.length - 1));
     els.list.innerHTML = '';
@@ -4313,6 +4479,23 @@ function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {}, i
         note.textContent = row.note;
         el.appendChild(note);
       }
+      // Send this one into the call the panel is looking through, in place of whatever it names
+      // now. Opening a row EDITS that preset; this plays it - which is what the list is for once a
+      // patch has more presets than it has calls, and you are picking one rather than shaping it.
+      // A library row gets one too: reusing someone else's is the whole point of having a library.
+      if (row.act === 'open' && use && canUse()) {
+        const send = document.createElement('span');
+        send.className = 'def-pick-use';
+        send.textContent = '→';
+        send.title = `play ${row.id} here`;
+        send.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation(); // the row's own handler opens it for editing instead
+          idx = i;
+          use(row.id, row.scope);
+        });
+        el.appendChild(send);
+      }
       // Only this buffer's own can be deleted - the shared library isn't ours, and there is
       // nothing to delete about one the "create" row is offering to make.
       if (row.act === 'open' && row.own) {
@@ -4325,7 +4508,7 @@ function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {}, i
         del.addEventListener('mousedown', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          reg.remove(row.id);
+          reg.remove(row.id, row.scope);
           renderList();
         });
         el.appendChild(del);
@@ -4347,8 +4530,10 @@ function makeNamePicker({ els, reg, current, open, refocus, onPick = () => {}, i
     if (!row) return;
     if (!inline) els.picker.classList.add('hidden');
     onPick();
-    if (row.act === 'create') reg.create(row.id);
-    else open(row.id);
+    // Created into the scope the list was drawn for - a preset made here belongs to the plugin the
+    // slot holds, which is the one it is about to be shaped on.
+    if (row.act === 'create') reg.create(row.id, scope());
+    else open(row.id, row.scope);
     refocus();
   }
 
@@ -4394,7 +4579,11 @@ function prRefreshRollList() {
       const prebake = (list) => (list ?? []).filter((r) => r.layer === 'prebake').map((r) => String(r.id));
       prPrebakeRolls = prebake(res.rolls);
       prPrebakeShapes = prebake(res.shapes);
-      prPrebakePresets = prebake(res.presets);
+      // Presets carry the plugin they were captured from, since that is half of what names one
+      // (see makeDefRegistry's scope) - so the library's entries keep it rather than flattening.
+      prPrebakePresets = (res.presets ?? [])
+        .filter((r) => r.layer === 'prebake')
+        .map((r) => ({ id: String(r.id), scope: String(r.plugin ?? '') }));
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
     })
     .catch(() => {}); // the picker still lists this buffer's rolls without it

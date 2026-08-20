@@ -216,7 +216,7 @@ const API_DOCS = {
   preset: {
     kind: 'method',
     sig: 'preset(names)',
-    desc: 'Swaps the last plugin in the chain between named whole-state presets. Double-click `preset` to shape one by ear.',
+    desc: 'Swaps the last plugin in the chain between named whole-state presets. Names belong to their plugin, so every slot in a chain can have its own `disco`. Double-click `preset` to shape one by ear.',
     eg: '.preset("<init growl>")',
   },
   scale: {

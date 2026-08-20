@@ -77,8 +77,8 @@ test('presetIds lists what is playable, buffer first', () => {
   setRollLayer('buffer');
   _preset('mine', 'Serum 2', 'H4sImine');
   assert.deepEqual(presetIds(), [
-    { id: 'mine', layer: 'buffer' },
-    { id: 'library', layer: 'prebake' },
+    { id: 'mine', plugin: 'Serum 2', layer: 'buffer' },
+    { id: 'library', plugin: 'Serum 2', layer: 'prebake' },
   ]);
   clearRolls('prebake');
 });
@@ -105,7 +105,99 @@ test("a preset is refused to a plugin it wasn't captured from", () => {
   _preset('growl', 'Serum 2', 'H4sIgrowl');
   const { state, why } = resolvePreset('growl', 'Diva');
   assert.equal(state, null, 'a program is only meaningful to the plugin that wrote it');
-  assert.match(why, /captured from Serum 2.*holds Diva/);
+  assert.match(why, /belongs to Serum 2.*holds Diva/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// One name per PLUGIN, not per buffer. A program only means anything to the plugin that wrote it,
+// so `disco` on a delay and `disco` on a reverb are two unrelated presets - which is what lets a chain
+// of effects carry one preset name throughout instead of disco1/disco2/disco3.
+// ---------------------------------------------------------------------------------------------
+
+test('the same name under two plugins is two different presets', () => {
+  clearRolls('buffer');
+  _preset('disco', 'ValhallaDelay', 'H4sIdelay');
+  _preset('disco', 'ValhallaVintageVerb', 'H4sIverb');
+  assert.equal(resolvePreset('disco', 'ValhallaDelay').state, 'H4sIdelay');
+  assert.equal(resolvePreset('disco', 'ValhallaVintageVerb').state, 'H4sIverb');
+});
+
+test('defining the same name twice for ONE plugin still warns', () => {
+  clearRolls('buffer');
+  const seen = warnings(() => {
+    _preset('disco', 'ValhallaDelay', 'H4sIfirst');
+    _preset('disco', 'ValhallaVintageVerb', 'H4sIverb'); // a different preset - no warning
+    _preset('disco', 'ValhallaDelay', 'H4sIsecond');
+  });
+  assert.equal(seen.length, 1, 'only the genuine collision is worth a line');
+  assert.match(seen[0], /preset "disco" \(ValhallaDelay\) is defined twice/);
+  assert.equal(resolvePreset('disco', 'ValhallaDelay').state, 'H4sIsecond');
+  assert.equal(resolvePreset('disco', 'ValhallaVintageVerb').state, 'H4sIverb', 'the other one is untouched');
+});
+
+test('a name owned by other plugins says who has it, not "no such preset"', () => {
+  clearRolls('buffer');
+  _preset('disco', 'ValhallaDelay', 'H4sIdelay');
+  _preset('disco', 'RC-20 Retro Color', 'H4sIrc');
+  const { state, why } = resolvePreset('disco', 'Serum 2');
+  assert.equal(state, null);
+  assert.match(why, /belongs to ValhallaDelay \/ RC-20 Retro Color/);
+  assert.match(why, /holds Serum 2/);
+});
+
+test('an uncaptured placeholder answers to whichever plugin asks', () => {
+  clearRolls('buffer');
+  _preset('disco', '', ''); // what the editor writes the moment a pattern says the name
+  // No owner yet, so it holds the plugin as it is rather than reporting a mismatch - for any of them.
+  assert.deepEqual(resolvePreset('disco', 'ValhallaDelay'), { state: null, why: null });
+  assert.deepEqual(resolvePreset('disco', 'Serum 2'), { state: null, why: null });
+});
+
+test('a capture claims the placeholder for its own plugin', () => {
+  clearRolls('buffer');
+  _preset('disco', 'ValhallaDelay', 'H4sIdelay'); // auto-pin fills the plugin in with the state
+  assert.equal(resolvePreset('disco', 'ValhallaDelay').state, 'H4sIdelay');
+  assert.match(resolvePreset('disco', 'Serum 2').why, /belongs to ValhallaDelay/);
+});
+
+test('with no plugin to go on, any preset of that name will do', () => {
+  clearRolls('buffer');
+  _preset('disco', 'ValhallaDelay', 'H4sIdelay');
+  // A slot past the end of the chain has no plugin name to check against; refusing there would
+  // break patches that worked before presets were keyed this way.
+  assert.equal(resolvePreset('disco', null).state, 'H4sIdelay');
+});
+
+test('a chain of effects each carry a preset called by the same name', () => {
+  clearRolls('buffer');
+  _preset('disco', 'ValhallaDelay', 'H4sIdelay');
+  _preset('disco', 'ValhallaVintageVerb', 'H4sIverb');
+  _preset('disco', 'RC-20 Retro Color', 'H4sIrc');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'disco' });
+  sch.setPattern(
+    note('c').synth('Serum 2')
+      .fx('ValhallaDelay').preset('disco')
+      .fx('ValhallaVintageVerb').preset('disco')
+      .fx('RC-20 Retro Color').preset('disco')
+  );
+  sch._schedulePresetSwaps(0, 1);
+
+  assert.deepEqual(argsTo('setPluginState'), [
+    ['disco', 1, 'H4sIdelay', at(0)],
+    ['disco', 2, 'H4sIverb', at(0)],
+    ['disco', 3, 'H4sIrc', at(0)],
+  ]);
+});
+
+test('presetIds keeps each name with the plugin that owns it', () => {
+  clearRolls('buffer');
+  _preset('disco', 'ValhallaDelay', 'H4sIdelay');
+  _preset('disco', 'ValhallaVintageVerb', 'H4sIverb');
+  assert.deepEqual(presetIds(), [
+    { id: 'disco', plugin: 'ValhallaDelay', layer: 'buffer' },
+    { id: 'disco', plugin: 'ValhallaVintageVerb', layer: 'buffer' },
+  ]);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -396,7 +488,7 @@ test('holding a preset captured from another plugin says why rather than loading
   const sch = new Scheduler(engine, { trackId: 'lead' });
   sch.setPattern(track('<a b>'));
 
-  assert.match(sch.holdPreset(0, 'q'), /captured from Pro-Q 3.*holds Serum 2/);
+  assert.match(sch.holdPreset(0, 'q'), /belongs to Pro-Q 3.*holds Serum 2/);
   assert.deepEqual(argsTo('setPluginState'), []);
 });
 

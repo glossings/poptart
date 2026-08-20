@@ -122,8 +122,55 @@ export const shapeIds = () => stores.shape.ids();
 // A preset's value is { plugin, state }, not a Sig: `state` is the plugin's own program (gzip +
 // base64, often megabytes) or a "@id" handle standing for one the host has put away somewhere -
 // either way an opaque string, resolved at the point it is loaded into a plugin. `plugin` is the
-// name it was captured from, which is what lets a swap refuse to push a Serum program into a Diva. An empty `state` is a named-but-not-yet-captured
+// name it was captured from. An empty `state` is a named-but-not-yet-captured
 // preset - the editor writes those the moment a pattern says a name, and auto-pin fills them in.
-export const registerPreset = (id, entry) => stores.preset.register(id, entry);
-export const lookupPreset = (id) => stores.preset.lookup(id);
-export const presetIds = () => stores.preset.ids();
+//
+// A preset is keyed by that PLUGIN as well as its name, because a program is only meaningful to
+// the plugin that wrote it: `disco` on a delay and `disco` on a reverb are two unrelated sounds
+// that happen to share a word, and keying them apart is what lets a chain of three effects each
+// carry a preset called `disco` rather than disco1/disco2/disco3. The store underneath is the same
+// two-layer one every kind uses - only the key is composite.
+const PRESET_KEY_SEP = '\u0000'; // in neither a plugin name nor a preset id, so the split is exact
+const presetKey = (plugin, id) => `${String(plugin ?? '').trim()}${PRESET_KEY_SEP}${id}`;
+
+// The store's own "defined twice" line would name the composite key, separator and all. Only two
+// definitions of the same name FOR THE SAME PLUGIN collide now, so the warning says which plugin.
+export function registerPreset(id, entry) {
+  if (!stores.preset.register(presetKey(entry?.plugin, id), entry)) return null;
+  const plugin = String(entry?.plugin ?? '').trim();
+  return `[signal] preset ${JSON.stringify(id)}${plugin ? ` (${plugin})` : ''} is defined twice - the later definition wins`;
+}
+
+/**
+ * What `name` means in a slot holding `plugin`: the exact pair, or - failing that - the same name
+ * with no plugin at all, which is a preset the editor has NAMED but nothing has been captured into
+ * yet. That placeholder belongs to whichever slot captures into it first (see Sig#preset's
+ * authoring loop), so until then it answers to any plugin that asks.
+ *
+ * With no plugin to go on - a slot past the end of the chain, a call the editor can't aim - any
+ * preset of that name will do. Refusing there would break patches that worked before presets were
+ * keyed this way, and the caller already has no way to tell whether the answer is right.
+ */
+export function lookupPreset(id, plugin = null) {
+  const scoped = String(plugin ?? '').trim();
+  if (scoped) return stores.preset.lookup(presetKey(scoped, id)) ?? stores.preset.lookup(presetKey('', id));
+  return stores.preset.lookup(presetKey('', id)) ?? presetEntries().find((e) => e.id === id)?.entry ?? null;
+}
+
+/** Every preset, its name and the plugin it was captured from split back out of the key. */
+function presetEntries() {
+  return stores.preset.ids().map(({ id: key, layer }) => {
+    const at = key.indexOf(PRESET_KEY_SEP);
+    return { id: key.slice(at + 1), plugin: key.slice(0, at), layer, entry: stores.preset.lookup(key) };
+  });
+}
+
+export const presetIds = () => presetEntries().map(({ id, plugin, layer }) => ({ id, plugin, layer }));
+
+/**
+ * Which plugins define a preset by this name - what turns "no preset called disco" into "there is
+ * a disco, but it belongs to ValhallaDelay and this slot holds Serum 2", which is the difference
+ * between a dead end and a fixable mistake.
+ */
+export const presetPluginsFor = (id) =>
+  [...new Set(presetEntries().filter((e) => e.id === id && e.plugin).map((e) => e.plugin))];

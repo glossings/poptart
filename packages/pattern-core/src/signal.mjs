@@ -15,7 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
-import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset } from './rolls.mjs';
+import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
@@ -643,6 +643,18 @@ export class Sig {
    * .synth(...) or .fx(...) it belongs to. The names are ordinary mini notation, so the whole
    * language applies - `<a b>` takes one per cycle, `a b` splits the cycle, `~` holds whatever is
    * already loaded.
+   *
+   * A preset belongs to the PLUGIN it was captured from - a program is only meaningful to the
+   * plugin that wrote it - so names are unique per plugin rather than per patch, and every slot in
+   * a chain can carry one called by the same word:
+   *
+   *   disco: pianoroll("<disco ~ disco2 disco>").s("dstab")
+   *     .fx("ValhallaDelay").preset("disco")
+   *     .fx("ValhallaVintageVerb").preset("disco")
+   *     .fx("RC-20 Retro Color").preset("disco")
+   *
+   * Each `disco` there is a different sound, resolved against the plugin its slot holds. Naming one
+   * that belongs to some other plugin doesn't load it - the console says which plugin has it.
    *
    * You don't write the presets: name one here, evaluate, and the editor files an empty definition
    * under that name. Double-click `preset` to open the picker on one - which HOLDS the slot on it,
@@ -3351,12 +3363,22 @@ export function _preset(id, plugin = '', state = '') {
  */
 export function resolvePreset(name, pluginInSlot) {
   const key = String(name).trim();
-  const found = lookupPreset(key);
-  if (!found) return { state: null, why: `no preset called ${JSON.stringify(key)} - name it and it is created empty on the next evaluation` };
-  if (!found.state) return { state: null, why: null }; // named, nothing captured yet: hold what's loaded
-  if (found.plugin && pluginInSlot && found.plugin !== pluginInSlot) {
-    return { state: null, why: `preset ${JSON.stringify(key)} was captured from ${found.plugin}, but that slot holds ${pluginInSlot}` };
+  const found = lookupPreset(key, pluginInSlot);
+  if (!found) {
+    // The name exists, but for other plugins - so this is a preset aimed at the wrong slot rather
+    // than a typo, and saying WHICH plugins own it is the difference between a dead end and a
+    // one-word fix. A preset belongs to the plugin it came from (see lookupPreset).
+    const elsewhere = presetPluginsFor(key);
+    if (elsewhere.length) {
+      return {
+        state: null,
+        why: `preset ${JSON.stringify(key)} belongs to ${elsewhere.join(' / ')}, and that slot holds `
+          + `${pluginInSlot || 'no plugin'} - each plugin has its own presets, so name one of ${pluginInSlot || 'its'}'s here`,
+      };
+    }
+    return { state: null, why: `no preset called ${JSON.stringify(key)} - name it and it is created empty on the next evaluation` };
   }
+  if (!found.state) return { state: null, why: null }; // named, nothing captured yet: hold what's loaded
   return { state: found.state, why: null };
 }
 
