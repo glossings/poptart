@@ -7348,6 +7348,7 @@ const soundsTab = document.getElementById('soundsTab');
 const filesTab = document.getElementById('filesTab');
 const settingsTab = document.getElementById('settingsTab');
 const audioDeviceSelect = document.getElementById('audioDeviceSelect');
+const audioChannelSelect = document.getElementById('audioChannelSelect');
 const audioInputList = document.getElementById('audioInputList');
 const audioInputLayoutNote = document.getElementById('audioInputLayout');
 const audioInputApply = document.getElementById('audioInputApply');
@@ -7380,14 +7381,43 @@ for (const btn of document.querySelectorAll('.side-tab')) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Settings tab - audio output device. Devices come with channel counts (what .o(n) wraps
-// against); changing the selection restarts the engine server-side, so playing tracks stop
-// and the user re-evaluates.
+// Settings tab - audio output device and how many of its channels to use. Changing either
+// restarts the engine server-side, so playing tracks stop and the user re-evaluates.
+//
+// The two are separate on purpose. The device list shows what each interface HAS; the channel
+// count says how much of it you are listening to, which is the number .o(n) wraps at. They are
+// usually different: six outputs on the back of an interface and two monitors on your desk is the
+// ordinary case, and defaulting to all six is what makes .o(2) play to a jack with nothing in it.
 // ---------------------------------------------------------------------------------------------
+
+// "4" -> "4 ch · 2 pairs". Pairs, because a pair is what one .o(n) addresses.
+function channelChoiceLabel(n) {
+  return n === 2 ? '2 ch · stereo' : `${n} ch · ${n / 2} pairs`;
+}
+
+function renderChannelChoices(choices, current, audible) {
+  const list = choices?.length ? choices : [2];
+  audioChannelSelect.innerHTML = '';
+  for (const n of list) {
+    const opt = document.createElement('option');
+    opt.value = String(n);
+    opt.textContent = channelChoiceLabel(n);
+    audioChannelSelect.appendChild(opt);
+  }
+  audioChannelSelect.value = String(current ?? list[0]);
+  // A stereo device has nothing to choose - leave the control readable rather than removing it,
+  // so "output channels" doesn't appear and vanish as you switch interfaces.
+  audioChannelSelect.disabled = list.length < 2;
+  audioChannelSelect.title = list.length < 2
+    ? `${audible === 2 ? 'this device is stereo' : `only ${audible} channels are audible here`} - every .o(n) plays to channels 1/2`
+    : 'how many output channels .o(n) may play to - stereo folds every orbit onto channels 1/2; raise it to reach this interface\'s other pairs';
+}
 
 async function refreshAudioDevices() {
   try {
-    const { devices, selected } = await api('GET', '/api/audioDevices');
+    const {
+      devices, selected, outputChannels, outputChannelChoices, audibleChannels,
+    } = await api('GET', '/api/audioDevices');
     audioDeviceSelect.innerHTML = '';
     const def = document.createElement('option');
     def.value = '';
@@ -7404,10 +7434,38 @@ async function refreshAudioDevices() {
     // on the system default in that case.
     audioDeviceSelect.value = selected ?? '';
     if (audioDeviceSelect.value !== (selected ?? '')) audioDeviceSelect.value = '';
+    renderChannelChoices(outputChannelChoices, outputChannels, audibleChannels);
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
 }
+
+audioChannelSelect.addEventListener('change', async () => {
+  const channels = Number(audioChannelSelect.value);
+  audioChannelSelect.disabled = true;
+  audioDeviceSelect.disabled = true;
+  engineStatus.textContent = 'restarting engine…';
+  engineStatus.className = 'status';
+  logLine(`using ${channels} output channels - restarting the engine…`);
+  try {
+    const res = await api('POST', '/api/audioOutputChannels', { channels });
+    stopHighlighting();
+    playing = false;
+    updateTransportButtons();
+    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
+    renderChannelChoices(res.outputChannelChoices, res.outputChannels, res.audibleChannels);
+    logLine(res.outputChannels === 2
+      ? 'every .o(n) now plays to channels 1/2 - re-evaluate (Cmd/Ctrl+Enter) to resume playback'
+      : `.o(n) now wraps at ${res.outputChannels / 2} stereo pairs - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    refreshAudioDevices().catch(() => {}); // put the control back to what the engine actually has
+  } finally {
+    audioChannelSelect.disabled = false;
+    audioDeviceSelect.disabled = false;
+    refreshStatus().catch(() => {});
+  }
+});
 
 audioDeviceSelect.addEventListener('change', async () => {
   const device = audioDeviceSelect.value || null;
@@ -7429,6 +7487,9 @@ audioDeviceSelect.addEventListener('change', async () => {
     logLine(`audio output is now ${label} - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
     setAudioDeviceWarning(warning);
     refreshAudioInputs().catch(() => {});
+    // A different interface has a different number of pairs, and the saved channel count is
+    // clamped to it server-side - so re-read rather than leaving the old device's choices up.
+    refreshAudioDevices().catch(() => {});
   } catch (e) {
     logLine(e.message ?? String(e), true);
   } finally {

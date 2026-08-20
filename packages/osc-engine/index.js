@@ -250,9 +250,11 @@ function toOscArgs(values) {
 class OscEngine {
   // outDevice: CoreAudio output device name (null = system default). outChannels: that
   // device's output channel count - sclang sizes numOutputBusChannels from it. playChannels: how
-  // many of those channels reach a speaker, which is what the .o(n) stereo-pair selector wraps at.
-  // The two differ only for poptart's aggregate, whose trailing channels belong to the input
-  // devices combined in behind the playback device (see audio-selection.js's playbackChannels).
+  // many of those channels are actually being listened to, which is what the .o(n) stereo-pair
+  // selector wraps at - the user's "output channels" setting, floored by what the device can be
+  // heard on (see audio-selection.js's playbackChannels). Smaller than outChannels whenever the
+  // interface is wider than the pairs in use, and for poptart's aggregate, whose trailing channels
+  // belong to the input devices combined in behind the playback device.
   // inChannels: that same device's input channel count (0 for output-only devices) - scsynth opens
   // one device for both in and out, so numInputBusChannels must not exceed what the device offers.
   constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0 } = {}) {

@@ -143,6 +143,25 @@ function deviceToOpen(devices) {
   return device;
 }
 
+// The output-channel picture for the settings tab and for loadEngine: how many channels the device
+// that would be opened can actually be heard on, which of those .o(n) is allowed to use, and the
+// counts the tab may offer. One function so the tab can never show a choice the engine would not
+// honour.
+function outputChannelState(devices = audioOutputDevices()) {
+  const args = {
+    devices,
+    wanted: settings.audioOutputDevice ?? null,
+    active: deviceToOpen(devices),
+    aggregateUid: audioDevices.AGGREGATE_UID,
+  };
+  const audible = audioSelection.audibleChannels(args);
+  return {
+    audible,
+    channels: audioSelection.playbackChannels({ ...args, cap: settings.audioOutputChannels ?? null }),
+    choices: audioSelection.outputChannelChoices(audible),
+  };
+}
+
 /**
  * Make poptart's aggregate match `uids` (the extra input devices), built around whatever the
  * output device currently is - it goes in first and is the clock master. An empty list tears the
@@ -243,10 +262,11 @@ async function loadEngine() {
     const e = new OscEngine({
       outDevice: pinned,
       outChannels: active?.channels ?? 2,
-      // What .o(n) wraps at: only the playback device's channels are somewhere anyone can hear,
-      // and an aggregate's are a prefix of its own (see audio-selection.js).
+      // What .o(n) wraps at: the channels anyone can actually hear, capped by the user's own
+      // "output channels" choice - stereo unless they went looking for more (audio-selection.js).
       playChannels: audioSelection.playbackChannels({
         devices, wanted: settings.audioOutputDevice ?? null, active, aggregateUid: audioDevices.AGGREGATE_UID,
+        cap: settings.audioOutputChannels ?? null,
       }),
       inChannels: active?.inChannels ?? 0,
     });
@@ -2397,11 +2417,39 @@ const routes = {
     return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
   },
 
-  // Output devices with channel counts, plus the saved selection (null = system default).
-  'GET /api/audioDevices': async () => ({
-    status: 200,
-    body: { devices: audioOutputDevices(), selected: settings.audioOutputDevice ?? null },
-  }),
+  // Output devices with channel counts, plus the saved selection (null = system default) and the
+  // output-channel picture for the device that would be opened: `channels` is what .o(n) wraps at
+  // right now, `choices` the counts the tab may offer, `audible` how wide the device really is.
+  'GET /api/audioDevices': async () => {
+    const devices = audioOutputDevices();
+    const { channels, choices, audible } = outputChannelState(devices);
+    return {
+      status: 200,
+      body: {
+        devices,
+        selected: settings.audioOutputDevice ?? null,
+        outputChannels: channels,
+        outputChannelChoices: choices,
+        audibleChannels: audible,
+      },
+    };
+  },
+
+  // Body: { channels } - how many output channels .o(n) may address, as a count of whole stereo
+  // pairs. Clamped to what the device can be heard on rather than refused, for the same reason
+  // playbackChannels clamps: the saved number outlives the device it was chosen for. Restarts the
+  // engine, because the pair count is compiled into every track SynthDef at boot.
+  'POST /api/audioOutputChannels': async (body) => {
+    // Whole stereo pairs only - a pair is the unit .o(n) addresses, and an odd count would leave
+    // one channel no orbit could reach.
+    const pairs = Math.max(1, Math.floor(Number(body?.channels) / 2) || 1);
+    settings.audioOutputChannels = pairs * 2;
+    saveSettings();
+    await restartEngine();
+    if (!engine) throw new Error(engineError ?? 'engine failed to restart');
+    const { channels, choices, audible } = outputChannelState();
+    return { status: 200, body: { outputChannels: channels, outputChannelChoices: choices, audibleChannels: audible } };
+  },
 
   // Body: { device } - a device name, or null/"" for the system default. Persists the choice
   // and restarts the engine on the new device (scsynth can't switch devices while running),

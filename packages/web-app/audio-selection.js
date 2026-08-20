@@ -120,7 +120,7 @@ function aggregateProblem({ layout, outDevice, absent = [] }) {
 }
 
 /**
- * How many of the opened device's output channels actually reach a speaker - what .o(n) wraps at.
+ * How many of the opened device's output channels actually reach a speaker.
  *
  * Normally that is the whole device. But when the device scsynth opened is poptart's aggregate,
  * only the playback device's channels do: the input devices combined in behind it bring output
@@ -128,12 +128,52 @@ function aggregateProblem({ layout, outDevice, absent = [] }) {
  * device first), so they pad the count without adding anywhere audible. Wrapping at the aggregate's
  * total is how .o(2) through stereo speakers with one loopback aggregated in became silence - pair
  * 2 is the loopback's outputs, meters moving and all.
+ *
+ * This is the CEILING on what .o(n) may address, not what it does address - that is
+ * playbackChannels, which the user's own setting has the final say over.
  */
-function playbackChannels({ devices, wanted = null, active, aggregateUid }) {
+function audibleChannels({ devices, wanted = null, active, aggregateUid }) {
   if (!active) return 2;
   if (active.uid !== aggregateUid) return active.channels;
   const plain = plainOutputDevice(devices, wanted, aggregateUid).device;
   return Math.min(active.channels, plain?.channels ?? active.channels);
+}
+
+/** Stereo, and the setting's default: the one channel count that is right on every device. */
+const DEFAULT_OUTPUT_CHANNELS = 2;
+
+/**
+ * What .o(n) actually wraps at: the audible channels, capped by the "output channels" setting.
+ *
+ * The cap exists because having six outputs and listening to two of them is the normal case, not
+ * an exotic one. An interface's spare pairs are real - CoreAudio reports them, scsynth will happily
+ * write to them - but they are usually back-panel jacks or SPDIF with nothing plugged in, so
+ * addressing them by default means .o(2) is silence on the very hardware that has the most outputs.
+ * Stereo by default, more when you say so. (Strudel arrives at the same answer from the other side:
+ * its orbits only become channel assignments once you tick "Multi Channel Orbits", which is off by
+ * default - see the README.)
+ *
+ * The cap is clamped rather than validated so a device change can never strand playback: pick a
+ * 6-channel interface, set 6, go back to the laptop speakers, and this quietly means 2 again -
+ * while leaving the saved 6 alone for when the interface comes back.
+ */
+function playbackChannels({ devices, wanted = null, active, aggregateUid, cap = null }) {
+  const audible = audibleChannels({ devices, wanted, active, aggregateUid });
+  const asked = Number(cap);
+  // Absent, zero, odd or junk all mean "just give me stereo" - this reads a hand-editable
+  // settings.json, so it has to survive whatever is in there.
+  const want = Number.isFinite(asked) && asked >= 2 ? Math.floor(asked / 2) * 2 : DEFAULT_OUTPUT_CHANNELS;
+  return Math.max(2, Math.min(want, audible));
+}
+
+/**
+ * The channel counts the settings tab offers for a device - every stereo pair it really has, since
+ * a pair is the unit .o(n) addresses. Always at least [2], so the control is never empty.
+ */
+function outputChannelChoices(audible) {
+  const choices = [];
+  for (let n = 2; n <= Math.max(2, audible); n += 2) choices.push(n);
+  return choices;
 }
 
 /**
@@ -189,6 +229,6 @@ function splitConnected(uids, knownUids) {
 }
 
 module.exports = {
-  plainOutputDevice, deviceToOpen, playbackChannels, aggregateProblem, aggregateMembers,
-  splitConnected, aggregateStaleReason,
+  plainOutputDevice, deviceToOpen, audibleChannels, playbackChannels, outputChannelChoices,
+  DEFAULT_OUTPUT_CHANNELS, aggregateProblem, aggregateMembers, splitConnected, aggregateStaleReason,
 };

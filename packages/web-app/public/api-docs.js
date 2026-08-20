@@ -233,7 +233,7 @@ const API_DOCS = {
   },
   gain: { kind: 'method', sig: 'gain(value)', desc: 'Track output gain after the whole chain, 1 = unity. Chains multiply, so a level and a modulator compose.', eg: '.gain(0.5).gain(env())' },
   pan: { kind: 'method', sig: 'pan(value)', desc: 'Stereo pan, -1 (left) .. 1 (right), 0 = center.', eg: '.pan(sine(0.2).range(-1, 1))' },
-  o: { kind: 'method', sig: 'o(pair)', desc: 'Which stereo output pair the track plays to - .o(1) is channels 1/2, .o(2) is 3/4. Wraps past the output device\'s last pair, so on stereo speakers every .o(n) is channels 1/2.', eg: '.o(2)' },
+  o: { kind: 'method', sig: 'o(pair)', desc: 'Which stereo output pair the track plays to - .o(1) is channels 1/2, .o(2) is 3/4. Wraps at the "output channels" setting, which is 2 unless you raise it - so by default every .o(n) is channels 1/2.', eg: '.o(2)' },
   bus: {
     kind: 'method',
     sig: 'bus(name, amount)',

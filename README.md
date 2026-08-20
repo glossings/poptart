@@ -484,15 +484,26 @@ and is written as the nearest one, which the log says out loud.)
 ### Audio output
 
 The **settings** tab picks the audio output device (the list shows each device's output channel
-count; the choice persists). Applying a change restarts the audio engine — scsynth only picks its
-device at boot — so playing tracks stop; re-evaluate to resume.
+count; the choice persists) and, next to it, **output channels** — how much of that device to
+actually play through. Applying either restarts the audio engine — scsynth only picks its device
+and channel count at boot — so playing tracks stop; re-evaluate to resume.
 
-On a multichannel device, `.o(n)` routes a track's stereo output to a channel pair: `.o(1)` is
-channels 1/2 (the default), `.o(2)` is 3/4, and so on, wrapping past the device's last pair — on
-stereo speakers every `.o(n)` is channels 1/2, so nothing is ever routed somewhere silent. (Pairs
-are counted on the output device you picked, not on the combined device built for *extra inputs*
-below: those inputs' own outputs go nowhere you can hear.) It's a channel-strip control like
-`.gain()`/`.pan()`, so patterns and signals work too.
+`.o(n)` routes a track's stereo output to a channel pair: `.o(1)` is channels 1/2 (the default),
+`.o(2)` is 3/4, and so on, wrapping past the last pair in use. **Output channels** is what it wraps
+at, and it defaults to **2** whatever the interface offers, so every `.o(n)` folds onto channels
+1/2 until you raise it. That default is deliberate: six outputs on the back of an interface and two
+monitors on the desk is the ordinary case, and addressing all six by default means `.o(2)` plays to
+a jack with nothing in it — audible nowhere, meters moving. Set it to 4 or 6 when you actually want
+those pairs. (Strudel reaches the same conclusion from the other direction: its orbits only become
+channel assignments once you tick *Multi Channel Orbits*, which is off by default.)
+
+The counts on offer are the pairs your chosen output device really has — not those of the combined
+device built for *extra inputs* below, whose trailing channels belong to the input interfaces and
+go nowhere you can hear. A count saved for a wide interface quietly means stereo on a narrow one,
+and is still there when the wide one comes back.
+
+`.o()` is a channel-strip control like `.gain()`/`.pan()`, so patterns and signals work too. It is
+purely about *where* a track lands — to group tracks through shared processing, use `.bus()`.
 
 ### Audio input
 

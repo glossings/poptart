@@ -9,8 +9,8 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 
 const {
-  plainOutputDevice, deviceToOpen, playbackChannels, aggregateProblem, aggregateMembers,
-  splitConnected, aggregateStaleReason,
+  plainOutputDevice, deviceToOpen, audibleChannels, playbackChannels, outputChannelChoices,
+  aggregateProblem, aggregateMembers, splitConnected, aggregateStaleReason,
 } = require('./audio-selection.js');
 
 const AGG = 'com.poptart.aggregate';
@@ -90,35 +90,85 @@ test('deviceToOpen: an unreadable layout leaves the aggregate trusted', () => {
   assert.strictEqual(device, aggregate);
 });
 
-test('playbackChannels: a plain device offers all of its own channels', () => {
-  assert.strictEqual(playbackChannels({ devices, wanted: null, active: speakers, aggregateUid: AGG }), 2);
-  assert.strictEqual(playbackChannels({
+test('audibleChannels: a plain device offers all of its own channels', () => {
+  assert.strictEqual(audibleChannels({ devices, wanted: null, active: speakers, aggregateUid: AGG }), 2);
+  assert.strictEqual(audibleChannels({
     devices, wanted: null, active: { ...speakers, channels: 8 }, aggregateUid: AGG,
   }), 8);
 });
 
-test('playbackChannels: the aggregate offers only the playback device\'s channels', () => {
+test('audibleChannels: the aggregate offers only the playback device\'s channels', () => {
   // Stereo speakers plus a stereo loopback is a FOUR-channel aggregate, and .o(2) wrapping at four
   // wrote pair 2 into the loopback - audible nowhere, meters moving. It has to wrap at two.
-  assert.strictEqual(playbackChannels({
+  assert.strictEqual(audibleChannels({
     devices, wanted: 'MacBook Pro Speakers', active: aggregate, aggregateUid: AGG,
   }), 2);
 });
 
-test('playbackChannels: an aggregate around a wider device keeps that device\'s pairs', () => {
+test('audibleChannels: an aggregate around a wider device keeps that device\'s pairs', () => {
   const scarlett = { uid: 'Scarlett:1', name: 'Scarlett 18i20', channels: 8, inChannels: 8, isDefault: false };
   const wide = { uid: AGG, name: 'poptart', channels: 10, inChannels: 10, isDefault: false };
-  assert.strictEqual(playbackChannels({
+  assert.strictEqual(audibleChannels({
     devices: [speakers, blackhole, scarlett, wide], wanted: 'Scarlett 18i20', active: wide, aggregateUid: AGG,
   }), 8);
 });
 
-test('playbackChannels: no device at all still leaves a stereo pair to wrap at', () => {
-  assert.strictEqual(playbackChannels({ devices: [], wanted: null, active: null, aggregateUid: AGG }), 2);
+test('audibleChannels: no device at all still leaves a stereo pair to wrap at', () => {
+  assert.strictEqual(audibleChannels({ devices: [], wanted: null, active: null, aggregateUid: AGG }), 2);
   // An aggregate whose playback device has vanished from the list must not report zero pairs.
-  assert.strictEqual(playbackChannels({
+  assert.strictEqual(audibleChannels({
     devices: [aggregate], wanted: 'EarPods', active: aggregate, aggregateUid: AGG,
   }), 4);
+});
+
+const scarlett = { uid: 'Scarlett:1', name: 'Scarlett 6i6 USB', channels: 6, inChannels: 6, isDefault: false };
+const scarlettAgg = { uid: AGG, name: 'poptart', channels: 8, inChannels: 8, isDefault: false };
+const sixDevices = [speakers, blackhole, scarlett, scarlettAgg];
+
+test('playbackChannels: stereo by default, however many the interface has', () => {
+  // The bug this setting exists for: a 6i6 monitored on outputs 1/2, where .o(2) went to a
+  // back-panel jack and read as "the snare is silent".
+  assert.strictEqual(playbackChannels({
+    devices: sixDevices, wanted: 'Scarlett 6i6 USB', active: scarlettAgg, aggregateUid: AGG, cap: null,
+  }), 2);
+});
+
+test('playbackChannels: raising the cap opens the interface\'s other pairs', () => {
+  const args = { devices: sixDevices, wanted: 'Scarlett 6i6 USB', active: scarlettAgg, aggregateUid: AGG };
+  assert.strictEqual(playbackChannels({ ...args, cap: 4 }), 4);
+  assert.strictEqual(playbackChannels({ ...args, cap: 6 }), 6);
+  // Never past what is audible, even when asked: the aggregate's last two channels are the
+  // loopback's, and the cap must not hand them back.
+  assert.strictEqual(playbackChannels({ ...args, cap: 8 }), 6);
+});
+
+test('playbackChannels: a cap saved for a wider device quietly means stereo on a narrow one', () => {
+  // Set 6 for the interface, then go back to the laptop speakers. Playback must not be stranded on
+  // pairs that no longer exist - and the saved 6 is left alone for when the interface comes back.
+  assert.strictEqual(playbackChannels({
+    devices, wanted: 'MacBook Pro Speakers', active: speakers, aggregateUid: AGG, cap: 6,
+  }), 2);
+});
+
+test('playbackChannels: settings.json is hand-editable, so junk caps still play', () => {
+  const args = { devices: sixDevices, wanted: 'Scarlett 6i6 USB', active: scarlettAgg, aggregateUid: AGG };
+  for (const cap of [0, 1, -4, NaN, null, undefined, 'six', {}]) {
+    assert.strictEqual(playbackChannels({ ...args, cap }), 2, `cap ${String(cap)} should fall back to stereo`);
+  }
+  // Odd counts round down to whole pairs rather than leaving a channel no orbit can reach.
+  assert.strictEqual(playbackChannels({ ...args, cap: 5 }), 4);
+});
+
+test('outputChannelChoices: every real pair, and never an empty control', () => {
+  assert.deepEqual(outputChannelChoices(6), [2, 4, 6]);
+  assert.deepEqual(outputChannelChoices(2), [2]);
+  assert.deepEqual(outputChannelChoices(0), [2]);
+  const wide = outputChannelChoices(64);
+  assert.strictEqual(wide.length, 32);
+  assert.strictEqual(wide.at(0), 2);
+  assert.strictEqual(wide.at(-1), 64);
+  // Odd hardware counts never offer a pair whose second channel does not exist.
+  assert.deepEqual(outputChannelChoices(5), [2, 4]);
 });
 
 test('aggregateProblem: names the two failures, and is silent when healthy', () => {

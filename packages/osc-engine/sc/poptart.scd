@@ -34,10 +34,10 @@ var blockSize = ("POPTART_BLOCK_SIZE".getenv ? "256").asInteger;
 // numOutputBusChannels so the device's channels are all addressable.
 var outDevice = "POPTART_OUT_DEVICE".getenv;
 var outChannels = ("POPTART_OUT_CHANNELS".getenv ? "2").asInteger;
-// How many of those channels actually reach a speaker - what .o(n)'s stereo-pair wraparound folds
-// onto. Same as outChannels for a plain device; smaller for poptart's aggregate, whose trailing
-// channels belong to the input devices combined in behind the playback device and go nowhere
-// audible. Node works it out (audio-selection.js's playbackChannels) since it knows the membership.
+// How many channels .o(n)'s stereo-pair wraparound folds onto - the editor's "output channels"
+// setting, which is 2 unless raised, and never more than the device can be heard on (poptart's
+// aggregate pads its count with the combined input devices' own outputs, which go nowhere
+// audible). Node works both halves out - audio-selection.js's playbackChannels.
 var playChannels = ("POPTART_PLAY_CHANNELS".getenv ? outChannels.asString).asInteger;
 // The chosen device's input channel count (0 for output-only devices). Currently poptart plays
 // out only, so this is 0 in practice, but it's the device's real input count so live-input
@@ -195,9 +195,11 @@ pluginList = {
 trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 
 buildTrackDef = { |key|
-    // .o(n)'s wraparound: pair indices past the last AUDIBLE pair fold back onto real outputs.
-    // Audible, not merely allocated - wrapping at numOutputBusChannels sent .o(2) into the silent
-    // tail of poptart's aggregate whenever an extra input was combined in (see playChannels).
+    // .o(n)'s wraparound: pair indices past the last pair IN USE fold back onto real outputs.
+    // In use, not merely allocated - wrapping at numOutputBusChannels sent .o(2) into the silent
+    // tail of poptart's aggregate, and wrapping at the interface's full width sends it to a
+    // back-panel jack nobody is monitoring. Both are silence with the meters moving; playChannels
+    // is the count that is actually being listened to.
     var numPairs = max(1, min(playChannels, server.options.numOutputBusChannels) div: 2);
     // scBus1..7 are per-fx-slot auxiliary (sidechain) input buses; scSend/scSendGain are this
     // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses

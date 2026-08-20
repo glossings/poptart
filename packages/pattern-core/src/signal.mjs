@@ -527,8 +527,9 @@ export class Sig {
 
   /**
    * Channel strip: which stereo output pair the track plays to - .o(1) sends to output
-   * channels 1/2 (the default), .o(2) to 3/4, and so on. Pairs past the device's last one wrap
-   * around, so .o(2) on a stereo interface is channels 1/2 again. Takes the same value kinds
+   * channels 1/2 (the default), .o(2) to 3/4, and so on. Pairs past the last one in use wrap
+   * around, and how many are in use is the editor's "output channels" setting - 2 unless raised,
+   * so by default .o(2) is channels 1/2 again on any interface. Takes the same value kinds
    * as .gain()/.pan(): `.o("1 2")` alternates pairs each half-cycle.
    */
   o(value) {
