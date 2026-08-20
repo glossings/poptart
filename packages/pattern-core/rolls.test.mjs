@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 import { _roll, pianoroll, cat, mini, setPatternWarn } from './src/signal.mjs';
 import { stepLocs } from './src/mini.mjs';
-import { clearRolls, setRollLayer, rollIds, lookupRoll } from './src/rolls.mjs';
+import { clearRolls, restoreRolls, setRollLayer, rollIds, lookupRoll } from './src/rolls.mjs';
 import { injectLocations } from './src/locations.mjs';
 
 // Each test owns the store: the buffer layer is rebuilt per evaluation in the real host too.
@@ -103,6 +103,23 @@ test('clearRolls() drops the buffer layer and leaves prebake standing', () => {
   clearRolls('buffer');
   assert.equal(lookupRoll('0'), null, 'a deleted buffer definition stops being playable');
   assert.ok(lookupRoll('library'), 'prebake is a library, not part of the buffer');
+});
+
+// Clearing the buffer layer is a TRANSACTION, because an evaluation can fail after it. The host
+// clears the registry, rebuilds it from the buffer, and applies nothing at all if a block doesn't
+// parse - while the tracks it built last time go on playing, resolving their definitions by name
+// every cycle. Handing the old contents back is what keeps a typo from silencing them.
+test('clearRolls hands back what it took, so a failed evaluation can put it straight back', () => {
+  fresh();
+  _roll(0, '60,0,4', { grid: 16 });
+  const playing = pianoroll('<0>'); // built last evaluation, still being queried each cycle
+
+  const had = clearRolls('buffer');
+  assert.deepEqual(capture(() => values(playing, 0)).value, [], 'cleared, it has nothing to play');
+
+  _roll(0, '67,0,4', { grid: 16 }); // half a rebuild, then the evaluation throws
+  restoreRolls(had);
+  assert.deepEqual(values(playing, 0), [60], 'the definitions are the ones it was playing before');
 });
 
 test('a buffer definition shadows a prebake one of the same id', () => {

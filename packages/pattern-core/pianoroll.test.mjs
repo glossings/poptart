@@ -19,7 +19,7 @@ import {
   duplicatePianoRollLoop,
   PIANOROLL_DEFAULT_STEPS,
 } from './src/pianoroll.mjs';
-import { pianoroll, note, mini, channelAt, soundingEnd } from './src/signal.mjs';
+import { pianoroll, note, n, mini, channelAt, soundingEnd } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 test('parsePianoRoll: fields, defaults, and empty input', () => {
@@ -200,38 +200,82 @@ test('pianoRollToMini: scale mode rounds out-of-key notes to the nearest degree'
   );
 });
 
-// The whole point of the converter is that what it emits plays the same notes the editor did.
-// Rebuild it the way the eval sandbox would (bare string -> mini(); note() -> note()) and compare
-// the step grids across several cycles - this exercises the loop threading (len < grid here) and
-// caught note() choking on ":vel" tokens. Probability is left out because the builder's rng and
-// mini's `?` draw independently (both honor the odds, but not the same coin flips).
+// Compared as the scheduler hears them, through the shared channel readers: velocity, and the span
+// the note SOUNDS for. A roll and its conversion carry a note's length differently - the builder
+// gives the step its real width, the mini round-trip a fixed-width cell plus a `clip` key (the
+// `<…>*grid` cells can't be any other width) - and it's the sounding span, not the step, that has
+// to agree.
+const soundsLike = (sig, cycle) =>
+  sig
+    .stepsForCycle(cycle)
+    .map((s) => {
+      const at = cycle + s.start;
+      return {
+        s: +s.start.toFixed(4),
+        e: +soundingEnd(s, sig.noteChannels, at, 1, at).toFixed(4),
+        v: s.value,
+        vel: channelAt('vel', s, sig.noteChannels, at, 1, at) ?? 1,
+      };
+    })
+    .sort((a, b) => a.s - b.s || a.v - b.v);
+
+/** An emitted expression, rebuilt the way the eval sandbox would: a bare template literal is mini. */
+const rebuildMini = (expr) =>
+  // eslint-disable-next-line no-new-func
+  new Function('mini', 'note', 'n', `return ${expr.replace(/^`([\s\S]*?)`/, 'mini(`$1`)')};`)(mini, note, n);
+
+// The whole point of the converter is that what it emits plays the same notes the editor did - and
+// that holds however the fields were split between the cells and the control calls, which is a
+// rewrite of the pattern's shape rather than just of its text. This also exercises the loop
+// threading (len < grid here) and caught note() choking on ":vel" tokens. Probability is left out
+// because the builder's rng and mini's `?` draw independently (both honor the odds, but not the
+// same coin flips).
 test('pianoroll(): playback matches its own mini-notation conversion', () => {
-  const str = '60,0,2 64,2,1,0.5 67,5,3';
-  const grid = 16;
-  const len = 8;
-  const pr = pianoroll(str, { grid, len });
-  const expr = pianoRollToMini(parsePianoRoll(str), { grid, len });
-  const asM = /^`([\s\S]*)`\.as\("([^"]*)"\)$/.exec(expr);
-  const noteM = /^note\(`([\s\S]*)`\)$/.exec(expr);
-  const rebuilt = asM ? mini(asM[1]).as(asM[2]) : note(noteM[1]);
-  // Compared as the scheduler hears them, through the shared channel readers: velocity, and the span
-  // the note SOUNDS for. The two forms carry a note's length differently - the builder gives the step
-  // its real width, the mini round-trip a fixed-width cell plus a `clip` key (the `<…>*grid` cells
-  // can't be any other width) - and it's the sounding span, not the step, that has to agree.
-  const norm = (sig, cycle) =>
-    sig
-      .stepsForCycle(cycle)
-      .map((s) => {
-        const at = cycle + s.start;
-        return {
-          s: +s.start.toFixed(4),
-          e: +soundingEnd(s, sig.noteChannels, at, 1, at).toFixed(4),
-          v: s.value,
-          vel: channelAt('vel', s, sig.noteChannels, at, 1, at) ?? 1,
-        };
-      })
-      .sort((a, b) => a.s - b.s || a.v - b.v);
-  for (const c of [0, 1, 2, 3]) assert.deepEqual(norm(pr, c), norm(rebuilt, c));
+  const cases = [
+    ['60,0,2 64,2,1,0.5 67,5,3', 16, 8], // every field varies: the whole .as("note:vel:clip") token
+    ['60,0,2 64,2,2 67,5,2', 16, 8], // one length throughout -> .clip(2)
+    ['60,0,2,0.5 64,2,1,0.5 67,5,3,0.5', 16, 8], // one velocity throughout -> .vel(0.5)
+    ['60,0,1 60,2,2 60,5,3', 16, 8], // one pitch throughout -> .note(60), the cells keeping clip
+    ['60,0,4,0.5 60,4,4,0.5', 8, 8], // nothing varies at all: the pitch stays in the cells
+  ];
+  for (const [str, grid, len] of cases) {
+    const pr = pianoroll(str, { grid, len });
+    const rebuilt = rebuildMini(pianoRollToMini(parsePianoRoll(str), { grid, len }));
+    for (const c of [0, 1, 2, 3]) assert.deepEqual(soundsLike(rebuilt, c), soundsLike(pr, c), str);
+  }
+});
+
+// A column of identical `:0.5`s says nothing per cell, so a field the whole window agrees on is
+// lifted onto its own control call - where it can be edited once - and the cells keep only what
+// actually varies.
+test('pianoRollToMini: a field every note agrees on is lifted onto a control call', () => {
+  // One length throughout: the cells go back to bare pitches and the length rides on .clip().
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60,0,2 64,1,2 67,2,2'), { grid: 4, len: 4 }),
+    'note(`<\n  60 64 67 ~\n>*4`).clip(2)',
+  );
+  // One velocity throughout, same idea.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60,0,1,0.5 64,1,1,0.5'), { grid: 4, len: 2 }),
+    'note(`<\n  60 64\n>*4`).vel(0.5)',
+  );
+  // One PITCH throughout - a drum lane, or a repeated note - leaves the varying fields in the
+  // cells behind a .as() that no longer has a pitch slot at all.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60,0,2,0.5 60,2,3,0.5'), { grid: 4, len: 4 }),
+    '`<\n  2 ~ 3 ~\n>*4`.as("clip").note(60).vel(0.5)',
+  );
+  // In a key it's the degree that lifts out, ahead of the .sc() that reads it.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('41,0,2,0.5 41,2,4,1'), { grid: 4, len: 4, scale: 'F minor' }),
+    '`<\n  0.5:2 ~ 1:4 ~\n>*4`.as("vel:clip").n(0).sc(3)',
+  );
+  // Nothing varies at all: the cells are still the rhythm, so the pitch stays in them and only the
+  // other fields lift out.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60,0,2,0.5 60,2,2,0.5'), { grid: 4, len: 4 }),
+    'note(`<\n  60 ~ 60 ~\n>*4`).vel(0.5).clip(2)',
+  );
 });
 
 test('pianoroll(): builds a step grid with fractional onsets, durations, and velocity', () => {

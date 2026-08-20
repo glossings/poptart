@@ -17,4 +17,4 @@ export { splitLabeledBlocks, isBareCallBlock } from './labels.mjs';
 export { injectLocations, isPatternPosition } from './locations.mjs';
 export { parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS } from './shape.mjs';
 export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, looksLikeNoteString, PIANOROLL_DEFAULT_STEPS } from './pianoroll.mjs';
-export { clearRolls, setRollLayer, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds } from './rolls.mjs';
+export { clearRolls, restoreRolls, setRollLayer, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds } from './rolls.mjs';

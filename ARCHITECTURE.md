@@ -54,8 +54,9 @@ the most unit-testable part.
 - `macros.mjs`, `midi.mjs`, `shape.mjs`, `record.mjs` — macro controls, MIDI CC input, LFO/envelope
   shape encoding, and recording helpers.
 - `midifile.mjs` — reading a dropped `.mid` into lanes, guessing the grid its rhythm sits on and
-  the key it's in, and writing each lane out as a `pianoroll(...)` call, so an import lands in the
-  editable form and the roll's own →♪ converts it to mini-notation when that's wanted.
+  the key it's in, and writing each lane out as the arguments of a roll — which the editor files
+  under the lane's name and plays with `pianoroll("name")` — so an import lands in the editable form
+  and the roll's own →♪ converts it to mini-notation when that's wanted.
 - `index.mjs` — the public surface that stitches these together.
 
 ### `packages/osc-engine` — the engine adapter

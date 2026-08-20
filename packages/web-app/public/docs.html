@@ -508,7 +508,12 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               cells — or its middle to slide the whole window) size and place it;
               <strong>cmd −/+</strong> zoom; <strong>🎧</strong> auditions each
               note through the track's synth; and <strong>→♪</strong> converts the whole roll to the
-              equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation. Clicking anywhere
+              equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation — written into the
+              pattern, so a roll kept under a name replaces every <code>pianoroll("name")</code> that
+              plays it and its definition goes with it. A field every note in the loop agrees on
+              isn't written into every cell: it rides on its own call instead
+              (<code>note(`&lt;…&gt;`).clip(2)</code>, <code>`&lt;…&gt;`.as("vel:clip").n(4)</code>),
+              where changing it is one edit. Clicking anywhere
               outside the panel closes it (so does <strong>Escape</strong>, or <strong>✕</strong>).
             </p>
             <p style="margin:0 0 8px">
@@ -858,8 +863,11 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
           <div class="callout">
             <span class="tag">importing</span>
             <strong>Drop a <code>.mid</code> file</strong> anywhere on the window and it becomes lanes
-            in the buffer — one <code>pianoroll(…)</code> per track the file plays, named after its own
-            track names. Double-click a <code>pianoroll</code> name to open the notes on the grid, and
+            in the buffer — one per track the file plays, each playing a roll under that track's own
+            name: <code>bass: pianoroll("bass")</code>, with the drawn notes filed as
+            <code>"bass"</code> in the folded <em>pianorolls</em> block at the bottom (a lane the file
+            never named, or one whose name a roll already has, takes an <code>_2</code> suffix).
+            Double-click a <code>pianoroll</code> name to open the notes on the grid, and
             hit <strong>→♪</strong> there whenever you want the same part as mini-notation instead. The
             dialog picks the grid (auto-detected per lane; a hand-played file that fits no grid is drawn
             on fine cells so it keeps its timing) and offers the <strong>key</strong> it guessed from the

@@ -325,7 +325,11 @@ export function pickGrid(starts, { candidates = GRID_CANDIDATES, tolerance = GRI
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Each lane as the `pianoroll(...)` call that plays it - what the editor writes after `label:`.
+ * Each lane as the ARGUMENTS of the roll that plays it - `"<notes>", { grid, len }`, which the
+ * editor files under a name (`_roll("bass", …)`, folded into the definitions block at the bottom of
+ * the buffer) and plays with a `pianoroll("bass")` after the lane's `label:`. Arguments rather than
+ * a whole call because those are the two halves the editor needs separately; wrap them in
+ * `pianoroll(…)` to get the inline form back.
  *
  * The notes stay absolute MIDI: a roll holds pitches, and the key only enters when the roll is
  * folded to one or converted to mini-notation, both of which are the roll's own business (and both
@@ -343,7 +347,7 @@ export function pickGrid(starts, { candidates = GRID_CANDIDATES, tolerance = GRI
  *   timing (the fine grid above).
  * @returns {{ entries: Array<{ name: string|null, drums: boolean, grid: number, len: number,
  *   quantized: boolean, notes: Array<{midi: number, start: number, len: number, vel: number,
- *   prob: number, mute: boolean}>, code: string }> }} - `quantized` is false for a lane that fit no grid and was
+ *   prob: number, mute: boolean}>, body: string }> }} - `quantized` is false for a lane that fit no grid and was
  *   drawn on the fine one, which is worth saying out loud to whoever dropped the file.
  */
 export function midiLanesToPianoroll({ lanes, cycles }, { grid = 'auto' } = {}) {
@@ -353,8 +357,8 @@ export function midiLanesToPianoroll({ lanes, cycles }, { grid = 'auto' } = {}) 
     const R = detected > 0 ? detected : UNQUANTIZED_GRID;
     const len = Math.max(1, Math.round(cycles * R));
     const notes = laneToRollNotes(lane.events, R, len);
-    const code = `pianoroll("${serializePianoRoll(notes)}", { grid: ${R}, len: ${len} })`;
-    return { name: lane.name, drums: lane.drums, grid: R, len, quantized: detected > 0, notes, code };
+    const body = `"${serializePianoRoll(notes)}", { grid: ${R}, len: ${len} }`;
+    return { name: lane.name, drums: lane.drums, grid: R, len, quantized: detected > 0, notes, body };
   });
   return { entries };
 }

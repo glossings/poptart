@@ -178,6 +178,25 @@ function logLine(text, isError = false) {
   // Mirror everything to the devtools console too, so the log is still there when the in-app
   // console is minimized (and gets devtools' filtering/timestamps).
   (isError ? console.error : console.log)(`[poptart] ${text}`);
+  // With the console collapsed, a refusal is silent - you press a button, nothing happens, and the
+  // line saying why is behind a panel you aren't looking at. So pulse the buffer red: not the
+  // message, just the fact that there IS one, and somewhere to go for it. Open, the line is already
+  // on screen (newest first, at the top) and a flash would be noise on top of it.
+  if (isError && document.documentElement.hasAttribute('data-console-collapsed')) {
+    pulse(document.getElementById('saveFlash'), 'error-flash');
+  }
+}
+
+/**
+ * One pulse of `cls` over `el`, restarting the animation rather than ignoring a second pulse that
+ * lands mid-flight (a reflow between remove and add is what makes the browser run it again).
+ */
+function pulse(el, cls) {
+  if (!el) return;
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+  el.addEventListener('animationend', () => el.classList.remove(cls), { once: true });
 }
 
 function copyText(text, what) {
@@ -3558,10 +3577,7 @@ function makeDefRegistry(opts) {
       return refuse(`${refs.length} pattern${refs.length === 1 ? '' : 's'} still play${refs.length === 1 ? 's' : ''} it `
         + '- take the name out of them first, or it will be re-created empty on the next evaluation');
     }
-    // The last definition of a run takes the run's label and its blank line with it, which is the
-    // same span the fold hides - otherwise deleting the only one leaves a bare label behind.
-    const run = runs(code).find((r) => r.some((d) => d.id === id));
-    const [from, to] = run && run.length === 1 ? runLineRange(code, run) : defLineRange(code, def);
+    const [from, to] = removalRange(code, def);
     const wasOpen = panel.current() === id;
     cm.replaceRange('', cm.posFromIndex(from), cm.posFromIndex(to));
     refoldAll();
@@ -3574,6 +3590,17 @@ function makeDefRegistry(opts) {
       if (next) panel.open(next.id, panel.carry());
       else panel.close();
     }
+  }
+
+  /**
+   * The span taking one definition out of the buffer covers: its own line, or - when it is the last
+   * of its run - the whole run, which is the same span the fold hides (otherwise deleting the only
+   * one leaves the block's blank line behind). Also what a conversion uses, which takes a
+   * definition out having rewritten the patterns that named it.
+   */
+  function removalRange(code, def) {
+    const run = runs(code).find((r) => r.some((d) => d.id === def.id));
+    return run && run.length === 1 ? runLineRange(code, run) : defLineRange(code, def);
   }
 
   // Renaming from the panel, which is the only place one of these HAS a visible name. The
@@ -3644,7 +3671,7 @@ function makeDefRegistry(opts) {
     );
   }
 
-  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, defsEdit, allIds, materialize, create, remove, rename };
+  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename };
 }
 
 
@@ -3742,6 +3769,32 @@ function sinkDefRuns() {
   const gap = '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length));
   applyEdits([...found.map((f) => [...f.span, '']), [code.length, code.length, `${gap}${block}`]]);
   return found.reduce((n, f) => n + f.run.length, 0);
+}
+
+// Where the definitions block BEGINS - the start of the line its first run opens on, which is the
+// offset new CODE is written in front of so the block stays the bottom of the buffer.
+//
+// Null unless the runs really are the bottom: everything from that line down has to be definitions
+// and blank space. An older patch keeps its block at the TOP until the first evaluation sinks it
+// (see sinkDefRuns), and new lanes belong under that code, not above it. Nested runs don't count,
+// for the same reason as lastDefRunEnd below.
+function firstDefRunStart(code) {
+  const isCode = codeOnly(code);
+  const spans = [];
+  for (const reg of DEF_REGISTRIES) {
+    for (const run of reg.runs(code)) {
+      if (!atTopLevel(code, isCode, run[0].start)) continue;
+      spans.push([code.lastIndexOf('\n', run[0].start - 1) + 1, run[run.length - 1].close + 1]);
+    }
+  }
+  if (!spans.length) return null;
+  spans.sort((a, b) => a[0] - b[0]);
+  let end = spans[0][0];
+  for (const [from, to] of spans) {
+    if (code.slice(end, from).trim()) return null; // ordinary code in among the runs
+    end = Math.max(end, to);
+  }
+  return code.slice(end).trim() ? null : spans[0][0];
 }
 
 // Where the last definition in the buffer ends, whatever kind it is - the offset a brand-new kind
@@ -4337,7 +4390,8 @@ function syncPianorollFromCode() {
   const text = cm.getRange(range.from, range.to);
   // The call must still be the KIND the panel opened: a definition edited back into a plain
   // pianoroll() (or the other way round) is no longer the thing on screen.
-  if (!(prState.idLiteral ? /^\s*roll\s*\(/ : /^\s*pianoroll\s*\(/).test(text)) { closePianorollEditor(); return; }
+  const stillTheCall = new RegExp(`^\\s*${prState.idLiteral ? rollDefs.defCall : 'pianoroll'}\\s*\\(`);
+  if (!stillTheCall.test(text)) { closePianorollEditor(); return; }
   const open = text.indexOf('(');
   // Hand-edited into the id form while open: the roll on screen no longer describes this call, and
   // the next edit would write its notes over the ids. Let it go, the same as any other call the
@@ -5545,32 +5599,83 @@ function initPianorollEditor() {
     prRefocus();
   });
 
+  // →♪ - the drawn roll leaves, and the mini-notation that plays the same thing takes its place.
+  //
+  // WHERE it takes its place depends on which form the roll is. An inline pianoroll(...) IS its own
+  // pattern, so the call is simply replaced. A NAMED roll is data behind a name: its definition
+  // holds no position in any pattern, so what gets rewritten is every pianoroll("name") that plays
+  // it - and the definition then goes, because a name nothing says any more is a name the next
+  // evaluation would otherwise hand back as an empty roll (see materialize).
   prToMiniBtn.addEventListener('click', () => {
     if (!prState) return;
     const range = prState.marker.find();
     if (!range) return;
-    const indent = (cm.getLine(range.from.line).match(/^\s*/)?.[0]) ?? ''; // align continuation lines
+    const code = cm.getValue();
+    const notes = prLiveNotes(prState.notes);
     // Folded to the key, the roll is being drawn IN that key, so it's written out in it: scale
     // degrees plus a `.sc(octave)`, which re-keys with the setscale line instead of freezing the
     // pitches that happened to be under the pencil. Unfolded, the roll is chromatic and so is what
     // it converts to.
     const scale = prState.fold && prScaleInfo() ? patchScale : null;
-    const expr = pianorollMod.pianoRollToMini(prLiveNotes(prState.notes), { grid: prState.grid, len: prState.len, start: prState.start, indent, scale });
+    // Each destination gets the expression indented to ITS own line: one roll can be written into
+    // several patterns, at whatever depth each of them sits.
+    const exprAt = (at) => pianorollMod.pianoRollToMini(notes, {
+      grid: prState.grid,
+      len: prState.len,
+      start: prState.start,
+      indent: /^[ \t]*/.exec(code.slice(code.lastIndexOf('\n', at - 1) + 1))[0],
+      scale,
+    });
     // Degrees can only name notes that are IN the key, so anything out of it lands on its nearest
     // neighbour - a real pitch change, and the one thing about this rewrite that isn't lossless.
     // Counted before the close, which drops the notes.
     // Muted notes aren't written out at all, so they can't be moved by the rounding either.
     const off = scale
-      ? prLiveNotes(prState.notes).filter((nt) => !nt.mute && prInLoop(nt.start) && notesMod.quantizeToScale(nt.midi, scale) !== nt.midi).length
+      ? notes.filter((nt) => !nt.mute && prInLoop(nt.start) && notesMod.quantizeToScale(nt.midi, scale) !== nt.midi).length
       : 0;
+
+    const id = prState.rollId;
+    const edits = [];
+    let played = 0;
+    if (id) {
+      const refuse = (why) => logLine(`can't convert roll "${id}" to mini-notation: ${why}`, true);
+      const refs = rollDefs.refCalls(code, id);
+      // A definition is not a place in a pattern, so with nothing naming it there is nowhere for
+      // the notes to be written to.
+      if (!refs.length) {
+        return refuse(`no pattern in this buffer plays it - put pianoroll("${id}") in one first`);
+      }
+      // The name has to be the WHOLE of what the call says. Written among others - pianoroll("<lead
+      // pad>") - the call is a pattern of names, and drawn notes can't take one name's turn inside
+      // it; a modifier (`"lead*2"`) belongs to the call this would replace outright.
+      const bare = refs.find((call) => call.str.trim().replace(/^<\s*|\s*>$/g, '') !== id);
+      if (bare) {
+        return refuse(`the pattern that plays it says "${bare.str.trim()}", and drawn notes can't take one name's `
+          + 'turn inside that - take the roll out of it first');
+      }
+      for (const call of refs) edits.push([call.start, call.close + 1, exprAt(call.start)]);
+      // Its definition goes with it: nothing names it now, and an unnamed definition is dead code
+      // the picker would still offer.
+      const def = rollDefs.defsInBuffer(code).find((d) => d.id === id);
+      if (def) edits.push([...rollDefs.removalRange(code, def), '']);
+      played = refs.length;
+    } else {
+      const from = cm.indexFromPos(range.from);
+      edits.push([from, cm.indexFromPos(range.to), exprAt(from)]);
+    }
+
     prSuppressCursor = true;
-    cm.replaceRange(expr, range.from, range.to);
-    closePianorollEditor(); // the pianoroll() call is gone now
+    applyEdits(edits);
+    closePianorollEditor(); // the call the panel was anchored to is gone now
     prSuppressCursor = false;
+    if (id) refoldAll(); // the definitions block lost a line - its chip has to be redrawn
     prScheduleEval(); // the rewrite plays the same notes - keep the running track in step with it
-    if (!scale) logLine('piano roll → mini-notation');
-    else if (!off) logLine(`piano roll → mini-notation (degrees in ${scale})`);
-    else logLine(`piano roll → mini-notation (degrees in ${scale}) - ${off} out-of-key note${off === 1 ? '' : 's'} moved to the nearest degree`, true);
+    const what = id
+      ? `roll "${id}" → mini-notation in ${played} pattern${played === 1 ? '' : 's'}, and its definition is gone`
+      : 'piano roll → mini-notation';
+    if (!scale) logLine(what);
+    else if (!off) logLine(`${what} (degrees in ${scale})`);
+    else logLine(`${what} (degrees in ${scale}) - ${off} out-of-key note${off === 1 ? '' : 's'} moved to the nearest degree`, true);
   });
 
   prCloseBtn.addEventListener('click', () => closePianorollEditor());
@@ -8221,11 +8326,7 @@ function suggestedPatternName() {
 // buffer it wrote: between them, one of the two is on screen whatever the sidebar is doing.
 function flashSaved() {
   for (const el of [document.getElementById('saveFlash'), document.querySelector('.file-row.current')]) {
-    if (!el) continue;
-    el.classList.remove('saved-flash');
-    void el.offsetWidth; // restart the animation rather than ignore a second save mid-pulse
-    el.classList.add('saved-flash');
-    el.addEventListener('animationend', () => el.classList.remove('saved-flash'), { once: true });
+    pulse(el, 'saved-flash');
   }
 }
 
@@ -8398,15 +8499,20 @@ fileNewBtn.addEventListener('click', newPatternFile);
 // ---------------------------------------------------------------------------------------------
 // MIDI file import - drop a .mid anywhere on the window and it becomes lanes in the buffer.
 //
-// The file is read in the browser and written out as DRAWN ROLLS, one per lane:
+// The file is read in the browser and written out as DRAWN ROLLS, one per lane - each filed under
+// the lane's own name, so the buffer reads as the parts and not as the data:
 //
-//   bass: pianoroll("36,0,4 47,9,3,0.5", { grid: 8, len: 16 })
+//   bass: pianoroll("bass")
+//
+//   _roll("bass", "36,0,4 47,9,3,0.5", { grid: 8, len: 16 })   <- folded into the block at the bottom
 //
 // A roll rather than mini-notation because it's the form that stays editable - double-click the
 // `pianoroll` name and the notes are there on a grid to drag, retime and audition - and because
 // nothing is given up by landing here: the roll's own →♪ writes the mini-notation whenever it's
 // wanted, in scale degrees if the roll is folded to the key, which is the same rewrite an import
-// straight to text used to do in one shot.
+// straight to text used to do in one shot. NAMED rather than inline because a whole file's worth of
+// note strings sitting in the middle of the code is unreadable - and because a named roll can be
+// swapped, picked from the roll list and played by more than one lane.
 //
 // One lane per (track, channel) the file plays, named after the file's own track names where it
 // has them. The dialog settles the two things the file can't say: which grid to snap the rhythm to
@@ -8660,6 +8766,20 @@ function midiLaneLabel(name, taken) {
   return label;
 }
 
+/**
+ * The name a lane's roll is filed under: the lane's own label, so the picker lists the parts of the
+ * file by name. `$` (an anonymous lane) can't be a roll name - it has to survive being written
+ * inside a mini pattern - so those fall back to the kind's own word. A name already taken by a roll
+ * in the buffer (or in prebake) is bumped with an `_2` suffix rather than quietly overwritten.
+ */
+function midiRollId(label, taken) {
+  const base = /^[A-Za-z_][\w]*$/.test(label) ? label : 'roll';
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
+  taken.add(id);
+  return id;
+}
+
 function runMidiImport() {
   const st = midiImportState;
   if (!st) return;
@@ -8672,8 +8792,10 @@ function runMidiImport() {
 
   const chosen = midiImportGridSel.value;
   const taken = new Set(labelsMod ? labelsMod.splitLabeledBlocks(cm.getValue()).map((b) => b.label) : []);
+  const takenRolls = new Set(rollDefs.allIds().map((r) => r.id));
   const lines = [];
   const names = [];
+  const drawn = new Map(); // roll id -> the notes and grid it is defined with
   let unquantized = 0;
   try {
     const { entries } = st.midifile.midiLanesToPianoroll(st.parsed, {
@@ -8681,8 +8803,10 @@ function runMidiImport() {
     });
     for (const entry of entries) {
       const label = midiLaneLabel(entry.name, taken);
+      const rollId = midiRollId(label, takenRolls);
       names.push(label);
-      lines.push(`${label}: ${entry.code}`);
+      lines.push(`${label}: pianoroll(${JSON.stringify(rollId)})`);
+      drawn.set(rollId, entry.body);
       // Only worth saying when the grid was left to the detector - asking for "off" is asking for
       // exactly this.
       if (!entry.quantized && chosen === 'auto') unquantized++;
@@ -8705,25 +8829,40 @@ function runMidiImport() {
   }
 
   const code = cm.getValue();
-  const at = cm.posFromIndex(code.length);
-  // Exactly one blank line between the buffer and the import, counting whatever newlines the
-  // buffer already ends with.
-  const trailing = /\n*$/.exec(code)[0].length;
-  const gap = code.trim() ? '\n'.repeat(Math.max(0, 2 - trailing)) : '';
-  const text = gap + lines.join('\n\n') + '\n';
-  cm.replaceRange(text, at, at);
+  // Below the player's code, but ABOVE any definitions block already down there - that block is the
+  // bottom of the buffer by construction, and the rolls this import is about to write join it.
+  const at = firstDefRunStart(code) ?? code.length;
+  const before = code.slice(0, at);
+  // Exactly one blank line between the code and the import, counting whatever newlines are already
+  // there - and one under it too when something (the definitions block) follows.
+  const trailing = /\n*$/.exec(before)[0].length;
+  const gap = before.trim() ? '\n'.repeat(Math.max(0, 2 - trailing)) : '';
+  const text = `${gap}${lines.join('\n\n')}\n${at < code.length ? '\n' : ''}`;
+  cm.replaceRange(text, cm.posFromIndex(at), cm.posFromIndex(at));
   // Park the cursor on the end of the last lane rather than the blank line under it - that's
-  // where the `.synth("…")` it still needs goes.
-  const caret = cm.posFromIndex(code.length + text.replace(/\n+$/, '').length);
-  cm.setCursor(caret);
-  cm.scrollIntoView(caret, 80);
+  // where the `.synth("…")` it still needs goes. Held as a bookmark across the definitions write
+  // below, which may go in above it.
+  const caret = cm.setBookmark(cm.posFromIndex(at + text.replace(/\n+$/, '').length));
+  // The notes themselves join the definitions block at the bottom - the same place every named
+  // roll lives, folded to one chip - so the lanes above read as the parts they play.
+  if (drawn.size) {
+    const [defFrom, defTo, defText] = rollDefs.defsEdit(cm.getValue(), [...drawn.keys()], (id) => drawn.get(id));
+    cm.replaceRange(defText, cm.posFromIndex(defFrom), cm.posFromIndex(defTo));
+  }
+  refoldAll(); // the block starts life hidden, like every other one
+  const caretAt = caret.find();
+  caret.clear();
+  if (caretAt) {
+    cm.setCursor(caretAt);
+    cm.scrollIntoView(caretAt, 80);
+  }
   cm.focus();
 
   closeMidiImport();
   logLine(
     `midi import: ${st.file.name} → ${names.length} piano roll${names.length === 1 ? '' : 's'} (${names.join(', ')})` +
-      `${takeKey ? ` in ${key}` : ''} - double-click a pianoroll name to edit or convert it, and add a` +
-      ' .synth() then Cmd/Ctrl+Enter to play',
+      `${takeKey ? ` in ${key}` : ''} - the notes are in the pianorolls block at the bottom; double-click a` +
+      ' pianoroll name to edit or convert one, and add a .synth() then Cmd/Ctrl+Enter to play',
   );
   if (unquantized) {
     logLine(

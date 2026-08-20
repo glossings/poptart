@@ -267,16 +267,16 @@ test('pickGrid: small timing errors are absorbed rather than forced onto a finer
 
 // --- lanes -> code -----------------------------------------------------------------------------
 
-/** The pieces of an emitted `pianoroll("…", { grid: G, len: L })` call. */
-function rollCall(code) {
-  const m = /^pianoroll\("([^"]*)", \{ grid: (\d+), len: (\d+) \}\)$/.exec(code);
-  assert.ok(m, `not a pianoroll call: ${code}`);
+/** The pieces of an emitted `"…", { grid: G, len: L }` argument list. */
+function rollCall(body) {
+  const m = /^"([^"]*)", \{ grid: (\d+), len: (\d+) \}$/.exec(body);
+  assert.ok(m, `not a roll argument list: ${body}`);
   return { notes: m[1], grid: Number(m[2]), len: Number(m[3]) };
 }
 
-/** What an emitted call plays on `cycle` - the roll built from the text, exactly as the buffer would. */
-function playedSteps(code, cycle = 0) {
-  const { notes, grid, len } = rollCall(code);
+/** What an emitted lane plays on `cycle` - the roll built from the text, exactly as the buffer would. */
+function playedSteps(body, cycle = 0) {
+  const { notes, grid, len } = rollCall(body);
   return pianoroll(notes, { grid, len })
     .stepsForCycle(cycle)
     .sort((a, b) => a.start - b.start || a.value - b.value);
@@ -291,9 +291,9 @@ test('midiLanesToPianoroll: a lane becomes a drawn roll on the grid its rhythm s
     { name: 'bass', drums: false, grid: 4, len: 4 }, // four quarter notes, one cycle of them
   );
   // The string in the call is the note list, so the editor reopens exactly what was written.
-  assert.deepEqual(parsePianoRoll(rollCall(entries[0].code).notes), entries[0].notes);
+  assert.deepEqual(parsePianoRoll(rollCall(entries[0].body).notes), entries[0].notes);
   assert.deepEqual(
-    playedSteps(entries[0].code).map((st) => [st.value, st.start]),
+    playedSteps(entries[0].body).map((st) => [st.value, st.start]),
     [[36, 0], [37, 0.25], [38, 0.5], [39, 0.75]],
   );
 });
@@ -308,8 +308,8 @@ test('midiLanesToPianoroll: what it writes plays back the notes, velocities and 
     ]),
   );
   const [entry] = midiLanesToPianoroll(parsed).entries;
-  assert.equal(rollCall(entry.code).notes, '60,0,1 67,2,2,0.5'); // full velocity is left implicit
-  const steps = playedSteps(entry.code);
+  assert.equal(rollCall(entry.body).notes, '60,0,1 67,2,2,0.5'); // full velocity is left implicit
+  const steps = playedSteps(entry.body);
   assert.deepEqual(steps.map((st) => [st.value, st.start, st.end]), [[60, 0, 0.25], [67, 0.5, 1]]);
   assert.deepEqual(steps.map((st) => st.vel), [1, 0.5]);
 });
@@ -321,7 +321,7 @@ test('midiLanesToPianoroll: percussion is a lane like any other, on its GM slot 
   ]);
   const { entries } = midiLanesToPianoroll(midiFileToLanes(file));
   assert.deepEqual(entries.map((e) => e.drums), [false, true]);
-  assert.equal(playedSteps(entries[1].code)[0].value, 36); // the kick's slot, drawn as a note
+  assert.equal(playedSteps(entries[1].body)[0].value, 36); // the kick's slot, drawn as a note
 });
 
 test('midiLanesToPianoroll: a file longer than a cycle is one roll that loops with the file', () => {
@@ -333,9 +333,9 @@ test('midiLanesToPianoroll: a file longer than a cycle is one roll that loops wi
   ]);
   const [entry] = midiLanesToPianoroll(midiFileToLanes(file)).entries;
   assert.deepEqual([entry.grid, entry.len], [4, 8]); // two cycles of quarter-note cells
-  assert.deepEqual(playedSteps(entry.code, 0).map((st) => [st.value, st.start]), [[60, 0]]);
-  assert.deepEqual(playedSteps(entry.code, 1).map((st) => [st.value, st.start]), [[67, 0]]);
-  assert.deepEqual(playedSteps(entry.code, 2).map((st) => [st.value, st.start]), [[60, 0]]); // and round again
+  assert.deepEqual(playedSteps(entry.body, 0).map((st) => [st.value, st.start]), [[60, 0]]);
+  assert.deepEqual(playedSteps(entry.body, 1).map((st) => [st.value, st.start]), [[67, 0]]);
+  assert.deepEqual(playedSteps(entry.body, 2).map((st) => [st.value, st.start]), [[60, 0]]); // and round again
 });
 
 test('midiLanesToPianoroll: a hand-played lane keeps its feel on the fine grid rather than a coarse one', () => {
@@ -353,7 +353,7 @@ test('midiLanesToPianoroll: a fixed grid overrides the per-lane detection', () =
   assert.equal(midiLanesToPianoroll(parsed).entries[0].grid, 4);
   const forced = midiLanesToPianoroll(parsed, { grid: 16 }).entries[0];
   assert.deepEqual([forced.grid, forced.len], [16, 16]);
-  assert.deepEqual(playedSteps(forced.code).map((st) => st.start), [0, 0.25, 0.5, 0.75]);
+  assert.deepEqual(playedSteps(forced.body).map((st) => st.start), [0, 0.25, 0.5, 0.75]);
   // "off" is the fine grid, not no grid at all - a roll's cells are whole numbers.
   assert.equal(midiLanesToPianoroll(parsed, { grid: 0 }).entries[0].grid, UNQUANTIZED_GRID);
 });
@@ -367,7 +367,7 @@ test('midiLanesToPianoroll: one pitch retriggered inside a cell merges instead o
   ]);
   const [entry] = midiLanesToPianoroll(midiFileToLanes(file), { grid: 4 }).entries;
   assert.deepEqual(entry.notes, [{ midi: 60, start: 0, len: 2, vel: 0.79, prob: 1, mute: false }]);
-  assert.equal(playedSteps(entry.code).length, 1); // one onset, not two of the same note at once
+  assert.equal(playedSteps(entry.body).length, 1); // one onset, not two of the same note at once
 });
 
 // --- key ---------------------------------------------------------------------------------------

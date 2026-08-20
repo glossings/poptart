@@ -32,9 +32,22 @@ function makeStore(what) {
     setLayer(layer) {
       current = layer === 'prebake' ? 'prebake' : 'buffer';
     },
-    /** Drops every name in one layer. The host calls this for 'buffer' at the top of each eval. */
+    /**
+     * Drops every name in one layer and hands back what was in it, so a host that clears the
+     * buffer to rebuild it can put the old definitions back if the rebuild never finishes (see
+     * restoreRolls).
+     */
     clear(layer = 'buffer') {
-      pick(layer).clear();
+      const store = pick(layer);
+      const had = new Map(store);
+      store.clear();
+      return had;
+    },
+    /** Puts a layer back exactly as `had` (from clear) left it. */
+    restore(had, layer = 'buffer') {
+      const store = pick(layer);
+      store.clear();
+      for (const [id, value] of had ?? []) store.set(id, value);
     },
     /**
      * Files `sig` under `id` in the current layer. Returns a warning string when the id was
@@ -74,8 +87,28 @@ export function setRollLayer(layer) {
   for (const store of Object.values(stores)) store.setLayer(layer);
 }
 
+/**
+ * Empties one layer of every store, and returns what was in them - hand that back to restoreRolls
+ * to undo the clear.
+ *
+ * The host clears 'buffer' at the top of each evaluation and fills it from the buffer again, which
+ * is what makes a definition you just deleted stop playing. But an evaluation that THROWS applies
+ * nothing else - the tracks that were playing go on playing, out of the Sigs they were built with -
+ * and those Sigs resolve their definitions BY NAME, lazily, every cycle (see rollPattern). So a
+ * cleared registry the evaluation never got round to refilling is silence on every track that names
+ * a roll: one typo below the last definition and the whole part drops out. Clearing is therefore a
+ * transaction - the host restores what it took out when the evaluation building the replacement
+ * doesn't reach the end.
+ */
 export function clearRolls(layer = 'buffer') {
-  for (const store of Object.values(stores)) store.clear(layer);
+  const had = {};
+  for (const [kind, store] of Object.entries(stores)) had[kind] = store.clear(layer);
+  return had;
+}
+
+/** Puts back what a clearRolls(layer) took out, definition for definition. */
+export function restoreRolls(had, layer = 'buffer') {
+  for (const [kind, store] of Object.entries(stores)) store.restore(had?.[kind], layer);
 }
 
 export const registerRoll = (id, sig) => stores.roll.register(id, sig);

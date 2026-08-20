@@ -683,20 +683,28 @@ aside h2 {
 }
 
 /* The same confirmation for the buffer itself - the one that's on screen whether the sidebar is
-   showing the files tab, showing something else, or collapsed altogether. Mostly a green frame:
-   this fires on every Cmd+S, so it has to register without washing out the code. */
+   showing the files tab, showing something else, or collapsed altogether. Mostly a coloured frame:
+   this fires on every Cmd+S, so it has to register without washing out the code. The colour is a
+   variable because the same overlay says two things: green for a save, red for an error logged
+   while the console is collapsed (see logLine) - one pulse, two meanings, told apart by colour. */
 .save-flash {
+  --flash: var(--ok);
   position: absolute;
   inset: 0;
   z-index: 5;
   opacity: 0;
   pointer-events: none;
-  outline: 2px solid var(--ok);
+  outline: 2px solid var(--flash);
   outline-offset: -2px;
-  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  background: color-mix(in srgb, var(--flash) 8%, transparent);
 }
 
 .save-flash.saved-flash {
+  animation: saved-flash-fade 600ms ease-out;
+}
+
+.save-flash.error-flash {
+  --flash: var(--err);
   animation: saved-flash-fade 600ms ease-out;
 }
 

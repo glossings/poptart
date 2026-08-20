@@ -154,6 +154,14 @@ export function clipOverlaps(notes) {
  * form - because note() would eagerly parse a `60:0.5:2` token as a pitch and choke; .as() is what
  * splits the fields apart. A template literal keeps it readable across lines.
  *
+ * A field every note in the window AGREES on is not written per cell: repeating `:0.5` down a
+ * column says nothing, so a constant field is lifted out of the tokens onto its own control call -
+ * `\`<…>\`.as("vel:clip").n(4)`, `note(\`<…>\`).vel(0.5)`. That is the same music either way (a
+ * control is one key on the pattern's bundle, and vel/clip survive a later pitch call as note
+ * channels), and it puts the number that never changes where it can be edited once. The pattern
+ * always keeps at least one field, since the cells are what carry the RHYTHM: when every field is
+ * constant the pitch stays in the tokens and the rest ride on calls.
+ *
  * Given a `scale` (a name like "F minor" - the roll passes the buffer's key when it's folded to
  * it), the pitches come out as SCALE DEGREES instead: the `n` field, with a `.sc(octave)` tacked on
  * the end. Same notes, but re-keying the patch by editing its `setscale(...)` line moves them,
@@ -180,10 +188,22 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   // Degrees are read against the scale AS .sc(octave) will build it, so the two agree exactly.
   const keyed = scale ? scaleAtOctave(scale, octave) : null;
   const pitchField = scale ? 'n' : 'note';
-  const fields = [pitchField, ...(anyVel ? ['vel'] : []), ...(anyClip ? ['clip'] : [])];
+  const present = [pitchField, ...(anyVel ? ['vel'] : []), ...(anyClip ? ['clip'] : [])];
 
   const pitchStr = (nt) => String(keyed ? midiToDegree(nt.midi, keyed) : Math.round(nt.midi));
   const fieldStr = (nt, f) => (f === pitchField ? pitchStr(nt) : f === 'vel' ? fmt(nt.vel) : String(Math.round(nt.len)));
+  // The fields that vary stay in the cells; the ones that don't are lifted onto control calls. An
+  // empty roll agrees on nothing (there is nothing to agree), so it keeps writing its pitch field.
+  const constant = (f) => notes.length > 0 && notes.every((nt) => fieldStr(nt, f) === fieldStr(notes[0], f));
+  let pulled = present.filter(constant);
+  let fields = present.filter((f) => !pulled.includes(f));
+  // The cells are the rhythm, so something has to stay in them: with every field constant the
+  // pitch goes back into the tokens (`note(\`<60 ~ 60>*4\`).vel(0.5)`) rather than the whole
+  // pattern collapsing to a bare `<x ~ x>` with no field to read it as.
+  if (!fields.length) {
+    fields = [pitchField];
+    pulled = pulled.filter((f) => f !== pitchField);
+  }
   const isDefault = (nt, f) => (f === 'vel' && nt.vel === 1) || (f === 'clip' && nt.len === 1);
   const tok = (nt) => {
     const parts = fields.map((f) => fieldStr(nt, f));
@@ -207,8 +227,12 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   for (let i = 0; i < total; i += perLine) lines.push(cells.slice(i, i + perLine).join(' '));
   const body = lines.map((l) => `${indent}  ${l}`).join('\n');
   const seq = `\`<\n${body}\n${indent}>*${g}\``;
-  const tail = scale ? `.sc(${octave})` : '';
-  return `${fields.length > 1 ? `${seq}.as("${fields.join(':')}")` : `${pitchField}(${seq})`}${tail}`;
+  // The lifted fields in the order they would have had in the token, then the key: `.n(4).sc(3)`.
+  const tail = `${pulled.map((f) => `.${f}(${fieldStr(notes[0], f)})`).join('')}${scale ? `.sc(${octave})` : ''}`;
+  // note(`…`) only reads a column of bare pitches - anything else (several fields, or one field
+  // that isn't the pitch) needs .as() to say which is which.
+  const head = fields.length === 1 && fields[0] === pitchField ? `${pitchField}(${seq})` : `${seq}.as("${fields.join(':')}")`;
+  return `${head}${tail}`;
 }
 
 /**

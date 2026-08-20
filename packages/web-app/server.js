@@ -1699,8 +1699,10 @@ const routes = {
 
     // Roll definitions are rebuilt from the buffer every time, for the reason the track teardown
     // below exists: a roll(...) call you just deleted has to stop being playable. Prebake's layer
-    // is untouched - it is a library, not part of this buffer.
-    patternCore.clearRolls();
+    // is untouched - it is a library, not part of this buffer. What was there is kept until the
+    // build below gets to the end (see the catch): an evaluation that throws applies nothing, so
+    // the tracks still playing must still find the definitions they resolve by name each cycle.
+    const definitionsBefore = patternCore.clearRolls();
 
     // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
     // and a redeclared name in the buffer overrides the copy without clobbering the original.
@@ -1712,34 +1714,45 @@ const routes = {
     // that can't run out of order (its argument comes from a `const` declared further up) is left
     // alone and simply runs in its own position, where it always did.
     const hoisted = new Map(); // block -> its value, so the in-order pass below doesn't run it twice
-    for (const b of blocks) {
-      if (!patternCore.isBareCallBlock(b.code, 'setscale')) continue;
-      try {
-        evalBlock(b.code, b.start);
-        hoisted.set(b, SCALE_BLOCK);
-      } catch {
-        // not evaluable up here - it keeps its place in the pass below (and reports errors there)
-      }
-    }
-
-    const evaluated = blocks.map((b) => {
-      try {
-        const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
-        if (value instanceof patternCore.Sig) {
-          dryRunPattern(value);
-        } else if (value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !b.label.startsWith('$')) {
-          // Only an explicitly *named* block promises sound. Anything anonymous (bare code
-          // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
-          // style: declarations shared with the blocks below (const kb = midikeys("...")),
-          // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
-          // it evaluated to is simply not played.
-          throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
+    let evaluated;
+    try {
+      for (const b of blocks) {
+        if (!patternCore.isBareCallBlock(b.code, 'setscale')) continue;
+        try {
+          evalBlock(b.code, b.start);
+          hoisted.set(b, SCALE_BLOCK);
+        } catch {
+          // not evaluable up here - it keeps its place in the pass below (and reports errors there)
         }
-        return { ...b, sig: value };
-      } catch (err) {
-        throw new Error(`${b.label}: ${err.message ?? err}`);
       }
-    });
+
+      evaluated = blocks.map((b) => {
+        try {
+          const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
+          if (value instanceof patternCore.Sig) {
+            dryRunPattern(value);
+          } else if (value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !b.label.startsWith('$')) {
+            // Only an explicitly *named* block promises sound. Anything anonymous (bare code
+            // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
+            // style: declarations shared with the blocks below (const kb = midikeys("...")),
+            // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
+            // it evaluated to is simply not played.
+            throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
+          }
+          return { ...b, sig: value };
+        } catch (err) {
+          throw new Error(`${b.label}: ${err.message ?? err}`);
+        }
+      });
+    } catch (err) {
+      // Nothing has been applied yet - no track was stopped, no pattern was set - so the buffer's
+      // definitions go back exactly as they were. Without this a block that doesn't parse takes
+      // every roll/shape/preset defined BELOW it out of the registry, and the tracks that are
+      // still playing (which resolve them by name, lazily) fall silent on a buffer nobody meant
+      // to change.
+      patternCore.restoreRolls(definitionsBefore);
+      throw err;
+    }
     // Tempo-only and definitions-only blocks act at eval time and don't become tracks.
     // A block of roll(...) definitions evaluates to its last definition, which is a real Sig but
     // not a track - playing it would turn the definitions block into an extra voice (see
