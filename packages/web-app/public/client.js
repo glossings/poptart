@@ -3083,10 +3083,14 @@ const PR_LANE_PAD = 5; // lane inset above 1.0 / below 0.0, so end-stop markers 
 const PR_LANE_CARET_W = 7; // solid caret after the lane's vel/prob label, marking it clickable
 const PR_ROWS = 24; // visible semitone rows (2 octaves)
 const PR_GUTTER = 54; // left piano-keyboard gutter, px
-// Top row when a fresh/empty roll opens - a MIDI note, framed 24 rows down to 54, which puts 66 in
-// the middle of the window: Live's F#3, the register it splits the difference at. (This package
-// names middle C c5, so that centre reads f#5 on the keyboard down the side.)
-const PR_DEFAULT_TOP = 78;
+// Top row when a fresh/empty roll opens - a MIDI note, framed 24 rows down to 24, so the window is
+// exactly the two octaves c2..b3 (this package names middle C c5 - see notes.mjs). The bottom row
+// is the sampler's native pitch: MIDI 24 is where a sample plays as recorded (DEFAULT_SYNTH_NOTE,
+// and the engine's repitch anchor), so on a sampler roll the "as recorded" row is the floor of the
+// window rather than somewhere off the bottom of it. It is also the register poptart's own idiom
+// writes in - the note() examples through the docs are c2/c3/f3. A roll that already HAS notes
+// ignores this and frames its own (prFramePitch), so this is only what an empty one opens at.
+const PR_DEFAULT_TOP = 47;
 // Top row an INDEX roll opens at: index 0 sits on the bottom row, because a pack is counted up
 // from its first file and nothing lives below it. (prMetrics clamps pitchTop to at least this, so
 // the axis can never be scrolled past 0 into negative indices.)

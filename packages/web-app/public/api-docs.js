@@ -254,6 +254,24 @@ const API_DOCS = {
     desc: 'Multiplies each note\'s ringing duration - .clip(2) holds every note for twice its step. Setting it replaces whatever clip was in force; as an operand it composes, so "0:2".as("n:clip").mul(clip(2)) rings for four steps.',
     eg: '.clip("<1 4 1>*4")',
   },
+  nudge: {
+    kind: 'both',
+    sig: 'nudge(value)',
+    desc: 'Plays each event off its grid position, as a fraction of its own step width - positive is late, negative early, clamped at half a step. The note keeps its written place in the pattern; only the timestamp moves. Also a field in .as("note:nudge"), where "38::0.04" pushes one hit and leaves the rest alone.',
+    eg: '.nudge("0 0.04")',
+  },
+  swing: {
+    kind: 'both',
+    sig: 'swing(amount, grid)',
+    desc: 'Delays the offbeats of a grid of `grid` slots per cycle (8 by default) and leaves the onbeats alone. `amount` is how far, as a fraction of one slot: 1/3 is the classic triplet shuffle, 0.5 the most there is. A drum machine\'s percentage is (pct - 50) / 50, so 66% is 1/3. Adds to whatever .nudge() is in force rather than replacing it. Write fractions as JS - inside a mini string "1/3" is the slow operator.',
+    eg: 's("hh*8").swing(1/3)',
+  },
+  swinggrid: {
+    kind: 'both',
+    sig: 'swinggrid(value)',
+    desc: 'How many slots swing divides the cycle into - 8 (eighths) by default, 16 for a sixteenth-note shuffle. Usually passed as swing\'s second argument; its own channel so it can be patterned.',
+    eg: '.swing(0.2, 16)',
+  },
 
   // ----------------------------------------------------------------- shaping
   range: { kind: 'method', sig: 'range(min, max)', desc: 'Rescales a 0..1 signal into [min, max]. Bounds may themselves be patterns or signals.', eg: '.range(200, 5000)' },
@@ -290,7 +308,7 @@ const API_DOCS = {
   as: {
     kind: 'method',
     sig: 'as(spec)',
-    desc: 'Reads "a:b:c" tokens as named fields - note, n, i, vel, clip - so one string carries pitch, sample choice and dynamics together.',
+    desc: 'Reads "a:b:c" tokens as named fields - note, n, i, vel, clip, nudge - so one string carries pitch, sample choice, dynamics and feel together. Empty fields keep their defaults, so "38::0.04" sets only the last one.',
     eg: '"<36:1:4 ~>*8".as("note:vel:clip")',
   },
   degrade: { kind: 'method', sig: 'degrade(prob, seed)', desc: 'Randomly drops events (default 50%), deterministic per cycle. The mini-notation "?" postfix is the same operation.', eg: '.degrade(0.3)' },

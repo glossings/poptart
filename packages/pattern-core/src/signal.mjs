@@ -68,6 +68,43 @@ function warnAndKeep(sig, message) {
   return sig;
 }
 
+// The constant a control was handed, if it lands outside the range that control has - else null.
+// Only constants are worth a line: a number past the stops is a typo, where a patterned or swept
+// value passing them is just a sweep reaching its limit, which clamps silently (see timeShift).
+function constOutOfRange(sig, max) {
+  return typeof sig.constVal === 'number' && Math.abs(sig.constVal) > max ? sig.constVal : null;
+}
+
+// Whether anything in this pattern lands where swing would move it, and if not, the grid that would
+// have. Swing acts on a GRID rather than on events (see timeShift), which is what keeps a stacked
+// kit honest - the kick of `s("hh*8, bd*4")` sits on onbeats of the eighth grid and rightly stays
+// put while the hats shuffle - but it also means a pattern written entirely in quarters is silently
+// unaffected, and a control that appears to do nothing is the one way .swing() can look broken.
+// Several cycles, because `<bd*4 hh*8>` only has offbeats in half of them; anything that throws is
+// answered "it moves", since a pattern this can't walk is not one to make claims about.
+function swingGridReport(stepsForCycle, n, cycles = 4) {
+  let finest = Infinity; // narrowest step seen - the resolution the pattern is written at
+  for (let c = 0; c < cycles; c++) {
+    let steps;
+    try {
+      steps = stepsForCycle(c);
+    } catch {
+      return { moves: true, suggest: null };
+    }
+    for (const st of steps) {
+      if (st.value == null || st.cont) continue;
+      const slot = Math.floor(st.start * n + SLOT_EPS);
+      if (((slot % 2) + 2) % 2 === 1) return { moves: true, suggest: null };
+      const width = st.end - st.start;
+      if (width > 0 && width < finest) finest = width;
+    }
+  }
+  // Nothing moved, so offer the grid the pattern is actually written on - its finest step. A pattern
+  // of one event a cycle has no offbeat at any grid, and gets no suggestion.
+  const suggest = Number.isFinite(finest) ? Math.round(1 / finest) : 0;
+  return { moves: false, suggest: suggest >= 2 ? suggest : null };
+}
+
 // Said by .sc() when no setscale() has run. Falling back to C major keeps the pattern audible (a
 // silent track mid-set is the worse failure) while naming the one line that's missing.
 const NO_GLOBAL_SCALE = `[signal] .sc() has no scale yet - put setscale("F minor") anywhere in the buffer. Playing in ${DEFAULT_SCALE} until then.`;
@@ -140,14 +177,15 @@ export class Sig {
     // how much still reaches the track's own output pair.
     this.busSends = opts.busSends ?? [];
     this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan'/'out'/'dry' -> Sig
-    // Persistent per-onset note channels (the "bundle" of the all-signals model): 'vel' and 'clip',
-    // each a Sig. Unlike a track channel these are sampled at each note ONSET, not streamed. Held
-    // separately from the step grid so they survive a later pitch swap - "<0 1>".as("vel").note("f3")
-    // re-merges the velocity onto note("f3")'s fresh trigger (see _noteLike / applyNoteChannels).
+    // Persistent per-onset note channels (the "bundle" of the all-signals model): 'vel', 'clip' and
+    // the time controls 'nudge'/'swing'/'swinggrid' (see timeShift), each a Sig. Unlike a track channel
+    // these are sampled at each note ONSET, not streamed. Held separately from the step grid so they
+    // survive a later pitch swap - "<0 1>".as("vel").note("f3") re-merges the velocity onto
+    // note("f3")'s fresh trigger (see _noteLike / applyNoteChannels).
     // A discrete (step) channel also cross-merges into the grid, subdividing + retriggering the
     // events it overlaps and carrying its value as step.vel; a continuous one (vel(sine)/vel(0.6))
     // has no grid, so it's sampled at each onset by the scheduler instead.
-    this.noteChannels = opts.noteChannels ?? {}; // 'vel'|'clip' -> Sig
+    this.noteChannels = opts.noteChannels ?? {}; // NOTE_CONTROLS name -> Sig
     // Captured plugin state per chain slot (0 = instrument, 1.. = fx), from synth/fx's second
     // argument: { [slot]: "<opaque state string>" }. Applied by the scheduler after load. Legacy:
     // still read so older patches sound right, but nothing writes one any more - a captured sound
@@ -618,6 +656,97 @@ export class Sig {
     const sig = toSignal(value);
     const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('clip'));
     return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, clip: sig }, stepsForCycle }));
+  }
+
+  /**
+   * Moves each event off its grid position in time, as a fraction of its own step width: .nudge(0.1)
+   * plays every note a tenth of a step late, .nudge(-0.05) a twentieth early. Same knob as the
+   * `nudge` field in .as("note:vel:nudge"), and the channel .swing() adds to.
+   *
+   * Like clip, this is a key on the event bundle rather than anything structural (see timeShift):
+   * the note keeps its place in the pattern - conditions, inner patterns and the roll all still see
+   * it where it was written - and only the timestamp it is played at moves. Beyond half a step
+   * either way it is clamped, since past that the event has swapped places with its neighbour and
+   * what you meant was a different rhythm.
+   */
+  nudge(value) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .nudge() needs a step pattern, e.g. s("hh*8").nudge(0.05)');
+    }
+    const sig = toSignal(value);
+    const over = constOutOfRange(sig, MAX_NUDGE);
+    if (over !== null) {
+      warnUser(`[signal] .nudge(${over}) is more than half a step - clamping. nudge is a fraction of the event's OWN step width, so .nudge(0.1) plays it a tenth of a step late.`);
+    }
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('nudge'));
+    return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, nudge: sig }, stepsForCycle }));
+  }
+
+  /**
+   * Swing: delays the offbeats of a subdivision grid, leaving the onbeats where they are.
+   *
+   *   s("hh*8").swing(1/3)         // the classic triplet shuffle
+   *   s("hh*16").swing(0.2, 16)    // a light sixteenth-note swing
+   *   s("hh*8").swing("<0 0.33>")  // straight bar, swung bar
+   *
+   * (Write fractions as JS - swing(1/3). Inside a mini string "1/3" is the slow operator, not a
+   * third, so a patterned amount takes decimals.)
+   *
+   * `amount` is how far a late note moves, as a fraction of one slot of the grid: 0 is straight,
+   * 1/3 is the triplet feel the word usually means, and 0.5 (the maximum) drags the offbeat all the
+   * way onto the next onbeat. A drum machine's percentage converts as (pct - 50) / 50, so an MPC's
+   * `grid` is how many slots the cycle is divided into, 8 (eighth notes) by default - it is the
+   * `swinggrid` channel, so it can be patterned on its own too.
+   *
+   * Swing is applied where the event is emitted (see timeShift), never by rewriting the pattern: the
+   * notes keep their written positions, and swing adds to whatever per-event .nudge() is in force
+   * rather than replacing it.
+   */
+  swing(amount, grid) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .swing() needs a step pattern, e.g. s("hh*8").swing(1/3)');
+    }
+    const sig = toSignal(amount === undefined ? DEFAULT_SWING : amount);
+    const over = constOutOfRange(sig, MAX_SWING);
+    if (over !== null) {
+      // A whole number that far out is almost always a subdivision written where the amount goes -
+      // Strudel's swing() takes the grid alone - so that reading gets its own line, with the number
+      // put back where it belongs. Anything else is just an amount past the stops.
+      warnUser(Number.isInteger(over) && over >= 2
+        ? `[signal] .swing(${over}) reads as an amount of ${over} slots - clamping to ${MAX_SWING}. The AMOUNT comes first and the grid is the second argument: .swing(1/3, ${over}) puts a triplet shuffle on a ${over}-per-cycle grid.`
+        : `[signal] .swing(${over}) is more than half a slot - clamping. The amount is a fraction of one slot: 0 is straight, 1/3 the triplet feel, ${MAX_SWING} the most there is.`);
+    }
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('swing'));
+    // Only when the grid is known here and the amount isn't a deliberate zero: a patterned grid is
+    // read per event, and a swinggrid already on the pattern is the grid rather than this default.
+    const known = grid === undefined ? DEFAULT_SWING_GRID : Math.round(Number(grid));
+    if (sig.constVal !== 0 && Number.isFinite(known) && known >= 1 && !(grid === undefined && this.noteChannels.swinggrid)) {
+      const { moves, suggest } = swingGridReport(stepsForCycle, known);
+      if (!moves) {
+        // Written back the way it was typed - 1/3 is a third, not 0.3333333333333333.
+        const amount = sig.constVal === undefined || Math.abs(sig.constVal - DEFAULT_SWING) < 1e-9
+          ? '1/3'
+          : String(Number(sig.constVal.toFixed(4)));
+        const fix = suggest ? ` Name the grid this pattern is written on: .swing(${amount}, ${suggest}).` : '';
+        warnUser(`[signal] .swing() on a ${known}-per-cycle grid has nothing to move here - every event is on an onbeat of that grid, so this plays exactly as it would straight.${fix} (Anything that subdivides the pattern afterwards - .fast(), .ply() - changes that.)`);
+      }
+    }
+    const out = this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, swing: sig }, stepsForCycle }));
+    return grid === undefined ? out : out.swinggrid(grid);
+  }
+
+  /**
+   * Which grid .swing() swings: 8 (eighth notes) by default, 16 for a sixteenth-note shuffle.
+   * The subdivision half of swing, as its own channel so it can be patterned - usually you just
+   * pass it as .swing(amount, grid).
+   */
+  swinggrid(value) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .swinggrid() needs a step pattern, e.g. s("hh*16").swing(0.2, 16)');
+    }
+    const sig = toSignal(value);
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('swinggrid'));
+    return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, swinggrid: sig }, stepsForCycle }));
   }
 
   /**
@@ -1684,13 +1813,16 @@ export class Sig {
    * read in the order the spec names them. Fields: `note` (MIDI number or note name), `n`
    * (scale degree - map it with .scale() afterwards), `i` (which file of the sample pack, as
    * .i() sets), `vel` (0..1 velocity for that one event), `clip` (duration as a multiple of the
-   * token's own step width - at *8, clip 3 rings for three eighth-slots). Missing/empty fields
-   * keep their defaults (vel 1, clip 1). This is the form the editor's midi-record writes in
-   * place of a kb()/midikeys()/keyboard() call, and the form an INDEX piano roll converts to.
+   * token's own step width - at *8, clip 3 rings for three eighth-slots), `nudge` (how far off its
+   * grid position that one event plays, as a fraction of its own step - `38::0.04` pushes just that
+   * snare late). Missing/empty fields keep their defaults (vel 1, clip 1, nudge 0), so a spec only
+   * costs the tokens that use it. This is the form the editor's midi-record writes in place of a
+   * kb()/midikeys()/keyboard() call, and the form an INDEX piano roll converts to.
    *
    * Each field is set onto the SAME channel the equivalent method would use - `note`/`n` become
    * the pitch value stream, `vel` a velocity signal (as if by .vel()), `clip` a duration scale
-   * (as if by .clip()) - so any of them can be overridden afterwards: `"<0 1 0.5>".as("vel")`
+   * (as if by .clip()), `nudge` a per-event time offset (as if by .nudge(), and still added to by a
+   * later .swing()) - so any of them can be overridden afterwards: `"<0 1 0.5>".as("vel")`
    * carries the velocities and a later .note("f3") (or .s("rave")) supplies the pitch/sound while
    * the velocities ride along. `i` is the exception: there is no sampler yet for a channel to live
    * on, so each token's index rides on its own event (step.cfg, the same place a drawn index roll
@@ -1702,10 +1834,10 @@ export class Sig {
    */
   as(spec) {
     const fields = String(spec).split(':').map((f) => f.trim().toLowerCase());
-    const KNOWN = ['note', 'n', 'i', 'vel', 'clip'];
+    const KNOWN = ['note', 'n', 'i', 'vel', 'clip', 'nudge'];
     for (const f of fields) {
       if (!KNOWN.includes(f)) {
-        throw new Error(`[signal] .as(): unknown field "${f}" - fields are note, n, i, vel, clip (e.g. .as("note:vel:clip"))`);
+        throw new Error(`[signal] .as(): unknown field "${f}" - fields are note, n, i, vel, clip, nudge (e.g. .as("note:vel:clip"))`);
       }
     }
     if (!this.stepsForCycle) {
@@ -1721,19 +1853,21 @@ export class Sig {
     const fieldSig = (f, coerce) => this.mapValue((raw) => fieldOf(raw, f, coerce));
     const hasVel = fields.includes('vel');
     const hasClip = fields.includes('clip');
+    const hasNudge = fields.includes('nudge');
     const hasIndex = fields.includes('i');
-    // vel/clip are split off PER STEP rather than by sampling a parallel signal at each onset,
+    // vel/clip/nudge are split off PER STEP rather than by sampling a parallel signal at each onset,
     // because every field here comes off the same token: a chord cell - `[57:0.8,59:10]`, what the
     // piano roll writes for a chord whose notes differ in length or velocity - puts two steps at the
     // SAME onset, and a point sample there can only return one of the two values (both notes would
-    // take the first layer's clip). Walking the steps keeps each token's fields with its own note.
-    // Both land as plain keys on the event, the same ones .vel()/.clip() merge.
+    // take the first layer's clip). Walking the steps keeps each token's fields with its own note -
+    // which is also what lets the notes of one chord be splayed apart by their own nudges.
+    // All of them land as plain keys on the event, the same ones .vel()/.clip()/.nudge() merge.
     let base = this;
-    if (hasVel || hasClip || hasIndex) {
+    if (hasVel || hasClip || hasNudge || hasIndex) {
       const split = (s) => {
         if (s.value == null) return s;
         const step = { ...s };
-        for (const f of ['vel', 'clip']) {
+        for (const f of ['vel', 'clip', 'nudge']) {
           if (!fields.includes(f)) continue;
           const v = fieldOf(s.value, f, Number);
           if (v != null && !Number.isNaN(v)) step[f] = v; // absent -> unset, i.e. the default
@@ -1756,15 +1890,16 @@ export class Sig {
     if (fields.includes('note')) out = withPitchKind(base.mapValue((raw) => fieldOf(raw, 'note', parseNoteValue)), 'note');
     else if (fields.includes('n')) out = withPitchKind(base.mapValue((raw) => fieldOf(raw, 'n', Number)), 'degree');
     else out = withPitchKind(base.mapValue(() => DEFAULT_SYNTH_NOTE), 'note');
-    // The two also ride as note channels (the same ones .vel()/.clip() set) so they survive a later
-    // .note()/.n()/.s() replacing the trigger grid - that's what lets .as("vel").note("f3") work.
-    // They are NOT merged onto THIS grid (no .vel()/.clip() call here): the per-step split above
+    // They also ride as note channels (the same ones .vel()/.clip()/.nudge() set) so they survive a
+    // later .note()/.n()/.s() replacing the trigger grid - that's what lets .as("vel").note("f3")
+    // work. They are NOT merged onto THIS grid (no .vel()/.clip() call here): the per-step split above
     // already put each token's own value on its own event, which a merge would overwrite.
     const noteChannels = { ...out.noteChannels };
     if (hasVel) noteChannels.vel = fieldSig('vel', Number);
     if (hasClip) noteChannels.clip = fieldSig('clip', Number);
+    if (hasNudge) noteChannels.nudge = fieldSig('nudge', Number);
     // `i` gets no channel of its own: the per-step stamp above is the whole of it.
-    return hasVel || hasClip ? out._clone({ noteChannels }) : out;
+    return hasVel || hasClip || hasNudge ? out._clone({ noteChannels }) : out;
   }
 
   /**
@@ -2217,7 +2352,12 @@ function stepKey(s) {
         .map((k) => `${k}=${s.cfg[k]}`)
         .join(',')
     : '';
-  return `${s.start}|${s.end}|${s.value}|${s.cont ? 1 : 0}|${s.vel ?? ''}|${cfg}`;
+  // Every note channel, not just vel: two events that agree on timing and value but carry different
+  // clips or different nudges are two different sounds, and collapsing them would silently drop one.
+  const channels = Object.keys(NOTE_CONTROLS)
+    .map((k) => s[k] ?? '')
+    .join('|');
+  return `${s.start}|${s.end}|${s.value}|${s.cont ? 1 : 0}|${channels}|${cfg}`;
 }
 
 // Collapses the duplicates a RE-merge of an already-merged channel produces. Setting a stacked
@@ -2407,6 +2547,68 @@ export function channelAt(name, step, channels, time, cps = 1, pos = undefined) 
   return undefined;
 }
 
+// Swing lives on a subdivision grid: `swinggrid` per cycle, 8 (eighth notes) by the tradition the word
+// comes from. Half a slot is the most a late offbeat can move before it lands on the downbeat that
+// follows it, so that is where both time controls stop: a swing of 0.5 is the whole slot's worth of
+// shuffle, and a nudge of 0.5 is half the event's own step. Clamping rather than refusing keeps a
+// swept control audible at its extremes (see the warn-don't-block rule); the builders warn about a
+// constant that was out of range, where the number is a typo rather than the end of a sweep.
+const DEFAULT_SWING_GRID = 8;
+const DEFAULT_SWING = 1 / 3; // bare .swing() is the triplet shuffle the word usually means
+const MAX_SWING = 0.5;
+const MAX_NUDGE = 0.5;
+// Slot boundaries are hit exactly by fractions that don't survive binary floating point - 1/8 * 8 is
+// 0.9999999999999999 as often as it is 1 - so the slot index is taken with a nudge of its own.
+const SLOT_EPS = 1e-9;
+
+const clampAbs = (v, max) => Math.max(-max, Math.min(max, v));
+
+/**
+ * How far an event moves off its grid position, in cycles - the emit-time half of `nudge`/`swing`.
+ *
+ * Both controls are ordinary keys on the event (see Sig#nudge, Sig#swing), applied HERE rather than
+ * by rewriting the pattern, exactly as clip is applied in soundingEnd. That is what keeps the
+ * musical grid intact while the sound moves: every other reader - a `.when()` condition, an inner
+ * pattern, the step positions the highlighter and the roll are drawn from - still sees the event
+ * where it was written, and only the timestamp handed to the engine (and the highlight, which
+ * follows the ear) carries the shift.
+ *
+ * `nudge` is a fraction of the event's OWN step width, like clip is a multiple of it: .nudge(0.1) is
+ * a tenth of a step late whatever the subdivision. `swing` delays the offbeats of the `swinggrid`
+ * by that fraction of one slot - 1/3 is the triplet feel the word usually means (an MPC's 66%; the
+ * conversion from a percentage is (pct - 50) / 50). The two SUM, so a groove committed to per-event
+ * nudges still swings, which is what makes "print the swing" a thing you can do halfway.
+ */
+export function timeShift(step, channels, time, cps = 1, pos = undefined) {
+  let shift = 0;
+  const nudge = channelAt('nudge', step, channels, time, cps, pos);
+  if (nudge) shift += clampAbs(nudge, MAX_NUDGE) * (step.end - step.start);
+  const amount = channelAt('swing', step, channels, time, cps, pos);
+  if (amount) {
+    const raw = channelAt('swinggrid', step, channels, time, cps, pos);
+    const n = Math.round(raw >= 1 ? raw : DEFAULT_SWING_GRID);
+    // Which slot of the swing grid the onset falls in - floor, not a test for landing exactly on
+    // one, so a sixteenth inside a swung eighth rides along with the eighth it belongs to.
+    const slot = Math.floor(step.start * n + SLOT_EPS);
+    if (((slot % 2) + 2) % 2 === 1) shift += clampAbs(amount, MAX_SWING) / n;
+  }
+  return shift;
+}
+
+/**
+ * The stand-in step for an event's END, at cycle-relative position `endPos`.
+ *
+ * Both edges of a shifted event are warped, each at its own position (see the scheduler's
+ * _shiftSecAt): swing bends the time axis, so a note whose end lands on the next event's onset has
+ * to move that end by whatever the next event moves by, or it rings straight into it. Its own width
+ * comes along (a nudge is a fraction of that), but none of its stamped values do - a stamp belongs
+ * to the event it is on, so only a channel with a grid of its own can say what happens where this
+ * note stops.
+ */
+export function endEdgeStep(step, endPos) {
+  return { start: endPos, end: endPos + (step.end - step.start) };
+}
+
 /**
  * Where an event actually stops sounding: its own step width times its `clip` (see Sig#clip).
  *
@@ -2451,6 +2653,10 @@ function applyNoteChannels(baseStepsForCycle, noteChannels) {
 // Said when a document still passes .loop()'s old { wrap, dir } object. The loop plays either way;
 // the modes are their own controls now (see Sig#loopwrap / Sig#loopdir).
 const LOOP_OPTS_MOVED = '[signal] loop()\'s wrap/dir options are their own controls now - ignoring them. Use .loopwrap(1) (0 file, 1 window) and .loopdir(1) (0 forward, 1 pingpong).';
+
+// Said by the top-level swing() when it is handed a subdivision as well: as an operand it is the
+// amount channel alone, so the grid has to arrive as its own channel.
+const SWING_GRID_OPERAND = '[signal] top-level swing() sets the amount channel only - ignoring the second argument. Use .swing(amount, grid) as a method, or swinggrid(grid) as a second operand.';
 
 export const LOOP_MODES = {
   loopWrap: ['file', 'window'],
@@ -2727,12 +2933,15 @@ const SAMPLER_CONTROLS = {
 
 // The note channels (Sig#noteChannels) - the same kind of thing as the sampler controls above, but
 // carried on the event itself rather than under `cfg`, and read on BOTH track kinds: vel is MIDI
-// velocity or sample gain, clip multiplies the ringing duration. `unset` is the resting value an
-// operand combines with where the channel isn't set yet, so `.mul(clip(2))` on a pattern with no
-// clip of its own is 1 * 2.
+// velocity or sample gain, clip multiplies the ringing duration, and nudge/swing/swinggrid move the
+// event in TIME (see timeShift). `unset` is the resting value an operand combines with where the
+// channel isn't set yet, so `.mul(clip(2))` on a pattern with no clip of its own is 1 * 2.
 const NOTE_CONTROLS = {
   vel: { key: 'vel', unset: 1 },
   clip: { key: 'clip', unset: 1 },
+  nudge: { key: 'nudge', unset: 0 },
+  swing: { key: 'swing', unset: 0 },
+  swinggrid: { key: 'swinggrid', unset: DEFAULT_SWING_GRID },
 };
 
 // A signal's VALUES with no track metadata and no control tag attached - what a channel signal is.
@@ -2772,8 +2981,9 @@ function bareSig(sig) {
  * and its values stay on the channel, so `vel("1!4").s("bd")` is `s("bd").vel("1!4")` - four kicks
  * at velocity 1, at the default note (24, where a sample plays as recorded). See _fromHeadCtl.
  *
- * The note channels (vel, clip) work on any pattern; aiming a SAMPLER control at a non-sampler
- * pattern is an error (there's no channel there) - the same message the method form gives.
+ * The note channels (vel, clip, nudge, swing, swinggrid) work on any pattern; aiming a SAMPLER control
+ * at a non-sampler pattern is an error (there's no channel there) - the same message the method
+ * form gives.
  */
 function controlBuilder(name) {
   return (value, opts) => {
@@ -2781,6 +2991,9 @@ function controlBuilder(name) {
     // of those work as operands like any other channel. Warned rather than thrown, and rather than
     // quietly dropped - the loop still plays, on the default modes.
     if (name === 'loop' && opts !== undefined) warnUser(LOOP_OPTS_MOVED);
+    // A control builder carries ONE channel, so top-level swing() can only be the amount - the
+    // method form takes the grid as its second argument, and swinggrid() is it as an operand.
+    if (name === 'swing' && opts !== undefined) warnUser(SWING_GRID_OPERAND);
     // fit() alone means "nearest power of two", which is a mode rather than a number - flag it so
     // a combinator sets the channel instead of trying to do arithmetic with it.
     if (name === 'fit' && value === undefined) {
@@ -2830,6 +3043,12 @@ export const release = controlBuilder('release');
 export const vel = controlBuilder('vel');
 /** Duration multiplier as an operand - the top-level form of `.clip()`. */
 export const clip = controlBuilder('clip');
+/** Per-event time offset as an operand - the top-level form of `.nudge()`. */
+export const nudge = controlBuilder('nudge');
+/** Swing amount as an operand - the top-level form of `.swing()`'s first argument. */
+export const swing = controlBuilder('swing');
+/** Which grid swing swings, as an operand - the top-level form of `.swing()`'s second argument. */
+export const swinggrid = controlBuilder('swinggrid');
 
 /** Every top-level control, by name - what the host puts in userland scope. */
 export const SAMPLER_CONTROL_NAMES = [

@@ -468,7 +468,7 @@ function syncUserStringMethods() {
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
@@ -790,11 +790,19 @@ function highlightGrid(sig, start, end, from, count) {
           .map((l) => [l[0] - start, l[1] - start]);
         // A lit atom stays lit for as long as its note SOUNDS, so clip is applied here exactly as
         // the scheduler applies it when placing the noteOff (see pattern-core soundingEnd) - the
-        // highlighter is just another emitter of the same event.
+        // highlighter is just another emitter of the same event. Same for nudge/swing (timeShift):
+        // the highlight follows the EAR, lighting up when the note is heard rather than where it
+        // sits on the grid, so a swung hat flashes with the sound and not a moment before it.
         if (locs.length) {
           const at = c + s.start;
           const soundsTo = patternCore.soundingEnd(s, sub.noteChannels, at, 1, at);
-          out.push({ start: s.start, end: soundsTo, ...(s.cont ? { cont: true } : {}), locs });
+          // Both edges are warped at their own positions, exactly as the scheduler warps them (see
+          // endEdgeStep), so a swung flash starts and stops with the sound it belongs to.
+          const endAt = c + soundsTo;
+          const endStep = patternCore.endEdgeStep(s, endAt - Math.floor(endAt));
+          const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at);
+          const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt);
+          out.push({ start: s.start + startShift, end: soundsTo + endShift, ...(s.cont ? { cont: true } : {}), locs });
         }
       }
     }

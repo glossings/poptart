@@ -20,7 +20,7 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, warnPattern, lfoRateHz, resolvePreset } from './signal.mjs';
+import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, resolvePreset } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -64,6 +64,22 @@ const LFO_ANCHOR_INTERVAL_SEC = 4;
 // engine-side execution order is jitter-dependent, and off-after-on silences the new voice at
 // birth. A few ms of daylight makes the ordering deterministic and is inaudible as a release.
 const NOTE_OFF_EARLY_SEC = 0.005;
+
+// The floor under an event pushed EARLY by .nudge()/.swing() (see pattern-core's timeShift). An
+// onset enters the lookahead window at least (lookahead - one tick) ahead of its grid position, so
+// that is the whole budget an early shift has to spend; the rest is margin for the trip to the
+// engine. A shift past it doesn't get to move the event any further - the note plays as early as it
+// can be played instead of arriving after its own timestamp, which is the difference between a
+// slightly-too-small push and a note that jumps to the front of the queue. In musical terms this is
+// enormous: a "rushed" feel is 5-30ms, and the budget is 100ms at any tempo.
+const MAX_EARLY_SHIFT_SEC = DEFAULT_LOOKAHEAD_SEC - POLL_INTERVAL_MS / 1000 - 0.02;
+// The last moment a message is worth timestamping for. Under it the audio thread would be handed a
+// time it has already passed, and would play the note immediately - and possibly after one written
+// behind it. Only an early shift can get near this; nothing else here schedules for "now".
+const MIN_SEND_LEAD_SEC = 0.005;
+// The shortest span an event may be handed to the engine as. Only a time shift can invert one (a
+// late onset against an early end), and a backwards span would be taken literally.
+const MIN_SOUNDING_SEC = 0.001;
 
 // Track-level channel-strip controls (Sig#gain/#pan) ride the same setParam/setParamLFO/
 // setParamEnv engine calls as plugin parameters, addressed with this pseudo-slot instead of a
@@ -292,6 +308,7 @@ export class Scheduler {
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
     this._livePresets = new Map(); // slot -> preset name currently sounding (auto-pin writes into it)
     this._presetWarned = new Set(); // "slot name" already complained about, so a bad name says it once
+    this._earlyShiftWarned = false; // an over-early nudge says so once, not once per event
     this._presetHold = new Map(); // slot -> preset the editor is holding it on (see holdPreset)
     this._stateHold = new Set(); // slots being edited by hand right now (see holdPluginState)
   }
@@ -477,6 +494,7 @@ export class Scheduler {
       if (!(slot in (sig.presetPatterns ?? {}))) this._livePresets.delete(slot);
     }
     this._presetWarned.clear();
+    this._earlyShiftWarned = false;
 
     // A channel control the new pattern dropped (`.gain(...)` deleted mid-session, or `.bsend()`
     // removed - which drops dry) snaps back to its default. Schedule the reset at the lookahead
@@ -661,7 +679,7 @@ export class Scheduler {
       // still news when the note at its onset has been committed to play straight through it,
       // which is exactly the note that was being eaten (see poptart.scd's waitForLoad).
       this._schedulePresetSwaps(this._scheduledUntilCycle, targetCycle);
-      this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle);
+      this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle, nowSec);
       this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
       this._scheduledUntilCycle = targetCycle;
 
@@ -680,7 +698,10 @@ export class Scheduler {
     }
   }
 
-  _scheduleNoteEdges(fromCycle, toCycle) {
+  // `nowSec` is the tick's own clock reading, passed in so every event of one tick is measured
+  // against the same instant; it only matters to an EARLY time shift, which is the one thing here
+  // that can ask to be scheduled in the past (see _timeShiftSec).
+  _scheduleNoteEdges(fromCycle, toCycle, nowSec = this.engine.getTime()) {
     if (!this.pattern.stepsForCycle) return; // top-level pattern has no note structure (e.g. a bare LFO)
 
     for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
@@ -690,21 +711,53 @@ export class Scheduler {
 
         const stepStartCycle = cycle + step.start;
         // Only trigger onsets newly entering the lookahead window - each tick advances
-        // `fromCycle` to the previous tick's `toCycle`, so this never double-fires.
+        // `fromCycle` to the previous tick's `toCycle`, so this never double-fires. The window is
+        // tested against the GRID position, never the nudged one: an event belongs to the tick its
+        // written position falls in, and moving that test would either double-fire an event or drop
+        // one whenever a shift carried it across a window edge.
         if (stepStartCycle < fromCycle || stepStartCycle >= toCycle) continue;
 
-        const onsetSec = this.transport.secAt(stepStartCycle);
+        const gridSec = this.transport.secAt(stepStartCycle);
         // How long it rings: the step's own width times its clip channel. This is where clip is
         // applied - it's a key on the event like any other (see soundingEnd), so the noteOff simply
         // lands later, possibly cycles later, with nothing about the pattern's structure changed.
-        const stepEndCycle = cycle + this._soundingEnd(step, onsetSec, stepStartCycle);
-        const offsetSec = this.transport.secAt(stepEndCycle);
+        const stepEndCycle = cycle + this._soundingEnd(step, gridSec, stepStartCycle);
+
+        // Where it actually plays: its grid position plus whatever .nudge()/.swing() move it by
+        // (see timeShift), the other control read at the point of emission. Every channel above and
+        // below is sampled at the GRID position, shift included - the event's musical position is
+        // where it was written, and swing moves the sound, not the note.
+        const shiftSec = this._timeShiftSec(step, stepStartCycle, gridSec, nowSec);
+        const onsetSec = gridSec + shiftSec;
+        // The END is warped too, and at ITS OWN grid position rather than the onset's - swing bends
+        // the time axis, so both edges of the note follow the bend they each sit on. Translating the
+        // whole event by the onset's shift instead would have a swung note ring straight through the
+        // straight note that follows it: a default (clip 1) note ends exactly where the next one
+        // begins, and moving only one of those two apart by a third of a slot puts one event's
+        // noteOff a long way inside the next event's note - which on a repeated pitch (a swung
+        // bassline on one note) silences every second note partway through. Warping both edges keeps
+        // the gap between consecutive events exactly as it was written, and leaves the noteOff and
+        // the next noteOn coincident, which is the case NOTE_OFF_EARLY_SEC already handles.
+        const endGridSec = this.transport.secAt(stepEndCycle);
+        const endStep = endEdgeStep(step, stepEndCycle - Math.floor(stepEndCycle));
+        const endSec = endGridSec + this._shiftSecAt(endStep, stepEndCycle, endGridSec);
+        // A note can't end before it starts - reachable only by mixing a late onset nudge with an
+        // early one at the end position, but the engine would take a backwards span literally.
+        const offsetSec = Math.max(onsetSec + MIN_SOUNDING_SEC, endSec);
 
         // Velocity is one note channel now, read uniformly for both track kinds (see _velAt): the
         // merged step.vel wins, else the channel is sampled at the onset, else it's unset.
-        const velocity = this._velAt(step, onsetSec, stepStartCycle);
+        const velocity = this._velAt(step, gridSec, stepStartCycle);
+        // .log() prints where the event is HEARD - a swung note reads at the position it plays, not
+        // the one it was written at. Unshifted events skip the round trip so their positions stay
+        // the exact fractions the grid produced.
+        const logAt = !this.pattern.logging
+          ? null
+          : shiftSec === 0
+            ? [stepStartCycle, stepEndCycle]
+            : [this.transport.cycleAt(onsetSec), this.transport.cycleAt(offsetSec)];
         if (this.pattern.sampler) {
-          const cfg = this._sampleConfigAt(step, onsetSec, stepStartCycle);
+          const cfg = this._sampleConfigAt(step, gridSec, stepStartCycle);
           if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
           // What the engine resolves to files: a bare name is a pack, "file:"/"rec:" name one
           // exact file (se/sr). Only a pack takes the index suffix - the other two address a
@@ -725,14 +778,14 @@ export class Scheduler {
           // window, and the window's length in seconds) - that's what .log() prints, since none
           // of it can be known here: it depends on the sample file's own length.
           const info = this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
-          if (this.pattern.logging) {
-            this._logEvent(stepStartCycle, stepEndCycle, formatSampleEvent(pack, cfg, info, stepEndCycle - stepStartCycle));
+          if (logAt) {
+            this._logEvent(logAt[0], logAt[1], formatSampleEvent(pack, cfg, info, stepEndCycle - stepStartCycle));
           }
         } else {
           const midiNote = Math.round(step.value);
           const vel = velocity ?? 1.0; // unset velocity on a synth note is full
-          if (this.pattern.logging) {
-            this._logEvent(stepStartCycle, stepEndCycle, formatNoteEvent(midiNote, vel));
+          if (logAt) {
+            this._logEvent(logAt[0], logAt[1], formatNoteEvent(midiNote, vel));
           }
           if (vel <= 0) continue;
           this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec);
@@ -858,6 +911,46 @@ export class Scheduler {
   // clock the note is actually played against.
   _soundingEnd(step, onsetSec, onsetCycle) {
     return soundingEnd(step, this.pattern.noteChannels, onsetSec, this.transport.cps, onsetCycle);
+  }
+
+  // How far off its grid position this event plays, in SECONDS: what .nudge()/.swing() ask for (see
+  // pattern-core's timeShift, which works in cycles) converted through the transport, so a shift
+  // means the same fraction of a step whatever the tempo is doing.
+  //
+  // Only the early direction has a limit, and it isn't musical: the note has to reach the engine
+  // before it is due (see MAX_EARLY_SHIFT_SEC). Late shifts have no ceiling at all - the timestamp
+  // is simply later - which is why swing, shuffle and every traditional groove, all of which only
+  // ever delay, are unaffected by any of this. A shift that would land in the past is pulled up to
+  // the earliest playable moment and warned about once per track: the note plays a touch late
+  // rather than jumping the queue, and the console says which track asked for the impossible.
+  // The shift asked for at one grid position, in seconds and with nothing clamped - the shared half
+  // of the two edges. For the onset that is the event itself, stamped values and all; for the end it
+  // is a stand-in step at the end's own position, so the time channels are read THERE. That is what
+  // makes an end landing on the next event's onset pick up the same shift that event will play with,
+  // and what a per-step stamp can't answer for: a stamp belongs to the event it is on, so a channel
+  // with a grid of its own is the only thing that can say what happens where this note stops.
+  _shiftSecAt(step, atCycle, atSec) {
+    const shift = timeShift(step, this.pattern.noteChannels, atSec, this.transport.cps, atCycle);
+    if (!shift) return 0;
+    return this.transport.secAt(atCycle + shift) - atSec;
+  }
+
+  _timeShiftSec(step, onsetCycle, onsetSec, nowSec) {
+    let shiftSec = this._shiftSecAt(step, onsetCycle, onsetSec);
+    if (!shiftSec) return 0;
+    // The budget is a fixed number of seconds rather than "however much lead this event happened to
+    // be found with": the same note must move by the same amount on every pass, or an event sitting
+    // near the window's edge would be pushed a different distance each cycle and jitter.
+    if (shiftSec < -MAX_EARLY_SHIFT_SEC) {
+      shiftSec = -MAX_EARLY_SHIFT_SEC;
+      if (!this._earlyShiftWarned) {
+        this._earlyShiftWarned = true;
+        warnPattern(`[scheduler] track "${this.trackId}": an early nudge asks for more than ${Math.round(MAX_EARLY_SHIFT_SEC * 1000)}ms, which is as far ahead as a note can be scheduled - playing it ${Math.round(MAX_EARLY_SHIFT_SEC * 1000)}ms early instead. Late shifts (swing, shuffle) have no such limit.`);
+      }
+    }
+    // The absolute floor the budget above normally keeps well clear of: a timestamp in the past
+    // plays immediately and out of order, which is worse than playing a hair late.
+    return Math.max(shiftSec, nowSec + MIN_SEND_LEAD_SEC - onsetSec);
   }
 
   // Sampler config signals evaluated at one event's onset. `fit: 'auto'` passes through as-is

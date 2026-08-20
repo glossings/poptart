@@ -1,8 +1,8 @@
 export { Sig, Signal, n, note, mini, s, se, sr, synth, sine, saw, tri, square, ramp, rand, perlin, lfo, env, midicc, midikeys, macro, choose, cat, seq, irand, resetRandomSeeds, keyboard, tap, midi, audio, input, pianoroll, _roll, _shape, _preset } from './signal.mjs';
 // Controls as top-level builders (Strudel's control patterns) - the method form of each still lives
 // on Sig; these are what let a combinator aim at one channel, x.mul(speed("-1")) / x.mul(clip(2)).
-export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, attack, decay, sustain, release, vel, clip, SAMPLER_CONTROL_NAMES } from './signal.mjs';
-export { channelAt, soundingEnd, withSoundingSpan } from './signal.mjs';
+export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, attack, decay, sustain, release, vel, clip, nudge, swing, swinggrid, SAMPLER_CONTROL_NAMES } from './signal.mjs';
+export { channelAt, soundingEnd, timeShift, endEdgeStep, withSoundingSpan } from './signal.mjs';
 export { setPatternWarn } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveInputChannels } from './audio-inputs.mjs';
