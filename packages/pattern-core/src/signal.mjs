@@ -14,7 +14,7 @@ import {
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
-import { parsePianoRoll, normalizePianoRollSteps, looksLikeNoteString } from './pianoroll.mjs';
+import { parsePianoRoll, normalizePianoRollSteps, noteIndex, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
@@ -596,7 +596,7 @@ export class Sig {
     // samples the channel at each onset instead. Synth and sampler tracks carry it identically -
     // the walker reads step.vel / the channel uniformly, mapping it to MIDI velocity or sample gain.
     const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('vel'));
-    return this._clone({ noteChannels: { ...this.noteChannels, vel: sig }, stepsForCycle });
+    return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, vel: sig }, stepsForCycle }));
   }
 
   /**
@@ -617,7 +617,7 @@ export class Sig {
     }
     const sig = toSignal(value);
     const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('clip'));
-    return this._clone({ noteChannels: { ...this.noteChannels, clip: sig }, stepsForCycle });
+    return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, clip: sig }, stepsForCycle }));
   }
 
   /**
@@ -905,6 +905,22 @@ export class Sig {
    * `attach` adds the sound (.s()/.note()/.synth()) in between, because a sampler channel can only
    * be set once the sampler exists; aimed at a synth track it still errors, as .speed() does.
    */
+  /**
+   * Carries a HEAD control tag across a method that merely adds a channel - .vel(), .clip() - to a
+   * derived Sig. No other derivation keeps the tag (see _clone, and bareSig, which strips it so an
+   * operand can't route a merge back into itself), and rightly: mapping the VALUES of `i("0 3")`
+   * makes something that is no longer the index channel. But a note channel is a second thing said
+   * about the same events, and the control is still waiting for its sound - so
+   * `i("0 3").vel(0.8).s("dstab")` has to reach .s() with the tag intact. Without this it arrived
+   * bare, and .s() read 0 and 3 as PITCHES: the sample played at the pack's first file, transposed
+   * down to nothing.
+   */
+  _keepCtl(out) {
+    if (this.ctl) out.ctl = this.ctl;
+    if (this.ctlAuto) out.ctlAuto = this.ctlAuto;
+    return out;
+  }
+
   _fromHeadCtl(attach) {
     const { ctl, ctlAuto } = this;
     // The channel takes the VALUES alone: no tag (one here would route the setter below straight
@@ -1654,26 +1670,30 @@ export class Sig {
    * Destructures multi-field tokens into separate note/velocity/duration controls, Strudel-style:
    * `"<36:1:4 ~ 47:0.5:3 ~>*8".as("note:vel:clip")`. Each token's fields are split on ":" and
    * read in the order the spec names them. Fields: `note` (MIDI number or note name), `n`
-   * (scale degree - map it with .scale() afterwards), `vel` (0..1 velocity for that one
-   * event), `clip` (duration as a multiple of the token's own step width - at *8, clip 3 rings
-   * for three eighth-slots). Missing/empty fields keep their defaults (vel 1, clip 1). This is
-   * the form the editor's midi-record writes in place of a kb()/midikeys()/keyboard() call.
+   * (scale degree - map it with .scale() afterwards), `i` (which file of the sample pack, as
+   * .i() sets), `vel` (0..1 velocity for that one event), `clip` (duration as a multiple of the
+   * token's own step width - at *8, clip 3 rings for three eighth-slots). Missing/empty fields
+   * keep their defaults (vel 1, clip 1). This is the form the editor's midi-record writes in
+   * place of a kb()/midikeys()/keyboard() call, and the form an INDEX piano roll converts to.
    *
    * Each field is set onto the SAME channel the equivalent method would use - `note`/`n` become
    * the pitch value stream, `vel` a velocity signal (as if by .vel()), `clip` a duration scale
    * (as if by .clip()) - so any of them can be overridden afterwards: `"<0 1 0.5>".as("vel")`
    * carries the velocities and a later .note("f3") (or .s("rave")) supplies the pitch/sound while
-   * the velocities ride along. A spec with no pitch field - `.as("vel:clip")` - is the note-less
+   * the velocities ride along. `i` is the exception: there is no sampler yet for a channel to live
+   * on, so each token's index rides on its own event (step.cfg, the same place a drawn index roll
+   * puts it) and the .s("pack") that follows carries it through.
+   * A spec with no pitch field - `.as("vel:clip")`, `.as("i")` - is the note-less
    * form a tap() recording writes: every present token fires the default note (C2, like a
    * note-less synth("X")) at its velocity/clip, until a later .note()/.n() sets the pitch. Rests
    * (`~`) stay rests throughout.
    */
   as(spec) {
     const fields = String(spec).split(':').map((f) => f.trim().toLowerCase());
-    const KNOWN = ['note', 'n', 'vel', 'clip'];
+    const KNOWN = ['note', 'n', 'i', 'vel', 'clip'];
     for (const f of fields) {
       if (!KNOWN.includes(f)) {
-        throw new Error(`[signal] .as(): unknown field "${f}" - fields are note, n, vel, clip (e.g. .as("note:vel:clip"))`);
+        throw new Error(`[signal] .as(): unknown field "${f}" - fields are note, n, i, vel, clip (e.g. .as("note:vel:clip"))`);
       }
     }
     if (!this.stepsForCycle) {
@@ -1689,6 +1709,7 @@ export class Sig {
     const fieldSig = (f, coerce) => this.mapValue((raw) => fieldOf(raw, f, coerce));
     const hasVel = fields.includes('vel');
     const hasClip = fields.includes('clip');
+    const hasIndex = fields.includes('i');
     // vel/clip are split off PER STEP rather than by sampling a parallel signal at each onset,
     // because every field here comes off the same token: a chord cell - `[57:0.8,59:10]`, what the
     // piano roll writes for a chord whose notes differ in length or velocity - puts two steps at the
@@ -1696,7 +1717,7 @@ export class Sig {
     // take the first layer's clip). Walking the steps keeps each token's fields with its own note.
     // Both land as plain keys on the event, the same ones .vel()/.clip() merge.
     let base = this;
-    if (hasVel || hasClip) {
+    if (hasVel || hasClip || hasIndex) {
       const split = (s) => {
         if (s.value == null) return s;
         const step = { ...s };
@@ -1704,6 +1725,12 @@ export class Sig {
           if (!fields.includes(f)) continue;
           const v = fieldOf(s.value, f, Number);
           if (v != null && !Number.isNaN(v)) step[f] = v; // absent -> unset, i.e. the default
+        }
+        if (hasIndex) {
+          // Sampler config, so it goes under `cfg` rather than on the step itself - the key the
+          // scheduler reads per event, and the one a later .i() would clear and replace.
+          const v = fieldOf(s.value, 'i', Number);
+          if (v != null && !Number.isNaN(v)) step.cfg = { ...step.cfg, index: v };
         }
         return step;
       };
@@ -1724,6 +1751,7 @@ export class Sig {
     const noteChannels = { ...out.noteChannels };
     if (hasVel) noteChannels.vel = fieldSig('vel', Number);
     if (hasClip) noteChannels.clip = fieldSig('clip', Number);
+    // `i` gets no channel of its own: the per-step stamp above is the whole of it.
     return hasVel || hasClip ? out._clone({ noteChannels }) : out;
   }
 
@@ -3124,6 +3152,18 @@ export function note(value) {
  * A note written with a leading `!` - `"!60,0,4"` - is MUTED: the roll still shows it (greyed out,
  * and pressing `0` over it switches it back on) but it doesn't sound.
  *
+ * Every event carries a SAMPLE INDEX as well as a pitch - `"24:3,0,1"` is the pack's fourth file,
+ * struck at c2 - which is how a pack is sequenced by file:
+ * `pianoroll("24:0,0,1 24:3,4,1", { grid: 8 }).s("breaks")` plays its first file, then its fourth.
+ * The index goes to each event's `i` channel (exactly what `.i()` sets, and per event, so a chord
+ * is several files struck together); the pitch is the note the sample is repitched to, c2 being as
+ * recorded. A roll where nothing sets an index leaves the channel alone entirely, so `.i()` after
+ * it still means what it always meant.
+ *
+ * `mode: "index"` is EDITOR metadata and changes no sound: it says the panel draws this roll on the
+ * sample-index axis rather than the piano keyboard, so reopening it puts you back where you were
+ * (see pianoroll.mjs). Both channels play whichever mode the roll is in.
+ *
  * A bare `pianoroll()` (or `pianoroll("")`) is a valid empty roll - silence - so typing the call to
  * open the editor and drawing into it never has to pass through an error state.
  *
@@ -3144,7 +3184,17 @@ export function pianoroll(str = '', opts = {}) {
   const grid = normalizePianoRollSteps(typeof opts === 'number' ? opts : (opts.grid ?? opts.steps));
   const len = Math.max(1, Math.round(opts.len ?? grid));
   const from = Math.max(0, Math.round(opts.start ?? 0));
+  const rawMode = typeof opts === 'number' ? undefined : opts.mode;
+  // The mode picks the editor's axis and nothing else, so a misspelt one costs a panel that opens
+  // on the keyboard - worth a line, never a reason to stop the roll playing.
+  if (rawMode !== undefined && !PIANOROLL_MODES.includes(String(rawMode).trim().toLowerCase())) {
+    warnUser(`[signal] pianoroll(): unknown mode ${JSON.stringify(rawMode)} - modes are ${PIANOROLL_MODES.join(' and ')}; the editor will open this roll on the note axis.`);
+  }
   const notes = parsePianoRoll(str);
+  // Whether this roll has anything to say about the sample index at all. All-or-nothing per roll:
+  // stamping the channel on SOME events would leave a later .i() setting only the others (the
+  // stamp wins over the channel - see _sampleConfigAt), which is a roll that half-obeys.
+  const anyIndex = notes.some((nt) => noteIndex(nt) !== PIANOROLL_DEFAULT_INDEX);
   // Index onsets by their position WITHIN the loop window, cell `from` being position 0. Playback
   // walks absolute cells m = cycle*grid + j; the cell sounding is (m mod len), so a len-cell loop
   // threads seamlessly across cycles - identical to `<len cells>*grid`. dur is the note's length in
@@ -3156,7 +3206,7 @@ export function pianoroll(str = '', opts = {}) {
     const cell = nt.start - from;
     if (cell < 0 || cell >= len) return; // outside the loop window - never sounds
     const list = byStart.get(cell) ?? [];
-    list.push({ value: nt.midi, vel: nt.vel, dur: nt.len / grid, prob: nt.prob, seed: i + 1 });
+    list.push({ value: nt.midi, vel: nt.vel, index: noteIndex(nt), dur: nt.len / grid, prob: nt.prob, seed: i + 1 });
     byStart.set(cell, list);
   });
   const stepsForCycle = (cycle) => {
@@ -3168,7 +3218,12 @@ export function pianoroll(str = '', opts = {}) {
       const start = j / grid;
       for (const o of onsets) {
         if (o.prob < 1 && !(rng2(m, o.seed) < o.prob)) continue;
-        out.push({ start, end: start + o.dur, value: o.value, vel: o.vel });
+        const step = { start, end: start + o.dur, value: o.value, vel: o.vel };
+        // The sample index rides ON the event (step.cfg, which the scheduler reads ahead of the
+        // channel - see _sampleConfigAt) rather than as a channel, because a chord is two events at
+        // ONE onset and sampling a channel there could only ever tell them both the same index.
+        if (anyIndex) step.cfg = { index: o.index };
+        out.push(step);
       }
     }
     return out;
@@ -3193,7 +3248,9 @@ function rollPattern(str, opts) {
     const found = lookupRoll(key);
     if (!found && !warned.has(key)) {
       warned.add(key);
-      warnUser(`[signal] pianoroll(): no roll called ${JSON.stringify(key)} - it plays silence until a roll(${JSON.stringify(id)}, ...) defines it.`);
+      // `_roll`, with the underscore: the definition call is the editor's own (see INTERNAL_BUILDERS
+      // in server.js), and the bare `roll` this used to name is not bound to anything at all.
+      warnUser(`[signal] pianoroll(): no roll called ${JSON.stringify(key)} - it plays silence until a _roll(${JSON.stringify(id)}, ...) defines it. Double-click the pianoroll name to draw one.`);
     }
     return found;
   };

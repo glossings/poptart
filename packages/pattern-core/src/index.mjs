@@ -16,5 +16,5 @@ export { parseMini, getStepsForCycle, stepLocs } from './mini.mjs';
 export { splitLabeledBlocks, isBareCallBlock } from './labels.mjs';
 export { injectLocations, isPatternPosition } from './locations.mjs';
 export { parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS } from './shape.mjs';
-export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, looksLikeNoteString, PIANOROLL_DEFAULT_STEPS } from './pianoroll.mjs';
+export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, looksLikeNoteString, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX } from './pianoroll.mjs';
 export { clearRolls, restoreRolls, setRollLayer, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds } from './rolls.mjs';

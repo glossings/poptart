@@ -1729,14 +1729,13 @@ const routes = {
       evaluated = blocks.map((b) => {
         try {
           const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
-          if (value instanceof patternCore.Sig) {
-            dryRunPattern(value);
-          } else if (value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !b.label.startsWith('$')) {
-            // Only an explicitly *named* block promises sound. Anything anonymous (bare code
-            // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
-            // style: declarations shared with the blocks below (const kb = midikeys("...")),
-            // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
-            // it evaluated to is simply not played.
+          // Only an explicitly *named* block promises sound. Anything anonymous (bare code
+          // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
+          // style: declarations shared with the blocks below (const kb = midikeys("...")),
+          // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
+          // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
+          const isPattern = value instanceof patternCore.Sig;
+          if (!isPattern && value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !b.label.startsWith('$')) {
             throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
           }
           return { ...b, sig: value };
@@ -1744,6 +1743,22 @@ const routes = {
           throw new Error(`${b.label}: ${err.message ?? err}`);
         }
       });
+
+      // Only now, with every block evaluated, are any cycles built. A pattern resolves the rolls
+      // and shapes it NAMES lazily, one cycle at a time, so that the definitions may sit anywhere
+      // in the buffer - and the editor writes them in a block at the FOOT of it, below the patterns
+      // that play them. Building a cycle inside the pass above therefore asked the registry for
+      // definitions the pass had not reached yet: every `pianoroll("lead")` in a normally-laid-out
+      // buffer reported itself undefined on every evaluation, on a name that was defined two lines
+      // later and played perfectly.
+      for (const b of evaluated) {
+        if (!(b.sig instanceof patternCore.Sig)) continue;
+        try {
+          dryRunPattern(b.sig);
+        } catch (err) {
+          throw new Error(`${b.label}: ${err.message ?? err}`);
+        }
+      }
     } catch (err) {
       // Nothing has been applied yet - no track was stopped, no pattern was set - so the buffer's
       // definitions go back exactly as they were. Without this a block that doesn't parse takes

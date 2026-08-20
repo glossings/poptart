@@ -2942,7 +2942,11 @@ function initPresetPanel() {
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
 // gets everything back the moment the note on top moves away (see prClipOverlaps). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
-// zooms in on fine grids. The loop bar along the top carries the playing window: drag either end
+// zooms in on fine grids. Every note carries a pitch AND a sample index, and the `note`/`index`
+// button says which of them the rows are showing - a piano keyboard, or a plain 0, 1, 2, … count of
+// a pack's files driving .i(). Switching moves nothing and changes no sound (see prSetMode). `fold`
+// hides the rows nothing is drawn on, on either axis; `scale` hides everything outside the key, and
+// greys out on the index rows, where there is no key. The loop bar along the top carries the playing window: drag either end
 // anywhere on the timeline - so a loop can open half way through bar 1 and close half way through
 // bar 2, the note it opens on being the pattern's first beat - or drag its body to slide the whole
 // window over the notes (its ends snap to bar lines and their halves - hold shift for exact cells),
@@ -2974,6 +2978,8 @@ const prHalveBtn = document.getElementById('pianorollHalve');
 const prDoubleBtn = document.getElementById('pianorollDouble');
 const prDupLoopBtn = document.getElementById('pianorollDupLoop');
 const prToolBtn = document.getElementById('pianorollTool');
+const prModeBtn = document.getElementById('pianorollMode');
+const prScaleFoldBtn = document.getElementById('pianorollScaleFold');
 const prFoldBtn = document.getElementById('pianorollFold');
 const prScaleLabel = document.getElementById('pianorollScale');
 const prPreviewBtn = document.getElementById('pianorollPreview');
@@ -2995,6 +3001,11 @@ const PR_GUTTER = 54; // left piano-keyboard gutter, px
 // the middle of the window: Live's F#3, the register it splits the difference at. (This package
 // names middle C c5, so that centre reads f#5 on the keyboard down the side.)
 const PR_DEFAULT_TOP = 78;
+// Top row an INDEX roll opens at: index 0 sits on the bottom row, because a pack is counted up
+// from its first file and nothing lives below it. (prMetrics clamps pitchTop to at least this, so
+// the axis can never be scrolled past 0 into negative indices.)
+const PR_INDEX_TOP = PR_ROWS - 1;
+const PR_INDEX_GROUP = 4; // rows per heavy line on the index axis - and shift-arrow's jump on it
 const PR_DEFAULT_VEL = 0.8; // velocity of a freshly drawn note
 const PR_EDGE_PX = 6; // right-edge grab zone for resizing
 const PR_MAX_ZOOM = 24; // deepest horizontal zoom (cells that many times wider than "fit")
@@ -3037,7 +3048,8 @@ let prPreviewEnabled = localStorage.getItem('poptartPianorollPreview') !== '0';
 let prSounding = null; // midi note currently ringing from a preview (so we can note-off it)
 let prTool = localStorage.getItem('poptartPianorollTool') === 'select' ? 'select' : 'draw'; // pencil vs arrow
 let prCmdMode = localStorage.getItem('poptartPianorollCmd') === 'prob' ? 'prob' : 'vel'; // what cmd-drag sets
-let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // fold the roll to the scale's notes
+let prScaleFold = localStorage.getItem('poptartPianorollScaleFold') === '1'; // show only the scale's rows
+let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // Live's Fold: only rows that have notes
 let prSideMin = localStorage.getItem('poptartPianorollSide') === '1'; // timing controls column minimized
 // The grid's logical width in CSS px. PR_W to start with, but the canvas is a flex child now: it
 // takes whatever the control column isn't using, so minimizing the column widens the roll instead
@@ -3070,7 +3082,7 @@ function setPatchScale(name) {
   const next = name ?? null;
   if (next === patchScale) return;
   patchScale = next;
-  if (prScaleLabel) prScaleLabel.textContent = patchScale ?? '';
+  if (prScaleLabel) prScaleLabel.textContent = prIndexMode() ? '' : (patchScale ?? '');
   if (prState) drawPianoroll();
 }
 
@@ -3096,20 +3108,114 @@ function prScaleInfo() {
   return prScaleCache.info;
 }
 
-// --- pitch lanes ---
-// The roll's vertical axis is a list of LANES rather than raw semitones. Unfolded every semitone
-// gets one, so a lane index simply *is* its MIDI note and all the geometry below is unchanged.
-// Folded, only the scale's notes get a lane - plus any pitch the roll actually uses, so folding
-// can never hide a note you drew (an out-of-key one keeps its dimmed lane, which is exactly the
-// signal you want) - and the roll compresses to the key.
+// --- the two axes ---
+// Every event in a roll carries BOTH a pitch and a sample index - two channels of one event (see
+// pianoroll.mjs). The mode says which of them the vertical axis is showing you:
+//
+//   note   the piano keyboard this editor has always had. A row is a semitone; a note drawn here
+//          gets sample index 0.
+//   index  a plain 0, 1, 2, … count of a pack's files, driving `.i()`. A row is a file; a note
+//          drawn here gets pitch c2, where a sample plays as recorded.
+//
+// Switching moves nothing and changes no sound - the timings, lengths, velocity, probability and
+// mute are the same events either way, and the other channel keeps whatever it already had. It is
+// a change of view, so it costs one `mode:` in the call and nothing else.
+//
+// What DOESN'T carry over is the key: a pack has no scale, so `scale` (the tint and its fold) is a
+// note-axis feature. It stays in the toolbar - greyed, not removed, so the buttons never move
+// under the pointer - and `fold`, which hides the rows nothing is drawn on, works on both.
 
-/** The lane list, low to high, or null for the identity mapping (lane index === midi). */
+const prIndexMode = () => prState?.mode === 'index';
+
+/** The channel the axis is showing: which key of a note object a drawn ROW reads and writes. */
+const prRowField = () => (prIndexMode() ? 'index' : 'midi');
+
+/** Where a note sits on the axis currently on screen. */
+const prRowOf = (nt) => (prIndexMode() ? pianorollMod.noteIndex(nt) : nt.midi);
+
+/** Move a note to row `row` on the axis currently on screen, leaving its other channel alone. */
+const prSetRow = (nt, row) => { nt[prRowField()] = Math.max(0, Math.min(127, Math.round(row))); };
+
+/** A fresh note at row `row`: the drawn channel takes the row, the other one its resting value. */
+const prNewNote = (row, cell) => ({
+  ...pianorollMod.pianoRollEventAt(row, prState.mode),
+  start: cell,
+  len: 1,
+  full: 1,
+  vel: PR_DEFAULT_VEL,
+  prob: 1,
+  mute: false,
+});
+
+/** Rows either side of one another in the axis's own units: an octave, or a group of 4 indices. */
+const prAxisJump = () => (prIndexMode() ? PR_INDEX_GROUP : 12);
+
+/** The mode button's face, and the one control that only means something on one of the two axes. */
+function prSyncMode() {
+  if (!prState) return;
+  const index = prIndexMode();
+  // The label IS the state - which is why this button never takes the `active` accent the toggles
+  // do: switching would flash the accent colour off behind the new word, and the word had already
+  // said it.
+  prModeBtn.textContent = index ? 'index' : 'note';
+  prModeBtn.title = index
+    ? 'rows are sample indices (.i()) — click for note names'
+    : 'rows are note names — click for sample indices (.i())';
+  // Greyed rather than hidden: a toolbar that reshuffles itself under the pointer is worse than a
+  // button that plainly doesn't apply here. Both of these are keyboard things - a key to fold to,
+  // and a pitch to audition - and the index rows have neither. (Preview would happily play the c2
+  // every index note sits at, which is worse than silence: it would sound the same on every row.)
+  prScaleFoldBtn.disabled = index;
+  prScaleFoldBtn.title = index
+    ? 'a key is a note-axis thing — switch to note rows to fold to the scale'
+    : 'show only the scale set by setscale()';
+  prPreviewBtn.disabled = index;
+  prPreviewBtn.title = index ? 'the index rows name files, not pitches — nothing to audition' : 'preview notes as you draw';
+  prScaleLabel.textContent = index ? '' : (patchScale ?? '');
+}
+
+/**
+ * Switch which channel the axis shows. Nothing about the roll moves: the notes are the same
+ * events, drawn against a different ruler, and each keeps the channel you can't currently see. The
+ * view is re-framed around wherever they land on the new axis, which is the only thing that has to
+ * change.
+ */
+function prSetMode(mode) {
+  if (!prState || prState.mode === mode) return;
+  prState.mode = mode;
+  prState.sel.clear(); // a selection is a set of rows to nudge, and the rows just changed meaning
+  prPreviewOff();
+  prSyncMode();
+  prFramePitch();
+  writePianorollCall();
+  drawPianoroll();
+}
+
+// --- lanes ---
+// The roll's vertical axis is a list of LANES rather than raw rows. Unfolded every row gets one, so
+// a lane index simply *is* its row value (a MIDI note, or a sample index) and all the geometry
+// below is unchanged. Two things narrow it:
+//
+//   fold    Live's Fold - only the rows something is actually drawn on. Works on either axis: on
+//           the keyboard it collapses a two-octave line to the notes it uses, on the index axis to
+//           the files the pack actually plays. Nothing drawn means nothing to fold to, so it falls
+//           back to the full axis rather than to an empty one.
+//   scale   only the notes of the global key, plus any pitch the roll actually uses - so it can
+//           never hide a note you drew (an out-of-key one keeps its dimmed lane, which is exactly
+//           the signal you want). Note axis only; a pack has no key.
+//
+// Both at once is just fold: it is the narrower of the two, and the rows it keeps are the ones you
+// drew, in or out of the key.
+
+/** The lane list, low to high, or null for the identity mapping (lane index === row value). */
 function prLaneList() {
-  const info = prState.fold ? prScaleInfo() : null;
+  const used = [...new Set(prLiveNotes(prState.notes).map(prRowOf))].sort((a, b) => a - b);
+  if (prState.fold) return used.length ? used : null;
+  const info = prIndexMode() || !prState.scaleFold ? null : prScaleInfo();
   if (!info) return null;
-  const used = new Set(prLiveNotes(prState.notes).map((nt) => nt.midi));
+  const inUse = new Set(used);
   const lanes = [];
-  for (let midi = 0; midi <= 127; midi++) if (info.pcs.has(pitchClass(midi)) || used.has(midi)) lanes.push(midi);
+  for (let midi = 0; midi <= 127; midi++) if (info.pcs.has(pitchClass(midi)) || inUse.has(midi)) lanes.push(midi);
   return lanes.length ? lanes : null;
 }
 
@@ -3123,10 +3229,10 @@ const prScaleRank = (midi, info) => (!info ? null : pitchClass(midi) === info.to
 const PR_LANE_TINT = [0, 0.07, 0.18]; // out (unused - dimmed instead), in key, tonic
 const PR_KEY_TINT = [0, 0.26, 0.62];
 
-/** midi -> lane index. Off-lane pitches (a note mid-drag) resolve to the nearest lane below. */
+/** row value -> lane index. Off-lane rows (a note mid-drag) resolve to the nearest lane below. */
 const prPosOf = (midi, m) => (m.lanes ? m.laneOf[Math.min(127, Math.max(0, Math.round(midi)))] : midi);
 
-/** lane index -> midi, clamped to the ends of the axis. */
+/** lane index -> row value, clamped to the ends of the axis. */
 const prMidiOf = (pos, m) =>
   m.lanes
     ? m.lanes[Math.min(m.lanes.length - 1, Math.max(0, Math.round(pos)))]
@@ -3156,7 +3262,9 @@ function prPreviewSend(note, isOn) {
   api('POST', '/api/previewNote', { trackId: prState.trackLabel, note, vel: PR_DEFAULT_VEL, isOn }).catch(() => {});
 }
 function prPreview(midi) {
-  if (!prPreviewEnabled || prSounding === midi) return;
+  // An index roll's rows are files in a pack, not pitches: there is nothing here that knows what
+  // row 3 sounds like, and playing it as MIDI note 3 would be a lie rather than a preview.
+  if (!prPreviewEnabled || prIndexMode() || prSounding === midi) return;
   if (prSounding != null) prPreviewSend(prSounding, false);
   prPreviewSend(midi, true);
   prSounding = midi;
@@ -3216,20 +3324,25 @@ function parsePianorollCall(inner) {
   // start: where the loop window opens, in cells. 0 (the default) is left out of the code entirely.
   const startM = /\bstart\s*:\s*(\d+)/.exec(inner);
   const start = startM ? Math.max(0, Math.round(Number(startM[1]))) : 0;
+  // mode: what the rows MEAN - notes (the default, and what every roll drawn before index mode
+  // existed says) or sample indices. Only ever written when it isn't the default.
+  const modeM = /\bmode\s*:\s*(["'`])(\w+)\1/.exec(inner);
+  const mode = pianorollMod.normalizePianoRollMode(modeM?.[2]);
   let notes = [];
   try {
     notes = pianorollMod.parsePianoRoll(noteStr);
   } catch {
     // unparseable note string - start from an empty roll
   }
-  return { notes, grid, len, start };
+  return { notes, grid, len, start, mode };
 }
 
 // Hidden notes (buried under another - see prClipOverlaps) are left out: the code holds what
 // actually sounds, and they are only kept around in the panel so they can come back.
-function serializePianorollCall({ notes, grid, len, start, idLiteral }) {
+function serializePianorollCall({ notes, grid, len, start, mode, idLiteral }) {
   const from = start ? `, start: ${start}` : ''; // a window that opens at 0 is the default - don't write it
-  const body = `"${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { grid: ${grid}, len: ${len}${from} }`;
+  const how = mode === 'index' ? ', mode: "index"' : ''; // notes are the default - don't write it
+  const body = `"${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { grid: ${grid}, len: ${len}${from}${how} }`;
   // The roll being edited is either drawn inline or kept under an id - same notes, same options,
   // one argument apart. The id is written back exactly as it was found, so _roll(0, …) doesn't
   // become _roll("0", …) the first time you move a note.
@@ -3932,10 +4045,10 @@ function prFramePitch() {
   const m = prMetrics();
   const notes = prLiveNotes(prState.notes);
   if (!notes.length) {
-    prState.pitchTop = prPosOf(PR_DEFAULT_TOP, m);
+    prState.pitchTop = prIndexMode() ? PR_INDEX_TOP : prPosOf(PR_DEFAULT_TOP, m);
     return;
   }
-  const positions = notes.map((nt) => prPosOf(nt.midi, m));
+  const positions = notes.map((nt) => prPosOf(prRowOf(nt), m));
   const center = Math.round((Math.min(...positions) + Math.max(...positions)) / 2);
   prState.pitchTop = center + Math.floor(PR_ROWS / 2);
 }
@@ -3960,7 +4073,7 @@ function openPianorollEditor(call, carry = null) {
   if (prState?.marker) prState.marker.clear();
   // A roll(...) definition is a pianoroll() call with an id in front of it - drop the id and the
   // rest parses identically.
-  const { notes, grid, len, start } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
+  const { notes, grid, len, start, mode } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
   prState = {
     marker: cm.markText(from, to, {}),
     callStart: call.start,
@@ -3968,8 +4081,13 @@ function openPianorollEditor(call, carry = null) {
     grid, // granularity: cells per cycle (the *grid multiplier)
     len, // loop length in cells (grid-th notes)
     start, // where the loop window opens, in cells - drag either end of the loop bar to move it
+    // What the vertical axis MEANS: 'note' (a piano keyboard, MIDI pitches) or 'index' (a plain
+    // 0,1,2… list of a sample pack's files). Per ROLL - it is written into the call - rather than
+    // sticky like the tool, because it is a fact about this roll's data, not a way of working.
+    mode,
     pitchTop: PR_DEFAULT_TOP, // replaced by prFramePitch below, which needs prState to exist
-    fold: prFold, // show only the scale's lanes (sticky across rolls, like the tool and cmd mode)
+    fold: prFold, // Live's Fold: only the rows something is drawn on (either axis)
+    scaleFold: prScaleFold, // ...and only the key's rows, on the note axis (both sticky, like the tool)
     zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
     scrollCells: 0, // leftmost visible cell when zoomed in
     sel: new Set(), // currently selected note objects (transient; mutated in place, never reserialized)
@@ -3996,6 +4114,7 @@ function openPianorollEditor(call, carry = null) {
     prState.scrollCells = carry.scrollCells;
   }
   prSyncGridLenInputs();
+  prSyncMode();
   prSyncRollHead();
   if (call.id && !wasOpen) prRefreshRollList(); // the prebake half of the picker, asked for once
   prPanel.classList.remove('hidden');
@@ -4311,8 +4430,8 @@ function prPlayheadLoop() {
 
 const PR_HISTORY_MAX = 200; // snapshots kept; the oldest are dropped past this
 
-const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start });
-const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}`;
+const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start, mode: prState.mode });
+const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}|${s.mode}`;
 
 // Record the roll's current state, unless it's identical to the entry we're already sitting on -
 // which makes this safe to call from anywhere, including the code-sync path that fires on every
@@ -4337,8 +4456,10 @@ function prHistoryStep(delta) {
   prState.grid = snap.grid;
   prState.len = snap.len;
   prState.start = snap.start;
+  prState.mode = snap.mode;
   prState.sel.clear(); // the restored notes are new objects; the old selection means nothing
   prSyncGridLenInputs();
+  prSyncMode();
   writePianorollCall(false); // restoring is not itself an edit to record
   drawPianoroll();
 }
@@ -4409,6 +4530,13 @@ function syncPianorollFromCode() {
   prState.grid = parsed.grid;
   prState.len = parsed.len;
   prState.start = parsed.start;
+  if (parsed.mode !== prState.mode) {
+    // Typed `mode: "index"` into the call by hand - the same change of view the button makes.
+    prState.mode = parsed.mode;
+    prState.sel.clear();
+    prPreviewOff();
+    prSyncMode();
+  }
   if (pianorollMod.serializePianoRoll(parsed.notes) !== pianorollMod.serializePianoRoll(prLiveNotes(prState.notes))) {
     prState.notes = parsed.notes;
     prState.sel.clear(); // the old note objects are gone
@@ -4511,7 +4639,6 @@ function prMetrics() {
 
 const prCellToX = (cell, m) => PR_GUTTER + (cell - m.scroll) * m.cellW;
 const prPosToY = (pos, m) => PR_TOPBAR + (prState.pitchTop - pos) * m.rowH;
-const prMidiToY = (midi, m) => prPosToY(prPosOf(midi, m), m);
 const prCellFloat = (px, m) => m.scroll + (px - PR_GUTTER) / m.cellW; // fractional cell under px
 
 function prCanvasPos(e) {
@@ -4528,14 +4655,14 @@ function prCellAt(px, m) {
 const prClampCell = (px, m) => Math.max(0, Math.min(m.cols - 1, Math.floor(prCellFloat(px, m))));
 // pitchTop is fractional (smooth scroll); the integer lane containing py is ceil(top - rows).
 const prPosAt = (py, m) => Math.ceil(prState.pitchTop - (py - PR_TOPBAR) / m.rowH);
-const prMidiAt = (py, m) => prMidiOf(prPosAt(py, m), m);
+const prMidiAt = (py, m) => prMidiOf(prPosAt(py, m), m); // the ROW value under py, on whichever axis is showing
 
-// Topmost note covering (cell, midi) - later notes draw on top (and win overlaps), so scan from
-// the end. Hidden notes aren't on the grid at all, so they can't be hit.
-function prNoteAt(cell, midi) {
+// Topmost note covering (cell, row) on the axis currently on screen - later notes draw on top (and
+// win overlaps), so scan from the end. Hidden notes aren't on the grid at all, so they can't be hit.
+function prNoteAt(cell, row) {
   for (let i = prState.notes.length - 1; i >= 0; i--) {
     const nt = prState.notes[i];
-    if (!nt.hidden && nt.midi === midi && cell >= nt.start && cell < nt.start + nt.len) return i;
+    if (!nt.hidden && prRowOf(nt) === row && cell >= nt.start && cell < nt.start + nt.len) return i;
   }
   return null;
 }
@@ -4611,6 +4738,38 @@ function drawPianoKeys(ctx, col, m, info) {
     ctx.fillStyle = rank >= 1 ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.5)';
     ctx.textAlign = 'right';
     ctx.fillText(midiName(M), bw - 4, y + rowH / 2 + 0.5);
+  }
+  ctx.restore();
+
+  ctx.strokeStyle = col('--border-strong');
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PR_GUTTER + 0.5, 0); ctx.lineTo(PR_GUTTER + 0.5, H); ctx.stroke();
+}
+
+// The index axis's gutter, in place of the keyboard: just the numbers, right-aligned, one per row,
+// with every fourth called out - the same job the C labels and the heavier octave lines do on the
+// piano, so a row twelve up from the bottom can be counted to rather than squinted at. No keys and
+// no scale tint: an index names a file in a pack, and a pack has neither black notes nor a key.
+function drawIndexRows(ctx, col, m) {
+  const { H, gridTop, rowH, laneTop } = m;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, gridTop, PR_GUTTER, laneTop - gridTop);
+
+  ctx.save(); // clip to the grid area so partial edge rows don't spill into the ruler or the value lane
+  ctx.beginPath(); ctx.rect(0, gridTop, PR_GUTTER, laneTop - gridTop); ctx.clip();
+  for (let p = Math.ceil(prState.pitchTop); p >= Math.floor(prState.pitchTop - PR_ROWS) - 1; p--) {
+    if (p < 0 || p > m.laneMax) continue;
+    const row = prMidiOf(p, m); // the index itself - folded, the lane it sits in is not its number
+    const y = prPosToY(p, m);
+    ctx.strokeStyle = col('--border');
+    ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y + rowH); ctx.lineTo(PR_GUTTER, y + rowH); ctx.stroke();
+    const marked = row % PR_INDEX_GROUP === 0;
+    ctx.font = `${marked ? '600 ' : ''}9px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    ctx.fillStyle = col(marked ? '--text' : '--text-dim');
+    ctx.fillText(String(row), PR_GUTTER - 5, y + rowH / 2 + 0.5);
   }
   ctx.restore();
 
@@ -4837,7 +4996,9 @@ function drawPianoroll() {
   // tonic in the accent, in-key notes on the plain background, out-of-key ones dimmed - so the
   // key reads off the grid the way it does in Live. Folded, the out-of-key lanes are gone
   // entirely and the dimmed ones left are notes you drew outside the key.
-  const info = prScaleInfo();
+  // No scale colouring on the index axis: its rows are files in a pack, not pitches in a key.
+  const info = prIndexMode() ? null : prScaleInfo();
+  const index = prIndexMode();
   const accent = col('--accent');
   ctx.fillStyle = col('--bg');
   ctx.fillRect(PR_GUTTER, gridTop, W - PR_GUTTER, gridH);
@@ -4857,15 +5018,16 @@ function drawPianoroll() {
         ctx.globalAlpha = PR_LANE_TINT[rank];
         ctx.fillRect(PR_GUTTER, y0, W - PR_GUTTER, y1 - y0);
         ctx.globalAlpha = 1;
-      } else if (rank === 0 || (rank === null && isBlackKey(M))) {
+      } else if (!index && (rank === 0 || (rank === null && isBlackKey(M)))) {
         ctx.fillStyle = col('--hover-bg');
         ctx.fillRect(PR_GUTTER, y0, W - PR_GUTTER, y1 - y0);
       }
     }
     if (y >= gridTop - 0.5 && y <= laneTop + 0.5) {
       ctx.strokeStyle = col('--border');
-      // heavier at each octave boundary - the tonic's when there's a scale, otherwise each C
-      ctx.lineWidth = (info ? rank === 2 : M % 12 === 0) ? 1.2 : 0.5;
+      // heavier at each octave boundary - the tonic's when there's a scale, otherwise each C - and
+      // every fourth row on the index axis, which is what its gutter counts in.
+      ctx.lineWidth = (index ? M % PR_INDEX_GROUP === 0 : info ? rank === 2 : M % 12 === 0) ? 1.2 : 0.5;
       ctx.beginPath(); ctx.moveTo(PR_GUTTER, y); ctx.lineTo(W, y); ctx.stroke();
     }
   }
@@ -4889,14 +5051,14 @@ function drawPianoroll() {
   const selCol = col('--text');
   const muteCol = col('--text-dim');
   for (const nt of prLiveNotes(prState.notes)) {
-    const pos = prPosOf(nt.midi, m);
+    const pos = prPosOf(prRowOf(nt), m);
     if (pos > prState.pitchTop + 1 || pos < m.bottomPos) continue; // +1: keep a partial top lane
     const x = prCellToX(nt.start, m);
     const x2 = prCellToX(nt.start + nt.len, m);
     if (x2 <= PR_GUTTER || x >= W) continue;
     const dx = Math.max(PR_GUTTER + 0.5, x);
     const dx2 = Math.min(W, x2);
-    const y = prMidiToY(nt.midi, m);
+    const y = prPosToY(pos, m);
     const w = Math.max(2, dx2 - dx - 1);
     const selected = prState.sel.has(nt);
     // Muted notes ignore velocity too - a fixed wash, since the loudness of a note that doesn't
@@ -4940,7 +5102,9 @@ function drawPianoroll() {
   }
 
   drawLoopBar(ctx, col, m);
-  drawPianoKeys(ctx, col, m, info); // last, so it overlays the grid's left edge cleanly
+  // last, so the gutter overlays the grid's left edge cleanly
+  if (index) drawIndexRows(ctx, col, m);
+  else drawPianoKeys(ctx, col, m, info);
 }
 
 // Keep the moved selection within the visible pitch window (in lane coordinates, so it follows a
@@ -4948,7 +5112,7 @@ function drawPianoroll() {
 function prScrollTo(notes) {
   if (!notes.length) return;
   const m = prMetrics();
-  const positions = notes.map((n) => prPosOf(n.midi, m));
+  const positions = notes.map((n) => prPosOf(prRowOf(n), m));
   const hi = Math.max(...positions);
   const lo = Math.min(...positions);
   if (hi > prState.pitchTop) prState.pitchTop = hi;
@@ -4965,7 +5129,7 @@ function prCursorFor(px, py, m, velMod) {
     if (px < PR_GUTTER) return 'pointer';
     return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
   }
-  if (px < PR_GUTTER) return 'pointer'; // over the piano keyboard
+  if (px < PR_GUTTER) return prIndexMode() ? 'default' : 'pointer'; // over the piano keyboard - the index gutter has nothing to play
   const cell = prCellAt(px, m);
   const emptyCursor = prTool === 'draw' ? CUR_PENCIL : 'crosshair'; // pencil draws, arrow marquees
   if (cell == null) return emptyCursor;
@@ -5039,15 +5203,15 @@ function prDuplicate() {
   drawPianoroll();
 }
 
-// Fold on/off, keeping the view where it was: the pitch axis changes length underneath, so the
-// note at the middle of the window is re-centered in the new coordinates rather than letting the
+// Either fold on/off, keeping the view where it was: the axis changes length underneath, so the
+// row at the middle of the window is re-centered in the new coordinates rather than letting the
 // raw lane index carry over (which would jump the roll somewhere unrelated).
-function prSetFold(on) {
+function prSetFold(key, on) {
   const before = prMetrics();
-  const centerMidi = prMidiOf(Math.round(prState.pitchTop - PR_ROWS / 2), before);
-  prState.fold = on;
+  const centerRow = prMidiOf(Math.round(prState.pitchTop - PR_ROWS / 2), before);
+  prState[key] = on;
   const after = prMetrics();
-  prState.pitchTop = prPosOf(centerMidi, after) + Math.floor(PR_ROWS / 2);
+  prState.pitchTop = prPosOf(centerRow, after) + Math.floor(PR_ROWS / 2);
   drawPianoroll();
 }
 
@@ -5085,7 +5249,7 @@ function initPianorollCanvas() {
   new ResizeObserver(prSizeCanvas).observe(prCanvas);
 
   let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'lane'|'marquee'|'loop'|'audition', ... }
-  const snapshotPos = () => [...prState.sel].map((n) => ({ n, start: n.start, midi: n.midi }));
+  const snapshotPos = () => [...prState.sel].map((n) => ({ n, start: n.start, row: prRowOf(n) }));
   const snapshotLen = () => [...prState.sel].map((n) => ({ n, len: n.len }));
   // Raise the dragged notes over whatever they land on - but only once the drag has actually moved
   // something, so a click that merely selects a note never reshuffles the lane it sits in.
@@ -5100,7 +5264,7 @@ function initPianorollCanvas() {
     const copies = d.orig.map((o) => ({ ...o.n })); // still at their original cells - nothing has moved yet
     prState.notes.push(...copies); // last, so the copies win the overlap rule wherever they land
     prState.sel = new Set(copies);
-    d.orig = copies.map((n, i) => ({ n, start: d.orig[i].start, midi: d.orig[i].midi }));
+    d.orig = copies.map((n, i) => ({ n, start: d.orig[i].start, row: d.orig[i].row }));
   };
   const setCursor = (c) => { if (prCanvas.style.cursor !== c) prCanvas.style.cursor = c; };
   const dragCursor = (d) =>
@@ -5145,14 +5309,18 @@ function initPianorollCanvas() {
       return;
     }
     const pos = prPosAt(py, m);
-    const midi = prMidiOf(pos, m);
+    const row = prMidiOf(pos, m);
     const cell = prCellAt(px, m);
     if (cell == null) {
-      // clicked the piano keyboard - audition that key, don't edit
-      if (px < PR_GUTTER && pos <= prState.pitchTop && pos >= m.bottomPos) { drag = { kind: 'audition' }; prPreview(midi); }
+      // clicked the piano keyboard - audition that key, don't edit. There is no key to audition on
+      // the index axis, where the gutter is a list of files the engine holds, not pitches.
+      if (!prIndexMode() && px < PR_GUTTER && pos <= prState.pitchTop && pos >= m.bottomPos) {
+        drag = { kind: 'audition' };
+        prPreview(row);
+      }
       return;
     }
-    const hit = prNoteAt(cell, midi);
+    const hit = prNoteAt(cell, row);
     const velMod = e.metaKey || e.ctrlKey; // cmd (mac) / ctrl - velocity or probability drag
     if (hit != null) {
       const nt = prState.notes[hit];
@@ -5179,12 +5347,12 @@ function initPianorollCanvas() {
       prState.marquee = { x: px, y: py, w: 0, h: 0 };
     } else if (prInLoop(cell)) { // draw a note (only inside the loop window)
       if (!e.shiftKey) prState.sel = new Set();
-      const nt = { midi, start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1, mute: false };
+      const nt = prNewNote(row, cell);
       prState.notes.push(nt);
       prState.sel.add(nt);
       drag = { kind: 'create', note: nt };
       prClipOverlaps(); // pushed last, so it takes the lane from whatever was under the pencil
-      prPreview(midi);
+      prPreview(nt.midi);
     } else {
       prState.sel = new Set(); // click in the dimmed area outside the loop window - just clear selection
     }
@@ -5220,7 +5388,7 @@ function initPianorollCanvas() {
       if (dCell || dPos) { altCopy(drag); raiseOnce(drag); }
       for (const o of drag.orig) {
         o.n.start = prClampToLoop(o.start + dCell);
-        o.n.midi = prMidiOf(prPosOf(o.midi, m) + dPos, m);
+        prSetRow(o.n, prMidiOf(prPosOf(o.row, m) + dPos, m));
       }
       prClipOverlaps(); // notes it passes over give way, and come back behind it
       if (drag.orig[0]) prPreviewNotes([drag.orig[0].n]);
@@ -5244,7 +5412,7 @@ function initPianorollCanvas() {
       prState.marquee = { x: rx, y: ry, w: rw, h: rh };
       const c0 = prCellFloat(rx, m), c1 = prCellFloat(rx + rw, m);
       const midiHi = prMidiAt(ry, m), midiLo = prMidiAt(ry + rh, m);
-      const inRect = (n) => n.midi >= midiLo && n.midi <= midiHi && n.start < c1 && n.start + n.len > c0;
+      const inRect = (n) => prRowOf(n) >= midiLo && prRowOf(n) <= midiHi && n.start < c1 && n.start + n.len > c0;
       prState.sel = new Set([...drag.base, ...prLiveNotes(prState.notes).filter(inRect)]);
     }
     setCursor(dragCursor(drag));
@@ -5282,7 +5450,7 @@ function initPianorollCanvas() {
       writePianorollCall();
       drawPianoroll();
     } else if (prTool === 'select' && prInLoop(cell)) { // double-click empty in the arrow tool draws a note
-      const nt = { midi: prMidiAt(py, m), start: cell, len: 1, full: 1, vel: PR_DEFAULT_VEL, prob: 1, mute: false };
+      const nt = prNewNote(prMidiAt(py, m), cell);
       prState.notes.push(nt);
       prState.sel = new Set([nt]);
       prClipOverlaps();
@@ -5352,15 +5520,15 @@ function initPianorollCanvas() {
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (!sel.length) return;
       e.preventDefault();
-      // A plain arrow steps one LANE (a semitone, or one scale step when folded); shift is an
-      // octave, which is 12 semitones either way.
+      // A plain arrow steps one LANE (a semitone, or one scale step when folded); shift is a jump
+      // in whatever the axis counts in - an octave of 12 semitones, or a group of 4 indices.
       const dir = e.key === 'ArrowUp' ? 1 : -1;
       const m = prMetrics();
+      const jump = prAxisJump();
       prTouch(sel); // a nudged note lands on top, like a dragged one
       for (const n of sel) {
-        n.midi = e.shiftKey
-          ? Math.min(127, Math.max(0, n.midi + dir * 12))
-          : prMidiOf(prPosOf(n.midi, m) + dir, m);
+        const row = prRowOf(n);
+        prSetRow(n, e.shiftKey ? row + dir * jump : prMidiOf(prPosOf(row, m) + dir, m));
       }
       prScrollTo(sel);
       prPreviewNotes(sel);
@@ -5542,7 +5710,7 @@ function initPianorollEditor() {
   // quantize `.scale()`/`.sc()` apply to a note pattern, so a drawn line and a written one land on
   // the same pitches. One history entry, so cmd-Z puts the out-of-key notes back.
   prScaleLabel.addEventListener('click', () => {
-    if (!prState || !prScaleInfo()) return;
+    if (!prState || prIndexMode() || !prScaleInfo()) return; // a pack has no key to snap to
     prRefocus();
     const live = prLiveNotes(prState.notes);
     const snapped = live.map((nt) => notesMod.quantizeToScale(nt.midi, patchScale));
@@ -5555,22 +5723,48 @@ function initPianorollEditor() {
     logLine(`snapped ${moved} note${moved === 1 ? '' : 's'} to ${patchScale}`);
   });
 
-  // Fold: show only the global scale's lanes. Sticky like the tool and cmd mode, but it needs a
-  // scale to fold to - without one the button says so rather than silently doing nothing.
+  // note ⇄ index: show the other channel. Per roll (it is written into the call, and undo walks
+  // back over it), unlike the tool and the folds, which are ways of working and stay sticky. No log
+  // line: nothing happened to the music, and the button's own label says where you now are.
+  prModeBtn.addEventListener('click', () => {
+    if (!prState) return;
+    prSetMode(prIndexMode() ? 'note' : 'index');
+    prRefocus();
+  });
+
+  // scale: show only the global scale's lanes. Sticky like the tool and cmd mode, but it needs a
+  // scale to fold to - without one the button says so rather than silently doing nothing. (On the
+  // index axis it is disabled outright; see prSyncMode.)
+  const reflectScaleFold = () => {
+    prScaleFoldBtn.classList.toggle('active', prScaleFold);
+    prScaleFoldBtn.title = prScaleFold ? 'showing the scale’s notes' : 'show only the scale set by setscale()';
+  };
+  reflectScaleFold();
+  prScaleFoldBtn.addEventListener('click', () => {
+    if (!prScaleFold && !prScaleInfo()) {
+      logLine('scale needs a key — put setscale("F minor") in the buffer', true);
+      return;
+    }
+    prScaleFold = !prScaleFold;
+    localStorage.setItem('poptartPianorollScaleFold', prScaleFold ? '1' : '0');
+    reflectScaleFold();
+    if (prState) prSetFold('scaleFold', prScaleFold);
+    prRefocus();
+  });
+
+  // fold: Live's Fold - drop every row nothing is drawn on, so a line spread over two octaves (or a
+  // pack sequence using four of its files) closes up to the rows you are actually working in. Both
+  // axes, no key needed; an empty roll has nothing to fold to and stays as it is.
   const reflectFold = () => {
     prFoldBtn.classList.toggle('active', prFold);
-    prFoldBtn.title = prFold ? 'showing the scale’s notes' : 'showing every semitone';
+    prFoldBtn.title = prFold ? 'showing only the rows that have notes' : 'show only the rows that have notes';
   };
   reflectFold();
   prFoldBtn.addEventListener('click', () => {
-    if (!prFold && !prScaleInfo()) {
-      logLine('fold needs a scale — put setscale("F minor") in the buffer', true);
-      return;
-    }
     prFold = !prFold;
     localStorage.setItem('poptartPianorollFold', prFold ? '1' : '0');
     reflectFold();
-    if (prState) prSetFold(prFold);
+    if (prState) prSetFold('fold', prFold);
     prRefocus();
   });
 
@@ -5612,11 +5806,11 @@ function initPianorollEditor() {
     if (!range) return;
     const code = cm.getValue();
     const notes = prLiveNotes(prState.notes);
-    // Folded to the key, the roll is being drawn IN that key, so it's written out in it: scale
+    // With `scale` on, the roll is being drawn IN that key, so it's written out in it: scale
     // degrees plus a `.sc(octave)`, which re-keys with the setscale line instead of freezing the
-    // pitches that happened to be under the pencil. Unfolded, the roll is chromatic and so is what
+    // pitches that happened to be under the pencil. Off, the roll is chromatic and so is what
     // it converts to.
-    const scale = prState.fold && prScaleInfo() ? patchScale : null;
+    const scale = prState.scaleFold && !prIndexMode() && prScaleInfo() ? patchScale : null;
     // Each destination gets the expression indented to ITS own line: one roll can be written into
     // several patterns, at whatever depth each of them sits.
     const exprAt = (at) => pianorollMod.pianoRollToMini(notes, {
@@ -5625,6 +5819,9 @@ function initPianorollEditor() {
       start: prState.start,
       indent: /^[ \t]*/.exec(code.slice(code.lastIndexOf('\n', at - 1) + 1))[0],
       scale,
+      // Only decides which channel carries the RHYTHM where none of them differs from its default;
+      // every channel the roll actually sets is written whichever axis it was drawn on.
+      mode: prState.mode,
     });
     // Degrees can only name notes that are IN the key, so anything out of it lands on its nearest
     // neighbour - a real pitch change, and the one thing about this rewrite that isn't lossless.

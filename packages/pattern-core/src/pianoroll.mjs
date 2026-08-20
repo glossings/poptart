@@ -4,12 +4,17 @@
 // notes the scheduler plays - and depends on nothing outside this package (notes.mjs, its one
 // import, is served the same way and is itself dependency-free).
 //
-// Format: space-separated note events `[!]midi,start,len[,vel[,prob]]`, e.g. "60,0,4 64,0,4,0.7 67,8,8".
+// Format: space-separated note events `[!]midi[:index],start,len[,vel[,prob]]`, e.g.
+// "60,0,4 64,0,4,0.7 67,8,8" or "24:0,0,1 24:3,4,1".
 //   !     - optional MUTE marker: the note is deactivated (Live's `0` key). It stays in the roll -
 //           drawn greyed out, still movable, still holding its lane against the overlap rule - but
 //           it never sounds and it isn't converted to mini-notation. Unmuting it is one keypress,
 //           which is the point of keeping it in the string rather than deleting it.
 //   midi  - MIDI note number, 0..127 (this package's c5 = 60 convention)
+//   index - optional sample index, >= 0 (omitted when 0, the default): which file of the pack this
+//           event plays, the `i` channel. EVERY event has both a pitch and an index - they are two
+//           channels of one event, not two kinds of event - and the roll's mode only says which of
+//           them the editor is drawing on (see below).
 //   start - onset cell, integer 0..steps-1 (a cell is one column of the grid)
 //   len   - length in cells, integer >= 1 (may run past the last cell: the note rings on, like a
 //           mini-notation tie)
@@ -21,11 +26,29 @@
 // not the string - the same split shape.mjs uses for lfo()'s rate/mode - and so does the loop
 // window it plays: `len` cells starting at cell `start`. Notes are written at their drawn cell
 // either way, so sliding the window over them never rewrites a single note.
+//
+// The options also carry the roll's MODE - which of the two channels the EDITOR draws on:
+//   note   (the default) - the vertical axis is a piano keyboard and a drawn row is a pitch; the
+//          index of a note drawn there is 0
+//   index  - the vertical axis is a plain 0, 1, 2, … count and a drawn row is a sample index; the
+//          pitch of a note drawn there is PIANOROLL_DEFAULT_NOTE, c2, where a sample plays as
+//          recorded
+// It is EDITOR METADATA and nothing else: playback reads both channels off every event whichever
+// mode the roll is in, so switching modes moves not one note and changes not one sound. It is in
+// the call so that reopening the panel puts you back on the axis you were drawing on.
 
 import { DEFAULT_SCALE_OCTAVE, midiToDegree, noteToMidi, scaleAtOctave, scaleParts } from './notes.mjs';
 
 export const PIANOROLL_DEFAULT_STEPS = 16;
 export const PIANOROLL_MAX_GRID = 512; // finest grid the retime buttons will push a roll to
+export const PIANOROLL_MODES = ['note', 'index'];
+// What the channel a roll ISN'T being drawn on is worth. A note drawn on the index axis plays at
+// c2 - the pitch a sample sounds at unrepitched, and what a note-less pattern fires anyway
+// (DEFAULT_SYNTH_NOTE in signal.mjs) - and a note drawn on the piano keyboard plays the pack's
+// first file. Both are the value that channel has when nobody has set it, so an event drawn on
+// one axis is silent about the other rather than asserting anything.
+export const PIANOROLL_DEFAULT_NOTE = 24;
+export const PIANOROLL_DEFAULT_INDEX = 0;
 
 /** Clamp/validate a grid width into a positive integer number of cells per cycle. */
 export function normalizePianoRollSteps(steps) {
@@ -34,6 +57,31 @@ export function normalizePianoRollSteps(steps) {
     throw new Error(`[pianoroll] steps must be a positive integer number of cells (got ${JSON.stringify(steps)})`);
   }
   return n;
+}
+
+/**
+ * Which axis the editor draws this roll on: 'index' or 'note' (the default, and what every roll
+ * written before index mode existed says). Anything unrecognised comes back as 'note' - the caller
+ * warns about it, since a roll that opens on the keyboard is a better answer to a typo than one
+ * that refuses to open at all.
+ */
+export function normalizePianoRollMode(mode) {
+  return String(mode ?? 'note').trim().toLowerCase() === 'index' ? 'index' : 'note';
+}
+
+/** The channel `mode` draws on, and the one it leaves at its default. */
+export const PIANOROLL_ROW_FIELD = { note: 'midi', index: 'index' };
+
+/**
+ * A fresh event drawn at row `row` on `mode`'s axis: the drawn channel takes the row, the other one
+ * takes its resting value. This is the whole of what the two modes disagree about.
+ */
+export function pianoRollEventAt(row, mode) {
+  const index = normalizePianoRollMode(mode) === 'index';
+  return {
+    midi: index ? PIANOROLL_DEFAULT_NOTE : clampInt(row, 0, 127),
+    index: index ? Math.max(0, Math.round(row)) : PIANOROLL_DEFAULT_INDEX,
+  };
 }
 
 /**
@@ -58,14 +106,19 @@ export function parsePianoRoll(str) {
     const mute = tok.startsWith('!');
     const parts = (mute ? tok.slice(1) : tok).split(',');
     if (parts.length < 3 || parts.length > 5) {
-      throw new Error(`[pianoroll] bad note "${tok}" (want "midi,start,len" .. "midi,start,len,vel,prob")`);
+      throw new Error(`[pianoroll] bad note "${tok}" (want "midi[:index],start,len" .. "midi[:index],start,len,vel,prob")`);
     }
-    const [midi, start, len, vel = 1, prob = 1] = parts.map(Number);
-    if (![midi, start, len, vel, prob].every(Number.isFinite)) {
+    // The pitch field carries the sample index behind a ":" when it isn't the default - the same
+    // "one token, several channels" spelling .as("note:vel") uses - so a roll that only ever plays
+    // pitches reads exactly as it always did.
+    const [midiStr, indexStr = PIANOROLL_DEFAULT_INDEX] = parts[0].split(':');
+    const [midi, index, start, len, vel = 1, prob = 1] = [midiStr, indexStr, ...parts.slice(1)].map(Number);
+    if (![midi, index, start, len, vel, prob].every(Number.isFinite)) {
       throw new Error(`[pianoroll] non-numeric field in note "${tok}"`);
     }
     return {
       midi: clampInt(midi, 0, 127),
+      index: Math.max(0, Math.round(index)),
       start: Math.max(0, Math.round(start)),
       len: Math.max(1, Math.round(len)),
       vel: clamp01(vel),
@@ -78,9 +131,11 @@ export function parsePianoRoll(str) {
 export function serializePianoRoll(notes) {
   return [...notes]
     // Left-to-right, low-to-high: stable output so re-serializing an unchanged roll is a no-op.
-    .sort((a, b) => a.start - b.start || a.midi - b.midi)
+    .sort((a, b) => a.start - b.start || a.midi - b.midi || noteIndex(a) - noteIndex(b))
     .map((nt) => {
-      let s = `${nt.mute ? '!' : ''}${Math.round(nt.midi)},${Math.round(nt.start)},${Math.round(nt.len)}`;
+      const index = noteIndex(nt);
+      const pitch = index === PIANOROLL_DEFAULT_INDEX ? `${Math.round(nt.midi)}` : `${Math.round(nt.midi)}:${index}`;
+      let s = `${nt.mute ? '!' : ''}${pitch},${Math.round(nt.start)},${Math.round(nt.len)}`;
       // vel holds prob's field slot, so a sub-unity prob forces vel to be written even when it's 1.
       if (nt.prob < 1) s += `,${fmt(nt.vel)},${fmt(nt.prob)}`;
       else if (nt.vel < 1) s += `,${fmt(nt.vel)}`;
@@ -89,10 +144,21 @@ export function serializePianoRoll(notes) {
     .join(' ');
 }
 
+/** A note's sample index, defaulted - notes built before the channel existed simply haven't got one. */
+export const noteIndex = (nt) => (Number.isFinite(nt.index) ? Math.round(nt.index) : PIANOROLL_DEFAULT_INDEX);
+
 /**
- * Ableton-style overlap resolution, one pitch lane at a time: two notes at the same pitch are
+ * Ableton-style overlap resolution, one lane at a time: two notes in the same lane are
  * never left ringing together, so a long note with a short one dropped into its middle stops where
  * the short one starts instead of carrying on invisibly behind it.
+ *
+ * A LANE is a pitch and an index together, not either one alone. Both are drawn on the same rows -
+ * whichever axis the roll is on, the other channel is invisible - so keying the lane on the visible
+ * axis would make the rule DESTRUCTIVE across a mode switch: a two-file stack drawn on the index
+ * axis (one pitch, two indices, one onset) would collapse to a single note the moment the keyboard
+ * came back, and switching away and back would have quietly deleted half the roll. Keyed on the
+ * pair, an overlap only ever resolves between events that really are the same event twice, which is
+ * the same rule as before for any roll that uses only one of the two channels - the usual case.
  *
  * Priority is ARRAY ORDER - later notes win, which is also the order they are drawn in and the
  * order hit-testing scans, so "the note on top" means one thing everywhere. The winner keeps the
@@ -121,8 +187,9 @@ export function clipOverlaps(notes) {
 
   const lanes = new Map();
   notes.forEach((nt, i) => {
-    if (!lanes.has(nt.midi)) lanes.set(nt.midi, []);
-    lanes.get(nt.midi).push({ nt, i });
+    const key = `${Math.round(nt.midi)}:${noteIndex(nt)}`;
+    if (!lanes.has(key)) lanes.set(key, []);
+    lanes.get(key).push({ nt, i });
   });
 
   for (const lane of lanes.values()) {
@@ -170,10 +237,22 @@ export function clipOverlaps(notes) {
  * name notes in the key, so an out-of-key one is written as its nearest degree (see midiToDegree) -
  * the one lossy part of this conversion.
  *
+ * The `i` channel is written the same way, as its own field, whenever any event carries a sample
+ * index - `i(\`<0 ~ 3>*8\`)` on its own, `\`<…>\`.as("note:i:vel")` alongside the others - so a roll
+ * that sets both channels converts with both. A channel NO event sets is left out entirely: a roll
+ * of plain pitches writes no `i`, and one drawn purely on the index axis (every pitch at c2, the
+ * default) writes no `note`, exactly as `.as("vel")` leaves the pitch out today. If that empties
+ * the field list - nothing about the roll differs from the defaults - the axis it was drawn on goes
+ * back into the cells, since something has to carry the rhythm.
+ *
+ * `i` is the one field that never lifts out of the cells onto a control call the way a constant
+ * pitch does: `.i()` only exists once there is a sampler, and the call this replaces comes before
+ * the `.s()`. There is no scale form of it either - an index is not a pitch.
+ *
  * Muted notes are left out entirely: this writes down what the roll PLAYS, and mini-notation has no
  * spelling for a note that's there but switched off.
  */
-export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', scale = null } = {}) {
+export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', scale = null, mode = 'note' } = {}) {
   const g = normalizePianoRollSteps(grid);
   const total = Math.max(1, Math.round(len ?? g));
   const from = Math.max(0, Math.round(start));
@@ -184,27 +263,41 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   for (const nt of notes) onsets[nt.start - from].push(nt);
   const anyVel = notes.some((nt) => nt.vel < 1);
   const anyClip = notes.some((nt) => nt.len > 1);
-  const octave = scale ? rollOctave(notes, scale) : null;
+  const anyNote = notes.some((nt) => Math.round(nt.midi) !== PIANOROLL_DEFAULT_NOTE);
+  const anyIndex = notes.some((nt) => noteIndex(nt) !== PIANOROLL_DEFAULT_INDEX);
+  const drawnIndex = normalizePianoRollMode(mode) === 'index';
   // Degrees are read against the scale AS .sc(octave) will build it, so the two agree exactly.
-  const keyed = scale ? scaleAtOctave(scale, octave) : null;
-  const pitchField = scale ? 'n' : 'note';
-  const present = [pitchField, ...(anyVel ? ['vel'] : []), ...(anyClip ? ['clip'] : [])];
+  // With no pitch to write (every event at the default note) there is no key to write it in either.
+  const octave = scale && anyNote ? rollOctave(notes, scale) : null;
+  const keyed = octave === null ? null : scaleAtOctave(scale, octave);
+  const pitchField = keyed ? 'n' : 'note';
+  const present = [
+    ...(anyNote ? [pitchField] : []),
+    ...(anyIndex ? ['i'] : []),
+    ...(anyVel ? ['vel'] : []),
+    ...(anyClip ? ['clip'] : []),
+  ];
 
   const pitchStr = (nt) => String(keyed ? midiToDegree(nt.midi, keyed) : Math.round(nt.midi));
-  const fieldStr = (nt, f) => (f === pitchField ? pitchStr(nt) : f === 'vel' ? fmt(nt.vel) : String(Math.round(nt.len)));
+  const fieldStr = (nt, f) =>
+    (f === pitchField ? pitchStr(nt) : f === 'i' ? String(noteIndex(nt)) : f === 'vel' ? fmt(nt.vel) : String(Math.round(nt.len)));
   // The fields that vary stay in the cells; the ones that don't are lifted onto control calls. An
   // empty roll agrees on nothing (there is nothing to agree), so it keeps writing its pitch field.
   const constant = (f) => notes.length > 0 && notes.every((nt) => fieldStr(nt, f) === fieldStr(notes[0], f));
-  let pulled = present.filter(constant);
+  // ...except `i`, which has nowhere to be lifted TO: `.i(4)` needs a sampler, and this expression
+  // is written in the pianoroll() call's place, before the `.s()` that makes one.
+  let pulled = present.filter((f) => constant(f) && f !== 'i');
   let fields = present.filter((f) => !pulled.includes(f));
-  // The cells are the rhythm, so something has to stay in them: with every field constant the
-  // pitch goes back into the tokens (`note(\`<60 ~ 60>*4\`).vel(0.5)`) rather than the whole
-  // pattern collapsing to a bare `<x ~ x>` with no field to read it as.
+  // The cells are the rhythm, so something has to stay in them: with every field constant (or no
+  // field differing from its default at all) the axis the roll was DRAWN on goes back into the
+  // tokens - `note(\`<60 ~ 60>*4\`).vel(0.5)` - rather than the whole pattern collapsing to a bare
+  // `<x ~ x>` with no field to read it as.
   if (!fields.length) {
-    fields = [pitchField];
-    pulled = pulled.filter((f) => f !== pitchField);
+    fields = [drawnIndex ? 'i' : pitchField];
+    pulled = pulled.filter((f) => f !== fields[0]);
   }
-  const isDefault = (nt, f) => (f === 'vel' && nt.vel === 1) || (f === 'clip' && nt.len === 1);
+  const isDefault = (nt, f) =>
+    (f === 'vel' && nt.vel === 1) || (f === 'clip' && nt.len === 1) || (f === 'i' && noteIndex(nt) === PIANOROLL_DEFAULT_INDEX);
   const tok = (nt) => {
     const parts = fields.map((f) => fieldStr(nt, f));
     while (parts.length > 1 && isDefault(nt, fields[parts.length - 1])) parts.pop(); // trim trailing defaults
@@ -228,10 +321,12 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   const body = lines.map((l) => `${indent}  ${l}`).join('\n');
   const seq = `\`<\n${body}\n${indent}>*${g}\``;
   // The lifted fields in the order they would have had in the token, then the key: `.n(4).sc(3)`.
-  const tail = `${pulled.map((f) => `.${f}(${fieldStr(notes[0], f)})`).join('')}${scale ? `.sc(${octave})` : ''}`;
-  // note(`…`) only reads a column of bare pitches - anything else (several fields, or one field
-  // that isn't the pitch) needs .as() to say which is which.
-  const head = fields.length === 1 && fields[0] === pitchField ? `${pitchField}(${seq})` : `${seq}.as("${fields.join(':')}")`;
+  const tail = `${pulled.map((f) => `.${f}(${fieldStr(notes[0], f)})`).join('')}${keyed ? `.sc(${octave})` : ''}`;
+  // note(`…`) only reads a column of bare pitches, and i(`…`) a column of bare indices - anything
+  // else (several fields, or one field that is neither) needs .as() to say which is which.
+  const head = fields.length === 1 && (fields[0] === pitchField || fields[0] === 'i')
+    ? `${fields[0]}(${seq})`
+    : `${seq}.as("${fields.join(':')}")`;
   return `${head}${tail}`;
 }
 

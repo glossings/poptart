@@ -2257,6 +2257,14 @@ li.CodeMirror-hint-active {
   border-color: var(--accent);
 }
 
+/* A header control that doesn't apply to the axis on screen - `scale` on the index rows, where
+   there is no key. Greyed in place rather than removed: a toolbar that reshuffles itself under the
+   pointer is worse than a button that plainly isn't for here. */
+.pianoroll-panel-head button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 /* An engaged toggle in the roll's header (preview on, folded to the scale) lights up, so its
    state is readable without hovering for the tooltip. */
 .pianoroll-panel-head button.active {

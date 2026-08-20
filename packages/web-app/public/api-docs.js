@@ -75,8 +75,8 @@ const API_DOCS = {
   },
   pianoroll: {
     kind: 'builder',
-    sig: 'pianoroll(notes, { grid, len, start })',
-    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it. Rolls can be named and patterned: pianoroll("<lead alt>"). grid is cells per cycle, and the loop window is len cells from start.',
+    sig: 'pianoroll(notes, { grid, len, start, mode })',
+    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it. Rolls can be named and patterned: pianoroll("<lead alt>"). grid is cells per cycle, and the loop window is len cells from start. Every note carries a pitch and a sample index ("24:3,0,1" is the pack\'s fourth file at c2), so a roll can sequence a pack by file; mode: "index" only says which of the two the editor draws on.',
     eg: 'lead: pianoroll().synth("Serum 2")',
   },
 
@@ -290,7 +290,7 @@ const API_DOCS = {
   as: {
     kind: 'method',
     sig: 'as(spec)',
-    desc: 'Reads "a:b:c" tokens as named fields - note, n, vel, clip - so one string carries pitch and dynamics together.',
+    desc: 'Reads "a:b:c" tokens as named fields - note, n, i, vel, clip - so one string carries pitch, sample choice and dynamics together.',
     eg: '"<36:1:4 ~>*8".as("note:vel:clip")',
   },
   degrade: { kind: 'method', sig: 'degrade(prob, seed)', desc: 'Randomly drops events (default 50%), deterministic per cycle. The mini-notation "?" postfix is the same operation.', eg: '.degrade(0.3)' },

@@ -19,7 +19,7 @@
 // reports as `timeSig` so the caller can say so.
 
 import { UNQUANTIZED_GRID } from './record.mjs';
-import { serializePianoRoll } from './pianoroll.mjs';
+import { serializePianoRoll, PIANOROLL_DEFAULT_INDEX } from './pianoroll.mjs';
 
 // ---------------------------------------------------------------------------------------------
 // Reading the file
@@ -346,7 +346,7 @@ export function pickGrid(starts, { candidates = GRID_CANDIDATES, tolerance = GRI
  * @param {'auto'|number} [opts.grid] - cells per cycle; 'auto' detects one per lane, 0 = keep the
  *   timing (the fine grid above).
  * @returns {{ entries: Array<{ name: string|null, drums: boolean, grid: number, len: number,
- *   quantized: boolean, notes: Array<{midi: number, start: number, len: number, vel: number,
+ *   quantized: boolean, notes: Array<{midi: number, index: number, start: number, len: number, vel: number,
  *   prob: number, mute: boolean}>, body: string }> }} - `quantized` is false for a lane that fit no grid and was
  *   drawn on the fine one, which is worth saying out loud to whoever dropped the file.
  */
@@ -384,7 +384,9 @@ function laneToRollNotes(events, R, len) {
       existing.len = Math.max(existing.len, length);
       continue;
     }
-    const note = { midi, start, len: length, vel: ev.vel, prob: 1, mute: false }; // an imported note always plays
+    // An imported note always plays, and picks the pack's first file: a MIDI file says nothing
+    // about the sample-index channel, so it is left at its default like any other unset channel.
+    const note = { midi, index: PIANOROLL_DEFAULT_INDEX, start, len: length, vel: ev.vel, prob: 1, mute: false };
     byCell.set(key, note);
     notes.push(note);
   }

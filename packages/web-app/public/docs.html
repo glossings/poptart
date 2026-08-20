@@ -458,7 +458,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               <code>setscale</code> is <strong>hoisted</strong>: whichever one comes last in the buffer
               is the key the whole buffer plays in, <em>including the patterns above it</em>. Re-keying
               mid-set is one edit, wherever it's convenient to make it. The piano roll follows along —
-              the tonic's lanes are tinted, out-of-key ones dimmed, and <strong>fold</strong> collapses
+              the tonic's lanes are tinted, out-of-key ones dimmed, and <strong>scale</strong> collapses
               the grid to the scale's notes alone.
             </p>
           </div>
@@ -494,7 +494,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               probability — and dragging a marker up or down sets the value, for the whole
               selection at once. <strong>cmd-D</strong> duplicates, <strong>option-drag</strong>
               drags a copy (the original stays where it was), arrow keys nudge
-              (<strong>shift</strong> + up/down = octave, <strong>shift</strong> + right/left lengthen
+              (<strong>shift</strong> + up/down = octave, or four rows on the index axis;
+              <strong>shift</strong> + right/left lengthen
               and shorten), delete removes, double-click erases one. <strong>0</strong> mutes the
               selected notes (or the one under the pointer) the way Live deactivates them: they grey
               out and stop sounding but stay on the grid — a <code>!</code> in front of their token
@@ -533,22 +534,53 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               overlap rule settles anything that lands on a neighbour.)
             </p>
             <p style="margin:0 0 8px">
+              Every note in a roll carries <em>two</em> values: a <strong>pitch</strong> and a
+              <strong>sample index</strong> — which file of a pack it plays, the same thing
+              <code>.i()</code> sets. The <strong>note</strong> / <strong>index</strong> button says
+              which of them the <em>rows</em> are showing. On <strong>note</strong> — the default — a
+              row is a semitone on the piano keyboard, and a note drawn there gets index 0. On
+              <strong>index</strong> the keyboard becomes a plain <code>0, 1, 2, …</code> count of the
+              pack's files, and a note drawn there gets pitch c2, where a sample plays as recorded. So
+              <code>pianoroll("24:0,0,1 24:3,4,1", { grid: 8 }).s("breaks")</code> sequences the pack
+              by file, with lengths, velocity, probability, stacks (several files struck together) and
+              the loop window all meaning exactly what they do on the keyboard.
+            </p>
+            <p style="margin:0 0 8px">
+              Switching between the two <em>moves nothing and changes no sound</em>: the timings are
+              one set of events seen against a different ruler, and each note keeps the channel you
+              can't currently see, so you can draw a rhythm on one axis and set the pitches on the
+              other. <code>mode:</code> in the call is only a note of where the panel should open.
+              <strong>→♪</strong> writes down whichever channels the roll actually sets —
+              <code>i(`&lt;0 ~ 3&gt;*8`)</code> where only files vary,
+              <code>`&lt;…&gt;`.as("note:i:vel")</code> where both do, and a plain
+              <code>note(…)</code> for a roll that never touches an index.
+            </p>
+            <p style="margin:0 0 8px">
+              Two buttons narrow the rows on show. <strong>fold</strong> is Live's Fold: drop every row
+              nothing is drawn on, so a line spread over two octaves — or a sequence using four of a
+              pack's files — closes up to the rows you are working in. It works on either axis.
+              <strong>scale</strong> is the key-aware one: show only the notes of the
+              <code>setscale</code> key (plus any pitch the roll actually uses, so it can never hide
+              something you drew). It greys out on the index rows, where there is no key — it stays in
+              the toolbar rather than vanishing, so the buttons never move under the pointer.
+            </p>
+            <p style="margin:0 0 8px">
               <strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> step back and forward through the
               roll's own edit history while the grid has focus — one drag is one step, however many
               notes it moved. (With the cursor in the code, cmd-Z is the editor's, as always.)
             </p>
             <p style="margin:0 0 8px">
               With a key in force (<code>setscale</code>), the roll colours its keyboard and lanes by
-              it, <strong>fold</strong> hides everything out of the key, and clicking the
+              it, <strong>scale</strong> hides everything out of the key, and clicking the
               <strong>key chip</strong> in the header snaps every note in the roll to the nearest tone
               in it — the same quantize <code>.sc()</code> applies to a written note pattern.
-              Folded, <strong>→♪</strong> also converts <em>in</em> the key: scale degrees and a
+              With <strong>scale</strong> on, <strong>→♪</strong> also converts <em>in</em> the key: scale degrees and a
               <code>.sc(octave)</code> — <code>n(`&lt;0 2 4 ~&gt;*16`).sc(3)</code> — so re-keying the
               patch later moves the notes with it. (An out-of-key note has no degree of its own and is
               written as the nearest one; the log says how many.)
             </p>
             <pre style="margin:0"><code><span class="f">pianoroll</span>(<span class="s">"60,0,4 64,0,4 67,8,8"</span>, { steps: <span class="s">16</span> }).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)
-<span class="c">// each note is midi,start,len[,vel] over a `steps`-cell cycle. Chains like note(): .scale(), .add(), …</span></code></pre>
+<span class="c">// each note is midi[:index],start,len[,vel] over a `steps`-cell cycle. Chains like note(): .scale(), .add(), …</span></code></pre>
           </div>
         </section>
 

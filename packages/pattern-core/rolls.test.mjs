@@ -222,3 +222,47 @@ test('a roll definition is marked as one, and stops being marked once it is buil
   assert.equal(def.fast(2).isDef, undefined, 'deliberately playing a definition still works');
   assert.equal(pianoroll('<0>').isDef, undefined, 'a pattern naming rolls is a track like any other');
 });
+
+// A named roll that sets the sample-index channel, played through the id form. Nothing on the
+// pianoroll("…") call has to say so: the index rides on each event the definition contributes
+// (step.cfg), so the join carries it through to whatever sampler the pattern ends in - which is
+// what lets one call alternate a roll that picks files and one that plays pitches.
+test('pianoroll("<ids>") carries a roll\'s i channel through to the sampler', () => {
+  fresh();
+  _roll('hits', '24:0,0,4 24:3,8,4', { grid: 16, mode: 'index' });
+  const steps = pianoroll('hits').s('breaks').stepsForCycle(0);
+  assert.deepEqual(steps.map((s) => s.cfg.index), [0, 3]);
+  assert.deepEqual(steps.map((s) => s.value), ['breaks', 'breaks']);
+  // ...and a roll that sets no index leaves the channel alone on the cycles it holds
+  _roll('line', '60,0,4', { grid: 16 });
+  const mixed = pianoroll('<hits line>').s('breaks');
+  assert.deepEqual(mixed.stepsForCycle(0).map((s) => s.cfg.index), [0, 3]);
+  assert.deepEqual(mixed.stepsForCycle(1).map((s) => s.cfg.note), [60]);
+  assert.equal(mixed.stepsForCycle(1)[0].cfg.index, undefined);
+});
+
+// The evaluation ORDER this laziness demands. A buffer puts its patterns at the top and the
+// definitions the editor writes in a block at the foot, so a cycle built while the evaluation is
+// still working down the buffer asks the registry for a name it has not reached yet. /api/evaluate
+// therefore runs every block first and builds cycles only afterwards (see its dry-run pass) -
+// without that, an ordinary `pianoroll("disco")` reported itself undefined on every evaluation, on
+// a name defined two lines below it that played perfectly.
+test('a name asked for before its definition warns - which is why cycles are built last', () => {
+  fresh();
+  const early = capture(() => {
+    const pat = pianoroll('disco'); // the pattern block, evaluated first...
+    pat.stepsForCycle(0); // ...and asked for a cycle before the foot of the buffer ran
+  });
+  assert.match(early.lines.join('\n'), /no roll called "disco"/);
+  // and it names the call that is actually bound - `roll` is deliberately not (INTERNAL_BUILDERS)
+  assert.match(early.lines.join('\n'), /_roll\("disco", \.\.\.\)/);
+
+  fresh();
+  const inOrder = capture(() => {
+    _roll('disco', '19,1,1,0.8 19:7,10,1,0.8 19:16,12,3,0.8', { grid: 16, len: 16, mode: 'index' });
+    return pianoroll('disco').s('dstab').stepsForCycle(0);
+  });
+  assert.deepEqual(inOrder.lines, [], 'nothing to report once the definition has been evaluated');
+  assert.deepEqual(inOrder.value.map((st) => st.cfg.index), [0, 7, 16]);
+  assert.deepEqual(inOrder.value.map((st) => st.value), ['dstab', 'dstab', 'dstab']);
+});
