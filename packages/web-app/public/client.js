@@ -68,6 +68,7 @@ const coreReady = Promise.all([
 // The piano roll's drawn notes.
 const rollDefs = makeDefRegistry({
   kind: 'roll',
+  section: 'pianorolls',
   defCall: '_roll',
   useCall: 'pianoroll',
   legacyCall: 'roll',
@@ -97,6 +98,7 @@ const rollDefs = makeDefRegistry({
 // roll registry uses.
 const shapeDefs = makeDefRegistry({
   kind: 'shape',
+  section: 'lfos',
   defCall: '_shape',
   useCall: 'lfo',
   legacyCall: 'shape',
@@ -128,6 +130,7 @@ const shapeDefs = makeDefRegistry({
 // else. Its argument is always names, never data, which is the one thing that needs saying here.
 const presetDefs = makeDefRegistry({
   kind: 'preset',
+  section: 'presets',
   defCall: '_preset',
   useCall: 'preset',
   emptyBody: '"", ""', // plugin, state - both filled in by the first capture
@@ -770,13 +773,14 @@ function foldConfigBlobs() {
   }
 }
 
-// How many ids a chip spells out before it starts counting instead.
+// How many ids a chip's tooltip spells out before it starts counting instead.
 const ROLL_CHIP_IDS = 6;
 
 // A run of consecutive definitions is a library rather than music: it plays nothing (the server
 // drops every definition sig) and what it holds is editor-written data that no one - least of all
-// an audience - wants to read. So it folds to one chip naming what the run holds, and is worked on
-// from its own editor panel instead.
+// an audience - wants to read. So it folds to one chip naming the KIND it holds - the names are in
+// its tooltip, since a chip reading `⋯ pianorolls` says what the line is far better than a list of
+// ids does - and is worked on from its own editor panel instead.
 //
 // It folds rather than HIDES, which it used to. CodeMirror renders a collapsed multi-line mark as
 // one visual line and there is no way down from there to none - so hiding a run never removed it
@@ -802,8 +806,8 @@ function foldDefRuns(code, reg) {
     foldSpan(
       from,
       to,
-      `⋯ ${reg.kind}${ids.length === 1 ? '' : 's'}: ${shown.join(', ')}`,
-      `${ids.length} ${reg.kind} definition${ids.length === 1 ? '' : 's'} — click to expand`,
+      `⋯ ${reg.section}`,
+      `${reg.section}: ${shown.join(', ')} — click to expand`,
       key
     );
   }
@@ -3334,6 +3338,9 @@ function sourceCallAmong(refs, sourceMark) {
 /**
  * One kind of named definition. `opts`:
  *   kind        what the console calls one of these ("roll")
+ *   section     what a PLAYER calls a block of these ("pianorolls") - the word on the folded chip.
+ *               The editor's own name for the panel that edits them, not the builder's, and always
+ *               plural: the chip names the SECTION, and how many are in it is not the point
  *   defCall     the (private) builder that defines one ("_roll")
  *   useCall     the builder that NAMES them ("pianoroll")
  *   legacyCall  what defCall was called back when it was public ("roll"), for the migration to
@@ -3348,7 +3355,7 @@ function sourceCallAmong(refs, sourceMark) {
  *   panel       the editor panel's hooks - see the roll instance below for the full shape
  */
 function makeDefRegistry(opts) {
-  const { kind, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel } = opts;
+  const { kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel } = opts;
   const say = (line, isError) => logLine(line, isError);
 
   // Is this string a list of NAMES rather than the data itself? The two share one argument
@@ -3451,6 +3458,12 @@ function makeDefRegistry(opts) {
       const at = found[0][found[0].length - 1].close + 1;
       return [at, at, `\n${lines.join('\n')}`];
     }
+    // The first of ITS kind, but not necessarily the first definition down there: another kind's
+    // block is already the bottom of the buffer, and the two stack up flush. Each folds to its own
+    // chip, so they read as two lines either way - and a blank line between them would only be a
+    // hole in the code, kept alive by every pass that puts the block back together.
+    const below = lastDefRunEnd(code);
+    if (below !== null) return [below, below, `\n${lines.join('\n')}`];
     // A blank line between the player's code and the block, without stacking up another one each
     // time a buffer that already ends in one gets its first definition.
     const gap = code.trim() ? '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length)) : '';
@@ -3631,7 +3644,7 @@ function makeDefRegistry(opts) {
     );
   }
 
-  return { kind, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, defsEdit, allIds, materialize, create, remove, rename };
+  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, idCalls, refCalls, runs, defsEdit, allIds, materialize, create, remove, rename };
 }
 
 
@@ -3642,22 +3655,25 @@ function makeDefRegistry(opts) {
 // evaluated, which is the only moment it matters. Only calls that actually look like DEFINITIONS
 // (a literal id first) are touched, so someone's own `const roll = …` is left alone.
 function migrateDefNames() {
-  // Four passes, each reading what the last wrote: runs() looks for the private names, so the
+  // Five passes, each reading what the last wrote: runs() looks for the private names, so the
   // labels above them can only be found once the calls have been renamed - the indentation those
   // labels left behind can only be squared up once they are gone - and only then is the block in
-  // the shape sinkDefRuns will agree to move.
+  // the shape sinkDefRuns will agree to move, which is what leaves the runs adjacent enough for
+  // the last pass to close the gaps between them.
   const renamed = renameLegacyDefCalls();
   const labels = legacyLabelLines(cm.getValue());
   if (labels.length) applyEdits(labels.map(([from, to]) => [from, to, '']));
   const dedented = dedentDefRuns();
   const sunk = sinkDefRuns();
-  if (!renamed && !labels.length && !dedented && !sunk) return;
+  const tightened = tightenDefRuns();
+  if (!renamed && !labels.length && !dedented && !sunk && !tightened) return;
   refoldAll();
   const parts = [];
   if (renamed) parts.push(`${renamed} definition${renamed === 1 ? '' : 's'} renamed to the editor's private form`);
   if (labels.length) parts.push(`${labels.length} leftover label${labels.length === 1 ? '' : 's'} removed`);
   if (dedented) parts.push(`${dedented} definition${dedented === 1 ? '' : 's'} un-indented`);
   if (sunk) parts.push(`${sunk} definition${sunk === 1 ? '' : 's'} moved below the code, so the line numbers read straight`);
+  if (tightened) parts.push(`${tightened} blank line${tightened === 1 ? '' : 's'} between definition blocks closed up`);
   logLine(`tidied the definitions block: ${parts.join(', ')}`);
 }
 
@@ -3716,12 +3732,62 @@ function sinkDefRuns() {
   // Already at the bottom: nothing but blank space follows the last block.
   if (!code.slice(found[found.length - 1].span[1]).trim()) return 0;
   // Each span carries the newline (and any blank lines) that followed it, which is what separates
-  // them once they are stacked up - but the last one would leave a blank line under the block, and
-  // an empty line at the bottom of the buffer is the one thing that looks like a mistake.
-  const block = found.map((f) => code.slice(...f.span)).join('').replace(/\n+$/, '');
+  // them once they are stacked up - squeezed to the single newline that puts the next block on the
+  // next line, since blocks brought down from anywhere in the buffer land as one block. The last
+  // one loses its newline entirely: an empty line at the bottom of the buffer looks like a mistake.
+  const block = found
+    .map((f) => code.slice(...f.span).replace(/\n+$/, '\n'))
+    .join('')
+    .replace(/\n+$/, '');
   const gap = '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length));
   applyEdits([...found.map((f) => [...f.span, '']), [code.length, code.length, `${gap}${block}`]]);
   return found.reduce((n, f) => n + f.run.length, 0);
+}
+
+// Where the last definition in the buffer ends, whatever kind it is - the offset a brand-new kind
+// of block is appended at, so all of them stack up as one. Null when the buffer holds no run at
+// all, and a run nested in a function body doesn't count: it is scoped to that body, and appending
+// to it would write a definition into a scope the buffer can't see.
+function lastDefRunEnd(code) {
+  const isCode = codeOnly(code);
+  let end = null;
+  for (const reg of DEF_REGISTRIES) {
+    for (const run of reg.runs(code)) {
+      if (!atTopLevel(code, isCode, run[0].start)) continue;
+      const at = run[run.length - 1].close + 1;
+      if (end === null || at > end) end = at;
+    }
+  }
+  return end;
+}
+
+// Pass five: the blank lines an older patch has between one definition block and the next - two
+// kinds first written at different times, or blocks a hand-edit pulled apart. Each block folds to
+// one chip, and a gap between two chips at the bottom of the buffer reads as a hole in the code
+// rather than as structure, so they are squeezed onto consecutive lines. Only the space BETWEEN
+// two runs is touched: the blank line that separates the whole block from the player's code is
+// what tells them apart, and it is above the first run.
+function tightenDefRuns() {
+  const code = cm.getValue();
+  const isCode = codeOnly(code);
+  const spans = [];
+  for (const reg of DEF_REGISTRIES) {
+    for (const run of reg.runs(code)) {
+      if (!atTopLevel(code, isCode, run[0].start)) continue;
+      spans.push([run[0].start, run[run.length - 1].close + 1]);
+    }
+  }
+  spans.sort((a, b) => a[0] - b[0]);
+  const edits = [];
+  for (let i = 1; i < spans.length; i++) {
+    const [from, to] = [spans[i - 1][1], spans[i][0]];
+    const gap = code.slice(from, to);
+    // Whitespace and a stray `;` only - a comment between two blocks is someone's note about the
+    // one below it, and closing that gap would strand it against the block above.
+    if (gap !== '\n' && /^[ \t;]*\n\s*$/.test(gap)) edits.push([from, to, '\n']);
+  }
+  if (edits.length) applyEdits(edits);
+  return edits.length;
 }
 
 /** Is `at` outside every bracket - i.e. a statement of the buffer itself rather than of some block? */
