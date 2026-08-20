@@ -496,13 +496,21 @@ clearPending = { |seqKey, seq|
 // ('Serum 2.vst3') - accept exact key, display name, or a literal file path.
 resolvePlugin = { |pluginId|
     var dict = VSTPlugin.plugins(server);
-    var desc = dict[pluginId.asSymbol] ?? {
+    var hit = dict[pluginId.asSymbol];
+    // An exact key wins - EXCEPT when that key IS a bare display name. VSTPlugin keys a VST2 by
+    // its plain name and a VST3 by "Name.vst3", so for a plugin installed in both formats the
+    // VST2 owns the bare name: `.fx("Kickstart 2")` hit it here and the prefer-VST3 rule below
+    // never ran. That silently loaded the VST2, which folds its sidechain into extra channels on
+    // a single input bus instead of exposing the second bus buildTrackDef feeds - so `.audio(...)`
+    // wired a route the plugin had no input for, and the plugin sat there reporting no sidechain
+    // audio while the engine logged a successful route. A key carrying an extension or a path is
+    // unambiguous and still wins outright; a shadowed VST2 stays reachable by its full file path.
+    var desc = if (hit.notNil and: { hit.name.asString != pluginId.asString }) { hit } {
         // Display-name lookup. A name can exist as both VST2 and VST3 ("Mangle" + "Mangle.vst3");
         // prefer the VST3 so resolution is deterministic instead of dict-order luck, matching the
         // browser/autocomplete (which hide shadowed VST2s when the prefer-VST3 setting is on).
-        // The VST2 build stays reachable by its exact dict key.
         var matches = dict.values.select { |d| d.name == pluginId };
-        matches.detect { |d| d.key.asString.endsWith(".vst3") } ?? { matches.first };
+        matches.detect { |d| d.key.asString.endsWith(".vst3") } ?? { hit ?? { matches.first } };
     };
     desc !? { desc.key } ? pluginId;
 };
