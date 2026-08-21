@@ -16,6 +16,10 @@ import { splitLabeledBlocks, codeMask } from './labels.mjs';
 // A bare numeric argument: the only kind of call the mixer may rewrite in place.
 const NUM_ARG_RE = /^\s*(-?(?:\d+\.?\d*|\.\d+))\s*$/;
 
+// What a channel control reads as when the block doesn't set it - the same neutral values the
+// scheduler snaps a dropped control back to (see CHANNEL_DEFAULTS there).
+export const TRIM_DEFAULTS = { gain: 1, pan: 0, width: 1 };
+
 // Matching close paren for the opener at `openIdx`, counting only characters the mask says are
 // code - brackets inside strings and comments don't nest. -1 if unbalanced.
 function matchParen(code, mask, openIdx) {
@@ -74,7 +78,7 @@ export function analyze(code) {
  *   patterned - a non-literal call for this control exists that the mixer won't touch.
  *   null when the block isn't in the buffer.
  */
-export function readTrim(code, label, name, fallback = name === 'gain' ? 1 : 0, ctx = null) {
+export function readTrim(code, label, name, fallback = TRIM_DEFAULTS[name] ?? 0, ctx = null) {
   const { blocks, mask } = ctx ?? analyze(code);
   const block = blocks.find((b) => b.label === label);
   if (!block) return null;

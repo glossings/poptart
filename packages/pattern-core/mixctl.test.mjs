@@ -30,6 +30,15 @@ test('readTrim: the LAST call wins, and only a bare number counts as a trim', ()
   assert.deepEqual(readTrim(code2, 'a', 'gain'), { value: 0.4, patterned: false });
 });
 
+test('readTrim/trimEdit: width defaults to 1, not 0 - a missing .width() is untouched, not mono', () => {
+  const code = 'pad: n("0 2").synth("Serum 2")';
+  assert.deepEqual(readTrim(code, 'pad', 'width'), { value: 1, patterned: false });
+  const edit = trimEdit(code, 'pad', 'width', 1.8);
+  assert.equal(applied(code, edit), 'pad: n("0 2").synth("Serum 2").width(1.8)');
+  const set = 'pad: n("0 2").width(0.5)';
+  assert.deepEqual(readTrim(set, 'pad', 'width'), { value: 0.5, patterned: false });
+});
+
 test('readTrim: unknown label is null; other blocks are not read', () => {
   const code = 'a: s("bd").gain(0.4)\n\nb: s("sn")';
   assert.equal(readTrim(code, 'c', 'gain'), null);

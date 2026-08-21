@@ -564,6 +564,24 @@ export class Sig {
   }
 
   /**
+   * Channel strip: stereo width, mid/side. 0 is mono, 1 leaves the track alone, and up to 4 is
+   * Ableton Utility's 400% - the difference between the channels is what gets scaled, so a track
+   * with no stereo content of its own (most synth patches, every mono sample) has nothing to
+   * widen and stays where it is however far this goes.
+   *
+   * Applied BEFORE .pan(), which is the order that composes: narrow a wide pad down and then
+   * place it somewhere, rather than panning it and smearing it back out. Signals welcome, and
+   * cheap - `.width(sine(0.1).range(0.6, 1.8))` breathes.
+   *
+   * Widening past 1 costs mono compatibility: it is literally turning up the part of the signal
+   * that cancels when the two channels are summed. The mixer's stereo image (ctrl+g) is where
+   * that shows up - content past the ±45° safe lines is the part a mono system will lose.
+   */
+  width(value) {
+    return this._clone({ channel: { ...this.channel, width: toSignal(value) } });
+  }
+
+  /**
    * Channel strip: which stereo output pair the track plays to - .o(1) sends to output
    * channels 1/2 (the default), .o(2) to 3/4, and so on. Pairs past the last one in use wrap
    * around, and how many are in use is the editor's "output channels" setting - 2 unless raised,

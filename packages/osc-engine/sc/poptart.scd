@@ -216,12 +216,13 @@ buildTrackDef = { |key|
     // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
-    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, out = 1, dry = 1, scSend, scSendGain = 1,
+    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, out = 1, dry = 1, scSend, scSendGain = 1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
         var sig = Silent.ar(2);
         var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
+        var mid, side; // the channel strip's mid/side pair (see the width control below)
         maxSlots.do { |i|
             if (i == 0) {
                 // The instrument slot's output, plus whatever the track's sample synths wrote
@@ -242,10 +243,20 @@ buildTrackDef = { |key|
                 sig = Select.ar(("active" ++ i).asSymbol.kr(0), [sig, wet]);
             };
         };
-        // Channel strip (post-chain): gain + equal-power pan, addressed from Node as pseudo-slot
-        // -1 (Sig#gain/#pan; setParam sets these controls, setParam[Shape]LFO/Env map busses to
-        // them). Lag smooths the ~30ms Tier-1 polling steps; clip keeps a runaway signal sane.
-        sig = Balance2.ar(sig[0], sig[1], pan.lag(0.02).clip(-1, 1), gain.lag(0.02).clip(0, 4));
+        // Channel strip (post-chain): width, then gain + equal-power pan, addressed from Node as
+        // pseudo-slot -1 (Sig#width/#gain/#pan; setParam sets these controls, setParam[Shape]LFO/Env
+        // map busses to them). Lag smooths the ~30ms Tier-1 polling steps; clip keeps a runaway
+        // signal sane.
+        //
+        // Width is mid/side: the sum is left alone and the difference is scaled, so 0 is mono, 1
+        // is untouched, and 4 is Ableton Utility's 400%. It sits BEFORE the pan because the two
+        // compose in that order and not the other - narrowing a wide pad and then placing it is a
+        // real move, while panning first and then widening just re-smears it back across the
+        // image. Everything downstream (the sends, the recorder tap, the mixer's own analysis)
+        // therefore sees the finished stereo picture.
+        mid = (sig[0] + sig[1]) * 0.5;
+        side = (sig[0] - sig[1]) * 0.5 * width.lag(0.02).clip(0, 4);
+        sig = Balance2.ar(mid + side, mid - side, pan.lag(0.02).clip(-1, 1), gain.lag(0.02).clip(0, 4));
         // Sidechain send: a copy of this track's post-fader output written to another track's
         // aux bus (scSend). Parked to trashBus when this track feeds nothing, so the graph stays
         // static; scSendGain scales the amount. Always-on Out keeps the UGen graph fixed.
@@ -280,7 +291,7 @@ buildTrackDef = { |key|
 // Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
 // unity gain, center pan, first output pair.
 channelDefault = { |name|
-    if ((name == "gain") or: { name == "out" } or: { name == "dry" }) { 1 } { 0 };
+    if ((name == "gain") or: { name == "out" } or: { name == "dry" } or: { name == "width" }) { 1 } { 0 };
 };
 
 // Parked sidechain args for a freshly created track synth: every fx-slot aux input reads the

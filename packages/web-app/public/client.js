@@ -7625,6 +7625,33 @@ function mixerFmtDb(gain) {
   return `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`;
 }
 
+// The two knobs under each fader, in signal order (width happens before pan on the channel
+// strip, so it sits to the left of it). Each maps its control's value onto the knob's 0..1
+// throw and back; both draw as an arc from the middle, which is each one's neutral.
+const MIXER_KNOBS = [
+  {
+    name: 'width',
+    def: 1,
+    // Unity at the CENTRE of the throw - 0..1 over the left half, 1..4 over the right - so the
+    // half-turn either side of "leave it alone" is where the resolution goes. Linear over 0..400%
+    // (Ableton's own taper) would spend three quarters of the knob above unity.
+    posOf: (v) => (v <= 1 ? v * 0.5 : 0.5 + (v - 1) / 6),
+    valueAt: (p) => (p <= 0.5 ? p * 2 : 1 + (p - 0.5) * 6),
+    format: (v) => `${Math.round(v * 100)}%`,
+    title: 'width — 0 mono, 100% untouched, up to 400%; drag, double-click to reset. Writes .width(x)',
+    patternedTitle: 'width is patterned in the code - grabbing the knob writes a .width(x) that takes over',
+  },
+  {
+    name: 'pan',
+    def: 0,
+    posOf: (v) => (v + 1) / 2,
+    valueAt: (p) => p * 2 - 1,
+    format: (v) => mixerFmtPan(v),
+    title: 'pan — drag, double-click to center. Writes .pan(x)',
+    patternedTitle: 'pan is patterned in the code - grabbing the knob writes a .pan(x) that takes over',
+  },
+];
+
 function mixerFmtPan(pan) {
   const p = Math.round(pan * 100);
   return p === 0 ? 'C' : p < 0 ? `L${-p}` : `R${p}`;
@@ -7844,25 +7871,34 @@ function buildMixerStrip(label) {
   const dbLabel = document.createElement('div');
   dbLabel.className = 'mixer-db';
 
-  const panCanvas = document.createElement('canvas');
-  panCanvas.className = 'mixer-pan';
-  panCanvas.width = 34 * dpr; panCanvas.height = 34 * dpr;
-  panCanvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
-  panCanvas.title = 'pan — drag up/down, double-click to center; writes .pan(x)';
+  const knobRow = document.createElement('div');
+  knobRow.className = 'mixer-knob-row';
+  const knobLabelRow = document.createElement('div');
+  knobLabelRow.className = 'mixer-knob-labels';
+  const knobs = new Map();
+  for (const spec of MIXER_KNOBS) {
+    const canvas = document.createElement('canvas');
+    canvas.className = 'mixer-knob';
+    canvas.width = 30 * dpr; canvas.height = 30 * dpr;
+    canvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+    canvas.title = spec.title;
+    const valueEl = document.createElement('div');
+    valueEl.className = 'mixer-knob-label';
+    knobRow.appendChild(canvas);
+    knobLabelRow.appendChild(valueEl);
+    knobs.set(spec.name, { spec, canvas, valueEl, value: spec.def, drag: null });
+  }
 
-  const panLabel = document.createElement('div');
-  panLabel.className = 'mixer-pan-label';
-
-  el.append(name, msRow, body, dbLabel, panCanvas, panLabel);
+  el.append(name, msRow, body, dbLabel, knobRow, knobLabelRow);
 
   const strip = {
-    label, color, el, fader, meterCanvas, dbLabel, panCanvas, panLabel, muteBtn, soloBtn,
-    gain: 1, pan: 0, gone: false, muted: false, soloed: false,
-    dragGain: false, dragPan: null,
+    label, color, el, fader, meterCanvas, dbLabel, knobs, muteBtn, soloBtn,
+    gain: 1, gone: false, muted: false, soloed: false,
+    dragGain: false,
     writeTimer: {}, pendingWrite: {},
     meter: { tPeakL: 0, tRmsL: 0, tPeakR: 0, tRmsR: 0, rmsL: 0, rmsR: 0, peakL: 0, peakR: 0, holdL: 0, holdR: 0, holdAtL: 0, holdAtR: 0 },
     bandTarget: null,
-    bandDisp: null, // smoothed [[l, r], ...], grown lazily to bandFreqs' length
+    bandDisp: null, // smoothed [[l, r, mid, side], ...], grown lazily to bandFreqs' length
   };
 
   muteBtn.addEventListener('click', () => applyMixerFlags(strip, { muted: !strip.muted, soloed: strip.soloed }));
@@ -7897,32 +7933,35 @@ function buildMixerStrip(label) {
     queueMixerWrite(strip, 'gain', 1);
   });
 
-  panCanvas.addEventListener('pointerdown', (e) => {
-    if (strip.gone) return;
-    panCanvas.setPointerCapture(e.pointerId);
-    strip.dragPan = { x: e.clientX, y: e.clientY, pan: strip.pan };
-    mixerFocus = label;
-    mixerFocusFromPointer = true;
-  });
-  panCanvas.addEventListener('pointermove', (e) => {
-    if (!strip.dragPan) return;
-    const d = strip.dragPan;
-    const pan = mixerClamp(d.pan + (e.clientX - d.x - (e.clientY - d.y)) * 0.006, -1, 1);
-    strip.pan = Math.round(pan * 100) / 100;
-    panLabel.textContent = mixerFmtPan(strip.pan);
-    queueMixerWrite(strip, 'pan', strip.pan);
-  });
-  // The window handler above covers the release; this is just the local pair for a pointer the
-  // canvas captured.
-  const endPan = () => { strip.dragPan = null; };
-  panCanvas.addEventListener('pointerup', endPan);
-  panCanvas.addEventListener('pointercancel', endPan);
-  panCanvas.addEventListener('dblclick', () => {
-    if (strip.gone) return;
-    strip.pan = 0;
-    panLabel.textContent = mixerFmtPan(0);
-    queueMixerWrite(strip, 'pan', 0);
-  });
+  for (const knob of knobs.values()) {
+    const { spec, canvas, valueEl } = knob;
+    const set = (value) => {
+      knob.value = Math.round(value * 100) / 100;
+      valueEl.textContent = spec.format(knob.value);
+      queueMixerWrite(strip, spec.name, knob.value);
+    };
+    canvas.addEventListener('pointerdown', (e) => {
+      if (strip.gone) return;
+      canvas.setPointerCapture(e.pointerId);
+      knob.drag = { x: e.clientX, y: e.clientY, pos: spec.posOf(knob.value) };
+      mixerFocus = label;
+      mixerFocusFromPointer = true;
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!knob.drag) return;
+      const d = knob.drag;
+      // Right and up both turn it up, so either gesture works without thinking about it.
+      const pos = mixerClamp(d.pos + (e.clientX - d.x - (e.clientY - d.y)) * 0.004, 0, 1);
+      set(spec.valueAt(pos));
+    });
+    // The window handler above covers the release; this is the local pair for a captured pointer.
+    const end = () => { knob.drag = null; };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+    canvas.addEventListener('dblclick', () => {
+      if (!strip.gone) set(spec.def);
+    });
+  }
 
   return strip;
 }
@@ -7996,8 +8035,7 @@ function syncMixerFromCode() {
   // engine was between evals.
   const anySolo = ctx.blocks.some((b) => b.soloed && !b.muted);
   for (const strip of mixerState.strips.values()) {
-    const gain = mixctlMod.readTrim(code, strip.label, 'gain', 1, ctx);
-    const pan = mixctlMod.readTrim(code, strip.label, 'pan', 0, ctx);
+    const gain = mixctlMod.readTrim(code, strip.label, 'gain', undefined, ctx);
     const block = ctx.blocks.find((b) => b.label === strip.label);
     strip.gone = !gain;
     strip.silent = !!block && (block.muted || (anySolo && !block.soloed));
@@ -8027,19 +8065,20 @@ function syncMixerFromCode() {
       strip.fader.value = Math.round(mixerGainToFader(gain.value) * 1000);
       strip.dbLabel.textContent = mixerFmtDb(gain.value);
     }
-    if (!strip.dragPan && !strip.writeTimer.pan) {
-      strip.pan = pan.value;
-      strip.panLabel.textContent = mixerFmtPan(pan.value);
-    }
     // A patterned control keeps modulating under the trim - say so rather than lying flat.
     strip.fader.classList.toggle('mixer-patterned', gain.patterned);
     strip.fader.title = gain.patterned
       ? 'gain is patterned in the code - the fader writes a trim that multiplies it'
       : 'gain — writes .gain(x) onto this block';
-    strip.panCanvas.classList.toggle('mixer-patterned', pan.patterned);
-    strip.panCanvas.title = pan.patterned
-      ? 'pan is patterned in the code - grabbing the knob writes a .pan(x) that takes over'
-      : 'pan — drag up/down, double-click to center; writes .pan(x)';
+    for (const knob of strip.knobs.values()) {
+      const read = mixctlMod.readTrim(code, strip.label, knob.spec.name, undefined, ctx);
+      if (!knob.drag && !strip.writeTimer[knob.spec.name]) {
+        knob.value = read.value;
+        knob.valueEl.textContent = knob.spec.format(read.value);
+      }
+      knob.canvas.classList.toggle('mixer-patterned', read.patterned);
+      knob.canvas.title = read.patterned ? knob.spec.patternedTitle : knob.spec.title;
+    }
   }
   renderMixerLegend();
 }
@@ -8104,7 +8143,7 @@ function drawMixer(dt) {
     stepStripMeter(strip, dt);
     strip.bandDisp = stepBandFrame(strip.bandDisp, strip.bandTarget, dt);
     drawStripMeter(strip, colors);
-    drawPanKnob(strip, colors);
+    for (const knob of strip.knobs.values()) drawMixerKnob(strip, knob, colors);
   }
   mixerState.masterDisp = stepBandFrame(mixerState.masterDisp, mixerState.masterTarget, dt);
   syncMixerLegendFocus();
@@ -8189,11 +8228,15 @@ function drawStripMeter(strip, colors) {
   ctx.fillRect(bars[0].x - 2, zeroY, barW * 2 + gap + 4, 1);
 }
 
-function drawPanKnob(strip, colors) {
-  const ctx = strip.panCanvas.getContext('2d');
-  const s = 34, cx = s / 2, cy = s / 2, r = 13;
+// One knob: a track around the dial, the travelled arc from the middle (each control's neutral)
+// filled in the track's colour, and a pointer. Both knobs are the same shape because both are
+// "how far either side of neutral" questions.
+function drawMixerKnob(strip, knob, colors) {
+  const ctx = knob.canvas.getContext('2d');
+  const s = 30, cx = s / 2, cy = s / 2, r = 11;
   ctx.clearRect(0, 0, s, s);
   const a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
+  const pos = mixerClamp(knob.spec.posOf(knob.value), 0, 1);
   ctx.lineWidth = 3;
   ctx.lineCap = 'round';
   ctx.strokeStyle = rgbaFrom(ctx, colors.grid, 0.9);
@@ -8201,16 +8244,16 @@ function drawPanKnob(strip, colors) {
   ctx.arc(cx, cy, r, a0, a1);
   ctx.stroke();
   const mid = (a0 + a1) / 2;
-  const at = mid + (strip.pan * (a1 - a0)) / 2;
+  const at = a0 + pos * (a1 - a0);
   ctx.strokeStyle = strip.color;
   ctx.beginPath();
-  if (strip.pan >= 0) ctx.arc(cx, cy, r, mid, at);
+  if (at >= mid) ctx.arc(cx, cy, r, mid, at);
   else ctx.arc(cx, cy, r, at, mid);
   ctx.stroke();
   ctx.strokeStyle = colors.text;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(cx + Math.cos(at) * 5, cy + Math.sin(at) * 5);
+  ctx.moveTo(cx + Math.cos(at) * 4, cy + Math.sin(at) * 4);
   ctx.lineTo(cx + Math.cos(at) * r, cy + Math.sin(at) * r);
   ctx.stroke();
 }
@@ -8520,7 +8563,7 @@ for (const ev of ['pointerup', 'pointercancel']) {
     if (!mixerState) return;
     for (const strip of mixerState.strips.values()) {
       strip.dragGain = false;
-      strip.dragPan = null;
+      for (const knob of strip.knobs.values()) knob.drag = null;
     }
     if (mixerFocusFromPointer) {
       mixerFocus = null;

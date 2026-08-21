@@ -233,6 +233,7 @@ const API_DOCS = {
   },
   gain: { kind: 'method', sig: 'gain(value)', desc: 'Track output gain after the whole chain, 1 = unity. Chains multiply, so a level and a modulator compose.', eg: '.gain(0.5).gain(env())' },
   pan: { kind: 'method', sig: 'pan(value)', desc: 'Stereo pan, -1 (left) .. 1 (right), 0 = center.', eg: '.pan(sine(0.2).range(-1, 1))' },
+  width: { kind: 'method', sig: 'width(amount)', desc: 'Stereo width (mid/side): 0 mono, 1 untouched, up to 4 = 400%. Scales the difference between the channels, so a mono source has nothing to widen. Applied before pan, so you can narrow a wide sound and then place it. Past 1 costs mono compatibility - watch the mixer\'s stereo image.', eg: '.width(0.6).pan(-0.4)' },
   o: { kind: 'method', sig: 'o(pair)', desc: 'Which stereo output pair the track plays to - .o(1) is channels 1/2, .o(2) is 3/4. Wraps at the "output channels" setting, which is 2 unless you raise it - so by default every .o(n) is channels 1/2.', eg: '.o(2)' },
   bus: {
     kind: 'method',

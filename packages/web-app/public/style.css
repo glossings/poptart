@@ -2595,7 +2595,7 @@ li.CodeMirror-hint-active {
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  min-width: 68px;
+  min-width: 76px;
   padding: 8px 6px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2706,7 +2706,7 @@ li.CodeMirror-hint-active {
 }
 
 .mixer-fader.mixer-patterned,
-.mixer-pan.mixer-patterned {
+.mixer-knob.mixer-patterned {
   /* This control's channel is patterned in the code - the write composes rather than replaces
      (gain) or takes over (pan); the tooltip carries the words. */
   outline: 1px dashed var(--warn);
@@ -2714,16 +2714,34 @@ li.CodeMirror-hint-active {
   border-radius: 3px;
 }
 
-.mixer-db,
-.mixer-pan-label {
+.mixer-db {
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
 }
 
-.mixer-pan {
-  width: 34px;
-  height: 34px;
+/* width and pan, side by side in signal order, with their readouts lined up underneath. */
+.mixer-knob-row,
+.mixer-knob-labels {
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+}
+
+.mixer-knob-label {
+  width: 30px;
+  font-size: 9px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mixer-knob {
+  width: 30px;
+  height: 30px;
   cursor: ns-resize;
   touch-action: none;
 }

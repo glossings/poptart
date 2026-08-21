@@ -735,11 +735,19 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><th>Method</th><th>Does</th></tr>
             <tr><td><code>.gain(v)</code></td><td>Output level (1 = unity). Chains multiply: <code>.gain(0.5).gain(env())</code> is a base level times a VCA.</td></tr>
             <tr><td><code>.pan(v)</code></td><td>Stereo pan, −1 (left) … 1 (right), 0 = centre.</td></tr>
+            <tr><td><code>.width(v)</code></td><td>Stereo width (mid/side): 0 mono, 1 untouched, up to 4 = 400%. Applied <em>before</em> the pan, so you can narrow a wide sound and then place it. Scales only the difference between the channels — a mono source has nothing to widen.</td></tr>
             <tr><td><code>.o(n)</code></td><td>Which output pair: <code>.o(1)</code> = channels 1/2, <code>.o(2)</code> = 3/4, wrapping past the device's last pair.</td></tr>
           </table>
           <pre><code>pad: note(<span class="s">"c3 e3 g3"</span>).synth(<span class="s">"Diva"</span>)
   .gain(0.7)
-  .pan(sine(0.2).range(-1, 1))    <span class="c">// slow auto-pan</span></code></pre>
+  .width(0.6)                     <span class="c">// rein the patch's own stereo in…</span>
+  .pan(sine(0.2).range(-1, 1))    <span class="c">// …then move it around</span></code></pre>
+          <p>
+            Width past 1 is bought with mono compatibility — it turns up exactly the part of the
+            signal that cancels when the channels are summed. The mixer's stereo image
+            (<strong>ctrl+g</strong>) is where that shows: content beyond the ±45° safe lines is
+            what a mono system will lose.
+          </p>
         </section>
 
         <!-- ================================================================= -->
@@ -883,9 +891,16 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
             fades the other tracks back so you can see the one you're moving.
           </p>
           <p>
+            Each strip also has a <strong>width</strong> knob beside its pan knob:
+            <code>.width(x)</code> is a mid/side widener on the channel strip — 0 is mono, 100%
+            leaves the track alone, up to 400% like Ableton's Utility. It runs <em>before</em> the
+            pan, so narrowing a sprawling pad and then placing it is one gesture. A mono source has
+            no side content to scale, so widening it does nothing.
+          </p>
+          <p>
             The controls write <em>code</em>, not hidden mixer state: a fader move rewrites the
-            block's trailing <code>.gain(x)</code> (appending one if there isn't any), the pan knob
-            does the same with <code>.pan(x)</code>, mute and solo write the label markers you'd
+            block's trailing <code>.gain(x)</code> (appending one if there isn't any), the knobs
+            do the same with <code>.pan(x)</code> and <code>.width(x)</code>, mute and solo write the label markers you'd
             type yourself (<code>_bass:</code> / <code>Sbass:</code>), and the buffer re-evaluates
             on the same quiet update path the LFO editor uses. A muted track keeps its strip — that's
             how it gets un-muted. Because chained <code>.gain()</code> calls multiply, the written
@@ -1175,7 +1190,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><th>Chain</th><th></th></tr>
             <tr><td><code>.fx("…")</code> · <code>.param("name", v)</code></td><td>effects &amp; knobs</td></tr>
             <tr><td><code>.midi("kick")</code> · <code>.audio("kick")</code></td><td>inject MIDI / audio sidechain into the last fx</td></tr>
-            <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
+            <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.width(v)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
             <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity &amp; note length</td></tr>
             <tr><td><code>.scale("…")</code></td><td>map degrees / snap notes to key</td></tr>
             <tr><td><code>.sc(oct)</code></td><td>the same, in the setscale key</td></tr>
