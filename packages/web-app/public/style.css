@@ -2491,3 +2491,251 @@ li.CodeMirror-hint-active {
   letter-spacing: 0.04em;
   color: var(--text);
 }
+
+/* ------------------------------------------------------------------- mixer
+   The ctrl+g modal (see client.js's mixer section). Its own backdrop class rather than
+   dir-picker-backdrop on purpose: that class silences the transport hotkeys, which must keep
+   working while mixing. */
+
+.mixer-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--shadow);
+  z-index: 40;
+}
+
+.mixer-backdrop.hidden {
+  display: none;
+}
+
+.mixer-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(980px, 94vw);
+  max-height: 92vh;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px var(--shadow);
+  overflow: hidden;
+}
+
+.mixer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.mixer-view-btn {
+  text-transform: none;
+  letter-spacing: normal;
+  min-width: 64px;
+}
+
+.mixer-plots {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px 4px;
+}
+
+.mixer-plot {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mixer-plot canvas {
+  width: 100%;
+  height: 190px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+}
+
+.mixer-plot-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 2px 0;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.mixer-freeze-btn {
+  font-size: 9px;
+  padding: 0 8px;
+}
+
+.mixer-freeze-btn.mixer-freeze-on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.mixer-strips {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 12px;
+  overflow-x: auto;
+}
+
+.mixer-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 68px;
+  padding: 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+}
+
+.mixer-strip-gone {
+  opacity: 0.55;
+}
+
+/* Muted (or soloed-away) but still listed - the strip a mute button needs to stay un-mutable
+   from. Marked on the frame rather than by fading the name: a dimmed label is hard to read and
+   reads as "gone", which is the opposite of what a strip you can still un-mute should say. */
+.mixer-strip-silent {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
+}
+
+.mixer-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 4px 12px 0;
+}
+
+.mixer-legend.hidden {
+  display: none;
+}
+
+.mixer-legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--text);
+  transition: opacity 0.12s ease;
+}
+
+.mixer-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.mixer-legend-silent {
+  color: var(--text-dim);
+}
+
+.mixer-legend-silent .mixer-legend-dot {
+  opacity: 0.45;
+}
+
+/* While a fader or knob is held, the other tracks fade back in the plots - the legend says the
+   same thing so the two never disagree about what you are looking at. */
+.mixer-legend-dim {
+  opacity: 0.35;
+}
+
+.mixer-strip-ms {
+  display: flex;
+  gap: 4px;
+}
+
+.mixer-ms-btn {
+  font-size: 9px;
+  padding: 0 7px;
+}
+
+.mixer-ms-btn.on-mute {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.mixer-ms-btn.on-solo {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.mixer-strip-name {
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.mixer-strip-body {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: 140px;
+}
+
+.mixer-meter {
+  width: 26px;
+  height: 140px;
+}
+
+/* A vertical range: modern writing-mode styling, bottom-up. */
+.mixer-fader {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 22px;
+  height: 140px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.mixer-fader.mixer-patterned,
+.mixer-pan.mixer-patterned {
+  /* This control's channel is patterned in the code - the write composes rather than replaces
+     (gain) or takes over (pan); the tooltip carries the words. */
+  outline: 1px dashed var(--warn);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+.mixer-db,
+.mixer-pan-label {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.mixer-pan {
+  width: 34px;
+  height: 34px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.mixer-note {
+  min-height: 16px;
+  padding: 0 12px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mixer-note:empty {
+  padding: 0;
+  min-height: 0;
+}

@@ -180,6 +180,13 @@
                    and collapsed by :empty - this is a fault light, not a hint. -->
               <div id="audioDeviceWarning" class="settings-warning"></div>
             </section>
+            <section id="mixerSection">
+              <h2>mixer</h2>
+              <div class="settings-actions">
+                <button id="mixerOpenBtn" class="small"
+                  title="level meters, spectrum and stereo field for every playing track (ctrl+g)">open mixer…</button>
+              </div>
+            </section>
             <section id="editorSection">
               <h2>editor</h2>
               <label class="settings-row settings-check"
@@ -459,6 +466,37 @@
           <span class="spacer"></span>
           <button id="midiImportGo" class="small primary">import</button>
         </div>
+      </div>
+    </div>
+
+    <!-- The mixer (ctrl+g). Its own backdrop class, NOT dir-picker-backdrop: that class makes the
+         global hotkey handler stand down, and the transport keys (cmd+enter, cmd+.) must keep
+         working while mixing. -->
+    <div id="mixerBackdrop" class="mixer-backdrop hidden">
+      <div class="mixer-dialog" role="dialog" aria-label="mixer">
+        <div class="mixer-head">
+          <span>mixer</span>
+          <button id="mixerViewBtn" class="small mixer-view-btn"
+            title="color-coded per track, or the summed master alone">by track</button>
+          <span class="spacer"></span>
+          <button id="mixerClose" class="small">✕</button>
+        </div>
+        <div class="mixer-plots">
+          <div class="mixer-plot">
+            <canvas id="mixerSpectrum"></canvas>
+            <div class="mixer-plot-label">spectrum
+              <button id="mixerFreezeBtn" class="small mixer-freeze-btn"
+                title="hold the maximum over time — click again to clear and go back to live">freeze</button>
+            </div>
+          </div>
+          <div class="mixer-plot">
+            <canvas id="mixerSpatial" title="angle is stereo position, radius is level — a narrow petal is mono, a wide fan is wide"></canvas>
+            <div class="mixer-plot-label">stereo image</div>
+          </div>
+        </div>
+        <div id="mixerLegend" class="mixer-legend"></div>
+        <div id="mixerStrips" class="mixer-strips"></div>
+        <div id="mixerNote" class="mixer-note"></div>
       </div>
     </div>
 

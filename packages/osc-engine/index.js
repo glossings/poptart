@@ -233,6 +233,24 @@ const PACK_LOAD_TIMEOUT_MS = 120000;
 // eval - but not at the cost of a filesystem look per sample event. See _ensurePack.
 const MISSING_SOURCE_RETRY_MS = 2000;
 
+// The mixer's analysis bands: 96 log-spaced centers, 30Hz..17kHz - ~11 per octave (a bit under
+// 1/10 octave), which is the resolution at which a filter-bank analyzer starts reading like an
+// analyzer rather than a graphic-EQ display. Defined HERE and shipped to sclang with the
+// mixMeters on message (which builds the analyzer SynthDef from them), so the engine measures
+// exactly the frequencies the client draws - one list, no drift. Rounded to whole Hz so the
+// list survives a JSON round-trip bit-identically (sclang compares it against the previous one
+// to know whether to rebuild).
+const MIX_BAND_COUNT = 96;
+const MIX_BAND_LO = 30;
+const MIX_BAND_HI = 17000;
+const MIX_BAND_FREQS = Array.from({ length: MIX_BAND_COUNT }, (_, i) =>
+  Math.round(MIX_BAND_LO * (MIX_BAND_HI / MIX_BAND_LO) ** (i / (MIX_BAND_COUNT - 1))));
+// Values each band reports, in order: left, right, mid (L+R), side (L-R). The first two carry
+// level and left/right balance; the last two are what make the stereo image a real goniometer -
+// mid vs side IS the phase-correlation axis, and without them a magnitude-only display can
+// never leave the in-phase ±45° wedge (see the client's imager).
+const MIX_SPEC_VALUES_PER_BAND = 4;
+
 // The osc package with `metadata: true` requires args as { type, value } objects - raw JS
 // values would throw. Integers map to 'i', other numbers 'f', strings 's'.
 const wrap = (i, n) => ((i % n) + n) % n;
@@ -646,6 +664,25 @@ class OscEngine {
   // to bounce. Idempotent; turning it off frees the tap and cancels any bounce still running.
   tapTrack(trackId, on) {
     this._send('/poptart/tapTrack', [trackId, on ? 1 : 0]);
+  }
+
+  // Global mixer monitoring: while on, the engine taps EVERY live track (and the master bus) with
+  // an analysis synth and streams per-track peak/RMS through onMixLevel plus per-band L/R
+  // amplitudes through onMixSpec - what the editor's mixer modal draws. The band centers ride
+  // along so the analyzer is built against MIX_BAND_FREQS (see there). Idempotent; tracks created
+  // while on join by themselves.
+  mixMeters(on) {
+    this._send('/poptart/mixMeters', [on ? 1 : 0, JSON.stringify(MIX_BAND_FREQS)]);
+  }
+
+  /** The band centers onMixSpec frames are measured at, lowest first. */
+  mixBandFreqs() {
+    return [...MIX_BAND_FREQS];
+  }
+
+  /** How many values each band contributes to an onMixSpec frame (see MIX_SPEC_VALUES_PER_BAND). */
+  mixSpecStride() {
+    return MIX_SPEC_VALUES_PER_BAND;
   }
 
   /**
@@ -1311,6 +1348,22 @@ class OscEngine {
       // both already reduced across the two channels engine-side.
       const [track, peak, rms] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onRecLevel === 'function') this.onRecLevel(String(track), Number(peak), Number(rms));
+      return;
+    }
+    if (msg.address === '/poptart/mixLevel') {
+      // Mixer meter feed for one monitored track, ~20/sec while the mixer is on:
+      // [key, peakL, rmsL, peakR, rmsR]. Key "*" is the master bus.
+      const [track, peakL, rmsL, peakR, rmsR] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onMixLevel === 'function') {
+        this.onMixLevel(String(track), Number(peakL), Number(rmsL), Number(peakR), Number(rmsR));
+      }
+      return;
+    }
+    if (msg.address === '/poptart/mixSpec') {
+      // Mixer band-analyzer frame, ~20/sec: [key, then MIX_SPEC_VALUES_PER_BAND values per band]
+      // in mixBandFreqs() order.
+      const [track, ...values] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onMixSpec === 'function') this.onMixSpec(String(track), values.map(Number));
       return;
     }
     if (msg.address === '/poptart/midiNoteIn') {

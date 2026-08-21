@@ -43,6 +43,12 @@ That's a synth line in F minor played through Serum, with its filter cutoff swep
 - **Bounce a track from the keyboard.** ctrl+b records the block the cursor is in — starting on the
   next phrase, for as many cycles as you asked — files the audio, mutes the source, and writes the
   playback line in below it. `.record()` gives you the same thing with a panel and a live meter.
+- **A mixer that writes code.** ctrl+g opens level meters, an analyzer-style spectrum (with a
+  freeze-max hold), and a polar goniometer that shows each track's stereo width *and* its phase
+  — color-coded per track or summed.
+  Its faders, pan knobs, and mute/solo buttons don't hold hidden state — they write
+  `.gain(…)`/`.pan(…)` and the `_`/`S` label markers onto the pattern itself, so the mix lives
+  in the code and travels with the patch.
 - **Shareable patches.** A plugin's full state (preset, every knob, wavetables) is written into the
   code automatically, so the patch *is* the sound — **export** hands someone a single file that
   plays exactly what you hear, and **link** puts a whole plain-code patch in the clipboard.

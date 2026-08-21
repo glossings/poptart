@@ -318,6 +318,14 @@ async function restartEngine() {
     midiRec = null;
     recTapped.clear();
     recLevels.clear();
+    // The mixer's analysis synths died with the old scsynth. Flag off without sending anything
+    // (there's nothing to send to); an open mixer sees on:false on its next poll and re-arms
+    // itself against the fresh engine.
+    mixMonitorOn = false;
+    clearTimeout(mixOffTimer);
+    mixOffTimer = null;
+    mixLevels.clear();
+    mixSpecs.clear();
     transport?.stop(); // playback is over - freeze the clock at cycle 0 until the next eval
     // Drop the shared references BEFORE the teardown, not after it. Everything that reaches for
     // `engine` outside a request - the VST transport re-sync on its 4s timer, the recorder ticks -
@@ -369,6 +377,9 @@ function wireEngine() {
   engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackId, slot);
   // Peak level of a track tapped for recording - what the record panel's meter draws.
   engine.onRecLevel = (trackId, left, right) => handleRecLevel(trackId, left, right);
+  // Mixer monitoring feeds (per-track levels + band frames) - what the mixer modal draws.
+  engine.onMixLevel = (key, peakL, rmsL, peakR, rmsR) => handleMixLevel(key, peakL, rmsL, peakR, rmsR);
+  engine.onMixSpec = (key, values) => handleMixSpec(key, values);
   // Which input channels input() can address, and what a device-relative input("name", n) resolves
   // against. Only the booted device has any, so this is re-fed on every start (a device change is
   // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
@@ -1114,6 +1125,94 @@ function releaseRecTap(label) {
     // engine already down - the tap went with it
   }
   recLevels.delete(label);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Global mixer monitoring - what the editor's mixer modal (ctrl+g) polls. While on, the engine
+// taps every live track plus the master bus (see engine.mixMeters) and streams two feeds back:
+// peak/RMS levels for the strips' meters, and per-band L/R amplitudes serving both the spectrum
+// and the stereo-field display. The mixer's WRITES don't come through here at all - a fader edits
+// the code (`.gain(x)` on the block) and re-evaluates, so the buffer stays the source of truth.
+// ---------------------------------------------------------------------------------------------
+
+let mixMonitorOn = false;
+let mixOffTimer = null; // re-armed by every status poll; firing means the mixer went away
+const mixLevels = new Map(); // key -> queued { peakL, rmsL, peakR, rmsR, at } ('*' = master bus)
+const mixSpecs = new Map(); // key -> latest band frame [[l, r], ...] in mixBandFreqs() order
+
+// Same queue-don't-overwrite reasoning as the record panel's meter (see REC_LEVEL_QUEUE_MAX).
+const MIX_LEVEL_QUEUE_MAX = 64;
+// Polls arrive ~10x/sec from an open mixer; a few missed beats is a hidden tab, not a gap.
+const MIX_AUTO_OFF_MS = 4000;
+
+function handleMixLevel(key, peakL, rmsL, peakR, rmsR) {
+  let queue = mixLevels.get(key);
+  if (!queue) mixLevels.set(key, (queue = []));
+  queue.push({ peakL, rmsL, peakR, rmsR, at: Date.now() });
+  while (queue.length > MIX_LEVEL_QUEUE_MAX) queue.shift();
+}
+
+// A band frame arrives flat; the client wants it per band. The stride is the engine's to state
+// (see OscEngine#mixSpecStride) so adding a measured value per band stays a one-file change.
+//
+// Rounded on the way in, because these are JSON'd to the browser ten times a second and a raw
+// float spells itself out as seventeen digits: at 96 bands x 4 values x 9 sources that was a
+// 140KB poll (1.4MB/s) of which nearly all was decimal places no display could use. A millionth
+// is -120dB - far below the plots' -72dB floor - so nothing visible survives the trim, and the
+// payload drops by roughly two thirds.
+function handleMixSpec(key, values) {
+  const stride = engine?.mixSpecStride?.() ?? 4;
+  const bands = [];
+  for (let i = 0; i + stride <= values.length; i += stride) {
+    const band = new Array(stride);
+    for (let k = 0; k < stride; k++) band[k] = Math.round(values[i + k] * 1e6) / 1e6;
+    bands.push(band);
+  }
+  mixSpecs.set(key, bands);
+}
+
+function setMixMonitor(on) {
+  if (on && !engine) throw new Error(engineError ?? 'engine not loaded');
+  clearTimeout(mixOffTimer);
+  mixOffTimer = null;
+  try {
+    if (engine) engine.mixMeters(on);
+  } catch (err) {
+    if (on) throw err; // turning OFF a dead engine is fine - the taps died with it
+  }
+  mixMonitorOn = !!on && !!engine;
+  if (!mixMonitorOn) {
+    mixLevels.clear();
+    mixSpecs.clear();
+  }
+}
+
+// Everything one mixer poll needs. Meter readings queue engine-side of this map and are drained
+// per poll, oldest first (the engine meters 20x/sec, the mixer polls ~10x - dropping every other
+// reading would eat transients, exactly as the record panel found). Band frames are
+// latest-value-wins: they draw a display that decays smoothly client-side, so a skipped frame is
+// invisible. Polling is also the mixer's keep-alive: monitoring shuts itself off when the polls
+// stop (closed tab, crashed page), so an abandoned mixer never leaves analysis synths running.
+function mixStatus() {
+  if (mixMonitorOn) {
+    clearTimeout(mixOffTimer);
+    mixOffTimer = setTimeout(() => setMixMonitor(false), MIX_AUTO_OFF_MS);
+  }
+  const cutoff = Date.now() - 1000;
+  const levels = {};
+  for (const [key, queue] of mixLevels) {
+    levels[key] = queue.filter((r) => r.at >= cutoff)
+      .map(({ peakL, rmsL, peakR, rmsR }) => ({ peakL, rmsL, peakR, rmsR }));
+    queue.length = 0;
+  }
+  return {
+    on: mixMonitorOn,
+    tracks: [...schedulers.keys()],
+    levels,
+    spec: Object.fromEntries(mixSpecs),
+    bandFreqs: engine ? engine.mixBandFreqs() : [],
+    transport: transport?.snapshot(),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2374,6 +2473,19 @@ const routes = {
     }
     return { status: 200, body: {} };
   },
+
+  // --- the mixer modal (ctrl+g) ---
+
+  // Engine-side monitoring on/off. Body: { on }. Off is always accepted (even with the engine
+  // down); on needs a live engine to tap.
+  'POST /api/mixer/monitor': async (body) => {
+    setMixMonitor(!!body.on);
+    return { status: 200, body: { on: mixMonitorOn } };
+  },
+
+  // What an open mixer polls ~10x/sec: playing track labels, drained meter readings, the latest
+  // band frames, and the band centers they're measured at. Also the keep-alive - see mixStatus.
+  'GET /api/mixer/status': async () => ({ status: 200, body: mixStatus() }),
 
   // Every bounce on disk, newest first - the sr() autocomplete's word list and the recordings
   // browser. Reads the filesystem directly, so it works with the engine down.

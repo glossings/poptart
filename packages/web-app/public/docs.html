@@ -865,6 +865,34 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
             tail back over the head, for a track that was <em>silent</em> going in; a loop that's
             already running records the previous pass's tail into its own head and doesn't want it.
           </p>
+          <h3>The mixer: ctrl+g</h3>
+          <p>
+            <strong>ctrl+g</strong> (or settings → <em>open mixer…</em>) opens a strip per track:
+            a stereo meter with peak hold, a gain fader, a pan knob, and mute/solo. Above the strips
+            sit the <em>spectrum</em> — tilted and slow-release so it reads like an analyzer, with a
+            <em>freeze</em> button that holds the maximum over time while it's lit (great for "where
+            did that peak land") — and the <em>stereo image</em>, a polar goniometer where radius is
+            level and the angle is the band's mid/side ratio: straight up is mono, the dashed
+            <strong>±45° safe lines</strong> are hard left and hard right, and anything spilling into
+            the outer wedges (marked <code>ø</code>) is <em>out of phase</em> — content that will
+            partly vanish in mono. So a mono bass is a narrow vertical petal, a wide pad a broad fan,
+            a hard-panned shaker a spike on its safe line, and a phasey chorus a flat smear. Per-band
+            dots ride on top to show which frequencies sit where. The <em>by track</em>/<em>overall</em>
+            button switches both plots between color-coded tracks and the summed master, the legend
+            above the strips says which color is which, and <strong>holding any fader or pan knob</strong>
+            fades the other tracks back so you can see the one you're moving.
+          </p>
+          <p>
+            The controls write <em>code</em>, not hidden mixer state: a fader move rewrites the
+            block's trailing <code>.gain(x)</code> (appending one if there isn't any), the pan knob
+            does the same with <code>.pan(x)</code>, mute and solo write the label markers you'd
+            type yourself (<code>_bass:</code> / <code>Sbass:</code>), and the buffer re-evaluates
+            on the same quiet update path the LFO editor uses. A muted track keeps its strip — that's
+            how it gets un-muted. Because chained <code>.gain()</code> calls multiply, the written
+            value is a clean trim even on a track whose gain is patterned —
+            <code>.gain(env())</code> keeps pumping and the fader scales it (such controls are marked
+            with a dashed outline). The mix lives in the pattern and travels with the patch.
+          </p>
         </section>
 
         <!-- ================================================================= -->
@@ -1123,7 +1151,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             character offset — <code>getCode</code>/<code>setCode</code>, <code>insertCode</code>/<code>replaceCode</code>,
             <code>getSelection</code>, <code>getCursorLocation</code>/<code>setCursorLocation</code> — and the sandbox
             also hands you <code>prompt</code>, <code>alert</code>, <code>log</code>, and the rhythm helpers
-            <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>. Built-in <code>ctrl+p</code>/<code>ctrl+r</code>/<code>ctrl+m</code>
+            <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>. Built-in <code>ctrl+p</code>/<code>ctrl+r</code>/<code>ctrl+m</code>/<code>ctrl+g</code>
             are reserved.
           </p>
         </section>

@@ -29,6 +29,7 @@ let labelsMod = null;
 let shapeMod = null;
 let pianorollMod = null;
 let notesMod = null; // notes.mjs - pure music-theory helpers piped up to the userland prebake scope
+let mixctlMod = null; // mixctl.mjs - the mixer's gain/pan trim reads and code edits
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -37,13 +38,15 @@ const coreReady = Promise.all([
   import('/pattern-core/shape.mjs'),
   import('/pattern-core/pianoroll.mjs'),
   import('/pattern-core/notes.mjs'),
+  import('/pattern-core/mixctl.mjs'),
 ])
-  .then(([m, l, s, pr, nt]) => {
+  .then(([m, l, s, pr, nt, mx]) => {
     miniMod = m;
     labelsMod = l;
     shapeMod = s;
     pianorollMod = pr;
     notesMod = nt;
+    mixctlMod = mx;
     initLfoEditor();
     initPianorollEditor();
     initRecordPanel();
@@ -7493,6 +7496,1041 @@ function bounceBlockAtCursor() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The mixer (ctrl+g, or settings → open mixer…). One modal: a strip per track - stereo meter,
+// gain fader, pan knob, mute/solo - plus the spectrum (Pro-Q-flavoured: tilted, slow-release,
+// with a freeze-max hold) and a polar stereo image (Imager-flavoured: angle is stereo position,
+// radius is level - a mono track is a narrow vertical petal, a wide one a fan). Both plots
+// switch between color-coded per-track and the summed master alone. Monitoring is engine-side
+// (see server.js's mixer section): opening posts /api/mixer/monitor and the modal polls
+// /api/mixer/status ~10x/sec, which doubles as the server's keep-alive.
+//
+// The controls WRITE CODE, not engine state: a fader gesture rewrites the block's trailing
+// `.gain(x)` literal (or appends one - mixctl.mjs owns the edit) and re-evaluates on the same
+// debounced update path the LFO editor uses, so what you hear is always what an eval of the
+// buffer plays, and the mix survives in the pattern itself. .gain() chains multiply, which is
+// what makes an appended literal a clean trim even over a patterned gain; a pan write replaces
+// a patterned pan, which is what grabbing the knob means. Mute and solo write the label markers
+// the language already has (`_bass:` / `Sbass:`) - which is why the strip list can't just be
+// "what's playing": a track muted HERE must keep its strip (a strip that vanishes on mute could
+// never be un-muted), so blocks silenced by mute or someone else's solo stay listed, metering
+// silence. Only labels the last eval knew as tracks qualify, so a muted setup block never grows
+// a strip.
+// ---------------------------------------------------------------------------------------------
+
+const mixerBackdrop = document.getElementById('mixerBackdrop');
+const mixerStripsEl = document.getElementById('mixerStrips');
+const mixerNoteEl = document.getElementById('mixerNote');
+const mixerSpectrumCanvas = document.getElementById('mixerSpectrum');
+const mixerSpatialCanvas = document.getElementById('mixerSpatial');
+const mixerViewBtn = document.getElementById('mixerViewBtn');
+const mixerLegendEl = document.getElementById('mixerLegend');
+
+const MIXER_POLL_MS = 100;
+// The plots are redrawn at ~30fps, not at the display's rate: the analyzer sends 20 frames a
+// second, so painting 60 (or 120, on a fast panel) is the same picture drawn twice for nothing -
+// and this loop walks every band of every track through two canvases.
+const MIXER_FRAME_MS = 32;
+// Ballistics as TIME CONSTANTS rather than per-frame factors, so a 120Hz display doesn't decay
+// everything twice as fast as a 60Hz one. Attack is near-instant, release is what makes a
+// spectrum readable; the meters sit between the two.
+const MIXER_TAU_ATTACK = 0.02;
+const MIXER_TAU_RELEASE = 0.25;
+const MIXER_TAU_METER_RMS = 0.13;
+const MIXER_TAU_METER_PEAK = 0.2;
+// dt -> the fraction of the remaining distance to close this frame, for a given time constant.
+const mixerLerp = (dt, tau) => 1 - Math.exp(-dt / tau);
+const MIXER_EVAL_DEBOUNCE_MS = 300; // one eval per gesture, same reasoning as LFO_EVAL_DEBOUNCE_MS
+const MIXER_WRITE_THROTTLE_MS = 120; // code writes during a drag - the buffer re-lexes per write
+const MIXER_METER_DB_MIN = -60;
+const MIXER_METER_DB_MAX = 6;
+// The fader's law: unity gain sits at 80% of the throw and the curve is gentle around it, like a
+// console fader - linear-in-gain put the whole mix in the top centimetre.
+const MIXER_FADER_UNITY = 0.8;
+const MIXER_FADER_EXP = 2.5;
+// Track colors, assigned first-seen per label so a track keeps its color across re-evals. Chosen
+// to stay apart from each other on both dark and light themes.
+const MIXER_PALETTE = [
+  '#ff7a9c', '#63b4ff', '#7ed896', '#ffcb6b', '#c792ea', '#4dd0c4',
+  '#f78c6c', '#82aaff', '#a5d98a', '#ff8fd8', '#e6c07b', '#7fd8f7',
+];
+const mixerColorByLabel = new Map();
+
+// --- the spectrum's vertical scaling ---
+//
+// Display tilt, dB/octave around a 1kHz pivot. Pro-Q's default is 4.5, but that number belongs
+// to an FFT display, whose bins fall 3dB/oct on pink noise; a constant-Q filter bank like ours
+// already reads pink as flat, so the equivalent extra tilt is the difference. Setting the full
+// 4.5 here is what buried the low end: it subtracts 15dB at 100Hz and 22dB at 35Hz.
+const MIXER_SPEC_TILT_DB = 1.5;
+// Makeup applied to every band before plotting. One narrow band of a full-scale mix holds a
+// small slice of its total energy - pink noise at -12dBFS reads about -30dB in any one of these
+// bands - so without this the whole curve hugs the floor no matter how loud the music is.
+// Display-only, and a constant, so relative heights (the thing you actually read) are untouched.
+// Sized to put that pink noise around two thirds up the plot, leaving room for the crest the
+// followers add on real material: this is the number to nudge if the curve sits too low or pegs.
+const MIXER_SPEC_MAKEUP_DB = 12;
+// The plot's own dB window, wider than the strip meters': a spectrum wants to show what's
+// happening well below the level a meter cares about.
+const MIXER_SPEC_DB_MIN = -72;
+const MIXER_SPEC_DB_MAX = 6;
+
+let mixerState = null; // open modal: { strips: Map(label -> strip), order, bandFreqs, ... }
+let mixerEvalTimer = null;
+let mixerSuppressSync = false; // our own replaceRange must not bounce back through the code sync
+let mixerSyncTimer = null;
+let mixerViewMode = localStorage.getItem('poptart-mixer-view') === 'overall' ? 'overall' : 'tracks';
+// Labels the last eval built as tracks, muted ones included (renderTracks records it). What
+// qualifies a silenced block for a strip - see the section comment.
+let mixerKnownTracks = [];
+// The strip whose fader or pan knob is being held right now. While one is, the plots draw that
+// track at full strength and everything else faded back, so you can see what you are moving in
+// among the rest - the reason to have the plots and the controls on one panel at all.
+//
+// "Held" means held: a pointer focus ends on release, not when you next click something else.
+// Clicking a range input also gives it DOM focus, so hanging this on focus/blur left the plots
+// dimmed after the mouse was long gone. Keyboard focus is the one case that should persist -
+// tab to a fader, arrow it, and the dimming stays until you tab away - so the two are told
+// apart by which one started it.
+let mixerFocus = null;
+let mixerFocusFromPointer = false;
+
+const mixerClamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const mixerDbOf = (amp) => 20 * Math.log10(Math.max(amp, 1e-6));
+// dB onto 0..1 of the strip meters' range.
+const mixerDbUnit = (db) => mixerClamp((db - MIXER_METER_DB_MIN) / (MIXER_METER_DB_MAX - MIXER_METER_DB_MIN), 0, 1);
+// dB onto 0..1 of the spectrum plot's (wider) range.
+const mixerSpecUnit = (db) => mixerClamp((db - MIXER_SPEC_DB_MIN) / (MIXER_SPEC_DB_MAX - MIXER_SPEC_DB_MIN), 0, 1);
+
+// One band's measured values, as the engine lays them out (see MIX_SPEC_VALUES_PER_BAND):
+// left, right, mid, side. Everything the plots show is derived here and nowhere else.
+const bandL = (b) => b[0] ?? 0;
+const bandR = (b) => b[1] ?? 0;
+const bandMid = (b) => b[2] ?? 0;
+const bandSide = (b) => b[3] ?? 0;
+/** A band's level (mean of the two channels), as a linear amplitude. */
+const bandAmp = (b) => (bandL(b) + bandR(b)) / 2;
+const mixerFaderToGain = (v) => (v <= 0 ? 0 : (v / MIXER_FADER_UNITY) ** MIXER_FADER_EXP);
+const mixerGainToFader = (g) => (g <= 0 ? 0 : mixerClamp(MIXER_FADER_UNITY * g ** (1 / MIXER_FADER_EXP), 0, 1));
+
+function mixerColorFor(label) {
+  if (!mixerColorByLabel.has(label)) {
+    mixerColorByLabel.set(label, MIXER_PALETTE[mixerColorByLabel.size % MIXER_PALETTE.length]);
+  }
+  return mixerColorByLabel.get(label);
+}
+
+function mixerFmtDb(gain) {
+  if (gain <= 0) return '-∞ dB';
+  const db = 20 * Math.log10(gain);
+  return `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`;
+}
+
+function mixerFmtPan(pan) {
+  const p = Math.round(pan * 100);
+  return p === 0 ? 'C' : p < 0 ? `L${-p}` : `R${p}`;
+}
+
+function toggleMixer() {
+  if (mixerState) closeMixer();
+  else openMixer();
+}
+
+async function openMixer() {
+  if (mixerState) return;
+  mixerBackdrop.classList.remove('hidden');
+  mixerState = {
+    strips: new Map(),
+    order: [], // strip labels in code order - the palette walk and the draw order
+    serverTracks: [], // what the engine says is playing, as of the last poll
+    bandFreqs: [],
+    masterDisp: null, // smoothed master band frame, [[l, r], ...]
+    masterTarget: null,
+    freeze: false, // spectrum freeze-max hold (the button on the plot)
+    freezeMax: new Map(), // key ('*' or label) -> per-band max amp accumulated while frozen
+    pollTimer: 0,
+    raf: 0,
+    lastArmAt: 0, // last re-POST of monitor-on, so a dead engine isn't spammed at poll rate
+    monitorError: null,
+  };
+  updateMixerViewBtn();
+  updateMixerFreezeBtn();
+  sizeMixerCanvases();
+  try {
+    await api('POST', '/api/mixer/monitor', { on: true });
+  } catch (e) {
+    // Strips (built from the buffer) and their controls still work; only the meters stay dark.
+    if (mixerState) mixerState.monitorError = e.message ?? String(e);
+  }
+  if (!mixerState) return; // closed again before the POST came back
+  mixerPoll().catch(() => {});
+  mixerState.pollTimer = setInterval(() => mixerPoll().catch(() => {}), MIXER_POLL_MS);
+  const loop = () => {
+    if (!mixerState) return;
+    mixerState.raf = requestAnimationFrame(loop);
+    const now = performance.now();
+    const since = now - (mixerState.lastDrawAt ?? 0);
+    if (since < MIXER_FRAME_MS) return;
+    mixerState.lastDrawAt = now;
+    // Capped: a tab that was hidden (or a stalled frame) must not hand the ballistics a
+    // multi-second step and snap every meter to its target at once.
+    drawMixer(Math.min(since / 1000, 0.25));
+  };
+  mixerState.raf = requestAnimationFrame(loop);
+}
+
+function closeMixer() {
+  if (!mixerState) return;
+  clearInterval(mixerState.pollTimer);
+  cancelAnimationFrame(mixerState.raf);
+  mixerState = null;
+  mixerBackdrop.classList.add('hidden');
+  api('POST', '/api/mixer/monitor', { on: false }).catch(() => {}); // server auto-offs anyway
+}
+
+function updateMixerViewBtn() {
+  mixerViewBtn.textContent = mixerViewMode === 'tracks' ? 'by track' : 'overall';
+}
+
+// The plots take their bitmap size from their laid-out size, at device resolution; drawing code
+// works in CSS pixels via the transform.
+function sizeMixerCanvases() {
+  const dpr = window.devicePixelRatio || 1;
+  for (const c of [mixerSpectrumCanvas, mixerSpatialCanvas]) {
+    const r = c.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    c.width = Math.round(r.width * dpr);
+    c.height = Math.round(r.height * dpr);
+    c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.dataset.w = r.width;
+    c.dataset.h = r.height;
+  }
+}
+
+// --- polling: track list, meter readings, band frames ---
+
+async function mixerPoll() {
+  if (!mixerState) return;
+  const s = await api('GET', '/api/mixer/status');
+  if (!mixerState) return;
+  // The server flags off when the engine restarted under it (or our first arm failed) - re-arm,
+  // gently. While the engine is down this fails and the note below says so.
+  if (!s.on && Date.now() - mixerState.lastArmAt > 1000) {
+    mixerState.lastArmAt = Date.now();
+    api('POST', '/api/mixer/monitor', { on: true })
+      .then(() => { if (mixerState) mixerState.monitorError = null; })
+      .catch((e) => { if (mixerState) mixerState.monitorError = e.message ?? String(e); });
+  } else if (s.on) {
+    mixerState.monitorError = null;
+  }
+  if (s.bandFreqs?.length) mixerState.bandFreqs = s.bandFreqs;
+
+  mixerState.serverTracks = s.tracks ?? [];
+  refreshMixerStrips();
+
+  for (const strip of mixerState.strips.values()) {
+    const batch = s.levels?.[strip.label] ?? [];
+    const m = strip.meter;
+    m.tPeakL = 0; m.tRmsL = 0; m.tPeakR = 0; m.tRmsR = 0;
+    for (const r of batch) {
+      m.tPeakL = Math.max(m.tPeakL, r.peakL); m.tRmsL = Math.max(m.tRmsL, r.rmsL);
+      m.tPeakR = Math.max(m.tPeakR, r.peakR); m.tRmsR = Math.max(m.tRmsR, r.rmsR);
+    }
+    strip.bandTarget = s.spec?.[strip.label] ?? null;
+    if (mixerState.freeze) accumMixerFreeze(strip.label, strip.bandTarget);
+  }
+  mixerState.masterTarget = s.spec?.['*'] ?? null;
+  if (mixerState.freeze) accumMixerFreeze('*', mixerState.masterTarget);
+
+  mixerNoteEl.textContent =
+    !mixerState.order.length ? 'nothing playing — evaluate a pattern and its tracks appear here'
+    : mixerState.monitorError ? `meters offline: ${mixerState.monitorError}`
+    : '';
+}
+
+// The freeze hold accumulates from the RAW 15Hz frames, not the smoothed display, so a one-frame
+// transient leaves its true mark - the point of the hold.
+function accumMixerFreeze(key, frame) {
+  if (!frame) return;
+  let arr = mixerState.freezeMax.get(key);
+  if (!arr || arr.length !== frame.length) {
+    arr = new Array(frame.length).fill(0);
+    mixerState.freezeMax.set(key, arr);
+  }
+  for (let i = 0; i < frame.length; i++) arr[i] = Math.max(arr[i], bandAmp(frame[i]));
+}
+
+// --- strips ---
+
+// Which labels get a strip: every block the last eval knew as a track (mixerKnownTracks - which
+// includes the muted ones, so a setup or definitions block never grows a strip), plus anything
+// the engine currently reports playing.
+//
+// Deliberately NOT "what is playing, plus what the code has silenced". That was the same list
+// most of the time and wrong for half a second at the worst moment: the server's playing set
+// lags a mute/solo edit by the debounce plus a poll, so un-soloing showed the solo's single
+// track until the re-eval landed and every other strip blinked out and back. Membership tracks
+// the CODE, which changes the instant you click; only the dimming below reads the engine.
+function mixerStripLabels() {
+  const playing = mixerState.serverTracks;
+  const blocks = labelsMod ? labelsMod.splitLabeledBlocks(cm.getValue()) : [];
+  const known = new Set([...mixerKnownTracks, ...playing]);
+  const inStrip = new Set(playing);
+  for (const b of blocks) if (known.has(b.label)) inStrip.add(b.label);
+  const codeOrder = blocks.map((b) => b.label);
+  const pos = (l) => { const i = codeOrder.indexOf(l); return i < 0 ? codeOrder.length : i; };
+  return [...inStrip].sort((a, b) => pos(a) - pos(b));
+}
+
+// Recompute the strip list, rebuild the row only when it actually changed, and re-read the
+// code's values into the controls. Called from every poll and (debounced) from every buffer
+// edit - but the code-derived work re-runs only when the buffer or the server's track list
+// moved, keyed on CodeMirror's change generation, so an idle open mixer costs the polls alone.
+function refreshMixerStrips() {
+  const gen = cm.changeGeneration();
+  const tracksKey = mixerState.serverTracks.join('\n');
+  if (gen === mixerState.codeGen && tracksKey === mixerState.tracksKey) return;
+  mixerState.codeGen = gen;
+  mixerState.tracksKey = tracksKey;
+  const labels = mixerStripLabels();
+  if (labels.join('\n') !== mixerState.order.join('\n')) {
+    const kept = mixerState.strips;
+    mixerState.strips = new Map();
+    mixerState.order = labels;
+    mixerStripsEl.innerHTML = '';
+    for (const label of labels) {
+      const strip = kept.get(label) ?? buildMixerStrip(label);
+      mixerState.strips.set(label, strip);
+      mixerStripsEl.appendChild(strip.el);
+    }
+  }
+  syncMixerFromCode();
+}
+
+function buildMixerStrip(label) {
+  const dpr = window.devicePixelRatio || 1;
+  const color = mixerColorFor(label);
+  const el = document.createElement('div');
+  el.className = 'mixer-strip';
+
+  const name = document.createElement('div');
+  name.className = 'mixer-strip-name';
+  name.textContent = label;
+  name.title = label;
+  name.style.color = color;
+
+  const msRow = document.createElement('div');
+  msRow.className = 'mixer-strip-ms';
+  const muteBtn = document.createElement('button');
+  muteBtn.className = 'small mixer-ms-btn';
+  muteBtn.textContent = 'M';
+  const soloBtn = document.createElement('button');
+  soloBtn.className = 'small mixer-ms-btn';
+  soloBtn.textContent = 'S';
+  msRow.append(muteBtn, soloBtn);
+
+  const body = document.createElement('div');
+  body.className = 'mixer-strip-body';
+  const fader = document.createElement('input');
+  fader.type = 'range';
+  fader.className = 'mixer-fader';
+  fader.min = 0; fader.max = 1000; fader.step = 1;
+  fader.title = 'gain — writes .gain(x) onto this block';
+  const meterCanvas = document.createElement('canvas');
+  meterCanvas.className = 'mixer-meter';
+  meterCanvas.width = 26 * dpr; meterCanvas.height = 140 * dpr;
+  meterCanvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+  body.append(fader, meterCanvas);
+
+  const dbLabel = document.createElement('div');
+  dbLabel.className = 'mixer-db';
+
+  const panCanvas = document.createElement('canvas');
+  panCanvas.className = 'mixer-pan';
+  panCanvas.width = 34 * dpr; panCanvas.height = 34 * dpr;
+  panCanvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+  panCanvas.title = 'pan — drag up/down, double-click to center; writes .pan(x)';
+
+  const panLabel = document.createElement('div');
+  panLabel.className = 'mixer-pan-label';
+
+  el.append(name, msRow, body, dbLabel, panCanvas, panLabel);
+
+  const strip = {
+    label, color, el, fader, meterCanvas, dbLabel, panCanvas, panLabel, muteBtn, soloBtn,
+    gain: 1, pan: 0, gone: false, muted: false, soloed: false,
+    dragGain: false, dragPan: null,
+    writeTimer: {}, pendingWrite: {},
+    meter: { tPeakL: 0, tRmsL: 0, tPeakR: 0, tRmsR: 0, rmsL: 0, rmsR: 0, peakL: 0, peakR: 0, holdL: 0, holdR: 0, holdAtL: 0, holdAtR: 0 },
+    bandTarget: null,
+    bandDisp: null, // smoothed [[l, r], ...], grown lazily to bandFreqs' length
+  };
+
+  muteBtn.addEventListener('click', () => applyMixerFlags(strip, { muted: !strip.muted, soloed: strip.soloed }));
+  soloBtn.addEventListener('click', () => applyMixerFlags(strip, { muted: strip.muted, soloed: !strip.soloed }));
+
+  fader.addEventListener('input', () => {
+    const gain = mixerFaderToGain(fader.value / 1000);
+    strip.gain = gain;
+    dbLabel.textContent = mixerFmtDb(gain);
+    queueMixerWrite(strip, 'gain', gain);
+  });
+  // Pointer grabs are released by the window-level handler below (a drag can end anywhere), so
+  // all this does is take the focus. Arrow keys take it too, and only that kind survives to the
+  // blur - see mixerFocusFromPointer.
+  fader.addEventListener('pointerdown', () => {
+    strip.dragGain = true;
+    mixerFocus = label;
+    mixerFocusFromPointer = true;
+  });
+  fader.addEventListener('keydown', () => {
+    mixerFocus = label;
+    mixerFocusFromPointer = false;
+  });
+  fader.addEventListener('blur', () => {
+    if (!mixerFocusFromPointer && mixerFocus === label) mixerFocus = null;
+  });
+  // Double-click back to unity, matching the pan knob's reset gesture.
+  fader.addEventListener('dblclick', () => {
+    strip.gain = 1;
+    fader.value = Math.round(mixerGainToFader(1) * 1000);
+    dbLabel.textContent = mixerFmtDb(1);
+    queueMixerWrite(strip, 'gain', 1);
+  });
+
+  panCanvas.addEventListener('pointerdown', (e) => {
+    if (strip.gone) return;
+    panCanvas.setPointerCapture(e.pointerId);
+    strip.dragPan = { x: e.clientX, y: e.clientY, pan: strip.pan };
+    mixerFocus = label;
+    mixerFocusFromPointer = true;
+  });
+  panCanvas.addEventListener('pointermove', (e) => {
+    if (!strip.dragPan) return;
+    const d = strip.dragPan;
+    const pan = mixerClamp(d.pan + (e.clientX - d.x - (e.clientY - d.y)) * 0.006, -1, 1);
+    strip.pan = Math.round(pan * 100) / 100;
+    panLabel.textContent = mixerFmtPan(strip.pan);
+    queueMixerWrite(strip, 'pan', strip.pan);
+  });
+  // The window handler above covers the release; this is just the local pair for a pointer the
+  // canvas captured.
+  const endPan = () => { strip.dragPan = null; };
+  panCanvas.addEventListener('pointerup', endPan);
+  panCanvas.addEventListener('pointercancel', endPan);
+  panCanvas.addEventListener('dblclick', () => {
+    if (strip.gone) return;
+    strip.pan = 0;
+    panLabel.textContent = mixerFmtPan(0);
+    queueMixerWrite(strip, 'pan', 0);
+  });
+
+  return strip;
+}
+
+// --- the code writes ---
+
+// One trailing write per control per throttle window: replaceRange re-lexes the buffer, and a
+// drag emits input events far faster than the code needs to move.
+function queueMixerWrite(strip, name, value) {
+  strip.pendingWrite[name] = value;
+  if (strip.writeTimer[name]) return;
+  strip.writeTimer[name] = setTimeout(() => {
+    strip.writeTimer[name] = null;
+    const v = strip.pendingWrite[name];
+    strip.pendingWrite[name] = null;
+    if (v != null) applyMixerTrim(strip.label, name, v);
+  }, MIXER_WRITE_THROTTLE_MS);
+}
+
+function applyMixerTrim(label, name, value) {
+  if (!mixctlMod) return;
+  const code = cm.getValue();
+  const edit = mixctlMod.trimEdit(code, label, name, mixctlMod.formatTrim(value));
+  if (!edit) {
+    logLine(`mixer: couldn't find a block "${label}" to write .${name}() into - re-evaluate and try again`, true);
+    return;
+  }
+  mixerSuppressSync = true;
+  try {
+    cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+  } finally {
+    mixerSuppressSync = false;
+  }
+  mixerScheduleEval();
+}
+
+// Mute/solo rewrite the block's label marker (`_bass:` / `Sbass:`) - the same switch you'd type.
+function applyMixerFlags(strip, flags) {
+  if (!mixctlMod || strip.gone) return;
+  const edit = mixctlMod.flagEdit(cm.getValue(), strip.label, flags);
+  if (!edit) {
+    logLine(`mixer: "${strip.label}" has no label to mark - name the block to mute/solo it here`, true);
+    return;
+  }
+  mixerSuppressSync = true;
+  try {
+    cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+  } finally {
+    mixerSuppressSync = false;
+  }
+  refreshMixerStrips(); // the buttons (and possibly the strip list) change right away
+  mixerScheduleEval();
+}
+
+// A trim isn't set until it *sounds*: same debounced evaluate(false) the LFO editor uses - a
+// stopped clock stays stopped, a running one picks the new level up.
+function mixerScheduleEval() {
+  clearTimeout(mixerEvalTimer);
+  mixerEvalTimer = setTimeout(() => { mixerEvalTimer = null; evaluate(false); }, MIXER_EVAL_DEBOUNCE_MS);
+}
+
+// The reverse direction: hand edits to the buffer move the faders and the mute/solo lights, so
+// the mixer never reverts a value someone typed. Controls mid-drag are left alone.
+function syncMixerFromCode() {
+  if (!mixerState || !mixctlMod) return;
+  const code = cm.getValue();
+  const ctx = mixctlMod.analyze(code); // one lex serves every strip's reads below
+  // "Silenced" is read off the CODE, not off the engine's playing set: the code is what the
+  // buttons just changed, and the engine is a debounce and a poll behind it. Reading the engine
+  // here dimmed every name for half a second after each mute, and all of them whenever the
+  // engine was between evals.
+  const anySolo = ctx.blocks.some((b) => b.soloed && !b.muted);
+  for (const strip of mixerState.strips.values()) {
+    const gain = mixctlMod.readTrim(code, strip.label, 'gain', 1, ctx);
+    const pan = mixctlMod.readTrim(code, strip.label, 'pan', 0, ctx);
+    const block = ctx.blocks.find((b) => b.label === strip.label);
+    strip.gone = !gain;
+    strip.silent = !!block && (block.muted || (anySolo && !block.soloed));
+    strip.el.classList.toggle('mixer-strip-gone', strip.gone);
+    strip.el.classList.toggle('mixer-strip-silent', strip.silent);
+    strip.fader.disabled = strip.gone;
+    strip.muted = block?.muted ?? false;
+    strip.soloed = block?.soloed ?? false;
+    const canFlag = !strip.gone && !!mixctlMod.flagEdit(code, strip.label, {}, ctx);
+    strip.muteBtn.disabled = !canFlag;
+    strip.soloBtn.disabled = !canFlag;
+    strip.muteBtn.classList.toggle('on-mute', strip.muted);
+    strip.soloBtn.classList.toggle('on-solo', strip.soloed);
+    strip.muteBtn.title = canFlag
+      ? `mute — writes the _ marker on this block's label${strip.muted ? ' (on)' : ''}`
+      : 'name the block to mute it here';
+    strip.soloBtn.title = canFlag
+      ? `solo — writes the S marker on this block's label${strip.soloed ? ' (on)' : ''}`
+      : 'name the block to solo it here';
+    if (strip.gone) {
+      strip.el.title = `"${strip.label}" is playing but isn't in the buffer any more - its controls are off`;
+      continue;
+    }
+    strip.el.title = '';
+    if (!strip.dragGain && !strip.writeTimer.gain) {
+      strip.gain = gain.value;
+      strip.fader.value = Math.round(mixerGainToFader(gain.value) * 1000);
+      strip.dbLabel.textContent = mixerFmtDb(gain.value);
+    }
+    if (!strip.dragPan && !strip.writeTimer.pan) {
+      strip.pan = pan.value;
+      strip.panLabel.textContent = mixerFmtPan(pan.value);
+    }
+    // A patterned control keeps modulating under the trim - say so rather than lying flat.
+    strip.fader.classList.toggle('mixer-patterned', gain.patterned);
+    strip.fader.title = gain.patterned
+      ? 'gain is patterned in the code - the fader writes a trim that multiplies it'
+      : 'gain — writes .gain(x) onto this block';
+    strip.panCanvas.classList.toggle('mixer-patterned', pan.patterned);
+    strip.panCanvas.title = pan.patterned
+      ? 'pan is patterned in the code - grabbing the knob writes a .pan(x) that takes over'
+      : 'pan — drag up/down, double-click to center; writes .pan(x)';
+  }
+  renderMixerLegend();
+}
+
+// Which curve is which track: the plots are color-coded and nothing in them says a name, so the
+// legend is where the colors are spelled out. Rebuilt with the strips (names and colors only
+// change then); the focus highlight below is a class toggle per frame.
+function renderMixerLegend() {
+  mixerLegendEl.innerHTML = '';
+  if (mixerViewMode === 'overall') {
+    mixerLegendEl.classList.add('hidden');
+    return;
+  }
+  mixerLegendEl.classList.remove('hidden');
+  for (const strip of mixerState.strips.values()) {
+    const chip = document.createElement('span');
+    chip.className = 'mixer-legend-chip';
+    chip.dataset.label = strip.label;
+    if (strip.silent) chip.classList.add('mixer-legend-silent');
+    const dot = document.createElement('span');
+    dot.className = 'mixer-legend-dot';
+    dot.style.background = strip.color;
+    const name = document.createElement('span');
+    name.textContent = strip.label;
+    chip.append(dot, name);
+    mixerLegendEl.appendChild(chip);
+  }
+  mixerState.legendFocus = undefined; // force the next frame to apply the focus classes
+}
+
+// Highlight the legend chip for whichever track a held control belongs to. Only touches the DOM
+// when the focus actually changed - this runs every animation frame.
+function syncMixerLegendFocus() {
+  if (mixerState.legendFocus === mixerFocus) return;
+  mixerState.legendFocus = mixerFocus;
+  for (const chip of mixerLegendEl.children) {
+    chip.classList.toggle('mixer-legend-dim', !!mixerFocus && chip.dataset.label !== mixerFocus);
+  }
+}
+
+function scheduleMixerSync() {
+  if (!mixerState || mixerSuppressSync) return;
+  clearTimeout(mixerSyncTimer);
+  mixerSyncTimer = setTimeout(() => {
+    mixerSyncTimer = null;
+    if (mixerState) refreshMixerStrips(); // an edit can silence/unsilence a block, not just retune it
+  }, 200);
+}
+
+// --- drawing ---
+
+function drawMixer(dt) {
+  const css = getComputedStyle(document.documentElement);
+  const colors = {
+    text: css.getPropertyValue('--text').trim() || '#ccc',
+    dim: css.getPropertyValue('--text-dim').trim() || '#888',
+    grid: css.getPropertyValue('--border').trim() || '#333',
+    accent: css.getPropertyValue('--accent').trim() || '#6cf',
+    err: css.getPropertyValue('--err').trim() || '#f66',
+  };
+  for (const strip of mixerState.strips.values()) {
+    stepStripMeter(strip, dt);
+    strip.bandDisp = stepBandFrame(strip.bandDisp, strip.bandTarget, dt);
+    drawStripMeter(strip, colors);
+    drawPanKnob(strip, colors);
+  }
+  mixerState.masterDisp = stepBandFrame(mixerState.masterDisp, mixerState.masterTarget, dt);
+  syncMixerLegendFocus();
+  drawMixerSpectrum(colors);
+  drawMixerSpatial(colors);
+}
+
+// Meter ballistics: instant attack, exponential release, and a peak-hold line that sits for a
+// second before falling - the usual meter grammar, so it reads like every other meter.
+function stepStripMeter(strip, dt) {
+  const m = strip.meter;
+  const now = performance.now();
+  const fallRms = Math.exp(-dt / MIXER_TAU_METER_RMS);
+  const fallPeak = Math.exp(-dt / MIXER_TAU_METER_PEAK);
+  m.rmsL = Math.max(m.tRmsL, m.rmsL * fallRms);
+  m.rmsR = Math.max(m.tRmsR, m.rmsR * fallRms);
+  m.peakL = Math.max(m.tPeakL, m.peakL * fallPeak);
+  m.peakR = Math.max(m.tPeakR, m.peakR * fallPeak);
+  if (m.tPeakL >= m.holdL) { m.holdL = m.tPeakL; m.holdAtL = now; }
+  else if (now - m.holdAtL > 1000) m.holdL *= 0.9;
+  if (m.tPeakR >= m.holdR) { m.holdR = m.tPeakR; m.holdAtR = now; }
+  else if (now - m.holdAtR > 1000) m.holdR *= 0.9;
+}
+
+// Smooth one band frame toward its target: fast up, slow down - Pro-Q's "the peak registers,
+// the fall is readable" ballistics (release time-constant ~0.3s), so the curve holds still long
+// enough to be read instead of flickering at the analyzer's 15Hz. Returns the (possibly
+// re-grown) display frame.
+const MIXER_BAND_VALUES = 4; // l, r, mid, side - what the engine sends per band
+
+function stepBandFrame(disp, target, dt) {
+  const n = mixerState.bandFreqs.length;
+  if (!n) return null;
+  if (!disp || disp.length !== n) disp = Array.from({ length: n }, () => new Array(MIXER_BAND_VALUES).fill(0));
+  const rise = mixerLerp(dt, MIXER_TAU_ATTACK);
+  const fall = mixerLerp(dt, MIXER_TAU_RELEASE);
+  for (let i = 0; i < n; i++) {
+    const t = target?.[i];
+    for (let ch = 0; ch < MIXER_BAND_VALUES; ch++) {
+      const cur = disp[i][ch];
+      const tgt = t?.[ch] ?? 0;
+      disp[i][ch] = cur + (tgt - cur) * (tgt > cur ? rise : fall);
+    }
+  }
+  return disp;
+}
+
+function drawStripMeter(strip, colors) {
+  const ctx = strip.meterCanvas.getContext('2d');
+  const w = 26, h = 140;
+  ctx.clearRect(0, 0, w, h);
+  const m = strip.meter;
+  const barW = 10, gap = 2;
+  const yOf = (amp) => h - mixerDbUnit(mixerDbOf(amp)) * h;
+  const zeroY = h - mixerDbUnit(0) * h;
+  const bars = [
+    { x: (w - barW * 2 - gap) / 2, rms: m.rmsL, peak: m.peakL, hold: m.holdL },
+    { x: (w - barW * 2 - gap) / 2 + barW + gap, rms: m.rmsR, peak: m.peakR, hold: m.holdR },
+  ];
+  for (const b of bars) {
+    ctx.fillStyle = rgbaFrom(ctx, colors.grid, 0.5);
+    ctx.fillRect(b.x, 0, barW, h);
+    const py = yOf(b.peak);
+    ctx.fillStyle = rgbaFrom(ctx, strip.color, 0.35);
+    ctx.fillRect(b.x, py, barW, h - py);
+    const ry = yOf(b.rms);
+    ctx.fillStyle = rgbaFrom(ctx, strip.color, 0.95);
+    ctx.fillRect(b.x, ry, barW, h - ry);
+    // Anything over 0 dBFS paints the overshoot in the error color - that's the readout to act on.
+    if (py < zeroY) {
+      ctx.fillStyle = rgbaFrom(ctx, colors.err, 0.9);
+      ctx.fillRect(b.x, py, barW, zeroY - py);
+    }
+    if (b.hold > 0.001) {
+      const hy = yOf(b.hold);
+      ctx.fillStyle = b.hold > 1 ? colors.err : colors.text;
+      ctx.fillRect(b.x, hy - 1, barW, 1.5);
+    }
+  }
+  // The 0 dB line across both bars.
+  ctx.fillStyle = rgbaFrom(ctx, colors.dim, 0.6);
+  ctx.fillRect(bars[0].x - 2, zeroY, barW * 2 + gap + 4, 1);
+}
+
+function drawPanKnob(strip, colors) {
+  const ctx = strip.panCanvas.getContext('2d');
+  const s = 34, cx = s / 2, cy = s / 2, r = 13;
+  ctx.clearRect(0, 0, s, s);
+  const a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = rgbaFrom(ctx, colors.grid, 0.9);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, a0, a1);
+  ctx.stroke();
+  const mid = (a0 + a1) / 2;
+  const at = mid + (strip.pan * (a1 - a0)) / 2;
+  ctx.strokeStyle = strip.color;
+  ctx.beginPath();
+  if (strip.pan >= 0) ctx.arc(cx, cy, r, mid, at);
+  else ctx.arc(cx, cy, r, at, mid);
+  ctx.stroke();
+  ctx.strokeStyle = colors.text;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.cos(at) * 5, cy + Math.sin(at) * 5);
+  ctx.lineTo(cx + Math.cos(at) * r, cy + Math.sin(at) * r);
+  ctx.stroke();
+}
+
+// --- what one band means ---
+
+/** A band's height on the plots: its level in dB, made up and clamped to the plot window. */
+function mixerBandLevel(b) {
+  return mixerSpecUnit(mixerDbOf(bandAmp(b)) + MIXER_SPEC_MAKEUP_DB);
+}
+
+/** Left/right balance, -1..1: the L/R power ratio. Which SIDE the band sits on. */
+function mixerBandPan(b) {
+  const l = bandL(b), r = bandR(b);
+  const p = l * l + r * r;
+  return p < 1e-12 ? 0 : mixerClamp((r * r - l * l) / p, -1, 1);
+}
+
+/**
+ * The band's goniometer angle as a signed fraction of 90°, which is what the stereo image plots.
+ *
+ * A goniometer's angle is the mid/side ratio, not the pan pot's number: mono content (no side)
+ * points straight up at 0, a hard-panned band has |mid| = |side| and sits at ±45° - iZotope's
+ * "safe lines" - and content whose channels are out of phase has no mid at all and lies flat at
+ * ±90°. So `atan2(side, mid)` IS the display angle, and the outer half of the fan means exactly
+ * one thing: phase cancellation. This is also why the display can use its whole span, which an
+ * L/R-magnitude plot never can - the widest such a plot can read is one channel silent, i.e. 45°.
+ */
+function mixerBandAngle(b) {
+  const theta = Math.atan2(Math.abs(bandSide(b)), Math.abs(bandMid(b))) / (Math.PI / 2);
+  const pan = mixerBandPan(b);
+  return { theta, pan, sign: pan >= 0 ? 1 : -1 };
+}
+
+// Which display frames the plots draw: color-coded strips, or the master alone. `key` is what
+// the freeze hold files its maxima under. A frame that has decayed to silence (a muted track)
+// is dropped entirely - a dead-flat floor line per silent track is clutter, not information.
+// `dim` marks the tracks a held fader/knob is not about; the focused one is sorted last so it
+// draws over the faded ones.
+function mixerPlotSources(colors) {
+  const alive = (disp) => disp && disp.some((b) => bandAmp(b) > 1e-5);
+  let out;
+  if (mixerViewMode === 'overall') {
+    const keep = mixerState.masterDisp
+      && (alive(mixerState.masterDisp) || (mixerState.freeze && mixerState.freezeMax.has('*')));
+    out = keep ? [{ key: '*', disp: mixerState.masterDisp, color: colors.accent }] : [];
+  } else {
+    out = [...mixerState.strips.values()]
+      .filter((s) => alive(s.bandDisp) || (mixerState.freeze && mixerState.freezeMax.has(s.label)))
+      .map((s) => ({ key: s.label, disp: s.bandDisp, color: s.color }));
+  }
+  if (mixerFocus && out.length > 1 && out.some((s) => s.key === mixerFocus)) {
+    out = out.map((s) => ({ ...s, dim: s.key !== mixerFocus }));
+    out.sort((a, b) => Number(!!b.dim) - Number(!!a.dim));
+  }
+  return out;
+}
+
+// How strongly a source draws: a faded one is still visible as context, not erased.
+const mixerSrcAlpha = (src, base) => (src.dim ? base * 0.18 : base);
+
+// A smooth curve through band points: quadratics through segment midpoints - the standard trick
+// that stays inside the data's envelope, so the spectrum reads as a curve, never a bar chart.
+function mixerSmoothPath(ctx, pts) {
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length - 1; i++) {
+    ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
+  }
+  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+}
+
+function drawMixerSpectrum(colors) {
+  const c = mixerSpectrumCanvas;
+  const ctx = c.getContext('2d');
+  const w = Number(c.dataset.w) || 0, h = Number(c.dataset.h) || 0;
+  if (!w) return;
+  ctx.clearRect(0, 0, w, h);
+  const freqs = mixerState.bandFreqs;
+  const n = freqs.length;
+  const padB = 14, padT = 6;
+  const ih = h - padT - padB;
+  // The bands are log-spaced, so equal x steps ARE the log-frequency axis.
+  const xOf = (i) => (i / Math.max(1, n - 1)) * w;
+  const yOf = (u) => padT + (1 - u) * ih;
+  // Everything the vertical axis does, in one place: makeup, then the gentle tilt around 1kHz.
+  const dbAt = (amp, f) => mixerDbOf(amp) + MIXER_SPEC_MAKEUP_DB + MIXER_SPEC_TILT_DB * Math.log2(f / 1000);
+  const curvePts = (ampOf) => {
+    const pts = [];
+    for (let i = 0; i < n; i++) pts.push({ x: xOf(i), y: yOf(mixerSpecUnit(dbAt(ampOf(i), freqs[i]))) });
+    return pts;
+  };
+
+  ctx.strokeStyle = rgbaFrom(ctx, colors.grid, 0.6);
+  ctx.fillStyle = rgbaFrom(ctx, colors.dim, 0.9);
+  ctx.font = '9px system-ui, sans-serif';
+  ctx.lineWidth = 1;
+  for (const db of [0, -12, -24, -36, -48, -60]) {
+    const y = Math.round(yOf(mixerSpecUnit(db))) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  if (n > 1) {
+    const logSpan = Math.log(freqs[n - 1] / freqs[0]);
+    for (const f of [50, 100, 200, 500, 1000, 2000, 5000, 10000]) {
+      if (f < freqs[0] || f > freqs[n - 1]) continue;
+      const x = Math.round((Math.log(f / freqs[0]) / logSpan) * w) + 0.5;
+      // Decade lines carry the label and a stronger stroke; the rest are just orientation.
+      const major = f === 100 || f === 1000 || f === 10000;
+      ctx.strokeStyle = rgbaFrom(ctx, colors.grid, major ? 0.85 : 0.4);
+      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+      if (major) ctx.fillText(f === 100 ? '100' : f === 1000 ? '1k' : '10k', x + 3, h - 4);
+    }
+  }
+  if (!n) return;
+
+  // Frozen, the hold is the ONLY curve: the point of a max-hold is to read a still picture, and
+  // a live curve jittering under it is what you froze the display to get away from.
+  const frozen = mixerState.freeze;
+  for (const src of mixerPlotSources(colors)) {
+    const held = frozen ? mixerState.freezeMax.get(src.key) : null;
+    if (frozen && !(held && held.length === n)) continue; // nothing accumulated yet
+    const pts = curvePts(held ? (i) => held[i] : (i) => bandAmp(src.disp[i]));
+    ctx.beginPath();
+    mixerSmoothPath(ctx, pts);
+    ctx.strokeStyle = rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 1));
+    ctx.lineWidth = src.dim ? 1 : 1.6;
+    ctx.stroke();
+    ctx.lineTo(w, h - padB);
+    ctx.lineTo(0, h - padB);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, padT, 0, h - padB);
+    grad.addColorStop(0, rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 0.24)));
+    grad.addColorStop(1, rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 0.02)));
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+}
+
+// The stereo image, polar - the Imager's geometry (see mixerBandAngle for why these angles are
+// what they are): straight up is mono, the ±45° "safe lines" are hard left and hard right, and
+// the outer wedges out to ±90° are out-of-phase content. Radius is level. Every band splats
+// into an angular profile, so a mono track draws a narrow vertical petal, a wide pad a broad
+// fan, a hard-panned shaker a spike leaning onto its safe line, and anything phasey spills past
+// them; per-band dots ride on top for the detail (which frequencies sit where).
+const MIXER_IMG_ANG = Math.PI / 2; // the display's half-span: the full ±90°
+const MIXER_IMG_BINS = 61;
+// Out-of-phase content has equal channel magnitudes, so its left/right balance says nothing.
+// Below this it is drawn symmetrically into BOTH wedges rather than picked arbitrarily - which
+// is exactly the flat horizontal smear a hardware goniometer shows for an inverted channel.
+const MIXER_IMG_SIDE_DEADZONE = 0.15;
+
+// `a` is a signed fraction of 90°: 0 up (mono), ±0.5 the safe lines (hard L/R), ±1 flat
+// (inverted). `r01` is level.
+function mixerImagerPoint(a, r01, cx, cy, R) {
+  const ang = a * MIXER_IMG_ANG;
+  return { x: cx + Math.sin(ang) * r01 * R, y: cy - Math.cos(ang) * r01 * R };
+}
+
+function drawMixerSpatial(colors) {
+  const c = mixerSpatialCanvas;
+  const ctx = c.getContext('2d');
+  const w = Number(c.dataset.w) || 0, h = Number(c.dataset.h) || 0;
+  if (!w) return;
+  ctx.clearRect(0, 0, w, h);
+  // A half-disc that spans the full width: the center sits on the bottom edge, so the ±90°
+  // wedges run out along it.
+  const cx = w / 2, cy = h - 14;
+  const R = Math.min(h - 26, w / 2 - 18);
+  const n = mixerState.bandFreqs.length;
+
+  // The fan's grid: level arcs, spokes, and the safe lines called out - inside them is
+  // in-phase, outside is not, which is the one thing this display is read for.
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = rgbaFrom(ctx, colors.grid, 0.8);
+  for (const db of [0, -12, -24, -36, -48]) {
+    const r = mixerSpecUnit(db) * R;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI / 2 - MIXER_IMG_ANG, -Math.PI / 2 + MIXER_IMG_ANG);
+    ctx.stroke();
+  }
+  for (const a of [-1, -0.75, -0.25, 0, 0.25, 0.75, 1]) {
+    const p = mixerImagerPoint(a, 1, cx, cy, R);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = rgbaFrom(ctx, colors.dim, 0.75);
+  for (const a of [-0.5, 0.5]) {
+    const p = mixerImagerPoint(a, 1, cx, cy, R);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.fillStyle = rgbaFrom(ctx, colors.dim, 0.9);
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  const label = (a, text, rr = 1.07) => {
+    const p = mixerImagerPoint(a, rr, cx, cy, R);
+    ctx.fillText(text, p.x, p.y + 3);
+  };
+  label(-0.5, 'L');
+  label(0.5, 'R');
+  label(0, 'M', 1.05);
+  ctx.font = '9px system-ui, sans-serif';
+  ctx.fillStyle = rgbaFrom(ctx, colors.dim, 0.6);
+  label(-0.88, 'ø');
+  label(0.88, 'ø');
+  ctx.textAlign = 'left';
+  if (!n) return;
+
+  // Gaussian splat kernel, in bins. Max-combine, not sum: the profile's radius means "the level
+  // at this angle", and two quiet bands pointing the same way are not one loud one.
+  const kernel = [1, 0.88, 0.62, 0.34, 0.14, 0.04];
+  for (const src of mixerPlotSources(colors)) {
+    const bins = new Array(MIXER_IMG_BINS).fill(0);
+    const dots = [];
+    const splat = (a, level) => {
+      const bi = Math.round(((a + 1) / 2) * (MIXER_IMG_BINS - 1));
+      for (let k = -5; k <= 5; k++) {
+        const b = bi + k;
+        if (b < 0 || b >= MIXER_IMG_BINS) continue;
+        bins[b] = Math.max(bins[b], level * kernel[Math.abs(k)]);
+      }
+      dots.push({ a, level });
+    };
+    for (let i = 0; i < n; i++) {
+      const level = mixerBandLevel(src.disp[i]);
+      if (level < 0.05) continue;
+      const { theta, pan, sign } = mixerBandAngle(src.disp[i]);
+      // Balance too even to mean anything (see MIXER_IMG_SIDE_DEADZONE): draw both ways.
+      if (Math.abs(pan) < MIXER_IMG_SIDE_DEADZONE && theta > 0.5) {
+        splat(-theta, level);
+        splat(theta, level);
+      } else {
+        splat(sign * theta, level);
+      }
+    }
+    // The petal: around the smoothed profile, then back through the center to close.
+    const pts = bins.map((r, b) => mixerImagerPoint((b / (MIXER_IMG_BINS - 1)) * 2 - 1, r, cx, cy, R));
+    ctx.beginPath();
+    mixerSmoothPath(ctx, pts);
+    ctx.lineTo(cx, cy);
+    ctx.closePath();
+    ctx.fillStyle = rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 0.18));
+    ctx.fill();
+    ctx.strokeStyle = rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 0.9));
+    ctx.lineWidth = src.dim ? 1 : 1.5;
+    ctx.stroke();
+    // Per-band sparkle on top - the Polar Sample half of the picture.
+    ctx.fillStyle = rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 1));
+    for (const d of dots) {
+      const p = mixerImagerPoint(d.a, d.level, cx, cy, R);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.2 + d.level * 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// --- wiring ---
+
+mixerViewBtn.addEventListener('click', () => {
+  mixerViewMode = mixerViewMode === 'tracks' ? 'overall' : 'tracks';
+  localStorage.setItem('poptart-mixer-view', mixerViewMode);
+  updateMixerViewBtn();
+  // The freeze hold is filed per source, and the two views draw different sources - a hold
+  // taken by track says nothing about the master's curve, so it starts again for what's now on
+  // screen rather than showing a stale one.
+  if (mixerState) {
+    mixerState.freezeMax.clear();
+    renderMixerLegend();
+  }
+});
+document.getElementById('mixerClose').addEventListener('click', closeMixer);
+document.getElementById('mixerOpenBtn').addEventListener('click', openMixer);
+mixerBackdrop.addEventListener('mousedown', (e) => {
+  if (e.target === mixerBackdrop) closeMixer();
+});
+document.addEventListener('keydown', (e) => {
+  if (!mixerState || e.key !== 'Escape') return;
+  e.preventDefault();
+  e.stopPropagation();
+  closeMixer();
+}, true);
+window.addEventListener('resize', () => { if (mixerState) sizeMixerCanvases(); });
+// The spectrum's freeze-max hold: on = accumulate every raw frame's maximum and draw that;
+// clicking again clears the hold and goes back to live. Fresh on every press, so a second
+// freeze starts from silence rather than continuing the last one.
+const mixerFreezeBtn = document.getElementById('mixerFreezeBtn');
+function updateMixerFreezeBtn() {
+  mixerFreezeBtn.classList.toggle('mixer-freeze-on', !!mixerState?.freeze);
+}
+mixerFreezeBtn.addEventListener('click', () => {
+  if (!mixerState) return;
+  mixerState.freeze = !mixerState.freeze;
+  mixerState.freezeMax.clear();
+  updateMixerFreezeBtn();
+});
+// Releasing anything restores the plots, wherever the release happens - a fader drag routinely
+// ends with the pointer off the control (and a range input keeps DOM focus afterwards, which is
+// why this can't be left to blur). One listener for every strip rather than three apiece.
+for (const ev of ['pointerup', 'pointercancel']) {
+  window.addEventListener(ev, () => {
+    if (!mixerState) return;
+    for (const strip of mixerState.strips.values()) {
+      strip.dragGain = false;
+      strip.dragPan = null;
+    }
+    if (mixerFocusFromPointer) {
+      mixerFocus = null;
+      mixerFocusFromPointer = false;
+    }
+  });
+}
+cm.on('change', scheduleMixerSync);
+
+// ---------------------------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------------------------
 
@@ -7516,6 +8554,9 @@ async function refreshStatus() {
 }
 
 function renderTracks(result) {
+  // The mixer's memory of which labels are TRACKS (muted ones included) - what lets a strip
+  // outlive its own mute button. See the mixer section.
+  mixerKnownTracks = result.tracks.map((t) => t.label);
   trackInfo.innerHTML = '';
   for (const t of result.tracks) {
     const head = document.createElement('div');
@@ -9985,6 +11026,9 @@ addHotkey(builtinHotkeys, 'ctrl+b', () => bounceBlockAtCursor(), 'bounce block t
 
 // ctrl+m - toggle the keyboard/tap instrument between off and midi.
 addHotkey(builtinHotkeys, 'ctrl+m', () => setKbMode(kbMode === 'normal' ? 'midi' : 'normal'), 'toggle midi keyboard');
+
+// ctrl+g - open/close the mixer (mirrors settings → open mixer…).
+addHotkey(builtinHotkeys, 'ctrl+g', () => toggleMixer(), 'toggle mixer');
 
 // ---------------------------------------------------------------------------------------------
 // Userland API + sandbox. runUserPrebake() executes the prebake source in a function scope where
