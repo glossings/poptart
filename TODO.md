@@ -16,6 +16,23 @@ $: `<
   0 4 ${myInt}
 >*8`.as("n").scale("F3 minor")
 ```
+[ ] Mixer analysis: peak followers → RMS, and a true windowed correlation. The band analyzer in
+    sc/poptart.scd (`buildMixDef`) measures each band with `Amplitude.kr`, which peak-follows the
+    rectified signal. Two consequences, both display-only — nothing here affects audio:
+    - The spectrum reads peaks, not energy, so it sits higher and jumpier than an RMS analyzer
+      and the makeup constant (`MIXER_SPEC_MAKEUP_DB` in client.js) is tuned around that.
+      `RunningSum.rms` or `Integrator` on the squared signal would give real band energy.
+    - The stereo image's angle is `atan2(|side|, |mid|)` of two independent envelope followers,
+      which approximates correlation rather than measuring it. The exact relation is `r = cos 2θ`
+      (hence the ±45° safe lines being r = 0), but that identity assumes equal channel power and
+      a proper statistical average — so a hard-panned *and* phasey band reads approximately, and
+      brief attack/release mismatches between the two followers make θ wobble. A real windowed
+      correlation per band — `E[LR] / sqrt(E[L²]E[R²])` over a short window, all three sums
+      available from the same filtered pair — would be both more honest and cheaper to explain,
+      and would let the display show a signed correlation number per band.
+    Worth doing together: both are the same change to how the bands are summarized, and the
+    client's `mixerBandLevel`/`mixerBandAngle` are the only readers.
+
 [ ] Evict sample packs that haven't been played in a while. Packs load whole and stay for the
     session (`_packs` in osc-engine/index.js, `samplePacks` in poptart.scd) — nothing frees them
     but reloading the same pack. numBuffers is 16384 now so the *count* is fine, but the audio is

@@ -564,8 +564,8 @@ export class Sig {
   }
 
   /**
-   * Channel strip: stereo width, mid/side. 0 is mono, 1 leaves the track alone, and up to 4 is
-   * Ableton Utility's 400% - the difference between the channels is what gets scaled, so a track
+   * Channel strip: stereo width, mid/side. 0 is mono, 1 leaves the track alone, and 4 is the
+   * ceiling - the difference between the channels is what gets scaled, so a track
    * with no stereo content of its own (most synth patches, every mono sample) has nothing to
    * widen and stays where it is however far this goes.
    *
@@ -579,6 +579,20 @@ export class Sig {
    */
   width(value) {
     return this._clone({ channel: { ...this.channel, width: toSignal(value) } });
+  }
+
+  /**
+   * Channel strip: collapse everything below `hz` to mono, keeping the width above it. 0 (the
+   * default) is off; `.bassmono(120)` is the usual starting point.
+   *
+   * Only the side signal is filtered, so this costs the low end nothing but its width - the
+   * mono content underneath is untouched. Worth doing to any wide bass: stereo information down
+   * there is what disappears on a club system or a phone, and on vinyl it is what makes a
+   * cutting engineer phone you. Applied after .width(), so the guarantee holds however wide the
+   * track is set.
+   */
+  bassmono(hz) {
+    return this._clone({ channel: { ...this.channel, bassmono: toSignal(hz) } });
   }
 
   /**

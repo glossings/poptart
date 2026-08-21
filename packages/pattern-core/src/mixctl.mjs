@@ -18,7 +18,7 @@ const NUM_ARG_RE = /^\s*(-?(?:\d+\.?\d*|\.\d+))\s*$/;
 
 // What a channel control reads as when the block doesn't set it - the same neutral values the
 // scheduler snaps a dropped control back to (see CHANNEL_DEFAULTS there).
-export const TRIM_DEFAULTS = { gain: 1, pan: 0, width: 1 };
+export const TRIM_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0 };
 
 // Matching close paren for the opener at `openIdx`, counting only characters the mask says are
 // code - brackets inside strings and comments don't nest. -1 if unbalanced.

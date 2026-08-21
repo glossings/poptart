@@ -39,6 +39,17 @@ test('readTrim/trimEdit: width defaults to 1, not 0 - a missing .width() is unto
   assert.deepEqual(readTrim(set, 'pad', 'width'), { value: 0.5, patterned: false });
 });
 
+test('readTrim/trimEdit: bassmono defaults to 0 (off) and writes a frequency', () => {
+  const code = 'bass: n("0").synth("Serum 2")';
+  assert.deepEqual(readTrim(code, 'bass', 'bassmono'), { value: 0, patterned: false });
+  assert.equal(applied(code, trimEdit(code, 'bass', 'bassmono', 120)),
+    'bass: n("0").synth("Serum 2").bassmono(120)');
+  const on = 'bass: n("0").bassmono(120)';
+  assert.deepEqual(readTrim(on, 'bass', 'bassmono'), { value: 120, patterned: false });
+  // Switching it off rewrites the same call rather than appending a second one.
+  assert.equal(applied(on, trimEdit(on, 'bass', 'bassmono', 0)), 'bass: n("0").bassmono(0)');
+});
+
 test('readTrim: unknown label is null; other blocks are not read', () => {
   const code = 'a: s("bd").gain(0.4)\n\nb: s("sn")';
   assert.equal(readTrim(code, 'c', 'gain'), null);

@@ -2614,44 +2614,37 @@ li.CodeMirror-hint-active {
   background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
 }
 
-.mixer-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  padding: 4px 12px 0;
+.mixer-strip-silent .mixer-strip-swatch {
+  opacity: 0.4;
 }
 
-.mixer-legend.hidden {
-  display: none;
-}
-
-.mixer-legend-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 10px;
-  color: var(--text);
-  transition: opacity 0.12s ease;
-}
-
-.mixer-legend-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-}
-
-.mixer-legend-silent {
-  color: var(--text-dim);
-}
-
-.mixer-legend-silent .mixer-legend-dot {
+/* While a fader or knob is held, the other tracks fade back in the plots - the strips say the
+   same thing, so the two never disagree about what you are looking at. */
+.mixer-strip-unfocused {
   opacity: 0.45;
 }
 
-/* While a fader or knob is held, the other tracks fade back in the plots - the legend says the
-   same thing so the two never disagree about what you are looking at. */
-.mixer-legend-dim {
-  opacity: 0.35;
+.mixer-strip-focus {
+  border-color: var(--text-dim);
+}
+
+.mixer-strip,
+.mixer-strip-unfocused {
+  transition: opacity 0.12s ease;
+}
+
+.mixer-bass-btn {
+  font-size: 9px;
+  padding: 0 6px;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+  touch-action: none;
+  cursor: ew-resize;
+}
+
+.mixer-bass-btn.on-bass {
+  color: var(--ok);
+  border-color: var(--ok);
 }
 
 .mixer-strip-ms {
@@ -2674,13 +2667,28 @@ li.CodeMirror-hint-active {
   border-color: var(--accent);
 }
 
+/* The name row doubles as the plots' legend - swatch in the track's curve colour, then the
+   label. The swatch carries the colour so the text stays readable on light themes. */
 .mixer-strip-name {
-  max-width: 64px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 72px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.mixer-strip-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.mixer-strip-name-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .mixer-strip-body {

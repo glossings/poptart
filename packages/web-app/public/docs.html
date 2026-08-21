@@ -736,6 +736,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><td><code>.gain(v)</code></td><td>Output level (1 = unity). Chains multiply: <code>.gain(0.5).gain(env())</code> is a base level times a VCA.</td></tr>
             <tr><td><code>.pan(v)</code></td><td>Stereo pan, −1 (left) … 1 (right), 0 = centre.</td></tr>
             <tr><td><code>.width(v)</code></td><td>Stereo width (mid/side): 0 mono, 1 untouched, up to 4 = 400%. Applied <em>before</em> the pan, so you can narrow a wide sound and then place it. Scales only the difference between the channels — a mono source has nothing to widen.</td></tr>
+            <tr><td><code>.bassmono(hz)</code></td><td>Collapse everything below <code>hz</code> to mono, keeping the width above it; 0 = off. Filters only the side signal, so the low end keeps its level and loses only its width.</td></tr>
             <tr><td><code>.o(n)</code></td><td>Which output pair: <code>.o(1)</code> = channels 1/2, <code>.o(2)</code> = 3/4, wrapping past the device's last pair.</td></tr>
           </table>
           <pre><code>pad: note(<span class="s">"c3 e3 g3"</span>).synth(<span class="s">"Diva"</span>)
@@ -746,8 +747,13 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             Width past 1 is bought with mono compatibility — it turns up exactly the part of the
             signal that cancels when the channels are summed. The mixer's stereo image
             (<strong>ctrl+g</strong>) is where that shows: content beyond the ±45° safe lines is
-            what a mono system will lose.
+            what a mono system will lose. <code>.bassmono(120)</code> is the standard insurance —
+            stereo information in the low end is what disappears first on a club rig or a phone,
+            and it costs nothing to give up:
           </p>
+          <pre><code>bass: note(<span class="s">"c1 eb1"</span>).synth(<span class="s">"Serum 2"</span>)
+  .width(1.8)                     <span class="c">// wide up top…</span>
+  .bassmono(120)                  <span class="c">// …but one centred source underneath</span></code></pre>
         </section>
 
         <!-- ================================================================= -->
@@ -893,9 +899,12 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
           <p>
             Each strip also has a <strong>width</strong> knob beside its pan knob:
             <code>.width(x)</code> is a mid/side widener on the channel strip — 0 is mono, 100%
-            leaves the track alone, up to 400% like Ableton's Utility. It runs <em>before</em> the
+            leaves the track alone, and 400% is the ceiling. It runs <em>before</em> the
             pan, so narrowing a sprawling pad and then placing it is one gesture. A mono source has
-            no side content to scale, so widening it does nothing.
+            no side content to scale, so widening it does nothing. Under the knobs, the
+            <strong>▽ mono</strong> button is bass mono: click it to collapse the low end to a
+            single centred source, and drag it left/right to move the cutoff. It writes
+            <code>.bassmono(hz)</code>.
           </p>
           <p>
             The controls write <em>code</em>, not hidden mixer state: a fader move rewrites the

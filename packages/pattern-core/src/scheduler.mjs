@@ -86,8 +86,8 @@ const MIN_SOUNDING_SEC = 0.001;
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
 const CHANNEL_SLOT = -1;
 // out = stereo pair (Sig#o), 1-based; dry = direct-output level (Sig#dry); width = M/S stereo
-// width (Sig#width), 1 = untouched.
-const CHANNEL_DEFAULTS = { gain: 1, pan: 0, width: 1, out: 1, dry: 1 };
+// width (Sig#width), 1 = untouched; bassmono = mono-below-this-many-Hz (Sig#bassmono), 0 = off.
+const CHANNEL_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1 };
 // Engine call that tears down each kind of Tier-2 modulator (persistent engine-side synth).
 const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC' };
 

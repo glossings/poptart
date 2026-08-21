@@ -7497,8 +7497,8 @@ function bounceBlockAtCursor() {
 
 // ---------------------------------------------------------------------------------------------
 // The mixer (ctrl+g, or settings → open mixer…). One modal: a strip per track - stereo meter,
-// gain fader, pan knob, mute/solo - plus the spectrum (Pro-Q-flavoured: tilted, slow-release,
-// with a freeze-max hold) and a polar stereo image (Imager-flavoured: angle is stereo position,
+// gain fader, pan knob, mute/solo - plus the spectrum (tilted, slow-release, with a freeze-max
+// hold, the way a mastering analyzer reads) and a polar stereo image (angle is stereo position,
 // radius is level - a mono track is a narrow vertical petal, a wide one a fan). Both plots
 // switch between color-coded per-track and the summed master alone. Monitoring is engine-side
 // (see server.js's mixer section): opening posts /api/mixer/monitor and the modal polls
@@ -7523,7 +7523,6 @@ const mixerNoteEl = document.getElementById('mixerNote');
 const mixerSpectrumCanvas = document.getElementById('mixerSpectrum');
 const mixerSpatialCanvas = document.getElementById('mixerSpatial');
 const mixerViewBtn = document.getElementById('mixerViewBtn');
-const mixerLegendEl = document.getElementById('mixerLegend');
 
 const MIXER_POLL_MS = 100;
 // The plots are redrawn at ~30fps, not at the display's rate: the analyzer sends 20 frames a
@@ -7557,10 +7556,11 @@ const mixerColorByLabel = new Map();
 
 // --- the spectrum's vertical scaling ---
 //
-// Display tilt, dB/octave around a 1kHz pivot. Pro-Q's default is 4.5, but that number belongs
-// to an FFT display, whose bins fall 3dB/oct on pink noise; a constant-Q filter bank like ours
-// already reads pink as flat, so the equivalent extra tilt is the difference. Setting the full
-// 4.5 here is what buried the low end: it subtracts 15dB at 100Hz and 22dB at 35Hz.
+// Display tilt, dB/octave around a 1kHz pivot, so program material reads roughly level instead
+// of drooping to the right. The usual analyzer figure is 4.5, but that belongs to an FFT
+// display, whose bins fall 3dB/oct on pink noise; a constant-Q filter bank like ours already
+// reads pink as flat, so what we want is the difference between the two. Taking the 4.5 at face
+// value is what buried the low end: it subtracts 15dB at 100Hz and 22dB at 35Hz.
 const MIXER_SPEC_TILT_DB = 1.5;
 // Makeup applied to every band before plotting. One narrow band of a full-scale mix holds a
 // small slice of its total energy - pink noise at -12dBFS reads about -30dB in any one of these
@@ -7628,13 +7628,20 @@ function mixerFmtDb(gain) {
 // The two knobs under each fader, in signal order (width happens before pan on the channel
 // strip, so it sits to the left of it). Each maps its control's value onto the knob's 0..1
 // throw and back; both draw as an arc from the middle, which is each one's neutral.
+// Bass mono: the cutoff the button switches on to, and the range it drags over. 120Hz is the
+// conventional starting point for monoing a low end. Below ~20Hz there is nothing to collapse;
+// above ~500 you are monoing the instruments, not the bass.
+const MIXER_BASSMONO_DEFAULT = 120;
+const MIXER_BASSMONO_MIN = 20;
+const MIXER_BASSMONO_MAX = 500;
+
 const MIXER_KNOBS = [
   {
     name: 'width',
     def: 1,
     // Unity at the CENTRE of the throw - 0..1 over the left half, 1..4 over the right - so the
-    // half-turn either side of "leave it alone" is where the resolution goes. Linear over 0..400%
-    // (Ableton's own taper) would spend three quarters of the knob above unity.
+    // half-turn either side of "leave it alone" is where the resolution goes. A plain linear
+    // 0..400% taper would spend three quarters of the knob above unity.
     posOf: (v) => (v <= 1 ? v * 0.5 : 0.5 + (v - 1) / 6),
     valueAt: (p) => (p <= 0.5 ? p * 2 : 1 + (p - 0.5) * 6),
     format: (v) => `${Math.round(v * 100)}%`,
@@ -7651,6 +7658,19 @@ const MIXER_KNOBS = [
     patternedTitle: 'pan is patterned in the code - grabbing the knob writes a .pan(x) that takes over',
   },
 ];
+
+// The bass-mono button says what it is doing rather than just whether it is on - the cutoff is
+// the whole decision, and it is the thing you drag.
+function updateMixerBassBtn(strip) {
+  const on = strip.bassmono > 0;
+  strip.bassBtn.textContent = on ? `▽ ${strip.bassmono}` : '▽ mono';
+  strip.bassBtn.classList.toggle('on-bass', on);
+  strip.bassBtn.title = on
+    ? `bass mono: everything below ${strip.bassmono} Hz is centred, the width above it is kept. `
+      + 'Click to switch off, drag left/right for the cutoff. Writes .bassmono(hz)'
+    : 'bass mono — collapse the low end to mono, keeping the width above the cutoff. '
+      + 'Click to switch on, drag left/right for the cutoff. Writes .bassmono(hz)';
+}
 
 function mixerFmtPan(pan) {
   const p = Math.round(pan * 100);
@@ -7839,11 +7859,20 @@ function buildMixerStrip(label) {
   const el = document.createElement('div');
   el.className = 'mixer-strip';
 
+  // The name row IS the plots' legend: the swatch is the colour that track draws in, right next
+  // to the controls that move it. (A separate legend row said the same thing twice.) The swatch
+  // carries the colour rather than the text, so the label stays readable on light themes where
+  // the lighter palette entries wash out.
   const name = document.createElement('div');
   name.className = 'mixer-strip-name';
-  name.textContent = label;
   name.title = label;
-  name.style.color = color;
+  const swatch = document.createElement('span');
+  swatch.className = 'mixer-strip-swatch';
+  swatch.style.background = color;
+  const nameText = document.createElement('span');
+  nameText.className = 'mixer-strip-name-text';
+  nameText.textContent = label;
+  name.append(swatch, nameText);
 
   const msRow = document.createElement('div');
   msRow.className = 'mixer-strip-ms';
@@ -7889,11 +7918,17 @@ function buildMixerStrip(label) {
     knobs.set(spec.name, { spec, canvas, valueEl, value: spec.def, drag: null });
   }
 
-  el.append(name, msRow, body, dbLabel, knobRow, knobLabelRow);
+  const bassBtn = document.createElement('button');
+  bassBtn.className = 'small mixer-bass-btn';
+
+  el.append(name, msRow, body, dbLabel, knobRow, knobLabelRow, bassBtn);
 
   const strip = {
-    label, color, el, fader, meterCanvas, dbLabel, knobs, muteBtn, soloBtn,
+    label, color, el, fader, meterCanvas, dbLabel, knobs, muteBtn, soloBtn, bassBtn,
     gain: 1, gone: false, muted: false, soloed: false,
+    bassmono: 0, // Hz, 0 = off
+    bassLastHz: MIXER_BASSMONO_DEFAULT, // what the button switches back on to
+    dragBass: null,
     dragGain: false,
     writeTimer: {}, pendingWrite: {},
     meter: { tPeakL: 0, tRmsL: 0, tPeakR: 0, tRmsR: 0, rmsL: 0, rmsR: 0, peakL: 0, peakR: 0, holdL: 0, holdR: 0, holdAtL: 0, holdAtR: 0 },
@@ -7932,6 +7967,39 @@ function buildMixerStrip(label) {
     dbLabel.textContent = mixerFmtDb(1);
     queueMixerWrite(strip, 'gain', 1);
   });
+
+  // Bass mono: click toggles it, drag left/right sets the cutoff (and switches it on if it was
+  // off, since dragging a frequency you can't hear yet is never what you meant). One control
+  // instead of a switch plus a slider, because a strip is 76px wide.
+  const setBass = (hz) => {
+    strip.bassmono = hz > 0 ? Math.round(hz) : 0;
+    if (strip.bassmono > 0) strip.bassLastHz = strip.bassmono;
+    updateMixerBassBtn(strip);
+    queueMixerWrite(strip, 'bassmono', strip.bassmono);
+  };
+  bassBtn.addEventListener('pointerdown', (e) => {
+    if (strip.gone) return;
+    bassBtn.setPointerCapture(e.pointerId);
+    strip.dragBass = { x: e.clientX, hz: strip.bassmono || strip.bassLastHz, moved: false };
+    mixerFocus = label;
+    mixerFocusFromPointer = true;
+  });
+  bassBtn.addEventListener('pointermove', (e) => {
+    const d = strip.dragBass;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    if (!d.moved && Math.abs(dx) < 3) return; // still a click, not a drag
+    d.moved = true;
+    // Exponential, so the drag feels the same at 30Hz as at 300.
+    setBass(mixerClamp(d.hz * Math.exp(dx * 0.006), MIXER_BASSMONO_MIN, MIXER_BASSMONO_MAX));
+  });
+  const endBass = () => {
+    const d = strip.dragBass;
+    strip.dragBass = null;
+    if (d && !d.moved) setBass(strip.bassmono > 0 ? 0 : strip.bassLastHz); // a plain click toggles
+  };
+  bassBtn.addEventListener('pointerup', endBass);
+  bassBtn.addEventListener('pointercancel', endBass);
 
   for (const knob of knobs.values()) {
     const { spec, canvas, valueEl } = knob;
@@ -8070,6 +8138,14 @@ function syncMixerFromCode() {
     strip.fader.title = gain.patterned
       ? 'gain is patterned in the code - the fader writes a trim that multiplies it'
       : 'gain — writes .gain(x) onto this block';
+    const bass = mixctlMod.readTrim(code, strip.label, 'bassmono', undefined, ctx);
+    if (!strip.dragBass && !strip.writeTimer.bassmono) {
+      strip.bassmono = Math.round(bass.value);
+      if (strip.bassmono > 0) strip.bassLastHz = strip.bassmono;
+      updateMixerBassBtn(strip);
+    }
+    strip.bassBtn.disabled = strip.gone;
+    strip.bassBtn.classList.toggle('mixer-patterned', bass.patterned);
     for (const knob of strip.knobs.values()) {
       const read = mixctlMod.readTrim(code, strip.label, knob.spec.name, undefined, ctx);
       if (!knob.drag && !strip.writeTimer[knob.spec.name]) {
@@ -8080,42 +8156,18 @@ function syncMixerFromCode() {
       knob.canvas.title = read.patterned ? knob.spec.patternedTitle : knob.spec.title;
     }
   }
-  renderMixerLegend();
 }
 
-// Which curve is which track: the plots are color-coded and nothing in them says a name, so the
-// legend is where the colors are spelled out. Rebuilt with the strips (names and colors only
-// change then); the focus highlight below is a class toggle per frame.
-function renderMixerLegend() {
-  mixerLegendEl.innerHTML = '';
-  if (mixerViewMode === 'overall') {
-    mixerLegendEl.classList.add('hidden');
-    return;
-  }
-  mixerLegendEl.classList.remove('hidden');
+// Highlight the strip whose control is being held, and fade the others - the strips ARE the
+// legend (each carries its colour swatch and name), so this is the same information the plots
+// are showing without a second row of chips to read. Only touches the DOM when the focus
+// actually changed; this runs every animation frame.
+function syncMixerStripFocus() {
+  if (mixerState.stripFocus === mixerFocus) return;
+  mixerState.stripFocus = mixerFocus;
   for (const strip of mixerState.strips.values()) {
-    const chip = document.createElement('span');
-    chip.className = 'mixer-legend-chip';
-    chip.dataset.label = strip.label;
-    if (strip.silent) chip.classList.add('mixer-legend-silent');
-    const dot = document.createElement('span');
-    dot.className = 'mixer-legend-dot';
-    dot.style.background = strip.color;
-    const name = document.createElement('span');
-    name.textContent = strip.label;
-    chip.append(dot, name);
-    mixerLegendEl.appendChild(chip);
-  }
-  mixerState.legendFocus = undefined; // force the next frame to apply the focus classes
-}
-
-// Highlight the legend chip for whichever track a held control belongs to. Only touches the DOM
-// when the focus actually changed - this runs every animation frame.
-function syncMixerLegendFocus() {
-  if (mixerState.legendFocus === mixerFocus) return;
-  mixerState.legendFocus = mixerFocus;
-  for (const chip of mixerLegendEl.children) {
-    chip.classList.toggle('mixer-legend-dim', !!mixerFocus && chip.dataset.label !== mixerFocus);
+    strip.el.classList.toggle('mixer-strip-focus', mixerFocus === strip.label);
+    strip.el.classList.toggle('mixer-strip-unfocused', !!mixerFocus && mixerFocus !== strip.label);
   }
 }
 
@@ -8146,7 +8198,7 @@ function drawMixer(dt) {
     for (const knob of strip.knobs.values()) drawMixerKnob(strip, knob, colors);
   }
   mixerState.masterDisp = stepBandFrame(mixerState.masterDisp, mixerState.masterTarget, dt);
-  syncMixerLegendFocus();
+  syncMixerStripFocus();
   drawMixerSpectrum(colors);
   drawMixerSpatial(colors);
 }
@@ -8168,10 +8220,10 @@ function stepStripMeter(strip, dt) {
   else if (now - m.holdAtR > 1000) m.holdR *= 0.9;
 }
 
-// Smooth one band frame toward its target: fast up, slow down - Pro-Q's "the peak registers,
-// the fall is readable" ballistics (release time-constant ~0.3s), so the curve holds still long
-// enough to be read instead of flickering at the analyzer's 15Hz. Returns the (possibly
-// re-grown) display frame.
+// Smooth one band frame toward its target: fast up, slow down - the analyzer ballistics that
+// make a peak register while keeping the fall readable (release time-constant ~0.25s), so the
+// curve holds still long enough to read instead of flickering at the analyzer's frame rate.
+// Returns the (possibly re-grown) display frame.
 const MIXER_BAND_VALUES = 4; // l, r, mid, side - what the engine sends per band
 
 function stepBandFrame(disp, target, dt) {
@@ -8276,8 +8328,9 @@ function mixerBandPan(b) {
  * The band's goniometer angle as a signed fraction of 90°, which is what the stereo image plots.
  *
  * A goniometer's angle is the mid/side ratio, not the pan pot's number: mono content (no side)
- * points straight up at 0, a hard-panned band has |mid| = |side| and sits at ±45° - iZotope's
- * "safe lines" - and content whose channels are out of phase has no mid at all and lies flat at
+ * points straight up at 0, a hard-panned band has |mid| = |side| and sits at ±45° - the
+ * goniometer's long-standing "safe lines", where channel correlation crosses zero (r = cos 2θ,
+ * so 45° is exactly r = 0) - and content whose channels are out of phase has no mid at all and lies flat at
  * ±90°. So `atan2(side, mid)` IS the display angle, and the outer half of the fan means exactly
  * one thing: phase cancellation. This is also why the display can use its whole span, which an
  * L/R-magnitude plot never can - the widest such a plot can read is one channel silent, i.e. 45°.
@@ -8391,8 +8444,8 @@ function drawMixerSpectrum(colors) {
   }
 }
 
-// The stereo image, polar - the Imager's geometry (see mixerBandAngle for why these angles are
-// what they are): straight up is mono, the ±45° "safe lines" are hard left and hard right, and
+// The stereo image, drawn as a polar goniometer (see mixerBandAngle for why these angles are
+// what they are): straight up is mono, the ±45° safe lines are hard left and hard right, and
 // the outer wedges out to ±90° are out-of-phase content. Radius is level. Every band splats
 // into an angular profile, so a mono track draws a narrow vertical petal, a wide pad a broad
 // fan, a hard-panned shaker a spike leaning onto its safe line, and anything phasey spills past
@@ -8505,7 +8558,8 @@ function drawMixerSpatial(colors) {
     ctx.strokeStyle = rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 0.9));
     ctx.lineWidth = src.dim ? 1 : 1.5;
     ctx.stroke();
-    // Per-band sparkle on top - the Polar Sample half of the picture.
+    // Per-band dots on top of the profile: which frequencies are sitting where, rather than
+    // just the shape of the whole.
     ctx.fillStyle = rgbaFrom(ctx, src.color, mixerSrcAlpha(src, 1));
     for (const d of dots) {
       const p = mixerImagerPoint(d.a, d.level, cx, cy, R);
@@ -8525,10 +8579,7 @@ mixerViewBtn.addEventListener('click', () => {
   // The freeze hold is filed per source, and the two views draw different sources - a hold
   // taken by track says nothing about the master's curve, so it starts again for what's now on
   // screen rather than showing a stale one.
-  if (mixerState) {
-    mixerState.freezeMax.clear();
-    renderMixerLegend();
-  }
+  if (mixerState) mixerState.freezeMax.clear();
 });
 document.getElementById('mixerClose').addEventListener('click', closeMixer);
 document.getElementById('mixerOpenBtn').addEventListener('click', openMixer);
@@ -8563,6 +8614,7 @@ for (const ev of ['pointerup', 'pointercancel']) {
     if (!mixerState) return;
     for (const strip of mixerState.strips.values()) {
       strip.dragGain = false;
+      strip.dragBass = null;
       for (const knob of strip.knobs.values()) knob.drag = null;
     }
     if (mixerFocusFromPointer) {

@@ -216,7 +216,7 @@ buildTrackDef = { |key|
     // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
-    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, out = 1, dry = 1, scSend, scSendGain = 1,
+    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
@@ -249,13 +249,22 @@ buildTrackDef = { |key|
         // signal sane.
         //
         // Width is mid/side: the sum is left alone and the difference is scaled, so 0 is mono, 1
-        // is untouched, and 4 is Ableton Utility's 400%. It sits BEFORE the pan because the two
+        // is untouched, and 4 quadruples the stereo difference. It sits BEFORE the pan because the two
         // compose in that order and not the other - narrowing a wide pad and then placing it is a
         // real move, while panning first and then widening just re-smears it back across the
         // image. Everything downstream (the sends, the recorder tap, the mixer's own analysis)
         // therefore sees the finished stereo picture.
         mid = (sig[0] + sig[1]) * 0.5;
         side = (sig[0] - sig[1]) * 0.5 * width.lag(0.02).clip(0, 4);
+        // Bass mono (Sig#bassmono, 0 = off, else a cutoff in Hz): high-pass the SIDE only, so
+        // below the cutoff both channels are the mid and the low end is one centred source,
+        // while everything above keeps its width. Applied after the width scaling, so the
+        // guarantee holds however wide the track is set. Crossfaded rather than switched - the
+        // control is a live one, and Select.ar would click on the way in.
+        side = LinXFade2.ar(
+            side,
+            HPF.ar(side, bassmono.lag(0.05).clip(20, 2000)),
+            ((bassmono > 0) * 2 - 1).lag(0.05));
         sig = Balance2.ar(mid + side, mid - side, pan.lag(0.02).clip(-1, 1), gain.lag(0.02).clip(0, 4));
         // Sidechain send: a copy of this track's post-fader output written to another track's
         // aux bus (scSend). Parked to trashBus when this track feeds nothing, so the graph stays
