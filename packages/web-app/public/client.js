@@ -108,10 +108,10 @@ const shapeDefs = makeDefRegistry({
   libraryNote: 'preset',
   panel: {
     current: () => lfoState?.shapeId ?? null,
-    open: (id) => openShapeById(id),
+    open: (id, carry) => openShapeById(id, carry ?? {}),
     close: () => closeLfoEditor(),
-    carry: () => null, // the shape panel has no view state to carry, and follows nothing
-    sourceCall: () => null, // ...so a rename here is always a plain rename, never a fork
+    carry: () => lfoCarry(), // the call it is looking through - a shape has no view state of its own
+    sourceCall: () => null, // a rename here is always a plain rename, never a fork
     setCurrent: (from, to) => {
       if (lfoState?.shapeId === from) {
         lfoState.shapeId = to;
@@ -2188,6 +2188,8 @@ const lfoTitle = document.getElementById('lfoTitle');
 const lfoPickWrap = document.getElementById('lfoPickWrap');
 const lfoName = document.getElementById('lfoName');
 const lfoPickBtn = document.getElementById('lfoPickBtn');
+const lfoUseBtn = document.getElementById('lfoUseBtn');
+const lfoLockBtn = document.getElementById('lfoLock');
 const lfoPickBox = document.getElementById('lfoPicker');
 const lfoSearch = document.getElementById('lfoSearch');
 const lfoPickList = document.getElementById('lfoPickList');
@@ -2238,28 +2240,138 @@ function serializeLfoCall(state) {
   return `lfo("${pts}", ${lfoCfgText(state)})`;
 }
 
-// Rate and mode for a shape opened THROUGH an lfo() call go back into that call, since that is
-// where they live. Opened from the picker there is no call to write to, and the panel hides them.
-function writeLfoOptions() {
+/**
+ * The lfo() this panel was opened through, split into the two halves the panel edits separately:
+ * `shape` is the first argument exactly as written (a name, a pattern of them, or drawn points),
+ * `opts` is the rest, and `idRange` is where the first STRING sits in the document. Null when the
+ * panel was opened from the picker and has no call behind it.
+ */
+function lfoCallParts() {
   const range = lfoState?.callSource?.find();
-  if (!range) return;
+  if (!range) return null;
   const text = cm.getRange(range.from, range.to);
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
-  if (open < 0 || close < open) return;
-  const [first] = splitFirstArg(text.slice(open + 1, close));
-  const next = `lfo(${first}, ${lfoCfgText(lfoState)})`;
+  if (open < 0 || close < open) return null;
+  const [shape, opts] = splitFirstArg(text.slice(open + 1, close));
+  // Read off the call's own text rather than the buffer's: the follow loop asks for this every
+  // frame, and cm.getValue() rebuilds the whole document each time it is called.
+  const rel = idStringRange({ open, close }, text);
+  const start = cm.indexFromPos(range.from);
+  return { range, shape, opts: opts.trim(), idRange: rel && [start + rel[0], start + rel[1]] };
+}
+
+/** Rewrites that call whole, keeping the marker over it so the panel goes on following it. */
+function writeLfoSourceCall(range, text) {
   lfoSuppressCursor = true;
   try {
-    cm.replaceRange(next, range.from, range.to);
+    cm.replaceRange(text, range.from, range.to);
     lfoState.callSource.clear();
     const startIdx = cm.indexFromPos(range.from);
-    lfoState.callSource = cm.markText(range.from, cm.posFromIndex(startIdx + next.length), {});
+    lfoState.callSource = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
   } finally {
     lfoSuppressCursor = false;
   }
+}
+
+// Rate and mode for a shape opened THROUGH an lfo() call go back into that call, since that is
+// where they live. Opened from the picker there is no call to write to, and the panel hides them.
+function writeLfoOptions() {
+  const parts = lfoCallParts();
+  if (!parts) return;
+  writeLfoSourceCall(parts.range, `lfo(${parts.shape}, ${lfoCfgText(lfoState)})`);
   refoldAll(); // rate/mode rewrite the call too, taking the shape's fold with it - see writeLfoCall
   lfoScheduleEval();
+}
+
+/** The shape the call this panel came from names right now, or null (no call, or drawn points). */
+function lfoSourceShapeId() {
+  const parts = lfoCallParts();
+  return parts ? idLiteralValue(parts.shape) : null;
+}
+
+/**
+ * Puts `id` into the lfo(...) the panel was opened through, in place of whatever it plays now -
+ * the modulator's half of what presetUseInCall does for a plugin preset, and the other half of what
+ * the picker is for: opening a row EDITS that shape, this plays it here. Reached from the row's →
+ * and from the head's, which sends whatever is on screen - the gesture for having drawn a shape,
+ * liked it, and wanting the call you came from to play THAT one.
+ *
+ * The whole first argument goes, pattern and all, which is why the line says what it replaced: it
+ * is one undo away, but only if you can see that it happened.
+ */
+function lfoUseInCall(id) {
+  const parts = lfoCallParts();
+  if (!parts || idLiteralValue(parts.shape) === id) return;
+  writeLfoSourceCall(parts.range, `lfo(${JSON.stringify(id)}${parts.opts ? `, ${parts.opts}` : ''})`);
+  refoldAll();
+  lfoHead.closePicker(); // sending one is the end of a browse - hand the canvas back
+  logLine(`lfo(${parts.shape}) now plays "${id}"`);
+  // Following it is only possible into a definition this buffer holds. A built-in preset plays
+  // perfectly well from the call - shapeNamed resolves it - but there is nothing of ours to put
+  // under the editor, and writing a definition just to have something to show would be forking one
+  // nobody asked for. Sending a name never forks; opening one does (see forkShapePreset).
+  if (shapeDefs.defsInBuffer().some((d) => d.id === id)) openShapeById(id, lfoCarry());
+  else lfoSyncHead();
+  lfoScheduleEval();
+}
+
+/**
+ * What the shape panel carries across a switch: the call it is looking THROUGH, and the rate and
+ * mode that belong to it. A shape has no view state of its own, unlike a roll's pitch window.
+ *
+ * Carrying the call is what makes the picker a place to browse from - pick your way through four
+ * shapes and the → still knows which lfo() you started at. Carrying its options is what keeps the
+ * rate box honest while you do: rate and mode live on the CALL, so re-reading them from the
+ * definition being opened (which has none) would show a shape playing at 2 as playing at 1.
+ */
+function lfoCarry() {
+  const parts = lfoCallParts();
+  if (!parts) return {};
+  const { rate, rateHz, mode } = parseLfoCall(parts.opts);
+  return { callSource: lfoState.callSource, options: { rate, rateHz, mode } };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Following the playing shape. lfo("<pluck swell>") swaps shapes on the beat, and the panel rides
+// along: the shape under the editor is the one you can hear, until you lock it. The piano roll's
+// follow, pointed at the shape names - the same lit-span read (see activeIdIn), the same lock, the
+// same pinning gesture when you reach into the picker.
+//
+// Landing on a shape this buffer hasn't got forks it in (see forkShapePreset), which is the whole
+// of what "editing a built-in" means here. That writes a line of code from a playback loop, which
+// wants stating plainly - but it is a line per preset ever played, into a block that is folded, and
+// once written the follow finds a definition like any other. The alternative was a read-only panel
+// for library shapes, which is a lot of machinery to avoid eight lines of `_shape(...)`.
+// ---------------------------------------------------------------------------------------------
+
+let lfoFollowLocked = localStorage.getItem('poptartLfoLock') === '1';
+
+// One frame's worth of following: swap the shape under the editor when the call it was opened from
+// moves on to another one. Locked, stopped, or already showing it - nothing to do.
+function lfoFollowPlayingShape() {
+  if (lfoFollowLocked || !playing || !lfoState?.callSource) return;
+  // Renaming or browsing is a conversation about ONE shape, and a drag is a gesture aimed at the
+  // one under the pointer; swapping any of them out mid-way would land on the wrong shape.
+  if (document.activeElement === lfoName || lfoHead.isOpen() || lfoDrag) return;
+  // The id STRING, not the whole call: a patterned rate ("<1 2>") is lit on the same grid, and
+  // reading the call whole would take its atom for a shape name.
+  const range = lfoCallParts()?.idRange;
+  if (!range) return;
+  const id = activeIdIn(range[0], range[1]);
+  if (id == null || id === lfoState.shapeId) return;
+  // Only into something there is a shape to show for. A name that is neither ours nor a preset -
+  // prebake's, whose points the editor never sees - would fail to open every frame for as long as
+  // it sounds, and say so on the console every time. Asking first is also self-correcting: define
+  // that name later and the follow picks it straight up.
+  if (!shapeMod?.SHAPE_PRESETS?.[id] && !shapeDefs.defsInBuffer().some((d) => d.id === id)) return;
+  openShapeById(id, lfoCarry());
+}
+
+function lfoSetFollowLock(locked) {
+  lfoFollowLocked = !!locked;
+  localStorage.setItem('poptartLfoLock', lfoFollowLocked ? '1' : '0');
+  lfoSyncHead();
 }
 
 /** Whichever of the two the current state should write to. */
@@ -2273,6 +2385,10 @@ function openLfoEditor(call) {
   const to = cm.posFromIndex(call.close + 1);
   const inner = cm.getValue().slice(call.open + 1, call.close);
   if (lfoState?.marker) lfoState.marker.clear();
+  // The call marker outlives a switch only while it is being carried INTO the new state (lfoCarry).
+  // Any other one is the panel's last look at some other call, and dropping the reference without
+  // clearing it would leave the mark behind in the document for good.
+  if (lfoState?.callSource && lfoState.callSource !== call.callSource) lfoState.callSource.clear();
   // A shape(...) definition is an lfo() with a name in front of it - drop the name and the rest
   // reads identically, exactly as a roll(...) reads as a pianoroll().
   lfoState = {
@@ -2297,14 +2413,19 @@ function openLfoEditor(call) {
   drawLfoShape();
 }
 
-/** Puts shape `id`'s definition under the editor. False (and a line) if this buffer hasn't got one. */
+/**
+ * Puts shape `id`'s definition under the editor. A built-in preset is copied into the buffer first
+ * (see forkShapePreset); false (and a line) for anything else this buffer hasn't got.
+ */
 function openShapeById(id, from = {}) {
-  const def = shapeDefs.defsInBuffer().find((d) => d.id === String(id));
+  const name = String(id);
+  const def = shapeDefs.defsInBuffer().find((d) => d.id === name);
   if (!def) {
+    if (shapeMod?.SHAPE_PRESETS?.[name]) return forkShapePreset(name, from);
     logLine(
-      shapeDefs.allIds().some((r) => r.id === String(id))
-        ? `shape "${id}" is a built-in preset - it has no definition here to edit. Make one of your own and it will shadow it.`
-        : `no shape(${JSON.stringify(String(id))}, …) in this buffer to open`,
+      shapeDefs.allIds().some((r) => r.id === name)
+        ? `shape "${id}" is defined in prebake.js - open it there to edit its points`
+        : `no shape(${JSON.stringify(name)}, …) in this buffer to open`,
       true
     );
     return false;
@@ -2313,12 +2434,40 @@ function openShapeById(id, from = {}) {
   return true;
 }
 
+/**
+ * A built-in preset has no definition anywhere to put under the editor - `pluck` is a line of data
+ * in shape.mjs, not something this buffer wrote - so editing one can only mean starting FROM it.
+ * Write its points into the buffer under the same name and open that: the shadowing rule (buffer
+ * first, presets after - see shapeNamed) then hands every lfo("<pluck>") already playing the copy
+ * on screen, curve for curve identical until a point is moved. Which is exactly what the line this
+ * replaces used to ask people to go and do by hand.
+ *
+ * Prebake's shapes are library entries too, but their data isn't ours to copy - the editor only
+ * ever learns their names - so those still say where to go and edit them.
+ */
+function forkShapePreset(id, from = {}) {
+  const data = shapeMod?.SHAPE_PRESETS?.[id];
+  if (data == null) return false;
+  const [start, end, text] = shapeDefs.defsEdit(cm.getValue(), [id], () => JSON.stringify(data));
+  cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
+  refoldAll(); // the new definition starts life hidden, like every other one
+  const def = shapeDefs.defsInBuffer().find((d) => d.id === id);
+  if (!def) return false; // can't happen; never open a panel over a definition that isn't there
+  logLine(`shape "${id}" was a built-in preset - copied into this buffer, where it now shadows it`);
+  openLfoEditor({ ...def, ...from });
+  lfoScheduleEval();
+  return true;
+}
+
 // lfo("<pluck swell>") NAMES shapes rather than drawing them: the breakpoints live in the
-// shape(...) definitions, so open the first one it names. Unlike a roll there is no following from
-// here - a modulator has no note grid for the highlighter to light - so the panel stays put.
+// _shape(...) definitions, so open the one you can HEAR - read off the playback highlighter's lit
+// spans, exactly as the roll and preset panels do. The shape names are on that grid like any other
+// atom: the transpile wraps them in mini() for the purpose, and the server ships their steps with
+// the track's own (see patternSigs). Stopped, it opens the first one named.
 function openShapeFromIdCall(call, code) {
   const range = idStringRange(call, code);
-  const id = range && (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0];
+  const id = range
+    && (activeIdIn(range[0], range[1]) ?? (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0]);
   if (id == null) return false;
   // Marked so the panel's rate/mode controls can write back into this call while a definition of
   // its own is on screen (see writeLfoOptions).
@@ -2382,7 +2531,11 @@ function syncLfoFromCode() {
   const text = cm.getRange(range.from, range.to);
   // The call must still be the KIND the panel opened: a definition edited back into a plain lfo()
   // (or the other way round) is a different thing to be editing.
-  if (!(lfoState.idLiteral ? /^\s*shape\s*\(/ : /^\s*lfo\s*\(/).test(text)) { closeLfoEditor(); return; }
+  // Read off the registry rather than spelled out here: a definition is `_shape(`, and a guard that
+  // still said `shape(` would fail on every definition there is - closing the panel on the next
+  // keystroke anywhere in the buffer. Same shape of test as syncPianorollFromCode's.
+  const stillTheCall = new RegExp(`^\\s*${lfoState.idLiteral ? shapeDefs.defCall : 'lfo'}\\s*\\(`);
+  if (!stillTheCall.test(text)) { closeLfoEditor(); return; }
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
@@ -2424,6 +2577,15 @@ function initLfoEditor() {
   lfoPickBtn.addEventListener('click', () => {
     if (lfoHead.isOpen()) lfoHead.closePicker();
     else lfoHead.openPicker();
+  });
+  // Send what's on screen back into the lfo() the panel came from. Hidden unless there is one and
+  // it plays something else - see lfoSyncHead.
+  lfoUseBtn.addEventListener('click', () => {
+    if (lfoState?.shapeId) lfoUseInCall(lfoState.shapeId);
+  });
+  lfoLockBtn.addEventListener('click', () => {
+    lfoSetFollowLock(!lfoFollowLocked);
+    lfoCanvas.focus({ preventScroll: true });
   });
   lfoSearch.addEventListener('input', () => lfoHead.renderList(true));
   lfoSearch.addEventListener('keydown', (e) => {
@@ -2521,8 +2683,14 @@ function lfoPhaseNow() {
 // One repaint per frame while the panel is open and the clock is running. Stops itself when the
 // panel closes, like the piano roll's own loop.
 let lfoRaf = null;
+// The breakpoint being dragged, if any. Module-level rather than initLfoCanvas's own, because the
+// follow loop has to know: swapping the shape out from under a pointer that is bending it would
+// land the drag on whichever shape the pattern moved on to.
+let lfoDrag = null; // { kind: 'point'|'curve', index }
+
 function lfoPlayheadLoop() {
   if (!lfoState) { lfoRaf = null; return; }
+  lfoFollowPlayingShape();
   if (!transport.paused && lfoState.mode === 'free') drawLfoShape();
   lfoRaf = requestAnimationFrame(lfoPlayheadLoop);
 }
@@ -2584,8 +2752,6 @@ function drawLfoShape() {
 }
 
 function initLfoCanvas() {
-  let drag = null; // { kind: 'point'|'curve', index }
-
   const canvasPos = (e) => {
     const r = lfoCanvas.getBoundingClientRect();
     return { px: e.clientX - r.left, py: e.clientY - r.top };
@@ -2613,15 +2779,15 @@ function initLfoCanvas() {
     lfoCanvas.setPointerCapture(e.pointerId);
     const { px, py } = canvasPos(e);
     const pointIdx = hitPoint(px, py);
-    drag = pointIdx != null ? { kind: 'point', index: pointIdx } : { kind: 'curve', index: segmentAt(px) };
+    lfoDrag = pointIdx != null ? { kind: 'point', index: pointIdx } : { kind: 'curve', index: segmentAt(px) };
   });
 
   lfoCanvas.addEventListener('pointermove', (e) => {
-    if (!drag || !lfoState || drag.index == null) return;
+    if (!lfoDrag || !lfoState || lfoDrag.index == null) return;
     const { px, py } = canvasPos(e);
     const pts = lfoState.points;
-    if (drag.kind === 'point') {
-      const i = drag.index;
+    if (lfoDrag.kind === 'point') {
+      const i = lfoDrag.index;
       const { x, y } = canvasToLfo(px, py);
       const isEnd = i === 0 || i === pts.length - 1;
       pts[i] = {
@@ -2632,8 +2798,8 @@ function initLfoCanvas() {
       };
     } else {
       // vertical drag bends the segment: push the curve toward the pointer
-      const seg = pts[drag.index];
-      const rising = pts[drag.index + 1].y >= seg.y;
+      const seg = pts[lfoDrag.index];
+      const rising = pts[lfoDrag.index + 1].y >= seg.y;
       const delta = (e.movementY ?? 0) * 0.08 * (rising ? 1 : -1);
       seg.c = Math.max(-12, Math.min(12, (seg.c ?? 0) + delta));
     }
@@ -2641,8 +2807,8 @@ function initLfoCanvas() {
   });
 
   lfoCanvas.addEventListener('pointerup', (e) => {
-    if (drag && lfoState) writeLfoCall();
-    drag = null;
+    if (lfoDrag && lfoState) writeLfoCall();
+    lfoDrag = null;
     lfoCanvas.releasePointerCapture(e.pointerId);
   });
 
@@ -2828,7 +2994,7 @@ function openPresetFromCall(call, code) {
   const range = idStringRange(call, code);
   if (!range) return false;
   const [from, to] = range;
-  const id = activeRollIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return false;
   const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
   // Read from the call rather than from presetTarget(), which follows the panel - and the panel is
@@ -4228,8 +4394,12 @@ const lfoHead = makeNamePicker({
   els: { wrap: lfoPickWrap, title: lfoTitle, name: lfoName, btn: lfoPickBtn, picker: lfoPickBox, search: lfoSearch, list: lfoPickList },
   reg: shapeDefs,
   current: () => lfoState?.shapeId ?? null,
-  open: (id) => openShapeById(id),
+  // Carried, so browsing the list doesn't lose the call the panel came from - see lfoCarry.
+  open: (id) => openShapeById(id, lfoCarry()),
+  canUse: () => !!lfoState?.callSource?.find(),
+  use: (id) => lfoUseInCall(id),
   refocus: () => lfoCanvas.focus({ preventScroll: true }),
+  onPick: () => lfoSetFollowLock(true), // reaching in here says you want THAT one, not the next bar's
 });
 
 function lfoSyncHead() {
@@ -4239,6 +4409,19 @@ function lfoSyncHead() {
   const editable = !named || !!lfoState?.callSource?.find();
   lfoRateWrap.classList.toggle('hidden', !editable);
   lfoModeWrap.classList.toggle('hidden', !editable);
+  // The → is offered only when it would change something: there is a call behind the panel, and it
+  // isn't already playing what you are looking at. A call that names several (`lfo("<a b>")`) is
+  // never "already" it - sending collapses the pattern onto this one, which is a real edit.
+  const plays = named && editable ? lfoSourceShapeId() : lfoState?.shapeId;
+  lfoUseBtn.classList.toggle('hidden', plays === lfoState?.shapeId);
+  lfoUseBtn.title = `play "${lfoState?.shapeId}" in the lfo() this panel came from`
+    + (plays == null ? '' : ` (it plays "${plays}" now)`);
+  // The lock, like the roll's, only appears when there is something to follow: a shape opened
+  // straight from the picker follows nothing, and an inline lfo() is the whole of its own pattern.
+  lfoLockBtn.classList.toggle('hidden', !(named && editable));
+  lfoLockBtn.textContent = lfoFollowLocked ? '🔒' : '🔓';
+  lfoLockBtn.classList.toggle('active', lfoFollowLocked);
+  lfoLockBtn.title = lfoFollowLocked ? 'pinned to this shape' : 'following the playing shape';
   lfoRateUnit.textContent = lfoState?.rateHz ? 'hz' : 'cyc';
   lfoRateUnit.title = lfoState?.rateHz ? 'free-running — click for cycles' : 'synced to the cycle — click for hz';
   lfoHead.syncHead(named ? shapeDefs.refCalls(cm.getValue(), lfoState.shapeId).length : 0);
@@ -4387,7 +4570,7 @@ function openRollFromIdCall(call, code) {
   const range = idStringRange(call, code);
   if (!range) return;
   const [from, to] = range;
-  const id = activeRollIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return;
   const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
   // Just the source marker: no view to carry on a first open, so the roll frames its own notes.
@@ -4399,8 +4582,10 @@ function openRollFromIdCall(call, code) {
 }
 
 // The id sounding inside a document range, read off the playback highlighter's own lit spans - the
-// same grid the scheduler plays, so the panel can never disagree with what you are hearing.
-function activeRollIdIn(from, to) {
+// same grid the scheduler plays, so a panel can never disagree with what you are hearing. Not
+// roll-specific: rolls, presets and lfo shapes all name their definitions in a mini string, and all
+// three ask this the same question about it.
+function activeIdIn(from, to) {
   for (const r of patternRegions) {
     for (const [a, b] of r.litSpans ?? []) {
       if (a >= from && b <= to) return cm.getRange(cm.posFromIndex(a), cm.posFromIndex(b)).trim();
@@ -4418,7 +4603,7 @@ function prFollowPlayingRoll() {
   if (document.activeElement === prName || !prPicker.classList.contains('hidden')) return;
   const range = prState.source.find();
   if (!range) return;
-  const id = activeRollIdIn(cm.indexFromPos(range.from), cm.indexFromPos(range.to));
+  const id = activeIdIn(cm.indexFromPos(range.from), cm.indexFromPos(range.to));
   if (id == null || id === prState.rollId) return;
   openRollById(id, prCarry());
 }
@@ -4498,7 +4683,11 @@ function makeNamePicker({
     if (inline || current() == null) return;
     els.picker.classList.remove('hidden');
     els.search.value = '';
-    renderList();
+    // Opened ON the one you are looking at: `idx` outlives a close, so without the reset the
+    // highlight bar comes back wherever it was left - pointing at some other row than the ● dot,
+    // and one Enter away from opening it. The list is a place to leave from, so it starts where
+    // you are (see renderList's reset).
+    renderList(true);
     els.search.focus();
   }
 
@@ -4590,6 +4779,20 @@ function makeNamePicker({
       el.addEventListener('mousedown', (e) => { e.preventDefault(); idx = i; choose(); });
       els.list.appendChild(el);
     });
+    scrollRowIntoView();
+  }
+
+  // The list scrolls once it is more than a box deep, so the highlighted row is regularly below the
+  // fold - on open, where it is the one you came in on, and while arrow-keying, which would
+  // otherwise walk off the bottom with nothing appearing to happen. Measured against the box rather
+  // than offsetTop, which would be relative to whichever ancestor happens to be positioned.
+  function scrollRowIntoView() {
+    const el = els.list.children[idx];
+    if (!el) return;
+    const box = els.list.getBoundingClientRect();
+    const row = el.getBoundingClientRect();
+    if (row.top < box.top) els.list.scrollTop -= box.top - row.top;
+    else if (row.bottom > box.bottom) els.list.scrollTop += row.bottom - box.bottom;
   }
 
   function move(delta) {
