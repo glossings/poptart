@@ -313,6 +313,50 @@ export class Scheduler {
     this._earlyShiftWarned = false; // an over-early nudge says so once, not once per event
     this._presetHold = new Map(); // slot -> preset the editor is holding it on (see holdPreset)
     this._stateHold = new Set(); // slots being edited by hand right now (see holdPluginState)
+    this._channelHold = new Map(); // channel control -> value a mixer control is holding it at (see holdChannel)
+  }
+
+  /**
+   * Holds one channel-strip control (gain/pan/width/bassmono/out/dry) at a value while a mixer
+   * control is being dragged. `value` null releases it back to the pattern. Returns the reason it
+   * couldn't be taken, or null.
+   *
+   * This is what makes the mixer's faders mixable. A fader writes `.gain(x)` into the code, and
+   * the code only *sounds* once it is evaluated - so without a hold, riding a fader is silent
+   * until you let go and the debounced eval lands. The engine side is already continuous (the
+   * track SynthDef lags these controls, and _pollGenericParams re-sends them every tick), so all
+   * a hold has to do is put the fader's value where the pattern's would have gone. Nothing else
+   * stops: the notes play, every other control and every other track carry on.
+   *
+   * The value REPLACES the pattern's rather than scaling it. Every .gain() on a track composes
+   * into one post-chain gain (see multiplyGain), so there is no separate trim factor to scale -
+   * the fader's number IS the whole control, which is what it already shows.
+   *
+   * A control driven by a Tier-2 modulator is refused. Those don't go through the poll at all -
+   * the engine runs them as a persistent synth on a control bus MAPPED onto this control, and a
+   * scalar set would unmap the bus and silently kill the modulator until the next eval. The
+   * caller falls back to writing the code (see the web app's mixer), which re-establishes the
+   * modulator with new bounds instead of destroying it.
+   */
+  holdChannel(name, value) {
+    if (value == null) {
+      if (!this._channelHold.delete(name)) return null;
+      // The poll only re-sends controls the pattern actually carries, so releasing a hold on one
+      // it doesn't (a block with no .pan(), or a lease that expired without an eval behind it)
+      // would leave the track pinned at the held value forever. Put it back by hand.
+      if (!(name in (this.pattern?.channel ?? {}))) {
+        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0,
+          this.engine.getTime() + DEFAULT_LOOKAHEAD_SEC);
+      }
+      return null;
+    }
+    if (!(name in CHANNEL_DEFAULTS)) return `"${name}" is not a channel control`;
+    const sig = this.pattern?.channel?.[name];
+    if (sig && (sig.lfoIR || sig.envIR || sig.ccIR)) {
+      return `${name} is driven by a native modulator (env/lfo/midicc) - edit the code instead`;
+    }
+    this._channelHold.set(name, value);
+    return null;
   }
 
   /**
@@ -675,6 +719,10 @@ export class Scheduler {
     // A stopped track's plugins are no longer playing anything to protect; the server re-asserts
     // any live hand edit on the evaluation that brings the track back (see its eval route).
     this._stateHold.clear();
+    // Nothing is sounding for a mixer control to hold either. Dropped rather than released: the
+    // release path would push a value at a track that is on its way out, and the server's lease
+    // re-takes the hold on the Scheduler that comes back (see setChannelHold).
+    this._channelHold.clear();
   }
 
   _tick() {
@@ -1038,10 +1086,20 @@ export class Scheduler {
     const applyCycle = this.transport.cycleAt(applySec);
     for (const c of this._controlEntries(this.pattern)) {
       if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // native Tier 2 already owns this, set once in setPattern()
-      const value = c.sig.sample(applySec, this.transport.cps, applyCycle);
+      // A mixer control being dragged holds this one at the value under your finger (see
+      // holdChannel); the pattern's own value is what it returns to when you let go. Read with a
+      // conditional rather than `&&` so a plugin param can't come out as `false ?? sample`.
+      const held = c.slot === CHANNEL_SLOT ? this._channelHold.get(c.name) : undefined;
+      const value = held ?? c.sig.sample(applySec, this.transport.cps, applyCycle);
       if (typeof value === 'number') {
         this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);
       }
+    }
+    // Held controls the pattern doesn't carry at all - a block with no .pan() still has a pan knob,
+    // and grabbing it has to sound. The loop above only walks what the pattern set.
+    for (const [name, value] of this._channelHold) {
+      if (name in this.pattern.channel) continue; // already sent (or Tier-2, which a hold won't touch)
+      this.engine.setParam(this.trackId, CHANNEL_SLOT, name, value, applySec);
     }
   }
 }

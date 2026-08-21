@@ -1251,10 +1251,14 @@ async function pollPluginEdits({ flush = false } = {}) {
   // it as a lease, so a tab that closes with the panel open releases the slot instead of leaving it
   // frozen on one preset (see /api/presetHold).
   const hold = presetState?.held ? { ...presetState.held, trackId: presetState.held.label, preset: presetState.id } : null;
+  // The mixer's drag lease renews here too. It can't ride its own value posts: a finger resting
+  // motionless on a fader emits no pointermove, and the server would give the control back mid-mix.
+  const channelHold = mixerHold?.value == null ? null : { trackId: mixerHold.label, name: mixerHold.name, value: mixerHold.value };
   const committed = [...commitQueue];
   const { edits, logs, pending, holds } = await api('POST', '/api/pluginEdits', {
     flush,
     hold,
+    channelHold,
     committed,
   });
   // What is held right now, drawn on the code. Every poll, so a hold taken or dropped between two
@@ -7943,15 +7947,17 @@ function buildMixerStrip(label) {
     const gain = mixerFaderToGain(fader.value / 1000);
     strip.gain = gain;
     dbLabel.textContent = mixerFmtDb(gain);
-    queueMixerWrite(strip, 'gain', gain);
+    // Arrow keys raise `input` too, with no pointer and so no hold - those take the code path.
+    mixerDragValue(strip, 'gain', gain);
   });
   // Pointer grabs are released by the window-level handler below (a drag can end anywhere), so
-  // all this does is take the focus. Arrow keys take it too, and only that kind survives to the
-  // blur - see mixerFocusFromPointer.
+  // all this does is take the focus and arm the hold. Arrow keys take the focus too, and only
+  // that kind survives to the blur - see mixerFocusFromPointer.
   fader.addEventListener('pointerdown', () => {
     strip.dragGain = true;
     mixerFocus = label;
     mixerFocusFromPointer = true;
+    armMixerHold(strip, 'gain');
   });
   fader.addEventListener('keydown', () => {
     mixerFocus = label;
@@ -7975,7 +7981,7 @@ function buildMixerStrip(label) {
     strip.bassmono = hz > 0 ? Math.round(hz) : 0;
     if (strip.bassmono > 0) strip.bassLastHz = strip.bassmono;
     updateMixerBassBtn(strip);
-    queueMixerWrite(strip, 'bassmono', strip.bassmono);
+    mixerDragValue(strip, 'bassmono', strip.bassmono);
   };
   bassBtn.addEventListener('pointerdown', (e) => {
     if (strip.gone) return;
@@ -7983,6 +7989,10 @@ function buildMixerStrip(label) {
     strip.dragBass = { x: e.clientX, hz: strip.bassmono || strip.bassLastHz, moved: false };
     mixerFocus = label;
     mixerFocusFromPointer = true;
+    // Armed for the click-toggle as well as the drag: endBass runs on this button's own pointerup,
+    // before the window release below, so a toggle is held (and therefore heard) exactly like a
+    // drag's last value and written by the same release.
+    armMixerHold(strip, 'bassmono');
   });
   bassBtn.addEventListener('pointermove', (e) => {
     const d = strip.dragBass;
@@ -8006,7 +8016,7 @@ function buildMixerStrip(label) {
     const set = (value) => {
       knob.value = Math.round(value * 100) / 100;
       valueEl.textContent = spec.format(knob.value);
-      queueMixerWrite(strip, spec.name, knob.value);
+      mixerDragValue(strip, spec.name, knob.value);
     };
     canvas.addEventListener('pointerdown', (e) => {
       if (strip.gone) return;
@@ -8014,6 +8024,7 @@ function buildMixerStrip(label) {
       knob.drag = { x: e.clientX, y: e.clientY, pos: spec.posOf(knob.value) };
       mixerFocus = label;
       mixerFocusFromPointer = true;
+      armMixerHold(strip, spec.name);
     });
     canvas.addEventListener('pointermove', (e) => {
       if (!knob.drag) return;
@@ -8050,12 +8061,12 @@ function queueMixerWrite(strip, name, value) {
 }
 
 function applyMixerTrim(label, name, value) {
-  if (!mixctlMod) return;
+  if (!mixctlMod) return false;
   const code = cm.getValue();
   const edit = mixctlMod.trimEdit(code, label, name, mixctlMod.formatTrim(value));
   if (!edit) {
     logLine(`mixer: couldn't find a block "${label}" to write .${name}() into - re-evaluate and try again`, true);
-    return;
+    return false;
   }
   mixerSuppressSync = true;
   try {
@@ -8064,6 +8075,86 @@ function applyMixerTrim(label, name, value) {
     mixerSuppressSync = false;
   }
   mixerScheduleEval();
+  return true;
+}
+
+// --- live audition: holding a control while it is dragged ---
+//
+// A trim only *sounds* once it has been written into the code and the buffer evaluated - and the
+// eval is debounced, which a moving fader keeps resetting - so riding one used to be silent until
+// you let go. Instead a drag posts its value straight to the engine, which holds the channel control
+// there while everything else carries on playing (see Scheduler#holdChannel), and the code is
+// written once, on release. Both halves of what a mixer wants: the buffer stops being rewritten
+// mid-gesture, and you hear what your hand is doing while you do it.
+//
+// A control the code modulates natively (.gain(env()), .pan(sine(...))) keeps the old path. The
+// engine runs those from a control bus MAPPED onto the channel strip, and holding a scalar there
+// would unmap the bus and kill the modulation until the next eval. mixctl's `patterned` read is the
+// guard: a superset of the native case, so a Tier-1 pattern falls back too - which costs it nothing,
+// since writing and evaluating is what it did before.
+let mixerHold = null; // { label, name, value, postedAt } while a control is held, else null
+const MIXER_HOLD_POST_MS = 30; // the scheduler's own poll interval - posting faster is wasted
+
+/** Can this control be auditioned live, or does the code modulate it natively? */
+function mixerHoldable(label, name) {
+  if (!mixctlMod) return false;
+  const trim = mixctlMod.readTrim(cm.getValue(), label, name); // null when the block isn't in the buffer
+  return !!trim && !trim.patterned;
+}
+
+// Arms a hold for the control a pointer just grabbed. Nothing is posted yet: a click that never
+// moves (and the two of a double-click reset) should write no code and evaluate nothing, so the
+// hold only goes live on the first value the drag produces.
+function armMixerHold(strip, name) {
+  // A second pointer arriving mid-drag (touch, mostly): finish the first gesture properly rather
+  // than dropping the value it was holding. Safe to leave running - it takes the old hold and
+  // clears `mixerHold` before its first await, so what we assign below is untouched by it.
+  if (mixerHold?.value != null) releaseMixerHold().catch(() => {});
+  mixerHold = strip.gone || !mixerHoldable(strip.label, name) ? null : { label: strip.label, name, value: null, postedAt: 0 };
+}
+
+// One new value from a drag: into the engine if this control holds, into the code if it doesn't.
+// Throttled, since a pointermove stream runs far ahead of what the engine can use.
+function mixerDragValue(strip, name, value) {
+  if (mixerHold?.label !== strip.label || mixerHold?.name !== name) {
+    queueMixerWrite(strip, name, value); // not held: write the code and let the eval debounce
+    return;
+  }
+  const first = mixerHold.value == null;
+  mixerHold.value = value;
+  const now = performance.now();
+  if (!first && now - mixerHold.postedAt < MIXER_HOLD_POST_MS) return;
+  mixerHold.postedAt = now;
+  const held = mixerHold;
+  api('POST', '/api/channelHold', { trackId: held.label, name, value }).then((r) => {
+    // Refused - the control became natively modulated between the grab and now. Drop the hold so
+    // the rest of the drag writes code instead, which is the path that can express a modulator.
+    if (r?.why && mixerHold === held) {
+      mixerHold = null;
+      queueMixerWrite(strip, name, value);
+    }
+  }).catch(() => {});
+}
+
+// Release. The code write and its evaluation happen once, here - and the control is handed back only
+// AFTER that eval has landed. Release first and the scheduler's next poll would put the code's old
+// value back for the length of a round trip, which is an audible jump at the end of every gesture.
+// The debounce is skipped rather than waited out: letting go IS the moment this wanted to sound.
+async function releaseMixerHold() {
+  const held = mixerHold;
+  mixerHold = null; // before any await, so a drag starting now gets a hold of its own
+  if (!held || held.value == null) return; // never moved: nothing was posted, nothing to write
+  try {
+    if (applyMixerTrim(held.label, held.name, held.value)) {
+      clearTimeout(mixerEvalTimer);
+      mixerEvalTimer = null;
+      await evaluate(false);
+    }
+  } finally {
+    // Handed back even if the write or the eval threw. A hold nobody releases is a track stuck at
+    // the level your hand was at until the lease times out - a worse failure than the one above.
+    api('POST', '/api/channelHold', { trackId: held.label, name: held.name, value: null }).catch(() => {});
+  }
 }
 
 // Mute/solo rewrite the block's label marker (`_bass:` / `Sbass:`) - the same switch you'd type.
@@ -8611,6 +8702,10 @@ mixerFreezeBtn.addEventListener('click', () => {
 // why this can't be left to blur). One listener for every strip rather than three apiece.
 for (const ev of ['pointerup', 'pointercancel']) {
   window.addEventListener(ev, () => {
+    // Before the panel guard: this is the one place a held control is written and handed back, and
+    // a mixer closed mid-drag must not leave the track pinned waiting for the lease to time out.
+    // evaluate() reports its own failures, so there is nothing left for this to say.
+    releaseMixerHold().catch(() => {});
     if (!mixerState) return;
     for (const strip of mixerState.strips.values()) {
       strip.dragGain = false;

@@ -33,6 +33,23 @@ $: `<
     Worth doing together: both are the same change to how the bands are summarized, and the
     client's `mixerBandLevel`/`mixerBandAngle` are the only readers.
 
+[ ] Live-audition a shape while its breakpoint is being dragged, the way the mixer's channel
+    holds do (`Scheduler#holdChannel`). The LFO panel writes the call on release and re-evaluates
+    150ms later (`lfoScheduleEval` in client.js), so a shape being drawn is silent until you let
+    go — the same complaint the mixer had, but it can't be fixed the same way.
+
+    A drawn shape reaches the engine as a whole modulator IR (`_sendModulator` in
+    pattern-core/src/scheduler.mjs, where `lfoShapes(ir)` turns the name into `points`/`shapes`),
+    and the only in-place update sc/poptart.scd offers is `setParamShape` — an index swap between
+    shapes compiled *up front*. There is no "replace these breakpoints on the running synth", so
+    live dragging means re-sending `setParamLFO`, which restarts the shape's phase (see
+    `phaseOriginSec` in `_anchorLFOs`): every mouse move would retrigger the LFO.
+
+    So this is an engine change, not a client one — a `/poptart/setParamShapePoints` that rewrites
+    the running shape buffer while leaving the phase pointer alone, then a hold on top of it. Only
+    worth it if drawing-while-hearing turns out to matter; the 150ms debounce already covers
+    "pause mid-drag and listen", which may well be enough.
+
 [ ] Evict sample packs that haven't been played in a while. Packs load whole and stay for the
     session (`_packs` in osc-engine/index.js, `samplePacks` in poptart.scd) — nothing frees them
     but reloading the same pack. numBuffers is 16384 now so the *count* is fine, but the audio is

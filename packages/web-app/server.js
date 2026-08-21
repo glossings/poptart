@@ -1383,6 +1383,48 @@ function expirePresetHolds() {
     schedulers.get(key.slice(0, at))?.holdPreset(Number(key.slice(at + 1)), null);
   }
 }
+
+// "trackId|control" -> { name, value, at } - the channel-strip control a mixer fader or knob is
+// holding while it is dragged (see the /api/channelHold route and Scheduler#holdChannel). Kept HERE
+// as well as on the Scheduler for the same reason preset holds are: setPattern rebuilds what a
+// track plays on every evaluation, and the release of a drag both writes code and evaluates - so
+// the hold has to be re-asserted afterwards, or the level would snap back to the code in the gap
+// between that eval landing and your finger actually lifting.
+//
+// A lease, not a flag: the editor renews it on the pluginEdits poll it already runs, and it expires
+// a few seconds after the editor stops asking. Renewal can't ride the drag's own value posts - a
+// finger held still on a fader sends no pointermove at all - so it goes on the poll, which is also
+// what makes a closed tab, a reload, or a pointerup that never arrived give the control back. A
+// held control ignores its pattern, so one that outlived its drag would leave a track stuck at
+// whatever level your hand was at, with nothing on screen to explain why.
+const channelHolds = new Map();
+const CHANNEL_HOLD_TTL_MS = 3000; // ~6 missed polls (see the editor's 500ms pluginEdits loop)
+
+/**
+ * Takes, renews, or releases one channel control's hold. Returns the reason it couldn't be taken
+ * (a Tier-2 modulator drives it), or null. Renewing an unchanged hold is a plain heartbeat - unlike
+ * a preset hold there is nothing to re-load, so re-asserting the same value costs nothing.
+ */
+function setChannelHold(trackId, name, value) {
+  const key = `${trackId}|${name}`;
+  if (value == null) {
+    channelHolds.delete(key);
+    schedulers.get(trackId)?.holdChannel(name, null);
+    return null;
+  }
+  channelHolds.set(key, { name, value, at: Date.now() });
+  return schedulers.get(trackId)?.holdChannel(name, value) ?? null;
+}
+
+/** Drops leases the editor has stopped renewing, handing those controls back to their patterns. */
+function expireChannelHolds() {
+  const cutoff = Date.now() - CHANNEL_HOLD_TTL_MS;
+  for (const [key, held] of channelHolds) {
+    if (held.at >= cutoff) continue;
+    channelHolds.delete(key);
+    schedulers.get(key.slice(0, key.lastIndexOf('|')))?.holdChannel(held.name, null);
+  }
+}
 // ---------------------------------------------------------------------------------------------
 // Hand editing. While you are turning a plugin's own knobs, that plugin holds a sound nothing else
 // has yet: not the preset store, not the buffer, not a `{ state }` argument. Anything that pushes a
@@ -1919,6 +1961,12 @@ const routes = {
         const at = key.lastIndexOf('|');
         if (key.slice(0, at) === b.label) sch.holdPreset(Number(key.slice(at + 1)), held.preset);
       }
+      // A mixer control still under someone's finger keeps its level across this eval - which is
+      // the eval its own release just triggered (see setChannelHold). After setPattern, so the
+      // refusal for a natively modulated control reads the pattern that is now playing.
+      for (const [key, held] of channelHolds) {
+        if (key.slice(0, key.lastIndexOf('|')) === b.label) sch.holdChannel(held.name, held.value);
+      }
       sch.start();
     }
 
@@ -2102,6 +2150,13 @@ const routes = {
     // request either way, and a browser that stops polling releases what it was holding.
     if (body?.hold) setPresetHold(String(body.hold.trackId ?? ''), Number(body.hold.slot ?? 0), String(body.hold.preset ?? ''));
     expirePresetHolds();
+    // The mixer's drag lease renews here too, and for a reason its own value posts can't cover: a
+    // finger resting motionless on a fader emits no pointermove, so the drag alone would look
+    // abandoned (see setChannelHold).
+    if (body?.channelHold) {
+      setChannelHold(String(body.channelHold.trackId ?? ''), String(body.channelHold.name ?? ''), Number(body.channelHold.value));
+    }
+    expireChannelHolds();
     // Hand editing, both halves, on the same poll and for the same reason (see that section):
     // `editing` renews the lease on every plugin window the editor has open, and `committed` says
     // which captures have reached the code - by sequence number, so the report of one capture can
@@ -2137,6 +2192,20 @@ const routes = {
     if (name != null && presetHolds.get(`${trackId}|${slot}`)?.preset !== name) await flushPluginCaptures();
     const why = setPresetHold(trackId, slot, name, { force: true });
     return { status: 200, body: { held: name, why } };
+  },
+
+  // Hold one channel-strip control at the value under a mixer fader/knob while it is dragged, so
+  // riding it sounds instead of waiting for the release to write code and evaluate (see
+  // Scheduler#holdChannel). Body: { trackId, name, value }, value null to release. Called on every
+  // pointermove, so like /api/macros/set it deliberately touches nothing but the in-memory store -
+  // the code write happens once, on release.
+  'POST /api/channelHold': async (body) => {
+    const trackId = String(body?.trackId ?? '');
+    const name = String(body?.name ?? '');
+    const value = body?.value == null ? null : Number(body.value);
+    if (value != null && !Number.isFinite(value)) throw new Error('channelHold: value must be a number');
+    const why = setChannelHold(trackId, name, value);
+    return { status: 200, body: { held: value, why } };
   },
 
   // Pop open the native editor window of the plugin in a chain slot (design your supersaw in
