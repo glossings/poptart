@@ -14,7 +14,7 @@ import {
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
-import { parsePianoRoll, normalizePianoRollSteps, noteIndex, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
+import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
@@ -731,6 +731,14 @@ export class Sig {
         warnUser(`[signal] .swing() on a ${known}-per-cycle grid has nothing to move here - every event is on an onbeat of that grid, so this plays exactly as it would straight.${fix} (Anything that subdivides the pattern afterwards - .fast(), .ply() - changes that.)`);
       }
     }
+    return this._swingChannels(sig, stepsForCycle, grid);
+  }
+
+  // The channel half of .swing(), without the advice. Split out for the piano roll, which sets the
+  // same channels from its own panel: the "this does nothing" check is worth making there too, but
+  // the fix it should offer is a control in the roll's side bar, not an edit to a .swing() call the
+  // person never wrote (see the pianoroll builder).
+  _swingChannels(sig, stepsForCycle, grid) {
     const out = this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, swing: sig }, stepsForCycle }));
     return grid === undefined ? out : out.swinggrid(grid);
   }
@@ -3437,7 +3445,17 @@ export function pianoroll(str = '', opts = {}) {
     const cell = nt.start - from;
     if (cell < 0 || cell >= len) return; // outside the loop window - never sounds
     const list = byStart.get(cell) ?? [];
-    list.push({ value: nt.midi, vel: nt.vel, index: noteIndex(nt), dur: nt.len / grid, prob: nt.prob, seed: i + 1 });
+    list.push({
+      value: nt.midi,
+      vel: nt.vel,
+      index: noteIndex(nt),
+      dur: nt.len / grid,
+      // Cells on the roll, a share of the event's own width on the step - the same conversion
+      // pianoRollToMini does when it prints the roll out (see noteNudgeChannel).
+      nudge: noteNudgeChannel(nt),
+      prob: nt.prob,
+      seed: i + 1,
+    });
     byStart.set(cell, list);
   });
   const stepsForCycle = (cycle) => {
@@ -3450,6 +3468,11 @@ export function pianoroll(str = '', opts = {}) {
       for (const o of onsets) {
         if (o.prob < 1 && !(rng2(m, o.seed) < o.prob)) continue;
         const step = { start, end: start + o.dur, value: o.value, vel: o.vel };
+        // A drawn offset rides ON the event, for the same reason the index does: a chord is several
+        // events at ONE onset, and a channel sampled there could only give them all the same answer
+        // - which is exactly what a splayed chord isn't. Only when it's set, so a plain roll leaves
+        // the channel alone and a later .nudge()/.swing() still reads normally.
+        if (o.nudge) step.nudge = o.nudge;
         // The sample index rides ON the event (step.cfg, which the scheduler reads ahead of the
         // channel - see _sampleConfigAt) rather than as a channel, because a chord is two events at
         // ONE onset and sampling a channel there could only ever tell them both the same index.
@@ -3460,7 +3483,31 @@ export function pianoroll(str = '', opts = {}) {
     return out;
   };
   const sample = (t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos);
-  return new Sig(sample, { stepsForCycle, pitchKind: 'note' });
+  const roll = new Sig(sample, { stepsForCycle, pitchKind: 'note' });
+  // A roll carries its own swing, set on the panel beside its grid. It is the ordinary channel (so
+  // it sums with the per-note nudges drawn on the roll, and a .swing() on the TRACK replaces it like
+  // any other control), and its division defaults to the roll's own grid rather than to eighths: a
+  // roll is written on a stated resolution, and swinging that resolution is what the knob on a drum
+  // machine does. Committing it writes the same offsets into the notes and puts this back to 0.
+  const swingAmount = typeof opts === 'number' ? 0 : Number(opts.swing) || 0;
+  if (!swingAmount) return roll;
+  const swingGrid = Math.max(1, Math.round(Number(opts.swinggrid) || grid));
+  const sig = toSignal(Math.min(MAX_SWING, Math.max(-MAX_SWING, swingAmount)));
+  const swung = crossMerge(roll.stepsForCycle, sig, stampField('swing'));
+  // Same check .swing() makes, different advice: a roll's grid is the resolution it is DRAWN on, and
+  // notes sitting on every other cell of it (quarter notes on a sixteenth grid) are all onbeats -
+  // so a roll is if anything likelier than a written pattern to be swung by a division that has
+  // nothing to move. The fix is the panel's own control, which is where the number came from.
+  const { moves } = swingGridReport(swung, swingGrid);
+  if (!moves) {
+    // Suggested off the notes' SPACING, not off swingGridReport's step widths: in a roll a step is
+    // as long as the note is, so width would answer with the drawing grid - the very number that
+    // has just been shown not to move anything (see pianoRollNoteGrid).
+    const on = pianoRollNoteGrid(notes, grid);
+    const fix = on && on !== swingGrid ? ` Set "sw grid" to ${on} - the division this roll's notes are actually on.` : '';
+    warnUser(`[signal] this roll's swing has nothing to move: every note is on an onbeat of the ${swingGrid}-per-cycle division it swings, so it plays exactly as it would straight.${fix}`);
+  }
+  return roll._swingChannels(sig, swung, swingGrid);
 }
 
 // pianoroll("<0 chorus>") - the argument names rolls instead of drawing them. The ids are ordinary
@@ -3732,11 +3779,14 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
       unipolar = sum / norm;
       break;
     }
-    case 'custom':
+    case 'custom': {
       // lfo() shapes: only free mode has a JS-side value - retrigger/envelope depend on note
       // gates only the engine sees, so (like env()) they just hold the shape's start level.
-      unipolar = ir.mode === 'free' || ir.mode == null ? sampleShape(ir.points, phase) : ir.points[0].y;
+      // Read through lfoShapes, so a named shape is looked up now rather than when lfo() was built.
+      const points = lfoPoints(ir);
+      unipolar = ir.mode === 'free' || ir.mode == null ? sampleShape(points, phase) : points[0].y;
       break;
+    }
     case 'sine':
     default:
       unipolar = 0.5 + 0.5 * Math.sin(phase * 2 * Math.PI);
@@ -3838,12 +3888,12 @@ export function lfo(shape, opts = {}) {
   if (!['free', 'retrigger', 'envelope'].includes(mode)) {
     throw new Error(`[signal] lfo() mode must be 'free', 'retrigger', or 'envelope' (got "${mode}")`);
   }
-  const { shapes, names, pattern } = resolveShapeArg(shape);
+  const { names, pattern } = resolveShapeArg(shape);
   return withLfoIR({
     shape: 'custom',
-    points: shapes[0], // the shape it starts on; `shapes` is the whole set the engine compiles
-    shapes,
-    shapeNames: names, // what the pattern says, in the order `shapes` holds them
+    // The NAMES, not the breakpoints: what they stand for is read later, once the whole buffer has
+    // been evaluated and the definitions exist (see lfoShapes).
+    shapeNames: names,
     shapePattern: pattern, // null unless the argument named more than one
     glide: Math.max(0, Number(glide) || 0),
     mode,
@@ -3888,6 +3938,15 @@ function shapeNamed(str) {
   return parseShapePoints(DEFAULT_LFO_SHAPE);
 }
 
+// Breakpoint DATA is parsed at build time even though nothing needs the result yet, so a typo in a
+// drawn shape still reports against the line it was written on. Only NAMES are deferred (see
+// lfoShapes): a name has nothing to check until the registry is complete, whereas "0,0 1,notanumber"
+// is wrong the moment it is typed - and finding that out later would mean finding out from inside a
+// scheduler tick, which stops the track rather than failing the evaluation.
+function validateShapeData(name) {
+  if (String(name).includes(',')) parseShapePoints(name);
+}
+
 function resolveShapeArg(shape) {
   // The editor's transpile hands us a Sig for a name pattern (it wraps it in mini() so the
   // playing shape can be highlighted, exactly as it does a pianoroll's roll ids); a bare string is
@@ -3895,7 +3954,10 @@ function resolveShapeArg(shape) {
   const sig = shape instanceof Sig ? shape : null;
   if (!sig) {
     const str = typeof shape === 'string' && shape.trim() ? shape : DEFAULT_LFO_SHAPE;
-    if (!SHAPE_PATTERN_CHARS.test(str)) return { shapes: [shapeNamed(str)], names: [str.trim()], pattern: null };
+    if (!SHAPE_PATTERN_CHARS.test(str)) {
+      validateShapeData(str.trim());
+      return { names: [str.trim()], pattern: null };
+    }
     return namesFrom(mini(str));
   }
   return namesFrom(sig);
@@ -3904,12 +3966,41 @@ function resolveShapeArg(shape) {
 function namesFrom(sig) {
   const names = patternNames(sig);
   if (!names.length) throw new Error('[signal] lfo() names no shape - it patterns nothing to play');
-  const shapes = names.map(shapeNamed);
+  for (const name of names) validateShapeData(name);
   // One shape is not a pattern: nothing to swap to, so it runs as the plain single-shape LFO it
   // effectively is. A rest changes nothing either - a modulator that stopped would just hold its
   // value, which is exactly what not swapping already does.
-  return { shapes, names, pattern: shapes.length > 1 ? sig : null };
+  return { names, pattern: names.length > 1 ? sig : null };
 }
+
+/**
+ * The breakpoints an LFO's names stand for, resolved on FIRST READ rather than when lfo() was
+ * called - the same laziness the roll registry has, and for the same reason.
+ *
+ * A definition lives in a `_shape(...)` block that the editor writes at the FOOT of the buffer,
+ * below the patterns naming it, and blocks are evaluated in document order against a registry that
+ * each evaluation clears. Looking a name up while lfo() was being built therefore asked for
+ * something two lines further down that had not been registered yet: every named shape resolved to
+ * the default triangle, and said so, on every evaluation. Reading them here instead puts the lookup
+ * after the whole buffer has run - the scheduler resolves them on its way to the engine, and the
+ * JS-side sampler when it first plays - by which time every definition is in.
+ *
+ * Memoised on the IR, which lives exactly one evaluation: the names cannot change under it, and
+ * nothing may pay for a map lookup and a parse per sample.
+ */
+export function lfoShapes(ir) {
+  if (!ir._shapes) {
+    // Non-enumerable so a spread can't carry it: .range()/.fast()/.phase() all rebuild the IR with
+    // `{ ...ir, … }` at BUILD time, and a memo riding along in one of those copies would be the
+    // early lookup coming back in through the side door. (It is also why this is a function rather
+    // than a getter on the IR - an enumerable getter would simply be CALLED by those same spreads.)
+    Object.defineProperty(ir, '_shapes', { value: (ir.shapeNames ?? []).map(shapeNamed), writable: true });
+  }
+  return ir._shapes;
+}
+
+/** The one shape a custom LFO starts on - the first of the set it can reach. */
+export const lfoPoints = (ir) => lfoShapes(ir)[0];
 
 // How far ahead a name pattern is read. The shapes have to exist BEFORE the pattern reaches them
 // (they are compiled up front, not on the fly), so they are collected from the pattern rather than

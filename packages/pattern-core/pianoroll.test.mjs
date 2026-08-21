@@ -16,6 +16,11 @@ import {
   normalizePianoRollMode,
   pianoRollEventAt,
   noteIndex,
+  noteNudge,
+  pianoRollSwingCells,
+  pianoRollNoteGrid,
+  commitPianoRollSwing,
+  noteNudgeChannel,
   rescalePianoRoll,
   regridPianoRoll,
   retimePianoRoll,
@@ -24,33 +29,34 @@ import {
   PIANOROLL_DEFAULT_NOTE,
   PIANOROLL_DEFAULT_INDEX,
 } from './src/pianoroll.mjs';
-import { pianoroll, note, n, i, vel, mini, s, channelAt, soundingEnd } from './src/signal.mjs';
+import { pianoroll, note, n, i, vel, mini, s, channelAt, soundingEnd, timeShift, setPatternWarn } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 test('parsePianoRoll: fields, defaults, and empty input', () => {
   assert.deepEqual(parsePianoRoll(''), []);
   assert.deepEqual(parsePianoRoll('   '), []);
-  assert.deepEqual(parsePianoRoll('60,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, mute: false }]);
-  assert.deepEqual(parsePianoRoll('60,0,4,0.5'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 1, mute: false }]);
-  assert.deepEqual(parsePianoRoll('60,0,4,0.5,0.25'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 0.25, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4,0.5'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4,0.5,0.25'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 0.25, nudge: 0, mute: false }]);
   // the pitch field carries the sample index behind a ":" when it isn't the default
-  assert.deepEqual(parsePianoRoll('24:3,0,4'), [{ midi: 24, index: 3, start: 0, len: 4, vel: 1, prob: 1, mute: false }]);
-  assert.deepEqual(parsePianoRoll('!60:2,0,4,0.5'), [{ midi: 60, index: 2, start: 0, len: 4, vel: 0.5, prob: 1, mute: true }]);
+  assert.deepEqual(parsePianoRoll('24:3,0,4'), [{ midi: 24, index: 3, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('!60:2,0,4,0.5'), [{ midi: 60, index: 2, start: 0, len: 4, vel: 0.5, prob: 1, nudge: 0, mute: true }]);
 });
 
 test('parsePianoRoll: clamps out-of-range fields, rejects malformed tokens', () => {
-  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, index: 0, start: 0, len: 1, vel: 1, prob: 1, mute: false }]);
-  assert.deepEqual(parsePianoRoll('60:-2,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, mute: false }]);
+  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, index: 0, start: 0, len: 1, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60:-2,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
   assert.throws(() => parsePianoRoll('60,0'), /bad note/);
-  assert.throws(() => parsePianoRoll('60,0,4,0.5,0.5,7'), /bad note/);
+  assert.equal(parsePianoRoll('60,0,4,0.5,0.5,7')[0].nudge, 0.5, 'six fields is a nudge, clamped');
+  assert.throws(() => parsePianoRoll('60,0,4,0.5,0.5,0.1,9'), /bad note/);
   assert.throws(() => parsePianoRoll('c,0,4'), /non-numeric/);
 });
 
 // The `!` marker is the muted (Live-deactivated) note: still in the roll, never sounding.
 test('parsePianoRoll / serializePianoRoll: the ! mute marker round-trips', () => {
-  assert.deepEqual(parsePianoRoll('!60,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, mute: true }]);
+  assert.deepEqual(parsePianoRoll('!60,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: true }]);
   // it rides in front of every other field, and the rest of the token parses exactly as it would
-  assert.deepEqual(parsePianoRoll('!60,0,4,0.5,0.25'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 0.25, mute: true }]);
+  assert.deepEqual(parsePianoRoll('!60,0,4,0.5,0.25'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 0.25, nudge: 0, mute: true }]);
   assert.equal(serializePianoRoll([{ midi: 60, start: 0, len: 4, vel: 1, prob: 1, mute: true }]), '!60,0,4');
   assert.equal(serializePianoRoll([{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 1, mute: true }]), '!60,0,4,0.5');
   const str = '!60,0,4 64,0,4,0.5 !67,8,8,1,0.3';
@@ -717,4 +723,190 @@ test('a head control survives .vel()/.clip() on its way to .s()', () => {
   );
   // ...and the same holds for the note controls in head position
   assert.deepEqual(vel('<1 0.5>*2').clip(2).s('bd').stepsForCycle(0).map((st) => st.value), ['bd', 'bd']);
+});
+
+// ---------------------------------------------------------------------------------------------
+// nudge - a note drawn off its cell (see the format notes, and signal.mjs's timeShift)
+// ---------------------------------------------------------------------------------------------
+
+test('nudge is the sixth field, and holds the ones before it open', () => {
+  const notes = parsePianoRoll('60,0,1 62,4,1,1,1,0.1 64,8,4,0.8,0.5,-0.05');
+  assert.deepEqual(notes.map((nt) => nt.nudge), [0, 0.1, -0.05]);
+  // A nudge writes vel and prob whatever they are - the fields are positional - and a roll with no
+  // nudge anywhere is written exactly as it was before the field existed.
+  assert.equal(serializePianoRoll(notes), '60,0,1 62,4,1,1,1,0.1 64,8,4,0.8,0.5,-0.05');
+  assert.equal(serializePianoRoll(parsePianoRoll('60,0,1 62,4,1,0.5')), '60,0,1 62,4,1,0.5');
+  // Past half a cell the note has changed places with its neighbour, so that is where it stops.
+  assert.equal(parsePianoRoll('60,0,1,1,1,3')[0].nudge, 0.5);
+  assert.equal(parsePianoRoll('60,0,1,1,1,-3')[0].nudge, -0.5);
+});
+
+test('a note drawn before nudge existed reads as 0, not as absent', () => {
+  assert.equal(noteNudge({ midi: 60, start: 0, len: 1 }), 0);
+  assert.equal(noteNudgeChannel({ midi: 60, start: 0, len: 4 }), 0);
+});
+
+test('the roll draws nudge in CELLS and plays it as a share of the note', () => {
+  // The conversion that makes two notes of different lengths, nudged the same on screen, sound
+  // equally late: a cell is 1/grid of a cycle either way, so the offset in CYCLES must match.
+  const grid = 16;
+  const sig = pianoroll('60,0,1,1,1,0.1 64,8,4,1,1,0.1', { grid });
+  const steps = sig.stepsForCycle(0);
+  assert.equal(steps[0].nudge, 0.1, 'a one-cell note: a tenth of its own width');
+  assert.equal(steps[1].nudge.toFixed(10), (0.1 / 4).toFixed(10), 'a four-cell note: a quarter of that');
+  const shift = (st) => timeShift(st, sig.noteChannels, st.start, 1, st.start);
+  assert.equal(shift(steps[0]).toFixed(10), (0.1 / grid).toFixed(10));
+  assert.equal(shift(steps[1]).toFixed(10), (0.1 / grid).toFixed(10), 'the same distance in time');
+});
+
+test('an un-nudged roll stamps nothing, so a later .nudge()/.swing() reads normally', () => {
+  const plain = pianoroll('60,0,1 64,4,1', { grid: 16 });
+  assert.ok(plain.stepsForCycle(0).every((st) => st.nudge === undefined));
+  // ...and swing still reaches it, since swing is a channel rather than a stamp.
+  const swung = pianoroll('60,0,2 64,2,2 67,4,2 71,6,2', { grid: 8 }).swing(1 / 3);
+  const shifts = swung.stepsForCycle(0).map((st) => timeShift(st, swung.noteChannels, st.start, 1, st.start));
+  assert.deepEqual(shifts.map((x) => Number(x.toFixed(10))), [0, 0, 0, 0], 'quarters sit on onbeats of the eighth grid');
+});
+
+test('a drawn nudge and a track swing sum, which is what half-committing a groove means', () => {
+  const roll = pianoroll('60,0,1 64,1,1 67,2,1 71,3,1', { grid: 8 }).swing(0.5, 8);
+  const steps = roll.stepsForCycle(0);
+  assert.equal(steps[1].start, 1 / 8);
+  const shift = (st) => timeShift(st, roll.noteChannels, st.start, 1, st.start);
+  assert.equal(shift(steps[1]).toFixed(10), (0.5 / 8).toFixed(10), 'offbeat: swing only');
+  const nudged = pianoroll('60,0,1 64,1,1,1,1,0.2 67,2,1 71,3,1', { grid: 8 }).swing(0.5, 8);
+  const st = nudged.stepsForCycle(0)[1];
+  assert.equal(
+    timeShift(st, nudged.noteChannels, st.start, 1, st.start).toFixed(10),
+    (0.5 / 8 + 0.2 / 8).toFixed(10),
+    'offbeat: swing plus its own drawn offset',
+  );
+});
+
+test('pianoRollToMini writes nudge, converted, so the printed pattern plays where the roll did', () => {
+  const notes = parsePianoRoll('60,0,1 62,1,1,1,1,0.25 64,2,2,1,1,0.25');
+  const out = pianoRollToMini(notes, { grid: 4, len: 4 });
+  assert.match(out, /\.as\("note:clip:nudge"\)/);
+  // Cells go out as cells: the emitted pattern puts one step in each cell and carries length as a
+  // clip, so both notes are offset by a quarter of a cell and both say so the same way.
+  assert.match(out, /62:1:0\.25/);
+  assert.match(out, /64:2:0\.25/);
+  // Trailing defaults still trim, so an un-nudged note in the same roll doesn't carry the field.
+  assert.match(out, /(^|\s)60(\s|\n)/);
+});
+
+test('a printed roll plays exactly what the roll played', () => {
+  const notes = parsePianoRoll('60,0,1 62,1,1,1,1,0.25 64,2,2,1,1,-0.1');
+  const drawn = pianoroll(serializePianoRoll(notes), { grid: 4 });
+  const printed = rebuildIndexMini(pianoRollToMini(notes, { grid: 4, len: 4 }));
+  const shifts = (sig) => sig.stepsForCycle(0).map((st) => Number(timeShift(st, sig.noteChannels, st.start, 1, st.start).toFixed(10)));
+  assert.deepEqual(shifts(printed), shifts(drawn));
+});
+
+test('rescaling a roll carries the nudge with the cells it is measured in', () => {
+  // Cells got half as long, so the same moment in time is twice as many of them along.
+  const notes = parsePianoRoll('60,4,1,1,1,0.2');
+  rescalePianoRoll(notes, 2);
+  assert.equal(notes[0].start, 8);
+  assert.equal(notes[0].nudge.toFixed(10), (0.4).toFixed(10));
+  // Coarsening past half a cell clamps rather than reordering the roll.
+  const coarse = parsePianoRoll('60,4,1,1,1,0.4');
+  rescalePianoRoll(coarse, 2);
+  assert.equal(coarse[0].nudge, 0.5);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The roll's own swing, and committing it into the notes
+// ---------------------------------------------------------------------------------------------
+
+test('a roll swings on its own grid unless it names another', () => {
+  // Cells, not cycles: on a 4-cell grid a third of a slot is a third of a cell.
+  assert.deepEqual(
+    [0, 1, 2, 3].map((c) => +pianoRollSwingCells(c, { grid: 4, swing: 1 / 3 }).toFixed(6)),
+    [0, 0.333333, 0, 0.333333],
+  );
+  // Naming a coarser division swings that instead, so the cells between ride along with it.
+  assert.deepEqual(
+    [0, 1, 2, 3].map((c) => +pianoRollSwingCells(c, { grid: 4, swing: 0.5, swinggrid: 2 }).toFixed(6)),
+    [0, 0, 1, 1],
+  );
+  assert.equal(pianoRollSwingCells(1, { grid: 4, swing: 0 }), 0, 'straight is straight');
+});
+
+test('a roll plays its own swing, through the ordinary channel', () => {
+  const str = '60,0,1 62,1,1 64,2,1 67,3,1';
+  const swung = pianoroll(str, { grid: 4, len: 4, swing: 1 / 3 });
+  const shifts = swung.stepsForCycle(0).map((st) => +timeShift(st, swung.noteChannels, st.start, 1, st.start).toFixed(6));
+  assert.deepEqual(shifts, [0, 0.083333, 0, 0.083333], 'a third of a slot, in cycles');
+  // ...and a straight roll is untouched, so nothing changes for a roll that says nothing.
+  const plain = pianoroll(str, { grid: 4, len: 4 });
+  assert.deepEqual(plain.stepsForCycle(0).map((st) => timeShift(st, plain.noteChannels, st.start, 1, st.start)), [0, 0, 0, 0]);
+});
+
+test('committing a roll\'s swing changes what is written, not what is heard', () => {
+  const str = '60,0,1 62,1,1 64,2,1 67,3,1';
+  const opts = { grid: 4, len: 4, swing: 1 / 3 };
+  const heard = (sig) => sig.stepsForCycle(0).map((st) => timeShift(st, sig.noteChannels, st.start, 1, st.start));
+  const before = heard(pianoroll(str, opts));
+
+  const notes = parsePianoRoll(str);
+  const { clamped, uneven } = commitPianoRollSwing(notes, opts);
+  assert.equal(clamped, 0);
+  assert.equal(uneven, false);
+  // The swing is now in the notes, and the roll is straight.
+  const committed = serializePianoRoll(notes);
+  assert.match(committed, /62,1,1,1,1,0\.33333/);
+  const after = heard(pianoroll(committed, { grid: 4, len: 4 }));
+  for (let k = 0; k < before.length; k++) {
+    assert.ok(Math.abs(before[k] - after[k]) < 1e-5, `note ${k}: ${before[k]} vs ${after[k]}`);
+  }
+});
+
+test('committing adds to the offsets already drawn rather than replacing them', () => {
+  // Half-committed grooves are the point of the two summing in the first place.
+  const notes = parsePianoRoll('60,0,1,1,1,0.1 62,1,1,1,1,0.1');
+  commitPianoRollSwing(notes, { grid: 4, len: 4, swing: 1 / 3 });
+  assert.equal(notes[0].nudge.toFixed(6), (0.1).toFixed(6), 'an onbeat keeps its own hand-made offset');
+  assert.equal(notes[1].nudge.toFixed(6), (0.1 + 1 / 3).toFixed(6), 'an offbeat gets both');
+});
+
+test('committing reports what it could not say exactly', () => {
+  // A slot coarser than the grid can want more than half a cell, which is a nudge's reach.
+  const wide = parsePianoRoll('60,0,1 62,2,1');
+  const { clamped } = commitPianoRollSwing(wide, { grid: 4, len: 4, swing: 0.5, swinggrid: 2 });
+  assert.equal(clamped, 1, 'the offbeat wanted a whole cell');
+  assert.equal(wide[1].nudge, 0.5);
+  // A loop that isn't a whole cycle puts a note on a different beat each pass.
+  const { uneven } = commitPianoRollSwing(parsePianoRoll('60,0,1'), { grid: 16, len: 6, swing: 0.2 });
+  assert.equal(uneven, true);
+  assert.equal(commitPianoRollSwing(parsePianoRoll('60,0,1'), { grid: 16, len: 16, swing: 0.2 }).uneven, false);
+});
+
+test('a roll swung on a division with nothing on it says so, and names the right one', () => {
+  const said = [];
+  setPatternWarn((line) => said.push(line));
+  try {
+    // Quarter notes DRAWN on an eighth grid: swinging eighths moves nothing, and the division to
+    // reach for is the one the notes are spaced on - which is not the grid, and not their length.
+    pianoroll('36,0,1 38,2,1 36,4,1 38,6,1', { grid: 8, len: 8, swing: 1 / 3 });
+    assert.equal(said.length, 1);
+    assert.match(said[0], /nothing to move/);
+    assert.match(said[0], /"sw grid" to 4/);
+    // Nothing to say when it does move something, or when the roll is straight.
+    said.length = 0;
+    pianoroll('42,0,1 42,1,1 42,2,1 42,3,1', { grid: 4, len: 4, swing: 1 / 3 });
+    pianoroll('36,0,1 38,2,1', { grid: 8, len: 8 });
+    assert.deepEqual(said, []);
+  } finally {
+    setPatternWarn(null);
+  }
+});
+
+test('the division a roll\'s notes sit on is their spacing, not the grid or their length', () => {
+  assert.equal(pianoRollNoteGrid(parsePianoRoll('36,0,4 38,4,4 36,8,4 38,12,4'), 16), 4, 'long notes, quarter spacing');
+  assert.equal(pianoRollNoteGrid(parsePianoRoll('42,0,1 42,1,1 42,2,1'), 16), 16, 'every cell');
+  assert.equal(pianoRollNoteGrid(parsePianoRoll('42,0,1 42,3,1'), 12), 4, 'a triplet grid counts the same way');
+  assert.equal(pianoRollNoteGrid(parsePianoRoll('36,0,1'), 16), null, 'nothing off the downbeat to measure');
+  assert.equal(pianoRollNoteGrid([], 16), null);
+  assert.equal(pianoRollNoteGrid(parsePianoRoll('!42,0,1 !42,1,1'), 16), null, 'muted notes are not notes');
 });

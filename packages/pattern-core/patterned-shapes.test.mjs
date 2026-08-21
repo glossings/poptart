@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { note, synth, lfo, sine, _shape, setPatternWarn, lfoRateHz } from './src/signal.mjs';
+import { note, synth, lfo, sine, _shape, setPatternWarn, lfoRateHz, lfoShapes, lfoPoints } from './src/signal.mjs';
 import { clearRolls, setRollLayer, shapeIds } from './src/rolls.mjs';
 import { injectLocations } from './src/locations.mjs';
 import { mini } from './src/signal.mjs';
@@ -24,28 +24,28 @@ const withLfo = (l) => note('c').synth('X').param('Cutoff', l);
 
 test('one drawn shape is not a pattern', () => {
   const ir = lfo('0,0 0.5,1 1,0').lfoIR;
-  assert.equal(ir.shapes.length, 1);
+  assert.equal(lfoShapes(ir).length, 1);
   assert.equal(ir.shapePattern, null);
 });
 
 test('a preset name is a shape', () => {
-  assert.deepEqual(lfo('pluck').lfoIR.points, lfo('0,1,-4 1,0').lfoIR.points);
+  assert.deepEqual(lfoPoints(lfo('pluck').lfoIR), lfoPoints(lfo('0,1,-4 1,0').lfoIR));
 });
 
 test('grouping names several shapes, in order', () => {
   const ir = lfo('<pluck swell>').lfoIR;
   assert.deepEqual(ir.shapeNames, ['pluck', 'swell']);
-  assert.equal(ir.shapes.length, 2);
+  assert.equal(lfoShapes(ir).length, 2);
   assert.ok(ir.shapePattern);
-  assert.deepEqual(ir.points, ir.shapes[0]); // it starts on the first one
+  assert.deepEqual(lfoPoints(ir), lfoShapes(ir)[0]); // it starts on the first one
 });
 
 test('a drawn shape inside a pattern is quoted, and commas stay breakpoints', () => {
   const ir = lfo("<'0,0 1,1' pluck>").lfoIR;
-  assert.deepEqual(ir.shapes[0], [{ x: 0, y: 0, c: 0 }, { x: 1, y: 1, c: 0 }]);
-  assert.equal(ir.shapes.length, 2);
+  assert.deepEqual(lfoShapes(ir)[0], [{ x: 0, y: 0, c: 0 }, { x: 1, y: 1, c: 0 }]);
+  assert.equal(lfoShapes(ir).length, 2);
   // A bare breakpoint list is full of commas and is still one shape.
-  assert.equal(lfo('0,0 0.5,1 1,0').lfoIR.shapes.length, 1);
+  assert.equal(lfoShapes(lfo('0,0 0.5,1 1,0').lfoIR).length, 1);
 });
 
 test('glide is carried as a fraction of a period, and defaults to a jump', () => {
@@ -119,16 +119,16 @@ test('a defined shape is what a pattern naming it plays', () => {
   _shape('swell2', '0,0,2 0.7,1 1,0');
   const ir = lfo('<swell2 pluck>').lfoIR;
   assert.deepEqual(ir.shapeNames, ['swell2', 'pluck']);
-  assert.deepEqual(ir.shapes[0], [{ x: 0, y: 0, c: 2 }, { x: 0.7, y: 1, c: 0 }, { x: 1, y: 0, c: 0 }]);
+  assert.deepEqual(lfoShapes(ir)[0], [{ x: 0, y: 0, c: 2 }, { x: 0.7, y: 1, c: 0 }, { x: 1, y: 0, c: 0 }]);
 });
 
 test('a definition shadows the built-in preset of the same name', () => {
   clearRolls('buffer');
-  const stock = lfo('pluck').lfoIR.points;
+  const stock = lfoPoints(lfo('pluck').lfoIR);
   _shape('pluck', '0,0 1,1');
-  assert.deepEqual(lfo('pluck').lfoIR.points, [{ x: 0, y: 0, c: 0 }, { x: 1, y: 1, c: 0 }]);
+  assert.deepEqual(lfoPoints(lfo('pluck').lfoIR), [{ x: 0, y: 0, c: 0 }, { x: 1, y: 1, c: 0 }]);
   clearRolls('buffer');
-  assert.deepEqual(lfo('pluck').lfoIR.points, stock, 'and the preset is back once the buffer clears');
+  assert.deepEqual(lfoPoints(lfo('pluck').lfoIR), stock, 'and the preset is back once the buffer clears');
 });
 
 test('a definition is marked so a definitions block is never played as a track', () => {
@@ -155,7 +155,7 @@ test('defining one twice warns rather than throwing - the later one wins', () =>
     _shape('dup', '0,1 1,0');
   } finally { setPatternWarn(null); }
   assert.match(seen[0], /defined twice/);
-  assert.deepEqual(lfo('dup').lfoIR.points, [{ x: 0, y: 1, c: 0 }, { x: 1, y: 0, c: 0 }]);
+  assert.deepEqual(lfoPoints(lfo('dup').lfoIR), [{ x: 0, y: 1, c: 0 }, { x: 1, y: 0, c: 0 }]);
 });
 
 test('shapeIds lists what is playable, buffer first', () => {
@@ -188,14 +188,21 @@ test('a name nothing defines warns and plays the default rather than throwing', 
   clearRolls('buffer');
   const seen = [];
   setPatternWarn((m) => seen.push(m));
-  let ir;
-  try { ir = lfo('<gone missing>').lfoIR; } finally { setPatternWarn(null); }
+  // The name is looked up when the shape is first READ, not when lfo() was built - so that is
+  // where the warning comes from too, and by then the whole buffer has had its chance to define it.
+  const ir = lfo('<gone missing>').lfoIR;
+  assert.deepEqual(seen, [], 'nothing said yet - the definition could still be two lines further down');
+  let points;
+  try { points = lfoPoints(ir); } finally { setPatternWarn(null); }
   assert.match(seen[0], /no shape called "gone"/);
-  assert.deepEqual(ir.points, lfo('triangle').lfoIR.points, 'it plays the default shape');
+  assert.deepEqual(points, lfoPoints(lfo('triangle').lfoIR), 'it plays the default shape');
 });
 
 test('malformed breakpoints still report as breakpoints, not as a missing name', () => {
+  // At BUILD time, though the lookup of a name is deferred: data is wrong where it is written, and
+  // a bad breakpoint surfacing later would surface from inside a scheduler tick (see lfoShapes).
   assert.throws(() => lfo('0,0 1,notanumber'), /\[shape\] bad breakpoint/);
+  assert.throws(() => lfo("<'0,0 1,notanumber' pluck>"), /\[shape\] bad breakpoint/);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -242,5 +249,95 @@ test('a synced modulator is re-sent when the tempo moves; a free one is not', ()
     sch.transport.cps = 0.5; // setbpm
     for (const m of sch._activeModulators.values()) sch._sendModulator(m, 0);
     assert.deepEqual(sent(), resent ? [1, 0.5] : [0.5], `rate ${JSON.stringify(rate)}`);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// A name is resolved LATE - the ordering the editor's buffer layout actually has
+// ---------------------------------------------------------------------------------------------
+
+// The editor writes `_shape(...)` definitions in a block at the FOOT of the buffer, below the
+// patterns that name them, and the host evaluates blocks in document order against a registry it
+// clears each time. So a name is looked up while nothing defines it yet, and everything downstream
+// has to wait rather than settle for the fallback. These pin the order, since getting it wrong is
+// silent: the LFO simply plays the default triangle for ever.
+
+const TRIANGLE = '0,0 0.5,1 1,0'; // DEFAULT_LFO_SHAPE - what an unresolved name used to fall back to
+const asPoints = (pts) => pts.map((p) => [+p.x.toFixed(4), +p.y.toFixed(4)]);
+
+test('a shape defined AFTER the pattern that names it still plays', () => {
+  clearRolls();
+  setRollLayer('buffer');
+  const said = [];
+  setPatternWarn((line) => said.push(line));
+  try {
+    // 1. the `pluck:` block builds, naming a shape nothing has defined yet
+    const track = withLfo(lfo('pluck2'));
+    // 2. ...and only now does the definition block at the foot of the buffer run
+    _shape('pluck2', '0,1,-4 1,0');
+    // 3. the engine is handed the drawn shape, not the fallback
+    const { engine, argsTo } = mockEngine();
+    const sch = new Scheduler(engine, { trackId: 'lead', cps: 0.5 });
+    sch.setPattern(track);
+    const [args] = argsTo('setParamLFO');
+    assert.ok(args, 'the modulator was sent');
+    const ir = args[3];
+    assert.deepEqual(asPoints(ir.points), [[0, 1], [1, 0]], 'the pluck, not the triangle');
+    assert.deepEqual(asPoints(ir.shapes[0]), asPoints(ir.points));
+    assert.deepEqual(said, [], 'and nothing was warned about, because nothing was missing');
+  } finally {
+    setPatternWarn(null);
+    clearRolls();
+  }
+});
+
+test('a name nothing ever defines still warns, once, and still plays', () => {
+  clearRolls();
+  setRollLayer('buffer');
+  const said = [];
+  setPatternWarn((line) => said.push(line));
+  try {
+    const track = withLfo(lfo('nosuchshape'));
+    const { engine, argsTo } = mockEngine();
+    const sch = new Scheduler(engine, { trackId: 'lead', cps: 0.5 });
+    sch.setPattern(track);
+    const ir = argsTo('setParamLFO')[0][3];
+    assert.deepEqual(asPoints(ir.points), asPoints(lfoPoints(lfo(TRIANGLE).lfoIR)), 'falls back rather than going silent');
+    assert.equal(said.length, 1, 'said once, at the point it was actually looked for');
+    assert.match(said[0], /no shape called "nosuchshape"/);
+  } finally {
+    setPatternWarn(null);
+    clearRolls();
+  }
+});
+
+test('a patterned name resolves late too, and keeps its order', () => {
+  clearRolls();
+  setRollLayer('buffer');
+  try {
+    const track = withLfo(lfo(mini('<a b>')));
+    _shape('a', '0,1 1,0');   // saw down
+    _shape('b', '0,0 1,1');   // ramp up
+    const { engine, argsTo } = mockEngine();
+    const sch = new Scheduler(engine, { trackId: 'lead', cps: 0.5 });
+    sch.setPattern(track);
+    const ir = argsTo('setParamLFO')[0][3];
+    assert.deepEqual(ir.shapes.map(asPoints), [[[0, 1], [1, 0]], [[0, 0], [1, 1]]], 'in the order the pattern names them');
+    assert.deepEqual(asPoints(ir.points), [[0, 1], [1, 0]], 'starting on the first');
+  } finally {
+    clearRolls();
+  }
+});
+
+test('the resolved shapes are read once, not per sample', () => {
+  clearRolls();
+  setRollLayer('buffer');
+  try {
+    const l = lfo('memo');
+    _shape('memo', '0,1 1,0');
+    const first = lfoShapes(l.lfoIR);
+    assert.strictEqual(lfoShapes(l.lfoIR), first, 'the same array back, not a fresh lookup');
+  } finally {
+    clearRolls();
   }
 });

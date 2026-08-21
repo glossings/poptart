@@ -20,7 +20,7 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, resolvePreset } from './signal.mjs';
+import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoShapes, resolvePreset } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -615,7 +615,16 @@ export class Scheduler {
     m.lastLo = lo;
     m.lastHi = hi;
     m.lastRateHz = rateHz;
-    const resolved = m.dynamic ? { ...ir, min: lo, max: hi, ...(rateHz == null ? {} : { rateHz }) } : ir;
+    let resolved = m.dynamic ? { ...ir, min: lo, max: hi, ...(rateHz == null ? {} : { rateHz }) } : ir;
+    if (m.kind === 'lfo' && ir.shape === 'custom') {
+      // A drawn shape reaches the engine as breakpoints, and this is where its NAME becomes them
+      // (see lfoShapes): the engine is deliberately ignorant of pattern-core, and by the time a
+      // modulator is being sent the whole buffer has evaluated, so a `_shape(...)` written below
+      // the pattern that names it is in the registry. `points` is the shape it starts on and
+      // `shapes` the set compiled up front, both spelled as the engine has always read them.
+      const shapes = lfoShapes(ir);
+      resolved = { ...resolved, points: shapes[0], shapes };
+    }
     if (m.kind === 'lfo') {
       this.engine.setParamLFO(this.trackId, m.slot, m.name, resolved);
     } else if (m.kind === 'env') {

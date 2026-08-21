@@ -4,7 +4,7 @@
 // notes the scheduler plays - and depends on nothing outside this package (notes.mjs, its one
 // import, is served the same way and is itself dependency-free).
 //
-// Format: space-separated note events `[!]midi[:index],start,len[,vel[,prob]]`, e.g.
+// Format: space-separated note events `[!]midi[:index],start,len[,vel[,prob[,nudge]]]`, e.g.
 // "60,0,4 64,0,4,0.7 67,8,8" or "24:0,0,1 24:3,4,1".
 //   !     - optional MUTE marker: the note is deactivated (Live's `0` key). It stays in the roll -
 //           drawn greyed out, still movable, still holding its lane against the overlap rule - but
@@ -22,6 +22,14 @@
 //   prob  - optional probability the note plays, 0..1 (omitted when 1). Drives a per-cycle random
 //           gate in the builder, and becomes a `?` degrade when converted to mini-notation. When
 //           present, vel is written too (it holds the field's place), even if it is the default.
+//   nudge - optional time offset, in CELLS (omitted when 0, the default): how far off its drawn
+//           cell the note actually plays, -0.5..+0.5, positive late. Cells are the unit because
+//           cells are what the roll is drawn on - a sixteenth pushed a tenth of a cell is a tenth
+//           of a sixteenth late whatever length the note happens to have. The `nudge` CHANNEL the
+//           scheduler reads is a fraction of the event's own width instead (see signal.mjs's
+//           timeShift), so the two conversions - into the builder's steps and into mini-notation -
+//           both divide by the note's length in cells. Like prob, it holds the fields before it
+//           open: a nudge writes vel and prob too, default or not.
 // The grid width (`grid`, how many cells span one cycle) lives in the pianoroll() call's options,
 // not the string - the same split shape.mjs uses for lfo()'s rate/mode - and so does the loop
 // window it plays: `len` cells starting at cell `start`. Notes are written at their drawn cell
@@ -49,6 +57,97 @@ export const PIANOROLL_MODES = ['note', 'index'];
 // one axis is silent about the other rather than asserting anything.
 export const PIANOROLL_DEFAULT_NOTE = 24;
 export const PIANOROLL_DEFAULT_INDEX = 0;
+// How far off its cell one note may be drawn, either way. Half a cell is where a nudge stops being
+// a feel and starts being a different rhythm - past it the note has swapped places with the cell
+// next door, and the honest edit is to move it. (The nudge CHANNEL clamps at half the event's own
+// width for the same reason; on a one-cell note the two limits are the same number.)
+export const PIANOROLL_MAX_NUDGE = 0.5;
+
+// Slot boundaries land on fractions binary floating point can't hold exactly - the same nudge
+// signal.mjs's timeShift takes, and for the same reason: floor(2/16 * 8) must be 1, not 0.
+const SLOT_EPS = 1e-9;
+
+/**
+ * The swing offset one cell of a roll gets, in CELLS - the roll-shaped view of what timeShift
+ * computes in cycles, and the number the editor draws and the commit button folds into a nudge.
+ *
+ * `cell` is the cell's position WITHIN THE CYCLE (0..grid-1), which is what the builder gives a step
+ * as `start`, so the two agree by construction. Offbeats of the `swingGrid` division are delayed by
+ * `amount` of one of its slots; everything else stays where it was drawn.
+ */
+export function pianoRollSwingCells(cell, { grid, swing = 0, swinggrid = null } = {}) {
+  const g = normalizePianoRollSteps(grid);
+  const amount = Math.min(0.5, Math.max(-0.5, Number(swing) || 0));
+  if (!amount) return 0;
+  // A roll knows exactly what it is written on, so its own grid is the division to swing unless the
+  // roll says otherwise - the drum-machine reading of the word, where the knob acts on whatever
+  // resolution the sequencer is set to.
+  const n = Math.max(1, Math.round(Number(swinggrid) || g));
+  const slot = Math.floor((cell / g) * n + SLOT_EPS);
+  if (((slot % 2) + 2) % 2 !== 1) return 0;
+  return (amount / n) * g; // cycles -> cells
+}
+
+/**
+ * The finest division this roll's notes actually sit on, or null when there is nothing to tell it
+ * from (an empty roll, or one whose every note is on the downbeat). This is NOT the roll's grid: the
+ * grid is the resolution it is DRAWN on, and quarter notes drawn on a sixteenth grid are quarter
+ * notes. Their spacing is what a swing has to act on to move anything, so it is what gets suggested
+ * when the roll's swing turns out to have nothing to move.
+ *
+ * The onsets' spacing is their greatest common divisor in cells, and the division is how many of
+ * those fit in a cycle: hits every 4 cells of a 16-grid are on the 4-per-cycle division.
+ */
+export function pianoRollNoteGrid(notes, grid) {
+  const g = normalizePianoRollSteps(grid);
+  let spacing = 0; // gcd so far; 0 is the identity, which is also "no onset seen off the downbeat"
+  for (const nt of notes) {
+    if (nt.mute) continue;
+    const cell = ((Math.round(nt.start) % g) + g) % g;
+    spacing = gcd(spacing, cell);
+    if (spacing === 1) break; // as fine as it can get
+  }
+  const together = gcd(spacing, g);
+  return together > 0 && together < g ? g / together : null;
+}
+
+function gcd(a, b) {
+  a = Math.abs(a);
+  b = Math.abs(b);
+  while (b) [a, b] = [b, a % b];
+  return a;
+}
+
+/**
+ * Fold a roll's swing into its notes, so they play where they already sounded and the swing can go
+ * back to zero - Ableton's "commit groove", and the reason nudge is a per-note field at all.
+ *
+ * Each note takes the offset its cell was getting (pianoRollSwingCells) ON TOP of whatever nudge it
+ * already carried, which is what makes committing a half-nudged roll leave the hand-made offsets
+ * alone. Notes are mutated in place and handed back with a report of what couldn't be said exactly:
+ *
+ *   clamped - notes whose combined offset ran past half a cell, which is as far as a nudge reaches.
+ *             Only possible when swinging a division COARSER than the roll's own grid, where one
+ *             slot is several cells wide; the note is committed as far as it goes.
+ *   uneven  - the roll's loop doesn't line up with the cycle (`len` is not the grid), so a note
+ *             lands on a different beat each time round and has no ONE offset to be committed to.
+ *             What is written is the offset of its first pass.
+ */
+export function commitPianoRollSwing(notes, { grid, len = null, swing = 0, swinggrid = null } = {}) {
+  const g = normalizePianoRollSteps(grid);
+  const window = Math.max(1, Math.round(len ?? g));
+  let clamped = 0;
+  for (const nt of notes) {
+    const at = ((Math.round(nt.start) % g) + g) % g;
+    const swung = pianoRollSwingCells(at, { grid: g, swing, swinggrid });
+    if (!swung) continue;
+    const wanted = noteNudge(nt) + swung;
+    const got = clampNudge(wanted);
+    if (Math.abs(wanted - got) > 1e-9) clamped++;
+    nt.nudge = got;
+  }
+  return { notes, clamped, uneven: window !== g };
+}
 
 /** Clamp/validate a grid width into a positive integer number of cells per cycle. */
 export function normalizePianoRollSteps(steps) {
@@ -105,15 +204,15 @@ export function parsePianoRoll(str) {
   return trimmed.split(/\s+/).map((tok) => {
     const mute = tok.startsWith('!');
     const parts = (mute ? tok.slice(1) : tok).split(',');
-    if (parts.length < 3 || parts.length > 5) {
-      throw new Error(`[pianoroll] bad note "${tok}" (want "midi[:index],start,len" .. "midi[:index],start,len,vel,prob")`);
+    if (parts.length < 3 || parts.length > 6) {
+      throw new Error(`[pianoroll] bad note "${tok}" (want "midi[:index],start,len" .. "midi[:index],start,len,vel,prob,nudge")`);
     }
     // The pitch field carries the sample index behind a ":" when it isn't the default - the same
     // "one token, several channels" spelling .as("note:vel") uses - so a roll that only ever plays
     // pitches reads exactly as it always did.
     const [midiStr, indexStr = PIANOROLL_DEFAULT_INDEX] = parts[0].split(':');
-    const [midi, index, start, len, vel = 1, prob = 1] = [midiStr, indexStr, ...parts.slice(1)].map(Number);
-    if (![midi, index, start, len, vel, prob].every(Number.isFinite)) {
+    const [midi, index, start, len, vel = 1, prob = 1, nudge = 0] = [midiStr, indexStr, ...parts.slice(1)].map(Number);
+    if (![midi, index, start, len, vel, prob, nudge].every(Number.isFinite)) {
       throw new Error(`[pianoroll] non-numeric field in note "${tok}"`);
     }
     return {
@@ -123,6 +222,7 @@ export function parsePianoRoll(str) {
       len: Math.max(1, Math.round(len)),
       vel: clamp01(vel),
       prob: clamp01(prob),
+      nudge: clampNudge(nudge),
       mute,
     };
   });
@@ -136,8 +236,11 @@ export function serializePianoRoll(notes) {
       const index = noteIndex(nt);
       const pitch = index === PIANOROLL_DEFAULT_INDEX ? `${Math.round(nt.midi)}` : `${Math.round(nt.midi)}:${index}`;
       let s = `${nt.mute ? '!' : ''}${pitch},${Math.round(nt.start)},${Math.round(nt.len)}`;
-      // vel holds prob's field slot, so a sub-unity prob forces vel to be written even when it's 1.
-      if (nt.prob < 1) s += `,${fmt(nt.vel)},${fmt(nt.prob)}`;
+      // Positional fields, so each one holds open the slots before it: a nudge writes vel and prob
+      // whatever they are, and a sub-unity prob writes vel even when it's 1.
+      const nudge = noteNudge(nt);
+      if (nudge !== 0) s += `,${fmt(nt.vel)},${fmt(nt.prob)},${fmtNudge(nudge)}`;
+      else if (nt.prob < 1) s += `,${fmt(nt.vel)},${fmt(nt.prob)}`;
       else if (nt.vel < 1) s += `,${fmt(nt.vel)}`;
       return s;
     })
@@ -146,6 +249,20 @@ export function serializePianoRoll(notes) {
 
 /** A note's sample index, defaulted - notes built before the channel existed simply haven't got one. */
 export const noteIndex = (nt) => (Number.isFinite(nt.index) ? Math.round(nt.index) : PIANOROLL_DEFAULT_INDEX);
+
+/** A note's time offset in CELLS, defaulted and clamped - 0 for every note drawn before it existed. */
+export const noteNudge = (nt) => (Number.isFinite(nt.nudge) ? clampNudge(nt.nudge) : 0);
+
+/**
+ * One note's offset as the BUILDER's steps need it: a fraction of the event's own width, where the
+ * roll holds a fraction of a CELL (see the format notes above). The builder gives a `len`-cell note
+ * a step `len` cells wide, so the same distance is that many times smaller a share of it - which is
+ * what keeps two notes of different lengths, nudged the same on screen, sounding equally late.
+ *
+ * Only the builder divides. pianoRollToMini writes cells straight out, because the pattern it emits
+ * puts one step in each cell and carries length as a clip instead (see fieldStr there).
+ */
+export const noteNudgeChannel = (nt) => noteNudge(nt) / Math.max(1, Math.round(nt.len));
 
 /**
  * Ableton-style overlap resolution, one lane at a time: two notes in the same lane are
@@ -214,7 +331,10 @@ export function clipOverlaps(notes) {
  * from cell `start` - so a window that begins half way through the first bar writes the note it
  * begins on as the first cell, exactly as playback sounds it. Each cell is a rest `~`, a note, or a chord
  * `[a,b]`. Note length is carried by the `clip` field (a `_` tie misbehaves inside `<…>`), velocity
- * by the `vel` field, and probability by a `?amount` degrade (amount = 1 - prob).
+ * by the `vel` field, probability by a `?amount` degrade (amount = 1 - prob), and a note drawn off
+ * its cell by the `nudge` field - converted out of the roll's cells into the share of the event's
+ * own width the channel reads (see noteNudgeChannel), so the printed pattern plays where the roll
+ * played. That is what makes a groove committed to the roll survive being turned into text.
  *
  * With only bare notes it emits `note(\`<…>*grid\`)` (which reads each atom as a MIDI note). As soon
  * as any velocity or multi-cell length appears it switches to the bare-string `.as("note[:vel][:clip]")`
@@ -265,6 +385,7 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   const anyClip = notes.some((nt) => nt.len > 1);
   const anyNote = notes.some((nt) => Math.round(nt.midi) !== PIANOROLL_DEFAULT_NOTE);
   const anyIndex = notes.some((nt) => noteIndex(nt) !== PIANOROLL_DEFAULT_INDEX);
+  const anyNudge = notes.some((nt) => noteNudge(nt) !== 0);
   const drawnIndex = normalizePianoRollMode(mode) === 'index';
   // Degrees are read against the scale AS .sc(octave) will build it, so the two agree exactly.
   // With no pitch to write (every event at the default note) there is no key to write it in either.
@@ -276,11 +397,25 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
     ...(anyIndex ? ['i'] : []),
     ...(anyVel ? ['vel'] : []),
     ...(anyClip ? ['clip'] : []),
+    // Last, because it is the field most often at its default - and the trailing ones are what a
+    // token gets to leave off (see tok).
+    ...(anyNudge ? ['nudge'] : []),
   ];
 
   const pitchStr = (nt) => String(keyed ? midiToDegree(nt.midi, keyed) : Math.round(nt.midi));
-  const fieldStr = (nt, f) =>
-    (f === pitchField ? pitchStr(nt) : f === 'i' ? String(noteIndex(nt)) : f === 'vel' ? fmt(nt.vel) : String(Math.round(nt.len)));
+  const fieldStr = (nt, f) => {
+    if (f === pitchField) return pitchStr(nt);
+    if (f === 'i') return String(noteIndex(nt));
+    if (f === 'vel') return fmt(nt.vel);
+    // Written in CELLS, unconverted - unlike the builder's conversion (noteNudgeChannel), and for
+    // the reason that conversion exists at all. `nudge` is a share of the step's own width, and the
+    // step here is one cell: this writes `<…>*grid`, one column per cell, and carries a note's
+    // LENGTH as a clip rather than as a wider step. So a cell and a step are the same thing on this
+    // side, and the roll's cells go out as they are. (The builder makes a multi-cell note one wide
+    // step instead, which is why it has to divide.)
+    if (f === 'nudge') return fmtNudge(noteNudge(nt));
+    return String(Math.round(nt.len));
+  };
   // The fields that vary stay in the cells; the ones that don't are lifted onto control calls. An
   // empty roll agrees on nothing (there is nothing to agree), so it keeps writing its pitch field.
   const constant = (f) => notes.length > 0 && notes.every((nt) => fieldStr(nt, f) === fieldStr(notes[0], f));
@@ -297,7 +432,8 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
     pulled = pulled.filter((f) => f !== fields[0]);
   }
   const isDefault = (nt, f) =>
-    (f === 'vel' && nt.vel === 1) || (f === 'clip' && nt.len === 1) || (f === 'i' && noteIndex(nt) === PIANOROLL_DEFAULT_INDEX);
+    (f === 'vel' && nt.vel === 1) || (f === 'clip' && nt.len === 1) || (f === 'i' && noteIndex(nt) === PIANOROLL_DEFAULT_INDEX)
+    || (f === 'nudge' && noteNudge(nt) === 0);
   const tok = (nt) => {
     const parts = fields.map((f) => fieldStr(nt, f));
     while (parts.length > 1 && isDefault(nt, fields[parts.length - 1])) parts.pop(); // trim trailing defaults
@@ -346,6 +482,11 @@ export function rescalePianoRoll(notes, ratio, anchor = 0) {
     nt.start = Math.max(0, Math.round(anchor + (nt.start - anchor) * ratio));
     nt.full = Math.max(1, Math.round(full * ratio));
     nt.len = Math.max(1, Math.round(nt.len * ratio));
+    // A nudge is measured in cells, and the cells just changed size: a note at 4.1 cells belongs at
+    // 4.1 * ratio, which is the new start plus the old offset scaled the same way. Coarsening can
+    // push it past half a cell, where it is clamped - the note has been rounded onto a grid too
+    // coarse to hold the feel it was drawn with, and half a cell is as much as one can say.
+    if (noteNudge(nt) !== 0) nt.nudge = clampNudge(nt.nudge * ratio);
   }
   return notes;
 }
@@ -419,10 +560,21 @@ function fmt(v) {
   return String(Math.round(v * 1000) / 1000);
 }
 
+// Nudge keeps more places than the 0..1 fields do. A third of a cell is the commonest offset there
+// is - it is what committing a triplet swing writes - and at three decimals the roll would come
+// back a hair straighter than it sounded. Five is past anything a clock can hear and still short.
+function fmtNudge(v) {
+  return String(Math.round(v * 100000) / 100000);
+}
+
 function clampInt(v, lo, hi) {
   return Math.min(hi, Math.max(lo, Math.round(v)));
 }
 
 function clamp01(v) {
   return Math.min(1, Math.max(0, v));
+}
+
+function clampNudge(v) {
+  return Math.min(PIANOROLL_MAX_NUDGE, Math.max(-PIANOROLL_MAX_NUDGE, v));
 }

@@ -1084,7 +1084,14 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   // belongs to its plugin (see makeDefRegistry's scope), so every slot in a chain can have one
   // called `lead` and each means the one on that plugin. The suffix is only the fallback for a name
   // already taken ON THIS PLUGIN - the same plugin twice in one chain.
-  const id = freshDefId(trackLabel, (name) => presetDefs.allIds(plugin ?? null).some((r) => r.id === name), 'preset');
+  const rows = presetDefs.allIds(plugin ?? null);
+  const id = freshDefId(trackLabel, (name) => rows.some((r) => r.id === name), 'preset');
+  // A name taken by something outside the buffer gets a word, for the same reason it does when a
+  // roll or shape is auto-named: the suffix is otherwise unexplained (see libraryBumpNote). `own`
+  // is what tells the buffer's own definitions from the prebake's.
+  const wantedId = preferredDefId(trackLabel, 'preset');
+  const fromLibrary = rows.find((r) => r.id === wantedId && !r.own);
+  if (fromLibrary) libraryBumpNote('preset', wantedId, id, fromLibrary.note ?? 'prebake');
   const edits = [
     [call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`],
     presetDefs.defsEdit(code, [id], () => `${JSON.stringify(plugin ?? '')}, ${JSON.stringify(state)}`),
@@ -3060,6 +3067,9 @@ const prLockBtn = document.getElementById('pianorollLock');
 const prCanvas = document.getElementById('pianorollCanvas');
 const prGridSelect = document.getElementById('pianorollGrid');
 const prLenInput = document.getElementById('pianorollLen');
+const prSwingInput = document.getElementById('pianorollSwing');
+const prSwingGridSelect = document.getElementById('pianorollSwingGrid');
+const prCommitSwingBtn = document.getElementById('pianorollCommitSwing');
 const prHalveBtn = document.getElementById('pianorollHalve');
 const prDoubleBtn = document.getElementById('pianorollDouble');
 const prDupLoopBtn = document.getElementById('pianorollDupLoop');
@@ -3080,7 +3090,7 @@ const PR_GRIDH = 384; // piano-grid height below the ruler
 const PR_LANEH = 64; // value lane below the grid (per-note velocity / probability markers)
 const PR_CH = PR_TOPBAR + PR_GRIDH + PR_LANEH; // full canvas height
 const PR_LANE_PAD = 5; // lane inset above 1.0 / below 0.0, so end-stop markers stay visible
-const PR_LANE_CARET_W = 7; // solid caret after the lane's vel/prob label, marking it clickable
+const PR_LANE_CARET_W = 7; // solid caret after the value lane's channel label, marking it clickable
 const PR_ROWS = 24; // visible semitone rows (2 octaves)
 const PR_GUTTER = 54; // left piano-keyboard gutter, px
 // Top row when a fresh/empty roll opens - a MIDI note, framed 24 rows down to 24, so the window is
@@ -3137,7 +3147,13 @@ let prSuppressCursor = false;
 let prPreviewEnabled = localStorage.getItem('poptartPianorollPreview') !== '0';
 let prSounding = null; // midi note currently ringing from a preview (so we can note-off it)
 let prTool = localStorage.getItem('poptartPianorollTool') === 'select' ? 'select' : 'draw'; // pencil vs arrow
-let prCmdMode = localStorage.getItem('poptartPianorollCmd') === 'prob' ? 'prob' : 'vel'; // what cmd-drag sets
+// The channels the value lane edits, in the order its gutter label cycles them. vel and prob are
+// 0..1; nudge is the drawn time offset (see pianoroll.mjs), bipolar around 0 and measured in cells.
+const PR_LANE_KEYS = ['vel', 'prob', 'nudge'];
+const PR_MAX_NUDGE = 0.5; // mirrors pianoroll.mjs's PIANOROLL_MAX_NUDGE - half a cell either way
+let prCmdMode = PR_LANE_KEYS.includes(localStorage.getItem('poptartPianorollCmd'))
+  ? localStorage.getItem('poptartPianorollCmd')
+  : 'vel'; // what the lane and cmd-drag set
 let prScaleFold = localStorage.getItem('poptartPianorollScaleFold') === '1'; // show only the scale's rows
 let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // Live's Fold: only rows that have notes
 let prSideMin = localStorage.getItem('poptartPianorollSide') === '1'; // timing controls column minimized
@@ -3234,6 +3250,7 @@ const prNewNote = (row, cell) => ({
   full: 1,
   vel: PR_DEFAULT_VEL,
   prob: 1,
+  nudge: 0, // on the grid until something drags it off - see the value lane's nudge channel
   mute: false,
 });
 
@@ -3418,21 +3435,31 @@ function parsePianorollCall(inner) {
   // existed says) or sample indices. Only ever written when it isn't the default.
   const modeM = /\bmode\s*:\s*(["'`])(\w+)\1/.exec(inner);
   const mode = pianorollMod.normalizePianoRollMode(modeM?.[2]);
+  // swing: the roll's own groove knob, and the division it acts on. Both are left out of the code
+  // at their defaults (straight, and the roll's own grid), like start and mode.
+  const swingM = /\bswing\s*:\s*(-?[\d.]+)/.exec(inner);
+  const swing = swingM ? Math.min(0.5, Math.max(-0.5, Number(swingM[1]) || 0)) : 0;
+  const sgM = /\bswinggrid\s*:\s*(\d+)/.exec(inner);
+  const swinggrid = sgM ? Math.max(1, Math.round(Number(sgM[1]))) : null;
   let notes = [];
   try {
     notes = pianorollMod.parsePianoRoll(noteStr);
   } catch {
     // unparseable note string - start from an empty roll
   }
-  return { notes, grid, len, start, mode };
+  return { notes, grid, len, start, mode, swing, swinggrid };
 }
 
 // Hidden notes (buried under another - see prClipOverlaps) are left out: the code holds what
 // actually sounds, and they are only kept around in the panel so they can come back.
-function serializePianorollCall({ notes, grid, len, start, mode, idLiteral }) {
+function serializePianorollCall({ notes, grid, len, start, mode, swing, swinggrid, idLiteral }) {
   const from = start ? `, start: ${start}` : ''; // a window that opens at 0 is the default - don't write it
   const how = mode === 'index' ? ', mode: "index"' : ''; // notes are the default - don't write it
-  const body = `"${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { grid: ${grid}, len: ${len}${from}${how} }`;
+  // A straight roll writes no swing at all, and one swinging its own grid writes no division: both
+  // are what the builder assumes, and a roll that says nothing about groove should look like one.
+  const sw = swing ? `, swing: ${Math.round(swing * 100000) / 100000}` : '';
+  const swg = swing && swinggrid && swinggrid !== grid ? `, swinggrid: ${swinggrid}` : '';
+  const body = `"${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { grid: ${grid}, len: ${len}${from}${how}${sw}${swg} }`;
   // The roll being edited is either drawn inline or kept under an id - same notes, same options,
   // one argument apart. The id is written back exactly as it was found, so _roll(0, …) doesn't
   // become _roll("0", …) the first time you move a note.
@@ -3544,11 +3571,31 @@ function applyEdits(edits) {
 // appended only to break a tie, so the common case is the plain track name.
 // `taken` is a Set of names, or - where what counts as taken depends on more than the name (a
 // preset is only taken within its own plugin, see makeDefRegistry's scope) - a predicate.
+/**
+ * The name a fresh definition would LIKE: its block's label, when that reads as an identifier, and
+ * the kind's own word otherwise. Named separately from freshDefId because a caller that has just
+ * been given a suffixed name often wants to know what it asked for - see libraryBumpNote.
+ */
+const preferredDefId = (label, base) => (/^[A-Za-z_][\w]*$/.test(label ?? '') ? label : base);
+
 function freshDefId(label, taken, base) {
   const isTaken = typeof taken === 'function' ? taken : (name) => taken.has(name);
-  const name = /^[A-Za-z_][\w]*$/.test(label ?? '') ? label : base;
+  const name = preferredDefId(label, base);
   if (!isTaken(name)) return name;
   for (let i = 2; ; i++) if (!isTaken(`${name}${i}`)) return `${name}${i}`;
+}
+
+/**
+ * Says so when an auto-named definition was pushed off the name it wanted by something OUTSIDE the
+ * buffer - a built-in shape preset, a prebake roll. A collision inside the buffer explains itself
+ * (the other definition is right there on screen), but a library one is invisible: the `2` appears
+ * from nowhere and reads as a bug. The shadowing is the reason it matters - a buffer definition
+ * WINS over the library of the same name (see shapeNamed), so taking the name would quietly
+ * repoint every other use of it in the patch.
+ */
+function libraryBumpNote(kind, wanted, got, note) {
+  if (got === wanted) return;
+  logLine(`named this ${kind} "${got}": "${wanted}" is a ${note} ${kind} already, and a ${kind} of your own by that name would shadow it.`);
 }
 
 /** Which of `refs` the panel is looking THROUGH, given the marker over its id string. */
@@ -3760,11 +3807,15 @@ function makeDefRegistry(opts) {
     const code = cm.getValue();
     // { id, scope } rather than a flat set of names: for a scoped kind the same name is free again
     // under a different plugin, and the definition written for it records which one it belongs to.
+    // Kept apart from the buffer's own names so a bump can say WHICH kind of collision it was: one
+    // the person can see on screen, or one from outside the buffer that needs explaining.
+    const libTaken = library().map((e) => ({ id: libId(e), scope: libScope(e) }));
     const taken = [
       ...defsInBuffer(code).map((d) => ({ id: d.id, scope: d.scope })),
-      ...library().map((e) => ({ id: libId(e), scope: libScope(e) })),
+      ...libTaken,
     ];
     const isTaken = (id, sc) => taken.some((t) => t.id === id && sameScope(t.scope, sc));
+    const inLibrary = (id, sc) => libTaken.some((t) => t.id === id && sameScope(t.scope, sc));
     const claim = (id, sc) => { taken.push({ id, scope: sc }); };
     const created = []; // in the order they were first named, which is the order they are written
     const rewrites = []; // [from, to, text] against `code`, applied last-first so offsets hold
@@ -3775,7 +3826,10 @@ function makeDefRegistry(opts) {
     while ((m = bare.exec(code)) !== null) {
       if (!isCode(m.index)) continue;
       const sc = scopeOfCall(code, { start: m.index });
-      const id = freshDefId(prBlockLabelAt(m.index), (name) => isTaken(name, sc), kind);
+      const label = prBlockLabelAt(m.index);
+      const id = freshDefId(label, (name) => isTaken(name, sc), kind);
+      const wanted = preferredDefId(label, kind);
+      if (inLibrary(wanted, sc)) libraryBumpNote(kind, wanted, id, libraryNote);
       claim(id, sc);
       created.push({ id, scope: sc });
       rewrites.push([m.index, m.index + m[0].length, `${useCall}(${JSON.stringify(id)})`]);
@@ -4217,6 +4271,16 @@ function prSyncGridLenInputs() {
   for (const [label, n] of opts) prGridSelect.add(new Option(label, String(n)));
   prGridSelect.value = String(prState.grid);
   prLenInput.value = prState.len;
+  prSwingInput.value = prState.swing ?? 0;
+  // The division swing acts on. The blank first option is "whatever the roll's grid is", which is
+  // the default and what most rolls want - a stated resolution, swung.
+  prSwingGridSelect.innerHTML = '';
+  prSwingGridSelect.add(new Option('grid', ''));
+  for (const [label, n] of opts) prSwingGridSelect.add(new Option(label, String(n)));
+  prSwingGridSelect.value = prState.swinggrid ? String(prState.swinggrid) : '';
+  // Nothing to commit on a straight roll, and saying so with the button is better than letting it
+  // look like it did something.
+  prCommitSwingBtn.disabled = !prState.swing;
 }
 
 function openPianorollEditor(call, carry = null) {
@@ -4227,7 +4291,7 @@ function openPianorollEditor(call, carry = null) {
   if (prState?.marker) prState.marker.clear();
   // A roll(...) definition is a pianoroll() call with an id in front of it - drop the id and the
   // rest parses identically.
-  const { notes, grid, len, start, mode } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
+  const { notes, grid, len, start, mode, swing, swinggrid } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
   prState = {
     marker: cm.markText(from, to, {}),
     callStart: call.start,
@@ -4239,6 +4303,11 @@ function openPianorollEditor(call, carry = null) {
     // 0,1,2… list of a sample pack's files). Per ROLL - it is written into the call - rather than
     // sticky like the tool, because it is a fact about this roll's data, not a way of working.
     mode,
+    // The roll's own groove: how far its offbeats are delayed, and which division counts as an
+    // offbeat (null = the roll's own grid). Played as the ordinary swing channel (see the builder),
+    // and the commit button turns it into per-note nudges without changing a thing that sounds.
+    swing,
+    swinggrid,
     pitchTop: PR_DEFAULT_TOP, // replaced by prFramePitch below, which needs prState to exist
     fold: prFold, // Live's Fold: only the rows something is drawn on (either axis)
     scaleFold: prScaleFold, // ...and only the key's rows, on the note axis (both sticky, like the tool)
@@ -5062,22 +5131,33 @@ function prSetLoopEdge(edge, cell0) {
 // lane is showing probability (Live's chance style). Drag a marker up or down to set the value; a
 // marker in the selection drags the whole selection together, keeping their differences. The label
 // in the lane's gutter names the channel on show, carries a caret to say it's clickable, and
-// switches to the other channel when clicked - it's the only vel/prob switch there is.
+// steps on to the next channel when clicked - it's the only channel switch there is.
 
 /** Which note channel the lane (and cmd-drag) is editing right now. */
-const prLaneKey = () => (prCmdMode === 'prob' ? 'prob' : 'vel');
+const prLaneKey = () => (PR_LANE_KEYS.includes(prCmdMode) ? prCmdMode : 'vel');
 
-/** Flip the lane (and cmd-drag) between velocity and probability. The lane's own gutter label is
-    the only switch there is - it names the channel on show and carries a caret to say so. */
+/** Step the lane (and cmd-drag) on to the next channel. The lane's own gutter label is the only
+    switch there is - it names the channel on show and carries a caret to say so. */
 function prToggleCmdMode() {
-  prCmdMode = prCmdMode === 'vel' ? 'prob' : 'vel';
+  prCmdMode = PR_LANE_KEYS[(PR_LANE_KEYS.indexOf(prLaneKey()) + 1) % PR_LANE_KEYS.length];
   localStorage.setItem('poptartPianorollCmd', prCmdMode);
   if (prState) drawPianoroll(); // the lane redraws with the newly chosen channel
   prRefocus();
 }
 
-/** value (0..1) -> lane y, inset so the end-stop dots at 0 and 1 stay fully visible. */
-const prLaneY = (v, m) => m.laneTop + PR_LANE_PAD + (1 - v) * (m.laneH - 2 * PR_LANE_PAD);
+/**
+ * One note's value on the lane's channel. `nudge` goes through the roll's own reader, since a note
+ * drawn before the field existed simply hasn't got one and `nt.nudge` would read undefined.
+ */
+const prLaneVal = (nt, key) => (key === 'nudge' ? (pianorollMod?.noteNudge(nt) ?? 0) : nt[key]);
+
+/** A channel's value as the lane's height, 0 at the bottom - and back. vel and prob are already
+    that; nudge is bipolar, so its zero sits half way up and "higher" reads as "later". */
+const prLaneNorm = (v, key) => (key === 'nudge' ? (v / PR_MAX_NUDGE + 1) / 2 : v);
+const prLaneDenorm = (u, key) => (key === 'nudge' ? (u * 2 - 1) * PR_MAX_NUDGE : u);
+
+/** value -> lane y, inset so the end-stop dots at either extreme stay fully visible. */
+const prLaneY = (v, m, key) => m.laneTop + PR_LANE_PAD + (1 - prLaneNorm(v, key)) * (m.laneH - 2 * PR_LANE_PAD);
 
 // The note whose lane column contains px - grabbing anywhere under a note works, like Live. When
 // several share the column (a chord), the marker nearest the pointer wins; ties go to the topmost
@@ -5089,7 +5169,7 @@ function prLaneNoteAt(px, py, m) {
     const nt = prState.notes[i];
     if (nt.hidden) continue;
     if (px < prCellToX(nt.start, m) - 4 || px >= prCellToX(nt.start + nt.len, m)) continue;
-    const dy = Math.abs(prLaneY(nt[key], m) - py);
+    const dy = Math.abs(prLaneY(prLaneVal(nt, key), m, key) - py);
     if (dy < bestDy) { bestDy = dy; best = nt; }
   }
   return best;
@@ -5111,6 +5191,15 @@ function drawValueLane(ctx, col, m) {
     ctx.beginPath(); ctx.moveTo(x, laneTop); ctx.lineTo(x, laneTop + laneH); ctx.stroke();
   }
   ctx.globalAlpha = 1;
+  // A bipolar channel needs its zero drawn, or "no offset" and "half a cell early" look alike.
+  if (key === 'nudge') {
+    ctx.strokeStyle = col('--border-strong');
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.7;
+    const y0 = prLaneY(0, m, key);
+    ctx.beginPath(); ctx.moveTo(PR_GUTTER, y0 + 0.5); ctx.lineTo(W, y0 + 0.5); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
   // dim outside the loop window, matching the grid above
   prDimOutside(ctx, m, laneTop, laneH);
 
@@ -5121,7 +5210,7 @@ function drawValueLane(ctx, col, m) {
     const x = prCellToX(nt.start, m);
     const x2 = prCellToX(nt.start + nt.len, m);
     if (x2 <= PR_GUTTER || x >= W) return;
-    const y = prLaneY(nt[key], m);
+    const y = prLaneY(prLaneVal(nt, key), m, key);
     const selected = prState.sel.has(nt);
     ctx.strokeStyle = ctx.fillStyle = nt.mute ? muteCol : selected ? selCol : accent;
     ctx.globalAlpha = nt.mute ? 0.35 : 0.9;
@@ -5140,12 +5229,12 @@ function drawValueLane(ctx, col, m) {
   const dragNt = prState._laneDrag;
   if (dragNt && !dragNt.hidden) {
     const x = prCellToX(dragNt.start, m);
-    const y = prLaneY(dragNt[key], m);
+    const y = prLaneY(prLaneVal(dragNt, key), m, key);
     ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = col('--text');
-    ctx.fillText(String(Math.round(dragNt[key] * 100) / 100), Math.max(PR_GUTTER + 3, x + 7), Math.min(laneTop + laneH - 6, Math.max(laneTop + 7, y - 9)));
+    ctx.fillText(String(Math.round(prLaneVal(dragNt, key) * 1000) / 1000), Math.max(PR_GUTTER + 3, x + 7), Math.min(laneTop + laneH - 6, Math.max(laneTop + 7, y - 9)));
   }
 
   // gutter: the channel on show; clicking it flips to the other one
@@ -5155,7 +5244,7 @@ function drawValueLane(ctx, col, m) {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = accent;
-  // name + a solid caret, so the label reads as the switch it is (clicking flips vel ⇄ prob).
+  // name + a solid caret, so the label reads as the switch it is (clicking steps vel → prob → nudge).
   const cy = laneTop + laneH / 2;
   const tw = ctx.measureText(key).width;
   const x0 = (PR_GUTTER - (tw + PR_LANE_CARET_W + 4)) / 2;
@@ -5265,6 +5354,24 @@ function drawPianoroll() {
     ctx.setLineDash(nt.prob < 1 && !selected ? [3, 2] : []);
     prRoundRect(ctx, dx + 1, y + 1.5, w, rowH - 3, 3); ctx.stroke();
     ctx.setLineDash([]);
+    // A nudged note keeps its CELL - the grid is what the roll is written on, and a rectangle that
+    // wandered off it would also wander out of its own hit box. What moves is a tick at the onset
+    // the note actually plays at, standing out to the left or right of the block it belongs to.
+    //
+    // The roll's swing counts towards that onset as well, because it is the same offset arriving
+    // from somewhere else (the two sum - see timeShift). So turning the swing knob slides the ticks,
+    // and pressing commit - which folds exactly this number into each note's own nudge - leaves
+    // every one of them where it already was. Nothing moving is the confirmation that nothing changed.
+    const nudge = pianorollMod.noteNudge(nt)
+      + pianorollMod.pianoRollSwingCells(((Math.round(nt.start) % prState.grid) + prState.grid) % prState.grid, prState);
+    if (nudge) {
+      const tx = prCellToX(nt.start + nudge, m);
+      if (tx >= PR_GUTTER && tx <= W) {
+        ctx.strokeStyle = nt.mute ? muteCol : selected ? selCol : accent;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(tx, y + 1.5); ctx.lineTo(tx, y + rowH - 1.5); ctx.stroke();
+      }
+    }
   }
 
   // marquee rubber-band (select tool)
@@ -5318,7 +5425,7 @@ function prCursorFor(px, py, m, velMod) {
     if (px < PR_GUTTER) return 'default';
     return prLoopEdgeAt(px, m) === 'move' ? 'grab' : 'ew-resize';
   }
-  if (py >= m.laneTop) { // value lane: markers drag up/down, the gutter label is the vel/prob switch
+  if (py >= m.laneTop) { // value lane: markers drag up/down, the gutter label is the channel switch
     if (px < PR_GUTTER) return 'pointer';
     return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
   }
@@ -5329,7 +5436,7 @@ function prCursorFor(px, py, m, velMod) {
   const hit = prNoteAt(cell, prMidiAt(py, m));
   if (hit == null) return emptyCursor;
   const nt = prState.notes[hit];
-  if (velMod) return CUR_UPDOWN; // cmd/ctrl over a note = velocity/probability drag
+  if (velMod) return CUR_UPDOWN; // cmd/ctrl over a note = a drag on whichever channel the lane shows
   if (px >= prCellToX(nt.start + nt.len, m) - PR_EDGE_PX) return CUR_BRACKET; // right-edge = length
   return 'move';
 }
@@ -5486,8 +5593,8 @@ function initPianorollCanvas() {
       }
       return;
     }
-    if (py >= m.laneTop) { // value lane - drag a marker to set velocity/probability (see drawValueLane)
-      if (px < PR_GUTTER) { prToggleCmdMode(); return; } // the vel/prob label - the lane's channel switch
+    if (py >= m.laneTop) { // value lane - drag a marker to set the channel on show (see drawValueLane)
+      if (px < PR_GUTTER) { prToggleCmdMode(); return; } // the channel label - the lane's channel switch
       const nt = prLaneNoteAt(px, py, m);
       if (!nt) { prState.sel = new Set(); drawPianoroll(); return; }
       if (e.shiftKey) { // shift-click toggles selection, same as on the note itself
@@ -5587,9 +5694,9 @@ function initPianorollCanvas() {
       if (drag.orig[0]) prPreviewNotes([drag.orig[0].n]);
     } else if (drag.kind === 'vel') {
       const d = (e.movementY ?? 0) * 0.01;
+      const key = prLaneKey();
       for (const n of prState.sel) {
-        if (prCmdMode === 'prob') n.prob = Math.min(1, Math.max(0, n.prob - d));
-        else n.vel = Math.min(1, Math.max(0, n.vel - d));
+        n[key] = prLaneDenorm(Math.min(1, Math.max(0, prLaneNorm(prLaneVal(n, key), key) - d)), key);
       }
     } else if (drag.kind === 'lane') {
       // The lane's full height is the full 0..1 range; the delta is relative, so a multi-note drag
@@ -5597,7 +5704,11 @@ function initPianorollCanvas() {
       const d = (py - drag.lastPy) / (m.laneH - 2 * PR_LANE_PAD);
       drag.lastPy = py;
       const key = prLaneKey();
-      for (const n of prState.sel) n[key] = Math.min(1, Math.max(0, n[key] - d));
+      // The delta is in lane HEIGHT, which every channel shares, so a bipolar one (nudge) drags at
+      // the same feel as vel and a multi-note drag keeps the selection's differences either way.
+      for (const n of prState.sel) {
+        n[key] = prLaneDenorm(Math.min(1, Math.max(0, prLaneNorm(prLaneVal(n, key), key) - d)), key);
+      }
     } else if (drag.kind === 'marquee') {
       const xa = Math.min(Math.max(px, PR_GUTTER), prW), xb = Math.min(Math.max(drag.x0, PR_GUTTER), prW);
       const ya = Math.min(Math.max(py, PR_TOPBAR), m.laneTop), yb = Math.min(Math.max(drag.y0, PR_TOPBAR), m.laneTop);
@@ -5833,6 +5944,51 @@ function initPianorollEditor() {
     prSyncGridLenInputs();
     writePianorollCall();
     drawPianoroll();
+    prRefocus();
+  });
+
+  // The roll's own groove. Setting it changes nothing about where the notes are WRITTEN - it is the
+  // swing channel, applied where the events are emitted (see timeShift) - so the grid stays put and
+  // the onset ticks move. Committing is what turns that into something the notes themselves hold.
+  const prSetSwing = () => {
+    if (!prState) return;
+    const raw = Number(prSwingInput.value);
+    prState.swing = Number.isFinite(raw) ? Math.min(0.5, Math.max(-0.5, raw)) : 0;
+    const sg = Number(prSwingGridSelect.value);
+    prState.swinggrid = sg >= 1 ? Math.round(sg) : null;
+    prSyncGridLenInputs();
+    writePianorollCall();
+    drawPianoroll();
+    prRefocus();
+  };
+  prSwingInput.addEventListener('change', prSetSwing);
+  prSwingGridSelect.addEventListener('change', prSetSwing);
+
+  // Commit: the swing stops being a setting and becomes the notes' own offsets. Nothing about the
+  // sound changes - that is the whole promise - so the onset ticks don't move as you click; what
+  // changes is that they are now editable one at a time, and survive being converted to notation.
+  prCommitSwingBtn.addEventListener('click', () => {
+    if (!prState?.swing) return;
+    prPushHistory(); // one undo step puts the swing knob and every nudge back together
+    const { clamped, uneven } = pianorollMod.commitPianoRollSwing(prState.notes, {
+      grid: prState.grid,
+      len: prState.len,
+      swing: prState.swing,
+      swinggrid: prState.swinggrid,
+    });
+    prState.swing = 0;
+    prState.swinggrid = null;
+    prSyncGridLenInputs();
+    writePianorollCall();
+    drawPianoroll();
+    // Both of these leave a roll that plays slightly differently from the one you just heard, which
+    // is worth a line - and neither is a reason to refuse the edit (see the warn-don't-block rule).
+    if (clamped) {
+      logLine(`piano roll: ${clamped} note${clamped === 1 ? '' : 's'} needed more than half a cell of swing, which is as far as a per-note offset reaches - committed as far as they go. Swinging the roll's own grid always fits.`);
+    }
+    if (uneven) {
+      logLine('piano roll: this roll\'s loop is not a whole cycle, so a note falls on a different beat each time round - the committed offsets are the ones from its first pass.');
+    }
     prRefocus();
   });
 

@@ -386,7 +386,11 @@ function laneToRollNotes(events, R, len) {
     }
     // An imported note always plays, and picks the pack's first file: a MIDI file says nothing
     // about the sample-index channel, so it is left at its default like any other unset channel.
-    const note = { midi, index: PIANOROLL_DEFAULT_INDEX, start, len: length, vel: ev.vel, prob: 1, mute: false };
+    // `nudge` is 0 for the same reason and one more: the onset above has just been ROUNDED onto a
+    // cell, and how far it moved to get there is exactly what a nudge could hold. Writing the field
+    // out (rather than leaving it off the object) keeps this note the same shape parsePianoRoll
+    // returns, which is what lets the roll be re-read from the string it was written into.
+    const note = { midi, index: PIANOROLL_DEFAULT_INDEX, start, len: length, vel: ev.vel, prob: 1, nudge: 0, mute: false };
     byCell.set(key, note);
     notes.push(note);
   }

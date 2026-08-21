@@ -353,6 +353,11 @@
           <div class="pr-side-row">
             <button id="pianorollDupLoop" class="small" title="repeat the loop after itself">⧉</button>
           </div>
+          <label class="pianoroll-ctl pr-side-ctl">swing <input id="pianorollSwing" type="number" step="0.05" min="-0.5" max="0.5" value="0" title="how far offbeats are delayed, as a fraction of one slot — 0 is straight, 0.33 the triplet shuffle, 0.5 the most there is" /></label>
+          <label class="pianoroll-ctl pr-side-ctl">sw grid <select id="pianorollSwingGrid" title="which division swing swings — the roll's own grid unless you say otherwise"></select></label>
+          <div class="pr-side-row">
+            <button id="pianorollCommitSwing" class="small pr-text-btn" title="write the swing into the notes as per-note offsets, and set swing back to 0">commit</button>
+          </div>
           <button id="pianorollSideToggle" class="small pr-side-toggle" title="hide the timing controls">«</button>
         </div>
         <canvas id="pianorollCanvas" width="660" height="464"></canvas>
