@@ -55,6 +55,31 @@ $: `<
     but reloading the same pack. numBuffers is 16384 now so the *count* is fine, but the audio is
     real RAM: a 15G library is only a few big packs away from hurting. Wants an LRU keyed on last
     play, freeing the SC buffers and dropping the Node entry so the next event reloads it.
+[ ] A selector join drops its children's note channels. `selectorJoin` (pattern-core/src/signal.mjs)
+    returns `new Sig(sample, { stepsForCycle })` — the child's *events* come through, its
+    `noteChannels` do not. So `cat(s("hh*8").swing(1/3), s("hh*8"))` plays dead straight, and the
+    same goes for anything a child carries as a channel rather than as a stamp on the event: swing,
+    swinggrid, a `.nudge()`/`.vel()`/`.clip()` attached to the child rather than merged into it.
+    `buildJoin` carries pitchKind and the instrument chain across, but nothing else.
+
+    Found 2026-08-22 via the piano roll: a roll's own swing lives on `noteChannels`, so a roll played
+    by NAME — `pianoroll("<0 chorus>")`, which is every roll with an id — swung not at all, while the
+    panel's commit button appeared to work because it writes per-note nudges and those are stamped ON
+    the event. Fixed there by stamping the roll's swing onto its steps as well (the tail of
+    `pianoroll()`), which is a fix for rolls, not for the join.
+
+    Why the general fix wasn't taken: the honest version is for the join to sample each child's
+    channels at each contributed step's onset and stamp them, which is defensible — a join is a cut
+    between running patterns, so flattening a child's channels onto the events it contributes says
+    exactly what is heard. But `channelAt` prefers a stamp over a channel, so stamping every channel
+    would invert precedence for anything set on the OUTSIDE: `cat(a, b).vel(0.5)` would stop
+    overriding a vel that `a` already carried. Getting that right means deciding, per channel, who
+    wins when both an option and the joined pattern set it — a real design question, not a patch.
+
+    One channel bundle genuinely can't answer for every option (the pick is per cycle), so whatever
+    is decided, the data has to end up on the events. The question is only whether the outer
+    pattern's later word can still clear it, the way `crossMerge`'s clear-then-restamp does today.
+
 [ ] Instance-based presets — considered and deferred 2026-08-19, on CPU/RAM. Written down so it
     isn't re-derived from scratch, not because it's queued.
 

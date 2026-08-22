@@ -488,11 +488,17 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               drag the right edge to resize, <strong>cmd-drag</strong> up/down to set velocity (or
               click the value lane's <code>vel</code> label, bottom left, to flip it to
               <code>prob</code> and set per-note probability, which becomes a <code>?</code>
-              degrade). The value lane along the bottom shows whichever channel that label picks
+              degrade, then again to <code>nudge</code>, the per-note timing offset). The value lane
+              along the bottom shows whichever channel that label picks
               as one marker per note —
               a dot at the onset with a line running right for the duration, dashed when it's
-              probability — and dragging a marker up or down sets the value, for the whole
-              selection at once. <strong>cmd-D</strong> duplicates, <strong>option-drag</strong>
+              probability. With the <em>arrow</em> tool, dragging a marker up or down sets the value
+              for the whole selection at once, keeping their differences. With the <em>pencil</em> you
+              paint instead: drag across the lane and every note you sweep over snaps to the height
+              you're holding it at, so one gesture flattens a bar to an even velocity or ramps it into
+              a crescendo. <strong>🎲</strong> in the header rolls the whole channel at random — the
+              selection if there is one, otherwise the whole roll.
+              <strong>cmd-D</strong> duplicates, <strong>option-drag</strong>
               drags a copy (the original stays where it was), arrow keys nudge
               (<strong>shift</strong> + up/down = octave, or four rows on the index axis;
               <strong>shift</strong> + right/left lengthen

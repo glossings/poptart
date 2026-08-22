@@ -3255,7 +3255,10 @@ function initPresetPanel() {
 // on with another 0 (Live's deactivate). A value lane along the bottom shows every note's velocity
 // or probability (its gutter label names the channel and clicks through to the other one) as an
 // Ableton-style marker - a dot at the onset, a line running right for the duration, dashed for
-// probability - which drags up and down, whole selection at once. A note dropped on one already sounding at that pitch keeps its own
+// probability. With the arrow tool a marker drags up and down, whole selection at once, keeping the
+// selection's differences; with the pencil you PAINT instead, and every note the drag sweeps over
+// snaps to the height you're holding it at (see prPaintLane). 🎲 rolls the whole channel at once -
+// the selection, or the roll. A note dropped on one already sounding at that pitch keeps its own
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
 // gets everything back the moment the note on top moves away (see prClipOverlaps). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
@@ -3291,7 +3294,7 @@ const prLockBtn = document.getElementById('pianorollLock');
 const prCanvas = document.getElementById('pianorollCanvas');
 const prGridSelect = document.getElementById('pianorollGrid');
 const prLenInput = document.getElementById('pianorollLen');
-const prSwingInput = document.getElementById('pianorollSwing');
+const prSwingBox = document.getElementById('pianorollSwing'); // a box slider, not a text field (see prMakeBoxSlider)
 const prSwingGridSelect = document.getElementById('pianorollSwingGrid');
 const prCommitSwingBtn = document.getElementById('pianorollCommitSwing');
 const prHalveBtn = document.getElementById('pianorollHalve');
@@ -3303,6 +3306,7 @@ const prScaleFoldBtn = document.getElementById('pianorollScaleFold');
 const prFoldBtn = document.getElementById('pianorollFold');
 const prScaleLabel = document.getElementById('pianorollScale');
 const prPreviewBtn = document.getElementById('pianorollPreview');
+const prRandomBtn = document.getElementById('pianorollRandom');
 const prToMiniBtn = document.getElementById('pianorollToMini');
 const prSide = document.querySelector('.pianoroll-side');
 const prSideToggle = document.getElementById('pianorollSideToggle');
@@ -3337,6 +3341,8 @@ const PR_ZOOM_WHEEL = 0.0012; // wheel-zoom sensitivity (smaller = slower); prop
 const PR_PITCH_WHEEL = 0.013; // wheel pitch-scroll sensitivity, rows per deltaY unit (smaller = slower)
 const PR_BTN_ZOOM = 1.4; // per-keypress zoom step for cmd ± (the wheel zooms proportionally)
 const PR_EVAL_DEBOUNCE_MS = 150; // quiet time after the last roll edit before it re-evaluates
+const PR_WRITE_COALESCE_MS = 60; // fastest a live control (the swing slider) rewrites the call
+const PR_BOX_SWEEP_PX = 170; // sideways travel for a box slider's full range; shift is a tenth of it
 const PR_GRID_DIVS = [['1/4', 4], ['1/8', 8], ['1/8T', 12], ['1/16', 16], ['1/16T', 24], ['1/32', 32], ['1/64', 64]];
 // Vertical time lines, by how coarse a division they land on (0 = a bar line, 1 = its halves, …):
 // how wide they are drawn and how solid. Past the end of the arrays every deeper level draws like
@@ -3375,9 +3381,11 @@ let prTool = localStorage.getItem('poptartPianorollTool') === 'select' ? 'select
 // 0..1; nudge is the drawn time offset (see pianoroll.mjs), bipolar around 0 and measured in cells.
 const PR_LANE_KEYS = ['vel', 'prob', 'nudge'];
 const PR_MAX_NUDGE = 0.5; // mirrors pianoroll.mjs's PIANOROLL_MAX_NUDGE - half a cell either way
-let prCmdMode = PR_LANE_KEYS.includes(localStorage.getItem('poptartPianorollCmd'))
-  ? localStorage.getItem('poptartPianorollCmd')
-  : 'vel'; // what the lane and cmd-drag set
+// What the lane and cmd-drag set. Deliberately NOT sticky, unlike the tool and the folds: a roll
+// opened fresh always shows `vel`, because that is what you reach for nearly every time, and a lane
+// still parked on `nudge` from a session an hour ago reads as the panel having lost its place.
+// Switching channels lasts as long as the panel stays open (see openPianorollEditor).
+let prCmdMode = 'vel';
 let prScaleFold = localStorage.getItem('poptartPianorollScaleFold') === '1'; // show only the scale's rows
 let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // Live's Fold: only rows that have notes
 let prSideMin = localStorage.getItem('poptartPianorollSide') === '1'; // timing controls column minimized
@@ -4502,6 +4510,92 @@ function prFramePitch() {
   prState.pitchTop = center + Math.floor(PR_ROWS / 2);
 }
 
+/**
+ * Live's box slider: a control that READS as a value box and WORKS as a slider. Drag it sideways
+ * and a fill sweeps behind the number, so the amount is legible at a glance without a track and a
+ * handle eating a whole row of a 92px column. The drag is relative (it picks up from where the
+ * value already was, rather than jumping to wherever the box was grabbed), shift makes it fine, and
+ * double-click puts it back to `home`.
+ *
+ * `center: true` grows the fill from the value's zero instead of from the left edge, which is what a
+ * bipolar control needs - on swing, which side of straight you are on is half the reading.
+ *
+ * onInput fires all the way THROUGH a drag - that's the point of the thing, a value you hear your
+ * way to - and onCommit once at the end of one, for whatever is too expensive to do per frame.
+ * Returns { get, set }, where set is silent: it's how the panel syncs the widget from state.
+ */
+function prMakeBoxSlider(el, { min, max, step, home = 0, center = false, fmt, onInput, onCommit }) {
+  const fill = el.querySelector('.pr-box-fill');
+  const label = el.querySelector('.pr-box-val');
+  // Step-quantized, then trimmed: 0.1 + 0.2 arithmetic would otherwise reach the serializer.
+  const quant = (v) => Number((Math.round(Math.min(max, Math.max(min, v)) / step) * step).toFixed(6));
+  let value = quant(home);
+
+  const paint = () => {
+    label.textContent = fmt(value);
+    const u = (value - min) / (max - min); // where the value sits across the box, 0..1
+    const base = center ? (0 - min) / (max - min) : 0; // ...and where its fill grows from
+    fill.style.left = `${Math.min(u, base) * 100}%`;
+    fill.style.width = `${Math.abs(u - base) * 100}%`;
+    el.setAttribute('aria-valuenow', String(value));
+  };
+
+  const set = (v) => { value = quant(v); paint(); };
+  // Reports whether the value actually moved, so a gesture that changed nothing - a plain click, an
+  // arrow held against an end stop - doesn't commit, and so doesn't cost the buffer a re-eval.
+  const apply = (v) => {
+    const next = quant(v);
+    if (next === value) return false;
+    value = next;
+    paint();
+    onInput?.(value);
+    return true;
+  };
+  paint();
+
+  el.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); // no text selection, and the panel's own click-outside never sees it
+    el.setPointerCapture(e.pointerId);
+    el.focus();
+    const x0 = e.clientX;
+    const v0 = value;
+    let moved = false;
+    const onMove = (ev) => {
+      moved = apply(v0 + ((ev.clientX - x0) / PR_BOX_SWEEP_PX) * (max - min) * (ev.shiftKey ? 0.1 : 1)) || moved;
+    };
+    const onUp = () => {
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+      if (moved) onCommit?.(value);
+    };
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+  });
+
+  el.addEventListener('dblclick', () => { if (apply(home)) onCommit?.(value); });
+
+  el.addEventListener('keydown', (e) => {
+    const dir = e.key === 'ArrowRight' || e.key === 'ArrowUp' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -1 : 0;
+    if (!dir) return;
+    e.preventDefault();
+    e.stopPropagation(); // the arrows are this control's while it has focus, not the roll's
+    if (apply(value + dir * step * (e.shiftKey ? 10 : 1))) onCommit?.(value);
+  });
+
+  // No onCommit here: a trackpad fires these in bursts, and the live path already lands the final
+  // value a coalescing window later.
+  el.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    apply(value - Math.sign(e.deltaY) * step * (e.shiftKey ? 1 : 5));
+  }, { passive: false });
+
+  return { get: () => value, set };
+}
+
+let prSwingSlider = null; // the swing box slider, built once the panel's controls are wired
+
 // (Re)populate the grid <select> and len field from prState; a non-standard grid gets its own option.
 function prSyncGridLenInputs() {
   if (!prState) return;
@@ -4512,7 +4606,7 @@ function prSyncGridLenInputs() {
   for (const [label, n] of opts) prGridSelect.add(new Option(label, String(n)));
   prGridSelect.value = String(prState.grid);
   prLenInput.value = prState.len;
-  prSwingInput.value = prState.swing ?? 0;
+  prSwingSlider?.set(prState.swing ?? 0);
   // The division swing acts on. The blank first option is "whatever the roll's grid is", which is
   // the default and what most rolls want - a stated resolution, swung.
   prSwingGridSelect.innerHTML = '';
@@ -4526,6 +4620,7 @@ function prSyncGridLenInputs() {
 
 function openPianorollEditor(call, carry = null) {
   const wasOpen = !!prState; // a fresh open refreshes the roll list; a follow-switch must not
+  if (!wasOpen) prCmdMode = 'vel'; // every fresh open starts on velocity (see prCmdMode)
   const from = cm.posFromIndex(call.start);
   const to = cm.posFromIndex(call.close + 1);
   const inner = cm.getValue().slice(call.open + 1, call.close);
@@ -4580,6 +4675,7 @@ function openPianorollEditor(call, carry = null) {
   prSyncGridLenInputs();
   prSyncMode();
   prSyncRollHead();
+  prSyncLaneChannel();
   if (call.id && !wasOpen) prRefreshRollList(); // the prebake half of the picker, asked for once
   prPanel.classList.remove('hidden');
   prSizeCanvas(); // the width the layout gives it now, so the first frame is already right
@@ -4953,8 +5049,11 @@ function prPlayheadLoop() {
 
 const PR_HISTORY_MAX = 200; // snapshots kept; the oldest are dropped past this
 
-const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start, mode: prState.mode });
-const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}|${s.mode}`;
+// The roll as one undoable state. Swing is in it because committing is an edit like any other: it
+// zeroes the knob and writes the same offsets into the notes, and an undo that put the nudges back
+// while leaving the knob at 0 would double the groove.
+const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start, mode: prState.mode, swing: prState.swing, swinggrid: prState.swinggrid });
+const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}|${s.mode}|${s.swing}|${s.swinggrid}`;
 
 // Record the roll's current state, unless it's identical to the entry we're already sitting on -
 // which makes this safe to call from anywhere, including the code-sync path that fires on every
@@ -4980,6 +5079,8 @@ function prHistoryStep(delta) {
   prState.len = snap.len;
   prState.start = snap.start;
   prState.mode = snap.mode;
+  prState.swing = snap.swing;
+  prState.swinggrid = snap.swinggrid;
   prState.sel.clear(); // the restored notes are new objects; the old selection means nothing
   prSyncGridLenInputs();
   prSyncMode();
@@ -5020,6 +5121,22 @@ function prScheduleEval() {
   prEvalTimer = setTimeout(() => { prEvalTimer = null; evaluate(false); }, PR_EVAL_DEBOUNCE_MS);
 }
 
+// A control that streams while you hold it (the swing slider) would otherwise rewrite the call -
+// and re-fold the whole buffer - on every pointer frame. The eval each write schedules is debounced
+// anyway, so there is nothing to hear from writing faster than this; the code just catches up on a
+// slower beat. Nothing mid-gesture is RECORDED: one drag of the knob is one undo step, the same as
+// one drag of a note, and prWriteNow - the end of the gesture - is what records it.
+let prWriteTimer = null;
+function prWriteSoon() {
+  if (prWriteTimer) return; // already on the way - it will pick up whatever the state says by then
+  prWriteTimer = setTimeout(() => { prWriteTimer = null; if (prState) writePianorollCall(false); }, PR_WRITE_COALESCE_MS);
+}
+function prWriteNow() {
+  clearTimeout(prWriteTimer);
+  prWriteTimer = null;
+  writePianorollCall();
+}
+
 // The reverse direction: the panel re-reads the call whenever it's edited by hand, so tweaking
 // `grid:`/`len:`/the note string in the code updates the roll instead of being silently reverted
 // by the next drag. Notes are only rebuilt when the string actually changed (the parsed objects
@@ -5053,6 +5170,8 @@ function syncPianorollFromCode() {
   prState.grid = parsed.grid;
   prState.len = parsed.len;
   prState.start = parsed.start;
+  prState.swing = parsed.swing;
+  prState.swinggrid = parsed.swinggrid;
   if (parsed.mode !== prState.mode) {
     // Typed `mode: "index"` into the call by hand - the same change of view the button makes.
     prState.mode = parsed.mode;
@@ -5401,9 +5520,14 @@ const prLaneKey = () => (PR_LANE_KEYS.includes(prCmdMode) ? prCmdMode : 'vel');
     switch there is - it names the channel on show and carries a caret to say so. */
 function prToggleCmdMode() {
   prCmdMode = PR_LANE_KEYS[(PR_LANE_KEYS.indexOf(prLaneKey()) + 1) % PR_LANE_KEYS.length];
-  localStorage.setItem('poptartPianorollCmd', prCmdMode);
+  prSyncLaneChannel();
   if (prState) drawPianoroll(); // the lane redraws with the newly chosen channel
   prRefocus();
+}
+
+/** Whatever outside the canvas names the lane's channel - just the 🎲 button's tooltip, for now. */
+function prSyncLaneChannel() {
+  if (prRandomBtn) prRandomBtn.title = `randomize ${prLaneKey()} — the selection, or the whole roll`;
 }
 
 /**
@@ -5419,6 +5543,55 @@ const prLaneDenorm = (u, key) => (key === 'nudge' ? (u * 2 - 1) * PR_MAX_NUDGE :
 
 /** value -> lane y, inset so the end-stop dots at either extreme stay fully visible. */
 const prLaneY = (v, m, key) => m.laneTop + PR_LANE_PAD + (1 - prLaneNorm(v, key)) * (m.laneH - 2 * PR_LANE_PAD);
+
+/** ...and back: the channel value at a lane y, clamped to the end stops. What the pencil paints. */
+const prLaneValAt = (py, m, key) =>
+  prLaneDenorm(Math.min(1, Math.max(0, 1 - (py - m.laneTop - PR_LANE_PAD) / (m.laneH - 2 * PR_LANE_PAD))), key);
+
+/**
+ * The pencil in the value lane, Live's draw tool: every note the drag sweeps over takes the
+ * ABSOLUTE height the pointer is held at, whatever it was before - so dragging across a bar flattens
+ * it to one value and a diagonal drag ramps it. The whole span from the last pointer position is
+ * painted rather than just the current one, so a fast drag can't skip a column.
+ *
+ * The arrow tool keeps the relative marker drag instead (see the 'lane' drag), which is the one that
+ * preserves a selection's differences - the two gestures answer different questions.
+ */
+function prPaintLane(pxA, pxB, py, m) {
+  const key = prLaneKey();
+  const v = prLaneValAt(py, m, key);
+  const x0 = Math.min(pxA, pxB), x1 = Math.max(pxA, pxB);
+  let lead = null; // the painted note nearest the pointer - what the lane's readout follows
+  let leadX = -Infinity;
+  let painted = 0;
+  for (const nt of prLiveNotes(prState.notes)) {
+    const sx = prCellToX(nt.start, m);
+    // Same reach as prLaneNoteAt: anywhere under the marker's line counts, with a few px of grace
+    // in front of its onset dot.
+    if (prCellToX(nt.start + nt.len, m) <= x0 || sx - 4 > x1) continue;
+    nt[key] = v;
+    painted++;
+    if (sx <= x1 && sx > leadX) { leadX = sx; lead = nt; }
+  }
+  prState._laneDrag = lead; // null over a gap: the readout belongs to the note being painted, or nothing
+  return painted;
+}
+
+/**
+ * 🎲: fill the lane's channel with fresh random values - the selection if there is one, otherwise
+ * every note in the roll. Uniform across the channel's own range (0..1 for vel and prob, half a cell
+ * either way for nudge), which is what a die does; anything gentler is a pencil drag away.
+ */
+function prRandomizeLane() {
+  if (!prState) return;
+  const key = prLaneKey();
+  const targets = prState.sel.size ? [...prState.sel].filter((nt) => !nt.hidden) : prLiveNotes(prState.notes);
+  if (!targets.length) return;
+  for (const nt of targets) nt[key] = prLaneDenorm(Math.random(), key);
+  writePianorollCall();
+  drawPianoroll();
+  prRefocus();
+}
 
 // The note whose lane column contains px - grabbing anywhere under a note works, like Live. When
 // several share the column (a chord), the marker nearest the pointer wins; ties go to the topmost
@@ -5688,6 +5861,7 @@ function prCursorFor(px, py, m, velMod) {
   }
   if (py >= m.laneTop) { // value lane: markers drag up/down, the gutter label is the channel switch
     if (px < PR_GUTTER) return 'pointer';
+    if (prTool === 'draw') return CUR_PENCIL; // ...and the pencil paints values across it
     return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
   }
   if (px < PR_GUTTER) return prIndexMode() ? 'default' : 'pointer'; // over the piano keyboard - the index gutter has nothing to play
@@ -5831,7 +6005,7 @@ function initPianorollCanvas() {
   const dragCursor = (d) =>
     (d.kind === 'loop'
       ? (d.edge === 'move' ? 'grabbing' : 'ew-resize')
-      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
+      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
 
   prCanvas.addEventListener('contextmenu', (e) => { if (prState) e.preventDefault(); }); // ctrl-drag (mac) = velocity, not a menu
 
@@ -5856,6 +6030,14 @@ function initPianorollCanvas() {
     }
     if (py >= m.laneTop) { // value lane - drag a marker to set the channel on show (see drawValueLane)
       if (px < PR_GUTTER) { prToggleCmdMode(); return; } // the channel label - the lane's channel switch
+      // Pencil: paint values across the lane at the height you hold it (see prPaintLane). Shift is
+      // left to the marker drag below, so extending the selection from the lane still works.
+      if (prTool === 'draw' && !e.shiftKey) {
+        drag = { kind: 'paint', lastPx: px, painted: 0 };
+        drag.painted += prPaintLane(px, px, py, m);
+        drawPianoroll();
+        return;
+      }
       const nt = prLaneNoteAt(px, py, m);
       if (!nt) { prState.sel = new Set(); drawPianoroll(); return; }
       if (e.shiftKey) { // shift-click toggles selection, same as on the note itself
@@ -5970,6 +6152,10 @@ function initPianorollCanvas() {
       for (const n of prState.sel) {
         n[key] = prLaneDenorm(Math.min(1, Math.max(0, prLaneNorm(prLaneVal(n, key), key) - d)), key);
       }
+    } else if (drag.kind === 'paint') {
+      // Sweep from where the pointer was to where it is, so nothing between two frames is missed.
+      drag.painted += prPaintLane(drag.lastPx, px, py, m);
+      drag.lastPx = px;
     } else if (drag.kind === 'marquee') {
       const xa = Math.min(Math.max(px, PR_GUTTER), prW), xb = Math.min(Math.max(drag.x0, PR_GUTTER), prW);
       const ya = Math.min(Math.max(py, PR_TOPBAR), m.laneTop), yb = Math.min(Math.max(drag.y0, PR_TOPBAR), m.laneTop);
@@ -5987,6 +6173,9 @@ function initPianorollCanvas() {
   prCanvas.addEventListener('pointerup', (e) => {
     if (drag && prState) {
       if (drag.kind === 'marquee') prState.marquee = null;
+      // A pencil click that landed on empty lane changed nothing - and a write that changes nothing
+      // still costs the buffer a re-eval, so it doesn't get one.
+      else if (drag.kind === 'paint') { if (drag.painted) writePianorollCall(); }
       else if (drag.kind !== 'audition') {
         prClipOverlaps(); // already clipped live on every frame; this settles the final position
         writePianorollCall();
@@ -6211,19 +6400,32 @@ function initPianorollEditor() {
   // The roll's own groove. Setting it changes nothing about where the notes are WRITTEN - it is the
   // swing channel, applied where the events are emitted (see timeShift) - so the grid stays put and
   // the onset ticks move. Committing is what turns that into something the notes themselves hold.
-  const prSetSwing = () => {
+  //
+  // It applies as you DRAG it, not when you let go: swing is a thing you hear your way to, and a
+  // groove knob you have to release to audition is a groove knob you can't dial in. `live` says the
+  // gesture is still going, which is the only thing that changes - the write is coalesced onto a
+  // slower beat (see prWriteSoon) instead of rewriting the call on every pointer frame.
+  const prSetSwing = (live = false) => {
     if (!prState) return;
-    const raw = Number(prSwingInput.value);
-    prState.swing = Number.isFinite(raw) ? Math.min(0.5, Math.max(-0.5, raw)) : 0;
+    prState.swing = prSwingSlider.get();
     const sg = Number(prSwingGridSelect.value);
     prState.swinggrid = sg >= 1 ? Math.round(sg) : null;
-    prSyncGridLenInputs();
-    writePianorollCall();
+    // Just the commit button, not prSyncGridLenInputs: rebuilding the inputs mid-drag would set the
+    // slider back from state under the pointer that is moving it.
+    prCommitSwingBtn.disabled = !prState.swing;
+    if (live) prWriteSoon(); else prWriteNow();
     drawPianoroll();
-    prRefocus();
   };
-  prSwingInput.addEventListener('change', prSetSwing);
-  prSwingGridSelect.addEventListener('change', prSetSwing);
+  prSwingSlider = prMakeBoxSlider(prSwingBox, {
+    min: -0.5,
+    max: 0.5,
+    step: 0.01,
+    center: true, // straight sits in the middle: the fill says which side of it you're on
+    fmt: (v) => (v ? v.toFixed(2) : '0'),
+    onInput: () => prSetSwing(true),
+    onCommit: () => prSetSwing(false),
+  });
+  prSwingGridSelect.addEventListener('change', () => { prSetSwing(); prRefocus(); });
 
   // Commit: the swing stops being a setting and becomes the notes' own offsets. Nothing about the
   // sound changes - that is the whole promise - so the onset ticks don't move as you click; what
@@ -6387,6 +6589,11 @@ function initPianorollEditor() {
     reflectPreview();
     prRefocus();
   });
+
+  // 🎲 rolls the value lane's channel. Which channel that is comes from the lane's own gutter label,
+  // the one switch there is - the button's tooltip names it so the die is never a mystery.
+  prSyncLaneChannel();
+  prRandomBtn.addEventListener('click', prRandomizeLane);
 
   // The timing controls fold away, like the main sidebar - the grid is what you are working in,
   // and grid/len/÷2/×2/⧉ are set once and then left alone. Sticky, like the tool and fold.

@@ -2199,8 +2199,48 @@ li.CodeMirror-hint-active {
 }
 
 .pianoroll-side .pr-side-ctl input[type='number'],
-.pianoroll-side .pr-side-ctl select {
+.pianoroll-side .pr-side-ctl select,
+.pianoroll-side .pr-side-ctl .pr-box-slider {
   width: 100%;
+}
+
+/* A control that reads as a value box and works as a slider: drag it sideways and a fill sweeps
+   behind the number (see prMakeBoxSlider). A track and a handle would cost a whole row of a 92px
+   column to say what the fill says inside the box the number was going to take anyway. */
+.pr-box-slider {
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  text-align: center;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: ew-resize;
+  user-select: none;
+  outline: none;
+}
+
+.pr-box-slider:hover,
+.pr-box-slider:focus-visible {
+  border-color: var(--accent);
+}
+
+/* Painted behind the number; left/width come from the value, growing from the left edge or (on a
+   bipolar control like swing) from wherever its zero sits. */
+.pr-box-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent-soft);
+  pointer-events: none;
+}
+
+.pr-box-val {
+  position: relative; /* over the fill, which is absolutely placed */
 }
 
 .pianoroll-side .pr-side-row {

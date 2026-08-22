@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { _roll, pianoroll, cat, mini, setPatternWarn } from './src/signal.mjs';
+import { _roll, pianoroll, cat, mini, setPatternWarn, timeShift } from './src/signal.mjs';
 import { stepLocs } from './src/mini.mjs';
 import { clearRolls, restoreRolls, setRollLayer, rollIds, lookupRoll } from './src/rolls.mjs';
 import { injectLocations } from './src/locations.mjs';
@@ -17,6 +17,13 @@ const fresh = () => {
 };
 
 const values = (sig, cycle) => sig.stepsForCycle(cycle).map((s) => s.value);
+// Exact fractions carry floating-point fuzz; every timing assertion here is rounded the same way.
+const round10 = (x) => Number(x.toFixed(10));
+// What each step of one cycle asks to be moved by, in cycles - what the scheduler and the
+// highlighter both read (see timeShift). Reads the stamps on the events AND the pattern's channels,
+// which is the whole point: a named roll only has the former.
+const shifts = (sig, cycle = 0) =>
+  sig.stepsForCycle(cycle).map((st) => round10(timeShift(st, sig.noteChannels, cycle + st.start, 1, cycle + st.start)));
 const capture = (fn) => {
   const lines = [];
   setPatternWarn((m) => lines.push(m));
@@ -265,4 +272,48 @@ test('a name asked for before its definition warns - which is why cycles are bui
   assert.deepEqual(inOrder.lines, [], 'nothing to report once the definition has been evaluated');
   assert.deepEqual(inOrder.value.map((st) => st.cfg.index), [0, 7, 16]);
   assert.deepEqual(inOrder.value.map((st) => st.value), ['dstab', 'dstab', 'dstab']);
+});
+
+// ---------------------------------------------------------------------------------------------
+// A named roll's own swing
+//
+// A roll's swing is set on the panel and written into its definition. It reaches the track through
+// selectorJoin, which carries a slot's child EVENTS but not its channels - one channel bundle can't
+// answer for every roll a `<a b>` might name - so the builder stamps the swing onto the events as
+// well. Without that a named roll played dead straight and only the panel's commit button (which
+// writes per-note nudges, and those are stamped) appeared to work.
+// ---------------------------------------------------------------------------------------------
+
+test('a roll played by NAME keeps its own swing', () => {
+  fresh();
+  const eighths = '60,0,1 60,1,1 60,2,1 60,3,1 60,4,1 60,5,1 60,6,1 60,7,1';
+  const opts = { grid: 8, len: 8, swing: 1 / 3 };
+  const inline = pianoroll(eighths, opts);
+  _roll('swung', eighths, opts);
+  _roll('straight', eighths, { grid: 8, len: 8 });
+
+  // The same offbeat shift either way round: a third of an eighth-note slot, in cycles.
+  assert.deepEqual(shifts(pianoroll('swung')), shifts(inline));
+  assert.deepEqual(shifts(pianoroll('swung')), [0, 1 / 24, 0, 1 / 24, 0, 1 / 24, 0, 1 / 24].map(round10));
+  // ...and a straight roll is still straight, so nothing is stamped on a roll that says nothing.
+  assert.deepEqual(shifts(pianoroll('straight')), [0, 0, 0, 0, 0, 0, 0, 0]);
+});
+
+test('a swung roll names its division, so the stamp is not read against the default 8', () => {
+  fresh();
+  // Sixteenths on a 16-grid: swinging them is what the roll means, and the generic swing default
+  // (eighths) would move a quite different set of onsets.
+  const str = Array.from({ length: 16 }, (_, k) => `60,${k},1`).join(' ');
+  _roll('sixteenths', str, { grid: 16, len: 16, swing: 0.25 });
+  const got = shifts(pianoroll('sixteenths'));
+  assert.deepEqual(got, Array.from({ length: 16 }, (_, k) => (k % 2 ? round10(0.25 / 16) : 0)));
+});
+
+test('a .swing() on the TRACK still replaces a named roll\'s own', () => {
+  fresh();
+  const eighths = '60,0,1 60,1,1 60,2,1 60,3,1 60,4,1 60,5,1 60,6,1 60,7,1';
+  _roll('swung', eighths, { grid: 8, len: 8, swing: 1 / 3 });
+  // Setting a control clears that field off the events first (see crossMerge), so the track's
+  // number wins over the stamp exactly as it wins over a channel.
+  assert.deepEqual(shifts(pianoroll('swung').swing(0.5, 8)), [0, 1 / 16, 0, 1 / 16, 0, 1 / 16, 0, 1 / 16].map(round10));
 });

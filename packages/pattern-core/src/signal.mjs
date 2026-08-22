@@ -3490,6 +3490,15 @@ export function pianoroll(str = '', opts = {}) {
     });
     byStart.set(cell, list);
   });
+  // A roll carries its own swing, set on the panel beside its grid, and its division defaults to the
+  // roll's own grid rather than to eighths: a roll is written on a stated resolution, and swinging
+  // that resolution is what the knob on a drum machine does. Committing it writes the same offsets
+  // into the notes and puts this back to 0. Read here, above the step builder, because the events
+  // carry it as well as the channel below does.
+  const swingAmount = typeof opts === 'number'
+    ? 0
+    : Math.min(MAX_SWING, Math.max(-MAX_SWING, Number(opts.swing) || 0));
+  const swingGrid = Math.max(1, Math.round(Number(opts.swinggrid) || grid));
   const stepsForCycle = (cycle) => {
     const out = [];
     for (let j = 0; j < grid; j++) {
@@ -3516,15 +3525,8 @@ export function pianoroll(str = '', opts = {}) {
   };
   const sample = (t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos);
   const roll = new Sig(sample, { stepsForCycle, pitchKind: 'note' });
-  // A roll carries its own swing, set on the panel beside its grid. It is the ordinary channel (so
-  // it sums with the per-note nudges drawn on the roll, and a .swing() on the TRACK replaces it like
-  // any other control), and its division defaults to the roll's own grid rather than to eighths: a
-  // roll is written on a stated resolution, and swinging that resolution is what the knob on a drum
-  // machine does. Committing it writes the same offsets into the notes and puts this back to 0.
-  const swingAmount = typeof opts === 'number' ? 0 : Number(opts.swing) || 0;
   if (!swingAmount) return roll;
-  const swingGrid = Math.max(1, Math.round(Number(opts.swinggrid) || grid));
-  const sig = toSignal(Math.min(MAX_SWING, Math.max(-MAX_SWING, swingAmount)));
+  const sig = toSignal(swingAmount);
   const swung = crossMerge(roll.stepsForCycle, sig, stampField('swing'));
   // Same check .swing() makes, different advice: a roll's grid is the resolution it is DRAWN on, and
   // notes sitting on every other cell of it (quarter notes on a sixteenth grid) are all onbeats -
@@ -3539,8 +3541,25 @@ export function pianoroll(str = '', opts = {}) {
     const fix = on && on !== swingGrid ? ` Set "sw grid" to ${on} - the division this roll's notes are actually on.` : '';
     warnUser(`[signal] this roll's swing has nothing to move: every note is on an onbeat of the ${swingGrid}-per-cycle division it swings, so it plays exactly as it would straight.${fix}`);
   }
-  return roll._swingChannels(sig, swung, swingGrid);
+  const out = roll._swingChannels(sig, swung, swingGrid);
+  // The channels alone are not enough. A roll played by NAME - pianoroll("<0 chorus>") - reaches the
+  // track through a selector join, which carries the events of whichever roll a slot picked but not
+  // its channels: the pick is per cycle, and one channel bundle can't answer for every roll the
+  // pattern might name. So the same two numbers ride ON each event as well, exactly as a drawn nudge
+  // does, and the groove a roll was filed under its name with travels with its notes.
+  //
+  // Stamped LAST, after both channel builders: setting a control clears that field off the events
+  // first (see crossMerge), so a stamp applied any earlier would be taken straight back off. The
+  // channels stay because only they can warp the far EDGE of a note as well as its onset - a stamp
+  // belongs to the event it is on, and the end edge is a step of its own (see endEdgeStep). A
+  // straight roll stamps nothing, and a .swing() on the TRACK clears these and replaces them, so it
+  // still wins the way every other control does.
+  return out._clone({ stepsForCycle: swingStamped(out.stepsForCycle, swingAmount, swingGrid) });
 }
+
+/** A roll's steps carrying its own swing, for the joins that keep events but drop channels. */
+const swingStamped = (stepsForCycle, amount, grid) => (cycle) =>
+  stepsForCycle(cycle).map((st) => ({ ...st, swing: amount, swinggrid: grid }));
 
 // pianoroll("<0 chorus>") - the argument names rolls instead of drawing them. The ids are ordinary
 // mini-notation, so the whole language applies: `<a b>` takes a roll per cycle, `a b` splits the

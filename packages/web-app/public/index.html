@@ -346,6 +346,7 @@
           <button id="pianorollScaleFold" class="small pr-text-btn" title="show only the scale set by setscale()">scale</button>
           <button id="pianorollFold" class="small pr-text-btn" title="show only the rows that have notes">fold</button>
           <button id="pianorollPreview" class="small" title="preview notes as you draw">🎧</button>
+          <button id="pianorollRandom" class="small" title="randomize the value lane's channel">🎲</button>
           <button id="pianorollToMini" class="small" title="convert to mini-notation">→♪</button>
           <button id="pianorollClose" class="small">✕</button>
         </div>
@@ -362,7 +363,11 @@
           <div class="pr-side-row">
             <button id="pianorollDupLoop" class="small" title="repeat the loop after itself">⧉</button>
           </div>
-          <label class="pianoroll-ctl pr-side-ctl">swing <input id="pianorollSwing" type="number" step="0.05" min="-0.5" max="0.5" value="0" title="how far offbeats are delayed, as a fraction of one sw-grid step" /></label>
+          <div class="pianoroll-ctl pr-side-ctl">swing
+            <div id="pianorollSwing" class="pr-box-slider" role="slider" tabindex="0" aria-label="swing"
+              aria-valuemin="-0.5" aria-valuemax="0.5" aria-valuenow="0"
+              title="how far offbeats are delayed, as a fraction of one sw-grid step — drag sideways (shift for fine), double-click for straight"><span class="pr-box-fill"></span><span class="pr-box-val">0</span></div>
+          </div>
           <label class="pianoroll-ctl pr-side-ctl">sw grid <select id="pianorollSwingGrid" title="which division swing swings"></select></label>
           <div class="pr-side-row">
             <button id="pianorollCommitSwing" class="small pr-text-btn" title="write the swing into the notes as per-note offsets, and set swing back to 0">commit</button>
