@@ -1714,6 +1714,52 @@ function sampleFileHints(cur, typed) {
   });
 }
 
+// Sample packs for s(". Unlike se(", the string is mini-notation holding many tokens
+// (`s("bd*4, ~ hh")`), so only the word under the cursor is completed and the rest is left
+// alone. A ":" in that word switches the popup to the pack's files, whose positions ARE the
+// sampler indexes - so the filenames stay visible while you pick a number.
+async function fetchSamplePacks() {
+  if (!samplePacks) await loadSamples(); // shares the sounds tab's cache; it swallows its own errors
+  return samplePacks ?? [];
+}
+
+function samplePackHints(cur, typed) {
+  // Everything up to the last mini-notation separator (space, `[`, `<`, `,`, `*`, …) is
+  // structure the completion must not eat; the trailing word is what's being named.
+  const token = typed.match(/[A-Za-z0-9_.:#-]*$/)[0];
+  const colon = token.indexOf(':');
+
+  return fetchSamplePacks().then((packs) => {
+    if (colon < 0) {
+      const pool = packs.map((p) => ({ key: p.name, count: p.files.length }));
+      let matches = rankedMatches(pool, token, 40);
+      // The name has to be a pack that exists, so an unmatched word is better answered with the
+      // whole library than with silence.
+      if (matches.length === 0) matches = pool.slice(0, 40);
+      return hintResult(cur, token, matches.map((item) => ({
+        text: item.key,
+        displayText: `${item.key} · ${item.count}`,
+      })));
+    }
+
+    const packName = token.slice(0, colon);
+    const partial = token.slice(colon + 1);
+    const pack = packs.find((p) => p.name.toLowerCase() === packName.toLowerCase());
+    if (!pack) return hintResult(cur, token, []);
+    // Digits (or nothing yet) pick by index; anything else is the user naming the file they
+    // want, which is exactly what the index is hard to remember.
+    const byIndex = partial === '' || /^\d+$/.test(partial);
+    const pool = pack.files.map((name, i) => ({ key: `${pack.name}:${i}`, name, i }));
+    const matches = (byIndex
+      ? rankedMatches(pool.map((f) => ({ ...f, key: String(f.i) })), partial, 40)
+      : pool.filter((f) => f.name.toLowerCase().includes(partial.toLowerCase())).slice(0, 40));
+    return hintResult(cur, token, matches.map((item) => ({
+      text: `${pack.name}:${item.i}`,
+      displayText: `${pack.name}:${item.i} · ${item.name}`,
+    })));
+  });
+}
+
 // Recording names for sr(". A flat list on purpose - names are minted unique across every month
 // folder, so the name IS the address (see osc-engine/recordings.js).
 let recordingList = null;
@@ -1802,6 +1848,11 @@ function poptartHint(cm) {
   // Inside sr(" → recording names.
   m = before.match(/(?<![.\w$])sr\s*\(\s*["']([^"']*)$/);
   if (m) return recordingHints(cur, m[1]);
+
+  // Inside s(" → sample packs (and their files after a ":"). `s` is both a builder and a chain
+  // method (`n("0").s("clap")`), so a leading dot is allowed where se(/sr( forbid it.
+  m = before.match(/(?<![\w$])\.?s\s*\(\s*["']([^"']*)$/);
+  if (m) return samplePackHints(cur, m[1]);
 
   // After a dot → chain methods; bare word → top-level builders. A dot straight after a digit is
   // the decimal point of a number being typed (`begin(0.3`), not a chain - offering the whole
@@ -9355,6 +9406,11 @@ const samplesCount = document.getElementById('samplesCount');
 const MAX_SAMPLE_ROWS = 300;
 let samplePacks = null; // null until the first load, then [{ name, files }]
 let samplesRootDir = '';
+// Packs are folded shut by default so a big library reads as a scannable list of packs rather
+// than thousands of file rows. This map holds the user's explicit open/shut clicks, which beat
+// the default; it's cleared whenever the filter changes (see the input handler).
+const packOverride = new Map(); // pack name -> open?
+let sampleRowBudget = MAX_SAMPLE_ROWS; // grown by the "show more" note, reset with the filter
 
 // Sample preview (auditioning). Plays the actual file the sounds browser lists - fetched from
 // /api/sampleAudio by the same pack/index that `s("pack:i")` uses - through Web Audio, so a
@@ -9421,26 +9477,37 @@ function renderSamples() {
   samplesCount.textContent = `${samplePacks.reduce((sum, p) => sum + p.files.length, 0)}`;
 
   let shown = 0;
-  let matched = 0;
+  let hidden = 0;
+  let packsShown = 0;
   for (const pack of samplePacks) {
-    const packMatches = pack.name.toLowerCase().includes(query);
+    const packMatches = !query || pack.name.toLowerCase().includes(query);
     // Indexes must be positions in the full pack, not the filtered view - attach before filtering.
     const files = pack.files
       .map((name, i) => ({ name, i }))
       .filter((f) => !query || packMatches || f.name.toLowerCase().includes(query));
     if (!files.length) continue;
-    matched += files.length;
-    if (shown >= MAX_SAMPLE_ROWS) continue; // keep counting for the more-note, stop rendering
+    packsShown++;
+    // A pack opens on click, or when the filter matched files *inside* it. A pack-NAME match
+    // leaves it shut: a broad query then stays a list of packs instead of every file in them.
+    const open = packOverride.get(pack.name) ?? (!!query && !packMatches);
 
     const head = document.createElement('div');
     head.className = 'slot-head sample-pack-head';
-    head.title = 'click to copy';
-    head.textContent = `${pack.name} · ${pack.files.length}`;
-    head.onclick = () => copyText(`s("${pack.name}")`, 'pack');
+    head.title = 'click to open · copies s("pack")';
+    head.textContent = `${open ? '▾' : '▸'} ${pack.name} · ${pack.files.length}`;
+    head.onclick = () => {
+      packOverride.set(pack.name, !open);
+      copyText(`s("${pack.name}")`, 'pack');
+      renderSamples();
+    };
     sampleList.appendChild(head);
+    if (!open) continue;
+
+    const room = Math.max(0, sampleRowBudget - shown);
+    hidden += files.length - Math.min(files.length, room);
 
     for (const f of files) {
-      if (shown >= MAX_SAMPLE_ROWS) break;
+      if (shown >= sampleRowBudget) break;
       const row = document.createElement('div');
       row.className = 'param-row sample-row';
       row.title = 'hold to preview · click copies';
@@ -9463,13 +9530,17 @@ function renderSamples() {
     }
   }
 
-  if (matched > shown) {
+  if (hidden) {
     const more = document.createElement('div');
-    more.className = 'more-note';
-    more.textContent = `…${matched - shown} more — refine the filter to see them`;
+    more.className = 'more-note more-note-click';
+    more.textContent = `…${hidden} more — click to show ${Math.min(hidden, MAX_SAMPLE_ROWS)}`;
+    more.onclick = () => {
+      sampleRowBudget += MAX_SAMPLE_ROWS;
+      renderSamples();
+    };
     sampleList.appendChild(more);
   }
-  if (!matched) sampleList.textContent = 'no samples match';
+  if (!packsShown) sampleList.textContent = 'no samples match';
 }
 
 async function loadSamples() {
@@ -9484,7 +9555,13 @@ async function loadSamples() {
   renderSamples();
 }
 
-sampleSearch.addEventListener('input', renderSamples);
+// A new filter is a fresh browse: drop the hand-opened packs and the grown row budget so the
+// list can't stay stuck open on packs the query no longer cares about.
+sampleSearch.addEventListener('input', () => {
+  packOverride.clear();
+  sampleRowBudget = MAX_SAMPLE_ROWS;
+  renderSamples();
+});
 
 // ---------------------------------------------------------------------------------------------
 // Sidebar tabs (session | sounds | files | settings) + pattern file manager. Pattern files are

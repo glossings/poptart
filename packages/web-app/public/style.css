@@ -999,6 +999,16 @@ aside h2 {
   color: var(--text-dim);
 }
 
+.more-note-click {
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.more-note-click:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 /* --------------------------------------------------------------------- log */
 
 footer#console {

@@ -377,7 +377,9 @@ loop: sr("bass").slow(8)                       // an 8-cycle bounce, played whol
 A path contains characters mini-notation reads as operators — `/` is slow, a space separates
 steps — so anything beyond a bare filename goes in **single quotes**, which make it one literal
 value. Quoting works in any mini string, not just `se`. Recording names never need it. The editor
-autocompletes both: `se("` offers a folder at a time, `sr("` offers every take you've made.
+autocompletes all three: `s("` offers pack names (and, after a `:`, that pack's files by index —
+type part of a filename to find its number), `se("` offers a folder at a time, `sr("` offers every
+take you've made.
 
 The ADSR shapes the voice's amplitude. `attack`/`decay`/`release` are **multiples of the played
 duration**: `.decay(0.5)` reaches the sustain level halfway through the note, while `.attack(2)`
