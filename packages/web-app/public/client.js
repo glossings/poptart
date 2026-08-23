@@ -4487,7 +4487,7 @@ function makeDefRegistry(opts) {
     }
   }
 
-  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate, pinState, pin, unpin };
+  return { kind, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate, pinState, pin, unpin };
 }
 
 
@@ -5224,7 +5224,9 @@ function makeNamePicker({
         });
         el.appendChild(star);
       }
-      if (row.note) {
+      // A filled star already says "library"; the note is for what the star can't - a hand-written
+      // prebake definition (no star), or the create row's "new".
+      if (row.note && !(row.note === reg.libraryNote && pinned !== 'none')) {
         const note = document.createElement('span');
         note.className = 'def-pick-note';
         note.textContent = row.note;
@@ -10760,8 +10762,40 @@ const packHead = makeNamePicker({
   inline: true, // the list is the panel's first column, like the preset panel
   current: () => packState?.id ?? null,
   open: (id) => openPackById(id),
+  canUse: () => !!packState?.source?.find(),
+  use: (id) => packUseInCall(id),
   refocus: () => packSearch.focus(),
 });
+
+// Puts `id` into the sp(...) the panel is looking through - the pack's half of prUseInCall. Where
+// the call says the open pack by name (`kit:0 kit:2`), only the name changes and the indexes stay,
+// since a drum pattern's numbers are the pattern; otherwise the whole argument goes, which is why
+// the line says what it replaced.
+function packUseInCall(id) {
+  const span = packState?.source?.find();
+  if (!span) return;
+  const was = cm.getRange(span.from, span.to);
+  if (was === id) return;
+  const word = packState.id && idWordRe(packState.id, '').test(was) ? packState.id : null;
+  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  if (word) {
+    const from = cm.indexFromPos(span.from);
+    applyEdits(idOccurrenceEdits({ from, str: was }, word, id));
+  } else {
+    cm.replaceRange(id, span.from, span.to);
+  }
+  const after = quoted.find();
+  quoted.clear();
+  packState.source.clear();
+  packState.source = after
+    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    : null;
+  refoldAll();
+  logLine(`sp("${was}") now plays "${id}"`);
+  if (id !== packState.id) openPackById(id);
+  else packSyncHead();
+  packScheduleEval();
+}
 const packSyncHead = () => packHead.syncHead();
 const packRenderList = () => { if (packState) packHead.renderList(); };
 
@@ -10776,7 +10810,10 @@ function packEntriesOf(code, def) {
 
 const packDefOf = (id) => packDefs.findDef(cm.getValue(), String(id));
 
-function openPackById(id) {
+// `from.source`: a marker over the id string of the sp(...) the panel was opened through, which is
+// what the list's → writes into. Opened any other way, the first call that names the pack stands
+// in - picking a kit and sending it to the pattern is the point of having the list.
+function openPackById(id, from = {}) {
   const key = String(id);
   const def = packDefOf(key);
   const lib = def ? null : prPrebakePacks.find((p) => p.id === key);
@@ -10784,7 +10821,13 @@ function openPackById(id) {
     logLine(`no pack called "${key}" is defined in this buffer`, true);
     return false;
   }
-  packState = { id: key, entries: def ? packEntriesOf(cm.getValue(), def) : [...lib.files], own: !!def };
+  let source = from.source ?? packState?.source ?? null;
+  if (!source?.find()) {
+    source = null;
+    const call = packDefs.refCalls(cm.getValue(), key)[0];
+    if (call) source = cm.markText(cm.posFromIndex(call.from), cm.posFromIndex(call.to), {});
+  }
+  packState = { id: key, entries: def ? packEntriesOf(cm.getValue(), def) : [...lib.files], own: !!def, source };
   packSel.entries.clear();
   packSel.entriesAnchor = null;
   packBackdrop.classList.remove('hidden');
@@ -10808,11 +10851,15 @@ function openPackFromCall(call, code) {
   const [from, to] = range;
   const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return false;
-  return openPackById(id);
+  const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
+  if (openPackById(id, { source })) return true;
+  source.clear();
+  return false;
 }
 
 function closePackPanel() {
   if (!packState) return;
+  packState.source?.clear();
   packState = null;
   packBackdrop.classList.add('hidden');
   packPlayerStopSource();
