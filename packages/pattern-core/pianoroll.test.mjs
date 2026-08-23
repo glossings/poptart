@@ -44,7 +44,8 @@ test('parsePianoRoll: fields, defaults, and empty input', () => {
 });
 
 test('parsePianoRoll: clamps out-of-range fields, rejects malformed tokens', () => {
-  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, index: 0, start: 0, len: 1, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  // start is NOT clamped at 0: a negative cell is a note before the roll's time (a recorded count-in)
+  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, index: 0, start: -3, len: 1, vel: 1, prob: 1, nudge: 0, mute: false }]);
   assert.deepEqual(parsePianoRoll('60:-2,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
   assert.throws(() => parsePianoRoll('60,0'), /bad note/);
   assert.equal(parsePianoRoll('60,0,4,0.5,0.5,7')[0].nudge, 0.5, 'six fields is a nudge, clamped');

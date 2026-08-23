@@ -49,8 +49,8 @@
         <div class="spacer"></div>
         <div id="phraseViz" title="position in the 4-cycle phrase - one circle per cycle"></div>
         <div class="rec-wrap">
-          <button id="recBtn" title="record MIDI keys — starts at the next phrase">● rec</button>
-          <button id="recOptsBtn" class="small" title="record options">▾</button>
+          <button id="recBtn" title="record live playing (MIDI keys, or a roll's ⌨) into the piano roll — starts at the next phrase"><span class="ico">●</span> rec</button>
+          <button id="recOptsBtn" title="record options"><svg class="chev" viewBox="0 0 10 6" width="10" height="6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <div id="recPanel" class="rec-panel hidden">
             <label>cycles
               <select id="recCycles">
@@ -71,16 +71,11 @@
             </label>
           </div>
         </div>
-        <select id="kbMode" title="keyboard() / tap() input — off types normally, midi plays notes, both does each">
-          <option value="normal">⌨ off</option>
-          <option value="midi">⌨ midi</option>
-          <option value="both">⌨ both</option>
-        </select>
         <select id="themeSelect" title="color theme"></select>
-        <button id="themeEditBtn" title="edit theme colors">🎨</button>
-        <a id="docsLink" class="hbtn" href="/docs.html" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs ↗</a>
-        <button id="playBtn" class="primary" title="Cmd/Ctrl + Enter">▶ play</button>
-        <button id="updateBtn" title="evaluate without changing play state">⟳ update</button>
+        <button id="themeEditBtn" title="edit theme colors"><span class="ico">🎨</span></button>
+        <a id="docsLink" class="hbtn" href="/docs.html" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs <span class="ico">↗</span></a>
+        <button id="playBtn" class="primary" title="Cmd/Ctrl + Enter"><span class="ico">▶</span> play</button>
+        <button id="updateBtn" title="evaluate without changing play state"><span class="ico">↻</span> update</button>
       </header>
 
       <main>
@@ -345,6 +340,8 @@
           <button id="pianorollMode" class="small pr-text-btn" title="what the rows mean">note</button>
           <button id="pianorollScaleFold" class="small pr-text-btn" title="show only the scale set by setscale()">scale</button>
           <button id="pianorollFold" class="small pr-text-btn" title="show only the rows that have notes">fold</button>
+          <button id="pianorollKeys" class="small" title="computer keyboard: play this roll's track from the typing keyboard (ctrl+m)">⌨</button>
+          <button id="pianorollCapture" class="small pr-text-btn" title="capture what was just played on this roll's track into the roll — as if record had been on">capture</button>
           <button id="pianorollPreview" class="small" title="preview notes as you draw">🎧</button>
           <button id="pianorollRandom" class="small" title="randomize the value lane's channel">🎲</button>
           <button id="pianorollToMini" class="small" title="convert to mini-notation">→♪</button>

@@ -182,6 +182,38 @@ header h1 {
   letter-spacing: 0.03em;
 }
 
+/* Every control in the header is one height and one radius, with its contents centred - a button,
+   a select and the docs link read as one row of the same thing, whatever each is made of. The
+   icons are spans of their own so they can be sized as glyphs (a ▶ or ↻ at text size is a speck)
+   without the label growing with them. */
+header > button,
+header > select,
+header > a.hbtn,
+.rec-wrap > button {
+  height: 32px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+header .ico {
+  font-size: 15px;
+  line-height: 1;
+  display: inline-block;
+  transform: translateY(-0.5px); /* optical centre: glyphs sit a hair low against lowercase text */
+}
+
+#recBtn .ico {
+  font-size: 11px;
+}
+
 .spacer {
   flex: 1;
 }
@@ -220,7 +252,7 @@ select {
 
 button:hover,
 select:hover {
-  background: var(--hover-bg);
+  background-color: var(--hover-bg); /* -color, not the shorthand: a select's chevron is a background-image */
   border-color: var(--border-strong);
 }
 
@@ -239,8 +271,7 @@ button.primary:hover {
    sit symmetrically and the Play/Stop toggle doesn't reflow the header when it changes text. */
 #playBtn,
 #updateBtn {
-  min-width: 96px;
-  text-align: center;
+  min-width: 100px;
 }
 
 /* Play/Stop toggle: green while it says "▶ play", red once it flips to "■ stop". */
@@ -2144,6 +2175,17 @@ li.CodeMirror-hint-active {
   margin-left: auto;
 }
 
+/* One height for the tool row, contents centred, so a glyph-sized button (⌨) and a word-sized one
+   (fold) stand level. */
+.pianoroll-head-tools button {
+  height: 22px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+}
+
 /* The roll and the controls that shape it sit side by side, Live-style: the timing controls in a
    column down the left, the grid itself to their right. */
 .pianoroll-body {
@@ -2350,6 +2392,18 @@ li.CodeMirror-hint-active {
   font-weight: 700;
 }
 
+/* ⌨ is a glyph, not a word - at the tools' text size it is a smudge, so it gets glyph size in the
+   same button height. On, it means the letter keys are playing notes rather than typing - worth
+   more than a tint, so it pulses the way an armed recorder does. */
+#pianorollKeys {
+  font-size: 17px;
+  padding: 0 7px;
+}
+
+#pianorollKeys.active {
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+
 /* Takes whatever the control column isn't using - flex-basis 0 so the backing store's pixel size
    (dpr-scaled, and set from the width this lands on) never feeds back into the layout. prSizeCanvas
    watches it and re-sizes/redraws the roll to match. */
@@ -2374,6 +2428,12 @@ li.CodeMirror-hint-active {
    sliding along when they arrive. */
 #themeSelect {
   min-width: 132px;
+  padding: 0 28px 0 14px; /* a name reads left-aligned, like a menu; the chevron keeps its margin */
+  justify-content: flex-start;
+}
+
+#themeEditBtn {
+  padding: 0 10px;
 }
 
 /* Its circles are built by script, so the box holds their space from the first paint instead of
@@ -2415,12 +2475,29 @@ li.CodeMirror-hint-active {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0; /* ● rec and its chevron are one segmented control - see #recBtn / #recOptsBtn */
 }
 
-/* label swaps between "● rec" and countdowns - fixed width keeps the header from jittering */
+/* label swaps between "● rec" and countdowns - fixed width keeps the header from jittering. The
+   options chevron is the button's other half: one segmented control, joined at the seam. */
 #recBtn {
   min-width: 88px;
+  border-radius: 8px 0 0 8px;
+}
+
+#recOptsBtn {
+  padding: 0 9px;
+  border-left-width: 0; /* shares ● rec's right border */
+  border-radius: 0 8px 8px 0;
+}
+
+#recOptsBtn .chev {
+  display: block;
+  color: var(--text-dim);
+}
+
+#recOptsBtn:hover .chev {
+  color: var(--text);
 }
 
 #recBtn.rec-armed {
@@ -2450,9 +2527,9 @@ li.CodeMirror-hint-active {
   gap: 8px;
   background: var(--bg-panel);
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  padding: 10px 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 36px var(--shadow);
   font-size: 12px;
   color: var(--text-dim);
   white-space: nowrap;
@@ -2466,7 +2543,18 @@ li.CodeMirror-hint-active {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 14px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.rec-panel select {
+  min-width: 84px;
+  padding: 4px 26px 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
 }
 
 .rec-panel select {

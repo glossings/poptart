@@ -30,6 +30,7 @@ let shapeMod = null;
 let pianorollMod = null;
 let notesMod = null; // notes.mjs - pure music-theory helpers piped up to the userland prebake scope
 let mixctlMod = null; // mixctl.mjs - the mixer's gain/pan trim reads and code edits
+let recordMod = null; // record.mjs - a live take into a roll (the ● rec and capture paths)
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -39,14 +40,16 @@ const coreReady = Promise.all([
   import('/pattern-core/pianoroll.mjs'),
   import('/pattern-core/notes.mjs'),
   import('/pattern-core/mixctl.mjs'),
+  import('/pattern-core/record.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx]) => {
+  .then(([m, l, s, pr, nt, mx, rc]) => {
     miniMod = m;
     labelsMod = l;
     shapeMod = s;
     pianorollMod = pr;
     notesMod = nt;
     mixctlMod = mx;
+    recordMod = rc;
     initLfoEditor();
     initPianorollEditor();
     initRecordPanel();
@@ -1461,7 +1464,7 @@ async function pollConf(labelOverride) {
 }
 
 // The block a track label names, for a write aimed at the TRACK - conf's .param(), auto-pin's
-// preset, a keyboard() swap. A muted copy (`pluck_: …`) and a playing one (`pluck: …`) carry the
+// preset, a recorded roll. A muted copy (`pluck_: …`) and a playing one (`pluck: …`) carry the
 // same label, and the engine only knows the one that is playing: the gesture came out of ITS
 // plugin, so that is the block the write belongs in. The muted one is only the fallback when
 // nothing by that name plays (a capture landing just after the track was muted).
@@ -3437,7 +3440,11 @@ function initPresetPanel() {
 // stretch the music itself - the selected notes, or the whole roll when nothing is selected. Clicking the scale chip snaps every note into
 // the key. Clicking anywhere outside the panel closes it - the roll is a tool you reach past to get back to the code.
 // With 🎧 on, drawing/dragging previews the note through the track's own
-// synth; →♪ rewrites the whole roll as an equivalent mini-notation note("…"). Every change is
+// synth; →♪ rewrites the whole roll as an equivalent mini-notation note("…"). ⌨ turns the typing
+// keyboard into a piano aimed at this roll's track (see the computer-keyboard section), the
+// header's ● rec records what you play INTO the roll - the take lands on the grid as you play it,
+// over itself if the roll is shorter, and the count-in's notes before cell 0 - and `capture` does
+// the same after the fact for whatever was just played (see the MIDI record section). Every change is
 // serialized straight back into `pianoroll("midi,start,len[,vel[,prob]] …", { grid, len, start })` and
 // re-evaluated (debounced), so the track plays what's drawn without a manual ⏎; hand edits to the
 // call flow the other way, back into the open panel. The code stays the single source of truth,
@@ -3470,6 +3477,8 @@ const prScaleLabel = document.getElementById('pianorollScale');
 const prPreviewBtn = document.getElementById('pianorollPreview');
 const prRandomBtn = document.getElementById('pianorollRandom');
 const prToMiniBtn = document.getElementById('pianorollToMini');
+const prKeysBtn = document.getElementById('pianorollKeys'); // ⌨ - the computer keyboard plays this roll's track
+const prCaptureBtn = document.getElementById('pianorollCapture'); // what was just played, into the roll
 const prSide = document.querySelector('.pianoroll-side');
 const prSideToggle = document.getElementById('pianorollSideToggle');
 const prCloseBtn = document.getElementById('pianorollClose');
@@ -3757,11 +3766,32 @@ function prBlockLabelAt(idx) {
   return labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => idx >= b.start && idx < b.end)?.label ?? null;
 }
 
+/**
+ * The track that PLAYS the roll on screen - what a preview sounds through, what the ⌨ keys play, and
+ * whose live notes a recording or a capture writes in here. An inline pianoroll() is in its track's
+ * block. A named roll's definition sits in the definitions block at the foot, so its track is the
+ * one whose pianoroll("<…>") the panel was opened through (the `source` marker), or failing that
+ * the first call in the buffer that names it. Null when nothing plays it.
+ */
+function prPlayingTrack() {
+  if (!prState || !labelsMod) return null;
+  const code = cm.getValue();
+  const labelAt = (idx) => labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx < b.end)?.label ?? null;
+  const src = prState.source?.find();
+  if (src) return labelAt(cm.indexFromPos(src.from));
+  if (prState.rollId != null) {
+    const call = rollDefs.refCalls(code, prState.rollId)[0];
+    if (call) return labelAt(call.start);
+  }
+  return prState.trackLabel;
+}
+
 // --- note preview: play the drawn note through the track's own synth (if the 🎧 toggle is on and
 // the track has been evaluated with an instrument). One note at a time; always paired with an off.
 function prPreviewSend(note, isOn) {
-  if (!prState?.trackLabel) return;
-  api('POST', '/api/previewNote', { trackId: prState.trackLabel, note, vel: PR_DEFAULT_VEL, isOn }).catch(() => {});
+  const trackId = prPlayingTrack();
+  if (!trackId) return;
+  api('POST', '/api/previewNote', { trackId, note, vel: PR_DEFAULT_VEL, isOn }).catch(() => {});
 }
 function prPreview(midi) {
   // An index roll's rows are files in a pack, not pitches: there is nothing here that knows what
@@ -3823,9 +3853,10 @@ function parsePianorollCall(inner) {
   if (grid == null) { const bare = /["'`]\s*,\s*(\d+)\s*$/.exec(inner.trim()); if (bare) grid = Math.max(1, Number(bare[1])); }
   if (grid == null) grid = 16;
   const len = int(/\blen\s*:\s*(\d+)/) ?? grid;
-  // start: where the loop window opens, in cells. 0 (the default) is left out of the code entirely.
-  const startM = /\bstart\s*:\s*(\d+)/.exec(inner);
-  const start = startM ? Math.max(0, Math.round(Number(startM[1]))) : 0;
+  // start: where the loop window opens, in cells - negative when it has been slid back over the
+  // notes before 0. 0 (the default) is left out of the code entirely.
+  const startM = /\bstart\s*:\s*(-?\d+)/.exec(inner);
+  const start = startM ? Math.round(Number(startM[1])) : 0;
   // mode: what the rows MEAN - notes (the default, and what every roll drawn before index mode
   // existed says) or sample indices. Only ever written when it isn't the default.
   const modeM = /\bmode\s*:\s*(["'`])(\w+)\1/.exec(inner);
@@ -4913,6 +4944,8 @@ function openPianorollEditor(call, carry = null) {
     zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
     scrollCells: 0, // leftmost visible cell when zoomed in
     sel: new Set(), // currently selected note objects (transient; mutated in place, never reserialized)
+    ghost: [], // keys still down in a take being recorded into this roll, drawn where they will land (see prRecGhosts); never serialized
+    take: null, // the recording under way's books - which events are in, which notes are the take's (see prRecTake)
     history: [], // undo snapshots, oldest first (see prPushHistory); seeded with the opening state
     histIdx: -1,
     trackLabel: prBlockLabelAt(call.start),
@@ -4939,6 +4972,8 @@ function openPianorollEditor(call, carry = null) {
   prSyncMode();
   prSyncRollHead();
   prSyncLaneChannel();
+  prSyncKeyboardBtn(); // ⌨ carries over a follow-switch (same track), and is off on a fresh open
+  prRecGhosts(); // a recording already under way shows in the roll it just opened on
   if (call.id && !wasOpen) prRefreshRollList(); // the prebake half of the picker, asked for once
   prPanel.classList.remove('hidden');
   prSizeCanvas(); // the width the layout gives it now, so the first frame is already right
@@ -5413,6 +5448,9 @@ function prRefreshRollList() {
 function closePianorollEditor() {
   prClosePicker();
   prPreviewOff();
+  // The keyboard plays the roll on screen; no roll, nothing for it to play - and no lit ⌨ to
+  // tell you your typing is being eaten.
+  if (prKbOn) { prKbOn = false; kbReleaseAll(); prSyncKeyboardBtn(); }
   if (prRaf) { cancelAnimationFrame(prRaf); prRaf = null; }
   if (prState?.marker) prState.marker.clear();
   if (prState?.source) prState.source.clear();
@@ -5586,13 +5624,33 @@ function syncPianorollFromCode() {
 // cycle (grid) for context. Horizontal zoom widens each cell past the "fit" width and scrolls; the
 // pitch axis never zooms. A loop ruler occupies the top PR_TOPBAR px; note rows sit below it.
 
-// Rendered columns: the loop window's end rounded up to its next whole bar, plus a little headroom
-// to drag into. Frozen (prState._dragCols) during a loop drag so the cell width - and thus the drag
-// mapping - stays put instead of feeding back on itself as the window changes.
-const prRenderCols = () => (Math.floor(prLoopEnd() / prState.grid) + 1) * prState.grid + 4;
+// Rendered columns: the loop window's end - or the end of the last note, whichever is further -
+// rounded up to its next whole bar, plus a little headroom to drag into. Notes are not fenced in by
+// the window (they can be moved out of it and back, and a take records before it), so the grid
+// shows wherever they are. Frozen (prState._dragCols) for the length of any drag that moves
+// notes or the window, so the cell width - and thus the drag mapping - stays put instead of feeding
+// back on itself as the thing being dragged changes.
+const prRenderCols = () => {
+  let end = prLoopEnd();
+  for (const nt of prState.notes) if (!nt.hidden && nt.start + nt.len > end) end = nt.start + nt.len;
+  for (const g of prState.ghost) if (g.start + g.len > end) end = g.start + g.len;
+  return (Math.floor(end / prState.grid) + 1) * prState.grid + 4;
+};
 
-// The loop window: `len` cells from `start`. Notes outside it are drawn (dimmed) but never sound,
-// and the editing gestures - drawing, dragging, nudging - keep notes inside it.
+// The leftmost rendered column: 0, or - when the roll holds notes BEFORE its own time (a recorded
+// count-in, which record.mjs writes at negative cells; a take being recorded, still a ghost), or the
+// window has been slid back over them - the bar line at or before the earliest of those, so they
+// are on screen. Frozen during a drag like the right edge (prState._dragMin), for the same reason.
+const prMinCell = () => {
+  let min = Math.min(0, prState.start);
+  for (const nt of prState.notes) if (!nt.hidden && nt.start < min) min = nt.start;
+  for (const g of prState.ghost) if (g.start < min) min = g.start;
+  return Math.floor(min / prState.grid) * prState.grid;
+};
+
+// The loop window: `len` cells from `start` (negative when slid back before 0). Notes outside it
+// are drawn (dimmed) but never sound. Drawing starts inside it; dragging and nudging move notes
+// freely across it, and duplicating/pasting lands copies within it.
 const prLoopEnd = () => prState.start + prState.len;
 const prInLoop = (cell) => cell >= prState.start && cell < prLoopEnd();
 const prClampToLoop = (cell) => Math.min(prLoopEnd() - 1, Math.max(prState.start, cell));
@@ -5621,7 +5679,7 @@ function prTimeLines(m, maxDepth = Infinity) {
   const crowded = divs.findIndex((d) => d * m.cellW < PR_DIV_MIN_PX);
   const deepest = Math.min(maxDepth, crowded === -1 ? divs.length - 1 : Math.max(0, crowded - 1));
   const out = [];
-  const c0 = Math.max(0, Math.floor(m.scroll));
+  const c0 = Math.max(m.minCell, Math.floor(m.scroll));
   const c1 = Math.min(m.cols, Math.ceil(m.scroll + m.visibleCells));
   for (let c = c0; c <= c1; c++) {
     const level = divs.findIndex((d) => c % d === 0);
@@ -5646,10 +5704,11 @@ function prMetrics() {
   const gridW = prW - PR_GUTTER;
   const rowH = PR_GRIDH / PR_ROWS;
   const cols = prState._dragCols ?? prRenderCols();
-  const cellW = (gridW / cols) * prState.zoom;
-  const visibleCells = gridW / cellW; // = cols / zoom
-  const maxScroll = Math.max(0, cols - visibleCells);
-  const scroll = Math.min(maxScroll, Math.max(0, prState.scrollCells));
+  const minCell = prState._dragMin ?? prMinCell(); // <= 0: the rendered span runs minCell..cols
+  const cellW = (gridW / (cols - minCell)) * prState.zoom;
+  const visibleCells = gridW / cellW; // = (cols - minCell) / zoom
+  const maxScroll = Math.max(minCell, cols - visibleCells);
+  const scroll = Math.min(maxScroll, Math.max(minCell, prState.scrollCells));
   prState.scrollCells = scroll; // keep state clamped as len/grid/zoom change
   // The pitch axis in lane terms (see prLaneList): laneOf is midi -> lane for O(1) lookups during
   // a draw, built here so folding, drawing and hit-testing all read the same axis.
@@ -5667,7 +5726,7 @@ function prMetrics() {
   // Clamp the pitch window the same way scrollCells is clamped, so toggling fold (or deleting the
   // notes that were holding a lane open) can't leave the view parked past the end of the axis.
   prState.pitchTop = Math.max(Math.min(PR_ROWS - 1, laneMax), Math.min(laneMax, prState.pitchTop));
-  return { W: prW, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, laneTop: PR_TOPBAR + PR_GRIDH, laneH: PR_LANEH, gridW, cols, cellW, rowH, visibleCells, maxScroll, scroll, lanes, laneOf, laneMax, bottomPos: prState.pitchTop - PR_ROWS };
+  return { W: prW, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, laneTop: PR_TOPBAR + PR_GRIDH, laneH: PR_LANEH, gridW, cols, minCell, cellW, rowH, visibleCells, maxScroll, scroll, lanes, laneOf, laneMax, bottomPos: prState.pitchTop - PR_ROWS };
 }
 
 const prCellToX = (cell, m) => PR_GUTTER + (cell - m.scroll) * m.cellW;
@@ -5682,10 +5741,21 @@ function prCanvasPos(e) {
 function prCellAt(px, m) {
   if (px < PR_GUTTER) return null;
   const cell = Math.floor(prCellFloat(px, m));
-  return cell >= 0 && cell < m.cols ? cell : null;
+  return cell >= m.minCell && cell < m.cols ? cell : null;
 }
 
-const prClampCell = (px, m) => Math.max(0, Math.min(m.cols - 1, Math.floor(prCellFloat(px, m))));
+const prClampCell = (px, m) => Math.max(m.minCell, Math.min(m.cols - 1, Math.floor(prCellFloat(px, m))));
+
+// How far a dragged SELECTION may move, asked for `by` cells: the whole group shifts by one number,
+// clamped so that its first note stays on the rendered grid (the frozen one, during a drag) - never
+// per note, which would pile the leading notes up against an edge and change the timing between
+// them. Notes are free to leave the loop window (and come back): the window is what PLAYS, not a
+// fence, and a take recorded before it has to be draggable into it.
+const prGroupShift = (starts, by, m) => {
+  const lo = Math.min(...starts);
+  const hi = Math.max(...starts);
+  return Math.max(m.minCell - lo, Math.min(m.cols - 1 - hi, by));
+};
 // pitchTop is fractional (smooth scroll); the integer lane containing py is ceil(top - rows).
 const prPosAt = (py, m) => Math.ceil(prState.pitchTop - (py - PR_TOPBAR) / m.rowH);
 const prMidiAt = (py, m) => prMidiOf(prPosAt(py, m), m); // the ROW value under py, on whichever axis is showing
@@ -5829,7 +5899,7 @@ function drawLoopBar(ctx, col, m) {
   ctx.textAlign = 'left';
   ctx.font = '8px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.fillStyle = col('--text-dim');
-  for (let c = 0; c <= m.cols; c += prState.grid) {
+  for (let c = m.minCell; c <= m.cols; c += prState.grid) { // minCell is a bar line (see prMinCell)
     const x = prCellToX(c, m);
     if (x < PR_GUTTER - 0.5 || x > m.W + 0.5) continue;
     ctx.strokeStyle = col('--border-strong');
@@ -5883,9 +5953,9 @@ function prSnapCell(cellF, m, fine) {
 }
 
 // Put one end of the window at `cell`, keeping the other where it is (so either end can be
-// dragged anywhere on the timeline, and the window never closes below one cell).
-function prSetLoopEdge(edge, cell0) {
-  const cell = Math.max(0, cell0);
+// dragged anywhere on the timeline - back over the notes before 0 too - and the window never
+// closes below one cell).
+function prSetLoopEdge(edge, cell) {
   if (edge === 'start') {
     const end = prLoopEnd();
     prState.start = Math.min(cell, end - 1);
@@ -6199,6 +6269,34 @@ function drawPianoroll() {
     }
   }
 
+  // A take being recorded into this roll, as it happens (see prRecGhosts): the notes the recorder
+  // has so far, where they will land - count-in notes in the armed colour, the window's in the
+  // recording colour, a key still down drawn hollow. Ghosts until the take is written.
+  if (prState.ghost.length) {
+    const armCol = col('--warn');
+    const liveCol = col('--err');
+    for (const g of prState.ghost) {
+      const pos = prPosOf(index ? g.index : g.midi, m);
+      if (pos > prState.pitchTop + 1 || pos < m.bottomPos) continue;
+      const x = prCellToX(g.start, m);
+      const x2 = prCellToX(g.start + g.len, m);
+      if (x2 <= PR_GUTTER || x >= W) continue;
+      const dx = Math.max(PR_GUTTER + 0.5, x);
+      const dx2 = Math.min(W, x2);
+      const y = prPosToY(pos, m);
+      const w = Math.max(2, dx2 - dx - 1);
+      ctx.fillStyle = ctx.strokeStyle = g.countIn ? armCol : liveCol;
+      ctx.lineWidth = 1;
+      ctx.setLineDash(g.held ? [3, 2] : []);
+      ctx.globalAlpha = g.held ? 0.25 : 0.35 + 0.4 * g.vel;
+      prRoundRect(ctx, dx + 1, y + 1.5, w, rowH - 3, 3); ctx.fill();
+      ctx.globalAlpha = 0.9;
+      prRoundRect(ctx, dx + 1, y + 1.5, w, rowH - 3, 3); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+  }
+
   // marquee rubber-band (select tool)
   if (prState.marquee) {
     const r = prState.marquee;
@@ -6439,6 +6537,7 @@ function initPianorollCanvas() {
         const edge = prLoopEdgeAt(px, m);
         drag = { kind: 'loop', edge, grabCell: prCellFloat(px, m), start0: prState.start };
         prState._dragCols = m.cols;
+        prState._dragMin = m.minCell;
         // Grabbing an end throws it straight to the pointer (clicking out on the ruler is still
         // "put the near boundary here"); grabbing the body only moves once the pointer does.
         if (edge !== 'move') prSetLoopEdge(edge, prSnapCell(prCellFloat(px, m), m, e.shiftKey));
@@ -6500,6 +6599,9 @@ function initPianorollCanvas() {
         drag = { kind: 'move', grabCell: cell, grabPos: pos, orig: snapshotPos(), alt: e.altKey };
         prPreviewNotes([nt]);
       }
+      // The grid's extent follows the notes, so a drag that moves or lengthens them would otherwise
+      // re-mesh the columns under the pointer as it went (see prRenderCols).
+      if (drag.kind !== 'vel') { prState._dragCols = m.cols; prState._dragMin = m.minCell; }
     } else if (prTool === 'select') {
       // rubber-band select (shift keeps the existing selection as a base). Without shift the click
       // deselects right away, so a click that never becomes a drag still lands on empty space empty-handed.
@@ -6512,6 +6614,8 @@ function initPianorollCanvas() {
       prState.notes.push(nt);
       prState.sel.add(nt);
       drag = { kind: 'create', note: nt };
+      prState._dragCols = m.cols; // see the move/resize drags above
+      prState._dragMin = m.minCell;
       prClipOverlaps(); // pushed last, so it takes the lane from whatever was under the pencil
       prPreview(nt.midi);
     } else {
@@ -6530,7 +6634,7 @@ function initPianorollCanvas() {
       // The window's ends - and its start when the whole thing is being slid - snap to the bar and
       // its halves unless shift is held (see prSnapCell).
       const at = prSnapCell(drag.edge === 'move' ? drag.start0 + prCellFloat(px, m) - drag.grabCell : prCellFloat(px, m), m, e.shiftKey);
-      if (drag.edge === 'move') prState.start = Math.max(0, at);
+      if (drag.edge === 'move') prState.start = at;
       else prSetLoopEdge(drag.edge, at);
     } else if (drag.kind === 'create') {
       drag.note.full = Math.max(1, prClampCell(px, m) - drag.note.start + 1); // what you drew...
@@ -6547,8 +6651,9 @@ function initPianorollCanvas() {
       const dCell = cell - drag.grabCell;
       const dPos = prPosAt(py, m) - drag.grabPos; // lanes, so a folded drag steps through the scale
       if (dCell || dPos) { altCopy(drag); raiseOnce(drag); }
+      const shift = prGroupShift(drag.orig.map((o) => o.start), dCell, m);
       for (const o of drag.orig) {
-        o.n.start = prClampToLoop(o.start + dCell);
+        o.n.start = o.start + shift;
         prSetRow(o.n, prMidiOf(prPosOf(o.row, m) + dPos, m));
       }
       prClipOverlaps(); // notes it passes over give way, and come back behind it
@@ -6598,7 +6703,8 @@ function initPianorollCanvas() {
         prClipOverlaps(); // already clipped live on every frame; this settles the final position
         writePianorollCall();
       }
-      prState._dragCols = null; // unfreeze the loop-drag column width
+      prState._dragCols = null; // unfreeze the column range
+      prState._dragMin = null;
       prState._laneDrag = null; // the lane readout only follows an active drag
     }
     prPreviewOff();
@@ -6730,10 +6836,11 @@ function initPianorollCanvas() {
         // Shift is Live's length nudge: the onset stays put and the END moves one cell - right
         // lengthens, left shortens back down to a single cell. It nudges the length you can SEE
         // (the clipped one), same as dragging the visible right edge does.
-        const cols = prMetrics().cols;
-        for (const n of sel) n.full = Math.max(1, Math.min(n.len + dir, cols - n.start));
+        for (const n of sel) n.full = Math.max(1, n.len + dir);
       } else {
-        for (const n of sel) n.start = prClampToLoop(n.start + dir);
+        // The whole selection steps together, unfenced - out of the window, past the grid's edge
+        // (which grows to keep up) - so the timing between the notes is never touched.
+        for (const n of sel) n.start += dir;
       }
       prClipOverlaps();
       writePianorollCall();
@@ -7124,6 +7231,13 @@ function initPianorollEditor() {
     else logLine(`${what} (degrees in ${scale}) - ${off} out-of-key note${off === 1 ? '' : 's'} moved to the nearest degree`, true);
   });
 
+  // ⌨ - the typing keyboard plays this roll's track (see the computer-keyboard section).
+  prSyncKeyboardBtn();
+  prKeysBtn.addEventListener('click', () => { prSetKeyboard(!prKbOn); prRefocus(); });
+
+  // capture - what was just played on this roll's track, into the roll, as if record had been on.
+  prCaptureBtn.addEventListener('click', () => { prCapture(); prRefocus(); });
+
   prCloseBtn.addEventListener('click', () => closePianorollEditor());
 
   // Click anywhere off the panel - the code, the console, the toolbar - and the roll gets out of
@@ -7131,8 +7245,10 @@ function initPianorollEditor() {
   // writing is the same gesture as dismissing it. Capture phase, so a click that never bubbles
   // still counts. Reopening is unaffected: the double-click on the `pianoroll` name lands outside
   // the panel too, but its second mousedown reaches openWidgetAt, which opens the roll again.
+  // The header's recorder (● rec and its options) is the one outside thing that is ABOUT the open
+  // roll - arming a take you then watch land on it - so reaching for it leaves the roll up.
   document.addEventListener('pointerdown', (e) => {
-    if (prState && !prPanel.contains(e.target)) closePianorollEditor();
+    if (prState && !prPanel.contains(e.target) && !e.target.closest?.('.rec-wrap')) closePianorollEditor();
   }, true);
 
   // Panel-wide keys while it's open: Escape (when the code has focus - the canvas handles its own),
@@ -7382,12 +7498,16 @@ function updatePhraseViz() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// MIDI record - capture what's being played on a midikeys() route and write it back into the
-// code as a `<...>*n`.as("note:vel:clip") pattern, replacing the kb()/midikeys() call. The
-// server owns the recording window (/api/midiRecord/*): it arms at the next 4-cycle phrase
-// boundary (the wait is the count-in - watch the circles), records for the chosen number of
-// cycles at the chosen grid, and serves the converted pattern; this side polls for it, edits
-// the buffer, and re-evaluates so the loop takes over from the live keys seamlessly.
+// MIDI record - capture what's being played live (a midikeys() route, or the roll's ⌨ keyboard)
+// and write it into a PIANO ROLL. The server owns the recording window (/api/midiRecord/*): it
+// arms at the next phrase boundary (the wait is the count-in - watch the circles), records for the
+// chosen number of cycles, and serves the events as absolute cycle times; this side turns them
+// into roll notes (pattern-core's record.mjs), draws the take into the open roll AS IT HAPPENS, and
+// on 'done' writes each track's take into that track's roll - the open roll, the block's own
+// pianoroll(...) or the definition it names, or a fresh roll in place of the kb()/midikeys() call
+// - and re-evaluates so the loop takes over from the live keys seamlessly. Where the roll was
+// playing when a note sounded is the cell it lands on, so a take longer than the roll overdubs
+// (see recordingToRoll), and what was played during the count-in goes in before cell 0.
 // ---------------------------------------------------------------------------------------------
 
 const recBtn = document.getElementById('recBtn');
@@ -7398,21 +7518,26 @@ const recGrid = document.getElementById('recGrid');
 
 let recState = null; // latest /api/midiRecord status while armed/recording, else null
 let recPollTimer = null;
+const REC_POLL_MS = 120; // the take is drawn into the open roll from these, so brisk
 
 recOptsBtn.addEventListener('click', () => recPanel.classList.toggle('hidden'));
 recBtn.addEventListener('click', () => (recState ? cancelMidiRecord(true) : startMidiRecord()));
+
+/** The quantize the rec options ask for: slots per cycle, 0 = off. */
+const recQuantize = () => Number(recGrid.value) || 0;
 
 async function startMidiRecord() {
   recPanel.classList.add('hidden');
   try {
     recState = await api('POST', '/api/midiRecord/start', {
       cycles: Number(recCycles.value),
-      grid: Number(recGrid.value),
+      grid: recQuantize(),
     });
     if (recState.transport) transport = recState.transport;
-    recPollTimer = setInterval(pollMidiRecord, 300);
+    recPollTimer = setInterval(pollMidiRecord, REC_POLL_MS);
+    prRecGhosts();
     logLine(
-      `midi record armed: ${recState.cycles} cycle(s), quantize ${recGrid.selectedOptions[0].textContent} - recording starts when the phrase ends`,
+      `midi record armed: ${recState.cycles} cycle(s), quantize ${recGrid.selectedOptions[0].textContent} - recording starts at cycle ${recState.startCycle}`,
     );
   } catch (e) {
     recState = null;
@@ -7424,6 +7549,7 @@ async function cancelMidiRecord(log = false) {
   clearInterval(recPollTimer);
   recPollTimer = null;
   recState = null;
+  prRecGhosts();
   try {
     await api('POST', '/api/midiRecord/cancel');
   } catch {
@@ -7439,17 +7565,21 @@ async function pollMidiRecord() {
     if (s.phase === 'done') {
       clearInterval(recPollTimer);
       recPollTimer = null;
+      const take = recState;
       recState = null;
+      prRecGhosts();
       api('POST', '/api/midiRecord/cancel').catch(() => {}); // ack: clear the served results
-      applyRecording(s.results ?? []);
+      applyRecording(s.results ?? [], { ...take, ...s });
     } else if (s.phase === 'idle') {
       // server restarted / lost the recording
       clearInterval(recPollTimer);
       recPollTimer = null;
       recState = null;
+      prRecGhosts();
       logLine('midi record: the server dropped the recording', true);
     } else {
       recState = s;
+      prRecGhosts();
     }
   } catch {
     // transient fetch error - keep polling
@@ -7457,53 +7587,259 @@ async function pollMidiRecord() {
 }
 
 function updateRecButton() {
+  const say = (text) => { if (recBtn.dataset.text !== text) { recBtn.dataset.text = text; recBtn.innerHTML = `<span class="ico">●</span> ${text}`; } };
   if (!recState) {
-    if (recBtn.textContent !== '● rec') recBtn.textContent = '● rec';
+    say('rec');
     recBtn.classList.remove('rec-armed', 'rec-live');
     return;
   }
   const pos = currentCyclePos();
   if (pos < recState.startCycle) {
-    recBtn.textContent = `● in ${Math.max(0, recState.startCycle - pos).toFixed(1)}`;
+    say(`in ${Math.max(0, recState.startCycle - pos).toFixed(1)}`);
     recBtn.classList.add('rec-armed');
     recBtn.classList.remove('rec-live');
   } else {
-    recBtn.textContent = `● ${Math.min(recState.cycles, pos - recState.startCycle).toFixed(1)}/${recState.cycles}`;
+    say(`${Math.min(recState.cycles, pos - recState.startCycle).toFixed(1)}/${recState.cycles}`);
     recBtn.classList.add('rec-live');
     recBtn.classList.remove('rec-armed');
   }
 }
 
-function applyRecording(results) {
+/**
+ * The take so far, INTO the open roll, as it happens. Every poll, the events the recorder has
+ * completed since the last one (keys that have come back up) are written into the roll for real -
+ * through the same conversion that 'done' uses - and the buffer re-evaluated on the panel's usual
+ * debounce, so what you played on the first pass is PLAYING by the second: the overdub you hear is
+ * the overdub you get. Keys still down are drawn as ghosts in the meantime - where they will land,
+ * growing, count-in ones in the armed colour, the window's in the recording colour - and become
+ * notes the moment they are released. The notes of the take stay selected as one, so it can be
+ * moved or undone together; the roll's history takes it as a single step at 'done' (prRecFinish).
+ *
+ * The status carries every track's events; only the open roll's track is drawn/written here - the
+ * others are written at 'done' (see applyRecording). prState.take remembers which events have been
+ * written (keyed by track, pitch and onset), so a poll never writes one twice and 'done' only adds
+ * what is left. A finer quantize than the roll's grid re-meshes the roll on the first note it
+ * writes (see recordingToRoll), and the ghosts are scaled back from the scratch grid to the roll's.
+ */
+function prRecGhosts() {
+  if (!prState) return;
+  const was = prState.ghost.length;
+  prState.ghost = [];
+  const track = recState?.events && prPlayingTrack();
+  const events = track ? recState.events[track] : null;
+  if (events?.length && recordMod) {
+    const take = prRecTake(track);
+    const opts = { window: [recState.startCycle, recState.endCycle], quantize: recState.grid };
+    // 1. completed since the last poll: into the roll
+    const fresh = events.filter((ev) => !ev.held && !take.keys.has(prRecKey(ev)));
+    if (fresh.length) {
+      prRecWrite(fresh, opts, take, false);
+      writePianorollCall(false); // one history step for the whole take, at the end
+    }
+    // 2. still down: ghosts, where they will land
+    const held = events.filter((ev) => ev.held);
+    if (held.length) {
+      const scratch = { notes: [], grid: prState.grid, len: prState.len, start: prState.start };
+      const out = recordMod.recordingToRoll(held, scratch, opts);
+      const scale = prState.grid / out.grid;
+      out.added.forEach((nt, i) => {
+        const ev = out.sources[i];
+        prState.ghost.push({
+          midi: nt.midi,
+          index: nt.index,
+          start: nt.start * scale,
+          len: Math.max(0.25, nt.len * scale),
+          vel: nt.vel,
+          countIn: ev.start < recState.startCycle,
+          held: true,
+        });
+      });
+    }
+  }
+  if (was || prState.ghost.length) drawPianoroll();
+}
+
+/** An event's identity across polls: the recorder hands the same start back each time. */
+const prRecKey = (ev) => `${ev.note}|${ev.index ?? ''}|${ev.start}`;
+
+/** The open roll's bookkeeping for the recording under way - fresh per arming, and per track. */
+function prRecTake(track) {
+  const arm = recState?.armCycle ?? null;
+  if (!prState.take || prState.take.arm !== arm || prState.take.track !== track) {
+    prState.take = { arm, track, keys: new Set(), notes: [] };
+  }
+  return prState.take;
+}
+
+/**
+ * Write `events` into the open roll and keep the take's books: the roll's grid/len/start follow the
+ * conversion (a re-mesh for a fine quantize), the new notes join the take and the selection.
+ */
+function prRecWrite(events, opts, take, scroll = true) {
+  const out = recordMod.recordingToRoll(events, prState, opts);
+  prState.grid = out.grid;
+  prState.len = out.len;
+  prState.start = out.start;
+  for (const ev of events) take.keys.add(prRecKey(ev));
+  take.notes.push(...out.added);
+  prState.sel = new Set(take.notes.filter((nt) => !nt.hidden));
+  prSyncGridLenInputs();
+  if (scroll) prScrollTo(out.added); // bring the take into the pitch window without throwing the view away
+  return out;
+}
+
+/**
+ * 'done': write each track's take into its roll. Three places a take can go, tried in order:
+ *   1. the OPEN roll, when it is this track's - straight into the panel's notes (selected, so
+ *      they can be moved or deleted as one), and out to the code through the panel's own write;
+ *   2. the block's own roll - an inline pianoroll("…") in the block, or the definition a
+ *      single-name pianoroll("<name>") plays - rewritten in place;
+ *   3. a FRESH roll in place of the block's kb()/midikeys() call, sized to the take
+ *      (the old mini-notation replacement, as a roll).
+ * A fresh roll takes the quantize as its grid (UNQUANTIZED_ROLL_GRID with quantize off); an
+ * existing roll keeps its own, re-meshed only if the quantize is finer (see recordingToRoll).
+ */
+function applyRecording(results, take) {
   if (!results.length) {
     logLine('midi record: no notes were played during the recording window', true);
     return;
   }
-  let applied = 0;
+  if (!recordMod || !pianorollMod) {
+    logLine('midi record: pattern-core is not loaded - nothing written', true);
+    return;
+  }
+  const window = [take.startCycle, take.endCycle];
+  const quantize = take.grid;
+  let evalNeeded = false;
   for (const r of results) {
-    if (r.error) {
-      logLine(`midi record (${r.label}): ${r.error}`, true);
+    const { label, events } = r;
+    const n = events.length;
+    const countIn = events.filter((ev) => ev.start < take.startCycle).length;
+    const what = `${n} note${n === 1 ? '' : 's'}${countIn ? ` (${countIn} from the count-in, before cell 0)` : ''}`;
+    // 1. the open roll - this track's, or the very call the take would otherwise be written under
+    // (a definition two tracks share, opened through the other one)
+    const target = rollTargetForTrack(label);
+    if (prState && (prPlayingTrack() === label || (target && prState.callStart === target.start))) {
+      // Most of it is already in (prRecGhosts wrote each note as its key came up); this adds what
+      // was still down when the window closed, and files the whole take as one undo step.
+      const take = prRecTake(label);
+      const rest = events.filter((ev) => !take.keys.has(prRecKey(ev)));
+      const out = rest.length ? prRecWrite(rest, { window, quantize }, take) : null;
+      prState.sel = new Set(take.notes.filter((nt) => !nt.hidden));
+      prState.take = null;
+      writePianorollCall();
+      drawPianoroll();
+      logLine(`midi record: ${what} into the open roll ("${label}")${out?.regridded ? ` - re-meshed to a ${out.grid} grid for the quantize` : ''}`);
       continue;
     }
-    const spec = r.noteless ? 'vel:clip' : 'note:vel:clip'; // tap() records note-less
-    const replacement = '`' + r.pattern + '`.as("' + spec + '")';
-    if (replaceKbCall(r.label, replacement)) {
-      applied++;
-      logLine(`midi record: wrote ${r.count} ${r.noteless ? 'hit' : 'note'}(s) into "${r.label}"`);
+    // 2. the block's roll
+    if (target) {
+      const code = cm.getValue();
+      const inner = code.slice(target.open + 1, target.close);
+      const parsed = parsePianorollCall(target.idLiteral ? splitFirstArg(inner)[1] : inner);
+      const out = recordMod.recordingToRoll(events, parsed, { window, quantize });
+      const text = serializePianorollCall({ ...parsed, grid: out.grid, len: out.len, start: out.start, idLiteral: target.idLiteral ?? null });
+      cm.replaceRange(text, cm.posFromIndex(target.start), cm.posFromIndex(target.close + 1));
+      refoldAll();
+      evalNeeded = true;
+      logLine(`midi record: ${what} into ${target.idLiteral ? `roll ${target.idLiteral}` : 'the roll'} of "${label}"`);
+      continue;
+    }
+    // 3. a fresh roll for the live-keys call
+    const grid = quantize > 0 ? quantize : recordMod.UNQUANTIZED_ROLL_GRID;
+    const fresh = { notes: [], grid, len: grid * take.cycles, start: 0 };
+    const out = recordMod.recordingToRoll(events, fresh, { window, quantize });
+    const text = serializePianorollCall({ notes: out.notes, grid: out.grid, len: out.len, start: out.start, mode: 'note', swing: 0, swinggrid: null, idLiteral: null });
+    if (replaceKbCall(label, text)) {
+      evalNeeded = true;
+      logLine(`midi record: ${what} into a new roll in "${label}" - double-click pianoroll to open it`);
     } else {
-      logLine(
-        `midi record (${r.label}): no midikeys/kb/keyboard/tap call found to replace - recorded pattern: ${r.pattern.replace(/\n\s*/g, ' ')}`,
-        true,
-      );
+      logLine(`midi record ("${label}"): no pianoroll or midikeys/kb call found to write ${what} into - it was: ${pianorollMod.serializePianoRoll(out.notes.filter((nt) => !nt.hidden))}`, true);
     }
   }
-  if (applied) evaluate(true);
+  if (evalNeeded) evaluate(true);
+}
+
+/**
+ * The roll a track's block plays, as a call to rewrite: an inline pianoroll("…") with drawn notes,
+ * or the _roll(...) definition a pianoroll("<name>") naming exactly one roll resolves to. The
+ * first in the block wins. Null when the block has neither (a bare live-keys track, or a roll
+ * pattern naming several rolls - which one a take belongs in is not a question this can answer).
+ * Shape: { start, open, close, idLiteral } - the span to replace, and the id when it is a definition.
+ */
+function rollTargetForTrack(label) {
+  if (!labelsMod || !pianorollMod) return null;
+  const code = cm.getValue();
+  const block = blockForTrack(code, label);
+  if (!block) return null;
+  const re = /\bpianoroll\s*\(/g;
+  let m;
+  while ((m = re.exec(code))) {
+    if (m.index < block.start || m.index >= block.end) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    const inner = code.slice(open + 1, close);
+    if (!inner.trim()) continue; // an empty call: materialize names it on the next eval, nothing to write into yet
+    if (rollDefs.isIdCall(inner)) {
+      const str = /(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner)?.[2] ?? '';
+      const ids = idsNamedIn(str);
+      if (ids.length !== 1) continue;
+      const def = rollDefs.findDef(code, ids[0]);
+      if (!def) continue;
+      return { start: def.start, open: def.open, close: def.close, idLiteral: def.idLiteral };
+    }
+    return { start: m.index, open, close, idLiteral: null };
+  }
+  return null;
+}
+
+/**
+ * capture - Live's Capture MIDI, for the roll on screen: what was just played on its track goes
+ * into the roll as if record had been on. The server keeps the last minute or so of every track's
+ * live notes (midikeys() routes and the ⌨ keyboard both); this asks for the roll's track's, picks
+ * the window (captureWindow: the trailing run since the last phrase of silence - one pass of the
+ * loop for a roll with notes, a fitted power-of-two length for an empty one) and writes it with
+ * the same conversion a recording uses. An empty roll takes the captured length as its loop.
+ */
+async function prCapture() {
+  if (!prState || !recordMod) return;
+  const trackId = prPlayingTrack();
+  if (!trackId) { logLine('capture: nothing plays this roll yet - put pianoroll(…) in a track first', true); return; }
+  let events;
+  try {
+    ({ events } = await api('POST', '/api/liveNotes', { trackId }));
+  } catch (e) {
+    logLine(`capture: ${e.message ?? e}`, true);
+    return;
+  }
+  if (!prState || prPlayingTrack() !== trackId) return; // the panel moved on while we waited
+  const hasNotes = prLiveNotes(prState.notes).length > 0;
+  const win = recordMod.captureWindow(events ?? [], { loopCycles: hasNotes ? prState.len / prState.grid : null });
+  if (!win) { logLine(`capture: nothing has been played on "${trackId}" lately`, true); return; }
+  const inWindow = events.filter((ev) => ev.start >= win.start && ev.start < win.end);
+  if (!inWindow.length) { logLine(`capture: nothing of "${trackId}" falls in the last pass`, true); return; }
+  if (!hasNotes) {
+    // An empty roll becomes the take's shape: the loop is the captured stretch, from its first cell.
+    prState.start = 0;
+    prState.len = Math.max(1, Math.round(win.cycles * prState.grid));
+  }
+  const out = recordMod.recordingToRoll(inWindow, prState, { window: [win.start, win.end], quantize: recQuantize(), countIn: false });
+  prState.grid = out.grid;
+  prState.len = out.len;
+  prState.start = out.start;
+  prState.sel = new Set(out.added.filter((nt) => !nt.hidden));
+  prSyncGridLenInputs();
+  prScrollTo(out.added);
+  writePianorollCall();
+  drawPianoroll();
+  const n = out.added.length;
+  logLine(`capture: ${n} note${n === 1 ? '' : 's'} from cycles ${win.start}–${win.end} into ${hasNotes ? 'the roll' : `a ${win.cycles}-cycle loop`} ("${trackId}")${out.regridded ? ` - re-meshed to a ${out.grid} grid for the quantize` : ''}`);
 }
 
 // Finds the live-keys call in the labeled block and swaps the whole call expression for the
-// recorded pattern. Handles the MIDI routes - `midikeys("device")(ch)` directly, or `kb(ch)`
-// through a `const kb = midikeys(...)` binding - and the computer-keyboard sources `keyboard()`
-// and `tap()` (called directly, no channel). First candidate in the block wins.
+// recorded roll. Handles the MIDI routes - `midikeys("device")(ch)` directly, or `kb(ch)`
+// through a `const kb = midikeys(...)` binding. First candidate in the block wins.
 function replaceKbCall(label, replacement) {
   if (!labelsMod) return false;
   const code = cm.getValue();
@@ -7515,16 +7851,6 @@ function replaceKbCall(label, replacement) {
     return close < 0 ? null : [callStart, close + 1];
   };
   const spans = [];
-
-  // Computer-keyboard sources: `keyboard()` / `tap()` used directly (they return a signal, so no
-  // trailing channel call like midikeys). Match the whole `keyboard(...)` / `tap(...)` call.
-  const kbCall = /(?<![.\w$])(?:keyboard|tap)\s*\(/g;
-  let km;
-  while ((km = kbCall.exec(code))) {
-    if (km.index < block.start || km.index >= block.end) continue;
-    const span = spanFrom(km.index, km.index + km[0].length - 1);
-    if (span) spans.push(span);
-  }
 
   const direct = /\bmidikeys\s*\(/g;
   let m;
@@ -9448,13 +9774,6 @@ function renderTracks(result) {
     if (t.muted) head.appendChild(badge('muted', 'badge-muted'));
     if (t.soloed) head.appendChild(badge('solo', 'badge-solo'));
     if (!t.active && !t.muted) head.appendChild(badge('off', 'badge-muted'));
-    if (t.keyboard) {
-      const b = badge(`⌨ ${t.keyboard}`, 'badge-solo');
-      b.title = kbMode === 'normal'
-        ? 'live from the computer keyboard - set the ⌨ dropdown up top to midi or both to play'
-        : `live from the computer keyboard (${kbMode} mode)`;
-      head.appendChild(b);
-    }
     const confBtn = document.createElement('button');
     confBtn.className = 'small conf-btn';
     confBtn.textContent = 'conf';
@@ -9502,7 +9821,7 @@ function badge(text, cls) {
 // Reflect play state on the single Play/Stop toggle button (see the transport TODO): it reads
 // "▶ play" when stopped and turns into "■ stop" once playing.
 function updateTransportButtons() {
-  playBtn.innerHTML = playing ? '■ stop' : '▶ play';
+  playBtn.innerHTML = playing ? '<span class="ico">■</span> stop' : '<span class="ico">▶</span> play';
   playBtn.classList.toggle('is-playing', playing);
   playBtn.title = playing ? 'Cmd/Ctrl + .' : 'Cmd/Ctrl + Enter';
 }
@@ -9549,7 +9868,6 @@ async function evaluate(start, { byHand = false } = {}) {
     setPatchScale(result.scale); // a setscale() in the buffer re-colours (and re-folds) the roll
     renderTracks(result);
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
-    setKeyboardRoutes(result.keyboardTracks ?? []);
     refoldAll();
     if (start) playing = true; // Update keeps the current play state; Play begins it
     const nActive = result.tracks.filter((t) => t.active).length;
@@ -9583,76 +9901,66 @@ async function doStop() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Computer-keyboard instrument (keyboard() / tap() tracks). The note source is *here*, in the
-// browser (the engine can't read the typing keyboard like a MIDI device), so each eval tells us
-// which tracks are keyboard targets and we POST every key edge to /api/keyNote - the server turns
-// those into engine.noteOn/noteOff on the track. The #kbMode dropdown gates it: `off` types
-// normally (no capture), `midi` plays notes and swallows the keystroke so it doesn't reach the
-// editor, `both` does both at once. Held keys are tracked so switching mode, alt-tabbing, or a
-// stop releases anything still down instead of leaving a note stuck on.
+// Computer-keyboard instrument - the piano roll's ⌨ button. With it on, the typing keyboard plays
+// the open roll's TRACK (à la Live's "Computer MIDI Keyboard", but aimed by the roll on screen
+// rather than by an armed track): every key edge is POSTed to /api/keyNote and the server turns
+// it into engine.noteOn/noteOff on that track, through its own synth. The server logs the same
+// edges, so a take plays into the recorder and is there for the roll's capture button afterwards.
+// Keys that play are swallowed - they never reach the editor - and everything else types as usual;
+// closing the roll (or toggling ⌨ off) hands the keyboard back. Held keys are tracked so toggling,
+// alt-tabbing, or a stop releases anything still down instead of leaving a note stuck on.
 //
 // Layout (à la Ableton/tracker typing keyboards): the home row a s d f g h j k l are the white
 // keys and the row above (w e t y u o p) the black keys; z / x shift octave, c / v nudge
-// velocity. A tap() track ignores pitch - any other key is a hit at the current velocity on a
-// fixed note - so the whole keyboard is one velocity pad.
+// velocity. On an INDEX roll the same keys count files instead - `a` is the pack's first, `w` its
+// second… - struck at the roll's default pitch with the index riding along, so a drum roll records
+// from the keys the way it is drawn. (Nothing sounds for those yet: a sampler is triggered by
+// playSample, not noteOn, and keyNote only knows the latter - they record, and play back from the
+// roll on its next pass.)
 // ---------------------------------------------------------------------------------------------
 
-const kbModeSelect = document.getElementById('kbMode');
 const KB_SEMITONES = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12, o: 13, l: 14, p: 15 };
 const KB_BASE_NOTE = 48; // MIDI note the home-row `a` plays at octave shift 0 (C, this package's c5 = 60)
-const KB_TAP_NOTE = 24; // fixed pitch a tap() key strikes (C2 - the engine's default note, so a
-// live tap and its .as("vel:clip") recording play the same pitch); only velocity/timing matter
 const KB_OCT_MIN = -3;
 const KB_OCT_MAX = 4;
 const KB_CONTROL_KEYS = new Set(['z', 'x', 'c', 'v']); // octave -/+, velocity -/+ (never notes)
 
-let kbMode = localStorage.getItem('poptart-kb-mode') || 'normal';
-let kbRoutes = []; // [{ trackId, kind, note }] from the latest eval (note: fixed tap pitch, or null)
+let prKbOn = false; // the roll panel's ⌨ toggle - the keyboard plays the open roll's track while set
 let kbOctave = 0; // octave shift in whole octaves (z/x)
 let kbVelocity = 0.8; // 0.1..1 (c/v)
-const kbHeldKeys = new Map(); // key char -> [{ trackId, note }] currently sounding, for keyup/release
+const kbHeldKeys = new Map(); // key char -> [{ trackId, note, index }] currently sounding, for keyup/release
 
-// Set the computer-keyboard instrument mode ('normal' | 'midi' | 'both'), keeping the dropdown,
-// persisted state, and held-note bookkeeping in sync. Also invoked by the ctrl+b hotkey.
-function setKbMode(mode) {
-  kbMode = mode;
-  kbModeSelect.value = mode;
-  localStorage.setItem('poptart-kb-mode', mode);
-  if (mode === 'normal') kbReleaseAll();
-  logLine(`computer keyboard: ${mode}${mode !== 'normal' && kbRoutes.length === 0 ? ' (no keyboard()/tap() track yet)' : ''}`);
+/** The track the keyboard plays right now - the open roll's, with ⌨ on - or null. */
+function kbTarget() {
+  if (!prKbOn || !prState) return null;
+  return prPlayingTrack();
 }
 
-kbModeSelect.value = kbMode;
-kbModeSelect.addEventListener('change', () => setKbMode(kbModeSelect.value));
-
-// Called from evaluate() with the eval response's keyboardTracks. Drops held notes for any track
-// that is no longer a keyboard target, and nudges the user if they've written keyboard()/tap()
-// but left the mode off.
-function setKeyboardRoutes(routes) {
-  const nextIds = new Set(routes.map((r) => r.trackId));
-  for (const [key, held] of [...kbHeldKeys]) {
-    const kept = held.filter((h) => nextIds.has(h.trackId));
-    if (kept.length !== held.length) {
-      for (const h of held) if (!nextIds.has(h.trackId)) kbSend(h.trackId, h.note, false);
-      if (kept.length) kbHeldKeys.set(key, kept);
-      else kbHeldKeys.delete(key);
-    }
-  }
-  const gained = routes.length > 0 && kbRoutes.length === 0;
-  kbRoutes = routes;
-  if (gained && kbMode === 'normal') {
-    logLine('keyboard()/tap() track ready - pick "⌨ midi" (or "both") up top to play it from your keyboard');
-  }
+/** The roll panel's ⌨: on/off for the roll on screen. Off releases whatever is down. */
+function prSetKeyboard(on) {
+  prKbOn = !!on && !!prState;
+  if (!prKbOn) kbReleaseAll();
+  prSyncKeyboardBtn();
+  if (prState) logLine(prKbOn ? `computer keyboard on - playing "${prPlayingTrack() ?? '?'}" from the keys (a s d f… / w e t y…, z/x octave, c/v velocity)` : 'computer keyboard off');
 }
 
-function kbSend(trackId, note, isOn) {
-  api('POST', '/api/keyNote', { trackId, note, vel: kbVelocity, isOn }).catch(() => {});
+function prSyncKeyboardBtn() {
+  prKeysBtn.classList.toggle('active', prKbOn);
+  prKeysBtn.title = prKbOn
+    ? 'computer keyboard: on - the keys play this roll\'s track (ctrl+m)'
+    : 'computer keyboard: play this roll\'s track from the typing keyboard (ctrl+m)';
 }
 
-// Release every currently-held key (send note-offs and forget them). Used on mode change, window
-// blur, and losing all keyboard tracks.
+function kbSend(trackId, note, isOn, index = null) {
+  const body = { trackId, note, vel: kbVelocity, isOn };
+  if (index != null) body.index = index;
+  api('POST', '/api/keyNote', body).catch(() => {});
+}
+
+// Release every currently-held key (send note-offs and forget them). Used on toggle-off, window
+// blur, and closing the roll.
 function kbReleaseAll() {
-  for (const held of kbHeldKeys.values()) for (const { trackId, note } of held) kbSend(trackId, note, false);
+  for (const held of kbHeldKeys.values()) for (const { trackId, note, index } of held) kbSend(trackId, note, false, index);
   kbHeldKeys.clear();
 }
 
@@ -9678,7 +9986,8 @@ function kbAdjustVelocity(delta) {
 }
 
 // Should this keydown be intercepted at all? Not when a non-editor text field has focus (so the
-// file-name box, param search, etc. type normally) - the CodeMirror editor itself is fair game.
+// roll's name box, param search, etc. type normally) - the CodeMirror editor and the roll's canvas
+// are fair game.
 function kbShouldCapture() {
   const el = document.activeElement;
   if (!el) return true;
@@ -9687,24 +9996,18 @@ function kbShouldCapture() {
   return true;
 }
 
-// A tap() track strikes on any single-character key that isn't a reserved control.
-function kbIsTapKey(key) {
-  return key.length === 1 && !KB_CONTROL_KEYS.has(key);
-}
-
 function onKbKeyDown(e) {
-  if (kbMode === 'normal' || kbRoutes.length === 0) return;
+  const trackId = kbTarget();
+  if (!trackId) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return; // never swallow shortcuts (Cmd+Enter to eval, etc.)
   const key = e.key.toLowerCase();
   if (!kbShouldCapture()) return;
 
-  // In midi mode we swallow every key we act on so it never reaches the editor; both mode lets
-  // it through so it plays *and* types. Auto-repeat is dropped (a held key is one sustained note).
+  // Every key that plays is swallowed, so it never reaches the editor or the roll's own shortcuts.
+  // Auto-repeat is dropped (a held key is one sustained note).
   const swallow = () => {
-    if (kbMode === 'midi') {
-      e.preventDefault();
-      e.stopPropagation();
-    }
+    e.preventDefault();
+    e.stopPropagation();
   };
 
   if (KB_CONTROL_KEYS.has(key)) {
@@ -9717,53 +10020,35 @@ function onKbKeyDown(e) {
     swallow();
     return;
   }
-
+  if (!(key in KB_SEMITONES)) return;
   if (e.repeat || kbHeldKeys.has(key)) {
-    // Already sounding (OS auto-repeat) - keep swallowing in midi mode, but don't retrigger.
-    let anyMapped = false;
-    for (const r of kbRoutes) anyMapped = anyMapped || (r.kind === 'tap' ? kbIsTapKey(key) : key in KB_SEMITONES);
-    if (anyMapped) swallow();
+    // Already sounding (OS auto-repeat) - keep swallowing, but don't retrigger.
+    swallow();
     return;
   }
-
-  const struck = [];
-  for (const r of kbRoutes) {
-    let note;
-    if (r.kind === 'tap') {
-      if (!kbIsTapKey(key)) continue;
-      // .note("f3")/.n(...).scale(...) on the track sets the struck pitch (route.note); with none
-      // set, fall back to the default pad note.
-      note = typeof r.note === 'number' ? r.note : KB_TAP_NOTE;
-    } else {
-      if (!(key in KB_SEMITONES)) continue;
-      // A fixed pitch from .note("f3")/.n(...).scale(...) replaces the played note: every piano key
-      // strikes that one note (keyboard().note("f3")). With none set, the key's own pitch plays.
-      note = typeof r.note === 'number' ? r.note : KB_BASE_NOTE + kbOctave * 12 + KB_SEMITONES[key];
-    }
-    kbSend(r.trackId, note, true);
-    struck.push({ trackId: r.trackId, note });
-  }
-  if (struck.length) {
-    kbHeldKeys.set(key, struck);
-    swallow();
-  }
+  // On the index axis a key is a FILE of the pack, struck at the roll's default pitch; on the
+  // piano it is the pitch itself.
+  const struck = prIndexMode()
+    ? { note: pianorollMod.PIANOROLL_DEFAULT_NOTE, index: Math.max(0, KB_SEMITONES[key] + kbOctave * 12) }
+    : { note: KB_BASE_NOTE + kbOctave * 12 + KB_SEMITONES[key], index: null };
+  kbSend(trackId, struck.note, true, struck.index);
+  kbHeldKeys.set(key, [{ trackId, ...struck }]);
+  swallow();
 }
 
-// Key-up always releases whatever that key started, regardless of the current mode/focus, so a
-// note can never get stuck (mode may have changed while the key was down).
+// Key-up always releases whatever that key started, regardless of the current target/focus, so a
+// note can never get stuck (the roll may have closed while the key was down).
 function onKbKeyUp(e) {
   const key = e.key.toLowerCase();
   const held = kbHeldKeys.get(key);
   if (!held) return;
   kbHeldKeys.delete(key);
-  for (const { trackId, note } of held) kbSend(trackId, note, false);
-  if (kbMode === 'midi') {
-    e.preventDefault();
-    e.stopPropagation();
-  }
+  for (const { trackId, note, index } of held) kbSend(trackId, note, false, index);
+  e.preventDefault();
+  e.stopPropagation();
 }
 
-// Capture phase so we beat CodeMirror to the key and can suppress typing in midi mode.
+// Capture phase so we beat CodeMirror (and the roll's canvas) to the key and can suppress it.
 document.addEventListener('keydown', onKbKeyDown, true);
 document.addEventListener('keyup', onKbKeyUp, true);
 window.addEventListener('blur', kbReleaseAll); // alt-tab away -> don't leave notes ringing
@@ -12670,8 +12955,8 @@ addHotkey(builtinHotkeys, 'ctrl+r', () => (recState ? cancelMidiRecord(true) : s
 // ctrl+b - bounce the block the cursor is in to audio (mirrors the record panel's button).
 addHotkey(builtinHotkeys, 'ctrl+b', () => bounceBlockAtCursor(), 'bounce block to audio');
 
-// ctrl+m - toggle the keyboard/tap instrument between off and midi.
-addHotkey(builtinHotkeys, 'ctrl+m', () => setKbMode(kbMode === 'normal' ? 'midi' : 'normal'), 'toggle midi keyboard');
+// ctrl+m - toggle the open piano roll's computer keyboard (its ⌨ button).
+addHotkey(builtinHotkeys, 'ctrl+m', () => { if (prState) prSetKeyboard(!prKbOn); else logLine('open a piano roll first - ⌨ plays the roll on screen', true); }, 'toggle the roll\'s computer keyboard');
 
 // ctrl+g - open/close the mixer (mirrors settings → open mixer…).
 addHotkey(builtinHotkeys, 'ctrl+g', () => toggleMixer(), 'toggle mixer');

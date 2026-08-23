@@ -81,24 +81,12 @@ const API_DOCS = {
   },
   pianoroll: {
     kind: 'builder',
-    sig: 'pianoroll(notes, { grid, len, start, mode })',
-    desc: 'A note pattern drawn on an interactive roll - double-click the name to open it. Rolls can be named and patterned: pianoroll("<lead alt>"). grid is cells per cycle, and the loop window is len cells from start. Every note carries a pitch and a sample index ("24:3,0,1" is the pack\'s fourth file at c2), so a roll can sequence a pack by file; mode: "index" only says which of the two the editor draws on.',
+    sig: 'pianoroll(names)',
+    desc: 'A note pattern you draw - double-click the pianoroll name to open the roll. Bare pianoroll() makes a new roll named after its track; rolls are named and patterned like anything else: pianoroll("<lead alt>") alternates two. The roll\'s ⌨ plays its track from the typing keyboard, ● rec and capture record into it.',
     eg: 'lead: pianoroll().synth("Serum 2")',
   },
 
   // ----------------------------------------------------------------- live input
-  keyboard: {
-    kind: 'builder',
-    sig: 'keyboard()',
-    desc: 'Play a track live from the computer keyboard - home row = white keys, row above = black, z/x octave, c/v velocity.',
-    eg: 'keyboard().synth("Serum 2")',
-  },
-  tap: {
-    kind: 'builder',
-    sig: 'tap()',
-    desc: 'Like keyboard(), but every key is a fixed-pitch hit at the current velocity - the whole keyboard as one pad.',
-    eg: 'tap().n("0").s("clap")',
-  },
   midikeys: {
     kind: 'builder',
     sig: 'midikeys(device)',

@@ -1,10 +1,10 @@
-// .as() field decomposition and its composition with .note()/.n()/.s(), plus keyboard()/tap()
-// routes carrying a fixed pitch. Pure pattern math - no scheduler/engine boot (see testing notes).
+// .as() field decomposition and its composition with .note()/.n()/.s(). Pure pattern math - no
+// scheduler/engine boot (see testing notes).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mini, n, note, s, tap, keyboard, clip, channelAt, soundingEnd } from './src/signal.mjs';
+import { mini, n, note, s, clip, channelAt, soundingEnd } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, msg ?? `${a} !~ ${b}`);
@@ -148,30 +148,6 @@ test('.s() is a method that repitches a note line by the pack', () => {
   assert.deepEqual(stepsAt(sig).map((s2) => s2.value), ['rave', 'rave', 'rave']);
   const notes = stepsAt(sig).map((_, i) => Math.round(sig.sampler.note.stepsForCycle(0)[i].value));
   assert.deepEqual(notes, [note('c').sample(0, 1), note('e').sample(0, 1), note('g').sample(0, 1)]);
-});
-
-// ---------------------------------------------------------------------------------------------
-// keyboard()/tap() routes: .note() sets the struck pitch and schedules nothing
-// ---------------------------------------------------------------------------------------------
-
-test('tap().note("f3") schedules no notes and records the fixed pitch on the route', () => {
-  const sig = tap().note('f3').synth('Serum 2');
-  assert.equal(sig.stepsForCycle, null, 'no step grid, so the scheduler fires nothing');
-  assert.equal(sig.keyboardRoute.kind, 'tap');
-  assert.equal(Math.round(sig.keyboardRoute.note.sample(0, 1)), note('f3').sample(0, 1));
-  assert.equal(sig.instrument, 'Serum 2');
-});
-
-test('tap() alone has no fixed pitch on the route', () => {
-  assert.equal(tap().keyboardRoute.note ?? null, null);
-});
-
-test('keyboard().n("0").scale maps the route pitch through the scale', () => {
-  const sig = keyboard().n('0').scale('F minor');
-  assert.equal(sig.stepsForCycle, null);
-  // degree 0 maps to the scale root, not a bare 0 - same mapping n("0").scale() does.
-  const oracle = n('0').scale('F minor').sample(0, 1);
-  assert.equal(sig.keyboardRoute.note.sample(0, 1), oracle);
 });
 
 // ---------------------------------------------------------------------------------------------

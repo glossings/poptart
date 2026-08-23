@@ -955,26 +955,36 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
         <section id="s8">
           <h2>Study 8</h2>
           <h3>Playing live</h3>
-          <p>Three ways to play a track by hand, in real time, alongside the patterns:</p>
+          <p>Two ways to play a track by hand, in real time, alongside the patterns:</p>
           <table>
             <tr><th>Source</th><th>What it is</th></tr>
             <tr><td><code>midikeys("&lt;device&gt;")</code></td><td>A MIDI keyboard. <code>midikeys("KeyStep")(1).synth("Serum 2")</code> plays channel 1 live — notes, velocity, pitch bend, aftertouch, CCs — routed engine-side, so latency is the MIDI driver's, not the pattern clock's.</td></tr>
-            <tr><td><code>keyboard()</code></td><td>Your computer's typing keyboard as a piano: home row = white keys, the row above = black keys, <code>z</code>/<code>x</code> shift octave, <code>c</code>/<code>v</code> nudge velocity.</td></tr>
-            <tr><td><code>tap()</code></td><td>Like <code>keyboard()</code>, but <em>every</em> key fires the track's default note — the whole keyboard becomes one velocity-sensitive pad. Great for drums and stabs.</td></tr>
+            <tr><td>the piano roll's <strong>⌨</strong></td><td>Your computer's typing keyboard, aimed at the roll on screen: open any <code>pianoroll</code> and click <strong>⌨</strong> (or ctrl+m) and the keys play that roll's <em>track</em> — home row = white keys, the row above = black keys, <code>z</code>/<code>x</code> shift octave, <code>c</code>/<code>v</code> nudge velocity. On an index roll the same keys count the pack's files instead. Keys that play never reach the code; click ⌨ again, or close the roll, and they type as usual.</td></tr>
           </table>
-          <pre><code>keys: keyboard().synth(<span class="s">"Serum 2"</span>).scale(<span class="s">"F minor"</span>)</code></pre>
+          <pre><code>keys: pianoroll().synth(<span class="s">"Serum 2"</span>).scale(<span class="s">"F minor"</span>)  <span class="c">// double-click pianoroll, hit ⌨, play</span></code></pre>
           <p>
-            For the computer keyboard, flip the <strong>⌨</strong> switch in the header: <em>off</em>
-            types normally, <em>midi</em> plays notes and suppresses typing, <em>both</em> does each at
-            once. Live notes gate <code>env()</code> modulators and retrigger note-synced
+            Live notes gate <code>env()</code> modulators and retrigger note-synced
             <code>lfo()</code> shapes exactly like pattern notes — and <code>.scale()</code> on a live
             source quantizes incoming notes to the key.
           </p>
           <div class="callout">
             <span class="tag">recording</span>
-            The header's <strong>● rec</strong> button captures MIDI-key playing back into the pattern:
-            it arms now and starts on the next 4-cycle phrase, quantizing to the grid you pick. What it
-            writes is an ordinary pattern string you can then edit by hand.
+            The header's <strong>● rec</strong> button records live playing — a MIDI keyboard's, or the
+            roll's ⌨ — <em>into the piano roll</em>: it arms now, starts on the next 4-cycle phrase (the
+            wait is the count-in; the circles show it), runs for the cycles you pick and quantizes to the
+            grid you pick (off = the nearest cell, the rest kept as each note's nudge). With a roll open
+            you watch the take land on the grid as you play it; a roll shorter than the take overdubs —
+            each note goes to the cell the roll was playing when you struck it. Anything played during the
+            count-in goes in too, <em>before</em> cell 0, dimmed and silent, there to drag into the loop if
+            it was good. A track with no roll yet — a bare <code>midikeys</code> route — gets a fresh
+            <code>pianoroll(…)</code> in its place, sized to the take.
+          </div>
+          <div class="callout">
+            <span class="tag">capture</span>
+            Jammed something good without record on? The roll's <strong>capture</strong> button is Live's
+            Capture MIDI: the last stretch played on that roll's track (since the last phrase of silence)
+            goes into the roll as if you had hit record — one pass of the loop over a roll that has notes,
+            a fitted power-of-two loop into an empty one.
           </div>
           <div class="callout">
             <span class="tag">importing</span>
@@ -1237,7 +1247,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code></td><td>sampler pack</td></tr>
-            <tr><td><code>midikeys("…")(ch)</code> · <code>keyboard()</code> · <code>tap()</code></td><td>live input</td></tr>
+            <tr><td><code>midikeys("…")(ch)</code></td><td>live input (the computer keyboard is the piano roll's ⌨)</td></tr>
             <tr><td><code>midi("kick")</code> · <code>audio("mic")</code></td><td>source: play/route an input</td></tr>
             <tr><td><code>input(3)</code> · <code>input("Scarlett", 1, 2)</code></td><td>source: hardware input channels (numbered from 1)</td></tr>
             <tr><td><code>choose(a, b, c)</code></td><td>random pick per cycle</td></tr>

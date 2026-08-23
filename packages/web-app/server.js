@@ -297,10 +297,11 @@ async function restartEngine() {
       mappedEngine?.removeChain(label);
     }
     schedulers.clear();
-    // The replacement engine has no tracks and no held notes - drop the keyboard-routing state
-    // so a stale held note isn't "released" against the new engine on the next eval.
-    kbTracks.clear();
+    // The replacement engine has no tracks and no held notes - drop the held-key bookkeeping so
+    // a stale held note isn't "released" against the new engine, and the live note log with it
+    // (its times are the old clock's).
     kbHeld.clear();
+    clearLiveLog();
     // Every plugin window went with the old scsynth, and so did whatever was being edited in one.
     // Left alone, these would hold slots still for windows that no longer exist and for captures
     // nothing can take any more (see the hand-editing section).
@@ -370,7 +371,7 @@ function wireEngine() {
   // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
   // live-value store - what a Tier-1 midicc() signal samples.
   engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
-  // Live note edges from midikeys() routes - what an armed MIDI recording collects.
+  // Live note edges from midikeys() routes - logged for the MIDI recorder and the roll's capture.
   engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
   // Plugin-GUI knob gestures - what conf capture writes into the code.
   engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackId, slot, name, index, value);
@@ -479,7 +480,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'pianoroll',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
@@ -893,96 +894,134 @@ const {
 const { matchesQuery } = require('./public/pattern-meta.js');
 
 // ---------------------------------------------------------------------------------------------
-// MIDI record - capture a midikeys() performance as mini-notation. sclang forwards every note
-// edge of an active midikeys() route as /poptart/midiNoteIn (see poptart.scd's midiRoute
-// handlers); arming a recording collects those between two cycle boundaries. Recording starts
-// at the next 4-cycle phrase boundary - the wait until then is the count-in - and runs for
-// `cycles` cycles. The editor polls /api/midiRecord/status and, on 'done', writes each track's
-// pattern into the code in place of its kb()/midikeys() call (see client.js applyRecording).
+// Live notes - every note edge played by hand on a track, kept for a while.
+//
+// Two sources, one log: sclang forwards each note edge of an active midikeys() route as
+// /poptart/midiNoteIn (see poptart.scd's midiRoute handlers), and the browser POSTs the computer
+// keyboard's key edges to /api/keyNote (the piano roll's ⌨ button). Both land in handleMidiNoteIn,
+// which pairs a note-on with its note-off and files the completed event - absolute cycle start
+// and end, velocity, the pitch, and the sample index when the key was struck on an index roll -
+// under the track. The log is ALWAYS on while the engine runs, which is what makes the roll's
+// capture button possible: "what did I just play" is a question about the last minute, asked
+// after the fact, and the recorder proper (below) is just a window cut out of the same log. It is
+// trimmed to the last LIVE_LOG_CYCLES cycles of each track and thrown away when the clock resets
+// (stop, engine restart), since its times are the transport's own count and mean nothing across a
+// reset. The browser owns turning events into roll notes (pattern-core's record.mjs, served to it),
+// because the roll is in the code buffer, which only the editor can see.
 // ---------------------------------------------------------------------------------------------
 
 const PHRASE_CYCLES = 4;
+const LIVE_LOG_CYCLES = 64; // how far back the log reaches, per track
+const LIVE_LOG_MAX = 4096; // ...and a hard cap on events per track, whatever the tempo
 
-let midiRec = null; // { phase: 'armed'|'recording'|'done', startCycle, endCycle, cycles, grid, held, events, results, timer }
+const liveLog = new Map(); // trackId -> [{ note, vel, start, end, index? }], completed events, oldest first
+const liveHeld = new Map(); // trackId -> Map<note, [{ note, vel, start, index? }]> - notes down right now
 
-function midiRecStatus() {
-  if (!midiRec) return { phase: 'idle' };
-  const { phase, startCycle, endCycle, cycles, grid, results } = midiRec;
-  return { phase, startCycle, endCycle, cycles, grid, results, transport: transport.snapshot() };
+function clearLiveLog() {
+  liveLog.clear();
+  liveHeld.clear();
 }
 
-function pushRecEvent(trackId, ev) {
-  let list = midiRec.events.get(trackId);
-  if (!list) midiRec.events.set(trackId, (list = []));
-  list.push(ev);
-}
+// Keys the browser has down on each track via /api/keyNote, so a stop or an engine restart can
+// release them instead of leaving a note stuck on. (The live log's own held map is about LOGGING
+// - it also sees midikeys() notes, which sclang releases itself.)
+const kbHeld = new Map(); // trackId -> Map<liveKey, { note, index }>
 
-// One live note edge. Held notes wait per track+note (a stack, so fast retriggers of the same
-// key pair up correctly) until their note-off completes the event.
-function handleMidiNoteIn(trackId, note, vel, isOn) {
-  if (!midiRec || midiRec.phase === 'done') return;
-  const rel = transport.cycleAt(engine.getTime()) - midiRec.startCycle;
-  if (isOn && vel > 0) {
-    // Slightly-early onsets (played into the count-in's last moment, meant for beat 1) snap to
-    // the window start; anything earlier is count-in noodling and stays unrecorded.
-    const preRoll = 0.5 / (midiRec.grid > 0 ? midiRec.grid : patternCore.UNQUANTIZED_GRID);
-    if (rel < -preRoll || rel >= midiRec.cycles) return;
-    let held = midiRec.held.get(trackId);
-    if (!held) midiRec.held.set(trackId, (held = new Map()));
-    let stack = held.get(note);
-    if (!stack) held.set(note, (stack = []));
-    stack.push({ note, vel, start: Math.max(0, rel) });
-  } else {
-    const ev = midiRec.held.get(trackId)?.get(note)?.pop();
-    if (!ev) return; // off for a note that started before the window (or after it closed)
-    pushRecEvent(trackId, { ...ev, end: Math.min(midiRec.cycles, Math.max(ev.start + 1e-3, rel)) });
-  }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Live computer-keyboard routing (keyboard()/tap()). Unlike a midikeys() route, the note source
-// is the browser, not the audio engine - so the flow is inverted: after each eval we tell the
-// editor which tracks are keyboard targets (kbTracks), and the browser POSTs every key edge to
-// /api/keyNote, which drives engine.noteOn/noteOff on that track (the same call the scheduler
-// makes for pattern notes, so env()/lfo() gating is identical). We track held notes per track so
-// a stop, re-eval, or dropped keyboard() can release anything still down instead of leaving a
-// stuck note. Key edges also feed the MIDI recorder, so a typed performance records like a
-// midikeys() one.
-// ---------------------------------------------------------------------------------------------
-
-const kbTracks = new Map(); // trackId -> { kind: 'keyboard'|'tap' } - tracks currently accepting key edges
-const kbHeld = new Map(); // trackId -> Set<note> currently held via /api/keyNote
-
-// Send note-offs for every key still held on a track and forget them (stop, re-eval, un-arm).
+// Send note-offs for every key still held on a track and forget them (stop, restart).
 function releaseKbNotes(trackId) {
   const held = kbHeld.get(trackId);
   if (held && engine) {
     const now = engine.getTime();
-    for (const note of held) {
+    for (const { note, index } of held.values()) {
       engine.noteOff(trackId, note, now);
-      handleMidiNoteIn(trackId, note, 0, false); // close its recorded event too
+      handleMidiNoteIn(trackId, note, 0, false, index); // close its logged event too
     }
   }
   kbHeld.delete(trackId);
 }
 
-// The fixed MIDI pitch a route's key strikes, when .note()/.n() set one (a Sig on the route). A
-// tap() with no .note() returns null and the browser falls back to its default pad note.
-function kbRouteNote(route) {
-  if (!route.note) return null;
-  const v = route.note.sample(0, 1);
-  return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null;
+// One live note edge. Held notes wait per track+key (a stack, so fast retriggers of the same key
+// pair up correctly) until their note-off completes the event. The key is the note, and the index
+// with it when there is one: index-roll keys all strike the same default pitch, and two of them down
+// together must not close each other's events.
+const liveKey = (note, index) => (Number.isFinite(index) ? `${note}:${Math.max(0, Math.round(index))}` : String(note));
+
+function handleMidiNoteIn(trackId, note, vel, isOn, index = null) {
+  if (!engine || !transport) return;
+  const now = transport.cycleAt(engine.getTime());
+  const key = liveKey(note, index);
+  if (isOn && vel > 0) {
+    let held = liveHeld.get(trackId);
+    if (!held) liveHeld.set(trackId, (held = new Map()));
+    let stack = held.get(key);
+    if (!stack) held.set(key, (stack = []));
+    const ev = { note, vel, start: now };
+    if (Number.isFinite(index)) ev.index = Math.max(0, Math.round(index));
+    stack.push(ev);
+  } else {
+    const ev = liveHeld.get(trackId)?.get(key)?.pop();
+    if (!ev) return; // off for a note that was never logged on (or the log was cleared under it)
+    pushLiveEvent(trackId, { ...ev, end: Math.max(ev.start + 1e-3, now) });
+  }
 }
 
-// Re-derive the armed keyboard tracks from the just-evaluated active patterns, releasing any
-// track that is no longer a keyboard target. Returns the list the eval response hands the editor.
-function syncKbTracks(active) {
-  const next = new Map();
-  for (const b of active) if (b.sig.keyboardRoute) next.set(b.label, b.sig.keyboardRoute);
-  for (const id of kbTracks.keys()) if (!next.has(id)) releaseKbNotes(id);
-  kbTracks.clear();
-  for (const [id, route] of next) kbTracks.set(id, route);
-  return [...kbTracks].map(([trackId, route]) => ({ trackId, kind: route.kind, note: kbRouteNote(route) }));
+function pushLiveEvent(trackId, ev) {
+  let list = liveLog.get(trackId);
+  if (!list) liveLog.set(trackId, (list = []));
+  list.push(ev);
+  // Trim by age and by count - from the front, where the oldest sit.
+  const horizon = ev.end - LIVE_LOG_CYCLES;
+  let drop = 0;
+  while (drop < list.length && (list[drop].end < horizon || list.length - drop > LIVE_LOG_MAX)) drop++;
+  if (drop) list.splice(0, drop);
+}
+
+// A track's log plus its still-held notes closed at `now` - what a capture reads, and what the
+// recorder's live view shows. Events from `since` on (by start) when given.
+function liveEventsFor(trackId, since = -Infinity, now = null) {
+  const out = (liveLog.get(trackId) ?? []).filter((ev) => ev.start >= since);
+  const held = liveHeld.get(trackId);
+  if (held && now != null) {
+    for (const stack of held.values()) {
+      for (const ev of stack) if (ev.start >= since) out.push({ ...ev, end: Math.max(ev.start + 1e-3, now), held: true });
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// MIDI record - a window cut out of the live log. Arming notes the cycle (armCycle), the window
+// opens at the next phrase boundary (the wait is the count-in - watch the circles; see
+// recordStartCycle for how longer power-of-two takes align to themselves) and closes `cycles`
+// later. Status carries everything played since arming, count-in included, so the editor can draw
+// the take into the open roll as it happens; on 'done' it hands over the same events, closed, and
+// the editor writes each track's into its roll (see client.js applyRecording).
+// ---------------------------------------------------------------------------------------------
+
+let midiRec = null; // { phase: 'armed'|'recording'|'done', armCycle, startCycle, endCycle, cycles, grid, results, timer }
+
+function midiRecStatus() {
+  if (!midiRec) return { phase: 'idle' };
+  const { phase, armCycle, startCycle, endCycle, cycles, grid, results } = midiRec;
+  const body = { phase, armCycle, startCycle, endCycle, cycles, grid, results, transport: transport.snapshot() };
+  if (phase !== 'done') {
+    // The take so far, per track - completed events and the keys still down, closed at now.
+    const now = transport.cycleAt(engine.getTime());
+    body.now = now;
+    body.events = liveTakes(armCycle, now);
+  }
+  return body;
+}
+
+// Every track's events from `since`, held ones closed at `now`: { label: events }.
+function liveTakes(since, now) {
+  const out = {};
+  const ids = new Set([...liveLog.keys(), ...liveHeld.keys()]);
+  for (const id of ids) {
+    const evs = liveEventsFor(id, since, now);
+    if (evs.length) out[id] = evs;
+  }
+  return out;
 }
 
 function midiRecTick() {
@@ -996,29 +1035,15 @@ function midiRecTick() {
 function finalizeMidiRec() {
   clearInterval(midiRec.timer);
   midiRec.timer = null;
-  // Keys still held when the window closes become events that ring to the end.
-  for (const [trackId, held] of midiRec.held) {
-    for (const stack of held.values()) {
-      for (const ev of stack) pushRecEvent(trackId, { ...ev, end: midiRec.cycles });
-    }
-  }
-  midiRec.held.clear();
+  // Keys still held when the window closes are taken as ringing to its end; the log itself keeps
+  // them open until the key comes up, so a later capture still sees the whole note.
+  const takes = liveTakes(midiRec.armCycle, midiRec.endCycle);
   const results = [];
-  for (const [label, events] of midiRec.events) {
-    if (events.length === 0) continue;
-    // A tap() track records note-less (velocity/clip only) - the client wraps it .as("vel:clip").
-    const noteless = kbTracks.get(label)?.kind === 'tap';
-    try {
-      const { pattern, count } = patternCore.recordingToMini(events, {
-        cycles: midiRec.cycles,
-        grid: midiRec.grid,
-        startCycle: midiRec.startCycle,
-        noteless,
-      });
-      results.push({ label, pattern, count, noteless });
-    } catch (err) {
-      results.push({ label, error: err.message ?? String(err) });
-    }
+  for (const [label, events] of Object.entries(takes)) {
+    const inWindow = events
+      .filter((ev) => ev.start < midiRec.endCycle)
+      .map((ev) => ({ ...ev, end: Math.min(midiRec.endCycle, ev.end) }));
+    if (inWindow.length) results.push({ label, events: inWindow });
   }
   midiRec.results = results;
   midiRec.phase = 'done';
@@ -2043,9 +2068,6 @@ const routes = {
     // engine restart discards - the eval that recreates the track re-sends it. Idempotent.
     if (conf && active.some((b) => b.label === conf.trackId)) engine.setConfMode(conf.trackId, true);
 
-    // Which tracks the browser should route computer-keyboard input to (keyboard()/tap()).
-    const keyboardTracks = syncKbTracks(active);
-
     // Refresh the highlight-grid source set to this eval's active tracks, and ship each active
     // track's first window inline so playback lights up immediately without a follow-up request.
     hlTracks.clear();
@@ -2058,7 +2080,6 @@ const routes = {
         cps: transport.cps,
         transport: transport.snapshot(),
         scale: patternCore.globalScale(), // what setscale() left in force - the piano roll colours by it
-        keyboardTracks,
         gridFrom,
         gridCount: HL_WINDOW,
         tracks: built.map((b) => ({
@@ -2071,7 +2092,6 @@ const routes = {
           instrument: b.sig.instrument,
           fxChain: b.sig.fxChain,
           paramNames: Object.keys(b.sig.paramSignals),
-          keyboard: b.sig.keyboardRoute?.kind ?? null,
           grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW) : null,
         })),
       },
@@ -2139,54 +2159,72 @@ const routes = {
 
   'POST /api/stop': async () => {
     for (const sch of schedulers.values()) sch.stop();
-    // Release any live-keyboard notes still held so nothing rings through the stop. The tracks
-    // stay armed (kbTracks intact) - a live keyboard isn't sequenced, so it keeps playing after
-    // stop until the pattern is removed or re-evaluated.
-    for (const id of kbTracks.keys()) releaseKbNotes(id);
-    // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top.
+    // Release any live-keyboard notes still held so nothing rings through the stop.
+    for (const id of [...kbHeld.keys()]) releaseKbNotes(id);
+    // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top. The
+    // live note log counts in that clock's cycles, so it goes too.
     transport?.stop();
+    clearLiveLog();
     // Now that nothing is playing, any plugin edit held back during the performance is free to
     // capture (the suspension it costs has nothing left to interrupt).
     flushPluginCaptures();
     return { status: 200, body: { transport: transport?.snapshot() ?? null } };
   },
 
-  // A live computer-keyboard note edge from the browser (keyboard()/tap() tracks). Body:
-  // { trackId, note, vel, isOn }. Routed straight to the instrument like a scheduled note, so
-  // env()/lfo() shapes gate the same way; also fed to the MIDI recorder so typed takes record.
-  // Ignored for a track that isn't currently a keyboard target (a stale key-up after re-eval).
+  // A live computer-keyboard note edge from the browser - the piano roll's ⌨ button, aimed at the
+  // roll's track. Body: { trackId, note, vel, isOn[, index] }. Routed straight to the instrument
+  // like a scheduled note, so env()/lfo() shapes gate the same way; also logged (see "Live notes")
+  // so typed takes record and capture. `index` is the sample index of a key struck on an INDEX
+  // roll - it rides into the log for the roll to read back, and is nothing to the instrument. A
+  // track that hasn't been evaluated (no instrument) simply makes no sound.
   'POST /api/keyNote': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const trackId = String(body.trackId ?? '');
-    if (!kbTracks.has(trackId)) return { status: 200, body: { ok: false, reason: 'not a keyboard track' } };
+    if (!trackId) return { status: 200, body: { ok: false, reason: 'no track' } };
     const note = Math.round(Number(body.note));
     if (!Number.isFinite(note)) throw new Error('keyNote: note must be a number');
     const isOn = !!body.isOn;
+    const index = body.index == null ? null : Number(body.index);
+    const key = liveKey(note, index);
     const now = engine.getTime();
     let held = kbHeld.get(trackId);
-    if (!held) kbHeld.set(trackId, (held = new Set()));
+    if (!held) kbHeld.set(trackId, (held = new Map()));
     if (isOn) {
       const vel = Math.max(0, Math.min(1, Number(body.vel ?? 1)));
       if (vel <= 0) return { status: 200, body: { ok: true } };
       // Retrigger a re-pressed key cleanly (some layouts fire keydown without an intervening
       // keyup); the browser suppresses auto-repeat, so a real double-down means a new hit.
-      if (held.has(note)) engine.noteOff(trackId, note, now);
+      if (held.has(key)) {
+        engine.noteOff(trackId, note, now);
+        handleMidiNoteIn(trackId, note, 0, false, index);
+      }
       engine.noteOn(trackId, note, vel, now);
-      held.add(note);
-      handleMidiNoteIn(trackId, note, vel, true);
+      held.set(key, { note, index });
+      handleMidiNoteIn(trackId, note, vel, true, index);
     } else {
-      if (!held.has(note)) return { status: 200, body: { ok: true } };
+      if (!held.has(key)) return { status: 200, body: { ok: true } };
       engine.noteOff(trackId, note, now);
-      held.delete(note);
-      handleMidiNoteIn(trackId, note, 0, false);
+      held.delete(key);
+      handleMidiNoteIn(trackId, note, 0, false, index);
     }
     return { status: 200, body: { ok: true } };
   },
 
+  // What a track has had played on it lately - the live log (see "Live notes"), held keys closed
+  // at now - for the piano roll's capture button. Body: { trackId }. The editor picks the window
+  // and writes the notes (record.mjs's captureWindow / recordingToRoll).
+  'POST /api/liveNotes': async (body) => {
+    if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
+    const trackId = String(body.trackId ?? '');
+    const now = transport.cycleAt(engine.getTime());
+    return { status: 200, body: { events: liveEventsFor(trackId, -Infinity, now), now, transport: transport.snapshot() } };
+  },
+
   // A one-off audition note from the piano roll editor. Body: { trackId, note, vel, isOn }. Unlike
-  // keyNote this isn't gated on a keyboard()/tap() route - it plays straight on whatever track the
-  // pianoroll(...) block built, so the note previews through that track's own synth. If the track
-  // hasn't been evaluated (no instrument loaded), the engine call simply makes no sound.
+  // keyNote it is NOT logged - a note auditioned while drawing is not a note played - but like it
+  // the note goes straight to whatever track the pianoroll(...) block built, so it previews through
+  // that track's own synth. If the track hasn't been evaluated (no instrument loaded), the engine
+  // call simply makes no sound.
   'POST /api/previewNote': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const trackId = String(body.trackId ?? '');
@@ -2515,23 +2553,25 @@ const routes = {
   // --- MIDI record (see the "MIDI record" section above) ---
 
   // Arm a recording. Body: { cycles, grid } - grid is slots per cycle (16 = sixteenth notes at
-  // 4 beats/cycle), 0 = unquantized. Starts at the next 4-cycle phrase boundary; the response
-  // carries start/end cycles + a transport snapshot so the editor renders the count-in locally.
+  // 4 beats/cycle), 0 = unquantized; it is carried back out in the status for the editor, which
+  // does the quantizing (into a roll). Starts at the next phrase boundary, pushed on to a multiple
+  // of the length for power-of-two takes (see recordStartCycle); the response carries start/end
+  // cycles + a transport snapshot so the editor renders the count-in locally.
   'POST /api/midiRecord/start': async (body) => {
     if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
     if (midiRec && midiRec.phase !== 'done') throw new Error('a MIDI recording is already armed or running - cancel it first');
     const cycles = Math.min(64, Math.max(1, Math.round(Number(body.cycles) || 4)));
     const grid = Math.max(0, Math.round(body.grid == null ? 16 : Number(body.grid) || 0));
-    const startCycle = (Math.floor(transport.cycleAt(engine.getTime()) / PHRASE_CYCLES) + 1) * PHRASE_CYCLES;
+    const armCycle = transport.cycleAt(engine.getTime());
+    const startCycle = patternCore.recordStartCycle(armCycle, cycles, PHRASE_CYCLES);
     if (midiRec?.timer) clearInterval(midiRec.timer);
     midiRec = {
       phase: 'armed',
+      armCycle,
       startCycle,
       endCycle: startCycle + cycles,
       cycles,
       grid,
-      held: new Map(),
-      events: new Map(),
       results: null,
       timer: setInterval(midiRecTick, 50),
     };

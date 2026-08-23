@@ -15,7 +15,10 @@
 //           event plays, the `i` channel. EVERY event has both a pitch and an index - they are two
 //           channels of one event, not two kinds of event - and the roll's mode only says which of
 //           them the editor is drawing on (see below).
-//   start - onset cell, integer 0..steps-1 (a cell is one column of the grid)
+//   start - onset cell, an integer (a cell is one column of the grid). Normally 0 or more; the
+//           MIDI recorder writes what was played during the count-in at NEGATIVE cells, before the
+//           roll's own time starts (see record.mjs) - drawn to the left of cell 0, never played, there
+//           to be dragged into the loop if it turns out you want it
 //   len   - length in cells, integer >= 1 (may run past the last cell: the note rings on, like a
 //           mini-notation tie)
 //   vel   - optional velocity, 0..1 (omitted when 1, the default)
@@ -32,8 +35,9 @@
 //           open: a nudge writes vel and prob too, default or not.
 // The grid width (`grid`, how many cells span one cycle) lives in the pianoroll() call's options,
 // not the string - the same split shape.mjs uses for lfo()'s rate/mode - and so does the loop
-// window it plays: `len` cells starting at cell `start`. Notes are written at their drawn cell
-// either way, so sliding the window over them never rewrites a single note.
+// window it plays: `len` cells starting at cell `start` (which may itself be negative: the window
+// can be slid back over a recorded count-in). Notes are written at their drawn cell either way, so
+// sliding the window over them never rewrites a single note.
 //
 // The options also carry the roll's MODE - which of the two channels the EDITOR draws on:
 //   note   (the default) - the vertical axis is a piano keyboard and a drawn row is a pitch; the
@@ -218,7 +222,7 @@ export function parsePianoRoll(str) {
     return {
       midi: clampInt(midi, 0, 127),
       index: Math.max(0, Math.round(index)),
-      start: Math.max(0, Math.round(start)),
+      start: Math.round(start), // may be negative - count-in material sits before cell 0
       len: Math.max(1, Math.round(len)),
       vel: clamp01(vel),
       prob: clamp01(prob),
@@ -375,7 +379,7 @@ export function clipOverlaps(notes) {
 export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', scale = null, mode = 'note' } = {}) {
   const g = normalizePianoRollSteps(grid);
   const total = Math.max(1, Math.round(len ?? g));
-  const from = Math.max(0, Math.round(start));
+  const from = Math.round(start); // may be negative: the window can open before cell 0
   // Only what the window plays is written down - and at its offset within the window, so cell
   // `from` is the pattern's first beat.
   const notes = allNotes.filter((nt) => !nt.mute && nt.start >= from && nt.start < from + total);
@@ -479,7 +483,7 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
 export function rescalePianoRoll(notes, ratio, anchor = 0) {
   for (const nt of notes) {
     const full = Number.isFinite(nt.full) ? nt.full : nt.len;
-    nt.start = Math.max(0, Math.round(anchor + (nt.start - anchor) * ratio));
+    nt.start = Math.round(anchor + (nt.start - anchor) * ratio);
     nt.full = Math.max(1, Math.round(full * ratio));
     nt.len = Math.max(1, Math.round(nt.len * ratio));
     // A nudge is measured in cells, and the cells just changed size: a note at 4.1 cells belongs at
@@ -504,7 +508,7 @@ export function regridPianoRoll(roll, grid) {
   return {
     grid: next,
     len: Math.max(1, Math.round(Math.max(1, Math.round(roll.len ?? cur)) * ratio)),
-    start: Math.max(0, Math.round(Math.max(0, Math.round(roll.start ?? 0)) * ratio)),
+    start: Math.round(Math.round(roll.start ?? 0) * ratio),
   };
 }
 
@@ -521,11 +525,11 @@ export function regridPianoRoll(roll, grid) {
 export function retimePianoRoll(roll, factor) {
   const grid = normalizePianoRollSteps(roll.grid);
   const len = Math.max(1, Math.round(roll.len ?? grid));
-  const start = Math.max(0, Math.round(roll.start ?? 0));
+  const start = Math.round(roll.start ?? 0);
   const scaled = grid / factor;
   if (Number.isInteger(scaled) && scaled >= 1 && scaled <= PIANOROLL_MAX_GRID) return { grid: scaled, len, start };
   rescalePianoRoll(roll.notes ?? [], factor);
-  return { grid, len: Math.max(1, Math.round(len * factor)), start: Math.max(0, Math.round(start * factor)) };
+  return { grid, len: Math.max(1, Math.round(len * factor)), start: Math.round(start * factor) };
 }
 
 /**
@@ -535,7 +539,7 @@ export function retimePianoRoll(roll, factor) {
  * rule resolves in their favour) and the new `len`.
  */
 export function duplicatePianoRollLoop({ notes = [], len, start = 0 }) {
-  const from = Math.max(0, Math.round(start));
+  const from = Math.round(start);
   const span = Math.max(1, Math.round(len));
   const copies = notes
     .filter((nt) => nt.start >= from && nt.start < from + span)

@@ -214,11 +214,6 @@ export class Sig {
     // Live MIDI note routing, from midikeys(): { device, channel (null = all) }. The scheduler
     // hands this to the engine, which plays the device's note stream on this track directly.
     this.midiNotes = opts.midiNotes ?? null;
-    // Live computer-keyboard routing, from keyboard()/tap(): { kind: 'keyboard'|'tap' }. Unlike
-    // midiNotes this can't be routed engine-side (the keys are in the browser) - the server
-    // reports the track as a keyboard target after eval and the browser POSTs its key edges to
-    // /api/keyNote, which drives engine.noteOn/noteOff. Schedules no notes of its own.
-    this.keyboardRoute = opts.keyboardRoute ?? null;
     // Whether this signal's values are absolute MIDI notes ('note'), scale degrees ('degree'),
     // or neither/unknown (null). Only .scale() reads it: on a note pattern it quantizes each
     // value to the nearest scale tone, on a degree pattern it maps degrees to MIDI. Set by the
@@ -262,7 +257,6 @@ export class Sig {
       slotStates: this.slotStates,
       presetPatterns: this.presetPatterns,
       midiNotes: this.midiNotes,
-      keyboardRoute: this.keyboardRoute,
       pitchKind: this.pitchKind,
       logging: this.logging,
     };
@@ -329,12 +323,6 @@ export class Sig {
     if (this.midiNotes) out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName } });
     // A midi() source: quantize its live notes to the scale engine-side, like a midikeys() route.
     if (this.inputSource?.io === 'midi') out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName } });
-    // A keyboard()/tap() route carrying a fixed pitch (from .note()/.n()): map that pitch too, so
-    // tap().n("0").scale("F minor") strikes the scale's root rather than a bare degree 0.
-    if (this.keyboardRoute?.note) {
-      const nSig = this.keyboardRoute.note;
-      out = out._clone({ keyboardRoute: { ...this.keyboardRoute, note: nSig.mapValue(mapFor(nSig.pitchKind)) } });
-    }
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     return out;
   }
@@ -1974,8 +1962,8 @@ export class Sig {
    * token's own step width - at *8, clip 3 rings for three eighth-slots), `nudge` (how far off its
    * grid position that one event plays, as a fraction of its own step - `38::0.04` pushes just that
    * snare late). Missing/empty fields keep their defaults (vel 1, clip 1, nudge 0), so a spec only
-   * costs the tokens that use it. This is the form the editor's midi-record writes in place of a
-   * kb()/midikeys()/keyboard() call, and the form an INDEX piano roll converts to.
+   * costs the tokens that use it. This is the form the piano roll's →♪ button writes (a live
+   * recording goes into a roll, not a string - see record.mjs).
    *
    * Each field is set onto the SAME channel the equivalent method would use - `note`/`n` become
    * the pitch value stream, `vel` a velocity signal (as if by .vel()), `clip` a duration scale
@@ -1985,10 +1973,9 @@ export class Sig {
    * the velocities ride along. `i` is the exception: there is no sampler yet for a channel to live
    * on, so each token's index rides on its own event (step.cfg, the same place a drawn index roll
    * puts it) and the .s("pack") that follows carries it through.
-   * A spec with no pitch field - `.as("vel:clip")`, `.as("i")` - is the note-less
-   * form a tap() recording writes: every present token fires the default note (C2, like a
-   * note-less synth("X")) at its velocity/clip, until a later .note()/.n() sets the pitch. Rests
-   * (`~`) stay rests throughout.
+   * A spec with no pitch field - `.as("vel:clip")`, `.as("i")` - is a note-less pattern: every
+   * present token fires the default note (C2, like a note-less synth("X")) at its velocity/clip,
+   * until a later .note()/.n() sets the pitch. Rests (`~`) stay rests throughout.
    */
   as(spec) {
     const fields = String(spec).split(':').map((f) => f.trim().toLowerCase());
@@ -2229,13 +2216,6 @@ export class Sig {
     // Without this the tag is simply dropped (it isn't track metadata) and with it the velocities -
     // leaving the note pattern's bare grid, one event per cycle.
     if (this.ctl) return this._fromHeadCtl((trigger) => trigger._noteLike(sig));
-    // A live keyboard()/tap() route schedules no notes of its own - the keys are the trigger. So
-    // .note()/.n() here just set the fixed pitch a key strikes (tap()'s pad note, or the base
-    // pitch), stored on the route for the browser to play; the track stays unscheduled (this
-    // Sig keeps its null step grid) instead of turning into a pattern that also fires every cycle.
-    if (this.keyboardRoute) {
-      return this._clone({ keyboardRoute: { ...this.keyboardRoute, note: sig } });
-    }
     if (this.sampler) {
       const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampCfg('note'));
       return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
@@ -2818,7 +2798,7 @@ export function channelAt(name, step, channels, time, cps = 1, pos = undefined) 
   const ch = channels?.[name];
   if (ch) {
     // A channel built by .as() yields null where the token had no such field - `36` in a
-    // `.as("note:vel:clip")` pattern, which recordingToMini writes whenever vel and clip are both
+    // `.as("note:vel:clip")` pattern, which a converted roll writes whenever vel and clip are both
     // the default. That's "unset", not zero, so the null is checked BEFORE coercing: Number(null)
     // is 0, and letting it through played every full-velocity note silently.
     const raw = ch.sample(time, cps, pos);
@@ -3659,11 +3639,17 @@ export function note(value) {
 }
 
 /**
- * A note pattern drawn on an interactive piano roll: `pianoroll("60,0,4 64,0,4", { grid: 16, len:
- * 16 })`. Clicking the `pianoroll` name in the editor opens the roll - draw, erase, resize, set
- * per-note velocity/probability, and drag the loop length - and every change is serialized straight
- * back into the string (see pianoroll.mjs for the format) and re-evaluated, the code staying the
+ * A note pattern you draw. The usual spelling is the bare `lead: pianoroll().synth("Serum 2")` -
+ * the editor names the roll after its track and files its notes as a definition at the foot of the
+ * buffer - or `pianoroll("<lead alt>")`, a pattern of roll NAMES (see rollPattern below). Either way,
+ * double-clicking the `pianoroll` name opens the roll: draw, erase, resize, set per-note velocity/
+ * probability, drag the loop, play the track from the typing keyboard (⌨), record into it (● rec,
+ * capture), and every change is written back into the code and re-evaluated, the code staying the
  * single source of truth exactly like lfo()'s shape editor.
+ *
+ * The DRAWN form the editor writes is `pianoroll("60,0,4 64,0,4", { grid: 16, len: 16 })` - a note
+ * string (see pianoroll.mjs for the format) and the roll's options, which the rest of this comment
+ * describes. Nothing below is something you need to type.
  *
  * Two independent dimensions: `grid` is the granularity - cells per cycle, so grid 16 is a 1/16
  * grid (this is the `*grid` multiplier of the equivalent mini-notation). `len` is the loop length
@@ -3710,7 +3696,7 @@ export function pianoroll(str = '', opts = {}) {
   if (str.trim() && !looksLikeNoteString(str)) return rollPattern(str, opts);
   const grid = normalizePianoRollSteps(typeof opts === 'number' ? opts : (opts.grid ?? opts.steps));
   const len = Math.max(1, Math.round(opts.len ?? grid));
-  const from = Math.max(0, Math.round(opts.start ?? 0));
+  const from = Math.round(opts.start ?? 0); // may be negative - a window slid back before cell 0
   const rawMode = typeof opts === 'number' ? undefined : opts.mode;
   // The mode picks the editor's axis and nothing else, so a misspelt one costs a panel that opens
   // on the keyboard - worth a line, never a reason to stop the roll playing.
@@ -4461,29 +4447,6 @@ export function midikeys(device) {
   };
 }
 
-/**
- * `keyboard().synth("Serum 2")` - play a track live from the computer keyboard, à la Ableton's
- * typing keyboard. The note stream comes from the *browser* (the keys can't be read engine-side
- * like a MIDI device): the home row plays the white keys, the row above the black keys, z/x shift
- * octave and c/v nudge velocity - see client.js for the exact map and the midi/normal/both mode
- * toggle. Like midikeys() it schedules no notes of its own; each key edge is routed straight to
- * the instrument, gating env()/lfo() shapes exactly like a pattern or MIDI note. Chain it with
- * .synth()/.fx()/.param()/.scale() as usual.
- */
-export function keyboard() {
-  return new Sig(() => null, { keyboardRoute: { kind: 'keyboard' } });
-}
-
-/**
- * `tap().synth("Serum 2")` - like keyboard(), but every key is a fixed-pitch hit: any key
- * triggers the track's default note at the current velocity (z/x octave and c/v velocity still
- * apply), turning the whole keyboard into one velocity-sensitive pad. Good for drums, stabs, and
- * one-shots where only the timing and dynamics matter.
- */
-export function tap() {
-  return new Sig(() => null, { keyboardRoute: { kind: 'tap' } });
-}
-
 function assertInputName(builder, name) {
   if (typeof name !== 'string' || !name.trim()) {
     const what = builder === 'audio' ? 'an audio input' : 'a MIDI device';
@@ -4499,7 +4462,8 @@ function assertInputName(builder, name) {
  * it schedules no notes of its own - the source's notes are routed to this track's instrument
  * engine-side, gating env()/lfo() shapes like any note. Chain .synth()/.fx()/.param()/.scale() as
  * usual. Called as a *method* after a plugin, `.midi(...)` injects into that plugin instead - see
- * Sig#midi. (For the computer keyboard use keyboard()/tap(); for a specific device, midikeys().)
+ * Sig#midi. (For a specific device, midikeys(); the computer keyboard plays through the piano
+ * roll's ⌨ button - see client.js - and isn't a source in the language.)
  */
 export function midi(name, channel = null) {
   assertInputName('midi', name);
