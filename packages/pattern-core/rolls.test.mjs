@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { _roll, pianoroll, cat, mini, setPatternWarn, timeShift } from './src/signal.mjs';
+import { _roll, liveRoll, pianoroll, cat, mini, channelAt, setPatternWarn, timeShift } from './src/signal.mjs';
 import { stepLocs } from './src/mini.mjs';
 import { clearRolls, restoreRolls, setRollLayer, rollIds, lookupRoll } from './src/rolls.mjs';
 import { injectLocations } from './src/locations.mjs';
@@ -316,4 +316,51 @@ test('a .swing() on the TRACK still replaces a named roll\'s own', () => {
   // Setting a control clears that field off the events first (see crossMerge), so the track's
   // number wins over the stamp exactly as it wins over a channel.
   assert.deepEqual(shifts(pianoroll('swung').swing(0.5, 8)), [0, 1 / 16, 0, 1 / 16, 0, 1 / 16, 0, 1 / 16].map(round10));
+});
+
+// --- liveRoll: the piano roll panel's channel to the player while a gesture is still held --------
+
+test('liveRoll re-files a roll under the name a playing pattern already resolves', () => {
+  fresh();
+  _roll('lead', '60,0,4', { grid: 16 });
+  const track = pianoroll('lead'); // built ONCE, exactly as an evaluation builds it
+  assert.deepEqual(values(track, 0), [60]);
+  liveRoll('lead', '67,0,4', { grid: 16 });
+  // The same pattern object, never rebuilt, now plays the new notes: resolution is per cycle, which
+  // is what lets a drag be heard without the buffer being rewritten and re-evaluated.
+  assert.deepEqual(values(track, 1), [67]);
+});
+
+test('a velocity pushed mid-drag reaches the channel the scheduler reads', () => {
+  fresh();
+  _roll('lead', '60,0,4', { grid: 16 });
+  const track = pianoroll('lead');
+  const velOf = (cycle) => {
+    const st = track.stepsForCycle(cycle)[0];
+    const at = cycle + st.start;
+    return channelAt('vel', st, track.noteChannels, at, 1, at) ?? 1;
+  };
+  assert.equal(velOf(0), 1);
+  liveRoll('lead', '60,0,4,0.25', { grid: 16 });
+  assert.equal(velOf(1), 0.25);
+});
+
+test('liveRoll re-files silently - the same id twice is its whole job, not a mistake', () => {
+  fresh();
+  _roll('lead', '60,0,4', { grid: 16 });
+  const { lines } = capture(() => liveRoll('lead', '67,0,4', { grid: 16 }));
+  assert.deepEqual(lines, []);
+});
+
+test('_roll still warns when the buffer itself defines an id twice', () => {
+  fresh();
+  _roll('lead', '60,0,4', { grid: 16 });
+  const { lines } = capture(() => _roll('lead', '67,0,4', { grid: 16 }));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /defined twice/);
+});
+
+test('liveRoll rejects an id that could never be named in a pattern', () => {
+  fresh();
+  assert.throws(() => liveRoll('two words', '60,0,4'), /one plain word/);
 });

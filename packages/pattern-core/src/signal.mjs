@@ -3843,6 +3843,24 @@ function rollPattern(str, opts) {
  * buffer definition of the same id wins for that buffer.
  */
 export function _roll(id, str = '', opts = {}) {
+  return defineRoll(id, str, opts, false);
+}
+
+/**
+ * The same definition, re-filed WITHOUT the "defined twice" warning - what the piano roll panel
+ * pushes while a drag is still in the hand.
+ *
+ * The point is that resolution is lazy (see rollPattern): re-registering under the id a pattern
+ * already names is enough for the next cycle to play the new notes, so a lane drag is heard
+ * without the buffer being rewritten and the whole patch re-evaluated on every frame. Re-filing
+ * the same id is the ENTIRE job here rather than a mistake, hence the silence; the eval at the end
+ * of the gesture rebuilds this id from the code like any other, and has the last word.
+ */
+export function liveRoll(id, str = '', opts = {}) {
+  return defineRoll(id, str, opts, true);
+}
+
+function defineRoll(id, str, opts, quiet) {
   if (typeof id !== 'number' && typeof id !== 'string') {
     throw new Error('[signal] a roll definition takes a number or a name as its id - draw one in the piano roll panel rather than writing it by hand');
   }
@@ -3857,7 +3875,7 @@ export function _roll(id, str = '', opts = {}) {
   // deliberately playing a definition (`lead: roll(0, "…").synth("Serum 2")`) still works.
   sig.isDef = key;
   const replaced = registerRoll(key, sig);
-  if (replaced) warnUser(replaced);
+  if (replaced && !quiet) warnUser(replaced);
   return sig;
 }
 

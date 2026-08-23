@@ -372,8 +372,11 @@
         </div>
         <canvas id="pianorollCanvas" width="660" height="464"></canvas>
       </div>
-      <div id="pianorollMenu" class="pr-menu hidden" role="menu"></div>
     </div>
+
+    <!-- Outside #pianorollPanel on purpose: the panel is transform:translate-d, which would make
+         this fixed menu position against the panel and be clipped away by its overflow:hidden. -->
+    <div id="pianorollMenu" class="pr-menu hidden" role="menu"></div>
 
     <div id="themePanel" class="theme-panel hidden">
       <div class="theme-panel-head">

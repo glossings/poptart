@@ -2119,6 +2119,23 @@ const routes = {
     },
   }),
 
+  // Body: { id, notes, opts } - re-files one roll definition from the piano roll panel while a
+  // gesture is still in the hand (a lane drag, the swing slider). Because a pattern resolves the
+  // rolls it NAMES once per cycle, this is heard on the next cycle without the buffer being
+  // rewritten or re-evaluated - which is the whole point: an eval per frame of a drag would mean a
+  // full re-transpile, a browser-history entry and an autosave for a value still moving. The write
+  // to the code, and the ordinary eval that comes with it, land once when the gesture is let go.
+  //
+  // Nothing here touches the engine, so it works stopped as well as playing, and it deliberately
+  // does NOT report an unknown id: the panel may be ahead of the buffer (a roll drawn before the
+  // first eval names it), and re-filing is how it catches up.
+  'POST /api/liveRoll': async (body) => {
+    const id = body?.id;
+    if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveRoll needs the roll id');
+    patternCore.liveRoll(id, String(body.notes ?? ''), body.opts ?? {});
+    return { status: 200, body: { ok: true } };
+  },
+
   // --- the ★ library (see pinned-defs.js) ---
 
   'GET /api/pinned': async () => ({ status: 200, body: { pinned: pinnedList() } }),
