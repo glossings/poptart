@@ -2393,15 +2393,53 @@ li.CodeMirror-hint-active {
 }
 
 /* ⌨ is a glyph, not a word - at the tools' text size it is a smudge, so it gets glyph size in the
-   same button height. On, it means the letter keys are playing notes rather than typing - worth
-   more than a tint, so it pulses the way an armed recorder does. */
+   same button height. (On, it takes the header's ordinary .active tint - a pulse was tried and
+   found distracting.) */
 #pianorollKeys {
   font-size: 17px;
   padding: 0 7px;
 }
 
-#pianorollKeys.active {
-  animation: rec-pulse 1.6s ease-in-out infinite;
+/* Right-click on the value lane: randomize / reset the channel it shows (see prOpenLaneMenu). */
+.pr-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 13em;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px var(--shadow);
+  font-size: 12px;
+}
+
+.pr-menu.hidden {
+  display: none;
+}
+
+.pr-menu-head {
+  padding: 4px 9px 5px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.pr-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 9px;
+  font: inherit;
+  color: var(--text);
+}
+
+.pr-menu button:hover {
+  background: var(--hover-bg);
 }
 
 /* Takes whatever the control column isn't using - flex-basis 0 so the backing store's pixel size

@@ -37,7 +37,7 @@ test('odd lengths take the next phrase rather than a far-off multiple', () => {
 
 test('a fresh roll recorded from an aligned start fills from cell 0, quantized to its grid', () => {
   const roll = fresh(16, 4);
-  const events = [ev(60, 8.0, 8.25), ev(64, 8.26, 8.5, 0.5), ev(67, 11.75, 12.0)];
+  const events = [ev(60, 8.0, 8.25), ev(64, 8.25, 8.5, 0.5), ev(67, 11.75, 12.0)];
   const out = recordingToRoll(events, roll, { window: [8, 12], quantize: 16 });
   assert.equal(out.grid, 16);
   assert.equal(out.len, 64);
@@ -102,11 +102,23 @@ test('unquantized: the nearest cell, with the remainder as a nudge', () => {
   assert.equal(nt.len, 1);
 });
 
-test('a coarse quantize on a fine roll lands on the matching cells, no nudge', () => {
+test('a coarse quantize on a fine roll lands on the matching cells, keeping the offset as a nudge', () => {
   const roll = fresh(16, 1);
-  const out = recordingToRoll([ev(60, 8.2, 8.3)], roll, { window: [8, 9], quantize: 4 });
-  assert.equal(serializePianoRoll(live(out.notes)), '60,4,2');
+  const out = recordingToRoll([ev(60, 8.26, 8.36)], roll, { window: [8, 9], quantize: 4 });
+  const [nt] = live(out.notes);
+  assert.equal(nt.start, 4); // the quarter-note slot
+  assert.ok(Math.abs(nt.nudge - 0.16) < 1e-6); // 0.26 cycles is 4.16 cells: 0.16 late of the slot, kept
   assert.equal(out.grid, 16);
+  // ...but only as far as a nudge reaches: half a cell off the slot is the most it can keep
+  const far = recordingToRoll([ev(60, 8.1, 8.2)], fresh(16, 1), { window: [8, 9], quantize: 4 });
+  assert.equal(live(far.notes)[0].start, 0); // 8.1 snaps to the downbeat's slot...
+  assert.equal(live(far.notes)[0].nudge, 0.5); // ...1.6 cells late, clamped to the half-cell
+});
+
+test('a take on the grid quantizes clean - no nudge where nothing was off', () => {
+  const roll = fresh(16, 1);
+  const out = recordingToRoll([ev(60, 8.25, 8.5)], roll, { window: [8, 9], quantize: 16 });
+  assert.equal(serializePianoRoll(live(out.notes)), '60,4,4');
 });
 
 test('a quantize finer than the roll re-meshes it, keeping the drawn notes where they were', () => {

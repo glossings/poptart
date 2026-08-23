@@ -208,8 +208,11 @@ const CAPTURE_EDGE_TOL = 1 / 32; // cycles
  *   quantize  - slots per cycle to snap onsets to, 0 for none. Coarser than the roll's grid, onsets
  *               land on the matching cells; FINER, the roll is re-meshed to hold them (regridPianoRoll,
  *               lossless - the existing notes don't move), up to PIANOROLL_MAX_GRID. Unquantized,
- *               each note takes the nearest cell and keeps the remainder as its nudge (within the
- *               half-cell a nudge can say). Lengths are never quantized - Live's record quantization
+ *               each note takes the nearest cell. EITHER WAY the note keeps what the snap took off
+ *               it as its nudge - the distance from where it was played to the cell it sits on, as
+ *               far as the half-cell a nudge can say - so a take is quantized on the GRID and plays
+ *               with the feel it was played with; resetting the nudges (the lane's menu) is the hard
+ *               quantize, one click later. Lengths are never quantized - Live's record quantization
  *               moves onsets and leaves durations alone.
  *
  * Velocity is kept as played; an event's `index` (a key struck on an index roll) goes to the note's
@@ -240,9 +243,8 @@ export function recordingToRoll(events, roll, { window, quantize = 0, countIn = 
   for (const ev of sorted) {
     if (!Number.isFinite(ev.start) || !Number.isFinite(ev.end) || !Number.isFinite(ev.note)) continue;
     const onset = q > 0 ? Math.round(ev.start * q) / q : ev.start;
-    const absCell = onset * grid;
-    const cell = Math.round(absCell);
-    const nudge = q > 0 ? 0 : Math.min(PIANOROLL_MAX_NUDGE, Math.max(-PIANOROLL_MAX_NUDGE, absCell - cell));
+    const cell = Math.round(onset * grid);
+    const nudge = Math.min(PIANOROLL_MAX_NUDGE, Math.max(-PIANOROLL_MAX_NUDGE, ev.start * grid - cell));
     const noteLen = Math.max(1, Math.round((ev.end - ev.start) * grid));
     const rel = cell - startCell;
     let drawn;

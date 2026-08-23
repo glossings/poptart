@@ -3422,8 +3422,8 @@ function initPresetPanel() {
 // Ableton-style marker - a dot at the onset, a line running right for the duration, dashed for
 // probability. With the arrow tool a marker drags up and down, whole selection at once, keeping the
 // selection's differences; with the pencil you PAINT instead, and every note the drag sweeps over
-// snaps to the height you're holding it at (see prPaintLane). 🎲 rolls the whole channel at once -
-// the selection, or the roll. A note dropped on one already sounding at that pitch keeps its own
+// snaps to the height you're holding it at (see prPaintLane). Right-click the lane for randomize /
+// reset of the channel - the selection, or the roll. A note dropped on one already sounding at that pitch keeps its own
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
 // gets everything back the moment the note on top moves away (see prClipOverlaps). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
@@ -3475,7 +3475,7 @@ const prScaleFoldBtn = document.getElementById('pianorollScaleFold');
 const prFoldBtn = document.getElementById('pianorollFold');
 const prScaleLabel = document.getElementById('pianorollScale');
 const prPreviewBtn = document.getElementById('pianorollPreview');
-const prRandomBtn = document.getElementById('pianorollRandom');
+const prMenu = document.getElementById('pianorollMenu'); // right-click menu over the value lane
 const prToMiniBtn = document.getElementById('pianorollToMini');
 const prKeysBtn = document.getElementById('pianorollKeys'); // ⌨ - the computer keyboard plays this roll's track
 const prCaptureBtn = document.getElementById('pianorollCapture'); // what was just played, into the roll
@@ -5447,6 +5447,7 @@ function prRefreshRollList() {
 
 function closePianorollEditor() {
   prClosePicker();
+  prCloseLaneMenu();
   prPreviewOff();
   // The keyboard plays the roll on screen; no roll, nothing for it to play - and no lit ⌨ to
   // tell you your typing is being eaten.
@@ -5986,10 +5987,11 @@ function prToggleCmdMode() {
   prRefocus();
 }
 
-/** Whatever outside the canvas names the lane's channel - just the 🎲 button's tooltip, for now. */
-function prSyncLaneChannel() {
-  if (prRandomBtn) prRandomBtn.title = `randomize ${prLaneKey()} — the selection, or the whole roll`;
-}
+/** Whatever outside the canvas names the lane's channel - nothing, now the lane's menu reads it live. */
+function prSyncLaneChannel() {}
+
+/** What a channel goes back to when reset: full velocity, certain to play, on its cell. */
+const PR_LANE_DEFAULT = { vel: 1, prob: 1, nudge: 0 };
 
 /**
  * One note's value on the lane's channel. `nudge` goes through the roll's own reader, since a note
@@ -6038,20 +6040,58 @@ function prPaintLane(pxA, pxB, py, m) {
   return painted;
 }
 
+/** The notes a lane-wide edit acts on: the selection if there is one, otherwise the whole roll. */
+const prLaneTargets = () => (prState.sel.size ? [...prState.sel].filter((nt) => !nt.hidden) : prLiveNotes(prState.notes));
+
 /**
- * 🎲: fill the lane's channel with fresh random values - the selection if there is one, otherwise
- * every note in the roll. Uniform across the channel's own range (0..1 for vel and prob, half a cell
- * either way for nudge), which is what a die does; anything gentler is a pencil drag away.
+ * Set the lane's channel on every target note from `valueFor(note)` - the one edit behind the lane
+ * menu's randomize (uniform across the channel's own range: 0..1 for vel and prob, half a cell
+ * either way for nudge, which is what a die does) and reset (PR_LANE_DEFAULT - which is how a
+ * quantized take gets its nudges, kept on record, snapped away: see recordingToRoll).
  */
-function prRandomizeLane() {
+function prSetLane(valueFor) {
   if (!prState) return;
   const key = prLaneKey();
-  const targets = prState.sel.size ? [...prState.sel].filter((nt) => !nt.hidden) : prLiveNotes(prState.notes);
+  const targets = prLaneTargets();
   if (!targets.length) return;
-  for (const nt of targets) nt[key] = prLaneDenorm(Math.random(), key);
+  for (const nt of targets) nt[key] = valueFor(nt);
   writePianorollCall();
   drawPianoroll();
-  prRefocus();
+}
+
+/**
+ * Right-click on the value lane (or its channel label): a small menu to randomize or reset the
+ * channel on show, over the selection if there is one and the whole roll otherwise - the menu says
+ * which. The only place those two live; a lane is what you'd reach for to do either.
+ */
+function prOpenLaneMenu(clientX, clientY) {
+  if (!prState) return;
+  const key = prLaneKey();
+  const n = prLaneTargets().length;
+  const scope = prState.sel.size ? `selection (${n})` : `all notes (${n})`;
+  prMenu.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'pr-menu-head';
+  head.textContent = `${key} · ${scope}`;
+  prMenu.appendChild(head);
+  const item = (label, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.addEventListener('click', () => { prCloseLaneMenu(); fn(); prRefocus(); });
+    prMenu.appendChild(b);
+  };
+  item(`randomize ${key}`, () => prSetLane(() => prLaneDenorm(Math.random(), key)));
+  item(`reset ${key} to ${PR_LANE_DEFAULT[key]}`, () => prSetLane(() => PR_LANE_DEFAULT[key]));
+  prMenu.classList.remove('hidden');
+  // On screen where the pointer is, nudged back in if that would run off the window's edge.
+  const w = prMenu.offsetWidth, h = prMenu.offsetHeight;
+  prMenu.style.left = `${Math.min(clientX, window.innerWidth - w - 8)}px`;
+  prMenu.style.top = `${Math.min(clientY, window.innerHeight - h - 8)}px`;
+}
+
+function prCloseLaneMenu() {
+  prMenu.classList.add('hidden');
 }
 
 // The note whose lane column contains px - grabbing anywhere under a note works, like Live. When
@@ -6523,7 +6563,18 @@ function initPianorollCanvas() {
       ? (d.edge === 'move' ? 'grabbing' : 'ew-resize')
       : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
 
-  prCanvas.addEventListener('contextmenu', (e) => { if (prState) e.preventDefault(); }); // ctrl-drag (mac) = velocity, not a menu
+  // ctrl-drag (mac) = velocity, not a menu - except over the value lane, which has one of its own
+  // (randomize / reset the channel it shows; see prOpenLaneMenu).
+  prCanvas.addEventListener('contextmenu', (e) => {
+    if (!prState) return;
+    e.preventDefault();
+    const { py } = prCanvasPos(e);
+    if (py >= prMetrics().laneTop) prOpenLaneMenu(e.clientX, e.clientY);
+  });
+  // The menu goes away on any press outside it (its items act on click, so a press ON it must not
+  // hide them first), and on Escape.
+  document.addEventListener('pointerdown', (e) => { if (!prMenu.contains(e.target)) prCloseLaneMenu(); }, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !prMenu.classList.contains('hidden')) { prCloseLaneMenu(); e.stopPropagation(); } }, true);
 
   prCanvas.addEventListener('pointerdown', (e) => {
     if (!prState) return;
@@ -7128,11 +7179,6 @@ function initPianorollEditor() {
     reflectPreview();
     prRefocus();
   });
-
-  // 🎲 rolls the value lane's channel. Which channel that is comes from the lane's own gutter label,
-  // the one switch there is - the button's tooltip names it so the die is never a mystery.
-  prSyncLaneChannel();
-  prRandomBtn.addEventListener('click', prRandomizeLane);
 
   // The timing controls fold away, like the main sidebar - the grid is what you are working in,
   // and grid/len/÷2/×2/⧉ are set once and then left alone. Sticky, like the tool and fold.
