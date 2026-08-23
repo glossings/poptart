@@ -317,6 +317,12 @@ const API_DOCS = {
   ply: { kind: 'method', sig: 'ply(reps, fn)', desc: 'Retriggers each event `reps` times; the optional (x, n) => signal transforms each repetition.', eg: '.ply(3, (x, n) => x.add(n * 12))' },
   echo: { kind: 'method', sig: 'echo(reps, time, fn)', desc: 'Repeats each event `reps` times, `time` cycles apart; the optional (x, n) => signal shapes each copy.', eg: '.echo(4, 1/8, (x, n) => x.gain(0.6 ** n))' },
   arp: { kind: 'method', sig: 'arp(indices)', desc: 'Spreads each chord over the index pattern - indices past the top wrap up an octave. Apply .scale() first on degrees.', eg: 'note("[c3,e3,g3]").arp("0 1 2 1")' },
+  bite: {
+    kind: 'method',
+    sig: 'bite(indices, {grid, len})',
+    desc: 'Remixes the pattern: its len-cycle window (default 4) is chopped into grid bites per cycle (default 8), and each index event jumps the playhead to that bite. Fractions start partway in; struck notes keep their written durations.',
+    eg: 'n("0 1 2 3 4 5 6 7").bite("<0 12 2 9>*8")',
+  },
 
   // ----------------------------------------------------------------- arithmetic
   add: { kind: 'method', sig: 'add(x)', desc: 'Adds, keeping the left side\'s structure. On a control pattern it reaches into that channel. A `,`-stacked right side sounds every layer at once - .add(note("0,7")) keeps each note and adds its fifth alongside.', eg: '.add(note("0,7"))' },

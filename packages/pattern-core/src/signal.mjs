@@ -1703,6 +1703,123 @@ export class Sig {
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
+  /**
+   * Remixes the pattern by chopping it into a grid of bites and re-ordering them with an index
+   * pattern: `.bite("<0 3 2 1>*8")` re-sequences the pattern's grid-th notes. The source is laid
+   * out over a window of `len` cycles chopped into `grid` bites per cycle - 8 x 4 = 32 bites by
+   * default, so an index that simply counts them in order (`"<0 1 2 ... 31>*8"`, written out)
+   * plays the pattern exactly as written, and any other order is a remix of it. Config is
+   * `{ grid, len }` (a bare number is read as the grid); both may themselves be patterned, read
+   * once per cycle.
+   *
+   * Each index event JUMPS the playhead to bite `v` and rolls forward from there for the event's
+   * whole span - an event exactly one grid-th long (the `*8` form) plays exactly its one bite,
+   * while `.bite("0 8")` (two half-cycle events, grid 8) plays bites 0-3 and then 8-11. A
+   * fractional index starts that far INTO the bite - 2.5 reads from halfway through bite 2 - and
+   * an index wraps mod `grid * len`, so -1 is the window's last bite. A rest in the index pattern
+   * is a gap where nothing new is struck.
+   *
+   * What a bite strikes is every source note whose ONSET it covers, and each note keeps the
+   * duration it was written with - a held pad bitten near its start rings its full length past the
+   * next bite rather than being truncated to the grid. A note already sounding where the playhead
+   * lands does NOT re-strike (its onset belongs to another bite), which is what keeps the identity
+   * index a true identity instead of double-striking long notes.
+   *
+   * The window is the len-aligned block around NOW - during output cycles 4-7 the bites come from
+   * source cycles 4-7 - so the source's own longer structure (`<...>` alternations, irand melodies)
+   * keeps evolving underneath the remix; freeze it first with .rib() if you want fixed material.
+   * Every control set BEFORE the .bite() travels with its notes - sampler config, vel/clip,
+   * gain/pan, .param() signals - exactly as .rib() carries them. An index with no step grid of its
+   * own (irand(32), a continuous LFO) is read once per output grid slot: `.bite(irand(32))` is a
+   * fresh random splice every grid-th note.
+   */
+  bite(indices, config = {}) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .bite() needs a step pattern, e.g. n("0 1 2 3").bite("<3 2 1 0>*4")');
+    }
+    if (indices == null) {
+      throw new Error('[signal] .bite() takes an index pattern, e.g. .bite("<0 1 2 3>*8", { grid: 8, len: 4 })');
+    }
+    const idxSig = toSignal(indices);
+    // A bare number is the grid (`.bite("0 3", 16)`); everything else reads off the config object.
+    const cfg =
+      typeof config === 'number'
+        ? { grid: config }
+        : config && typeof config === 'object'
+          ? config
+          : warnAndKeep({}, `[signal] .bite() config should be an object like { grid: 8, len: 4 } (got ${JSON.stringify(config)}) - using the defaults`);
+    for (const k of Object.keys(cfg)) {
+      if (k !== 'grid' && k !== 'len') warnUser(`[signal] .bite() config has no '${k}' - it takes { grid, len }`);
+    }
+    // grid/len are controls like any other, so they may be patterned - read once per cycle (the
+    // bite layout has to hold still across a cycle, like echo's). A constant that can't cut a grid
+    // warns now and falls back to the default; a patterned value is guarded per cycle instead.
+    let gridSig = toSignal(cfg.grid ?? DEFAULT_BITE_GRID);
+    let lenSig = toSignal(cfg.len ?? DEFAULT_BITE_LEN);
+    if (gridSig.constVal !== undefined && !(gridSig.constVal >= 1)) {
+      gridSig = warnAndKeep(toSignal(DEFAULT_BITE_GRID), `[signal] .bite() grid takes at least 1 bite per cycle (got ${cfg.grid}) - using ${DEFAULT_BITE_GRID}`);
+    }
+    if (lenSig.constVal !== undefined && !(lenSig.constVal > 0)) {
+      lenSig = warnAndKeep(toSignal(DEFAULT_BITE_LEN), `[signal] .bite() len takes a positive number of cycles (got ${cfg.len}) - using ${DEFAULT_BITE_LEN}`);
+    }
+    const layoutAt = (cycle) => {
+      const g = Math.round(Number(gridSig.sample(cycle, 1, cycle)));
+      const l = Number(lenSig.sample(cycle, 1, cycle));
+      return { grid: g >= 1 ? g : DEFAULT_BITE_GRID, len: l > 0 ? l : DEFAULT_BITE_LEN };
+    };
+    // Everything here is deterministic in the cycle, and the lookback walks re-ask for the same
+    // cycles constantly (each note query walks BITE_LOOKBACK cycles of events) - memoized.
+    const eventCache = new Map();
+    const events = (cycle) => {
+      if (!eventCache.has(cycle)) eventCache.set(cycle, biteEventsFor(idxSig, cycle, layoutAt(cycle)));
+      return eventCache.get(cycle);
+    };
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => biteSteps(cycle, events, base);
+    // Where the playhead reads from at output position c - the emit-time map every control set
+    // before the .bite() follows, exactly as rib's remap does. Controls are sampled at note
+    // ONSETS, which always land inside an index event; an uncovered position (an index rest) maps
+    // to itself, so continuous streams (a pre-bite .gain(sine)) stay defined everywhere.
+    const remapPos = (c) => {
+      const cyc = Math.floor(c);
+      for (let b = cyc; b >= cyc - BITE_LOOKBACK; b--) {
+        let best = null;
+        for (const ev of events(b)) {
+          if (ev.onset <= c + BITE_EPS && ev.end > c + BITE_EPS) best = ev; // latest onset wins
+        }
+        if (best) return best.src + (c - best.onset);
+      }
+      return c;
+    };
+    // Carried control signals loop through the same jumps as the notes (see rib's remapSig):
+    // constants are position-independent and engine-side IR modulators run on the server's clock,
+    // so both pass through untouched. A control's own step grid is remapped by COVERAGE (clipped at
+    // the jumps, like rib's remapGrid) - a control holds over a window, it doesn't strike.
+    const remapSig = (sig) => {
+      if (!(sig instanceof Sig) || sig.constVal !== undefined || sig.lfoIR || sig.envIR || sig.ccIR) return sig;
+      return new Sig(
+        (t, cps, pos) => {
+          const c = pos ?? t * cps;
+          const rc = remapPos(c);
+          return sig.sample(rc / cps, cps, rc);
+        },
+        {
+          ...(sig.stepsForCycle ? { stepsForCycle: (cycle) => biteCoverSteps(cycle, events, sig.stepsForCycle) } : {}),
+          ...(sig.eventAt ? { eventAt: (cyclePos) => sig.eventAt(remapPos(cyclePos)) } : {}),
+        },
+      );
+    };
+    const remapObj = (obj) => obj && Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, remapSig(v)]));
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), {
+      stepsForCycle,
+      ...this._meta(),
+      sampler: remapObj(this.sampler),
+      noteChannels: remapObj(this.noteChannels),
+      channel: remapObj(this.channel),
+      paramSignals: remapObj(this.paramSignals),
+    });
+  }
+
   // -------------------------------------------------------------------------------------------
   // Sampler config - only meaningful on s("pack") patterns. Every setter accepts a number, a
   // mini string, or any Sig; the value is sampled at each event's onset, so patterns and LFOs
@@ -2331,6 +2448,121 @@ function arpIndexSteps(sig, cycle, seg) {
     return [{ start: seg.start, end: seg.end, value: ev.value, locs: ev.locs }];
   }
   return sig.stepsForCycle(cycle);
+}
+
+// ---------------------------------------------------------------------------------------------
+// bite helpers (Sig#bite): the index pattern is resolved into absolute-time playhead events, and
+// the source grid is collected through them twice over - by ONSET for the notes (a note plays iff
+// a bite covers where it begins, and keeps its written duration) and by COVERAGE for carried
+// control grids (a control holds over a window, it doesn't strike).
+// ---------------------------------------------------------------------------------------------
+
+const DEFAULT_BITE_GRID = 8;
+const DEFAULT_BITE_LEN = 4;
+// How many output cycles back an index event (or the ring of a note it struck) is still looked
+// for. An index event held longer than this, or a bitten note ringing longer, keeps its sound
+// (the scheduler triggers off the origin step, which carries the full duration) but stops being
+// re-reported as a `cont` tail - the same order of bound echo() lives with.
+const BITE_LOOKBACK = 8;
+const BITE_EPS = 1e-9;
+
+// The playhead events one output cycle's index steps open, in ABSOLUTE time: { onset, end, src,
+// locs }, where src is the absolute source position the playhead jumps to at onset (and rolls
+// forward from). Only origin steps open events - a `cont` re-report belongs to the event its
+// origin cycle already opened (mini reports the full span there). The integer part of an index
+// picks the bite within the len-aligned block around the event's own cycle, the remainder walks
+// that far into it, and the whole thing wraps mod grid*len - all in Frac, so a bite boundary is
+// the same moment however it was computed. A rest or non-numeric index opens nothing (a gap).
+// An index with no honest step grid (irand/choose via eventAt, a continuous LFO) is read once per
+// output grid slot instead - the arpIndexSteps convention, one draw per bite.
+function biteEventsFor(idxSig, cycle, { grid, len }) {
+  const total = grid * len;
+  const blockBase = Frac.fromNumber(cycle).sub(Frac.fromNumber(cycle).mod(len)); // len-aligned block start
+  const open = (start, end, value, locs) => {
+    const v = Number(value);
+    if (value == null || !Number.isFinite(v)) return null;
+    const src = blockBase.add(Frac.fromNumber(v).mod(total).div(grid)).toNumber();
+    return { onset: cycle + start, end: cycle + end, src, locs };
+  };
+  const out = [];
+  if (!idxSig.stepsForCycle || idxSig.eventAt) {
+    for (let k = 0; k < grid; k++) {
+      const start = k / grid;
+      const ev = readEvent(idxSig, cycle + start);
+      const opened = open(start, (k + 1) / grid, ev.value, ev.locs);
+      if (opened) out.push(opened);
+    }
+    return out;
+  }
+  for (const s of idxSig.stepsForCycle(cycle)) {
+    if (s.cont) continue;
+    const opened = open(s.start, s.end, s.value, stepLocs(s));
+    if (opened) out.push(opened);
+  }
+  return out;
+}
+
+// One output cycle of bitten NOTES. Each playhead event reads the source over [src, src + span)
+// and strikes every origin step whose onset falls inside; the struck note keeps its full written
+// duration (`end` past the cycle line, as mini itself reports a held note) and lights both its own
+// atom and the index atom that chose it. A note whose onset lands in an earlier output cycle but
+// still rings here is re-reported as a `cont` tail, clamped to the cycle - which is why events up
+// to BITE_LOOKBACK cycles back are walked.
+function biteSteps(cycle, eventsFor, srcStepsFor) {
+  const out = [];
+  for (let b = cycle - BITE_LOOKBACK; b <= cycle; b++) {
+    for (const ev of eventsFor(b)) {
+      const w0 = ev.src;
+      const w1 = ev.src + (ev.end - ev.onset);
+      for (let sc = Math.floor(w0 + BITE_EPS); sc < w1 - BITE_EPS; sc++) {
+        for (const st of srcStepsFor(sc)) {
+          if (st.value == null || st.cont) continue;
+          const so = sc + st.start;
+          if (so < w0 - BITE_EPS || so >= w1 - BITE_EPS) continue;
+          const outStart = ev.onset + (so - w0);
+          const outEnd = outStart + (st.end - st.start);
+          const locs = [...stepLocs(st), ...ev.locs];
+          if (outStart >= cycle - BITE_EPS && outStart < cycle + 1 - BITE_EPS) {
+            out.push({ ...st, start: outStart - cycle, end: outEnd - cycle, cont: undefined, ...(locs.length ? { locs } : {}) });
+          } else if (outStart < cycle - BITE_EPS && outEnd > cycle + BITE_EPS) {
+            out.push({ ...st, start: 0, end: Math.min(outEnd - cycle, 1), cont: true, ...(locs.length ? { locs } : {}) });
+          }
+        }
+      }
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+// One output cycle of a carried CONTROL's grid, remapped through the same playhead events by
+// COVERAGE (remapGrid's convention): every part of a control step the window passes over is
+// reported, clipped at the jumps. A step clipped on the left was already holding when the playhead
+// landed mid-step, so it's a tie (`cont`) - unless the clip is the event's own opening edge, where
+// the jump is a fresh read. Control steps don't ring, so only events overlapping this cycle count.
+function biteCoverSteps(cycle, eventsFor, srcStepsFor) {
+  const out = [];
+  for (let b = cycle - BITE_LOOKBACK; b <= cycle; b++) {
+    for (const ev of eventsFor(b)) {
+      if (ev.end <= cycle + BITE_EPS || ev.onset >= cycle + 1 - BITE_EPS) continue;
+      const a = Math.max(ev.onset, cycle);
+      const z = Math.min(ev.end, cycle + 1);
+      const s0 = ev.src + (a - ev.onset);
+      const s1 = ev.src + (z - ev.onset);
+      for (let sc = Math.floor(s0 + BITE_EPS); sc < s1 - BITE_EPS; sc++) {
+        for (const st of srcStepsFor(sc)) {
+          const absS = sc + st.start;
+          const absE = sc + st.end;
+          const cs = Math.max(absS, s0);
+          const ce = Math.min(absE, s1);
+          if (cs >= ce - 1e-12) continue;
+          const clippedLeft = cs > absS + 1e-12;
+          const atOpen = cs <= s0 + 1e-12 && a <= ev.onset + BITE_EPS;
+          out.push({ ...st, start: a - cycle + (cs - s0), end: a - cycle + (ce - s0), cont: ((clippedLeft && !atOpen) || st.cont) || undefined });
+        }
+      }
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
 }
 
 // The bundle trigger cross-product (Step 2 of the all-signals rewrite). Cross-products a base
