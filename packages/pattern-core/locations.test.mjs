@@ -337,9 +337,18 @@ test('a definition the editor writes is never rewritten by the transpile', () =>
     '_preset("growl", "", "")',
     '_pack("kit", ["drums/kick.wav", "/Volumes/lib/snare 02.wav"])',
     '_pack("kit", [])',
+    // Parens and operators INSIDE an earlier argument are not syntax: the position of the second
+    // path must not be judged off the `)` in the first.
+    '_pack("kit", ["Kick & Bass Vol.1 - Bass Loop 02 (Amin).wav", "Kick & Bass (Gmin) 02.wav"])',
+    '_preset("growl", "Serum (2)", "H4sIAAAAAAAA")',
   ]) {
     assert.equal(injectLocations(src, 0), src, `${src} carries a name and data, not patterns`);
   }
+});
+
+test('a paren inside a comment or another string does not change where a literal stands', () => {
+  assert.equal(injectLocations('// (setup)\nlead: n("0 2")', 0), '// (setup)\nlead: n(mini("0 2", 20))');
+  assert.equal(injectLocations('x.param("Cutoff (Hz)", "0.2 0.8")', 0), 'x.param("Cutoff (Hz)", mini("0.2 0.8", 24))');
 });
 
 test('a pattern of NAMES is tagged for highlighting; the drawn data beside it is not', () => {

@@ -5099,6 +5099,10 @@ const prPickChoose = () => rollPicker.choose();
 // here at all says you want to look at that roll rather than whatever the bar brings next.
 // ---------------------------------------------------------------------------------------------
 
+// The ★ on a picker row (see makeNamePicker): outline for an unpinned one, filled once it is in the
+// library - one shape, the CSS decides the fill.
+const DEF_PICK_STAR_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M12 2.8l2.8 5.9 6.5.8-4.8 4.5 1.3 6.4L12 17.3l-5.8 3.1 1.3-6.4-4.8-4.5 6.5-.8z"/></svg>';
+
 /**
  * The name-and-picker head a definition editor wears: the name IS the title, typing over it
  * renames, and the ▾ behind it searches every name there is, offering to create one that matches
@@ -5181,6 +5185,19 @@ function makeNamePicker({
       const name = document.createElement('span');
       name.className = 'def-pick-name';
       name.textContent = row.label;
+      // In an inline list the rows ARE the panel, so the open one's name is also where it is
+      // renamed: click it and type (the same rename as the head's box - the definition and every
+      // call that names it move together). A row that isn't open opens on click, as ever.
+      if (inline && row.act === 'open' && row.own && row.id === current()) {
+        name.title = 'click to rename';
+        name.classList.add('def-pick-renamable');
+        name.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          idx = i;
+          renameInline(el, name, row);
+        });
+      }
       el.appendChild(name);
       // ★ - in the library or not (see makeDefRegistry's pin). On this buffer's own rows, and on
       // library rows that are pinned; a library row that comes from prebake.js by hand has no star,
@@ -5189,7 +5206,7 @@ function makeNamePicker({
       if (row.act === 'open' && (row.own || pinned !== 'none')) {
         const star = document.createElement('span');
         star.className = `def-pick-star ${pinned}`;
-        star.textContent = pinned === 'none' ? '☆' : '★';
+        star.innerHTML = DEF_PICK_STAR_SVG; // drawn, not typed: the text ☆ is a runt next to ⧉ → ×
         star.title = {
           none: `add ${row.id} to your library - every project gets it`,
           same: `${row.id} is in your library - click to take it out`,
@@ -5274,6 +5291,33 @@ function makeNamePicker({
       els.list.appendChild(el);
     });
     scrollRowIntoView();
+  }
+
+  // The row's name swapped for a box holding it: Enter or leaving commits, Escape puts it back.
+  function renameInline(el, name, row) {
+    const box = document.createElement('input');
+    box.className = 'def-pick-rename';
+    box.type = 'text';
+    box.value = row.id;
+    box.spellcheck = false;
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      const to = box.value.trim();
+      if (commit && to && to !== row.id) reg.rename(row.id, to, row.scope);
+      if (isOpen()) renderList();
+    };
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      e.stopPropagation(); // the list's own arrows/delete must not fire while typing a name
+    });
+    box.addEventListener('mousedown', (e) => e.stopPropagation());
+    box.addEventListener('blur', () => finish(true));
+    el.replaceChild(box, name);
+    box.focus();
+    box.select();
   }
 
   // The list scrolls once it is more than a box deep, so the highlighted row is regularly below the
@@ -10043,11 +10087,6 @@ function previewSample(pack, i, row) {
   return previewSampleUrl(`/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`, row);
 }
 
-// The same audition for one file by path - what the pack panel's rows play.
-function previewSampleFile(file, row) {
-  return previewSampleUrl(`/api/sampleAudio?file=${encodeURIComponent(file)}`, row);
-}
-
 async function previewSampleUrl(url, row) {
   stopPreview();
   const gen = ++previewGen;
@@ -10660,10 +10699,16 @@ document.addEventListener('keydown', (e) => {
 // Pack panel - the editor for a named sample pack (sp("kit"), a `_pack("kit", [...])` definition).
 // A pack is a list of files picked off the disk, so the panel is three lists side by side: the
 // packs there are (this buffer's and the library's - find, name, ★, delete, exactly the preset
-// panel's list), the files IN the open pack in index order (entry 0 is `kit:0` / .i(0) - reorder
-// with the arrows, × takes one out), and a folder browser over the whole disk to pick from (click a
-// file to add it, + on a folder for everything in it; hold ▶ to hear one first). Every change is
-// written straight back into the definition and re-evaluated, the way drawing into a roll is.
+// panel's list), the files IN the open pack in index order (entry 0 is `kit:0` / .i(0)), and a
+// folder browser over the whole disk to pick from.
+//
+// Picking is a two-step: clicking a row SELECTS it (and plays it, so auditioning is the same
+// gesture as choosing - ↑/↓ walk the list playing as they go), and ← (or the add button) moves
+// the selection into the pack; in the pack, → / delete takes the selection out. Shift-click and
+// ⌘-click select in bulk, ⌘A takes the whole folder, and a folder is selected with one click and
+// entered with two, so a whole folder is one click and a ←. What is playing shows in the transport
+// along the foot - scrub it, pause it. Every change is written straight back into the definition
+// and re-evaluated, the way drawing into a roll is.
 //
 // Opens on double-clicking an `sp` name, from the picker rows, and by itself when an evaluation
 // names a pack for the first time - a new pack has no files and plays silence, and the one thing
@@ -10679,9 +10724,15 @@ const packSearch = document.getElementById('packSearch');
 const packPickList = document.getElementById('packPickList');
 const packEntriesHead = document.getElementById('packEntriesHead');
 const packEntriesEl = document.getElementById('packEntries');
+const packRemoveSelBtn = document.getElementById('packRemoveSel');
 const packBrowsePath = document.getElementById('packBrowsePath');
 const packBrowseList = document.getElementById('packBrowseList');
-const packAddFolderBtn = document.getElementById('packAddFolder');
+const packAddSelBtn = document.getElementById('packAddSel');
+const packPlayBtn = document.getElementById('packPlayBtn');
+const packPlayName = document.getElementById('packPlayName');
+const packPlayBar = document.getElementById('packPlayBar');
+const packPlayHead = document.getElementById('packPlayHead');
+const packPlayTime = document.getElementById('packPlayTime');
 const packNote = document.getElementById('packNote');
 const packCloseBtn = document.getElementById('packClose');
 
@@ -10689,6 +10740,11 @@ const packCloseBtn = document.getElementById('packClose');
 // it is the library's, shown as it is, and the ★ is how it becomes this buffer's to edit.
 let packState = null;
 let packBrowse = { path: null, parent: null, dirs: [], files: [], samplesRoot: '' };
+// What is selected in each list, and the row the last plain click or arrow landed on (the end a
+// shift-range extends from). Browse keys are "d:name" / "f:name" in the current folder; entry keys
+// are indexes into the pack.
+const packSel = { browse: new Set(), entries: new Set(), browseAnchor: null, entriesAnchor: null };
+const packListings = new Map(); // folder path -> its listing, for folders selected without going in
 let packEvalTimer = null;
 let packSuppressSync = false; // our own write-back, which the change listener must not re-read
 const PACK_EVAL_DEBOUNCE_MS = 250;
@@ -10729,6 +10785,8 @@ function openPackById(id) {
     return false;
   }
   packState = { id: key, entries: def ? packEntriesOf(cm.getValue(), def) : [...lib.files], own: !!def };
+  packSel.entries.clear();
+  packSel.entriesAnchor = null;
   packBackdrop.classList.remove('hidden');
   packSyncHead();
   packRenderEntries();
@@ -10739,6 +10797,7 @@ function openPackById(id) {
   } else {
     packRenderBrowse();
   }
+  packRenderTransport();
   return true;
 }
 
@@ -10756,7 +10815,8 @@ function closePackPanel() {
   if (!packState) return;
   packState = null;
   packBackdrop.classList.add('hidden');
-  stopPreview();
+  packPlayerStopSource();
+  packRenderTransport();
 }
 
 // Writes the entries back into the definition. The id is written back exactly as it was found, so
@@ -10797,19 +10857,28 @@ function packAdd(absPaths) {
     packState.entries.push(entry);
     added.push(entry);
   }
-  if (!added.length) return;
+  if (!added.length) return packSay('already in the pack');
   packWrite();
   packRenderEntries();
   packRenderBrowse();
   packSay(`added ${added.length === 1 ? packBasename(added[0]) : `${added.length} files`}`);
 }
 
-function packRemoveAt(i) {
+function packRemoveIndexes(indexes) {
   if (!packState?.own) return packRefuseLibrary();
-  packState.entries.splice(i, 1);
+  const drop = [...new Set(indexes)].sort((a, b) => b - a);
+  if (!drop.length) return;
+  for (const i of drop) packState.entries.splice(i, 1);
   packWrite();
+  packSay(`took ${drop.length === 1 ? 'one file' : `${drop.length} files`} out`);
+  // The cursor stays where the removal happened - on whatever slid up into the gap - and that one
+  // plays, so deciding what to keep goes on down the list rather than starting over from the top.
+  const next = Math.min(drop[drop.length - 1], packState.entries.length - 1);
+  packSel.entries = new Set(next >= 0 ? [next] : []);
+  packSel.entriesAnchor = next >= 0 ? next : null;
   packRenderEntries();
   packRenderBrowse();
+  if (next >= 0) packAfterSelect('entries', packRows('entries')[next]);
 }
 
 function packMove(i, delta) {
@@ -10818,6 +10887,8 @@ function packMove(i, delta) {
   if (j < 0 || j >= packState.entries.length) return;
   const [e] = packState.entries.splice(i, 1);
   packState.entries.splice(j, 0, e);
+  packSel.entries = new Set([j]);
+  packSel.entriesAnchor = j;
   packWrite();
   packRenderEntries();
 }
@@ -10831,11 +10902,141 @@ function packSay(text, isError = false) {
   packNote.classList.toggle('error', !!isError);
 }
 
+// --- selection ---------------------------------------------------------------------------------
+
+/** The rows of a list in order: { key, abs, name, kind } - what clicks, arrows and ⌘A walk. */
+function packRows(list) {
+  if (list === 'entries') {
+    return (packState?.entries ?? []).map((entry, i) => ({ key: i, abs: packAbsOf(entry), name: packBasename(entry), kind: isAudioPath(entry) ? 'file' : 'dir' }));
+  }
+  const { path: dir, dirs, files } = packBrowse;
+  if (dir == null) return [];
+  return [
+    ...dirs.map((name) => ({ key: `d:${name}`, abs: `${dir}/${name}`, name, kind: 'dir' })),
+    ...files.map((name) => ({ key: `f:${name}`, abs: `${dir}/${name}`, name, kind: 'file' })),
+  ];
+}
+
+const packAnchorKey = (list) => (list === 'entries' ? 'entriesAnchor' : 'browseAnchor');
+
+/**
+ * A click on row `key` of `list`: plain selects it alone, ⌘ toggles it, shift takes the range from
+ * the anchor. A file (or an entry) selected this way is also played - hearing it IS the point of
+ * selecting it - and a lone folder says how many files it holds.
+ */
+function packSelectClick(list, key, e) {
+  const rows = packRows(list);
+  const sel = packSel[list];
+  const anchorKey = packAnchorKey(list);
+  const at = rows.findIndex((r) => r.key === key);
+  if (at < 0) return;
+  if (e.shiftKey && packSel[anchorKey] != null) {
+    const from = rows.findIndex((r) => r.key === packSel[anchorKey]);
+    if (!(e.metaKey || e.ctrlKey)) sel.clear();
+    const [a, b] = from < 0 ? [at, at] : [Math.min(from, at), Math.max(from, at)];
+    for (let i = a; i <= b; i++) sel.add(rows[i].key);
+  } else if (e.metaKey || e.ctrlKey) {
+    if (sel.has(key)) sel.delete(key);
+    else sel.add(key);
+    packSel[anchorKey] = key;
+  } else {
+    sel.clear();
+    sel.add(key);
+    packSel[anchorKey] = key;
+  }
+  packAfterSelect(list, rows[at]);
+}
+
+/** Arrow keys: move the anchor a row, shift dragging the selection along with it. */
+function packSelectStep(list, delta, extend) {
+  const rows = packRows(list);
+  if (!rows.length) return;
+  const anchorKey = packAnchorKey(list);
+  const from = rows.findIndex((r) => r.key === packSel[anchorKey]);
+  const to = Math.max(0, Math.min(rows.length - 1, (from < 0 ? (delta > 0 ? -1 : rows.length) : from) + delta));
+  const sel = packSel[list];
+  if (!extend) sel.clear();
+  sel.add(rows[to].key);
+  packSel[anchorKey] = rows[to].key;
+  packAfterSelect(list, rows[to]);
+}
+
+/** ⌘A: every file in the list (folders are a different kind of thing to add; they stay unselected). Plays the last, so something is heard. */
+function packSelectAll(list) {
+  const rows = packRows(list).filter((r) => list === 'entries' || r.kind === 'file');
+  if (!rows.length) return;
+  packSel[list] = new Set(rows.map((r) => r.key));
+  packSel[packAnchorKey(list)] = rows[rows.length - 1].key;
+  packAfterSelect(list, rows[rows.length - 1]);
+}
+
+function packAfterSelect(list, row) {
+  if (list === 'entries') packRenderEntries();
+  else packRenderBrowse();
+  packScrollTo(list, row.key);
+  if (row.kind === 'file') packPlay(row.abs, row.name);
+  else if (list === 'browse') packDescribeFolder(row.abs, row.name);
+}
+
+function packScrollTo(list, key) {
+  const box = list === 'entries' ? packEntriesEl : packBrowseList;
+  const el = [...box.children].find((c) => c.dataset.key === String(key));
+  if (!el) return;
+  const b = box.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  if (r.top < b.top) box.scrollTop -= b.top - r.top;
+  else if (r.bottom > b.bottom) box.scrollTop += r.bottom - b.bottom;
+}
+
+/** One folder's listing, fetched once - what a folder selected from outside adds, and what it says about itself. */
+async function packListing(dir) {
+  if (!packListings.has(dir)) {
+    packListings.set(dir, api('GET', `/api/browseDir?path=${encodeURIComponent(dir)}`).then((r) => ({ path: r.path, files: r.files ?? [] })));
+  }
+  return packListings.get(dir);
+}
+
+async function packDescribeFolder(abs, name) {
+  try {
+    const { files } = await packListing(abs);
+    if (packSel.browse.has(`d:${name}`)) packSay(`${name} · ${files.length} audio file${files.length === 1 ? '' : 's'} · ← adds them all, double-click goes in`);
+  } catch { /* the listing failed - the folder still adds nothing, which the add will say */ }
+}
+
+/** ← / the add button: the selection into the pack - files as they are, folders as everything in them. Nothing selected means the whole folder on screen. */
+async function packAddSelected() {
+  if (!packState?.own) return packRefuseLibrary();
+  const rows = packRows('browse');
+  const picked = rows.filter((r) => packSel.browse.has(r.key));
+  const chosen = picked.length ? picked : rows.filter((r) => r.kind === 'file');
+  const paths = [];
+  for (const r of chosen) {
+    if (r.kind === 'file') { paths.push(r.abs); continue; }
+    try {
+      const { path: dir, files } = await packListing(r.abs);
+      paths.push(...files.map((f) => `${dir}/${f}`));
+    } catch (err) {
+      packSay(err.message ?? String(err), true);
+    }
+  }
+  if (!paths.length) return packSay('nothing to add here', true);
+  packAdd(paths);
+}
+
+function packRemoveSelected() {
+  packRemoveIndexes([...packSel.entries].map(Number));
+}
+
+// --- the lists ---------------------------------------------------------------------------------
+
 function packRenderEntries() {
   packEntriesEl.innerHTML = '';
   if (!packState) return;
   const n = packState.entries.length;
   packEntriesHead.textContent = `${n} file${n === 1 ? '' : 's'}${packState.own ? '' : ' · library'}`;
+  const nSel = packSel.entries.size;
+  packRemoveSelBtn.disabled = !nSel || !packState.own;
+  packRemoveSelBtn.textContent = nSel > 1 ? `remove ${nSel} →` : 'remove →';
   if (!n) {
     const empty = document.createElement('div');
     empty.className = 'dir-empty';
@@ -10843,58 +11044,43 @@ function packRenderEntries() {
     packEntriesEl.appendChild(empty);
     return;
   }
-  packState.entries.forEach((entry, i) => {
-    const row = document.createElement('div');
-    row.className = 'pack-entry';
+  for (const row of packRows('entries')) {
+    const i = row.key;
+    const entry = packState.entries[i];
+    const el = document.createElement('div');
+    el.className = `pack-entry${packSel.entries.has(i) ? ' selected' : ''}${packPlayer.abs === row.abs ? ' playing' : ''}`;
+    el.dataset.key = String(i);
     const idx = document.createElement('span');
     idx.className = 'pack-entry-index';
     idx.textContent = String(i);
     idx.title = `sp("${packState.id}:${i}") / .i(${i})`;
-    row.appendChild(idx);
+    el.appendChild(idx);
     const name = document.createElement('span');
     name.className = 'pack-entry-name';
-    const isDir = !isAudioPath(entry);
-    name.textContent = `${isDir ? '📁 ' : ''}${packBasename(entry)}`;
-    name.title = isDir ? `${entry} - a folder: every audio file in it, in name order` : entry;
-    row.appendChild(name);
-    if (!isDir) row.appendChild(packPlayButton(packAbsOf(entry), row));
+    name.textContent = `${row.kind === 'dir' ? '📁 ' : ''}${row.name}`;
+    name.title = row.kind === 'dir' ? `${entry} - a folder: every audio file in it, in name order` : entry;
+    el.appendChild(name);
     if (packState.own) {
       const up = document.createElement('span');
       up.className = `pack-entry-btn${i === 0 ? ' off' : ''}`;
       up.textContent = '↑';
       up.title = 'move up (lower index)';
-      up.addEventListener('click', () => packMove(i, -1));
-      row.appendChild(up);
+      up.addEventListener('click', (e) => { e.stopPropagation(); packMove(i, -1); });
+      el.appendChild(up);
       const down = document.createElement('span');
       down.className = `pack-entry-btn${i === n - 1 ? ' off' : ''}`;
       down.textContent = '↓';
       down.title = 'move down (higher index)';
-      down.addEventListener('click', () => packMove(i, 1));
-      row.appendChild(down);
-      const del = document.createElement('span');
-      del.className = 'pack-entry-btn pack-entry-del';
-      del.textContent = '×';
-      del.title = 'take out of the pack';
-      del.addEventListener('click', () => packRemoveAt(i));
-      row.appendChild(del);
+      down.addEventListener('click', (e) => { e.stopPropagation(); packMove(i, 1); });
+      el.appendChild(down);
     }
-    packEntriesEl.appendChild(row);
-  });
-}
-
-// Hold to hear - the sounds tab's own gesture (see previewSample), so the two feel the same.
-function packPlayButton(abs, row) {
-  const play = document.createElement('span');
-  play.className = 'pack-entry-btn pack-play';
-  play.textContent = '▶';
-  play.title = 'hold to hear';
-  play.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    previewSampleFile(abs, row);
-  });
-  play.addEventListener('click', (e) => e.stopPropagation());
-  return play;
+    el.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // keeps the list focused for the keys, rather than selecting text
+      packEntriesEl.focus({ preventScroll: true });
+      packSelectClick('entries', i, e);
+    });
+    packEntriesEl.appendChild(el);
+  }
 }
 
 async function packBrowseTo(target) {
@@ -10902,7 +11088,10 @@ async function packBrowseTo(target) {
   try {
     const { path, parent, dirs, files, samplesRoot } = await api('GET', `/api/browseDir?path=${encodeURIComponent(target ?? '')}`);
     packBrowse = { path, parent, dirs, files: files ?? [], samplesRoot: samplesRoot ?? '' };
+    packListings.set(path, Promise.resolve({ path, files: packBrowse.files }));
     packBrowsePath.value = path;
+    packSel.browse.clear(); // a selection is of rows in THIS folder
+    packSel.browseAnchor = null;
     packRenderBrowse();
   } catch (e) {
     packSay(e.message ?? String(e), true);
@@ -10910,12 +11099,13 @@ async function packBrowseTo(target) {
 }
 
 function packRenderBrowse() {
-  const { path: dir, parent, dirs, files } = packBrowse;
+  const { path: dir, parent, files } = packBrowse;
   packBrowseList.innerHTML = '';
   if (dir == null) return;
-  packAddFolderBtn.disabled = !files.length || !packState?.own;
-  packAddFolderBtn.textContent = `+ all ${files.length} here`;
-  packAddFolderBtn.title = `add every audio file in this folder (${files.length})`;
+  const nSel = packSel.browse.size;
+  packAddSelBtn.disabled = !packState?.own || (!nSel && !files.length);
+  packAddSelBtn.textContent = nSel ? `← add ${nSel > 1 ? nSel : ''}`.trimEnd() : `← add all ${files.length} here`;
+  packAddSelBtn.title = nSel ? 'add the selection to the pack (←)' : 'add every audio file in this folder (←)';
   if (parent) {
     const up = document.createElement('div');
     up.className = 'dir-row dir-up';
@@ -10923,58 +11113,157 @@ function packRenderBrowse() {
     up.addEventListener('click', () => packBrowseTo(parent));
     packBrowseList.appendChild(up);
   }
-  for (const name of dirs) {
-    const row = document.createElement('div');
-    row.className = 'dir-row pack-dir-row';
-    const label = document.createElement('span');
-    label.className = 'pack-dir-name';
-    label.textContent = name;
-    row.appendChild(label);
-    // + adds everything in the folder without going in - a drum folder is one click.
-    const add = document.createElement('span');
-    add.className = 'pack-entry-btn pack-dir-add';
-    add.textContent = '+';
-    add.title = `add every audio file in ${name}`;
-    add.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try {
-        const sub = await api('GET', `/api/browseDir?path=${encodeURIComponent(`${dir}/${name}`)}`);
-        const inside = (sub.files ?? []).map((f) => `${sub.path}/${f}`);
-        if (!inside.length) packSay(`no audio files in ${name}`, true);
-        else packAdd(inside);
-      } catch (err) {
-        packSay(err.message ?? String(err), true);
-      }
-    });
-    row.appendChild(add);
-    row.addEventListener('click', () => packBrowseTo(`${dir}/${name}`));
-    packBrowseList.appendChild(row);
-  }
   const have = new Set((packState?.entries ?? []).map((e) => packAbsOf(e)));
-  for (const name of files) {
-    const abs = `${dir}/${name}`;
-    const row = document.createElement('div');
-    row.className = `pack-file-row${have.has(abs) ? ' on' : ''}`;
+  for (const row of packRows('browse')) {
+    const el = document.createElement('div');
+    const selected = packSel.browse.has(row.key);
+    if (row.kind === 'dir') {
+      el.className = `dir-row pack-dir-row${selected ? ' selected' : ''}`;
+      el.title = 'click to select (← adds everything in it) · double-click to go in';
+      el.addEventListener('dblclick', (e) => { e.preventDefault(); packBrowseTo(row.abs); });
+    } else {
+      el.className = `pack-file-row${have.has(row.abs) ? ' on' : ''}${selected ? ' selected' : ''}${packPlayer.abs === row.abs ? ' playing' : ''}`;
+      el.title = have.has(row.abs) ? 'in the pack already' : 'click to hear and select · ← (or double-click) adds to the pack';
+      el.addEventListener('dblclick', (e) => { e.preventDefault(); packAdd([row.abs]); });
+    }
+    el.dataset.key = row.key;
     const label = document.createElement('span');
-    label.className = 'pack-file-name';
-    label.textContent = name;
-    label.title = have.has(abs) ? 'in the pack - click to take it out' : 'click to add to the pack';
-    row.appendChild(label);
-    row.appendChild(packPlayButton(abs, row));
-    row.addEventListener('click', () => {
-      if (!packState?.own) return packRefuseLibrary();
-      const entry = packEntryFor(abs);
-      const at = packState.entries.indexOf(entry);
-      if (at >= 0) packRemoveAt(at);
-      else packAdd([abs]);
+    label.className = row.kind === 'dir' ? 'pack-dir-name' : 'pack-file-name';
+    label.textContent = row.name;
+    el.appendChild(label);
+    el.addEventListener('mousedown', (e) => {
+      if (e.detail > 1) return; // the double-click's second press: the dblclick handler has it
+      e.preventDefault();
+      packBrowseList.focus({ preventScroll: true });
+      packSelectClick('browse', row.key, e);
     });
-    packBrowseList.appendChild(row);
+    packBrowseList.appendChild(el);
   }
-  if (!dirs.length && !files.length) {
+  if (!packRows('browse').length) {
     const empty = document.createElement('div');
     empty.className = 'dir-empty';
     empty.textContent = 'nothing here';
     packBrowseList.appendChild(empty);
+  }
+}
+
+// --- the player --------------------------------------------------------------------------------
+// One file at a time, played whole from the moment it is selected, with a transport along the
+// foot: play/pause (space), and a bar to scrub. Shares the sounds tab's AudioContext (previewCtx),
+// not its hold-to-hear gesture - picking from a list wants the whole file, not as long as a press.
+
+const packPlayer = { abs: null, name: '', buffer: null, source: null, startedAt: 0, offset: 0, playing: false, raf: null, gen: 0 };
+const packBuffers = new Map(); // abs -> decoded AudioBuffer, so walking back up a list is instant
+const PACK_BUFFER_CACHE = 48;
+
+async function packLoadBuffer(abs) {
+  if (packBuffers.has(abs)) return packBuffers.get(abs);
+  previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+  const res = await fetch(`/api/sampleAudio?file=${encodeURIComponent(abs)}`);
+  if (!res.ok) throw new Error(`can't read ${packBasename(abs)} (${res.status})`);
+  const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
+  if (packBuffers.size >= PACK_BUFFER_CACHE) packBuffers.delete(packBuffers.keys().next().value);
+  packBuffers.set(abs, buf);
+  return buf;
+}
+
+async function packPlay(abs, name = packBasename(abs)) {
+  const gen = ++packPlayer.gen;
+  packPlayerStopSource();
+  Object.assign(packPlayer, { abs, name, buffer: null, offset: 0 });
+  packRenderTransport();
+  packMarkPlaying();
+  try {
+    const buf = await packLoadBuffer(abs);
+    if (gen !== packPlayer.gen) return; // a newer pick superseded this one while it decoded
+    packPlayer.buffer = buf;
+    packPlayerStart(0);
+  } catch (e) {
+    if (gen === packPlayer.gen) packSay(e.message ?? String(e), true);
+  }
+}
+
+function packPlayerStopSource() {
+  if (packPlayer.source) {
+    const src = packPlayer.source;
+    packPlayer.source = null;
+    src.onended = null;
+    try { src.stop(); } catch { /* already ended */ }
+  }
+  packPlayer.playing = false;
+  cancelAnimationFrame(packPlayer.raf);
+}
+
+function packPlayerStart(offset) {
+  const buf = packPlayer.buffer;
+  if (!buf) return;
+  packPlayerStopSource();
+  if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
+  const at = Math.max(0, Math.min(offset, buf.duration));
+  const src = previewCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(previewCtx.destination);
+  src.start(0, at);
+  Object.assign(packPlayer, { source: src, startedAt: previewCtx.currentTime - at, offset: at, playing: true });
+  src.onended = () => {
+    if (packPlayer.source !== src) return;
+    packPlayer.source = null;
+    packPlayer.playing = false;
+    packPlayer.offset = 0;
+    packRenderTransport();
+  };
+  packPlayerTick();
+}
+
+const packPlayerPosition = () => (packPlayer.playing ? previewCtx.currentTime - packPlayer.startedAt : packPlayer.offset);
+
+function packPlayerPause() {
+  if (!packPlayer.playing) return;
+  packPlayer.offset = packPlayerPosition();
+  packPlayerStopSource();
+  packRenderTransport();
+}
+
+function packPlayerToggle() {
+  if (!packPlayer.buffer) return;
+  if (packPlayer.playing) packPlayerPause();
+  else packPlayerStart(packPlayer.offset >= packPlayer.buffer.duration - 0.01 ? 0 : packPlayer.offset);
+}
+
+function packPlayerSeek(frac) {
+  if (!packPlayer.buffer) return;
+  packPlayer.offset = Math.max(0, Math.min(1, frac)) * packPlayer.buffer.duration;
+  if (packPlayer.playing) packPlayerStart(packPlayer.offset);
+  else packRenderTransport();
+}
+
+function packPlayerTick() {
+  cancelAnimationFrame(packPlayer.raf);
+  packRenderTransport();
+  if (packPlayer.playing) packPlayer.raf = requestAnimationFrame(packPlayerTick);
+}
+
+function packRenderTransport() {
+  const d = packPlayer.buffer?.duration ?? 0;
+  const pos = Math.min(d, Math.max(0, packPlayerPosition()));
+  packPlayBtn.textContent = packPlayer.playing ? '❚❚' : '▶';
+  packPlayBtn.disabled = !packPlayer.buffer;
+  packPlayName.textContent = packPlayer.name;
+  packPlayName.title = packPlayer.abs ?? '';
+  packPlayHead.style.width = d ? `${(pos / d) * 100}%` : '0%';
+  packPlayTime.textContent = d ? `${pos.toFixed(2)} / ${d.toFixed(2)}s` : '';
+}
+
+// The rows that ARE the playing file light up, in both lists, without redrawing them.
+function packMarkPlaying() {
+  for (const box of [packEntriesEl, packBrowseList]) {
+    for (const el of box.children) {
+      const key = el.dataset.key;
+      if (key == null) continue;
+      const rows = box === packEntriesEl ? packRows('entries') : packRows('browse');
+      const row = rows.find((r) => String(r.key) === key);
+      el.classList.toggle('playing', !!row && row.abs === packPlayer.abs);
+    }
   }
 }
 
@@ -10993,9 +11282,39 @@ function packSyncFromCode() {
     if (JSON.stringify(entries) === JSON.stringify(packState.entries) && packState.own) return;
     packState.entries = entries;
     packState.own = true;
+    packSel.entries.clear();
     packRenderEntries();
     packRenderBrowse();
   }, 0);
+}
+
+// The keys a list answers to, once it has focus (clicking a row gives it focus).
+function packListKeys(list, e) {
+  const meta = e.metaKey || e.ctrlKey;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    packSelectStep(list, e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
+  } else if (meta && (e.key === 'a' || e.key === 'A')) {
+    e.preventDefault();
+    packSelectAll(list);
+  } else if (e.key === ' ') {
+    e.preventDefault();
+    packPlayerToggle();
+  } else if (list === 'browse' && (e.key === 'ArrowLeft' || e.key === 'Enter')) {
+    e.preventDefault();
+    // Enter on one folder goes in (the folder is what a lone selection mostly is); otherwise it adds.
+    const sel = [...packSel.browse];
+    if (e.key === 'Enter' && sel.length === 1 && sel[0].startsWith('d:')) packBrowseTo(`${packBrowse.path}/${sel[0].slice(2)}`);
+    else packAddSelected();
+  } else if (list === 'entries' && (e.key === 'ArrowRight' || e.key === 'Delete' || e.key === 'Backspace')) {
+    e.preventDefault();
+    packRemoveSelected();
+  } else if (e.key === 'Escape') {
+    return; // the panel's, handled on the document
+  } else {
+    return;
+  }
+  e.stopPropagation();
 }
 
 function initPackPanel() {
@@ -11022,9 +11341,34 @@ function initPackPanel() {
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePackPanel(); return; }
     e.stopPropagation();
   });
-  packAddFolderBtn.addEventListener('click', () => {
-    const { path: dir, files } = packBrowse;
-    if (dir != null && files.length) packAdd(files.map((f) => `${dir}/${f}`));
+  packBrowseList.addEventListener('keydown', (e) => packListKeys('browse', e));
+  packEntriesEl.addEventListener('keydown', (e) => packListKeys('entries', e));
+  packAddSelBtn.addEventListener('click', () => packAddSelected());
+  packRemoveSelBtn.addEventListener('click', () => packRemoveSelected());
+
+  // The transport: play/pause, and a bar that scrubs - held down it follows the pointer, and a
+  // file that was playing picks up again where the pointer lets go.
+  packPlayBtn.addEventListener('click', () => packPlayerToggle());
+  let scrubWasPlaying = false;
+  const scrubTo = (e) => {
+    const r = packPlayBar.getBoundingClientRect();
+    packPlayerSeek((e.clientX - r.left) / Math.max(1, r.width));
+  };
+  packPlayBar.addEventListener('pointerdown', (e) => {
+    if (!packPlayer.buffer) return;
+    e.preventDefault();
+    packPlayBar.setPointerCapture(e.pointerId);
+    scrubWasPlaying = packPlayer.playing;
+    packPlayerPause();
+    scrubTo(e);
+  });
+  packPlayBar.addEventListener('pointermove', (e) => {
+    if (packPlayBar.hasPointerCapture?.(e.pointerId)) scrubTo(e);
+  });
+  packPlayBar.addEventListener('pointerup', (e) => {
+    if (!packPlayBar.hasPointerCapture?.(e.pointerId)) return;
+    packPlayBar.releasePointerCapture(e.pointerId);
+    if (scrubWasPlaying) packPlayerStart(packPlayer.offset);
   });
 
   packCloseBtn.addEventListener('click', () => closePackPanel());

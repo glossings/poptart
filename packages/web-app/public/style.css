@@ -2826,12 +2826,45 @@ li.CodeMirror-hint-active {
    Out of the way like the row's other second gestures, except when it is filled - that is a
    state worth reading off the list, not only acting on. --------------------------------------- */
 .def-pick-row .def-pick-star {
+  display: inline-flex;
+  align-self: center;
   padding: 0 2px;
-  font-size: 12px;
   line-height: 1;
   color: var(--text-dim);
   opacity: 0;
   cursor: pointer;
+}
+
+.def-pick-row .def-pick-star svg {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.def-pick-row .def-pick-star.same svg,
+.def-pick-row .def-pick-star.differs svg,
+.def-pick-row .def-pick-star.library svg {
+  fill: currentColor;
+}
+
+/* The open row's name in an inline list renames on click (see renameInline). */
+.def-pick-row .def-pick-renamable {
+  cursor: text;
+}
+
+.def-pick-row .def-pick-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  outline: none;
 }
 
 .def-pick-row .def-pick-star.same,
@@ -2971,13 +3004,8 @@ li.CodeMirror-hint-active {
   color: var(--text);
 }
 
-.pack-entry:hover,
-.pack-entry.previewing {
+.pack-entry:hover {
   background: var(--hover-bg);
-}
-
-.pack-entry.previewing {
-  color: var(--accent);
 }
 
 .pack-entry-index {
@@ -3025,8 +3053,74 @@ li.CodeMirror-hint-active {
   color: var(--err);
 }
 
-.pack-play {
-  font-size: 10px;
+/* A focused list is the one the arrow keys drive; the ring says which, quietly. */
+.pack-entries:focus-visible,
+.pack-browse-list:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  border-radius: 6px;
+}
+
+/* Selected rows in either list - what ← / → act on. */
+.pack-entry.selected,
+.pack-file-row.selected,
+.pack-dir-row.selected {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pack-entry.selected .pack-entry-index {
+  color: inherit;
+}
+
+/* The row that is in the transport right now. */
+.pack-entry.playing .pack-entry-name::after,
+.pack-file-row.playing .pack-file-name::after {
+  content: ' ▶';
+  font-size: 9px;
+  color: var(--accent);
+}
+
+.pack-foot {
+  gap: 8px;
+}
+
+.pack-play-name {
+  max-width: 16em;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pack-play-bar {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  min-width: 6em;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.pack-play-head {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  opacity: 0.8;
+}
+
+.pack-play-time {
+  min-width: 8em;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  text-align: right;
 }
 
 .pack-browse-path {
@@ -3052,6 +3146,11 @@ li.CodeMirror-hint-active {
   border-radius: 6px;
   font-size: 12.5px;
   cursor: pointer;
+  user-select: none;
+}
+
+.pack-dir-row {
+  user-select: none;
 }
 
 .pack-file-row::before {
@@ -3073,12 +3172,8 @@ li.CodeMirror-hint-active {
   color: var(--accent);
 }
 
-.pack-file-row.previewing {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
 .pack-note {
+  flex: 0 1 auto;
   font-size: 10.5px;
   color: var(--text-dim);
   overflow: hidden;

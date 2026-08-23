@@ -494,17 +494,21 @@
             <div id="packPickList" class="def-pick-list pack-list"></div>
           </div>
           <div class="pack-col pack-col-entries">
-            <div class="pack-col-head">in the pack<span class="spacer"></span><span id="packEntriesHead" class="pack-col-sub"></span></div>
-            <div id="packEntries" class="pack-entries"></div>
+            <div class="pack-col-head">in the pack<span id="packEntriesHead" class="pack-col-sub"></span><span class="spacer"></span><button id="packRemoveSel" class="small" title="take the selection out of the pack (→ or delete)">remove →</button></div>
+            <div id="packEntries" class="pack-entries" tabindex="0"></div>
           </div>
           <div class="pack-col pack-col-browse">
-            <div class="pack-col-head">pick from<span class="spacer"></span><button id="packAddFolder" class="small" title="add every audio file in this folder">+ all here</button></div>
+            <div class="pack-col-head">pick from<span class="spacer"></span><button id="packAddSel" class="small" title="add the selection to the pack (←)">← add</button></div>
             <input id="packBrowsePath" class="dir-picker-path pack-browse-path" type="text" spellcheck="false"
               title="current folder — edit or paste a path, then Enter to go there" />
-            <div id="packBrowseList" class="dir-picker-list pack-browse-list"></div>
+            <div id="packBrowseList" class="dir-picker-list pack-browse-list" tabindex="0"></div>
           </div>
         </div>
-        <div class="dir-picker-foot">
+        <div class="dir-picker-foot pack-foot">
+          <button id="packPlayBtn" class="small" title="play / pause (space)" disabled>▶</button>
+          <span id="packPlayName" class="pack-play-name"></span>
+          <div id="packPlayBar" class="pack-play-bar" title="scrub"><div id="packPlayHead" class="pack-play-head"></div></div>
+          <span id="packPlayTime" class="pack-play-time"></span>
           <span id="packNote" class="pack-note"></span>
         </div>
       </div>

@@ -33,12 +33,15 @@ import { looksLikeShapeData } from './shape.mjs';
 // dynamic strings). Positions are computed from the ORIGINAL code (captured before any rewriting),
 // so inserting the wrappers can't disturb the offsets we hand to mini().
 export function injectLocations(code, base = 0) {
-  const lits = scanLiterals(code);
+  const { lits, masked } = scanLiterals(code);
   let out = '';
   let prev = 0;
   for (const lit of lits) {
-    const before = code.slice(0, lit.fullStart);
-    const after = code.slice(lit.fullEnd);
+    // Position is judged on the MASKED code: what is inside other literals and comments is not
+    // syntax, and a path like "Kick & Bass (Amin).wav" in the previous argument would otherwise
+    // hand the paren scan a `)` to stop on, leaving this literal looking like a pattern.
+    const before = masked.slice(0, lit.fullStart);
+    const after = masked.slice(lit.fullEnd);
     if (lit.hasInterp || !isPatternPosition(before, after, code.slice(lit.contentStart, lit.fullEnd - 1))) continue;
     out += code.slice(prev, lit.fullStart);
     out += `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart})`;
@@ -166,27 +169,38 @@ export function isPatternPosition(before, after, text = '') {
 }
 
 // Left-to-right scan collecting every string/template literal span, skipping comments so a quote
-// inside `// …` or `/* … */` is never mistaken for a literal. Returns, per literal:
+// inside `// …` or `/* … */` is never mistaken for a literal. Returns { lits, masked }: per literal
 //   fullStart    index of the opening quote
 //   contentStart index of the first content char (fullStart + 1) - the offset handed to mini()
 //   fullEnd      index just past the closing quote
 //   hasInterp    a template literal containing ${…} (its content isn't a static string - skip it)
+// and `masked`, the same code with every literal's CONTENT and every comment's body blanked to
+// spaces (newlines kept, so every offset still lines up) - the code as syntax alone, for the
+// position tests, which must not read a paren or an operator that sits inside a string.
 function scanLiterals(code) {
   const out = [];
+  const mask = code.split('');
+  const blank = (from, to) => {
+    for (let k = from; k < to; k++) if (mask[k] !== '\n') mask[k] = ' ';
+  };
   let i = 0;
   const n = code.length;
   while (i < n) {
     const c = code[i];
     const d = code[i + 1];
     if (c === '/' && d === '/') {
+      const from = i;
       i += 2;
       while (i < n && code[i] !== '\n') i++;
+      blank(from, i);
       continue;
     }
     if (c === '/' && d === '*') {
+      const from = i;
       i += 2;
       while (i < n && !(code[i] === '*' && code[i + 1] === '/')) i++;
       i += 2;
+      blank(from, Math.min(i, n));
       continue;
     }
     if (c === '"' || c === "'") {
@@ -199,6 +213,7 @@ function scanLiterals(code) {
       // Only a properly closed quote is a literal; an unterminated one (newline/EOF) is left alone.
       if (code[i] === c) {
         out.push({ fullStart, contentStart: fullStart + 1, fullEnd: i + 1, hasInterp: false });
+        blank(fullStart + 1, i);
         i++;
       }
       continue;
@@ -214,11 +229,12 @@ function scanLiterals(code) {
       }
       if (code[i] === '`') {
         out.push({ fullStart, contentStart: fullStart + 1, fullEnd: i + 1, hasInterp });
+        blank(fullStart + 1, i);
         i++;
       }
       continue;
     }
     i++;
   }
-  return out;
+  return { lits: out, masked: mask.join('') };
 }
