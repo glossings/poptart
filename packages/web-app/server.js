@@ -13,6 +13,7 @@ const { blockReason, isLoopbackHostname } = require('./request-guard');
 const { preferVst3 } = require('./plugin-filter');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
+const pinnedDefs = require('./pinned-defs');
 const recordings = require('@poptart/osc-engine/recordings');
 const analysis = require('@poptart/osc-engine/analysis');
 
@@ -384,6 +385,8 @@ function wireEngine() {
   // against. Only the booted device has any, so this is re-fed on every start (a device change is
   // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
   patternCore.setAudioInputLayout(audioInputLayout());
+  // A fresh engine knows no named packs; the registry (buffer + prebake) is still standing.
+  syncSamplePacks();
 }
 
 // The booted device's input channels, split per subdevice when it's an aggregate - which is what
@@ -476,7 +479,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'keyboard', 'tap', 'midi', 'audio', 'input', 'pianoroll',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
@@ -487,12 +490,12 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'synth', 
   'noteToMidi', 'degreeToMidi', 'parseScaleName'];
 
 // Builders the EDITOR writes and nobody types: the definition calls behind a drawn roll, an LFO
-// shape or a captured plugin preset. Bound so the buffer they are written into evaluates, but
-// deliberately kept out of
+// shape, a captured plugin preset or a hand-picked sample pack. Bound so the buffer they are
+// written into evaluates, but deliberately kept out of
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -700,7 +703,42 @@ function runPrebake() {
     const defs = prebakeDefs.size ? `; defs: ${[...prebakeDefs.keys()].join(', ')}` : '';
     console.log(`[poptart] prebake ran ${sources.length} file(s)${defs}`);
   }
+  syncSamplePacks(); // a _pack() in prebake is a library pack - the engine has to know its files
   return errors;
+}
+
+// The named sample packs (sp(), from _pack() definitions in the buffer or prebake), pushed to the
+// engine wholesale. The registry is pattern-core's and the files are the engine's, and this is the
+// one place they meet: after every evaluation, after prebake runs, and when an engine comes up
+// (a fresh engine starts empty). Wholesale, so a pack whose definition went away is forgotten too.
+function syncSamplePacks() {
+  if (!engine || !patternCore || typeof engine.defineSamplePacks !== 'function') return;
+  const defs = {};
+  for (const { id } of patternCore.packIds()) defs[id] = patternCore.lookupPack(id)?.files ?? [];
+  engine.defineSamplePacks(defs);
+}
+
+// The ★ library: definitions pinned from the editor, one per line in ~/.poptart/prebake/pinned.js
+// (see pinned-defs.js). A prebake source like any other - runPrebake picks it up - so a pinned
+// roll/shape/preset/pack is a library name in every project. The editor asks for the list to draw
+// its stars and to know when a buffer definition has drifted from its pinned copy.
+const PINNED_FILE = path.join(PREBAKE_DIR, 'pinned.js');
+
+function readPinnedFile() {
+  try {
+    return fs.readFileSync(PINNED_FILE, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function pinnedList() {
+  return pinnedDefs.parsePinned(readPinnedFile()).map(({ kind, id, scope, code }) => ({ kind, id, scope, code }));
+}
+
+function writePinnedFile(text) {
+  fs.mkdirSync(PREBAKE_DIR, { recursive: true });
+  fs.writeFileSync(PINNED_FILE, text, 'utf8');
 }
 
 // The single ~/.poptart/prebake.js file, read for the browser's prebake editor ('' if missing).
@@ -1681,7 +1719,7 @@ function schedulePrune() {
     // but pointless.
     Promise.resolve(expireWipSessions())
       .then(() => pruneSnapshots())
-      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR], alsoKeep: [...liveStateIds] }))
+      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds] }))
       .then(({ deleted, freed }) => {
         if (deleted) console.log(`[poptart] released ${deleted} captured plugin state(s), ${(freed / 1048576).toFixed(1)}MB`);
       })
@@ -1805,7 +1843,18 @@ const routes = {
     }
     if (!dirs) throw new Error(`can't read ${path.resolve(expanded)}`);
     const parent = path.dirname(dir);
-    return { status: 200, body: { path: dir, parent: parent === dir ? null : parent, dirs } };
+    // The audio files in it too, for the pack panel, which picks files as well as folders. The
+    // settings folder picker ignores them. And where the sample library is, so a pick under it can
+    // be written relative to the root (which is how a pack travels with the library).
+    const { isAudioName, samplesRoot } = require('@poptart/osc-engine/samples');
+    let files = [];
+    try {
+      files = fs.readdirSync(dir, { withFileTypes: true })
+        .filter((e) => (e.isFile() || e.isSymbolicLink()) && isAudioName(e.name))
+        .map((e) => e.name)
+        .sort((a, b) => a.localeCompare(b));
+    } catch { /* listed the dirs a moment ago - a race; files stay empty */ }
+    return { status: 200, body: { path: dir, parent: parent === dir ? null : parent, dirs, files, samplesRoot: path.resolve(samplesRoot()) } };
   },
 
   // Prefer-VST3 toggle (settings tab). Default on; body: { enabled }. Applied on the next
@@ -1927,6 +1976,10 @@ const routes = {
       patternCore.restoreRolls(definitionsBefore);
       throw err;
     }
+    // The buffer's _pack() definitions are in the registry now - the engine needs their files
+    // before the schedulers below ask it to play them.
+    syncSamplePacks();
+
     // Tempo-only and definitions-only blocks act at eval time and don't become tracks.
     // A block of roll(...) definitions evaluates to its last definition, which is a real Sig but
     // not a track - playing it would turn the definitions block into an extra voice (see
@@ -2035,8 +2088,44 @@ const routes = {
   // picker's library list was quietly always empty.
   'GET /api/rolls': async () => ({
     status: 200,
-    body: { rolls: patternCore.rollIds(), shapes: patternCore.shapeIds(), presets: patternCore.presetIds() },
+    body: {
+      rolls: patternCore.rollIds(),
+      shapes: patternCore.shapeIds(),
+      presets: patternCore.presetIds(),
+      // A pack's files come too: the pack panel shows a library pack's contents, which - unlike a
+      // buffer pack's - are nowhere in the code it can read.
+      packs: patternCore.packIds().map((p) => ({ ...p, files: patternCore.lookupPack(p.id)?.files ?? [] })),
+      pinned: pinnedList(),
+    },
   }),
+
+  // --- the ★ library (see pinned-defs.js) ---
+
+  'GET /api/pinned': async () => ({ status: 200, body: { pinned: pinnedList() } }),
+
+  // Body: { kind, id, scope?, code } - `code` is the whole definition as it stands in the buffer.
+  // Files it under that name (replacing an older pinned copy) and re-runs prebake, so the name is a
+  // library name from this moment. A preset's program is stored by handle (see blobs.js), so the
+  // file stays small; the sweep keeps the handle alive by scanning the prebake folder.
+  'POST /api/pinned': async (body) => {
+    const kind = String(body?.kind ?? '');
+    const id = String(body?.id ?? '');
+    const scope = String(body?.scope ?? '');
+    const { code } = await blobs.dehydrate(String(body?.code ?? ''));
+    writePinnedFile(pinnedDefs.upsertPinned(readPinnedFile(), { kind, id, scope, code }));
+    return { status: 200, body: { errors: runPrebake(), pinned: pinnedList() } };
+  },
+
+  // Body: { kind, id, scope? }. Takes the entry out and re-runs prebake; returns the code it held,
+  // so the editor can keep a copy in the buffer when it wants to.
+  'POST /api/pinned/remove': async (body) => {
+    const kind = String(body?.kind ?? '');
+    const id = String(body?.id ?? '');
+    const scope = String(body?.scope ?? '');
+    const had = pinnedList().find((e) => e.kind === kind && e.id === id && (kind !== 'preset' || e.scope === scope)) ?? null;
+    if (had) writePinnedFile(pinnedDefs.removePinned(readPinnedFile(), { kind, id, scope }));
+    return { status: 200, body: { errors: had ? runPrebake() : [], pinned: pinnedList(), code: had?.code ?? null } };
+  },
 
   'GET /api/highlight': async (q) => {
     const from = Math.max(0, Math.floor(Number(q.from)) || 0);
@@ -2640,7 +2729,7 @@ const routes = {
     saveSettings();
     const { deleted, freed } = months > 0 ? pruneWipSessions(months) : { deleted: 0, freed: 0 };
     // The states those sessions were holding alive can go with them, if nothing else names them.
-    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR], alsoKeep: [...liveStateIds] });
+    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds] });
     return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
   },
 
@@ -2904,16 +2993,28 @@ const AUDIO_MIME = {
 };
 
 function serveSampleAudio(query, res) {
-  const pack = String(query.pack ?? '');
-  const i = Number(query.i);
-  // Pack is a single folder name under the samples root; reject anything that could escape it.
-  if (!pack || pack.includes('/') || pack.includes('\\') || pack.includes('..') || !Number.isInteger(i) || i < 0) {
-    res.writeHead(400).end('bad request');
-    return;
+  const { listPackFiles, isAudioName, samplesRoot } = require('@poptart/osc-engine/samples');
+  let filePath;
+  if (query.file != null) {
+    // One file by path - what the pack panel auditions. Absolute, or relative to the samples root
+    // (the two spellings a pack entry has). Only audio: the same machine's own files, but this is
+    // still a sound preview and not a file server.
+    const raw = String(query.file);
+    if (!raw || !isAudioName(raw)) {
+      res.writeHead(400).end('bad request');
+      return;
+    }
+    filePath = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(samplesRoot(), raw);
+  } else {
+    const pack = String(query.pack ?? '');
+    const i = Number(query.i);
+    // Pack is a single folder name under the samples root; reject anything that could escape it.
+    if (!pack || pack.includes('/') || pack.includes('\\') || pack.includes('..') || !Number.isInteger(i) || i < 0) {
+      res.writeHead(400).end('bad request');
+      return;
+    }
+    filePath = listPackFiles(pack)?.[i];
   }
-  const { listPackFiles } = require('@poptart/osc-engine/samples');
-  const files = listPackFiles(pack);
-  const filePath = files?.[i];
   if (!filePath) {
     res.writeHead(404).end('not found');
     return;

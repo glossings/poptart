@@ -474,6 +474,42 @@
       </div>
     </div>
 
+    <!-- The pack panel: a named sample pack (sp("kit")) is a list of files picked off the disk, so
+         its editor is three lists - the packs there are, the files in this one (index order), and a
+         folder browser to pick from. dir-picker-backdrop on purpose: the global hotkeys stand down. -->
+    <div id="packBackdrop" class="dir-picker-backdrop hidden">
+      <div class="dir-picker pack-dialog" role="dialog" aria-label="sample pack">
+        <div class="dir-picker-head">
+          <span id="packTitle">sample pack</span>
+          <div id="packPickWrap" class="def-pick-wrap hidden">pack
+            <input id="packName" class="def-name" type="text" spellcheck="false" title="pack name" />
+          </div>
+          <span class="spacer"></span>
+          <button id="packClose" class="small">✕</button>
+        </div>
+        <div class="pack-cols">
+          <div class="pack-col pack-col-packs">
+            <div class="pack-col-head">packs</div>
+            <input id="packSearch" class="pack-search" type="text" spellcheck="false" placeholder="search, or type a new name" autocomplete="off" />
+            <div id="packPickList" class="def-pick-list pack-list"></div>
+          </div>
+          <div class="pack-col pack-col-entries">
+            <div class="pack-col-head">in the pack<span class="spacer"></span><span id="packEntriesHead" class="pack-col-sub"></span></div>
+            <div id="packEntries" class="pack-entries"></div>
+          </div>
+          <div class="pack-col pack-col-browse">
+            <div class="pack-col-head">pick from<span class="spacer"></span><button id="packAddFolder" class="small" title="add every audio file in this folder">+ all here</button></div>
+            <input id="packBrowsePath" class="dir-picker-path pack-browse-path" type="text" spellcheck="false"
+              title="current folder — edit or paste a path, then Enter to go there" />
+            <div id="packBrowseList" class="dir-picker-list pack-browse-list"></div>
+          </div>
+        </div>
+        <div class="dir-picker-foot">
+          <span id="packNote" class="pack-note"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- The mixer (ctrl+g). Its own backdrop class, NOT dir-picker-backdrop: that class makes the
          global hotkey handler stand down, and the transport keys (cmd+enter, cmd+.) must keep
          working while mixing. -->

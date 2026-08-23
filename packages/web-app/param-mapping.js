@@ -170,6 +170,7 @@ class MappedEngine {
   noteOn(...a) { return this.engine.noteOn(...a); }
   noteOff(...a) { return this.engine.noteOff(...a); }
   playSample(...a) { return this.engine.playSample(...a); }
+  defineSamplePacks(...a) { return this.engine.defineSamplePacks(...a); }
   record(...a) { return this.engine.record(...a); }
   enableMidi(...a) { return this.engine.enableMidi(...a); }
   setMidiNotes(...a) { return this.engine.setMidiNotes(...a); }

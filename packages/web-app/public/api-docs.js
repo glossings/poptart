@@ -49,6 +49,12 @@ const API_DOCS = {
     desc: 'Sampler pattern playing a bounce from the recordings folder by name. Pair with .slow(n) to play the whole loop.',
     eg: 'sr("bass").slow(8)',
   },
+  sp: {
+    kind: 'both',
+    sig: 'sp(pack)',
+    desc: 'Sampler pattern playing a named pack you picked file by file - double-click the name to build one; ":n" or .i(n) picks its nth file.',
+    eg: 'sp("kit:0 kit:1 kit:0 kit:2")',
+  },
   record: {
     kind: 'method',
     sig: 'record({ cycles, name, wrapTail })',

@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, se, sr, note, speed } from './src/signal.mjs';
+import { s, se, sr, sp, note, speed, mini } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 function mockEngine() {
@@ -51,6 +51,17 @@ test('only a pack splits the ":n" index suffix off the value', () => {
 
 test('an explicit .i() still wins over a pack suffix', () => {
   assert.equal(cfgs(s('bd:4').i(7))[0].index, 7);
+});
+
+test('sp() namespaces a named pack and takes the index suffix like s()', () => {
+  assert.deepEqual(refs(sp('kit kit2')), ['sp:kit', 'sp:kit2']);
+  assert.deepEqual(refs(sp('kit:3')), ['sp:kit']);
+  assert.equal(cfgs(sp('kit:3'))[0].index, 3);
+  assert.equal(cfgs(sp('kit:3').i(5))[0].index, 5);
+  // The method form, like .s(): the notes own the grid, the name rides along - and a Sig argument
+  // (what the editor's transpile hands over for any "<…>" string) is a pattern of names.
+  assert.deepEqual(refs(note('c e g').sp('kit')), ['sp:kit', 'sp:kit', 'sp:kit']);
+  assert.deepEqual(refs(note('c e').sp(mini('<kit kit2>'))), ['sp:kit', 'sp:kit']);
 });
 
 test('the sampler config works identically on all three', () => {

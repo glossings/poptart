@@ -867,6 +867,20 @@ loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8
             <code>-</code> and <code>_</code> only. The editor autocompletes both — <code>se("</code>
             offers a folder at a time, <code>sr("</code> offers every take you've made.
           </p>
+          <h3>A pack of your own: <code>sp()</code></h3>
+          <p>
+            <code>sp("kit")</code> plays a pack you put together <em>yourself</em> — eight hits from
+            four folders, a drum rack, a kit for one track — addressed by index exactly like a
+            folder's: <code>sp("kit:0 kit:1")</code>, <code>.i("0 1")</code>, or a piano roll in index
+            mode. Evaluate a pattern that names a pack nothing defines yet (or double-click the
+            <code>sp</code> name) and the <strong>pack panel</strong> opens: click a file to add it,
+            <code>+</code> on a folder for everything in it, hold ▶ to hear one first, reorder with the
+            arrows. What it writes is a <code>_pack("kit", [paths…])</code> definition, folded at the
+            foot of the buffer beside the rolls and shapes; a path under the sample library is relative
+            to it, anything else is as it is, and a folder entry stands for every audio file in it.
+          </p>
+          <pre><code>drums: sp(<span class="s">"kit:0 kit:2 kit:1 kit:2"</span>)            <span class="c">// 0 = kick, 1 = snare, 2 = hat — whatever you put there</span>
+hits:  note(<span class="s">"c e g"</span>).sp(<span class="s">"&lt;kit kit2&gt;"</span>).i(<span class="s">"0 2"</span>)  <span class="c">// the method form takes a pattern of names, like .s()</span></code></pre>
           <h3>Bouncing a track: <code>.record()</code> and ctrl+b</h3>
           <p>
             Put the cursor in any named block and press <strong>ctrl+b</strong> to record that track's
@@ -1159,6 +1173,21 @@ const acid = (p) =&gt; p.param(<span class="s">"Filter 1 Freq"</span>, 0.3);</co
             or <code>bass: acid(note("c2*8").synth("Serum 2"))</code> just work. For more, add a
             <code>~/.poptart/prebake/</code> folder of <code>*.js</code> files (they run in filename
             order). Removing a prototype extension needs a restart; everything else re-runs on save.
+          </p>
+
+          <h4>★ The library: definitions in every project</h4>
+          <p>
+            A drawn roll, an LFO shape, a captured preset or a sample pack lives in the buffer it was
+            made in. Every picker that lists them shows a <strong>★ beside each name</strong>: click it and
+            the definition is copied into <code>~/.poptart/prebake/pinned.js</code>, a prebake file
+            poptart manages, and from then on the name is an option in <em>every</em> project —
+            <code>pianoroll("bass")</code>, <code>lfo("swell")</code>, <code>.preset("growl")</code>,
+            <code>sp("kit")</code> resolve against the library wherever the buffer has no definition of
+            its own, and the pickers list it under <code>prebake</code>. The buffer keeps its own copy,
+            which shadows the library's. Draw into it afterwards and the star dims — click to update the
+            library copy, ⇧click to take it out. A filled star on a library entry takes it out of the
+            library, copying it into the buffer first so nothing that names it falls silent. The file is
+            plain JavaScript, one definition per line, safe to edit by hand.
           </p>
 
           <h4>Write your own functions</h4>

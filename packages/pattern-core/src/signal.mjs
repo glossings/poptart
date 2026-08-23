@@ -15,7 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
-import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor } from './rolls.mjs';
+import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
@@ -202,7 +202,8 @@ export class Sig {
     // Patterned values also merge their step grid into the pattern's (see _samplerOpt).
     this.sampler = opts.sampler ?? null;
     // Which namespace this sampler's step values address: 'pack' (s - a folder, plus an index),
-    // 'file' (se - one exact path under the samples root), or 'rec' (sr - a bounce, by name). Held
+    // 'named' (sp - a _pack() definition, plus an index), 'file' (se - one exact path under the
+    // samples root), or 'rec' (sr - a bounce, by name). Held
     // OUTSIDE `sampler` on purpose: that object is walked generically wherever a pattern is
     // time-warped or condition-switched, and everything in it has to be a signal.
     this.samplerKind = opts.samplerKind ?? null;
@@ -2091,6 +2092,16 @@ export class Sig {
     return this._asSampler('sr', name, 'rec', 'a recording name, e.g. note("c e g").sr("stab")');
   }
 
+  /**
+   * The method form of sp() - play this pattern's notes with a NAMED pack as the sound:
+   * `note("c e g").sp("kit")`. Like .s(), the argument may be a pattern of names ("<kit kit2>");
+   * each step's pitch becomes the repitch note, and the index picks the file (.i(), or an index
+   * roll's rows).
+   */
+  sp(name) {
+    return this._asSampler('sp', name, 'named', 'a pack name, e.g. note("c e g").sp("kit")');
+  }
+
   _asSampler(method, value, kind, expected) {
     // A control in head position - vel("1!4").s("bd") - is a channel plus a trigger grid, never a
     // pitch: without this its velocities would be read as the repitch note (see _fromHeadCtl).
@@ -3158,7 +3169,20 @@ export function sr(value) {
   return samplerPattern('sr', value, 'rec');
 }
 
-// The three sampler sources differ only in how the engine turns a step's value into files (see
+/**
+ * Sampler pattern playing a NAMED pack - one you put together yourself, file by file, rather than
+ * a folder on disk: `sp("kit")`. A pack is defined by a `_pack("kit", [...])` definition (the
+ * editor writes those: double-click the name, or evaluate `sp("kit")` and the pack panel opens to
+ * pick files), and its files are addressed by index exactly as `s()` addresses a folder's -
+ * `sp("kit:3")`, `.i(3)`, or the pianoroll's index lanes - so a drum rack is a pack whose entry 0
+ * is the kick. Everything the sampler can do applies unchanged. Names are plain words, so no
+ * quoting is ever needed: `sp("<kit kit2>")`.
+ */
+export function sp(value) {
+  return samplerPattern('sp', value, 'named');
+}
+
+// The four sampler sources differ only in how the engine turns a step's value into files (see
 // OscEngine#_resolveSource); `kind` rides on Sig#samplerKind and the scheduler stamps it onto the
 // ref it sends.
 function samplerPattern(builder, value, kind) {
@@ -3900,6 +3924,35 @@ export function _preset(id, plugin = '', state = '') {
   if (replaced) warnUser(replaced);
   // A preset makes no sound of its own - it is a setting for a plugin, not a pattern - so this is
   // a silent Sig whose only job is to be marked as a definition (see _roll) and carry the id.
+  const sig = new Sig(() => null);
+  sig.isDef = key;
+  return sig;
+}
+
+/**
+ * `_pack("kit", ["drums/kick.wav", "/Volumes/lib/snare 02.wav", "hats"])` - files a hand-picked
+ * SAMPLE PACK under a name, so `sp("kit")` can play it by name and index the way `s("bd")` plays a
+ * folder. Each entry is a file, or a folder standing for every audio file in it (filename order);
+ * a relative path is under the samples root, an absolute one is wherever it says. The order IS the
+ * index: entry 0 is `sp("kit:0")` / `.i(0)`. The editor writes these - the pack panel picks files
+ * from the disk and rewrites the definition - so `_pack(` is not a word you need to type.
+ *
+ * Plays nothing itself: a pack is a sound source for a pattern, not a pattern. Like _preset, the
+ * value is a silent Sig marked as a definition so a block of them is never taken for a track.
+ */
+export function _pack(id, files = []) {
+  if (typeof id !== 'number' && typeof id !== 'string') {
+    throw new Error('[signal] a pack definition takes a number or a name as its id - pick files in the pack panel rather than writing it by hand');
+  }
+  const key = String(id).trim();
+  if (!key || /\s/.test(key) || /[<>[\]{}(),*!?~@:]/.test(key)) {
+    throw new Error(`[signal] a pack id has to be one plain word - ${JSON.stringify(String(id))} can't be written inside sp("<...>")`);
+  }
+  const list = (Array.isArray(files) ? files : files == null || files === '' ? [] : [files])
+    .map((f) => String(f ?? '').trim())
+    .filter(Boolean);
+  const replaced = registerPack(key, { files: list });
+  if (replaced) warnUser(replaced);
   const sig = new Sig(() => null);
   sig.isDef = key;
   return sig;

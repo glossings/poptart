@@ -5,7 +5,8 @@
 // .preset("<init wob>") swaps the plugin between them. The definitions are still ordinary code in
 // the buffer (the editor folds them out of the way rather than hiding them), so export, snapshots
 // and undo are untouched; these stores are only how a call finds what a name means at playback
-// time.
+// time. `_pack("kit", [...files])` files a hand-picked SAMPLE PACK the same way, and `sp("kit")`
+// plays it by name the way `s("bd")` plays a folder.
 //
 // Like macros.mjs and midi.mjs this lives apart from signal.mjs so both stay dependency-free: the
 // browser imports the same signal code against its own copy of the store.
@@ -78,7 +79,7 @@ function makeStore(what) {
   };
 }
 
-const stores = { roll: makeStore('roll'), shape: makeStore('shape'), preset: makeStore('preset') };
+const stores = { roll: makeStore('roll'), shape: makeStore('shape'), preset: makeStore('preset'), pack: makeStore('sample pack') };
 
 /** Both stores, for the host passes that treat them alike (clearing per eval, listing). */
 export const DEF_KINDS = Object.keys(stores);
@@ -174,3 +175,12 @@ export const presetIds = () => presetEntries().map(({ id, plugin, layer }) => ({
  */
 export const presetPluginsFor = (id) =>
   [...new Set(presetEntries().filter((e) => e.id === id && e.plugin).map((e) => e.plugin))];
+
+// A named sample pack's value is { files }: the paths it was built from, in index order. Each is a
+// file, or a folder standing for every audio file in it; a relative one is under the samples root,
+// an absolute one is wherever it says. Plain data, not a Sig - the engine turns it into loaded
+// buffers (see OscEngine#defineSamplePacks), and `sp("kit")` addresses it by name plus index the
+// way `s("bd")` addresses a folder.
+export const registerPack = (id, entry) => stores.pack.register(id, entry);
+export const lookupPack = (id) => stores.pack.lookup(id);
+export const packIds = () => stores.pack.ids();

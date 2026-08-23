@@ -39,7 +39,8 @@ That's a synth line in F minor played through Serum, with its filter cutoff swep
   alternation, euclidean rhythms, fast/slow, replicate, weight, ties, and per-cycle rates.
 - **A sampler alongside the synths.** `s("pack")` plays folders of audio files with slicing,
   timestretch, repitch, per-event velocity, and the same effects chain as instrument tracks;
-  `se("path")` and `sr("name")` play one exact file, or one of your own bounces.
+  `se("path")` and `sr("name")` play one exact file, or one of your own bounces; `sp("kit")` plays a
+  pack you put together yourself, file by file, in a panel — a drum rack in a minute.
 - **Bounce a track from the keyboard.** ctrl+b records the block the cursor is in — starting on the
   next phrase, for as many cycles as you asked — files the audio, mutes the source, and writes the
   playback line in below it. `.record()` gives you the same thing with a panel and a live meter.
@@ -308,6 +309,20 @@ prebake file that throws is logged and skipped — it never blocks startup, and 
 surfaces the error on save. One caveat: *removing* a `Signal.prototype` extension needs a restart,
 since the prototype keeps methods already added to it.
 
+### ★ The library: definitions that follow you to every project
+
+A drawn roll, an LFO shape, a captured plugin preset or a sample pack is defined in the buffer it was
+made in, and ends with it. Every picker that lists them — the piano roll's, the lfo panel's, the
+preset panel's, the pack panel's — shows a **★ beside each name**: click it and that definition is
+copied into `~/.poptart/prebake/pinned.js`, a prebake file poptart manages for you, and from then on
+the name is an option in **every** project: `pianoroll("bass")`, `lfo("swell")`, `.preset("growl")`,
+`sp("kit")` resolve against the library wherever the buffer has no definition of its own, and the
+pickers list it under `prebake`. The buffer keeps its own copy, which shadows the library's, so
+pinning changes nothing about what is playing. Draw into it afterwards and the star dims — click
+again to update the library copy (⇧click takes it out). Clicking a filled star on a *library* entry
+takes it out of the library, but copies it into the buffer first, so nothing that names it falls
+silent. The file is plain JavaScript, one definition per line, and safe to edit by hand.
+
 ### Plugin state in the code
 
 `synth("Serum 2")` leaves the sound to the plugin's own default. The moment you change anything in
@@ -386,6 +401,24 @@ value. Quoting works in any mini string, not just `se`. Recording names never ne
 autocompletes all three: `s("` offers pack names (and, after a `:`, that pack's files by index —
 type part of a filename to find its number), `se("` offers a folder at a time, `sr("` offers every
 take you've made.
+
+A pack you put together **yourself** — eight hits from four folders, a drum rack, a kit for one
+track — is `sp("kit")`. Evaluate a pattern that names a pack nobody has defined yet (or double-click
+the `sp` name) and the **pack panel** opens: pick files off the disk (click a file to add it, `+` on
+a folder for everything in it, hold ▶ to hear one first), reorder them, and the pack's files are
+addressed by index exactly like a folder's — `sp("kit:0 kit:1")`, `.i("0 1")`, or a piano roll in
+index mode:
+
+```js
+drums: sp("kit:0 kit:2 kit:1 kit:2")            // 0 = kick, 1 = snare, 2 = hat — whatever you put there
+hits:  note("c e g").sp("<kit kit2>").i("0 2")  // the method form takes a pattern of names, like .s()
+```
+
+What the panel writes is a `_pack("kit", ["drums/kick 01.wav", "/Volumes/lib/snare.wav", …])`
+definition, folded into the definitions block at the foot of the buffer beside the rolls and
+shapes; a path under the sample library is written relative to it, anything else as it is, and a
+folder entry stands for every audio file in it. `sp("` autocompletes this buffer's packs and the
+library's.
 
 The ADSR shapes the voice's amplitude. `attack`/`decay`/`release` are **multiples of the played
 duration**: `.decay(0.5)` reaches the sustain level halfway through the note, while `.attack(2)`
@@ -579,6 +612,7 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Saved patterns (and autosaved sessions, under `wip/`) | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |
 | Bounced tracks (filed by month, played with `sr()`) | `POPTART_RECORDINGS_DIR` | `~/.poptart/recordings` |
 | Startup setup file / folder | `POPTART_PREBAKE_FILE`, `POPTART_PREBAKE_DIR` | `~/.poptart/prebake.js`, `~/.poptart/prebake/` |
+| ★ library (pinned rolls/shapes/presets/packs) | the ★ in any picker (or edit the file) | `~/.poptart/prebake/pinned.js` |
 | Persisted settings | `POPTART_SETTINGS_FILE` | `~/.poptart/settings.json` |
 | OSC / scsynth ports | `POPTART_OSC_NODE_PORT`, `POPTART_OSC_SC_PORT`, `POPTART_SCSYNTH_PORT` | `57140` / `57150` / `57110` |
 | SuperCollider binary | `POPTART_SCLANG` | auto-detected (PATH, then the standard install location) |

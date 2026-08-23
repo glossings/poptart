@@ -2,7 +2,8 @@
 
 // Sample-pack discovery and WAV analysis for the sampler (`s("bd")` patterns). A pack is a
 // folder of audio files under the samples root; files are addressed by index (`.i(4)`) in
-// filename-sorted order, strudel-style. scsynth does the actual playback (Buffer.read supports
+// filename-sorted order, strudel-style. A NAMED pack (`sp("kit")`, a `_pack()` definition) is a
+// hand-picked list of files and folders instead - see expandPackEntries. scsynth does the actual playback (Buffer.read supports
 // whatever libsndfile does - wav/aiff/flac); the JS-side analysis here only needs the raw
 // samples for transient detection (`.slice()`), so that part is WAV-only: non-WAV files simply
 // have no slices rather than failing the pack.
@@ -67,6 +68,46 @@ function resolveSampleFile(relPath) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The files a named pack's entries stand for, in index order. An entry is a file, or a folder
+ * standing for every audio file in it (filename order, one level); a relative path is under the
+ * samples root, an absolute one is wherever it says - a pack is how a folder OUTSIDE the library
+ * gets played, so there is no root check here. Anything missing or not audio is skipped rather
+ * than failing the pack, so a drum rack with one moved file still plays its other seven.
+ */
+function expandPackEntries(entries) {
+  const root = path.resolve(samplesRoot());
+  const out = [];
+  for (const raw of entries ?? []) {
+    const rel = String(raw ?? '').trim();
+    if (!rel) continue;
+    const abs = path.isAbsolute(rel) ? path.resolve(rel) : path.resolve(root, rel);
+    let stat;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      let names;
+      try {
+        names = fs.readdirSync(abs);
+      } catch {
+        continue;
+      }
+      for (const f of names.filter((n) => AUDIO_EXTS.has(path.extname(n).toLowerCase())).sort()) out.push(path.join(abs, f));
+    } else if (stat.isFile() && AUDIO_EXTS.has(path.extname(abs).toLowerCase())) {
+      out.push(abs);
+    }
+  }
+  return out;
+}
+
+/** True if `name` has an audio extension the sampler plays - what the pack panel lists as pickable. */
+function isAudioName(name) {
+  return AUDIO_EXTS.has(path.extname(String(name ?? '')).toLowerCase());
 }
 
 /**
@@ -184,6 +225,8 @@ module.exports = {
   setSamplesRoot,
   listPackFiles,
   resolveSampleFile,
+  expandPackEntries,
+  isAudioName,
   browseSamples,
   detectSlices,
   readWav,

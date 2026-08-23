@@ -66,7 +66,8 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   command set to it: load plugin into a track slot, set parameters, trigger notes, start/stop
   native LFOs and envelopes, tempo, routing. Implements the plain-object engine interface the
   scheduler expects.
-- `samples.js` — the sampler side: reads audio folders, resolves one exact file for `se()`,
+- `samples.js` — the sampler side: reads audio folders, resolves one exact file for `se()`, expands
+  a hand-picked `sp()` pack's files and folders,
   transient/slice analysis (Node-side, WAV-only), and sample event handling.
 - `recordings.js` — where bounced tracks live (`~/.poptart/recordings/<YYYY-MM>/<name>.wav`) and
   how they're named. Owns all path building, like web-app's `pattern-files.js`.
@@ -235,6 +236,17 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   methods. Rather than special-case one builder, the tokenizer grew `'…'` — one literal value,
   operators suspended — which works in any mini string and also covers sample names with spaces.
   Postfix operators still apply outside the quotes, so nothing else about the notation changed.
+- **Named definitions are code in the buffer, resolved lazily by name — and the library is a prebake
+  file.** A drawn roll, LFO shape, captured preset or hand-picked sample pack is a `_roll`/`_shape`/
+  `_preset`/`_pack` call the editor writes and folds at the foot of the buffer; patterns say the
+  name (`pianoroll("bass")`, `sp("kit")`) and a two-layer registry (buffer over prebake) answers at
+  cycle-build time, so a definition may sit anywhere and a buffer that fails to evaluate keeps the
+  old registry. "Make it permanent" (the ★ in every picker) is therefore nothing new: the server
+  copies the definition into `~/.poptart/prebake/pinned.js`, a managed prebake source, and the
+  existing prebake layer makes it a name in every project. A sample pack is the one kind the engine
+  has to be told about (it loads the files): the server pushes the registry's packs to the engine
+  wholesale after every evaluation, prebake run and engine start (`defineSamplePacks`), and the
+  engine reloads only a pack whose file list actually changed.
 - **`.record()` is a marker, not a mechanism.** It carries the panel's settings in the code and
   gives the editor something to hang the panel off, and changes nothing about playback. The actual
   bounce is keyed on the *block label*, which is why ctrl+b works on any block without it.

@@ -51,6 +51,7 @@ const coreReady = Promise.all([
     initPianorollEditor();
     initRecordPanel();
     initPresetPanel();
+    initPackPanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
     // Which spans are DATA (rather than roll ids) is a question only pianoroll.mjs can answer, so
@@ -167,8 +168,39 @@ const presetDefs = makeDefRegistry({
   },
 });
 
+// Hand-picked sample packs, for sp("kit"): a list of files under a name. There is nothing to draw
+// and nothing to capture - a pack is chosen, file by file, off the disk - so its panel is a browser
+// (see the pack panel section) rather than a canvas, and its argument is always names, like a
+// preset's.
+const packDefs = makeDefRegistry({
+  kind: 'pack',
+  section: 'packs',
+  defCall: '_pack',
+  useCall: 'sp',
+  emptyBody: '[]',
+  isData: () => false,
+  library: () => prPrebakePacks.map((p) => p.id),
+  libraryNote: 'prebake',
+  panel: {
+    current: () => packState?.id ?? null,
+    open: (id) => openPackById(id),
+    close: () => closePackPanel(),
+    carry: () => null, // nothing to carry: the panel is the whole view
+    sourceCall: () => null, // a rename is always a plain rename, never a fork
+    setCurrent: (from, to) => {
+      if (packState?.id === from) packState.id = to;
+    },
+    syncHead: () => packSyncHead(),
+    scheduleEval: () => packScheduleEval(),
+  },
+});
+
 // Every registry, for the passes that have to run over all of them (folding, auto-naming).
-const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs];
+const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs];
+
+// The ★ library: what ~/.poptart/prebake/pinned.js holds, as last fetched (see prRefreshRollList) -
+// [{ kind, id, scope, code }]. Every registry reads it to draw its stars; see makeDefRegistry's pin.
+let pinnedDefs = [];
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -1847,6 +1879,24 @@ function samplePackHints(cur, typed) {
   });
 }
 
+// Named packs for sp(" - what this buffer defines and what the library holds (see packDefs).
+function packNameHints(cur, typed) {
+  const token = typed.match(/[A-Za-z0-9_:#-]*$/)[0];
+  const word = token.split(':')[0];
+  const pool = packDefs.allIds().map((r) => {
+    const files = r.own
+      ? packEntriesOf(cm.getValue(), packDefs.findDef(cm.getValue(), r.id)) ?? []
+      : prPrebakePacks.find((p) => p.id === r.id)?.files ?? [];
+    return { key: r.id, count: files.length, note: r.note };
+  });
+  let matches = rankedMatches(pool, word, 40);
+  if (matches.length === 0) matches = pool.slice(0, 40);
+  return Promise.resolve(hintResult(cur, token, matches.map((item) => ({
+    text: item.key,
+    displayText: `${item.key} · ${item.count}${item.note ? ` · ${item.note}` : ''}`,
+  }))));
+}
+
 // Recording names for sr(". A flat list on purpose - names are minted unique across every month
 // folder, so the name IS the address (see osc-engine/recordings.js).
 let recordingList = null;
@@ -1935,6 +1985,11 @@ function poptartHint(cm) {
   // Inside sr(" → recording names.
   m = before.match(/(?<![.\w$])sr\s*\(\s*["']([^"']*)$/);
   if (m) return recordingHints(cur, m[1]);
+
+  // Inside sp(" → named packs, this buffer's and the library's. Like s(", the string is mini
+  // notation, so only the word under the cursor is completed, and the method form is allowed.
+  m = before.match(/(?<![\w$])\.?sp\s*\(\s*["']([^"']*)$/);
+  if (m) return packNameHints(cur, m[1]);
 
   // Inside s(" → sample packs (and their files after a ":"). `s` is both a builder and a chain
   // method (`n("0").s("clap")`), so a leading dot is allowed where se(/sr( forbid it.
@@ -2235,6 +2290,20 @@ function openWidgetAt(code, idx) {
       if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
     }
     openPresetFromCall(preset, code);
+    return true;
+  }
+  const packCall = findSpCallAt(code, idx);
+  if (packCall?.onName) {
+    // An empty sp() has no name yet. Give it one, then open whatever it became - the same bookmark
+    // dance as the roll's, since the definition is written below and moves nothing above it.
+    if (!code.slice(packCall.open + 1, packCall.close).trim()) {
+      const at = cm.setBookmark(cm.posFromIndex(idx));
+      const named = packDefs.materialize();
+      const back = at.find();
+      at.clear();
+      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+    }
+    openPackFromCall(packCall, code);
     return true;
   }
   const rec = findRecordCallAt(code, idx);
@@ -3015,6 +3084,12 @@ function findPresetCallAt(code, idx) {
   return findNamedCallAt(code, idx, /\.\s*preset\s*\(/g, 'preset');
 }
 
+// sp("kit") names a pack, in builder or method form alike (note("c e").sp("kit")); the
+// lookbehind keeps `.speed(` - whose name merely starts with the same letters - from matching.
+function findSpCallAt(code, idx) {
+  return findNamedCallAt(code, idx, /(?<![\w$])\.?\s*sp\s*\(/g, 'sp');
+}
+
 // splitLabeledBlocks over the whole buffer, remembered for the code it was computed from. Every
 // `.preset(...)` call is now asked which plugin it aims at (see presetDefs' scope), and that runs on
 // each buffer change - so the scan has to happen once per keystroke, not once per call.
@@ -3488,6 +3563,7 @@ let prFollowLocked = localStorage.getItem('poptartPianorollLock') === '1';
 let prPrebakeRolls = []; // ids from ~/.poptart/prebake.js: listed in the picker, not editable here
 let prPrebakeShapes = []; // the same for shape(...) definitions
 let prPrebakePresets = []; // ...and for captured plugin presets, a sound library shared by every patch
+let prPrebakePacks = []; // ...and for sample packs: [{ id, files }] - the files, since the pack panel shows them
 let prRaf = null; // requestAnimationFrame handle for the playhead sweep
 let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
 let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
@@ -4340,7 +4416,78 @@ function makeDefRegistry(opts) {
     panel.scheduleEval();
   }
 
-  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate };
+  // ★ - the library. A definition lives and dies with the buffer it was drawn in; pinning one copies
+  // it into a prebake source the server keeps (see server.js's PINNED_FILE), so the name is a
+  // library name in every project from then on - an option in every picker, and a name patterns
+  // can say. The buffer keeps its own copy, which shadows the library's exactly as any buffer
+  // definition shadows prebake, so pinning changes nothing about what is playing now.
+  const pinnedEntry = (id, sc) => pinnedDefs.find((e) => e.kind === kind && e.id === String(id) && sameScope(e.scope, sc ?? '')) ?? null;
+  const defText = (code, def) => code.slice(def.start, def.close + 1);
+
+  /**
+   * Where `id` stands with the library: 'none' (not pinned), 'same' (pinned, and this buffer's
+   * copy is that copy), 'differs' (pinned, but this buffer's copy has moved on - drawn into since),
+   * or 'library' (pinned, and nothing in this buffer defines it - the library is where it lives).
+   */
+  function pinState(id, sc = null) {
+    const e = pinnedEntry(id, sc);
+    if (!e) return 'none';
+    const code = cm.getValue();
+    const def = findDef(code, id, sc);
+    if (!def) return 'library';
+    return defText(code, def) === e.code ? 'same' : 'differs';
+  }
+
+  /** Copies this buffer's definition of `id` into the library (over an older pinned copy, if any). */
+  async function pin(id, sc = null) {
+    const code = cm.getValue();
+    const def = findDef(code, id, sc);
+    if (!def) return say(`can't pin ${kind} "${id}": its definition is not in this buffer`, true);
+    const had = pinnedEntry(id, def.scope);
+    try {
+      const res = await api('POST', '/api/pinned', { kind, id: String(id), scope: def.scope ?? '', code: defText(code, def) });
+      pinnedDefs = res.pinned ?? pinnedDefs;
+      for (const msg of res.errors ?? []) say(`library: ${msg}`, true);
+      say(had
+        ? `★ ${kind} "${id}" in your library updated to this buffer's copy`
+        : `★ ${kind} "${id}" is in your library - every project can play it now`);
+      prRefreshRollList();
+    } catch (err) {
+      say(`can't pin ${kind} "${id}": ${err.message ?? err}`, true);
+    }
+  }
+
+  /**
+   * Takes `id` out of the library. When nothing in this buffer defines it, a copy goes into the
+   * buffer FIRST - taking a library name away from the patterns here that say it would silence
+   * them, and "not in the library any more" was never meant to mean "gone".
+   */
+  async function unpin(id, sc = null) {
+    const e = pinnedEntry(id, sc);
+    if (!e) return;
+    const code = cm.getValue();
+    let copied = false;
+    if (!findDef(code, id, e.scope)) {
+      const inner = e.code.slice(e.code.indexOf('(') + 1, e.code.lastIndexOf(')'));
+      const body = splitFirstArg(inner)[1].trim();
+      const [from, to, text] = defsEdit(code, [{ id: String(id), scope: e.scope }], () => body);
+      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+      refoldAll();
+      copied = true;
+    }
+    try {
+      const res = await api('POST', '/api/pinned/remove', { kind, id: String(id), scope: e.scope ?? '' });
+      pinnedDefs = res.pinned ?? pinnedDefs;
+      for (const msg of res.errors ?? []) say(`library: ${msg}`, true);
+      say(`${kind} "${id}" is out of your library${copied ? ' - this buffer keeps its own copy' : ''}`);
+      prRefreshRollList();
+      if (copied) panel.scheduleEval();
+    } catch (err) {
+      say(`can't take ${kind} "${id}" out of your library: ${err.message ?? err}`, true);
+    }
+  }
+
+  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate, pinState, pin, unpin };
 }
 
 
@@ -5035,6 +5182,31 @@ function makeNamePicker({
       name.className = 'def-pick-name';
       name.textContent = row.label;
       el.appendChild(name);
+      // ★ - in the library or not (see makeDefRegistry's pin). On this buffer's own rows, and on
+      // library rows that are pinned; a library row that comes from prebake.js by hand has no star,
+      // since the file it lives in is already every project's.
+      const pinned = row.act === 'open' ? reg.pinState(row.id, row.scope) : 'none';
+      if (row.act === 'open' && (row.own || pinned !== 'none')) {
+        const star = document.createElement('span');
+        star.className = `def-pick-star ${pinned}`;
+        star.textContent = pinned === 'none' ? '☆' : '★';
+        star.title = {
+          none: `add ${row.id} to your library - every project gets it`,
+          same: `${row.id} is in your library - click to take it out`,
+          differs: `${row.id} is in your library, but this buffer's copy has changed - click to update it (⇧click takes it out)`,
+          library: `${row.id} comes from your library - click to take it out (this buffer keeps a copy)`,
+        }[pinned];
+        star.addEventListener('mousedown', async (e) => {
+          e.preventDefault();
+          e.stopPropagation(); // the row's own handler opens it instead
+          idx = i;
+          if (pinned === 'none' || (pinned === 'differs' && !e.shiftKey)) await reg.pin(row.id, row.scope);
+          else await reg.unpin(row.id, row.scope);
+          if (isOpen()) renderList();
+          if (isOpen()) els.search.focus();
+        });
+        el.appendChild(star);
+      }
       if (row.note) {
         const note = document.createElement('span');
         note.className = 'def-pick-note';
@@ -5182,7 +5354,12 @@ function prRefreshRollList() {
       prPrebakePresets = (res.presets ?? [])
         .filter((r) => r.layer === 'prebake')
         .map((r) => ({ id: String(r.id), scope: String(r.plugin ?? '') }));
+      prPrebakePacks = (res.packs ?? [])
+        .filter((r) => r.layer === 'prebake')
+        .map((r) => ({ id: String(r.id), files: (r.files ?? []).map(String) }));
+      pinnedDefs = res.pinned ?? pinnedDefs; // the ★s every picker draws
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
+      if (packState) packRenderList();
     })
     .catch(() => {}); // the picker still lists this buffer's rolls without it
 }
@@ -9300,7 +9477,13 @@ async function evaluate(start, { byHand = false } = {}) {
   }
   migrateDefNames(); // a patch saved before the builders were privatised still says roll(...)
   convertLegacyStates(); // ...and one from before presets still pins `{ state }` onto its calls
-  for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset() gets its definition first
+  // A pack named for the first time (`sp("kit")`, or a bare `sp()` that materialize just named)
+  // has no files yet, so it plays silence - and the one thing you want at that moment is the
+  // panel to fill it. Noted before materialize writes the definitions and opened once the eval
+  // is away, so the prompt never sits between the keystroke and the sound.
+  const packsBefore = new Set(packDefs.defsInBuffer().map((d) => d.id));
+  for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset()/sp() gets its definition first
+  const newPacks = packDefs.defsInBuffer().map((d) => d.id).filter((id) => !packsBefore.has(id));
   const code = cm.getValue();
   // Whatever auto-pin has written into the buffer is in THIS code, so this is the evaluation that
   // puts those programs where the scheduler reads them - and so the one that thaws their slots
@@ -9313,6 +9496,7 @@ async function evaluate(start, { byHand = false } = {}) {
   const pending = api('POST', '/api/evaluate', { code, start });
   checkpointUrl(); // a state you played is a state worth finding again in browser history
   saveWip();       // ...and worth having on disk right now, not a debounce from now
+  if (newPacks.length) openPackById(newPacks[0]); // it has no files - here is where to pick them
   try {
     const result = await pending;
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
@@ -9855,14 +10039,23 @@ function stopPreview() {
   }
 }
 
-async function previewSample(pack, i, row) {
+function previewSample(pack, i, row) {
+  return previewSampleUrl(`/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`, row);
+}
+
+// The same audition for one file by path - what the pack panel's rows play.
+function previewSampleFile(file, row) {
+  return previewSampleUrl(`/api/sampleAudio?file=${encodeURIComponent(file)}`, row);
+}
+
+async function previewSampleUrl(url, row) {
   stopPreview();
   const gen = ++previewGen;
   previewHeld = true;
   previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
   if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
   try {
-    const res = await fetch(`/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`);
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`preview failed: ${res.status}`);
     const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
     // Drop this press if a newer one superseded it, or the button was already released.
@@ -10462,6 +10655,384 @@ dirPickerUse.addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !dirPickerBackdrop.classList.contains('hidden')) closeDirPicker();
 });
+
+// ---------------------------------------------------------------------------------------------
+// Pack panel - the editor for a named sample pack (sp("kit"), a `_pack("kit", [...])` definition).
+// A pack is a list of files picked off the disk, so the panel is three lists side by side: the
+// packs there are (this buffer's and the library's - find, name, ★, delete, exactly the preset
+// panel's list), the files IN the open pack in index order (entry 0 is `kit:0` / .i(0) - reorder
+// with the arrows, × takes one out), and a folder browser over the whole disk to pick from (click a
+// file to add it, + on a folder for everything in it; hold ▶ to hear one first). Every change is
+// written straight back into the definition and re-evaluated, the way drawing into a roll is.
+//
+// Opens on double-clicking an `sp` name, from the picker rows, and by itself when an evaluation
+// names a pack for the first time - a new pack has no files and plays silence, and the one thing
+// you want then is this. Its backdrop class is the dialogs' (dir-picker-backdrop), which is what
+// makes the global hotkeys stand down while it is up.
+// ---------------------------------------------------------------------------------------------
+
+const packBackdrop = document.getElementById('packBackdrop');
+const packTitle = document.getElementById('packTitle');
+const packPickWrap = document.getElementById('packPickWrap');
+const packName = document.getElementById('packName');
+const packSearch = document.getElementById('packSearch');
+const packPickList = document.getElementById('packPickList');
+const packEntriesHead = document.getElementById('packEntriesHead');
+const packEntriesEl = document.getElementById('packEntries');
+const packBrowsePath = document.getElementById('packBrowsePath');
+const packBrowseList = document.getElementById('packBrowseList');
+const packAddFolderBtn = document.getElementById('packAddFolder');
+const packNote = document.getElementById('packNote');
+const packCloseBtn = document.getElementById('packClose');
+
+// { id, entries, own } - the pack on screen. `own`: defined in this buffer (editable); otherwise
+// it is the library's, shown as it is, and the ★ is how it becomes this buffer's to edit.
+let packState = null;
+let packBrowse = { path: null, parent: null, dirs: [], files: [], samplesRoot: '' };
+let packEvalTimer = null;
+let packSuppressSync = false; // our own write-back, which the change listener must not re-read
+const PACK_EVAL_DEBOUNCE_MS = 250;
+
+function packScheduleEval() {
+  clearTimeout(packEvalTimer);
+  packEvalTimer = setTimeout(() => { packEvalTimer = null; evaluate(false); }, PACK_EVAL_DEBOUNCE_MS);
+}
+
+const packHead = makeNamePicker({
+  els: { wrap: packPickWrap, title: packTitle, name: packName, search: packSearch, list: packPickList },
+  reg: packDefs,
+  inline: true, // the list is the panel's first column, like the preset panel
+  current: () => packState?.id ?? null,
+  open: (id) => openPackById(id),
+  refocus: () => packSearch.focus(),
+});
+const packSyncHead = () => packHead.syncHead();
+const packRenderList = () => { if (packState) packHead.renderList(); };
+
+/** The entries a `_pack(...)` definition lists, read off the code: every string in the list after the id. */
+function packEntriesOf(code, def) {
+  if (!def) return null;
+  const [, rest] = splitFirstArg(code.slice(def.open + 1, def.close));
+  return [...rest.matchAll(/(["'])((?:\\.|(?!\1)[\s\S])*?)\1/g)].map((m) => {
+    try { return JSON.parse(`"${m[2]}"`); } catch { return m[2]; }
+  });
+}
+
+const packDefOf = (id) => packDefs.findDef(cm.getValue(), String(id));
+
+function openPackById(id) {
+  const key = String(id);
+  const def = packDefOf(key);
+  const lib = def ? null : prPrebakePacks.find((p) => p.id === key);
+  if (!def && !lib) {
+    logLine(`no pack called "${key}" is defined in this buffer`, true);
+    return false;
+  }
+  packState = { id: key, entries: def ? packEntriesOf(cm.getValue(), def) : [...lib.files], own: !!def };
+  packBackdrop.classList.remove('hidden');
+  packSyncHead();
+  packRenderEntries();
+  packHead.renderList(true);
+  // The browser opens on the sample library the first time, and stays where you left it after.
+  if (packBrowse.path == null) {
+    api('GET', '/api/samplesDir').then(({ dir }) => packBrowseTo(dir)).catch(() => packBrowseTo(null));
+  } else {
+    packRenderBrowse();
+  }
+  return true;
+}
+
+// Double-clicked the name of an sp("<kit kit2>"): open the one sounding, or the first named.
+function openPackFromCall(call, code) {
+  const range = idStringRange(call, code);
+  if (!range) return false;
+  const [from, to] = range;
+  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  if (id == null) return false;
+  return openPackById(id);
+}
+
+function closePackPanel() {
+  if (!packState) return;
+  packState = null;
+  packBackdrop.classList.add('hidden');
+  stopPreview();
+}
+
+// Writes the entries back into the definition. The id is written back exactly as it was found, so
+// a numeric id stays a number; the list is JSON, which is what the editor reads and what the
+// builder takes.
+function packWrite() {
+  if (!packState?.own) return;
+  const code = cm.getValue();
+  const def = packDefOf(packState.id);
+  if (!def) return;
+  packSuppressSync = true;
+  try {
+    cm.replaceRange(`${def.idLiteral}, ${JSON.stringify(packState.entries)}`, cm.posFromIndex(def.open + 1), cm.posFromIndex(def.close));
+  } finally {
+    packSuppressSync = false;
+  }
+  refoldAll();
+  packScheduleEval();
+}
+
+// A path as the definition should say it: under the sample library it is written relative to the
+// root (so the pack travels with the library, and reads short); anywhere else, as it is.
+function packEntryFor(abs) {
+  const root = packBrowse.samplesRoot;
+  if (root && (abs === root || abs.startsWith(`${root}/`))) return abs.slice(root.length + 1);
+  return abs;
+}
+const packAbsOf = (entry) => (entry.startsWith('/') ? entry : `${packBrowse.samplesRoot}/${entry}`);
+const packBasename = (entry) => entry.replace(/\/+$/, '').split('/').pop() || entry;
+const isAudioPath = (p) => /\.(wav|aif|aiff|flac)$/i.test(p);
+
+function packAdd(absPaths) {
+  if (!packState?.own) return packRefuseLibrary();
+  const added = [];
+  for (const abs of absPaths) {
+    const entry = packEntryFor(abs);
+    if (packState.entries.includes(entry)) continue;
+    packState.entries.push(entry);
+    added.push(entry);
+  }
+  if (!added.length) return;
+  packWrite();
+  packRenderEntries();
+  packRenderBrowse();
+  packSay(`added ${added.length === 1 ? packBasename(added[0]) : `${added.length} files`}`);
+}
+
+function packRemoveAt(i) {
+  if (!packState?.own) return packRefuseLibrary();
+  packState.entries.splice(i, 1);
+  packWrite();
+  packRenderEntries();
+  packRenderBrowse();
+}
+
+function packMove(i, delta) {
+  if (!packState?.own) return packRefuseLibrary();
+  const j = i + delta;
+  if (j < 0 || j >= packState.entries.length) return;
+  const [e] = packState.entries.splice(i, 1);
+  packState.entries.splice(j, 0, e);
+  packWrite();
+  packRenderEntries();
+}
+
+function packRefuseLibrary() {
+  packSay(`"${packState?.id}" comes from your library - ★ takes a copy into this buffer to edit`, true);
+}
+
+function packSay(text, isError = false) {
+  packNote.textContent = text;
+  packNote.classList.toggle('error', !!isError);
+}
+
+function packRenderEntries() {
+  packEntriesEl.innerHTML = '';
+  if (!packState) return;
+  const n = packState.entries.length;
+  packEntriesHead.textContent = `${n} file${n === 1 ? '' : 's'}${packState.own ? '' : ' · library'}`;
+  if (!n) {
+    const empty = document.createElement('div');
+    empty.className = 'dir-empty';
+    empty.textContent = packState.own ? 'empty - pick files on the right' : 'empty';
+    packEntriesEl.appendChild(empty);
+    return;
+  }
+  packState.entries.forEach((entry, i) => {
+    const row = document.createElement('div');
+    row.className = 'pack-entry';
+    const idx = document.createElement('span');
+    idx.className = 'pack-entry-index';
+    idx.textContent = String(i);
+    idx.title = `sp("${packState.id}:${i}") / .i(${i})`;
+    row.appendChild(idx);
+    const name = document.createElement('span');
+    name.className = 'pack-entry-name';
+    const isDir = !isAudioPath(entry);
+    name.textContent = `${isDir ? '📁 ' : ''}${packBasename(entry)}`;
+    name.title = isDir ? `${entry} - a folder: every audio file in it, in name order` : entry;
+    row.appendChild(name);
+    if (!isDir) row.appendChild(packPlayButton(packAbsOf(entry), row));
+    if (packState.own) {
+      const up = document.createElement('span');
+      up.className = `pack-entry-btn${i === 0 ? ' off' : ''}`;
+      up.textContent = '↑';
+      up.title = 'move up (lower index)';
+      up.addEventListener('click', () => packMove(i, -1));
+      row.appendChild(up);
+      const down = document.createElement('span');
+      down.className = `pack-entry-btn${i === n - 1 ? ' off' : ''}`;
+      down.textContent = '↓';
+      down.title = 'move down (higher index)';
+      down.addEventListener('click', () => packMove(i, 1));
+      row.appendChild(down);
+      const del = document.createElement('span');
+      del.className = 'pack-entry-btn pack-entry-del';
+      del.textContent = '×';
+      del.title = 'take out of the pack';
+      del.addEventListener('click', () => packRemoveAt(i));
+      row.appendChild(del);
+    }
+    packEntriesEl.appendChild(row);
+  });
+}
+
+// Hold to hear - the sounds tab's own gesture (see previewSample), so the two feel the same.
+function packPlayButton(abs, row) {
+  const play = document.createElement('span');
+  play.className = 'pack-entry-btn pack-play';
+  play.textContent = '▶';
+  play.title = 'hold to hear';
+  play.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    previewSampleFile(abs, row);
+  });
+  play.addEventListener('click', (e) => e.stopPropagation());
+  return play;
+}
+
+async function packBrowseTo(target) {
+  packSay('');
+  try {
+    const { path, parent, dirs, files, samplesRoot } = await api('GET', `/api/browseDir?path=${encodeURIComponent(target ?? '')}`);
+    packBrowse = { path, parent, dirs, files: files ?? [], samplesRoot: samplesRoot ?? '' };
+    packBrowsePath.value = path;
+    packRenderBrowse();
+  } catch (e) {
+    packSay(e.message ?? String(e), true);
+  }
+}
+
+function packRenderBrowse() {
+  const { path: dir, parent, dirs, files } = packBrowse;
+  packBrowseList.innerHTML = '';
+  if (dir == null) return;
+  packAddFolderBtn.disabled = !files.length || !packState?.own;
+  packAddFolderBtn.textContent = `+ all ${files.length} here`;
+  packAddFolderBtn.title = `add every audio file in this folder (${files.length})`;
+  if (parent) {
+    const up = document.createElement('div');
+    up.className = 'dir-row dir-up';
+    up.textContent = '↑ ..';
+    up.addEventListener('click', () => packBrowseTo(parent));
+    packBrowseList.appendChild(up);
+  }
+  for (const name of dirs) {
+    const row = document.createElement('div');
+    row.className = 'dir-row pack-dir-row';
+    const label = document.createElement('span');
+    label.className = 'pack-dir-name';
+    label.textContent = name;
+    row.appendChild(label);
+    // + adds everything in the folder without going in - a drum folder is one click.
+    const add = document.createElement('span');
+    add.className = 'pack-entry-btn pack-dir-add';
+    add.textContent = '+';
+    add.title = `add every audio file in ${name}`;
+    add.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        const sub = await api('GET', `/api/browseDir?path=${encodeURIComponent(`${dir}/${name}`)}`);
+        const inside = (sub.files ?? []).map((f) => `${sub.path}/${f}`);
+        if (!inside.length) packSay(`no audio files in ${name}`, true);
+        else packAdd(inside);
+      } catch (err) {
+        packSay(err.message ?? String(err), true);
+      }
+    });
+    row.appendChild(add);
+    row.addEventListener('click', () => packBrowseTo(`${dir}/${name}`));
+    packBrowseList.appendChild(row);
+  }
+  const have = new Set((packState?.entries ?? []).map((e) => packAbsOf(e)));
+  for (const name of files) {
+    const abs = `${dir}/${name}`;
+    const row = document.createElement('div');
+    row.className = `pack-file-row${have.has(abs) ? ' on' : ''}`;
+    const label = document.createElement('span');
+    label.className = 'pack-file-name';
+    label.textContent = name;
+    label.title = have.has(abs) ? 'in the pack - click to take it out' : 'click to add to the pack';
+    row.appendChild(label);
+    row.appendChild(packPlayButton(abs, row));
+    row.addEventListener('click', () => {
+      if (!packState?.own) return packRefuseLibrary();
+      const entry = packEntryFor(abs);
+      const at = packState.entries.indexOf(entry);
+      if (at >= 0) packRemoveAt(at);
+      else packAdd([abs]);
+    });
+    packBrowseList.appendChild(row);
+  }
+  if (!dirs.length && !files.length) {
+    const empty = document.createElement('div');
+    empty.className = 'dir-empty';
+    empty.textContent = 'nothing here';
+    packBrowseList.appendChild(empty);
+  }
+}
+
+// The reverse direction: a hand edit to the definition (or its removal) shows in the panel. Checked
+// after the change settles, since a rename rewrites the id before the panel learns the new one.
+function packSyncFromCode() {
+  if (!packState || packSuppressSync) return;
+  setTimeout(() => {
+    if (!packState) return;
+    const def = packDefOf(packState.id);
+    if (!def) {
+      if (packState.own && !prPrebakePacks.some((p) => p.id === packState.id)) closePackPanel();
+      return;
+    }
+    const entries = packEntriesOf(cm.getValue(), def);
+    if (JSON.stringify(entries) === JSON.stringify(packState.entries) && packState.own) return;
+    packState.entries = entries;
+    packState.own = true;
+    packRenderEntries();
+    packRenderBrowse();
+  }, 0);
+}
+
+function initPackPanel() {
+  cm.on('change', packSyncFromCode);
+
+  packName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); packName.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); packHead.revertName(); packName.blur(); return; }
+    e.stopPropagation();
+  });
+  packName.addEventListener('blur', () => packHead.commitName());
+
+  packSearch.addEventListener('input', () => packHead.renderList(true));
+  packSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); packHead.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); packHead.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); packHead.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePackPanel(); return; }
+    e.stopPropagation();
+  });
+
+  packBrowsePath.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); packBrowseTo(packBrowsePath.value.trim()); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePackPanel(); return; }
+    e.stopPropagation();
+  });
+  packAddFolderBtn.addEventListener('click', () => {
+    const { path: dir, files } = packBrowse;
+    if (dir != null && files.length) packAdd(files.map((f) => `${dir}/${f}`));
+  });
+
+  packCloseBtn.addEventListener('click', () => closePackPanel());
+  packBackdrop.addEventListener('click', (e) => { if (e.target === packBackdrop) closePackPanel(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && packState) closePackPanel();
+  });
+}
 
 // ---------------------------------------------------------------------------------------------
 // Prebake editor - a modal CodeMirror over ~/.poptart/prebake.js (settings tab -> "edit

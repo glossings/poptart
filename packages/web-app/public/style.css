@@ -2819,3 +2819,273 @@ li.CodeMirror-hint-active {
   padding: 0;
   min-height: 0;
 }
+
+/* ---------------------------------------------------------------------------------------------
+   ★ - the library. A definition's row in any picker carries a star: hollow for one that lives only
+   in this buffer, filled for one that is pinned into every project (see makeDefRegistry's pin).
+   Out of the way like the row's other second gestures, except when it is filled - that is a
+   state worth reading off the list, not only acting on. --------------------------------------- */
+.def-pick-row .def-pick-star {
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-dim);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.def-pick-row .def-pick-star.same,
+.def-pick-row .def-pick-star.differs,
+.def-pick-row .def-pick-star.library {
+  opacity: 0.85;
+  color: var(--accent);
+}
+
+/* Pinned, but this buffer's copy has moved on: the star is a little less sure of itself. */
+.def-pick-row .def-pick-star.differs {
+  opacity: 0.5;
+}
+
+.def-pick-row.on .def-pick-star,
+.def-pick-row:hover .def-pick-star {
+  opacity: 0.85;
+}
+
+.def-pick-row .def-pick-star:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Pack panel (see the pack panel section in client.js). Three columns: packs | in the pack | pick
+   from. Wider than the other dialogs because it holds three lists, and the file names are the
+   content. ------------------------------------------------------------------------------------ */
+.pack-dialog {
+  width: min(1040px, 94vw);
+  max-height: 80vh;
+  height: min(640px, 80vh);
+}
+
+.pack-dialog .hidden {
+  display: none;
+}
+
+.pack-dialog .dir-picker-head {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.pack-dialog .dir-picker-head > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pack-dialog .def-pick-wrap {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pack-cols {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 15em minmax(0, 1fr) minmax(0, 1.3fr);
+  min-height: 0;
+}
+
+.pack-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+
+.pack-col:last-child {
+  border-right: 0;
+}
+
+.pack-col-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.pack-col-sub {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--mono);
+}
+
+.pack-search {
+  margin: 4px 10px 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.pack-search:focus {
+  border-color: var(--accent);
+}
+
+.pack-list {
+  flex: 1;
+  max-height: none;
+  margin: 4px 4px 6px;
+  padding: 0 6px;
+  overflow-y: auto;
+}
+
+.pack-list .def-pick-row.current .def-pick-name::after {
+  content: ' ●';
+  color: var(--accent);
+}
+
+.pack-entries {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 8px 8px;
+}
+
+/* One file in the pack: its index first, since the index is how a pattern says it. */
+.pack-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.pack-entry:hover,
+.pack-entry.previewing {
+  background: var(--hover-bg);
+}
+
+.pack-entry.previewing {
+  color: var(--accent);
+}
+
+.pack-entry-index {
+  min-width: 2ch;
+  text-align: right;
+  color: var(--accent);
+}
+
+.pack-entry-name,
+.pack-file-name,
+.pack-dir-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pack-entry-btn {
+  padding: 0 3px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-dim);
+  opacity: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pack-entry:hover .pack-entry-btn,
+.pack-file-row:hover .pack-entry-btn,
+.pack-dir-row:hover .pack-entry-btn {
+  opacity: 0.7;
+}
+
+.pack-entry-btn:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.pack-entry-btn.off {
+  visibility: hidden;
+}
+
+.pack-entry-del:hover {
+  color: var(--err);
+}
+
+.pack-play {
+  font-size: 10px;
+}
+
+.pack-browse-path {
+  margin: 4px 10px 4px;
+}
+
+.pack-browse-list {
+  min-height: 0;
+  padding: 2px 6px 8px;
+}
+
+.pack-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pack-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.pack-file-row::before {
+  content: '♪ ';
+  color: var(--text-dim);
+}
+
+.pack-file-row:hover {
+  background: var(--hover-bg);
+}
+
+/* In the pack already - the browser says so, and clicking takes it back out. */
+.pack-file-row.on {
+  color: var(--accent);
+}
+
+.pack-file-row.on::before {
+  content: '✓ ';
+  color: var(--accent);
+}
+
+.pack-file-row.previewing {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pack-note {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pack-note.error {
+  color: var(--err);
+}

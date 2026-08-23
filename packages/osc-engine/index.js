@@ -19,7 +19,7 @@ const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
-const { samplesRoot, listPackFiles, resolveSampleFile } = require('./samples');
+const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
 
@@ -300,6 +300,10 @@ class OscEngine {
     // (see _slicesFor): undefined = not analyzed, an array = its slice points, null = analyzed
     // and there are none to have (a non-WAV, or the analysis failed).
     this._packs = new Map();
+    // Named packs (sp("kit") - a _pack() definition): id -> the entries it is made of, as the host
+    // last pushed them (see defineSamplePacks). Resolved to files per load, so a folder entry
+    // picks up what is in it at the time. A fresh engine starts empty; the host re-pushes.
+    this._namedPacks = new Map();
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateCache = new Map(); // captured state -> inflated program, LRU (see _inflateState)
@@ -853,14 +857,46 @@ class OscEngine {
   }
 
   /**
+   * The named packs (sp()) the host knows about, wholesale: { id: [entries] }. A pack whose entries
+   * changed is dropped from the loaded cache so its next event reloads it with the new files; one
+   * whose entries are the same keeps its buffers (this is called after every evaluation, and
+   * reloading every pack each time would be a beat of silence per eval). A name no longer in
+   * `defs` is forgotten, and any buffers it held are released on the next load of that ref.
+   */
+  defineSamplePacks(defs) {
+    const next = new Map(Object.entries(defs ?? {}).map(([id, entries]) => [String(id), (entries ?? []).map((e) => String(e))]));
+    for (const [id, entries] of next) {
+      const had = this._namedPacks.get(id);
+      if (had && had.length === entries.length && had.every((e, i) => e === entries[i])) continue;
+      this._namedPacks.set(id, entries);
+      this._packs.delete(`sp:${id}`); // the next event loads the new list
+      this._warned.delete(`source:sp:${id}`); // ...and may warn afresh if it is still empty
+    }
+    for (const id of [...this._namedPacks.keys()]) {
+      if (next.has(id)) continue;
+      this._namedPacks.delete(id);
+      this._packs.delete(`sp:${id}`);
+      this._warned.delete(`source:sp:${id}`);
+    }
+  }
+
+  /**
    * What a sampler source ref names on disk. A ref is the mini-notation value with a namespace in
-   * front: a bare name is a PACK (s("bd") - a folder, addressed further by index), "file:<rel>" is
-   * one exact file under the samples root (se()), "rec:<name>" is one bounce from the recordings
-   * folder (sr()). All three come back as a plain list of paths, so everything downstream - the
-   * buffer load, slices, begin/end, fit - is identical for all of them; a one-file source is just
-   * a pack of one, whose index wraps to 0.
+   * front: a bare name is a PACK (s("bd") - a folder, addressed further by index), "sp:<id>" is a
+   * NAMED pack (sp("kit") - a hand-picked list of files the host pushed via defineSamplePacks,
+   * also addressed by index), "file:<rel>" is one exact file under the samples root (se()),
+   * "rec:<name>" is one bounce from the recordings folder (sr()). All four come back as a plain
+   * list of paths, so everything downstream - the buffer load, slices, begin/end, fit - is
+   * identical for all of them; a one-file source is just a pack of one, whose index wraps to 0.
    */
   _resolveSource(ref) {
+    if (ref.startsWith('sp:')) {
+      const id = ref.slice(3);
+      const entries = this._namedPacks.get(id);
+      if (!entries) return { paths: null, what: `named pack "${id}"`, where: 'a _pack("…") definition in the buffer or prebake', stable: false };
+      if (!entries.length) return { paths: null, what: `named pack "${id}"`, where: 'its definition - it has no files yet; pick some in the pack panel', stable: false };
+      return { paths: expandPackEntries(entries), what: `named pack "${id}"`, where: entries.join(', '), stable: false };
+    }
     if (ref.startsWith('file:')) {
       const rel = ref.slice(5);
       const file = resolveSampleFile(rel);

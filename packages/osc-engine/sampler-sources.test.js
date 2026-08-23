@@ -18,7 +18,7 @@ process.env.POPTART_SAMPLES_DIR = SAMPLES;
 process.env.POPTART_RECORDINGS_DIR = RECORDINGS;
 
 const { OscEngine } = require('./index.js');
-const { resolveSampleFile, browseSamples } = require('./samples.js');
+const { resolveSampleFile, browseSamples, expandPackEntries } = require('./samples.js');
 
 function put(root, rel) {
   const file = path.join(root, rel);
@@ -40,6 +40,42 @@ test('"file:" resolves one exact file under the samples root', () => {
   const file = put(SAMPLES, 'drums/kick 01.wav');
   const { paths } = engine()._resolveSource('file:drums/kick 01.wav');
   assert.deepStrictEqual(paths, [file]);
+});
+
+test('"sp:" resolves a named pack the host pushed - files and folders, relative or absolute', () => {
+  const a = put(SAMPLES, 'kit/a.wav');
+  put(SAMPLES, 'hats/hh2.wav');
+  put(SAMPLES, 'hats/hh1.wav');
+  put(SAMPLES, 'hats/readme.txt'); // not audio - skipped, not an error
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-elsewhere-'));
+  const b = put(outside, 'snare 02.wav');
+  const e = engine();
+  // Unknown until the host says otherwise - and retryable, since the definition may be evaluated
+  // a moment after the pattern that names it.
+  assert.strictEqual(e._resolveSource('sp:kit').paths, null);
+  assert.strictEqual(e._resolveSource('sp:kit').stable, false);
+  e.defineSamplePacks({ kit: ['kit/a.wav', b, 'hats', 'missing.wav'] });
+  const { paths } = e._resolveSource('sp:kit');
+  assert.deepStrictEqual(paths, [a, b, path.join(SAMPLES, 'hats/hh1.wav'), path.join(SAMPLES, 'hats/hh2.wav')]);
+  // Empty is a named-but-unfilled pack: nothing to play, retryable.
+  e.defineSamplePacks({ kit: [] });
+  assert.strictEqual(e._resolveSource('sp:kit').paths, null);
+  // Forgotten when the host stops mentioning it.
+  e.defineSamplePacks({});
+  assert.strictEqual(e._namedPacks.has('kit'), false);
+});
+
+test('redefining a named pack drops its loaded cache only when the entries changed', () => {
+  const e = engine();
+  e.defineSamplePacks({ kit: ['a.wav'] });
+  e._packs.set('sp:kit', { status: 'ready', files: [] });
+  e.defineSamplePacks({ kit: ['a.wav'] });
+  assert.ok(e._packs.has('sp:kit'), 'same entries keep the buffers');
+  e.defineSamplePacks({ kit: ['a.wav', 'b.wav'] });
+  assert.ok(!e._packs.has('sp:kit'), 'new entries reload');
+  e.defineSamplePacks({});
+  assert.ok(!e._packs.has('sp:kit'), 'a forgotten pack releases its cache');
+  assert.deepStrictEqual(expandPackEntries(['', null, 'nope/nothing.wav']), []);
 });
 
 test('"rec:" resolves one recording by name, whatever month it is filed under', () => {

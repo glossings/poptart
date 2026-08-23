@@ -335,6 +335,8 @@ test('a definition the editor writes is never rewritten by the transpile', () =>
     '_shape("swell", "0,0 0.5,1 1,0")',
     '_preset("growl", "Serum 2", "H4sIAAAAAAAA")',
     '_preset("growl", "", "")',
+    '_pack("kit", ["drums/kick.wav", "/Volumes/lib/snare 02.wav"])',
+    '_pack("kit", [])',
   ]) {
     assert.equal(injectLocations(src, 0), src, `${src} carries a name and data, not patterns`);
   }
