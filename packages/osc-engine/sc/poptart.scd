@@ -107,7 +107,7 @@ var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackD
 var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var slotKey, waitForLoad, flushNotes, clearPending;
 var midiInitialized = false, midiWarned = IdentitySet.new;
-var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing;
+var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
 // Audio sidechain routing (Sig#sidechain / '/poptart/setSidechain'). silentBus is the read-only
 // default for every fx slot's aux input (never written -> silence); trashBus is the write-only
 // default for a track's sidechain send when it feeds nothing (parked, never read). scArgsFor
@@ -583,21 +583,42 @@ midiEnable = {
         midiInitialized = true;
         MIDIClient.init;
         MIDIIn.connectAll;
+        midiConnected = IdentitySet.newFrom(MIDIClient.sources.collect { |s| s.uid });
         MIDIdef.cc(\poptart_cc_forward, { |val, num, chan, src|
             nodeAddr.sendMsg("/poptart/midiIn", midiNameForUid.(src), chan + 1, num, val / 127.0);
         });
         ("poptart: MIDI input enabled (" ++ MIDIClient.sources.size ++ " source(s))").postln;
     };
 };
+// The source list is a snapshot taken when MIDI was enabled, so a controller switched on or
+// plugged in after that is not in it - and a pattern naming it would go on saying "no such
+// device" until a restart. Re-reading the list is cheap and safe while the client is up (it is
+// what MIDIClient.init itself does); connecting is done per NEW source only, since connecting
+// one twice could deliver its events twice. Called when a name fails to match, so the lookup
+// that follows sees whatever is plugged in now.
+midiRefreshSources = {
+    MIDIClient.list;
+    MIDIClient.sources.do { |s|
+        if (midiConnected.includes(s.uid).not) {
+            MIDIIn.connect(0, s);
+            midiConnected.add(s.uid);
+            ("poptart: MIDI source connected: " ++ s.device ++ " " ++ s.name).postln;
+        };
+    };
+};
 midiNameForUid = { |uid|
     var s = MIDIClient.sources.detect { |e| e.uid == uid };
+    if (s.isNil) { midiRefreshSources.(); s = MIDIClient.sources.detect { |e| e.uid == uid } };
     if (s.notNil) { s.device.asString ++ " " ++ s.name.asString } { "unknown" };
 };
 // Same matching rule as pattern-core's midi.mjs: case-insensitive substring of "device name",
 // so both the native paths here and Node's Tier-1 store agree on which controller a name means.
 midiSourceFor = { |pattern|
     var p = pattern.asString.toLower;
-    MIDIClient.sources.detect { |s| (s.device.asString ++ " " ++ s.name.asString).toLower.contains(p) };
+    var find = { MIDIClient.sources.detect { |s| (s.device.asString ++ " " ++ s.name.asString).toLower.contains(p) } };
+    var src = find.value;
+    if (src.isNil) { midiRefreshSources.(); src = find.value };
+    src;
 };
 midiWarnMissing = { |context, device|
     if (midiWarned.includes(device.asSymbol).not) {
@@ -1189,6 +1210,13 @@ OSCdef(\poptartSetParamLFO, { |msg|
                             ++ "' is outside the normalized 0..1 VST parameter range and will pin -"
                             + "use .range(0.2, 0.9)-style values until per-plugin calibration exists").warn;
                     };
+                    // An entry outlives the plugin it was mapped onto (see setParamCC): re-map the bus
+                    // on every send so a swapped plugin, whose open cleared the UGen's mappings, still
+                    // hears it - on the same bus and index this is a no-op.
+                    if (existing.notNil) {
+                        existing[\index] = index;
+                        if (isChannel) { track[\synth].map(paramName.asSymbol, existing[\bus]) } { ctl.map(index, existing[\bus]) };
+                    };
                     case
                     { existing.notNil and: { existing[\shape] == shape } } {
                         existing[\synth].set(\freq, rateHz, \lo, lo, \hi, hi); // phase preserved
@@ -1548,6 +1576,11 @@ OSCdef(\poptartSetParamCC, { |msg|
                                 e[\last] = val / 127;
                                 e[\bus].set(e[\lo] + (e[\last] * (e[\hi] - e[\lo])));
                             }, cc, if (channel > 0) { channel - 1 }, srcID: src.uid);
+                            e[\srcUid] = src.uid;
+                            // The one line that says a knob IS wired - the thing to look for when
+                            // a cc does nothing: no line here means the binding never happened.
+                            ("poptart: cc " ++ cc ++ " on " ++ device ++ " -> " ++ key ++ " slot " ++ slot
+                                ++ " '" ++ paramName ++ "' (" ++ lo ++ ".." ++ hi ++ ")").postln;
                         };
                         if (existing.isNil and: { isChannel.not } and: { (lo < 0) or: { hi > 1 } }) {
                             ("poptart: CC range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
@@ -1557,9 +1590,21 @@ OSCdef(\poptartSetParamCC, { |msg|
                         if (existing.notNil) {
                             existing[\lo] = lo;
                             existing[\hi] = hi;
-                            if (existing[\binding] != binding) {
+                            // The entry outlives the plugin it was mapped onto: swap the slot's
+                            // plugin (a changed .synth()/.fx() name) and opening the new one clears
+                            // the UGen's parameter mappings, so the bus this knob writes to reads to
+                            // nothing - and the parameter may sit at a different index now. Map it
+                            // again on every send (onto the same bus it is a no-op), so a re-eval
+                            // always leaves the knob connected to what is in the slot today.
+                            existing[\index] = index;
+                            if (isChannel) { track[\synth].map(paramName.asSymbol, existing[\bus]) } { ctl.map(index, existing[\bus]) };
+                            // And the def: the device may have come back under another uid, or the
+                            // def been freed out from under the entry - either way nothing would
+                            // fire. A binding that still matches but whose def is gone or re-sourced
+                            // is registered afresh (same defKey - replaces the old MIDIdef).
+                            if ((existing[\binding] != binding) or: { existing[\srcUid] != src.uid } or: { MIDIdef.all[defKey].isNil }) {
                                 existing[\binding] = binding;
-                                registerDef.(existing); // same defKey - replaces the old MIDIdef
+                                registerDef.(existing);
                             };
                             existing[\bus].set(lo + (existing[\last] * (hi - lo)));
                         } {

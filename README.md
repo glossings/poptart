@@ -312,15 +312,21 @@ since the prototype keeps methods already added to it.
 
 `synth("Serum 2")` leaves the sound to the plugin's own default. The moment you change anything in
 the plugin's own window — a knob, a preset from its browser — that state is captured and written
-into the code for you, as the call's second argument: `synth("Serum 2", { state: "H4sIAAAA…" })`,
-same for `.fx(...)`. Nothing to press; the code keeps describing what you're hearing.
+into the code for you, under a **name**: the call gains `.preset("lead")` (named after the track)
+and a `_preset("lead", "Serum 2", "H4sIAAAA…")` definition is filed at the bottom of the buffer,
+same for `.fx(...)`. Nothing to press; the code keeps describing what you're hearing. Storing one
+sound and patterning between several are then the same thing — `.preset("<lead growl>")` swaps the
+plugin's whole program per cycle, and the `preset` panel (double-click the word) is where the
+names are picked, made, copied (the ⧉ on a row) and shaped by ear. (Patches from before presets carry the
+state on the call itself, `synth("Serum 2", { state: "…" })`; they still play, and an evaluation
+converts each one into a named preset on its way through.)
 
 That string is the plugin's whole program — every knob, the preset, the wavetables — gzipped and
-base64'd, often megabytes of it. It folds on screen to a `{◆ 2184kb}` chip you can click open, so
-it takes one line of reading space. **The patch is the file**: what you save, export or paste
-carries its own sound, with nothing to resolve and nothing that can go missing behind it. That's
-also what makes the obvious workflow work — duplicate a line, change the preset on one copy, and
-switch between them by commenting one out. Both states are right there in the text.
+base64'd, often megabytes of it. The definitions fold on screen to a `presets` chip you can click
+open, so they take one line of reading space. **The patch is the file**: what you save, export or
+paste carries its own sound, with nothing to resolve and nothing that can go missing behind it.
+That's also what makes the obvious workflow work — name a second preset, shape it, and swap between
+the two by pattern or by commenting. Both states are right there in the text.
 
 The state lands about half a second after you let go of the knob, so the code is never behind what
 you're hearing and closing the tab can't cost you a preset. Asking a plugin for its program does
@@ -340,9 +346,9 @@ megabytes and the address bar will truncate it, so the editor tells you to expor
 ARCHITECTURE.md. Back/Forward walk your evals.)
 
 Capture is debounced, so a knob sweep writes once when you let go rather than continuously, and
-the writes collapse into a single undo step. Delete the `{ state }` argument and the call goes back
-to meaning "however the plugin defaults" — on the next eval, not retroactively: the plugin keeps
-sounding how it sounds until something reloads it.
+the writes collapse into a single undo step. Delete the `.preset("lead")` off the call and it goes
+back to meaning "however the plugin defaults" — on the next eval, not retroactively: the plugin
+keeps sounding how it sounds until something reloads it.
 
 ### Sampler
 

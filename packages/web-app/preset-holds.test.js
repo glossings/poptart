@@ -425,3 +425,20 @@ test('one slot held for two reasons is reported once, by the most deliberate', (
 
   assert.deepEqual(currentHolds().map((h) => h.why), ['hand']);
 });
+
+test("a modulator's pattern-valued .range() bounds are in the grid; numeric bounds are not", () => {
+  // sine(1).range("200 300", 4000) on a param: the LFO is native, but the "200 300" is a step
+  // pattern the scheduler polls to move its floor, and it is on screen - so it lights. The 4000
+  // is a number, with nothing to light. Same for env()/midicc() bounds, and for a channel control.
+  const lo = { name: 'lo' };
+  const hi = { name: 'hi' };
+  const t = {
+    paramSignals: { cutoff: { name: 'cutoff', lfoIR: { min: lo, max: 4000 } } },
+    channel: { gain: { name: 'gain', ccIR: { min: 0, max: hi } } },
+    presetPatterns: {},
+  };
+  assert.deepEqual(names(patternSigs(t)), ['cutoff', 'lo', 'gain', 'hi']);
+  // A patterned shape AND a patterned bound on one lfo(): both come along.
+  const shaped = { paramSignals: { x: { name: 'x', lfoIR: { shapePattern: { name: 'shapes' }, min: lo, max: 1 } } }, channel: {}, presetPatterns: {} };
+  assert.deepEqual(names(patternSigs(shaped)), ['x', 'shapes', 'lo']);
+});

@@ -2059,6 +2059,7 @@ li.CodeMirror-hint-active {
 /* "Play this one here" - writes the name into the call the panel is looking through. Kept to the
    same manners as the delete button (out of the way until you are on the row), since it is the same
    kind of thing: a second gesture on a row whose first gesture is opening it. */
+.def-pick-row .def-pick-dup,
 .def-pick-row .def-pick-use {
   padding: 0 2px;
   font-size: 13px;
@@ -2068,11 +2069,14 @@ li.CodeMirror-hint-active {
   cursor: pointer;
 }
 
+.def-pick-row.on .def-pick-dup,
+.def-pick-row:hover .def-pick-dup,
 .def-pick-row.on .def-pick-use,
 .def-pick-row:hover .def-pick-use {
   opacity: 0.7;
 }
 
+.def-pick-row .def-pick-dup:hover,
 .def-pick-row .def-pick-use:hover {
   opacity: 1;
   color: var(--accent);

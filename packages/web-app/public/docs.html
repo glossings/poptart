@@ -480,7 +480,11 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               plays. (Only the name opens it — the arguments stay ordinary code you can edit by
               hand, and the roll follows along when you do.) Every change you draw is written back into the call <em>and</em>
               re-evaluated, so what you hear is always what's on screen. An empty
-              <code>pianoroll()</code> is a valid empty roll — start there and draw.
+              <code>pianoroll()</code> is a valid empty roll — start there and draw. A named roll's
+              panel shows the name in its head (type over it to rename), a <strong>▾</strong> picker
+              to find or create one; each row in it has <strong>⧉</strong> (copy the roll under the next free
+              name and open the copy) and <strong>→</strong> (make the call this panel came from play
+              that roll instead). The lfo and preset panels work the same way.
             </p>
             <p style="margin:0 0 8px">
               Draw with the pencil (drag), or press <strong>B</strong> for the arrow tool to
@@ -498,7 +502,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
               you're holding it at, so one gesture flattens a bar to an even velocity or ramps it into
               a crescendo. <strong>🎲</strong> in the header rolls the whole channel at random — the
               selection if there is one, otherwise the whole roll.
-              <strong>cmd-D</strong> duplicates, <strong>option-drag</strong>
+              <strong>cmd-D</strong> duplicates, <strong>cmd-C</strong>/<strong>cmd-X</strong>/<strong>cmd-V</strong>
+              copy, cut and paste — into another roll too, or one you create after copying (pasted
+              notes land where they were copied from, selected), <strong>option-drag</strong>
               drags a copy (the original stays where it was), arrow keys nudge
               (<strong>shift</strong> + up/down = octave, or four rows on the index axis;
               <strong>shift</strong> + right/left lengthen

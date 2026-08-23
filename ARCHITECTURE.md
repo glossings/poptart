@@ -138,8 +138,10 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   and transient carries a `@…` handle into the content-addressed store at `~/.poptart/blobs`
   (`blobs.js`). Saved patterns and exports are hydrated on the way out, so a patch file is still
   self-contained — the file is the sound. The live buffer, the wip autosave and history snapshots
-  keep handles, so `synth("Serum 2", { state: "@2f9a1c3d5e7b" })` is what CodeMirror holds, what the
-  1.2s autosave writes, what every checkpoint stores and what each eval ships.
+  keep handles, so `_preset("lead", "Serum 2", "@2f9a1c3d5e7b")` is what CodeMirror holds, what the
+  1.2s autosave writes, what every checkpoint stores and what each eval ships. (A patch from before
+  presets pins the same thing onto the call — `synth("Serum 2", { state: "@…" })` — and the editor
+  converts each such call into a named preset the next time the buffer is evaluated.)
 
   An earlier attempt at a store (`~/.poptart/states`, `st_…` chips) was rolled back because it made
   the *patch* a pointer, and pointers dangle: states went missing and a patch that can lose its own

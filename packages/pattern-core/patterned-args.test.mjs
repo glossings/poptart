@@ -7,7 +7,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, note, s, mini, Signal, sine, saw, irand } from './src/signal.mjs';
+import { n, note, s, mini, Signal, sine, saw, irand, env, midicc } from './src/signal.mjs';
+import { stepLocs } from './src/mini.mjs';
 
 const starts = (sig, cycle) => sig.stepsForCycle(cycle).map((x) => x.start);
 const values = (sig, cycle) => sig.stepsForCycle(cycle).filter((x) => x.value != null).map((x) => x.value);
@@ -172,4 +173,34 @@ test('arithmetic reads a note name as its MIDI number', () => {
   assert.deepEqual(values(mini('c2 e2').add(12), 0), [36, 40]);
   // Converting first, the long way round, gives the same thing.
   assert.deepEqual(values(note('C2').add('0 12'), 0), [24, 36]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// .range()
+// ---------------------------------------------------------------------------------------------
+
+test('.range() takes pattern bounds on a native modulator and keeps their spans for the highlighter', () => {
+  // sine(1).range("200 300", 4000) as the editor hands it over: the string is already a mini Sig
+  // carrying its document offset. The bound rides in the IR as itself (the scheduler polls it to
+  // move the running LFO's floor), and its steps keep the atom spans the highlighter lights.
+  const lo = mini('200 300', 10);
+  const lfo = sine(1).range(lo, mini('4000', 22));
+  assert.equal(lfo.lfoIR.min, lo, 'a pattern bound rides along in the IR as itself');
+  assert.deepEqual(lfo.lfoIR.min.stepsForCycle(0).map((x) => [x.value, x.loc]), [[200, [10, 13]], [300, [14, 17]]]);
+  assert.deepEqual(lfo.lfoIR.max.stepsForCycle(0).map((x) => [x.value, x.loc]), [[4000, [22, 26]]]);
+  // env() and midicc() carry theirs the same way; a plain number stays a number.
+  const e = env().range(mini('0.2 0.5', 3), 1);
+  assert.deepEqual(e.envIR.min.stepsForCycle(0).map((x) => x.value), [0.2, 0.5]);
+  assert.equal(e.envIR.max, 1);
+  const c = midicc('Twister')(12).range(mini('80 100', 0), 2000);
+  assert.deepEqual(c.ccIR.min.stepsForCycle(0).map((x) => x.value), [80, 100]);
+  assert.equal(c.ccIR.max, 2000);
+});
+
+test('.range() with pattern bounds on a step pattern is plain arithmetic, and both sides keep their spans', () => {
+  const p = n('0 1').range(mini('10 20', 5), 100);
+  assert.deepEqual(values(p, 0), [10, 100]);
+  const spans = p.stepsForCycle(0).map((x) => stepLocs(x));
+  assert.ok(spans[0].some(([a, b]) => a === 5 && b === 7), 'the first event lights the "10" it read');
+  assert.ok(spans[1].some(([a, b]) => a === 8 && b === 10), 'the second lights the "20"');
 });

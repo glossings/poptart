@@ -1067,7 +1067,7 @@ function writePluginState(trackLabel, slot, state, plugin, preset) {
 // `{ state }` on that call goes at the same time - the preset replaces it, and leaving both would
 // be two descriptions of one sound, the pinned one silently ignored (see Scheduler#setPattern).
 function createPresetForSlot(code, trackLabel, slot, plugin, state) {
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === trackLabel);
+  const block = blockForTrack(code, trackLabel);
   const call = block && findChainCall(code, block.start, block.end, slot);
   if (!call) {
     // The call was renamed or deleted between the gesture and the capture. Nothing to write to;
@@ -1112,6 +1112,83 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   logLine(`captured ${plugin ?? 'plugin'} into new preset "${id}"`);
   presetScheduleEval();
   return 'eval';
+}
+
+// ---------------------------------------------------------------------------------------------
+// Legacy `{ state }` arguments. `synth("Serum 2", { state: "@f658c5f18010" })` is how a captured
+// sound used to be written: the program pinned onto the call itself. It still plays (see
+// Sig#synth), but it is a second way of saying what a preset says, and one nothing else can see -
+// no panel lists it, no pattern can swap it, and a capture into that slot would leave the two
+// describing one sound. So an evaluation converts each one on its way through: the state goes into
+// a `_preset(...)` definition named after the track, and the call gets `.preset("name")` where the
+// argument was. Same sound, now under a name - the rewrite auto-pin makes when it first captures
+// into such a slot (see createPresetForSlot), done up front rather than waiting for a knob to move.
+// ---------------------------------------------------------------------------------------------
+
+// The first synth()/.fx() call in the buffer still carrying a `{ state }` second argument, as
+// { label, slot, plugin, state, afterFirstArg, closeParen }, or null. One at a time: every
+// conversion moves the offsets below it, so the caller converts and looks again.
+function findLegacyStateCall(code) {
+  const isCode = codeOnly(code);
+  for (const block of labelsMod.splitLabeledBlocks(code)) {
+    const re = /\b(synth|fx)\s*\(/g;
+    re.lastIndex = block.start;
+    let m;
+    let fxSeen = 0; // live .fx() calls so far in this block: the slot numbering Sig#fx gives them
+    while ((m = re.exec(code)) && m.index < block.end) {
+      if (!isCode(m.index)) continue; // a commented-out call is a sound you are not hearing - leave it
+      const slot = m[1] === 'synth' ? 0 : ++fxSeen;
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(code, open);
+      if (close < 0 || close > block.end) break;
+      const lit = firstStringLiteral(code, open + 1, close);
+      if (!lit) continue;
+      const head = /^\s*,\s*\{\s*["']?state["']?\s*:\s*(?=["'])/.exec(code.slice(lit.end, close));
+      if (!head) continue;
+      const stateLit = firstStringLiteral(code, lit.end + head[0].length, close);
+      if (!stateLit || !/^\s*,?\s*\}\s*$/.test(code.slice(stateLit.end, close))) continue; // not the simple shape
+      if (!stateLit.content) continue; // `{ state: "" }` pins nothing, and says nothing worth naming
+      return { label: block.label, slot, plugin: lit.content, state: stateLit.content, afterFirstArg: lit.end, closeParen: close };
+    }
+  }
+  return null;
+}
+
+function convertLegacyStates() {
+  if (!labelsMod) return;
+  const converted = [];
+  for (let guard = 0; guard < 64; guard++) { // a bound, not a budget: a buffer has a handful of these
+    const code = cm.getValue();
+    const call = findLegacyStateCall(code);
+    if (!call) break;
+    const { label, slot, plugin, state } = call;
+    // Named after the track, like an auto-pinned capture (see createPresetForSlot) - and unique
+    // within the PLUGIN, since a preset belongs to the plugin it came from.
+    const rows = presetDefs.allIds(plugin);
+    const id = freshDefId(label, (name) => rows.some((r) => r.id === name), 'preset');
+    const wantedId = preferredDefId(label, 'preset');
+    const fromLibrary = rows.find((r) => r.id === wantedId && !r.own);
+    if (fromLibrary) libraryBumpNote('preset', wantedId, id, fromLibrary.note ?? 'prebake');
+    // A slot a .preset(...) pattern already drives is already in the current form, and the pinned
+    // state under it is the one the scheduler ignores (see Sig#synth) - so the program is FILED
+    // under a name, where the picker can offer it, but nothing is chained on: the pattern that is
+    // there goes on saying what the slot plays.
+    const driven = !!presetCallForSlot(code, label, slot);
+    const edits = [
+      [call.afterFirstArg, call.closeParen, ''],
+      presetDefs.defsEdit(code, [id], () => `${JSON.stringify(plugin)}, ${JSON.stringify(state)}`),
+    ];
+    if (!driven) edits.push([call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`]);
+    cm.operation(() => {
+      for (const [from, to, text] of edits.sort((a, b) => b[0] - a[0])) {
+        cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), '+legacyState');
+      }
+    });
+    converted.push(`"${label}" ${slot === 0 ? 'synth' : `fx slot ${slot}`} → preset "${id}"${driven ? ' (filed only: that slot is already driven by .preset(…))' : ''}`);
+  }
+  if (!converted.length) return;
+  refoldAll();
+  logLine(`converted legacy { state } into presets: ${converted.join('; ')}`);
 }
 
 // Deliberately does NOT re-evaluate: the state is already live in the plugin (it came from
@@ -1351,10 +1428,20 @@ async function pollConf(labelOverride) {
   }
 }
 
+// The block a track label names, for a write aimed at the TRACK - conf's .param(), auto-pin's
+// preset, a keyboard() swap. A muted copy (`pluck_: …`) and a playing one (`pluck: …`) carry the
+// same label, and the engine only knows the one that is playing: the gesture came out of ITS
+// plugin, so that is the block the write belongs in. The muted one is only the fallback when
+// nothing by that name plays (a capture landing just after the track was muted).
+function blockForTrack(code, label) {
+  const blocks = labelsMod.splitLabeledBlocks(code);
+  return blocks.find((b) => b.label === label && !b.muted) ?? blocks.find((b) => b.label === label) ?? null;
+}
+
 function upsertParam(trackLabel, slot, name, value) {
   if (!labelsMod) return;
   const code = cm.getValue();
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === trackLabel);
+  const block = blockForTrack(code, trackLabel);
   if (!block) return;
   // Overwrite an existing .param() for this name, else insert one targeting the touched slot.
   const existing = findParamCall(code, block.start, block.end, name);
@@ -4224,7 +4311,36 @@ function makeDefRegistry(opts) {
     );
   }
 
-  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename };
+  // A copy of one under a new name, from the panel's `dup` button: the same data, under the next
+  // free spelling of its name (`lead` -> `lead2`), opened in place of the original so the next
+  // stroke lands in the copy. Nothing plays it until a pattern names it - which is the point: a
+  // variation is drawn on top of what is playing and swapped in when it is ready, the same way a
+  // new one is (see create), only without starting from nothing.
+  function duplicate(id = panel.current(), sc = panelScope()) {
+    if (id == null) return;
+    const code = cm.getValue();
+    const def = findDef(code, id, sc);
+    if (!def) {
+      return say(`can't duplicate ${kind} "${id}": ${inLibrary(id, sc) ? 'it comes from the shared library - only what this buffer defines can be copied here' : 'its definition is not in this buffer'}`, true);
+    }
+    const rows = allIds(def.scope ?? null);
+    // Counted from the stem, not the name: duplicating `snare2` gives `snare3`, not `snare22` -
+    // a copy of a copy is the next one in the series, which is how you think of them.
+    const stem = id.replace(/\d+$/, '') || id;
+    const to = freshDefId(stem, (name) => rows.some((r) => r.id === name), kind);
+    const [litStart, litEnd] = defIdLiteralRange(code, def);
+    const text = code.slice(def.start, def.close + 1);
+    const copy = text.slice(0, litStart - def.start) + JSON.stringify(to) + text.slice(litEnd - def.start);
+    const lineStart = code.lastIndexOf('\n', def.start - 1) + 1;
+    const indent = /^[ \t]*/.exec(code.slice(lineStart, def.start))[0];
+    applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`]]);
+    refoldAll();
+    say(`${kind} "${to}" is a copy of "${id}"`);
+    panel.open(to, panel.carry());
+    panel.scheduleEval();
+  }
+
+  return { kind, section, defCall, useCall, legacyCall, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate };
 }
 
 
@@ -4778,9 +4894,39 @@ const rollPicker = makeNamePicker({
   reg: rollDefs,
   current: () => prState?.rollId ?? null,
   open: (id) => { if (!openRollById(id, prCarry())) prSyncRollHead(); }, // refused - say so, stay put
+  canUse: () => !!prState?.source?.find(),
+  use: (id) => prUseInCall(id),
   refocus: () => prRefocus(),
   onPick: () => prSetFollowLock(true), // reaching in here says you want THAT one, not the next bar's
 });
+
+// Puts `id` into the pianoroll(...) the panel is looking through, in place of whatever it names
+// now - the roll's half of presetUseInCall: opening a row EDITS that roll, this plays it here. It is
+// the gesture after ⧉: the copy is on screen, and the → on its row is how the call comes to play it
+// instead of the original. The whole argument goes, pattern and all, which is why the line says
+// what it replaced: it is one undo away, but only if you can see that it happened.
+function prUseInCall(id) {
+  const span = prState?.source?.find();
+  if (!span) return;
+  const was = cm.getRange(span.from, span.to);
+  if (was === id) return;
+  // A mark over just the string BODY collapses when the body is replaced wholesale, so take the
+  // quotes in for the duration of the edit and put the inner mark back over the new name (see
+  // presetUseInCall, and makeDefRegistry's fork).
+  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  cm.replaceRange(id, span.from, span.to);
+  const after = quoted.find();
+  quoted.clear();
+  prState.source.clear();
+  prState.source = after
+    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    : null;
+  refoldAll();
+  logLine(`pianoroll("${was}") now plays "${id}"`);
+  if (id !== prState.rollId) openRollById(id, prCarry());
+  else prSyncRollHead();
+  prScheduleEval();
+}
 
 function prSyncRollHead() {
   prLockBtn.classList.toggle('hidden', !prState?.source);
@@ -4894,6 +5040,28 @@ function makeNamePicker({
         note.className = 'def-pick-note';
         note.textContent = row.note;
         el.appendChild(note);
+      }
+      // A copy of this one under the next free spelling of its name, opened in its place - the same
+      // data, to draw a variation on; the → beside it is then how the call comes to play the copy.
+      // Only this buffer's own: a library entry's data isn't in the buffer to copy (see duplicate).
+      if (row.act === 'open' && row.own) {
+        const dup = document.createElement('span');
+        dup.className = 'def-pick-dup';
+        dup.textContent = '⧉';
+        dup.title = `duplicate ${row.id}`;
+        dup.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation(); // the row's own handler opens it instead
+          idx = i;
+          onPick();
+          reg.duplicate(row.id, row.scope);
+          // The list stays up, moved onto the copy (which the panel now shows, so it is `current`):
+          // the → beside it is the likely next gesture, and Enter/arrows start from there. Focus
+          // stays in the search box so the keyboard keeps driving the list rather than the canvas.
+          renderList(true);
+          els.search.focus();
+        });
+        el.appendChild(dup);
       }
       // Send this one into the call the panel is looking through, in place of whatever it names
       // now. Opening a row EDITS that preset; this plays it - which is what the list is for once a
@@ -5938,6 +6106,33 @@ function prDuplicate() {
   drawPianoroll();
 }
 
+// Copy and paste (cmd-C / cmd-X / cmd-V), between rolls as well as within one. The editor's own
+// clipboard rather than the system one: a note is a row of a roll, and the roll it is pasted into
+// may be a different one - or one that did not exist when it was copied, since making a new roll
+// and pasting a phrase into it is most of what this is for. So it is kept OUTSIDE prState: the
+// panel moving to another roll, or a new one being created, leaves it exactly as it was.
+//
+// Pasted notes land where they were copied from - the phrase keeps its place in the bar, which is
+// what carrying it into another roll means - clamped into the loop, and selected, so a paste is one
+// arrow-key or drag away from anywhere else. Within the same roll that puts the copies on top of
+// the originals (Ableton's overlap rule keeps the top ones); cmd-D is the in-roll duplicate.
+let prClipboard = null; // [{ ...note }], each a detached copy - the roll it came from may be gone
+function prCopy(notes) {
+  prClipboard = notes.map((n) => ({ ...n, hidden: false }));
+  logLine(`copied ${notes.length} note${notes.length === 1 ? '' : 's'} - cmd-V pastes them into any roll`);
+}
+
+function prPaste() {
+  if (!prState || !prClipboard?.length) return;
+  const copies = prClipboard.map((n) => ({ ...n, start: prClampToLoop(n.start) }));
+  prState.notes.push(...copies); // last, so the pasted notes win the overlap rule where they land
+  prState.sel = new Set(copies);
+  prClipOverlaps();
+  prScrollTo(copies);
+  writePianorollCall();
+  drawPianoroll();
+}
+
 // Either fold on/off, keeping the view where it was: the axis changes length underneath, so the
 // row at the middle of the window is re-centered in the new coordinates rather than letting the
 // raw lane index carry over (which would jump the roll somewhere unrelated).
@@ -6257,6 +6452,20 @@ function initPianorollCanvas() {
     } else if (mod && (e.key === 'd' || e.key === 'D')) {
       e.preventDefault();
       prDuplicate();
+    } else if (mod && !e.shiftKey && (e.key === 'c' || e.key === 'C' || e.key === 'x' || e.key === 'X')) {
+      if (!sel.length) return;
+      e.preventDefault();
+      prCopy(sel);
+      if (e.key === 'x' || e.key === 'X') {
+        prState.notes = prState.notes.filter((n) => !prState.sel.has(n));
+        prState.sel.clear();
+        prClipOverlaps();
+        writePianorollCall();
+        drawPianoroll();
+      }
+    } else if (mod && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+      e.preventDefault();
+      prPaste();
     } else if (e.key === '0' && !mod && !e.altKey) {
       e.preventDefault();
       prToggleMute();
@@ -7075,7 +7284,7 @@ function applyRecording(results) {
 function replaceKbCall(label, replacement) {
   if (!labelsMod) return false;
   const code = cm.getValue();
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label);
+  const block = blockForTrack(code, label);
   if (!block) return false;
 
   const spanFrom = (callStart, openParenIdx) => {
@@ -9090,6 +9299,7 @@ async function evaluate(start, { byHand = false } = {}) {
     refoldAll();
   }
   migrateDefNames(); // a patch saved before the builders were privatised still says roll(...)
+  convertLegacyStates(); // ...and one from before presets still pins `{ state }` onto its calls
   for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset() gets its definition first
   const code = cm.getValue();
   // Whatever auto-pin has written into the buffer is in THIS code, so this is the evaluation that

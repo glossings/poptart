@@ -743,9 +743,19 @@ function patternSigs(sig) {
   // hold was taken, and left them dark after one was dropped, until the next evaluation rebuilt it.
   // The grid says what the pattern says; the editor is told what is held on the poll it already
   // runs and suppresses those spans live. See client.js's syncHeldPresets.
+  //
+  // A modulator's signal-valued .range() bounds light up the same way: `sine(1).range("200 300",
+  // 4000)` is native engine-side, but the "200 300" is a step pattern of its own that the scheduler
+  // polls to move the running LFO's floor - it is what says where the sweep sits, and it is on
+  // screen. Numeric bounds have nothing to light and are skipped.
   const presets = Object.values(sig.presetPatterns ?? {});
   return [sig, ...Object.values(sig.paramSignals), ...Object.values(sig.channel), ...presets]
-    .flatMap((s) => (s?.lfoIR?.shapePattern ? [s, s.lfoIR.shapePattern] : [s]));
+    .flatMap((s) => {
+      const ir = s?.lfoIR ?? s?.envIR ?? s?.ccIR;
+      if (!ir) return [s];
+      const bounds = [ir.min, ir.max].filter((b) => b && typeof b === 'object');
+      return [s, ...(ir.shapePattern ? [ir.shapePattern] : []), ...bounds];
+    });
 }
 
 function dryRunPattern(sig) {
