@@ -2,7 +2,7 @@
 
 A high-level map of how poptart is put together and *why* it is shaped this way. This is a living
 experiment log: it records the load-bearing design decisions and the trade-offs behind them, not a
-line-by-line API reference (the README covers usage). Keep it high-level; update it when a
+line-by-line API reference (the in-app guide, `packages/web-app/public/docs.html`, covers usage). Keep it high-level; update it when a
 structural decision changes.
 
 ---

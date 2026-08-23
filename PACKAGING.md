@@ -61,8 +61,8 @@ engine) does:
     downloads: quarantine xattrs are added by browsers, not by Node/curl downloads, so the
     auto-install path sidesteps Gatekeeper. (Setup still strips the xattr defensively.)
   - Install failure is a warning, not a hard stop — the engine's existing boot diagnostics
-    name the problem, and manual install (README) always remains possible.
-- **Preflight for known footguns**, replacing the README troubleshooting section with checks:
+    name the problem, and manual install (SETUP.md) always remains possible.
+- **Preflight for known footguns**, replacing the SETUP.md troubleshooting section with checks:
   a symlinked `sclang` shadowing the real one (breaks class-library resolution), and orphaned
   `sclang`/`scsynth` processes holding ports or the audio device (warn + name the pkill,
   don't kill — it could be a deliberately open SC IDE).

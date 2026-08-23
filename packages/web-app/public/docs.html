@@ -194,17 +194,18 @@
         <p class="tagline">a field guide</p>
         <a href="#intro">Overture</a>
         <a class="study" href="#s0"><span class="num">0</span>The editor &amp; the loop</a>
-        <a class="study" href="#s1"><span class="num">1</span>Patterns are signals</a>
+        <a class="study" href="#s1"><span class="num">1</span>Everything is a signal</a>
         <a class="study" href="#s2"><span class="num">2</span>Mini-notation</a>
         <a class="study" href="#s3"><span class="num">3</span>Notes, degrees, scales</a>
-        <a class="study" href="#s4"><span class="num">4</span>Instruments &amp; effects</a>
-        <a class="study" href="#s5"><span class="num">5</span>Modulation</a>
-        <a class="study" href="#s6"><span class="num">6</span>The channel strip</a>
-        <a class="study" href="#s7"><span class="num">7</span>The sampler</a>
-        <a class="study" href="#s8"><span class="num">8</span>Playing live</a>
-        <a class="study" href="#s8b"><span class="num">8½</span>Routing: midi &amp; audio</a>
-        <a class="study" href="#s9"><span class="num">9</span>Transforms</a>
-        <a class="study" href="#s10"><span class="num">10</span>Making it yours</a>
+        <a class="study" href="#s4"><span class="num">4</span>The piano roll</a>
+        <a class="study" href="#s5"><span class="num">5</span>Instruments &amp; effects</a>
+        <a class="study" href="#s6"><span class="num">6</span>Modulation</a>
+        <a class="study" href="#s7"><span class="num">7</span>Channel strip &amp; mixer</a>
+        <a class="study" href="#s8"><span class="num">8</span>The sampler</a>
+        <a class="study" href="#s9"><span class="num">9</span>Playing live</a>
+        <a class="study" href="#s10"><span class="num">10</span>Routing: midi &amp; audio</a>
+        <a class="study" href="#s11"><span class="num">11</span>Transforms</a>
+        <a class="study" href="#s12"><span class="num">12</span>Making it yours</a>
         <a href="#cheat">Cheat sheet</a>
         <a class="back" href="/">← back to poptart</a>
       </nav>
@@ -214,16 +215,15 @@
           <h1>poptart, from scratch</h1>
           <p class="lede">A livecoding instrument that plays real plugins from terse patterns.</p>
           <p>
-            This is a guided tour — a handful of short <em>studies</em> that build on each other. Read
-            them in order the first time and you'll come out the other side able to play. There's
-            nothing to click along with here; keep the editor open in the other tab and try each idea
-            as you meet it. Everything below is plain text you can paste and bend.
+            Thirteen short <em>studies</em>, each building on the last. Read them in order once and
+            you'll be able to play; after that, dip in for whatever you need. Keep the editor open in
+            the other tab and try each idea as you meet it — everything here is plain text you can
+            paste and bend.
           </p>
           <p class="lead-in">
             The one-sentence version: you write little patterns, poptart turns them into notes and
-            knob-turns, and it sends those to actual VST/VST3 instruments and effects running inside a
-            SuperCollider audio engine. No samples pretending to be a synth — the real thing, modulated
-            continuously while it plays.
+            knob-turns, and sends those to actual VST/VST3 instruments and effects running inside a
+            SuperCollider audio engine. The real thing, modulated continuously while it plays.
           </p>
         </header>
 
@@ -232,73 +232,52 @@
           <h2>Study 0</h2>
           <h3>The editor &amp; the loop</h3>
           <p>
-            The whole workflow is one gesture: <strong>type, then evaluate</strong>. Press
-            <code>Cmd/Ctrl + Enter</code> to play what's in the editor; press <code>Cmd/Ctrl + .</code>
-            to stop. Editing and re-evaluating swaps the running sound out from under itself without a
-            gap — that's livecoding. There's an <strong>update</strong> button too, which re-evaluates
-            without changing the play/stop state.
+            The whole workflow is one gesture: <strong>type, then evaluate</strong>.
+            <code>Cmd/Ctrl + Enter</code> plays what's in the editor; <code>Cmd/Ctrl + .</code> stops.
+            Re-evaluating swaps the running sound out from under itself without a gap — that's the
+            livecoding part. (<strong>update</strong> re-evaluates without touching play/stop.)
           </p>
           <p>
-            A buffer is split into <strong>blocks</strong>. A block that starts with a
-            <em>label</em> — a name, then a colon, at the very start of a line — becomes one
-            <strong>track</strong>:
+            A buffer is split into <strong>blocks</strong>. A block that starts with a label — a name
+            and a colon at the start of a line — is a <strong>track</strong>:
           </p>
           <pre><code><span class="f">bass</span>: note(<span class="s">"c2 c2 g1 a1"</span>).synth(<span class="s">"Serum 2"</span>)
 <span class="f">drums</span>: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)</code></pre>
           <p>
-            Two labels, two tracks, playing together. The label is just an identifier — call it
-            whatever you like. Lines that continue an expression (a <code>.param(…)</code> chain, a
-            multi-line template) stay attached to the block above them, so you can spread one track
-            across many lines.
+            Two labels, two tracks, playing together. Call them whatever you like. Lines that continue
+            an expression (a <code>.param(…)</code> chain) stay attached to the block above, so one
+            track can span many lines.
           </p>
-          <p>Two decorations on a label change whether it sounds, without deleting the code:</p>
           <ul>
-            <li>
-              A leading or trailing underscore <strong>mutes</strong> it: <code>_bass:</code> or
-              <code>bass_:</code> go silent.
-            </li>
-            <li>
-              A leading or trailing capital <code>S</code> <strong>solos</strong> it:
-              <code>Sdrums:</code> — if anything is soloed, only soloed tracks play (mute still wins
-              over solo).
-            </li>
+            <li><code>_bass:</code> (or <code>bass_:</code>) <strong>mutes</strong> a track without deleting it.</li>
+            <li><code>Sdrums:</code> <strong>solos</strong> it — if anything is soloed, only soloed tracks play. Mute still wins.</li>
           </ul>
           <p>
-            Code that <em>isn't</em> a labelled track — a bare line, or a block starting with
-            <code>$:</code> — runs as <strong>setup</strong>: shared <code>const</code>s, language
-            extensions, one-off statements. More on that in <a href="#s10">Study 10</a>. A named block,
-            by contrast, <em>must</em> evaluate to a pattern.
+            Anything that <em>isn't</em> a labelled track — a bare line, or a <code>$:</code> block —
+            runs as <strong>setup</strong>: shared <code>const</code>s, language extensions, one-off
+            calls like <code>setbpm(128)</code>. A named block must evaluate to a pattern.
           </p>
           <div class="callout">
             <span class="tag">panels</span>
-            The sidebar has four tabs. <strong>session</strong> shows the live tracks and the macro
-            knobs; <strong>sounds</strong> lists your scanned plugins, their parameters, and your
-            samples; <strong>files</strong> saves and loads whole buffers (hit <strong>＋ new</strong>
-            to start a blank one); <strong>settings</strong> holds the audio device, sample folder,
-            editor options, and the startup <em>prebake</em> file.
+            The sidebar has four tabs. <strong>session</strong>: the live tracks and macro knobs.
+            <strong>sounds</strong>: your plugins, their parameters, your samples. <strong>files</strong>:
+            save and load buffers. <strong>settings</strong>: audio device, sample folder, editor
+            options, the startup <em>prebake</em>.
           </div>
           <div class="callout">
             <span class="tag">nothing gets lost</span>
-            You never have to save to keep something. Whatever is in the editor is written to disk as
-            you type, as a <strong>work in progress</strong> session filed under the month you played
-            it — listed at the bottom of the <strong>files</strong> tab, where <strong>⤓</strong> keeps
-            one under a real name. Give a pattern a title and it names itself everywhere; write these
-            anywhere in your comments and the search box finds them:
-            <pre><code class="c">// @title kick drift
-// @by aria  @tags techno, generative</code></pre>
-            The search box matches the file name, those tags, and the code itself —
-            <code>tag:techno</code> or <code>by:aria</code> narrows a word to one field. As a last
-            resort, your browser history works too: every time you hit play or save, the URL (which
-            carries the whole buffer) is recorded under the pattern's title, so searching your history
-            for it brings the code back.
+            Whatever is in the editor is autosaved as a <em>work in progress</em> under the month you
+            played it (bottom of the <strong>files</strong> tab; <strong>⤓</strong> keeps one under a
+            real name). Give a pattern a title in a comment and it names itself everywhere —
+            <code>// @title kick drift</code>, <code>// @by aria @tags techno</code> — and the search
+            box finds it by name, tag or code (<code>tag:techno</code>, <code>by:aria</code>). Every
+            evaluation is also a browser-history entry, so Back walks you through what you played.
           </div>
           <div class="callout">
             <span class="tag">help as you type</span>
-            The autocomplete (it opens on its own, or <code>Ctrl + Space</code>) lists each name with
-            its signature and what it does, and describes the highlighted one in full beside the
-            popup. To look something up that's already written, hold <code>Ctrl</code> and hover over
-            it. Both are the same reference, and both switch off under
-            <strong>settings → editor → documentation tooltips</strong>.
+            Autocomplete (it opens by itself, or <code>Ctrl + Space</code>) shows each name with its
+            signature and a one-line description. Hold <code>Ctrl</code> and hover over anything
+            already written to see the same thing. That reference is the short form of this guide.
           </div>
         </section>
 
@@ -307,29 +286,26 @@
           <h2>Study 1</h2>
           <h3>Everything is a signal</h3>
           <p>
-            Here is the single idea that makes the rest of poptart click. A <strong>signal</strong> is
-            a value that changes over time. That's it. A melody is a signal. An LFO is a signal. A
-            single unchanging number is a (boring) signal. They are all the same kind of thing, so they
-            all compose the same way.
+            Here's the one idea that makes the rest click. A <strong>signal</strong> is a value that
+            changes over time. A melody is a signal. An LFO is a signal. A single number is a (boring)
+            signal. They're all the same kind of thing, so they all compose the same way.
           </p>
           <p>
-            Some signals have <em>edges</em> — known moments where one value ends and the next begins.
-            A note pattern <code>"c e g"</code> has three steps per cycle, so poptart knows exactly when
-            to trigger each note-on and note-off. Other signals are <em>smooth</em>: an LFO has no
-            steps, it's just sampled continuously wherever a value is needed. The same machinery reads
+            Some signals have <em>edges</em> — a note pattern <code>"c e g"</code> has three steps per
+            cycle, so poptart knows exactly when each note starts and stops. Others are <em>smooth</em>
+            — an LFO has no steps, it's just read wherever a value is needed. The same machinery handles
             both.
           </p>
           <p>
-            The unit of time is the <strong>cycle</strong> (a bar). Tempo is set with
-            <code>setbpm(120)</code> — read as 4 beats per cycle, so 120 bpm is two cycles per second.
-            Whatever you write inside a pattern string is laid out to fill exactly one cycle, then
-            repeats.
+            The unit of time is the <strong>cycle</strong> (a bar). <code>setbpm(120)</code> sets the
+            tempo — 4 beats per cycle, so 120 bpm is two cycles a second. Whatever you write in a
+            pattern string fills exactly one cycle, then repeats.
           </p>
           <p>
-            Because signals compose, the interesting verbs are the ones that combine and reshape them —
-            <code>.add()</code>, <code>.range()</code>, <code>.when()</code>, <code>.mul()</code> — and
-            they don't care whether they're working on a melody, an LFO, or a knob. Keep the mental
-            picture of "a value that changes over time" and the API stops being a list to memorise.
+            Because signals compose, the interesting verbs are the ones that combine and reshape
+            them — <code>.add()</code>, <code>.range()</code>, <code>.when()</code> — and they don't
+            care whether they're holding a melody, an LFO or a knob. Keep "a value that changes over
+            time" in mind and the API stops being a list to memorise.
           </p>
         </section>
 
@@ -339,46 +315,38 @@
           <h3>Mini-notation: the string language</h3>
           <p>
             The strings inside <code>note("…")</code>, <code>s("…")</code>, <code>.param("…", "…")</code>
-            and friends are their own tiny rhythmic language, borrowed from Strudel/Tidal. A space-
-            separated list divides the cycle evenly:
+            and friends are a tiny rhythm language borrowed from Tidal and Strudel. Space-separated
+            items divide the cycle evenly; <code>~</code> is a rest:
           </p>
           <pre><code><span class="s">"0 1 2 3"</span>        <span class="c">// four equal steps</span>
-<span class="s">"0 ~ 2 ~"</span>        <span class="c">// ~ is a rest (a gap / gate-off)</span></code></pre>
-          <p>The rest of the vocabulary, by example:</p>
+<span class="s">"0 ~ 2 ~"</span>        <span class="c">// two notes, two gaps</span></code></pre>
           <table>
             <tr><th>Syntax</th><th>Means</th></tr>
             <tr><td><code>[a b]</code></td><td>Sub-group: the pair shares one step's worth of time.</td></tr>
             <tr><td><code>a b, c d</code></td><td>Stack: comma layers voices that play at once.</td></tr>
-            <tr><td><code>&lt;a b c&gt;</code></td><td>Alternation: one item per cycle, cycling round.</td></tr>
-            <tr><td><code>a*4</code></td><td>Fast: repeat <code>a</code> four times inside its slot. The rate can be a pattern: <code>a*&lt;2 3&gt;</code> alternates it per cycle, <code>a*[1 2]</code> changes it mid-cycle.</td></tr>
-            <tr><td><code>a/2</code></td><td>Slow: stretch <code>a</code> across two cycles. Patterned rates work here too.</td></tr>
+            <tr><td><code>&lt;a b c&gt;</code></td><td>Alternation: one per cycle, round and round.</td></tr>
+            <tr><td><code>a*4</code></td><td>Fast: four <code>a</code>s in its slot. The rate can be a pattern — <code>a*&lt;2 3&gt;</code>.</td></tr>
+            <tr><td><code>a/2</code></td><td>Slow: stretch <code>a</code> across two cycles.</td></tr>
             <tr><td><code>a!3</code></td><td>Replicate: three separate <code>a</code> steps.</td></tr>
             <tr><td><code>a@3 b</code></td><td>Weight: <code>a</code> takes 3× the room of <code>b</code>.</td></tr>
-            <tr><td><code>a _ _</code></td><td>Tie: <code>_</code> extends the previous note, so it holds.</td></tr>
-            <tr><td><code>1.e(3,8)</code></td><td>Euclidean: 3 hits over 8 steps, as a <code>value.method(...)</code> postfix (on a sample: <code>bd.e(3,8)</code>). Each hit is <em>legato</em> — held until the next onset. The euclid supplies the rhythm; a patterned value keeps its own timeline over the cycle and mixes its own triggers in, so <code>&lt;0.5 [1 2]&gt;.e(7,16)</code> plays 0.5 across a cycle, then 1 until the value turns over halfway through the next — which retriggers as 2. Every argument takes a pattern too, resolved once per cycle: <code>1.e(7,16,&lt;0 1&gt;)</code> rotates every other cycle, <code>1.e(&lt;3 5&gt;,8)</code> alternates the hit count.</td></tr>
+            <tr><td><code>a _ _</code></td><td>Tie: <code>_</code> extends the previous note.</td></tr>
+            <tr><td><code>bd.e(3,8)</code></td><td>Euclidean: 3 hits over 8 steps, held until the next hit. Every argument takes a pattern — <code>1.e(&lt;3 5&gt;,8)</code>.</td></tr>
             <tr><td><code>a?</code> / <code>a?0.3</code></td><td>Degrade: randomly drop the step (30% here).</td></tr>
-            <tr><td><code>a|b|c</code></td><td>Random choice: pick one per cycle.</td></tr>
-            <tr><td><code>(&lt;12 13&gt;*4 + 5 * i(0,5))</code></td><td>Expression: full mini-notation combined with <code>+ - * /</code>. See below.</td></tr>
-            <tr><td><code>r</code> / <code>r(a)</code> / <code>r(a,b)</code></td><td>Random float: <code>[0,1]</code> / <code>[0,a]</code> / <code>[a,b]</code>.</td></tr>
-            <tr><td><code>i(a)</code> / <code>i(a,b)</code></td><td>Random integer, inclusive of both ends.</td></tr>
-            <tr><td><code>p</code> / <code>p(a,b)</code></td><td>Perlin-ish drift: value-noise that changes gradually across cycles.</td></tr>
-            <tr><td><code>round/floor/ceil(x)</code></td><td>Rounding, e.g. <code>(floor(r*12))</code>.</td></tr>
+            <tr><td><code>a|b|c</code></td><td>Random choice, one per cycle.</td></tr>
+            <tr><td><code>r</code> · <code>i(a,b)</code> · <code>p</code></td><td>Random float 0..1 · random integer · slow perlin drift.</td></tr>
+            <tr><td><code>(c2 + 12)</code></td><td>Expression: mini-notation with <code>+ - * /</code>. Note names are their MIDI number.</td></tr>
           </table>
           <p>
-            These nest freely: <code>"&lt;[0 2] [3 5]&gt;*2"</code> is legal and does what it looks like.
-            Inside <code>(...)</code> you can write full mini-notation and combine it arithmetically:
-            operators bind tighter than the space that separates sequence steps, and each operator
-            takes the left pattern's structure. Crucially <code>*</code>/<code>/</code> stay fast/slow
-            when glued to a value (<code>2*4</code>) but mean multiply/divide when spaced
-            (<code>2 * 4</code>); put a space before a <code>-</code>. A note name is its MIDI number to arithmetic, so <code>"(c2 + 12)"</code> — and <code>note("c2".add(12))</code> — transpose. <code>r i p round floor ceil</code>
-            are reserved names. One Strudel feature isn't in yet — polymeter
-            <code>{a b, c d}</code>.
+            These nest freely — <code>"&lt;[0 2] [3 5]&gt;*2"</code> does what it looks like. Inside
+            <code>(...)</code>, <code>*</code> glued to a value is still <em>fast</em> (<code>2*4</code>)
+            but spaced out it's <em>multiply</em> (<code>2 * 4</code>); put a space before a
+            <code>-</code>. Polymeter <code>{a b, c d}</code> isn't in yet.
           </p>
           <div class="callout">
             <span class="tag">tip</span>
-            The randomness in <code>?</code>, <code>|</code>, <code>r</code>, <code>i</code> and <code>p</code>
-            is deterministic per cycle: a given bar plays the same each time it comes round, and the
-            editor's playback highlight always agrees with what you hear.
+            The randomness in <code>?</code>, <code>|</code>, <code>r</code>, <code>i</code> and
+            <code>p</code> is deterministic per cycle: a given bar plays the same each time it comes
+            round, and the editor's playback highlight always agrees with what you hear.
           </div>
         </section>
 
@@ -386,775 +354,469 @@
         <section id="s3">
           <h2>Study 3</h2>
           <h3>Notes, degrees, and scales</h3>
-          <p>There are two ways to say which pitch you want, and it's worth being clear on the difference.</p>
           <p>
-            <code>note(…)</code> is <strong>absolute pitch</strong>. It takes note names or MIDI
-            numbers: <code>note("c4 e4 g4")</code>, <code>note("60 64 67")</code>. The convention is
-            <code>c5 = 60</code> (middle C), the same as Strudel. Sharps and flats are
-            <code>c#4</code> / <code>db4</code>.
+            <code>note(…)</code> is <strong>absolute pitch</strong>: note names or MIDI numbers,
+            <code>note("c4 e4 g4")</code>, <code>note("60 64 67")</code>. <code>c5 = 60</code>, as in
+            Strudel; sharps and flats are <code>c#4</code> / <code>db4</code>.
           </p>
           <p>
-            <code>n(…)</code> is <strong>scale degrees</strong>. The numbers are steps within a scale —
-            <code>0</code> is the root, <code>1</code> the next note up, <code>7</code> the octave —
-            and they mean nothing musical until you name the scale:
+            <code>n(…)</code> is <strong>scale degrees</strong>: <code>0</code> is the root, <code>1</code>
+            the next note up, <code>7</code> the octave — and they mean nothing until you name the scale:
           </p>
           <pre><code><span class="f">n</span>(<span class="s">"0 2 4 6"</span>).<span class="f">scale</span>(<span class="s">"F minor"</span>)   <span class="c">// degrees → the notes of F minor</span></code></pre>
           <p>
-            A scale name is <code>"&lt;root&gt; &lt;mode&gt;"</code>: <code>"F minor"</code>,
-            <code>"c dorian"</code>, <code>"Bb mixolydian"</code>. Bare mode names default to root C.
-            The usual modes, pentatonics, blues, harmonic/melodic minor, and chromatic are all there,
-            with the common aliases (<code>maj</code>, <code>min</code>, <code>m</code>, …).
+            A scale is <code>"&lt;root&gt; &lt;mode&gt;"</code> — <code>"F minor"</code>,
+            <code>"c dorian"</code>, <code>"Bb mixolydian"</code>. The usual modes, pentatonics, blues,
+            harmonic/melodic minor and chromatic are all there, with the common aliases.
           </p>
-
-          <div class="callout new">
-            <span class="tag">note-quantizing</span>
-            <p style="margin:0 0 8px">
-              <code>.scale()</code> now does the sensible thing for <em>both</em> kinds of pattern:
-            </p>
-            <ul style="margin:0">
-              <li>
-                On a <strong>degree</strong> pattern (<code>n(…)</code>) it maps degrees to notes, as
-                above.
-              </li>
-              <li>
-                On a <strong>note</strong> pattern (<code>note(…)</code>) it <strong>snaps each note to
-                the nearest pitch in the scale</strong>, bending out-of-key notes into the key:
-              </li>
-            </ul>
-            <pre style="margin:12px 0 0"><code><span class="f">note</span>(<span class="s">"c4 e4 f#4 g4"</span>).<span class="f">scale</span>(<span class="s">"C major"</span>)
-<span class="c">// f#4 is not in C major → snaps to the nearest scale tone (f4). The rest are already in key.</span></code></pre>
-            <p style="margin:8px 0 0">
-              This is the exact same snap poptart applies to live notes coming off a MIDI keyboard, so
-              a played line and a written line land on the same pitches. Ties resolve downward.
-            </p>
+          <div class="callout">
+            <span class="tag">snap to key</span>
+            <code>.scale()</code> on a <code>note(…)</code> pattern does the other sensible thing: it
+            <strong>snaps each note to the nearest pitch in the scale</strong>.
+            <code>note("c4 e4 f#4 g4").scale("C major")</code> bends the f# into an f. The same snap
+            applies to notes played live from a MIDI keyboard, so played and written lines land on
+            the same pitches.
           </div>
-
-          <p>
-            Both builders work on <strong>either side</strong> of the instrument, and the pitch kind is
-            remembered through arithmetic — <code>note("c4 f#4").add(12).scale("C major")</code> still
-            knows it's holding notes, not degrees. A bare <code>synth("…")</code> with no notes plays a
-            default C2 every cycle, so a fresh instrument makes sound immediately while you decide what
-            it should play.
-          </p>
-
-          <div class="callout new">
+          <div class="callout">
             <span class="tag">one key, one edit</span>
-            <p style="margin:0 0 8px">
-              A patch is nearly always in one key, so the key can live in the <em>document</em> instead
-              of in every pattern. <code>setscale("F minor")</code> sets it and <code>.sc()</code> reads
-              it — <code>n("0 2 4").sc()</code> is <code>n("0 2 4").scale("F minor")</code>, and it
-              quantizes note patterns just the same.
-            </p>
-            <pre style="margin:0 0 8px"><code><span class="f">setscale</span>(<span class="s">"C minor"</span>)
+            A patch is nearly always in one key, so the key can live in the <em>document</em>:
+            <code>setscale("F minor")</code> sets it and <code>.sc()</code> reads it.
+            <pre><code><span class="f">setscale</span>(<span class="s">"C minor"</span>)
 
-bass: <span class="f">n</span>(<span class="s">"0 3 5"</span>).<span class="f">sc</span>(3).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)
+bass: <span class="f">n</span>(<span class="s">"0 3 5"</span>).<span class="f">sc</span>(3).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)    <span class="c">// root in octave 3</span>
 lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f">sc</span>(5).<span class="f">synth</span>(<span class="s">"Diva"</span>)</code></pre>
-            <p style="margin:0 0 8px">
-              <code>.sc(3)</code> puts the scale's <strong>root</strong> in octave 3, exactly like
-              writing <code>.scale("c3 minor")</code> by hand; bare <code>.sc()</code> leaves it where
-              <code>setscale</code> put it. A patterned octave works too — <code>.sc("&lt;3 4&gt;")</code>.
-            </p>
-            <p style="margin:0">
-              <code>setscale</code> is <strong>hoisted</strong>: whichever one comes last in the buffer
-              is the key the whole buffer plays in, <em>including the patterns above it</em>. Re-keying
-              mid-set is one edit, wherever it's convenient to make it. The piano roll follows along —
-              the tonic's lanes are tinted, out-of-key ones dimmed, and <strong>scale</strong> collapses
-              the grid to the scale's notes alone.
-            </p>
+            <code>setscale</code> is <strong>hoisted</strong>: the last one in the buffer is the key the
+            whole buffer plays in, including the patterns above it. Re-keying a set is one edit,
+            wherever it's convenient to make it. The piano roll follows along.
           </div>
-
-          <div class="callout new">
-            <span class="tag">draw it</span>
-            <p style="margin:0 0 8px">
-              <code>pianoroll("…", { grid, len, start })</code> is the same absolute-note pattern as
-              <code>note(…)</code>, but <strong>drawn</strong>. <code>grid</code> is the granularity
-              (cells per cycle — the <code>*grid</code> of the equivalent mini-notation) and
-              <code>len</code> is the loop length in cells, so <code>{ grid: 16, len: 3 }</code> is a
-              three-1/16-note loop. The loop <em>window</em> is those <code>len</code> cells counted
-              from cell <code>start</code> (0 unless you drag it): whatever cell the window opens on
-              is the pattern's first beat, so a loop can begin half way through the first bar and end
-              half way through the second. Notes outside the window stay drawn — dimmed — and never
-              sound. <strong>Double-click</strong> the word <code>pianoroll</code>
-              and an Ableton-style grid opens over the editor, with a real piano keyboard down the
-              side, a draggable loop bar along the top, and a playhead that sweeps the loop as it
-              plays. (Only the name opens it — the arguments stay ordinary code you can edit by
-              hand, and the roll follows along when you do.) Every change you draw is written back into the call <em>and</em>
-              re-evaluated, so what you hear is always what's on screen. An empty
-              <code>pianoroll()</code> is a valid empty roll — start there and draw. A named roll's
-              panel shows the name in its head (type over it to rename), a <strong>▾</strong> picker
-              to find or create one; each row in it has <strong>⧉</strong> (copy the roll under the next free
-              name and open the copy) and <strong>→</strong> (make the call this panel came from play
-              that roll instead). The lfo and preset panels work the same way.
-            </p>
-            <p style="margin:0 0 8px">
-              Draw with the pencil (drag), or press <strong>B</strong> for the arrow tool to
-              marquee-select; click to select (shift-click or ctrl/cmd-A for more), drag to move,
-              drag the right edge to resize, <strong>cmd-drag</strong> up/down to set velocity (or
-              click the value lane's <code>vel</code> label, bottom left, to flip it to
-              <code>prob</code> and set per-note probability, which becomes a <code>?</code>
-              degrade, then again to <code>nudge</code>, the per-note timing offset). The value lane
-              along the bottom shows whichever channel that label picks
-              as one marker per note —
-              a dot at the onset with a line running right for the duration, dashed when it's
-              probability. With the <em>arrow</em> tool, dragging a marker up or down sets the value
-              for the whole selection at once, keeping their differences. With the <em>pencil</em> you
-              paint instead: drag across the lane and every note you sweep over snaps to the height
-              you're holding it at, so one gesture flattens a bar to an even velocity or ramps it into
-              a crescendo. <strong>Right-click</strong> the lane to randomize the channel, or reset it
-              (velocity to 1, probability to 1, nudge to 0) — the selection if there is one, otherwise
-              the whole roll.
-              <strong>cmd-D</strong> duplicates, <strong>cmd-C</strong>/<strong>cmd-X</strong>/<strong>cmd-V</strong>
-              copy, cut and paste — into another roll too, or one you create after copying (pasted
-              notes land where they were copied from, selected), <strong>option-drag</strong>
-              drags a copy (the original stays where it was), arrow keys nudge
-              (<strong>shift</strong> + up/down = octave, or four rows on the index axis;
-              <strong>shift</strong> + right/left lengthen
-              and shorten), delete removes, double-click erases one. <strong>0</strong> mutes the
-              selected notes (or the one under the pointer) the way Live deactivates them: they grey
-              out and stop sounding but stay on the grid — a <code>!</code> in front of their token
-              in the code — and <strong>0</strong> again switches them back on. Drop a note on top of one
-              already sounding at that pitch and the note on top keeps its length while the one
-              underneath gives way — cut short at the new note's onset, or hidden if it was landed
-              on square, the way Live does it. Nothing is really lost: move the note on top away and
-              whatever was under it comes straight back. Notes at different pitches
-              still play as chords; the <strong>grid</strong> and <strong>len</strong> fields (or dragging either
-              end of the top loop bar — it snaps to bar lines and their halves, <strong>shift</strong> for exact
-              cells — or its middle to slide the whole window) size and place it;
-              <strong>cmd −/+</strong> zoom; <strong>🎧</strong> auditions each
-              note through the track's synth; and <strong>→♪</strong> converts the whole roll to the
-              equivalent multi-line <code>&lt;…&gt;*grid</code> mini-notation — written into the
-              pattern, so a roll kept under a name replaces every <code>pianoroll("name")</code> that
-              plays it and its definition goes with it. A field every note in the loop agrees on
-              isn't written into every cell: it rides on its own call instead
-              (<code>note(`&lt;…&gt;`).clip(2)</code>, <code>`&lt;…&gt;`.as("vel:clip").n(4)</code>),
-              where changing it is one edit. Clicking anywhere
-              outside the panel closes it (so does <strong>Escape</strong>, or <strong>✕</strong>).
-            </p>
-            <p style="margin:0 0 8px">
-              The header's three shape buttons work on the <em>whole</em> roll.
-              <strong>⧉</strong> repeats the loop after itself — twice the length, the same notes
-              again, so a one-bar arpeggio becomes that arpeggio over two bars (the copies land
-              selected, ready to be varied). <strong>÷2</strong> and <strong>×2</strong> stretch the
-              music in time. With notes selected they stretch just those, out from (or in towards) the
-              first of them, so the phrase keeps its starting beat while its rhythm halves or doubles.
-              With nothing selected they stretch the whole roll: a pattern spanning one measure becomes
-              half a measure, or two, with every note's duration halved or doubled to match —
-              <code>len</code> stays put and the <code>grid</code> moves under the cells, so nothing is
-              rounded. Changing
-              <strong>grid</strong> itself does the opposite: it re-meshes the roll while the music
-              stays where it is, so a quarter note drawn on the 1/4 grid becomes four cells on the
-              1/16 grid rather than a sixteenth. (Going coarser rounds — it does its best, and the
-              overlap rule settles anything that lands on a neighbour.)
-            </p>
-            <p style="margin:0 0 8px">
-              Every note in a roll carries <em>two</em> values: a <strong>pitch</strong> and a
-              <strong>sample index</strong> — which file of a pack it plays, the same thing
-              <code>.i()</code> sets. The <strong>note</strong> / <strong>index</strong> button says
-              which of them the <em>rows</em> are showing. On <strong>note</strong> — the default — a
-              row is a semitone on the piano keyboard, and a note drawn there gets index 0. On
-              <strong>index</strong> the keyboard becomes a plain <code>0, 1, 2, …</code> count of the
-              pack's files, and a note drawn there gets pitch c2, where a sample plays as recorded. So
-              <code>pianoroll("24:0,0,1 24:3,4,1", { grid: 8 }).s("breaks")</code> sequences the pack
-              by file, with lengths, velocity, probability, stacks (several files struck together) and
-              the loop window all meaning exactly what they do on the keyboard.
-            </p>
-            <p style="margin:0 0 8px">
-              Switching between the two <em>moves nothing and changes no sound</em>: the timings are
-              one set of events seen against a different ruler, and each note keeps the channel you
-              can't currently see, so you can draw a rhythm on one axis and set the pitches on the
-              other. <code>mode:</code> in the call is only a note of where the panel should open.
-              <strong>→♪</strong> writes down whichever channels the roll actually sets —
-              <code>i(`&lt;0 ~ 3&gt;*8`)</code> where only files vary,
-              <code>`&lt;…&gt;`.as("note:i:vel")</code> where both do, and a plain
-              <code>note(…)</code> for a roll that never touches an index.
-            </p>
-            <p style="margin:0 0 8px">
-              Two buttons narrow the rows on show. <strong>fold</strong> is Live's Fold: drop every row
-              nothing is drawn on, so a line spread over two octaves — or a sequence using four of a
-              pack's files — closes up to the rows you are working in. It works on either axis.
-              <strong>scale</strong> is the key-aware one: show only the notes of the
-              <code>setscale</code> key (plus any pitch the roll actually uses, so it can never hide
-              something you drew). It greys out on the index rows, where there is no key — it stays in
-              the toolbar rather than vanishing, so the buttons never move under the pointer.
-            </p>
-            <p style="margin:0 0 8px">
-              <strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> step back and forward through the
-              roll's own edit history while the grid has focus — one drag is one step, however many
-              notes it moved. (With the cursor in the code, cmd-Z is the editor's, as always.)
-            </p>
-            <p style="margin:0 0 8px">
-              With a key in force (<code>setscale</code>), the roll colours its keyboard and lanes by
-              it, <strong>scale</strong> hides everything out of the key, and clicking the
-              <strong>key chip</strong> in the header snaps every note in the roll to the nearest tone
-              in it — the same quantize <code>.sc()</code> applies to a written note pattern.
-              With <strong>scale</strong> on, <strong>→♪</strong> also converts <em>in</em> the key: scale degrees and a
-              <code>.sc(octave)</code> — <code>n(`&lt;0 2 4 ~&gt;*16`).sc(3)</code> — so re-keying the
-              patch later moves the notes with it. (An out-of-key note has no degree of its own and is
-              written as the nearest one; the log says how many.)
-            </p>
-            <pre style="margin:0"><code><span class="f">pianoroll</span>(<span class="s">"60,0,4 64,0,4 67,8,8"</span>, { steps: <span class="s">16</span> }).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)
-<span class="c">// each note is midi[:index],start,len[,vel] over a `steps`-cell cycle. Chains like note(): .scale(), .add(), …</span></code></pre>
-          </div>
+          <p>
+            Notes work on either side of the instrument, and the pitch kind survives arithmetic —
+            <code>note("c4 f#4").add(12).scale("C major")</code> still knows it's holding notes. A bare
+            <code>synth("…")</code> with no notes plays a C2 every cycle, so a fresh instrument makes
+            sound while you decide what it should play.
+          </p>
         </section>
 
         <!-- ================================================================= -->
         <section id="s4">
           <h2>Study 4</h2>
-          <h3>Instruments &amp; effects</h3>
+          <h3>The piano roll</h3>
           <p>
-            <code>.synth("…")</code> loads a VST/VST3 <em>instrument</em> into the track;
-            <code>.fx("…")</code> chains an <em>effect</em> after it (and after any earlier
-            <code>.fx()</code>). The strings are the plugins' real names.
+            <code>pianoroll()</code> is a note pattern you <strong>draw</strong> instead of type:
           </p>
-          <div class="callout">
-            <span class="tag">your rig, not mine</span>
-            This guide writes <code>"Serum 2"</code>, <code>"Diva"</code>, and so on as stand-ins.
-            <strong>Substitute plugins you actually have.</strong> Open the <strong>sounds</strong> tab,
-            hit <strong>rescan</strong> to scan your installed plugins, and click any result to copy its
-            exact name — that copied string is what <code>.synth()</code> / <code>.fx()</code> want.
-            Names also autocomplete as you type inside the quotes.
-          </div>
-          <pre><code><span class="f">lead</span>: note(<span class="s">"c4 e4 g4 b4"</span>)
-  .synth(<span class="s">"Serum 2"</span>)
-  .fx(<span class="s">"ValhallaDelay"</span>)
-  .fx(<span class="s">"Pro-Q 3"</span>)</code></pre>
+          <pre><code>lead: <span class="f">pianoroll</span>().synth(<span class="s">"Serum 2"</span>)   <span class="c">// double-click the word pianoroll</span></code></pre>
           <p>
-            Chain length maxes out at 8 slots (1 instrument + 7 effects) — a deliberate limit of how the
-            audio engine is built.
-          </p>
-
-          <h4>Parameters</h4>
-          <p>
-            <code>.param("&lt;real VST name&gt;", value)</code> sets any knob on whatever plugin is
-            currently last in the chain. There's <strong>no alias layer</strong> — you address the
-            plugin's own parameter names directly:
-          </p>
-          <pre><code>.param(<span class="s">"Filter 1 On"</span>, 1)
-.param(<span class="s">"Filter 1 Freq"</span>, 0.6)</code></pre>
-          <p>
-            To discover names: evaluate once with the <code>.synth(...)</code> so the plugin loads, then
-            open the <strong>params</strong> panel (sounds tab) — every parameter of every plugin in the
-            chain, searchable; click one to copy it. Inside <code>.param("…")</code> the names also
-            autocomplete.
+            Double-click the name and a grid opens over the editor — a piano keyboard down the side, a
+            loop bar along the top, a playhead sweeping as it plays. Draw; every stroke is written
+            back into the code and re-evaluated, so what you hear is always what's on screen. Rolls
+            are <strong>named</strong> (a bare <code>pianoroll()</code> names itself after its track),
+            their notes are filed in a folded <em>pianorolls</em> block at the foot of the buffer, and
+            the names pattern like anything else: <code>pianoroll("&lt;verse chorus&gt;")</code>.
+            The panel's <strong>▾</strong> finds or creates rolls, <strong>⧉</strong> copies one.
           </p>
           <p>
-            A raw parameter value is <strong>normalized 0..1</strong> unless a <em>mapping file</em>
-            gives it real-world units. With a mapping in place, <code>.range(200, 5000)</code> on a
-            filter cutoff means literal Hertz. Mapping files live in <code>mappings/*.json</code> and
-            hot-reload each eval; one worked example (<code>serum2.json</code>) ships. Without a mapping,
-            just think in 0..1.
+            The options are <code>{ grid, len, start }</code>: <code>grid</code> cells per cycle,
+            <code>len</code> cells in the loop, <code>start</code> the cell the loop window opens on.
+            So <code>{ grid: 16, len: 24 }</code> is a bar and a half of sixteenths. Drag the loop bar's
+            ends (or its middle) rather than typing them. Notes outside the window stay drawn, dimmed,
+            and silent.
           </p>
-          <div class="callout">
-            <span class="tag">duplicate names</span>
-            Some plugins reuse a name across sections (Diva has three params called
-            <code>Frequency</code>). Plain <code>.param("Frequency", …)</code> hits the first; append the
-            parameter index to pick one — <code>.param("Frequency#95", …)</code>. The params panel and
-            autocomplete show the <code>#index</code> form for you whenever a name collides.
-          </div>
+          <table>
+            <tr><th>At the grid</th><th></th></tr>
+            <tr><td>draw / erase</td><td>drag with the pencil · double-click a note</td></tr>
+            <tr><td>select</td><td><strong>B</strong> for the arrow tool; click, shift-click, marquee, <strong>cmd-A</strong></td></tr>
+            <tr><td>move / resize / copy</td><td>drag · drag the right edge · <strong>option</strong>-drag</td></tr>
+            <tr><td>nudge</td><td>arrow keys; <strong>shift</strong>+↑↓ an octave, <strong>shift</strong>+←→ lengthens/shortens</td></tr>
+            <tr><td>velocity</td><td><strong>cmd</strong>-drag up/down</td></tr>
+            <tr><td>mute a note</td><td><strong>0</strong> — it greys out and stays (a <code>!</code> in the code); <strong>0</strong> again un-mutes</td></tr>
+            <tr><td>clipboard</td><td><strong>cmd-C / X / V / D</strong> — into another roll too</td></tr>
+            <tr><td>undo</td><td><strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> while the grid has focus</td></tr>
+            <tr><td>zoom · close</td><td><strong>cmd −/+</strong> · <strong>Esc</strong>, <strong>✕</strong>, or click outside</td></tr>
+          </table>
+          <h4>The value lane</h4>
           <p>
-            For fiddly static sound-design settings (unison voices, wavetable position), click
-            <strong>ui</strong> next to a plugin in the track panel to open its own editor window and set
-            them by hand — then keep livecoding everything else.
+            Along the bottom, one marker per note. Click its label to flip it between
+            <code>vel</code>, <code>prob</code> (a per-note <code>?</code>) and <code>nudge</code> (a
+            per-note timing offset). With the arrow tool, dragging moves the whole selection together;
+            with the pencil, you <em>paint</em> — sweep across and every note snaps to the height
+            you're at, so one gesture is a crescendo. Right-click the lane to randomize or reset.
           </p>
-
-          <h4>Design a sound, share a link</h4>
+          <h4>The header</h4>
           <p>
-            Change anything in a plugin's own window — a knob, a preset from its browser — and its
-            complete state is captured into the code for you, as the call's second argument:
-            <code>synth("Serum 2", { state: "H4sI…" })</code>. Nothing to press, and until you touch
-            it the bare <code>synth("Serum 2")</code> means "however the plugin defaults". Writes are
-            debounced, so a knob sweep lands once when you let go, as one undo step.
-            On every load that state is restored, so
-            the patch sounds identical on a cold start. Because the whole buffer lives in the URL hash,
-            <strong>sharing the link shares the exact sound</strong>. The editor folds the blob into a
-            small <code>{⋯}</code> pill — click it to expand. <code>lfo()</code> shape strings and
-            <code>pianoroll()</code> note strings fold the same way (they're editor-written data, not
-            code to read), so a call stays one readable line however much it holds.
+            <strong>⧉</strong> repeats the loop after itself. <strong>÷2</strong> / <strong>×2</strong>
+            halve or double the rhythm — of the selection, or the whole roll. Changing
+            <strong>grid</strong> re-meshes without moving the music (a quarter note on the 1/4 grid is
+            four cells on the 1/16 grid). <strong>🎧</strong> auditions notes as you draw.
+            <strong>⌨</strong> plays the roll's track from your typing keyboard (<a href="#s9">Study 9</a>).
+            <strong>→♪</strong> converts the roll to the equivalent <code>&lt;…&gt;*grid</code>
+            mini-notation, written into the pattern — handy when a drawn idea is done and you want to
+            bend it in text.
+          </p>
+          <h4>Note rows, index rows</h4>
+          <p>
+            Every note carries <em>two</em> values: a pitch and a <strong>sample index</strong> (the
+            thing <code>.i()</code> sets). The <strong>note</strong> / <strong>index</strong> button
+            picks which one the rows show. On <strong>index</strong> the keyboard becomes
+            <code>0, 1, 2, …</code> — a pack's files — so
+            <code>pianoroll("chops").s("breaks")</code> sequences a break by file, with lengths, velocity
+            and probability meaning exactly what they do on the keyboard. Switching views moves
+            nothing: draw a rhythm on one axis, set the pitches on the other.
+          </p>
+          <h4>In key</h4>
+          <p>
+            <strong>fold</strong> hides every row nothing is drawn on. With a <code>setscale</code> in
+            force, the keyboard tints in-key lanes, <strong>scale</strong> shows only the key's notes
+            (plus anything you drew), and the <strong>key chip</strong> snaps every note into the key.
+            With <strong>scale</strong> on, <strong>→♪</strong> writes degrees —
+            <code>n(`&lt;0 2 4 ~&gt;*16`).sc(3)</code> — so re-keying later moves the notes too.
+          </p>
+          <p>
+            You never type the note string by hand — it folds to a small pill in the editor — but for
+            the curious: <code>pianoroll("60,0,4 64,0,4 67,8,8", { grid: 16 })</code> is
+            <code>midi[:index],start,len[,vel]</code> per note, and it chains like
+            <code>note()</code>: <code>.scale()</code>, <code>.add()</code>, and the rest.
           </p>
         </section>
 
         <!-- ================================================================= -->
         <section id="s5">
           <h2>Study 5</h2>
-          <h3>Modulation: making it move</h3>
+          <h3>Instruments &amp; effects</h3>
           <p>
-            Any <code>.param()</code> value can be a number, a mini-notation string, an LFO, or an
-            envelope. This is where poptart earns its keep — modulation runs <em>natively inside the
-            audio engine</em>, sample-accurate, with no per-note network traffic.
-          </p>
-
-          <h4>LFOs</h4>
-          <p>
-            <code>sine</code>, <code>saw</code>, <code>tri</code>, <code>square</code>, plus
-            <code>ramp</code> and <code>rand</code>. Each is a 0..1 shape; <code>.range(lo, hi)</code>
-            rescales it. Set the speed with a rate in Hz:
-          </p>
-          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, sine({ rate: 0.3 }).range(200, 5000))
-.param(<span class="s">"Filter 1 Freq"</span>, sine(0.3).range(200, 5000))  <span class="c">// rate shorthand</span></code></pre>
-          <p>
-            <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape.
-            <strong>Double-click</strong> the
-            word <code>lfo</code> in the editor and an interactive shape editor opens — drag points,
-            bend segments — writing the breakpoint string for you and re-evaluating as you go, so the
-            modulation follows the curve. (Only the name opens it; the arguments stay ordinary code,
-            and the panel follows along when you edit them by hand.) Modes:
-            <code>free</code> (its own clock), <code>retrigger</code> (phase resets on each note),
-            <code>envelope</code> (plays once per note then holds).
-          </p>
-
-          <h4>Envelopes</h4>
-          <p>
-            <code>env({ attack, decay, sustain, release, curve })</code> is an ADSR retriggered by the
-            track's own notes — a per-note filter or mod envelope, times in seconds, sustain 0..1.
-            <code>.range()</code> scales it like an LFO:
-          </p>
-          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, env({ attack: 0.01, decay: 0.3, sustain: 0.2 }).range(300, 6000))</code></pre>
-          <p>
-            An envelope's value only exists inside the engine (it depends on note gates), so you can't
-            do arithmetic on it in JS — shape it with <code>.range()</code> and the <code>curve</code>
-            option instead.
-          </p>
-
-          <h4>Macros &amp; MIDI knobs</h4>
-          <p>
-            The <strong>macros</strong> panel gives you eight knobs, pre-bound in code as
-            <code>macro1</code>…<code>macro8</code> (also <code>macro(3)</code>). Drop one anywhere a
-            signal goes for a hands-on control:
-          </p>
-          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, macro1.range(200, 4000))</code></pre>
-          <p>
-            <code>midicc("&lt;device&gt;")</code> turns a hardware controller into a signal source:
-            <code>const cc = midicc("Twister"); … cc(12, 1).range(0, 1)</code> is CC 12 on channel 1.
-            Assigned to a param it binds natively — a real knob driving a real knob, no polling lag.
+            <code>.synth("…")</code> loads a VST/VST3 <em>instrument</em>; <code>.fx("…")</code>
+            chains an <em>effect</em> after it (and after any earlier <code>.fx()</code>). Up to eight
+            slots — one instrument, seven effects. The strings are the plugins' real names.
           </p>
           <div class="callout">
-            <span class="tag">signal bounds</span>
-            <code>.range()</code>'s bounds can themselves be signals:
-            <code>lfo().range("200 300", 4000)</code> sweeps from a stepped floor. (Signal bounds move
-            that modulator onto the polled path, since the native oscillator takes only fixed lo/hi —
-            still musical, just not sample-accurate.)
+            <span class="tag">your rig, not mine</span>
+            This guide writes <code>"Serum 2"</code>, <code>"Diva"</code> and so on as stand-ins —
+            <strong>substitute plugins you actually have</strong>. Open <strong>sounds</strong>, hit
+            <strong>rescan</strong>, and click any result to copy its exact name. Names also
+            autocomplete inside the quotes.
           </div>
+          <pre><code><span class="f">lead</span>: note(<span class="s">"c4 e4 g4 b4"</span>)
+  .synth(<span class="s">"Serum 2"</span>)
+  .fx(<span class="s">"ValhallaDelay"</span>)
+  .fx(<span class="s">"Pro-Q 3"</span>)</code></pre>
+
+          <h4>Parameters</h4>
+          <p>
+            <code>.param("&lt;real name&gt;", value)</code> sets any knob on whatever plugin is last in
+            the chain — the plugin's own parameter names, no alias layer:
+          </p>
+          <pre><code>.param(<span class="s">"Filter 1 On"</span>, 1)
+.param(<span class="s">"Filter 1 Freq"</span>, 0.6)</code></pre>
+          <p>
+            To find names, evaluate once so the plugin loads, then open the <strong>params</strong>
+            panel (sounds tab) — every parameter of every plugin in the chain, searchable, click to
+            copy. They autocomplete inside <code>.param("…")</code> too. Values are
+            <strong>0..1</strong> unless a mapping file in <code>mappings/*.json</code> gives them real
+            units (one ships for Serum 2, so <code>.range(200, 5000)</code> on its cutoff means Hertz).
+          </p>
+          <div class="callout">
+            <span class="tag">duplicate names</span>
+            Some plugins reuse a name across sections (Diva has three <code>Frequency</code>s). Plain
+            <code>.param("Frequency", …)</code> hits the first; <code>"Frequency#95"</code> picks by
+            index. The params panel and autocomplete show the <code>#index</code> form whenever a name
+            collides.
+          </div>
+
+          <h4>Design a sound, keep it in the code</h4>
+          <p>
+            Double-click the <code>synth</code> or <code>fx</code> name (or click <strong>ui</strong>
+            in the track panel) to open the plugin's own window for the fiddly stuff — unison,
+            wavetables, a preset from its browser. Change anything there and the plugin's whole state
+            is captured into the code for you, as a named <strong>preset</strong>: the call gains
+            <code>.preset("lead")</code> and a folded definition lands at the foot of the buffer.
+            Nothing to press, and the patch sounds identical on a cold start.
+          </p>
+          <pre><code>lead: note(<span class="s">"c4 e4 g4"</span>).synth(<span class="s">"Serum 2"</span>).preset(<span class="s">"&lt;lead growl&gt;"</span>)  <span class="c">// swap whole programs per cycle</span></code></pre>
+          <p>
+            Presets are just names, so they pattern. Double-click <code>preset</code> to open the panel
+            where names are picked, made, copied and shaped by ear. <strong>export</strong> hands someone
+            a single file that plays exactly what you hear; <strong>link</strong> puts a plain patch
+            (no presets) on the clipboard.
+          </p>
         </section>
 
         <!-- ================================================================= -->
         <section id="s6">
           <h2>Study 6</h2>
-          <h3>The channel strip</h3>
+          <h3>Modulation: making it move</h3>
           <p>
-            Three controls live on the track's output stage, after the whole plugin chain. They take
-            numbers, mini strings, or any signal:
+            Any <code>.param()</code> value can be a number, a mini string, an LFO or an envelope.
+            This is where poptart earns its keep — modulation runs <em>natively inside the audio
+            engine</em>, sample-accurate, with no per-note traffic.
           </p>
-          <table>
-            <tr><th>Method</th><th>Does</th></tr>
-            <tr><td><code>.gain(v)</code></td><td>Output level (1 = unity). Chains multiply: <code>.gain(0.5).gain(env())</code> is a base level times a VCA.</td></tr>
-            <tr><td><code>.pan(v)</code></td><td>Stereo pan, −1 (left) … 1 (right), 0 = centre.</td></tr>
-            <tr><td><code>.width(v)</code></td><td>Stereo width (mid/side): 0 mono, 1 untouched, up to 4 = 400%. Applied <em>before</em> the pan, so you can narrow a wide sound and then place it. Scales only the difference between the channels — a mono source has nothing to widen.</td></tr>
-            <tr><td><code>.bassmono(hz)</code></td><td>Collapse everything below <code>hz</code> to mono, keeping the width above it; 0 = off. Filters only the side signal, so the low end keeps its level and loses only its width.</td></tr>
-            <tr><td><code>.o(n)</code></td><td>Which output pair: <code>.o(1)</code> = channels 1/2, <code>.o(2)</code> = 3/4, wrapping past the device's last pair.</td></tr>
-          </table>
-          <pre><code>pad: note(<span class="s">"c3 e3 g3"</span>).synth(<span class="s">"Diva"</span>)
-  .gain(0.7)
-  .width(0.6)                     <span class="c">// rein the patch's own stereo in…</span>
-  .pan(sine(0.2).range(-1, 1))    <span class="c">// …then move it around</span></code></pre>
+          <h4>LFOs</h4>
           <p>
-            Width past 1 is bought with mono compatibility — it turns up exactly the part of the
-            signal that cancels when the channels are summed. The mixer's stereo image
-            (<strong>ctrl+g</strong>) is where that shows: content beyond the ±45° safe lines is
-            what a mono system will lose. <code>.bassmono(120)</code> is the standard insurance —
-            stereo information in the low end is what disappears first on a club rig or a phone,
-            and it costs nothing to give up:
+            <code>sine</code>, <code>saw</code>, <code>tri</code>, <code>square</code>, <code>ramp</code>,
+            <code>rand</code>, <code>perlin</code>. Each is a 0..1 shape; <code>.range(lo, hi)</code>
+            rescales it; the rate is in Hz:
           </p>
-          <pre><code>bass: note(<span class="s">"c1 eb1"</span>).synth(<span class="s">"Serum 2"</span>)
-  .width(1.8)                     <span class="c">// wide up top…</span>
-  .bassmono(120)                  <span class="c">// …but one centred source underneath</span></code></pre>
+          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, sine(0.3).range(200, 5000))</code></pre>
+          <p>
+            <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape. Double-click
+            the word <code>lfo</code> and a shape editor opens — drag points, bend segments — writing
+            the string for you as you go. Modes: <code>free</code> (its own clock),
+            <code>retrigger</code> (phase resets on each note), <code>envelope</code> (once per note,
+            then hold).
+          </p>
+          <h4>Envelopes</h4>
+          <p>
+            <code>env({ attack, decay, sustain, release, curve })</code> is an ADSR retriggered by the
+            track's own notes — times in seconds, sustain 0..1, <code>.range()</code> to scale:
+          </p>
+          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, env({ attack: 0.01, decay: 0.3, sustain: 0.2 }).range(300, 6000))</code></pre>
+          <h4>Knobs</h4>
+          <p>
+            The <strong>session</strong> tab has eight macro knobs, bound as <code>macro1</code>…<code>macro8</code>;
+            drop one anywhere a signal goes. <code>midicc("Twister")(12)</code> is a hardware knob as a
+            signal, bound natively — a real knob driving a real knob, no lag.
+          </p>
+          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, macro1.range(200, 4000))</code></pre>
+          <div class="callout">
+            <span class="tag">tip</span>
+            <code>.range()</code>'s bounds can be signals too: <code>lfo().range("200 300", 4000)</code>
+            sweeps from a stepped floor.
+          </div>
         </section>
 
         <!-- ================================================================= -->
         <section id="s7">
           <h2>Study 7</h2>
-          <h3>The sampler</h3>
-          <p>
-            <code>s("pack")</code> plays a folder of audio files — a <em>pack</em> — from your sample
-            library (default <code>~/.poptart/samples</code>; set it in the settings tab). Files are
-            addressed by index in filename order, and everything runs through the same
-            <code>.fx()</code>/<code>.param()</code> chain as an instrument:
-          </p>
-          <p>
-            The <strong>sounds</strong> tab lists every pack; click one to open it and hold a file row
-            to audition it. Typing works too: inside <code>s("</code> autocomplete offers pack names,
-            and after a <code>:</code> it offers that pack's files — type part of a filename to find
-            its index.
-          </p>
-          <pre><code>drums: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)   <span class="c">// "bd:4" picks a file inline = s("bd").i(4)</span>
-  .i(<span class="s">"&lt;0 1 2&gt;"</span>)          <span class="c">// which file of the pack (Strudel's n, renamed)</span>
-  .begin(0).end(1)          <span class="c">// play region, 0..1</span>
-  .loop()                   <span class="c">// loop: run off the end of the file and carry on from 0</span>
-  .loop(1, { wrap: <span class="s">"window"</span> })  <span class="c">// ...or loop begin..end; dir: "pingpong" bounces</span>
-  .speed(<span class="s">"1 -1"</span>)           <span class="c">// playback rate; negative = reversed</span>
-  .stretch(2)               <span class="c">// granular timestretch (pitch preserved)</span>
-  .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// play the nth transient (WAV only)</span>
-  .note(<span class="s">"45 _ 52 57"</span>)       <span class="c">// repitch by MIDI note (24 / "c2" = as recorded)</span>
-  .vel(<span class="s">"1 .5 ~ 1"</span>)          <span class="c">// per-event volume (also on synth tracks: MIDI velocity)</span>
-  .adsr(0.1, 0.2, 0.6, 0.2) <span class="c">// amplitude envelope, as multiples of the note length</span></code></pre>
-          <p>
-            On a sampler, <code>.note()</code> / <code>.n()</code> <strong>repitch</strong> the sample
-            instead of choosing an instrument note — and <code>.scale()</code> applies exactly as in
-            <a href="#s3">Study 3</a> (degrees map, absolute notes snap to key). Sampler events are
-            always <strong>gated</strong>: a sample rings for exactly its event length and is cut there,
-            so a bare <code>s("longsample")</code> chops at each cycle rather than piling up. To let it
-            ring longer, make the event longer: <code>s("long/2")</code>, <code>"long@2"</code>, or ties.
-          </p>
-          <p>
-            <code>.fit()</code> repitches the <strong>whole file</strong> to last a given number of
-            cycles — bare <code>.fit()</code> picks the nearest power of two — and
-            <code>.begin()</code> then chooses a start position inside it. That pair is the usual
-            source of a track that drops out: <code>begin</code> moves the start, but nothing moves
-            the end, so a start at 0.75 of a break fitted to two cycles leaves only half a cycle of
-            audio, and an event longer than that ends in silence. Fire events short enough to be
-            filled (<code>.seg(8)</code>, as below), <code>.loop()</code> the region, or draw
-            <code>begin</code> from earlier in the file. <code>.log()</code> on the track prints
-            that arithmetic per event — how much audio the region holds against how long the event
-            is, flagged <code>gap=</code> when it comes up short.
-          </p>
-          <p>
-            Which is also the only time <code>.loop()</code> is audible at all: a loop only shows
-            itself once the playhead <em>reaches</em> the end of its region inside one event — which
-            depends on <code>begin</code>, not just on how short the events are. <code>.seg(8)</code>
-            on a fitted break has audio to spare at <code>begin(0)</code> and runs dry a third of the
-            way through each step at <code>begin(0.9)</code>. Look for <code>gap=</code> on the
-            <code>.log()</code> line: no gap, no loop.
-          </p>
-          <p>
-            Patterned <code>.note()</code>/<code>.vel()</code>/<code>.slice()</code> are
-            <em>structural</em> — each fresh step retriggers, a <code>~</code> drops the event — so you
-            can carve a melody or a beat out of a single sample.
-          </p>
-          <p>
-            Every one of those methods is also a <strong>top-level builder</strong>:
-            <code>speed("-1")</code> is the <em>speed channel</em> carrying −1, the way
-            <code>note(3)</code> is the pitch channel carrying 3. On its own that's just the long way
-            round, but as an operand it lets a combinator reach into one channel of a pattern it was
-            handed — which is the only way to say “reverse <em>this</em>” inside a
-            <code>.when()</code>:
-          </p>
-          <pre><code>tops: s(<span class="s">"breaks:19"</span>).fit()
-  .begin(irand(<span class="s">"8"</span>).seg(8).div(8))
-  .when(rand().gte(0.7), x =&gt; x.mul(speed(<span class="s">"-1"</span>)))   <span class="c">// ~30% of bars backwards</span>
-  .when(rand().gte(0.5), x =&gt; x.ply(<span class="s">"4"</span>))</code></pre>
-          <p>
-            The channel's current value is the left operand — its resting default where nothing has
-            set it (speed 1, begin 0, the repitch note 24) — so <code>.mul(speed("-1"))</code>
-            <em>flips</em> whatever speed is in force rather than replacing it, and composes with
-            <code>.fit()</code> exactly as an explicit <code>.speed()</code> would. Plain arithmetic on
-            a sampler pattern aims at the repitch note, since the values themselves are pack names:
-            <code>s("rave").add(7)</code> and <code>s("rave").add(note(7))</code> are the same seven
-            semitones up.
-          </p>
-          <h3>Naming one exact file: <code>se()</code> and <code>sr()</code></h3>
-          <p>
-            <code>s()</code> plays a <em>folder</em> and picks by index. When you want a particular
-            file, <code>se("path")</code> names it directly, relative to the samples folder — and
-            <code>sr("name")</code> does the same for a bounce in your recordings folder. Both are the
-            same sampler: every method above applies unchanged.
-          </p>
-          <pre><code>stab: se(<span class="s">"'hits/stab 01.wav'"</span>).slice(<span class="s">"0 2"</span>)
-loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8-cycle bounce, played whole</span></code></pre>
-          <p>
-            A path holds characters mini-notation reads as operators — <code>/</code> is slow, a space
-            separates steps — so anything beyond a bare filename goes in <strong>single quotes</strong>,
-            which suspend that reading for one value:
-            <code>se("'a/b.wav' 'c/d.wav'")</code>. Quoting works in any mini string, not just
-            <code>se</code>. Recording names never need it: they're minted from letters, digits,
-            <code>-</code> and <code>_</code> only. The editor autocompletes both — <code>se("</code>
-            offers a folder at a time, <code>sr("</code> offers every take you've made.
-          </p>
-          <h3>A pack of your own: <code>sp()</code></h3>
-          <p>
-            <code>sp("kit")</code> plays a pack you put together <em>yourself</em> — eight hits from
-            four folders, a drum rack, a kit for one track — addressed by index exactly like a
-            folder's: <code>sp("kit:0 kit:1")</code>, <code>.i("0 1")</code>, or a piano roll in index
-            mode. Evaluate a pattern that names a pack nothing defines yet (or double-click the
-            <code>sp</code> name) and the <strong>pack panel</strong> opens: click a file to add it,
-            <code>+</code> on a folder for everything in it, hold ▶ to hear one first, reorder with the
-            arrows. What it writes is a <code>_pack("kit", [paths…])</code> definition, folded at the
-            foot of the buffer beside the rolls and shapes; a path under the sample library is relative
-            to it, anything else is as it is, and a folder entry stands for every audio file in it.
-          </p>
-          <pre><code>drums: sp(<span class="s">"kit:0 kit:2 kit:1 kit:2"</span>)            <span class="c">// 0 = kick, 1 = snare, 2 = hat — whatever you put there</span>
-hits:  note(<span class="s">"c e g"</span>).sp(<span class="s">"&lt;kit kit2&gt;"</span>).i(<span class="s">"0 2"</span>)  <span class="c">// the method form takes a pattern of names, like .s()</span></code></pre>
-          <h3>Bouncing a track: <code>.record()</code> and ctrl+b</h3>
-          <p>
-            Put the cursor in any named block and press <strong>ctrl+b</strong> to record that track's
-            own audio. It starts at the next phrase boundary, runs for the chosen number of cycles,
-            files the result under <code>~/.poptart/recordings/YYYY-MM/</code>, then <em>mutes</em> the
-            block and writes the bounce in below it under the same label:
-          </p>
-          <pre><code><span class="c">// before</span>
-bass: note(<span class="s">"c2 eb2 g2 _"</span>).synth(<span class="s">"Serum 2"</span>).record({ cycles: 8 })
+          <h3>The channel strip &amp; the mixer</h3>
+          <p>These live after the whole plugin chain, and take numbers, mini strings or any signal:</p>
+          <table>
+            <tr><th>Method</th><th>Does</th></tr>
+            <tr><td><code>.gain(v)</code></td><td>Output level, 1 = unity. Chains multiply: <code>.gain(0.5).gain(env())</code> is a level times a VCA.</td></tr>
+            <tr><td><code>.pan(v)</code></td><td>−1 left … 1 right.</td></tr>
+            <tr><td><code>.width(v)</code></td><td>Stereo width: 0 mono, 1 untouched, up to 4. Applied before the pan.</td></tr>
+            <tr><td><code>.bassmono(hz)</code></td><td>Mono below <code>hz</code>, stereo above. The standard club-rig insurance.</td></tr>
+            <tr><td><code>.bus(name, amt)</code></td><td>Aux send to a named bus; another track reads it with <code>audio("name")</code>. <code>.dry(0)</code> kills the dry; <code>.bsend()</code> is both at once.</td></tr>
+            <tr><td><code>.o(n)</code></td><td>Which output pair: <code>.o(2)</code> = channels 3/4 (raise <em>output channels</em> in settings first).</td></tr>
+          </table>
+          <pre><code>pad: note(<span class="s">"c3 e3 g3"</span>).synth(<span class="s">"Diva"</span>)
+  .width(0.6)                     <span class="c">// rein the patch's stereo in…</span>
+  .pan(sine(0.2).range(-1, 1))    <span class="c">// …then move it around</span>
+  .bus(<span class="s">"space"</span>, 0.3)
 
-<span class="c">// after ctrl+b</span>
-_bass: note(<span class="s">"c2 eb2 g2 _"</span>).synth(<span class="s">"Serum 2"</span>).record({ cycles: 8 })
-bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
+verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</span>)</code></pre>
+          <h4>The mixer: ctrl+g</h4>
           <p>
-            The two share a label on purpose — the bounce takes the original's place on that engine
-            track, so the mix doesn't move and un-commenting one line puts the synth back. Only one of
-            them may be live at a time, which is what the mute guarantees. Note this <em>doesn't</em>
-            free the plugin: it stays loaded, ready for that un-mute.
-          </p>
-          <p>
-            Adding <code>.record({ cycles })</code> to a chain gives you the same thing with a panel:
-            <strong>double-click</strong> the <code>record</code> name and it opens showing that track's
-            live level, the length,
-            and the name to file it under — every change written straight back into the call, the way
-            <code>lfo()</code> and <code>pianoroll()</code> work. A finished take is drawn normalized to
-            its own peak, with that peak's true level in dBFS in the corner.
-            <code>wrapTail</code> folds the release
-            tail back over the head, for a track that was <em>silent</em> going in; a loop that's
-            already running records the previous pass's tail into its own head and doesn't want it.
-          </p>
-          <h3>The mixer: ctrl+g</h3>
-          <p>
-            <strong>ctrl+g</strong> (or settings → <em>open mixer…</em>) opens a strip per track:
-            a stereo meter with peak hold, a gain fader, a pan knob, and mute/solo. Above the strips
-            sit the <em>spectrum</em> — tilted and slow-release so it reads like an analyzer, with a
-            <em>freeze</em> button that holds the maximum over time while it's lit (great for "where
-            did that peak land") — and the <em>stereo image</em>, a polar goniometer where radius is
-            level and the angle is the band's mid/side ratio: straight up is mono, the dashed
-            <strong>±45° safe lines</strong> are hard left and hard right, and anything spilling into
-            the outer wedges (marked <code>ø</code>) is <em>out of phase</em> — content that will
-            partly vanish in mono. So a mono bass is a narrow vertical petal, a wide pad a broad fan,
-            a hard-panned shaker a spike on its safe line, and a phasey chorus a flat smear. Per-band
-            dots ride on top to show which frequencies sit where. The <em>by track</em>/<em>overall</em>
-            button switches both plots between color-coded tracks and the summed master, the legend
-            above the strips says which color is which, and <strong>holding any fader or pan knob</strong>
-            fades the other tracks back so you can see the one you're moving.
-          </p>
-          <p>
-            Each strip also has a <strong>width</strong> knob beside its pan knob:
-            <code>.width(x)</code> is a mid/side widener on the channel strip — 0 is mono, 100%
-            leaves the track alone, and 400% is the ceiling. It runs <em>before</em> the
-            pan, so narrowing a sprawling pad and then placing it is one gesture. A mono source has
-            no side content to scale, so widening it does nothing. Under the knobs, the
-            <strong>▽ mono</strong> button is bass mono: click it to collapse the low end to a
-            single centred source, and drag it left/right to move the cutoff. It writes
-            <code>.bassmono(hz)</code>.
-          </p>
-          <p>
-            The controls write <em>code</em>, not hidden mixer state: a fader move rewrites the
-            block's trailing <code>.gain(x)</code> (appending one if there isn't any), the knobs
-            do the same with <code>.pan(x)</code> and <code>.width(x)</code>, mute and solo write the label markers you'd
-            type yourself (<code>_bass:</code> / <code>Sbass:</code>), and the buffer re-evaluates
-            on the same quiet update path the LFO editor uses. A muted track keeps its strip — that's
-            how it gets un-muted. Because chained <code>.gain()</code> calls multiply, the written
-            value is a clean trim even on a track whose gain is patterned —
-            <code>.gain(env())</code> keeps pumping and the fader scales it (such controls are marked
-            with a dashed outline). The mix lives in the pattern and travels with the patch.
+            A strip per track — meter, fader, pan, width, mute/solo, a <strong>▽ mono</strong> button
+            for bass mono — plus a spectrum analyzer and a stereo image where anything spilling into
+            the outer <code>ø</code> wedges is what a mono system will lose. The controls
+            <strong>write code</strong>: a fader move rewrites the block's <code>.gain()</code>, mute and
+            solo write <code>_</code> / <code>S</code> on the label. The mix lives in the pattern and
+            travels with the patch.
           </p>
         </section>
 
         <!-- ================================================================= -->
         <section id="s8">
           <h2>Study 8</h2>
-          <h3>Playing live</h3>
-          <p>Two ways to play a track by hand, in real time, alongside the patterns:</p>
-          <table>
-            <tr><th>Source</th><th>What it is</th></tr>
-            <tr><td><code>midikeys("&lt;device&gt;")</code></td><td>A MIDI keyboard. <code>midikeys("KeyStep")(1).synth("Serum 2")</code> plays channel 1 live — notes, velocity, pitch bend, aftertouch, CCs — routed engine-side, so latency is the MIDI driver's, not the pattern clock's.</td></tr>
-            <tr><td>the piano roll's <strong>⌨</strong></td><td>Your computer's typing keyboard, aimed at the roll on screen: open any <code>pianoroll</code> and click <strong>⌨</strong> (or ctrl+m) and the keys play that roll's <em>track</em> — home row = white keys, the row above = black keys, <code>z</code>/<code>x</code> shift octave, <code>c</code>/<code>v</code> nudge velocity. On an index roll the same keys count the pack's files instead. Keys that play never reach the code; click ⌨ again, or close the roll, and they type as usual.</td></tr>
-          </table>
-          <pre><code>keys: pianoroll().synth(<span class="s">"Serum 2"</span>).scale(<span class="s">"F minor"</span>)  <span class="c">// double-click pianoroll, hit ⌨, play</span></code></pre>
+          <h3>The sampler</h3>
           <p>
-            Live notes gate <code>env()</code> modulators and retrigger note-synced
-            <code>lfo()</code> shapes exactly like pattern notes — and <code>.scale()</code> on a live
-            source quantizes incoming notes to the key.
+            <code>s("pack")</code> plays a folder of audio files from your sample library
+            (<code>~/.poptart/samples</code> by default — settings tab). Files are numbered in filename
+            order, and everything runs through the same <code>.fx()</code> chain as an instrument. The
+            <strong>sounds</strong> tab lists every pack; hold a file row to audition it.
+          </p>
+          <pre><code>drums: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)   <span class="c">// "bd:4" picks a file inline = s("bd").i(4)</span>
+  .i(<span class="s">"&lt;0 1 2&gt;"</span>)          <span class="c">// which file of the pack</span>
+  .begin(0).end(1)          <span class="c">// play region, 0..1</span>
+  .loop()                   <span class="c">// run off the end and carry on from 0 (.loopwrap(1) loops the region)</span>
+  .speed(<span class="s">"1 -1"</span>)           <span class="c">// playback rate; negative = backwards</span>
+  .flip(<span class="s">"&lt;0 1&gt;"</span>)           <span class="c">// reverse INTO the beat, landing on the next hit</span>
+  .stretch(2)               <span class="c">// timestretch, pitch preserved</span>
+  .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// the nth transient (WAV only)</span>
+  .note(<span class="s">"45 _ 52 57"</span>)       <span class="c">// repitch by MIDI note (c2 = as recorded)</span>
+  .vel(<span class="s">"1 .5 ~ 1"</span>)          <span class="c">// per-hit volume (on synths: MIDI velocity)</span>
+  .adsr(0.1, 0.2, 0.6, 0.2) <span class="c">// amplitude envelope, as multiples of the hit's length</span></code></pre>
+          <p>
+            On a sampler, <code>.note()</code> / <code>.n()</code> <strong>repitch</strong>, and
+            <code>.scale()</code> works as in <a href="#s3">Study 3</a>. Patterned
+            <code>.note()</code>/<code>.vel()</code>/<code>.slice()</code> are <em>structural</em> —
+            each step retriggers, a <code>~</code> is a gap — so you can carve a beat out of one
+            sample. Hits are <strong>gated</strong>: a sample rings for exactly its step and is cut
+            there, so to let it ring longer make the step longer (<code>"long/2"</code>, <code>"long@2"</code>,
+            ties).
           </p>
           <div class="callout">
-            <span class="tag">recording</span>
-            The header's <strong>● rec</strong> button records live playing — a MIDI keyboard's, or the
-            roll's ⌨ — <em>into the piano roll</em>: it arms now, starts on the next 4-cycle phrase (the
-            wait is the count-in; the circles show it), runs for the cycles you pick and quantizes to the
-            grid you pick (off = the nearest cell, the rest kept as each note's nudge). With a roll open
-            you watch the take land on the grid as you play it; a roll shorter than the take overdubs —
-            each note goes to the cell the roll was playing when you struck it. Anything played during the
-            count-in goes in too, <em>before</em> cell 0, dimmed and silent, there to drag into the loop if
-            it was good. A track with no roll yet — a bare <code>midikeys</code> route — gets a fresh
-            <code>pianoroll(…)</code> in its place, sized to the take.
+            <span class="tag">loops &amp; breaks</span>
+            <code>.fit()</code> repitches the whole file to a number of cycles (bare, the nearest power
+            of two). <code>.begin()</code> then picks where to start inside it — so
+            <code>s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code> is eight random slice
+            starts a bar. If a fitted loop drops out, the region ran dry before the step ended:
+            <code>.loop()</code> it, fire shorter steps, or start earlier. <code>.log()</code> on the
+            track prints that arithmetic per hit.
           </div>
-          <div class="callout">
-            <span class="tag">capture</span>
-            Jammed something good without record on? The roll's <strong>capture</strong> button is Live's
-            Capture MIDI: the last stretch played on that roll's track (since the last phrase of silence)
-            goes into the roll as if you had hit record — one pass of the loop over a roll that has notes,
-            a fitted power-of-two loop into an empty one.
-          </div>
-          <div class="callout">
-            <span class="tag">importing</span>
-            <strong>Drop a <code>.mid</code> file</strong> anywhere on the window and it becomes lanes
-            in the buffer — one per track the file plays, each playing a roll under that track's own
-            name: <code>bass: pianoroll("bass")</code>, with the drawn notes filed as
-            <code>"bass"</code> in the folded <em>pianorolls</em> block at the bottom (a lane the file
-            never named, or one whose name a roll already has, takes an <code>_2</code> suffix).
-            Double-click a <code>pianoroll</code> name to open the notes on the grid, and
-            hit <strong>→♪</strong> there whenever you want the same part as mini-notation instead. The
-            dialog picks the grid (auto-detected per lane; a hand-played file that fits no grid is drawn
-            on fine cells so it keeps its timing) and offers the <strong>key</strong> it guessed from the
-            notes: taking it writes the <code>setscale(…)</code> line, which is what colours and folds
-            the rolls to that key — and what makes <strong>→♪</strong> write scale degrees. Percussion —
-            MIDI channel 10, or a track the file named for a kit — is kept out of the key guess: a drum
-            map's pitches are kit slots, not a key. Nothing plays until you add a <code>.synth(…)</code>
-            and evaluate.
-          </div>
-        </section>
-
-        <!-- ================================================================= -->
-        <section id="s8b">
-          <h2>Study 8½</h2>
-          <h3>Routing: <code>midi()</code> &amp; <code>audio()</code></h3>
           <p>
-            Two builders, <code>midi()</code> and <code>audio()</code>, move MIDI and audio between
-            <em>inputs</em> — another track, or a piece of hardware — and your tracks and plugins. Each
-            works in two positions, and that position decides what it does.
+            Every control is also a <strong>top-level builder</strong>, which is how you reach into one
+            channel from inside a transform — <code>.mul(speed("-1"))</code> flips whatever speed is
+            in force:
           </p>
+          <pre><code>tops: s(<span class="s">"breaks:19"</span>).fit().begin(irand(8).seg(8).div(8))
+  .when(rand().gte(0.7), x =&gt; x.mul(speed(<span class="s">"-1"</span>)))   <span class="c">// ~30% of bars backwards</span></code></pre>
 
-          <h4>As a source, at the head of a track</h4>
-          <p>A bare <code>midi(...)</code> / <code>audio(...)</code> is where a track's signal comes from:</p>
-          <pre><code><span class="f">midi</span>(<span class="s">"KeyStep 32"</span>).synth(<span class="s">"Serum 2"</span>)     <span class="c">// play Serum from a MIDI device's notes</span>
-<span class="f">audio</span>(<span class="s">"Scarlett Input 1"</span>).fx(<span class="s">"ValhallaRoom"</span>) <span class="c">// run a hardware input through a reverb</span></code></pre>
-
-          <h4>As an injector, after a plugin</h4>
-          <p>Called as a method after an <code>.fx(...)</code>, it feeds that plugin's extra input:</p>
-          <pre><code>bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Kickstart"</span>).midi(<span class="s">"kick"</span>)  <span class="c">// duck to kick's rhythm (MIDI trigger)</span>
-bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Pro-C 2"</span>).audio(<span class="s">"kick"</span>)   <span class="c">// Pro-C's sidechain listens to kick (audio)</span>
-kick: s(<span class="s">"bd*4"</span>)</code></pre>
+          <h4>One exact file: <code>se()</code> and <code>sr()</code></h4>
           <p>
-            <code>.midi("kick")</code> injects MIDI into the plugin — a track source replays its notes
-            (a drum track fires a fixed note on each hit, a melodic track passes its pitch through), so
-            a MIDI-triggered ducker like Kickstart follows the rhythm. <code>.audio("kick")</code> feeds
-            the source's <em>audio</em> into the plugin's sidechain input, for audio-keyed
-            compressors/duckers (Pro-C 2, ShaperBox). Both target whatever plugin is last in the chain,
-            like <code>.param()</code>.
+            <code>se("path")</code> names a file under the samples folder; <code>sr("name")</code> names
+            one of your own bounces. Both are the same sampler. A path holds characters mini-notation
+            reads as operators, so put it in <strong>single quotes</strong>:
+          </p>
+          <pre><code>stab: se(<span class="s">"'hits/stab 01.wav'"</span>).slice(<span class="s">"0 2"</span>)
+loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8-cycle bounce, played whole</span></code></pre>
+
+          <h4>A kit of your own: <code>sp()</code></h4>
+          <p>
+            <code>sp("kit")</code> is a pack you put together file by file — eight hits from four
+            folders, a drum rack. Evaluate a name nothing defines yet (or double-click <code>sp</code>)
+            and the <strong>pack panel</strong> opens: click files to add, hold ▶ to hear one first,
+            reorder with the arrows. Index it like any pack: <code>sp("kit:0 kit:2 kit:1 kit:2")</code>,
+            or draw it in a piano roll's index rows.
           </p>
 
-          <h4>Names: tracks or hardware</h4>
+          <h4>Bounce a track: ctrl+b</h4>
           <p>
-            The argument to any of these is a <strong>name</strong>, resolved <strong>track-first</strong>:
-            if a track with that label exists it wins; otherwise it's matched against connected devices
-            (case-insensitive substring). Force either with a prefix:
+            Cursor in a block, <strong>ctrl+b</strong>: that track's audio is recorded from the next
+            phrase boundary for the chosen cycles, filed under <code>~/.poptart/recordings/</code>, and
+            the bounce is written in below the (now muted) source under the same label:
           </p>
-          <table>
-            <tr><th>Name</th><th>Means</th></tr>
-            <tr><td><code>"kick"</code></td><td>the track labelled <code>kick</code> (or a device, if no such track)</td></tr>
-            <tr><td><code>"track:kick"</code></td><td>always the track</td></tr>
-            <tr><td><code>"dev:KeyStep"</code></td><td>always a hardware MIDI/audio input</td></tr>
-          </table>
-          <div class="callout">
-            <span class="tag">tip</span>
-            For a plain MIDI-note trigger with no dedicated track, make a muted one and point at it:
-            <code>_trig: note("c5 ~ c5 ~")</code> then <code>…​.fx("Kickstart").midi("trig")</code>. A
-            leading underscore mutes the trigger track so you only hear its effect on the target.
-          </div>
-          <div class="callout">
-            <span class="tag">note</span>
-            Audio routing runs the source ahead of the target in the engine so the send is heard the
-            same instant. Hardware <em>audio</em> input depends on your audio device actually exposing
-            inputs (many output devices have none) — pick an input-capable device in settings.
-          </div>
-
-          <h4>Live audio in: <code>input()</code></h4>
+          <pre><code>_bass: note(<span class="s">"c2 eb2 g2 _"</span>).synth(<span class="s">"Serum 2"</span>).record({ cycles: 8 })
+bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
           <p>
-            <code>audio()</code> names a source; <code>input()</code> names <strong>channels</strong> on
-            your audio interface. Channels are numbered from <strong>1</strong>, the way they're labelled
-            on the hardware. One channel is mono and lands centred; two make a stereo pair, in the order
-            given — and they need not be adjacent.
+            Same label on purpose: the bounce takes the original's place, so the mix doesn't move and
+            un-muting one line puts the synth back. <code>.record({ cycles })</code> in a chain gives
+            you a panel with a live meter (double-click <code>record</code>).
           </p>
-          <pre><code>gtr:  input(3).fx(<span class="s">"Amp Room"</span>)              <span class="c">// channel 3, mono, through an amp sim</span>
-room: input(5, 6).fx(<span class="s">"Pro-C 2"</span>)            <span class="c">// a stereo pair</span>
-vox:  input(<span class="s">"Scarlett"</span>, 1).fx(<span class="s">"Pro-Q 4"</span>)     <span class="c">// channel 1 of that interface</span>
-bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Pro-C 2"</span>).audio(input(1))  <span class="c">// ducked by a live mic</span></code></pre>
-          <p>
-            The audio flows into the same chain input a synth would, so the whole
-            <code>.fx()</code>/<code>.param()</code> chain and channel strip apply. It schedules no notes
-            of its own. Pass an <code>input()</code> to <code>.audio()</code> after an <code>.fx(...)</code>
-            to feed that plugin's sidechain from a live input instead.
-          </p>
-          <div class="callout">
-            <span class="tag">note</span>
-            The optional leading <strong>device name</strong> only matters when your audio device is a
-            poptart aggregate built from several interfaces (settings → audio device). SuperCollider opens
-            exactly one device, so with a plain interface the numbers are already that interface's
-            channels and the name can be left off. A name that isn't in the aggregate warns in the console
-            and falls back to plain channel numbering — it won't stop your set.
-          </div>
         </section>
 
         <!-- ================================================================= -->
         <section id="s9">
           <h2>Study 9</h2>
-          <h3>Transforms &amp; combinators</h3>
-          <p>
-            Since patterns are signals, you reshape them with methods. <strong>Arithmetic</strong> takes
-            its structure from the left side, so the right can be a number, a string, or another signal:
-          </p>
-          <pre><code>note(<span class="s">"c3 e3 g3"</span>).add(12)          <span class="c">// up an octave</span>
-n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scale(<span class="s">"C major"</span>)  <span class="c">// transpose every other cycle</span></code></pre>
-          <p>
-            Full set: <code>add sub mul div mod round abs floor ceil clamp</code>, and comparisons
-            <code>gte gt lte lt eq neq</code> (which return 1/0, handy as conditions).
-          </p>
+          <h3>Playing live</h3>
           <table>
-            <tr><th>Method</th><th>Does</th></tr>
-            <tr><td><code>.fast(f)</code> / <code>.slow(f)</code></td><td>Playback rate: <code>.fast(2)</code> fits two cycles into one, <code>.slow(2)</code> spreads one over two. A <em>negative</em> factor plays the pattern in reverse — <code>.fast(-1)</code> is straight reverse playback. On an LFO, <code>.fast()</code> multiplies its rate (<code>.rate()</code> sets it absolutely).</td></tr>
-            <tr><td><code>.when(cond, fn)</code></td><td>Apply <code>fn</code> to this pattern wherever <code>cond</code> is truthy, on cond's own grid. <code>n("0 1 2 3").when("1 0".gte(1), x =&gt; x.add(12))</code>. Per-onset controls the callback set (sampler config, <code>.vel()</code>) switch with the condition too; the chain and the streamed channel strip stay on throughout.</td></tr>
-            <tr><td><code>.degrade(p)</code></td><td>Randomly drop each event with probability <code>p</code> (default 0.5). The <code>?</code> in mini-notation, as a method.</td></tr>
-            <tr><td><code>.ply(n, fn?)</code></td><td>Retrigger each event <code>n</code> times; optional <code>(x, i) =&gt; …</code> transforms each repeat. <code>n</code> is read per event, so <code>.ply("2 4")</code> plies the two halves differently.</td></tr>
-            <tr><td><code>.echo(n, dt, fn?)</code></td><td>Overlay <code>n</code> delayed copies, each <code>dt</code> cycles further along — a pattern-level tape echo.</td></tr>
-            <tr><td><code>.arp(pat)</code></td><td>Arpeggiate chords — the notes sounding together become a ladder, and <code>pat</code>'s numbers pick them off: <code>note("[c3,e3,g3]").arp("0 1 2 3")</code>. <code>0</code> is the lowest tone, and an index past the top wraps back to the bottom an octave up (<code>3</code> = c3+12), negatives off the top an octave down (<code>-1</code> = g3−12). The chord is whatever is ringing at each onset — a stack, or a drawn <code>pianoroll()</code> chord whose notes are all different lengths — so the arpeggio is one note at a time; one full pass of <code>pat</code> is squeezed into each chord.</td></tr>
-            <tr><td><code>.hold(trig)</code></td><td>Sample-and-hold: freeze this signal at each onset of <code>trig</code>. <code>rand().hold("1*8")</code> is stepped random.</td></tr>
-            <tr><td><code>.seg(n)</code></td><td>Sample-and-hold on an even grid of <code>n</code> steps per cycle — the shorthand for <code>.hold("1*n")</code>, and the way to give a structureless signal structure. <code>rand().seg(8)</code> is eighth-note stepped random; <code>s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code> fires eight random slice starts a bar. <code>n</code> may be patterned (<code>.seg("&lt;8 16&gt;")</code>) — or any signal at all, read once per cycle.</td></tr>
+            <tr><th>Source</th><th>What it is</th></tr>
+            <tr><td><code>midikeys("KeyStep")(1)</code></td><td>A MIDI keyboard on channel 1 — notes, velocity, bend, aftertouch — routed engine-side, so latency is the MIDI driver's, not the clock's.</td></tr>
+            <tr><td>the piano roll's <strong>⌨</strong></td><td>Your typing keyboard, playing the open roll's <em>track</em>: home row = white keys, the row above = black, <code>z</code>/<code>x</code> octave, <code>c</code>/<code>v</code> velocity. On an index roll the keys count files instead. Click ⌨ again (or close the roll) and they type as usual.</td></tr>
           </table>
+          <pre><code>keys: pianoroll().synth(<span class="s">"Serum 2"</span>).scale(<span class="s">"F minor"</span>)  <span class="c">// double-click pianoroll, hit ⌨, play</span></code></pre>
           <p>
-            Every numeric argument above takes a <strong>pattern</strong>, not just a number —
-            <code>.ply("&lt;2 4&gt;")</code>, <code>.degrade("&lt;0 .4&gt;")</code>,
-            <code>.seg("4 8")</code>, <code>.fast(macro1.range(1, 4))</code>. If you find one that
-            doesn't, it's a bug.
-          </p>
-          <p>
-            And <code>choose("0", "3", "5")</code> is a signal that randomly picks one option per cycle
-            — weight a pick with a <code>[value, weight]</code> pair. It drops in anywhere a signal goes:
-            <code>n(choose("0", "3", "7"))</code>, <code>.speed(choose(0.5, 1, 2))</code>,
-            <code>s(choose("bd", "hh"))</code>.
-          </p>
-          <p>
-            <code>irand(8)</code> is its numeric cousin — a random integer in 0…7, drawn per cycle as a
-            pattern and per onset as a control (<code>.vel(irand(2))</code> is a fresh coin at every note).
-            Its bound can be a pattern too, and a bound that <em>subdivides</em> the cycle hands the result
-            that structure: <code>irand("8!8")</code> is eight draws a bar, each its own event, so
-            <code>.begin(irand("8!8").div(8))</code> retriggers eight times — the same thing
-            <code>.begin(irand(8).seg(8).div(8))</code> says the other way round.
+            Live notes gate <code>env()</code> and retrigger note-synced <code>lfo()</code> shapes like
+            pattern notes do, and <code>.scale()</code> snaps them to the key.
           </p>
           <div class="callout">
-            <span class="tag">independence</span>
-            Every random builder — <code>rand()</code>, <code>perlin()</code>, <code>choose()</code>,
-            <code>irand()</code>, <code>.degrade()</code> — is its <strong>own stream</strong>. Two
-            <code>rand()</code>s in a document are two independent coins, so
-            <code>.when(rand().gte(0.7), …).when(rand().gte(0.7), …)</code> picks two different sets
-            of bars. Seeds are <em>positional</em> (the nth random call in the buffer), so a document
-            replays identically every time you hit play — and a re-evaluation doesn't reshuffle it.
-            Pass <code>{ seed }</code> / a seed argument only when you <em>want</em> two randoms to
-            move together: <code>rand({ seed: 1 })</code> twice is one coin gating two things.
+            <span class="tag">record &amp; capture</span>
+            The header's <strong>● rec</strong> records live playing <em>into the piano roll</em>: it
+            arms now, starts on the next phrase (the count-in), runs for the cycles you pick and
+            quantizes to the grid you pick (leftovers kept as each note's nudge). A roll shorter than
+            the take overdubs; notes from the count-in land before cell 0, dimmed, there to drag in if
+            they were good. Played something without rec on? The roll's <strong>capture</strong> button
+            grabs the last stretch you played, as if you had.
+          </div>
+          <div class="callout">
+            <span class="tag">importing</span>
+            <strong>Drop a <code>.mid</code> file</strong> on the window and it becomes one
+            <code>pianoroll</code> track per lane, with the key it guessed offered as a
+            <code>setscale(…)</code> line. Add a <code>.synth(…)</code> and evaluate.
           </div>
         </section>
 
         <!-- ================================================================= -->
         <section id="s10">
           <h2>Study 10</h2>
-          <h3>Making it yours</h3>
+          <h3>Routing: <code>midi()</code> &amp; <code>audio()</code></h3>
+          <p>
+            Two builders move MIDI and audio between tracks, hardware and plugins. Each works in two
+            positions, and the position decides what it does.
+          </p>
+          <h4>At the head of a track: a source</h4>
+          <pre><code><span class="f">midi</span>(<span class="s">"KeyStep 32"</span>).synth(<span class="s">"Serum 2"</span>)         <span class="c">// play Serum from a MIDI device</span>
+<span class="f">audio</span>(<span class="s">"drums"</span>).fx(<span class="s">"ValhallaRoom"</span>)           <span class="c">// run another track through a reverb</span>
+<span class="f">input</span>(3).fx(<span class="s">"Amp Room"</span>)                    <span class="c">// a hardware input (channels from 1; two = stereo)</span></code></pre>
+          <h4>After an <code>.fx()</code>: an injector</h4>
+          <pre><code>bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Kickstart"</span>).midi(<span class="s">"kick"</span>)  <span class="c">// duck to kick's rhythm</span>
+bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Pro-C 2"</span>).audio(<span class="s">"kick"</span>)   <span class="c">// Pro-C's sidechain hears kick</span>
+kick: s(<span class="s">"bd*4"</span>)</code></pre>
+          <p>
+            <code>.midi("kick")</code> replays the source's notes into the plugin (for MIDI-triggered
+            duckers); <code>.audio("kick")</code> feeds its audio into the sidechain input (for
+            compressors). <code>.audio(input(1))</code> sidechains off a live mic.
+          </p>
+          <p>
+            A name resolves <strong>track-first</strong>, then against connected devices by substring.
+            Force either: <code>"track:kick"</code>, <code>"dev:KeyStep"</code>.
+          </p>
+          <div class="callout">
+            <span class="tag">tip</span>
+            For a trigger with no track of its own, make a muted one and point at it:
+            <code>_trig: note("c5 ~ c5 ~")</code> then <code>.fx("Kickstart").midi("trig")</code>.
+          </div>
+          <div class="callout">
+            <span class="tag">note</span>
+            Hardware <em>audio</em> input needs a device that exposes inputs — pick one in settings.
+            To use several interfaces at once, tick them under <strong>extra inputs</strong>; poptart
+            combines them, and <code>input("Scarlett", 1)</code> then names whose channel 1 you mean.
+          </div>
+        </section>
 
+        <!-- ================================================================= -->
+        <section id="s11">
+          <h2>Study 11</h2>
+          <h3>Transforms &amp; combinators</h3>
+          <p>
+            Since patterns are signals, you reshape them with methods. <strong>Arithmetic</strong> takes
+            its structure from the left side; the right can be a number, a string or another signal:
+          </p>
+          <pre><code>note(<span class="s">"c3 e3 g3"</span>).add(12)                      <span class="c">// up an octave</span>
+n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scale(<span class="s">"C major"</span>)     <span class="c">// transpose every other cycle</span></code></pre>
+          <p>
+            The set: <code>add sub mul div mod round abs floor ceil clamp</code>, and the comparisons
+            <code>gte gt lte lt eq neq</code> (1/0 — handy as conditions).
+          </p>
+          <table>
+            <tr><th>Method</th><th>Does</th></tr>
+            <tr><td><code>.fast(f)</code> / <code>.slow(f)</code></td><td>Playback rate. Negative plays in reverse. On an LFO, <code>.fast()</code> multiplies its rate.</td></tr>
+            <tr><td><code>.when(cond, fn)</code></td><td>Apply <code>fn</code> wherever <code>cond</code> is truthy: <code>.when("1 0", x =&gt; x.add(12))</code>.</td></tr>
+            <tr><td><code>.degrade(p)</code></td><td>Randomly drop events — the <code>?</code>, as a method.</td></tr>
+            <tr><td><code>.ply(n, fn?)</code></td><td>Retrigger each event <code>n</code> times; <code>(x, i) =&gt; …</code> shapes each repeat.</td></tr>
+            <tr><td><code>.echo(n, dt, fn?)</code></td><td><code>n</code> delayed copies, <code>dt</code> cycles apart — a pattern-level tape echo.</td></tr>
+            <tr><td><code>.arp(pat)</code></td><td>Arpeggiate chords: <code>note("[c3,e3,g3]").arp("0 1 2 3")</code>. Indices past the top wrap up an octave.</td></tr>
+            <tr><td><code>.hold(trig)</code> / <code>.seg(n)</code></td><td>Sample-and-hold at <code>trig</code>'s onsets, or on an even grid of <code>n</code> per cycle: <code>rand().seg(8)</code> is stepped random.</td></tr>
+            <tr><td><code>.swing(amt, grid)</code> / <code>.nudge(v)</code></td><td>Groove: <code>s("hh*8").swing(1/3)</code> is the triplet shuffle; nudge offsets each hit by a fraction of its step.</td></tr>
+            <tr><td><code>.vel(v)</code> / <code>.clip(v)</code></td><td>Per-note velocity and length multiplier — on synths and samplers alike.</td></tr>
+          </table>
+          <p>
+            Every argument above takes a <strong>pattern</strong>, not just a number —
+            <code>.ply("&lt;2 4&gt;")</code>, <code>.seg("4 8")</code>, <code>.fast(macro1.range(1, 4))</code>.
+            If you find one that doesn't, it's a bug.
+          </p>
+          <p>
+            <code>choose("0", "3", "7")</code> picks one option per cycle (weight one with a
+            <code>[value, weight]</code> pair); <code>irand(8)</code> is a random integer 0…7. Both drop
+            in anywhere a signal goes: <code>n(choose("0", "3", "7"))</code>, <code>.vel(irand(2))</code>.
+          </p>
+          <div class="callout">
+            <span class="tag">independence</span>
+            Every <code>rand()</code>, <code>perlin()</code>, <code>choose()</code>, <code>irand()</code>
+            and <code>.degrade()</code> is its <strong>own stream</strong>, seeded by position in the
+            buffer — so two <code>.when(rand().gte(0.7), …)</code>s pick different bars, and a
+            document replays identically every time. Pass <code>{ seed: 1 }</code> when you
+            <em>want</em> two randoms to move together.
+          </div>
+        </section>
+
+        <!-- ================================================================= -->
+        <section id="s12">
+          <h2>Study 12</h2>
+          <h3>Making it yours</h3>
           <h4>Extend the language</h4>
           <p>
-            <code>Signal.prototype</code> is the shared prototype of every pattern, LFO, and mini string.
-            Add a method to it and every signal — <em>and every bare string</em> — picks it up, right
-            from the editor, exactly like Strudel's <code>Pattern.prototype</code>:
+            <code>Signal.prototype</code> is the shared prototype of every pattern, LFO and mini string.
+            Add a method to it and everything — <em>including bare strings</em> — picks it up, exactly
+            like Strudel's <code>Pattern.prototype</code>:
           </p>
           <pre><code>Signal.prototype.acid = function () {
   return this.param(<span class="s">"Filter 1 Freq"</span>, 0.3).param(<span class="s">"Filter 1 Reso"</span>, 0.8);
@@ -1162,64 +824,41 @@ n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scal
 
 bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).acid()</code></pre>
           <p>
-            These <code>Signal.prototype.…</code> and <code>const …</code> lines are ordinary setup
-            statements: put each on its own column-0 line <strong>anywhere</strong> in the buffer,
-            between tracks or above them. (A bare <code>$: Signal(0.5)</code> is <em>not</em> setup — it
-            evaluates to a signal, so it becomes a silent track. To reuse a value, name it:
-            <code>const half = Signal(0.5)</code>.)
+            Such lines, and <code>const …</code> declarations, are ordinary setup: put them on their own
+            column-0 line anywhere in the buffer. Three pitch helpers are exposed for writing your own:
+            <code>noteToMidi("c4")</code>, <code>degreeToMidi(2, "c minor")</code>,
+            <code>parseScaleName("f dorian")</code>.
           </p>
+          <pre><code><span class="c">// a chord builder: intervals above a root, stacked into one mini "," layer</span>
+const chord = (root, ...ivs) =&gt; note(ivs.map((iv) =&gt; noteToMidi(root) + iv).join(<span class="s">","</span>));
+
+pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Serum 2"</span>)   <span class="c">// Cmaj7</span></code></pre>
 
           <h4>Prebake: setup that runs at startup</h4>
           <p>
             Anything you'd paste at the top of every session — helpers, custom scales, prototype
-            extensions — goes in the <strong>prebake</strong>, run once at load before any pattern
-            plays. Edit it from the settings tab (<strong>edit prebake…</strong>; saving re-runs it, no
-            restart) or in <code>~/.poptart/prebake.js</code>:
-          </p>
-          <pre><code><span class="c">// ~/.poptart/prebake.js</span>
-const kick = s(<span class="s">"bd*4"</span>);
-const acid = (p) =&gt; p.param(<span class="s">"Filter 1 Freq"</span>, 0.3);</code></pre>
-          <p>
-            Its top-level bindings are injected into every buffer afterward, so <code>drums: kick</code>
-            or <code>bass: acid(note("c2*8").synth("Serum 2"))</code> just work. For more, add a
-            <code>~/.poptart/prebake/</code> folder of <code>*.js</code> files (they run in filename
-            order). Removing a prototype extension needs a restart; everything else re-runs on save.
+            extensions — goes in the <strong>prebake</strong>, run once at load. Edit it from
+            <strong>settings → edit prebake…</strong> (saving re-runs it) or in
+            <code>~/.poptart/prebake.js</code>; a <code>~/.poptart/prebake/</code> folder of
+            <code>*.js</code> files runs after it, in name order. Its top-level bindings are in scope in
+            every buffer: <code>drums: kick</code> just works.
           </p>
 
-          <h4>★ The library: definitions in every project</h4>
+          <h4>★ The library</h4>
           <p>
-            A drawn roll, an LFO shape, a captured preset or a sample pack lives in the buffer it was
-            made in. Every picker that lists them shows a <strong>★ beside each name</strong>: click it and
-            the definition is copied into <code>~/.poptart/prebake/pinned.js</code>, a prebake file
-            poptart manages, and from then on the name is an option in <em>every</em> project —
-            <code>pianoroll("bass")</code>, <code>lfo("swell")</code>, <code>.preset("growl")</code>,
-            <code>sp("kit")</code> resolve against the library wherever the buffer has no definition of
-            its own, and the pickers list it under <code>prebake</code>. The buffer keeps its own copy,
-            which shadows the library's. Draw into it afterwards and the star dims — click to update the
-            library copy, ⇧click to take it out. A filled star on a library entry takes it out of the
-            library, copying it into the buffer first so nothing that names it falls silent. The file is
-            plain JavaScript, one definition per line, safe to edit by hand.
+            A drawn roll, an LFO shape, a preset or a pack lives in the buffer it was made in. Every
+            picker shows a <strong>★</strong> beside each name: click it and the definition is copied
+            into a prebake file poptart manages, and from then on <code>pianoroll("bass")</code>,
+            <code>lfo("swell")</code>, <code>.preset("growl")</code>, <code>sp("kit")</code> resolve in
+            <em>every</em> project. The buffer's own copy shadows the library's; draw into it and the
+            star dims — click to update, ⇧click to take it out.
           </p>
-
-          <h4>Write your own functions</h4>
-          <p>
-            Inside a method, <code>this</code> is a signal and you return one — chain the same methods a
-            pattern has (<code>.add</code>/<code>.mul</code>/<code>.range</code>/<code>.when</code>/<code>.hold</code>/<code>.gain</code>/<code>.param</code>/<code>.mapValue</code>, and the rest). For
-            pitch math, three helpers are exposed by name everywhere: <code>noteToMidi("c4")</code> (note
-            name → MIDI), <code>degreeToMidi(degree, "c minor")</code> (scale step → MIDI, wrapping past
-            the scale), and <code>parseScaleName("f dorian")</code> (→ <code>{ rootMidi, intervals }</code>).
-          </p>
-          <pre><code><span class="c">// a chord builder: intervals above a root, stacked into one mini "," layer</span>
-const chord = (root, ...ivs) =&gt;
-  note(ivs.map((iv) =&gt; noteToMidi(root) + iv).join(<span class="s">","</span>));
-
-pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Serum 2"</span>)   <span class="c">// Cmaj7</span></code></pre>
 
           <h4>Hotkeys &amp; editor scripting</h4>
           <p>
-            The prebake runs in the <strong>browser</strong> too (DSL builders are inert there; the UI
-            helpers are live), so it's where you bind keys and script the editor. Register a chord with
-            <code>hotkey(combo, handler)</code>:
+            The prebake runs in the browser too, so it's where you bind keys with
+            <code>hotkey(combo, handler)</code> and script the editor through the <code>editor</code>
+            handle (<code>getSelection</code>, <code>replaceCode</code>, <code>getCode</code>, …):
           </p>
           <pre><code><span class="c">// rotate the selected space-separated steps by one</span>
 hotkey(<span class="s">"alt+r"</span>, () =&gt; {
@@ -1227,14 +866,10 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
   editor.replaceCode(rotate(text.trim().split(/\s+/), 1).join(<span class="s">" "</span>), from, to);
 });</code></pre>
           <p>
-            Combos are <code>+</code>-joined: modifiers <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>/<code>mod</code>
-            (<code>mod</code> = ⌘ on macOS, Ctrl elsewhere) plus one key, matched on physical key position.
-            The <code>editor</code> handle (aliased <code>repl</code>) reads and rewrites the buffer by
-            character offset — <code>getCode</code>/<code>setCode</code>, <code>insertCode</code>/<code>replaceCode</code>,
-            <code>getSelection</code>, <code>getCursorLocation</code>/<code>setCursorLocation</code> — and the sandbox
-            also hands you <code>prompt</code>, <code>alert</code>, <code>log</code>, and the rhythm helpers
-            <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>. Built-in <code>ctrl+p</code>/<code>ctrl+r</code>/<code>ctrl+m</code>/<code>ctrl+g</code>
-            are reserved.
+            Combos are <code>+</code>-joined — <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>/<code>mod</code>
+            plus one key. <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>, <code>prompt</code>
+            and <code>log</code> are on hand. <code>ctrl+p</code>/<code>r</code>/<code>m</code>/<code>g</code>
+            are taken.
           </p>
         </section>
 
@@ -1246,25 +881,25 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><th>Sources</th><th></th></tr>
             <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
+            <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
-            <tr><td><code>s("bd hh")</code></td><td>sampler pack</td></tr>
-            <tr><td><code>midikeys("…")(ch)</code></td><td>live input (the computer keyboard is the piano roll's ⌨)</td></tr>
-            <tr><td><code>midi("kick")</code> · <code>audio("mic")</code></td><td>source: play/route an input</td></tr>
-            <tr><td><code>input(3)</code> · <code>input("Scarlett", 1, 2)</code></td><td>source: hardware input channels (numbered from 1)</td></tr>
-            <tr><td><code>choose(a, b, c)</code></td><td>random pick per cycle</td></tr>
+            <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
+            <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>
+            <tr><td><code>midi("kick")</code> · <code>audio("mic")</code> · <code>input(3)</code></td><td>source: another track, a bus, a hardware input</td></tr>
+            <tr><td><code>choose(a, b, c)</code> · <code>irand(n)</code></td><td>random pick / integer per cycle</td></tr>
           </table>
           <table>
             <tr><th>Chain</th><th></th></tr>
-            <tr><td><code>.fx("…")</code> · <code>.param("name", v)</code></td><td>effects &amp; knobs</td></tr>
-            <tr><td><code>.midi("kick")</code> · <code>.audio("kick")</code></td><td>inject MIDI / audio sidechain into the last fx</td></tr>
-            <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.width(v)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
-            <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity &amp; note length</td></tr>
-            <tr><td><code>.scale("…")</code></td><td>map degrees / snap notes to key</td></tr>
-            <tr><td><code>.sc(oct)</code></td><td>the same, in the setscale key</td></tr>
+            <tr><td><code>.fx("…")</code> · <code>.param("name", v)</code> · <code>.preset("name")</code></td><td>effects, knobs, whole-state presets</td></tr>
+            <tr><td><code>.midi("kick")</code> · <code>.audio("kick")</code></td><td>inject MIDI / sidechain audio into the last fx</td></tr>
+            <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.width(v)</code> · <code>.bassmono(hz)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
+            <tr><td><code>.bus("name", amt)</code> · <code>.dry(v)</code></td><td>aux send</td></tr>
+            <tr><td><code>.vel(v)</code> · <code>.clip(v)</code> · <code>.swing(amt)</code> · <code>.nudge(v)</code></td><td>velocity, length, groove</td></tr>
+            <tr><td><code>.scale("…")</code> · <code>.sc(oct)</code></td><td>map degrees / snap notes to a key (<code>.sc</code> = the <code>setscale</code> key)</td></tr>
           </table>
           <table>
             <tr><th>Modulators</th><th></th></tr>
-            <tr><td><code>sine/saw/tri/square/ramp/rand(rate)</code></td><td>LFOs, 0..1</td></tr>
+            <tr><td><code>sine/saw/tri/square/ramp/rand/perlin(rate)</code></td><td>LFOs, 0..1</td></tr>
             <tr><td><code>lfo("shape", {rate, mode})</code></td><td>hand-drawn shape</td></tr>
             <tr><td><code>env({a, d, s, r})</code></td><td>per-note ADSR</td></tr>
             <tr><td><code>.range(lo, hi)</code></td><td>rescale a 0..1 signal</td></tr>
@@ -1275,20 +910,17 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>.add .sub .mul .div .mod</code></td><td>arithmetic (structure from the left)</td></tr>
             <tr><td><code>.when(cond, fn)</code></td><td>conditional transform</td></tr>
             <tr><td><code>.fast(f)</code> · <code>.slow(f)</code></td><td>playback rate (negative = reverse)</td></tr>
-            <tr><td><code>.degrade(p)</code> · <code>.ply(n)</code> · <code>.echo(n, dt)</code></td><td>rhythmic reshaping</td></tr>
-            <tr><td><code>.arp(pat)</code></td><td>arpeggiate a chord (indices wrap by octaves)</td></tr>
-            <tr><td><code>.hold(trig)</code></td><td>sample &amp; hold</td></tr>
-            <tr><td><code>.seg(n)</code></td><td>sample &amp; hold on an even n-per-cycle grid</td></tr>
+            <tr><td><code>.degrade(p)</code> · <code>.ply(n)</code> · <code>.echo(n, dt)</code> · <code>.arp(pat)</code></td><td>rhythmic reshaping</td></tr>
+            <tr><td><code>.hold(trig)</code> · <code>.seg(n)</code></td><td>sample &amp; hold</td></tr>
           </table>
           <table>
             <tr><th>Session</th><th></th></tr>
             <tr><td><code>name: …</code></td><td>a track</td></tr>
             <tr><td><code>_name:</code> / <code>Sname:</code></td><td>mute / solo</td></tr>
-            <tr><td><code>$:</code> / bare lines</td><td>setup blocks</td></tr>
-            <tr><td><code>setbpm(120)</code></td><td>tempo (4 beats/cycle)</td></tr>
-            <tr><td><code>setscale("F minor")</code></td><td>the key <code>.sc()</code> reads (hoisted)</td></tr>
-            <tr><td><code>.log()</code></td><td>print this track's events to the console</td></tr>
-            <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code></td><td>eval · stop</td></tr>
+            <tr><td><code>$:</code> / bare lines</td><td>setup</td></tr>
+            <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
+            <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
+            <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code> · <code>ctrl+b</code> · <code>ctrl+g</code></td><td>eval · stop · bounce · mixer</td></tr>
           </table>
         </section>
 

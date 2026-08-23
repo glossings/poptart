@@ -5,17 +5,60 @@ no completion notes.
 
 ---
 
-[ ] Visualize velocity and probability in pianoroll
-[ ] Double check what's going on with `arp`. It seems to have some weird `squeeze`-like behavior
-[ ] see if we can get highlighting to work with string templates
-[ ] signal in format string
-```js
-const myInt = rand().mul(8).round()
-$: `<
-  0 4 ${myInt}
-  0 4 ${myInt}
->*8`.as("n").scale("F3 minor")
-```
+[ ] Preset morph: `preset("A").morph("B", sig)` interpolates the plugin's *parameter vector*
+    (VSTPlugin getn/setn), not the opaque .fxp chunk - the chunk (wavetables etc.) is why a Serum
+    preset is 5MB and it can't be interpolated. Capture the vector with getn at preset-save time
+    (the instance is in that state right then) and store it beside the blob; backfill old presets
+    on next load. Morph A→B = load A's chunk as usual, then slide only the params that differ
+    between A and B toward B (a few dozen, not the 1000+ the plugin exposes). Limits to document:
+    non-param state (wavetable choice, FX order) can't morph; discrete params step through their
+    intermediate options - `morph({ except: [...] })`, or detect discreteness once per plugin by
+    probing the /vst_param display string at a few values and caching it.
+
+[ ] MIDI-FX plugin hosting in the note chain: `note(...).midifx("SomeArp").synth("Serum 2")`.
+    VSTPlugin delivers plugin MIDI-out to sclang via `midiReceived`, not plugin-to-plugin on the
+    server, so the arp's notes take an OSC round-trip before reaching the synth (a few ms of
+    latency/jitter; fine for arps/chord tools). Same path means the output can be captured as a
+    pattern later (freeze-to-code).
+
+[ ] `mutate()` - for presets: a seeded random walk over a subset of params (reuses the A/B param
+    diff from morph to decide what to touch), evolving per cycle, diff shown in the preset panel.
+    For patterns: seeded per-cycle variation of the pattern's events.
+
+[ ] Arrangement: `arrange()` opens an arrangement painter - rows are labeled blocks,
+    columns are cycles, paint cells to say when a block is audible. Stored like a pianoroll
+    (registry object serialized into the file, panel in the sidebar) and round-trips to a text form
+    (`arrange({ kick: "0-8 16-", pad: "8-16" })`). The scheduler masks each label's pattern by its
+    painted ranges. NOT a label-token mini string - a section is a *set* of blocks, which is why
+    muting several tracks at once was the blocker. To settle: blocks not referenced by the
+    arrangement keep playing live (probably yes - that's what keeps it livecoding).
+
+[ ] Alt+drag scrubbing in the editor: on a numeric literal, drag scrubs the value (hot reload
+    applies it live); on a string literal in a known list (sound names, presets, scales, lfo
+    shapes, plugin names) it steps through the completion list - live-apply for sounds/scales,
+    debounce to drag-end for plugin/preset loads. Alt+horizontal drag inside a mini string rotates
+    its tokens.
+
+[ ] `env(source)` as an envelope follower: `env("kick")` / `env(audio("kick"), { attack, release })`
+    delivered as a control-rate signal the way midicc is. Same word as the note-driven ADSR
+    (attack/release mean the same thing in both); the source decides which it is. Unlocks ducking
+    without a compressor, `param("Cutoff", env("kick").range(...))`, etc.
+
+[ ] `smooth(t)` - exponential lag on any signal (what lfo glide does, generalized). Not `slew`.
+
+[ ] `read("label")` - another block's Signal as a signal: `.note` / `.vel` (held since its last
+    onset), `.trig` (1 at its onsets, usable as struct). No event bus: both patterns are
+    deterministic functions of cycle time in one scheduler, so it's a registry lookup that queries
+    the other block's Signal at eval time. Warn on read cycles (a reads b reads a). A muted block
+    still reads (Cirklon-style: muted tracks keep clocking).
+
+[ ] `count()` - onset counter for the track (or `count(read("x").trig)` for another's), defined as
+    the onset integral from cycle 0 so it's pure, survives re-eval and can be cached with cumulative
+    sums per cycle. `.mod(4)` gives "every nth hit"; `y.rot(count(read("x").note.gt(24)))` is the
+    Cirklon "when X does this, do that to Y" idiom.
+
+[ ] `rot(n)` - rotate the pattern by n steps; n patternable/signal-driven (pairs with count/read).
+
 [ ] Mixer analysis: peak followers → RMS, and a true windowed correlation. The band analyzer in
     sc/poptart.scd (`buildMixDef`) measures each band with `Amplitude.kr`, which peak-follows the
     rectified signal. Two consequences, both display-only — nothing here affects audio:
