@@ -49,15 +49,15 @@ test('.sc() on a degree pattern is .scale(<the global scale>)', () => {
 
 test('.sc() on a note pattern quantizes into the global scale, like .scale()', () => {
   setGlobalScale('C major');
-  // f#4 (54) is out of key and bends down to f4 (53); the others already belong.
-  assert.deepEqual(values(note("c4 e4 f#4").sc()), [48, 52, 53]);
+  // f#4 (78) is out of key and bends down to f4 (77); the others already belong.
+  assert.deepEqual(values(note("c4 e4 f#4").sc()), [72, 76, 77]);
 });
 
 test('.sc(octave) re-roots the scale - the same thing as naming the octave in .scale()', () => {
   setGlobalScale('F minor');
   assert.deepEqual(values(n("0 2 4").sc(3)), values(n("0 2 4").scale('f3 minor')));
-  // bare .sc() leaves the root where setscale put it (octave 5 unless the name said otherwise)
-  assert.deepEqual(values(n("0").sc()), values(n("0").sc(5)));
+  // bare .sc() leaves the root where setscale put it (octave 3 unless the name said otherwise)
+  assert.deepEqual(values(n("0").sc()), values(n("0").sc(3)));
   setGlobalScale('f3 minor');
   assert.deepEqual(values(n("0").sc()), values(n("0").sc(3)));
 });
@@ -88,9 +88,9 @@ test('midiToDegree inverts degreeToMidi, and rounds an out-of-key note to the ne
   for (const scale of ['F3 minor', 'c5 major', 'bb2 mixolydian']) {
     for (let d = -9; d <= 20; d++) assert.equal(midiToDegree(degreeToMidi(d, scale), scale), d, `${scale} degree ${d}`);
   }
-  // f#3 (42) is not in F minor: degree 0 (f3 = 41) and degree 1 (g3 = 43) are equally close, and
+  // f#3 (66) is not in F minor: degree 0 (f3 = 65) and degree 1 (g3 = 67) are equally close, and
   // the tie resolves downward the way quantizeToScale rounds.
-  assert.equal(midiToDegree(42, 'F3 minor'), 0);
-  // eb4 (51) in C major sits between d4 (50) and e4 (52); the lower one wins the tie.
-  assert.equal(degreeToMidi(midiToDegree(51, 'c4 major'), 'c4 major'), 50);
+  assert.equal(midiToDegree(66, 'F3 minor'), 0);
+  // eb4 (75) in C major sits between d4 (74) and e4 (76); the lower one wins the tie.
+  assert.equal(degreeToMidi(midiToDegree(75, 'c4 major'), 'c4 major'), 74);
 });

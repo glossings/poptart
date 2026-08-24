@@ -3567,14 +3567,14 @@ const PR_LANE_PAD = 5; // lane inset above 1.0 / below 0.0, so end-stop markers 
 const PR_LANE_CARET_W = 7; // solid caret after the value lane's channel label, marking it clickable
 const PR_ROWS = 24; // visible semitone rows (2 octaves)
 const PR_GUTTER = 54; // left piano-keyboard gutter, px
-// Top row when a fresh/empty roll opens - a MIDI note, framed 24 rows down to 24, so the window is
-// exactly the two octaves c2..b3 (this package names middle C c5 - see notes.mjs). The bottom row
-// is the sampler's native pitch: MIDI 24 is where a sample plays as recorded (DEFAULT_SYNTH_NOTE,
-// and the engine's repitch anchor), so on a sampler roll the "as recorded" row is the floor of the
-// window rather than somewhere off the bottom of it. It is also the register poptart's own idiom
-// writes in - the note() examples through the docs are c2/c3/f3. A roll that already HAS notes
-// ignores this and frames its own (prFramePitch), so this is only what an empty one opens at.
-const PR_DEFAULT_TOP = 47;
+// Top row when a fresh/empty roll opens - a MIDI note, framed 24 rows down to 60, so the window is
+// the two octaves starting at middle C. The bottom row is the sampler's native pitch: MIDI 60 is
+// where a sample plays as recorded (DEFAULT_SYNTH_NOTE, and the engine's repitch anchor), so on a
+// sampler roll the "as recorded" row is the floor of the window rather than somewhere off the
+// bottom of it. Repitching DOWN now has room below that floor (5 octaves of it, where the old
+// anchor at 24 left only 2) - scroll to reach it. A roll that already HAS notes ignores this and
+// frames its own (prFramePitch), so this is only what an empty one opens at.
+const PR_DEFAULT_TOP = 83;
 // Top row an INDEX roll opens at: index 0 sits on the bottom row, because a pack is counted up
 // from its first file and nothing lives below it. (prMetrics clamps pitchTop to at least this, so
 // the axis can never be scrolled past 0 into negative indices.)
@@ -3655,7 +3655,9 @@ let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor up
 let prRefreshCursor = () => {}; // re-derives the canvas cursor in place (set by initPianorollCanvas)
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const midiName = (m) => `${NOTE_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12)}`;
+// c3 = 60 (see notes.mjs), so the octave number is two below the raw MIDI octave: 60 -> C3,
+// and the bottom of the range reads C-2, which is what plugin displays show there too.
+const midiName = (m) => `${NOTE_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12) - 2}`;
 const isBlackKey = (m) => [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
 const pitchClass = (m) => ((m % 12) + 12) % 12;
 
@@ -10232,7 +10234,7 @@ async function doStop() {
 // ---------------------------------------------------------------------------------------------
 
 const KB_SEMITONES = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12, o: 13, l: 14, p: 15 };
-const KB_BASE_NOTE = 48; // MIDI note the home-row `a` plays at octave shift 0 (C, this package's c5 = 60)
+const KB_BASE_NOTE = 48; // MIDI note the home-row `a` plays at octave shift 0 (c2, this package's c3 = 60)
 const KB_OCT_MIN = -3;
 const KB_OCT_MAX = 4;
 const KB_CONTROL_KEYS = new Set(['z', 'x', 'c', 'v']); // octave -/+, velocity -/+ (never notes)

@@ -10,7 +10,7 @@
 //           drawn greyed out, still movable, still holding its lane against the overlap rule - but
 //           it never sounds and it isn't converted to mini-notation. Unmuting it is one keypress,
 //           which is the point of keeping it in the string rather than deleting it.
-//   midi  - MIDI note number, 0..127 (this package's c5 = 60 convention)
+//   midi  - MIDI note number, 0..127 (this package's c3 = 60 convention)
 //   index - optional sample index, >= 0 (omitted when 0, the default): which file of the pack this
 //           event plays, the `i` channel. EVERY event has both a pitch and an index - they are two
 //           channels of one event, not two kinds of event - and the roll's mode only says which of
@@ -55,11 +55,11 @@ export const PIANOROLL_DEFAULT_STEPS = 16;
 export const PIANOROLL_MAX_GRID = 512; // finest grid the retime buttons will push a roll to
 export const PIANOROLL_MODES = ['note', 'index'];
 // What the channel a roll ISN'T being drawn on is worth. A note drawn on the index axis plays at
-// c2 - the pitch a sample sounds at unrepitched, and what a note-less pattern fires anyway
+// MIDI 60 - the pitch a sample sounds at unrepitched, and what a note-less pattern fires anyway
 // (DEFAULT_SYNTH_NOTE in signal.mjs) - and a note drawn on the piano keyboard plays the pack's
 // first file. Both are the value that channel has when nobody has set it, so an event drawn on
 // one axis is silent about the other rather than asserting anything.
-export const PIANOROLL_DEFAULT_NOTE = 24;
+export const PIANOROLL_DEFAULT_NOTE = 60;
 export const PIANOROLL_DEFAULT_INDEX = 0;
 // How far off its cell one note may be drawn, either way. Half a cell is where a nudge stops being
 // a feel and starts being a different rhythm - past it the note has swapped places with the cell
@@ -557,7 +557,11 @@ function rollOctave(notes, scale) {
   if (!notes.length) return octave ?? DEFAULT_SCALE_OCTAVE;
   const rootPc = ((noteToMidi(`${root}0`) ?? 0) % 12 + 12) % 12;
   const lowest = Math.min(...notes.map((nt) => Math.round(nt.midi)));
-  return Math.floor((lowest - rootPc) / 12);
+  // Octave NUMBERS are not raw MIDI octaves - where they start depends on the naming convention
+  // (c3 = 60, so octave 0 begins at MIDI 24). Ask notes.mjs where c0 is rather than hard-coding
+  // the offset, so this keeps agreeing with scaleAtOctave if that convention ever moves again.
+  const c0 = noteToMidi('c0') ?? 0;
+  return Math.floor((lowest - rootPc - c0) / 12);
 }
 
 function fmt(v) {

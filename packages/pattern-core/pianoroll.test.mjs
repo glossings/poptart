@@ -189,15 +189,15 @@ test('pianoRollToMini: velocity + probability fields', () => {
 // In a key the roll converts to DEGREES, so re-keying the patch moves the notes. The octave rides
 // on `.sc()` rather than on the numbers, which keeps every degree non-negative.
 test('pianoRollToMini: scale mode writes n degrees plus .sc(octave)', () => {
-  // f3 = 41 is the root of "F minor" at octave 3, so the lowest note drawn is degree 0; ab3 (44)
-  // is the minor third, degree 2; c4 (48) the fifth, degree 4.
+  // f3 = 65 is the root of "F minor" at octave 3, so the lowest note drawn is degree 0; ab3 (68)
+  // is the minor third, degree 2; c4 (72) the fifth, degree 4.
   assert.equal(
-    pianoRollToMini(parsePianoRoll('41,0,1 44,1,1 48,2,1'), { grid: 4, len: 3, scale: 'F minor' }),
+    pianoRollToMini(parsePianoRoll('65,0,1 68,1,1 72,2,1'), { grid: 4, len: 3, scale: 'F minor' }),
     'n(`<\n  0 2 4\n>*4`).sc(3)',
   );
   // ...and with the other fields in play it's the same `.as()` form with `n` in the pitch slot.
   assert.equal(
-    pianoRollToMini(parsePianoRoll('41,0,2,0.5 48,2,1'), { grid: 4, len: 4, scale: 'F minor' }),
+    pianoRollToMini(parsePianoRoll('65,0,2,0.5 72,2,1'), { grid: 4, len: 4, scale: 'F minor' }),
     '`<\n  0:0.5:2 ~ 4 ~\n>*4`.as("n:vel:clip").sc(3)',
   );
   // No scale: unchanged, absolute MIDI numbers.
@@ -208,10 +208,10 @@ test('pianoRollToMini: scale mode writes n degrees plus .sc(octave)', () => {
 });
 
 test('pianoRollToMini: scale mode rounds out-of-key notes to the nearest degree', () => {
-  // 42 (f#3) is not in F minor, and sits a semitone above degree 0 and a semitone below degree 1;
+  // 66 (f#3) is not in F minor, and sits a semitone above degree 0 and a semitone below degree 1;
   // the tie resolves downward, exactly as quantizeToScale rounds.
   assert.equal(
-    pianoRollToMini(parsePianoRoll('41,0,1 42,1,1'), { grid: 4, len: 2, scale: 'F minor' }),
+    pianoRollToMini(parsePianoRoll('65,0,1 66,1,1'), { grid: 4, len: 2, scale: 'F minor' }),
     'n(`<\n  0 0\n>*4`).sc(3)',
   );
 });
@@ -278,12 +278,12 @@ test('pianoRollToMini: a field every note agrees on is lifted onto a control cal
   // One PITCH throughout - a drum lane, or a repeated note - leaves the varying fields in the
   // cells behind a .as() that no longer has a pitch slot at all.
   assert.equal(
-    pianoRollToMini(parsePianoRoll('60,0,2,0.5 60,2,3,0.5'), { grid: 4, len: 4 }),
-    '`<\n  2 ~ 3 ~\n>*4`.as("clip").note(60).vel(0.5)',
+    pianoRollToMini(parsePianoRoll('62,0,2,0.5 62,2,3,0.5'), { grid: 4, len: 4 }),
+    '`<\n  2 ~ 3 ~\n>*4`.as("clip").note(62).vel(0.5)',
   );
   // In a key it's the degree that lifts out, ahead of the .sc() that reads it.
   assert.equal(
-    pianoRollToMini(parsePianoRoll('41,0,2,0.5 41,2,4,1'), { grid: 4, len: 4, scale: 'F minor' }),
+    pianoRollToMini(parsePianoRoll('65,0,2,0.5 65,2,4,1'), { grid: 4, len: 4, scale: 'F minor' }),
     '`<\n  0.5:2 ~ 1:4 ~\n>*4`.as("vel:clip").n(0).sc(3)',
   );
   // Nothing varies at all: the cells are still the rhythm, so the pitch stays in them and only the
@@ -344,7 +344,7 @@ test('pianoRollToMini: muted notes are left out', () => {
   );
   // a muted note is also not a reason to emit the vel/clip fields, nor to pick the octave
   assert.equal(
-    pianoRollToMini(parsePianoRoll('!41,0,2,0.5 48,2,1'), { grid: 4, len: 4, scale: 'F minor' }),
+    pianoRollToMini(parsePianoRoll('!65,0,2,0.5 72,2,1'), { grid: 4, len: 4, scale: 'F minor' }),
     'n(`<\n  ~ ~ 4 ~\n>*4`).sc(3)',
   );
 });
@@ -578,13 +578,13 @@ test('clipOverlaps: two files struck at one pitch and onset are not an overlap',
 // of the channel). A roll that sets no index says nothing about the channel at all, so a later
 // .i() on it means exactly what it always meant.
 test('pianoroll(): the drawn index rides on every event', () => {
-  const steps = pianoroll('24:0,0,2 24:3,4,1,0.5', { grid: 8, len: 8 }).stepsForCycle(0);
+  const steps = pianoroll('60:0,0,2 60:3,4,1,0.5', { grid: 8, len: 8 }).stepsForCycle(0);
   assert.deepEqual(steps.map((st) => st.cfg), [{ index: 0 }, { index: 3 }]);
-  assert.deepEqual(steps.map((st) => st.value), [24, 24]); // c2 - a sample plays as recorded
+  assert.deepEqual(steps.map((st) => st.value), [60, 60]); // c3 - a sample plays as recorded
   assert.deepEqual(steps.map((st) => [st.start, st.end, st.vel]), [[0, 0.25, 1], [0.5, 0.625, 0.5]]);
   // a stack is several files struck together - one onset, an index each, which is exactly why the
   // index rides on the event rather than being sampled off a channel at the shared onset
-  const stack = pianoroll('24:0,0,1 24:2,0,1 24:5,0,1', { grid: 8 }).stepsForCycle(0);
+  const stack = pianoroll('60:0,0,1 60:2,0,1 60:5,0,1', { grid: 8 }).stepsForCycle(0);
   assert.deepEqual(stack.map((st) => st.cfg.index).sort((a, b) => a - b), [0, 2, 5]);
   assert.ok(stack.every((st) => st.start === 0));
   // a roll of plain pitches leaves the channel alone
@@ -604,16 +604,16 @@ test('pianoroll(): the mode changes no sound', () => {
 
 // The index has to survive becoming a sampler - that is the whole chain the channel exists for.
 test('pianoroll(): the drawn index carries through .s()', () => {
-  const steps = pianoroll('24:0,0,1 24:3,2,1', { grid: 4 }).s('breaks').stepsForCycle(0);
+  const steps = pianoroll('60:0,0,1 60:3,2,1', { grid: 4 }).s('breaks').stepsForCycle(0);
   assert.deepEqual(steps.map((st) => st.value), ['breaks', 'breaks']);
   assert.deepEqual(steps.map((st) => st.cfg.index), [0, 3]);
-  assert.deepEqual(steps.map((st) => st.cfg.note), [24, 24]); // repitched to native speed, as drawn
+  assert.deepEqual(steps.map((st) => st.cfg.note), [60, 60]); // repitched to native speed, as drawn
   // an explicit .i() afterwards is the later word. A patterned one stamps its own value onto each
   // event; a plain number has no grid to stamp from, so it takes the drawn index back OFF them and
   // is sampled off the channel at each onset instead.
-  const patterned = pianoroll('24:0,0,1 24:3,2,1', { grid: 4 }).s('breaks').i('7 7').stepsForCycle(0);
+  const patterned = pianoroll('60:0,0,1 60:3,2,1', { grid: 4 }).s('breaks').i('7 7').stepsForCycle(0);
   assert.deepEqual(patterned.map((st) => st.cfg.index), [7, 7]);
-  const flat = pianoroll('24:0,0,1 24:3,2,1', { grid: 4 }).s('breaks').i(7);
+  const flat = pianoroll('60:0,0,1 60:3,2,1', { grid: 4 }).s('breaks').i(7);
   assert.deepEqual(flat.stepsForCycle(0).map((st) => st.cfg.index), [undefined, undefined]);
   assert.equal(flat.sampler.index.sample(0, 1, 0), 7);
 });
@@ -625,7 +625,7 @@ test('pianoroll(): the drawn index carries through .s()', () => {
 test('pianoRollToMini: the i channel is written whenever it is set', () => {
   // only files vary: the pitch is the default throughout, so no note field at all
   assert.equal(
-    pianoRollToMini(parsePianoRoll('24:0,0,1 24:3,1,1 24:1,2,1'), { grid: 4, len: 4, mode: 'index' }),
+    pianoRollToMini(parsePianoRoll('60:0,0,1 60:3,1,1 60:1,2,1'), { grid: 4, len: 4, mode: 'index' }),
     'i(`<\n  0 3 1 ~\n>*4`)',
   );
   // both channels set - the case that used to lose one of them. A token whose trailing fields are
@@ -641,12 +641,12 @@ test('pianoRollToMini: the i channel is written whenever it is set', () => {
   );
   // one index throughout: it stays in the cells (there is nowhere to lift it to) while vel varies
   assert.equal(
-    pianoRollToMini(parsePianoRoll('24:2,0,1,0.5 24:2,1,1,0.9'), { grid: 4, len: 2, mode: 'index' }),
+    pianoRollToMini(parsePianoRoll('60:2,0,1,0.5 60:2,1,1,0.9'), { grid: 4, len: 2, mode: 'index' }),
     '`<\n  2:0.5 2:0.9\n>*4`.as("i:vel")',
   );
   // an index is not a pitch, so a scale can't be written into one
   assert.equal(
-    pianoRollToMini(parsePianoRoll('24:0,0,1 24:3,1,1'), { grid: 4, len: 2, mode: 'index', scale: 'F minor' }),
+    pianoRollToMini(parsePianoRoll('60:0,0,1 60:3,1,1'), { grid: 4, len: 2, mode: 'index', scale: 'F minor' }),
     'i(`<\n  0 3\n>*4`)',
   );
   // a plain melody writes no i field, exactly as it did before the channel existed
@@ -668,7 +668,7 @@ const indexSteps = (sig, cycle) =>
         s: +st.start.toFixed(4),
         e: +soundingEnd(st, sig.noteChannels, at, 1, at).toFixed(4),
         i: st.cfg?.index ?? 0,
-        note: st.cfg?.note ?? 24,
+        note: st.cfg?.note ?? 60,
         vel: channelAt('vel', st, sig.noteChannels, at, 1, at) ?? 1,
       };
     })
@@ -677,9 +677,9 @@ const indexSteps = (sig, cycle) =>
 // ...and what it writes plays what the roll played, which is the only promise →♪ makes.
 test('pianoroll(): an index roll plays its own mini-notation conversion', () => {
   const cases = [
-    ['24:0,0,1 24:3,2,1', 4, 4, 'index'],
-    ['24:0,0,2 24:3,2,1,0.5 24:1,5,3', 8, 8, 'index'],
-    ['24:2,0,1,0.5 24:2,3,1,0.9', 4, 4, 'index'], // one file throughout, velocity varying
+    ['60:0,0,1 60:3,2,1', 4, 4, 'index'],
+    ['60:0,0,2 60:3,2,1,0.5 60:1,5,3', 8, 8, 'index'],
+    ['60:2,0,1,0.5 60:2,3,1,0.9', 4, 4, 'index'], // one file throughout, velocity varying
     ['60:0,0,1 67:3,2,1', 4, 4, 'note'], // both channels at once
   ];
   for (const [str, grid, len, mode] of cases) {
@@ -695,7 +695,7 @@ test('as(): the i field rides on the event and survives .s()', () => {
   assert.deepEqual(steps.map((st) => st.cfg.index), [0, 3]);
   assert.deepEqual(steps.map((st) => st.value), ['breaks', 'breaks']);
   // with no pitch field every present token fires the default note, as .as("vel") does
-  assert.deepEqual(mini('<0 3>*2').as('i').stepsForCycle(0).map((st) => st.value), [24, 24]);
+  assert.deepEqual(mini('<0 3>*2').as('i').stepsForCycle(0).map((st) => st.value), [60, 60]);
   // alongside a pitch, both land on the same event
   const both = mini('<60:3 67:5>*2').as('note:i').s('breaks').stepsForCycle(0);
   assert.deepEqual(both.map((st) => [st.cfg.note, st.cfg.index]), [[60, 3], [67, 5]]);
@@ -705,7 +705,7 @@ test('as(): the i field rides on the event and survives .s()', () => {
 // A sampler pattern is where the index channel normally lives; the drawn roll and the written
 // control have to land on the same events.
 test('pianoroll(): a drawn index agrees with s().i()', () => {
-  const drawn = pianoroll('24:0,0,1 24:3,1,1 24:1,2,1 24:5,3,1', { grid: 4, mode: 'index' }).s('breaks');
+  const drawn = pianoroll('60:0,0,1 60:3,1,1 60:1,2,1 60:5,3,1', { grid: 4, mode: 'index' }).s('breaks');
   assert.deepEqual(indexSteps(drawn, 0), indexSteps(s('breaks*4').i('0 3 1 5'), 0));
 });
 
@@ -716,7 +716,7 @@ test('a head control survives .vel()/.clip() on its way to .s()', () => {
   const steps = i('<0 12 6>*3').vel(0.8).s('dstab').stepsForCycle(0);
   assert.deepEqual(steps.map((st) => st.value), ['dstab', 'dstab', 'dstab']);
   assert.deepEqual(steps.map((st) => st.cfg.index), [0, 12, 6]);
-  assert.deepEqual(steps.map((st) => st.cfg.note), [24, 24, 24]); // not 0/12/6 read as pitches
+  assert.deepEqual(steps.map((st) => st.cfg.note), [60, 60, 60]); // not 0/12/6 read as pitches
   // it is exactly the method form, which is what "head position" promises
   assert.deepEqual(
     indexSteps(i('<0 12 6>*3').vel(0.8).s('dstab'), 0),

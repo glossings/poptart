@@ -995,7 +995,7 @@ class OscEngine {
    * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
    * whole sample lasts exactly the target number of cycles, `note` a further multiplier that
-   * repitches around MIDI 24 ("c2" = as recorded), `flip` a sign flip plus a re-anchored onset.
+   * repitches around MIDI 60 (= as recorded), `flip` a sign flip plus a re-anchored onset.
    * `vel` scales volume linearly.
    *
    * Returns what it resolved (the loop modes as their names, for the log line) - { index, begin,
@@ -1052,7 +1052,10 @@ class OscEngine {
       const target = cfg.fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : cfg.fit;
       if (target > 0) speed *= measures / target;
     }
-    if (cfg.note != null) speed *= 2 ** ((cfg.note - 24) / 12); // repitch: MIDI 24 ("c2") = as recorded
+    // Repitch anchor: MIDI 60 plays the file as recorded (the standard sampler root key). Mirrors
+    // DEFAULT_SYNTH_NOTE in pattern-core's signal.mjs - the two are deliberately duplicated across
+    // the package boundary, so a change here needs the same change there.
+    if (cfg.note != null) speed *= 2 ** ((cfg.note - 60) / 12);
 
     // Speed is a continuous rate read off `begin`: the playhead leaves `begin` at `speed`, so
     // positive runs up to `end` and 0 holds still. Going the other way it walks BACKWARDS out of

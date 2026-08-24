@@ -167,11 +167,11 @@ test('euclid: a patterned argument holds for the whole cycle, not per hit', () =
 // ---------------------------------------------------------------------------------------------
 
 test('expr: a note name is arithmetic\'s number, so "(c2 + 12)" transposes', () => {
-  // c5 = 60 here, so c2 = 24 and c2 + 12 = c3. Without the coercion the "+" quietly did nothing
+  // c3 = 60 here, so c2 = 48 and c2 + 12 = c3. Without the coercion the "+" quietly did nothing
   // (the value stayed "c2") and note() then played the untransposed note.
-  assert.deepEqual(values('(c2 + 12)'), ['36']);
-  assert.deepEqual(values('(c2 + <0 12>)', 1), ['36']);
-  assert.deepEqual(values('(C#2 + 1)'), ['26']);
+  assert.deepEqual(values('(c2 + 12)'), ['60']);
+  assert.deepEqual(values('(c2 + <0 12>)', 1), ['60']);
+  assert.deepEqual(values('(C#2 + 1)'), ['50']);
   // A value that is neither a number nor a note name still passes through untouched.
   assert.deepEqual(values('(bd + 1)'), ['bd']);
 });

@@ -103,8 +103,8 @@ test('the config that varies per event is on the line; streams are not', () => {
 test('a synth line carries the note and velocity', () => {
   const lines = linesOf(note('c3 e3').vel('1 0.5').log());
   assert.deepEqual(lines.map((l) => l.replace(/^\[tops\] /, '')), [
-    '0.000 -> 0.500  note=36 vel=1',
-    '0.500 -> 1.000  note=40 vel=0.5',
+    '0.000 -> 0.500  note=60 vel=1',
+    '0.500 -> 1.000  note=64 vel=0.5',
   ]);
 });
 

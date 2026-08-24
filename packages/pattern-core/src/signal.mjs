@@ -2308,7 +2308,7 @@ function factorWindows(factorSig, cycle) {
   return [{ start: 0, end: 1, rate: Number(factorSig.sample(cycle + 0.5, 1)), locs: [] }];
 }
 
-// A value as arithmetic sees it: a number, a numeric string, or a NOTE NAME - "C2" is MIDI 24, so
+// A value as arithmetic sees it: a number, a numeric string, or a NOTE NAME - "C2" is MIDI 48, so
 // `note("C2".add("0 12"))` transposes instead of producing NaN. The operand is a pattern of notes
 // before note()/n() has had a chance to convert it, and "add 12 to a note" is the same operation
 // either side of that builder. Anything else - a sound like "bd", a sample pack name - stays NaN, and
@@ -3231,9 +3231,12 @@ function samplerPattern(builder, value, kind) {
 // Sampler controls as top-level builders (Strudel's "control patterns")
 // ---------------------------------------------------------------------------------------------
 
-// What a note-less synth("X") plays: C2 (MIDI 24 in this package's c5 = 60 convention), one
-// whole-cycle note per cycle - the same note at which a sample plays back at native speed.
-const DEFAULT_SYNTH_NOTE = 24;
+// What a note-less synth("X") plays: MIDI 60 - one whole-cycle note per cycle. It is also the
+// note at which a sample plays back at native speed: the engine's repitch anchor (the matching
+// literal is in osc-engine's playSample - keep the two in step). 60 is the standard sampler root
+// key, and puts a sampler's neutral note and a synth's middle on the same number, so the two
+// track kinds share one register. Same value as DEFAULT_TRIG_NOTE below, for the same reason.
+const DEFAULT_SYNTH_NOTE = 60;
 
 // Every sampler channel, by the name of the method that sets it: which key it lives under in
 // Sig#sampler, and what it's worth when nobody has set it - the value a combinator has to combine
@@ -3665,12 +3668,12 @@ export function irand(n) {
 }
 
 // The pitch a .midi() injection fires for a note-less (drum) source, when no { note } is given:
-// middle C (c5 = 60 here). A MIDI-triggered ducker (Kickstart, LFOTool) ignores the note, so any
+// middle C (c3 = 60 here). A MIDI-triggered ducker (Kickstart, LFOTool) ignores the note, so any
 // fixed pitch works; a melodic source passes its own pitch through instead.
 const DEFAULT_TRIG_NOTE = 60;
 
 /**
- * Pattern starting from the instrument: synth("Serum 2") plays a default C2 every cycle until
+ * Pattern starting from the instrument: synth("Serum 2") plays a default middle C every cycle until
  * notes are given - add them before or after (`n("0 2 3").scale("F minor").synth("Serum 2")`
  * and `synth("Serum 2").n("0 2 3").scale("F minor")` are equivalent). Takes the same optional
  * `{ state }` second argument as Sig#synth.

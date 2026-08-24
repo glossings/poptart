@@ -3,11 +3,14 @@
 
 const NOTE_LETTER_SEMITONES = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
 
-// MIDI convention used throughout this package: c5 = 60 (matches general MIDI's "middle C",
-// and is the same convention Strudel itself uses).
+// MIDI convention used throughout this package: c3 = 60. This is the naming most plugin key
+// displays use, so a note name written here reads the same on the synth's own keyboard - that
+// match is the whole reason for the choice. It differs from Tidal (c5 = 60) and from Strudel
+// (c4 = 60), so note names copied from those sound two octaves / one octave off respectively.
+// Bare MIDI numbers are unaffected either way, and most of a pattern's pitch data is numbers.
 const NOTE_NAME_RE = /^([a-gA-G])([#sSbf]*)(-?\d+)?$/;
 
-/** "c4" / "f#3" / "Bb5" -> MIDI number, or null if `name` isn't a note name. c5 = MIDI 60. */
+/** "c4" / "f#3" / "Bb5" -> MIDI number, or null if `name` isn't a note name. c3 = MIDI 60. */
 export function noteToMidi(name) {
   const m = NOTE_NAME_RE.exec(String(name).trim());
   if (!m) return null;
@@ -17,8 +20,8 @@ export function noteToMidi(name) {
     if (acc === '#' || acc === 's' || acc === 'S') semitone += 1;
     else if (acc === 'b' || acc === 'f') semitone -= 1;
   }
-  const octave = octaveStr !== undefined ? Number(octaveStr) : 5;
-  return 60 + semitone + (octave - 5) * 12;
+  const octave = octaveStr !== undefined ? Number(octaveStr) : 3;
+  return 60 + semitone + (octave - 3) * 12;
 }
 
 /** Parses either a plain number (already a MIDI-ish value) or a note name string. */
@@ -84,7 +87,7 @@ export function parseScaleName(scaleName) {
     throw new Error(`[notes] unknown scale "${modePart}" (in "${scaleName}")`);
   }
 
-  const rootMidi = noteToMidi(/\d/.test(rootPart) ? rootPart : `${rootPart}5`);
+  const rootMidi = noteToMidi(/\d/.test(rootPart) ? rootPart : `${rootPart}3`);
   if (rootMidi == null) {
     throw new Error(`[notes] unrecognized scale root "${rootPart}" (in "${scaleName}")`);
   }
@@ -92,8 +95,8 @@ export function parseScaleName(scaleName) {
   return { rootMidi, intervals };
 }
 
-/** The octave a scale name with no octave of its own sits in (this module's c5 = 60 convention). */
-export const DEFAULT_SCALE_OCTAVE = 5;
+/** The octave a scale name with no octave of its own sits in (this module's c3 = 60 convention). */
+export const DEFAULT_SCALE_OCTAVE = 3;
 
 /**
  * Splits a scale name into `{ root, octave, mode }` exactly the way parseScaleName reads it: the

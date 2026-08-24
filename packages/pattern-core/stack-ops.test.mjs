@@ -90,8 +90,8 @@ test('a stacked sampler control plays one event per layer, each with its own val
 
 test('a stacked repitch turns a sample into a chord', () => {
   assert.deepEqual(cfgs(s('pluck').n('0,7')), [{ note: 0 }, { note: 7 }]);
-  // Bare arithmetic on a sampler aims at the repitch note, whose unset default is 24 (c2).
-  assert.deepEqual(cfgs(s('pluck').add(note('0,7'))), [{ note: 24 }, { note: 31 }]);
+  // Bare arithmetic on a sampler aims at the repitch note, whose unset default is 60 (c3).
+  assert.deepEqual(cfgs(s('pluck').add(note('0,7'))), [{ note: 60 }, { note: 67 }]);
 });
 
 test('different stacked controls cross-product; the same one re-applied does not', () => {

@@ -28,7 +28,7 @@ const API_DOCS = {
   note: {
     kind: 'both',
     sig: 'note(pitches)',
-    desc: 'Absolute pitch pattern - note names or MIDI numbers (c5 = 60). On a sampler it repitches the sample.',
+    desc: 'Absolute pitch pattern - note names or MIDI numbers (c3 = 60). On a sampler it repitches the sample.',
     eg: 'note("c3 e3 g3").synth("Serum 2")',
   },
   s: {
@@ -190,7 +190,7 @@ const API_DOCS = {
   },
 
   // ----------------------------------------------------------------- music-theory helpers
-  noteToMidi: { kind: 'builder', sig: 'noteToMidi(name)', desc: 'Note name → MIDI number ("c4" → 48), the c5 = 60 convention. Plain helper, handy inside your own methods.', eg: 'noteToMidi("f#3")' },
+  noteToMidi: { kind: 'builder', sig: 'noteToMidi(name)', desc: 'Note name → MIDI number ("c3" → 60), the c3 = 60 convention. Plain helper, handy inside your own methods.', eg: 'noteToMidi("f#3")' },
   degreeToMidi: { kind: 'builder', sig: 'degreeToMidi(degree, scale)', desc: 'Scale degree → MIDI number, the conversion .scale() does per value.', eg: 'degreeToMidi(2, "F minor")' },
   parseScaleName: { kind: 'builder', sig: 'parseScaleName(scale)', desc: 'A scale name → { rootMidi, intervals } - the raw material for writing your own chord/voicing helpers.', eg: 'parseScaleName("Bb mixolydian")' },
 

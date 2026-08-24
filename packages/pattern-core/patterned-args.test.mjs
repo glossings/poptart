@@ -168,11 +168,11 @@ test('.ply() switches count at the mixed triggers - n("0").ply("4 3")', () => {
 
 test('arithmetic reads a note name as its MIDI number', () => {
   // `note("C2".add("0 12"))`: after the string shim the add happens before note() ever sees the
-  // value, so the operator has to know that "C2" is 24 - otherwise the note came out NaN.
-  assert.deepEqual(values(note(mini('C2').add('0 12')), 0), [24, 36]);
-  assert.deepEqual(values(mini('c2 e2').add(12), 0), [36, 40]);
+  // value, so the operator has to know that "C2" is 48 - otherwise the note came out NaN.
+  assert.deepEqual(values(note(mini('C2').add('0 12')), 0), [48, 60]);
+  assert.deepEqual(values(mini('c2 e2').add(12), 0), [60, 64]);
   // Converting first, the long way round, gives the same thing.
-  assert.deepEqual(values(note('C2').add('0 12'), 0), [24, 36]);
+  assert.deepEqual(values(note('C2').add('0 12'), 0), [48, 60]);
 });
 
 // ---------------------------------------------------------------------------------------------

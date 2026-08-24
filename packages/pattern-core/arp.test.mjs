@@ -21,8 +21,8 @@ function onsets(sig, cycle = 0) {
 
 const values = (sig, cycle = 0) => onsets(sig, cycle).map((st) => st.value);
 
-// c3 = 36 under this package's c5 = 60 convention.
-const C3 = 36, E3 = 40, G3 = 43, F3 = 41, A3 = 45, C4 = 48;
+// c3 = 60 under this package's c3 = 60 convention.
+const C3 = 60, E3 = 64, G3 = 67, F3 = 65, A3 = 69, C4 = 72;
 
 test('arp: indices pick chord tones low to high, wrapping up an octave past the top', () => {
   const sig = note('[c3,e3,g3]').arp('0 1 2 3');

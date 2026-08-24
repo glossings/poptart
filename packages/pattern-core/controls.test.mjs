@@ -68,10 +68,10 @@ test('a control aimed at a non-sampler pattern says so', () => {
 
 test('arithmetic on a sampler pattern repitches instead of mangling the pack name', () => {
   const up = s('rave').add(7);
-  assert.equal(cfgAt(up, 'note', 0), 31, 'unset note is 24 ("c2", as recorded), so +7 = 31');
+  assert.equal(cfgAt(up, 'note', 0), 67, 'unset note is 60 ("c3", as recorded), so +7 = 67');
   assert.deepEqual(up.stepsForCycle(0).map((x) => x.value), ['rave'], 'the pack name survives');
   // The same thing said with a note() operand, Strudel's combinator idiom.
-  assert.equal(cfgAt(s('rave').add(note(7)), 'note', 0), 31);
+  assert.equal(cfgAt(s('rave').add(note(7)), 'note', 0), 67);
   // An existing repitch is the left operand.
   assert.equal(cfgAt(s('rave').note(36).add(12), 'note', 0), 48);
 });
@@ -84,13 +84,13 @@ test('the repitch channel keeps its note/degree kind through the arithmetic', ()
 test('a patterned operand gives the sampler pattern its structure', () => {
   const track = s('rave').add(note('0 7'));
   assert.deepEqual(track.stepsForCycle(0).map((x) => x.start), [0, 0.5]);
-  assert.equal(cfgAt(track, 'note', 0.25), 24);
-  assert.equal(cfgAt(track, 'note', 0.75), 31);
+  assert.equal(cfgAt(track, 'note', 0.25), 60);
+  assert.equal(cfgAt(track, 'note', 0.75), 67);
 });
 
 test('a synth pattern is untouched - arithmetic there is still plain value math', () => {
   assert.deepEqual(n('0 1').add(12).stepsForCycle(0).map((x) => x.value), [12, 13]);
-  assert.deepEqual(note('c3').add(note(3)).stepsForCycle(0).map((x) => x.value), [39]);
+  assert.deepEqual(note('c3').add(note(3)).stepsForCycle(0).map((x) => x.value), [63]);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -223,14 +223,14 @@ const eventsOf = (sig) =>
 
 test('a head-position vel triggers the pattern and keeps its velocities', () => {
   // The reported bug: the velocities were read as the pattern's own values, so each kick played at
-  // MIDI note 1 (23 semitones below native speed) with the velocity dropped.
+  // MIDI note 1 (59 semitones below native speed) with the velocity dropped.
   const track = vel('1!4').s('bd');
-  assert.deepEqual(eventsOf(track), eventsOf(note('C2').vel('1!4').s('bd')), 'exactly s("bd").vel("1!4")');
+  assert.deepEqual(eventsOf(track), eventsOf(note('c3').vel('1!4').s('bd')), 'exactly s("bd").vel("1!4")');
   assert.deepEqual(eventsOf(track), [
-    { at: 0, value: 'bd', vel: 1, note: 24 },
-    { at: 0.25, value: 'bd', vel: 1, note: 24 },
-    { at: 0.5, value: 'bd', vel: 1, note: 24 },
-    { at: 0.75, value: 'bd', vel: 1, note: 24 },
+    { at: 0, value: 'bd', vel: 1, note: 60 },
+    { at: 0.25, value: 'bd', vel: 1, note: 60 },
+    { at: 0.5, value: 'bd', vel: 1, note: 60 },
+    { at: 0.75, value: 'bd', vel: 1, note: 60 },
   ]);
   assert.equal(track.noteChannels.vel.sample(0, 1, 0), 1, 'and the channel is set, not just the steps');
 });
@@ -238,18 +238,18 @@ test('a head-position vel triggers the pattern and keeps its velocities', () => 
 test('a pitch after a head-position vel keeps both grids', () => {
   // The second reported bug: .note() replaced the trigger grid and the velocities went with it,
   // leaving one kick per bar instead of four.
-  const track = vel('1!4').note('C2').s('bd');
-  assert.deepEqual(eventsOf(track), eventsOf(note('C2').vel('1!4').s('bd')));
+  const track = vel('1!4').note('c3').s('bd');
+  assert.deepEqual(eventsOf(track), eventsOf(note('c3').vel('1!4').s('bd')));
   assert.equal(track.stepsForCycle(0).length, 4, 'four kicks, not one');
   // An explicit pitch is the pitch that plays - the default only stands in when none is given.
-  assert.deepEqual(eventsOf(vel('1!4').note('C3').s('bd')).map((e) => e.note), [36, 36, 36, 36]);
+  assert.deepEqual(eventsOf(vel('1!4').note('C4').s('bd')).map((e) => e.note), [72, 72, 72, 72]);
 });
 
 test('a head-position control with no pitch plays at native speed', () => {
-  // 24 ("c2") is the note a sample plays back as recorded, the same default a note-less synth("X")
+  // 60 ("c3") is the note a sample plays back as recorded, the same default a note-less synth("X")
   // gets - so a drum hit with no note is a drum hit, not a pitched-down one.
-  for (const track of [vel('1!4').s('bd'), vel(0.6).s('bd'), speed('2').s('bd'), clip('1 2').note('c2').s('bd')]) {
-    assert.deepEqual(new Set(eventsOf(track).map((e) => e.note)), new Set([24]));
+  for (const track of [vel('1!4').s('bd'), vel(0.6).s('bd'), speed('2').s('bd'), clip('1 2').note('c3').s('bd')]) {
+    assert.deepEqual(new Set(eventsOf(track).map((e) => e.note)), new Set([60]));
   }
 });
 
@@ -279,7 +279,7 @@ test('rests in a head-position control stay rests', () => {
 test('a head-position vel on a synth track plays the default note at those velocities', () => {
   const track = vel('1 0.5').synth('Serum 2');
   assert.equal(track.instrument, 'Serum 2');
-  assert.deepEqual(track.stepsForCycle(0).map((x) => [x.value, x.vel]), [[24, 1], [24, 0.5]]);
+  assert.deepEqual(track.stepsForCycle(0).map((x) => [x.value, x.vel]), [[60, 1], [60, 0.5]]);
 });
 
 test('a control is still an operand, not a head - both readings stay available', () => {

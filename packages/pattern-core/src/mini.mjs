@@ -1065,7 +1065,7 @@ function astToSteps(node, cycle, salt = 0) {
   }
 }
 
-// A value as arithmetic sees it: a number, a numeric string, or a NOTE NAME - "c2" is MIDI 24, so
+// A value as arithmetic sees it: a number, a numeric string, or a NOTE NAME - "c2" is MIDI 48, so
 // "(c2 + 12)" transposes to c3 instead of quietly staying c2. Anything else - a sound like "bd", a
 // sample pack - stays NaN, and the operator passes such a value through untouched (see the arith
 // case). Mirrors signal.mjs's numericValue so both spellings of "+" agree.
