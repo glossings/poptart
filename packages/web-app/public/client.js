@@ -2433,6 +2433,12 @@ function parseLfoCall(inner) {
   const rateHz = /hz\s*$/i.test(rateText);
   const rate = Number(rateText.replace(/hz\s*$/i, '')) || 1;
   const mode = (/mode\s*:\s*["'](\w+)["']/.exec(inner) ?? [])[1] ?? 'free';
+  // Read but never authored by the panel: the playhead has to count from the same offset the
+  // engine does, and both of these have to survive a rate/mode edit instead of being written away
+  // by one (see lfoCfgText).
+  const num = (key) => Number((new RegExp(`(?:^|[,{\\s])${key}\\s*:\\s*(-?[\\d.]+)`).exec(inner) ?? [])[1]) || 0;
+  const phase = num('phase');
+  const glide = num('glide');
   let points = null;
   try {
     if (shapeMatch?.[2]?.trim()) points = shapeMod.parseShapePoints(shapeMatch[2]);
@@ -2440,13 +2446,18 @@ function parseLfoCall(inner) {
     // unparseable shape string - fall back to the default below
   }
   if (!points) points = shapeMod.parseShapePoints('0,0 0.5,1 1,0');
-  return { points, rate, rateHz, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
+  return { points, rate, rateHz, phase, glide, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
 }
 
 // The options an lfo() call carries - the half that belongs to the CALL rather than to the shape.
-function lfoCfgText({ rate, rateHz, mode }) {
-  const r = rateHz ? `"${rate}hz"` : String(rate);
-  return mode === 'free' ? `{ rate: ${r} }` : `{ rate: ${r}, mode: '${mode}' }`;
+function lfoCfgText({ rate, rateHz, mode, phase, glide }) {
+  const parts = [`rate: ${rateHz ? `"${rate}hz"` : String(rate)}`];
+  if (mode !== 'free') parts.push(`mode: '${mode}'`);
+  // Options the panel has no control for are carried through rather than rewritten away: an edit
+  // to the rate is an edit to the rate.
+  if (phase) parts.push(`phase: ${phase}`);
+  if (glide) parts.push(`glide: ${glide}`);
+  return `{ ${parts.join(', ')} }`;
 }
 
 function serializeLfoCall(state) {
@@ -2545,8 +2556,8 @@ function lfoUseInCall(id) {
 function lfoCarry() {
   const parts = lfoCallParts();
   if (!parts) return {};
-  const { rate, rateHz, mode } = parseLfoCall(parts.opts);
-  return { callSource: lfoState.callSource, options: { rate, rateHz, mode } };
+  const { rate, rateHz, mode, phase, glide } = parseLfoCall(parts.opts);
+  return { callSource: lfoState.callSource, options: { rate, rateHz, mode, phase, glide } };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2689,8 +2700,8 @@ function openShapeFromIdCall(call, code) {
   // Marked so the panel's rate/mode controls can write back into this call while a definition of
   // its own is on screen (see writeLfoOptions).
   const callSource = cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {});
-  const { rate, rateHz, mode } = parseLfoCall(code.slice(call.open + 1, call.close));
-  if (openShapeById(id, { callSource, options: { rate, rateHz, mode } })) return true;
+  const { rate, rateHz, mode, phase, glide } = parseLfoCall(code.slice(call.open + 1, call.close));
+  if (openShapeById(id, { callSource, options: { rate, rateHz, mode, phase, glide } })) return true;
   callSource.clear();
   return false;
 }
@@ -2766,6 +2777,8 @@ function syncLfoFromCode() {
     lfoState.rate = parsed.rate;
     lfoState.rateHz = parsed.rateHz;
     lfoState.mode = parsed.mode;
+    lfoState.phase = parsed.phase;
+    lfoState.glide = parsed.glide;
   }
   lfoRate.value = lfoState.rate;
   lfoMode.value = lfoState.mode;
@@ -2885,16 +2898,74 @@ function canvasToLfo(px, py) {
   };
 }
 
-// The LFO's phase at this instant, 0..1, or null when there is nothing honest to draw: the panel
-// is closed, the transport is stopped, or the shape is note-gated (its phase belongs to the notes,
-// which the browser doesn't see). A synced rate counts in cycles, a free one in seconds - the same
-// two readings lfoRateHz makes of the same number.
+// The track whose notes gate this shape: the region containing the lfo() call the panel was opened
+// through (or the inline lfo() itself). Null for a definition opened straight from the picker -
+// a _shape(...) on its own belongs to no track, and several calls may be playing it at once.
+function lfoGateRegion() {
+  const range = (lfoState?.callSource ?? lfoState?.marker)?.find();
+  if (!range) return null;
+  const from = cm.indexFromPos(range.from);
+  const to = cm.indexFromPos(range.to);
+  for (const r of patternRegions) {
+    const a = r.anchor.find();
+    if (!a) continue;
+    if (cm.indexFromPos(a.from) <= from && cm.indexFromPos(a.to) >= to) return r;
+  }
+  return null;
+}
+
+// The last note onset at or before `cyclePos` on `region`, in absolute cycles, or null if the grid
+// holds none (nothing has played yet, or the look-back ran off the loaded window). Bounded, since
+// a track that has stopped emitting - a `.when()` gone quiet - would otherwise walk to gridFrom
+// every frame.
+const LFO_GATE_LOOKBACK = 16; // cycles
+function lastGateBefore(region, cyclePos) {
+  const cycle = Math.floor(cyclePos);
+  for (let k = 0; k <= LFO_GATE_LOOKBACK; k++) {
+    const cyc = cycle - k;
+    if (cyc < gridFrom) break;
+    const gates = region.gates.get(cyc);
+    if (!gates?.length) continue;
+    // Sorted ascending, so the last one that has happened is the one this note is playing from.
+    for (let i = gates.length - 1; i >= 0; i--) {
+      if (cyc + gates[i] <= cyclePos) return cyc + gates[i];
+    }
+  }
+  return null;
+}
+
+// The LFO's phase at this instant, 0..1, or null when there is nothing honest to draw (the panel
+// is closed, the clock is stopped, or a note-gated shape has no note to count from yet).
+//
+// The count is pattern-core's lfoPhaseCount, read the same way the engine's own anchor reads it
+// (see scheduler _anchorLFOs): a synced rate counts CYCLES off the transport grid, a "0.5hz" one
+// counts seconds and ignores the grid. In the note-gated modes the count starts at the last note
+// onset instead, exactly as the engine's t_trig does - a retrigger wraps, an envelope plays once
+// and holds its final level, so its line parks at the right edge until the next note.
+//
+// One thing it does not follow: a patterned lfo("<a b>") restarts its shape at each swap, and the
+// swap cycle lives on the scheduler (see _scheduleShapeSwaps). The line is right wherever a swap
+// lands on a period boundary - one shape per pass, which is what a shape pattern is usually for -
+// and drifts within a pass otherwise.
 function lfoPhaseNow() {
-  if (!lfoState || transport.paused || lfoState.mode !== 'free') return null;
-  const cycles = lfoState.rateHz
-    ? (Date.now() / 1000 - transport.baseSec) * lfoState.rate
-    : currentCyclePos() * lfoState.rate;
-  return ((cycles % 1) + 1) % 1;
+  if (!lfoState || transport.paused) return null;
+  const pos = currentCyclePos();
+  let turns;
+  if (lfoState.mode === 'free') {
+    turns = lfoState.rateHz ? (Date.now() / 1000) * lfoState.rate : pos * lfoState.rate;
+  } else {
+    const region = lfoGateRegion();
+    const gate = region && playing ? lastGateBefore(region, pos) : null;
+    if (gate == null) return null;
+    const sinceCycles = pos - gate;
+    turns = lfoState.rateHz ? (sinceCycles / transport.cps) * lfoState.rate : sinceCycles * lfoState.rate;
+    // An envelope plays the shape once and holds its final level - and takes no phase offset, the
+    // one mode that doesn't (poptart.scd's shape def sweeps it as `Sweep.min(1)`), since starting
+    // a one-shot part-way in is what a shorter shape is for.
+    if (lfoState.mode === 'envelope') return Math.min(1, turns);
+  }
+  const total = turns + (lfoState.phase ?? 0);
+  return ((total % 1) + 1) % 1;
 }
 
 // One repaint per frame while the panel is open and the clock is running. Stops itself when the
@@ -2905,10 +2976,14 @@ let lfoRaf = null;
 // land the drag on whichever shape the pattern moved on to.
 let lfoDrag = null; // { kind: 'point'|'curve', index }
 
+let lfoPlayheadOn = false; // whether the last frame drew a line, so a stop clears it exactly once
+
 function lfoPlayheadLoop() {
   if (!lfoState) { lfoRaf = null; return; }
   lfoFollowPlayingShape();
-  if (!transport.paused && lfoState.mode === 'free') drawLfoShape();
+  // Stopped with a line still on the canvas: one more pass to wipe it, then idle (the loop keeps
+  // spinning cheaply, like the piano roll's own).
+  if (!transport.paused || lfoPlayheadOn) drawLfoShape();
   lfoRaf = requestAnimationFrame(lfoPlayheadLoop);
 }
 
@@ -2951,10 +3026,10 @@ function drawLfoShape() {
     ctx.stroke();
   }
 
-  // Where the shape is right now, as a line down the canvas. Only in free mode: retrigger and
-  // envelope shapes are started by notes, and a line running on the transport's clock would be
-  // pointing at the wrong place in the shape for most of the bar.
+  // Where the shape is right now, as a line down the canvas - on the transport's own grid in free
+  // mode, and counted from the last note that gated it in the other two (see lfoPhaseNow).
   const phase = lfoPhaseNow();
+  lfoPlayheadOn = phase != null;
   if (phase != null) {
     const x = LFO_PAD + (W - 2 * LFO_PAD) * phase;
     ctx.strokeStyle = col('--accent');
@@ -7453,7 +7528,7 @@ let playing = false;
 // re-guessing from source text. Each region: an anchor marker at the track's block (highlights are
 // placed relative to it, so they survive edits until re-eval), the grid indexed by cycle, and the
 // longest ring so lookback catches a stretched/held note still sounding from an earlier cycle.
-let patternRegions = []; // { label, anchor, grid: Map<cycle, steps>, maxEnd, lastKey, marks: [] }
+let patternRegions = []; // { label, anchor, grid: Map<cycle, steps>, gates: Map<cycle, [pos]>, maxEnd, lastKey, marks: [] }
 let gridFrom = 0; // first cycle covered by every region's grid
 let gridTo = 0; // one past the last covered cycle (extended by /api/highlight top-ups)
 let gridCount = 32; // window size the server ships (mirrored from the eval response)
@@ -7480,7 +7555,7 @@ function setupHighlighting(tracks, from, count) {
   for (const t of tracks) {
     if (!t.active || !t.grid) continue;
     const anchor = cm.markText(cm.posFromIndex(t.start), cm.posFromIndex(t.end), {});
-    const region = { label: t.label, anchor, grid: new Map(), maxEnd: 1, lastKey: '', marks: [] };
+    const region = { label: t.label, anchor, grid: new Map(), gates: new Map(), maxEnd: 1, lastKey: '', marks: [] };
     ingestGrid(region, t.grid);
     patternRegions.push(region);
   }
@@ -7491,6 +7566,9 @@ function setupHighlighting(tracks, from, count) {
 function ingestGrid(region, grid) {
   for (const g of grid) {
     region.grid.set(g.cycle, g.steps);
+    // The track's note onsets, kept apart from the lit spans: they are what a note-gated lfo()
+    // shape restarts on, and nothing else on this side needs them (see lfoPhaseNow).
+    region.gates.set(g.cycle, g.gates ?? []);
     for (const s of g.steps) if (s.end > region.maxEnd) region.maxEnd = s.end;
   }
 }
@@ -7514,6 +7592,7 @@ function maybePrefetchGrid(cycle) {
         const grid = byLabel.get(r.label);
         if (grid) ingestGrid(r, grid);
         for (const c of r.grid.keys()) if (c < pruneBefore) r.grid.delete(c);
+        for (const c of r.gates.keys()) if (c < pruneBefore) r.gates.delete(c);
       }
       gridFrom = Math.max(gridFrom, pruneBefore);
       gridTo = Math.max(gridTo, res.gridFrom + res.gridCount);
@@ -8842,6 +8921,11 @@ async function openMixer() {
     strips: new Map(),
     order: [], // strip labels in code order - the palette walk and the draw order
     serverTracks: [], // what the engine says is playing, as of the last poll
+    // Labels a strip has been renamed away from, dropped from the poll's track list until the
+    // engine stops reporting them. The rename lands in the code at once, but the old track keeps
+    // playing until the debounced eval - without this the old strip would come back beside the
+    // new one on the very next poll and sit there for half a second.
+    renamedAway: new Set(),
     bandFreqs: [],
     masterDisp: null, // smoothed master band frame, [[l, r], ...]
     masterTarget: null,
@@ -8924,7 +9008,13 @@ async function mixerPoll() {
   }
   if (s.bandFreqs?.length) mixerState.bandFreqs = s.bandFreqs;
 
-  mixerState.serverTracks = s.tracks ?? [];
+  const tracks = s.tracks ?? [];
+  // A renamed-away label is forgotten the moment the engine stops reporting it - i.e. as soon as
+  // the eval that carried the new name landed.
+  for (const l of mixerState.renamedAway) if (!tracks.includes(l)) mixerState.renamedAway.delete(l);
+  mixerState.serverTracks = mixerState.renamedAway.size
+    ? tracks.filter((l) => !mixerState.renamedAway.has(l))
+    : tracks;
   refreshMixerStrips();
 
   for (const strip of mixerState.strips.values()) {
@@ -9018,7 +9108,7 @@ function buildMixerStrip(label) {
   // the lighter palette entries wash out.
   const name = document.createElement('div');
   name.className = 'mixer-strip-name';
-  name.title = label;
+  name.title = label; // the full name, for when the row ellipsizes it
   const swatch = document.createElement('span');
   swatch.className = 'mixer-strip-swatch';
   swatch.style.background = color;
@@ -9077,8 +9167,9 @@ function buildMixerStrip(label) {
   el.append(name, msRow, body, dbLabel, knobRow, knobLabelRow, bassBtn);
 
   const strip = {
-    label, color, el, fader, meterCanvas, dbLabel, knobs, muteBtn, soloBtn, bassBtn,
+    label, color, el, fader, meterCanvas, dbLabel, knobs, muteBtn, soloBtn, bassBtn, nameText,
     gain: 1, gone: false, muted: false, soloed: false,
+    renaming: false, // the name is swapped for its edit box (see startMixerRename)
     bassmono: 0, // Hz, 0 = off
     bassLastHz: MIXER_BASSMONO_DEFAULT, // what the button switches back on to
     dragBass: null,
@@ -9091,6 +9182,10 @@ function buildMixerStrip(label) {
 
   muteBtn.addEventListener('click', () => applyMixerFlags(strip, { muted: !strip.muted, soloed: strip.soloed }));
   soloBtn.addEventListener('click', () => applyMixerFlags(strip, { muted: strip.muted, soloed: !strip.soloed }));
+
+  // The name a strip shows IS the block's label, so this is the one place it can be typed over
+  // without going back to the code: click it and it becomes a box (see startMixerRename).
+  nameText.addEventListener('click', () => startMixerRename(strip));
 
   fader.addEventListener('input', () => {
     const gain = mixerFaderToGain(fader.value / 1000);
@@ -9306,6 +9401,83 @@ async function releaseMixerHold() {
   }
 }
 
+// --- renaming a track from its strip ---
+//
+// The strip's name swapped for a box holding it: Enter or clicking away commits, Escape puts it
+// back - the same inline rename the definition lists use. Nothing here updates the strip: the
+// label IS the track's identity, so the buffer edit lands and the next refresh builds a strip for
+// the new name, exactly as it would if the label had been retyped in the editor.
+function startMixerRename(strip) {
+  if (strip.renaming || strip.gone || !mixctlMod) return;
+  strip.renaming = true;
+  const box = document.createElement('input');
+  box.type = 'text';
+  box.className = 'mixer-strip-rename';
+  box.value = strip.label;
+  box.spellcheck = false;
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    strip.renaming = false;
+    const to = box.value.trim();
+    box.replaceWith(strip.nameText);
+    if (commit && to && to !== strip.label) applyMixerRename(strip, to);
+  };
+  box.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    e.stopPropagation(); // whatever the editor binds this key to, it isn't wanted mid-name
+  });
+  box.addEventListener('blur', () => finish(true));
+  strip.nameText.replaceWith(box);
+  box.focus();
+  box.select();
+}
+
+// The rename itself: the label token, plus every audio()/midi() source in the buffer that names
+// this track (mixctl finds those - a rename that left one behind would repoint it at a device or
+// a bus without a word). Refused names say why in the log and leave the code alone.
+function applyMixerRename(strip, to) {
+  if (!mixctlMod) return;
+  const from = strip.label;
+  const res = mixctlMod.renameEdits(cm.getValue(), from, to);
+  if (res.error) {
+    logLine(`mixer: ${res.error}`, true);
+    return;
+  }
+  mixerSuppressSync = true;
+  try {
+    // Back to front, so an earlier edit never shifts a later one's offsets.
+    for (const edit of [...res.edits].reverse()) {
+      cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+    }
+  } finally {
+    mixerSuppressSync = false;
+  }
+  // The strip keeps its colour: it's the same track in the plots, and moving the entry rather
+  // than adding one keeps the palette handing out the same colours to everybody else.
+  if (mixerColorByLabel.has(from) && !mixerColorByLabel.has(to)) {
+    mixerColorByLabel.set(to, mixerColorByLabel.get(from));
+    mixerColorByLabel.delete(from);
+  }
+  // Both lists that decide who gets a strip, moved over now rather than an eval and a poll from
+  // now: otherwise the track you just named loses its strip until the engine reports it back,
+  // and the old name keeps one until the engine drops it.
+  mixerKnownTracks = mixerKnownTracks.map((l) => (l === from ? to : l));
+  // Closing the panel blurs the box, which commits: the code edit above still stands, there is
+  // just no strip left to keep in step with it.
+  if (mixerState) {
+    mixerState.serverTracks = mixerState.serverTracks.filter((l) => l !== from);
+    mixerState.renamedAway.add(from);
+    mixerState.renamedAway.delete(to); // renamed back before the engine caught up - `to` is live again
+    if (mixerFocus === from) mixerFocus = to;
+    refreshMixerStrips();
+  }
+  logLine(`mixer: renamed "${from}" to "${to}"${res.refs ? ` (${res.refs} source reference(s) updated)` : ''}`);
+  mixerScheduleEval();
+}
+
 // Mute/solo rewrite the block's label marker (`_bass:` / `Sbass:`) - the same switch you'd type.
 function applyMixerFlags(strip, flags) {
   if (!mixctlMod || strip.gone) return;
@@ -9357,6 +9529,10 @@ function syncMixerFromCode() {
     strip.soloBtn.disabled = !canFlag;
     strip.muteBtn.classList.toggle('on-mute', strip.muted);
     strip.soloBtn.classList.toggle('on-solo', strip.soloed);
+    // The name is typed over in place while the block is in the buffer; a strip that has outlived
+    // its block has no label left to rewrite, so it stops offering.
+    strip.nameText.classList.toggle('mixer-renamable', !strip.gone);
+    strip.nameText.title = strip.gone ? strip.label : `${strip.label} — click to rename this pattern`;
     strip.muteBtn.title = canFlag
       ? `mute — writes the _ marker on this block's label${strip.muted ? ' (on)' : ''}`
       : 'name the block to mute it here';
@@ -9828,6 +10004,9 @@ mixerBackdrop.addEventListener('mousedown', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (!mixerState || e.key !== 'Escape') return;
+  // A strip's rename box takes Escape for itself - it puts the old name back. Closing the panel
+  // out from under a half-typed name would commit or lose it depending on where the blur landed.
+  if (document.activeElement?.classList.contains('mixer-strip-rename')) return;
   e.preventDefault();
   e.stopPropagation();
   closeMixer();

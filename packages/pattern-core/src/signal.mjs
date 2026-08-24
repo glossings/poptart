@@ -1143,12 +1143,16 @@ export class Sig {
    *
    * (Structure the callback adds is still structure - `x => x.ply(4)` retriggers as it says.)
    *
-   * Per-onset controls the callback set switch WITH the condition - sampler config and velocity -
-   * so `.when(rand().gte(0.7), x => x.add(flip(1)))` reverses only the bars the condition
-   * picks. Everything the callback did that can't be turned on and off per event stays
-   * unconditional: the chain (.synth()/.fx()), the streamed channel strip (.gain()/.pan()) and
-   * .param() signals, whose "off" state would be an unknown value to revert to rather than an
-   * absent one. Put those inside the pattern you pass in, not inside the callback.
+   * Controls the callback set switch WITH the condition - sampler config and velocity per onset,
+   * and the channel strip (.gain()/.pan()/.width()/.o()/.dry()) as a streamed value - so
+   * `.when(rand().gte(0.99), x => x.pan(0.49))` moves the hats that one bar in a hundred and
+   * leaves `.pan(-0.49)` playing the rest. A strip control only the callback sets returns to its
+   * neutral default (pan 0, gain 1, ...) where the condition is falsy.
+   *
+   * What can't be switched stays unconditional: the chain (.synth()/.fx()), .param() signals,
+   * whose "off" state would be an unknown plugin value to revert to rather than a named one, and
+   * a strip control a Tier-2 modulator drives (.gain(env()) - the engine runs that natively,
+   * mapped onto the control). Put those inside the pattern you pass in, not inside the callback.
    */
   when(cond, fn) {
     const condSig = toSignal(cond);
@@ -1229,13 +1233,15 @@ export class Sig {
       : null;
 
     // Track metadata comes from the transformed side - fn may have added an .fx()/.param(); those
-    // apply unconditionally. The controls the scheduler reads PER ONSET are the exception: they
-    // switch with the condition (see condSwitchMap), because "off" there is simply an absent
-    // value, which every reader already resolves to the right default.
+    // apply unconditionally. What the scheduler reads as a VALUE is the exception: the per-onset
+    // controls (see condSwitchMap) and the channel strip (see condSwitchChannel) both switch with
+    // the condition, because "off" for those is a state we can name - an absent value for a
+    // per-onset control, the strip's neutral default for a streamed one.
     const switched = (before, after, skip) => condSwitchMap(before, after, condAtCycle, truthy, skip);
     return new Sig(sample, {
       stepsForCycle,
       ...transformed._meta(),
+      channel: condSwitchChannel(this.channel, transformed.channel, condAtCycle, truthy),
       noteChannels: switched(this.noteChannels, transformed.noteChannels),
       // Only when the callback's result is still a sampler pattern - a callback that swapped the
       // track for a synth one has no channels to switch, and must not be handed a sampler back.
@@ -2964,6 +2970,43 @@ function condSwitchMap(before, after, condAt, truthy, skip = new Set()) {
   return out;
 }
 
+// What each track-level channel-strip control reads as when nothing sets it - the neutral values
+// the scheduler snaps a dropped control back to, and the "off" side of a .when() that only sets
+// one on the truthy branch. out = stereo pair (Sig#o), 1-based; dry = direct-output level
+// (Sig#dry); width = M/S stereo width (Sig#width), 1 = untouched; bassmono = mono-below-this-many-
+// Hz (Sig#bassmono), 0 = off.
+export const CHANNEL_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1 };
+
+// The track channel strip (Sig#gain/#pan/#width/...) across a .when(): the same switch the
+// per-onset controls get above, with one difference. These are STREAMED values, not per-event
+// ones, so a branch that doesn't set the control can't just rest - the engine would be left
+// holding whatever the other branch last sent. It falls back to the control's neutral default
+// instead, which is what the track would have read had the callback never touched it.
+//
+// A control a Tier-2 modulator drives (LFO/env/cc) still can't be switched: the engine runs those
+// as a persistent synth mapped onto the control rather than polling them (and env() can't be
+// sampled in JS at all), so there the callback's version stands unconditionally, as the whole
+// strip used to.
+function condSwitchChannel(before, after, condAt, truthy) {
+  const native = (sig) => !!(sig && (sig.lfoIR || sig.envIR || sig.ccIR));
+  const out = {};
+  for (const key of new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])) {
+    const off = before?.[key] ?? null;
+    const on = after?.[key] ?? null;
+    if (off === on || native(off) || native(on)) {
+      const kept = on ?? off;
+      if (kept != null) out[key] = kept;
+      continue;
+    }
+    const neutral = CHANNEL_DEFAULTS[key] ?? 0;
+    out[key] = new Sig((t, cps, pos) => {
+      const branch = truthy(condAt(pos ?? t * cps)) ? on : off;
+      return branch ? branch.sample(t, cps, pos) : neutral;
+    });
+  }
+  return out;
+}
+
 // Rests/gaps in a condition pattern count as falsy regions, not holes - without this, a cond
 // like "1 ~" would silence the second half of the cycle instead of playing the original.
 function fillCondGaps(steps) {
@@ -4046,7 +4089,8 @@ function sampleViaSteps(stepsForCycleFn, t, cps, pos) {
 // A modulator's rate is in CYCLES by default - rate 1 is one pass per cycle, which is what a
 // pattern means by "once", and what makes lfo("<a b>") play each shape exactly once. Hz is still
 // there for a modulator that should ignore the tempo, written with the unit on it: rate: "0.5hz".
-// A synced rate follows setbpm (the scheduler re-sends it); a free one does not.
+// A synced rate follows setbpm (the scheduler re-sends it) and is counted on the cycle grid, so
+// rate 0.25 starts its pass on cycles 0, 4, 8 (see lfoPhaseCount); a free one does neither.
 export function parseRate(rate) {
   if (typeof rate === 'string') {
     const hz = /^\s*(-?[\d.]+)\s*hz\s*$/i.exec(rate);
@@ -4069,8 +4113,25 @@ function withRate(ir, rate) {
   return { ...ir, rateHz: undefined, rateCycles: undefined, ...parseRate(rate) };
 }
 
+/**
+ * Where a modulator is, counted in turns of its shape (whole part = passes completed, fraction =
+ * phase). A synced rate counts in CYCLES, off the transport grid: rate 0.25 is one pass per four
+ * cycles AND starts that pass on cycles 0, 4, 8 - phase 0 is a position in the music, not the
+ * moment the process happened to boot. A free "0.5hz" rate counts seconds and ignores the grid,
+ * which is the whole of what asking for Hz means.
+ *
+ * The scheduler pins the native modulator to this same count (see _anchorLFOs), so the sound, the
+ * JS-side value, and anything drawing a playhead all read one clock.
+ */
+export function lfoPhaseCount(ir, tSeconds, cps, pos) {
+  const turns = ir.rateHz != null
+    ? tSeconds * ir.rateHz
+    : (pos ?? tSeconds * cps) * (ir.rateCycles ?? 1);
+  return turns + (ir.phaseCycles ?? 0);
+}
+
 function sampleLfoIR(ir, tSeconds, cps, pos) {
-  const total = tSeconds * lfoRateHz(ir, cps) + ir.phaseCycles;
+  const total = lfoPhaseCount(ir, tSeconds, cps, pos);
   const phase = ((total % 1) + 1) % 1;
   let unipolar;
   switch (ir.shape) {

@@ -835,6 +835,7 @@ function highlightGrid(sig, start, end, from, count) {
   const base = Math.max(0, from);
   for (let c = base; c < base + count; c++) {
     const out = [];
+    const gates = [];
     for (const sub of sigs) {
       let steps;
       try {
@@ -844,6 +845,18 @@ function highlightGrid(sig, start, end, from, count) {
       }
       for (const s of steps) {
         if (s.value == null) continue;
+        const at = c + s.start;
+        // Where the onset is HEARD - nudge/swing move the sound (see below), and everything that
+        // fires off a note fires off the shifted one.
+        const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at);
+        // The track's note gates: every onset the engine will actually play, on the same test the
+        // scheduler uses (_scheduleNoteEdges - a rest or a tie is not one). Note-gated lfo() modes
+        // reset their phase on these (poptart.scd's noteOn/playSample gate every lfo on the
+        // track), so the shape editor's playhead has nothing to draw without them. Only the
+        // track's OWN sig carries them: its control patterns are already cross-merged into it, and
+        // a param's step grid is not a trigger of anything. Kept whether or not the step lights an
+        // atom - a note whose source is out of this block still gates the modulator.
+        if (sub === sig && !s.cont) gates.push(s.start + startShift);
         const locs = patternCore
           .stepLocs(s)
           .filter((l) => l[0] >= start && l[1] <= end)
@@ -854,19 +867,17 @@ function highlightGrid(sig, start, end, from, count) {
         // the highlight follows the EAR, lighting up when the note is heard rather than where it
         // sits on the grid, so a swung hat flashes with the sound and not a moment before it.
         if (locs.length) {
-          const at = c + s.start;
           const soundsTo = patternCore.soundingEnd(s, sub.noteChannels, at, 1, at);
           // Both edges are warped at their own positions, exactly as the scheduler warps them (see
           // endEdgeStep), so a swung flash starts and stops with the sound it belongs to.
           const endAt = c + soundsTo;
           const endStep = patternCore.endEdgeStep(s, endAt - Math.floor(endAt));
-          const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at);
           const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt);
           out.push({ start: s.start + startShift, end: soundsTo + endShift, ...(s.cont ? { cont: true } : {}), locs });
         }
       }
     }
-    grid.push({ cycle: c, steps: out });
+    grid.push({ cycle: c, steps: out, ...(gates.length ? { gates: gates.sort((a, b) => a - b) } : {}) });
   }
   return grid;
 }

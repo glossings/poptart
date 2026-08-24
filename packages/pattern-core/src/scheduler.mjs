@@ -20,7 +20,7 @@
 //    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
 //    general, and fine for musical modulation rates.
 
-import { sampleBound, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoShapes, resolvePreset } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -85,9 +85,6 @@ const MIN_SOUNDING_SEC = 0.001;
 // setParamEnv engine calls as plugin parameters, addressed with this pseudo-slot instead of a
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
 const CHANNEL_SLOT = -1;
-// out = stereo pair (Sig#o), 1-based; dry = direct-output level (Sig#dry); width = M/S stereo
-// width (Sig#width), 1 = untouched; bassmono = mono-below-this-many-Hz (Sig#bassmono), 0 = off.
-const CHANNEL_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1 };
 // Engine call that tears down each kind of Tier-2 modulator (persistent engine-side synth).
 const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC' };
 
@@ -891,10 +888,12 @@ export class Scheduler {
           m.shapeIndex = index;
           const atSec = this.transport.secAt(at);
           this.engine.setParamShape(this.trackId, m.slot, m.name, index, atSec);
-          // Phase restarts at the swap, so that is where the anchor's phase formula counts from.
+          // Phase restarts at the swap, so that is where the anchor's phase formula counts from -
+          // in both units, since a synced rate counts the swap's cycle and a Hz one its second.
           // In the note-gated modes the engine defers the swap to the next gate and keeps its own
           // time anyway - those are never anchored (see _anchorLFOs).
           m.phaseOriginSec = atSec;
+          m.phaseOriginCycle = at;
         }
       }
     }
@@ -1070,11 +1069,17 @@ export class Scheduler {
       if (ir.shape === 'custom' && ir.mode != null && ir.mode !== 'free') continue; // note-gated
       if (m.anchoredAtSec != null && nowSec - m.anchoredAtSec < LFO_ANCHOR_INTERVAL_SEC) continue;
       const targetSec = nowSec + DEFAULT_LOOKAHEAD_SEC;
-      // sampleLfoIR's phase formula, counted from the last shape swap where there has been one:
-      // the swap restarted the shape, so anchoring to absolute time would immediately drag it back
-      // to a phase it never had.
-      const since = m.phaseOriginSec == null ? targetSec : targetSec - m.phaseOriginSec;
-      const total = since * lfoRateHz(ir, this.transport.cps) + (ir.phaseCycles ?? 0);
+      const targetCycle = this.transport.cycleAt(targetSec);
+      // sampleLfoIR's own phase count (lfoPhaseCount: cycles for a synced rate, seconds for a Hz
+      // one), measured from the last shape swap where there has been one - the swap restarted the
+      // shape, so counting from the grid origin would immediately drag it back to a phase it never
+      // had. Both origins are carried, since which one is read depends on the rate's unit.
+      const total = lfoPhaseCount(
+        ir,
+        m.phaseOriginSec == null ? targetSec : targetSec - m.phaseOriginSec,
+        this.transport.cps,
+        m.phaseOriginCycle == null ? targetCycle : targetCycle - m.phaseOriginCycle,
+      );
       this.engine.anchorParamLFO(this.trackId, m.slot, m.name, ((total % 1) + 1) % 1, targetSec);
       m.anchoredAtSec = nowSec;
     }

@@ -2871,6 +2871,25 @@ li.CodeMirror-hint-active {
   white-space: nowrap;
 }
 
+/* The name is the block's label, and clicking it types over it (see startMixerRename). */
+.mixer-strip-name-text.mixer-renamable {
+  cursor: text;
+}
+
+.mixer-strip-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 0 3px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  outline: none;
+}
+
 .mixer-strip-body {
   display: flex;
   align-items: stretch;

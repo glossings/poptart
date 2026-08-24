@@ -6,7 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readTrim, trimEdit, formatTrim, flagEdit, analyze } from './src/mixctl.mjs';
+import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits } from './src/mixctl.mjs';
+import { splitLabeledBlocks } from './src/labels.mjs';
 
 // Apply an edit the way CodeMirror would, so assertions read as the resulting buffer.
 const applied = (code, edit) => code.slice(0, edit.from) + edit.text + code.slice(edit.to);
@@ -140,4 +141,75 @@ test('flagEdit: unknown label is null; a shared ctx serves several calls', () =>
   const ctx = analyze(code);
   assert.deepEqual(readTrim(code, 'a', 'gain', 1, ctx), { value: 0.4, patterned: false });
   assert.equal(applied(code, flagEdit(code, 'b', { muted: true }, ctx)), 'a: s("bd").gain(0.4)\n_b: s("sn")');
+});
+
+// --- renameEdits: typing over a strip's name in the mixer ---
+
+// Apply a whole edit list the way the client does - back to front, so offsets stay valid.
+const appliedAll = (code, res) =>
+  [...res.edits].reverse().reduce((s, e) => s.slice(0, e.from) + e.text + s.slice(e.to), code);
+
+test('renameEdits: rewrites the label token and leaves the block alone', () => {
+  const code = 'bass: n("0 2").synth("Serum 2").gain(0.5)\n\nkeys: n("0 4")';
+  const res = renameEdits(code, 'bass', 'sub');
+  assert.equal(res.refs, 0);
+  assert.equal(appliedAll(code, res), 'sub: n("0 2").synth("Serum 2").gain(0.5)\n\nkeys: n("0 4")');
+});
+
+test('renameEdits: mute/solo markers survive, in the canonical order', () => {
+  const muted = '_bass: s("bd*4")';
+  assert.equal(appliedAll(muted, renameEdits(muted, 'bass', 'sub')), '_sub: s("bd*4")');
+  const soloedTrailing = 'bassS: s("bd*4")';
+  assert.equal(appliedAll(soloedTrailing, renameEdits(soloedTrailing, 'bass', 'sub')), 'Ssub: s("bd*4")');
+});
+
+test('renameEdits: a bare-statement block is given a label rather than refused', () => {
+  const code = 's("bd*4")';
+  assert.equal(appliedAll(code, renameEdits(code, '$1', 'kick')), 'kick: s("bd*4")');
+});
+
+test('renameEdits: audio()/midi() sources naming the track move with it', () => {
+  const code = [
+    'kick: s("bd*4")',
+    'bass: n("0").synth("Serum 2").fx("Pro-C 2").audio("kick")',
+    'arp: midi("track:kick").synth("Serum 2")',
+    'other: audio("kicker")', // a different name, and not a prefix match either
+  ].join('\n');
+  const res = renameEdits(code, 'kick', 'bd');
+  assert.equal(res.refs, 2);
+  assert.equal(appliedAll(code, res), [
+    'bd: s("bd*4")',
+    'bass: n("0").synth("Serum 2").fx("Pro-C 2").audio("bd")',
+    'arp: midi("track:bd").synth("Serum 2")',
+    'other: audio("kicker")',
+  ].join('\n'));
+});
+
+test('renameEdits: a commented-out or quoted source name is not a reference', () => {
+  const code = 'kick: s("bd*4")\nbass: n("0")\n  // .audio("kick")\n  .log("audio(\'kick\')")';
+  const res = renameEdits(code, 'kick', 'bd');
+  assert.equal(res.refs, 0);
+  assert.equal(appliedAll(code, res), code.replace('kick:', 'bd:'));
+});
+
+test('renameEdits: refuses a name that is taken, malformed, or reads as a marker', () => {
+  const code = 'kick: s("bd*4")\nbass: n("0")';
+  assert.match(renameEdits(code, 'kick', 'bass').error, /already/);
+  assert.match(renameEdits(code, 'kick', '2bad').error, /can't be a pattern name/);
+  assert.match(renameEdits(code, 'kick', 'kick drum').error, /can't be a pattern name/);
+  // `Snare` parses back as a SOLOED `nare`, `bass_` as a muted `bass`, `$` as anonymous.
+  assert.match(renameEdits(code, 'kick', 'Snare').error, /marker/);
+  assert.match(renameEdits(code, 'kick', 'kick_').error, /marker/);
+  assert.match(renameEdits(code, 'kick', '$').error, /marker/);
+  assert.match(renameEdits(code, 'gone', 'x').error, /no block named/);
+});
+
+test('renameEdits: the new name is what the splitter reads back', () => {
+  const code = '_Sbass: s("bd*4").audio("bass")';
+  const out = appliedAll(code, renameEdits(code, 'bass', 'sub2'));
+  const [block] = splitLabeledBlocks(out);
+  assert.equal(block.label, 'sub2');
+  assert.equal(block.muted, true);
+  assert.equal(block.soloed, true);
+  assert.match(out, /\.audio\("sub2"\)/);
 });

@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, s, note, rand, speed, flip, begin, fit, i, sine, vel, clip } from './src/signal.mjs';
+import { n, s, note, rand, speed, flip, begin, fit, i, sine, vel, clip, env } from './src/signal.mjs';
 
 // What the scheduler would read off a sampler channel at a given cycle position.
 const cfgAt = (sig, key, cyclePos) => sig.sampler[key].sample(cyclePos, 1, cyclePos);
@@ -157,10 +157,41 @@ test('a run of agreeing steps leaves the callback\'s own longer notes whole', ()
   assert.deepEqual(track.stepsForCycle(0).map((x) => [x.start, x.end]), [[0, 0.5], [0.5, 1]]);
 });
 
-test('the chain and streamed channel strip stay unconditional, as documented', () => {
+test('the chain stays unconditional, but the channel strip switches with the condition', () => {
   const track = s('bd').when('<1 0>', (x) => x.fx('Reverb').gain(0.5));
-  assert.deepEqual(track.fxChain, ['Reverb']);
-  assert.equal(track.channel.gain.sample(1.5, 1, 1.5), 0.5, 'gain is not switched');
+  assert.deepEqual(track.fxChain, ['Reverb'], 'an .fx() the callback added applies to the track');
+  assert.equal(track.channel.gain.sample(0.5, 1, 0.5), 0.5, 'the bar the condition picks');
+  assert.equal(track.channel.gain.sample(1.5, 1, 1.5), 1, 'and gain 1 - the default - on the rest');
+});
+
+test('a strip control the callback changes falls back to the value it had, not to nothing', () => {
+  // The reported bug: `.pan(-0.49).when(rand().gte(0.99), x => x.pan(0.49))` panned every hat
+  // right, because the whole strip came off the transformed side unconditionally.
+  const track = s('hh*16').pan(-0.49).when(rand().gte(0.99), (x) => x.pan(0.49));
+  const pans = [];
+  for (let cycle = 0; cycle < 40; cycle++) {
+    for (let k = 0; k < 16; k++) {
+      const pos = cycle + (k + 0.5) / 16;
+      pans.push(track.channel.pan.sample(pos, 1, pos));
+    }
+  }
+  assert.deepEqual([...new Set(pans)].sort(), [-0.49, 0.49], 'only the two panning positions');
+  assert.ok(pans.filter((v) => v === 0.49).length / pans.length < 0.1, 'and the 1% one stays rare');
+});
+
+test('a strip control switches on the same onsets the notes read the condition on', () => {
+  const track = s('hh*4').pan(-1).when('1 0 1 0', (x) => x.pan(1));
+  assert.deepEqual(
+    Array.from({ length: 4 }, (_, k) => track.channel.pan.sample((k + 0.5) / 4, 1, (k + 0.5) / 4)),
+    [1, -1, 1, -1],
+  );
+});
+
+test("a strip control a native modulator drives keeps the callback's version", () => {
+  // An env() gain is programmed into the engine once, not polled, so it can't follow a condition -
+  // wrapping it would demote it to a JS-sampled signal that env() can't even answer.
+  const track = s('bd').gain(env()).when('<1 0>', (x) => x.gain(0.5));
+  assert.ok(track.channel.gain.envIR, 'still the native env gain');
 });
 
 // ---------------------------------------------------------------------------------------------

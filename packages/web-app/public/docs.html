@@ -552,7 +552,10 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <code>sine</code>, <code>saw</code>, <code>tri</code>, <code>square</code>, <code>ramp</code>,
             <code>rand</code>, <code>perlin</code>. Each is a 0..1 shape; <code>.range(lo, hi)</code>
-            rescales it; the rate is in Hz:
+            rescales it. The rate is in <strong>cycles</strong>: <code>sine(0.25)</code> is one pass
+            per four cycles, and it starts that pass on the cycle grid (0, 4, 8…) — a slow sweep is
+            in the same place every time round. Write the unit for a rate that ignores the tempo
+            instead: <code>sine("0.5hz")</code>.
           </p>
           <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, sine(0.3).range(200, 5000))</code></pre>
           <p>
@@ -560,7 +563,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             the word <code>lfo</code> and a shape editor opens — drag points, bend segments — writing
             the string for you as you go. Modes: <code>free</code> (its own clock),
             <code>retrigger</code> (phase resets on each note), <code>envelope</code> (once per note,
-            then hold).
+            then hold). The editor's playhead follows all three.
           </p>
           <h4>Envelopes</h4>
           <p>
@@ -608,8 +611,10 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             for bass mono — plus a spectrum analyzer and a stereo image where anything spilling into
             the outer <code>ø</code> wedges is what a mono system will lose. The controls
             <strong>write code</strong>: a fader move rewrites the block's <code>.gain()</code>, mute and
-            solo write <code>_</code> / <code>S</code> on the label. The mix lives in the pattern and
-            travels with the patch.
+            solo write <code>_</code> / <code>S</code> on the label, and clicking a strip's
+            <strong>name</strong> renames the pattern itself — the label, and any
+            <code>audio("…")</code> / <code>midi("…")</code> that reads that track. The mix lives in the
+            pattern and travels with the patch.
           </p>
         </section>
 

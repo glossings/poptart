@@ -1,8 +1,9 @@
 // The mixer's code edits: a fader or pan knob in the editor's mixer writes a plain numeric
-// `.gain(x)` / `.pan(x)` onto the end of the track's block, and the mute/solo buttons write the
-// label markers (`_bass:` / `Sbass:`) the language already has - so the code stays the one
-// source of truth (an eval later plays exactly what the mixer shows). Pure string-in/edit-out,
-// so the browser applies the edit to CodeMirror and the tests here never need a DOM.
+// `.gain(x)` / `.pan(x)` onto the end of the track's block, the mute/solo buttons write the
+// label markers (`_bass:` / `Sbass:`) the language already has, and typing over a strip's name
+// rewrites the label itself - so the code stays the one source of truth (an eval later plays
+// exactly what the mixer shows). Pure string-in/edit-out, so the browser applies the edit to
+// CodeMirror and the tests here never need a DOM.
 //
 // The "trim" is the LAST .gain(...)/.pan(...) call in the block, and only when its argument is a
 // bare numeric literal - that's the call the mixer owns. A patterned call (.gain(env()),
@@ -17,7 +18,7 @@ import { splitLabeledBlocks, codeMask } from './labels.mjs';
 const NUM_ARG_RE = /^\s*(-?(?:\d+\.?\d*|\.\d+))\s*$/;
 
 // What a channel control reads as when the block doesn't set it - the same neutral values the
-// scheduler snaps a dropped control back to (see CHANNEL_DEFAULTS there).
+// scheduler snaps a dropped control back to (see CHANNEL_DEFAULTS in signal.mjs).
 export const TRIM_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0 };
 
 // Matching close paren for the opener at `openIdx`, counting only characters the mask says are
@@ -153,4 +154,67 @@ export function flagEdit(code, label, { muted = false, soloed = false } = {}, ct
   if (!m) return null;
   const text = `${muted ? '_' : ''}${soloed ? 'S' : ''}${labelBase(m[1])}`;
   return { from: block.start, to: block.start + m[1].length, text };
+}
+
+// A name that can be written as a label and read back as itself. The identifier shape is the
+// splitter's; the marker check is what stops `Snare` (which parses as a SOLOED `nare`) and
+// `bass_` (a muted `bass`) from becoming names you can't get rid of.
+const NAME_RE = /^[A-Za-z_$][\w$]*$/;
+
+// The calls that take a TRACK LABEL as a string: `audio("drums")` reads another track's output,
+// `midi("kick")` re-triggers off its notes - both also as methods (`.audio(…)` for a sidechain,
+// `.midi(…)`), and both accepting a `track:` prefix that forces the track over a device or bus of
+// the same name. These move with a rename: left behind, they don't error, they quietly resolve to
+// a device, a bus, or nothing, which is the worst way for a rename to go wrong.
+const SOURCE_REF_RE = /\b(?:audio|midi)\s*\(\s*(['"])((?:[^'"\\\n]|\\.)*)\1/g;
+
+// Every source-name string in the buffer that names `from`, as edits to its contents. Masked like
+// everything else here, so a commented-out `// .audio("kick")` keeps the name it was parked with.
+function sourceRefEdits(code, mask, from, to) {
+  const edits = [];
+  SOURCE_REF_RE.lastIndex = 0;
+  let m;
+  while ((m = SOURCE_REF_RE.exec(code))) {
+    if (!mask[m.index]) continue;
+    const raw = m[2];
+    const close = m.index + m[0].length - 1; // the closing quote
+    const name = raw.trim();
+    if (name === from) edits.push({ from: close - raw.length, to: close, text: to });
+    else if (name === `track:${from}`) edits.push({ from: close - raw.length, to: close, text: `track:${to}` });
+  }
+  return edits;
+}
+
+/**
+ * The edits that rename a labeled block to `newName`: its label token (mute/solo markers kept, in
+ * the canonical `_S` order) plus every source call in the buffer that names it. A block with no
+ * label token at all - a bare column-0 statement, the thing that made it anonymous - gets one
+ * written in front of it, since naming it is exactly what the mixer is being asked for.
+ *
+ * @returns {{ edits: Array<{ from: number, to: number, text: string }>, refs: number }
+ *   | { error: string }}
+ *   `edits` are in ascending order and overlap nothing: apply them BACK TO FRONT so an earlier
+ *   one never shifts a later one's offsets. `refs` counts the source calls among them. `error` is
+ *   a sentence for the log - the name is unusable or taken, or the block has gone.
+ */
+export function renameEdits(code, label, newName, ctx = null) {
+  const { blocks, mask } = ctx ?? analyze(code);
+  const block = blocks.find((b) => b.label === label);
+  if (!block) return { error: `there's no block named "${label}" in the buffer any more` };
+  const name = String(newName).trim();
+  if (!NAME_RE.test(name)) {
+    return { error: `"${name}" can't be a pattern name - names start with a letter, _ or $ and hold letters, digits, _ or $` };
+  }
+  if (name === '$' || labelBase(name) !== name) {
+    return { error: `"${name}" reads as a mute/solo marker (a leading or trailing _ or capital S) rather than a name` };
+  }
+  if (blocks.some((b) => b !== block && b.label === name)) {
+    return { error: `"${name}" is already another pattern's name` };
+  }
+  const m = LABEL_TOKEN_RE.exec(code.slice(block.start, block.start + 256));
+  const head = m
+    ? { from: block.start, to: block.start + m[1].length, text: `${block.muted ? '_' : ''}${block.soloed ? 'S' : ''}${name}` }
+    : { from: block.start, to: block.start, text: `${name}: ` };
+  const refs = sourceRefEdits(code, mask, label, name);
+  return { edits: [head, ...refs].sort((a, b) => a.from - b.from), refs: refs.length };
 }
