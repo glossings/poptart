@@ -154,8 +154,12 @@ export class Sig {
     // see _clone().
     this.instrument = opts.instrument ?? null;
     this.fxChain = opts.fxChain ?? [];
-    this.paramSignals = opts.paramSignals ?? {}; // name -> Sig
-    this.paramSlots = opts.paramSlots ?? {}; // name -> slot index (0 = instrument, 1..n = fx)
+    // "slot:name" -> { slot, name, sig }. Keyed by slot AND name because a chain can hold two
+    // plugins with a parameter of the same name - Mix, Drive, Gain and Freq are on half the
+    // plugins there are - and a name-only key silently dropped the earlier one. The key is only
+    // ever a Map key: slot and name are read off the entry, never parsed back out of it, so a
+    // parameter whose name contains a colon is safe.
+    this.paramSignals = opts.paramSignals ?? {};
     // MIDI injected into a specific plugin in the chain (see Sig#midi, the injector form): each
     // { slot, name, note } routes another track's notes (or a MIDI device) into the plugin at
     // `slot` (1..n = fx). The engine fans a track source's notes to the plugin, or wires a device.
@@ -244,7 +248,6 @@ export class Sig {
       instrument: this.instrument,
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
-      paramSlots: this.paramSlots,
       midiInjects: this.midiInjects,
       audioInjects: this.audioInjects,
       inputSource: this.inputSource,
@@ -783,11 +786,10 @@ export class Sig {
    * autocomplete in the editor), targeting whatever's last in the chain right now.
    */
   param(name, value) {
-    const slotIndex = this.fxChain.length; // 0 = instrument, 1..n = effects, in call order
+    const slot = this.fxChain.length; // 0 = instrument, 1..n = effects, in call order
     const sig = toSignal(value);
     return this._clone({
-      paramSignals: { ...this.paramSignals, [name]: sig },
-      paramSlots: { ...this.paramSlots, [name]: slotIndex },
+      paramSignals: { ...this.paramSignals, [`${slot}:${name}`]: { slot, name, sig } },
     });
   }
 
@@ -1443,13 +1445,16 @@ export class Sig {
       );
     };
     const remapObj = (obj) => obj && Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, remapSig(v)]));
+    // paramSignals holds { slot, name, sig } entries rather than bare Sigs (see the constructor).
+    const remapParams = (obj) => obj && Object.fromEntries(
+      Object.entries(obj).map(([k, e]) => [k, { ...e, sig: remapSig(e.sig) }]));
     return new Sig(sample, {
       stepsForCycle,
       ...this._meta(),
       sampler: remapObj(this.sampler),
       noteChannels: remapObj(this.noteChannels),
       channel: remapObj(this.channel),
-      paramSignals: remapObj(this.paramSignals),
+      paramSignals: remapParams(this.paramSignals),
     });
   }
 
@@ -1805,13 +1810,16 @@ export class Sig {
       );
     };
     const remapObj = (obj) => obj && Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, remapSig(v)]));
+    // paramSignals holds { slot, name, sig } entries rather than bare Sigs (see the constructor).
+    const remapParams = (obj) => obj && Object.fromEntries(
+      Object.entries(obj).map(([k, e]) => [k, { ...e, sig: remapSig(e.sig) }]));
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), {
       stepsForCycle,
       ...this._meta(),
       sampler: remapObj(this.sampler),
       noteChannels: remapObj(this.noteChannels),
       channel: remapObj(this.channel),
-      paramSignals: remapObj(this.paramSignals),
+      paramSignals: remapParams(this.paramSignals),
     });
   }
 

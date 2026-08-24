@@ -449,7 +449,7 @@ export class Scheduler {
   /** Every control signal the pattern carries: plugin params by slot, channel strip as slot -1. */
   _controlEntries(sig) {
     return [
-      ...Object.entries(sig.paramSignals).map(([name, s]) => ({ slot: sig.paramSlots[name], name, sig: s })),
+      ...Object.values(sig.paramSignals).map(({ slot, name, sig: s }) => ({ slot, name, sig: s })),
       ...Object.entries(sig.channel).map(([name, s]) => ({ slot: CHANNEL_SLOT, name, sig: s })),
     ];
   }

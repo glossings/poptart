@@ -788,13 +788,26 @@ function patternSigs(sig) {
   // polls to move the running LFO's floor - it is what says where the sweep sits, and it is on
   // screen. Numeric bounds have nothing to light and are skipped.
   const presets = Object.values(sig.presetPatterns ?? {});
-  return [sig, ...Object.values(sig.paramSignals), ...Object.values(sig.channel), ...presets]
+  const params = Object.values(sig.paramSignals).map((e) => e.sig);
+  return [sig, ...params, ...Object.values(sig.channel), ...presets]
     .flatMap((s) => {
       const ir = s?.lfoIR ?? s?.envIR ?? s?.ccIR;
       if (!ir) return [s];
       const bounds = [ir.min, ir.max].filter((b) => b && typeof b === 'object');
       return [s, ...(ir.shapePattern ? [ir.shapePattern] : []), ...bounds];
     });
+}
+
+// What the editor's track row lists after "modulating:". A chain can carry the same parameter
+// name on two different plugins, so a name that appears more than once is qualified with the
+// plugin it belongs to - "Decapitator Mix, FilterFreak2 Mix" rather than "Mix, Mix". The common
+// case (one Mix) stays the bare name.
+function paramLabels(sig) {
+  const entries = Object.values(sig.paramSignals ?? {});
+  const chain = [sig.instrument, ...(sig.fxChain ?? [])];
+  const seen = new Map();
+  for (const e of entries) seen.set(e.name, (seen.get(e.name) ?? 0) + 1);
+  return entries.map((e) => (seen.get(e.name) > 1 && chain[e.slot] ? `${chain[e.slot]} ${e.name}` : e.name));
 }
 
 function dryRunPattern(sig) {
@@ -2156,7 +2169,7 @@ const routes = {
           end: b.end,
           instrument: b.sig.instrument,
           fxChain: b.sig.fxChain,
-          paramNames: Object.keys(b.sig.paramSignals),
+          paramNames: paramLabels(b.sig),
           grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW) : null,
         })),
       },

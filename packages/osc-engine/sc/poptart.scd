@@ -1304,6 +1304,13 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
                     spec = mode.asString ++ "|" ++ glide.asString ++ "|" ++ shapesJson;
                     lfoKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
                     existing = track[\lfos][lfoKey];
+                    // An entry outlives the plugin it was mapped onto (see setParamLFO): re-map the
+                    // bus on every send, so a slot whose plugin was swapped - an open clears the
+                    // UGen's mappings - still reaches it. On the same bus and index it is a no-op.
+                    if (existing.notNil) {
+                        existing[\index] = index;
+                        if (isChannel) { track[\synth].map(paramName.asSymbol, existing[\bus]) } { ctl.map(index, existing[\bus]) };
+                    };
                     if (existing.notNil and: { existing[\spec] == spec }) {
                         existing[\synth].set(\rate, rateHz, \lo, lo, \hi, hi);
                         // A swap has to start the next shape at this one's rate and range.
@@ -1453,6 +1460,13 @@ OSCdef(\poptartSetParamEnv, { |msg|
                 } {
                     envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
                     existing = track[\envs][envKey];
+                    // An entry outlives the plugin it was mapped onto (see setParamLFO): re-map the
+                    // bus on every send, so a slot whose plugin was swapped - an open clears the
+                    // UGen's mappings - still reaches it. On the same bus and index it is a no-op.
+                    if (existing.notNil) {
+                        existing[\index] = index;
+                        if (isChannel) { track[\synth].map(paramName.asSymbol, existing[\bus]) } { ctl.map(index, existing[\bus]) };
+                    };
                     if (existing.isNil and: { isChannel.not } and: { (lo < 0) or: { hi > 1 } }) {
                         ("poptart: env range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
                             ++ "' is outside the normalized 0..1 VST parameter range and will pin -"

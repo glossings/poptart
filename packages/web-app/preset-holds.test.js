@@ -68,7 +68,7 @@ test('the track pattern itself is always in', () => {
 
 test('a patterned lfo shape still lights alongside', () => {
   const shapePattern = { name: 'shapes' };
-  const sig = { ...track(), paramSignals: { Cutoff: { name: 'cutoff', lfoIR: { shapePattern } } } };
+  const sig = { ...track(), paramSignals: { '1:Cutoff': { slot: 1, name: 'Cutoff', sig: { name: 'cutoff', lfoIR: { shapePattern } } } } };
   assert.deepEqual(names(patternSigs(sig)), ['cutoff', 'shapes', 'slot0names', 'slot1names']);
 });
 
@@ -433,12 +433,12 @@ test("a modulator's pattern-valued .range() bounds are in the grid; numeric boun
   const lo = { name: 'lo' };
   const hi = { name: 'hi' };
   const t = {
-    paramSignals: { cutoff: { name: 'cutoff', lfoIR: { min: lo, max: 4000 } } },
+    paramSignals: { '1:cutoff': { slot: 1, name: 'cutoff', sig: { name: 'cutoff', lfoIR: { min: lo, max: 4000 } } } },
     channel: { gain: { name: 'gain', ccIR: { min: 0, max: hi } } },
     presetPatterns: {},
   };
   assert.deepEqual(names(patternSigs(t)), ['cutoff', 'lo', 'gain', 'hi']);
   // A patterned shape AND a patterned bound on one lfo(): both come along.
-  const shaped = { paramSignals: { x: { name: 'x', lfoIR: { shapePattern: { name: 'shapes' }, min: lo, max: 1 } } }, channel: {}, presetPatterns: {} };
+  const shaped = { paramSignals: { '1:x': { slot: 1, name: 'x', sig: { name: 'x', lfoIR: { shapePattern: { name: 'shapes' }, min: lo, max: 1 } } } }, channel: {}, presetPatterns: {} };
   assert.deepEqual(names(patternSigs(shaped)), ['x', 'shapes', 'lo']);
 });
