@@ -1786,6 +1786,26 @@ function expireWipSessions() {
 // API handlers, keyed "METHOD /path" and dispatched by the plumbing at the bottom of the file.
 // ---------------------------------------------------------------------------------------------
 
+// Walked sample trees, held briefly for /api/findSamples (see there). Keyed by folder; a handful
+// of folders at a time is all a search session touches, so the map is trimmed rather than managed.
+const walkCache = new Map(); // dir -> { at, walk: Promise }
+const WALK_CACHE_MS = 5000;
+const WALK_CACHE_MAX = 8;
+
+function cachedWalk(dir, run) {
+  const now = Date.now();
+  const hit = walkCache.get(dir);
+  if (hit && now - hit.at < WALK_CACHE_MS) return hit.walk;
+  const walk = run().catch((err) => { walkCache.delete(dir); throw err; });
+  walkCache.delete(dir); // re-insert, so the map stays in oldest-first order for the trim below
+  walkCache.set(dir, { at: now, walk });
+  for (const [key, val] of [...walkCache]) {
+    if (key !== dir && now - val.at >= WALK_CACHE_MS) walkCache.delete(key);
+  }
+  while (walkCache.size > WALK_CACHE_MAX) walkCache.delete(walkCache.keys().next().value);
+  return walk;
+}
+
 const routes = {
   'GET /api/status': async () => ({
     status: 200,
@@ -1891,6 +1911,40 @@ const routes = {
         .sort((a, b) => a.localeCompare(b));
     } catch { /* listed the dirs a moment ago - a race; files stay empty */ }
     return { status: 200, body: { path: dir, parent: parent === dir ? null : parent, dirs, files, samplesRoot: path.resolve(samplesRoot()) } };
+  },
+
+  // Everything audio under a folder, for the pack panel: `q` filters (all terms must appear in the
+  // path), no `q` is the whole tree - which is what adding a folder recursively takes. The walk is
+  // capped; `truncated` says it saw only part of the tree, and `matched` is the real count when
+  // more matched than `limit` returns.
+  //
+  // A search is a request per keystroke over the same tree, so the walk is held for a few seconds:
+  // typing costs one walk, not one per letter, and a folder that changed on disk is still picked up
+  // by the time anyone notices.
+  'GET /api/findSamples': async (query) => {
+    const raw = (query.path || '').trim();
+    const expanded = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : (raw || os.homedir());
+    const dir = path.resolve(expanded);
+    const limit = Math.max(1, Math.min(20000, Number(query.limit) || 500));
+    const { walkAudioFiles, matchAudioPaths } = require('@poptart/osc-engine/samples');
+    let walked;
+    try {
+      if (!fs.statSync(dir).isDirectory()) throw new Error('not a folder');
+      walked = await cachedWalk(dir, () => walkAudioFiles(dir));
+    } catch {
+      throw new Error(`can't read ${dir}`);
+    }
+    const hits = matchAudioPaths(walked.files, query.q || '');
+    return {
+      status: 200,
+      body: {
+        path: dir,
+        files: hits.slice(0, limit),
+        matched: hits.length,
+        total: walked.files.length,
+        truncated: !!walked.truncated,
+      },
+    };
   },
 
   // Prefer-VST3 toggle (settings tab). Default on; body: { enabled }. Applied on the next

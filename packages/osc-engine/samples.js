@@ -143,6 +143,91 @@ function browseSamples(rel = '') {
   };
 }
 
+/**
+ * Every audio file under `dir`, as paths relative to it, in "this folder first, then each
+ * subfolder in name order" order - what the pack panel's search looks through and what adding a
+ * folder recursively picks up. A folder's own files come before its subfolders' so that adding a
+ * tree keeps the same indexes at the top as adding just the folder used to.
+ *
+ * Hidden entries are skipped (macOS `._x.wav` resource forks and `.git` are never what you meant),
+ * symlinked folders are followed but only once each, and the walk stops at `limit` files or
+ * `maxDepth` levels - `truncated` says which, so a caller can tell the user it saw only part.
+ *
+ * Async on purpose: this process is also the one sending OSC on time, and a sample library big
+ * enough to be worth searching is big enough that walking it synchronously would be heard.
+ */
+async function walkAudioFiles(dir, { limit = 20000, maxDepth = 12 } = {}) {
+  const files = [];
+  let truncated = false; // saw only part of the tree, for whatever reason
+  let full = false; // hit the file cap - the one reason to stop walking entirely
+  const seen = new Set(); // realpaths of folders already walked, so a symlink loop can't spin
+  const remember = async (abs) => {
+    try {
+      const real = await fs.promises.realpath(abs);
+      if (seen.has(real)) return false;
+      seen.add(real);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const walk = async (abs, rel, depth) => {
+    if (full) return;
+    let entries;
+    try {
+      entries = await fs.promises.readdir(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const subdirs = [];
+    const here = [];
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      let isDir = e.isDirectory();
+      if (!isDir && e.isSymbolicLink()) {
+        try { isDir = (await fs.promises.stat(path.join(abs, e.name))).isDirectory(); } catch { continue; }
+      }
+      if (isDir) subdirs.push(e.name);
+      else if (AUDIO_EXTS.has(path.extname(e.name).toLowerCase())) here.push(e.name);
+    }
+    here.sort((a, b) => a.localeCompare(b));
+    subdirs.sort((a, b) => a.localeCompare(b));
+    for (const f of here) {
+      if (files.length >= limit) { full = truncated = true; return; }
+      files.push(rel ? `${rel}/${f}` : f);
+    }
+    if (depth >= maxDepth) {
+      // Too deep to go on, but the folders beside this one are still worth having: only the file
+      // cap stops the whole walk, a depth cut just marks the result partial.
+      if (subdirs.length) truncated = true;
+      return;
+    }
+    for (const d of subdirs) {
+      if (!(await remember(path.join(abs, d)))) continue;
+      await walk(path.join(abs, d), rel ? `${rel}/${d}` : d, depth + 1);
+      if (full) return;
+    }
+  };
+  await remember(dir);
+  await walk(dir, '', 0);
+  return { files, truncated };
+}
+
+/**
+ * The subset of `files` (relative paths from walkAudioFiles) matching a search: every
+ * whitespace-separated term must appear somewhere in the path, case-insensitively. Matching the
+ * whole relative path rather than the filename is deliberate - "break" then also finds everything
+ * inside a folder called Breaks, which is how sample libraries are usually organized.
+ */
+function matchAudioPaths(files, query) {
+  const terms = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return files;
+  return files.filter((f) => {
+    const hay = f.toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  });
+}
+
 // ---------------------------------------------------------------------------------------------
 // Mono mixdown for the transient analysis below. The RIFF parsing itself lives in wav.js (the
 // recorder's trim pass needs the channels kept); this only flattens what it returns.
@@ -228,6 +313,8 @@ module.exports = {
   expandPackEntries,
   isAudioName,
   browseSamples,
+  walkAudioFiles,
+  matchAudioPaths,
   detectSlices,
   readWav,
 };

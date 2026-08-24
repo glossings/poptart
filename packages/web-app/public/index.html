@@ -498,9 +498,12 @@
             <div id="packEntries" class="pack-entries" tabindex="0"></div>
           </div>
           <div class="pack-col pack-col-browse">
-            <div class="pack-col-head">pick from<span class="spacer"></span><button id="packAddSel" class="small" title="add the selection to the pack (←)">← add</button></div>
+            <div class="pack-col-head">pick from<span id="packBrowseHead" class="pack-col-sub"></span><span class="spacer"></span><button id="packAddSel" class="small" title="add the selection to the pack (←)">← add</button></div>
             <input id="packBrowsePath" class="dir-picker-path pack-browse-path" type="text" spellcheck="false"
               title="current folder — edit or paste a path, then Enter to go there" />
+            <input id="packBrowseSearch" class="pack-search pack-browse-search" type="text" spellcheck="false"
+              placeholder="search this folder and everything under it" autocomplete="off"
+              title="filter to the audio files whose path contains what you type (every word must match)" />
             <div id="packBrowseList" class="dir-picker-list pack-browse-list" tabindex="0"></div>
           </div>
         </div>

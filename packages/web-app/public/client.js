@@ -11325,6 +11325,8 @@ const packEntriesHead = document.getElementById('packEntriesHead');
 const packEntriesEl = document.getElementById('packEntries');
 const packRemoveSelBtn = document.getElementById('packRemoveSel');
 const packBrowsePath = document.getElementById('packBrowsePath');
+const packBrowseSearch = document.getElementById('packBrowseSearch');
+const packBrowseHead = document.getElementById('packBrowseHead');
 const packBrowseList = document.getElementById('packBrowseList');
 const packAddSelBtn = document.getElementById('packAddSel');
 const packPlayBtn = document.getElementById('packPlayBtn');
@@ -11343,10 +11345,19 @@ let packBrowse = { path: null, parent: null, dirs: [], files: [], samplesRoot: '
 // shift-range extends from). Browse keys are "d:name" / "f:name" in the current folder; entry keys
 // are indexes into the pack.
 const packSel = { browse: new Set(), entries: new Set(), browseAnchor: null, entriesAnchor: null };
-const packListings = new Map(); // folder path -> its listing, for folders selected without going in
+const packWalks = new Map(); // folder path -> { at, walk } - every audio file under it, briefly held
+// The browse search. While `query` is set the browse list shows matches from anywhere under the
+// folder instead of the folder itself - `files` are paths relative to it, capped at what fits on
+// screen, with `matched` the real count (adding them all goes back for the rest).
+let packFind = { query: '', running: false, files: [], matched: 0, total: 0, truncated: false, seq: 0 };
+let packFindTimer = null;
 let packEvalTimer = null;
 let packSuppressSync = false; // our own write-back, which the change listener must not re-read
 const PACK_EVAL_DEBOUNCE_MS = 250;
+const PACK_FIND_DEBOUNCE_MS = 200;
+const PACK_FIND_SHOW = 500; // matches drawn at once; more than that, narrow the search
+const PACK_WALK_LIMIT = 20000; // the cap on a whole-tree add, matching the server's own
+const PACK_WALK_TTL_MS = 30000; // how long a folder's walk is reused, so a new file still shows up
 
 function packScheduleEval() {
   clearTimeout(packEvalTimer);
@@ -11436,6 +11447,7 @@ function openPackById(id, from = {}) {
     api('GET', '/api/samplesDir').then(({ dir }) => packBrowseTo(dir)).catch(() => packBrowseTo(null));
   } else {
     packRenderBrowse();
+    if (packFindActive()) packRunFind(packFind.query); // the disk may have moved on since last time
   }
   packRenderTransport();
   return true;
@@ -11553,8 +11565,12 @@ function packRows(list) {
   if (list === 'entries') {
     return (packState?.entries ?? []).map((entry, i) => ({ key: i, abs: packAbsOf(entry), name: packBasename(entry), kind: isAudioPath(entry) ? 'file' : 'dir' }));
   }
-  const { path: dir, dirs, files } = packBrowse;
+  const { path: dir } = packBrowse;
   if (dir == null) return [];
+  // Searching: the matches, which are files anywhere below - their names ARE relative paths, so
+  // clicks, keys, adding and the playing-row marks all work on them unchanged.
+  const dirs = packFindActive() ? [] : packBrowse.dirs;
+  const files = packFindActive() ? packFind.files : packBrowse.files;
   return [
     ...dirs.map((name) => ({ key: `d:${name}`, abs: `${dir}/${name}`, name, kind: 'dir' })),
     ...files.map((name) => ({ key: `f:${name}`, abs: `${dir}/${name}`, name, kind: 'file' })),
@@ -11632,39 +11648,131 @@ function packScrollTo(list, key) {
   else if (r.bottom > b.bottom) box.scrollTop += r.bottom - b.bottom;
 }
 
-/** One folder's listing, fetched once - what a folder selected from outside adds, and what it says about itself. */
-async function packListing(dir) {
-  if (!packListings.has(dir)) {
-    packListings.set(dir, api('GET', `/api/browseDir?path=${encodeURIComponent(dir)}`).then((r) => ({ path: r.path, files: r.files ?? [] })));
+// --- searching, and folders as whole trees -------------------------------------------------------
+// One endpoint serves both: it walks everything audio under a folder and filters by the query.
+// No query means the whole tree, which is what adding a folder takes.
+
+const packFindFetch = (dir, q, limit) =>
+  api('GET', `/api/findSamples?path=${encodeURIComponent(dir)}&q=${encodeURIComponent(q)}&limit=${limit}`);
+
+const packFindActive = () => packFind.query !== '';
+
+/**
+ * Every audio file under a folder, relative to it - what selecting a folder adds, and what the
+ * folder says about itself when you click it. Held for a moment so that clicking a folder and then
+ * adding it is one walk, and so arrowing back up a list of folders doesn't re-walk each one.
+ */
+function packWalk(dir) {
+  const hit = packWalks.get(dir);
+  if (hit && Date.now() - hit.at < PACK_WALK_TTL_MS) return hit.walk;
+  const walk = packFindFetch(dir, '', PACK_WALK_LIMIT)
+    .then((r) => ({ path: r.path, files: r.files ?? [], truncated: !!r.truncated }))
+    .catch((err) => { packWalks.delete(dir); throw err; }); // a failed walk must not stick
+  packWalks.set(dir, { at: Date.now(), walk });
+  return walk;
+}
+
+/** Back to showing the folder itself. Callers that are about to redraw anyway pass render = false. */
+function packFindClear(render = true) {
+  clearTimeout(packFindTimer);
+  packFindTimer = null;
+  packFind = { query: '', running: false, files: [], matched: 0, total: 0, truncated: false, seq: packFind.seq + 1 };
+  packSel.browse.clear();
+  packSel.browseAnchor = null;
+  if (render) packRenderBrowse();
+}
+
+/**
+ * A keystroke in the search box. The old matches stay on screen until the new ones land - typing
+ * another letter narrows what is already there, so blanking the list between keystrokes would only
+ * flicker.
+ */
+function packQueueFind() {
+  const q = packBrowseSearch.value.trim();
+  clearTimeout(packFindTimer);
+  if (!q) return packFindClear();
+  packFind.query = q;
+  packFind.running = true;
+  packFindTimer = setTimeout(() => packRunFind(q), PACK_FIND_DEBOUNCE_MS);
+  packRenderBrowse();
+}
+
+async function packRunFind(q) {
+  const dir = packBrowse.path;
+  if (dir == null) return;
+  const seq = ++packFind.seq;
+  try {
+    const r = await packFindFetch(dir, q, PACK_FIND_SHOW);
+    if (seq !== packFind.seq) return; // a later keystroke owns the list now
+    Object.assign(packFind, { files: r.files ?? [], matched: r.matched ?? 0, total: r.total ?? 0, truncated: !!r.truncated });
+  } catch (err) {
+    if (seq !== packFind.seq) return;
+    Object.assign(packFind, { files: [], matched: 0, total: 0, truncated: false });
+    packSay(err.message ?? String(err), true);
   }
-  return packListings.get(dir);
+  packFind.running = false;
+  packSel.browse.clear(); // the rows underneath the selection just changed
+  packSel.browseAnchor = null;
+  packRenderBrowse();
+}
+
+/** What the browse column says about itself: the search's tally, or nothing when not searching. */
+function packFindNote() {
+  if (!packFindActive()) return '';
+  if (packFind.running && !packFind.files.length) return 'searching…';
+  const parts = [packFind.matched
+    ? `${packFind.matched} of ${packFind.total} files match`
+    : `no match in ${packFind.total} files`];
+  if (packFind.matched > packFind.files.length) parts.push(`first ${packFind.files.length} shown`);
+  if (packFind.truncated) parts.push('big tree, searched part of it');
+  return `· ${parts.join(' · ')}`;
 }
 
 async function packDescribeFolder(abs, name) {
   try {
-    const { files } = await packListing(abs);
-    if (packSel.browse.has(`d:${name}`)) packSay(`${name} · ${files.length} audio file${files.length === 1 ? '' : 's'} · ← adds them all, double-click goes in`);
-  } catch { /* the listing failed - the folder still adds nothing, which the add will say */ }
+    const { files, truncated } = await packWalk(abs);
+    if (!packSel.browse.has(`d:${name}`)) return;
+    const deep = files.some((f) => f.includes('/'));
+    packSay(`${name} · ${files.length}${truncated ? '+' : ''} audio file${files.length === 1 ? '' : 's'}${deep ? ', subfolders and all' : ''} · ← adds them all, double-click goes in`);
+  } catch { /* the walk failed - the folder still adds nothing, which the add will say */ }
 }
 
-/** ← / the add button: the selection into the pack - files as they are, folders as everything in them. Nothing selected means the whole folder on screen. */
+/**
+ * ← / the add button: the selection into the pack - files as they are, folders as every audio file
+ * anywhere under them (subfolders walked, each folder's own files first). Nothing selected means
+ * the whole folder on screen, or, while searching, every match - including the ones past the rows
+ * drawn, which is why that case goes back to the server for the full list.
+ */
 async function packAddSelected() {
   if (!packState?.own) return packRefuseLibrary();
   const rows = packRows('browse');
   const picked = rows.filter((r) => packSel.browse.has(r.key));
+  if (!picked.length && packFindActive()) {
+    try {
+      const r = await packFindFetch(packBrowse.path, packFind.query, PACK_WALK_LIMIT);
+      const all = (r.files ?? []).map((f) => `${r.path}/${f}`);
+      if (!all.length) return packSay('nothing matches', true);
+      return packAdd(all);
+    } catch (err) {
+      return packSay(err.message ?? String(err), true);
+    }
+  }
   const chosen = picked.length ? picked : rows.filter((r) => r.kind === 'file');
   const paths = [];
+  let clipped = false;
   for (const r of chosen) {
     if (r.kind === 'file') { paths.push(r.abs); continue; }
     try {
-      const { path: dir, files } = await packListing(r.abs);
+      const { path: dir, files, truncated } = await packWalk(r.abs);
       paths.push(...files.map((f) => `${dir}/${f}`));
+      clipped ||= truncated;
     } catch (err) {
       packSay(err.message ?? String(err), true);
     }
   }
   if (!paths.length) return packSay('nothing to add here', true);
   packAdd(paths);
+  if (clipped) packSay(`that is a big tree — took the first ${paths.length} files`, true);
 }
 
 function packRemoveSelected() {
@@ -11732,10 +11840,11 @@ async function packBrowseTo(target) {
   try {
     const { path, parent, dirs, files, samplesRoot } = await api('GET', `/api/browseDir?path=${encodeURIComponent(target ?? '')}`);
     packBrowse = { path, parent, dirs, files: files ?? [], samplesRoot: samplesRoot ?? '' };
-    packListings.set(path, Promise.resolve({ path, files: packBrowse.files }));
     packBrowsePath.value = path;
     packSel.browse.clear(); // a selection is of rows in THIS folder
     packSel.browseAnchor = null;
+    packBrowseSearch.value = ''; // a search is of THIS folder's tree; going somewhere ends it
+    packFindClear(false);
     packRenderBrowse();
   } catch (e) {
     packSay(e.message ?? String(e), true);
@@ -11743,14 +11852,22 @@ async function packBrowseTo(target) {
 }
 
 function packRenderBrowse() {
-  const { path: dir, parent, files } = packBrowse;
+  const { path: dir, parent } = packBrowse;
   packBrowseList.innerHTML = '';
+  packBrowseHead.textContent = packFindNote();
   if (dir == null) return;
+  const rows = packRows('browse');
+  const finding = packFindActive();
   const nSel = packSel.browse.size;
-  packAddSelBtn.disabled = !packState?.own || (!nSel && !files.length);
-  packAddSelBtn.textContent = nSel ? `← add ${nSel > 1 ? nSel : ''}`.trimEnd() : `← add all ${files.length} here`;
-  packAddSelBtn.title = nSel ? 'add the selection to the pack (←)' : 'add every audio file in this folder (←)';
-  if (parent) {
+  const nFiles = finding ? packFind.matched : rows.filter((r) => r.kind === 'file').length;
+  packAddSelBtn.disabled = !packState?.own || (!nSel && !nFiles);
+  packAddSelBtn.textContent = nSel
+    ? `← add ${nSel > 1 ? nSel : ''}`.trimEnd()
+    : finding ? `← add all ${nFiles} matches` : `← add all ${nFiles} here`;
+  packAddSelBtn.title = nSel
+    ? 'add the selection to the pack (←)'
+    : finding ? 'add every file that matches, wherever it is (←)' : 'add every audio file in this folder (←)';
+  if (parent && !finding) {
     const up = document.createElement('div');
     up.className = 'dir-row dir-up';
     up.textContent = '↑ ..';
@@ -11758,7 +11875,7 @@ function packRenderBrowse() {
     packBrowseList.appendChild(up);
   }
   const have = new Set((packState?.entries ?? []).map((e) => packAbsOf(e)));
-  for (const row of packRows('browse')) {
+  for (const row of rows) {
     const el = document.createElement('div');
     const selected = packSel.browse.has(row.key);
     if (row.kind === 'dir') {
@@ -11767,13 +11884,27 @@ function packRenderBrowse() {
       el.addEventListener('dblclick', (e) => { e.preventDefault(); packBrowseTo(row.abs); });
     } else {
       el.className = `pack-file-row${have.has(row.abs) ? ' on' : ''}${selected ? ' selected' : ''}${packPlayer.abs === row.abs ? ' playing' : ''}`;
-      el.title = have.has(row.abs) ? 'in the pack already' : 'click to hear and select · ← (or double-click) adds to the pack';
+      el.title = have.has(row.abs) ? `${row.abs} - in the pack already` : `${row.abs}\nclick to hear and select · ← (or double-click) adds to the pack`;
       el.addEventListener('dblclick', (e) => { e.preventDefault(); packAdd([row.abs]); });
     }
     el.dataset.key = row.key;
     const label = document.createElement('span');
     label.className = row.kind === 'dir' ? 'pack-dir-name' : 'pack-file-name';
-    label.textContent = row.name;
+    // A search hit's name is its path from here: the folders it sits in read quieter than the file,
+    // and are the half that gets cut short when the row is too narrow for both.
+    const cut = row.name.lastIndexOf('/');
+    if (cut < 0) {
+      label.textContent = row.name;
+    } else {
+      label.classList.add('has-path');
+      const where = document.createElement('span');
+      where.className = 'pack-file-dir';
+      where.textContent = row.name.slice(0, cut + 1);
+      const base = document.createElement('span');
+      base.className = 'pack-file-base';
+      base.textContent = row.name.slice(cut + 1);
+      label.append(where, base);
+    }
     el.appendChild(label);
     el.addEventListener('mousedown', (e) => {
       if (e.detail > 1) return; // the double-click's second press: the dblclick handler has it
@@ -11783,10 +11914,10 @@ function packRenderBrowse() {
     });
     packBrowseList.appendChild(el);
   }
-  if (!packRows('browse').length) {
+  if (!rows.length) {
     const empty = document.createElement('div');
     empty.className = 'dir-empty';
-    empty.textContent = 'nothing here';
+    empty.textContent = finding ? (packFind.running ? 'searching…' : `nothing under here matches "${packFind.query}"`) : 'nothing here';
     packBrowseList.appendChild(empty);
   }
 }
@@ -11948,7 +12079,7 @@ function packListKeys(list, e) {
     e.preventDefault();
     // Enter on one folder goes in (the folder is what a lone selection mostly is); otherwise it adds.
     const sel = [...packSel.browse];
-    if (e.key === 'Enter' && sel.length === 1 && sel[0].startsWith('d:')) packBrowseTo(`${packBrowse.path}/${sel[0].slice(2)}`);
+    if (e.key === 'Enter' && sel.length === 1 && String(sel[0]).startsWith('d:')) packBrowseTo(`${packBrowse.path}/${String(sel[0]).slice(2)}`);
     else packAddSelected();
   } else if (list === 'entries' && (e.key === 'ArrowRight' || e.key === 'Delete' || e.key === 'Backspace')) {
     e.preventDefault();
@@ -11983,6 +12114,27 @@ function initPackPanel() {
   packBrowsePath.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); packBrowseTo(packBrowsePath.value.trim()); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePackPanel(); return; }
+    e.stopPropagation();
+  });
+
+  // The search box: typing filters, ↓ (or enter) drops into the results to hear them, and escape
+  // backs out of the search before it backs out of the panel.
+  packBrowseSearch.addEventListener('input', () => packQueueFind());
+  packBrowseSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (packBrowseSearch.value) { packBrowseSearch.value = ''; packFindClear(); }
+      else closePackPanel();
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'Enter') {
+      e.preventDefault();
+      if (packRows('browse').length) {
+        packBrowseList.focus({ preventScroll: true });
+        packSelectStep('browse', 1, false);
+      }
+    }
     e.stopPropagation();
   });
   packBrowseList.addEventListener('keydown', (e) => packListKeys('browse', e));

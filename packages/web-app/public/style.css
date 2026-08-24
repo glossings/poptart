@@ -3272,6 +3272,34 @@ li.CodeMirror-hint-active {
   margin: 4px 10px 4px;
 }
 
+.pack-browse-search {
+  margin: 0 10px 4px;
+}
+
+/* A search hit reads as <folders it is in>/<file>: the path is why it matched, the name is what
+   you are picking, so the path leads and fades and the name carries the weight - and when the row
+   is too narrow for both, it is the path that gets cut short, never the filename. */
+.pack-file-name.has-path {
+  display: flex;
+}
+
+.pack-file-dir,
+.pack-file-base {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pack-file-dir {
+  flex: 0 5 auto;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
+.pack-file-base {
+  flex: 0 1 auto;
+}
+
 .pack-browse-list {
   min-height: 0;
   padding: 2px 6px 8px;
