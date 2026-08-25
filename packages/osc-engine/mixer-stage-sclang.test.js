@@ -89,6 +89,9 @@ var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releas
 var birthParse;
 var waitForLoad, flushNotes, clearPending, now, fired;
 var cueOffset; // nil = the no-cue build; reassigned before the cue-armed build below
+// The deck meter buses (a 4-channel Bus in the shipped scd); the def only reads .index, so an
+// event stands in. 64 keeps the probe indices clear of the harness's own buses.
+var deckMeterBus = (index: 64);
 var statePending = IdentityDictionary.new, noteQueues = IdentityDictionary.new;
 var stateWaitMax = 0.3;
 var slotKey = { |k, slot| (k ++ "_" ++ slot).asSymbol };

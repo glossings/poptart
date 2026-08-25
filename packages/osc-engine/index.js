@@ -698,6 +698,14 @@ class OscEngine {
     this._send('/poptart/mixMeters', [on ? 1 : 0, JSON.stringify(MIX_BAND_FREQS)]);
   }
 
+  // DJ deck meters: while on, one reader synth per deck streams the deck's summed PRE-FADER
+  // level (post trim/EQ/filter - the cue tap's point) through onDeckLevel at ~20/sec, for the
+  // mix strip's channel meters. Which tracks sum into which deck is the `mdeck` birth arg
+  // (0 = A, 1 = B, -1 = neither); this only starts/stops the readers. Idempotent.
+  deckMeters(on) {
+    this._send('/poptart/deckMeters', [on ? 1 : 0]);
+  }
+
   /** The band centers onMixSpec frames are measured at, lowest first. */
   mixBandFreqs() {
     return [...MIX_BAND_FREQS];
@@ -793,7 +801,15 @@ class OscEngine {
     this._send('/poptart/statePending', [trackId, slotIndex, targetTime == null ? 0 : this._latency(targetTime), seq]);
     (async () => {
       const data = await this._inflateState(String(state), trackId, slotIndex);
-      if (!data || superseded()) return;
+      if (superseded()) return;
+      if (!data) {
+        // The announce above opened a note-hold window, and a state that turns out to be
+        // garbage (or a handle the store doesn't have) means no program will ever close it -
+        // on a cold-opening plugin the notes would sit held for the whole failsafe. Cancel
+        // releases them; the plugin keeps sounding as it is, which is all a bad state gets.
+        this.cancelPluginState(trackId, slotIndex);
+        return;
+      }
       const stateFile = path.join(os.tmpdir(), `poptart-state-${trackId}-${slotIndex}-${Date.now()}.fxp`);
       await fsp.writeFile(stateFile, data);
       if (superseded()) return;
@@ -806,6 +822,7 @@ class OscEngine {
       this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile, latency, seq]);
     })().catch((e) => {
       this._warnOnce(`state-write:${trackId}:${slotIndex}`, `[poptart] could not restore plugin state for ${trackId}/slot ${slotIndex}: ${e.message ?? e}`);
+      if (!superseded()) this.cancelPluginState(trackId, slotIndex); // release the announced hold (see above)
     });
   }
 
@@ -1418,6 +1435,15 @@ class OscEngine {
       const [track, peakL, rmsL, peakR, rmsR] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onMixLevel === 'function') {
         this.onMixLevel(String(track), Number(peakL), Number(rmsL), Number(peakR), Number(rmsR));
+      }
+      return;
+    }
+    if (msg.address === '/poptart/deckLevel') {
+      // DJ deck meter feed, ~20/sec per deck while deckMeters is on:
+      // [deck (0 = A, 1 = B), peakL, rmsL, peakR, rmsR], pre-fader (see deckMeters).
+      const [deck, peakL, rmsL, peakR, rmsR] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onDeckLevel === 'function') {
+        this.onDeckLevel(Number(deck), Number(peakL), Number(rmsL), Number(peakR), Number(rmsR));
       }
       return;
     }

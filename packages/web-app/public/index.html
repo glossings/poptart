@@ -280,6 +280,11 @@
              the center, like a mixer's channel strips. Knobs are built by client.js with the same
              ids the sliders had (mixTrimA...), so refresh/learn/reset all keep working. -->
         <div class="mix-knobs" id="mixKnobsA"></div>
+        <!-- Channel fader (long-throw, on top of the crossfader like a hardware desk's) and the
+             deck's channel meter (pre-fader, for gain staging with trim) - both built by
+             client.js, both mirrored on deck B's side. -->
+        <div class="mix-dfader-col" id="mixDfaderColA"></div>
+        <div class="mix-meter-col" id="mixMeterColA"></div>
         <div class="mix-center">
           <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out - the phase-continuous stem swap">
             <input id="mixSwap" type="checkbox" /> swap</label>
@@ -300,6 +305,8 @@
             <button id="mixLearn" class="small" title="MIDI learn: arm this, then click desk controls and turn hardware knobs, one after another; click again or press esc to finish. Alt+click a control to unbind it">midi</button>
           </div>
         </div>
+        <div class="mix-meter-col" id="mixMeterColB"></div>
+        <div class="mix-dfader-col" id="mixDfaderColB"></div>
         <div class="mix-knobs" id="mixKnobsB"></div>
         <div class="mix-tracks-col">
           <div class="mix-deck-head"><button id="mixCueB" class="small mix-cue" title="cue deck B in the headphones (post-EQ, pre-fader) - needs a cue device (settings tab)">&#127911;</button><span class="spacer"></span><strong>deck B</strong></div>

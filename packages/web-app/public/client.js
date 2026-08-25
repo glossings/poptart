@@ -8938,6 +8938,14 @@ function toggleMixer() {
 
 async function openMixer() {
   if (mixerState) return;
+  // Not during DJ mode: the mixer arms a meter tap + band analyzer for EVERY playing track,
+  // and with two full songs up that spike is an audible glitch on the very set being performed
+  // (reported 2026-08-24). The desk strip is the performance surface; this modal is for
+  // composing. Refused with a line rather than silently - warn, don't block sound.
+  if (mixModeOn) {
+    logLine('the mixer stays closed during DJ mode (its per-track meters across two songs glitch the audio) - use the desk strip', true);
+    return;
+  }
   mixerBackdrop.classList.remove('hidden');
   mixerState = {
     strips: new Map(),
@@ -13697,6 +13705,7 @@ async function openMixMode() {
     logLine(e.message ?? String(e), true);
   }
   preMix = { code: cm.getValue(), savedName: currentSavedName, wipSession: wipSessionId };
+  if (mixerState) closeMixer(); // the modal's meter load is the audio glitch openMixer refuses
   mixModeOn = true;
   document.body.classList.add('mix-on');
   deckBPaneEl.classList.remove('hidden');
@@ -13728,7 +13737,7 @@ async function openMixMode() {
   sendCrossfader();
   refreshDeckFiles();
   mixRefresh();
-  mixPollStart(); // mirrors MIDI-driven desk moves back onto the sliders
+  mixPushStart(); // mirrors MIDI-driven desk moves back onto the sliders, pushed live
 }
 
 // Leave DJ mode. `keep` says which world survives:
@@ -13781,7 +13790,7 @@ function finishDjExit() {
 
 function closeMixMode() {
   mixModeOn = false;
-  mixPollStop();
+  mixPushStop();
   document.body.classList.remove('mix-on');
   deckBPaneEl.classList.add('hidden');
   mixStripEl.classList.add('hidden');
@@ -13934,9 +13943,11 @@ function sendCrossfader() {
 const MIX_TRACK_CONTROLS = [
   ['fader', 0, 1, 'fader'],
 ];
-// Trim and the 3-band EQ are DECK-WIDE on the desk (broadcast into every track's own DJ stage,
-// so multitrack outs still carry them per track engine-side); only the fader is per stem.
-const MIX_DECK_CONTROLS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf'];
+// Trim, the 3-band EQ and the filter are DECK-WIDE on the desk (broadcast into every track's
+// own DJ stage, so multitrack outs still carry them per track engine-side); only the stem
+// mini-faders are per stem. `fader` here is the deck's CHANNEL fader (the long-throw one) -
+// server-side it folds into the deck gain (xf-curve x fader) and never touches the stems.
+const MIX_DECK_CONTROLS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'fader'];
 const mixDeckCtl = (deck, ctl) => document.getElementById(
   `mix${ctl === 'djf' ? 'Djf' : ctl.charAt(0).toUpperCase() + ctl.slice(1)}${deck.toUpperCase()}`,
 );
@@ -13947,10 +13958,11 @@ const mixDeckCtl = (deck, ctl) => document.getElementById(
 // 'input', exactly like the range inputs it replaced - so the post throttle, the refresh sync,
 // dblclick-reset and MIDI-learn all keep working against the same ids (mixTrimA, mixDjfB, ...).
 const MIX_KNOB_DEFS = [
+  // Hardware-desk order, top to bottom: trim, then the EQ high-first, then the filter.
   ['trim', 'trim', 0, 2, 'trim (deck-wide input gain) - drag up/down; double-click resets'],
-  ['eqlo', 'low', 0, 2, 'low (0 is a true kill) - drag up/down; double-click resets'],
-  ['eqmid', 'mid', 0, 2, 'mid (0 is a true kill) - drag up/down; double-click resets'],
   ['eqhi', 'high', 0, 2, 'high (0 is a true kill) - drag up/down; double-click resets'],
+  ['eqmid', 'mid', 0, 2, 'mid (0 is a true kill) - drag up/down; double-click resets'],
+  ['eqlo', 'low', 0, 2, 'low (0 is a true kill) - drag up/down; double-click resets'],
   ['djf', 'filter', -1, 1, 'one-knob filter: left sweeps a low-pass down, right a high-pass up; double-click resets'],
 ];
 
@@ -14007,6 +14019,184 @@ for (const deck of ['a', 'b']) {
   }
 }
 
+// --- the channel faders (mixFaderA/B) and channel meters, flanking the center ---
+// The fader is the deck's long-throw channel fader, on top of the crossfader like a hardware
+// desk's; like the knobs it carries a `value` property and fires 'input' so the shared
+// post/learn/sync wiring below sees just another control. The meter is that deck's PRE-FADER
+// level (post trim/EQ/filter - the same point the cue tap reads), which is what makes it a gain
+// staging meter: ride trim until the deck peaks around the top of the green, whatever the
+// faders are doing.
+function mixMakeFader(id, title) {
+  const el = document.createElement('div');
+  el.className = 'mix-dfader';
+  el.id = id;
+  el.title = title;
+  const grip = document.createElement('div');
+  grip.className = 'mix-dfader-grip';
+  el.appendChild(grip);
+  let v = 1;
+  const paint = () => el.style.setProperty('--pos', String(v));
+  Object.defineProperty(el, 'value', {
+    get: () => v,
+    set: (nv) => {
+      v = Math.min(1, Math.max(0, Number(nv)));
+      paint();
+    },
+  });
+  el.addEventListener('pointerdown', (e) => {
+    if (mixLearnArmed) return; // the learn handler (registered after this one) takes the click
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('dragging');
+    const apply = (ev) => {
+      const r = el.getBoundingClientRect();
+      const pad = 9; // half the grip: full travel keeps the grip inside the groove
+      el.value = 1 - (ev.clientY - r.top - pad) / Math.max(1, r.height - pad * 2);
+      el.dispatchEvent(new Event('input'));
+    };
+    apply(e); // jump to the pointer, then track it
+    const up = () => {
+      el.classList.remove('dragging');
+      el.removeEventListener('pointermove', apply);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+    };
+    el.addEventListener('pointermove', apply);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  });
+  paint();
+  return el;
+}
+
+// dBFS scale shared by drawing and readout. -42..+6 spans the useful range; the floor renders
+// as silence. Zone edges are the usual digital-desk ones: green headroom, amber from -9, red
+// from -3 (still pre-clip - 0 is the wall).
+const MIX_METER_DB = { min: -42, max: 6 };
+const mixMeterDb = (x) => 20 * Math.log10(Math.max(x, 1e-5));
+const mixMeterColor = (db) => (db >= -3 ? '#f85149' : db >= -9 ? '#d29922' : '#3fb950');
+
+// Latest pushed level per deck (the SSE 'level' events) and the drawn state: RMS bar with fast
+// attack / slow release, peak line, and a held numeric peak that decays after a beat.
+const mixMeterFeed = { a: null, b: null };
+const mixMeterDraw = {
+  a: { rms: -90, peak: -90, hold: -90, holdAt: 0 },
+  b: { rms: -90, peak: -90, hold: -90, holdAt: 0 },
+};
+
+for (const deck of ['a', 'b']) {
+  const faderCol = document.getElementById(deck === 'a' ? 'mixDfaderColA' : 'mixDfaderColB');
+  const fader = mixMakeFader(`mixFader${deck.toUpperCase()}`,
+    `deck ${deck.toUpperCase()} channel fader (with the crossfader on top) - double-click resets`);
+  const flab = document.createElement('span');
+  flab.textContent = 'fader';
+  faderCol.append(fader, flab);
+
+  const meterCol = document.getElementById(deck === 'a' ? 'mixMeterColA' : 'mixMeterColB');
+  const canvas = document.createElement('canvas');
+  canvas.className = 'mix-meter';
+  canvas.id = `mixMeter${deck.toUpperCase()}`;
+  canvas.title = `deck ${deck.toUpperCase()} channel meter - pre-fader (post trim/EQ/filter), like a desk's: gain stage with trim`;
+  const readout = document.createElement('span');
+  readout.className = 'mix-meter-db';
+  readout.id = `mixMeterDb${deck.toUpperCase()}`;
+  readout.textContent = '-∞';
+  meterCol.append(canvas, readout);
+}
+
+// One meter frame: segmented bar (lit up to the RMS), a peak line, dB ticks on the outer edge
+// (mirrored per deck), and the held peak as the number below. ~60fps only while the strip is
+// open; ballistics live here so however the ~25/sec frames land the fall reads as motion.
+function mixMeterPaint(deck, dtSec) {
+  const canvas = document.getElementById(`mixMeter${deck.toUpperCase()}`);
+  const readout = document.getElementById(`mixMeterDb${deck.toUpperCase()}`);
+  const cssW = canvas.clientWidth;
+  const cssH = canvas.clientHeight;
+  if (!cssW || !cssH) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+  }
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, cssW, cssH);
+
+  const d = mixMeterDraw[deck];
+  const feed = mixMeterFeed[deck];
+  const rmsDb = feed ? mixMeterDb(feed.r) : -90;
+  const peakDb = feed ? mixMeterDb(feed.p) : -90;
+  // Attack instantly, release at 36 dB/s (the classic readable fall); the held peak stays put
+  // for 1.2s then falls too.
+  const fall = 36 * dtSec;
+  d.rms = rmsDb > d.rms ? rmsDb : Math.max(rmsDb, d.rms - fall);
+  d.peak = peakDb > d.peak ? peakDb : Math.max(peakDb, d.peak - fall);
+  const now = performance.now();
+  if (peakDb >= d.hold) {
+    d.hold = peakDb;
+    d.holdAt = now;
+  } else if (now - d.holdAt > 1200) {
+    d.hold = Math.max(d.hold - fall, d.peak);
+  }
+
+  const pad = 8; // top/bottom margin so the end ticks' labels fit
+  const scaleH = cssH - pad * 2;
+  const yOf = (db) => pad + (1 - (db - MIX_METER_DB.min) / (MIX_METER_DB.max - MIX_METER_DB.min)) * scaleH;
+  const mirror = deck === 'b'; // deck B mirrors deck A: bars on the outer edges, ticks facing the center
+  const barW = 11;
+  const barX = mirror ? cssW - barW - 1 : 1;
+
+  // Segments, 3px on a 4px pitch, each colored by its own position - lit to the RMS bar.
+  for (let y = yOf(MIX_METER_DB.max); y < yOf(MIX_METER_DB.min); y += 4) {
+    const segDb = MIX_METER_DB.min + (1 - (y - pad) / scaleH) * (MIX_METER_DB.max - MIX_METER_DB.min);
+    g.globalAlpha = segDb <= d.rms ? 1 : 0.14;
+    g.fillStyle = mixMeterColor(segDb);
+    g.fillRect(barX, y, barW, 3);
+  }
+  g.globalAlpha = 1;
+  // The moving peak line and the held one above it.
+  if (d.peak > MIX_METER_DB.min) {
+    g.fillStyle = mixMeterColor(d.peak);
+    g.fillRect(barX, yOf(Math.min(d.peak, MIX_METER_DB.max)), barW, 1.5);
+  }
+  if (d.hold > MIX_METER_DB.min) {
+    g.fillStyle = mixMeterColor(d.hold);
+    g.fillRect(barX, yOf(Math.min(d.hold, MIX_METER_DB.max)), barW, 1);
+  }
+  // dB ticks on the center-facing edge, mirrored per deck like everything else on the desk.
+  g.font = '8px ' + (getComputedStyle(document.body).getPropertyValue('--mono') || 'monospace');
+  g.fillStyle = getComputedStyle(document.body).getPropertyValue('--text-dim') || '#888';
+  g.textBaseline = 'middle';
+  g.textAlign = mirror ? 'right' : 'left';
+  const tickX = mirror ? barX - 3 : barX + barW + 3;
+  for (const db of [6, 0, -6, -12, -18, -24, -36]) {
+    g.fillText(db > 0 ? `+${db}` : String(db), tickX, yOf(db));
+  }
+
+  readout.textContent = d.hold <= -55 ? '-∞' : d.hold.toFixed(1);
+  readout.classList.toggle('over', d.hold > -3);
+}
+
+let mixMeterRaf = null;
+let mixMeterLastT = 0;
+function mixMeterLoop(t) {
+  if (!mixModeOn) {
+    mixMeterRaf = null;
+    return;
+  }
+  const dt = Math.min(0.1, (t - mixMeterLastT) / 1000 || 0.016);
+  mixMeterLastT = t;
+  mixMeterPaint('a', dt);
+  mixMeterPaint('b', dt);
+  mixMeterRaf = requestAnimationFrame(mixMeterLoop);
+}
+function mixMeterStart() {
+  if (mixMeterRaf == null) {
+    mixMeterLastT = performance.now();
+    mixMeterRaf = requestAnimationFrame(mixMeterLoop);
+  }
+}
+
 async function mixRefresh() {
   if (!mixModeOn) return;
   let state;
@@ -14024,8 +14214,8 @@ async function mixRefresh() {
   mixSyncValues(state);
 }
 
-// A short visual glide toward `target` (~one poll interval), so a hardware knob's stream -
-// mirrored here at the poll rate - reads as motion rather than steps. Snaps when close.
+// A short visual glide toward `target`, so the pushed frames (~30ms apart under a moving
+// knob) read as one continuous sweep rather than steps. Snaps when close.
 function mixGlide(el, target) {
   const from = Number(el.value);
   cancelAnimationFrame(el._mixGlide);
@@ -14035,7 +14225,7 @@ function mixGlide(el, target) {
   }
   const t0 = performance.now();
   const step = (t) => {
-    const u = Math.min(1, (t - t0) / 140);
+    const u = Math.min(1, (t - t0) / 80); // frames arrive ~30ms apart; just enough to read as motion
     el.value = from + (target - from) * u;
     if (u < 1) el._mixGlide = requestAnimationFrame(step);
   };
@@ -14050,7 +14240,11 @@ function mixSyncValues(state) {
       const el = mixDeckCtl(deck, ctl);
       // not while a hand is on it: a focused input, or a knob mid-drag
       if (document.activeElement !== el && !el.classList.contains('dragging')) {
-        mixGlide(el, state.perDeck[deck][ctl] ?? MIX_NEUTRAL[ctl]);
+        // The channel fader lives in state.faders (it folds into the deck gain server-side,
+        // never into the perDeck broadcast - see MIX_DECK_CONTROLS).
+        const target = ctl === 'fader' ? (state.faders?.[deck] ?? 1)
+          : (state.perDeck[deck][ctl] ?? MIX_NEUTRAL[ctl]);
+        mixGlide(el, target);
       }
     }
   }
@@ -14067,19 +14261,35 @@ function mixSyncValues(state) {
   mixTempoRender(state);
 }
 
-let mixPollTimer = null;
-function mixPollStart() {
-  clearInterval(mixPollTimer);
-  mixPollTimer = setInterval(async () => {
+// The desk push channel: the server frames every desk change (throttled to ~30ms) over SSE,
+// so a learned MIDI knob's moves reach the on-screen desk near-instantly with zero idle
+// traffic - see serveMixEvents in server.js. EventSource reconnects by itself, so a server
+// restart mid-session just resumes the mirror.
+let mixEvents = null;
+function mixPushStart() {
+  mixPushStop();
+  mixEvents = new EventSource('/api/mix/events');
+  mixEvents.onmessage = (e) => {
     if (!mixModeOn) return;
     try {
-      mixSyncValues(await api('GET', '/api/mix?desk=1')); // desk values only - cheap at this rate
-    } catch { /* next tick retries */ }
-  }, 150);
+      mixSyncValues(JSON.parse(e.data));
+    } catch { /* a torn frame; the next one corrects */ }
+  };
+  // The channel meter feed rides the same stream as NAMED events, so the desk-state handler
+  // above never sees them. Frames just land in mixMeterFeed; the rAF loop draws.
+  mixEvents.addEventListener('level', (e) => {
+    if (!mixModeOn) return;
+    try {
+      const { a, b } = JSON.parse(e.data);
+      mixMeterFeed.a = a;
+      mixMeterFeed.b = b;
+    } catch { /* a torn frame; the next one corrects */ }
+  });
+  mixMeterStart();
 }
-function mixPollStop() {
-  clearInterval(mixPollTimer);
-  mixPollTimer = null;
+function mixPushStop() {
+  mixEvents?.close();
+  mixEvents = null;
 }
 
 // --- tempo migration (phase 5): the shared clock rides between the songs' native tempos ---

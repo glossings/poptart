@@ -3620,6 +3620,83 @@ body.mix-on #deckAHead {
   border-color: var(--accent);
 }
 
+/* --- the channel faders + channel meters, flanking the center (client-built; see
+   mixMakeFader/mixMeterPaint). Mirrored pairs like everything on the desk: deck A runs
+   knobs | fader | meter toward the center, deck B meter | fader | knobs away from it. --- */
+.mix-dfader-col,
+.mix-meter-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 0;
+}
+.mix-dfader-col > span {
+  font-size: 9px;
+  color: var(--text-dim);
+  line-height: 1;
+}
+.mix-dfader {
+  flex: 1;
+  min-height: 0;
+  width: 24px;
+  position: relative;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.mix-dfader::before {
+  /* the groove */
+  content: '';
+  position: absolute;
+  left: calc(50% - 2px);
+  top: 4px;
+  bottom: 4px;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+}
+.mix-dfader-grip {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 18px;
+  /* --pos is the fader value (0 bottom .. 1 top), set by mixMakeFader */
+  top: calc((100% - 18px) * (1 - var(--pos, 1)));
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.mix-dfader-grip::after {
+  /* the fader cap's index line */
+  content: '';
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: calc(50% - 1px);
+  height: 2px;
+  background: var(--accent);
+}
+.mix-dfader.dragging .mix-dfader-grip {
+  border-color: var(--accent);
+}
+.mix-meter {
+  flex: 1;
+  min-height: 0;
+  width: 34px;
+}
+.mix-meter-db {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  line-height: 1;
+  min-width: 32px;
+  text-align: center;
+}
+.mix-meter-db.over {
+  color: #f85149;
+}
+
 /* --- the organize modal (playlists; see the library section of client.js) --- */
 #orgModal {
   position: fixed;

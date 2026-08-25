@@ -128,6 +128,11 @@ const mixState = {
   perDeck: { a: new Map(), b: new Map() }, // deck-broadcast values (the crossfader's `deck`, a deck-wide djf)
   perTrack: new Map(), // key -> Map(name -> value): faders, per-track EQ, trim
   xf: -1, // crossfader position (-1 = hard at deck A) - the source of the two `deck` gains
+  // The channel faders (one per deck, like a hardware desk's, on top of the crossfader): each
+  // deck's engine-side `deck` gain is xf-curve x its fader. NOT broadcast as `fader` - that
+  // synth control belongs to the per-stem gates and mini-faders, and a deck-wide write to it
+  // would clobber them all at once.
+  faders: { a: 1, b: 1 },
   // Tempo migration (phase 5): once the mix desk touches the clock (/api/mix/tempo), this holds
   // the bpm it asked for and the MAIN deck's setbpm stops driving the transport (it still
   // records the song's native tempo) - otherwise re-evaling deck a mid-migration would snap the
@@ -144,7 +149,7 @@ const mixState = {
 // binds it. A mapped (or learning) CC is CONSUMED - a knob given to the desk must not also
 // drive a midicc() in song code.
 const MIX_MIDI_TARGETS = new Set(['xf',
-  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf'].map((c) => `${d}:${c}`))]);
+  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'fader'].map((c) => `${d}:${c}`))]);
 let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
 
 // A CC's 0..1 into the target's own range: two-sided controls center at 0, gains at unity.
@@ -198,6 +203,8 @@ function applyMixTo(key) {
 // (the swap-mode workflow), while a full sweep is still a smooth fade. Server-side so the UI
 // slider and a learned MIDI knob drive the same implementation (see /api/mix/set and mixMidi).
 const xfGain = (u) => Math.round(Math.sin((Math.PI / 2) * Math.min(1, u * 2)) * 1000) / 1000;
+// One deck's side of the current crossfader position through that curve (before its fader).
+const deckXfGain = (deck) => xfGain(deck === 'a' ? 1 - (mixState.xf + 1) / 2 : (mixState.xf + 1) / 2);
 
 // One mix-desk gesture, shared by the HTTP endpoint and the MIDI path. A target is
 // { name, value } plus `deck` (broadcast) or `key` (one track); name 'xf' is the crossfader
@@ -208,12 +215,18 @@ function applyMixTargets(targets) {
     const value = Number(t.value);
     if (!Number.isFinite(value)) throw new Error(`mix/set ${name}: value must be a number`);
     if (name === 'xf') {
-      const x = Math.min(1, Math.max(-1, value));
-      mixState.xf = x;
+      mixState.xf = Math.min(1, Math.max(-1, value));
       applyMixTargets([
-        { deck: 'a', name: 'deck', value: xfGain(1 - (x + 1) / 2) },
-        { deck: 'b', name: 'deck', value: xfGain((x + 1) / 2) },
+        { deck: 'a', name: 'deck', value: deckXfGain('a') * mixState.faders.a },
+        { deck: 'b', name: 'deck', value: deckXfGain('b') * mixState.faders.b },
       ]);
+      continue;
+    }
+    // The channel fader (deck-addressed `fader`): folds into that deck's `deck` gain rather
+    // than broadcasting - `fader` on the synths is the per-stem gates' control (see mixState).
+    if (name === 'fader' && (t.deck === 'a' || t.deck === 'b')) {
+      mixState.faders[t.deck] = Math.min(1, Math.max(0, value));
+      applyMixTargets([{ deck: t.deck, name: 'deck', value: deckXfGain(t.deck) * mixState.faders[t.deck] }]);
       continue;
     }
     if (!(name in DJ_NEUTRAL)) throw new Error(`"${name}" is not a mix control`);
@@ -233,6 +246,87 @@ function applyMixTargets(targets) {
       engine.setParam(engineTrack(key), -1, name, value, 0);
     }
   }
+  mixNotify();
+}
+
+// The desk's state as one plain object - what GET /api/mix returns (minus the track rows) and
+// what the push channel below frames. One builder so the two can never drift.
+function mixDeskBody() {
+  return {
+    swap: mixState.swap,
+    perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
+    deckBpm: {
+      a: typeof decks.a.bpm === 'number' ? decks.a.bpm : null,
+      b: typeof decks.b.bpm === 'number' ? decks.b.bpm : null,
+    },
+    tempo: {
+      master: transport ? transport.cps * 240 : null,
+      override: mixState.tempoOverride,
+    },
+    xf: mixState.xf,
+    faders: { ...mixState.faders },
+    cue: activeCue ? { name: activeCue.name } : null,
+    midi: settings.mixMidi ?? {},
+    neutral: DJ_NEUTRAL,
+  };
+}
+
+// --- the desk push channel (SSE, GET /api/mix/events) ---
+//
+// The strip's mirror of MIDI-driven desk moves. Push, not poll: a learned knob streams CCs into
+// this process at MIDI rate, and mirroring that by polling meant choosing between request
+// chatter on the scheduler's event loop and a laggy knob graphic. Frames are throttled to one
+// per ~30ms however fast the desk changes, and nothing at all is sent while the desk is idle -
+// strictly less steady-state work than any poll. EventSource reconnects by itself, so an engine
+// or server restart just resumes the stream.
+const mixEventClients = new Set();
+
+function serveMixEvents(res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(`data: ${JSON.stringify(mixDeskBody())}\n\n`); // the current state, immediately
+  mixEventClients.add(res);
+  // The deck meters live exactly as long as someone is watching the strip: first client in
+  // starts the engine's two reader synths, last one out frees them.
+  if (mixEventClients.size === 1) {
+    try { engine?.deckMeters(true); } catch { /* engine between restarts */ }
+  }
+  res.on('close', () => {
+    mixEventClients.delete(res);
+    if (!mixEventClients.size) {
+      try { engine?.deckMeters(false); } catch { /* engine between restarts */ }
+    }
+  });
+}
+
+// The strip's channel meter feed: latest pre-fader level per deck (max of the two channels -
+// the conservative side for gain staging), framed to the same SSE clients as a NAMED event
+// ('level', so the desk-state onmessage path never sees it) at most every ~40ms - the two
+// decks' ~20/sec replies land as one combined frame.
+const deckLevels = { a: null, b: null };
+let deckLevelTimer = null;
+function deckLevelNotify() {
+  if (!mixEventClients.size || deckLevelTimer) return;
+  deckLevelTimer = setTimeout(() => {
+    deckLevelTimer = null;
+    if (!mixEventClients.size) return;
+    const frame = `event: level\ndata: ${JSON.stringify(deckLevels)}\n\n`;
+    for (const res of mixEventClients) res.write(frame);
+  }, 40);
+}
+
+let mixNotifyTimer = null;
+function mixNotify() {
+  if (!mixEventClients.size || mixNotifyTimer) return;
+  mixNotifyTimer = setTimeout(() => {
+    mixNotifyTimer = null;
+    if (!mixEventClients.size) return;
+    const frame = `data: ${JSON.stringify(mixDeskBody())}\n\n`;
+    for (const res of mixEventClients) res.write(frame);
+  }, 30);
 }
 
 // The merged desk view for one track (deck-broadcast under its own values), as a plain object:
@@ -242,6 +336,9 @@ function mixBirthFor(key) {
   const birth = {};
   for (const [name, value] of mixState.perDeck[deckOfKey(key)] ?? []) birth[name] = value;
   for (const [name, value] of mixState.perTrack.get(key) ?? []) birth[name] = value;
+  // Which deck meter bus the synth sums its pre-fader signal into (see the scd's deckMeterBus)
+  // - a birth arg like the rest, so a stem born mid-set meters from its first sample.
+  birth.mdeck = deckOfKey(key) === 'b' ? 1 : 0;
   return birth;
 }
 
@@ -251,6 +348,9 @@ function neutralizeMix(key) {
   if (!engine) return;
   const tid = engineTrack(key);
   for (const [name, value] of Object.entries(DJ_NEUTRAL)) engine.setParam(tid, -1, name, value, 0);
+  // Post-mix every surviving track is the main deck: meter on the A side (a promoted deck-b
+  // track's synth was born with mdeck 1).
+  engine.setParam(tid, -1, 'mdeck', 0, 0);
 }
 
 // The "trackId|..."-keyed lease/capture maps, re-keyed or dropped together when a track changes
@@ -736,7 +836,10 @@ function wireEngine() {
   // Born paused at cycle 0: the clock only advances while something is playing (first eval
   // starts it, /api/stop freezes it back at 0). Survives engine restarts, hence the guard.
   if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
-  transport.onCpsChange = syncVstTransport;
+  transport.onCpsChange = () => {
+    syncVstTransport();
+    mixNotify(); // a tempo ramp's every step reaches the strip's readout live
+  };
   syncVstTransport(); // a fresh sclang needs the surviving transport's tempo, not 120
   // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
   // live-value store - what a Tier-1 midicc() signal samples.
@@ -757,6 +860,18 @@ function wireEngine() {
   // Mixer monitoring feeds (per-track levels + band frames) - what the mixer modal draws.
   engine.onMixLevel = (key, peakL, rmsL, peakR, rmsR) => handleMixLevel(trackLabel(key), peakL, rmsL, peakR, rmsR);
   engine.onMixSpec = (key, values) => handleMixSpec(trackLabel(key), values); // "*" (master) has no label and passes through
+  // The strip's channel meters (see deckLevelNotify): fold each ~20/sec reply to one
+  // conservative mono figure per deck and push over the desk SSE stream.
+  engine.onDeckLevel = (deck, peakL, rmsL, peakR, rmsR) => {
+    deckLevels[deck === 1 ? 'b' : 'a'] = {
+      p: Math.max(peakL, peakR),
+      r: Math.max(rmsL, rmsR),
+    };
+    deckLevelNotify();
+  };
+  // An engine restart mid-DJ-session: the strip's SSE clients are still connected (EventSource
+  // rides out the gap), so the fresh engine's readers must be re-armed here.
+  if (mixEventClients.size) engine.deckMeters(true);
   // Which input channels input() can address, and what a device-relative input("name", n) resolves
   // against. Only the booted device has any, so this is re-fed on every start (a device change is
   // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
@@ -3187,25 +3302,12 @@ const routes = {
   'GET /api/mix': async (query) => ({
     status: 200,
     body: {
-      swap: mixState.swap,
-      perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
+      ...mixDeskBody(),
       tracks: query?.desk ? undefined : [...schedulers.keys()].map((key) => ({
         key,
         deck: deckOfKey(key),
         controls: Object.fromEntries(mixState.perTrack.get(key) ?? []),
       })),
-      deckBpm: {
-        a: typeof decks.a.bpm === 'number' ? decks.a.bpm : null,
-        b: typeof decks.b.bpm === 'number' ? decks.b.bpm : null,
-      },
-      tempo: {
-        master: transport ? transport.cps * 240 : null,
-        override: mixState.tempoOverride,
-      },
-      xf: mixState.xf,
-      cue: activeCue ? { name: activeCue.name } : null,
-      midi: settings.mixMidi ?? {},
-      neutral: DJ_NEUTRAL,
     },
   }),
 
@@ -3262,6 +3364,7 @@ const routes = {
     const from = transport.cps * 240;
     mixState.tempoOverride = bpm;
     transport.rampBpm(bpm, seconds);
+    mixNotify();
     return { status: 200, body: { from, bpm, seconds } };
   },
 
@@ -3279,6 +3382,7 @@ const routes = {
   // stem OUT in the same gesture (see /api/mix/gate) - the phase-continuous stem swap.
   'POST /api/mix/swap': async (body) => {
     mixState.swap = !!body.on;
+    mixNotify();
     return { status: 200, body: { swap: mixState.swap } };
   },
 
@@ -3305,6 +3409,7 @@ const routes = {
         countered = other;
       }
     }
+    mixNotify();
     return { status: 200, body: { key, on, countered } };
   },
 
@@ -3328,6 +3433,7 @@ const routes = {
     if (deck === 'a') patternCore.setGlobalScale(null); // the resting scale was this deck's fact
     liveStateIds[deck] = new Set();
     patternCore.clearRolls('buffer', deck);
+    mixNotify();
     return { status: 200, body: {} };
   },
 
@@ -3348,6 +3454,7 @@ const routes = {
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
     mixState.xf = -1; // desk home: the next mix session re-arms from hard-A
+    mixState.faders = { a: 1, b: 1 };
     if (mixState.tempoOverride != null) {
       mixState.tempoOverride = null;
       // The surviving deck gets its declared tempo back - as a short glide, not a lurch (it is
@@ -3359,6 +3466,7 @@ const routes = {
     decks.b = { scale: null, bpm: null };
     liveStateIds.b = new Set();
     patternCore.clearRolls('buffer', 'b');
+    mixNotify();
     return { status: 200, body: {} };
   },
 
@@ -3393,10 +3501,12 @@ const routes = {
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
     mixState.xf = -1; // desk home: the next mix session re-arms from hard-A
+    mixState.faders = { a: 1, b: 1 };
     // The promoted song's declared tempo takes over on the client's promotion re-eval (override
     // gone, its setbpm drives again) - a no-op when the migration already landed on its native.
     mixState.tempoOverride = null;
     for (const key of schedulers.keys()) neutralizeMix(key);
+    mixNotify();
     return { status: 200, body: { promoted: promoted.map((k) => k.slice(k.indexOf(':') + 1)) } };
   },
 
@@ -3956,6 +4066,11 @@ const server = http.createServer(async (req, res) => {
   // Live-reload stream - long-lived SSE, so also outside the JSON route table.
   if (req.method === 'GET' && url.pathname === '/api/devReload') {
     return serveDevReload(res);
+  }
+
+  // The desk push channel (mix mode's knob mirror) - same deal.
+  if (req.method === 'GET' && url.pathname === '/api/mix/events') {
+    return serveMixEvents(res);
   }
 
   const handler = routes[`${req.method} ${url.pathname}`];

@@ -149,6 +149,13 @@ var recGroup, recTaps, startTap, stopTap;
 // born while the mixer is open.
 var mixTaps, mixOn = false, mixBandFreqs, mixMaster, buildMixDef, mixForwards;
 var startMixTap, stopMixTap, stopMixMaster;
+// DJ deck meters ('/poptart/deckMeters'): two stereo meter buses (A at .index, B at .index + 2)
+// that every track synth sums its PRE-FADER signal into (the mdeck birth arg says which, -1 for
+// neither), and one SendPeakRMS reader synth per deck while the strip is open. Pre-fader (post
+// trim/EQ/filter, the cue tap's point) on purpose: the meter answers "what is this deck making?"
+// for gain staging with trim, like a hardware desk's channel meter, not "what is the crossfader
+// letting through".
+var deckMeterBus, deckMeterSynths;
 
 // Boot-progress checkpoint ("poptart: booting scsynth" below is the other one):
 // diagnoseSclangOutput in ../index.js matches these exact strings to localize a boot that
@@ -228,7 +235,7 @@ buildTrackDef = { |key|
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
-        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, fader = 1, deck = 1, cue = 0,
+        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
@@ -340,6 +347,11 @@ buildTrackDef = { |key|
         cueOffset !? {
             Out.ar(cueOffset, live * cue.lag(0.05).clip(0, 1));
         };
+        // Deck meter send (the strip's channel meters): the same pre-fader point the cue tap
+        // reads. mdeck picks the deck's meter bus (0 = A, 1 = B; a web-app birth arg), -1 - the
+        // default outside DJ decks - multiplies the write to zeros. The buses always exist; the
+        // SendPeakRMS readers run only while the strip is open (see the deck meter section).
+        Out.ar(deckMeterBus.index + (mdeck.max(0) * 2), live * (mdeck > -0.5));
         live = live * fader.lag(0.08).clip(0, 1) * deck.lag(0.08).clip(0, 1);
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
         // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by
@@ -903,6 +915,11 @@ server.waitForBoot {
     SynthDef(\poptart_rec_meter, { |bus|
         SendPeakRMS.kr(In.ar(bus, 2), 20, 3, '/poptart/recLevel');
     }).add;
+    // DJ deck meter reader (see the deck meter section below): same feed shape as the mixer's
+    // per-track meter, one per deck while the strip is open, id 0 = deck A / 1 = deck B.
+    SynthDef(\poptart_deck_meter, { |bus, id|
+        SendPeakRMS.kr(In.ar(bus, 2), 20, 3, '/poptart/deckLevel', id);
+    }).add;
     // The bounce itself. Nothing but a DiskOut: everything about WHEN it runs is decided by the
     // timestamped bundles that start and free it (see the recordTrack OSCdef), so the file's
     // length is sample-accurate rather than however long the messages took to arrive.
@@ -913,6 +930,9 @@ server.waitForBoot {
     // here, so every track synth's sc* args have a valid default (silence in, send to nowhere).
     silentBus = Bus.audio(server, 2);
     trashBus = Bus.audio(server, 2);
+    // The DJ deck meter buses (see the var declaration): one 4-channel block so A and B are
+    // guaranteed adjacent and the track def can address B as `.index + 2`.
+    deckMeterBus = Bus.audio(server, 4);
     sidechainByTarget = IdentityDictionary.new; // scKey -> (bus:, target:, slot:, source:)
     sidechainBySource = IdentityDictionary.new; // sourceKey (Symbol) -> scKey it currently feeds
     // Named-bus registry + the head group its writer tracks live in (see the var declaration).
@@ -2456,6 +2476,32 @@ OSCdef(\poptartMixMeters, { |msg|
         };
     };
 }, '/poptart/mixMeters');
+
+// --- DJ deck meters (the strip's channel meters; see the deckMeterBus var declaration) ---
+//
+// On: one \poptart_deck_meter per deck reading its meter bus in the tail group (the track
+// synths wrote the buses earlier this block). Off: free them. The track-side sends are birth
+// args (mdeck), not touched here - an unread bus write costs nothing worth switching for.
+// Idempotent both ways; web-app ties this to the strip's SSE clients (first in / last out).
+OSCdef(\poptartDeckMeters, { |msg|
+    if (msg[1].asInteger == 1) {
+        if (deckMeterSynths.isNil) {
+            deckMeterSynths = [0, 1].collect { |i|
+                Synth(\poptart_deck_meter, [\bus, deckMeterBus.index + (i * 2), \id, i],
+                    target: recGroup, addAction: \addToTail);
+            };
+        };
+    } {
+        deckMeterSynths !? { |synths| synths.do(_.free) };
+        deckMeterSynths = nil;
+    };
+}, '/poptart/deckMeters');
+
+// Both readers answer here ([nodeID, replyID, peakL, rmsL, peakR, rmsR] from m[1]); forward to
+// Node keyed by deck id. Registered once - it only ever fires while reader synths exist.
+OSCFunc({ |m|
+    nodeAddr.sendMsg('/poptart/deckLevel', m[2].asInteger, m[3], m[4], m[5], m[6]);
+}, '/poptart/deckLevel', server.addr);
 
 // Bounce one track to a WAV. The window's edges are timestamped bundles, so the file is
 // sample-accurate rather than however long the messages took to arrive - but DiskOut drops
