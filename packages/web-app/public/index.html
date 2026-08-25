@@ -117,6 +117,17 @@
             <button id="deckBKeep" class="small" title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn (Shift+Cmd/Ctrl+Enter)">&#9167; keep</button>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
+          <!-- Songs phase 3: when deck B holds a disk FILE this replaces the editor - a zoomed
+               band-coloured strip (playhead fixed at center, the track scrolls under it; drag to
+               scrub, wheel to zoom) over a full-track overview (click to jump). -->
+          <div id="songPaneB" class="song-pane hidden">
+            <div class="song-title-row">
+              <span id="songTitleB"></span>
+              <span id="songTimeB"></span>
+            </div>
+            <canvas id="songDetailB"></canvas>
+            <canvas id="songOverviewB"></canvas>
+          </div>
         </div>
       </main>
 

@@ -57,6 +57,32 @@ test('resolveSongFile: a native file passes through untouched', async () => {
   assert.equal(calls.length, 0);
 });
 
+test('resolveSongFile with wav: only a real .wav passes through; aiff/flac decode like mp3', async () => {
+  // The waveform analysis (songs phase 3) reads with Node's own WAV parser, which scsynth's
+  // wider "native" set (aiff, flac) would defeat - so wav mode narrows the pass-through.
+  const dir = tmpdir();
+  const cache = tmpdir();
+  const wav = path.join(dir, 'song.wav');
+  const aiff = path.join(dir, 'song.aiff');
+  fs.writeFileSync(wav, 'riff');
+  fs.writeFileSync(aiff, 'form');
+
+  const calls = [];
+  const direct = await resolveSongFile(wav, { exec: fakeExec(calls), cacheDir: cache, wav: true });
+  assert.deepEqual(direct, { path: wav, decoded: false, cached: false });
+  assert.equal(calls.length, 0);
+
+  const res = await resolveSongFile(aiff, { exec: fakeExec(calls), cacheDir: cache, wav: true });
+  assert.equal(calls.length, 1, 'the aiff took an afconvert pass');
+  assert.ok(res.decoded);
+  assert.ok(res.path.startsWith(cache) && res.path.endsWith('.wav'));
+
+  // ...while the deck's own resolution still plays the aiff directly.
+  const play = await resolveSongFile(aiff, { exec: fakeExec(calls), cacheDir: cache });
+  assert.deepEqual(play, { path: aiff, decoded: false, cached: false });
+  assert.equal(calls.length, 1);
+});
+
 test('resolveSongFile: decodes once, then hits the cache', async () => {
   const dir = tmpdir();
   const cache = path.join(dir, 'cache');

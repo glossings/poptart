@@ -11,7 +11,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { decodeWavRaw, encodeWav, writeWav, readWavRaw, trimWindow, trimRecording, envelope, peaks, bands } = require('./wav');
+const {
+  decodeWavRaw, encodeWav, writeWav, readWavRaw, trimWindow, trimRecording,
+  envelope, reduceEnvelope, songWaveform, peaks, bands,
+} = require('./wav');
 
 const SR = 48000;
 
@@ -244,4 +247,56 @@ test('trimRecording carries the band balance alongside the peaks', () => {
   const info = trimRecording(capture, path.join(dir, 'take.wav'), { startSec: 0, lengthSec: 0.5 });
   assert.equal(info.bands.length, info.peaks.length);
   assert.ok(info.bands[4][0] > info.bands[4][2], 'a 60 Hz capture is mostly low');
+});
+
+// --- the song deck's waveform (songs phase 3) ---
+
+test('reduceEnvelope folds buckets: peak keeps the max, rms averages energy, colour follows the loud part', () => {
+  const env = {
+    peaks: [0.2, 1.0, 0.1, 0.1],
+    rms: [0.1, 0.8, 0.05, 0.05],
+    bands: [[1, 0, 0], [0, 0, 1], [1, 0, 0], [1, 0, 0]],
+  };
+  const out = reduceEnvelope(env, 2);
+  assert.equal(out.peaks.length, 2);
+  assert.equal(out.peaks[0], 1.0, 'the folded bucket keeps the loudest peak');
+  assert.ok(Math.abs(out.rms[0] - Math.sqrt((0.1 ** 2 + 0.8 ** 2) / 2)) < 1e-3, 'rms folds as energy, not as an average of readings');
+  assert.ok(out.bands[0][2] > out.bands[0][0], "the loud bucket's colour wins over its quiet neighbour's");
+  assert.ok(out.peaks[1] <= 0.1 + 1e-9);
+});
+
+test('reduceEnvelope never grows: asking for more buckets than exist returns them as-is in count', () => {
+  const env = { peaks: [0.5, 0.6], rms: [0.3, 0.4], bands: [[1, 0, 0], [0, 1, 0]] };
+  assert.equal(reduceEnvelope(env, 99).peaks.length, 2);
+});
+
+test('songWaveform: one file read yields a detail strip plus a folded overview', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-wav-'));
+  const src = path.join(dir, 'song.wav');
+  writeWav(src, tone(440, SR * 4)); // 4 seconds
+  const wave = songWaveform(src, { detailPerSec: 50, overviewBuckets: 20 });
+  assert.ok(Math.abs(wave.seconds - 4) < 1e-9);
+  assert.equal(wave.sampleRate, SR);
+  assert.equal(wave.detail.peaks.length, 200, '4s at 50 buckets/sec');
+  assert.ok(Math.abs(wave.detail.perSec - 50) < 1e-9);
+  assert.equal(wave.detail.rms.length, 200);
+  assert.equal(wave.detail.bands.length, 200);
+  assert.equal(wave.overview.peaks.length, 20);
+  assert.ok(wave.overview.peaks[10] > 0.9, 'a full-scale tone reads loud at both resolutions');
+});
+
+test('songWaveform caps the detail resolution so a long file thins out instead of ballooning', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-wav-'));
+  const src = path.join(dir, 'song.wav');
+  writeWav(src, tone(440, SR * 4));
+  const wave = songWaveform(src, { detailPerSec: 50, maxDetail: 60, overviewBuckets: 20 });
+  assert.equal(wave.detail.peaks.length, 60);
+  assert.ok(Math.abs(wave.detail.perSec - 15) < 1e-9, 'perSec reports the ACTUAL resolution');
+});
+
+test('songWaveform returns null rather than throwing on a non-WAV', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-wav-'));
+  const src = path.join(dir, 'song.wav');
+  fs.writeFileSync(src, 'not riff at all');
+  assert.equal(songWaveform(src), null);
 });

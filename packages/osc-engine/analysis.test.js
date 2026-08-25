@@ -17,7 +17,7 @@ const { OscEngine } = require('./index.js');
 const analysis = require('./analysis.js');
 const { analyzeSlices, shutdownAnalysis } = analysis;
 const { detectSlices } = require('./samples.js');
-const { encodeWav, trimRecording } = require('./wav.js');
+const { encodeWav, trimRecording, songWaveform } = require('./wav.js');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-slices-'));
 after(async () => {
@@ -113,6 +113,12 @@ test('the recorder trim pass agrees with the in-process one, audio and all', asy
   assert.deepStrictEqual(info, trimRecording(src, viaMain, opts), 'same report (peaks, bands, length)');
   // The report is derived from the samples, but only the file proves the right audio was written.
   assert.deepStrictEqual(fs.readFileSync(viaWorker), fs.readFileSync(viaMain), 'byte-identical output');
+});
+
+test('the song waveform pass agrees with the in-process one', async () => {
+  const src = writeClickTrack('song.wav', 4, 0.25);
+  const opts = { detailPerSec: 50, overviewBuckets: 24 };
+  assert.deepStrictEqual(await analysis.songWaveform(src, opts), songWaveform(src, opts));
 });
 
 test('an unreadable capture rejects rather than resolving to a bad bounce', async () => {

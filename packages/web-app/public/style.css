@@ -3574,6 +3574,67 @@ body.mix-on #deckAHead {
   height: auto;
   min-height: 0;
 }
+
+/* --- the song deck's waveform pane (songs phase 3): shown instead of the editor when deck B
+       holds a disk file. The editor stays in the DOM (it holds the descriptor card that shows
+       again if the analysis fails), just not on screen. --- */
+#deckBPane.song-on .CodeMirror {
+  display: none;
+}
+.song-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 6px;
+  padding: 8px;
+}
+.song-pane.hidden {
+  display: none;
+}
+.song-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+#songTitleB {
+  color: var(--accent);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#songTimeB {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+#songDetailB {
+  flex: 1;
+  min-height: 80px;
+  width: 100%;
+  cursor: grab;
+  touch-action: none; /* pointer capture owns the drag - no scroll/zoom gestures underneath */
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+}
+#songDetailB.dragging {
+  cursor: grabbing;
+}
+#songOverviewB {
+  height: 56px;
+  flex: none;
+  width: 100%;
+  cursor: pointer;
+  touch-action: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+}
 .mix-fader {
   width: 130px;
 }

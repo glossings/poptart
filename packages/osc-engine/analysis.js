@@ -86,6 +86,15 @@ function trimRecording(srcPath, destPath, opts) {
 }
 
 /**
+ * wav.js's songWaveform (the song deck's waveform pane), off-thread. Same arguments and same
+ * return. `wavPath` must already be a WAV - see songs.js's resolveSongFile({ wav: true }).
+ * @returns {Promise<object | null>}
+ */
+function songWaveform(wavPath, opts = {}) {
+  return run('songwave', { path: wavPath, ...opts });
+}
+
+/**
  * Drop the worker. Anything still in flight rejects. Nothing in normal operation calls this - the
  * worker is a process-wide singleton that unrefs itself while idle, so it neither needs tearing
  * down at engine shutdown nor holds the process open; this exists so a test suite can end cleanly.
@@ -97,4 +106,4 @@ async function shutdownAnalysis() {
   await w.terminate();
 }
 
-module.exports = { analyzeSlices, trimRecording, shutdownAnalysis };
+module.exports = { analyzeSlices, trimRecording, songWaveform, shutdownAnalysis };

@@ -13819,9 +13819,9 @@ async function exitDjMode(keep = 'restore') {
   try {
     if (keep === 'b') {
       if (deckBSong) {
-        // The main editor can't hold a song file yet - promoting one lands with the waveform
-        // pane (songs phase 3). Until then the mix ends by stopping deck A instead.
-        logLine('deck B holds a song file - keeping it as the set arrives with the waveform pane', true);
+        // The main editor can't hold a song file - promoting one is the complete-mix oddment
+        // still in TODO.md. Until then the mix ends by exiting and letting the song play on.
+        logLine('deck B holds a song file - promoting a file to the main deck isn\'t built yet; exit with restore instead', true);
         return;
       }
       const res = await api('POST', '/api/mix/complete');
@@ -13859,6 +13859,8 @@ function finishDjExit() {
     deckBCM.setOption('readOnly', false); // a song's descriptor card locked it
     deckBCM.setValue('');
   }
+  songPaneClose();
+  songMirror = null;
   deckBFileName = null;
   deckBSong = null;
   preMix = null;
@@ -14002,7 +14004,8 @@ async function loadDeckBFile() {
     clearPatternRegions('b');
     if (deckFileItems.has(value)) {
       // A disk file: it loads onto the deck's song track (/api/song/*, songs phase 1) and the
-      // pane shows a read-only card in the editor slot until the waveform pane (phase 3).
+      // pane becomes the waveform (phase 3). The read-only card written into the hidden editor
+      // is the fallback the pane reveals if the waveform analysis fails.
       const item = deckFileItems.get(value);
       const res = await api('POST', '/api/song/load', {
         deck: 'b', path: item.path, bpm: item.bpm, title: libFileTitle(item),
@@ -14013,10 +14016,13 @@ async function loadDeckBFile() {
       const s = String(Math.round(res.duration % 60)).padStart(2, '0');
       deckBCM.setValue(`// ♪ ${deckBSong.title}\n// ${deckBSong.path}\n// ${m}:${s}${deckBSong.bpm ? ` · ${deckBSong.bpm} bpm` : ''}`);
       deckBCM.setOption('readOnly', true);
+      songMirror = { playing: false, posSec: 0, startSec: 0, rate: 1, duration: res.duration };
+      songPaneOpen();
       logLine(`deck B loaded ♪ "${deckBSong.title}" (${m}:${s}${res.decoded ? ', decoded' : ''}) - ▶ plays it (it arrives silent)`);
     } else {
       const { code } = await api('POST', '/api/patterns/load', { name: value });
       deckBSong = null;
+      songPaneClose();
       deckBCM.setOption('readOnly', false);
       deckBCM.setValue(code);
       deckBFileName = value;
@@ -14046,6 +14052,360 @@ async function loadDeckAFile() {
   }
 }
 
+// --- the song deck's waveform pane (songs phase 3) ---
+//
+// When deck B holds a disk FILE the editor slot shows a DJ waveform instead of CodeMirror: a
+// zoomed strip whose playhead sits fixed at centre with the track scrolling under it (drag to
+// scrub, wheel to zoom), over a full-track overview (click or drag to jump). Both draw from ONE
+// server analysis (GET /api/song/waveform - the recorder's envelope pass generalized: per-bucket
+// peak + rms coloured by low/mid/high energy balance, run on the analysis worker). The playhead
+// is mirrored locally - posSec + (now - startSec) * rate, engine time being Date.now()/1000 on
+// the same machine - so the animation costs no polling; the desk's SSE frames keep the mirror
+// honest. Scrubbing a faded-out deck is still audible on the headphone cue (the cue tap sits
+// before fader x deck in the track def) - that IS the audition path, no extra plumbing.
+
+const songPaneEl = document.getElementById('songPaneB');
+const songDetailEl = document.getElementById('songDetailB');
+const songOverviewEl = document.getElementById('songOverviewB');
+const songTitleEl = document.getElementById('songTitleB');
+const songTimeEl = document.getElementById('songTimeB');
+
+let songWave = null; // the fetched analysis (null while loading, or when it failed)
+let songMirror = null; // deck b's playhead mirror { playing, posSec, startSec, rate, duration }
+let songZoomSec = 12; // seconds across the detail strip (wheel adjusts)
+let songScrubUntil = 0; // while a hand scrubs, SSE echoes of older seeks must not fight it
+let songRaf = null;
+let songOverviewImage = null; // the full track pre-rendered once; per-frame work is a blit + overlays
+
+/** Where deck b's playhead is right now, in song seconds. */
+function songPlayheadNow() {
+  const s = songMirror;
+  if (!s) return 0;
+  const dur = s.duration ?? songWave?.seconds ?? 0;
+  const at = s.playing ? s.posSec + Math.max(0, Date.now() / 1000 - s.startSec) * (s.rate || 1) : s.posSec;
+  return Math.min(Math.max(0, at), dur);
+}
+
+// The desk state's song half, run on every SSE frame and every mixRefresh. Keeps the mirror
+// current, and adopts a song this page never loaded (a reload mid-set: the server still holds
+// the deck) so reopening DJ mode comes back intact.
+function songPaneSync(state) {
+  if (!mixModeOn) return;
+  const sb = state?.song?.b ?? null;
+  if (!sb) {
+    songMirror = null;
+    return;
+  }
+  const scrubbing = performance.now() < songScrubUntil;
+  if (songMirror && scrubbing) {
+    // the hand owns the position; take everything else
+    songMirror.playing = sb.playing;
+    songMirror.rate = sb.rate;
+    songMirror.duration = sb.duration;
+  } else {
+    songMirror = { playing: sb.playing, posSec: sb.posSec, startSec: sb.startSec, rate: sb.rate, duration: sb.duration };
+  }
+  if (!deckBSong) {
+    deckBSong = { path: sb.path, title: sb.title, bpm: mixNativeBpm.b ?? null };
+    deckBFileName = null;
+    if (deckBCM) {
+      deckBCM.setValue(`// ♪ ${sb.title}\n// ${sb.path}`);
+      deckBCM.setOption('readOnly', true);
+    }
+    songPaneOpen();
+  }
+}
+
+// Show the pane and fetch its waveform. The descriptor card stays in the (hidden) editor
+// underneath - it is what shows again if the analysis fails.
+async function songPaneOpen() {
+  deckBPaneEl.classList.add('song-on');
+  songPaneEl.classList.remove('hidden');
+  songTitleEl.textContent = `♪ ${deckBSong.title}${deckBSong.bpm ? ` · ${deckBSong.bpm} bpm` : ''}`;
+  songTimeEl.textContent = '';
+  songWave = null;
+  songOverviewImage = null;
+  songRafStart();
+  const forPath = deckBSong.path;
+  try {
+    const wave = await api('GET', '/api/song/waveform?deck=b');
+    if (deckBSong?.path !== forPath) return; // a later load took the deck while this ran
+    songWave = wave;
+    songOverviewImage = null;
+  } catch (e) {
+    if (deckBSong?.path !== forPath) return;
+    logLine(`deck B waveform: ${e.message ?? String(e)}`, true);
+    songPaneClose(); // back to the descriptor card - playback is unaffected
+  }
+}
+
+function songPaneClose() {
+  deckBPaneEl.classList.remove('song-on');
+  songPaneEl.classList.add('hidden');
+  songWave = null;
+  songOverviewImage = null;
+  if (songRaf != null) cancelAnimationFrame(songRaf);
+  songRaf = null;
+  deckBCM?.refresh(); // it was display:none while the pane was up; unpainted until told
+}
+
+function songRafStart() {
+  if (songRaf == null) songRaf = requestAnimationFrame(songFrame);
+}
+
+function songFrame() {
+  songRaf = null;
+  if (!mixModeOn || songPaneEl.classList.contains('hidden')) return;
+  songDrawDetail();
+  songDrawOverview();
+  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
+  songTimeEl.textContent = dur ? `${songFmt(songPlayheadNow(), true)} / ${songFmt(dur)}` : '';
+  songRaf = requestAnimationFrame(songFrame);
+}
+
+function songFmt(sec, tenths = false) {
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
+  return tenths ? `${m}:${(s < 10 ? '0' : '') + s.toFixed(1)}` : `${m}:${String(Math.floor(s)).padStart(2, '0')}`;
+}
+
+/** Backing-store size synced to CSS size x devicePixelRatio; true when it just changed. */
+function songSizeCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width === w && canvas.height === h) return false;
+  canvas.width = w;
+  canvas.height = h;
+  return true;
+}
+
+function songThemeColors() {
+  const css = getComputedStyle(document.documentElement);
+  return {
+    accent: css.getPropertyValue('--accent').trim() || '#6cf',
+    dim: css.getPropertyValue('--border').trim() || '#444',
+    text: css.getPropertyValue('--text-dim').trim() || '#888',
+    bg: css.getPropertyValue('--bg-panel').trim() || '#111',
+  };
+}
+
+// The waveform is drawn NORMALIZED, like the recorder's finished takes: a quietly-mastered file
+// still fills the pane, and the desk's meters are what say how loud it actually is.
+function songNormOf(env) {
+  const peak = env.peaks.reduce((mx, v) => Math.max(mx, v ?? 0), 0);
+  return peak < 0.0005 ? 1 : Math.min(6, 1 / peak);
+}
+
+// One column per visible bucket, mirrored around the centre line: translucent peak envelope
+// with the solid rms body inside it, coloured by band balance - drawRecordScope's read, reused.
+function songDrawColumns(ctx, env, i0, i1, xAt, colW, mid, maxAmp, norm) {
+  for (let i = i0; i <= i1; i++) {
+    const [r, g, b] = bandColor(env.bands[i]);
+    const peakAmp = Math.min(1, (env.peaks[i] ?? 0) * norm) * maxAmp;
+    const rmsAmp = Math.min(peakAmp, Math.min(1, (env.rms[i] ?? 0) * norm) * maxAmp);
+    const x = xAt(i);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.32)`;
+    ctx.fillRect(x, mid - peakAmp, colW, peakAmp * 2 || 1);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.95)`;
+    ctx.fillRect(x, mid - rmsAmp, colW, rmsAmp * 2 || 1);
+  }
+}
+
+function songDrawDetail() {
+  songSizeCanvas(songDetailEl);
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = songDetailEl.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = songDetailEl.clientWidth;
+  const h = songDetailEl.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const { accent, dim, text } = songThemeColors();
+  const mid = h / 2;
+  const maxAmp = mid - 6;
+  const pos = songPlayheadNow();
+  const pxPerSec = w / songZoomSec;
+  const t0 = pos - songZoomSec / 2; // the playhead is pinned at centre; time scrolls under it
+  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
+
+  ctx.strokeStyle = dim;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, mid + 0.5);
+  ctx.lineTo(w, mid + 0.5);
+  ctx.stroke();
+
+  // Beatgrid: anchored at 0:00 until phase 4 brings tag parsing and a movable anchor.
+  // Downbeats (every 4th from the anchor) run full height; plain beats are edge ticks.
+  const bpm = deckBSong?.bpm ?? mixNativeBpm.b;
+  if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
+    const beat = 60 / bpm;
+    const kEnd = Math.min(dur, t0 + songZoomSec) / beat;
+    ctx.lineWidth = 1;
+    for (let k = Math.max(0, Math.ceil(t0 / beat)); k <= kEnd; k++) {
+      const x = Math.round((k * beat - t0) * pxPerSec) + 0.5;
+      const down = k % 4 === 0;
+      ctx.strokeStyle = down ? rgbaFrom(ctx, accent, 0.4) : rgbaFrom(ctx, text, 0.35);
+      ctx.beginPath();
+      if (down) {
+        ctx.moveTo(x, 2);
+        ctx.lineTo(x, h - 2);
+      } else {
+        ctx.moveTo(x, 2);
+        ctx.lineTo(x, 8);
+        ctx.moveTo(x, h - 8);
+        ctx.lineTo(x, h - 2);
+      }
+      ctx.stroke();
+    }
+  }
+
+  if (songWave) {
+    const det = songWave.detail;
+    songWave._norm ??= songNormOf(det);
+    const per = det.perSec;
+    const i0 = Math.max(0, Math.floor(t0 * per));
+    const i1 = Math.min(det.peaks.length - 1, Math.ceil((t0 + songZoomSec) * per));
+    const colW = Math.max(1, pxPerSec / per) + 0.6;
+    songDrawColumns(ctx, det, i0, i1, (i) => (i / per - t0) * pxPerSec, colW, mid, maxAmp, songWave._norm);
+  } else {
+    ctx.fillStyle = text;
+    ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('analyzing…', w / 2, mid);
+  }
+
+  // Hard edges where the file begins and ends, so blank space beyond isn't read as quiet audio.
+  if (dur) {
+    ctx.strokeStyle = rgbaFrom(ctx, text, 0.7);
+    ctx.lineWidth = 1;
+    for (const tEdge of [0, dur]) {
+      if (tEdge < t0 || tEdge > t0 + songZoomSec) continue;
+      const x = Math.round((tEdge - t0) * pxPerSec) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+  }
+
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(w / 2, 0);
+  ctx.lineTo(w / 2, h);
+  ctx.stroke();
+}
+
+function songDrawOverview() {
+  if (songSizeCanvas(songOverviewEl)) songOverviewImage = null; // pre-render matches the pixel size
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = songOverviewEl.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = songOverviewEl.clientWidth;
+  const h = songOverviewEl.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const { accent, dim, bg } = songThemeColors();
+  if (!songWave) {
+    ctx.strokeStyle = dim;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, h / 2 + 0.5);
+    ctx.lineTo(w, h / 2 + 0.5);
+    ctx.stroke();
+    return;
+  }
+  if (!songOverviewImage) {
+    const img = document.createElement('canvas');
+    img.width = Math.max(1, Math.round(w * dpr));
+    img.height = Math.max(1, Math.round(h * dpr));
+    const ictx = img.getContext('2d');
+    ictx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const ov = songWave.overview;
+    const n = ov.peaks.length;
+    songDrawColumns(ictx, ov, 0, n - 1, (i) => (i / n) * w, w / n + 0.6, h / 2, h / 2 - 3, songNormOf(ov));
+    songOverviewImage = img;
+  }
+  ctx.drawImage(songOverviewImage, 0, 0, w, h);
+  const dur = songWave.seconds || 1;
+  const px = (songPlayheadNow() / dur) * w;
+  ctx.fillStyle = rgbaFrom(ctx, bg, 0.55); // what's already played sits dimmed behind the playhead
+  ctx.fillRect(0, 0, px, h);
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(px, 0);
+  ctx.lineTo(px, h);
+  ctx.stroke();
+}
+
+// --- scrubbing (-> /api/song/seek, one POST per ~50ms however fast the hand moves) ---
+
+let songSeekTimer = null;
+let songSeekPos = null;
+function songSeek(pos) {
+  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
+  pos = Math.min(Math.max(0, pos), dur);
+  if (songMirror) {
+    // the mirror follows the hand immediately; the server echo confirms rather than leads
+    songMirror.posSec = pos;
+    songMirror.startSec = Date.now() / 1000;
+  }
+  songScrubUntil = performance.now() + 400;
+  songSeekPos = pos;
+  if (songSeekTimer) return;
+  songSeekTimer = setTimeout(() => {
+    songSeekTimer = null;
+    api('POST', '/api/song/seek', { deck: 'b', pos: songSeekPos })
+      .catch((e) => logLine(`deck B seek: ${e.message ?? String(e)}`, true));
+  }, 50);
+}
+
+// The detail strip drags like the record: pull the waveform right and the playhead moves back.
+let songDrag = null;
+songDetailEl.addEventListener('pointerdown', (e) => {
+  if (!deckBSong) return;
+  songDetailEl.setPointerCapture(e.pointerId);
+  songDetailEl.classList.add('dragging');
+  songDrag = { x: e.clientX, pos: songPlayheadNow() };
+});
+songDetailEl.addEventListener('pointermove', (e) => {
+  if (!songDrag) return;
+  const pxPerSec = songDetailEl.clientWidth / songZoomSec;
+  songSeek(songDrag.pos - (e.clientX - songDrag.x) / pxPerSec);
+});
+for (const ev of ['pointerup', 'pointercancel']) {
+  songDetailEl.addEventListener(ev, () => {
+    songDrag = null;
+    songDetailEl.classList.remove('dragging');
+  });
+}
+songDetailEl.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  songZoomSec = Math.min(60, Math.max(3, songZoomSec * Math.exp(e.deltaY * 0.0015)));
+}, { passive: false });
+
+// The overview jumps: click (or drag along it) seeks to that point of the track.
+let songOverviewDown = false;
+function songOverviewSeek(e) {
+  const r = songOverviewEl.getBoundingClientRect();
+  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
+  if (r.width && dur) songSeek(((e.clientX - r.left) / r.width) * dur);
+}
+songOverviewEl.addEventListener('pointerdown', (e) => {
+  if (!deckBSong) return;
+  songOverviewEl.setPointerCapture(e.pointerId);
+  songOverviewDown = true;
+  songOverviewSeek(e);
+});
+songOverviewEl.addEventListener('pointermove', (e) => {
+  if (songOverviewDown) songOverviewSeek(e);
+});
+for (const ev of ['pointerup', 'pointercancel']) {
+  songOverviewEl.addEventListener(ev, () => { songOverviewDown = false; });
+}
+
 async function evalDeckB(start) {
   if (!deckBCM) return;
   if (deckBSong) {
@@ -14053,7 +14413,7 @@ async function evalDeckB(start) {
     // against a running deck A server-side); ↻ has nothing to re-evaluate.
     try {
       if (!start) {
-        logLine('deck B holds a song - ▶ plays/resumes it (scrubbing arrives with the waveform pane)');
+        logLine('deck B holds a song - nothing to re-evaluate; ▶ plays/resumes, drag the waveform to scrub');
         return;
       }
       const res = await api('POST', '/api/song/play', { deck: 'b' });
@@ -14414,6 +14774,7 @@ function mixSyncValues(state) {
     btn.classList.toggle('on', (state.perDeck[deck].cue ?? 0) > 0);
   }
   mixTempoRender(state);
+  songPaneSync(state); // after the tempo render: adoption reads mixNativeBpm for its beatgrid
 }
 
 // The desk push channel: the server frames every desk change (throttled to ~30ms) over SSE,

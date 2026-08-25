@@ -46,9 +46,14 @@ function songCachePath(filePath, stat, dir = songCacheDir()) {
  * needed. Returns { path, decoded, cached }. Throws with a user-facing message for a missing
  * file, an unsupported format, or a failed decode.
  *
+ * `opts.wav` asks for a path Node's own WAV reader can parse (the waveform analysis, songs
+ * phase 3): only an actual .wav passes through then - aiff/flac, native to scsynth but not to
+ * wav.js, take the same afconvert pass as mp3, landing in the same cache entry a compressed
+ * source's playback decode already uses.
+ *
  * `opts.exec` (execFile-shaped) and `opts.cacheDir` are injectable for tests.
  */
-async function resolveSongFile(filePath, { exec = execFile, cacheDir } = {}) {
+async function resolveSongFile(filePath, { exec = execFile, cacheDir, wav = false } = {}) {
   const src = String(filePath ?? '').trim();
   let stat;
   try {
@@ -64,7 +69,8 @@ async function resolveSongFile(filePath, { exec = execFile, cacheDir } = {}) {
       + `wav/aiff/flac play directly, mp3/m4a/aac/caf are converted via afconvert`,
     );
   }
-  if (kind === 'native') return { path: src, decoded: false, cached: false };
+  const passesThrough = wav ? path.extname(src).toLowerCase() === '.wav' : kind === 'native';
+  if (passesThrough) return { path: src, decoded: false, cached: false };
 
   const dir = cacheDir ?? songCacheDir();
   fs.mkdirSync(dir, { recursive: true });

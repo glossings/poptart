@@ -162,6 +162,11 @@ const songDecks = { a: null, b: null };
 //         playing, posSec ("the playhead as of startSec" while playing; the resting playhead
 //         while paused), startSec (engine-clock moment posSec was current), endTimer }
 
+// Waveform analyses already computed, keyed by the analyzed file's identity (path + mtime +
+// size - a .wav plays from its source path, so the path alone wouldn't notice an edit). A set
+// that re-queues a song re-sends bytes, not work; bounded because the payloads are ~1MB each.
+const songWaveCache = new Map();
+
 const songKeysLive = () => ['a', 'b'].filter((d) => songDecks[d]).map((d) => SONG_KEYS[d]);
 // The desk's full population: every scheduler-driven track plus any song tracks - what deck
 // broadcasts, per-track mix sets and the strip's track list enumerate. A song is a stem too.
@@ -3804,6 +3809,29 @@ const routes = {
     if (body.unload) songUnload(deck);
     mixNotify();
     return { status: 200, body: { deck, unloaded: !!body.unload } };
+  },
+
+  // The waveform pane's data (songs phase 3): a high-resolution detail strip plus a full-track
+  // overview in one response - per-bucket peak + rms + low/mid/high balance, the recorder's
+  // envelope pass generalized (wav.js's songWaveform) and run on the analysis worker so a
+  // 5-minute file's read never blocks the note scheduler. aiff/flac sources take an afconvert
+  // pass first (Node's WAV reader can't parse them); mp3/m4a reuse their playback decode.
+  // Query: { deck }.
+  'GET /api/song/waveform': async (q) => {
+    const deck = q.deck === 'b' ? 'b' : 'a';
+    const s = songDecks[deck];
+    if (!s) throw new Error(`deck ${deck} has no song loaded`);
+    const resolved = await resolveSongFile(s.path, { wav: true });
+    const st = fs.statSync(resolved.path);
+    const cacheKey = `${resolved.path}|${Math.round(st.mtimeMs)}|${st.size}`;
+    let wave = songWaveCache.get(cacheKey);
+    if (!wave) {
+      wave = await analysis.songWaveform(resolved.path);
+      if (!wave) throw new Error(`couldn't read "${s.title}" for its waveform`);
+      songWaveCache.set(cacheKey, wave);
+      while (songWaveCache.size > 6) songWaveCache.delete(songWaveCache.keys().next().value);
+    }
+    return { status: 200, body: { deck, path: s.path, title: s.title, ...wave } };
   },
 
   // The file browser behind the organize modal's "+ file" (songs phase 2): one directory at a

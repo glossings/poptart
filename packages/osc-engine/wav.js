@@ -271,6 +271,80 @@ function envelope(audio, buckets = DEFAULT_BUCKETS) {
   return { peaks: outPeaks, rms: outRms, bands: outBands };
 }
 
+// --- the song decks' waveform (songs phase 3) ---
+
+// The zoomed strip's resolution: ~13ms per bucket, about a column per pixel at a typical DJ
+// zoom (10s across ~800px). Capped so a very long file thins out evenly instead of producing
+// an unbounded payload; the overview is folded from the detail so the file is read ONCE.
+const SONG_DETAIL_PER_SEC = 75;
+const SONG_DETAIL_MAX = 30000; // full resolution up to ~6.5 minutes
+const SONG_OVERVIEW_BUCKETS = 1200;
+
+/**
+ * Fold an envelope down to fewer buckets: peak keeps the max, rms averages energy, and the
+ * band balance is the energy-weighted mean of the folded buckets' shares (a loud bucket's
+ * colour should win over a near-silent neighbour's).
+ */
+function reduceEnvelope(env, buckets) {
+  const n = env.peaks.length;
+  const m = Math.max(1, Math.min(Math.round(buckets), n));
+  const outPeaks = new Array(m).fill(0);
+  const outRms = new Array(m).fill(0);
+  const outBands = new Array(m);
+  for (let b = 0; b < m; b++) {
+    const from = Math.floor((b * n) / m);
+    const to = Math.max(from + 1, Math.floor(((b + 1) * n) / m));
+    let peak = 0;
+    let sumSq = 0;
+    const acc = [0, 0, 0];
+    for (let i = from; i < to; i++) {
+      if (env.peaks[i] > peak) peak = env.peaks[i];
+      const e = (env.rms[i] ?? 0) ** 2;
+      sumSq += e;
+      const w = e || 1e-9; // silence still votes, just barely - keeps a quiet region neutral
+      for (let c = 0; c < 3; c++) acc[c] += (env.bands[i]?.[c] ?? 0) * w;
+    }
+    outPeaks[b] = peak;
+    outRms[b] = Math.round(Math.sqrt(sumSq / (to - from)) * 1000) / 1000;
+    outBands[b] = normalizeBands(acc);
+  }
+  return { peaks: outPeaks, rms: outRms, bands: outBands };
+}
+
+/**
+ * Everything the song deck's waveform pane draws, in one pass over the file: a high-resolution
+ * detail strip for the zoomed view and a full-track overview folded from it. `wavPath` must be
+ * a WAV - songs.js's resolveSongFile({ wav: true }) gets any deck-playable file there first.
+ * Returns null when the file can't be read as WAV. Runs on the analysis worker (see
+ * analysis.js) - a 5-minute file is a full read plus filter math, well past the note
+ * scheduler's budget.
+ *
+ * @returns {{ seconds, sampleRate, channels,
+ *             detail: { perSec, peaks, rms, bands },
+ *             overview: { peaks, rms, bands } } | null}
+ */
+function songWaveform(wavPath, {
+  detailPerSec = SONG_DETAIL_PER_SEC,
+  maxDetail = SONG_DETAIL_MAX,
+  overviewBuckets = SONG_OVERVIEW_BUCKETS,
+} = {}) {
+  const src = readWavRaw(wavPath);
+  if (!src) return null;
+  const seconds = src.frames / src.sampleRate;
+  const detailBuckets = Math.max(1, Math.min(maxDetail, Math.round(seconds * detailPerSec)));
+  const detail = envelope(src, detailBuckets);
+  const overview = reduceEnvelope(detail, overviewBuckets);
+  return {
+    seconds,
+    sampleRate: src.sampleRate,
+    channels: src.channels,
+    // From the envelope's ACTUAL bucket count (it clamps to the frame count), so a client
+    // mapping time -> bucket index stays exact however short the file.
+    detail: { perSec: detail.peaks.length / seconds, ...detail },
+    overview,
+  };
+}
+
 /** Per-bucket peak amplitude across all channels. See envelope(), which computes it. */
 function peaks(audio, buckets = DEFAULT_BUCKETS) {
   return envelope(audio, buckets).peaks;
@@ -297,6 +371,8 @@ module.exports = {
   trimWindow,
   trimRecording,
   envelope,
+  reduceEnvelope,
+  songWaveform,
   peaks,
   bands,
 };
