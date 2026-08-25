@@ -17,4 +17,4 @@ export { splitLabeledBlocks, isBareCallBlock } from './labels.mjs';
 export { injectLocations, isPatternPosition } from './locations.mjs';
 export { parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS } from './shape.mjs';
 export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, noteNudge, noteNudgeChannel, looksLikeNoteString, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_NUDGE, pianoRollSwingCells, commitPianoRollSwing, pianoRollNoteGrid } from './pianoroll.mjs';
-export { clearRolls, restoreRolls, setRollLayer, setDefOwner, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds } from './rolls.mjs';
+export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds } from './rolls.mjs';

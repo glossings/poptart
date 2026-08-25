@@ -261,6 +261,24 @@ function syncVstTransport() {
 }
 setInterval(syncVstTransport, VST_TRANSPORT_SYNC_MS);
 
+// Event-loop stall watchdog. The note scheduler shares this process, so any synchronous work
+// that holds the loop near the 150ms lookahead is an audible stutter on EVERY playing deck -
+// and in a live set that must never pass silently. 30ms resolution, logged with the overrun so
+// the terminal says when it happened and how long it was; the eval timer below says whether an
+// evaluation was the culprit.
+{
+  let lastTick = process.hrtime.bigint();
+  setInterval(() => {
+    const now = process.hrtime.bigint();
+    const stalledMs = Number(now - lastTick) / 1e6 - 30;
+    lastTick = now;
+    if (stalledMs > 100) {
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] event loop stalled ~${Math.round(stalledMs)}ms - long enough to delay note scheduling`);
+    }
+  }, 30);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Settings - small persisted knobs (currently just the audio output device), plain JSON under
 // ~/.poptart so they survive restarts and are hand-editable.
@@ -2206,6 +2224,7 @@ const routes = {
   // works.
   'POST /api/evaluate': async (body) => {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    const evalT0 = performance.now(); // see the eval-cost log at the success return
 
     // Which performance deck this buffer is (see the decks table above): 'a', the main editor,
     // unless the caller says 'b'. Everything below that keys or scopes by label goes through
@@ -2424,6 +2443,14 @@ const routes = {
     for (const k of [...hlTracks.keys()]) if (deckOfKey(k) === deck) hlTracks.delete(k);
     for (const b of active) hlTracks.set(keyOfBlock(b.label), { sig: b.sig, start: b.start, end: b.end });
     const gridFrom = currentGridCycle();
+
+    // Pairs with the event-loop watchdog above: an evaluation that held the process this long
+    // starved the scheduler of the OTHER deck too, and the terminal should name the culprit.
+    const evalMs = performance.now() - evalT0;
+    if (evalMs > 100) {
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] evaluate (deck ${deck}) took ${Math.round(evalMs)}ms`);
+    }
 
     return {
       status: 200,

@@ -91,12 +91,16 @@ var stateSeqs = IdentityDictionary.new;
 // - the note written at the swap simply does not play. See waitForLoad.
 var statePending = IdentityDictionary.new;
 var noteQueues = IdentityDictionary.new;
-// The longest a note will ever wait for a program, and the furthest past a load's start a note is
-// considered to be "in" it. A swap on a plugin that is already open takes tens of milliseconds, so
-// this is slack, not a budget - what it bounds is the bad case: a restore sent while its plugin is
-// still opening (a cold start) would otherwise hold every note for as long as the open took and
-// then play them all at once, which is far worse than the one eaten note it was avoiding.
+// The longest a note will ever wait for a program on a plugin that is already OPEN (a warm
+// preset swap takes tens of milliseconds, so this is slack, not a budget) - and, on release,
+// how late a held note may fire. A COLD restore - the state arriving while its plugin is still
+// opening, i.e. a new song coming up - is different on both counts: the hold lasts the whole
+// open+load (marked `cold` on the pending entry; coldWaitMax is only the stuck-load failsafe),
+// and the release DROPS the notes whose onset has passed instead of bursting them out late.
+// The track stays silent until its program is confirmed in, then joins on the next on-time
+// note - the alternative was every synth playing its init preset for the length of the load.
 var stateWaitMax = 0.3;
+var coldWaitMax = 20;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
 var confWant = IdentityDictionary.new; // trackId -> latest requested conf state (see setConfMode)
 // Host tempo (bpm) mirrored into every open VST as emulated DAW transport, so plugin-internal
@@ -105,6 +109,7 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
 var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
+var pluginOpenLock, openQueued;
 var destroyTrack;
 var slotKey, waitForLoad, flushNotes, clearPending;
 var midiInitialized = false, midiWarned = IdentitySet.new;
@@ -538,7 +543,11 @@ slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
 waitForLoad = { |key, slot, at, fire|
     var seqKey = slotKey.(key, slot);
     var pending = statePending[seqKey];
-    if (pending.notNil and: { pending[\at] <= at } and: { at <= (pending[\at] + stateWaitMax) }) {
+    // A warm swap only claims notes near its onset; a cold load claims everything until it
+    // clears - notes keep arriving for as long as the open takes, and every one of them would
+    // otherwise sound the init preset.
+    var window = if (pending.notNil and: { pending[\cold] == true }) { inf } { stateWaitMax };
+    if (pending.notNil and: { pending[\at] <= at } and: { at <= (pending[\at] + window) }) {
         noteQueues[seqKey] = (noteQueues[seqKey] ? []).add((at: at, fire: fire));
         true
     } { false };
@@ -549,22 +558,32 @@ waitForLoad = { |key, slot, at, fire|
 // little ahead of its onset for exactly this reason) leaves the note playing dead on time, and only
 // one that ran past the onset makes it late. The 2ms floor keeps the bundle just ahead of scsynth
 // rather than arriving stamped for a moment that has already gone.
-flushNotes = { |seqKey|
+// `dropBefore` (a time, or nil) is the cold-load release: entries whose onset is older are
+// history - a note that missed its moment during a plugin load must not play late in a burst -
+// while future-stamped ones (the scheduler runs a lookahead ahead) still land dead on time. An
+// on whose off survives it leaves an orphan note-off, which a plugin ignores.
+flushNotes = { |seqKey, dropBefore = nil|
     var waiting = noteQueues[seqKey];
     noteQueues[seqKey] = nil;
     waiting !? {
         var now = Main.elapsedTime;
-        waiting.do { |e| e[\fire].value((e[\at] - now).max(0.002)) };
+        waiting.do { |e|
+            if (dropBefore.isNil or: { e[\at] >= dropBefore }) {
+                e[\fire].value((e[\at] - now).max(0.002));
+            };
+        };
     };
 };
 
 // Ends the wait for one load - finished, failed, superseded or cancelled, the notes must go either
 // way. Only for the load it names: a newer one may have taken the slot over in the meantime, and
-// its notes are still waiting for IT.
+// its notes are still waiting for IT. A cold load's release drops the already-due notes rather
+// than bursting them (see flushNotes); a warm swap's flushes them all, slightly late at worst.
 clearPending = { |seqKey, seq|
-    if (statePending[seqKey].notNil and: { statePending[seqKey][\seq] == seq }) {
+    var pending = statePending[seqKey];
+    if (pending.notNil and: { pending[\seq] == seq }) {
         statePending[seqKey] = nil;
-        flushNotes.(seqKey);
+        flushNotes.(seqKey, if (pending[\cold] == true) { Main.elapsedTime - 0.02 } { nil });
     };
 };
 
@@ -1015,6 +1034,33 @@ watchPluginEdits = { |track, key, slot, ctl|
     };
 };
 
+// Plugin opens are SERIALIZED, engine-wide: evaluating a whole song fires its every open at
+// once, and a burst of simultaneous heavyweight instantiations (each with an editor) starves
+// the audio callback - with the two-deck mixer, the PLAYING deck audibly stuttered while the
+// queued one loaded (2026-08-24). One instantiation in flight at a time, with a breather after
+// each, spreads the same work over a couple of seconds nothing hears. The failsafe matters: a
+// plugin whose open never reports back must not wedge every later load of the set.
+pluginOpenLock = Semaphore(1);
+openQueued = { |ctl, desc, action|
+    fork {
+        var done = Condition.new;
+        pluginOpenLock.wait;
+        try {
+            ctl.open(desc, editor: true, action: { |self, ok|
+                action.(self, ok);
+                if (done.test.not) { done.test = true; done.signal };
+            });
+        } { |err|
+            ("poptart: plugin open threw: " ++ err.errorString).warn;
+            if (done.test.not) { done.test = true; done.signal };
+        };
+        fork { 30.wait; if (done.test.not) { done.test = true; done.signal } }; // stuck-open failsafe
+        done.wait;
+        0.05.wait; // let the audio thread breathe between instantiations
+        pluginOpenLock.signal;
+    };
+};
+
 OSCdef(\poptartLoadInstrument, { |msg|
     var key = msg[1].asSymbol;
     var pluginId = msg[2].asString;
@@ -1028,7 +1074,7 @@ OSCdef(\poptartLoadInstrument, { |msg|
                 };
                 track[\controllers][0] = ctl;
                 track[\loaded][0] = nil;
-                ctl.open(resolvePlugin.(pluginId), editor: true, action: { |self, ok|
+                openQueued.(ctl, resolvePlugin.(pluginId), { |self, ok|
                     if (ok) {
                         track[\loaded][0] = pluginId;
                         // Emulated DAW transport from the first sample on: a rolling transport
@@ -1072,7 +1118,7 @@ OSCdef(\poptartLoadEffect, { |msg|
                 // or a different loadEffect racing the async open must win. A failed open
                 // clears it so the next eval retries.
                 track[\wanted][slot] = pluginId;
-                ctl.open(resolvePlugin.(pluginId), editor: true, action: { |self, ok|
+                openQueued.(ctl, resolvePlugin.(pluginId), { |self, ok|
                     if (ok) {
                         if (track[\wanted][slot] == pluginId) {
                             track[\loaded][slot] = pluginId;
@@ -2182,16 +2228,20 @@ OSCdef(\poptartSetPluginState, { |msg|
     };
     // Recorded at RECEIPT, not at apply time: that is what lets a message sent later cancel one
     // still waiting. A restore that is already stale on arrival (out of order) never runs at all.
+    // Cold = the slot's plugin is not open yet (a new song coming up): the hold covers the whole
+    // open+load and its release DROPS the missed notes - silence, then a clean join - where a
+    // warm swap holds briefly and flushes (see stateWaitMax/clearPending).
+    var cold = tracks[key].isKindOf(Event).not or: { tracks[key][\loaded][slot].isNil };
     if (seq >= (stateSeqs[seqKey] ? 0)) {
         stateSeqs[seqKey] = seq;
         // Same reason, for the notes: a swap and the notes at its onset are sent together, a
         // lookahead early, and a note is a timestamped bundle the moment it is handled - so "a load
         // is coming at this time" has to be true HERE, not when the load starts (see waitForLoad).
-        statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency);
+        statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency, cold: cold);
         // The notes waiting on this load are released the moment the program is in - or by this,
-        // whatever the plugin does or fails to do. A late note is a bug; notes held for the length
-        // of a cold plugin open, and then all played at once, is a disaster.
-        SystemClock.sched(latency + stateWaitMax, { clearPending.(seqKey, seq); nil });
+        // whatever the plugin does or fails to do (for a cold load, a pure stuck-load failsafe;
+        // the apply below clears the pending itself on every path).
+        SystemClock.sched(latency + if (cold) { coldWaitMax } { stateWaitMax }, { clearPending.(seqKey, seq); nil });
         if (latency > 0) { SystemClock.sched(latency, { apply.value; nil }) } { apply.value };
     } {
         File.delete(path);
@@ -2211,10 +2261,11 @@ OSCdef(\poptartStatePending, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger;
     var latency = msg[3].asFloat, seq = msg[4].asInteger;
     var seqKey = (key ++ "_" ++ slot).asSymbol;
+    var cold = tracks[key].isKindOf(Event).not or: { tracks[key][\loaded][slot].isNil }; // see setPluginState
     if (seq >= (stateSeqs[seqKey] ? 0)) {
         stateSeqs[seqKey] = seq;
-        statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency);
-        SystemClock.sched(latency + stateWaitMax, { clearPending.(seqKey, seq); nil });
+        statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency, cold: cold);
+        SystemClock.sched(latency + if (cold) { coldWaitMax } { stateWaitMax }, { clearPending.(seqKey, seq); nil });
     };
 }, '/poptart/statePending');
 
