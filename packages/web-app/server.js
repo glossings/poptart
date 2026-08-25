@@ -90,6 +90,16 @@ const decks = {
 };
 const deckOfKey = (key) => (key.includes(':') ? key.slice(0, key.indexOf(':')) : 'a');
 
+// A deck's native tempo as the DESK sees it: what its track declared (setbpm, a song file's
+// tags, the pane's bpm field), or the 120 default an unspecified track gets - the same tempo it
+// would play at loaded outside dj mode. Only a signal-driven setbpm has no single number, and
+// that reads as null (there is nothing for the migration slider to ride to).
+function deckNativeBpm(deck) {
+  const bpm = decks[deck].bpm;
+  if (typeof bpm === 'number') return bpm;
+  return bpm == null ? DEFAULT_CPS * 240 : null;
+}
+
 // Signal.prototype is SHARED between decks by design: extensions from one song are available to
 // the other. The collision case - both songs defining the same name differently - gets a console
 // warning rather than isolation, and the later eval wins for both. Tracked by diffing the
@@ -153,8 +163,10 @@ const mixState = {
 // replay). See TODO.md's song-deck phases for what's still to come (waveform pane, tempo sync,
 // nudge, metadata).
 // ---------------------------------------------------------------------------------------------
-const { resolveSongFile } = require('@poptart/osc-engine/songs');
-const { browseSongDir, statSongPaths } = require('./song-files');
+const { resolveSongFile, classifySongFile } = require('@poptart/osc-engine/songs');
+const { readSongTags } = require('@poptart/osc-engine/song-tags');
+const songSync = require('./song-sync');
+const { browseSongDir, statSongPaths, walkSongFiles, defaultSongDir } = require('./song-files');
 const SONG_KEYS = { a: '#song', b: 'b:#song' };
 const SONG_START_LEAD_SEC = 0.15; // enough for the timestamped start bundle to arrive early
 const songDecks = { a: null, b: null };
@@ -218,6 +230,110 @@ function songArmEndTimer(deck) {
   }, Math.max(0, secondsLeft * 1000));
 }
 
+// --- tempo sync + nudge + drift servo (songs phase 4; the math lives in song-sync.js) ---
+
+// The rate a deck's song should run at before the momentary nudge: locked to the master clock
+// when synced (rate = master/native), the manual rate otherwise.
+function songBaseRate(deck) {
+  const s = songDecks[deck];
+  if (!s) return 1;
+  if (s.sync && s.bpm && transport) return songSync.syncRate(transport.cps * 240, s.bpm) ?? s.manualRate;
+  return s.manualRate;
+}
+
+// What the engine's `rate` control is actually set to: the musical rate plus the drift servo's
+// trim. The trim never enters Node's playhead model - it exists precisely to make the engine's
+// playhead converge on that model.
+function songSendRate(deck) {
+  const s = songDecks[deck];
+  if (!s || !engine) return;
+  try { engine.songSet(engineTrack(SONG_KEYS[deck]), 'rate', s.rate + s.servo, 0); } catch { /* engine between restarts */ }
+}
+
+// Apply the current effective rate (sync x nudge), rebasing the linear playhead model at the
+// same moment so it stays exact through any number of rate moves - a tempo ramp arrives as a
+// step every few tens of ms, and each step re-anchors here. A quantized start that hasn't
+// begun yet is left alone (its synth may not exist server-side yet); the first ramp step after
+// it begins corrects the rate.
+function songApplyRate(deck) {
+  const s = songDecks[deck];
+  if (!s) return;
+  const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge);
+  if (eff === s.rate) return;
+  if (s.playing && engine && engine.getTime() >= s.startSec) {
+    const now = engine.getTime();
+    s.posSec = songPlayheadSec(deck, now);
+    s.startSec = now;
+    s.rate = eff;
+    songSendRate(deck);
+    songArmEndTimer(deck);
+  } else {
+    s.rate = eff;
+    if (s.playing && engine && !s.pendingRateTimer) {
+      // A quantized start still pending was scheduled with an older rate baked into its
+      // bundle, and the player doesn't exist server-side until that timestamp - push the
+      // current rate just after it begins (the servo then trims out the sliver in between).
+      s.pendingRateTimer = setTimeout(() => {
+        s.pendingRateTimer = null;
+        if (songDecks[deck] === s && s.playing) songSendRate(deck);
+      }, Math.max(0, (s.startSec - engine.getTime()) * 1000) + 80);
+    }
+  }
+}
+
+// The drift servo's measurement side: the player reports its actual playhead ~2/sec (see the
+// song defs in sc/poptart.scd), and Node's clock and scsynth's sample clock drift apart over
+// minutes. Small error: trim the engine rate a hair (never audibly) until it closes. Large
+// error: that's not drift, adopt the engine's truth. Reports racing a fresh start/seek/rebase
+// are ignored - the model just moved, and the report predates it.
+const SONG_SERVO_SETTLE_SEC = 0.6;
+function handleSongPos(trackId, pos) {
+  const deck = ['a', 'b'].find((d) => songDecks[d] && engineTrack(SONG_KEYS[d]) === trackId);
+  const s = deck && songDecks[deck];
+  if (!s || !s.playing || !engine) return;
+  const now = engine.getTime();
+  if (now - s.startSec < SONG_SERVO_SETTLE_SEC) return;
+  const trim = songSync.servoTrim(pos - songPlayheadSec(deck, now));
+  if (trim == null) {
+    s.posSec = pos;
+    s.startSec = now;
+    s.servo = 0;
+    songSendRate(deck);
+    songArmEndTimer(deck);
+    mixNotify();
+  } else if (trim !== s.servo) {
+    s.servo = trim;
+    songSendRate(deck);
+  }
+}
+
+// One nudge gesture, shared by /api/song/nudge and the mixMidi nudge/jog buttons. `hold` is
+// the momentary rate offset (press +-1, release 0); `jog` steps the phase one song-beat (the
+// bar-fix after a beat-aligned start), or 100ms when the song has no bpm.
+function songNudge(deck, { hold, jog }) {
+  const s = songDecks[deck];
+  if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  if (hold !== undefined) {
+    s.nudge = Math.sign(Number(hold) || 0);
+    songApplyRate(deck);
+  }
+  const dir = Math.sign(Number(jog) || 0);
+  if (dir) {
+    const to = Math.min(Math.max(0, songPlayheadSec(deck) + (s.bpm ? 60 / s.bpm : 0.1) * dir), s.duration);
+    if (s.playing && engine) {
+      engine.songSeek(engineTrack(SONG_KEYS[deck]), to, 0);
+      s.posSec = to;
+      s.startSec = engine.getTime();
+      s.servo = 0;
+      songArmEndTimer(deck);
+    } else {
+      s.posSec = to;
+    }
+  }
+  mixNotify();
+  return { deck, nudge: s.nudge, pos: s.posSec, rate: s.rate };
+}
+
 // Forget one deck's song: player released and buffer freed engine-side, Node state dropped.
 // The TRACK stays warm (it's dropTrack's to take down) - a new load reuses it.
 function songUnload(deck) {
@@ -238,7 +354,10 @@ function songUnload(deck) {
 // binds it. A mapped (or learning) CC is CONSUMED - a knob given to the desk must not also
 // drive a midicc() in song code.
 const MIX_MIDI_TARGETS = new Set(['xf',
-  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'fader'].map((c) => `${d}:${c}`))]);
+  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'fader',
+    // The song deck's platter buttons (songs phase 4) - button targets, not knobs: a nudge
+    // holds while the CC is high (press 127 / release 0), a jog fires on the press edge.
+    'nudgedn', 'nudgeup', 'jogdn', 'jogup'].map((c) => `${d}:${c}`))]);
 let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
 
 // A CC's 0..1 into the target's own range: two-sided controls center at 0, gains at unity.
@@ -262,6 +381,14 @@ function handleMixMidi(device, channel, cc, value) {
   for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
     if (m && m.device === device && m.channel === channel && m.cc === cc) {
       const name = target === 'xf' ? 'xf' : target.slice(2);
+      if (name.startsWith('nudge') || name.startsWith('jog')) {
+        const press = value >= 0.5;
+        try {
+          if (name.startsWith('nudge')) songNudge(target[0], { hold: press ? (name === 'nudgeup' ? 1 : -1) : 0 });
+          else if (press) songNudge(target[0], { jog: name === 'jogup' ? 1 : -1 });
+        } catch { /* no song on that deck - the button just does nothing */ }
+        return true;
+      }
       const t = target === 'xf'
         ? { name: 'xf', value: mixMidiValue(target, value) }
         : { deck: target[0], name, value: mixMidiValue(target, value) };
@@ -354,9 +481,11 @@ function mixDeskBody() {
   return {
     swap: mixState.swap,
     perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
+    // Never '-' for a loaded deck: an unspecified track reads as the 120 default, so the tempo
+    // slider and detents always have two real endpoints to ride between.
     deckBpm: {
-      a: typeof decks.a.bpm === 'number' ? decks.a.bpm : null,
-      b: typeof decks.b.bpm === 'number' ? decks.b.bpm : null,
+      a: deckNativeBpm('a'),
+      b: deckNativeBpm('b'),
     },
     tempo: {
       master: transport ? transport.cps * 240 : null,
@@ -381,6 +510,12 @@ function mixDeskBody() {
         rate: s.rate,
         posSec: s.posSec,
         startSec: s.startSec,
+        bpm: s.bpm,
+        musicalKey: s.musicalKey,
+        anchorSec: s.anchorSec,
+        sync: s.sync,
+        keylock: s.keylock,
+        nudge: s.nudge,
       }];
     })),
   };
@@ -968,6 +1103,9 @@ function wireEngine() {
   if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
   transport.onCpsChange = () => {
     syncVstTransport();
+    // Rate-locked songs ride the clock: every ramp step re-derives rate = master/native (with
+    // a model rebase, so the mirrored playhead stays exact) - see songApplyRate.
+    for (const d of ['a', 'b']) if (songDecks[d]?.sync && songDecks[d]?.bpm) songApplyRate(d);
     mixNotify(); // a tempo ramp's every step reaches the strip's readout live
   };
   syncVstTransport(); // a fresh sclang needs the surviving transport's tempo, not 120
@@ -987,6 +1125,8 @@ function wireEngine() {
   engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackLabel(trackId), slot);
   // Peak level of a track tapped for recording - what the record panel's meter draws.
   engine.onRecLevel = (trackId, left, right) => handleRecLevel(trackLabel(trackId), left, right);
+  // A song player's actual playhead, ~2/sec - the drift servo's measurement (songs phase 4).
+  engine.onSongPos = handleSongPos;
   // Mixer monitoring feeds (per-track levels + band frames) - what the mixer modal draws.
   engine.onMixLevel = (key, peakL, rmsL, peakR, rmsR) => handleMixLevel(trackLabel(key), peakL, rmsL, peakR, rmsR);
   engine.onMixSpec = (key, values) => handleMixSpec(trackLabel(key), values); // "*" (master) has no label and passes through
@@ -2656,14 +2796,17 @@ const routes = {
     // the tracks still playing must still find the definitions they resolve by name each cycle.
     patternCore.setDefOwner(deck);
     const definitionsBefore = patternCore.clearRolls('buffer', deck);
-    // Enter this deck's key: the scale global is read at BUILD time (.sc() bakes it into the
-    // Sig), so holding the deck's key in force during its eval is all per-deck scale takes.
-    patternCore.setGlobalScale(decks[deck].scale ?? null);
+    // Enter the eval with NO key in force: the buffer's own setscale (hoisted below, so it
+    // runs before any pattern is built) is the only thing that sets one. Starting from the
+    // deck's previous scale instead is how one track's key used to leak into the next - a
+    // song without a setscale must play in the default key, not whatever the last song left.
+    patternCore.setGlobalScale(null);
 
     // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
     // and a redeclared name in the buffer overrides the copy without clobbering the original.
     // setbpm records this deck's native tempo, but only the MAIN deck's drives the shared
     // clock: a queued song declares what it wants, and the mix migrates toward it (phase 5).
+    let sawSetbpm = false;
     const hostBuilders = {
       ...HOST_BUILDERS,
       setbpm: (value) => {
@@ -2671,6 +2814,7 @@ const routes = {
         if (typeof v !== 'number' && typeof v?.sample !== 'function') {
           throw new Error('[transport] setbpm() takes a number or a signal (mini string / LFO / pattern)');
         }
+        sawSetbpm = true;
         decks[deck].bpm = v;
         // While a tempo migration holds the clock, even the main deck's setbpm only RECORDS.
         return deck === 'a' && mixState.tempoOverride == null ? setbpm(value) : TEMPO_BLOCK;
@@ -2746,6 +2890,14 @@ const routes = {
     // deck's, which is what every non-eval reader (/api/status, live-note quantization) means.
     const deckScale = (decks[deck].scale = patternCore.globalScale());
     patternCore.setGlobalScale(decks.a.scale ?? null);
+    // Same for tempo: a buffer with no setbpm() specifies nothing, so nothing of the previous
+    // track's may stand - its native reads as the 120 default (deckNativeBpm), and on the main
+    // deck the clock itself returns there (unless the mix desk holds it), exactly as if the
+    // song had been loaded outside dj mode.
+    if (!sawSetbpm) {
+      decks[deck].bpm = null;
+      if (deck === 'a' && mixState.tempoOverride == null) setbpm(DEFAULT_CPS * 240);
+    }
     noteProtoOwnership(deck);
 
     // The buffer's _pack() definitions are in the registry now - the engine needs their files
@@ -2871,7 +3023,7 @@ const routes = {
         transport: transport.snapshot(),
         scale: deckScale, // what setscale() left in force for this deck - the piano roll colours by it
         deck,
-        deckBpm: typeof decks[deck].bpm === 'number' ? decks[deck].bpm : null,
+        deckBpm: deckNativeBpm(deck),
         gridFrom,
         gridCount: HL_WINDOW,
         tracks: built.map((b) => ({
@@ -3519,9 +3671,9 @@ const routes = {
     if (!transport) throw new Error(engineError ?? 'engine not loaded');
     let bpm = Number(body.bpm);
     if (body.deck === 'a' || body.deck === 'b') {
-      const native = decks[body.deck].bpm;
-      if (typeof native !== 'number') {
-        throw new Error(`deck ${body.deck} has no native bpm (its song doesn't setbpm() a number)`);
+      const native = deckNativeBpm(body.deck); // 120 when the deck's track specifies nothing
+      if (native == null) {
+        throw new Error(`deck ${body.deck}'s tempo is signal-driven - no single native bpm to migrate to`);
       }
       bpm = native;
     }
@@ -3632,9 +3784,10 @@ const routes = {
     if (mixState.tempoOverride != null) {
       mixState.tempoOverride = null;
       // The surviving deck gets its declared tempo back - as a short glide, not a lurch (it is
-      // still playing). A signal tempo re-installs itself; no declaration leaves the clock be.
-      if (typeof decks.a.bpm === 'number') transport?.rampBpm(decks.a.bpm, 2);
-      else if (decks.a.bpm) transport?.setBpm(decks.a.bpm);
+      // still playing). A signal tempo re-installs itself; no declaration means the deck's
+      // native is the 120 default, and the clock glides home to that.
+      if (decks.a.bpm != null && typeof decks.a.bpm !== 'number') transport?.setBpm(decks.a.bpm);
+      else if (deckNativeBpm('a') != null) transport?.rampBpm(deckNativeBpm('a'), 2);
     }
     for (const key of mixKeys()) neutralizeMix(key);
     decks.b = { scale: null, bpm: null };
@@ -3696,11 +3849,13 @@ const routes = {
   // --- song decks (files on a DJ deck - see the song section near mixState) ---
 
   // Load a file onto a deck's song track, replacing whatever song it held. Body: { deck, path,
-  // bpm?, title? }. wav/aiff/flac load directly; mp3/m4a/aac/caf go through the afconvert cache
-  // (~/.poptart/cache/songs). The track is created (or reused) wearing the desk's current
+  // bpm?, title?, key? }. wav/aiff/flac load directly; mp3/m4a/aac/caf go through the afconvert
+  // cache (~/.poptart/cache/songs). The track is created (or reused) wearing the desk's current
   // state, so a song queued onto deck b arrives silent exactly like a queued pattern deck.
-  // `bpm` (until phase 4 reads it from tags) records the song's native tempo, which is what
-  // lets /api/mix/tempo migrate toward it.
+  // The song's native bpm - the playlist item's if it says, the file's own tags otherwise
+  // (ID3 TBPM/TKEY, vorbis comments, mp4 tmpo - see song-tags.js) - feeds decks[].bpm, which is
+  // what lets /api/mix/tempo migrate toward it; rate-lock (sync) defaults on when it's known.
+  // Everything stays editable via /api/song/meta.
   'POST /api/song/load': async (body) => {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     const deck = body.deck === 'b' ? 'b' : 'a';
@@ -3712,6 +3867,9 @@ const routes = {
     mappedEngine.createTrack(tid, mixBirthFor(key)); // idempotent - a reload keeps the track warm
     const meta = await mappedEngine.songLoad(tid, resolved.path);
     const duration = meta.sampleRate > 0 ? meta.frames / meta.sampleRate : 0;
+    const tags = readSongTags(srcPath);
+    const bodyBpm = Number(body.bpm);
+    const bpm = Number.isFinite(bodyBpm) && bodyBpm >= 20 && bodyBpm <= 400 ? bodyBpm : tags.bpm;
     songDecks[deck] = {
       path: srcPath,
       title: String(body.title ?? '').trim() || path.basename(srcPath),
@@ -3725,37 +3883,57 @@ const routes = {
       posSec: 0,
       startSec: 0,
       endTimer: null,
+      // The musical facts (songs phase 4) - the playlist item's word beats the file's tags,
+      // and /api/song/meta edits any of it later.
+      bpm,
+      musicalKey: String(body.key ?? '').trim() || tags.key,
+      anchorSec: 0,
+      sync: bpm != null,
+      keylock: false,
+      manualRate: 1,
+      nudge: 0,
+      servo: 0,
     };
-    const bpm = Number(body.bpm);
-    if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) decks[deck].bpm = bpm;
+    decks[deck].bpm = bpm; // null included: an untagged song reads as the 120 default, never the previous track's
+    songApplyRate(deck); // not playing: just settles s.rate so the pane's readout is honest
     mixNotify();
     return {
       status: 200,
-      body: { deck, key, duration, sampleRate: meta.sampleRate, channels: meta.channels, decoded: resolved.decoded },
+      body: {
+        deck, key, duration, sampleRate: meta.sampleRate, channels: meta.channels,
+        decoded: resolved.decoded, bpm, musicalKey: songDecks[deck].musicalKey, sync: songDecks[deck].sync,
+      },
     };
   },
 
   // Start playback. Body: { deck, pos? (seconds; default: resume where it stands, or the top
-  // after EOF), rate? (1 = native), now? (skip quantization) }. With the shared clock running,
-  // the start lands on the next cycle boundary - a song against a playing deck joins the grid
-  // the way a deck-b eval does; with the clock frozen (nothing else playing) it just starts.
+  // after EOF), rate? (manual rate when not synced; 1 = native), now? (skip quantization) }.
+  // With the shared clock running, the start lands on the next cycle boundary - a song against
+  // a playing deck joins the grid the way a deck-b eval does; with the clock frozen (nothing
+  // else playing) it just starts. A synced song (phase 4) additionally snaps its own entry
+  // point to the nearest gridpoint of its beatgrid, so the material entering at that cycle
+  // boundary is a beat - with rate locked to master/native, the two grids then stay in step.
   'POST /api/song/play': async (body) => {
     if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
     const deck = body.deck === 'b' ? 'b' : 'a';
     const s = songDecks[deck];
     if (!s) throw new Error(`deck ${deck} has no song loaded`);
     const rate = Number(body.rate);
-    if (Number.isFinite(rate) && rate > 0.01 && rate <= 4) s.rate = rate;
+    if (Number.isFinite(rate) && rate > 0.01 && rate <= 4) s.manualRate = rate;
     const pos = Number(body.pos);
-    const from = Number.isFinite(pos)
+    let from = Number.isFinite(pos)
       ? Math.min(Math.max(0, pos), s.duration)
       : (s.posSec >= s.duration ? 0 : s.posSec);
     const now = engine.getTime();
     let startSec = now + SONG_START_LEAD_SEC;
     if (!transport.paused && !body.now) {
       startSec = transport.secAt(Math.ceil(transport.cycleAt(now + SONG_START_LEAD_SEC)));
+      if (s.sync && s.bpm) from = songSync.snapToBeat(from, s.bpm, s.anchorSec, s.duration);
     }
-    engine.songStart(engineTrack(SONG_KEYS[deck]), from, s.rate, startSec);
+    s.nudge = 0;
+    s.servo = 0;
+    s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
+    engine.songStart(engineTrack(SONG_KEYS[deck]), from, s.rate, startSec, s.keylock ? 1 : 0);
     s.posSec = from;
     s.startSec = startSec;
     s.playing = true;
@@ -3789,6 +3967,10 @@ const routes = {
       engine.songSeek(engineTrack(SONG_KEYS[deck]), to, 0);
       s.posSec = to;
       s.startSec = engine.getTime();
+      if (s.servo) {
+        s.servo = 0; // the drift the trim was closing jumped away with the playhead
+        songSendRate(deck);
+      }
       songArmEndTimer(deck);
     } else {
       s.posSec = to;
@@ -3809,6 +3991,71 @@ const routes = {
     if (body.unload) songUnload(deck);
     mixNotify();
     return { status: 200, body: { deck, unloaded: !!body.unload } };
+  },
+
+  // Edit a song's musical facts (songs phase 4) - all of them user-editable, always: the tags
+  // are a convenience, not an authority. Body: { deck, bpm? (20..400, or null to clear - which
+  // also drops sync), key?, anchorSec? (the beatgrid's downbeat anchor, clamped to the file),
+  // sync? (rate-lock to the master clock; needs a bpm), keylock? (Warp1 timestretch player -
+  // rate moves time, not pitch; toggling mid-song is a declicked player swap at the playhead) }.
+  'POST /api/song/meta': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    const s = songDecks[deck];
+    if (!s) throw new Error(`deck ${deck} has no song loaded`);
+    if ('bpm' in body) {
+      if (body.bpm == null || body.bpm === '') {
+        s.bpm = null;
+        s.sync = false;
+        decks[deck].bpm = null; // native slot back to the 120 default
+      } else {
+        const bpm = Number(body.bpm);
+        if (!Number.isFinite(bpm) || bpm < 20 || bpm > 400) throw new Error('song/meta: bpm must be 20..400 (or null to clear)');
+        s.bpm = bpm;
+        decks[deck].bpm = bpm; // the native tempo the desk's migration slider/detents ride to
+      }
+    }
+    if ('key' in body) s.musicalKey = String(body.key ?? '').trim() || null;
+    if ('anchorSec' in body) {
+      const a = Number(body.anchorSec);
+      if (!Number.isFinite(a)) throw new Error('song/meta: anchorSec must be a number (seconds)');
+      s.anchorSec = Math.min(Math.max(0, a), s.duration);
+    }
+    if ('sync' in body) {
+      if (body.sync && s.bpm == null) throw new Error('sync needs a bpm - set one first (the tags had none)');
+      s.sync = !!body.sync;
+    }
+    if ('keylock' in body && !!body.keylock !== s.keylock) {
+      s.keylock = !!body.keylock;
+      if (s.playing && engine) {
+        // Swap the running player for the other def at the current playhead, declicked (the
+        // old one release-fades under the new one, exactly like a restart).
+        const now = engine.getTime();
+        const pos = songPlayheadSec(deck, now);
+        const startSec = now + SONG_START_LEAD_SEC;
+        engine.songStart(engineTrack(SONG_KEYS[deck]), pos, s.rate + s.servo, startSec, s.keylock ? 1 : 0);
+        s.posSec = pos;
+        s.startSec = startSec;
+        songArmEndTimer(deck);
+      }
+    }
+    songApplyRate(deck); // bpm/sync edits change the effective rate; paused songs settle too
+    mixNotify();
+    return {
+      status: 200,
+      body: {
+        deck, bpm: s.bpm, musicalKey: s.musicalKey, anchorSec: s.anchorSec,
+        sync: s.sync, keylock: s.keylock, rate: s.rate,
+      },
+    };
+  },
+
+  // The platter (songs phase 4). Body: { deck, hold?: -1|0|1, jog?: -1|1 }. `hold` is the
+  // momentary rate offset (press +-1, release 0 - +-4% while held, the classic push/drag);
+  // `jog` steps the phase by one song-beat (the bar-fix after a beat-aligned start; 100ms when
+  // no bpm is known). The mixMidi nudge/jog button targets drive the same gesture.
+  'POST /api/song/nudge': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    return { status: 200, body: songNudge(deck, body) };
   },
 
   // The waveform pane's data (songs phase 3): a high-resolution detail strip plus a full-track
@@ -3838,6 +4085,36 @@ const routes = {
   // time, subdirectories plus playable audio files - the client can't produce disk paths, so
   // this is how a real file gets into a playlist. Query: { dir? } (absent = ~/Music or home).
   'GET /api/songfiles': async (q) => ({ status: 200, body: browseSongDir(q.dir) }),
+
+  // Every playable file under a folder, filtered by a search - the organize modal's tree
+  // search and its whole-folder adds (mirroring /api/findSamples, which does the same for the
+  // pack browser over the sample formats). Query: { dir?, q?, limit? } -> { path, files
+  // (relative), matched, total, truncated }.
+  'GET /api/songfiles/find': async (q) => {
+    const dir = path.resolve(String(q.dir ?? '').trim() || defaultSongDir());
+    const limit = Math.max(1, Math.min(20000, Number(q.limit) || 500));
+    const { matchAudioPaths } = require('@poptart/osc-engine/samples');
+    let walked;
+    try {
+      if (!fs.statSync(dir).isDirectory()) throw new Error('not a folder');
+      // cachedWalk is shared with the sample browser - the key prefix keeps a folder walked
+      // for songs (mp3s included) apart from the same folder walked for packs.
+      walked = await cachedWalk(`songs:${dir}`, () => walkSongFiles(dir));
+    } catch {
+      throw new Error(`can't read ${dir}`);
+    }
+    const hits = matchAudioPaths(walked.files, q.q || '');
+    return {
+      status: 200,
+      body: {
+        path: dir,
+        files: hits.slice(0, limit),
+        matched: hits.length,
+        total: walked.files.length,
+        truncated: !!walked.truncated,
+      },
+    };
+  },
 
   // Which of a library's file items still exist - a moved or deleted file renders as missing,
   // the same contract as a deleted save. Body: { paths: [...] } -> { exists: { [path]: bool } }.
@@ -4314,6 +4591,34 @@ const AUDIO_MIME = {
   '.flac': 'audio/flac',
 };
 
+// Song preview bytes - the organize disk pane's audition (the pack browser's, mirrored onto
+// the song formats). The browser's own decoder handles wav/mp3/m4a/aac/flac; aiff and caf it
+// generally can't, so those take the same afconvert pass (and cache) deck playback uses.
+async function serveSongAudio(query, res) {
+  const raw = String(query.file ?? '');
+  if (!raw || !path.isAbsolute(raw) || !classifySongFile(raw)) {
+    res.writeHead(400).end('bad request');
+    return;
+  }
+  let filePath = path.resolve(raw);
+  try {
+    if (['.aif', '.aiff', '.caf'].includes(path.extname(filePath).toLowerCase())) {
+      filePath = (await resolveSongFile(filePath, { wav: true })).path;
+    }
+  } catch {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404).end('not found');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': data.length });
+    res.end(data);
+  });
+}
+
 function serveSampleAudio(query, res) {
   const { listPackFiles, isAudioName, samplesRoot } = require('@poptart/osc-engine/samples');
   let filePath;
@@ -4394,6 +4699,11 @@ const server = http.createServer(async (req, res) => {
   // Binary sample preview - answered outside the JSON route table (see serveSampleAudio).
   if (req.method === 'GET' && url.pathname === '/api/sampleAudio') {
     return serveSampleAudio(Object.fromEntries(url.searchParams), res);
+  }
+
+  // Song preview bytes for the organize modal's disk pane - same deal (see serveSongAudio).
+  if (req.method === 'GET' && url.pathname === '/api/songAudio') {
+    return serveSongAudio(Object.fromEntries(url.searchParams), res);
   }
 
   // Live-reload stream - long-lived SSE, so also outside the JSON route table.

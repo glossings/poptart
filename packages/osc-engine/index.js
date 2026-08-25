@@ -693,8 +693,10 @@ class OscEngine {
   }
 
   /** Start (or restart) playback at posSec, at `rate` (1 = native). */
-  songStart(trackId, posSec, rate = 1, targetTime = 0) {
-    this._send('/poptart/songStart', [trackId, posSec, rate, this._latency(targetTime)]);
+  songStart(trackId, posSec, rate = 1, targetTime = 0, warp = 0) {
+    // warp = 1 spawns the Warp1 keylock player instead of the repitch one (songs phase 4);
+    // restarting with the other flag at the current playhead is how keylock toggles mid-song.
+    this._send('/poptart/songStart', [trackId, posSec, rate, this._latency(targetTime), warp ? 1 : 0]);
   }
 
   /** Set one player control: 'run' (0/1 = pause/resume), 'rate', 'amp'. */
@@ -1459,6 +1461,13 @@ class OscEngine {
       // Live CC feed for Tier-1 signal sampling: [deviceName, channel (1-16), cc, value 0..1].
       const [device, channel, cc, value] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onMidiIn === 'function') this.onMidiIn(String(device), Number(channel), Number(cc), Number(value));
+      return;
+    }
+    if (msg.address === '/poptart/songPos') {
+      // A song player's actual playhead (song-seconds on the sample clock), ~2/sec while one
+      // plays - the drift servo's measurement (see server.js's song section): [trackId, posSec].
+      const [track, pos] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onSongPos === 'function') this.onSongPos(String(track), Number(pos));
       return;
     }
     if (msg.address === '/poptart/recLevel') {

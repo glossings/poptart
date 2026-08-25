@@ -362,10 +362,12 @@ document.addEventListener('keydown', (e) => {
   if (document.querySelector('.dir-picker-backdrop:not(.hidden)')) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    evaluate(true, { byHand: true });
+    // The song pane is the active "window" when it was clicked last: enter plays ITS deck.
+    if (mixModeOn && deckBSong && songPaneActive) evalDeckB(true);
+    else evaluate(true, { byHand: true });
   } else if (e.key === '.' && !e.shiftKey) {
     e.preventDefault();
-    doStop();
+    doStop(mixModeOn && deckBSong && songPaneActive ? 'b' : null);
   } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
     e.preventDefault();
     stepDeckBQueue(); // mix mode: load the active set's next song into deck B
@@ -14008,9 +14010,11 @@ async function loadDeckBFile() {
       // is the fallback the pane reveals if the waveform analysis fails.
       const item = deckFileItems.get(value);
       const res = await api('POST', '/api/song/load', {
-        deck: 'b', path: item.path, bpm: item.bpm, title: libFileTitle(item),
+        deck: 'b', path: item.path, bpm: item.bpm, key: item.key, title: libFileTitle(item),
       });
-      deckBSong = { path: item.path, title: libFileTitle(item), bpm: item.bpm ?? null };
+      // bpm/key come back resolved: the playlist item's word if it had one, the file's own
+      // tags otherwise (songs phase 4) - and stay editable in the pane's control row.
+      deckBSong = { path: item.path, title: libFileTitle(item), bpm: res.bpm ?? null };
       deckBFileName = null;
       const m = Math.floor(res.duration / 60);
       const s = String(Math.round(res.duration % 60)).padStart(2, '0');
@@ -14018,7 +14022,8 @@ async function loadDeckBFile() {
       deckBCM.setOption('readOnly', true);
       songMirror = { playing: false, posSec: 0, startSec: 0, rate: 1, duration: res.duration };
       songPaneOpen();
-      logLine(`deck B loaded ♪ "${deckBSong.title}" (${m}:${s}${res.decoded ? ', decoded' : ''}) - ▶ plays it (it arrives silent)`);
+      const facts = [deckBSong.bpm && `${deckBSong.bpm} bpm`, res.musicalKey, res.sync && 'synced'].filter(Boolean).join(', ');
+      logLine(`deck B loaded ♪ "${deckBSong.title}" (${m}:${s}${res.decoded ? ', decoded' : ''}${facts ? `; ${facts}` : ''}) - ▶ plays it (it arrives silent)`);
     } else {
       const { code } = await api('POST', '/api/patterns/load', { name: value });
       deckBSong = null;
@@ -14069,6 +14074,10 @@ const songDetailEl = document.getElementById('songDetailB');
 const songOverviewEl = document.getElementById('songOverviewB');
 const songTitleEl = document.getElementById('songTitleB');
 const songTimeEl = document.getElementById('songTimeB');
+const songRateEl = document.getElementById('songRateB');
+const songBpmEl = document.getElementById('songBpm');
+const songSyncEl = document.getElementById('songSync');
+const songKeylockEl = document.getElementById('songKeylock');
 
 let songWave = null; // the fetched analysis (null while loading, or when it failed)
 let songMirror = null; // deck b's playhead mirror { playing, posSec, startSec, rate, duration }
@@ -14105,8 +14114,19 @@ function songPaneSync(state) {
   } else {
     songMirror = { playing: sb.playing, posSec: sb.posSec, startSec: sb.startSec, rate: sb.rate, duration: sb.duration };
   }
+  // The musical facts (songs phase 4) ride every frame - server truth, however they got there
+  // (tags, playlist item, a meta edit, a MIDI nudge).
+  Object.assign(songMirror, {
+    bpm: sb.bpm ?? null,
+    musicalKey: sb.musicalKey ?? null,
+    anchorSec: sb.anchorSec ?? 0,
+    sync: !!sb.sync,
+    keylock: !!sb.keylock,
+    nudge: sb.nudge ?? 0,
+  });
+  songCtlRender();
   if (!deckBSong) {
-    deckBSong = { path: sb.path, title: sb.title, bpm: mixNativeBpm.b ?? null };
+    deckBSong = { path: sb.path, title: sb.title, bpm: sb.bpm ?? null };
     deckBFileName = null;
     if (deckBCM) {
       deckBCM.setValue(`// ♪ ${sb.title}\n// ${sb.path}`);
@@ -14121,7 +14141,7 @@ function songPaneSync(state) {
 async function songPaneOpen() {
   deckBPaneEl.classList.add('song-on');
   songPaneEl.classList.remove('hidden');
-  songTitleEl.textContent = `♪ ${deckBSong.title}${deckBSong.bpm ? ` · ${deckBSong.bpm} bpm` : ''}`;
+  songCtlRender(); // title, toggles, bpm - whatever the mirror already knows
   songTimeEl.textContent = '';
   songWave = null;
   songOverviewImage = null;
@@ -14146,6 +14166,7 @@ function songPaneClose() {
   songOverviewImage = null;
   if (songRaf != null) cancelAnimationFrame(songRaf);
   songRaf = null;
+  songPaneSetActive(false);
   deckBCM?.refresh(); // it was display:none while the pane was up; unpainted until told
 }
 
@@ -14160,6 +14181,8 @@ function songFrame() {
   songDrawOverview();
   const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
   songTimeEl.textContent = dur ? `${songFmt(songPlayheadNow(), true)} / ${songFmt(dur)}` : '';
+  const rate = songMirror?.rate ?? 1;
+  songRateEl.textContent = Math.abs(rate - 1) > 0.0005 ? `${rate > 1 ? '+' : ''}${((rate - 1) * 100).toFixed(1)}%` : '';
   songRaf = requestAnimationFrame(songFrame);
 }
 
@@ -14235,17 +14258,22 @@ function songDrawDetail() {
   ctx.lineTo(w, mid + 0.5);
   ctx.stroke();
 
-  // Beatgrid: anchored at 0:00 until phase 4 brings tag parsing and a movable anchor.
-  // Downbeats (every 4th from the anchor) run full height; plain beats are edge ticks.
-  const bpm = deckBSong?.bpm ?? mixNativeBpm.b;
+  // Beatgrid from the song's own facts (songs phase 4): bpm out of its tags/playlist/edits,
+  // downbeats every 4th beat from the user-settable anchor (the ⚓ button drops it at the
+  // playhead). The k = 0 line IS the anchor - drawn a little stronger.
+  // Only the song's OWN bpm draws a grid. The desk's native slot (mixNativeBpm) defaults to
+  // 120 for a track that specifies nothing - fine for the tempo slider, wrong as a beatgrid.
+  const bpm = songMirror ? songMirror.bpm : deckBSong?.bpm;
+  const anchor = songMirror?.anchorSec ?? 0;
   if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
     const beat = 60 / bpm;
-    const kEnd = Math.min(dur, t0 + songZoomSec) / beat;
+    const kEnd = (Math.min(dur, t0 + songZoomSec) - anchor) / beat;
     ctx.lineWidth = 1;
-    for (let k = Math.max(0, Math.ceil(t0 / beat)); k <= kEnd; k++) {
-      const x = Math.round((k * beat - t0) * pxPerSec) + 0.5;
-      const down = k % 4 === 0;
-      ctx.strokeStyle = down ? rgbaFrom(ctx, accent, 0.4) : rgbaFrom(ctx, text, 0.35);
+    for (let k = Math.ceil((Math.max(0, t0) - anchor) / beat); k <= kEnd; k++) {
+      if (anchor + k * beat < 0) continue;
+      const x = Math.round((anchor + k * beat - t0) * pxPerSec) + 0.5;
+      const down = ((k % 4) + 4) % 4 === 0;
+      ctx.strokeStyle = down ? rgbaFrom(ctx, accent, k === 0 ? 0.75 : 0.4) : rgbaFrom(ctx, text, 0.35);
       ctx.beginPath();
       if (down) {
         ctx.moveTo(x, 2);
@@ -14405,6 +14433,108 @@ songOverviewEl.addEventListener('pointermove', (e) => {
 for (const ev of ['pointerup', 'pointercancel']) {
   songOverviewEl.addEventListener(ev, () => { songOverviewDown = false; });
 }
+
+// --- the song pane's control row (songs phase 4) ---
+//
+// The song's musical facts are server truth (tags at load, playlist item, edits here) and ride
+// every SSE frame; this row just renders them and posts edits back. bpm feeds the desk's tempo
+// migration; ⚓ drops the beatgrid anchor at the playhead; sync rate-locks to the master clock;
+// keylock swaps the player for the Warp1 timestretcher; the nudge pair is the platter (±4%
+// while held) and the jog pair steps a beat. All four platter buttons are MIDI-learnable, same
+// gesture as the desk knobs.
+
+const songNudgeDnEl = document.getElementById('songNudgeDn');
+const songNudgeUpEl = document.getElementById('songNudgeUp');
+
+// Clicking into the song pane makes it the active "window", the way clicking an editor focuses
+// it: Cmd+Enter then plays/resumes the song and Cmd+. stops ITS deck (see the transport hotkey
+// handler near the top). The pane has no focusable editor underneath, so this is tracked by
+// pointer: any click inside claims it, any click outside releases it.
+let songPaneActive = false;
+function songPaneSetActive(on) {
+  if (songPaneActive === on) return;
+  songPaneActive = on;
+  songPaneEl.classList.toggle('active', on);
+}
+songPaneEl.addEventListener('pointerdown', () => songPaneSetActive(true), true);
+document.addEventListener('pointerdown', (e) => {
+  if (!songPaneEl.contains(e.target)) songPaneSetActive(false);
+}, true);
+
+function songTitleRender() {
+  const k = songMirror?.musicalKey;
+  songTitleEl.textContent = deckBSong ? `♪ ${deckBSong.title}${k ? ` · ${k}` : ''}` : '';
+}
+
+function songCtlRender() {
+  songTitleRender();
+  const m = songMirror;
+  songSyncEl.classList.toggle('on', !!m?.sync);
+  songKeylockEl.classList.toggle('on', !!m?.keylock);
+  songNudgeDnEl.classList.toggle('held', (m?.nudge ?? 0) < 0); // a MIDI nudge lights the button too
+  songNudgeUpEl.classList.toggle('held', (m?.nudge ?? 0) > 0);
+  if (document.activeElement !== songBpmEl) songBpmEl.value = m?.bpm ?? '';
+}
+
+function songMetaPost(patch, said) {
+  api('POST', '/api/song/meta', { deck: 'b', ...patch })
+    .then((res) => { if (said) logLine(said(res)); })
+    .catch((e) => logLine(e.message ?? String(e), true));
+}
+
+songBpmEl.addEventListener('change', () => {
+  if (!deckBSong) return;
+  const v = songBpmEl.value.trim();
+  songMetaPost({ bpm: v === '' ? null : Number(v) });
+  songBpmEl.blur();
+});
+document.getElementById('songAnchor').addEventListener('click', () => {
+  if (!deckBSong) return;
+  const at = songPlayheadNow();
+  songMetaPost({ anchorSec: at }, () => `beatgrid anchored at ${songFmt(at, true)}`);
+});
+songSyncEl.addEventListener('click', () => {
+  if (!deckBSong) return;
+  songMetaPost({ sync: !songMirror?.sync }, (r) => (r.sync
+    ? `sync on - deck B rides the master clock (rate ${r.rate.toFixed(3)})`
+    : 'sync off - deck B back to its own rate'));
+});
+songKeylockEl.addEventListener('click', () => {
+  if (!deckBSong) return;
+  songMetaPost({ keylock: !songMirror?.keylock }, (r) => `keylock ${r.keylock ? 'on - rate stretches time, not pitch' : 'off - back to repitch'}`);
+});
+
+// The platter: hold to push/drag (release restores), click a jog to step one beat.
+function songHoldWire(btn, dir) {
+  let holding = false; // local truth - the SSE echo of the press may not be back by release
+  const send = (hold) => api('POST', '/api/song/nudge', { deck: 'b', hold })
+    .catch((e) => logLine(e.message ?? String(e), true));
+  btn.addEventListener('pointerdown', (e) => {
+    if (!deckBSong) return;
+    btn.setPointerCapture(e.pointerId);
+    holding = true;
+    send(dir);
+  });
+  for (const ev of ['pointerup', 'pointercancel']) {
+    btn.addEventListener(ev, () => {
+      if (!holding) return;
+      holding = false;
+      if (deckBSong) send(0);
+    });
+  }
+}
+songHoldWire(songNudgeDnEl, -1);
+songHoldWire(songNudgeUpEl, 1);
+for (const [id, jog] of [['songJogDn', -1], ['songJogUp', 1]]) {
+  document.getElementById(id).addEventListener('click', () => {
+    if (!deckBSong) return;
+    api('POST', '/api/song/nudge', { deck: 'b', jog }).catch((e) => logLine(e.message ?? String(e), true));
+  });
+}
+mixLearnAttach(songNudgeDnEl, 'b:nudgedn');
+mixLearnAttach(songNudgeUpEl, 'b:nudgeup');
+mixLearnAttach(document.getElementById('songJogDn'), 'b:jogdn');
+mixLearnAttach(document.getElementById('songJogUp'), 'b:jogup');
 
 async function evalDeckB(start) {
   if (!deckBCM) return;
@@ -15089,12 +15219,15 @@ async function openOrganize() {
   if (!orgSelected) orgSelected = libDoc.playlists.find((p) => p.id === libDoc.active)?.id ?? libDoc.playlists[0]?.id ?? null;
   orgEl.classList.remove('hidden');
   window.addEventListener('keydown', orgOnKey);
+  orgSay(ORG_HINT);
   orgRender();
   orgEl.querySelector('#orgSearch').focus();
 }
 
 function closeOrganize() {
   orgHeld = null;
+  orgPlayerStopSource();
+  orgRenderTransport();
   orgEl?.classList.add('hidden');
   window.removeEventListener('keydown', orgOnKey);
 }
@@ -15136,11 +15269,20 @@ function buildOrganize() {
           <div id="orgDiskBar" class="hidden">
             <button id="orgBrowseUp" class="small" title="up one directory">↑</button>
             <span id="orgBrowsePath"></span>
+            <button id="orgDiskAdd" class="small" title="add the selection to the open playlist (←)">←</button>
           </div>
-          <ul id="orgAll"></ul>
+          <ul id="orgAll" tabindex="-1"></ul>
         </section>
       </div>
-      <footer id="orgFoot">drag songs into a playlist (the disk tab has your audio files); ● marks the ACTIVE set deck B follows; tags are the files' own @tags</footer>
+      <footer id="orgFoot">
+        <div id="orgPlayRow" class="hidden">
+          <button id="orgPlayBtn" class="small" title="play / pause (space)" disabled>▶</button>
+          <span id="orgPlayName" class="pack-play-name"></span>
+          <div id="orgPlayBar" class="pack-play-bar" title="scrub"><div id="orgPlayHead" class="pack-play-head"></div></div>
+          <span id="orgPlayTime" class="pack-play-time"></span>
+        </div>
+        <span id="orgNote"></span>
+      </footer>
     </div>`;
   document.body.appendChild(orgEl);
   orgEl.addEventListener('click', (e) => { if (e.target === orgEl) closeOrganize(); });
@@ -15154,9 +15296,29 @@ function buildOrganize() {
     saveLibraryDoc();
     orgRender();
   });
-  orgEl.querySelector('#orgSearch').addEventListener('input', (e) => {
+  const orgSearchEl = orgEl.querySelector('#orgSearch');
+  orgSearchEl.addEventListener('input', (e) => {
     orgQuery = e.target.value.trim().toLowerCase();
-    orgRenderAll();
+    if (orgPane3 === 'disk') orgDiskQueueFind(); // the disk tab searches the whole TREE, like sp
+    else orgRenderAll();
+  });
+  orgSearchEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && orgSearchEl.value) {
+      // back out of the search before backing out of the modal
+      e.preventDefault();
+      e.stopPropagation();
+      orgSearchEl.value = '';
+      orgQuery = '';
+      if (orgPane3 === 'disk') orgDiskFindClear();
+      else orgRenderAll();
+    } else if (orgPane3 === 'disk' && (e.key === 'ArrowDown' || e.key === 'Enter')) {
+      // drop into the results to hear them, exactly like the pack browser's search
+      e.preventDefault();
+      if (orgDiskRows().length) {
+        orgEl.querySelector('#orgAll').focus({ preventScroll: true });
+        orgDiskStep(1, false);
+      }
+    }
   });
   const sort = orgEl.querySelector('#orgSort');
   sort.append(new Option('last saved', 'saved'), new Option('name', 'name'));
@@ -15169,6 +15331,16 @@ function buildOrganize() {
   orgEl.querySelector('#orgBrowseUp').addEventListener('click', () => {
     if (orgDisk?.parent) orgBrowseTo(orgDisk.parent);
   });
+  orgEl.querySelector('#orgDiskAdd').addEventListener('click', () => orgDiskAddSelected());
+  orgEl.querySelector('#orgPlayBtn').addEventListener('click', () => orgPlayerToggle());
+  const orgBar = orgEl.querySelector('#orgPlayBar');
+  const orgBarSeek = (e) => {
+    const r = orgBar.getBoundingClientRect();
+    if (r.width) orgPlayerSeek((e.clientX - r.left) / r.width);
+  };
+  orgBar.addEventListener('pointerdown', (e) => { orgBar.setPointerCapture(e.pointerId); orgBarSeek(e); });
+  orgBar.addEventListener('pointermove', (e) => { if (e.buttons) orgBarSeek(e); });
+  orgEl.querySelector('#orgAll').addEventListener('keydown', orgDiskKeys);
   orgEl.addEventListener('dragend', () => { orgHeld = null; });
   // the empty space under the contents rows appends to the open playlist
   const items = orgEl.querySelector('#orgItems');
@@ -15440,21 +15612,52 @@ function orgRender() {
   orgRenderAll();
 }
 
-// --- pane 3's disk mode (songs phase 2) ---
+// --- pane 3's disk mode (songs phase 2; picking mirrors the sp pack browser) ---
 //
 // The client can't produce disk paths, so real audio files come in through the server's
 // directory listing (GET /api/songfiles), one directory at a time. The disk tab swaps the
-// all-songs list for that listing: folders navigate, files drag into playlists (or + appends to
-// the open one) exactly like saved songs do. The listing sticks around per session, so flipping
-// tabs doesn't lose your place.
+// all-songs list for that listing, and picking works exactly like the pack panel's browser:
+// clicking a row SELECTS it (and plays it - auditioning is the same gesture as choosing, with
+// a transport along the modal's foot), shift-click / ⌘-click select in bulk, ⌘A takes every
+// file, ↑/↓ walk the list playing as they go, and ← (or the bar's ← button) inserts the
+// selection into the open playlist - folders as every playable file anywhere under them
+// (GET /api/songfiles/find). A folder is selected with one click and entered with two; the
+// search box searches the whole tree under the open folder, like sp's. Drag and the per-row +
+// still work as before. The listing sticks around per session, so flipping tabs doesn't lose
+// your place.
 
 let orgPane3 = 'songs'; // 'songs' (every saved pattern) | 'disk' (the file browser)
 let orgDisk = null; // the last GET /api/songfiles listing ({ dir, parent, entries })
 let orgBrowseDir = null; // remembered for the session; the server starts at ~/Music
 
+// Selection in the disk list: keys "d:name" / "f:name" ("f:<relative path>" while searching),
+// plus the row the last plain click or arrow landed on (the end a shift-range extends from).
+const orgDiskSel = new Set();
+let orgDiskAnchor = null;
+// The tree search (mirroring packFind): while `query` is set the list shows matches from
+// anywhere under the folder instead of the folder itself.
+let orgDiskFind = { query: '', running: false, files: [], matched: 0, total: 0, truncated: false, seq: 0 };
+let orgDiskFindTimer = null;
+const orgWalks = new Map(); // folder path -> { at, walk } - every playable file under it, briefly held
+const ORG_FIND_DEBOUNCE_MS = 200;
+const ORG_FIND_SHOW = 500;
+const ORG_WALK_LIMIT = 20000;
+const ORG_WALK_TTL_MS = 30000;
+const ORG_HINT = 'drag songs into a playlist, or select on the disk tab and ← inserts (shift/⌘-click multiselect, ⌘A all, click plays); ● marks the ACTIVE set deck B follows';
+
+function orgSay(text, isError = false) {
+  const note = orgEl?.querySelector('#orgNote');
+  if (!note) return;
+  note.textContent = text;
+  note.classList.toggle('error', !!isError);
+}
+
 function setOrgPane3(mode) {
   orgPane3 = mode;
-  if (mode === 'disk' && !orgDisk) orgBrowseTo(orgBrowseDir);
+  if (mode === 'disk') {
+    if (!orgDisk) orgBrowseTo(orgBrowseDir);
+    if (orgEl.querySelector('#orgSearch').value.trim()) orgDiskQueueFind();
+  }
   orgRenderAll();
 }
 
@@ -15462,6 +15665,14 @@ async function orgBrowseTo(dir) {
   try {
     orgDisk = await api('GET', `/api/songfiles${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`);
     orgBrowseDir = orgDisk.dir;
+    orgDiskSel.clear(); // a selection is of rows in THIS folder
+    orgDiskAnchor = null;
+    const search = orgEl?.querySelector('#orgSearch');
+    if (orgPane3 === 'disk' && search?.value) {
+      search.value = ''; // a search is of THIS folder's tree; going somewhere ends it
+      orgQuery = '';
+    }
+    orgDiskFindClear(false);
     orgRenderAll();
   } catch (e) {
     logLine(e.message ?? String(e), true);
@@ -15469,49 +15680,447 @@ async function orgBrowseTo(dir) {
   }
 }
 
+// --- the disk list's rows + selection (packRows / packSelectClick / packSelectStep, mirrored) ---
+
+const orgDiskFindActive = () => orgDiskFind.query !== '';
+
+function orgDiskRows() {
+  if (!orgDisk) return [];
+  const dir = orgDisk.dir;
+  if (orgDiskFindActive()) {
+    return orgDiskFind.files.map((rel) => ({ key: `f:${rel}`, abs: `${dir}/${rel}`, name: rel, kind: 'file' }));
+  }
+  return orgDisk.entries.map((ent) => (ent.dir
+    ? { key: `d:${ent.name}`, abs: ent.path, name: ent.name, kind: 'dir' }
+    : { key: `f:${ent.name}`, abs: ent.path, name: ent.name, kind: 'file' }));
+}
+
+function orgDiskClick(key, e) {
+  const rows = orgDiskRows();
+  const at = rows.findIndex((r) => r.key === key);
+  if (at < 0) return;
+  if (e.shiftKey && orgDiskAnchor != null) {
+    const from = rows.findIndex((r) => r.key === orgDiskAnchor);
+    if (!(e.metaKey || e.ctrlKey)) orgDiskSel.clear();
+    const [a, b] = from < 0 ? [at, at] : [Math.min(from, at), Math.max(from, at)];
+    for (let i = a; i <= b; i++) orgDiskSel.add(rows[i].key);
+  } else if (e.metaKey || e.ctrlKey) {
+    if (orgDiskSel.has(key)) orgDiskSel.delete(key);
+    else orgDiskSel.add(key);
+    orgDiskAnchor = key;
+  } else {
+    orgDiskSel.clear();
+    orgDiskSel.add(key);
+    orgDiskAnchor = key;
+  }
+  orgDiskAfterSelect(rows[at]);
+}
+
+function orgDiskStep(delta, extend) {
+  const rows = orgDiskRows();
+  if (!rows.length) return;
+  const from = rows.findIndex((r) => r.key === orgDiskAnchor);
+  const to = Math.max(0, Math.min(rows.length - 1, (from < 0 ? (delta > 0 ? -1 : rows.length) : from) + delta));
+  if (!extend) orgDiskSel.clear();
+  orgDiskSel.add(rows[to].key);
+  orgDiskAnchor = rows[to].key;
+  orgDiskAfterSelect(rows[to]);
+}
+
+/** ⌘A: every file (folders are a different kind of thing to add). Plays the last, so something is heard. */
+function orgDiskSelectAll() {
+  const rows = orgDiskRows().filter((r) => r.kind === 'file');
+  if (!rows.length) return;
+  orgDiskSel.clear();
+  for (const r of rows) orgDiskSel.add(r.key);
+  orgDiskAnchor = rows[rows.length - 1].key;
+  orgDiskAfterSelect(rows[rows.length - 1]);
+}
+
+function orgDiskAfterSelect(row) {
+  orgRenderAll();
+  orgDiskScrollTo(row.key);
+  if (row.kind === 'file') orgPlay(row.abs, row.name);
+  else orgDescribeFolder(row.abs, row.name);
+}
+
+function orgDiskScrollTo(key) {
+  const box = orgEl.querySelector('#orgAll');
+  const el = [...box.children].find((c) => c.dataset.key === String(key));
+  if (!el) return;
+  const b = box.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  if (r.top < b.top) box.scrollTop -= b.top - r.top;
+  else if (r.bottom > b.bottom) box.scrollTop += r.bottom - b.bottom;
+}
+
+// --- folders as whole trees, and the tree search (packWalk / packFind, mirrored) ---
+
+const orgFindFetch = (dir, q, limit) =>
+  api('GET', `/api/songfiles/find?dir=${encodeURIComponent(dir)}&q=${encodeURIComponent(q)}&limit=${limit}`);
+
+function orgWalk(dir) {
+  const hit = orgWalks.get(dir);
+  if (hit && Date.now() - hit.at < ORG_WALK_TTL_MS) return hit.walk;
+  const walk = orgFindFetch(dir, '', ORG_WALK_LIMIT)
+    .then((r) => ({ path: r.path, files: r.files ?? [], truncated: !!r.truncated }))
+    .catch((err) => { orgWalks.delete(dir); throw err; }); // a failed walk must not stick
+  orgWalks.set(dir, { at: Date.now(), walk });
+  return walk;
+}
+
+async function orgDescribeFolder(abs, name) {
+  try {
+    const { files, truncated } = await orgWalk(abs);
+    if (!orgDiskSel.has(`d:${name}`)) return;
+    const deep = files.some((f) => f.includes('/'));
+    orgSay(`${name} · ${files.length}${truncated ? '+' : ''} playable file${files.length === 1 ? '' : 's'}${deep ? ', subfolders and all' : ''} · ← adds them all, double-click goes in`);
+  } catch { /* the walk failed - the add will say so */ }
+}
+
+function orgDiskFindClear(render = true) {
+  clearTimeout(orgDiskFindTimer);
+  orgDiskFindTimer = null;
+  orgDiskFind = { query: '', running: false, files: [], matched: 0, total: 0, truncated: false, seq: orgDiskFind.seq + 1 };
+  orgDiskSel.clear();
+  orgDiskAnchor = null;
+  if (render) orgRenderAll();
+}
+
+function orgDiskQueueFind() {
+  const q = orgEl.querySelector('#orgSearch').value.trim();
+  clearTimeout(orgDiskFindTimer);
+  if (!q) return orgDiskFindClear();
+  orgDiskFind.query = q;
+  orgDiskFind.running = true;
+  orgDiskFindTimer = setTimeout(() => orgDiskRunFind(q), ORG_FIND_DEBOUNCE_MS);
+  orgRenderAll();
+}
+
+async function orgDiskRunFind(q) {
+  const dir = orgDisk?.dir;
+  if (dir == null) return;
+  const seq = ++orgDiskFind.seq;
+  try {
+    const r = await orgFindFetch(dir, q, ORG_FIND_SHOW);
+    if (seq !== orgDiskFind.seq) return; // a later keystroke owns the list now
+    Object.assign(orgDiskFind, { files: r.files ?? [], matched: r.matched ?? 0, total: r.total ?? 0, truncated: !!r.truncated });
+  } catch (err) {
+    if (seq !== orgDiskFind.seq) return;
+    Object.assign(orgDiskFind, { files: [], matched: 0, total: 0, truncated: false });
+    orgSay(err.message ?? String(err), true);
+  }
+  orgDiskFind.running = false;
+  orgDiskSel.clear(); // the rows underneath the selection just changed
+  orgDiskAnchor = null;
+  orgRenderAll();
+}
+
+function orgDiskFindNote() {
+  if (!orgDiskFindActive()) return '';
+  if (orgDiskFind.running && !orgDiskFind.files.length) return 'searching…';
+  const parts = [orgDiskFind.matched
+    ? `${orgDiskFind.matched} of ${orgDiskFind.total} files match`
+    : `no match in ${orgDiskFind.total} files`];
+  if (orgDiskFind.matched > orgDiskFind.files.length) parts.push(`first ${orgDiskFind.files.length} shown`);
+  if (orgDiskFind.truncated) parts.push('big tree, searched part of it');
+  return parts.join(' · ');
+}
+
+// --- inserting the selection (packAddSelected, mirrored onto playlist items) ---
+
+const orgOpenPlaylist = () => libDoc.playlists.find((x) => x.id === orgSelected) ?? null;
+const orgDiskItem = (abs) => ({ kind: 'file', path: abs, title: abs.split('/').pop().replace(/\.[^.]+$/, '') });
+
+/** Paths already in the open playlist - the rows' ✓ marks, and what a bulk add skips. */
+function orgDiskHave() {
+  const p = orgOpenPlaylist();
+  return new Set((p?.items ?? []).filter(libItemIsFile).map((it) => it.path));
+}
+
+// A bulk insert skips what the playlist already holds (adding a folder twice must not double
+// the set); a deliberate replay of a track still goes in by drag or the row's + button.
+function orgDiskAddPaths(paths) {
+  const p = orgOpenPlaylist();
+  if (!p) return orgSay('pick a playlist on the left first', true);
+  const have = orgDiskHave();
+  const added = paths.filter((abs) => !have.has(abs));
+  for (const abs of added) p.items.push(orgDiskItem(abs));
+  if (!added.length) return orgSay('already in the playlist');
+  saveLibraryDoc();
+  orgRender();
+  orgSay(`added ${added.length === 1 ? added[0].split('/').pop() : `${added.length} files`} to ${p.name}`);
+}
+
+/**
+ * ← / the bar's add button: the selection into the open playlist - files as they are, folders
+ * as every playable file anywhere under them. Nothing selected means the whole folder on
+ * screen, or, while searching, every match (including the ones past the rows drawn).
+ */
+async function orgDiskAddSelected() {
+  const rows = orgDiskRows();
+  const picked = rows.filter((r) => orgDiskSel.has(r.key));
+  if (!picked.length && orgDiskFindActive()) {
+    try {
+      const r = await orgFindFetch(orgDisk.dir, orgDiskFind.query, ORG_WALK_LIMIT);
+      const all = (r.files ?? []).map((f) => `${r.path}/${f}`);
+      if (!all.length) return orgSay('nothing matches', true);
+      return orgDiskAddPaths(all);
+    } catch (err) {
+      return orgSay(err.message ?? String(err), true);
+    }
+  }
+  const chosen = picked.length ? picked : rows.filter((r) => r.kind === 'file');
+  const paths = [];
+  let clipped = false;
+  for (const r of chosen) {
+    if (r.kind === 'file') { paths.push(r.abs); continue; }
+    try {
+      const { path: dir, files, truncated } = await orgWalk(r.abs);
+      paths.push(...files.map((f) => `${dir}/${f}`));
+      clipped ||= truncated;
+    } catch (err) {
+      orgSay(err.message ?? String(err), true);
+    }
+  }
+  if (!paths.length) return orgSay('nothing to add here', true);
+  orgDiskAddPaths(paths);
+  if (clipped) orgSay(`that is a big tree — took the first ${paths.length} files`, true);
+}
+
+// --- the keys the focused list answers to (packListKeys, mirrored) ---
+
+function orgDiskKeys(e) {
+  if (orgPane3 !== 'disk') return;
+  const meta = e.metaKey || e.ctrlKey;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    orgDiskStep(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
+  } else if (meta && e.key.toLowerCase() === 'a') {
+    e.preventDefault();
+    orgDiskSelectAll();
+  } else if (e.key === ' ') {
+    e.preventDefault();
+    orgPlayerToggle();
+  } else if (e.key === 'ArrowLeft' || e.key === 'Enter') {
+    e.preventDefault();
+    // Enter on one folder goes in (the folder is what a lone selection mostly is); otherwise it adds.
+    const sel = [...orgDiskSel];
+    if (e.key === 'Enter' && sel.length === 1 && String(sel[0]).startsWith('d:')) orgBrowseTo(`${orgDisk.dir}/${String(sel[0]).slice(2)}`);
+    else orgDiskAddSelected();
+  } else {
+    return;
+  }
+  e.stopPropagation();
+}
+
+// --- the preview player (the pack panel's, mirrored onto /api/songAudio) ---
+// One file at a time, played whole from the moment it is selected, with a transport along the
+// modal's foot. The endpoint hands the browser bytes it can decode itself (aiff/caf take the
+// deck's afconvert cache server-side), so mp3s and m4as preview as readily as wavs.
+
+const orgPlayer = { abs: null, name: '', buffer: null, source: null, startedAt: 0, offset: 0, playing: false, raf: null, gen: 0 };
+const orgBuffers = new Map(); // abs -> decoded AudioBuffer, so walking back up a list is instant
+const ORG_BUFFER_CACHE = 24; // whole songs, not one-shots - keep fewer than the pack panel does
+
+async function orgLoadBuffer(abs) {
+  if (orgBuffers.has(abs)) return orgBuffers.get(abs);
+  previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+  const res = await fetch(`/api/songAudio?file=${encodeURIComponent(abs)}`);
+  if (!res.ok) throw new Error(`can't read ${abs.split('/').pop()} (${res.status})`);
+  const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
+  if (orgBuffers.size >= ORG_BUFFER_CACHE) orgBuffers.delete(orgBuffers.keys().next().value);
+  orgBuffers.set(abs, buf);
+  return buf;
+}
+
+async function orgPlay(abs, name) {
+  const gen = ++orgPlayer.gen;
+  orgPlayerStopSource();
+  Object.assign(orgPlayer, { abs, name, buffer: null, offset: 0 });
+  orgRenderTransport();
+  orgMarkPlaying();
+  try {
+    const buf = await orgLoadBuffer(abs);
+    if (gen !== orgPlayer.gen) return; // a newer pick superseded this one while it decoded
+    orgPlayer.buffer = buf;
+    orgPlayerStart(0);
+  } catch (e) {
+    if (gen === orgPlayer.gen) orgSay(e.message ?? String(e), true);
+  }
+}
+
+function orgPlayerStopSource() {
+  if (orgPlayer.source) {
+    const src = orgPlayer.source;
+    orgPlayer.source = null;
+    src.onended = null;
+    try { src.stop(); } catch { /* already ended */ }
+  }
+  orgPlayer.playing = false;
+  cancelAnimationFrame(orgPlayer.raf);
+}
+
+function orgPlayerStart(offset) {
+  const buf = orgPlayer.buffer;
+  if (!buf) return;
+  orgPlayerStopSource();
+  if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
+  const at = Math.max(0, Math.min(offset, buf.duration));
+  const src = previewCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(previewCtx.destination);
+  src.start(0, at);
+  Object.assign(orgPlayer, { source: src, startedAt: previewCtx.currentTime - at, offset: at, playing: true });
+  src.onended = () => {
+    if (orgPlayer.source !== src) return;
+    orgPlayer.source = null;
+    orgPlayer.playing = false;
+    orgPlayer.offset = 0;
+    orgRenderTransport();
+  };
+  orgPlayerTick();
+}
+
+const orgPlayerPosition = () => (orgPlayer.playing ? previewCtx.currentTime - orgPlayer.startedAt : orgPlayer.offset);
+
+function orgPlayerPause() {
+  if (!orgPlayer.playing) return;
+  orgPlayer.offset = orgPlayerPosition();
+  orgPlayerStopSource();
+  orgRenderTransport();
+}
+
+function orgPlayerToggle() {
+  if (!orgPlayer.buffer) return;
+  if (orgPlayer.playing) orgPlayerPause();
+  else orgPlayerStart(orgPlayer.offset >= orgPlayer.buffer.duration - 0.01 ? 0 : orgPlayer.offset);
+}
+
+function orgPlayerSeek(frac) {
+  if (!orgPlayer.buffer) return;
+  orgPlayer.offset = Math.max(0, Math.min(1, frac)) * orgPlayer.buffer.duration;
+  if (orgPlayer.playing) orgPlayerStart(orgPlayer.offset);
+  else orgRenderTransport();
+}
+
+function orgPlayerTick() {
+  cancelAnimationFrame(orgPlayer.raf);
+  orgRenderTransport();
+  if (orgPlayer.playing) orgPlayer.raf = requestAnimationFrame(orgPlayerTick);
+}
+
+function orgRenderTransport() {
+  if (!orgEl) return;
+  const row = orgEl.querySelector('#orgPlayRow');
+  row.classList.toggle('hidden', !orgPlayer.abs);
+  const d = orgPlayer.buffer?.duration ?? 0;
+  const pos = Math.min(d, Math.max(0, orgPlayerPosition()));
+  orgEl.querySelector('#orgPlayBtn').textContent = orgPlayer.playing ? '❚❚' : '▶';
+  orgEl.querySelector('#orgPlayBtn').disabled = !orgPlayer.buffer;
+  const nameEl = orgEl.querySelector('#orgPlayName');
+  nameEl.textContent = orgPlayer.name;
+  nameEl.title = orgPlayer.abs ?? '';
+  orgEl.querySelector('#orgPlayHead').style.width = d ? `${(pos / d) * 100}%` : '0%';
+  orgEl.querySelector('#orgPlayTime').textContent = d ? `${songFmt(pos, true)} / ${songFmt(d)}` : '';
+}
+
+/** The row that IS the playing file lights up without a redraw. */
+function orgMarkPlaying() {
+  if (!orgEl) return;
+  for (const el of orgEl.querySelector('#orgAll').children) {
+    if (el.dataset.key == null) continue;
+    el.classList.toggle('playing', el.dataset.abs === orgPlayer.abs);
+  }
+}
+
 function orgRenderDisk(ul) {
   const pathEl = orgEl.querySelector('#orgBrowsePath');
   const up = orgEl.querySelector('#orgBrowseUp');
+  const addBtn = orgEl.querySelector('#orgDiskAdd');
   if (!orgDisk) {
     ul.innerHTML = '<li class="org-empty">reading…</li>';
+    addBtn.disabled = true;
     return;
   }
   pathEl.textContent = orgDisk.dir;
   pathEl.title = orgDisk.dir;
   up.disabled = !orgDisk.parent;
-  const hits = orgDisk.entries.filter((ent) => !orgQuery
-    || orgQuery.split(/\s+/).every((w) => ent.name.toLowerCase().includes(w)));
-  if (!hits.length) {
-    ul.innerHTML = `<li class="org-empty">${orgDisk.entries.length ? 'nothing here matches that' : 'nothing playable in here'}</li>`;
+  const rows = orgDiskRows();
+  const finding = orgDiskFindActive();
+  if (finding) orgSay(orgDiskFindNote());
+  // The bar's ← reads like the pack panel's: the selection, or everything on screen.
+  const nSel = orgDiskSel.size;
+  const nFiles = finding ? orgDiskFind.matched : rows.filter((r) => r.kind === 'file').length;
+  addBtn.disabled = !orgSelected || (!nSel && !nFiles);
+  addBtn.textContent = nSel ? `← add ${nSel > 1 ? nSel : ''}`.trimEnd() : `← add all ${nFiles}`;
+  addBtn.title = nSel
+    ? 'add the selection to the open playlist (←)'
+    : finding ? 'add every file that matches, wherever it is (←)' : 'add every playable file in this folder (←)';
+  if (!rows.length) {
+    ul.innerHTML = `<li class="org-empty">${finding
+      ? (orgDiskFind.running ? 'searching…' : `nothing under here matches "${orgDiskFind.query}"`)
+      : 'nothing playable in here'}</li>`;
     return;
   }
-  for (const ent of hits) {
+  const have = orgDiskHave();
+  for (const row of rows) {
     const li = document.createElement('li');
+    li.dataset.key = row.key;
+    li.dataset.abs = row.abs;
+    const selected = orgDiskSel.has(row.key);
+    if (selected) li.classList.add('selected');
     const name = document.createElement('span');
-    name.textContent = `${ent.dir ? '▸' : '♪'} ${ent.name}`;
-    li.appendChild(name);
-    if (ent.dir) {
-      li.classList.add('org-browse-dir');
-      li.addEventListener('click', () => orgBrowseTo(ent.path));
+    if (row.kind === 'dir') {
+      name.textContent = `▸ ${row.name}`;
     } else {
-      const item = () => ({ kind: 'file', path: ent.path, title: ent.name.replace(/\.[^.]+$/, '') });
+      // A search hit's name is its path from here: the folders it sits in read quieter than
+      // the file (the pack browser's has-path rendering, reused classes and all).
+      const cut = row.name.lastIndexOf('/');
+      if (cut < 0) {
+        name.textContent = `♪ ${row.name}`;
+      } else {
+        const where = document.createElement('span');
+        where.className = 'pack-file-dir';
+        where.textContent = `♪ ${row.name.slice(0, cut + 1)}`;
+        const base = document.createElement('span');
+        base.className = 'pack-file-base';
+        base.textContent = row.name.slice(cut + 1);
+        name.append(where, base);
+      }
+    }
+    li.appendChild(name);
+    if (row.kind === 'dir') {
+      li.classList.add('org-browse-dir');
+      li.title = 'click to select (← adds everything in it) · double-click to go in';
+      li.addEventListener('dblclick', (e) => { e.preventDefault(); orgBrowseTo(row.abs); });
+    } else {
+      if (have.has(row.abs)) li.classList.add('org-added'); // the ✓ - already in the open playlist
+      if (row.abs === orgPlayer.abs) li.classList.add('playing');
+      li.title = `${row.abs}\nclick to hear and select · ← (or double-click) adds to the open playlist`;
       li.draggable = true;
-      const add = orgIconBtn('+', 'add to the open playlist', () => {
-        const p = libDoc.playlists.find((x) => x.id === orgSelected);
+      const add = orgIconBtn('+', 'add to the open playlist (a replay of a track goes in even when it is already there)', () => {
+        const p = orgOpenPlaylist();
         if (!p) return;
-        p.items.push(item());
-        li.classList.add('org-added'); // the ✓; the row stays live - a set may replay a track
+        p.items.push(orgDiskItem(row.abs));
         saveLibraryDoc();
-        orgRenderLists();
-        orgRenderItems(); // not orgRender - rebuilding this list would drop the ✓ marks
+        orgRender();
       });
       add.disabled = !orgSelected;
       li.appendChild(add);
+      li.addEventListener('dblclick', (e) => { e.preventDefault(); orgDiskAddPaths([row.abs]); });
       li.addEventListener('dragstart', (e) => {
-        orgHeld = { from: 'all', item: item() };
-        e.dataTransfer.setData('text/plain', ent.path);
+        orgHeld = { from: 'all', item: orgDiskItem(row.abs) };
+        e.dataTransfer.setData('text/plain', row.abs);
       });
     }
+    li.addEventListener('mousedown', (e) => {
+      if (e.detail > 1) return; // the double-click's second press: the dblclick handler has it
+      if (e.target.tagName === 'BUTTON') return; // the row's + is its own gesture
+      e.preventDefault();
+      ul.focus({ preventScroll: true });
+      orgDiskClick(row.key, e);
+    });
     ul.appendChild(li);
   }
 }

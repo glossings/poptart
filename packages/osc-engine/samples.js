@@ -156,7 +156,7 @@ function browseSamples(rel = '') {
  * Async on purpose: this process is also the one sending OSC on time, and a sample library big
  * enough to be worth searching is big enough that walking it synchronously would be heard.
  */
-async function walkAudioFiles(dir, { limit = 20000, maxDepth = 12 } = {}) {
+async function walkAudioFiles(dir, { limit = 20000, maxDepth = 12, exts = AUDIO_EXTS } = {}) {
   const files = [];
   let truncated = false; // saw only part of the tree, for whatever reason
   let full = false; // hit the file cap - the one reason to stop walking entirely
@@ -188,7 +188,7 @@ async function walkAudioFiles(dir, { limit = 20000, maxDepth = 12 } = {}) {
         try { isDir = (await fs.promises.stat(path.join(abs, e.name))).isDirectory(); } catch { continue; }
       }
       if (isDir) subdirs.push(e.name);
-      else if (AUDIO_EXTS.has(path.extname(e.name).toLowerCase())) here.push(e.name);
+      else if (exts.has(path.extname(e.name).toLowerCase())) here.push(e.name);
     }
     here.sort((a, b) => a.localeCompare(b));
     subdirs.sort((a, b) => a.localeCompare(b));

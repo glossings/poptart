@@ -3602,6 +3602,7 @@ body.mix-on #deckAHead {
 #songTitleB {
   color: var(--accent);
   font-weight: 600;
+  flex: 1; /* the growing element - rate and time keep right, however many spans the row holds */
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3611,6 +3612,41 @@ body.mix-on #deckAHead {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text-dim);
   white-space: nowrap;
+}
+#songRateB {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.song-ctl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.song-ctl-row .small.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.song-ctl-row .small.held {
+  color: var(--bg-panel);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.song-ctl-gap {
+  flex: 1;
+}
+.song-bpm-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+#songBpm {
+  width: 58px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.song-pane.active #songDetailB {
+  border-color: var(--accent); /* the active "window": Cmd+Enter plays, Cmd+. stops this deck */
 }
 #songDetailB {
   flex: 1;
@@ -4023,6 +4059,22 @@ body.mix-on #deckAHead {
   content: ' ✓';
   color: var(--ok);
 }
+/* The disk tab picks like the pack browser: focus ring off (the selection IS the focus),
+   selected rows in the accent wash, the playing row's name in the accent. */
+#orgAll:focus {
+  outline: none;
+}
+#orgAll li.selected {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+#orgAll li.playing > span:first-child {
+  color: var(--accent);
+}
+#orgAll li.playing > span:first-child::before {
+  content: '▶ ';
+  font-size: 9px;
+}
 
 .org-tags {
   display: flex;
@@ -4044,4 +4096,16 @@ body.mix-on #deckAHead {
   border-top: 1px solid var(--border);
   color: var(--text-dim);
   font-size: 11px;
+}
+#orgPlayRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+#orgPlayRow.hidden {
+  display: none;
+}
+#orgNote.error {
+  color: var(--warn);
 }

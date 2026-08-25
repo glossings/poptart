@@ -123,10 +123,22 @@
           <div id="songPaneB" class="song-pane hidden">
             <div class="song-title-row">
               <span id="songTitleB"></span>
+              <span id="songRateB" title="playing rate vs native (sync / nudge / clamp)"></span>
               <span id="songTimeB"></span>
             </div>
             <canvas id="songDetailB"></canvas>
             <canvas id="songOverviewB"></canvas>
+            <div class="song-ctl-row">
+              <button id="songJogDn" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
+              <button id="songNudgeDn" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
+              <button id="songNudgeUp" class="small" title="hold: push the platter (+4% while held)">&#9654;</button>
+              <button id="songJogUp" class="small" title="jog forward one beat">&#9654;|</button>
+              <span class="song-ctl-gap"></span>
+              <label class="song-bpm-label">bpm <input id="songBpm" type="number" min="20" max="400" step="0.1" placeholder="—" /></label>
+              <button id="songAnchor" class="small" title="anchor the beatgrid's downbeat at the playhead (scrub a downbeat under the centre line first)">&#9875;</button>
+              <button id="songSync" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
+              <button id="songKeylock" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
+            </div>
           </div>
         </div>
       </main>

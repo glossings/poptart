@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { browseSongDir, statSongPaths, defaultSongDir } = require('./song-files');
+const { browseSongDir, statSongPaths, defaultSongDir, walkSongFiles } = require('./song-files');
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-songbrowse-'));
@@ -62,4 +62,19 @@ test('statSongPaths: existing files true; missing files and directories false; j
   const gone = path.join(dir, 'gone.mp3');
   assert.deepEqual(statSongPaths([f, gone, dir, 42]), { [f]: true, [gone]: false, [dir]: false });
   assert.deepEqual(statSongPaths(null), {});
+});
+
+test('walkSongFiles: every playable file under the tree, mp3/m4a included, junk excluded', async () => {
+  // The organize modal's folder adds and tree search (mirroring the pack browser's walk, which
+  // only knows the sample formats - a song folder is mostly mp3s).
+  const dir = tmpdir();
+  fs.mkdirSync(path.join(dir, 'crates'));
+  fs.writeFileSync(path.join(dir, 'a.mp3'), 'x');
+  fs.writeFileSync(path.join(dir, 'b.wav'), 'x');
+  fs.writeFileSync(path.join(dir, 'cover.jpg'), 'x');
+  fs.writeFileSync(path.join(dir, 'crates', 'deep.m4a'), 'x');
+  fs.writeFileSync(path.join(dir, 'crates', 'notes.txt'), 'x');
+  const { files, truncated } = await walkSongFiles(dir);
+  assert.deepEqual(files, ['a.mp3', 'b.wav', 'crates/deep.m4a'], 'relative paths, files here before subfolders');
+  assert.equal(truncated, false);
 });

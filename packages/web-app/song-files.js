@@ -12,7 +12,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { classifySongFile } = require('@poptart/osc-engine/songs');
+const { classifySongFile, NATIVE_EXTS, DECODE_EXTS } = require('@poptart/osc-engine/songs');
+const { walkAudioFiles } = require('@poptart/osc-engine/samples');
+
+// Every extension a song deck can play - what the recursive walk below collects.
+const SONG_EXTS = new Set([...NATIVE_EXTS, ...DECODE_EXTS]);
 
 /** Where browsing starts with no history: ~/Music when it exists, else home. */
 function defaultSongDir() {
@@ -86,4 +90,14 @@ function statSongPaths(paths) {
   return out;
 }
 
-module.exports = { defaultSongDir, browseSongDir, statSongPaths };
+/**
+ * Every playable audio file anywhere under a folder, as paths relative to it - the organize
+ * modal's folder adds and its tree search (mirroring the pack browser's /api/findSamples).
+ * Same walker as the sample library's, pointed at the song formats (mp3/m4a and friends
+ * included). Resolves { files, truncated }.
+ */
+function walkSongFiles(dir, opts = {}) {
+  return walkAudioFiles(dir, { ...opts, exts: SONG_EXTS });
+}
+
+module.exports = { defaultSongDir, browseSongDir, statSongPaths, walkSongFiles };

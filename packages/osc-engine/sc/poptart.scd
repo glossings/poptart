@@ -900,6 +900,24 @@ server.waitForBoot {
             var idx = Phasor.ar(t_seek, step, 0, BufFrames.ir(buf), seekFrame);
             var sig = BufRd.ar(nc, buf, idx, loop: 0, interpolation: 4);
             var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
+            // Position report for the drift servo (songs phase 4): the actual playhead in song
+            // seconds, on the sample clock. sclang tags it with the track key and forwards it
+            // to Node (see the songStart OSCdef), which compares against its own model and
+            // trims `rate` ppm-gently - Node's clock and this one drift apart over minutes.
+            SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / BufSampleRate.ir(buf));
+            Out.ar(out, toStereo.(sig) * env * amp.lag(0.02));
+        }).add;
+        // Keylock variant (songs phase 4): the same player with Warp1 reading at the pointer
+        // instead of BufRd, so a rate change (tempo sync riding the master clock, a nudge)
+        // moves time without moving pitch. Same controls, same reports - the two defs are
+        // interchangeable, and toggling keylock is a declicked player swap via songStart.
+        // Same Warp1 recipe as the loop player above.
+        SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
+            var step = rate.lag(0.05) * BufRateScale.ir(buf) * run.lag(0.02);
+            var idx = Phasor.ar(t_seek, step, 0, BufFrames.ir(buf), seekFrame);
+            var sig = Warp1.ar(nc, buf, idx / BufFrames.ir(buf), 1, 0.1, -1, 8, 0.1, 2);
+            var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
+            SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / BufSampleRate.ir(buf));
             Out.ar(out, toStereo.(sig) * env * amp.lag(0.02));
         }).add;
     };
@@ -1045,7 +1063,7 @@ destroyTrack = { |key|
             track[\busSends] !? { |names| names.do { |bn| releaseBus.(bn) } };
             // A song deck's player synth dies with the group below; its buffer (the whole file,
             // real RAM) must not outlive the track.
-            songs[key] !? { |e| e[\buf] !? { |b| b.free }; songs[key] = nil };
+            songs[key] !? { |e| e[\posFunc] !? { |f| f.free }; e[\buf] !? { |b| b.free }; songs[key] = nil };
             track[\group].free;
             track[\inBus].free;
             tracks[key] = nil;
@@ -2184,7 +2202,7 @@ OSCdef(\poptartSongLoad, { |msg|
     var requestId = msg[1], key = msg[2].asSymbol, path = msg[3].asString;
     fork {
         var old = songs[key], buf, done = false, tries = 0;
-        old !? { old[\synth] !? { |s| s.free }; old[\buf] !? { |b| b.free }; songs[key] = nil };
+        old !? { old[\synth] !? { |s| s.free }; old[\posFunc] !? { |f| f.free }; old[\buf] !? { |b| b.free }; songs[key] = nil };
         try {
             buf = Buffer.read(server, path, action: { done = true });
         } { |err|
@@ -2216,17 +2234,25 @@ OSCdef(\poptartSongLoad, { |msg|
 OSCdef(\poptartSongStart, { |msg|
     var key = msg[1].asSymbol, posSec = msg[2].asFloat;
     var rate = msg[3].asFloat, latency = msg[4].asFloat;
+    var warp = (msg[5] ? 0).asInteger; // 1 = keylock (Warp1) player, 0 = repitch (BufRd)
     var track = tracks[key], song = songs[key];
     if (track.isKindOf(Event) and: { song.notNil }) {
         var buf = song[\buf];
         var frame = (posSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
+        var defName = ((if (warp > 0) { "poptart_songwarp_" } { "poptart_song_" }) ++ buf.numChannels).asSymbol;
         song[\synth] !? { |s| s.set(\gate, 0) }; // released, not freed: let the old one fade out
+        song[\posFunc] !? { |f| f.free };
         bundleNow.(latency, {
-            song[\synth] = Synth(("poptart_song_" ++ buf.numChannels).asSymbol,
+            song[\synth] = Synth(defName,
                 [\out, track[\inBus].index, \buf, buf, \rate, rate, \run, 1,
                  \t_seek, 1, \seekFrame, frame],
                 target: track[\group], addAction: \addToHead);
         });
+        // The player's position reports answer to sclang; forward them to Node tagged with the
+        // track (the message itself carries only the node id) - the drift servo's actual-side.
+        song[\posFunc] = OSCFunc({ |m|
+            nodeAddr.sendMsg('/poptart/songPos', key, m[3].asFloat);
+        }, '/poptart/songPos', server.addr, argTemplate: [song[\synth].nodeID]);
     };
 }, '/poptart/songStart');
 
@@ -2258,6 +2284,8 @@ OSCdef(\poptartSongStop, { |msg|
     songs[key] !? { |song|
         song[\synth] !? { |s| bundleNow.(latency, { s.set(\gate, 0) }) };
         song[\synth] = nil;
+        song[\posFunc] !? { |f| f.free };
+        song[\posFunc] = nil;
     };
 }, '/poptart/songStop');
 
@@ -2267,6 +2295,7 @@ OSCdef(\poptartSongFree, { |msg|
     var key = msg[1].asSymbol;
     songs[key] !? { |song|
         song[\synth] !? { |s| s.set(\gate, 0) };
+        song[\posFunc] !? { |f| f.free };
         song[\buf] !? { |b| b.free };
         songs[key] = nil;
     };
