@@ -3575,10 +3575,12 @@ body.mix-on #deckAHead {
   min-height: 0;
 }
 
-/* --- the song deck's waveform pane (songs phase 3): shown instead of the editor when deck B
-       holds a disk file. The editor stays in the DOM (it holds the descriptor card that shows
-       again if the analysis fails), just not on screen. --- */
-#deckBPane.song-on .CodeMirror {
+/* --- the song decks' waveform panes (songs phase 3; one per deck since deck A learned to
+       hold files): shown instead of the editor while the deck holds a disk file. The editor
+       stays in the DOM (deck B's holds the descriptor card, deck A's your untouched wip
+       buffer), just not on screen. --- */
+#deckBPane.song-on .CodeMirror,
+#editorPane.song-on .CodeMirror {
   display: none;
 }
 .song-pane {
@@ -3599,7 +3601,7 @@ body.mix-on #deckAHead {
   gap: 8px;
   font-size: 12px;
 }
-#songTitleB {
+.song-title {
   color: var(--accent);
   font-weight: 600;
   flex: 1; /* the growing element - rate and time keep right, however many spans the row holds */
@@ -3608,12 +3610,12 @@ body.mix-on #deckAHead {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#songTimeB {
+.song-time {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text-dim);
   white-space: nowrap;
 }
-#songRateB {
+.song-rate {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--accent);
   white-space: nowrap;
@@ -3641,14 +3643,19 @@ body.mix-on #deckAHead {
   color: var(--text-dim);
   white-space: nowrap;
 }
-#songBpm {
+.song-bpm {
   width: 58px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.song-pane.active #songDetailB {
+.song-bpm.detected {
+  /* a phase 5 ESTIMATE, not a tag or a typed value - dimmed italics until the hand confirms */
+  color: var(--text-dim);
+  font-style: italic;
+}
+.song-pane.active .song-detail {
   border-color: var(--accent); /* the active "window": Cmd+Enter plays, Cmd+. stops this deck */
 }
-#songDetailB {
+.song-detail {
   flex: 1;
   min-height: 80px;
   width: 100%;
@@ -3658,10 +3665,10 @@ body.mix-on #deckAHead {
   border-radius: 4px;
   background: var(--bg-panel);
 }
-#songDetailB.dragging {
+.song-detail.dragging {
   cursor: grabbing;
 }
-#songOverviewB {
+.song-overview {
   height: 56px;
   flex: none;
   width: 100%;

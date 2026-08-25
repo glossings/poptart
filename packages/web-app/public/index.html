@@ -84,7 +84,7 @@
                get the same head - load a song, play it, or leave DJ mode keeping this pane. -->
           <div id="deckAHead" class="deck-head">
             <span class="deck-b-title">deck A</span>
-            <select id="deckAFile" title="load a different song into this deck"></select>
+            <select id="deckAFile" title="the song to play on this deck - saved patterns and playlist files alike"></select>
             <button id="deckALoad" class="small" title="load the picked song into this pane (this deck's current tracks are cleared)">load</button>
             <button id="deckAPlay" class="small" title="Cmd/Ctrl+Enter">&#9654; play</button>
             <button id="deckAUpdate" class="small" title="evaluate without changing play state">&#8635;</button>
@@ -100,6 +100,29 @@
                overlay rather than a style on the pane itself, because CodeMirror's own background
                paints over anything drawn underneath it. -->
           <div id="saveFlash" class="save-flash" aria-hidden="true"></div>
+          <!-- The same waveform pane for deck A (the main deck learned to hold disk files):
+               it covers the editor while the deck holds a file - the editor's buffer is left
+               untouched underneath (it is your wip, not a descriptor card). -->
+          <div id="songPaneA" class="song-pane hidden">
+            <div class="song-title-row">
+              <span id="songTitleA" class="song-title"></span>
+              <span id="songRateA" class="song-rate" title="playing rate vs native (sync / nudge / clamp)"></span>
+              <span id="songTimeA" class="song-time"></span>
+            </div>
+            <canvas id="songDetailA" class="song-detail"></canvas>
+            <canvas id="songOverviewA" class="song-overview"></canvas>
+            <div class="song-ctl-row">
+              <button id="songJogDnA" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
+              <button id="songNudgeDnA" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
+              <button id="songNudgeUpA" class="small" title="hold: push the platter (+4% while held)">&#9654;</button>
+              <button id="songJogUpA" class="small" title="jog forward one beat">&#9654;|</button>
+              <span class="song-ctl-gap"></span>
+              <label class="song-bpm-label">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
+              <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead (scrub a downbeat under the centre line first)">&#9875;</button>
+              <button id="songSyncA" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
+              <button id="songKeylockA" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
+            </div>
+          </div>
         </div>
 
         <!-- Deck B - the incoming song of a mix (mix mode, Cmd/Ctrl+Shift+X). Evaluated as
@@ -122,22 +145,22 @@
                scrub, wheel to zoom) over a full-track overview (click to jump). -->
           <div id="songPaneB" class="song-pane hidden">
             <div class="song-title-row">
-              <span id="songTitleB"></span>
-              <span id="songRateB" title="playing rate vs native (sync / nudge / clamp)"></span>
-              <span id="songTimeB"></span>
+              <span id="songTitleB" class="song-title"></span>
+              <span id="songRateB" class="song-rate" title="playing rate vs native (sync / nudge / clamp)"></span>
+              <span id="songTimeB" class="song-time"></span>
             </div>
-            <canvas id="songDetailB"></canvas>
-            <canvas id="songOverviewB"></canvas>
+            <canvas id="songDetailB" class="song-detail"></canvas>
+            <canvas id="songOverviewB" class="song-overview"></canvas>
             <div class="song-ctl-row">
-              <button id="songJogDn" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
-              <button id="songNudgeDn" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
-              <button id="songNudgeUp" class="small" title="hold: push the platter (+4% while held)">&#9654;</button>
-              <button id="songJogUp" class="small" title="jog forward one beat">&#9654;|</button>
+              <button id="songJogDnB" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
+              <button id="songNudgeDnB" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
+              <button id="songNudgeUpB" class="small" title="hold: push the platter (+4% while held)">&#9654;</button>
+              <button id="songJogUpB" class="small" title="jog forward one beat">&#9654;|</button>
               <span class="song-ctl-gap"></span>
-              <label class="song-bpm-label">bpm <input id="songBpm" type="number" min="20" max="400" step="0.1" placeholder="—" /></label>
-              <button id="songAnchor" class="small" title="anchor the beatgrid's downbeat at the playhead (scrub a downbeat under the centre line first)">&#9875;</button>
-              <button id="songSync" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
-              <button id="songKeylock" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
+              <label class="song-bpm-label">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
+              <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead (scrub a downbeat under the centre line first)">&#9875;</button>
+              <button id="songSyncB" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
+              <button id="songKeylockB" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
             </div>
           </div>
         </div>

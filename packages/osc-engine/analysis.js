@@ -95,6 +95,15 @@ function songWaveform(wavPath, opts = {}) {
 }
 
 /**
+ * song-detect.js's detectSongFacts (the songs phase 5 bpm/key fallback), off-thread. Same
+ * arguments and same return. `wavPath` must already be a WAV.
+ * @returns {Promise<{ bpm: number|null, bpmConfidence: number|null, key: string|null, keyConfidence: number|null } | null>}
+ */
+function songDetect(wavPath) {
+  return run('songdetect', { path: wavPath });
+}
+
+/**
  * Drop the worker. Anything still in flight rejects. Nothing in normal operation calls this - the
  * worker is a process-wide singleton that unrefs itself while idle, so it neither needs tearing
  * down at engine shutdown nor holds the process open; this exists so a test suite can end cleanly.
@@ -106,4 +115,4 @@ async function shutdownAnalysis() {
   await w.terminate();
 }
 
-module.exports = { analyzeSlices, trimRecording, songWaveform, shutdownAnalysis };
+module.exports = { analyzeSlices, trimRecording, songWaveform, songDetect, shutdownAnalysis };

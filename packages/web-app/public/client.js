@@ -362,12 +362,15 @@ document.addEventListener('keydown', (e) => {
   if (document.querySelector('.dir-picker-backdrop:not(.hidden)')) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    // The song pane is the active "window" when it was clicked last: enter plays ITS deck.
-    if (mixModeOn && deckBSong && songPaneActive) evalDeckB(true);
+    // A song pane is the active "window" when it was clicked last: enter plays ITS deck. With
+    // no pane claimed, enter is the main deck's - a song play when deck A holds a file (the
+    // hidden editor underneath is not the sound).
+    const songDeck = mixModeOn ? (songActiveDeck() ?? (songPanes.a.song ? 'a' : null)) : null;
+    if (songDeck) songPlay(songDeck);
     else evaluate(true, { byHand: true });
   } else if (e.key === '.' && !e.shiftKey) {
     e.preventDefault();
-    doStop(mixModeOn && deckBSong && songPaneActive ? 'b' : null);
+    doStop(mixModeOn ? songActiveDeck() : null);
   } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
     e.preventDefault();
     stepDeckBQueue(); // mix mode: load the active set's next song into deck B
@@ -10229,6 +10232,7 @@ async function evaluate(start, { byHand = false } = {}) {
 // Play button: state-aware. Playing -> stop; stopped -> evaluate and start.
 function togglePlay() {
   if (playing) doStop();
+  else if (mixModeOn && songPanes.a.song) songPlay('a'); // the main deck holds a file, not code
   else evaluate(true, { byHand: true });
 }
 
@@ -13679,7 +13683,6 @@ coreReady
 let mixModeOn = false;
 let deckBCM = null; // CodeMirror in the deck B pane, created on first open
 let deckBFileName = null; // the saved pattern deck B holds - what complete hands the files tab
-let deckBSong = null; // the disk FILE deck B holds instead ({ path, title, bpm }) - songs phase 2
 let deckFileItems = new Map(); // deck picker option value ('file:<path>') -> its playlist file item
 
 const mixStripEl = document.getElementById('mixStrip');
@@ -13820,7 +13823,7 @@ async function openMixMode() {
 async function exitDjMode(keep = 'restore') {
   try {
     if (keep === 'b') {
-      if (deckBSong) {
+      if (songPanes.b.song) {
         // The main editor can't hold a song file - promoting one is the complete-mix oddment
         // still in TODO.md. Until then the mix ends by exiting and letting the song play on.
         logLine('deck B holds a song file - promoting a file to the main deck isn\'t built yet; exit with restore instead', true);
@@ -13835,8 +13838,16 @@ async function exitDjMode(keep = 'restore') {
       await evaluate(true); // finds every promoted track already playing; reprograms nothing
       return;
     }
+    if (keep === 'a' && songPanes.a.song) {
+      // "Keep this pane" promises the main editor survives - but this pane is a FILE, and the
+      // single-editor world can't hold one (the complete-mix oddment, from the other side).
+      logLine('deck A holds a song file - the single-editor world can\'t hold one; stop it and leave with the hotkey instead', true);
+      return;
+    }
     if (deckBCM?.getValue().trim() && !confirm('Leave DJ mode? Deck B is dropped.')) return;
-    const aChanged = preMix && (cm.getValue() !== preMix.code || currentSavedName !== preMix.savedName);
+    // A song on deck A counts as "moved on": the restored buffer and the sound would disagree.
+    const aChanged = !!songPanes.a.song
+      || (preMix && (cm.getValue() !== preMix.code || currentSavedName !== preMix.savedName));
     await api('POST', '/api/mix/eject'); // deck B gone, desk reset
     clearPatternRegions('b');
     if (keep === 'restore' && aChanged) {
@@ -13861,10 +13872,9 @@ function finishDjExit() {
     deckBCM.setOption('readOnly', false); // a song's descriptor card locked it
     deckBCM.setValue('');
   }
-  songPaneClose();
-  songMirror = null;
+  songPanes.a.clear();
+  songPanes.b.clear();
   deckBFileName = null;
-  deckBSong = null;
   preMix = null;
   document.getElementById('crossfader').value = -1;
   closeMixMode();
@@ -13926,8 +13936,6 @@ async function refreshDeckFiles() {
               `${i + 1}. ♪ ${libFileTitle(item)}${item.bpm ? ` · ${item.bpm}` : ''}${missing ? ' (missing)' : ''}`,
               libItemKey(item),
             );
-            // Deck A is the main editor, which can't hold a song file until the waveform pane
-            // (songs phase 3) - its picker shows the set in order but only deck B loads files.
             if (missing || !filesLoadHere) o.disabled = true;
           } else {
             const p = byName.get(item);
@@ -13949,7 +13957,7 @@ async function refreshDeckFiles() {
       }
       if (had) sel.value = had;
     };
-    fill(document.getElementById('deckAFile'), false);
+    fill(document.getElementById('deckAFile'), true); // both decks hold files now (song pane per deck)
     const selB = document.getElementById('deckBFile');
     fill(selB, true);
     // Deck B only: with nothing picked and the pane empty, the set queues itself - the song
@@ -13974,7 +13982,7 @@ function nextInSet(set) {
   const sel = document.getElementById('deckBFile');
   const opts = [...sel.querySelectorAll('option[data-set-index]')];
   if (!opts.length) return null;
-  const anchor = deckBSong ? `file:${deckBSong.path}` : (deckBFileName ?? currentSavedName);
+  const anchor = songPanes.b.song ? `file:${songPanes.b.song.path}` : (deckBFileName ?? currentSavedName);
   const at = anchor ? set.items.findIndex((it) => libItemKey(it) === anchor) : -1;
   return opts[(at + 1) % opts.length] ?? opts[0];
 }
@@ -14009,25 +14017,22 @@ async function loadDeckBFile() {
       // pane becomes the waveform (phase 3). The read-only card written into the hidden editor
       // is the fallback the pane reveals if the waveform analysis fails.
       const item = deckFileItems.get(value);
+      const title = libFileTitle(item);
       const res = await api('POST', '/api/song/load', {
-        deck: 'b', path: item.path, bpm: item.bpm, key: item.key, title: libFileTitle(item),
+        deck: 'b', path: item.path, bpm: item.bpm, key: item.key, title,
       });
       // bpm/key come back resolved: the playlist item's word if it had one, the file's own
       // tags otherwise (songs phase 4) - and stay editable in the pane's control row.
-      deckBSong = { path: item.path, title: libFileTitle(item), bpm: res.bpm ?? null };
       deckBFileName = null;
       const m = Math.floor(res.duration / 60);
       const s = String(Math.round(res.duration % 60)).padStart(2, '0');
-      deckBCM.setValue(`// ♪ ${deckBSong.title}\n// ${deckBSong.path}\n// ${m}:${s}${deckBSong.bpm ? ` · ${deckBSong.bpm} bpm` : ''}`);
+      deckBCM.setValue(`// ♪ ${title}\n// ${item.path}\n// ${m}:${s}${res.bpm ? ` · ${res.bpm} bpm` : ''}`);
       deckBCM.setOption('readOnly', true);
-      songMirror = { playing: false, posSec: 0, startSec: 0, rate: 1, duration: res.duration };
-      songPaneOpen();
-      const facts = [deckBSong.bpm && `${deckBSong.bpm} bpm`, res.musicalKey, res.sync && 'synced'].filter(Boolean).join(', ');
-      logLine(`deck B loaded ♪ "${deckBSong.title}" (${m}:${s}${res.decoded ? ', decoded' : ''}${facts ? `; ${facts}` : ''}) - ▶ plays it (it arrives silent)`);
+      songPanes.b.tookLoad(res, item.path, title);
+      logLine(`${songLoadLine('b', res, title)} (it arrives silent)`);
     } else {
       const { code } = await api('POST', '/api/patterns/load', { name: value });
-      deckBSong = null;
-      songPaneClose();
+      songPanes.b.clear();
       deckBCM.setOption('readOnly', false);
       deckBCM.setValue(code);
       deckBFileName = value;
@@ -14039,27 +14044,40 @@ async function loadDeckBFile() {
   }
 }
 
-// Deck A's load (DJ mode): the main editor IS deck A, so this clears the deck engine-side and
-// opens the picked song in the main editor - full editor semantics (autosave, history), since
-// it is the buffer you may livecode next.
+// Deck A's load (DJ mode): the main editor IS deck A. A saved pattern clears the deck
+// engine-side and opens in the main editor - full editor semantics (autosave, history), since
+// it is the buffer you may livecode next. A disk FILE loads onto the deck's song track and its
+// waveform pane covers the editor; the buffer underneath is left strictly alone (it is your
+// autosaved wip, not a descriptor card - unlike deck B's split editor).
 async function loadDeckAFile() {
-  const name = document.getElementById('deckAFile').value;
-  if (!name || !mixModeOn) return;
+  const value = document.getElementById('deckAFile').value;
+  if (!value || !mixModeOn) return;
   try {
     await api('POST', '/api/mix/clear', { deck: 'a' });
     clearPatternRegions('a');
-    const { code } = await api('POST', '/api/patterns/load', { name });
-    await openInEditor(code, name);
-    logLine(`deck A loaded "${name}" - play it when ready`);
-    if (mixModeOn) mixRefresh(); // its old stems left the strip
+    if (deckFileItems.has(value)) {
+      const item = deckFileItems.get(value);
+      const title = libFileTitle(item);
+      const res = await api('POST', '/api/song/load', {
+        deck: 'a', path: item.path, bpm: item.bpm, key: item.key, title,
+      });
+      songPanes.a.tookLoad(res, item.path, title);
+      logLine(songLoadLine('a', res, title));
+    } else {
+      songPanes.a.clear(); // a pattern takes the deck back from any song it held
+      const { code } = await api('POST', '/api/patterns/load', { name: value });
+      await openInEditor(code, value);
+      logLine(`deck A loaded "${value}" - play it when ready`);
+    }
+    if (mixModeOn) mixRefresh(); // its old stems left the strip; a song track may have arrived
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
 }
 
-// --- the song deck's waveform pane (songs phase 3) ---
+// --- the song decks' waveform panes (songs phase 3; one per deck since deck A learned files) ---
 //
-// When deck B holds a disk FILE the editor slot shows a DJ waveform instead of CodeMirror: a
+// When a deck holds a disk FILE the editor slot shows a DJ waveform instead of CodeMirror: a
 // zoomed strip whose playhead sits fixed at centre with the track scrolling under it (drag to
 // scrub, wheel to zoom), over a full-track overview (click or drag to jump). Both draw from ONE
 // server analysis (GET /api/song/waveform - the recorder's envelope pass generalized: per-bucket
@@ -14068,123 +14086,10 @@ async function loadDeckAFile() {
 // the same machine - so the animation costs no polling; the desk's SSE frames keep the mirror
 // honest. Scrubbing a faded-out deck is still audible on the headphone cue (the cue tap sits
 // before fader x deck in the track def) - that IS the audition path, no extra plumbing.
-
-const songPaneEl = document.getElementById('songPaneB');
-const songDetailEl = document.getElementById('songDetailB');
-const songOverviewEl = document.getElementById('songOverviewB');
-const songTitleEl = document.getElementById('songTitleB');
-const songTimeEl = document.getElementById('songTimeB');
-const songRateEl = document.getElementById('songRateB');
-const songBpmEl = document.getElementById('songBpm');
-const songSyncEl = document.getElementById('songSync');
-const songKeylockEl = document.getElementById('songKeylock');
-
-let songWave = null; // the fetched analysis (null while loading, or when it failed)
-let songMirror = null; // deck b's playhead mirror { playing, posSec, startSec, rate, duration }
-let songZoomSec = 12; // seconds across the detail strip (wheel adjusts)
-let songScrubUntil = 0; // while a hand scrubs, SSE echoes of older seeks must not fight it
-let songRaf = null;
-let songOverviewImage = null; // the full track pre-rendered once; per-frame work is a blit + overlays
-
-/** Where deck b's playhead is right now, in song seconds. */
-function songPlayheadNow() {
-  const s = songMirror;
-  if (!s) return 0;
-  const dur = s.duration ?? songWave?.seconds ?? 0;
-  const at = s.playing ? s.posSec + Math.max(0, Date.now() / 1000 - s.startSec) * (s.rate || 1) : s.posSec;
-  return Math.min(Math.max(0, at), dur);
-}
-
-// The desk state's song half, run on every SSE frame and every mixRefresh. Keeps the mirror
-// current, and adopts a song this page never loaded (a reload mid-set: the server still holds
-// the deck) so reopening DJ mode comes back intact.
-function songPaneSync(state) {
-  if (!mixModeOn) return;
-  const sb = state?.song?.b ?? null;
-  if (!sb) {
-    songMirror = null;
-    return;
-  }
-  const scrubbing = performance.now() < songScrubUntil;
-  if (songMirror && scrubbing) {
-    // the hand owns the position; take everything else
-    songMirror.playing = sb.playing;
-    songMirror.rate = sb.rate;
-    songMirror.duration = sb.duration;
-  } else {
-    songMirror = { playing: sb.playing, posSec: sb.posSec, startSec: sb.startSec, rate: sb.rate, duration: sb.duration };
-  }
-  // The musical facts (songs phase 4) ride every frame - server truth, however they got there
-  // (tags, playlist item, a meta edit, a MIDI nudge).
-  Object.assign(songMirror, {
-    bpm: sb.bpm ?? null,
-    musicalKey: sb.musicalKey ?? null,
-    anchorSec: sb.anchorSec ?? 0,
-    sync: !!sb.sync,
-    keylock: !!sb.keylock,
-    nudge: sb.nudge ?? 0,
-  });
-  songCtlRender();
-  if (!deckBSong) {
-    deckBSong = { path: sb.path, title: sb.title, bpm: sb.bpm ?? null };
-    deckBFileName = null;
-    if (deckBCM) {
-      deckBCM.setValue(`// ♪ ${sb.title}\n// ${sb.path}`);
-      deckBCM.setOption('readOnly', true);
-    }
-    songPaneOpen();
-  }
-}
-
-// Show the pane and fetch its waveform. The descriptor card stays in the (hidden) editor
-// underneath - it is what shows again if the analysis fails.
-async function songPaneOpen() {
-  deckBPaneEl.classList.add('song-on');
-  songPaneEl.classList.remove('hidden');
-  songCtlRender(); // title, toggles, bpm - whatever the mirror already knows
-  songTimeEl.textContent = '';
-  songWave = null;
-  songOverviewImage = null;
-  songRafStart();
-  const forPath = deckBSong.path;
-  try {
-    const wave = await api('GET', '/api/song/waveform?deck=b');
-    if (deckBSong?.path !== forPath) return; // a later load took the deck while this ran
-    songWave = wave;
-    songOverviewImage = null;
-  } catch (e) {
-    if (deckBSong?.path !== forPath) return;
-    logLine(`deck B waveform: ${e.message ?? String(e)}`, true);
-    songPaneClose(); // back to the descriptor card - playback is unaffected
-  }
-}
-
-function songPaneClose() {
-  deckBPaneEl.classList.remove('song-on');
-  songPaneEl.classList.add('hidden');
-  songWave = null;
-  songOverviewImage = null;
-  if (songRaf != null) cancelAnimationFrame(songRaf);
-  songRaf = null;
-  songPaneSetActive(false);
-  deckBCM?.refresh(); // it was display:none while the pane was up; unpainted until told
-}
-
-function songRafStart() {
-  if (songRaf == null) songRaf = requestAnimationFrame(songFrame);
-}
-
-function songFrame() {
-  songRaf = null;
-  if (!mixModeOn || songPaneEl.classList.contains('hidden')) return;
-  songDrawDetail();
-  songDrawOverview();
-  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
-  songTimeEl.textContent = dur ? `${songFmt(songPlayheadNow(), true)} / ${songFmt(dur)}` : '';
-  const rate = songMirror?.rate ?? 1;
-  songRateEl.textContent = Math.abs(rate - 1) > 0.0005 ? `${rate > 1 ? '+' : ''}${((rate - 1) * 100).toFixed(1)}%` : '';
-  songRaf = requestAnimationFrame(songFrame);
-}
+//
+// One pane per deck, built by makeSongPane: deck B's covers its split editor (whose hidden
+// buffer holds the descriptor card the pane falls back to), deck A's covers the MAIN editor
+// and leaves its buffer strictly alone - that buffer is your autosaved wip, not a card.
 
 function songFmt(sec, tenths = false) {
   const m = Math.floor(sec / 60);
@@ -14235,330 +14140,523 @@ function songDrawColumns(ctx, env, i0, i1, xAt, colW, mid, maxAmp, norm) {
   }
 }
 
-function songDrawDetail() {
-  songSizeCanvas(songDetailEl);
-  const dpr = window.devicePixelRatio || 1;
-  const ctx = songDetailEl.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const w = songDetailEl.clientWidth;
-  const h = songDetailEl.clientHeight;
-  ctx.clearRect(0, 0, w, h);
-  const { accent, dim, text } = songThemeColors();
-  const mid = h / 2;
-  const maxAmp = mid - 6;
-  const pos = songPlayheadNow();
-  const pxPerSec = w / songZoomSec;
-  const t0 = pos - songZoomSec / 2; // the playhead is pinned at centre; time scrolls under it
-  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
+function makeSongPane(deck) {
+  const U = deck.toUpperCase();
+  const byId = (name) => document.getElementById(name + U);
+  const paneEl = byId('songPane');
+  const detailEl = byId('songDetail');
+  const overviewEl = byId('songOverview');
+  const titleEl = byId('songTitle');
+  const timeEl = byId('songTime');
+  const rateEl = byId('songRate');
+  const bpmEl = byId('songBpm');
+  const syncEl = byId('songSync');
+  const keylockEl = byId('songKeylock');
+  const nudgeDnEl = byId('songNudgeDn');
+  const nudgeUpEl = byId('songNudgeUp');
+  const hostEl = deck === 'a' ? document.getElementById('editorPane') : deckBPaneEl;
+  const hostCM = () => (deck === 'a' ? cm : deckBCM);
+  const D = `deck ${U}`;
 
-  ctx.strokeStyle = dim;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, mid + 0.5);
-  ctx.lineTo(w, mid + 0.5);
-  ctx.stroke();
+  const P = {
+    deck,
+    song: null, // the disk FILE this deck holds ({ path, title, bpm }) - songs phase 2
+    mirror: null, // the playhead mirror { playing, posSec, startSec, rate, duration, ...facts }
+    active: false, // the "window" the transport hotkeys target - claimed by pointer, see below
+  };
 
-  // Beatgrid from the song's own facts (songs phase 4): bpm out of its tags/playlist/edits,
-  // downbeats every 4th beat from the user-settable anchor (the ⚓ button drops it at the
-  // playhead). The k = 0 line IS the anchor - drawn a little stronger.
-  // Only the song's OWN bpm draws a grid. The desk's native slot (mixNativeBpm) defaults to
-  // 120 for a track that specifies nothing - fine for the tempo slider, wrong as a beatgrid.
-  const bpm = songMirror ? songMirror.bpm : deckBSong?.bpm;
-  const anchor = songMirror?.anchorSec ?? 0;
-  if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
-    const beat = 60 / bpm;
-    const kEnd = (Math.min(dur, t0 + songZoomSec) - anchor) / beat;
-    ctx.lineWidth = 1;
-    for (let k = Math.ceil((Math.max(0, t0) - anchor) / beat); k <= kEnd; k++) {
-      if (anchor + k * beat < 0) continue;
-      const x = Math.round((anchor + k * beat - t0) * pxPerSec) + 0.5;
-      const down = ((k % 4) + 4) % 4 === 0;
-      ctx.strokeStyle = down ? rgbaFrom(ctx, accent, k === 0 ? 0.75 : 0.4) : rgbaFrom(ctx, text, 0.35);
-      ctx.beginPath();
-      if (down) {
-        ctx.moveTo(x, 2);
-        ctx.lineTo(x, h - 2);
-      } else {
-        ctx.moveTo(x, 2);
-        ctx.lineTo(x, 8);
-        ctx.moveTo(x, h - 8);
-        ctx.lineTo(x, h - 2);
+  let wave = null; // the fetched analysis (null while loading, or when it failed)
+  let waveFailed = false; // deck A keeps the pane up on failure - it has no card to fall back to
+  let zoomSec = 12; // seconds across the detail strip (wheel adjusts)
+  let scrubUntil = 0; // while a hand scrubs, SSE echoes of older seeks must not fight it
+  let raf = null;
+  let overviewImage = null; // the full track pre-rendered once; per-frame work is a blit + overlays
+  let detectSaid = null; // path whose phase 5 estimate was already announced - it logs once
+
+  /** Where this deck's playhead is right now, in song seconds. */
+  P.playheadNow = () => {
+    const s = P.mirror;
+    if (!s) return 0;
+    const dur = s.duration ?? wave?.seconds ?? 0;
+    const at = s.playing ? s.posSec + Math.max(0, Date.now() / 1000 - s.startSec) * (s.rate || 1) : s.posSec;
+    return Math.min(Math.max(0, at), dur);
+  };
+
+  // The desk state's song half for this deck, run on every SSE frame and every mixRefresh.
+  // Keeps the mirror current, and adopts a song this page never loaded (a reload mid-set: the
+  // server still holds the deck) so reopening DJ mode comes back intact.
+  P.sync = (sb) => {
+    if (!sb) {
+      P.mirror = null;
+      return;
+    }
+    const scrubbing = performance.now() < scrubUntil;
+    if (P.mirror && scrubbing) {
+      // the hand owns the position; take everything else
+      P.mirror.playing = sb.playing;
+      P.mirror.rate = sb.rate;
+      P.mirror.duration = sb.duration;
+    } else {
+      P.mirror = { playing: sb.playing, posSec: sb.posSec, startSec: sb.startSec, rate: sb.rate, duration: sb.duration };
+    }
+    // The musical facts (songs phase 4) ride every frame - server truth, however they got there
+    // (tags, playlist item, a meta edit, a MIDI nudge, a phase 5 estimate).
+    Object.assign(P.mirror, {
+      bpm: sb.bpm ?? null,
+      musicalKey: sb.musicalKey ?? null,
+      anchorSec: sb.anchorSec ?? 0,
+      sync: !!sb.sync,
+      keylock: !!sb.keylock,
+      nudge: sb.nudge ?? 0,
+      bpmDetected: sb.bpmDetected ?? null,
+      keyDetected: sb.keyDetected ?? null,
+    });
+    // A phase 5 estimate landing (bpm/key read from the audio because the tags said nothing)
+    // gets one console line; the facts themselves just appear in the control row, marked.
+    if ((sb.bpmDetected != null || sb.keyDetected != null) && detectSaid !== sb.path) {
+      detectSaid = sb.path;
+      const bits = [
+        sb.bpmDetected != null && `${sb.bpm} bpm (~${Math.round(sb.bpmDetected * 100)}%)`,
+        sb.keyDetected != null && `${sb.musicalKey} (~${Math.round(sb.keyDetected * 100)}%)`,
+      ].filter(Boolean).join(' · ');
+      logLine(`${D} ♪ detected ${bits} - estimates; typing a bpm overrides`);
+    }
+    ctlRender();
+    if (!P.song) {
+      P.song = { path: sb.path, title: sb.title, bpm: sb.bpm ?? null };
+      if (deck === 'b') {
+        deckBFileName = null;
+        if (deckBCM) {
+          deckBCM.setValue(`// ♪ ${sb.title}\n// ${sb.path}`);
+          deckBCM.setOption('readOnly', true);
+        }
       }
-      ctx.stroke();
+      P.open();
     }
-  }
+  };
 
-  if (songWave) {
-    const det = songWave.detail;
-    songWave._norm ??= songNormOf(det);
-    const per = det.perSec;
-    const i0 = Math.max(0, Math.floor(t0 * per));
-    const i1 = Math.min(det.peaks.length - 1, Math.ceil((t0 + songZoomSec) * per));
-    const colW = Math.max(1, pxPerSec / per) + 0.6;
-    songDrawColumns(ctx, det, i0, i1, (i) => (i / per - t0) * pxPerSec, colW, mid, maxAmp, songWave._norm);
-  } else {
-    ctx.fillStyle = text;
-    ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('analyzing…', w / 2, mid);
-  }
+  /** A fresh /api/song/load response becomes this pane's song. */
+  P.tookLoad = (res, filePath, title) => {
+    P.song = { path: filePath, title, bpm: res.bpm ?? null };
+    P.mirror = { playing: false, posSec: 0, startSec: 0, rate: 1, duration: res.duration };
+    detectSaid = null;
+    P.open();
+  };
 
-  // Hard edges where the file begins and ends, so blank space beyond isn't read as quiet audio.
-  if (dur) {
-    ctx.strokeStyle = rgbaFrom(ctx, text, 0.7);
-    ctx.lineWidth = 1;
-    for (const tEdge of [0, dur]) {
-      if (tEdge < t0 || tEdge > t0 + songZoomSec) continue;
-      const x = Math.round((tEdge - t0) * pxPerSec) + 0.5;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-      ctx.stroke();
+  // Show the pane and fetch its waveform. Deck B's descriptor card stays in the (hidden)
+  // editor underneath - it is what shows again if the analysis fails; deck A has no card (its
+  // editor holds your wip), so a failure there keeps the pane up and says so on the strip.
+  P.open = async () => {
+    hostEl.classList.add('song-on');
+    paneEl.classList.remove('hidden');
+    ctlRender(); // title, toggles, bpm - whatever the mirror already knows
+    timeEl.textContent = '';
+    wave = null;
+    waveFailed = false;
+    overviewImage = null;
+    rafStart();
+    const forPath = P.song.path;
+    try {
+      const w = await api('GET', `/api/song/waveform?deck=${deck}`);
+      if (P.song?.path !== forPath) return; // a later load took the deck while this ran
+      wave = w;
+      overviewImage = null;
+    } catch (e) {
+      if (P.song?.path !== forPath) return;
+      logLine(`${D} waveform: ${e.message ?? String(e)}`, true);
+      if (deck === 'b') P.close(); // back to the descriptor card - playback is unaffected
+      else waveFailed = true; // scrub and controls all still work; the strip says what happened
     }
+  };
+
+  P.close = () => {
+    hostEl.classList.remove('song-on');
+    paneEl.classList.add('hidden');
+    wave = null;
+    overviewImage = null;
+    if (raf != null) cancelAnimationFrame(raf);
+    raf = null;
+    P.setActive(false);
+    hostCM()?.refresh(); // it was display:none while the pane was up; unpainted until told
+  };
+
+  /** The DJ-exit case: close hides the pane; this also forgets the song it held. */
+  P.clear = () => {
+    P.close();
+    P.song = null;
+    P.mirror = null;
+  };
+
+  function rafStart() {
+    if (raf == null) raf = requestAnimationFrame(frame);
   }
 
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(w / 2, 0);
-  ctx.lineTo(w / 2, h);
-  ctx.stroke();
-}
+  function frame() {
+    raf = null;
+    if (!mixModeOn || paneEl.classList.contains('hidden')) return;
+    drawDetail();
+    drawOverview();
+    const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
+    timeEl.textContent = dur ? `${songFmt(P.playheadNow(), true)} / ${songFmt(dur)}` : '';
+    const rate = P.mirror?.rate ?? 1;
+    rateEl.textContent = Math.abs(rate - 1) > 0.0005 ? `${rate > 1 ? '+' : ''}${((rate - 1) * 100).toFixed(1)}%` : '';
+    raf = requestAnimationFrame(frame);
+  }
 
-function songDrawOverview() {
-  if (songSizeCanvas(songOverviewEl)) songOverviewImage = null; // pre-render matches the pixel size
-  const dpr = window.devicePixelRatio || 1;
-  const ctx = songOverviewEl.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const w = songOverviewEl.clientWidth;
-  const h = songOverviewEl.clientHeight;
-  ctx.clearRect(0, 0, w, h);
-  const { accent, dim, bg } = songThemeColors();
-  if (!songWave) {
+  function drawDetail() {
+    songSizeCanvas(detailEl);
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = detailEl.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = detailEl.clientWidth;
+    const h = detailEl.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+    const { accent, dim, text } = songThemeColors();
+    const mid = h / 2;
+    const maxAmp = mid - 6;
+    const pos = P.playheadNow();
+    const pxPerSec = w / zoomSec;
+    const t0 = pos - zoomSec / 2; // the playhead is pinned at centre; time scrolls under it
+    const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
+
     ctx.strokeStyle = dim;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, h / 2 + 0.5);
-    ctx.lineTo(w, h / 2 + 0.5);
+    ctx.moveTo(0, mid + 0.5);
+    ctx.lineTo(w, mid + 0.5);
     ctx.stroke();
-    return;
-  }
-  if (!songOverviewImage) {
-    const img = document.createElement('canvas');
-    img.width = Math.max(1, Math.round(w * dpr));
-    img.height = Math.max(1, Math.round(h * dpr));
-    const ictx = img.getContext('2d');
-    ictx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const ov = songWave.overview;
-    const n = ov.peaks.length;
-    songDrawColumns(ictx, ov, 0, n - 1, (i) => (i / n) * w, w / n + 0.6, h / 2, h / 2 - 3, songNormOf(ov));
-    songOverviewImage = img;
-  }
-  ctx.drawImage(songOverviewImage, 0, 0, w, h);
-  const dur = songWave.seconds || 1;
-  const px = (songPlayheadNow() / dur) * w;
-  ctx.fillStyle = rgbaFrom(ctx, bg, 0.55); // what's already played sits dimmed behind the playhead
-  ctx.fillRect(0, 0, px, h);
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(px, 0);
-  ctx.lineTo(px, h);
-  ctx.stroke();
-}
 
-// --- scrubbing (-> /api/song/seek, one POST per ~50ms however fast the hand moves) ---
+    // Beatgrid from the song's own facts (songs phase 4): bpm out of its tags/playlist/edits,
+    // downbeats every 4th beat from the user-settable anchor (the ⚓ button drops it at the
+    // playhead). The k = 0 line IS the anchor - drawn a little stronger.
+    // Only the song's OWN bpm draws a grid. The desk's native slot (mixNativeBpm) defaults to
+    // 120 for a track that specifies nothing - fine for the tempo slider, wrong as a beatgrid.
+    const bpm = P.mirror ? P.mirror.bpm : P.song?.bpm;
+    const anchor = P.mirror?.anchorSec ?? 0;
+    if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
+      const beat = 60 / bpm;
+      const kEnd = (Math.min(dur, t0 + zoomSec) - anchor) / beat;
+      ctx.lineWidth = 1;
+      for (let k = Math.ceil((Math.max(0, t0) - anchor) / beat); k <= kEnd; k++) {
+        if (anchor + k * beat < 0) continue;
+        const x = Math.round((anchor + k * beat - t0) * pxPerSec) + 0.5;
+        const down = ((k % 4) + 4) % 4 === 0;
+        ctx.strokeStyle = down ? rgbaFrom(ctx, accent, k === 0 ? 0.75 : 0.4) : rgbaFrom(ctx, text, 0.35);
+        ctx.beginPath();
+        if (down) {
+          ctx.moveTo(x, 2);
+          ctx.lineTo(x, h - 2);
+        } else {
+          ctx.moveTo(x, 2);
+          ctx.lineTo(x, 8);
+          ctx.moveTo(x, h - 8);
+          ctx.lineTo(x, h - 2);
+        }
+        ctx.stroke();
+      }
+    }
 
-let songSeekTimer = null;
-let songSeekPos = null;
-function songSeek(pos) {
-  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
-  pos = Math.min(Math.max(0, pos), dur);
-  if (songMirror) {
-    // the mirror follows the hand immediately; the server echo confirms rather than leads
-    songMirror.posSec = pos;
-    songMirror.startSec = Date.now() / 1000;
+    if (wave) {
+      const det = wave.detail;
+      wave._norm ??= songNormOf(det);
+      const per = det.perSec;
+      const i0 = Math.max(0, Math.floor(t0 * per));
+      const i1 = Math.min(det.peaks.length - 1, Math.ceil((t0 + zoomSec) * per));
+      const colW = Math.max(1, pxPerSec / per) + 0.6;
+      songDrawColumns(ctx, det, i0, i1, (i) => (i / per - t0) * pxPerSec, colW, mid, maxAmp, wave._norm);
+    } else {
+      ctx.fillStyle = text;
+      ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(waveFailed ? 'no waveform - scrubbing and controls still work' : 'analyzing…', w / 2, mid);
+    }
+
+    // Hard edges where the file begins and ends, so blank space beyond isn't read as quiet audio.
+    if (dur) {
+      ctx.strokeStyle = rgbaFrom(ctx, text, 0.7);
+      ctx.lineWidth = 1;
+      for (const tEdge of [0, dur]) {
+        if (tEdge < t0 || tEdge > t0 + zoomSec) continue;
+        const x = Math.round((tEdge - t0) * pxPerSec) + 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+    }
+
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(w / 2, 0);
+    ctx.lineTo(w / 2, h);
+    ctx.stroke();
   }
-  songScrubUntil = performance.now() + 400;
-  songSeekPos = pos;
-  if (songSeekTimer) return;
-  songSeekTimer = setTimeout(() => {
-    songSeekTimer = null;
-    api('POST', '/api/song/seek', { deck: 'b', pos: songSeekPos })
-      .catch((e) => logLine(`deck B seek: ${e.message ?? String(e)}`, true));
-  }, 50);
-}
 
-// The detail strip drags like the record: pull the waveform right and the playhead moves back.
-let songDrag = null;
-songDetailEl.addEventListener('pointerdown', (e) => {
-  if (!deckBSong) return;
-  songDetailEl.setPointerCapture(e.pointerId);
-  songDetailEl.classList.add('dragging');
-  songDrag = { x: e.clientX, pos: songPlayheadNow() };
-});
-songDetailEl.addEventListener('pointermove', (e) => {
-  if (!songDrag) return;
-  const pxPerSec = songDetailEl.clientWidth / songZoomSec;
-  songSeek(songDrag.pos - (e.clientX - songDrag.x) / pxPerSec);
-});
-for (const ev of ['pointerup', 'pointercancel']) {
-  songDetailEl.addEventListener(ev, () => {
-    songDrag = null;
-    songDetailEl.classList.remove('dragging');
+  function drawOverview() {
+    if (songSizeCanvas(overviewEl)) overviewImage = null; // pre-render matches the pixel size
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = overviewEl.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = overviewEl.clientWidth;
+    const h = overviewEl.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+    const { accent, dim, bg } = songThemeColors();
+    if (!wave) {
+      ctx.strokeStyle = dim;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, h / 2 + 0.5);
+      ctx.lineTo(w, h / 2 + 0.5);
+      ctx.stroke();
+      return;
+    }
+    if (!overviewImage) {
+      const img = document.createElement('canvas');
+      img.width = Math.max(1, Math.round(w * dpr));
+      img.height = Math.max(1, Math.round(h * dpr));
+      const ictx = img.getContext('2d');
+      ictx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const ov = wave.overview;
+      const n = ov.peaks.length;
+      songDrawColumns(ictx, ov, 0, n - 1, (i) => (i / n) * w, w / n + 0.6, h / 2, h / 2 - 3, songNormOf(ov));
+      overviewImage = img;
+    }
+    ctx.drawImage(overviewImage, 0, 0, w, h);
+    const dur = wave.seconds || 1;
+    const px = (P.playheadNow() / dur) * w;
+    ctx.fillStyle = rgbaFrom(ctx, bg, 0.55); // what's already played sits dimmed behind the playhead
+    ctx.fillRect(0, 0, px, h);
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px, 0);
+    ctx.lineTo(px, h);
+    ctx.stroke();
+  }
+
+  // --- scrubbing (-> /api/song/seek, one POST per ~50ms however fast the hand moves) ---
+
+  let seekTimer = null;
+  let seekPos = null;
+  function seek(pos) {
+    const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
+    pos = Math.min(Math.max(0, pos), dur);
+    if (P.mirror) {
+      // the mirror follows the hand immediately; the server echo confirms rather than leads
+      P.mirror.posSec = pos;
+      P.mirror.startSec = Date.now() / 1000;
+    }
+    scrubUntil = performance.now() + 400;
+    seekPos = pos;
+    if (seekTimer) return;
+    seekTimer = setTimeout(() => {
+      seekTimer = null;
+      api('POST', '/api/song/seek', { deck, pos: seekPos })
+        .catch((e) => logLine(`${D} seek: ${e.message ?? String(e)}`, true));
+    }, 50);
+  }
+
+  // The detail strip drags like the record: pull the waveform right and the playhead moves back.
+  let drag = null;
+  detailEl.addEventListener('pointerdown', (e) => {
+    if (!P.song) return;
+    detailEl.setPointerCapture(e.pointerId);
+    detailEl.classList.add('dragging');
+    drag = { x: e.clientX, pos: P.playheadNow() };
   });
-}
-songDetailEl.addEventListener('wheel', (e) => {
-  e.preventDefault();
-  songZoomSec = Math.min(60, Math.max(3, songZoomSec * Math.exp(e.deltaY * 0.0015)));
-}, { passive: false });
-
-// The overview jumps: click (or drag along it) seeks to that point of the track.
-let songOverviewDown = false;
-function songOverviewSeek(e) {
-  const r = songOverviewEl.getBoundingClientRect();
-  const dur = songWave?.seconds ?? songMirror?.duration ?? 0;
-  if (r.width && dur) songSeek(((e.clientX - r.left) / r.width) * dur);
-}
-songOverviewEl.addEventListener('pointerdown', (e) => {
-  if (!deckBSong) return;
-  songOverviewEl.setPointerCapture(e.pointerId);
-  songOverviewDown = true;
-  songOverviewSeek(e);
-});
-songOverviewEl.addEventListener('pointermove', (e) => {
-  if (songOverviewDown) songOverviewSeek(e);
-});
-for (const ev of ['pointerup', 'pointercancel']) {
-  songOverviewEl.addEventListener(ev, () => { songOverviewDown = false; });
-}
-
-// --- the song pane's control row (songs phase 4) ---
-//
-// The song's musical facts are server truth (tags at load, playlist item, edits here) and ride
-// every SSE frame; this row just renders them and posts edits back. bpm feeds the desk's tempo
-// migration; ⚓ drops the beatgrid anchor at the playhead; sync rate-locks to the master clock;
-// keylock swaps the player for the Warp1 timestretcher; the nudge pair is the platter (±4%
-// while held) and the jog pair steps a beat. All four platter buttons are MIDI-learnable, same
-// gesture as the desk knobs.
-
-const songNudgeDnEl = document.getElementById('songNudgeDn');
-const songNudgeUpEl = document.getElementById('songNudgeUp');
-
-// Clicking into the song pane makes it the active "window", the way clicking an editor focuses
-// it: Cmd+Enter then plays/resumes the song and Cmd+. stops ITS deck (see the transport hotkey
-// handler near the top). The pane has no focusable editor underneath, so this is tracked by
-// pointer: any click inside claims it, any click outside releases it.
-let songPaneActive = false;
-function songPaneSetActive(on) {
-  if (songPaneActive === on) return;
-  songPaneActive = on;
-  songPaneEl.classList.toggle('active', on);
-}
-songPaneEl.addEventListener('pointerdown', () => songPaneSetActive(true), true);
-document.addEventListener('pointerdown', (e) => {
-  if (!songPaneEl.contains(e.target)) songPaneSetActive(false);
-}, true);
-
-function songTitleRender() {
-  const k = songMirror?.musicalKey;
-  songTitleEl.textContent = deckBSong ? `♪ ${deckBSong.title}${k ? ` · ${k}` : ''}` : '';
-}
-
-function songCtlRender() {
-  songTitleRender();
-  const m = songMirror;
-  songSyncEl.classList.toggle('on', !!m?.sync);
-  songKeylockEl.classList.toggle('on', !!m?.keylock);
-  songNudgeDnEl.classList.toggle('held', (m?.nudge ?? 0) < 0); // a MIDI nudge lights the button too
-  songNudgeUpEl.classList.toggle('held', (m?.nudge ?? 0) > 0);
-  if (document.activeElement !== songBpmEl) songBpmEl.value = m?.bpm ?? '';
-}
-
-function songMetaPost(patch, said) {
-  api('POST', '/api/song/meta', { deck: 'b', ...patch })
-    .then((res) => { if (said) logLine(said(res)); })
-    .catch((e) => logLine(e.message ?? String(e), true));
-}
-
-songBpmEl.addEventListener('change', () => {
-  if (!deckBSong) return;
-  const v = songBpmEl.value.trim();
-  songMetaPost({ bpm: v === '' ? null : Number(v) });
-  songBpmEl.blur();
-});
-document.getElementById('songAnchor').addEventListener('click', () => {
-  if (!deckBSong) return;
-  const at = songPlayheadNow();
-  songMetaPost({ anchorSec: at }, () => `beatgrid anchored at ${songFmt(at, true)}`);
-});
-songSyncEl.addEventListener('click', () => {
-  if (!deckBSong) return;
-  songMetaPost({ sync: !songMirror?.sync }, (r) => (r.sync
-    ? `sync on - deck B rides the master clock (rate ${r.rate.toFixed(3)})`
-    : 'sync off - deck B back to its own rate'));
-});
-songKeylockEl.addEventListener('click', () => {
-  if (!deckBSong) return;
-  songMetaPost({ keylock: !songMirror?.keylock }, (r) => `keylock ${r.keylock ? 'on - rate stretches time, not pitch' : 'off - back to repitch'}`);
-});
-
-// The platter: hold to push/drag (release restores), click a jog to step one beat.
-function songHoldWire(btn, dir) {
-  let holding = false; // local truth - the SSE echo of the press may not be back by release
-  const send = (hold) => api('POST', '/api/song/nudge', { deck: 'b', hold })
-    .catch((e) => logLine(e.message ?? String(e), true));
-  btn.addEventListener('pointerdown', (e) => {
-    if (!deckBSong) return;
-    btn.setPointerCapture(e.pointerId);
-    holding = true;
-    send(dir);
+  detailEl.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const pxPerSec = detailEl.clientWidth / zoomSec;
+    seek(drag.pos - (e.clientX - drag.x) / pxPerSec);
   });
   for (const ev of ['pointerup', 'pointercancel']) {
-    btn.addEventListener(ev, () => {
-      if (!holding) return;
-      holding = false;
-      if (deckBSong) send(0);
+    detailEl.addEventListener(ev, () => {
+      drag = null;
+      detailEl.classList.remove('dragging');
     });
   }
-}
-songHoldWire(songNudgeDnEl, -1);
-songHoldWire(songNudgeUpEl, 1);
-for (const [id, jog] of [['songJogDn', -1], ['songJogUp', 1]]) {
-  document.getElementById(id).addEventListener('click', () => {
-    if (!deckBSong) return;
-    api('POST', '/api/song/nudge', { deck: 'b', jog }).catch((e) => logLine(e.message ?? String(e), true));
+  detailEl.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    zoomSec = Math.min(60, Math.max(3, zoomSec * Math.exp(e.deltaY * 0.0015)));
+  }, { passive: false });
+
+  // The overview jumps: click (or drag along it) seeks to that point of the track.
+  let overviewDown = false;
+  function overviewSeek(e) {
+    const r = overviewEl.getBoundingClientRect();
+    const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
+    if (r.width && dur) seek(((e.clientX - r.left) / r.width) * dur);
+  }
+  overviewEl.addEventListener('pointerdown', (e) => {
+    if (!P.song) return;
+    overviewEl.setPointerCapture(e.pointerId);
+    overviewDown = true;
+    overviewSeek(e);
   });
+  overviewEl.addEventListener('pointermove', (e) => {
+    if (overviewDown) overviewSeek(e);
+  });
+  for (const ev of ['pointerup', 'pointercancel']) {
+    overviewEl.addEventListener(ev, () => { overviewDown = false; });
+  }
+
+  // --- the control row (songs phase 4) and the active-"window" claim ---
+  //
+  // The song's musical facts are server truth (tags at load, playlist item, edits here, phase 5
+  // estimates) and ride every SSE frame; this row just renders them and posts edits back. bpm
+  // feeds the desk's tempo migration; ⚓ drops the beatgrid anchor at the playhead; sync
+  // rate-locks to the master clock; keylock swaps the player for the Warp1 timestretcher; the
+  // nudge pair is the platter (±4% while held) and the jog pair steps a beat. All four platter
+  // buttons are MIDI-learnable, same gesture as the desk knobs.
+  //
+  // Clicking into the pane makes it the active "window", the way clicking an editor focuses it:
+  // Cmd+Enter then plays/resumes the song and Cmd+. stops ITS deck (see the transport hotkey
+  // handler near the top). The pane has no focusable editor underneath, so this is tracked by
+  // pointer: any click inside claims it, any click outside releases it.
+
+  P.setActive = (on) => {
+    if (P.active === on) return;
+    P.active = on;
+    paneEl.classList.toggle('active', on);
+  };
+  paneEl.addEventListener('pointerdown', () => P.setActive(true), true);
+  document.addEventListener('pointerdown', (e) => {
+    if (!paneEl.contains(e.target)) P.setActive(false);
+  }, true);
+
+  function ctlRender() {
+    const m = P.mirror;
+    const est = m?.keyDetected != null ? '~' : '';
+    titleEl.textContent = P.song ? `♪ ${P.song.title}${m?.musicalKey ? ` · ${m.musicalKey}${est}` : ''}` : '';
+    titleEl.title = m?.keyDetected != null
+      ? `key estimated from the audio (~${Math.round(m.keyDetected * 100)}% sure)` : '';
+    syncEl.classList.toggle('on', !!m?.sync);
+    keylockEl.classList.toggle('on', !!m?.keylock);
+    nudgeDnEl.classList.toggle('held', (m?.nudge ?? 0) < 0); // a MIDI nudge lights the button too
+    nudgeUpEl.classList.toggle('held', (m?.nudge ?? 0) > 0);
+    if (document.activeElement !== bpmEl) bpmEl.value = m?.bpm ?? '';
+    bpmEl.classList.toggle('detected', m?.bpmDetected != null);
+    bpmEl.title = m?.bpmDetected != null
+      ? `estimated from the audio (~${Math.round(m.bpmDetected * 100)}% sure) - type to correct it` : '';
+  }
+
+  function metaPost(patch, said) {
+    api('POST', '/api/song/meta', { deck, ...patch })
+      .then((res) => { if (said) logLine(said(res)); })
+      .catch((e) => logLine(e.message ?? String(e), true));
+  }
+
+  bpmEl.addEventListener('change', () => {
+    if (!P.song) return;
+    const v = bpmEl.value.trim();
+    metaPost({ bpm: v === '' ? null : Number(v) });
+    bpmEl.blur();
+  });
+  byId('songAnchor').addEventListener('click', () => {
+    if (!P.song) return;
+    const at = P.playheadNow();
+    metaPost({ anchorSec: at }, () => `beatgrid anchored at ${songFmt(at, true)}`);
+  });
+  syncEl.addEventListener('click', () => {
+    if (!P.song) return;
+    metaPost({ sync: !P.mirror?.sync }, (r) => (r.sync
+      ? `sync on - ${D} rides the master clock (rate ${r.rate.toFixed(3)})`
+      : `sync off - ${D} back to its own rate`));
+  });
+  keylockEl.addEventListener('click', () => {
+    if (!P.song) return;
+    metaPost({ keylock: !P.mirror?.keylock }, (r) => `keylock ${r.keylock ? 'on - rate stretches time, not pitch' : 'off - back to repitch'}`);
+  });
+
+  // The platter: hold to push/drag (release restores), click a jog to step one beat.
+  function holdWire(btn, dir) {
+    let holding = false; // local truth - the SSE echo of the press may not be back by release
+    const send = (hold) => api('POST', '/api/song/nudge', { deck, hold })
+      .catch((e) => logLine(e.message ?? String(e), true));
+    btn.addEventListener('pointerdown', (e) => {
+      if (!P.song) return;
+      btn.setPointerCapture(e.pointerId);
+      holding = true;
+      send(dir);
+    });
+    for (const ev of ['pointerup', 'pointercancel']) {
+      btn.addEventListener(ev, () => {
+        if (!holding) return;
+        holding = false;
+        if (P.song) send(0);
+      });
+    }
+  }
+  holdWire(nudgeDnEl, -1);
+  holdWire(nudgeUpEl, 1);
+  for (const [name, jog] of [['songJogDn', -1], ['songJogUp', 1]]) {
+    byId(name).addEventListener('click', () => {
+      if (!P.song) return;
+      api('POST', '/api/song/nudge', { deck, jog }).catch((e) => logLine(e.message ?? String(e), true));
+    });
+  }
+  mixLearnAttach(nudgeDnEl, `${deck}:nudgedn`);
+  mixLearnAttach(nudgeUpEl, `${deck}:nudgeup`);
+  mixLearnAttach(byId('songJogDn'), `${deck}:jogdn`);
+  mixLearnAttach(byId('songJogUp'), `${deck}:jogup`);
+
+  return P;
 }
-mixLearnAttach(songNudgeDnEl, 'b:nudgedn');
-mixLearnAttach(songNudgeUpEl, 'b:nudgeup');
-mixLearnAttach(document.getElementById('songJogDn'), 'b:jogdn');
-mixLearnAttach(document.getElementById('songJogUp'), 'b:jogup');
+
+const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
+
+/** The deck whose song pane is the clicked-last "window" - what Cmd+Enter / Cmd+. target. */
+function songActiveDeck() {
+  for (const d of ['a', 'b']) if (songPanes[d].active && songPanes[d].song) return d;
+  return null;
+}
+
+// Both decks' halves of every desk frame.
+function songPaneSync(state) {
+  if (!mixModeOn) return;
+  for (const d of ['a', 'b']) songPanes[d].sync(state?.song?.[d] ?? null);
+}
+
+/** ▶ for a song deck: play/resume through the desk (cycle-quantized against a running clock). */
+async function songPlay(deck) {
+  const pane = songPanes[deck];
+  if (!pane.song) return;
+  const U = deck.toUpperCase();
+  try {
+    const res = await api('POST', '/api/song/play', { deck });
+    logLine(`deck ${U} ♪ playing "${pane.song.title}" from ${res.pos.toFixed(1)}s`);
+    // A deck faded fully out plays into a closed crossfader (meter lit, nothing heard) - that
+    // earns a pointer, whichever side it is.
+    const xf = Number(document.getElementById('crossfader').value);
+    if (deck === 'b' ? xf < -0.9 : xf > 0.9) {
+      logLine(`deck ${U} is faded all the way out - bring the crossfader over to hear it`);
+    }
+    playing = true;
+    updateTransportButtons();
+    mixRefresh();
+  } catch (e) {
+    logLine(`deck ${U}: ${e.message ?? String(e)}`, true);
+  }
+}
+
+/** The console line a song load earns - shared by both decks' load paths. */
+function songLoadLine(deck, res, title) {
+  const m = Math.floor(res.duration / 60);
+  const s = String(Math.round(res.duration % 60)).padStart(2, '0');
+  const facts = [res.bpm && `${res.bpm} bpm`, res.musicalKey, res.sync && 'synced'].filter(Boolean).join(', ');
+  return `deck ${deck.toUpperCase()} loaded ♪ "${title}" (${m}:${s}${res.decoded ? ', decoded' : ''}${facts ? `; ${facts}` : ''})`
+    + ' - ▶ plays it';
+}
 
 async function evalDeckB(start) {
   if (!deckBCM) return;
-  if (deckBSong) {
+  if (songPanes.b.song) {
     // The pane holds a file, not code: ▶ is play/resume through the same desk (cycle-quantized
     // against a running deck A server-side); ↻ has nothing to re-evaluate.
-    try {
-      if (!start) {
-        logLine('deck B holds a song - nothing to re-evaluate; ▶ plays/resumes, drag the waveform to scrub');
-        return;
-      }
-      const res = await api('POST', '/api/song/play', { deck: 'b' });
-      logLine(`deck B ♪ playing "${deckBSong.title}" from ${res.pos.toFixed(1)}s`);
-      // The queued deck arrives faded out by design - but a song deck has no other sound, so
-      // playing into a closed crossfader (meter lit, nothing heard) earns a pointer.
-      if (Number(document.getElementById('crossfader').value) < -0.9) {
-        logLine('deck B is faded all the way out - bring the crossfader over to hear it');
-      }
-      playing = true;
-      updateTransportButtons();
-      mixRefresh();
-    } catch (e) {
-      logLine(`deck B: ${e.message ?? String(e)}`, true);
-    }
+    if (!start) logLine('deck B holds a song - nothing to re-evaluate; ▶ plays/resumes, drag the waveform to scrub');
+    else await songPlay('b');
     return;
   }
   try {
@@ -15155,8 +15253,15 @@ document.getElementById('deckAKeep').addEventListener('click', () => exitDjMode(
 document.getElementById('deckBKeep').addEventListener('click', () => exitDjMode('b'));
 document.getElementById('deckALoad').addEventListener('click', loadDeckAFile);
 document.getElementById('deckAFile').addEventListener('change', loadDeckAFile);
-document.getElementById('deckAPlay').addEventListener('click', () => evaluate(true, { byHand: true }));
-document.getElementById('deckAUpdate').addEventListener('click', () => evaluate(false, { byHand: true }));
+document.getElementById('deckAPlay').addEventListener('click', () => (
+  mixModeOn && songPanes.a.song ? songPlay('a') : evaluate(true, { byHand: true })));
+document.getElementById('deckAUpdate').addEventListener('click', () => {
+  if (mixModeOn && songPanes.a.song) {
+    logLine('deck A holds a song - nothing to re-evaluate; ▶ plays/resumes, drag the waveform to scrub');
+    return;
+  }
+  evaluate(false, { byHand: true });
+});
 document.getElementById('deckAOrganize').addEventListener('click', () => openOrganize());
 document.getElementById('deckBNext').addEventListener('click', stepDeckBQueue);
 document.getElementById('deckBOrganize').addEventListener('click', () => openOrganize());

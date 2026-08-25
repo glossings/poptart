@@ -10,11 +10,13 @@ const { parentPort } = require('node:worker_threads');
 
 const { detectSlices } = require('./samples');
 const { trimRecording, songWaveform } = require('./wav');
+const { detectSongFacts } = require('./song-detect');
 
 const JOBS = {
   slices: ({ path }) => detectSlices(path),
   trim: ({ srcPath, destPath, ...opts }) => trimRecording(srcPath, destPath, opts),
   songwave: ({ path, ...opts }) => songWaveform(path, opts),
+  songdetect: ({ path }) => detectSongFacts(path),
 };
 
 parentPort.on('message', ({ id, kind, args }) => {

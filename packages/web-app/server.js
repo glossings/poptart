@@ -346,6 +346,59 @@ function songUnload(deck) {
   }
 }
 
+// --- bpm/key detection fallback (songs phase 5) ---
+//
+// When a load leaves bpm or key unknown (no tag, no playlist word), estimate them from the
+// audio: onset-envelope autocorrelation for bpm, chroma + Krumhansl profiles for key (see
+// osc-engine/song-detect.js), on the analysis worker. Fire-and-forget from /api/song/load; the
+// results adopt into the deck's facts ONLY where they are still unset when the analysis lands -
+// a typed value, a re-load, or an unload in the meantime wins by construction (the deck-state
+// object's identity is the staleness token). Adopted facts carry their confidence
+// (bpmDetected/keyDetected, 0..1) so the pane can show them as estimates; a manual edit clears
+// the marker (see /api/song/meta). Results are cached by file identity - re-queuing the same
+// untagged song re-reads a Map, not ninety seconds of audio.
+const songFactsCache = new Map();
+
+async function songDetectKick(deck) {
+  const s = songDecks[deck];
+  if (!s || (s.bpm != null && s.musicalKey != null)) return;
+  const srcPath = s.path;
+  try {
+    const st = fs.statSync(srcPath);
+    const cacheKey = `${srcPath}|${Math.round(st.mtimeMs)}|${st.size}`;
+    let facts = songFactsCache.get(cacheKey);
+    if (facts === undefined) {
+      // Give the pane's waveform fetch first crack at the shared analysis worker - the picture
+      // is what the user is waiting on; the estimate can land a beat later.
+      await new Promise((r) => { setTimeout(r, 1500); });
+      if (songDecks[deck] !== s) return;
+      const resolved = await resolveSongFile(srcPath, { wav: true });
+      facts = await analysis.songDetect(resolved.path);
+      songFactsCache.set(cacheKey, facts);
+      while (songFactsCache.size > 24) songFactsCache.delete(songFactsCache.keys().next().value);
+    }
+    if (songDecks[deck] !== s || !facts) return;
+    let changed = false;
+    if (s.bpm == null && facts.bpm != null) {
+      s.bpm = facts.bpm;
+      s.bpmDetected = facts.bpmConfidence ?? 0;
+      decks[deck].bpm = facts.bpm; // the native tempo slot the desk's migration slider rides to
+      // The same default a tagged load gets - but never mid-play: flipping sync under a song
+      // already running at manual rate would lurch it.
+      if (!s.playing && !s.sync) s.sync = true;
+      changed = true;
+    }
+    if (s.musicalKey == null && facts.key != null) {
+      s.musicalKey = facts.key;
+      s.keyDetected = facts.keyConfidence ?? 0;
+      changed = true;
+    }
+    if (!changed) return;
+    songApplyRate(deck);
+    mixNotify();
+  } catch { /* detection is a fallback - a failure just leaves manual entry, as before phase 5 */ }
+}
+
 // --- mix-strip MIDI (learn + drive) ---
 //
 // A hardware knob per desk control, the crossfader first: `settings.mixMidi` maps a target name
@@ -516,6 +569,10 @@ function mixDeskBody() {
         sync: s.sync,
         keylock: s.keylock,
         nudge: s.nudge,
+        // Confidence (0..1) when a fact is a phase 5 ESTIMATE rather than a tag/typed value -
+        // the pane marks these; a manual edit clears them (see /api/song/meta).
+        bpmDetected: s.bpmDetected ?? null,
+        keyDetected: s.keyDetected ?? null,
       }];
     })),
   };
@@ -3897,6 +3954,7 @@ const routes = {
     decks[deck].bpm = bpm; // null included: an untagged song reads as the 120 default, never the previous track's
     songApplyRate(deck); // not playing: just settles s.rate so the pane's readout is honest
     mixNotify();
+    songDetectKick(deck); // fire-and-forget: fills any fact still missing, once analyzed (phase 5)
     return {
       status: 200,
       body: {
@@ -4003,6 +4061,7 @@ const routes = {
     const s = songDecks[deck];
     if (!s) throw new Error(`deck ${deck} has no song loaded`);
     if ('bpm' in body) {
+      delete s.bpmDetected; // whatever the hand says, it is no longer an estimate
       if (body.bpm == null || body.bpm === '') {
         s.bpm = null;
         s.sync = false;
@@ -4014,7 +4073,10 @@ const routes = {
         decks[deck].bpm = bpm; // the native tempo the desk's migration slider/detents ride to
       }
     }
-    if ('key' in body) s.musicalKey = String(body.key ?? '').trim() || null;
+    if ('key' in body) {
+      s.musicalKey = String(body.key ?? '').trim() || null;
+      delete s.keyDetected;
+    }
     if ('anchorSec' in body) {
       const a = Number(body.anchorSec);
       if (!Number.isFinite(a)) throw new Error('song/meta: anchorSec must be a number (seconds)');
