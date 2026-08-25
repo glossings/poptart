@@ -127,13 +127,15 @@ function noteProtoOwnership(deck) {
 // Performance-mix state (the DJ layer - see TODO.md). EPHEMERAL by design: none of this is ever
 // written into song code (deliberately unlike the ctrl+g mixer's .gain() edits) - it belongs to
 // the mix session and dies with it. The engine side is the DJ stage baked into every track
-// SynthDef (trim / eqlo / eqmid / eqhi / djf / fader / deck - see sc/poptart.scd): all seven are
+// SynthDef (trim / eqlo / eqmid / eqhi / djf / djres / fader / deck - see sc/poptart.scd): all are
 // channel controls on pseudo-slot -1, so applying a value is one setParam. What's stored here is
 // re-applied to a track every time an eval (re)creates it, which is what makes a queued deck
 // arrive SILENT: the mix UI sets deck b's `deck` gain to 0 before its first eval, and every
 // track that eval births wears that gain before its scheduler starts.
 // ---------------------------------------------------------------------------------------------
-const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1, deck: 1, cue: 0 };
+// djf is the filter's cutoff (its center detent is 0); djres is that filter's resonance
+// AMOUNT, deliberately a control of its own - see the DJ stage in sc/poptart.scd.
+const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1, deck: 1, cue: 0 };
 const mixState = {
   swap: false, // swap mode: gating a stem in throws the SAME-NAMED stem on the other deck out
   perDeck: { a: new Map(), b: new Map() }, // deck-broadcast values (the crossfader's `deck`, a deck-wide djf)
@@ -197,6 +199,32 @@ function songPlayheadSec(deck, at = null) {
   return Math.min(Math.max(0, pos), s.duration);
 }
 
+// Pause a deck where it stands, engine gate and bookkeeping together - what /api/song/pause,
+// the per-deck stop and a cue release all want. (songMarkPaused below is the bookkeeping half
+// on its own, for the callers that close the gate differently or not at all.)
+//
+// Two engine messages, not one. `run` 0 slews the phasor to a halt over ~20ms - the little
+// turntable-style stop that makes a pause not a click. But a player halted that way is still a
+// running synth reading a frozen buffer index, which is a CONSTANT SAMPLE: every paused deck
+// was leaving a DC offset on its track's input bus, for as long as it stayed paused. It costs
+// headroom, it lights the deck's channel meter over silence, and any later gain move (a
+// crossfade, an EQ kill, the next start) steps that DC audibly. So the halted player is
+// released a quarter second later, once the slew is over and it has nothing left to say - a
+// resume spawns a fresh player at posSec regardless (see /api/song/play), so nothing is lost
+// by letting the old one go.
+const SONG_PAUSE_RELEASE_SEC = 0.25;
+function songPause(deck, posSec = null) {
+  if (!songDecks[deck]?.playing) return;
+  if (engine) {
+    const tid = engineTrack(SONG_KEYS[deck]);
+    try {
+      engine.songSet(tid, 'run', 0, 0);
+      engine.songStop(tid, engine.getTime() + SONG_PAUSE_RELEASE_SEC);
+    } catch { /* engine between restarts */ }
+  }
+  songMarkPaused(deck, posSec);
+}
+
 // Pause bookkeeping shared by pause/per-deck stop/end-of-file: fold the running playhead into
 // posSec and disarm the end timer. The engine-side `run` gate is the caller's to close.
 function songMarkPaused(deck, posSec = null) {
@@ -221,11 +249,9 @@ function songArmEndTimer(deck) {
   const secondsLeft = (begin - now) + (s.duration - songPlayheadSec(deck, begin)) / s.rate;
   s.endTimer = setTimeout(() => {
     s.endTimer = null;
-    if (!s.playing) return;
-    if (engine) {
-      try { engine.songSet(engineTrack(SONG_KEYS[deck]), 'run', 0, 0); } catch { /* engine between restarts */ }
-    }
-    songMarkPaused(deck, s.duration);
+    // The playhead is pinned to the duration rather than measured: this is the moment it got
+    // there, and the model must land exactly on the end, not a millisecond either side of it.
+    songPause(deck, s.duration);
     mixNotify();
   }, Math.max(0, secondsLeft * 1000));
 }
@@ -334,6 +360,49 @@ function songNudge(deck, { hold, jog }) {
   return { deck, nudge: s.nudge, pos: s.posSec, rate: s.rate };
 }
 
+// --- the cue point + the CUE gesture (the button on the song pane, and Ctrl+C) ---
+//
+// A deck's cue point is where the track "lives" when it isn't playing: press and HOLD cue to
+// preview from it, release to drop the playhead back on it, paused and ready. That is one
+// gesture, not two buttons, and it is the whole point of the control - the alternative (play,
+// listen, stop, scrub back to where you meant) loses the position every time.
+//
+// The cue point MOVES only on a press while the deck is paused: park the playhead somewhere,
+// press, and that is the new cue. Press while it is PLAYING and the position is left alone -
+// that press is the "back to cue" that takes a running deck home without redefining home.
+//
+// Never quantized. Everything else a deck can be told to do joins the shared clock at the next
+// cycle boundary; a cue preview has to answer the finger, because what it is for is hearing
+// whether the finger landed in the right place.
+function songCue(deck, hold) {
+  const s = songDecks[deck];
+  if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  if (!engine) throw new Error(engineError ?? 'engine not loaded');
+  const tid = engineTrack(SONG_KEYS[deck]);
+  if (hold) {
+    if (!s.playing) s.cueSec = songPlayheadSec(deck); // parked somewhere new: the cue is here now
+    // A playing deck comes home the same way a paused one previews - one songStart, which the
+    // engine already handles as a swap (the old player releases exactly at the new one's start,
+    // fading under it) rather than a stop followed by a start.
+    const startSec = engine.getTime() + SONG_START_LEAD_SEC;
+    s.nudge = 0;
+    s.servo = 0;
+    s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
+    engine.songStart(tid, s.cueSec, s.rate, startSec, s.keylock ? 1 : 0);
+    s.posSec = s.cueSec;
+    s.startSec = startSec;
+    s.playing = true;
+    s.cueHeld = true;
+    songArmEndTimer(deck);
+  } else if (s.cueHeld) {
+    s.cueHeld = false;
+    songPause(deck);
+    s.posSec = s.cueSec; // home again: the next start (cue or play) reads posSec for its entry
+  }
+  mixNotify();
+  return { deck, cueSec: s.cueSec, playing: s.playing };
+}
+
 // Forget one deck's song: player released and buffer freed engine-side, Node state dropped.
 // The TRACK stays warm (it's dropTrack's to take down) - a new load reuses it.
 function songUnload(deck) {
@@ -407,7 +476,7 @@ async function songDetectKick(deck) {
 // binds it. A mapped (or learning) CC is CONSUMED - a knob given to the desk must not also
 // drive a midicc() in song code.
 const MIX_MIDI_TARGETS = new Set(['xf',
-  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'fader',
+  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader',
     // The song deck's platter buttons (songs phase 4) - button targets, not knobs: a nudge
     // holds while the CC is high (press 127 / release 0), a jog fires on the press edge.
     'nudgedn', 'nudgeup', 'jogdn', 'jogup'].map((c) => `${d}:${c}`))]);
@@ -417,7 +486,7 @@ let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is
 function mixMidiValue(target, v01) {
   const ctl = target === 'xf' ? 'xf' : target.slice(2);
   if (ctl === 'xf' || ctl === 'djf') return v01 * 2 - 1;
-  if (ctl === 'fader') return v01;
+  if (ctl === 'fader' || ctl === 'djres') return v01; // one-sided 0..1, neutral at the bottom
   return v01 * 2; // trim and the EQ bands: 0..2, unity at center
 }
 
@@ -566,6 +635,7 @@ function mixDeskBody() {
         bpm: s.bpm,
         musicalKey: s.musicalKey,
         anchorSec: s.anchorSec,
+        cueSec: s.cueSec ?? 0, // the CUE gesture's home - the pane draws it on both waveforms
         sync: s.sync,
         keylock: s.keylock,
         nudge: s.nudge,
@@ -3189,11 +3259,9 @@ const routes = {
     const deck = body?.deck === 'a' || body?.deck === 'b' ? body.deck : null;
     // A deck's song pauses where it stands (a stop is not an unload - play resumes from here).
     const pauseSong = (d) => {
-      if (!songDecks[d]?.playing) return;
-      if (engine) {
-        try { engine.songSet(engineTrack(SONG_KEYS[d]), 'run', 0, 0); } catch { /* engine between restarts */ }
-      }
-      songMarkPaused(d);
+      if (!songDecks[d]) return;
+      songDecks[d].cueHeld = false; // a stop under a held cue wins; the release finds nothing to undo
+      songPause(d);
     };
     if (deck) {
       for (const [key, sch] of schedulers) if (deckOfKey(key) === deck) sch.stop();
@@ -3957,6 +4025,8 @@ const routes = {
       manualRate: 1,
       nudge: 0,
       servo: 0,
+      cueSec: 0, // the CUE gesture's home (see songCue) - the top until a press while paused moves it
+      cueHeld: false,
     };
     decks[deck].bpm = bpm; // null included: an untagged song reads as the 120 default, never the previous track's
     songApplyRate(deck); // not playing: just settles s.rate so the pane's readout is honest
@@ -3997,6 +4067,7 @@ const routes = {
     }
     s.nudge = 0;
     s.servo = 0;
+    s.cueHeld = false; // a real start supersedes a preview - its release must not yank us home
     s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
     engine.songStart(engineTrack(SONG_KEYS[deck]), from, s.rate, startSec, s.keylock ? 1 : 0);
     s.posSec = from;
@@ -4007,14 +4078,19 @@ const routes = {
     return { status: 200, body: { deck, pos: from, rate: s.rate, startSec } };
   },
 
+  // The CUE gesture: press-and-hold previews from the cue point, release drops the playhead
+  // back on it, paused. Body: { deck, hold (true = press, false = release) }. See songCue.
+  'POST /api/song/cue': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    return { status: 200, body: songCue(deck, !!body.hold) };
+  },
+
   // Pause where it stands; /api/song/play resumes from there. Body: { deck }.
   'POST /api/song/pause': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
     if (!songDecks[deck]) throw new Error(`deck ${deck} has no song loaded`);
-    if (songDecks[deck].playing && engine) {
-      engine.songSet(engineTrack(SONG_KEYS[deck]), 'run', 0, 0);
-    }
-    songMarkPaused(deck);
+    songDecks[deck].cueHeld = false;
+    songPause(deck);
     mixNotify();
     return { status: 200, body: { deck, pos: songDecks[deck].posSec } };
   },
@@ -4049,6 +4125,7 @@ const routes = {
   'POST /api/song/stop': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
     if (!songDecks[deck]) throw new Error(`deck ${deck} has no song loaded`);
+    songDecks[deck].cueHeld = false;
     if (engine) {
       try { engine.songStop(engineTrack(SONG_KEYS[deck]), 0); } catch { /* engine between restarts */ }
     }

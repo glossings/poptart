@@ -1,7 +1,8 @@
 'use strict';
 
 // The track SynthDef's DJ stage (sc/poptart.scd, performance mixing phase 2): trim -> 3-band
-// isolator EQ -> one-knob filter -> fader x deck gain, seven channel controls neutral by default.
+// isolator EQ -> one-knob filter (cutoff + its own resonance) -> fader x deck gain, eight
+// channel controls neutral by default.
 // What this guards: (1) the SynthDef still BUILDS - a var/arg/UGen typo in the def is otherwise
 // only discovered by booting the whole engine; (2) the filter knob's exponential cutoff mapping;
 // (3) channelDefault's neutral values, which the modulator-clear path snaps controls back to -
@@ -76,6 +77,9 @@ const DEFAULT_CASES = [
   // The DJ stage's controls: unity everywhere, except the filter knob's center detent at 0.
   ['trim', '1'], ['eqlo', '1'], ['eqmid', '1'], ['eqhi', '1'],
   ['fader', '1'], ['deck', '1'], ['djf', '0'], ['cue', '0'],
+  // djres is the filter's resonance AMOUNT, and its neutral is 0 for the opposite reason the
+  // gains' is 1: clearing a modulator off it must land on a plain sweep, never full whistle.
+  ['djres', '0'],
   // And the pre-existing strip, unchanged.
   ['gain', '1'], ['out', '1'], ['dry', '1'], ['width', '1'], ['pan', '0'], ['bassmono', '0'],
 ];
@@ -140,6 +144,11 @@ clearPending.(slotKey.(\\t, 0), 2);
 ("MAP<lpf-closed>" ++ (18000 * (900 ** -1)).clip(20, 18000)).postln;
 ("MAP<lpf-open>" ++ (18000 * (900 ** 0)).clip(20, 18000)).postln;
 ("MAP<hpf-closed>" ++ (20 * (900 ** 1)).clip(20, 18000)).postln;
+// And the resonance control's rq mapping. rq is 1/Q, so it runs DOWNWARD from 1: the endpoint
+// that matters is res-off, which must be a flat 1 - a polarity slip there would make an
+// untouched desk resonant, which is exactly what the separate control exists to avoid.
+("RES<off>" ++ (1 - (0.62 * 0.clip(0, 1)))).postln;
+("RES<full>" ++ (1 - (0.62 * 1.clip(0, 1)))).postln;
 ${DEFAULT_CASES.map(([name]) => `("DEFAULT<${name}>" ++ channelDefault.(${JSON.stringify(name)})).postln;`).join('\n')}
 0.exit;
 )
@@ -183,6 +192,8 @@ test('the track SynthDef builds with the DJ stage, and its neutrals are really n
   assert.match(out, /^MAP<lpf-closed>20(\.0)?$/m, 'filter full-left should close the LPF to 20 Hz');
   assert.match(out, /^MAP<lpf-open>18000(\.0)?$/m, 'filter at center should park the LPF open at 18 kHz');
   assert.match(out, /^MAP<hpf-closed>18000(\.0)?$/m, 'filter full-right should close the HPF to 18 kHz');
+  assert.match(out, /^RES<off>1(\.0)?$/m, 'resonance at 0 must be rq 1 - a flat filter, no peak');
+  assert.match(out, /^RES<full>0\.38$/m, 'resonance at 1 must be rq 0.38 (Q ~2.6)');
   for (const [name, expected] of DEFAULT_CASES) {
     const m = out.match(new RegExp(`^DEFAULT<${name}>(.*)$`, 'm'));
     assert.ok(m, `sclang printed no channelDefault for "${name}"`);

@@ -3527,8 +3527,15 @@ body.mix-on #deckAHead {
   width: 110px;
 }
 .mix-tempo-detent {
-  min-width: 34px;
+  /* FIXED width, not min-width: the whole strip is a flex row whose two track columns split
+     whatever the center leaves (flex 1 1 0 each), so anything in the center that resizes with
+     its text drags every knob, fader and meter sideways with it. A native tempo with a decimal
+     ("121.1" vs "121") did exactly that. Wide enough for a 3-digit bpm and one decimal. */
+  width: 52px;
+  padding: 2px 2px;
+  overflow: hidden;
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 .mix-tempo-detent.at {
   color: var(--ok);
@@ -3542,8 +3549,11 @@ body.mix-on #deckAHead {
   color: var(--text-dim);
 }
 #mixTempoNow {
+  /* fixed for the same reason as the detents above - it counts through a ramp, one frame per
+     100ms, and every digit it gains or loses would otherwise shove the desk */
   font-family: var(--mono);
-  min-width: 62px;
+  font-variant-numeric: tabular-nums;
+  width: 66px;
   text-align: right;
 }
 #mixTempoSecs {
@@ -3638,6 +3648,17 @@ body.mix-on #deckAHead {
 .song-ctl-gap {
   flex: 1;
 }
+/* A hairline between control groups (cue | platter), where a flex gap would push them apart. */
+.song-ctl-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+}
+/* While the cue is HELD (the preview is running) this wears the `held` state the platter
+   buttons already have; the marker on the two waveforms is the other half of the feedback. */
+.song-cue {
+  min-width: 40px;
+}
 .song-bpm-label {
   font-size: 11px;
   color: var(--text-dim);
@@ -3707,6 +3728,20 @@ body.mix-on #deckAHead {
   justify-content: space-between;
   gap: 4px;
   padding: 2px 6px;
+}
+/* One row of the knob column. Most rows hold a single knob; the filter shares its row with its
+   resonance, which keeps the column (and so the whole strip's height) exactly as tall as it was
+   when the filter stood alone. Deck A's row reverses so the pair mirrors about the midline like
+   everything else on the desk - and so the FILTER is the inboard knob on both sides, nearest the
+   hand resting at the crossfader. Resonance is set once a track; the filter is ridden. */
+.mix-knob-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+}
+#mixKnobsA .mix-knob-row {
+  flex-direction: row-reverse;
 }
 .mix-knob-wrap {
   display: flex;

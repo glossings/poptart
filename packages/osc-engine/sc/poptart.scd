@@ -244,14 +244,14 @@ buildTrackDef = { |key|
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
-        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
+        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
         var sig = Silent.ar(2);
         var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
         var mid, side; // the channel strip's mid/side pair (see the width control below)
-        var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv; // the DJ stage (see below)
+        var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv, djq; // the DJ stage (see below)
         maxSlots.do { |i|
             if (i == 0) {
                 // The instrument slot's output, plus whatever the track's sample synths wrote
@@ -319,13 +319,14 @@ buildTrackDef = { |key|
         // what it makes. Not lagged either: the tap only switches while the mixer opens/closes.
         Out.ar(mixOut, sig * mixSend);
         // DJ stage (performance mixing - see TODO.md): trim -> 3-band isolator EQ -> one-knob
-        // filter -> fader x deck gain, applied ONLY to the direct output path below. The sends
-        // and taps above stay pre-DJ-stage deliberately: every routed path ends at some track's
-        // own output (so a crossfade applies each deck's gain exactly once, never squared through
-        // a bus), a bounce records what the SONG makes, and the ctrl+g mixer keeps metering the
-        // channel strip its faders control. All seven controls are channel controls (pseudo-slot
-        // -1) like gain/pan: settable via setParam, modulatable via the slot -1 LFO/env path,
-        // neutral by default so a track sounds identical until a mix session touches them.
+        // filter (cutoff + its own resonance) -> fader x deck gain, applied ONLY to the direct
+        // output path below. The sends and taps above stay pre-DJ-stage deliberately: every routed
+        // path ends at some track's own output (so a crossfade applies each deck's gain exactly
+        // once, never squared through a bus), a bounce records what the SONG makes, and the
+        // ctrl+g mixer keeps metering the channel strip its faders control. All eight controls
+        // are channel controls (pseudo-slot -1) like gain/pan: settable via setParam, modulatable
+        // via the slot -1 LFO/env path, neutral by default so a track sounds identical until a
+        // mix session touches them.
         //
         // The EQ is a subtraction isolator: lo and hi are pulled out with cascaded filters and
         // the mid is what remains (live - lo - hi), so at neutral (1/1/1) the bands sum back to
@@ -341,14 +342,29 @@ buildTrackDef = { |key|
         live = (djLow * eqlo.lag(0.08).clip(0, 2))
             + (djMid * eqmid.lag(0.08).clip(0, 2))
             + (djHigh * eqhi.lag(0.08).clip(0, 2));
-        // One-knob filter: 0 is untouched (crossfaded out below, so center is bit-exact), negative
-        // sweeps a low-pass down from 18 kHz toward 20 Hz, positive sweeps a high-pass up from
-        // 20 Hz toward 18 kHz - both exponential, with a touch of resonance for the classic move.
+        // One-knob filter: `djf` 0 is untouched (crossfaded out below, so center is bit-exact),
+        // negative sweeps a low-pass down from 18 kHz toward 20 Hz, positive sweeps a high-pass up
+        // from 20 Hz toward 18 kHz - both exponential.
         // 18 kHz cap because near-Nyquist biquads misbehave; the crossfade hides the parked ends.
+        //
+        // `djf` is CUTOFF ONLY. Resonance is its own control (`djres`, 0..1, neutral 0), which is
+        // the arrangement performance filters converge on for a reason: how far you have swept and
+        // how much the filter whistles are separate musical decisions, and a filter that couples
+        // them cannot be asked for a deep sweep that stays polite. Tying rq to travel also puts
+        // the loudest resonant peak at exactly the end of the throw, where the sweep is already
+        // at its most extreme - which is how a fixed-resonance filter earns its reputation for
+        // sending levels through the roof at the top of the knob. Neutral 0 means a plain
+        // 2-pole sweep out of the box; the whistle is opt-in and always retreatable.
+        //
+        // Both filters share the one rq. The parked side sits at its 18 kHz / 20 Hz end where
+        // resonance would put a peak at the very edge of the band - but the crossfade below is
+        // what hides that end, so nothing is audible from it.
         djv = djf.lag(0.15).clip(-1, 1);
         djLpf = (18000 * (900 ** djv.min(0))).clip(20, 18000); // -1 -> 20 Hz, 0 -> open
         djHpf = (20 * (900 ** djv.max(0))).clip(20, 18000); // 0 -> open, 1 -> 18 kHz
-        djWet = RHPF.ar(RLPF.ar(live, djLpf, 0.7), djHpf, 0.7);
+        // rq is 1/Q: 1 is a flat 2-pole, 0.38 is Q ~2.6 (about +8 dB at the corner) at full res.
+        djq = 1 - (0.62 * djres.lag(0.08).clip(0, 1));
+        djWet = RHPF.ar(RLPF.ar(live, djLpf, djq), djHpf, djq);
         live = LinXFade2.ar(live, djWet, ((djv.abs > 0.005) * 2 - 1).lag(0.05));
         // Headphone cue: post-EQ/filter, PRE fader and crossfader - the DJ hears the queued
         // deck at full level whatever the desk is doing. Compiled in only when the engine
@@ -372,7 +388,7 @@ buildTrackDef = { |key|
 
 // Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
 // unity gain, center pan, first output pair - and for the DJ stage, unity trim/bands/fader/deck
-// (djf's neutral is 0, the filter's center detent).
+// (djf's neutral is 0, the filter's center detent; djres's is 0, no resonance).
 channelDefault = { |name|
     if ((name == "gain") or: { name == "out" } or: { name == "dry" } or: { name == "width" }
         or: { name == "trim" } or: { name == "fader" } or: { name == "deck" }

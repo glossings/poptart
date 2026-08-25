@@ -374,6 +374,12 @@ document.addEventListener('keydown', (e) => {
   } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
     e.preventDefault();
     stepDeckBQueue(); // mix mode: load the active set's next song into deck B
+  } else if (e.key.toLowerCase() === 'c' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
+    && songCueTarget(e)) {
+    // Ctrl+C is the CUE button, held until the key comes up. Ctrl specifically, and only where
+    // the gesture has a target that isn't someone trying to copy - Cmd+C is never touched.
+    e.preventDefault();
+    if (!e.repeat) songCueKeyDown(e);
   } else if (e.key.toLowerCase() === 's') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
     if (e.shiftKey) savePatternFileAs();
@@ -13687,7 +13693,7 @@ let deckFileItems = new Map(); // deck picker option value ('file:<path>') -> it
 
 const mixStripEl = document.getElementById('mixStrip');
 const deckBPaneEl = document.getElementById('deckBPane');
-const MIX_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1 };
+const MIX_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1 };
 
 // One POST per ~50ms however fast the sliders stream: each control keeps only its latest value,
 // and the batch goes out together (the crossfader is two targets in one).
@@ -14115,6 +14121,7 @@ function songThemeColors() {
     dim: css.getPropertyValue('--border').trim() || '#444',
     text: css.getPropertyValue('--text-dim').trim() || '#888',
     bg: css.getPropertyValue('--bg-panel').trim() || '#111',
+    warn: css.getPropertyValue('--warn').trim() || '#d29922',
   };
 }
 
@@ -14152,6 +14159,7 @@ function makeSongPane(deck) {
   const bpmEl = byId('songBpm');
   const syncEl = byId('songSync');
   const keylockEl = byId('songKeylock');
+  const cueEl = byId('songCue');
   const nudgeDnEl = byId('songNudgeDn');
   const nudgeUpEl = byId('songNudgeUp');
   const hostEl = deck === 'a' ? document.getElementById('editorPane') : deckBPaneEl;
@@ -14205,6 +14213,7 @@ function makeSongPane(deck) {
       bpm: sb.bpm ?? null,
       musicalKey: sb.musicalKey ?? null,
       anchorSec: sb.anchorSec ?? 0,
+      cueSec: sb.cueSec ?? 0,
       sync: !!sb.sync,
       keylock: !!sb.keylock,
       nudge: sb.nudge ?? 0,
@@ -14238,7 +14247,7 @@ function makeSongPane(deck) {
   /** A fresh /api/song/load response becomes this pane's song. */
   P.tookLoad = (res, filePath, title) => {
     P.song = { path: filePath, title, bpm: res.bpm ?? null };
-    P.mirror = { playing: false, posSec: 0, startSec: 0, rate: 1, duration: res.duration };
+    P.mirror = { playing: false, posSec: 0, startSec: 0, rate: 1, duration: res.duration, cueSec: 0 };
     detectSaid = null;
     P.open();
   };
@@ -14270,6 +14279,7 @@ function makeSongPane(deck) {
   };
 
   P.close = () => {
+    P.cueUp(); // a pane going away under a held cue would otherwise leave the deck previewing
     hostEl.classList.remove('song-on');
     paneEl.classList.add('hidden');
     wave = null;
@@ -14311,7 +14321,7 @@ function makeSongPane(deck) {
     const w = detailEl.clientWidth;
     const h = detailEl.clientHeight;
     ctx.clearRect(0, 0, w, h);
-    const { accent, dim, text } = songThemeColors();
+    const { accent, dim, text, warn } = songThemeColors();
     const mid = h / 2;
     const maxAmp = mid - 6;
     const pos = P.playheadNow();
@@ -14386,6 +14396,22 @@ function makeSongPane(deck) {
       }
     }
 
+    // The cue point: a marked line the playhead scrolls past, so where the CUE button will land
+    // is visible before it is pressed. Warn-coloured rather than accent - it must not read as
+    // another playhead - with a flag at the top the way a hardware waveform display marks it.
+    const cue = P.mirror?.cueSec ?? 0;
+    if (dur && cue >= t0 && cue <= t0 + zoomSec) {
+      const x = Math.round((cue - t0) * pxPerSec) + 0.5;
+      ctx.strokeStyle = warn;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.fillStyle = warn;
+      ctx.fillRect(x, 0, 6, 5);
+    }
+
     ctx.strokeStyle = accent;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -14402,7 +14428,7 @@ function makeSongPane(deck) {
     const w = overviewEl.clientWidth;
     const h = overviewEl.clientHeight;
     ctx.clearRect(0, 0, w, h);
-    const { accent, dim, bg } = songThemeColors();
+    const { accent, dim, bg, warn } = songThemeColors();
     if (!wave) {
       ctx.strokeStyle = dim;
       ctx.lineWidth = 1;
@@ -14428,6 +14454,16 @@ function makeSongPane(deck) {
     const px = (P.playheadNow() / dur) * w;
     ctx.fillStyle = rgbaFrom(ctx, bg, 0.55); // what's already played sits dimmed behind the playhead
     ctx.fillRect(0, 0, px, h);
+    const cue = P.mirror?.cueSec ?? 0;
+    if (cue > 0) { // the top needs no marker - that is where an untouched cue already is
+      const cx = Math.round((cue / dur) * w) + 0.5;
+      ctx.strokeStyle = warn;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx, 0);
+      ctx.lineTo(cx, h);
+      ctx.stroke();
+    }
     ctx.strokeStyle = accent;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -14570,6 +14606,40 @@ function makeSongPane(deck) {
     metaPost({ keylock: !P.mirror?.keylock }, (r) => `keylock ${r.keylock ? 'on - rate stretches time, not pitch' : 'off - back to repitch'}`);
   });
 
+  // --- the CUE gesture (the button here and Ctrl+C are the same press) ---
+  //
+  // Hold: preview from the cue point. Release: back onto it, paused. A press while the deck is
+  // PAUSED moves the cue point to the playhead first - park it and press, and that is home.
+  // The server owns all of that (see songCue there); this side owns the edges and the light.
+  //
+  // `held` is local truth, not read back off the mirror: the press's SSE echo may not have
+  // landed by the time the finger comes up, and a release that doesn't fire strands the deck
+  // playing. Every path out of a press goes through cueUp.
+  let cueHeld = false;
+  P.cueDown = () => {
+    if (!P.song || cueHeld) return;
+    cueHeld = true;
+    cueEl.classList.add('held');
+    api('POST', '/api/song/cue', { deck, hold: true }).catch((e) => {
+      cueHeld = false;
+      cueEl.classList.remove('held');
+      logLine(`${D} cue: ${e.message ?? String(e)}`, true);
+    });
+  };
+  P.cueUp = () => {
+    if (!cueHeld) return;
+    cueHeld = false;
+    cueEl.classList.remove('held');
+    api('POST', '/api/song/cue', { deck, hold: false })
+      .catch((e) => logLine(`${D} cue: ${e.message ?? String(e)}`, true));
+  };
+  cueEl.addEventListener('pointerdown', (e) => {
+    if (!P.song) return;
+    cueEl.setPointerCapture(e.pointerId); // the release counts wherever the finger ends up
+    P.cueDown();
+  });
+  for (const ev of ['pointerup', 'pointercancel']) cueEl.addEventListener(ev, () => P.cueUp());
+
   // The platter: hold to push/drag (release restores), click a jog to step one beat.
   function holdWire(btn, dir) {
     let holding = false; // local truth - the SSE echo of the press may not be back by release
@@ -14612,6 +14682,51 @@ function songActiveDeck() {
   for (const d of ['a', 'b']) if (songPanes[d].active && songPanes[d].song) return d;
   return null;
 }
+
+// --- Ctrl+C: the CUE button on the keyboard ---
+//
+// Same deck the other transport hotkeys aim at: the pane clicked last, or deck A when it holds
+// a file and nothing has been claimed. Held for as long as the key is, so it is the same
+// press-and-hold gesture the button is - which means the keyUP is what must never be missed.
+// It can go missing three ways, and all three land in songCueKeyUp: the C comes up, Ctrl comes
+// up first (browsers stop reporting the C in that state on some layouts), or the window loses
+// focus mid-hold.
+
+/**
+ * The deck Ctrl+C would cue right now, or null - which is also what gates the hotkey.
+ *
+ * Ctrl+C is copy everywhere else in the world, and unlike the other transport hotkeys nothing
+ * upstream claims it first (CodeMirror leaves copy to the browser, so `defaultPrevented` never
+ * saves us here). It stays copy whenever there is a selection to copy or the caret is in a text
+ * surface - deck B can be holding CODE while deck A holds the song, and taking the copy out of
+ * that editor would be indefensible. With nothing selected and no caret in text there is
+ * nothing to copy, so the key is free.
+ */
+function songCueTarget(e) {
+  if (!mixModeOn) return null;
+  if (e && (!(window.getSelection()?.isCollapsed ?? true)
+    || e.target?.closest?.('input, textarea, select, .CodeMirror, [contenteditable="true"]'))) return null;
+  return songActiveDeck() ?? (songPanes.a.song ? 'a' : null);
+}
+
+let songCueKeyDeck = null;
+function songCueKeyDown(e) {
+  if (songCueKeyDeck) return;
+  const deck = songCueTarget(e);
+  if (!deck) return;
+  songCueKeyDeck = deck;
+  songPanes[deck].cueDown();
+}
+function songCueKeyUp() {
+  if (!songCueKeyDeck) return;
+  const deck = songCueKeyDeck;
+  songCueKeyDeck = null;
+  songPanes[deck].cueUp();
+}
+document.addEventListener('keyup', (e) => {
+  if (e.key.toLowerCase() === 'c' || e.key === 'Control') songCueKeyUp();
+});
+window.addEventListener('blur', songCueKeyUp);
 
 // Both decks' halves of every desk frame.
 function songPaneSync(state) {
@@ -14690,7 +14805,7 @@ const MIX_TRACK_CONTROLS = [
 // own DJ stage, so multitrack outs still carry them per track engine-side); only the stem
 // mini-faders are per stem. `fader` here is the deck's CHANNEL fader (the long-throw one) -
 // server-side it folds into the deck gain (xf-curve x fader) and never touches the stems.
-const MIX_DECK_CONTROLS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'fader'];
+const MIX_DECK_CONTROLS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader'];
 const mixDeckCtl = (deck, ctl) => document.getElementById(
   `mix${ctl === 'djf' ? 'Djf' : ctl.charAt(0).toUpperCase() + ctl.slice(1)}${deck.toUpperCase()}`,
 );
@@ -14707,6 +14822,14 @@ const MIX_KNOB_DEFS = [
   ['eqmid', 'mid', 0, 2, 'mid (0 is a true kill) - drag up/down; double-click resets'],
   ['eqlo', 'low', 0, 2, 'low (0 is a true kill) - drag up/down; double-click resets'],
   ['djf', 'filter', -1, 1, 'one-knob filter: left sweeps a low-pass down, right a high-pass up; double-click resets'],
+  // Resonance is the filter's own control, not a function of how far the filter is swept: how
+  // deep the sweep goes and how much it whistles are separate decisions, and the loudest peak
+  // should not be forced on you at the end of the throw. Bottom of the range is a plain sweep.
+  //
+  // It rides BESIDE the filter rather than under it (the trailing flag): they are one filter,
+  // and the knob column is already what sets the whole strip's height - a sixth row would take
+  // that out of the editor for every DJ session, where the row has width to spare.
+  ['djres', 'res', 0, 1, "the filter's resonance - up for the whistle, off for a plain sweep; double-click resets", true],
 ];
 
 function mixMakeKnob(id, min, max, neutral, title) {
@@ -14750,7 +14873,8 @@ function mixMakeKnob(id, min, max, neutral, title) {
 
 for (const deck of ['a', 'b']) {
   const host = document.getElementById(deck === 'a' ? 'mixKnobsA' : 'mixKnobsB');
-  for (const [ctl, label, min, max, title] of MIX_KNOB_DEFS) {
+  let row = null; // the row being filled - a def flagged `pairWithPrev` joins it instead of starting one
+  for (const [ctl, label, min, max, title, pairWithPrev] of MIX_KNOB_DEFS) {
     const wrap = document.createElement('div');
     wrap.className = 'mix-knob-wrap';
     const id = `mix${ctl === 'djf' ? 'Djf' : ctl.charAt(0).toUpperCase() + ctl.slice(1)}${deck.toUpperCase()}`;
@@ -14758,7 +14882,12 @@ for (const deck of ['a', 'b']) {
     const lab = document.createElement('span');
     lab.textContent = label;
     wrap.append(knob, lab);
-    host.appendChild(wrap);
+    if (!(pairWithPrev && row)) {
+      row = document.createElement('div');
+      row.className = 'mix-knob-row';
+      host.appendChild(row);
+    }
+    row.appendChild(wrap);
   }
 }
 
@@ -15073,7 +15202,9 @@ function mixTempoRender(state) {
   for (const deck of ['a', 'b']) {
     const btn = document.getElementById(deck === 'a' ? 'mixTempoA' : 'mixTempoB');
     const bpm = state.deckBpm[deck];
-    btn.textContent = bpm != null ? `${bpm}` : '—';
+    // One decimal at most: a detected bpm can carry float noise, and the button is fixed-width
+    // (see .mix-tempo-detent - the center must not resize, or the whole desk shifts).
+    btn.textContent = bpm != null ? bpm.toFixed(1).replace(/\.0$/, '') : '—';
     btn.disabled = bpm == null;
     btn.classList.toggle('at', bpm != null && state.tempo.master != null
       && Math.abs(state.tempo.master - bpm) < 0.05);
