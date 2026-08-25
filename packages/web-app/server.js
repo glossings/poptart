@@ -643,6 +643,11 @@ function mixBirthFor(key) {
   const birth = {};
   for (const [name, value] of mixState.perDeck[deckOfKey(key)] ?? []) birth[name] = value;
   for (const [name, value] of mixState.perTrack.get(key) ?? []) birth[name] = value;
+  // The crossfader's deck gains enter perDeck only when the fader MOVES - after eject/complete
+  // (or on a fresh desk) the maps are empty while xf sits at hard-A, and a track born then
+  // would wear the synthdef's deck=1: wide open on the silent side (reported 2026-08-25, a
+  // deck-b song audible through a closed crossfader). Derive the gain when no gesture has.
+  if (!('deck' in birth)) birth.deck = deckXfGain(deckOfKey(key)) * mixState.faders[deckOfKey(key)];
   // Which deck meter bus the synth sums its pre-fader signal into (see the scd's deckMeterBus)
   // - a birth arg like the rest, so a stem born mid-set meters from its first sample.
   birth.mdeck = deckOfKey(key) === 'b' ? 1 : 0;
@@ -3197,6 +3202,7 @@ const routes = {
       const otherPlaying = [...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)
         || ['a', 'b'].some((d) => d !== deck && songDecks[d]?.playing);
       if (otherPlaying) {
+        mixNotify(); // the paused song's pane must hear playing:false, or its playhead sweeps on
         return { status: 200, body: { deck, transport: null } };
       }
     }
@@ -3211,6 +3217,7 @@ const routes = {
     // Now that nothing is playing, any plugin edit held back during the performance is free to
     // capture (the suspension it costs has nothing left to interrupt).
     flushPluginCaptures();
+    mixNotify(); // both decks' songs just paused - the panes' playheads follow the SSE frame
     return { status: 200, body: { transport: transport?.snapshot() ?? null } };
   },
 

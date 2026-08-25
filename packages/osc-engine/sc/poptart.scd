@@ -162,6 +162,9 @@ var deckMeterBus, deckMeterSynths;
 // makeBundle with a timestamp only when there is real lead - see the definition by the events
 // section.
 var bundleNow;
+// Bundle time for a message aimed at a song-deck player - clamped so it can never land before
+// the player's (possibly future, cycle-quantized) spawn. See the song decks section.
+var songLat;
 
 // Boot-progress checkpoint ("poptart: booting scsynth" below is the other one):
 // diagnoseSclangOutput in ../index.js matches these exact strings to localize a boot that
@@ -2195,6 +2198,16 @@ OSCdef(\poptartPlaySample, { |msg|
 // track's input bus. Node owns all the musical bookkeeping (position, quantized starts, the
 // end-of-file pause) - these handlers only hold the buffer and the synth.
 
+// A quantized start spawns its player in a FUTURE-timestamped bundle - until that moment the
+// node does not exist on scsynth, and any message aimed at it earlier fails ("Node not found")
+// while the spawn then lands anyway: an unpaused, unreleased orphan layered under the next
+// player (reported 2026-08-25 - re-cueing before the boundary stacked copies of the song).
+// So every message at a player goes through this clamp: no earlier than just after the spawn
+// time songStart recorded (0.02 covers the clock jitter between recording and comparing).
+songLat = { |song, latency|
+    max(latency ? 0, (song[\spawnUntil] ? 0) - Main.elapsedTime + 0.02);
+};
+
 // Load (or replace) a track's song: [requestId, key, path]. Replies with the buffer's shape so
 // Node can compute duration and schedule ends. Any playing synth for the old file is freed
 // first - a load IS a stop.
@@ -2202,7 +2215,15 @@ OSCdef(\poptartSongLoad, { |msg|
     var requestId = msg[1], key = msg[2].asSymbol, path = msg[3].asString;
     fork {
         var old = songs[key], buf, done = false, tries = 0;
-        old !? { old[\synth] !? { |s| s.free }; old[\posFunc] !? { |f| f.free }; old[\buf] !? { |b| b.free }; songs[key] = nil };
+        old !? {
+            var lat = songLat.(old, 0);
+            // Released (declicked) rather than hard-freed, at the clamped time - the old player
+            // may be a pending quantized start. Its buffer outlives the release fade.
+            old[\synth] !? { |s| bundleNow.(lat, { s.set(\gate, 0) }) };
+            old[\posFunc] !? { |f| f.free };
+            songs[key] = nil;
+            old[\buf] !? { |b| fork { (lat + 0.2).wait; b.free } };
+        };
         try {
             buf = Buffer.read(server, path, action: { done = true });
         } { |err|
@@ -2240,8 +2261,11 @@ OSCdef(\poptartSongStart, { |msg|
         var buf = song[\buf];
         var frame = (posSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
         var defName = ((if (warp > 0) { "poptart_songwarp_" } { "poptart_song_" }) ++ buf.numChannels).asSymbol;
-        song[\synth] !? { |s| s.set(\gate, 0) }; // released, not freed: let the old one fade out
+        // The old player releases AT THE NEW START (clamped past its own spawn - it may itself
+        // still be a pending quantized start): released, not freed, so it fades under the new one.
+        song[\synth] !? { |s| bundleNow.(songLat.(song, latency), { s.set(\gate, 0) }) };
         song[\posFunc] !? { |f| f.free };
+        song[\spawnUntil] = Main.elapsedTime + max(latency ? 0, 0);
         bundleNow.(latency, {
             song[\synth] = Synth(defName,
                 [\out, track[\inBus].index, \buf, buf, \rate, rate, \run, 1,
@@ -2262,7 +2286,7 @@ OSCdef(\poptartSongSet, { |msg|
     var key = msg[1].asSymbol, name = msg[2].asSymbol;
     var value = msg[3].asFloat, latency = msg[4].asFloat;
     songs[key] !? { |song|
-        song[\synth] !? { |s| bundleNow.(latency, { s.set(name, value) }) };
+        song[\synth] !? { |s| bundleNow.(songLat.(song, latency), { s.set(name, value) }) };
     };
 }, '/poptart/songSet');
 
@@ -2273,7 +2297,7 @@ OSCdef(\poptartSongSeek, { |msg|
     songs[key] !? { |song|
         var buf = song[\buf];
         var frame = (posSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
-        song[\synth] !? { |s| bundleNow.(latency, { s.set(\seekFrame, frame, \t_seek, 1) }) };
+        song[\synth] !? { |s| bundleNow.(songLat.(song, latency), { s.set(\seekFrame, frame, \t_seek, 1) }) };
     };
 }, '/poptart/songSeek');
 
@@ -2282,7 +2306,7 @@ OSCdef(\poptartSongSeek, { |msg|
 OSCdef(\poptartSongStop, { |msg|
     var key = msg[1].asSymbol, latency = msg[2].asFloat;
     songs[key] !? { |song|
-        song[\synth] !? { |s| bundleNow.(latency, { s.set(\gate, 0) }) };
+        song[\synth] !? { |s| bundleNow.(songLat.(song, latency), { s.set(\gate, 0) }) };
         song[\synth] = nil;
         song[\posFunc] !? { |f| f.free };
         song[\posFunc] = nil;
@@ -2294,10 +2318,13 @@ OSCdef(\poptartSongStop, { |msg|
 OSCdef(\poptartSongFree, { |msg|
     var key = msg[1].asSymbol;
     songs[key] !? { |song|
-        song[\synth] !? { |s| s.set(\gate, 0) };
+        var lat = songLat.(song, 0);
+        song[\synth] !? { |s| bundleNow.(lat, { s.set(\gate, 0) }) };
         song[\posFunc] !? { |f| f.free };
-        song[\buf] !? { |b| b.free };
         songs[key] = nil;
+        // The buffer waits out the clamped release fade - freeing it under a player still
+        // fading (or still pending its spawn) would leave that player reading a dead buffer.
+        song[\buf] !? { |b| fork { (lat + 0.2).wait; b.free } };
     };
 }, '/poptart/songFree');
 
