@@ -75,7 +75,7 @@ function extractDestroyTrack() {
 const DEFAULT_CASES = [
   // The DJ stage's controls: unity everywhere, except the filter knob's center detent at 0.
   ['trim', '1'], ['eqlo', '1'], ['eqmid', '1'], ['eqhi', '1'],
-  ['fader', '1'], ['deck', '1'], ['djf', '0'],
+  ['fader', '1'], ['deck', '1'], ['djf', '0'], ['cue', '0'],
   // And the pre-existing strip, unchanged.
   ['gain', '1'], ['out', '1'], ['dry', '1'], ['width', '1'], ['pan', '0'], ['bassmono', '0'],
 ];
@@ -88,6 +88,7 @@ var channelDefault, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks;
 var birthParse;
 var waitForLoad, flushNotes, clearPending, now, fired;
+var cueOffset; // nil = the no-cue build; reassigned before the cue-armed build below
 var statePending = IdentityDictionary.new, noteQueues = IdentityDictionary.new;
 var stateWaitMax = 0.3;
 var slotKey = { |k, slot| (k ++ "_" ++ slot).asSymbol };
@@ -98,6 +99,13 @@ ${extractChannelDefault()}
 // extension this fails to COMPILE ("Class not defined"), which the test reads as a skip.
 def = ${extractTrackDef()}
 ("DEF-OK<" ++ def.name ++ ">").postln;
+// And once more with the headphone-cue pair armed (phase 7): the cue send UGens only exist in
+// this build, so a mistake in them would otherwise pass every no-cue machine's run.
+cueOffset = 2;
+key = "probecue";
+def = ${extractTrackDef()}
+("DEF-CUE-OK<" ++ def.name ++ ">").postln;
+key = "probe";
 ${extractDestroyTrack()}
 ("DESTROY-OK<" ++ destroyTrack.isKindOf(Function) ++ ">").postln;
 birthParse = { |msg|
@@ -156,6 +164,7 @@ test('the track SynthDef builds with the DJ stage, and its neutrals are really n
     return;
   }
   assert.match(out, /^DEF-OK<poptart_probe_probe>$/m, `the SynthDef did not build:\n${out}`);
+  assert.match(out, /^DEF-CUE-OK<poptart_probe_probecue>$/m, `the SynthDef did not build with the cue send armed:\n${out}`);
   assert.match(out, /^DESTROY-OK<true>$/m, `the destroyTrack closure did not compile:\n${out}`);
   assert.match(out, /^BIRTH<\[ ?deck, 0\.0, fader, 0\.5 ?\]>$/m,
     'createTrack must parse trailing name/value pairs into Synth birth args');

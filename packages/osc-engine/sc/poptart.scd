@@ -45,6 +45,11 @@ var playChannels = ("POPTART_PLAY_CHANNELS".getenv ? outChannels.asString).asInt
 // inDevice == outDevice (set below) scsynth opens one device and will fail to boot if it's told
 // to open more input channels than the device has.
 var inChannels = ("POPTART_IN_CHANNELS".getenv ? "0").asInteger;
+// Headphone cue (the performance mixer, phase 7): the first output channel of the cue pair
+// inside the opened (combined) device, or nil for no cue. Set only when web-app booted the
+// engine on an aggregate that really contains the chosen cue device; the track SynthDefs
+// compile their cue send only when it is here.
+var cueOffset = "POPTART_CUE_OFFSET".getenv !? { |v| v.asInteger };
 // Plugin directories to scan. Priority: POPTART_VST_DIRS (colon-separated) if set, else
 // ~/.poptart/plugins if it exists (a folder of symlinks to just the plugins being played),
 // else VSTPlugin's standard locations. The curated folder stays the default because it keeps
@@ -223,7 +228,7 @@ buildTrackDef = { |key|
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
-        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, fader = 1, deck = 1,
+        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, fader = 1, deck = 1, cue = 0,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
@@ -329,6 +334,12 @@ buildTrackDef = { |key|
         djHpf = (20 * (900 ** djv.max(0))).clip(20, 18000); // 0 -> open, 1 -> 18 kHz
         djWet = RHPF.ar(RLPF.ar(live, djLpf, 0.7), djHpf, 0.7);
         live = LinXFade2.ar(live, djWet, ((djv.abs > 0.005) * 2 - 1).lag(0.05));
+        // Headphone cue: post-EQ/filter, PRE fader and crossfader - the DJ hears the queued
+        // deck at full level whatever the desk is doing. Compiled in only when the engine
+        // booted with a cue pair (cueOffset from web-app's settings; an engine-restart choice).
+        cueOffset !? {
+            Out.ar(cueOffset, live * cue.lag(0.05).clip(0, 1));
+        };
         live = live * fader.lag(0.08).clip(0, 1) * deck.lag(0.08).clip(0, 1);
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
         // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by

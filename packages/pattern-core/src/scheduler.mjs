@@ -721,10 +721,19 @@ export class Scheduler {
     }
   }
 
-  start() {
+  /**
+   * `fromCycle` is where the schedule window OPENS - pass the transport position from before
+   * the caller's own work (web-app captures it before un-freezing the clock and evaluating).
+   * Without it, the window opens wherever the clock has crept to by now, and everything at
+   * exactly the boundary is quietly dropped: play-from-stop started the clock a few ms before
+   * the schedulers, so the events at cycle 0.0 - the downbeat, and a `.preset()`'s FIRST
+   * application (leaving the synth on init until its second onset a whole cycle later) - fell
+   * just behind the window (found 2026-08-24).
+   */
+  start(fromCycle = null) {
     if (this._running) return;
     this._running = true;
-    this._scheduledUntilCycle = this.transport.cycleAt(this.engine.getTime());
+    this._scheduledUntilCycle = fromCycle ?? this.transport.cycleAt(this.engine.getTime());
     this._timer = setInterval(() => this._tick(), POLL_INTERVAL_MS);
   }
 

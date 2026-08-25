@@ -194,10 +194,7 @@ no completion notes.
     out - note feed, param gestures, pluginEdited, mixer meters), recordings filenames stay
     label-named. This is what makes complete-mix pure re-labeling with zero engine churn.
 
-[ ] Mixing polish - deck B playback highlighting (the grid machinery is single-pane today);
-    MIDI-learn for the mix strip's controls (crossfader first) via the existing midi.mjs CC
-    path; a wip autosave for deck B edits (today its edits live only in the pane).
-
-[ ] Mixing phase 7 - headphone cue: aggregate main interface + monitor device (audio-devices.js
-    machinery, outputs this time), cue bus routes the queued deck pre-fader to the extra output
-    pair. A before-the-gig settings choice (engine reboot to change devices), say so in the UI.
+[ ] Mix MIDI-learn, phase 2 ideas (phase 1 - crossfader + deck controls via settings.mixMidi -
+    shipped 2026-08-24): per-stem faders (needs stable addressing across songs - maybe "the Nth
+    stem of deck B"), buttons for gates/swap/tempo detents (CC 127/0 edges), and a MIDI map
+    panel showing what is bound where (today it's the console lines + settings.json).

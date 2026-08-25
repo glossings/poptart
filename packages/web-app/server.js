@@ -122,11 +122,12 @@ function noteProtoOwnership(deck) {
 // arrive SILENT: the mix UI sets deck b's `deck` gain to 0 before its first eval, and every
 // track that eval births wears that gain before its scheduler starts.
 // ---------------------------------------------------------------------------------------------
-const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1, deck: 1 };
+const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1, deck: 1, cue: 0 };
 const mixState = {
   swap: false, // swap mode: gating a stem in throws the SAME-NAMED stem on the other deck out
   perDeck: { a: new Map(), b: new Map() }, // deck-broadcast values (the crossfader's `deck`, a deck-wide djf)
   perTrack: new Map(), // key -> Map(name -> value): faders, per-track EQ, trim
+  xf: -1, // crossfader position (-1 = hard at deck A) - the source of the two `deck` gains
   // Tempo migration (phase 5): once the mix desk touches the clock (/api/mix/tempo), this holds
   // the bpm it asked for and the MAIN deck's setbpm stops driving the transport (it still
   // records the song's native tempo) - otherwise re-evaling deck a mid-migration would snap the
@@ -134,6 +135,50 @@ const mixState = {
   // by complete (the promoted song's own setbpm takes over on its promotion re-eval).
   tempoOverride: null,
 };
+
+// --- mix-strip MIDI (learn + drive) ---
+//
+// A hardware knob per desk control, the crossfader first: `settings.mixMidi` maps a target name
+// to the { device, channel, cc } that drives it, persisted in settings.json like everything
+// else. Learning is a long-poll: /api/mix/midilearn arms a target, the next CC message anywhere
+// binds it. A mapped (or learning) CC is CONSUMED - a knob given to the desk must not also
+// drive a midicc() in song code.
+const MIX_MIDI_TARGETS = new Set(['xf',
+  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf'].map((c) => `${d}:${c}`))]);
+let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
+
+// A CC's 0..1 into the target's own range: two-sided controls center at 0, gains at unity.
+function mixMidiValue(target, v01) {
+  const ctl = target === 'xf' ? 'xf' : target.slice(2);
+  if (ctl === 'xf' || ctl === 'djf') return v01 * 2 - 1;
+  if (ctl === 'fader') return v01;
+  return v01 * 2; // trim and the EQ bands: 0..2, unity at center
+}
+
+function handleMixMidi(device, channel, cc, value) {
+  if (mixMidiLearn) {
+    const { target, finish, timer } = mixMidiLearn;
+    mixMidiLearn = null;
+    clearTimeout(timer);
+    settings.mixMidi = { ...(settings.mixMidi ?? {}), [target]: { device, channel, cc } };
+    saveSettings();
+    finish({ device, channel, cc });
+    return true;
+  }
+  for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
+    if (m && m.device === device && m.channel === channel && m.cc === cc) {
+      const name = target === 'xf' ? 'xf' : target.slice(2);
+      const t = target === 'xf'
+        ? { name: 'xf', value: mixMidiValue(target, value) }
+        : { deck: target[0], name, value: mixMidiValue(target, value) };
+      try {
+        applyMixTargets([t]);
+      } catch { /* engine between restarts - the knob just does nothing */ }
+      return true;
+    }
+  }
+  return false;
+}
 
 // Everything the mix session holds for one (possibly just-created) track, applied engine-side.
 // Deck-broadcast values first, then the track's own, so a per-track value wins.
@@ -145,6 +190,49 @@ function applyMixTo(key) {
     if (!per?.has(name)) engine.setParam(tid, -1, name, value, 0);
   }
   for (const [name, value] of per ?? []) engine.setParam(tid, -1, name, value, 0);
+}
+
+// The crossfader as ONE control, server-side: position -1..1 through the transition
+// (constant-gain) curve - each deck holds FULL from its end through CENTER and only cuts on the
+// far half, so at center both decks are wide open and the per-stem gates decide what sounds
+// (the swap-mode workflow), while a full sweep is still a smooth fade. Server-side so the UI
+// slider and a learned MIDI knob drive the same implementation (see /api/mix/set and mixMidi).
+const xfGain = (u) => Math.round(Math.sin((Math.PI / 2) * Math.min(1, u * 2)) * 1000) / 1000;
+
+// One mix-desk gesture, shared by the HTTP endpoint and the MIDI path. A target is
+// { name, value } plus `deck` (broadcast) or `key` (one track); name 'xf' is the crossfader
+// pseudo-control, unpacked here into both decks' `deck` gains.
+function applyMixTargets(targets) {
+  for (const t of targets) {
+    const name = String(t.name ?? '');
+    const value = Number(t.value);
+    if (!Number.isFinite(value)) throw new Error(`mix/set ${name}: value must be a number`);
+    if (name === 'xf') {
+      const x = Math.min(1, Math.max(-1, value));
+      mixState.xf = x;
+      applyMixTargets([
+        { deck: 'a', name: 'deck', value: xfGain(1 - (x + 1) / 2) },
+        { deck: 'b', name: 'deck', value: xfGain((x + 1) / 2) },
+      ]);
+      continue;
+    }
+    if (!(name in DJ_NEUTRAL)) throw new Error(`"${name}" is not a mix control`);
+    if (t.deck === 'a' || t.deck === 'b') {
+      mixState.perDeck[t.deck].set(name, value);
+      for (const key of schedulers.keys()) {
+        if (deckOfKey(key) === t.deck && !mixState.perTrack.get(key)?.has(name)) {
+          engine.setParam(engineTrack(key), -1, name, value, 0);
+        }
+      }
+    } else {
+      const key = String(t.key ?? '');
+      if (!schedulers.has(key)) throw new Error(`mix/set: no playing track "${key}"`);
+      let per = mixState.perTrack.get(key);
+      if (!per) mixState.perTrack.set(key, (per = new Map()));
+      per.set(name, value);
+      engine.setParam(engineTrack(key), -1, name, value, 0);
+    }
+  }
 }
 
 // The merged desk view for one track (deck-broadcast under its own values), as a plain object:
@@ -341,8 +429,34 @@ function plainOutputDevice(devices) {
 // extra inputs have been combined in. Reading the aggregate's live membership is the point: an
 // aggregate that has lost the device we play through is not a playback path, however happily it
 // opens (see audio-selection.js).
+// The cue/monitor device (the headphone out - mixing phase 7), stored as { uid, name }. It
+// rides the SAME aggregate the extra input devices do - one more member, appended last so the
+// main outs' channel numbers are untouched - and the cue pair's offset inside the combined
+// device is read back from its layout at engine boot (see loadEngine). Changing it is a
+// settings action with an engine restart, like every other device choice.
+const cueDevice = () => settings.audioCueDevice ?? null;
+
+// Everything the aggregate must contain beyond the output device: the extra inputs, in their
+// saved order (input() offsets follow it), then the cue device.
+function aggregateExtraUids() {
+  const uids = [...(settings.audioInputDevices ?? [])];
+  const cue = cueDevice();
+  if (cue?.uid && !uids.includes(cue.uid)) uids.push(cue.uid);
+  return uids;
+}
+
+// Make the aggregate match what is selected AND connected right now (extra inputs + cue),
+// built around the current output device. The one place the member list is computed, so the
+// cue device can never be forgotten by one caller and kept by another.
+function syncAggregateNow() {
+  const uids = aggregateExtraUids();
+  const { present } = audioSelection.splitConnected(uids, audioDevices.listDevices().map((d) => d.uid));
+  syncAggregate(present);
+  return { uids, present };
+}
+
 function deviceToOpen(devices) {
-  const inputUids = settings.audioInputDevices ?? [];
+  const inputUids = aggregateExtraUids();
   const { device, warning } = audioSelection.deviceToOpen({
     devices,
     wanted: settings.audioOutputDevice ?? null,
@@ -419,9 +533,9 @@ function inputDeviceName(uid) {
  * So the aggregate follows the hardware and the selection keeps the intent.
  */
 function healAggregate() {
-  const uids = settings.audioInputDevices ?? [];
+  const uids = aggregateExtraUids();
   if (!uids.length || !audioDevices.helperAvailable()) return;
-  const { present } = splitSelectedInputs();
+  const { present } = audioSelection.splitConnected(uids, audioDevices.listDevices().map((d) => d.uid));
   const reason = audioSelection.aggregateStaleReason({
     layout: audioDevices.deviceLayout(audioDevices.AGGREGATE_UID),
     outUid: plainOutputDevice(audioOutputDevices())?.uid ?? null,
@@ -456,6 +570,9 @@ function audioDeviceWarning() {
 // The device scsynth actually opened, as reported by audioOutputDevices() - set by loadEngine on
 // every start and read by wireEngine to tell pattern-core which input channels input() can address.
 let activeAudioDevice = null;
+// Non-null when the engine booted with a headphone-cue pair: { offset, name }. `offset` is the
+// pair's first channel inside the combined device - what the track SynthDefs' cue send writes to.
+let activeCue = null;
 
 async function loadEngine() {
   try {
@@ -469,6 +586,32 @@ async function loadEngine() {
     const devices = audioOutputDevices();
     const active = deviceToOpen(devices);
     activeAudioDevice = active ?? null;
+    // The headphone cue is real only when the aggregate is what's being opened AND the cue
+    // device is actually inside it - its pair starts after every member before it. Anything
+    // else (helper missing, cue unplugged, aggregate fallen back) means no cue this boot, said
+    // out loud: silent headphones at a gig should never need debugging.
+    activeCue = null;
+    const cueWanted = cueDevice();
+    if (cueWanted?.uid && active?.uid === audioDevices.AGGREGATE_UID) {
+      const layout = audioDevices.deviceLayout(audioDevices.AGGREGATE_UID);
+      let offset = 0;
+      let found = false;
+      for (const d of layout?.subDevices ?? []) {
+        if (d.uid === cueWanted.uid) {
+          found = true;
+          break;
+        }
+        offset += d.outChannels ?? 0;
+      }
+      if (found) activeCue = { offset, name: cueWanted.name };
+      else {
+        // eslint-disable-next-line no-console
+        console.warn(`[poptart] cue device "${cueWanted.name}" is not in the combined device - no headphone cue this boot (is it plugged in?)`);
+      }
+    } else if (cueWanted?.uid) {
+      // eslint-disable-next-line no-console
+      console.warn('[poptart] a cue device is configured but the engine is not opening the combined device - no headphone cue this boot');
+    }
     // Pass the device name only when it isn't the system default: naming it pins inDevice too
     // (see poptart.scd), which is exactly what we want for a chosen device or the aggregate.
     const pinned = active && !active.isDefault ? active.name : null;
@@ -482,6 +625,7 @@ async function loadEngine() {
         cap: settings.audioOutputChannels ?? null,
       }),
       inChannels: active?.inChannels ?? 0,
+      cueOffset: activeCue?.offset ?? null,
     });
     await e.start(48000, 256);
     engineError = null;
@@ -596,7 +740,12 @@ function wireEngine() {
   syncVstTransport(); // a fresh sclang needs the surviving transport's tempo, not 120
   // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
   // live-value store - what a Tier-1 midicc() signal samples.
-  engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
+  engine.onMidiIn = (device, channel, cc, value) => {
+    if (handleMixMidi(device, channel, cc, value)) return; // a desk knob is the desk's alone
+    patternCore.feedMidiCC(device, channel, cc, value);
+  };
+  // Learned desk knobs must work without any midicc() in the song to enable MIDI for them.
+  if (Object.keys(settings.mixMidi ?? {}).length) engine.enableMidi();
   // Live note edges from midikeys() routes - logged for the MIDI recorder and the roll's capture.
   engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackLabel(trackId), note, vel, isOn);
   // Plugin-GUI knob gestures - what conf capture writes into the code.
@@ -2378,6 +2527,12 @@ const routes = {
     // pattern comes in from the top of the grid; mid-performance evals are a no-op here.
     // `start: false` (the editor's "Update" button) evaluates without touching the clock: a
     // stopped clock stays frozen (patterns load silently), a running one keeps running.
+    // Where this eval's schedulers open their window: the clock's position NOW, read before
+    // anything below advances it. On play-from-stop that is exactly cycle 0 (the transport is
+    // still frozen there), so the downbeat - and a `.preset()`'s first application, which is
+    // what used to leave synths on their init program for the whole first cycle - is inside the
+    // window instead of a few microseconds behind it (see Scheduler#start).
+    const scheduleFrom = transport.cycleAt(engine.getTime());
     if (active.length > 0 && body.start !== false) transport.start();
 
     for (const b of active) {
@@ -2425,7 +2580,7 @@ const routes = {
       // Already-live tracks get a re-assert; a NEW track had its values baked into its birth
       // args above, and this is a harmless no-op while it builds.
       applyMixTo(key);
-      sch.start();
+      sch.start(scheduleFrom);
     }
 
     // Any midicc()/midikeys() seen at eval time needs MIDI input running engine-side. The
@@ -3026,13 +3181,15 @@ const routes = {
   // the editor can draw the count-in against its own copy of the transport.
   // --- the performance mixer (two decks + the DJ stage; see TODO.md) ---
 
-  // The mix session's state, for the UI to (re)build from.
-  'GET /api/mix': async () => ({
+  // The mix session's state, for the UI to (re)build from. `?desk=1` returns only the desk
+  // values (no per-track rows) - the shape the client polls at ~150ms to mirror MIDI-driven
+  // knob moves smoothly, so it must stay cheap.
+  'GET /api/mix': async (query) => ({
     status: 200,
     body: {
       swap: mixState.swap,
       perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
-      tracks: [...schedulers.keys()].map((key) => ({
+      tracks: query?.desk ? undefined : [...schedulers.keys()].map((key) => ({
         key,
         deck: deckOfKey(key),
         controls: Object.fromEntries(mixState.perTrack.get(key) ?? []),
@@ -3045,9 +3202,44 @@ const routes = {
         master: transport ? transport.cps * 240 : null,
         override: mixState.tempoOverride,
       },
+      xf: mixState.xf,
+      cue: activeCue ? { name: activeCue.name } : null,
+      midi: settings.mixMidi ?? {},
       neutral: DJ_NEUTRAL,
     },
   }),
+
+  // MIDI-learn for a desk control. Body: { target } arms a learn and waits (long-poll) for the
+  // next CC anywhere -> { learned: { device, channel, cc } }, or { learned: null } after 10s.
+  // { target, clear: true } unbinds it. Targets: 'xf' or '<deck>:<control>' ("a:djf").
+  'POST /api/mix/midilearn': async (body) => {
+    const target = String(body.target ?? '');
+    if (!MIX_MIDI_TARGETS.has(target)) throw new Error(`"${target}" is not a learnable mix control`);
+    if (body.clear) {
+      if (settings.mixMidi?.[target]) {
+        delete settings.mixMidi[target];
+        saveSettings();
+      }
+      return { status: 200, body: { cleared: true } };
+    }
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    engine.enableMidi();
+    if (mixMidiLearn) {
+      clearTimeout(mixMidiLearn.timer);
+      mixMidiLearn.finish(null); // a new arm supersedes a stale one
+    }
+    const learned = await new Promise((resolve) => {
+      mixMidiLearn = {
+        target,
+        finish: resolve,
+        timer: setTimeout(() => {
+          if (mixMidiLearn?.finish === resolve) mixMidiLearn = null;
+          resolve(null);
+        }, 10000),
+      };
+    });
+    return { status: 200, body: { learned } };
+  },
 
   // Tempo migration: move the shared clock (all decks, one Transport) toward a bpm - instantly
   // (the slider ride) or as a glide over `seconds` (the detent buttons). Body: { bpm, seconds? }
@@ -3079,28 +3271,7 @@ const routes = {
   // over the broadcast).
   'POST /api/mix/set': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
-    const targets = Array.isArray(body.targets) ? body.targets : [body];
-    for (const t of targets) {
-      const name = String(t.name ?? '');
-      if (!(name in DJ_NEUTRAL)) throw new Error(`"${name}" is not a mix control`);
-      const value = Number(t.value);
-      if (!Number.isFinite(value)) throw new Error(`mix/set ${name}: value must be a number`);
-      if (t.deck === 'a' || t.deck === 'b') {
-        mixState.perDeck[t.deck].set(name, value);
-        for (const key of schedulers.keys()) {
-          if (deckOfKey(key) === t.deck && !mixState.perTrack.get(key)?.has(name)) {
-            engine.setParam(engineTrack(key), -1, name, value, 0);
-          }
-        }
-      } else {
-        const key = String(t.key ?? '');
-        if (!schedulers.has(key)) throw new Error(`mix/set: no playing track "${key}"`);
-        let per = mixState.perTrack.get(key);
-        if (!per) mixState.perTrack.set(key, (per = new Map()));
-        per.set(name, value);
-        engine.setParam(engineTrack(key), -1, name, value, 0);
-      }
-    }
+    applyMixTargets(Array.isArray(body.targets) ? body.targets : [body]);
     return { status: 200, body: { ok: true } };
   },
 
@@ -3137,6 +3308,29 @@ const routes = {
     return { status: 200, body: { key, on, countered } };
   },
 
+  // Empty ONE deck - a pane is loading a different song (DJ mode's load button). The old song's
+  // schedulers stop, its engine tracks are destroyed (plugins closed: switching songs all night
+  // must not accumulate a set's worth of idle plugins), and its song facts and definitions go.
+  // The DESK (crossfader, deck gains, EQ, swap, tempo) stays exactly as it stands - clearing a
+  // deck mid-mix is part of the performance, not the end of it. Body: { deck }.
+  'POST /api/mix/clear': async (body) => {
+    if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    for (const [key, sch] of [...schedulers]) {
+      if (deckOfKey(key) !== deck) continue;
+      sch.stop();
+      schedulers.delete(key);
+      mappedEngine.removeChain(engineTrack(key));
+      dropTrack(key);
+    }
+    for (const key of [...trackIds.keys()]) if (deckOfKey(key) === deck) dropTrack(key);
+    decks[deck] = { scale: null, bpm: null };
+    if (deck === 'a') patternCore.setGlobalScale(null); // the resting scale was this deck's fact
+    liveStateIds[deck] = new Set();
+    patternCore.clearRolls('buffer', deck);
+    return { status: 200, body: {} };
+  },
+
   // Eject the queued deck - abort the mix. Deck b's schedulers stop through the normal teardown,
   // its engine tracks are destroyed (plugins closed), its song-level facts and definitions are
   // forgotten, and the performance state resets: deck a comes back to a clean desk.
@@ -3153,6 +3347,7 @@ const routes = {
     mixState.perDeck.a.clear();
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
+    mixState.xf = -1; // desk home: the next mix session re-arms from hard-A
     if (mixState.tempoOverride != null) {
       mixState.tempoOverride = null;
       // The surviving deck gets its declared tempo back - as a short glide, not a lurch (it is
@@ -3197,6 +3392,7 @@ const routes = {
     mixState.perDeck.a.clear();
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
+    mixState.xf = -1; // desk home: the next mix session re-arms from hard-A
     // The promoted song's declared tempo takes over on the client's promotion re-eval (override
     // gone, its setbpm drives again) - a no-op when the migration already landed on its native.
     mixState.tempoOverride = null;
@@ -3384,6 +3580,52 @@ const routes = {
         outputChannels: channels,
         outputChannelChoices: choices,
         audibleChannels: audible,
+        cueAvailable: audioDevices.helperAvailable(),
+        cueSelected: settings.audioCueDevice?.name ?? null,
+        cueActive: activeCue?.name ?? null, // what the RUNNING engine actually has (null = no cue this boot)
+      },
+    };
+  },
+
+  // Body: { device } - the headphone/cue output device's name, or null/"" for no cue. The cue
+  // rides the combined (aggregate) device as its last member, and the track SynthDefs compile a
+  // cue send only when the engine boots with the pair - so this is a before-the-gig settings
+  // choice: it MUTATES the audio configuration and restarts the engine, like every device change.
+  'POST /api/audioCueDevice': async (body) => {
+    const name = body.device ? String(body.device) : null;
+    if (!name) {
+      settings.audioCueDevice = null;
+    } else {
+      if (!audioDevices.helperAvailable()) {
+        throw new Error('the headphone cue needs the poptart-audio helper, which is not available on this system');
+      }
+      const dev = audioOutputDevices().find((d) => d.name === name && !d.isAggregate);
+      if (!dev) throw new Error(`no audio output device named "${name}"`);
+      if (dev.uid && dev.uid === plainOutputDevice(audioOutputDevices())?.uid) {
+        throw new Error('the cue device must be different from the main output device - it is the separate pair your headphones are on');
+      }
+      settings.audioCueDevice = { uid: dev.uid, name: dev.name };
+    }
+    let rebuildWarning = null;
+    try {
+      syncAggregateNow();
+    } catch (err) {
+      rebuildWarning = {
+        message: 'the combined audio device could not be rebuilt - press apply to retry',
+        detail: `the combined audio device could not be rebuilt (${err.message}) - the cue pair is not available.`,
+      };
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] ${rebuildWarning.detail}`);
+    }
+    saveSettings();
+    await restartEngine();
+    if (!engine) throw new Error(engineError ?? 'engine failed to restart');
+    return {
+      status: 200,
+      body: {
+        device: settings.audioCueDevice?.name ?? null,
+        active: activeCue?.name ?? null,
+        warning: rebuildWarning ?? audioDeviceWarning(),
       },
     };
   },
@@ -3418,9 +3660,9 @@ const routes = {
     // choice is silently inert: deviceToOpen keeps opening an aggregate built around the device you
     // just stopped using, and picking your speakers changes nothing you can hear.
     let rebuildWarning = null;
-    if ((settings.audioInputDevices ?? []).length) {
+    if (aggregateExtraUids().length) {
       try {
-        syncAggregate(settings.audioInputDevices);
+        syncAggregateNow();
       } catch (err) {
         // Not fatal, and not a reason to refuse the device the user just asked for: deviceToOpen
         // sees an aggregate that no longer holds it and opens it directly instead. Say so, though -
@@ -3478,13 +3720,13 @@ const routes = {
     // splitConnected. Build from what's actually here; keep the rest saved, so plugging an
     // interface back in and pressing apply brings it straight back.
     const knownDevices = audioDevices.listDevices();
-    const { present, absent } = audioSelection.splitConnected(uids, knownDevices.map((d) => d.uid));
-
-    // The output device goes in as the clock master: it's the one whose timing playback is bound
-    // to, and every other member gets drift compensation against it.
-    syncAggregate(present);
+    const { absent } = audioSelection.splitConnected(uids, knownDevices.map((d) => d.uid));
 
     settings.audioInputDevices = uids;
+    // The output device goes in as the clock master: it's the one whose timing playback is bound
+    // to, and every other member gets drift compensation against it. The cue device (if chosen)
+    // rides along - see syncAggregateNow.
+    syncAggregateNow();
     // Remember what each one is CALLED while it's here to ask. A UID is all that survives an
     // unplug, and on its own it's unreadable - the difference between "EarPods · not plugged in"
     // and "AppleUSBAudioEngine:Apple, Inc.:EarPods:DHK4XW9QTV:2 · not plugged in".

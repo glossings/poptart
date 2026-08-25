@@ -367,9 +367,25 @@ main {
   display: flex;
   overflow: hidden;
 }
+/* In DJ mode the pane stacks its deck head over the editor (mirroring deck B's pane), and the
+   editor sizes by flex under it instead of the default single-child fill. */
+body.mix-on #editorPane {
+  flex-direction: column;
+}
+body.mix-on #editorPane .CodeMirror {
+  height: auto;
+  min-height: 0;
+  flex: 1;
+}
 
+:root {
+  --sidebar-w: 320px; /* one source for everything that must stop where the sidebar begins */
+}
+[data-sidebar-collapsed] {
+  --sidebar-w: 40px;
+}
 aside {
-  width: 320px;
+  width: var(--sidebar-w);
   border-left: 1px solid var(--border);
   background: var(--bg-raised);
   display: flex;
@@ -426,10 +442,6 @@ aside {
    Keyed off <html>, not a class on the panel, because index.html stamps these attributes from
    localStorage before the first paint - client.js runs far too late to decide it without the
    panel visibly opening and then shutting on every reload. */
-[data-sidebar-collapsed] aside {
-  width: 40px;
-}
-
 [data-sidebar-collapsed] aside .tab-body,
 [data-sidebar-collapsed] aside .side-tab {
   display: none;
@@ -3373,7 +3385,8 @@ li.CodeMirror-hint-active {
 #mixStrip.hidden {
   display: none;
 }
-#deckBHead {
+#deckBHead,
+#deckAHead {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3381,12 +3394,20 @@ li.CodeMirror-hint-active {
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
-#deckBHead .deck-b-title {
+#deckAHead {
+  display: none; /* the main editor grows its deck head only in DJ mode */
+}
+body.mix-on #deckAHead {
+  display: flex;
+}
+#deckBHead .deck-b-title,
+#deckAHead .deck-b-title {
   font-weight: 600;
   color: var(--accent);
   white-space: nowrap;
 }
-#deckBHead select {
+#deckBHead select,
+#deckAHead select {
   flex: 1;
   min-width: 0;
 }
@@ -3398,13 +3419,9 @@ li.CodeMirror-hint-active {
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
   padding: 6px 10px;
-}
-.mix-deck {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  /* the symmetric region ends at deck B's right edge - the strip belongs to the two
+     panes, not to the sidebar; its center then sits on the panes' true midline */
+  margin-right: var(--sidebar-w);
 }
 .mix-deck-head {
   display: flex;
@@ -3412,9 +3429,6 @@ li.CodeMirror-hint-active {
   gap: 8px;
   color: var(--text-dim);
   font-size: 11px;
-}
-.mix-djf {
-  width: 90px;
 }
 .mix-tracks {
   display: flex;
@@ -3475,6 +3489,14 @@ li.CodeMirror-hint-active {
   font-size: 11px;
   color: var(--text-dim);
 }
+.mix-cue.on {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+#mixLearn.on {
+  color: var(--warn);
+  border-color: var(--warn);
+}
 .mix-tempo {
   display: flex;
   align-items: center;
@@ -3507,52 +3529,95 @@ li.CodeMirror-hint-active {
   width: 44px;
 }
 
-/* The new scrollable surfaces carry the theme's colors instead of stock scrollbars, and the
-   deck B editor sizes by flex (the global .CodeMirror height:100% overflowed the pane past its
-   header, which is what put a stray scrollbar on the pane itself). */
+/* Every scrollable surface in the app carries the theme (thin, border-colored thumb) - stock
+   scrollbars were the one bit of chrome the theme didn't reach, and each new pane was picking
+   them back up one at a time. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* The deck B editor sizes by flex (the global .CodeMirror height:100% overflowed the pane past
+   its header, which is what put a stray scrollbar on the pane itself). */
 #deckBPane .CodeMirror {
   height: auto;
   min-height: 0;
 }
-.mix-tracks,
-#deckBPane .CodeMirror-scroll,
-#deckBPane .CodeMirror-vscrollbar,
-#deckBPane .CodeMirror-hscrollbar {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
-}
-.mix-tracks::-webkit-scrollbar,
-#deckBPane .CodeMirror-scroll::-webkit-scrollbar,
-#deckBPane .CodeMirror-vscrollbar::-webkit-scrollbar,
-#deckBPane .CodeMirror-hscrollbar::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-.mix-tracks::-webkit-scrollbar-thumb,
-#deckBPane .CodeMirror-scroll::-webkit-scrollbar-thumb,
-#deckBPane .CodeMirror-vscrollbar::-webkit-scrollbar-thumb,
-#deckBPane .CodeMirror-hscrollbar::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
-}
-.mix-tracks::-webkit-scrollbar-track,
-#deckBPane .CodeMirror-scroll::-webkit-scrollbar-track,
-#deckBPane .CodeMirror-vscrollbar::-webkit-scrollbar-track,
-#deckBPane .CodeMirror-hscrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-.mix-deck-ctl {
-  width: 46px;
-  height: 14px;
-}
-.mix-deck-head label {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  white-space: nowrap;
-}
 .mix-fader {
   width: 130px;
+}
+
+/* --- the per-deck knob columns (trim / low / mid / high / filter), mirrored around center --- */
+.mix-tracks-col {
+  /* basis 0, not auto: both track columns get EQUAL width regardless of content, which is what
+     keeps the shared center controls straddling the exact midline between the two panes. */
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+/* Deck B mirrors deck A around the center: its rows run right-to-left (fader | name | gate,
+   packed against the right edge) the way its head already reads cue-then-title. */
+#mixTracksB .mix-track {
+  flex-direction: row-reverse;
+}
+#mixTracksB .mix-name {
+  text-align: right;
+}
+.mix-knobs {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 2px 6px;
+}
+.mix-knob-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.mix-knob-wrap > span {
+  font-size: 9px;
+  color: var(--text-dim);
+  line-height: 1;
+}
+.mix-knob {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  position: relative;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.mix-knob::after {
+  content: '';
+  position: absolute;
+  left: calc(50% - 1px);
+  bottom: 50%;
+  width: 2px;
+  height: 11px;
+  background: var(--accent);
+  border-radius: 1px;
+  transform-origin: 50% 100%;
+  transform: rotate(var(--ang, 0deg));
+}
+.mix-knob.dragging {
+  border-color: var(--accent);
 }
 
 /* --- the organize modal (playlists; see the library section of client.js) --- */

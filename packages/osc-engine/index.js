@@ -275,7 +275,7 @@ class OscEngine {
   // belong to the input devices combined in behind the playback device.
   // inChannels: that same device's input channel count (0 for output-only devices) - scsynth opens
   // one device for both in and out, so numInputBusChannels must not exceed what the device offers.
-  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0 } = {}) {
+  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0, cueOffset = null } = {}) {
     this.nodePort = nodePort;
     this.scPort = scPort;
     // An explicit path wins (programmatic intent, e.g. tests); otherwise auto-detect, which
@@ -285,6 +285,9 @@ class OscEngine {
     this.outChannels = outChannels;
     this.playChannels = playChannels ?? outChannels;
     this.inChannels = inChannels;
+    // First output channel of the headphone-cue pair inside the opened device, or null for no
+    // cue: track SynthDefs compile a pre-fader cue send only when this is set (see poptart.scd).
+    this.cueOffset = cueOffset;
     this._sclangProcess = null;
     // scsynth's pid, as reported by sclang at /poptart/ready. sclang spawns scsynth, so this is
     // the only handle we get on the process that actually holds the audio device and UDP 57110 -
@@ -502,6 +505,7 @@ class OscEngine {
               POPTART_OUT_CHANNELS: String(this.outChannels),
               POPTART_PLAY_CHANNELS: String(this.playChannels),
               POPTART_IN_CHANNELS: String(this.inChannels),
+              ...(this.cueOffset != null ? { POPTART_CUE_OFFSET: String(this.cueOffset) } : {}),
             },
             stdio: ['ignore', 'pipe', 'pipe'],
           },
@@ -780,9 +784,13 @@ class OscEngine {
     // note handlers already know to hold the notes at the onset when they arrive (see waitForLoad
     // in poptart.scd). Without it the '/poptart/setPluginState' below always loses the race and
     // the note at the swap is bundled through the load that then wipes it.
-    if (targetTime != null) {
-      this._send('/poptart/statePending', [trackId, slotIndex, this._latency(targetTime), seq]);
-    }
+    //
+    // Sent for IMMEDIATE restores too (targetTime == null - the initial push of a loaded song's
+    // pinned states), not just timestamped swaps: the program still only follows after the async
+    // inflate+write below, and on a cold-opening plugin the notes that arrive in that window
+    // would sound the INIT preset until it lands. Latency 0: the hold starts now, and the cold
+    // path in poptart.scd keeps it up (and then drops the missed notes) until the program is in.
+    this._send('/poptart/statePending', [trackId, slotIndex, targetTime == null ? 0 : this._latency(targetTime), seq]);
     (async () => {
       const data = await this._inflateState(String(state), trackId, slotIndex);
       if (!data || superseded()) return;

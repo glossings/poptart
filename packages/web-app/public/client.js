@@ -2913,6 +2913,7 @@ function lfoGateRegion() {
   const from = cm.indexFromPos(range.from);
   const to = cm.indexFromPos(range.to);
   for (const r of patternRegions) {
+    if (r.deck !== 'a') continue; // panels live on the main editor; deck B's offsets are another doc's
     const a = r.anchor.find();
     if (!a) continue;
     if (cm.indexFromPos(a.from) <= from && cm.indexFromPos(a.to) >= to) return r;
@@ -5137,6 +5138,7 @@ function openRollFromIdCall(call, code) {
 // three ask this the same question about it.
 function activeIdIn(from, to) {
   for (const r of patternRegions) {
+    if (r.deck !== 'a') continue; // panels read main-editor offsets; deck B's are another doc's
     for (const [a, b] of r.litSpans ?? []) {
       if (a >= from && b <= to) return cm.getRange(cm.posFromIndex(a), cm.posFromIndex(b)).trim();
     }
@@ -7536,34 +7538,45 @@ let playing = false;
 // re-guessing from source text. Each region: an anchor marker at the track's block (highlights are
 // placed relative to it, so they survive edits until re-eval), the grid indexed by cycle, and the
 // longest ring so lookback catches a stretched/held note still sounding from an earlier cycle.
-let patternRegions = []; // { label, anchor, grid: Map<cycle, steps>, gates: Map<cycle, [pos]>, maxEnd, lastKey, marks: [] }
+// Each region carries the editor it lives in: deck A's regions mark the main cm, deck B's mark
+// the split pane's (mix mode) - one ticker lights both. `label` is the SERVER key ("b:kick" for
+// deck B), which is how /api/highlight top-ups find their region again.
+let patternRegions = []; // { label, deck, cm, anchor, grid: Map<cycle, steps>, gates: Map<cycle, [pos]>, maxEnd, lastKey, marks: [] }
 let gridFrom = 0; // first cycle covered by every region's grid
 let gridTo = 0; // one past the last covered cycle (extended by /api/highlight top-ups)
 let gridCount = 32; // window size the server ships (mirrored from the eval response)
 let gridFetching = false; // a top-up request is in flight - don't stack another
 
-function clearPatternRegions() {
+function clearPatternRegions(deck = null) {
+  const kept = [];
   for (const r of patternRegions) {
+    if (deck && r.deck !== deck) {
+      kept.push(r); // the other deck's eval must not blank this one's highlights
+      continue;
+    }
     r.anchor.clear();
     for (const mk of r.marks) mk.clear();
   }
-  patternRegions = [];
+  patternRegions = kept;
 }
 
 // Builds the per-track highlight regions from an /api/evaluate response: each active track carries
 // its grid (sounding steps per cycle, atom spans block-relative) plus its block [start,end], which
 // we anchor a marker to so highlights track edits until the next eval. No source-text parsing - the
 // server already did the real evaluation.
-function setupHighlighting(tracks, from, count) {
-  clearPatternRegions();
+function setupHighlighting(tracks, from, count, deck = 'a', editor = cm) {
+  clearPatternRegions(deck);
   gridFrom = from;
   gridTo = from + count;
   gridCount = count;
   gridFetching = false;
   for (const t of tracks) {
     if (!t.active || !t.grid) continue;
-    const anchor = cm.markText(cm.posFromIndex(t.start), cm.posFromIndex(t.end), {});
-    const region = { label: t.label, anchor, grid: new Map(), gates: new Map(), maxEnd: 1, lastKey: '', marks: [] };
+    const anchor = editor.markText(editor.posFromIndex(t.start), editor.posFromIndex(t.end), {});
+    const region = {
+      label: t.key ?? t.label, deck, cm: editor,
+      anchor, grid: new Map(), gates: new Map(), maxEnd: 1, lastKey: '', marks: [],
+    };
     ingestGrid(region, t.grid);
     patternRegions.push(region);
   }
@@ -7646,13 +7659,14 @@ function highlightTick() {
       }
     }
 
-    const base = cm.indexFromPos(range.from);
+    const base = r.cm.indexFromPos(range.from);
     // A held slot is not playing its `.preset(...)` names - its plugin window is open, or the panel
     // has it - and the grid deliberately says nothing about that: a grid is computed in windows and
     // shipped ahead of the sound, while a hold comes and goes between them (see server.js's
     // patternSigs). Dropping those spans HERE is what lets a hold start and stop being drawn within
-    // half a second instead of surviving until the next evaluation.
-    const lit = heldRanges.length
+    // half a second instead of surviving until the next evaluation. Held ranges are main-editor
+    // offsets, so only deck A's regions filter by them.
+    const lit = heldRanges.length && r.deck === 'a'
       ? [...locs.values()].filter((l) => !inHeldRange(base + l[0], base + l[1]))
       : [...locs.values()];
     const key = lit.map((l) => `${l[0]}-${l[1]}`).sort().join(',');
@@ -7664,7 +7678,7 @@ function highlightTick() {
     // than re-deriving the grid.
     r.litSpans = lit.map((loc) => [base + loc[0], base + loc[1]]);
     r.marks = lit.map((loc) =>
-      cm.markText(cm.posFromIndex(base + loc[0]), cm.posFromIndex(base + loc[1]), {
+      r.cm.markText(r.cm.posFromIndex(base + loc[0]), r.cm.posFromIndex(base + loc[1]), {
         className: 'cm-playing',
       })
     );
@@ -10902,7 +10916,18 @@ async function refreshAudioDevices() {
   try {
     const {
       devices, selected, outputChannels, outputChannelChoices, audibleChannels,
+      cueAvailable, cueSelected, cueActive,
     } = await api('GET', '/api/audioDevices');
+    audioCueSelect.innerHTML = '';
+    audioCueSelect.appendChild(new Option('none', ''));
+    for (const d of devices.filter((x) => !x.isAggregate)) {
+      audioCueSelect.appendChild(new Option(`${d.name} · ${d.channels} ch`, d.name));
+    }
+    audioCueSelect.value = cueSelected ?? '';
+    if (audioCueSelect.value !== (cueSelected ?? '')) audioCueSelect.value = '';
+    audioCueSelect.disabled = !cueAvailable;
+    if (!cueAvailable) audioCueSelect.title = 'the headphone cue needs the poptart-audio helper, which is not available on this system';
+    else if (cueSelected && !cueActive) audioCueSelect.title = `"${cueSelected}" is chosen but the running engine has no cue pair - is it plugged in? (restart the engine to retry)`;
     audioDeviceSelect.innerHTML = '';
     const def = document.createElement('option');
     def.value = '';
@@ -10924,6 +10949,36 @@ async function refreshAudioDevices() {
     logLine(e.message ?? String(e), true);
   }
 }
+
+const audioCueSelect = document.getElementById('audioCueSelect');
+audioCueSelect.addEventListener('change', async () => {
+  const device = audioCueSelect.value || null;
+  audioCueSelect.disabled = true;
+  audioDeviceSelect.disabled = true;
+  engineStatus.textContent = 'restarting engine…';
+  engineStatus.className = 'status';
+  logLine(device ? `cueing to ${device} - restarting the engine…` : 'headphone cue off - restarting the engine…');
+  try {
+    const res = await api('POST', '/api/audioCueDevice', { device });
+    stopHighlighting();
+    playing = false;
+    updateTransportButtons();
+    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
+    logLine(res.active
+      ? `headphone cue is on "${res.active}" - re-evaluate (Cmd/Ctrl+Enter) to resume playback`
+      : device
+        ? `cue device saved, but the engine came up WITHOUT a cue pair - check it is plugged in`
+        : 'headphone cue is off - re-evaluate (Cmd/Ctrl+Enter) to resume playback', device && !res.active);
+    setAudioDeviceWarning(res.warning);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    audioCueSelect.disabled = false;
+    audioDeviceSelect.disabled = false;
+    refreshAudioDevices().catch(() => {});
+    refreshStatus().catch(() => {});
+  }
+});
 
 audioChannelSelect.addEventListener('change', async () => {
   const channels = Number(audioChannelSelect.value);
@@ -13621,11 +13676,27 @@ function mixPost(throttleKey, body) {
 }
 
 function toggleMixMode() {
-  if (mixModeOn) closeMixMode();
+  if (mixModeOn) exitDjMode('restore');
   else openMixMode();
 }
 
+// What the single-editor world held when DJ mode opened: leaving with the hotkey brings it back
+// (see exitDjMode). Null while not in DJ mode.
+let preMix = null;
+
 async function openMixMode() {
+  // The current song is about to become deck A of a mix. Keep it first: a named song is saved
+  // over silently (saving over the open pattern is what saving is), a nameless one gets one
+  // offer - declining just means the pre-mix buffer only lives in this browser till exit.
+  try {
+    if (currentSavedName) await savePatternFile();
+    else if (cm.getValue().trim() && confirm('Save the current song before DJ mode? (it comes back when you exit)')) {
+      await savePatternFileAs();
+    }
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+  preMix = { code: cm.getValue(), savedName: currentSavedName, wipSession: wipSessionId };
   mixModeOn = true;
   document.body.classList.add('mix-on');
   deckBPaneEl.classList.remove('hidden');
@@ -13642,8 +13713,8 @@ async function openMixMode() {
       extraKeys: {
         'Cmd-Enter': () => evalDeckB(true),
         'Ctrl-Enter': () => evalDeckB(true),
-        'Shift-Cmd-Enter': () => completeMix(),
-        'Shift-Ctrl-Enter': () => completeMix(),
+        'Shift-Cmd-Enter': () => exitDjMode('b'),
+        'Shift-Ctrl-Enter': () => exitDjMode('b'),
         'Cmd-.': doStop,
         'Ctrl-.': doStop,
       },
@@ -13655,12 +13726,62 @@ async function openMixMode() {
   // A means deck b's gain is 0 in mixState, so the first eval's tracks are BORN silent (see
   // server.js's applyMixTo) - the whole "arrives silent" design in one post.
   sendCrossfader();
-  refreshDeckBFiles();
+  refreshDeckFiles();
   mixRefresh();
+  mixPollStart(); // mirrors MIDI-driven desk moves back onto the sliders
+}
+
+// Leave DJ mode. `keep` says which world survives:
+//   'a'       - this pane is the song: deck B is dropped (destroyed), the main editor stays.
+//   'b'       - the incoming song IS the set: promoted with zero engine churn, its code moves
+//               to the main editor (the old complete-mix).
+//   'restore' - the hotkey: back to whatever was up before DJ mode. If deck A still holds it,
+//               nothing even blinks; if deck A moved on, both decks are cleared and the
+//               pre-mix buffer returns (stopped - play is a deliberate act after that).
+async function exitDjMode(keep = 'restore') {
+  try {
+    if (keep === 'b') {
+      const res = await api('POST', '/api/mix/complete');
+      cm.setValue(deckBCM.getValue());
+      setCurrentSavedName(deckBFileName);
+      clearPatternRegions('b'); // the re-eval below rebuilds them as deck A's, in the main editor
+      logLine(`DJ mode off - "${deckBFileName ?? 'deck B'}" is the set (promoted: ${res.promoted.join(', ')})`);
+      finishDjExit();
+      await evaluate(true); // finds every promoted track already playing; reprograms nothing
+      return;
+    }
+    if (deckBCM?.getValue().trim() && !confirm('Leave DJ mode? Deck B is dropped.')) return;
+    const aChanged = preMix && (cm.getValue() !== preMix.code || currentSavedName !== preMix.savedName);
+    await api('POST', '/api/mix/eject'); // deck B gone, desk reset
+    clearPatternRegions('b');
+    if (keep === 'restore' && aChanged) {
+      // Deck A moved on mid-mix, so the sound and the restored buffer would disagree - clear it
+      // and come back stopped. Playing the restored song again is one Cmd+Enter, on purpose.
+      await api('POST', '/api/mix/clear', { deck: 'a' });
+      clearPatternRegions('a');
+      await openInEditor(preMix.code, preMix.savedName, preMix.wipSession);
+      logLine('DJ mode off - your pre-mix song is back (re-evaluate to play it)');
+    } else {
+      logLine('DJ mode off');
+    }
+    finishDjExit();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// The shared tail of every exit: the split closes, deck B's pane empties, the desk UI re-homes.
+function finishDjExit() {
+  if (deckBCM) deckBCM.setValue('');
+  deckBFileName = null;
+  preMix = null;
+  document.getElementById('crossfader').value = -1;
+  closeMixMode();
 }
 
 function closeMixMode() {
   mixModeOn = false;
+  mixPollStop();
   document.body.classList.remove('mix-on');
   deckBPaneEl.classList.add('hidden');
   mixStripEl.classList.add('hidden');
@@ -13671,37 +13792,43 @@ function closeMixMode() {
 // else files under "all songs". With nothing picked and the pane empty, the set queues itself:
 // the song after the one that is playing (or after what deck B last held) is preselected and
 // loaded - the "next in the set" default. ⏭ / Cmd+Shift+. steps it (see stepDeckBQueue).
-async function refreshDeckBFiles() {
+async function refreshDeckFiles() {
   try {
     const [{ patterns }, lib] = await Promise.all([api('GET', '/api/patterns?q='), loadLibraryDoc()]);
-    const sel = document.getElementById('deckBFile');
-    const had = sel.value;
-    sel.innerHTML = '<option value="">— pick a song —</option>';
     const byName = new Map(patterns.map((p) => [p.name, p]));
     const say = (p, name) => (p ? `${p.title || p.name}${p.bpm ? ` · ${p.bpm}` : ''}` : `${name} (missing)`);
     const set = lib.playlists.find((p) => p.id === lib.active);
-    if (set) {
-      const g = document.createElement('optgroup');
-      g.label = `set: ${set.name}`;
-      set.items.forEach((name, i) => {
-        const p = byName.get(name);
-        const o = new Option(`${i + 1}. ${say(p, name)}`, name);
-        o.dataset.setIndex = i;
-        if (!p) o.disabled = true;
-        g.appendChild(o);
-      });
-      sel.appendChild(g);
-    }
-    const inSet = new Set(set?.items ?? []);
-    const rest = patterns.filter((p) => !inSet.has(p.name));
-    if (rest.length) {
-      const g = set ? document.createElement('optgroup') : null;
-      if (g) g.label = 'all songs';
-      for (const p of rest) (g ?? sel).appendChild(new Option(say(p, p.name), p.name));
-      if (g) sel.appendChild(g);
-    }
-    if (had) sel.value = had;
-    if (!sel.value && set?.items.length) {
+    const fill = (sel) => {
+      const had = sel.value;
+      sel.innerHTML = '<option value="">— pick a song —</option>';
+      if (set) {
+        const g = document.createElement('optgroup');
+        g.label = `set: ${set.name}`;
+        set.items.forEach((name, i) => {
+          const p = byName.get(name);
+          const o = new Option(`${i + 1}. ${say(p, name)}`, name);
+          o.dataset.setIndex = i;
+          if (!p) o.disabled = true;
+          g.appendChild(o);
+        });
+        sel.appendChild(g);
+      }
+      const inSet = new Set(set?.items ?? []);
+      const rest = patterns.filter((p) => !inSet.has(p.name));
+      if (rest.length) {
+        const g = set ? document.createElement('optgroup') : null;
+        if (g) g.label = 'all songs';
+        for (const p of rest) (g ?? sel).appendChild(new Option(say(p, p.name), p.name));
+        if (g) sel.appendChild(g);
+      }
+      if (had) sel.value = had;
+    };
+    fill(document.getElementById('deckAFile'));
+    const selB = document.getElementById('deckBFile');
+    fill(selB);
+    // Deck B only: with nothing picked and the pane empty, the set queues itself - the song
+    // after the one that is playing. Deck A is playing the current song; it never auto-loads.
+    if (!selB.value && set?.items.length) {
       const next = nextInSet(set);
       if (next) {
         next.selected = true;
@@ -13746,10 +13873,33 @@ async function loadDeckBFile() {
   const name = document.getElementById('deckBFile').value;
   if (!name || !deckBCM) return;
   try {
+    // Loading a song is a song SWITCH: whatever this deck was playing is cleared engine-side
+    // (tracks destroyed, plugins closed) - a set that changes songs all night must not
+    // accumulate idle plugins. A no-op when the deck is empty (the auto-queue's case).
+    await api('POST', '/api/mix/clear', { deck: 'b' });
+    clearPatternRegions('b');
     const { code } = await api('POST', '/api/patterns/load', { name });
     deckBCM.setValue(code);
     deckBFileName = name;
     logLine(`deck B loaded "${name}" - play it when ready (it arrives silent)`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// Deck A's load (DJ mode): the main editor IS deck A, so this clears the deck engine-side and
+// opens the picked song in the main editor - full editor semantics (autosave, history), since
+// it is the buffer you may livecode next.
+async function loadDeckAFile() {
+  const name = document.getElementById('deckAFile').value;
+  if (!name || !mixModeOn) return;
+  try {
+    await api('POST', '/api/mix/clear', { deck: 'a' });
+    clearPatternRegions('a');
+    const { code } = await api('POST', '/api/patterns/load', { name });
+    await openInEditor(code, name);
+    logLine(`deck A loaded "${name}" - play it when ready`);
+    if (mixModeOn) mixRefresh(); // its old stems left the strip
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -13760,6 +13910,9 @@ async function evalDeckB(start) {
   try {
     const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start });
     if (result.transport) transport = result.transport;
+    // Deck B gets the same live playback highlighting as the main pane: its regions mark the
+    // split editor, keyed "b:<label>" (which is how the /api/highlight top-ups find them).
+    setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32, 'b', deckBCM);
     const n = result.tracks.filter((t) => t.active).length;
     logLine(`deck B ${start ? 'playing' : 'updated'} (${n}/${result.tracks.length} pattern(s)`
       + (result.deckBpm ? `, native ${result.deckBpm} bpm` : '') + ')');
@@ -13771,22 +13924,11 @@ async function evalDeckB(start) {
   }
 }
 
-// A transition (constant-gain) curve over the two decks' `deck` gains, the club-mixer shape:
-// each side holds FULL from its end through the CENTER and only cuts on the far half - so at
-// center both decks are wide open and the per-stem gates decide what sounds (the swap-mode
-// workflow), while a full sweep is still a smooth fade. (The first cut was equal-power, and it
-// made stem swaps inaudible: a gated-in stem sat under a -3dB-or-worse deck gain until the
-// fader crossed - the desk fought its own gates.)
+// The crossfader is ONE server-side control ('xf', position -1..1): the server unpacks it into
+// both decks' `deck` gains through the transition curve (see applyMixTargets in server.js), so
+// this slider and a learned MIDI knob drive the same implementation.
 function sendCrossfader() {
-  const x = Number(document.getElementById('crossfader').value);
-  const t = (x + 1) / 2;
-  const gain = (u) => Math.round(Math.sin((Math.PI / 2) * Math.min(1, u * 2)) * 1000) / 1000;
-  mixPost('xf', {
-    targets: [
-      { deck: 'a', name: 'deck', value: gain(1 - t) },
-      { deck: 'b', name: 'deck', value: gain(t) },
-    ],
-  });
+  mixPost('xf', { name: 'xf', value: Number(document.getElementById('crossfader').value) });
 }
 
 const MIX_TRACK_CONTROLS = [
@@ -13798,6 +13940,72 @@ const MIX_DECK_CONTROLS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf'];
 const mixDeckCtl = (deck, ctl) => document.getElementById(
   `mix${ctl === 'djf' ? 'Djf' : ctl.charAt(0).toUpperCase() + ctl.slice(1)}${deck.toUpperCase()}`,
 );
+
+// --- the per-deck knob columns ---
+// Real rotary knobs (drag up/down), stacked vertically like a mixer's channel strip, one column
+// per deck mirrored around the center. Each knob element carries a `value` property and fires
+// 'input', exactly like the range inputs it replaced - so the post throttle, the refresh sync,
+// dblclick-reset and MIDI-learn all keep working against the same ids (mixTrimA, mixDjfB, ...).
+const MIX_KNOB_DEFS = [
+  ['trim', 'trim', 0, 2, 'trim (deck-wide input gain) - drag up/down; double-click resets'],
+  ['eqlo', 'low', 0, 2, 'low (0 is a true kill) - drag up/down; double-click resets'],
+  ['eqmid', 'mid', 0, 2, 'mid (0 is a true kill) - drag up/down; double-click resets'],
+  ['eqhi', 'high', 0, 2, 'high (0 is a true kill) - drag up/down; double-click resets'],
+  ['djf', 'filter', -1, 1, 'one-knob filter: left sweeps a low-pass down, right a high-pass up; double-click resets'],
+];
+
+function mixMakeKnob(id, min, max, neutral, title) {
+  const knob = document.createElement('div');
+  knob.className = 'mix-knob';
+  knob.id = id;
+  knob.title = title;
+  let v = neutral;
+  const paint = () => knob.style.setProperty('--ang', `${-135 + ((v - min) / (max - min)) * 270}deg`);
+  Object.defineProperty(knob, 'value', {
+    get: () => v,
+    set: (nv) => {
+      v = Math.min(max, Math.max(min, Number(nv)));
+      paint();
+    },
+  });
+  knob.addEventListener('pointerdown', (e) => {
+    if (mixLearnArmed) return; // the learn handler (registered after this one) takes the click
+    e.preventDefault();
+    knob.setPointerCapture(e.pointerId);
+    knob.classList.add('dragging');
+    const y0 = e.clientY;
+    const v0 = v;
+    const move = (ev) => {
+      knob.value = v0 + ((y0 - ev.clientY) / 150) * (max - min); // full range over ~150px
+      knob.dispatchEvent(new Event('input'));
+    };
+    const up = () => {
+      knob.classList.remove('dragging');
+      knob.removeEventListener('pointermove', move);
+      knob.removeEventListener('pointerup', up);
+      knob.removeEventListener('pointercancel', up);
+    };
+    knob.addEventListener('pointermove', move);
+    knob.addEventListener('pointerup', up);
+    knob.addEventListener('pointercancel', up);
+  });
+  paint();
+  return knob;
+}
+
+for (const deck of ['a', 'b']) {
+  const host = document.getElementById(deck === 'a' ? 'mixKnobsA' : 'mixKnobsB');
+  for (const [ctl, label, min, max, title] of MIX_KNOB_DEFS) {
+    const wrap = document.createElement('div');
+    wrap.className = 'mix-knob-wrap';
+    const id = `mix${ctl === 'djf' ? 'Djf' : ctl.charAt(0).toUpperCase() + ctl.slice(1)}${deck.toUpperCase()}`;
+    const knob = mixMakeKnob(id, min, max, MIX_NEUTRAL[ctl], title);
+    const lab = document.createElement('span');
+    lab.textContent = label;
+    wrap.append(knob, lab);
+    host.appendChild(wrap);
+  }
+}
 
 async function mixRefresh() {
   if (!mixModeOn) return;
@@ -13811,13 +14019,67 @@ async function mixRefresh() {
     const host = document.getElementById(deck === 'a' ? 'mixTracksA' : 'mixTracksB');
     host.innerHTML = '';
     for (const t of state.tracks.filter((x) => x.deck === deck)) host.appendChild(mixTrackRow(t));
-    for (const ctl of MIX_DECK_CONTROLS) {
-      const el = mixDeckCtl(deck, ctl);
-      if (document.activeElement !== el) el.value = state.perDeck[deck][ctl] ?? MIX_NEUTRAL[ctl];
-    }
   }
   document.getElementById('mixSwap').checked = !!state.swap;
+  mixSyncValues(state);
+}
+
+// A short visual glide toward `target` (~one poll interval), so a hardware knob's stream -
+// mirrored here at the poll rate - reads as motion rather than steps. Snaps when close.
+function mixGlide(el, target) {
+  const from = Number(el.value);
+  cancelAnimationFrame(el._mixGlide);
+  if (!Number.isFinite(from) || Math.abs(target - from) < 0.002) {
+    el.value = target;
+    return;
+  }
+  const t0 = performance.now();
+  const step = (t) => {
+    const u = Math.min(1, (t - t0) / 140);
+    el.value = from + (target - from) * u;
+    if (u < 1) el._mixGlide = requestAnimationFrame(step);
+  };
+  el._mixGlide = requestAnimationFrame(step);
+}
+
+// The sliders' side of a refresh, rebuilt-row-free - also run on a poll while the strip is
+// open, so a learned MIDI knob (which drives the server directly) moves the on-screen desk.
+function mixSyncValues(state) {
+  for (const deck of ['a', 'b']) {
+    for (const ctl of MIX_DECK_CONTROLS) {
+      const el = mixDeckCtl(deck, ctl);
+      // not while a hand is on it: a focused input, or a knob mid-drag
+      if (document.activeElement !== el && !el.classList.contains('dragging')) {
+        mixGlide(el, state.perDeck[deck][ctl] ?? MIX_NEUTRAL[ctl]);
+      }
+    }
+  }
+  const xf = document.getElementById('crossfader');
+  if (document.activeElement !== xf && typeof state.xf === 'number') mixGlide(xf, state.xf);
+  for (const deck of ['a', 'b']) {
+    const btn = document.getElementById(deck === 'a' ? 'mixCueA' : 'mixCueB');
+    btn.disabled = !state.cue;
+    btn.title = state.cue
+      ? `cue deck ${deck.toUpperCase()} in the headphones ("${state.cue.name}", post-EQ pre-fader)`
+      : 'no cue pair this boot - pick a cue device in the settings tab (restarts the engine)';
+    btn.classList.toggle('on', (state.perDeck[deck].cue ?? 0) > 0);
+  }
   mixTempoRender(state);
+}
+
+let mixPollTimer = null;
+function mixPollStart() {
+  clearInterval(mixPollTimer);
+  mixPollTimer = setInterval(async () => {
+    if (!mixModeOn) return;
+    try {
+      mixSyncValues(await api('GET', '/api/mix?desk=1')); // desk values only - cheap at this rate
+    } catch { /* next tick retries */ }
+  }, 150);
+}
+function mixPollStop() {
+  clearInterval(mixPollTimer);
+  mixPollTimer = null;
 }
 
 // --- tempo migration (phase 5): the shared clock rides between the songs' native tempos ---
@@ -13945,37 +14207,70 @@ function mixTrackRow(t) {
   return row;
 }
 
-async function ejectDeckB() {
+// --- MIDI learn (the `midi` button): arm, click a desk control, move a hardware knob ---
+// The mapping itself lives server-side (settings.json) and the server consumes mapped CCs
+// directly - this is only the binding gesture. Alt+click a control while armed to unbind it.
+
+let mixLearnArmed = false;
+let mixLearnSeq = 0; // silences the null reply of a poll superseded by the NEXT control's click
+const mixLearnBtn = document.getElementById('mixLearn');
+
+// Learn mode STAYS armed across bindings: tap low, turn a knob, tap high, turn the next knob...
+// Only clicking `midi` again (or esc) leaves it.
+function setMixLearn(on) {
+  mixLearnArmed = on;
+  mixLearnBtn.classList.toggle('on', on);
+  logLine(on
+    ? 'MIDI learn armed - click a desk control then move a knob, as many as you like; esc or midi again to finish (alt+click unbinds)'
+    : 'MIDI learn off');
+}
+mixLearnBtn.addEventListener('click', () => setMixLearn(!mixLearnArmed));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && mixLearnArmed) setMixLearn(false);
+});
+
+async function mixLearnDo(target, clear) {
+  const my = ++mixLearnSeq;
   try {
-    await api('POST', '/api/mix/eject');
-    deckBFileName = null;
-    if (deckBCM) deckBCM.setValue('');
-    document.getElementById('crossfader').value = -1; // home for the next session (openMixMode re-arms)
-    logLine('deck B ejected - the desk is reset');
-    closeMixMode(); // the mix session is over; Shift+X reopens for the next one
+    if (clear) {
+      await api('POST', '/api/mix/midilearn', { target, clear: true });
+      logLine(`${target} unbound - next control?`);
+      return;
+    }
+    logLine(`learning ${target} - move a MIDI knob…`);
+    const { learned } = await api('POST', '/api/mix/midilearn', { target });
+    if (learned) logLine(`${target} ← cc ${learned.cc} (ch ${learned.channel}, ${learned.device}) - next control?`);
+    // A null reply is EITHER the 10s timeout or this poll being superseded by the next
+    // control's click - only the timeout (still the latest, still armed) is worth a line.
+    else if (my === mixLearnSeq && mixLearnArmed) logLine(`no CC seen for ${target} - still armed`, true);
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
 }
 
-async function completeMix() {
-  if (!deckBCM) return;
-  try {
-    const res = await api('POST', '/api/mix/complete');
-    // The incoming song IS the set now: its buffer moves to the main editor (and its file name
-    // to the files tab), and the re-eval below finds every promoted track already playing under
-    // its new name - nothing reloads, the music doesn't blink.
-    cm.setValue(deckBCM.getValue());
-    setCurrentSavedName(deckBFileName);
-    deckBCM.setValue('');
-    deckBFileName = null;
-    document.getElementById('crossfader').value = -1; // home for the next session (openMixMode re-arms)
-    logLine(`mix complete - promoted: ${res.promoted.join(', ')}`);
-    closeMixMode(); // the mix session is over; Shift+X opens the next one
-    await evaluate(true);
-  } catch (e) {
-    logLine(e.message ?? String(e), true);
-  }
+// While armed, a pointerdown on a learnable control is the binding gesture, not a drag.
+function mixLearnAttach(el, target) {
+  el.addEventListener('pointerdown', (e) => {
+    if (!mixLearnArmed) return;
+    e.preventDefault();
+    e.stopImmediatePropagation(); // the knob's own drag handler must not also fire
+    mixLearnDo(target, e.altKey);
+  }, true);
+}
+mixLearnAttach(document.getElementById('crossfader'), 'xf');
+for (const deck of ['a', 'b']) {
+  for (const ctl of MIX_DECK_CONTROLS) mixLearnAttach(mixDeckCtl(deck, ctl), `${deck}:${ctl}`);
+}
+
+// The 🎧 buttons: deck-wide cue on/off (a broadcast `cue` value, like every desk control - new
+// stems of that deck are born wearing it via the birth args).
+for (const deck of ['a', 'b']) {
+  const btn = document.getElementById(deck === 'a' ? 'mixCueA' : 'mixCueB');
+  btn.addEventListener('click', () => {
+    const on = !btn.classList.contains('on');
+    btn.classList.toggle('on', on);
+    mixPost(`cue-${deck}`, { deck, name: 'cue', value: on ? 1 : 0 });
+  });
 }
 
 document.getElementById('crossfader').addEventListener('input', sendCrossfader);
@@ -14000,8 +14295,13 @@ document.getElementById('deckBLoad').addEventListener('click', loadDeckBFile);
 document.getElementById('deckBFile').addEventListener('change', loadDeckBFile);
 document.getElementById('deckBPlay').addEventListener('click', () => evalDeckB(true));
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
-document.getElementById('mixEject').addEventListener('click', ejectDeckB);
-document.getElementById('mixComplete').addEventListener('click', completeMix);
+document.getElementById('deckAKeep').addEventListener('click', () => exitDjMode('a'));
+document.getElementById('deckBKeep').addEventListener('click', () => exitDjMode('b'));
+document.getElementById('deckALoad').addEventListener('click', loadDeckAFile);
+document.getElementById('deckAFile').addEventListener('change', loadDeckAFile);
+document.getElementById('deckAPlay').addEventListener('click', () => evaluate(true, { byHand: true }));
+document.getElementById('deckAUpdate').addEventListener('click', () => evaluate(false, { byHand: true }));
+document.getElementById('deckAOrganize').addEventListener('click', () => openOrganize());
 document.getElementById('deckBNext').addEventListener('click', stepDeckBQueue);
 document.getElementById('deckBOrganize').addEventListener('click', () => openOrganize());
 document.getElementById('fileOrganizeBtn').addEventListener('click', () => openOrganize());
@@ -14034,7 +14334,7 @@ function saveLibraryDoc() {
     } catch (e) {
       logLine(e.message ?? String(e), true);
     }
-    if (mixModeOn) refreshDeckBFiles(); // the picker mirrors the active set
+    if (mixModeOn) refreshDeckFiles(); // the pickers mirror the active set
   }, 200);
 }
 

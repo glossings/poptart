@@ -80,6 +80,17 @@
 
       <main>
         <div id="editorPane">
+          <!-- Shown only in DJ mode (body.mix-on): the main editor IS deck A, and both decks
+               get the same head - load a song, play it, or leave DJ mode keeping this pane. -->
+          <div id="deckAHead" class="deck-head">
+            <span class="deck-b-title">deck A</span>
+            <select id="deckAFile" title="load a different song into this deck"></select>
+            <button id="deckALoad" class="small" title="load the picked song into this pane (this deck's current tracks are cleared)">load</button>
+            <button id="deckAPlay" class="small" title="Cmd/Ctrl+Enter">&#9654; play</button>
+            <button id="deckAUpdate" class="small" title="evaluate without changing play state">&#8635;</button>
+            <button id="deckAOrganize" class="small" title="playlists - organize the set">&#8801;</button>
+            <button id="deckAKeep" class="small" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
+          </div>
           <textarea id="editor" spellcheck="false">keys: n("0 2 3 <5 7>")
   .scale("F minor")
   .synth("Serum 2")
@@ -103,6 +114,7 @@
             <button id="deckBPlay" class="small" title="Cmd/Ctrl+Enter in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
             <button id="deckBOrganize" class="small" title="playlists - organize the set">≡</button>
+            <button id="deckBKeep" class="small" title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn (Shift+Cmd/Ctrl+Enter)">&#9167; keep</button>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
         </div>
@@ -178,6 +190,9 @@
               </label>
               <label class="settings-row">output channels
                 <select id="audioChannelSelect" title="how many output channels .o(n) may play to - stereo folds every orbit onto channels 1/2; raise it to reach an interface's other pairs"></select>
+              </label>
+              <label class="settings-row">cue device
+                <select id="audioCueSelect" title="a SEPARATE output device for the headphones: mix mode's 🎧 buttons pre-listen a deck there (post-EQ, pre-fader). A before-the-gig choice - applying restarts the engine"></select>
               </label>
               <div class="settings-row settings-row-block">
                 <span title="extra input devices to combine, so input() reaches all their channels">extra inputs</span>
@@ -256,20 +271,15 @@
       <!-- The mix strip (mix mode): per-track DJ controls for both decks around the crossfader.
            Every control here is ephemeral performance state - nothing writes into song code. -->
       <div id="mixStrip" class="hidden">
-        <div class="mix-deck">
+        <div class="mix-tracks-col">
           <div class="mix-deck-head"><strong>deck A</strong><span class="spacer"></span>
-            <label title="trim (deck-wide input gain) - double-click resets">trim
-              <input id="mixTrimA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="low (0 is a true kill) - double-click resets">low
-              <input id="mixEqloA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="mid (0 is a true kill) - double-click resets">mid
-              <input id="mixEqmidA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="high (0 is a true kill) - double-click resets">high
-              <input id="mixEqhiA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="one-knob filter: left sweeps a low-pass down, right a high-pass up; double-click resets">filter
-              <input id="mixDjfA" class="mix-djf" type="range" min="-1" max="1" step="0.01" value="0" /></label></div>
+            <button id="mixCueA" class="small mix-cue" title="cue deck A in the headphones (post-EQ, pre-fader) - needs a cue device (settings tab)">&#127911;</button></div>
           <div class="mix-tracks" id="mixTracksA"></div>
         </div>
+        <!-- The per-deck knob columns (trim / low / mid / high / filter) mirror each other around
+             the center, like a mixer's channel strips. Knobs are built by client.js with the same
+             ids the sliders had (mixTrimA...), so refresh/learn/reset all keep working. -->
+        <div class="mix-knobs" id="mixKnobsA"></div>
         <div class="mix-center">
           <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out - the phase-continuous stem swap">
             <input id="mixSwap" type="checkbox" /> swap</label>
@@ -285,24 +295,14 @@
               <input id="mixTempoSecs" type="number" min="0" max="300" step="1" value="16" /> s</label>
           </div>
           <input id="crossfader" type="range" min="-1" max="1" step="0.01" value="-1"
-            title="crossfader (equal power) - hard left is all deck A" />
+            title="crossfader (transition curve) - hard left is all deck A, center is both decks open" />
           <div class="mix-actions">
-            <button id="mixEject" class="small" title="abort the mix: stop deck B, destroy its tracks, reset the desk and close the split">eject</button>
-            <button id="mixComplete" class="small" title="the incoming song becomes the set and the split closes (Shift+Cmd/Ctrl+Enter in deck B)">complete</button>
+            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click desk controls and turn hardware knobs, one after another; click again or press esc to finish. Alt+click a control to unbind it">midi</button>
           </div>
         </div>
-        <div class="mix-deck">
-          <div class="mix-deck-head"><strong>deck B</strong><span class="spacer"></span>
-            <label title="trim (deck-wide input gain) - double-click resets">trim
-              <input id="mixTrimB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="low (0 is a true kill) - double-click resets">low
-              <input id="mixEqloB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="mid (0 is a true kill) - double-click resets">mid
-              <input id="mixEqmidB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="high (0 is a true kill) - double-click resets">high
-              <input id="mixEqhiB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
-            <label title="one-knob filter: left sweeps a low-pass down, right a high-pass up; double-click resets">filter
-              <input id="mixDjfB" class="mix-djf" type="range" min="-1" max="1" step="0.01" value="0" /></label></div>
+        <div class="mix-knobs" id="mixKnobsB"></div>
+        <div class="mix-tracks-col">
+          <div class="mix-deck-head"><button id="mixCueB" class="small mix-cue" title="cue deck B in the headphones (post-EQ, pre-fader) - needs a cue device (settings tab)">&#127911;</button><span class="spacer"></span><strong>deck B</strong></div>
           <div class="mix-tracks" id="mixTracksB"></div>
         </div>
       </div>
