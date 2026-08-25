@@ -194,16 +194,6 @@ no completion notes.
     out - note feed, param gestures, pluginEdited, mixer meters), recordings filenames stay
     label-named. This is what makes complete-mix pure re-labeling with zero engine churn.
 
-[ ] Mixing phase 5 - tempo migration: Transport cps ramp (integrate 1/cps, cycle position stays
-    continuous), instant/timed/slider forms, native-bpm detents; setbpm intercepted per deck.
-
-[ ] Mixing phase 6 - playlists + organize: port fizzle's library.json model + three-pane organize
-    modal (see ~/td-livecode/src/{library,organize,sidebar}.js) to ~/.poptart/patterns/
-    library.json, paths owned by pattern-files.js, items reference named saves, @tags from
-    pattern-meta as the tag source, native bpm stored per item. Wire deck B's song picker (mix
-    mode - today it lists ALL saved patterns) to the active playlist, with next-in-list as the
-    default queue and a hotkey to step it.
-
 [ ] Mixing polish - deck B playback highlighting (the grid machinery is single-pane today);
     MIDI-learn for the mix strip's controls (crossfader first) via the existing midi.mjs CC
     path; a wip autosave for deck B edits (today its edits live only in the pane).

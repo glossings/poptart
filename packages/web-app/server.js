@@ -124,9 +124,15 @@ function noteProtoOwnership(deck) {
 // ---------------------------------------------------------------------------------------------
 const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1, deck: 1 };
 const mixState = {
-  clobber: false, // when on, gating a stem in throws the SAME-NAMED stem on the other deck out
+  swap: false, // swap mode: gating a stem in throws the SAME-NAMED stem on the other deck out
   perDeck: { a: new Map(), b: new Map() }, // deck-broadcast values (the crossfader's `deck`, a deck-wide djf)
   perTrack: new Map(), // key -> Map(name -> value): faders, per-track EQ, trim
+  // Tempo migration (phase 5): once the mix desk touches the clock (/api/mix/tempo), this holds
+  // the bpm it asked for and the MAIN deck's setbpm stops driving the transport (it still
+  // records the song's native tempo) - otherwise re-evaling deck a mid-migration would snap the
+  // clock back to its declared bpm. Cleared by eject (deck a's declared tempo is restored) and
+  // by complete (the promoted song's own setbpm takes over on its promotion re-eval).
+  tempoOverride: null,
 };
 
 // Everything the mix session holds for one (possibly just-created) track, applied engine-side.
@@ -139,6 +145,16 @@ function applyMixTo(key) {
     if (!per?.has(name)) engine.setParam(tid, -1, name, value, 0);
   }
   for (const [name, value] of per ?? []) engine.setParam(tid, -1, name, value, 0);
+}
+
+// The merged desk view for one track (deck-broadcast under its own values), as a plain object:
+// what a NEW track must be BORN wearing (engine.createTrack's birth args) - by the time a plain
+// setParam could land, the first samples have already played.
+function mixBirthFor(key) {
+  const birth = {};
+  for (const [name, value] of mixState.perDeck[deckOfKey(key)] ?? []) birth[name] = value;
+  for (const [name, value] of mixState.perTrack.get(key) ?? []) birth[name] = value;
+  return birth;
 }
 
 // Every DJ-stage control back to neutral on one track - what complete-mix does to the promoted
@@ -1110,6 +1126,8 @@ const {
   listWipPatterns,
   wipOlderThan,
   pruneWipSessions,
+  readLibrary,
+  writeLibrary,
 } = require('./pattern-files');
 const { matchesQuery } = require('./public/pattern-meta.js');
 
@@ -2234,7 +2252,8 @@ const routes = {
           throw new Error('[transport] setbpm() takes a number or a signal (mini string / LFO / pattern)');
         }
         decks[deck].bpm = v;
-        return deck === 'a' ? setbpm(value) : TEMPO_BLOCK;
+        // While a tempo migration holds the clock, even the main deck's setbpm only RECORDS.
+        return deck === 'a' && mixState.tempoOverride == null ? setbpm(value) : TEMPO_BLOCK;
       },
     };
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
@@ -2347,6 +2366,20 @@ const routes = {
       // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
       const tid = claimEngineTrack(key);
       mappedEngine.setChain(tid, [b.sig.instrument, ...b.sig.fxChain]);
+      // With swap mode on, an incoming stem starts GATED OUT (fader 0) the first time it
+      // appears: the whole point of the mode is choosing when each stem swaps its twin out, so
+      // none may play just by being evaluated. Recorded (not just applied) so its gate shows OFF.
+      if (deck === 'b' && mixState.swap && !mixState.perTrack.get(key)?.has('fader')) {
+        let per = mixState.perTrack.get(key);
+        if (!per) mixState.perTrack.set(key, (per = new Map()));
+        per.set('fader', 0);
+      }
+      // Pre-claim the engine track with the desk's current values as BIRTH args (deck gain 0 =
+      // born silent). This must ride the creation itself: a track is built asynchronously
+      // sclang-side, and a setParam sent while it is still pending is dropped - the race that
+      // had a freshly evaled stem play at full volume until the desk was touched. Idempotent:
+      // the scheduler's own createTrack (inside setPattern) finds the key taken and no-ops.
+      mappedEngine.createTrack(tid, mixBirthFor(key));
       let sch = schedulers.get(key);
       if (!sch) {
         sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: key });
@@ -2368,16 +2401,10 @@ const routes = {
       for (const [holdKey, held] of channelHolds) {
         if (holdKey.slice(0, holdKey.lastIndexOf('|')) === key) sch.holdChannel(held.name, held.value);
       }
-      // With clobber on, an incoming stem starts GATED OUT (fader 0) the first time it appears:
-      // the whole point of the mode is choosing when each stem clobbers its twin, so none may
-      // play just by being evaluated. Recorded (not just applied) so its gate shows OFF.
-      if (deck === 'b' && mixState.clobber && !mixState.perTrack.get(key)?.has('fader')) {
-        let per = mixState.perTrack.get(key);
-        if (!per) mixState.perTrack.set(key, (per = new Map()));
-        per.set('fader', 0);
-      }
       // The mix session's DJ-stage values (see mixState): a track (re)created into a live mix
       // must come up wearing them - this is what makes a queued deck's tracks arrive silent.
+      // Already-live tracks get a re-assert; a NEW track had its values baked into its birth
+      // args above, and this is a harmless no-op while it builds.
       applyMixTo(key);
       sch.start();
     }
@@ -2789,8 +2816,25 @@ const routes = {
     if (!fs.existsSync(from)) throw new Error(`no saved pattern named "${body.from}"`);
     if (fs.existsSync(to)) throw new Error(`a pattern named "${body.to}" already exists`);
     fs.renameSync(from, to);
+    // The rename follows the song into every playlist that plays it - a set is a list of names,
+    // and the name just changed. (A DELETE deliberately does not do this: the slot stays and
+    // renders as missing; the playlist is the user's document, not an index to repair.)
+    const lib = readLibrary();
+    let inSets = false;
+    for (const p of lib.playlists) {
+      p.items = p.items.map((k) => (k === body.from ? ((inSets = true), String(body.to)) : k));
+    }
+    if (inSets) writeLibrary(lib);
     return { status: 200, body: {} };
   },
+
+  // --- the library (playlists; see pattern-files.js) ---
+
+  // The whole document both ways: the client edits its copy and posts it back coalesced (a drag
+  // through a playlist is one write, not one per row). POST returns what was actually kept, so
+  // the client's copy converges on the normalized truth.
+  'GET /api/library': async () => ({ status: 200, body: readLibrary() }),
+  'POST /api/library': async (body) => ({ status: 200, body: writeLibrary(body) }),
 
   // --- work in progress (the editor autosaves the live buffer here; see wipFilePath) ---
 
@@ -2959,7 +3003,7 @@ const routes = {
   'GET /api/mix': async () => ({
     status: 200,
     body: {
-      clobber: mixState.clobber,
+      swap: mixState.swap,
       perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
       tracks: [...schedulers.keys()].map((key) => ({
         key,
@@ -2970,9 +3014,37 @@ const routes = {
         a: typeof decks.a.bpm === 'number' ? decks.a.bpm : null,
         b: typeof decks.b.bpm === 'number' ? decks.b.bpm : null,
       },
+      tempo: {
+        master: transport ? transport.cps * 240 : null,
+        override: mixState.tempoOverride,
+      },
       neutral: DJ_NEUTRAL,
     },
   }),
+
+  // Tempo migration: move the shared clock (all decks, one Transport) toward a bpm - instantly
+  // (the slider ride) or as a glide over `seconds` (the detent buttons). Body: { bpm, seconds? }
+  // or { deck: 'a'|'b', seconds? } to target that deck's native tempo. Cycle position stays
+  // continuous through the whole ramp (Transport#rampBpm rebases every step) - nothing jumps,
+  // nothing re-triggers, multi-cycle structures keep their phase. Ephemeral like the rest of
+  // the desk: from the first touch, song-code setbpm stops driving the clock (see mixState).
+  'POST /api/mix/tempo': async (body) => {
+    if (!transport) throw new Error(engineError ?? 'engine not loaded');
+    let bpm = Number(body.bpm);
+    if (body.deck === 'a' || body.deck === 'b') {
+      const native = decks[body.deck].bpm;
+      if (typeof native !== 'number') {
+        throw new Error(`deck ${body.deck} has no native bpm (its song doesn't setbpm() a number)`);
+      }
+      bpm = native;
+    }
+    if (!Number.isFinite(bpm) || bpm < 20 || bpm > 400) throw new Error('mix/tempo: bpm must be 20..400');
+    const seconds = Math.min(600, Math.max(0, Number(body.seconds) || 0));
+    const from = transport.cps * 240;
+    mixState.tempoOverride = bpm;
+    transport.rampBpm(bpm, seconds);
+    return { status: 200, body: { from, bpm, seconds } };
+  },
 
   // Set DJ-stage controls, ephemerally (never into code). Body: one { name, value, key? | deck? }
   // or { targets: [...] } of them. A `deck` target broadcasts to every track of that deck AND is
@@ -3005,14 +3077,14 @@ const routes = {
     return { status: 200, body: { ok: true } };
   },
 
-  // Clobber mode. Body: { on }. With it on, gating a stem IN throws the other deck's same-named
-  // stem OUT in the same gesture (see /api/mix/gate).
-  'POST /api/mix/clobber': async (body) => {
-    mixState.clobber = !!body.on;
-    return { status: 200, body: { clobber: mixState.clobber } };
+  // Swap mode. Body: { on }. With it on, gating a stem IN throws the other deck's same-named
+  // stem OUT in the same gesture (see /api/mix/gate) - the phase-continuous stem swap.
+  'POST /api/mix/swap': async (body) => {
+    mixState.swap = !!body.on;
+    return { status: 200, body: { swap: mixState.swap } };
   },
 
-  // Gate one stem in or out (its DJ fader, 1 or 0). In clobber mode, gating IN also gates the
+  // Gate one stem in or out (its DJ fader, 1 or 0). In swap mode, gating IN also gates the
   // other deck's same-named stem out - the phase-continuous stem swap. Body: { key, on }.
   'POST /api/mix/gate': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
@@ -3027,7 +3099,7 @@ const routes = {
     const on = !!body.on;
     setFader(key, on ? 1 : 0);
     let countered = null;
-    if (mixState.clobber && on) {
+    if (mixState.swap && on) {
       const base = deckOfKey(key) === 'a' ? key : key.slice(key.indexOf(':') + 1);
       const other = deckOfKey(key) === 'a' ? `b:${base}` : base;
       if (schedulers.has(other)) {
@@ -3054,6 +3126,13 @@ const routes = {
     mixState.perDeck.a.clear();
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
+    if (mixState.tempoOverride != null) {
+      mixState.tempoOverride = null;
+      // The surviving deck gets its declared tempo back - as a short glide, not a lurch (it is
+      // still playing). A signal tempo re-installs itself; no declaration leaves the clock be.
+      if (typeof decks.a.bpm === 'number') transport?.rampBpm(decks.a.bpm, 2);
+      else if (decks.a.bpm) transport?.setBpm(decks.a.bpm);
+    }
     for (const key of schedulers.keys()) neutralizeMix(key);
     decks.b = { scale: null, bpm: null };
     liveStateIds.b = new Set();
@@ -3091,6 +3170,9 @@ const routes = {
     mixState.perDeck.a.clear();
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
+    // The promoted song's declared tempo takes over on the client's promotion re-eval (override
+    // gone, its setbpm drives again) - a no-op when the migration already landed on its native.
+    mixState.tempoOverride = null;
     for (const key of schedulers.keys()) neutralizeMix(key);
     return { status: 200, body: { promoted: promoted.map((k) => k.slice(k.indexOf(':') + 1)) } };
   },

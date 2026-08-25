@@ -192,6 +192,7 @@ export class Transport {
     this._paused = paused;
     this._tempoSig = null;
     this._tempoTimer = null;
+    this._rampTimer = null;
     // Fired after every effective tempo change (with the new cps). The host uses it to mirror
     // the tempo out to listeners beyond the schedulers - e.g. web-app forwards it to the
     // engine so VST-internal synced LFOs/delays follow setbpm (see server.js).
@@ -235,8 +236,49 @@ export class Transport {
     if (typeof this.onCpsChange === 'function') this.onCpsChange(cps);
   }
 
+  /**
+   * Migrate the tempo: glide cps to `targetCps` over `seconds` (0 = instant). Applied as a
+   * stream of small setCps rebases every POLL_INTERVAL_MS - exactly how tempo signals are
+   * applied - so cycle position is the exact integral of the piecewise tempo and stays
+   * continuous the whole way (nothing jumps, nothing re-triggers). Linear in cps (= linear in
+   * bpm, a pitch-fader ride). Cancels any tempo signal; setBpm/setCps in turn cancel the ramp.
+   */
+  rampCps(targetCps, seconds = 0) {
+    if (!(targetCps > 0) || !Number.isFinite(targetCps)) return;
+    this._clearRamp();
+    if (this._tempoTimer) {
+      clearInterval(this._tempoTimer);
+      this._tempoTimer = null;
+      this._tempoSig = null;
+    }
+    if (!(seconds > 0)) {
+      this.setCps(targetCps);
+      return;
+    }
+    const fromCps = this.cps;
+    const t0 = this.getTime();
+    this._rampTimer = setInterval(() => {
+      const u = Math.min(1, (this.getTime() - t0) / seconds);
+      this.setCps(fromCps + (targetCps - fromCps) * u);
+      if (u >= 1) this._clearRamp();
+    }, POLL_INTERVAL_MS);
+  }
+
+  /** rampCps in bpm terms (4 beats per cycle, like setBpm). */
+  rampBpm(bpm, seconds = 0) {
+    this.rampCps(bpm / 240, seconds);
+  }
+
+  _clearRamp() {
+    if (this._rampTimer) {
+      clearInterval(this._rampTimer);
+      this._rampTimer = null;
+    }
+  }
+
   /** @param {number | import('./signal.mjs').Sig} bpm - beats per minute, 4 beats per cycle. */
   setBpm(bpm) {
+    this._clearRamp();
     if (this._tempoTimer) {
       clearInterval(this._tempoTimer);
       this._tempoTimer = null;
@@ -279,6 +321,7 @@ export class Transport {
   dispose() {
     if (this._tempoTimer) clearInterval(this._tempoTimer);
     this._tempoTimer = null;
+    this._clearRamp();
   }
 }
 

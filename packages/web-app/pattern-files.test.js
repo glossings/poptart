@@ -22,6 +22,9 @@ const {
   wipFallbackLabel,
   wipOlderThan,
   pruneWipSessions,
+  nativeBpmOf,
+  readLibrary,
+  writeLibrary,
 } = require('./pattern-files');
 
 function write(rel, code) {
@@ -174,4 +177,54 @@ test('pruning with no policy deletes nothing', () => {
   const old = aged('2022-02/2022-02-02-020202', 900);
   assert.deepEqual(pruneWipSessions(0), { deleted: 0, freed: 0 });
   assert.ok(fs.existsSync(wipFilePath(old)));
+});
+
+// --- native bpm (read from the source at list time, never stored) ---
+
+test('nativeBpmOf reads the last plain-number setbpm, quoted or not', () => {
+  assert.equal(nativeBpmOf('setbpm(120)'), 120);
+  assert.equal(nativeBpmOf('setbpm(120)\nsetbpm("140")'), 140, 'the last one is the one an eval leaves in force');
+  assert.equal(nativeBpmOf('setbpm(87.5)'), 87.5);
+  assert.equal(nativeBpmOf('kick: s("bd*4")'), null, 'no tempo declared');
+  assert.equal(nativeBpmOf('setbpm("<120 140>")'), null, 'a signal tempo has no single native bpm');
+  assert.equal(nativeBpmOf('mysetbpm(99)'), null, 'someone else\'s function is not a tempo');
+  assert.equal(nativeBpmOf('x.setbpm(99)'), null, 'a method is not the host builder');
+});
+
+test('listings carry the native bpm', () => {
+  write('tempoed.js', 'setbpm(133)\nkick: s("bd*4")');
+  const entry = listSavedPatterns().find((p) => p.name === 'tempoed');
+  assert.equal(entry.bpm, 133);
+});
+
+// --- the library (playlists; one library.json beside the pattern files) ---
+
+test('an empty or unreadable library reads as an empty one', () => {
+  assert.deepEqual(readLibrary(), { version: 1, playlists: [], active: null });
+  write('library.json', 'not json at all {');
+  assert.deepEqual(readLibrary(), { version: 1, playlists: [], active: null });
+});
+
+test('writeLibrary normalizes and round-trips', () => {
+  const kept = writeLibrary({
+    playlists: [
+      { id: 'set1', name: 'friday', items: ['a', 'b', 'a', 42, null] }, // repeats stay, junk goes
+      { name: 'untitled-shape', items: 'nope' }, // no id -> minted; bad items -> empty
+      { notAName: true }, // no name -> dropped
+    ],
+    active: 'set1',
+    extra: 'ignored',
+  });
+  assert.equal(kept.version, 1);
+  assert.equal(kept.playlists.length, 2);
+  assert.deepEqual(kept.playlists[0], { id: 'set1', name: 'friday', items: ['a', 'b', 'a'] });
+  assert.ok(kept.playlists[1].id, 'a playlist without an id is given one');
+  assert.deepEqual(kept.playlists[1].items, []);
+  assert.equal(kept.active, 'set1');
+  assert.deepEqual(readLibrary(), kept, 'what was kept is what a later read sees');
+});
+
+test('an active id that names no playlist clears to null', () => {
+  const kept = writeLibrary({ playlists: [{ id: 'p', name: 'x', items: [] }], active: 'gone' });
+  assert.equal(kept.active, null);
 });

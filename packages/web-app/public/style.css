@@ -3468,12 +3468,43 @@ li.CodeMirror-hint-active {
   display: flex;
   gap: 6px;
 }
-.mix-clobber-label {
+.mix-swap-label {
   display: flex;
   gap: 4px;
   align-items: center;
   font-size: 11px;
   color: var(--text-dim);
+}
+.mix-tempo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#mixTempoSlider {
+  width: 110px;
+}
+.mix-tempo-detent {
+  min-width: 34px;
+  font-family: var(--mono);
+}
+.mix-tempo-detent.at {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.mix-tempo-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+#mixTempoNow {
+  font-family: var(--mono);
+  min-width: 62px;
+  text-align: right;
+}
+#mixTempoSecs {
+  width: 44px;
 }
 
 /* The new scrollable surfaces carry the theme's colors instead of stock scrollbars, and the
@@ -3522,4 +3553,186 @@ li.CodeMirror-hint-active {
 }
 .mix-fader {
   width: 130px;
+}
+
+/* --- the organize modal (playlists; see the library section of client.js) --- */
+#orgModal {
+  position: fixed;
+  inset: 0;
+  background: var(--shadow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+#orgModal.hidden {
+  display: none;
+}
+#orgPanel {
+  width: min(880px, 92vw);
+  height: min(560px, 84vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px var(--shadow);
+  overflow: hidden;
+}
+#orgPanel header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.org-title {
+  font-weight: 600;
+}
+#orgSearch {
+  width: 260px;
+}
+#orgCols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1.2fr 1.4fr;
+}
+.org-col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+.org-col:last-child {
+  border-right: none;
+}
+.org-col h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.org-col ul {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 6px 8px;
+  list-style: none;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.org-col ul::-webkit-scrollbar {
+  width: 8px;
+}
+.org-col ul::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.org-col ul::-webkit-scrollbar-track {
+  background: transparent;
+}
+.org-col li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: default;
+  border-top: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+}
+.org-col li.on {
+  background: var(--selection);
+}
+.org-col li:hover {
+  background: var(--bg-raised);
+}
+.org-col li.on:hover {
+  background: var(--selection);
+}
+.org-col li > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.org-col li em {
+  font-style: normal;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.org-col li .org-bpm {
+  font-family: var(--mono);
+}
+.org-col li button {
+  visibility: hidden;
+}
+.org-col li:hover button,
+.org-col li button.org-star {
+  visibility: visible;
+}
+.org-col li button:disabled {
+  opacity: 0.35;
+}
+.org-del:hover {
+  color: var(--err);
+}
+.org-star {
+  color: var(--ok);
+}
+.org-n {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  width: 16px;
+  text-align: right;
+}
+.org-empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.org-missing {
+  color: var(--err);
+  font-style: italic;
+}
+.org-over {
+  background: var(--selection);
+}
+.org-before {
+  border-top-color: var(--accent) !important;
+}
+.org-after {
+  border-bottom-color: var(--accent) !important;
+}
+.org-tags {
+  display: flex;
+  gap: 3px;
+  flex: none !important;
+  overflow: hidden;
+}
+.org-tags i {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+#orgFoot {
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
 }

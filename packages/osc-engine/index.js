@@ -641,8 +641,15 @@ class OscEngine {
   }
 
   // --- track / chain management ---
-  createTrack(trackId) {
-    this._send('/poptart/createTrack', [trackId]);
+  /**
+   * @param {Record<string, number>} [initial] - channel-control values baked into the synth's
+   * birth args (the performance mixer's "born silent"): a plain setParam sent while the track
+   * is still being built sclang-side is dropped, so state a new track must wear from its very
+   * first sample has to ride the creation itself. Idempotent per trackId (later calls no-op).
+   */
+  createTrack(trackId, initial) {
+    const pairs = Object.entries(initial ?? {}).flatMap(([k, v]) => [k, v]);
+    this._send('/poptart/createTrack', [trackId, ...pairs]);
   }
   /**
    * Destroy a track and everything it owns (plugins, modulators, routes, buses). Used by the

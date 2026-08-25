@@ -911,6 +911,14 @@ server.waitForBoot {
 
 OSCdef(\poptartCreateTrack, { |msg|
     var key = msg[1].asSymbol;
+    // Optional birth values (name/value pairs after the key): channel controls baked into the
+    // Synth's own args, so a track created into a live mix comes up ALREADY wearing the desk's
+    // state (deck gain 0 = born silent). They have to ride the creation itself: a setParam sent
+    // while the track is still \pending is dropped (see poptartSetParam), which is the race
+    // that had freshly evaled stems flash in at full volume before the desk caught them.
+    var birth = if (msg.size > 2) {
+        msg.copyRange(2, msg.size - 1).clump(2).collect { |p| [p[0].asSymbol, p[1].asFloat] }.flatten;
+    } { [] };
     if (tracks[key].isNil) {
         tracks[key] = \pending;
         fork {
@@ -923,7 +931,7 @@ OSCdef(\poptartCreateTrack, { |msg|
                 def: def,
                 group: group,
                 inBus: inBus,
-                synth: Synth(trackDefName.(key), [\inBus, inBus.index] ++ scArgsFor.(), target: group, addAction: \addToTail),
+                synth: Synth(trackDefName.(key), [\inBus, inBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail),
                 controllers: Array.newClear(maxSlots),
                 loaded: Array.newClear(maxSlots), // slot -> pluginId once open() succeeds
                 wanted: Array.newClear(maxSlots), // slot -> pluginId an in-flight open() should commit

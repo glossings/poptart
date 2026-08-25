@@ -97,10 +97,12 @@
         <div id="deckBPane" class="hidden">
           <div id="deckBHead">
             <span class="deck-b-title">deck B</span>
-            <select id="deckBFile" title="the saved song to bring in"></select>
+            <select id="deckBFile" title="the saved song to bring in - the active playlist leads, everything else below"></select>
             <button id="deckBLoad" class="small" title="load the picked song into this pane">load</button>
+            <button id="deckBNext" class="small" title="queue the next song in the active playlist (⇧⌘/Ctrl+Shift+.)">⏭</button>
             <button id="deckBPlay" class="small" title="Cmd/Ctrl+Enter in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
+            <button id="deckBOrganize" class="small" title="playlists - organize the set">≡</button>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
         </div>
@@ -151,6 +153,7 @@
               <h2>pattern files
                 <button id="fileNewBtn" class="small" title="clear the editor and start a new pattern">＋ new</button>
                 <button id="fileImportBtn" class="small" title="open a patch file someone sent you">import</button>
+                <button id="fileOrganizeBtn" class="small" title="playlists - organize saved patterns into sets">organize</button>
               </h2>
               <input id="fileImportInput" type="file" accept=".js,text/javascript" hidden />
               <div class="file-save-row">
@@ -254,7 +257,7 @@
            Every control here is ephemeral performance state - nothing writes into song code. -->
       <div id="mixStrip" class="hidden">
         <div class="mix-deck">
-          <div class="mix-deck-head"><strong>deck A</strong> <span id="mixBpmA"></span><span class="spacer"></span>
+          <div class="mix-deck-head"><strong>deck A</strong><span class="spacer"></span>
             <label title="trim (deck-wide input gain) - double-click resets">trim
               <input id="mixTrimA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
             <label title="low (0 is a true kill) - double-click resets">low
@@ -268,17 +271,28 @@
           <div class="mix-tracks" id="mixTracksA"></div>
         </div>
         <div class="mix-center">
-          <label class="mix-clobber-label" title="gating a stem in throws the other deck's same-named stem out - the phase-continuous stem swap">
-            <input id="mixClobber" type="checkbox" /> clobber</label>
+          <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out - the phase-continuous stem swap">
+            <input id="mixSwap" type="checkbox" /> swap</label>
+          <div class="mix-tempo">
+            <button id="mixTempoA" class="small mix-tempo-detent" title="migrate the clock to deck A's native tempo (over the ramp time)">—</button>
+            <input id="mixTempoSlider" type="range" min="0" max="1" step="0.001" value="0"
+              title="tempo migration: ride the shared clock between the decks' native tempos" />
+            <button id="mixTempoB" class="small mix-tempo-detent" title="migrate the clock to deck B's native tempo (over the ramp time)">—</button>
+          </div>
+          <div class="mix-tempo-status">
+            <span id="mixTempoNow" title="the shared clock, right now"></span>
+            <label title="how long a detent migration takes; the slider is always instant">ramp
+              <input id="mixTempoSecs" type="number" min="0" max="300" step="1" value="16" /> s</label>
+          </div>
           <input id="crossfader" type="range" min="-1" max="1" step="0.01" value="-1"
             title="crossfader (equal power) - hard left is all deck A" />
           <div class="mix-actions">
-            <button id="mixEject" class="small" title="abort the mix: stop deck B, destroy its tracks, reset the desk">eject</button>
-            <button id="mixComplete" class="small" title="the incoming song becomes the set (Shift+Cmd/Ctrl+Enter in deck B)">complete</button>
+            <button id="mixEject" class="small" title="abort the mix: stop deck B, destroy its tracks, reset the desk and close the split">eject</button>
+            <button id="mixComplete" class="small" title="the incoming song becomes the set and the split closes (Shift+Cmd/Ctrl+Enter in deck B)">complete</button>
           </div>
         </div>
         <div class="mix-deck">
-          <div class="mix-deck-head"><strong>deck B</strong> <span id="mixBpmB"></span><span class="spacer"></span>
+          <div class="mix-deck-head"><strong>deck B</strong><span class="spacer"></span>
             <label title="trim (deck-wide input gain) - double-click resets">trim
               <input id="mixTrimB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
             <label title="low (0 is a true kill) - double-click resets">low

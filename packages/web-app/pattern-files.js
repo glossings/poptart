@@ -53,6 +53,18 @@ function wipFilePath(id) {
   return path.join(WIP_DIR, `${m[0]}.js`);
 }
 
+// A song's native tempo, read straight from its source: the LAST plain-number setbpm() in the
+// buffer is the one an eval leaves in force. Quoted numbers count (setbpm("140") is the same
+// call); a signal tempo ("<120 140>", an lfo) has no single native bpm and reads as null.
+// Derived at list time rather than stored anywhere, so it can never go stale against the file.
+function nativeBpmOf(code) {
+  let bpm = null;
+  for (const m of String(code).matchAll(/(?<![\w$.])setbpm\s*\(\s*["']?(\d+(?:\.\d+)?)["']?\s*\)/g)) {
+    bpm = Number(m[1]);
+  }
+  return bpm;
+}
+
 function readIfSmall(file) {
   try {
     if (fs.statSync(file).size > MAX_INDEXED_BYTES) return '';
@@ -83,6 +95,7 @@ function indexEntry({ kind, name, id, file, displayName, fallbackLabel, borrowBl
     title: meta.title,
     by: meta.by,
     tags: meta.tags,
+    bpm: nativeBpmOf(code),
     label: displayLabel({ title: meta.title, name: displayName, code, fallback: fallbackLabel, borrowBlockLabel }),
     code,
   };
@@ -152,6 +165,54 @@ function listWipPatterns() {
     }
   }
   return out;
+}
+
+// --- the library (playlists; the organize modal and deck B's song queue) ---
+//
+// One library.json alongside the pattern files, so a set travels with the songs it plays
+// (fizzle's model). It holds only what the files can't say for themselves: the playlists and
+// which one is the ACTIVE set (deck B's picker follows it). Tags stay in the files (@tags),
+// tempo is read from the source (nativeBpmOf) - nothing here duplicates a file's own facts.
+//
+//   { version: 1, playlists: [{ id, name, items: ["saved-name", ...] }], active: id | null }
+//
+// Items reference named saves and may repeat (a set that comes back to a song is a real set).
+// An item whose save was deleted stays in the list and renders as missing - the playlist is the
+// user's document, not an index to be silently repaired.
+
+const LIBRARY_FILE = path.join(PATTERNS_DIR, 'library.json');
+
+const newLibraryId = () => Math.random().toString(36).slice(2, 10);
+
+// Whatever is on disk (or handed to writeLibrary) is coerced to the shape above - a hand-edited
+// or truncated file degrades to an empty library rather than taking the UI down with it.
+function normalizeLibrary(doc) {
+  const src = doc && typeof doc === 'object' ? doc : {};
+  const playlists = (Array.isArray(src.playlists) ? src.playlists : [])
+    .filter((p) => p && typeof p.name === 'string')
+    .map((p) => ({
+      id: String(p.id ?? newLibraryId()),
+      name: p.name,
+      items: Array.isArray(p.items) ? p.items.filter((k) => typeof k === 'string') : [],
+    }));
+  const active = playlists.some((p) => p.id === src.active) ? src.active : null;
+  return { version: 1, playlists, active };
+}
+
+function readLibrary() {
+  try {
+    return normalizeLibrary(JSON.parse(fs.readFileSync(LIBRARY_FILE, 'utf8')));
+  } catch {
+    return normalizeLibrary(null); // no library yet (or unreadable) - start empty
+  }
+}
+
+/** Normalizes, writes, and returns what was actually kept. */
+function writeLibrary(doc) {
+  const clean = normalizeLibrary(doc);
+  fs.mkdirSync(PATTERNS_DIR, { recursive: true });
+  fs.writeFileSync(LIBRARY_FILE, JSON.stringify(clean, null, 2), 'utf8');
+  return clean;
 }
 
 // --- session retention (off unless the settings tab turns it on) ---
@@ -231,4 +292,7 @@ module.exports = {
   listSavedPatterns,
   listWipPatterns,
   wipFallbackLabel,
+  nativeBpmOf,
+  readLibrary,
+  writeLibrary,
 };

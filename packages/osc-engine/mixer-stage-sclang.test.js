@@ -39,6 +39,16 @@ function extractChannelDefault() {
   return m[0];
 }
 
+// And createTrack's birth-args parse (name/value pairs after the key become Synth args - the
+// performance mixer's "born silent"; see osc-engine/index.js createTrack). Lifted as the exact
+// `var birth = ...` statement and run against probe messages.
+function extractBirthParse() {
+  const src = fs.readFileSync(SCD, 'utf8');
+  const m = src.match(/^    var birth = if \(msg\.size > 2\) \{[\s\S]*?\} \{ \[\] \};$/m);
+  assert.ok(m, 'could not find the createTrack birth-args parse in sc/poptart.scd');
+  return m[0];
+}
+
 // And `destroyTrack = { ... };` (performance mixing phase 4) - compiled, not called: assigning
 // the closure in a scope that declares its dependencies catches syntax and undeclared-variable
 // mistakes, the ones otherwise only found by booting the whole engine.
@@ -63,6 +73,7 @@ var maxSlots = 8, numPairs = 2, key = "probe";
 var trackDefName = { |k| ("poptart_probe_" ++ k).asSymbol };
 var channelDefault, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks;
+var birthParse;
 ${extractChannelDefault()}
 // Building the def runs the whole UGen graph function client-side - no server needed; this is
 // where an undeclared var, a bad arg default, or a misused UGen throws. Pasted directly (like
@@ -72,6 +83,12 @@ def = ${extractTrackDef()}
 ("DEF-OK<" ++ def.name ++ ">").postln;
 ${extractDestroyTrack()}
 ("DESTROY-OK<" ++ destroyTrack.isKindOf(Function) ++ ">").postln;
+birthParse = { |msg|
+${extractBirthParse()}
+    birth;
+};
+("BIRTH<" ++ birthParse.([nil, "probe", "deck", 0, "fader", 0.5]) ++ ">").postln;
+("BIRTH-EMPTY<" ++ birthParse.([nil, "probe"]).size ++ ">").postln;
 // The one-knob filter's cutoff mapping at its three cardinal positions.
 ("MAP<lpf-closed>" ++ (18000 * (900 ** -1)).clip(20, 18000)).postln;
 ("MAP<lpf-open>" ++ (18000 * (900 ** 0)).clip(20, 18000)).postln;
@@ -105,6 +122,9 @@ test('the track SynthDef builds with the DJ stage, and its neutrals are really n
   }
   assert.match(out, /^DEF-OK<poptart_probe_probe>$/m, `the SynthDef did not build:\n${out}`);
   assert.match(out, /^DESTROY-OK<true>$/m, `the destroyTrack closure did not compile:\n${out}`);
+  assert.match(out, /^BIRTH<\[ ?deck, 0\.0, fader, 0\.5 ?\]>$/m,
+    'createTrack must parse trailing name/value pairs into Synth birth args');
+  assert.match(out, /^BIRTH-EMPTY<0>$/m, 'a bare createTrack message must yield no birth args');
   assert.match(out, /^MAP<lpf-closed>20(\.0)?$/m, 'filter full-left should close the LPF to 20 Hz');
   assert.match(out, /^MAP<lpf-open>18000(\.0)?$/m, 'filter at center should park the LPF open at 18 kHz');
   assert.match(out, /^MAP<hpf-closed>18000(\.0)?$/m, 'filter full-right should close the HPF to 18 kHz');

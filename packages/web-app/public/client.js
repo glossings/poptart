@@ -363,9 +363,12 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
     evaluate(true, { byHand: true });
-  } else if (e.key === '.') {
+  } else if (e.key === '.' && !e.shiftKey) {
     e.preventDefault();
     doStop();
+  } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
+    e.preventDefault();
+    stepDeckBQueue(); // mix mode: load the active set's next song into deck B
   } else if (e.key.toLowerCase() === 's') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
     if (e.shiftKey) savePatternFileAs();
@@ -13581,7 +13584,7 @@ coreReady
 // as deck "b" (same clock, so it joins in phase; namespaced labels, so its kick and yours are
 // separate tracks; born wearing the crossfader's gain, so it arrives silent). Between them the
 // strip: per-track gate / trim / 3-band EQ / fader, a one-knob filter per deck, the equal-power
-// crossfader, clobber mode, eject and complete.
+// crossfader, swap mode, eject and complete.
 //
 // All of it is EPHEMERAL performance state (server.js's mixState): nothing here ever writes
 // into song code - deliberately unlike the ctrl+g mixer, whose faders edit .gain() calls. A DJ
@@ -13601,7 +13604,6 @@ let deckBFileName = null; // the saved pattern deck B holds - what complete hand
 const mixStripEl = document.getElementById('mixStrip');
 const deckBPaneEl = document.getElementById('deckBPane');
 const MIX_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1 };
-const escMix = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 // One POST per ~50ms however fast the sliders stream: each control keeps only its latest value,
 // and the batch goes out together (the crossfader is two targets in one).
@@ -13665,17 +13667,79 @@ function closeMixMode() {
   cm.refresh();
 }
 
+// The song picker: the ACTIVE playlist (the set, in order, with native bpms) leads, everything
+// else files under "all songs". With nothing picked and the pane empty, the set queues itself:
+// the song after the one that is playing (or after what deck B last held) is preselected and
+// loaded - the "next in the set" default. ⏭ / Cmd+Shift+. steps it (see stepDeckBQueue).
 async function refreshDeckBFiles() {
   try {
-    const { patterns } = await api('GET', '/api/patterns?q=');
+    const [{ patterns }, lib] = await Promise.all([api('GET', '/api/patterns?q='), loadLibraryDoc()]);
     const sel = document.getElementById('deckBFile');
     const had = sel.value;
-    sel.innerHTML = '<option value="">— pick a song —</option>'
-      + patterns.map((p) => `<option value="${escMix(p.name)}">${escMix(p.title || p.name)}</option>`).join('');
+    sel.innerHTML = '<option value="">— pick a song —</option>';
+    const byName = new Map(patterns.map((p) => [p.name, p]));
+    const say = (p, name) => (p ? `${p.title || p.name}${p.bpm ? ` · ${p.bpm}` : ''}` : `${name} (missing)`);
+    const set = lib.playlists.find((p) => p.id === lib.active);
+    if (set) {
+      const g = document.createElement('optgroup');
+      g.label = `set: ${set.name}`;
+      set.items.forEach((name, i) => {
+        const p = byName.get(name);
+        const o = new Option(`${i + 1}. ${say(p, name)}`, name);
+        o.dataset.setIndex = i;
+        if (!p) o.disabled = true;
+        g.appendChild(o);
+      });
+      sel.appendChild(g);
+    }
+    const inSet = new Set(set?.items ?? []);
+    const rest = patterns.filter((p) => !inSet.has(p.name));
+    if (rest.length) {
+      const g = set ? document.createElement('optgroup') : null;
+      if (g) g.label = 'all songs';
+      for (const p of rest) (g ?? sel).appendChild(new Option(say(p, p.name), p.name));
+      if (g) sel.appendChild(g);
+    }
     if (had) sel.value = had;
+    if (!sel.value && set?.items.length) {
+      const next = nextInSet(set);
+      if (next) {
+        next.selected = true;
+        // an empty pane takes the queue's suggestion as a real load; edits are never clobbered
+        if (deckBCM && !deckBCM.getValue().trim() && !next.disabled) await loadDeckBFile();
+      }
+    }
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
+}
+
+// The set's default queue position: the OPTION after the song deck B holds - or, with the pane
+// fresh, after the song the main deck is playing (a set mid-flight resumes from where you are).
+// Falls back to the top of the set.
+function nextInSet(set) {
+  const sel = document.getElementById('deckBFile');
+  const opts = [...sel.querySelectorAll('option[data-set-index]')];
+  if (!opts.length) return null;
+  const anchor = deckBFileName ?? currentSavedName;
+  const at = anchor ? set.items.indexOf(anchor) : -1;
+  return opts[(at + 1) % opts.length] ?? opts[0];
+}
+
+// ⏭ (and Cmd/Ctrl+Shift+.): step the set - select the next song in the active playlist and
+// load it into deck B, wrapping at the end.
+async function stepDeckBQueue() {
+  if (!mixModeOn) return;
+  const sel = document.getElementById('deckBFile');
+  const opts = [...sel.querySelectorAll('option[data-set-index]')].filter((o) => !o.disabled);
+  if (!opts.length) {
+    logLine('no active playlist to step - open organize (≡) and mark a set active', true);
+    return;
+  }
+  const cur = opts.findIndex((o) => o.selected);
+  const next = opts[(cur + 1) % opts.length];
+  next.selected = true;
+  await loadDeckBFile();
 }
 
 async function loadDeckBFile() {
@@ -13709,7 +13773,7 @@ async function evalDeckB(start) {
 
 // A transition (constant-gain) curve over the two decks' `deck` gains, the club-mixer shape:
 // each side holds FULL from its end through the CENTER and only cuts on the far half - so at
-// center both decks are wide open and the per-stem gates decide what sounds (the clobber
+// center both decks are wide open and the per-stem gates decide what sounds (the swap-mode
 // workflow), while a full sweep is still a smooth fade. (The first cut was equal-power, and it
 // made stem swaps inaudible: a gated-in stem sat under a -3dB-or-worse deck gain until the
 // fader crossed - the desk fought its own gates.)
@@ -13747,15 +13811,96 @@ async function mixRefresh() {
     const host = document.getElementById(deck === 'a' ? 'mixTracksA' : 'mixTracksB');
     host.innerHTML = '';
     for (const t of state.tracks.filter((x) => x.deck === deck)) host.appendChild(mixTrackRow(t));
-    const bpm = state.deckBpm[deck];
-    document.getElementById(deck === 'a' ? 'mixBpmA' : 'mixBpmB').textContent = bpm ? `${bpm} bpm` : '';
     for (const ctl of MIX_DECK_CONTROLS) {
       const el = mixDeckCtl(deck, ctl);
       if (document.activeElement !== el) el.value = state.perDeck[deck][ctl] ?? MIX_NEUTRAL[ctl];
     }
   }
-  document.getElementById('mixClobber').checked = !!state.clobber;
+  document.getElementById('mixSwap').checked = !!state.swap;
+  mixTempoRender(state);
 }
+
+// --- tempo migration (phase 5): the shared clock rides between the songs' native tempos ---
+
+let mixNativeBpm = { a: null, b: null }; // what each deck's song declared (setbpm), via /api/mix
+let mixTempoAnim = null; // local mirror of a server-side ramp, so the readout glides w/o polling
+
+const mixTempoNowEl = document.getElementById('mixTempoNow');
+const mixTempoSliderEl = document.getElementById('mixTempoSlider');
+
+function mixTempoShow(bpm) {
+  mixTempoNowEl.textContent = bpm == null ? '' : `${bpm.toFixed(1)} bpm`;
+  const { a, b } = mixNativeBpm;
+  if (bpm != null && a != null && b != null && a !== b && document.activeElement !== mixTempoSliderEl) {
+    mixTempoSliderEl.value = Math.min(1, Math.max(0, (bpm - a) / (b - a)));
+  }
+}
+
+function mixTempoAnimStop() {
+  if (mixTempoAnim) clearInterval(mixTempoAnim);
+  mixTempoAnim = null;
+}
+
+function mixTempoAnimStart(from, to, seconds) {
+  mixTempoAnimStop();
+  if (!(seconds > 0)) return mixTempoShow(to);
+  const t0 = performance.now();
+  mixTempoAnim = setInterval(() => {
+    const u = Math.min(1, (performance.now() - t0) / (seconds * 1000));
+    mixTempoShow(from + (to - from) * u);
+    if (u >= 1) mixTempoAnimStop();
+  }, 100);
+}
+
+function mixTempoRender(state) {
+  mixNativeBpm = state.deckBpm;
+  for (const deck of ['a', 'b']) {
+    const btn = document.getElementById(deck === 'a' ? 'mixTempoA' : 'mixTempoB');
+    const bpm = state.deckBpm[deck];
+    btn.textContent = bpm != null ? `${bpm}` : '—';
+    btn.disabled = bpm == null;
+    btn.classList.toggle('at', bpm != null && state.tempo.master != null
+      && Math.abs(state.tempo.master - bpm) < 0.05);
+  }
+  mixTempoSliderEl.disabled = !(state.deckBpm.a != null && state.deckBpm.b != null
+    && state.deckBpm.a !== state.deckBpm.b);
+  if (!mixTempoAnim) mixTempoShow(state.tempo.master);
+}
+
+// A detent: glide the clock to that deck's native tempo over the ramp time. One clean request
+// per click - no throttle needed.
+async function mixTempoDetent(deck) {
+  const seconds = Math.max(0, Number(document.getElementById('mixTempoSecs').value) || 0);
+  try {
+    const res = await api('POST', '/api/mix/tempo', { deck, seconds });
+    mixTempoAnimStart(res.from, res.bpm, res.seconds);
+    logLine(`tempo → ${res.bpm} bpm (deck ${deck.toUpperCase()}'s native)${res.seconds ? ` over ${res.seconds}s` : ''}`);
+    mixRefresh(); // the detent highlight (and, at 0s, the readout) comes from server truth
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// The slider ride: position 0..1 maps deck A's native to deck B's, applied instantly and
+// throttled like every other streamed control (latest value wins, one POST per ~50ms).
+let mixTempoFlushTimer = null;
+let mixTempoPendingBpm = null;
+mixTempoSliderEl.addEventListener('input', () => {
+  const { a, b } = mixNativeBpm;
+  if (a == null || b == null || a === b) return;
+  mixTempoAnimStop();
+  const bpm = a + (b - a) * Number(mixTempoSliderEl.value);
+  mixTempoShow(bpm);
+  mixTempoPendingBpm = bpm;
+  if (mixTempoFlushTimer) return;
+  mixTempoFlushTimer = setTimeout(() => {
+    mixTempoFlushTimer = null;
+    api('POST', '/api/mix/tempo', { bpm: mixTempoPendingBpm, seconds: 0 })
+      .catch((e) => logLine(e.message ?? String(e), true));
+  }, 50);
+});
+document.getElementById('mixTempoA').addEventListener('click', () => mixTempoDetent('a'));
+document.getElementById('mixTempoB').addEventListener('click', () => mixTempoDetent('b'));
 
 function mixTrackRow(t) {
   const row = document.createElement('div');
@@ -13765,7 +13910,7 @@ function mixTrackRow(t) {
   const gate = document.createElement('button');
   gate.className = 'mix-gate' + (fader > 0 ? ' on' : '');
   gate.title = 'gate this stem in/out (fader to 1/0)'
-    + '; with clobber on, gating IN throws the other deck\'s same-named stem out';
+    + '; with swap on, gating IN throws the other deck\'s same-named stem out';
   gate.addEventListener('click', async () => {
     try {
       await api('POST', '/api/mix/gate', { key: t.key, on: !gate.classList.contains('on') });
@@ -13804,10 +13949,10 @@ async function ejectDeckB() {
   try {
     await api('POST', '/api/mix/eject');
     deckBFileName = null;
-    document.getElementById('crossfader').value = -1;
-    sendCrossfader(); // re-arm: the next queued song is born silent again
+    if (deckBCM) deckBCM.setValue('');
+    document.getElementById('crossfader').value = -1; // home for the next session (openMixMode re-arms)
     logLine('deck B ejected - the desk is reset');
-    mixRefresh();
+    closeMixMode(); // the mix session is over; Shift+X reopens for the next one
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -13824,11 +13969,10 @@ async function completeMix() {
     setCurrentSavedName(deckBFileName);
     deckBCM.setValue('');
     deckBFileName = null;
-    document.getElementById('crossfader').value = -1;
-    sendCrossfader();
+    document.getElementById('crossfader').value = -1; // home for the next session (openMixMode re-arms)
     logLine(`mix complete - promoted: ${res.promoted.join(', ')}`);
+    closeMixMode(); // the mix session is over; Shift+X opens the next one
     await evaluate(true);
-    mixRefresh();
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -13839,8 +13983,8 @@ document.getElementById('crossfader').addEventListener('dblclick', (e) => {
   e.target.value = -1; // home: all deck A
   sendCrossfader();
 });
-document.getElementById('mixClobber').addEventListener('change', (e) => {
-  api('POST', '/api/mix/clobber', { on: e.target.checked }).catch((err) => logLine(err.message ?? String(err), true));
+document.getElementById('mixSwap').addEventListener('change', (e) => {
+  api('POST', '/api/mix/swap', { on: e.target.checked }).catch((err) => logLine(err.message ?? String(err), true));
 });
 for (const deck of ['a', 'b']) {
   for (const ctl of MIX_DECK_CONTROLS) {
@@ -13858,3 +14002,367 @@ document.getElementById('deckBPlay').addEventListener('click', () => evalDeckB(t
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
 document.getElementById('mixEject').addEventListener('click', ejectDeckB);
 document.getElementById('mixComplete').addEventListener('click', completeMix);
+document.getElementById('deckBNext').addEventListener('click', stepDeckBQueue);
+document.getElementById('deckBOrganize').addEventListener('click', () => openOrganize());
+document.getElementById('fileOrganizeBtn').addEventListener('click', () => openOrganize());
+
+// ---------------------------------------------------------------------------------------------
+// The library - playlists over saved patterns, and the organize modal (three panes: playlists /
+// the open one's contents / every saved song). Ported from fizzle (~/td-livecode). One
+// library.json lives WITH the pattern files server-side, so a set travels with its songs; this
+// side holds a working copy and posts the whole document back, coalesced. Tags are read-only
+// here - they are the files' own @tags, edited in the code - and bpm is read from each song's
+// setbpm, so the library never duplicates what a file already says. The ACTIVE playlist is the
+// set deck B's picker follows.
+// ---------------------------------------------------------------------------------------------
+
+let libDoc = null; // the working copy; null until first needed
+let libSaveTimer = null;
+
+async function loadLibraryDoc() {
+  if (!libDoc) libDoc = await api('GET', '/api/library');
+  return libDoc;
+}
+
+// One write per gesture, not per row: a drag through a playlist coalesces. The response is the
+// normalized document, which becomes the working copy - the client converges on server truth.
+function saveLibraryDoc() {
+  clearTimeout(libSaveTimer);
+  libSaveTimer = setTimeout(async () => {
+    try {
+      libDoc = await api('POST', '/api/library', libDoc);
+    } catch (e) {
+      logLine(e.message ?? String(e), true);
+    }
+    if (mixModeOn) refreshDeckBFiles(); // the picker mirrors the active set
+  }, 200);
+}
+
+const libNewId = () => Math.random().toString(36).slice(2, 10);
+
+// --- the organize modal ---
+
+let orgEl = null; // built on first open
+let orgSelected = null; // playlist id open in the middle pane
+let orgQuery = '';
+let orgSort = 'saved'; // 'saved' (newest first, the API's order) | 'name'
+let orgSongs = []; // saved patterns, refreshed on open
+let orgHeld = null; // what a drag is carrying: { from: 'all'|'items', name, index? }
+
+async function openOrganize() {
+  try {
+    await loadLibraryDoc();
+    const { patterns } = await api('GET', '/api/patterns?q=');
+    orgSongs = patterns;
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    return;
+  }
+  if (!orgEl) buildOrganize();
+  if (!orgSelected) orgSelected = libDoc.playlists.find((p) => p.id === libDoc.active)?.id ?? libDoc.playlists[0]?.id ?? null;
+  orgEl.classList.remove('hidden');
+  window.addEventListener('keydown', orgOnKey);
+  orgRender();
+  orgEl.querySelector('#orgSearch').focus();
+}
+
+function closeOrganize() {
+  orgHeld = null;
+  orgEl?.classList.add('hidden');
+  window.removeEventListener('keydown', orgOnKey);
+}
+
+function orgOnKey(e) {
+  if (e.key !== 'Escape') return;
+  e.stopPropagation();
+  closeOrganize();
+}
+
+function buildOrganize() {
+  orgEl = document.createElement('div');
+  orgEl.id = 'orgModal';
+  orgEl.className = 'hidden';
+  orgEl.innerHTML = `
+    <div id="orgPanel">
+      <header>
+        <span class="org-title">organize</span>
+        <input id="orgSearch" type="search" placeholder="filter songs… (name, tag:, bpm)" autocomplete="off" spellcheck="false">
+        <span class="spacer"></span>
+        <button id="orgClose" class="small" title="close (esc)">✕</button>
+      </header>
+      <div id="orgCols">
+        <section class="org-col">
+          <h3>playlists <button id="orgAdd" class="small" title="new playlist">+</button></h3>
+          <ul id="orgLists"></ul>
+        </section>
+        <section class="org-col">
+          <h3 id="orgItemsTitle">contents</h3>
+          <ul id="orgItems"></ul>
+        </section>
+        <section class="org-col">
+          <h3>all songs <select id="orgSort" title="order of this list"></select></h3>
+          <ul id="orgAll"></ul>
+        </section>
+      </div>
+      <footer id="orgFoot">drag songs into a playlist; ● marks the ACTIVE set deck B follows; tags are the files' own @tags</footer>
+    </div>`;
+  document.body.appendChild(orgEl);
+  orgEl.addEventListener('click', (e) => { if (e.target === orgEl) closeOrganize(); });
+  orgEl.querySelector('#orgClose').addEventListener('click', closeOrganize);
+  orgEl.querySelector('#orgAdd').addEventListener('click', () => {
+    const name = prompt('playlist name:')?.trim();
+    if (!name) return;
+    const p = { id: libNewId(), name, items: [] };
+    libDoc.playlists.push(p);
+    orgSelected = p.id;
+    saveLibraryDoc();
+    orgRender();
+  });
+  orgEl.querySelector('#orgSearch').addEventListener('input', (e) => {
+    orgQuery = e.target.value.trim().toLowerCase();
+    orgRenderAll();
+  });
+  const sort = orgEl.querySelector('#orgSort');
+  sort.append(new Option('last saved', 'saved'), new Option('name', 'name'));
+  sort.addEventListener('change', (e) => {
+    orgSort = e.target.value;
+    orgRenderAll();
+  });
+  orgEl.addEventListener('dragend', () => { orgHeld = null; });
+  // the empty space under the contents rows appends to the open playlist
+  const items = orgEl.querySelector('#orgItems');
+  items.addEventListener('dragover', (e) => { if (orgHeld) e.preventDefault(); });
+  items.addEventListener('drop', (e) => {
+    const p = libDoc.playlists.find((x) => x.id === orgSelected);
+    if (!orgHeld || !p) return;
+    e.preventDefault();
+    if (orgHeld.from === 'items') orgMove(p, orgHeld.index, p.items.length);
+    else p.items.push(orgHeld.name);
+    orgHeld = null;
+    saveLibraryDoc();
+    orgRender();
+  });
+}
+
+function orgMove(p, from, to) {
+  const [item] = p.items.splice(from, 1);
+  if (item == null) return;
+  p.items.splice(from < to ? to - 1 : to, 0, item);
+}
+
+function orgIconBtn(glyph, title, onClick) {
+  const b = document.createElement('button');
+  b.className = 'small';
+  b.textContent = glyph;
+  b.title = title;
+  b.addEventListener('click', (e) => {
+    e.stopPropagation(); // the row underneath is a selection, not this
+    onClick();
+  });
+  return b;
+}
+
+function orgSongSay(name) {
+  const p = orgSongs.find((s) => s.name === name);
+  return p ? (p.title || p.name) : `${name} (missing)`;
+}
+
+// --- pane 1: the playlists ---
+
+function orgRenderLists() {
+  const ul = orgEl.querySelector('#orgLists');
+  ul.innerHTML = '';
+  if (!libDoc.playlists.length) {
+    ul.innerHTML = '<li class="org-empty">no playlists yet — + starts one</li>';
+    return;
+  }
+  for (const p of libDoc.playlists) {
+    const li = document.createElement('li');
+    li.className = p.id === orgSelected ? 'on' : '';
+    const star = orgIconBtn(p.id === libDoc.active ? '●' : '○',
+      p.id === libDoc.active ? 'the active set (deck B follows it) - click to clear' : 'make this the active set', () => {
+        libDoc.active = libDoc.active === p.id ? null : p.id;
+        saveLibraryDoc();
+        orgRenderLists();
+      });
+    star.classList.add('org-star');
+    const name = document.createElement('span');
+    name.textContent = p.name;
+    const count = document.createElement('em');
+    count.textContent = p.items.length;
+    const rename = orgIconBtn('✎', `rename ${p.name}`, () => {
+      const next = prompt('playlist name:', p.name)?.trim();
+      if (!next) return;
+      p.name = next;
+      saveLibraryDoc();
+      orgRender();
+    });
+    const del = orgIconBtn('✕', `delete ${p.name}`, () => {
+      if (!confirm(`Delete playlist "${p.name}"? The songs themselves stay.`)) return;
+      libDoc.playlists = libDoc.playlists.filter((x) => x.id !== p.id);
+      if (libDoc.active === p.id) libDoc.active = null;
+      if (orgSelected === p.id) orgSelected = libDoc.playlists[0]?.id ?? null;
+      saveLibraryDoc();
+      orgRender();
+    });
+    del.classList.add('org-del');
+    li.append(star, name, count, rename, del);
+    li.addEventListener('click', () => { orgSelected = p.id; orgRender(); });
+    // dropping a song on a playlist row adds it to the end, whichever list is open
+    li.addEventListener('dragover', (e) => {
+      if (orgHeld?.from !== 'all') return;
+      e.preventDefault();
+      li.classList.add('org-over');
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('org-over'));
+    li.addEventListener('drop', (e) => {
+      li.classList.remove('org-over');
+      if (orgHeld?.from !== 'all') return;
+      e.preventDefault();
+      e.stopPropagation();
+      p.items.push(orgHeld.name);
+      orgHeld = null;
+      saveLibraryDoc();
+      orgRender();
+    });
+    ul.appendChild(li);
+  }
+}
+
+// --- pane 2: what's in the open playlist ---
+
+function orgRenderItems() {
+  const title = orgEl.querySelector('#orgItemsTitle');
+  const ul = orgEl.querySelector('#orgItems');
+  const p = libDoc.playlists.find((x) => x.id === orgSelected);
+  title.textContent = p ? p.name : 'contents';
+  ul.innerHTML = '';
+  if (!p) {
+    ul.innerHTML = '<li class="org-empty">pick a playlist on the left</li>';
+    return;
+  }
+  if (!p.items.length) {
+    ul.innerHTML = '<li class="org-empty">empty — drag songs in from the right</li>';
+  }
+  p.items.forEach((name, i) => {
+    const s = orgSongs.find((x) => x.name === name);
+    const li = document.createElement('li');
+    li.draggable = true;
+    const n = document.createElement('i');
+    n.className = 'org-n';
+    n.textContent = i + 1;
+    const label = document.createElement('span');
+    label.textContent = orgSongSay(name);
+    if (!s) label.className = 'org-missing'; // deleted out from under the set; the slot stays
+    li.append(n, label);
+    if (s?.bpm) {
+      const bpm = document.createElement('em');
+      bpm.className = 'org-bpm';
+      bpm.textContent = s.bpm;
+      li.appendChild(bpm);
+    }
+    const up = orgIconBtn('↑', 'move up', () => { orgMove(p, i, i - 1); saveLibraryDoc(); orgRender(); });
+    const down = orgIconBtn('↓', 'move down', () => { orgMove(p, i, i + 2); saveLibraryDoc(); orgRender(); });
+    up.disabled = i === 0;
+    down.disabled = i === p.items.length - 1;
+    const del = orgIconBtn('✕', 'remove from playlist', () => { p.items.splice(i, 1); saveLibraryDoc(); orgRender(); });
+    del.classList.add('org-del');
+    li.append(up, down, del);
+    li.addEventListener('dragstart', (e) => {
+      orgHeld = { from: 'items', name, index: i };
+      e.dataTransfer.setData('text/plain', name); // Firefox won't start a drag without it
+    });
+    li.addEventListener('dragover', (e) => {
+      if (!orgHeld) return;
+      e.preventDefault();
+      // above or below the midline decides which side of this row it lands
+      const box = li.getBoundingClientRect();
+      li.classList.toggle('org-before', e.clientY < box.top + box.height / 2);
+      li.classList.toggle('org-after', e.clientY >= box.top + box.height / 2);
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('org-before', 'org-after'));
+    li.addEventListener('drop', (e) => {
+      const after = li.classList.contains('org-after');
+      li.classList.remove('org-before', 'org-after');
+      if (!orgHeld) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const at = i + (after ? 1 : 0);
+      if (orgHeld.from === 'items') orgMove(p, orgHeld.index, at);
+      else p.items.splice(at, 0, orgHeld.name);
+      orgHeld = null;
+      saveLibraryDoc();
+      orgRender();
+    });
+    ul.appendChild(li);
+  });
+}
+
+// --- pane 3: every saved song ---
+
+function orgMatches(s) {
+  if (!orgQuery) return true;
+  const hay = `${s.name} ${s.title || ''}`.toLowerCase();
+  const tags = (s.tags ?? []).map((t) => t.toLowerCase());
+  return orgQuery.split(/\s+/).every((w) => {
+    if (w.startsWith('tag:')) return tags.some((t) => t.includes(w.slice(4)));
+    return hay.includes(w) || tags.some((t) => t.includes(w)) || String(s.bpm ?? '').includes(w);
+  });
+}
+
+function orgRenderAll() {
+  const ul = orgEl.querySelector('#orgAll');
+  ul.innerHTML = '';
+  orgEl.querySelector('#orgSort').value = orgSort;
+  const list = orgSort === 'name'
+    ? [...orgSongs].sort((a, b) => (a.title || a.name).localeCompare(b.title || b.name))
+    : orgSongs; // the API's order: last saved first
+  const hits = list.filter(orgMatches);
+  if (!hits.length) {
+    ul.innerHTML = '<li class="org-empty">nothing matches that</li>';
+    return;
+  }
+  for (const s of hits) {
+    const li = document.createElement('li');
+    li.draggable = true;
+    const name = document.createElement('span');
+    name.textContent = s.title || s.name;
+    li.appendChild(name);
+    if (s.bpm) {
+      const bpm = document.createElement('em');
+      bpm.className = 'org-bpm';
+      bpm.textContent = s.bpm;
+      li.appendChild(bpm);
+    }
+    if (s.tags?.length) {
+      const chips = document.createElement('span');
+      chips.className = 'org-tags';
+      for (const t of s.tags) {
+        const chip = document.createElement('i');
+        chip.textContent = t;
+        chips.appendChild(chip);
+      }
+      li.appendChild(chips);
+    }
+    const add = orgIconBtn('+', 'add to the open playlist', () => {
+      const p = libDoc.playlists.find((x) => x.id === orgSelected);
+      if (!p) return;
+      p.items.push(s.name);
+      saveLibraryDoc();
+      orgRender();
+    });
+    add.disabled = !orgSelected;
+    li.appendChild(add);
+    li.addEventListener('dragstart', (e) => {
+      orgHeld = { from: 'all', name: s.name };
+      e.dataTransfer.setData('text/plain', s.name);
+    });
+    ul.appendChild(li);
+  }
+}
+
+function orgRender() {
+  orgRenderLists();
+  orgRenderItems();
+  orgRenderAll();
+}
