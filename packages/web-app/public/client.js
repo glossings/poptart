@@ -13677,6 +13677,8 @@ coreReady
 let mixModeOn = false;
 let deckBCM = null; // CodeMirror in the deck B pane, created on first open
 let deckBFileName = null; // the saved pattern deck B holds - what complete hands the files tab
+let deckBSong = null; // the disk FILE deck B holds instead ({ path, title, bpm }) - songs phase 2
+let deckFileItems = new Map(); // deck picker option value ('file:<path>') -> its playlist file item
 
 const mixStripEl = document.getElementById('mixStrip');
 const deckBPaneEl = document.getElementById('deckBPane');
@@ -13702,6 +13704,51 @@ function toggleMixMode() {
   else openMixMode();
 }
 
+// A small in-style choice dialog - what native confirm() can't be: three-way, styled like the
+// app, and honest about which button does what. Resolves the picked choice's value; esc or a
+// click on the backdrop resolve null (the "cancel" answer, so give no choice the value null).
+let askEl = null;
+function askDialog(message, choices) {
+  return new Promise((resolve) => {
+    if (!askEl) {
+      askEl = document.createElement('div');
+      askEl.id = 'askModal';
+      document.body.appendChild(askEl);
+    }
+    askEl.innerHTML = '';
+    const panel = document.createElement('div');
+    panel.id = 'askPanel';
+    const msg = document.createElement('p');
+    msg.textContent = message;
+    const row = document.createElement('div');
+    row.className = 'ask-row';
+    const done = (v) => {
+      askEl.classList.add('hidden');
+      window.removeEventListener('keydown', onKey, true);
+      resolve(v);
+    };
+    function onKey(e) {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      e.preventDefault();
+      done(null);
+    }
+    for (const c of choices) {
+      const b = document.createElement('button');
+      b.textContent = c.label;
+      if (c.primary) b.className = 'primary';
+      b.addEventListener('click', () => done(c.value));
+      row.appendChild(b);
+    }
+    panel.append(msg, row);
+    askEl.appendChild(panel);
+    askEl.classList.remove('hidden');
+    askEl.onclick = (e) => { if (e.target === askEl) done(null); };
+    window.addEventListener('keydown', onKey, true); // capture: esc must not fall through to the editor
+    row.querySelector('button.primary')?.focus();
+  });
+}
+
 // What the single-editor world held when DJ mode opened: leaving with the hotkey brings it back
 // (see exitDjMode). Null while not in DJ mode.
 let preMix = null;
@@ -13709,11 +13756,18 @@ let preMix = null;
 async function openMixMode() {
   // The current song is about to become deck A of a mix. Keep it first: a named song is saved
   // over silently (saving over the open pattern is what saving is), a nameless one gets one
-  // offer - declining just means the pre-mix buffer only lives in this browser till exit.
+  // three-way offer - "don't save" just means the pre-mix buffer only lives in this browser
+  // till exit, and cancel stays out of DJ mode entirely.
   try {
     if (currentSavedName) await savePatternFile();
-    else if (cm.getValue().trim() && confirm('Save the current song before DJ mode? (it comes back when you exit)')) {
-      await savePatternFileAs();
+    else if (cm.getValue().trim()) {
+      const choice = await askDialog('Save the current song before DJ mode? It comes back when you exit.', [
+        { label: 'save', value: 'save', primary: true },
+        { label: "don't save", value: 'skip' },
+        { label: 'cancel', value: null },
+      ]);
+      if (choice === null) return;
+      if (choice === 'save') await savePatternFileAs();
     }
   } catch (e) {
     logLine(e.message ?? String(e), true);
@@ -13764,6 +13818,12 @@ async function openMixMode() {
 async function exitDjMode(keep = 'restore') {
   try {
     if (keep === 'b') {
+      if (deckBSong) {
+        // The main editor can't hold a song file yet - promoting one lands with the waveform
+        // pane (songs phase 3). Until then the mix ends by stopping deck A instead.
+        logLine('deck B holds a song file - keeping it as the set arrives with the waveform pane', true);
+        return;
+      }
       const res = await api('POST', '/api/mix/complete');
       cm.setValue(deckBCM.getValue());
       setCurrentSavedName(deckBFileName);
@@ -13795,8 +13855,12 @@ async function exitDjMode(keep = 'restore') {
 
 // The shared tail of every exit: the split closes, deck B's pane empties, the desk UI re-homes.
 function finishDjExit() {
-  if (deckBCM) deckBCM.setValue('');
+  if (deckBCM) {
+    deckBCM.setOption('readOnly', false); // a song's descriptor card locked it
+    deckBCM.setValue('');
+  }
   deckBFileName = null;
+  deckBSong = null;
   preMix = null;
   document.getElementById('crossfader').value = -1;
   closeMixMode();
@@ -13811,6 +13875,27 @@ function closeMixMode() {
   cm.refresh();
 }
 
+// Playlist items come in two kinds (songs phase 2): a named save (a bare string) or a disk file
+// ({ kind: 'file', path, title?, bpm?, key? } - see pattern-files.js). Everything that walks a
+// set goes through these three, so the kinds stay one concept.
+const libItemIsFile = (it) => !!it && typeof it === 'object' && it.kind === 'file';
+const libItemKey = (it) => (libItemIsFile(it) ? `file:${it.path}` : it);
+const libFileTitle = (it) => it.title || it.path.split('/').pop().replace(/\.[^.]+$/, '');
+
+// Which file items' paths still exist on disk, keyed by path - refreshed alongside the views
+// that render them, so a moved or deleted file shows as missing (the deleted-save contract).
+let songFileExists = {};
+async function refreshSongFileStat(lib) {
+  const paths = [...new Set(lib.playlists.flatMap((p) => p.items.filter(libItemIsFile).map((it) => it.path)))];
+  if (!paths.length) {
+    songFileExists = {};
+    return;
+  }
+  try {
+    ({ exists: songFileExists } = await api('POST', '/api/songfiles/stat', { paths }));
+  } catch { /* advisory - unverified rows render as present and fail loudly on load */ }
+}
+
 // The song picker: the ACTIVE playlist (the set, in order, with native bpms) leads, everything
 // else files under "all songs". With nothing picked and the pane empty, the set queues itself:
 // the song after the one that is playing (or after what deck B last held) is preselected and
@@ -13818,20 +13903,34 @@ function closeMixMode() {
 async function refreshDeckFiles() {
   try {
     const [{ patterns }, lib] = await Promise.all([api('GET', '/api/patterns?q='), loadLibraryDoc()]);
+    await refreshSongFileStat(lib);
     const byName = new Map(patterns.map((p) => [p.name, p]));
     const say = (p, name) => (p ? `${p.title || p.name}${p.bpm ? ` · ${p.bpm}` : ''}` : `${name} (missing)`);
     const set = lib.playlists.find((p) => p.id === lib.active);
-    const fill = (sel) => {
+    deckFileItems = new Map((set?.items ?? []).filter(libItemIsFile).map((it) => [libItemKey(it), it]));
+    const fill = (sel, filesLoadHere) => {
       const had = sel.value;
       sel.innerHTML = '<option value="">— pick a song —</option>';
       if (set) {
         const g = document.createElement('optgroup');
         g.label = `set: ${set.name}`;
-        set.items.forEach((name, i) => {
-          const p = byName.get(name);
-          const o = new Option(`${i + 1}. ${say(p, name)}`, name);
+        set.items.forEach((item, i) => {
+          let o;
+          if (libItemIsFile(item)) {
+            const missing = songFileExists[item.path] === false;
+            o = new Option(
+              `${i + 1}. ♪ ${libFileTitle(item)}${item.bpm ? ` · ${item.bpm}` : ''}${missing ? ' (missing)' : ''}`,
+              libItemKey(item),
+            );
+            // Deck A is the main editor, which can't hold a song file until the waveform pane
+            // (songs phase 3) - its picker shows the set in order but only deck B loads files.
+            if (missing || !filesLoadHere) o.disabled = true;
+          } else {
+            const p = byName.get(item);
+            o = new Option(`${i + 1}. ${say(p, item)}`, item);
+            if (!p) o.disabled = true;
+          }
           o.dataset.setIndex = i;
-          if (!p) o.disabled = true;
           g.appendChild(o);
         });
         sel.appendChild(g);
@@ -13846,9 +13945,9 @@ async function refreshDeckFiles() {
       }
       if (had) sel.value = had;
     };
-    fill(document.getElementById('deckAFile'));
+    fill(document.getElementById('deckAFile'), false);
     const selB = document.getElementById('deckBFile');
-    fill(selB);
+    fill(selB, true);
     // Deck B only: with nothing picked and the pane empty, the set queues itself - the song
     // after the one that is playing. Deck A is playing the current song; it never auto-loads.
     if (!selB.value && set?.items.length) {
@@ -13871,8 +13970,8 @@ function nextInSet(set) {
   const sel = document.getElementById('deckBFile');
   const opts = [...sel.querySelectorAll('option[data-set-index]')];
   if (!opts.length) return null;
-  const anchor = deckBFileName ?? currentSavedName;
-  const at = anchor ? set.items.indexOf(anchor) : -1;
+  const anchor = deckBSong ? `file:${deckBSong.path}` : (deckBFileName ?? currentSavedName);
+  const at = anchor ? set.items.findIndex((it) => libItemKey(it) === anchor) : -1;
   return opts[(at + 1) % opts.length] ?? opts[0];
 }
 
@@ -13893,18 +13992,37 @@ async function stepDeckBQueue() {
 }
 
 async function loadDeckBFile() {
-  const name = document.getElementById('deckBFile').value;
-  if (!name || !deckBCM) return;
+  const value = document.getElementById('deckBFile').value;
+  if (!value || !deckBCM) return;
   try {
     // Loading a song is a song SWITCH: whatever this deck was playing is cleared engine-side
     // (tracks destroyed, plugins closed) - a set that changes songs all night must not
     // accumulate idle plugins. A no-op when the deck is empty (the auto-queue's case).
     await api('POST', '/api/mix/clear', { deck: 'b' });
     clearPatternRegions('b');
-    const { code } = await api('POST', '/api/patterns/load', { name });
-    deckBCM.setValue(code);
-    deckBFileName = name;
-    logLine(`deck B loaded "${name}" - play it when ready (it arrives silent)`);
+    if (deckFileItems.has(value)) {
+      // A disk file: it loads onto the deck's song track (/api/song/*, songs phase 1) and the
+      // pane shows a read-only card in the editor slot until the waveform pane (phase 3).
+      const item = deckFileItems.get(value);
+      const res = await api('POST', '/api/song/load', {
+        deck: 'b', path: item.path, bpm: item.bpm, title: libFileTitle(item),
+      });
+      deckBSong = { path: item.path, title: libFileTitle(item), bpm: item.bpm ?? null };
+      deckBFileName = null;
+      const m = Math.floor(res.duration / 60);
+      const s = String(Math.round(res.duration % 60)).padStart(2, '0');
+      deckBCM.setValue(`// ♪ ${deckBSong.title}\n// ${deckBSong.path}\n// ${m}:${s}${deckBSong.bpm ? ` · ${deckBSong.bpm} bpm` : ''}`);
+      deckBCM.setOption('readOnly', true);
+      logLine(`deck B loaded ♪ "${deckBSong.title}" (${m}:${s}${res.decoded ? ', decoded' : ''}) - ▶ plays it (it arrives silent)`);
+    } else {
+      const { code } = await api('POST', '/api/patterns/load', { name: value });
+      deckBSong = null;
+      deckBCM.setOption('readOnly', false);
+      deckBCM.setValue(code);
+      deckBFileName = value;
+      logLine(`deck B loaded "${value}" - play it when ready (it arrives silent)`);
+    }
+    if (mixModeOn) mixRefresh(); // the old song's stems left the strip; a song track arrived
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -13930,6 +14048,29 @@ async function loadDeckAFile() {
 
 async function evalDeckB(start) {
   if (!deckBCM) return;
+  if (deckBSong) {
+    // The pane holds a file, not code: ▶ is play/resume through the same desk (cycle-quantized
+    // against a running deck A server-side); ↻ has nothing to re-evaluate.
+    try {
+      if (!start) {
+        logLine('deck B holds a song - ▶ plays/resumes it (scrubbing arrives with the waveform pane)');
+        return;
+      }
+      const res = await api('POST', '/api/song/play', { deck: 'b' });
+      logLine(`deck B ♪ playing "${deckBSong.title}" from ${res.pos.toFixed(1)}s`);
+      // The queued deck arrives faded out by design - but a song deck has no other sound, so
+      // playing into a closed crossfader (meter lit, nothing heard) earns a pointer.
+      if (Number(document.getElementById('crossfader').value) < -0.9) {
+        logLine('deck B is faded all the way out - bring the crossfader over to hear it');
+      }
+      playing = true;
+      updateTransportButtons();
+      mixRefresh();
+    } catch (e) {
+      logLine(`deck B: ${e.message ?? String(e)}`, true);
+    }
+    return;
+  }
   try {
     const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start });
     if (result.transport) transport = result.transport;
@@ -14571,11 +14712,12 @@ let orgSelected = null; // playlist id open in the middle pane
 let orgQuery = '';
 let orgSort = 'saved'; // 'saved' (newest first, the API's order) | 'name'
 let orgSongs = []; // saved patterns, refreshed on open
-let orgHeld = null; // what a drag is carrying: { from: 'all'|'items', name, index? }
+let orgHeld = null; // what a drag is carrying: { from: 'all'|'items', item, index? } - item is a name or a file item
 
 async function openOrganize() {
   try {
     await loadLibraryDoc();
+    await refreshSongFileStat(libDoc); // file items render as missing when their path is gone
     const { patterns } = await api('GET', '/api/patterns?q=');
     orgSongs = patterns;
   } catch (e) {
@@ -14624,11 +14766,20 @@ function buildOrganize() {
           <ul id="orgItems"></ul>
         </section>
         <section class="org-col">
-          <h3>all songs <select id="orgSort" title="order of this list"></select></h3>
+          <h3>
+            <button id="orgTabSongs" class="org-tab on" title="every saved pattern">all songs</button>
+            <button id="orgTabDisk" class="org-tab" title="audio files on this computer">disk</button>
+            <span class="spacer"></span>
+            <select id="orgSort" title="order of this list"></select>
+          </h3>
+          <div id="orgDiskBar" class="hidden">
+            <button id="orgBrowseUp" class="small" title="up one directory">↑</button>
+            <span id="orgBrowsePath"></span>
+          </div>
           <ul id="orgAll"></ul>
         </section>
       </div>
-      <footer id="orgFoot">drag songs into a playlist; ● marks the ACTIVE set deck B follows; tags are the files' own @tags</footer>
+      <footer id="orgFoot">drag songs into a playlist (the disk tab has your audio files); ● marks the ACTIVE set deck B follows; tags are the files' own @tags</footer>
     </div>`;
   document.body.appendChild(orgEl);
   orgEl.addEventListener('click', (e) => { if (e.target === orgEl) closeOrganize(); });
@@ -14652,6 +14803,11 @@ function buildOrganize() {
     orgSort = e.target.value;
     orgRenderAll();
   });
+  orgEl.querySelector('#orgTabSongs').addEventListener('click', () => setOrgPane3('songs'));
+  orgEl.querySelector('#orgTabDisk').addEventListener('click', () => setOrgPane3('disk'));
+  orgEl.querySelector('#orgBrowseUp').addEventListener('click', () => {
+    if (orgDisk?.parent) orgBrowseTo(orgDisk.parent);
+  });
   orgEl.addEventListener('dragend', () => { orgHeld = null; });
   // the empty space under the contents rows appends to the open playlist
   const items = orgEl.querySelector('#orgItems');
@@ -14661,7 +14817,7 @@ function buildOrganize() {
     if (!orgHeld || !p) return;
     e.preventDefault();
     if (orgHeld.from === 'items') orgMove(p, orgHeld.index, p.items.length);
-    else p.items.push(orgHeld.name);
+    else p.items.push(orgHeld.item);
     orgHeld = null;
     saveLibraryDoc();
     orgRender();
@@ -14744,7 +14900,7 @@ function orgRenderLists() {
       if (orgHeld?.from !== 'all') return;
       e.preventDefault();
       e.stopPropagation();
-      p.items.push(orgHeld.name);
+      p.items.push(orgHeld.item);
       orgHeld = null;
       saveLibraryDoc();
       orgRender();
@@ -14768,22 +14924,46 @@ function orgRenderItems() {
   if (!p.items.length) {
     ul.innerHTML = '<li class="org-empty">empty — drag songs in from the right</li>';
   }
-  p.items.forEach((name, i) => {
-    const s = orgSongs.find((x) => x.name === name);
+  p.items.forEach((item, i) => {
+    const isFile = libItemIsFile(item);
+    const s = isFile ? null : orgSongs.find((x) => x.name === item);
+    // Missing for a save = deleted out from under the set; for a file = moved or deleted on
+    // disk. Either way the slot stays - the playlist is the user's document.
+    const missing = isFile ? songFileExists[item.path] === false : !s;
     const li = document.createElement('li');
     li.draggable = true;
     const n = document.createElement('i');
     n.className = 'org-n';
     n.textContent = i + 1;
     const label = document.createElement('span');
-    label.textContent = orgSongSay(name);
-    if (!s) label.className = 'org-missing'; // deleted out from under the set; the slot stays
+    label.textContent = isFile ? `♪ ${libFileTitle(item)}${missing ? ' (missing)' : ''}` : orgSongSay(item);
+    if (isFile) label.title = item.path;
+    if (missing) label.className = 'org-missing';
     li.append(n, label);
-    if (s?.bpm) {
+    const bpmVal = isFile ? item.bpm : s?.bpm;
+    if (bpmVal) {
       const bpm = document.createElement('em');
       bpm.className = 'org-bpm';
-      bpm.textContent = s.bpm;
+      bpm.textContent = bpmVal;
       li.appendChild(bpm);
+    }
+    if (isFile) {
+      // A file's title/bpm live on the item itself (its save has no code to carry them) - by
+      // hand here until tag parsing (songs phase 4) reads them from the file.
+      const edit = orgIconBtn('✎', 'title / native bpm', () => {
+        const t = prompt('title:', libFileTitle(item));
+        if (t != null && t.trim()) item.title = t.trim();
+        const b = prompt('native bpm (blank = unknown):', item.bpm ?? '');
+        if (b != null) {
+          const num = Number(b);
+          if (!b.trim()) delete item.bpm;
+          else if (Number.isFinite(num) && num >= 20 && num <= 400) item.bpm = num;
+          else logLine('native bpm must be a number from 20 to 400', true);
+        }
+        saveLibraryDoc();
+        orgRender();
+      });
+      li.appendChild(edit);
     }
     const up = orgIconBtn('↑', 'move up', () => { orgMove(p, i, i - 1); saveLibraryDoc(); orgRender(); });
     const down = orgIconBtn('↓', 'move down', () => { orgMove(p, i, i + 2); saveLibraryDoc(); orgRender(); });
@@ -14793,8 +14973,8 @@ function orgRenderItems() {
     del.classList.add('org-del');
     li.append(up, down, del);
     li.addEventListener('dragstart', (e) => {
-      orgHeld = { from: 'items', name, index: i };
-      e.dataTransfer.setData('text/plain', name); // Firefox won't start a drag without it
+      orgHeld = { from: 'items', item, index: i };
+      e.dataTransfer.setData('text/plain', libItemKey(item)); // Firefox won't start a drag without it
     });
     li.addEventListener('dragover', (e) => {
       if (!orgHeld) return;
@@ -14813,7 +14993,7 @@ function orgRenderItems() {
       e.stopPropagation();
       const at = i + (after ? 1 : 0);
       if (orgHeld.from === 'items') orgMove(p, orgHeld.index, at);
-      else p.items.splice(at, 0, orgHeld.name);
+      else p.items.splice(at, 0, orgHeld.item);
       orgHeld = null;
       saveLibraryDoc();
       orgRender();
@@ -14837,6 +15017,14 @@ function orgMatches(s) {
 function orgRenderAll() {
   const ul = orgEl.querySelector('#orgAll');
   ul.innerHTML = '';
+  orgEl.querySelector('#orgTabSongs').classList.toggle('on', orgPane3 === 'songs');
+  orgEl.querySelector('#orgTabDisk').classList.toggle('on', orgPane3 === 'disk');
+  orgEl.querySelector('#orgDiskBar').classList.toggle('hidden', orgPane3 !== 'disk');
+  orgEl.querySelector('#orgSort').classList.toggle('hidden', orgPane3 === 'disk');
+  if (orgPane3 === 'disk') {
+    orgRenderDisk(ul);
+    return;
+  }
   orgEl.querySelector('#orgSort').value = orgSort;
   const list = orgSort === 'name'
     ? [...orgSongs].sort((a, b) => (a.title || a.name).localeCompare(b.title || b.name))
@@ -14878,7 +15066,7 @@ function orgRenderAll() {
     add.disabled = !orgSelected;
     li.appendChild(add);
     li.addEventListener('dragstart', (e) => {
-      orgHeld = { from: 'all', name: s.name };
+      orgHeld = { from: 'all', item: s.name };
       e.dataTransfer.setData('text/plain', s.name);
     });
     ul.appendChild(li);
@@ -14889,4 +15077,80 @@ function orgRender() {
   orgRenderLists();
   orgRenderItems();
   orgRenderAll();
+}
+
+// --- pane 3's disk mode (songs phase 2) ---
+//
+// The client can't produce disk paths, so real audio files come in through the server's
+// directory listing (GET /api/songfiles), one directory at a time. The disk tab swaps the
+// all-songs list for that listing: folders navigate, files drag into playlists (or + appends to
+// the open one) exactly like saved songs do. The listing sticks around per session, so flipping
+// tabs doesn't lose your place.
+
+let orgPane3 = 'songs'; // 'songs' (every saved pattern) | 'disk' (the file browser)
+let orgDisk = null; // the last GET /api/songfiles listing ({ dir, parent, entries })
+let orgBrowseDir = null; // remembered for the session; the server starts at ~/Music
+
+function setOrgPane3(mode) {
+  orgPane3 = mode;
+  if (mode === 'disk' && !orgDisk) orgBrowseTo(orgBrowseDir);
+  orgRenderAll();
+}
+
+async function orgBrowseTo(dir) {
+  try {
+    orgDisk = await api('GET', `/api/songfiles${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`);
+    orgBrowseDir = orgDisk.dir;
+    orgRenderAll();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    if (dir) orgBrowseTo(null); // the remembered directory is gone - back to the default
+  }
+}
+
+function orgRenderDisk(ul) {
+  const pathEl = orgEl.querySelector('#orgBrowsePath');
+  const up = orgEl.querySelector('#orgBrowseUp');
+  if (!orgDisk) {
+    ul.innerHTML = '<li class="org-empty">reading…</li>';
+    return;
+  }
+  pathEl.textContent = orgDisk.dir;
+  pathEl.title = orgDisk.dir;
+  up.disabled = !orgDisk.parent;
+  const hits = orgDisk.entries.filter((ent) => !orgQuery
+    || orgQuery.split(/\s+/).every((w) => ent.name.toLowerCase().includes(w)));
+  if (!hits.length) {
+    ul.innerHTML = `<li class="org-empty">${orgDisk.entries.length ? 'nothing here matches that' : 'nothing playable in here'}</li>`;
+    return;
+  }
+  for (const ent of hits) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.textContent = `${ent.dir ? '▸' : '♪'} ${ent.name}`;
+    li.appendChild(name);
+    if (ent.dir) {
+      li.classList.add('org-browse-dir');
+      li.addEventListener('click', () => orgBrowseTo(ent.path));
+    } else {
+      const item = () => ({ kind: 'file', path: ent.path, title: ent.name.replace(/\.[^.]+$/, '') });
+      li.draggable = true;
+      const add = orgIconBtn('+', 'add to the open playlist', () => {
+        const p = libDoc.playlists.find((x) => x.id === orgSelected);
+        if (!p) return;
+        p.items.push(item());
+        li.classList.add('org-added'); // the ✓; the row stays live - a set may replay a track
+        saveLibraryDoc();
+        orgRenderLists();
+        orgRenderItems(); // not orgRender - rebuilding this list would drop the ✓ marks
+      });
+      add.disabled = !orgSelected;
+      li.appendChild(add);
+      li.addEventListener('dragstart', (e) => {
+        orgHeld = { from: 'all', item: item() };
+        e.dataTransfer.setData('text/plain', ent.path);
+      });
+    }
+    ul.appendChild(li);
+  }
 }

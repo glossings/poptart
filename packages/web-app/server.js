@@ -154,6 +154,7 @@ const mixState = {
 // nudge, metadata).
 // ---------------------------------------------------------------------------------------------
 const { resolveSongFile } = require('@poptart/osc-engine/songs');
+const { browseSongDir, statSongPaths } = require('./song-files');
 const SONG_KEYS = { a: '#song', b: 'b:#song' };
 const SONG_START_LEAD_SEC = 0.15; // enough for the timestamped start bundle to arrive early
 const songDecks = { a: null, b: null };
@@ -3804,6 +3805,15 @@ const routes = {
     mixNotify();
     return { status: 200, body: { deck, unloaded: !!body.unload } };
   },
+
+  // The file browser behind the organize modal's "+ file" (songs phase 2): one directory at a
+  // time, subdirectories plus playable audio files - the client can't produce disk paths, so
+  // this is how a real file gets into a playlist. Query: { dir? } (absent = ~/Music or home).
+  'GET /api/songfiles': async (q) => ({ status: 200, body: browseSongDir(q.dir) }),
+
+  // Which of a library's file items still exist - a moved or deleted file renders as missing,
+  // the same contract as a deleted save. Body: { paths: [...] } -> { exists: { [path]: bool } }.
+  'POST /api/songfiles/stat': async (body) => ({ status: 200, body: { exists: statSongPaths(body.paths) } }),
 
   'POST /api/trackRecord/start': async (body) => {
     if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');

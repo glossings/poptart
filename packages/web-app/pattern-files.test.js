@@ -224,6 +224,32 @@ test('writeLibrary normalizes and round-trips', () => {
   assert.deepEqual(readLibrary(), kept, 'what was kept is what a later read sees');
 });
 
+test('playlists hold disk-file items beside saved names (songs phase 2)', () => {
+  const kept = writeLibrary({
+    playlists: [{
+      id: 'set1',
+      name: 'friday',
+      items: [
+        'a-save',
+        { kind: 'file', path: '/music/one.mp3', title: ' One ', bpm: '124', key: 'Am', junk: 'no' },
+        { kind: 'file', path: '/music/two.wav' }, // the bare minimum: kind + path
+        { kind: 'file', path: '   ' }, // no path -> dropped
+        { kind: 'file', path: '/x.mp3', bpm: 9000, key: '  ' }, // silly bpm / blank key -> absent
+        { kind: 'nope', path: '/x.mp3' }, // unknown kind -> dropped
+        { path: '/x.mp3' }, // no kind -> dropped
+      ],
+    }],
+    active: 'set1',
+  });
+  assert.deepEqual(kept.playlists[0].items, [
+    'a-save',
+    { kind: 'file', path: '/music/one.mp3', title: 'One', bpm: 124, key: 'Am' },
+    { kind: 'file', path: '/music/two.wav' },
+    { kind: 'file', path: '/x.mp3' },
+  ]);
+  assert.deepEqual(readLibrary(), kept, 'file items round-trip');
+});
+
 test('an active id that names no playlist clears to null', () => {
   const kept = writeLibrary({ playlists: [{ id: 'p', name: 'x', items: [] }], active: 'gone' });
   assert.equal(kept.active, null);

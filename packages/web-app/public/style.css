@@ -3719,6 +3719,38 @@ body.mix-on #deckAHead {
 }
 
 /* --- the organize modal (playlists; see the library section of client.js) --- */
+/* the app's own confirm dialog (askDialog in client.js) - above every other modal */
+#askModal {
+  position: fixed;
+  inset: 0;
+  background: var(--shadow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 80;
+}
+#askModal.hidden {
+  display: none;
+}
+#askPanel {
+  width: min(420px, 90vw);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px var(--shadow);
+  padding: 16px;
+}
+#askPanel p {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.ask-row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 #orgModal {
   position: fixed;
   inset: 0;
@@ -3763,6 +3795,10 @@ body.mix-on #deckAHead {
 }
 .org-col {
   min-width: 0;
+  /* Grid items default to min-height auto, so without this a long list stretches every column
+     (and its separator border) past the panel into the footer instead of scrolling. */
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
@@ -3878,6 +3914,55 @@ body.mix-on #deckAHead {
 .org-after {
   border-bottom-color: var(--accent) !important;
 }
+/* pane 3's disk mode (songs phase 2): the all songs / disk tabs and the path bar */
+.org-tab {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  opacity: 0.55;
+  cursor: pointer;
+}
+.org-tab.on {
+  opacity: 1;
+}
+#orgSort.hidden {
+  display: none;
+}
+#orgDiskBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 6px;
+}
+#orgDiskBar.hidden {
+  display: none;
+}
+#orgBrowsePath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* a long path keeps its tail (the folder you are in) visible */
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.org-browse-dir {
+  cursor: pointer;
+}
+#orgAll li.org-added > span::after {
+  content: ' ✓';
+  color: var(--ok);
+}
+
 .org-tags {
   display: flex;
   gap: 3px;

@@ -24,7 +24,7 @@ no completion notes.
     same contract as a deleted save.
 
 [ ] Songs phase 3 - the song deck pane: when the queued item is a file, the deck shows a
-    rekordbox-style waveform instead of CodeMirror - band-colored peak/RMS columns (generalize the
+    high-resolution DJ waveform instead of CodeMirror - band-colored peak/RMS columns (generalize the
     recorder's canvas renderer + analysis-worker pass, which already do exactly this), full-track
     overview + zoomed scrolling strip, beatgrid + playhead overlays (client mirrors the transport
     clock - engine getTime is Date.now()/1000), click/drag scrub -> songSeek, audition via cue.

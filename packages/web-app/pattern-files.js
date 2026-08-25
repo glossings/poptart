@@ -174,15 +174,37 @@ function listWipPatterns() {
 // which one is the ACTIVE set (deck B's picker follows it). Tags stay in the files (@tags),
 // tempo is read from the source (nativeBpmOf) - nothing here duplicates a file's own facts.
 //
-//   { version: 1, playlists: [{ id, name, items: ["saved-name", ...] }], active: id | null }
+//   { version: 1, playlists: [{ id, name, items: [item, ...] }], active: id | null }
 //
-// Items reference named saves and may repeat (a set that comes back to a song is a real set).
-// An item whose save was deleted stays in the list and renders as missing - the playlist is the
-// user's document, not an index to be silently repaired.
+// An item is either a named save (a bare string) or a real audio file on disk (songs phase 2):
+//
+//   "saved-name"
+//   { kind: 'file', path, title?, bpm?, key? }
+//
+// A file item carries what its file can't say to poptart yet - a display title, the native
+// tempo /api/mix/tempo migrates toward, the musical key - entered by hand until tag parsing
+// (phase 4) fills them in. Items of either kind may repeat (a set that comes back to a song is
+// a real set). An item whose save was deleted - or whose file moved - stays in the list and
+// renders as missing: the playlist is the user's document, not an index to be silently repaired.
 
 const LIBRARY_FILE = path.join(PATTERNS_DIR, 'library.json');
 
 const newLibraryId = () => Math.random().toString(36).slice(2, 10);
+
+// One item coerced to the shapes above, or null for junk. Field rules match their consumers:
+// bpm the /api/song/load sanity range, title/key non-empty trimmed strings or absent.
+function normalizeLibraryItem(it) {
+  if (typeof it === 'string') return it;
+  if (!it || typeof it !== 'object' || it.kind !== 'file') return null;
+  const p = typeof it.path === 'string' ? it.path.trim() : '';
+  if (!p) return null;
+  const item = { kind: 'file', path: p };
+  if (typeof it.title === 'string' && it.title.trim()) item.title = it.title.trim();
+  const bpm = Number(it.bpm);
+  if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) item.bpm = bpm;
+  if (typeof it.key === 'string' && it.key.trim()) item.key = it.key.trim();
+  return item;
+}
 
 // Whatever is on disk (or handed to writeLibrary) is coerced to the shape above - a hand-edited
 // or truncated file degrades to an empty library rather than taking the UI down with it.
@@ -193,7 +215,7 @@ function normalizeLibrary(doc) {
     .map((p) => ({
       id: String(p.id ?? newLibraryId()),
       name: p.name,
-      items: Array.isArray(p.items) ? p.items.filter((k) => typeof k === 'string') : [],
+      items: Array.isArray(p.items) ? p.items.map(normalizeLibraryItem).filter((k) => k != null) : [],
     }));
   const active = playlists.some((p) => p.id === src.active) ? src.active : null;
   return { version: 1, playlists, active };
