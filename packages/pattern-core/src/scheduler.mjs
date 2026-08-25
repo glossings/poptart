@@ -737,6 +737,12 @@ export class Scheduler {
     this._timer = setInterval(() => this._tick(), POLL_INTERVAL_MS);
   }
 
+  /** Whether start() has run without a stop() since - what a per-deck stop checks to know if
+   * anything is still playing elsewhere before it freezes the shared clock. */
+  get running() {
+    return this._running;
+  }
+
   stop() {
     this._running = false;
     if (this._timer) clearInterval(this._timer);

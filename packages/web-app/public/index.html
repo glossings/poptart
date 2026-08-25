@@ -118,7 +118,11 @@
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
         </div>
+      </main>
 
+        <!-- A .layout grid child (NOT inside main): the sidebar spans the main row AND the
+             mix-strip row, so in DJ mode the settings run all the way down beside the strip
+             instead of stopping above it (see the .layout grid in style.css). -->
         <aside id="sidebar">
           <div class="side-tabs">
             <button class="side-tab active" data-tab="session">session</button>
@@ -266,7 +270,6 @@
             </section>
           </div>
         </aside>
-      </main>
 
       <!-- The mix strip (mix mode): per-track DJ controls for both decks around the crossfader.
            Every control here is ephemeral performance state - nothing writes into song code. -->
@@ -286,7 +289,7 @@
         <div class="mix-dfader-col" id="mixDfaderColA"></div>
         <div class="mix-meter-col" id="mixMeterColA"></div>
         <div class="mix-center">
-          <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out - the phase-continuous stem swap">
+          <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out (and back out brings it back) - the phase-continuous stem swap. Also flips the crossfader to the hold-through-center curve (both decks full at center, gates decide)">
             <input id="mixSwap" type="checkbox" /> swap</label>
           <div class="mix-tempo">
             <button id="mixTempoA" class="small mix-tempo-detent" title="migrate the clock to deck A's native tempo (over the ramp time)">—</button>
@@ -300,7 +303,7 @@
               <input id="mixTempoSecs" type="number" min="0" max="300" step="1" value="16" /> s</label>
           </div>
           <input id="crossfader" type="range" min="-1" max="1" step="0.01" value="-1"
-            title="crossfader (transition curve) - hard left is all deck A, center is both decks open" />
+            title="crossfader - constant power (each deck ~-3 dB at center, energy stays level); with swap on it holds both decks full through center instead" />
           <div class="mix-actions">
             <button id="mixLearn" class="small" title="MIDI learn: arm this, then click desk controls and turn hardware knobs, one after another; click again or press esc to finish. Alt+click a control to unbind it">midi</button>
           </div>

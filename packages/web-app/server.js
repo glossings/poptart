@@ -197,12 +197,22 @@ function applyMixTo(key) {
   for (const [name, value] of per ?? []) engine.setParam(tid, -1, name, value, 0);
 }
 
-// The crossfader as ONE control, server-side: position -1..1 through the transition
-// (constant-gain) curve - each deck holds FULL from its end through CENTER and only cuts on the
-// far half, so at center both decks are wide open and the per-stem gates decide what sounds
-// (the swap-mode workflow), while a full sweep is still a smooth fade. Server-side so the UI
-// slider and a learned MIDI knob drive the same implementation (see /api/mix/set and mixMidi).
-const xfGain = (u) => Math.round(Math.sin((Math.PI / 2) * Math.min(1, u * 2)) * 1000) / 1000;
+// The crossfader as ONE control, server-side: position -1..1 (u is this deck's own 0..1 share)
+// through one of TWO curves, following the swap toggle like a hardware desk's curve switch:
+//   - swap OFF (blend mixing): constant power, the classic mixing curve - each side ~-3 dB at
+//     center, so the summed energy stays level across the sweep instead of bumping ~+3 dB with
+//     the fader parked in the middle (reported 2026-08-25);
+//   - swap ON (the stem-swap workflow): each deck holds FULL from its end through CENTER and
+//     only cuts on the far half - both decks wide open at center so the per-stem gates decide
+//     what sounds, and a gate-swap is loudness-neutral.
+// Server-side so the UI slider and a learned MIDI knob drive the same implementation (see
+// /api/mix/set and mixMidi); /api/mix/swap re-derives the deck gains when the curve flips.
+const xfGain = (u) => Math.round(
+  (mixState.swap
+    ? Math.sin((Math.PI / 2) * Math.min(1, u * 2)) // hold-through-center (scratch-style)
+    : Math.sin((Math.PI / 2) * u) // constant power (cos on the other deck's mirrored share)
+  ) * 1000,
+) / 1000;
 // One deck's side of the current crossfader position through that curve (before its fader).
 const deckXfGain = (deck) => xfGain(deck === 'a' ? 1 - (mixState.xf + 1) / 2 : (mixState.xf + 1) / 2);
 
@@ -2164,6 +2174,13 @@ let autoPinTimer = null;
 let autoPinRun = null; // the capture pass in flight, so a flush can wait for it instead of racing
 
 function handlePluginEdited(trackId, slot) {
+  // Not for the queued deck's tracks: at mix time the songs are ~done (mixing is playback, per
+  // the design), deck b's code lives in the other pane under UNPREFIXED labels the pin-writer
+  // can't target - every capture ended in "auto-pin: no .fx(...) call for b:kick - state not
+  // written" (and a loaded song's own preset restores fire these edit events too, so mixing
+  // sprayed that warning constantly). A promoted track re-keys to a plain label on complete-mix
+  // and pins normally again from there.
+  if (deckOfKey(trackId) === 'b') return;
   const key = `${trackId}|${slot}`;
   autoPinDirty.set(key, {
     trackId,
@@ -2655,10 +2672,15 @@ const routes = {
       // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
       const tid = claimEngineTrack(key);
       mappedEngine.setChain(tid, [b.sig.instrument, ...b.sig.fxChain]);
-      // With swap mode on, an incoming stem starts GATED OUT (fader 0) the first time it
-      // appears: the whole point of the mode is choosing when each stem swaps its twin out, so
-      // none may play just by being evaluated. Recorded (not just applied) so its gate shows OFF.
-      if (deck === 'b' && mixState.swap && !mixState.perTrack.get(key)?.has('fader')) {
+      // With swap mode on, an incoming stem starts GATED OUT (fader 0) whenever the OTHER deck
+      // already has a song up - on either deck, symmetrically: the whole point of the mode is
+      // choosing when each stem swaps its twin out, so none may play just by being evaluated.
+      // The first song of the session (other deck empty) plays normally, and only genuinely NEW
+      // stems are gated - a re-eval of a playing deck must not mute what is already sounding.
+      // Recorded (not just applied) so its gate shows OFF.
+      if (mixState.swap && !schedulers.has(key)
+        && [...schedulers.keys()].some((k) => deckOfKey(k) !== deck)
+        && !mixState.perTrack.get(key)?.has('fader')) {
         let per = mixState.perTrack.get(key);
         if (!per) mixState.perTrack.set(key, (per = new Map()));
         per.set('fader', 0);
@@ -2825,7 +2847,19 @@ const routes = {
     return { status: 200, body: { gridFrom: from, gridCount: count, tracks } };
   },
 
-  'POST /api/stop': async () => {
+  'POST /api/stop': async (body) => {
+    // { deck } stops just that deck's playback (DJ mode's per-pane Cmd+.): its schedulers stop,
+    // tracks stay warm, and the shared clock keeps running for the other deck. Only when
+    // nothing is left playing anywhere does it fall through to the full stop below - so
+    // stopping the last playing deck behaves exactly like a normal stop.
+    const deck = body?.deck === 'a' || body?.deck === 'b' ? body.deck : null;
+    if (deck) {
+      for (const [key, sch] of schedulers) if (deckOfKey(key) === deck) sch.stop();
+      for (const id of [...kbHeld.keys()]) if (deckOfKey(id) === deck) releaseKbNotes(id);
+      if ([...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)) {
+        return { status: 200, body: { deck, transport: null } };
+      }
+    }
     for (const sch of schedulers.values()) sch.stop();
     // Release any live-keyboard notes still held so nothing rings through the stop.
     for (const id of [...kbHeld.keys()]) releaseKbNotes(id);
@@ -3382,7 +3416,10 @@ const routes = {
   // stem OUT in the same gesture (see /api/mix/gate) - the phase-continuous stem swap.
   'POST /api/mix/swap': async (body) => {
     mixState.swap = !!body.on;
-    mixNotify();
+    // The crossfader curve follows the toggle (see xfGain): re-derive both deck gains from the
+    // current fader position under the new curve, so flipping swap is audible immediately.
+    if (engine) applyMixTargets([{ name: 'xf', value: mixState.xf }]); // notifies
+    else mixNotify();
     return { status: 200, body: { swap: mixState.swap } };
   },
 
@@ -3400,12 +3437,15 @@ const routes = {
     };
     const on = !!body.on;
     setFader(key, on ? 1 : 0);
+    // The swap counter runs BOTH ways: gating a stem IN throws its same-named twin out, and
+    // gating it back OUT brings the twin back in - so a swap can be toggled back and forth to
+    // audition either song's version of the stem.
     let countered = null;
-    if (mixState.swap && on) {
+    if (mixState.swap) {
       const base = deckOfKey(key) === 'a' ? key : key.slice(key.indexOf(':') + 1);
       const other = deckOfKey(key) === 'a' ? `b:${base}` : base;
       if (schedulers.has(other)) {
-        setFader(other, 0);
+        setFader(other, on ? 0 : 1);
         countered = other;
       }
     }

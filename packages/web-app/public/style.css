@@ -150,10 +150,33 @@ body {
   color: var(--text);
 }
 
+/* The page grid. The sidebar has its own COLUMN (spanning the main row and the mix-strip row)
+   rather than living inside main: in DJ mode the settings then run all the way down beside the
+   strip, and the strip's symmetric region is simply grid column 1 - no margin arithmetic. */
 .layout {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   height: 100vh;
+}
+.layout > header {
+  grid-column: 1 / -1;
+}
+main {
+  grid-column: 1;
+  grid-row: 2;
+}
+aside {
+  grid-column: 2;
+  grid-row: 2 / span 2; /* down past the mix-strip row */
+}
+#mixStrip {
+  grid-column: 1;
+  grid-row: 3;
+}
+#console {
+  grid-column: 1 / -1;
+  grid-row: 4;
 }
 
 /* ------------------------------------------------------------------ header */
@@ -356,7 +379,6 @@ button.small.conf-active {
 /* -------------------------------------------------------------------- main */
 
 main {
-  flex: 1;
   display: flex;
   overflow: hidden;
 }
@@ -3419,9 +3441,8 @@ body.mix-on #deckAHead {
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
   padding: 6px 10px;
-  /* the symmetric region ends at deck B's right edge - the strip belongs to the two
-     panes, not to the sidebar; its center then sits on the panes' true midline */
-  margin-right: var(--sidebar-w);
+  /* the symmetric region ends at deck B's right edge: the strip sits in grid column 1 (the
+     sidebar has its own column - see .layout), so its center IS the panes' true midline */
 }
 .mix-deck-head {
   display: flex;

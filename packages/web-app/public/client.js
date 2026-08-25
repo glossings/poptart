@@ -333,8 +333,8 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   extraKeys: {
     'Cmd-Enter': () => evaluate(true, { byHand: true }),
     'Ctrl-Enter': () => evaluate(true, { byHand: true }),
-    'Cmd-.': doStop,
-    'Ctrl-.': doStop,
+    'Cmd-.': () => doStop('a'), // in DJ mode: this pane's deck only; otherwise a full stop
+    'Ctrl-.': () => doStop('a'),
     'Cmd-S': () => savePatternFile(),
     'Ctrl-S': () => savePatternFile(),
     'Shift-Cmd-S': () => savePatternFileAs(),
@@ -10230,13 +10230,27 @@ function togglePlay() {
   else evaluate(true, { byHand: true });
 }
 
-async function doStop() {
-  if (recState) cancelMidiRecord(true);
-  // Stopping the clock strands an armed bounce: its window is measured in cycles that will never
-  // come round. The panel (and its meter) stays open.
-  if (trackRecState) cancelTrackRecord(true);
-  const result = await api('POST', '/api/stop');
-  if (result.transport) transport = result.transport; // frozen at cycle 0
+async function doStop(deck = null) {
+  // In DJ mode, Cmd+. in an editor stops just that pane's deck (the other keeps playing on the
+  // shared clock); outside DJ mode - or from the play button / the global hotkey - it stops
+  // everything, as ever. The record cancels only apply when the main deck is going down: both
+  // record into the main editor's song.
+  const perDeck = deck && mixModeOn ? deck : null;
+  if (!perDeck || perDeck === 'a') {
+    if (recState) cancelMidiRecord(true);
+    // Stopping the clock strands an armed bounce: its window is measured in cycles that will
+    // never come round. The panel (and its meter) stays open.
+    if (trackRecState) cancelTrackRecord(true);
+  }
+  const result = await api('POST', '/api/stop', perDeck ? { deck: perDeck } : undefined);
+  if (!result.transport) {
+    // Per-deck stop with the other deck still playing: the clock ran on. Just drop this deck's
+    // playback highlights; everything else (transport, play button) still reflects the set.
+    clearPatternRegions(perDeck);
+    logLine(`deck ${perDeck.toUpperCase()} stopped`);
+    return;
+  }
+  transport = result.transport; // frozen at cycle 0
   stopHighlighting();
   updateTransportButtons();
   logLine('stopped');
@@ -13724,8 +13738,8 @@ async function openMixMode() {
         'Ctrl-Enter': () => evalDeckB(true),
         'Shift-Cmd-Enter': () => exitDjMode('b'),
         'Shift-Ctrl-Enter': () => exitDjMode('b'),
-        'Cmd-.': doStop,
-        'Ctrl-.': doStop,
+        'Cmd-.': () => doStop('b'), // this pane's deck only; deck A plays on
+        'Ctrl-.': () => doStop('b'),
       },
     });
   }
@@ -14382,7 +14396,7 @@ function mixTrackRow(t) {
   const gate = document.createElement('button');
   gate.className = 'mix-gate' + (fader > 0 ? ' on' : '');
   gate.title = 'gate this stem in/out (fader to 1/0)'
-    + '; with swap on, gating IN throws the other deck\'s same-named stem out';
+    + '; with swap on, gating IN throws the other deck\'s same-named stem out and gating OUT brings it back - toggle to audition either';
   gate.addEventListener('click', async () => {
     try {
       await api('POST', '/api/mix/gate', { key: t.key, on: !gate.classList.contains('on') });

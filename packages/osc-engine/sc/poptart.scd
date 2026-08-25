@@ -156,6 +156,9 @@ var startMixTap, stopMixTap, stopMixMaster;
 // for gain staging with trim, like a hardware desk's channel meter, not "what is the crossfader
 // letting through".
 var deckMeterBus, deckMeterSynths;
+// makeBundle with a timestamp only when there is real lead - see the definition by the events
+// section.
+var bundleNow;
 
 // Boot-progress checkpoint ("poptart: booting scsynth" below is the other one):
 // diagnoseSclangOutput in ../index.js matches these exact strings to localize a boot that
@@ -1210,7 +1213,7 @@ OSCdef(\poptartUnloadEffect, { |msg|
 OSCdef(\poptartSetTempo, { |msg|
     var bpm = msg[1].asFloat, beats = msg[2].asFloat, latency = msg[3].asFloat;
     currentTempo = bpm;
-    server.makeBundle(latency, {
+    bundleNow.(latency, {
         tracks.do { |track|
             if (track.isKindOf(Event)) {
                 track[\loaded].do { |id, i|
@@ -1229,6 +1232,16 @@ OSCdef(\poptartSetTempo, { |msg|
 // --- events (latency = seconds from now, computed by OscEngine against its own clock; ---
 // --- makeBundle turns it into a timestamped OSC bundle scsynth executes sample-accurately) ---
 
+// makeBundle, but timestamped only when there is real lead. A latency of ~0 means "now", and a
+// bundle stamped "now" is already in the past by transit + a hardware block by the time the
+// audio thread compares clocks - scsynth applies it immediately either way, but prints a
+// `late 0.01x` line for every one. The desk streams latency-0 setParams at 20+/sec while
+// mixing, so that was a console full of them. nil skips the stamp: same immediate application,
+// nothing to complain about; anything with real lead keeps its sample-accurate timestamp.
+bundleNow = { |latency, func|
+    server.makeBundle(if (latency.notNil and: { latency > 0.001 }) { latency } { nil }, func);
+};
+
 // Note events also gate any env modulators on the track (in the same timestamped bundle, so
 // envelope attacks line up sample-accurately with their notes). The gate follows a held-note
 // count: opens on the first held note, closes (release phase) when the last one ends. The
@@ -1244,7 +1257,7 @@ OSCdef(\poptartNoteOn, { |msg|
     var fire;
     if (ctl.notNil) {
         fire = { |lat|
-            server.makeBundle(lat, {
+            bundleNow.(lat, {
                 ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger);
                 track[\envs].do { |e| e[\synth].set(\gate, 1) };
                 // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
@@ -1271,7 +1284,7 @@ OSCdef(\poptartNoteOff, { |msg|
     var fire;
     if (ctl.notNil) {
         fire = { |lat|
-            server.makeBundle(lat, {
+            bundleNow.(lat, {
                 ctl.midi.noteOff(0, note, 0);
                 if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
             });
@@ -1293,7 +1306,7 @@ OSCdef(\poptartNoteOnSlot, { |msg|
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        var fire = { |lat| server.makeBundle(lat, { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) }) };
+        var fire = { |lat| bundleNow.(lat, { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) }) };
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOnSlot');
@@ -1303,7 +1316,7 @@ OSCdef(\poptartNoteOffSlot, { |msg|
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        var fire = { |lat| server.makeBundle(lat, { ctl.midi.noteOff(0, note, 0) }) };
+        var fire = { |lat| bundleNow.(lat, { ctl.midi.noteOff(0, note, 0) }) };
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOffSlot');
@@ -1317,13 +1330,13 @@ OSCdef(\poptartSetParam, { |msg|
         if (slot == -1) {
             // Channel controls (gain/pan) live on the track synth itself, not a plugin. Not
             // clipped to 0..1 - gain may exceed unity, pan is -1..1 (the SynthDef clips sanely).
-            server.makeBundle(latency, { track[\synth].set(paramName.asSymbol, value) });
+            bundleNow.(latency, { track[\synth].set(paramName.asSymbol, value) });
         } {
             ctl = track[\controllers][slot];
             if (ctl.notNil) {
                 // Resolve by name (or a "Name#N" index suffix - see resolveParamIndex) and set
                 // that specific parameter; values are normalized 0..1.
-                server.makeBundle(latency, {
+                bundleNow.(latency, {
                     var index = resolveParamIndex.(ctl.info, paramName);
                     if (index.notNil) { ctl.set(index, value.clip(0, 1)) };
                 });
@@ -1414,7 +1427,7 @@ OSCdef(\poptartAnchorParamLFO, { |msg|
     var track = tracks[key];
     var entry = if (track.isKindOf(Event)) { track[\lfos][("slot" ++ slot ++ "_" ++ paramName).asSymbol] };
     if (entry.notNil) {
-        server.makeBundle(latency, { entry[\synth].set(\t_trig, 1, \phase, phase) });
+        bundleNow.(latency, { entry[\synth].set(\t_trig, 1, \phase, phase) });
     };
 }, '/poptart/anchorParamLFO');
 
@@ -1587,7 +1600,7 @@ OSCdef(\poptartSetParamShape, { |msg|
             old.free; // after the new one is made, so its In.kr still sees this one's last value
         };
         if (existing[\mode] == \free) {
-            server.makeBundle(latency, swap);
+            bundleNow.(latency, swap);
         } {
             existing[\pending] = swap;
         };
@@ -2118,7 +2131,7 @@ OSCdef(\poptartPlaySample, { |msg|
         if (loop == 1) {
             args = args ++ [\loopLo, loopLo, \loopHi, loopHi, \entry, entry, \pingpong, pingpong];
         };
-        server.makeBundle(latency, {
+        bundleNow.(latency, {
             synth = Synth(defName, args, target: track[\group], addAction: \addToHead);
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
             track[\lfos].do { |e|
@@ -2126,7 +2139,7 @@ OSCdef(\poptartPlaySample, { |msg|
             };
         });
         if (gated) {
-            server.makeBundle(stopLatency, { synth.set(\gate, 0) });
+            bundleNow.(stopLatency, { synth.set(\gate, 0) });
         };
         SystemClock.sched(if (gated) { stopLatency } { latency + dur }, {
             track[\held] = max(0, track[\held] - 1);
@@ -2557,11 +2570,11 @@ OSCdef(\poptartRecordTrack, { |msg|
             // assuming an exact pre-roll.
             setupSec = Main.elapsedTime - t0;
             stage = "scheduling the window";
-            server.makeBundle(max(0, startLatency - setupSec), {
+            bundleNow.(max(0, startLatency - setupSec), {
                 entry[\disk] = Synth(\poptart_rec_disk, [\bus, entry[\bus].index, \buf, buf],
                     target: recGroup, addAction: \addToTail);
             });
-            server.makeBundle(max(0, stopLatency - setupSec), { entry[\disk].free });
+            bundleNow.(max(0, stopLatency - setupSec), { entry[\disk].free });
             stage = "recording";
             // Closing the file is what flushes DiskOut's last block and writes the real data size
             // into the WAV header, so it waits until after the synth is actually gone. freeMsg -
