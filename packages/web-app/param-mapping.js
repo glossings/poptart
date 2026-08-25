@@ -63,6 +63,27 @@ class MappedEngine {
     this.engine = engine;
     this.mappings = loadMappings();
     this.chains = new Map(); // trackId -> [instrument, ...fx plugin names], set on every eval
+    this.resolveTrack = null; // label -> engine track id, installed by the server (setTrackResolver)
+  }
+
+  // Track references INSIDE arguments: audio("kick") / .audio("kick") / .midi("kick") name
+  // another track by its label, but the engine knows tracks only by their opaque ids (see
+  // server.js's track registry). The server installs the resolver; without one, names pass
+  // through untouched (mocks, tests). The rule is syntactic, mirroring osc-engine's own
+  // routing-name grammar: "dev:"/"bus:" sources aren't tracks, "track:label" is an explicit
+  // track reference, and a bare name is a track (track-first resolution).
+  setTrackResolver(fn) {
+    this.resolveTrack = fn;
+  }
+
+  _trackRef(name, from) {
+    if (!this.resolveTrack || name == null) return name;
+    const str = String(name);
+    if (str.startsWith('dev:') || str.startsWith('bus:')) return name;
+    if (str.startsWith('track:')) return `track:${this.resolveTrack(str.slice(6), from)}`;
+    // `from` is the referencing track's engine id: the resolver scopes the lookup to that
+    // track's deck first, so deck b's audio("kick") means deck b's kick.
+    return this.resolveTrack(str, from);
   }
 
   // Called on every eval, per track, with [instrument, ...fxChain]; also reload mapping files
@@ -156,6 +177,7 @@ class MappedEngine {
   scanPlugins(...a) { return this.engine.scanPlugins(...a); }
   getKnownPlugins(...a) { return this.engine.getKnownPlugins(...a); }
   createTrack(...a) { return this.engine.createTrack(...a); }
+  destroyTrack(...a) { return this.engine.destroyTrack(...a); }
   loadInstrument(...a) { return this.engine.loadInstrument(...a); }
   loadEffect(...a) { return this.engine.loadEffect(...a); }
   unloadEffect(...a) { return this.engine.unloadEffect(...a); }
@@ -175,16 +197,17 @@ class MappedEngine {
   enableMidi(...a) { return this.engine.enableMidi(...a); }
   setMidiNotes(...a) { return this.engine.setMidiNotes(...a); }
   clearMidiNotes(...a) { return this.engine.clearMidiNotes(...a); }
-  // Signal routing (midi()/audio() source builders and .midi()/.audio() injectors). Plain
-  // pass-throughs - no parameter mapping involved, but the scheduler feature-detects each of
-  // these (typeof engine.X === 'function'), so they must exist on the wrapper to be reached.
-  setInputSource(...a) { return this.engine.setInputSource(...a); }
+  // Signal routing (midi()/audio() source builders and .midi()/.audio() injectors). No
+  // parameter mapping involved, but the scheduler feature-detects each of these (typeof
+  // engine.X === 'function'), so they must exist on the wrapper to be reached - and the ones
+  // that carry a routing name translate track references on the way down (see _trackRef).
+  setInputSource(trackId, io, name, ...a) { return this.engine.setInputSource(trackId, io, this._trackRef(name, trackId), ...a); }
   clearInputSource(...a) { return this.engine.clearInputSource(...a); }
   setBusSends(...a) { return this.engine.setBusSends(...a); }
   clearBusSends(...a) { return this.engine.clearBusSends(...a); }
-  injectAudio(...a) { return this.engine.injectAudio(...a); }
+  injectAudio(trackId, slot, name, ...a) { return this.engine.injectAudio(trackId, slot, this._trackRef(name, trackId), ...a); }
   clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
-  injectMidi(...a) { return this.engine.injectMidi(...a); }
+  injectMidi(trackId, slot, name, ...a) { return this.engine.injectMidi(trackId, slot, this._trackRef(name, trackId), ...a); }
   clearMidiInject(...a) { return this.engine.clearMidiInject(...a); }
 }
 

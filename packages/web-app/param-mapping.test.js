@@ -60,3 +60,56 @@ test('MappedEngine forwards each scheduler-called method to the underlying engin
     );
   }
 });
+
+test('MappedEngine translates track references in routing names, and only those', () => {
+  const calls = [];
+  const spyEngine = new Proxy(
+    {},
+    { get: (_t, prop) => (...args) => { calls.push([prop, ...args]); } },
+  );
+  const mapped = new MappedEngine(spyEngine);
+
+  // Without a resolver installed (mocks, tests), names pass through untouched.
+  mapped.setInputSource('#1', 'audio', 'kick', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'audio', 'kick', 0]);
+
+  // The server's resolver: known labels become engine track ids, anything else passes verbatim.
+  mapped.setTrackResolver((label) => (label === 'kick' ? '#7' : label));
+
+  // A bare routing name is a track reference (track-first resolution, same as osc-engine's).
+  mapped.setInputSource('#1', 'audio', 'kick', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'audio', '#7', 0]);
+  // "track:label" is the explicit form; the prefix survives, the label is resolved.
+  mapped.injectAudio('#1', 2, 'track:kick', 1);
+  assert.deepEqual(calls.pop(), ['injectAudio', '#1', 2, 'track:#7', 1]);
+  // MIDI fan-out references a source track by name too.
+  mapped.injectMidi('#1', 0, 'kick', 60);
+  assert.deepEqual(calls.pop(), ['injectMidi', '#1', 0, '#7', 60]);
+  // Devices and named buses are not tracks and pass through verbatim.
+  mapped.setInputSource('#1', 'audio', 'dev:Scarlett', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'audio', 'dev:Scarlett', 0]);
+  mapped.injectAudio('#1', 2, 'bus:pads', 1);
+  assert.deepEqual(calls.pop(), ['injectAudio', '#1', 2, 'bus:pads', 1]);
+  // A label no eval has seen passes through verbatim - the engine warns about it, as ever.
+  mapped.setInputSource('#1', 'audio', 'nope', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'audio', 'nope', 0]);
+});
+
+test('MappedEngine hands the resolver the referencing track, so references scope per deck', () => {
+  const calls = [];
+  const spyEngine = new Proxy(
+    {},
+    { get: (_t, prop) => (...args) => { calls.push([prop, ...args]); } },
+  );
+  const mapped = new MappedEngine(spyEngine);
+  // The server's real resolver scopes by the CALLER: a reference from a deck-b track resolves
+  // within deck b first. Mimic that shape - what this pins is that the caller's id arrives.
+  mapped.setTrackResolver((label, from) => (from === '#b1' ? `#b-${label}` : label));
+
+  mapped.setInputSource('#b1', 'audio', 'kick', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#b1', 'audio', '#b-kick', 0]);
+  mapped.injectMidi('#a1', 0, 'kick', 60); // a caller outside deck b resolves unscoped
+  assert.deepEqual(calls.pop(), ['injectMidi', '#a1', 0, 'kick', 60]);
+  mapped.injectAudio('#b1', 2, 'track:kick', 1);
+  assert.deepEqual(calls.pop(), ['injectAudio', '#b1', 2, 'track:#b-kick', 1]);
+});

@@ -644,6 +644,14 @@ class OscEngine {
   createTrack(trackId) {
     this._send('/poptart/createTrack', [trackId]);
   }
+  /**
+   * Destroy a track and everything it owns (plugins, modulators, routes, buses). Used by the
+   * performance mixer's complete-mix/eject - NOT by the eval sweep, which keeps a dropped
+   * label's track warm for its return.
+   */
+  destroyTrack(trackId) {
+    this._send('/poptart/destroyTrack', [trackId]);
+  }
   loadInstrument(trackId, pluginId) {
     this._send('/poptart/loadInstrument', [trackId, pluginId]);
   }

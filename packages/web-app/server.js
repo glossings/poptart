@@ -50,6 +50,184 @@ let engineError = null;
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
 
+// Engine tracks are keyed by opaque ids ("#1", "#2", ...), not labels, so a track can be
+// re-labeled (deck promotion, in the performance-mixing work - see TODO.md) without any engine
+// churn. Everything client-facing stays in label space; translation happens only at the engine
+// boundary (engineTrack) and at engine-callback entry (trackLabel, applied in wireEngine).
+// Ids start with '#', which no block label can contain, so an unknown label passed through
+// verbatim can't collide with a real track. Like the engine tracks they name, ids live for the
+// server's life - there is no destroyTrack, and an engine restart recreates tracks under the
+// same ids (each Scheduler re-sends createTrack with the id it was built with).
+const trackIds = new Map(); // label -> engine track id
+const trackLabels = new Map(); // engine track id -> label
+let nextTrackNum = 1;
+// The eval loop is the one place tracks come into being, so it is the one caller allowed to mint
+// an id; everything else must use engineTrack, or a typo'd label would allocate a ghost track.
+function claimEngineTrack(label) {
+  let id = trackIds.get(label);
+  if (!id) {
+    id = `#${nextTrackNum++}`;
+    trackIds.set(label, id);
+    trackLabels.set(id, label);
+  }
+  return id;
+}
+// Non-minting: a label no eval has seen passes through verbatim, and the engine ignores it the
+// same way it has always ignored notes aimed at tracks that don't exist.
+const engineTrack = (label) => trackIds.get(label) ?? label;
+const trackLabel = (id) => trackLabels.get(id) ?? id;
+
+// The two performance decks (see TODO.md). 'a' is the main editor; 'b' is the queued song a mix
+// brings in. A deck-b eval keys its schedulers "b:<label>" (a block label can't contain ':', so
+// the namespace can't collide), and its song-level facts - the key setscale() left in force, the
+// tempo setbpm() asked for - are recorded HERE rather than applied globally: deck b plays in its
+// own key but at the main deck's tempo until the mix migrates it (phase 5). The process-global
+// scale holds deck a's key at rest; a deck's eval borrows it and puts it back.
+const decks = {
+  a: { scale: null, bpm: null },
+  b: { scale: null, bpm: null },
+};
+const deckOfKey = (key) => (key.includes(':') ? key.slice(0, key.indexOf(':')) : 'a');
+
+// Signal.prototype is SHARED between decks by design: extensions from one song are available to
+// the other. The collision case - both songs defining the same name differently - gets a console
+// warning rather than isolation, and the later eval wins for both. Tracked by diffing the
+// prototype after every eval against the baseline captured after prebake (built-ins and the
+// prebake library are nobody's).
+const protoOwners = new Map(); // prop -> { deck, value }
+let protoBaseline = null; // own props of Sig.prototype before any buffer extended it
+function noteProtoOwnership(deck) {
+  if (!protoBaseline || !patternCore?.Sig) return;
+  const proto = patternCore.Sig.prototype;
+  for (const prop of Object.getOwnPropertyNames(proto)) {
+    if (protoBaseline.has(prop)) continue;
+    const desc = Object.getOwnPropertyDescriptor(proto, prop);
+    const value = desc.get ?? desc.value;
+    const prev = protoOwners.get(prop);
+    if (prev && prev.value === value) continue;
+    if (prev && prev.deck !== deck) {
+      eventLogQueue.push(`[deck] Signal.prototype.${prop} is defined by both decks' code - deck ${deck}'s later definition now wins for both`);
+    }
+    protoOwners.set(prop, { deck, value });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Performance-mix state (the DJ layer - see TODO.md). EPHEMERAL by design: none of this is ever
+// written into song code (deliberately unlike the ctrl+g mixer's .gain() edits) - it belongs to
+// the mix session and dies with it. The engine side is the DJ stage baked into every track
+// SynthDef (trim / eqlo / eqmid / eqhi / djf / fader / deck - see sc/poptart.scd): all seven are
+// channel controls on pseudo-slot -1, so applying a value is one setParam. What's stored here is
+// re-applied to a track every time an eval (re)creates it, which is what makes a queued deck
+// arrive SILENT: the mix UI sets deck b's `deck` gain to 0 before its first eval, and every
+// track that eval births wears that gain before its scheduler starts.
+// ---------------------------------------------------------------------------------------------
+const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1, deck: 1 };
+const mixState = {
+  clobber: false, // when on, gating a stem in throws the SAME-NAMED stem on the other deck out
+  perDeck: { a: new Map(), b: new Map() }, // deck-broadcast values (the crossfader's `deck`, a deck-wide djf)
+  perTrack: new Map(), // key -> Map(name -> value): faders, per-track EQ, trim
+};
+
+// Everything the mix session holds for one (possibly just-created) track, applied engine-side.
+// Deck-broadcast values first, then the track's own, so a per-track value wins.
+function applyMixTo(key) {
+  if (!engine) return;
+  const tid = engineTrack(key);
+  const per = mixState.perTrack.get(key);
+  for (const [name, value] of mixState.perDeck[deckOfKey(key)] ?? []) {
+    if (!per?.has(name)) engine.setParam(tid, -1, name, value, 0);
+  }
+  for (const [name, value] of per ?? []) engine.setParam(tid, -1, name, value, 0);
+}
+
+// Every DJ-stage control back to neutral on one track - what complete-mix does to the promoted
+// song (it is the main act now; the next mix starts from a clean desk).
+function neutralizeMix(key) {
+  if (!engine) return;
+  const tid = engineTrack(key);
+  for (const [name, value] of Object.entries(DJ_NEUTRAL)) engine.setParam(tid, -1, name, value, 0);
+}
+
+// The "trackId|..."-keyed lease/capture maps, re-keyed or dropped together when a track changes
+// name (promotion) or dies (eject / complete-mix). A function, not a const list: several are
+// declared further down the file.
+const PIPED_MAPS = () => [presetHolds, channelHolds, uncaptured, autoPinDirty, autoPinReady];
+
+// Forget a track completely: its engine side is destroyed (plugins closed - see destroyTrack in
+// sc/poptart.scd), its registry ids freed, and every server-side trace of the key dropped. Used
+// by eject and complete-mix's teardown of the outgoing deck - NOT by the eval sweep, which keeps
+// a dropped label's track warm for the label's return.
+function dropTrack(key) {
+  const id = trackIds.get(key);
+  if (recTapped.has(key)) {
+    recTapped.delete(key);
+    if (id && engine) {
+      try { engine.tapTrack(id, false); } catch { /* engine already down */ }
+    }
+  }
+  if (id && engine) {
+    try { engine.destroyTrack(id); } catch { /* engine already down */ }
+  }
+  if (id) trackLabels.delete(id);
+  trackIds.delete(key);
+  hlTracks.delete(key);
+  liveHeld.delete(key);
+  kbHeld.delete(key);
+  mixState.perTrack.delete(key);
+  const pfx = `${key}|`;
+  for (const m of PIPED_MAPS()) for (const k of [...m.keys()]) if (k.startsWith(pfx)) m.delete(k);
+  for (const k of [...handTaken]) if (k.startsWith(pfx)) handTaken.delete(k);
+  if (conf?.trackId === key) conf = null;
+}
+
+// Promotion: everything filed under `from` answers to `to` from here on. The engine is never
+// touched - the opaque-track-id payoff - so the music doesn't blink.
+function rekeyTrack(from, to) {
+  const id = trackIds.get(from);
+  const oldId = trackIds.get(to); // a stale entry from a since-destroyed same-named track
+  if (oldId) trackLabels.delete(oldId);
+  trackIds.delete(from);
+  if (id) {
+    trackIds.set(to, id);
+    trackLabels.set(id, to);
+  }
+  const sch = schedulers.get(from);
+  if (sch) {
+    schedulers.delete(from);
+    schedulers.set(to, sch);
+    sch.label = to; // user-facing lines say the new name; the trackId inside never changes
+  }
+  for (const m of [hlTracks, liveHeld, kbHeld, mixState.perTrack]) {
+    const v = m.get(from);
+    if (v !== undefined) {
+      m.delete(from);
+      m.set(to, v);
+    }
+  }
+  if (recTapped.has(from)) {
+    recTapped.delete(from);
+    recTapped.add(to);
+  }
+  const pfx = `${from}|`;
+  for (const m of PIPED_MAPS()) {
+    for (const [k, v] of [...m]) {
+      if (!k.startsWith(pfx)) continue;
+      m.delete(k);
+      const nv = v && typeof v === 'object' && 'trackId' in v ? { ...v, trackId: to } : v;
+      m.set(`${to}|${k.slice(pfx.length)}`, nv);
+    }
+  }
+  for (const k of [...handTaken]) {
+    if (k.startsWith(pfx)) {
+      handTaken.delete(k);
+      handTaken.add(`${to}|${k.slice(pfx.length)}`);
+    }
+  }
+  if (conf?.trackId === from) conf.trackId = to;
+  if (trackRec?.label === from) trackRec.label = to;
+}
+
 // VST host-transport mirror: pushes the Transport's tempo + song position (in beats, 4 per
 // cycle) into the engine, which forwards it to every open plugin as emulated DAW transport -
 // what makes plugin-internal synced LFOs/delays/arpeggiators follow setbpm. Called on every
@@ -359,6 +537,20 @@ async function restartEngine() {
 // first audio-device change. Any new engine callback goes here and nowhere else.
 function wireEngine() {
   mappedEngine = new MappedEngine(engine);
+  // audio("kick")/.midi("kick") reference other tracks by label inside engine-call arguments;
+  // the wrapper turns those into engine track ids on the way down (see MappedEngine._trackRef).
+  // A reference from inside a deck resolves within that deck first - deck b's audio("kick")
+  // means deck b's kick - then falls back to the plain label: a deliberate cross-deck
+  // reference, or a name no eval has seen (passed through for the engine to shrug at).
+  mappedEngine.setTrackResolver((label, callerTid) => {
+    const caller = callerTid ? trackLabels.get(callerTid) : null;
+    const at = caller ? caller.indexOf(':') : -1;
+    if (at > 0) {
+      const scoped = trackIds.get(caller.slice(0, at + 1) + label);
+      if (scoped) return scoped;
+    }
+    return trackIds.get(label) ?? label;
+  });
   // Captured plugin programs live in the blob store, not in the code (see blobs.js), so what the
   // scheduler hands the engine is usually a "@id" handle. This is the one place it is turned back
   // into a program.
@@ -372,16 +564,16 @@ function wireEngine() {
   // live-value store - what a Tier-1 midicc() signal samples.
   engine.onMidiIn = (device, channel, cc, value) => patternCore.feedMidiCC(device, channel, cc, value);
   // Live note edges from midikeys() routes - logged for the MIDI recorder and the roll's capture.
-  engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackId, note, vel, isOn);
+  engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackLabel(trackId), note, vel, isOn);
   // Plugin-GUI knob gestures - what conf capture writes into the code.
-  engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackId, slot, name, index, value);
+  engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackLabel(trackId), slot, name, index, value);
   // Any edit inside a plugin's own window - what auto-pin captures back into the code.
-  engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackId, slot);
+  engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackLabel(trackId), slot);
   // Peak level of a track tapped for recording - what the record panel's meter draws.
-  engine.onRecLevel = (trackId, left, right) => handleRecLevel(trackId, left, right);
+  engine.onRecLevel = (trackId, left, right) => handleRecLevel(trackLabel(trackId), left, right);
   // Mixer monitoring feeds (per-track levels + band frames) - what the mixer modal draws.
-  engine.onMixLevel = (key, peakL, rmsL, peakR, rmsR) => handleMixLevel(key, peakL, rmsL, peakR, rmsR);
-  engine.onMixSpec = (key, values) => handleMixSpec(key, values);
+  engine.onMixLevel = (key, peakL, rmsL, peakR, rmsR) => handleMixLevel(trackLabel(key), peakL, rmsL, peakR, rmsR);
+  engine.onMixSpec = (key, values) => handleMixSpec(trackLabel(key), values); // "*" (master) has no label and passes through
   // Which input channels input() can address, and what a device-relative input("name", n) resolves
   // against. Only the booted device has any, so this is re-fed on every start (a device change is
   // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
@@ -587,7 +779,7 @@ const PREBAKE_BROWSER_SHIMS = {
   },
 };
 
-function makeBlockEvaluator(defs = new Map()) {
+function makeBlockEvaluator(defs = new Map(), hostBuilders = HOST_BUILDERS) {
   // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
   // top-level bindings are in scope for every user block too (see runPrebake).
   const evalBlock = function evalBlock(code, locBase) {
@@ -602,9 +794,9 @@ function makeBlockEvaluator(defs = new Map()) {
     const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase) : code;
     const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
     const macroNames = macroSigNames();
-    const baseNames = [...BUILDER_NAMES, ...INTERNAL_BUILDERS, ...macroNames, ...Object.keys(HOST_BUILDERS)].filter((n) => !defs.has(n)); // defs may shadow builders
+    const baseNames = [...BUILDER_NAMES, ...INTERNAL_BUILDERS, ...macroNames, ...Object.keys(hostBuilders)].filter((n) => !defs.has(n)); // defs may shadow builders
     const baseValues = baseNames.map((n) => {
-      if (n in HOST_BUILDERS) return HOST_BUILDERS[n];
+      if (n in hostBuilders) return hostBuilders[n];
       if (macroNames.includes(n)) return patternCore.macro(Number(n.slice(5)));
       return patternCore[n];
     });
@@ -705,6 +897,10 @@ function runPrebake() {
     console.log(`[poptart] prebake ran ${sources.length} file(s)${defs}`);
   }
   syncSamplePacks(); // a _pack() in prebake is a library pack - the engine has to know its files
+  // The prototype-collision baseline (see noteProtoOwnership): what Sig.prototype owns after
+  // prebake - built-ins plus the prebake library - is nobody's; only what a buffer adds beyond
+  // this is deck-attributable. Recaptured on every prebake re-run.
+  protoBaseline = new Set(Object.getOwnPropertyNames(patternCore.Sig.prototype));
   return errors;
 }
 
@@ -956,8 +1152,9 @@ function releaseKbNotes(trackId) {
   const held = kbHeld.get(trackId);
   if (held && engine) {
     const now = engine.getTime();
+    const tid = engineTrack(trackId);
     for (const { note, index } of held.values()) {
-      engine.noteOff(trackId, note, now);
+      engine.noteOff(tid, note, now);
       handleMidiNoteIn(trackId, note, 0, false, index); // close its logged event too
     }
   }
@@ -1159,7 +1356,7 @@ function setRecTap(label, on) {
   if (on) recTapped.add(label);
   else if (trackRec?.label !== label) recTapped.delete(label); // a running bounce keeps its own tap
   else return; // don't pull the tap out from under a recording
-  engine.tapTrack(label, on);
+  engine.tapTrack(engineTrack(label), on);
   if (!on) recLevels.delete(label);
 }
 
@@ -1217,7 +1414,7 @@ async function finalizeTrackRec(wrote = {}) {
 function releaseRecTap(label) {
   if (recTapped.has(label)) return;
   try {
-    engine.tapTrack(label, false);
+    engine.tapTrack(engineTrack(label), false);
   } catch {
     // engine already down - the tap went with it
   }
@@ -1350,9 +1547,9 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
     console.log(`[conf] gesture "${name}" from track "${trackId}" ignored - configuring: ${conf ? `"${conf.trackId}"` : 'none'}`);
     return;
   }
-  const spec = mappedEngine?.specFor(trackId, slot, name);
+  const spec = mappedEngine?.specFor(engineTrack(trackId), slot, name);
   const value = spec ? roundSig(toRealWorld(normValue, spec)) : Math.round(normValue * 1e4) / 1e4;
-  const addr = paramAddr(mappedEngine?.chains.get(trackId)?.[slot], name, index);
+  const addr = paramAddr(mappedEngine?.chains.get(engineTrack(trackId))?.[slot], name, index);
   // One line per param per session (not per gesture - dragging floods otherwise), so the server
   // console shows what conf is capturing.
   if (!conf.seen.has(addr)) {
@@ -1686,7 +1883,7 @@ function handlePluginEdited(trackId, slot) {
 }
 
 function pluginInSlot(trackId, slot) {
-  return mappedEngine?.chains.get(trackId)?.[slot] ?? null;
+  return mappedEngine?.chains.get(engineTrack(trackId))?.[slot] ?? null;
 }
 
 /**
@@ -1719,7 +1916,7 @@ async function captureDirtyPlugins() {
     }
     try {
       const t0 = performance.now();
-      const state = await engine.getPluginState(trackId, slot);
+      const state = await engine.getPluginState(engineTrack(trackId), slot);
       const ms = performance.now() - t0;
       // Nearly all of this is the plugin serializing itself with its processing suspended - the
       // gzip on our side is off the event loop (see osc-engine). Worth logging when it's slow:
@@ -1741,7 +1938,7 @@ async function captureDirtyPlugins() {
       // tell the track's scheduler it's already applied. Without this, every eval would have
       // the plugin re-chew a state it already has (a reload, and an audible one on some).
       // Marked under the handle, because that is what the code the next eval reads will say.
-      schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(trackId)?.[slot], handle);
+      schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(engineTrack(trackId))?.[slot], handle);
     } catch (e) {
       // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
       // all self-correcting on the next edit. Log once per slot so it's diagnosable.
@@ -1768,7 +1965,7 @@ function schedulePrune() {
     // but pointless.
     Promise.resolve(expireWipSessions())
       .then(() => pruneSnapshots())
-      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds] }))
+      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] }))
       .then(({ deleted, freed }) => {
         if (deleted) console.log(`[poptart] released ${deleted} captured plugin state(s), ${(freed / 1048576).toFixed(1)}MB`);
       })
@@ -1780,7 +1977,7 @@ function schedulePrune() {
 // Refreshed from both places the server sees that buffer - the eval request and the autosave - so
 // a state stays safe from the moment it is written into the code, whether or not it has reached a
 // file yet.
-let liveStateIds = new Set();
+const liveStateIds = { a: new Set(), b: new Set() }; // per deck - both decks' states are in use
 
 // The retention policy, if the settings tab has been asked for one: session files older than
 // `wipRetentionMonths` go, which is also what lets the state store shrink (a session pins the
@@ -1992,6 +2189,12 @@ const routes = {
   'POST /api/evaluate': async (body) => {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
 
+    // Which performance deck this buffer is (see the decks table above): 'a', the main editor,
+    // unless the caller says 'b'. Everything below that keys or scopes by label goes through
+    // keyOfBlock, so the two decks' identically-named blocks stay separate tracks.
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    const keyOfBlock = (label) => (deck === 'a' ? label : `b:${label}`);
+
     // Whatever you last moved in a plugin's own window is captured here, before anything else:
     // this eval may reload the very plugin holding the only copy of that tweak, and it is the
     // moment the code has to describe the sound anyway (see the auto-pin section).
@@ -1999,7 +2202,7 @@ const routes = {
 
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
-    liveStateIds = blobs.referencedIds(body.code ?? ''); // this buffer's states are in use
+    liveStateIds[deck] = blobs.referencedIds(body.code ?? ''); // this buffer's states are in use
 
     // Rewind the random builders' seed counter before building anything, so choose()/irand()
     // seeds are a function of position in the buffer rather than of how many times this server
@@ -2013,11 +2216,28 @@ const routes = {
     // is untouched - it is a library, not part of this buffer. What was there is kept until the
     // build below gets to the end (see the catch): an evaluation that throws applies nothing, so
     // the tracks still playing must still find the definitions they resolve by name each cycle.
-    const definitionsBefore = patternCore.clearRolls();
+    patternCore.setDefOwner(deck);
+    const definitionsBefore = patternCore.clearRolls('buffer', deck);
+    // Enter this deck's key: the scale global is read at BUILD time (.sc() bakes it into the
+    // Sig), so holding the deck's key in force during its eval is all per-deck scale takes.
+    patternCore.setGlobalScale(decks[deck].scale ?? null);
 
     // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
     // and a redeclared name in the buffer overrides the copy without clobbering the original.
-    const evalBlock = makeBlockEvaluator(new Map(prebakeDefs));
+    // setbpm records this deck's native tempo, but only the MAIN deck's drives the shared
+    // clock: a queued song declares what it wants, and the mix migrates toward it (phase 5).
+    const hostBuilders = {
+      ...HOST_BUILDERS,
+      setbpm: (value) => {
+        const v = typeof value === 'string' ? patternCore.mini(value) : value;
+        if (typeof v !== 'number' && typeof v?.sample !== 'function') {
+          throw new Error('[transport] setbpm() takes a number or a signal (mini string / LFO / pattern)');
+        }
+        decks[deck].bpm = v;
+        return deck === 'a' ? setbpm(value) : TEMPO_BLOCK;
+      },
+    };
+    const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
 
     // setscale is HOISTED: every block that is nothing but a `setscale(...)` call runs here, in
     // document order, before any pattern is built - so the LAST one in the buffer is the key the
@@ -2076,9 +2296,19 @@ const routes = {
       // every roll/shape/preset defined BELOW it out of the registry, and the tracks that are
       // still playing (which resolve them by name, lazily) fall silent on a buffer nobody meant
       // to change.
-      patternCore.restoreRolls(definitionsBefore);
+      patternCore.restoreRolls(definitionsBefore, 'buffer', deck);
+      patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
+      decks[deck].scale = patternCore.globalScale();
+      patternCore.setGlobalScale(decks.a.scale ?? null); // the global holds the main deck's key at rest
       throw err;
     }
+    patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
+    // What setscale() left in force is this deck's key; the global goes back to holding the main
+    // deck's, which is what every non-eval reader (/api/status, live-note quantization) means.
+    const deckScale = (decks[deck].scale = patternCore.globalScale());
+    patternCore.setGlobalScale(decks.a.scale ?? null);
+    noteProtoOwnership(deck);
+
     // The buffer's _pack() definitions are in the registry now - the engine needs their files
     // before the schedulers below ask it to play them.
     syncSamplePacks();
@@ -2094,12 +2324,15 @@ const routes = {
     const anySolo = built.some((b) => b.soloed && !b.muted);
     const active = built.filter((b) => !b.muted && (!anySolo || b.soloed));
 
-    // Stop tracks whose label disappeared (or that are now muted / un-soloed).
-    for (const [label, sch] of schedulers) {
-      if (!active.some((b) => b.label === label)) {
+    // Stop tracks whose label disappeared (or that are now muted / un-soloed) - within THIS
+    // deck only: the other deck's tracks are not in this buffer, and this eval must not touch
+    // them (each deck sweeps its own).
+    for (const [key, sch] of schedulers) {
+      if (deckOfKey(key) !== deck) continue;
+      if (!active.some((b) => keyOfBlock(b.label) === key)) {
         sch.stop();
-        schedulers.delete(label);
-        mappedEngine.removeChain(label);
+        schedulers.delete(key);
+        mappedEngine.removeChain(engineTrack(key));
       }
     }
 
@@ -2110,29 +2343,42 @@ const routes = {
     if (active.length > 0 && body.start !== false) transport.start();
 
     for (const b of active) {
+      const key = keyOfBlock(b.label);
       // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
-      mappedEngine.setChain(b.label, [b.sig.instrument, ...b.sig.fxChain]);
-      let sch = schedulers.get(b.label);
+      const tid = claimEngineTrack(key);
+      mappedEngine.setChain(tid, [b.sig.instrument, ...b.sig.fxChain]);
+      let sch = schedulers.get(key);
       if (!sch) {
-        sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: b.label });
-        schedulers.set(b.label, sch);
+        sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: key });
+        schedulers.set(key, sch);
       }
       // Hand-edit freezes go on BEFORE the pattern does: setPattern pushes any pinned `{ state }`,
       // and a slot whose plugin is being edited must not have a stored program pushed into it (see
       // the hand-editing section). Re-asserted here because a Scheduler is rebuilt whenever its
       // label comes back, and unlike a preset hold this sends nothing - it only holds things off.
-      for (const slot of stateHeldSlotsFor(b.label)) sch.holdPluginState(slot, true);
+      for (const slot of stateHeldSlotsFor(key)) sch.holdPluginState(slot, true);
       sch.setPattern(b.sig);
-      for (const [key, held] of presetHolds) {
-        const at = key.lastIndexOf('|');
-        if (key.slice(0, at) === b.label) sch.holdPreset(Number(key.slice(at + 1)), held.preset);
+      for (const [holdKey, held] of presetHolds) {
+        const at = holdKey.lastIndexOf('|');
+        if (holdKey.slice(0, at) === key) sch.holdPreset(Number(holdKey.slice(at + 1)), held.preset);
       }
       // A mixer control still under someone's finger keeps its level across this eval - which is
       // the eval its own release just triggered (see setChannelHold). After setPattern, so the
       // refusal for a natively modulated control reads the pattern that is now playing.
-      for (const [key, held] of channelHolds) {
-        if (key.slice(0, key.lastIndexOf('|')) === b.label) sch.holdChannel(held.name, held.value);
+      for (const [holdKey, held] of channelHolds) {
+        if (holdKey.slice(0, holdKey.lastIndexOf('|')) === key) sch.holdChannel(held.name, held.value);
       }
+      // With clobber on, an incoming stem starts GATED OUT (fader 0) the first time it appears:
+      // the whole point of the mode is choosing when each stem clobbers its twin, so none may
+      // play just by being evaluated. Recorded (not just applied) so its gate shows OFF.
+      if (deck === 'b' && mixState.clobber && !mixState.perTrack.get(key)?.has('fader')) {
+        let per = mixState.perTrack.get(key);
+        if (!per) mixState.perTrack.set(key, (per = new Map()));
+        per.set('fader', 0);
+      }
+      // The mix session's DJ-stage values (see mixState): a track (re)created into a live mix
+      // must come up wearing them - this is what makes a queued deck's tracks arrive silent.
+      applyMixTo(key);
       sch.start();
     }
 
@@ -2144,12 +2390,12 @@ const routes = {
 
     // Re-arm conf capture engine-side: sclang keeps the flag on its track object, which an
     // engine restart discards - the eval that recreates the track re-sends it. Idempotent.
-    if (conf && active.some((b) => b.label === conf.trackId)) engine.setConfMode(conf.trackId, true);
+    if (conf && active.some((b) => keyOfBlock(b.label) === conf.trackId)) engine.setConfMode(engineTrack(conf.trackId), true);
 
     // Refresh the highlight-grid source set to this eval's active tracks, and ship each active
     // track's first window inline so playback lights up immediately without a follow-up request.
-    hlTracks.clear();
-    for (const b of active) hlTracks.set(b.label, { sig: b.sig, start: b.start, end: b.end });
+    for (const k of [...hlTracks.keys()]) if (deckOfKey(k) === deck) hlTracks.delete(k);
+    for (const b of active) hlTracks.set(keyOfBlock(b.label), { sig: b.sig, start: b.start, end: b.end });
     const gridFrom = currentGridCycle();
 
     return {
@@ -2157,11 +2403,14 @@ const routes = {
       body: {
         cps: transport.cps,
         transport: transport.snapshot(),
-        scale: patternCore.globalScale(), // what setscale() left in force - the piano roll colours by it
+        scale: deckScale, // what setscale() left in force for this deck - the piano roll colours by it
+        deck,
+        deckBpm: typeof decks[deck].bpm === 'number' ? decks[deck].bpm : null,
         gridFrom,
         gridCount: HL_WINDOW,
         tracks: built.map((b) => ({
           label: b.label,
+          key: keyOfBlock(b.label), // what this track is called server-side (deck b keys are "b:<label>")
           muted: b.muted,
           soloed: b.soloed,
           active: active.includes(b),
@@ -2282,6 +2531,7 @@ const routes = {
     const index = body.index == null ? null : Number(body.index);
     const key = liveKey(note, index);
     const now = engine.getTime();
+    const tid = engineTrack(trackId);
     let held = kbHeld.get(trackId);
     if (!held) kbHeld.set(trackId, (held = new Map()));
     if (isOn) {
@@ -2290,15 +2540,15 @@ const routes = {
       // Retrigger a re-pressed key cleanly (some layouts fire keydown without an intervening
       // keyup); the browser suppresses auto-repeat, so a real double-down means a new hit.
       if (held.has(key)) {
-        engine.noteOff(trackId, note, now);
+        engine.noteOff(tid, note, now);
         handleMidiNoteIn(trackId, note, 0, false, index);
       }
-      engine.noteOn(trackId, note, vel, now);
+      engine.noteOn(tid, note, vel, now);
       held.set(key, { note, index });
       handleMidiNoteIn(trackId, note, vel, true, index);
     } else {
       if (!held.has(key)) return { status: 200, body: { ok: true } };
-      engine.noteOff(trackId, note, now);
+      engine.noteOff(tid, note, now);
       held.delete(key);
       handleMidiNoteIn(trackId, note, 0, false, index);
     }
@@ -2326,11 +2576,12 @@ const routes = {
     const note = Math.round(Number(body.note));
     if (!trackId || !Number.isFinite(note)) return { status: 200, body: { ok: false } };
     const now = engine.getTime();
+    const tid = engineTrack(trackId);
     if (body.isOn) {
       const vel = Math.max(0, Math.min(1, Number(body.vel ?? 0.8)));
-      if (vel > 0) engine.noteOn(trackId, note, vel, now);
+      if (vel > 0) engine.noteOn(tid, note, vel, now);
     } else {
-      engine.noteOff(trackId, note, now);
+      engine.noteOff(tid, note, now);
     }
     return { status: 200, body: { ok: true } };
   },
@@ -2338,7 +2589,7 @@ const routes = {
   // Introspection: real parameter names of the plugin in a track slot. Body: { trackId, slot }.
   'POST /api/params': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
-    return { status: 200, body: await engine.getParams(body.trackId ?? 'default', body.slot ?? 0) };
+    return { status: 200, body: await engine.getParams(engineTrack(body.trackId ?? 'default'), body.slot ?? 0) };
   },
 
   // Parameter lists for every plugin in the currently-evaluated chain, for the editor's
@@ -2356,11 +2607,11 @@ const routes = {
           try {
             paramsByPlugin.set(plugin, await getParamsWhenLoaded(trackId, slot));
           } catch (err) {
-            slots.push({ track: trackId, slot, plugin, params: [], error: err.message ?? String(err) });
+            slots.push({ track: trackLabel(trackId), slot, plugin, params: [], error: err.message ?? String(err) });
             continue;
           }
         }
-        slots.push({ track: trackId, slot, plugin, params: paramsByPlugin.get(plugin) });
+        slots.push({ track: trackLabel(trackId), slot, plugin, params: paramsByPlugin.get(plugin) });
       }
     }
     return { status: 200, body: { slots } };
@@ -2446,7 +2697,7 @@ const routes = {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const trackId = body.trackId ?? 'default';
     const slot = body.slot ?? 0;
-    engine.showPluginEditor(trackId, slot);
+    engine.showPluginEditor(engineTrack(trackId), slot);
     // The window is up, so the slot's program is yours to change from here: take it now rather than
     // on the editor's next poll, or a swap in between would change the preset out from under the
     // window you just opened - and a knob turned after that would land in the wrong preset.
@@ -2465,9 +2716,9 @@ const routes = {
   'POST /api/confMode': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const trackId = body.trackId ?? 'default';
-    if (conf && conf.trackId !== trackId) engine.setConfMode(conf.trackId, false); // release the previous track
+    if (conf && conf.trackId !== trackId) engine.setConfMode(engineTrack(conf.trackId), false); // release the previous track
     conf = body.on ? { trackId, touched: new Map(), seen: new Set() } : null;
-    engine.setConfMode(trackId, !!body.on);
+    engine.setConfMode(engineTrack(trackId), !!body.on);
     return { status: 200, body: { on: !!body.on, trackId } };
   },
 
@@ -2560,7 +2811,7 @@ const routes = {
     // buffer - so it replaces rather than adds. It fires a second after a capture is written into
     // the code, where an eval can be an hour later, which is what makes it safe for the sweep's age
     // floor to be short.
-    liveStateIds = blobs.referencedIds(code);
+    liveStateIds.a = blobs.referencedIds(code); // the wip autosave is the MAIN editor's buffer (deck b's arrives with phase 4)
     if (!code.trim()) {
       await fs.promises.unlink(file).catch(() => {}); // already gone is the wanted state
       return { status: 200, body: { saved: false } };
@@ -2702,6 +2953,148 @@ const routes = {
   // Arm a bounce of one labeled block. Body: { label, cycles, name, wrapTail }. Starts at the next
   // phrase boundary that leaves room for the pre-roll; the response carries the start/end cycles so
   // the editor can draw the count-in against its own copy of the transport.
+  // --- the performance mixer (two decks + the DJ stage; see TODO.md) ---
+
+  // The mix session's state, for the UI to (re)build from.
+  'GET /api/mix': async () => ({
+    status: 200,
+    body: {
+      clobber: mixState.clobber,
+      perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
+      tracks: [...schedulers.keys()].map((key) => ({
+        key,
+        deck: deckOfKey(key),
+        controls: Object.fromEntries(mixState.perTrack.get(key) ?? []),
+      })),
+      deckBpm: {
+        a: typeof decks.a.bpm === 'number' ? decks.a.bpm : null,
+        b: typeof decks.b.bpm === 'number' ? decks.b.bpm : null,
+      },
+      neutral: DJ_NEUTRAL,
+    },
+  }),
+
+  // Set DJ-stage controls, ephemerally (never into code). Body: one { name, value, key? | deck? }
+  // or { targets: [...] } of them. A `deck` target broadcasts to every track of that deck AND is
+  // remembered for tracks its later evals create; a `key` target is one track's own (and wins
+  // over the broadcast).
+  'POST /api/mix/set': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    const targets = Array.isArray(body.targets) ? body.targets : [body];
+    for (const t of targets) {
+      const name = String(t.name ?? '');
+      if (!(name in DJ_NEUTRAL)) throw new Error(`"${name}" is not a mix control`);
+      const value = Number(t.value);
+      if (!Number.isFinite(value)) throw new Error(`mix/set ${name}: value must be a number`);
+      if (t.deck === 'a' || t.deck === 'b') {
+        mixState.perDeck[t.deck].set(name, value);
+        for (const key of schedulers.keys()) {
+          if (deckOfKey(key) === t.deck && !mixState.perTrack.get(key)?.has(name)) {
+            engine.setParam(engineTrack(key), -1, name, value, 0);
+          }
+        }
+      } else {
+        const key = String(t.key ?? '');
+        if (!schedulers.has(key)) throw new Error(`mix/set: no playing track "${key}"`);
+        let per = mixState.perTrack.get(key);
+        if (!per) mixState.perTrack.set(key, (per = new Map()));
+        per.set(name, value);
+        engine.setParam(engineTrack(key), -1, name, value, 0);
+      }
+    }
+    return { status: 200, body: { ok: true } };
+  },
+
+  // Clobber mode. Body: { on }. With it on, gating a stem IN throws the other deck's same-named
+  // stem OUT in the same gesture (see /api/mix/gate).
+  'POST /api/mix/clobber': async (body) => {
+    mixState.clobber = !!body.on;
+    return { status: 200, body: { clobber: mixState.clobber } };
+  },
+
+  // Gate one stem in or out (its DJ fader, 1 or 0). In clobber mode, gating IN also gates the
+  // other deck's same-named stem out - the phase-continuous stem swap. Body: { key, on }.
+  'POST /api/mix/gate': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    const key = String(body.key ?? '');
+    if (!schedulers.has(key)) throw new Error(`mix/gate: no playing track "${key}"`);
+    const setFader = (k, v) => {
+      let per = mixState.perTrack.get(k);
+      if (!per) mixState.perTrack.set(k, (per = new Map()));
+      per.set('fader', v);
+      engine.setParam(engineTrack(k), -1, 'fader', v, 0);
+    };
+    const on = !!body.on;
+    setFader(key, on ? 1 : 0);
+    let countered = null;
+    if (mixState.clobber && on) {
+      const base = deckOfKey(key) === 'a' ? key : key.slice(key.indexOf(':') + 1);
+      const other = deckOfKey(key) === 'a' ? `b:${base}` : base;
+      if (schedulers.has(other)) {
+        setFader(other, 0);
+        countered = other;
+      }
+    }
+    return { status: 200, body: { key, on, countered } };
+  },
+
+  // Eject the queued deck - abort the mix. Deck b's schedulers stop through the normal teardown,
+  // its engine tracks are destroyed (plugins closed), its song-level facts and definitions are
+  // forgotten, and the performance state resets: deck a comes back to a clean desk.
+  'POST /api/mix/eject': async () => {
+    if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    for (const [key, sch] of [...schedulers]) {
+      if (deckOfKey(key) !== 'b') continue;
+      sch.stop();
+      schedulers.delete(key);
+      mappedEngine.removeChain(engineTrack(key));
+      dropTrack(key);
+    }
+    for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'b') dropTrack(key);
+    mixState.perDeck.a.clear();
+    mixState.perDeck.b.clear();
+    mixState.perTrack.clear();
+    for (const key of schedulers.keys()) neutralizeMix(key);
+    decks.b = { scale: null, bpm: null };
+    liveStateIds.b = new Set();
+    patternCore.clearRolls('buffer', 'b');
+    return { status: 200, body: {} };
+  },
+
+  // Complete the mix: the queued song IS the set now. The outgoing deck's tracks stop and are
+  // destroyed; deck b's schedulers, holds, highlights and definitions re-key to plain labels
+  // with ZERO engine churn (the opaque-track-id payoff: the music doesn't blink); its scale and
+  // native tempo become the main deck's facts; the performance state resets to neutral. The
+  // client then loads deck b's code into the main editor and re-evals as deck a, which finds
+  // every track already playing under its new name and reprograms nothing.
+  'POST /api/mix/complete': async () => {
+    if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    const promoted = [...schedulers.keys()].filter((k) => deckOfKey(k) === 'b');
+    if (!promoted.length) throw new Error('deck b has nothing playing - nothing to promote');
+    for (const [key, sch] of [...schedulers]) {
+      if (deckOfKey(key) !== 'a') continue;
+      sch.stop();
+      schedulers.delete(key);
+      mappedEngine.removeChain(engineTrack(key));
+      dropTrack(key);
+    }
+    for (const key of promoted) rekeyTrack(key, key.slice(key.indexOf(':') + 1));
+    for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'b') dropTrack(key); // never-promoted leftovers
+    decks.a = { ...decks.b };
+    decks.b = { scale: null, bpm: null };
+    patternCore.setGlobalScale(decks.a.scale ?? null);
+    liveStateIds.a = liveStateIds.b;
+    liveStateIds.b = new Set();
+    patternCore.clearRolls('buffer', 'a'); // the outgoing song's definitions
+    patternCore.adoptDefs('b', 'a'); // the promoted song's are the main deck's now
+    for (const [prop, o] of protoOwners) if (o.deck === 'b') protoOwners.set(prop, { ...o, deck: 'a' });
+    mixState.perDeck.a.clear();
+    mixState.perDeck.b.clear();
+    mixState.perTrack.clear();
+    for (const key of schedulers.keys()) neutralizeMix(key);
+    return { status: 200, body: { promoted: promoted.map((k) => k.slice(k.indexOf(':') + 1)) } };
+  },
+
   'POST /api/trackRecord/start': async (body) => {
     if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
     if (trackRec && trackRec.phase !== 'done') throw new Error('a bounce is already armed or running - cancel it first');
@@ -2739,9 +3132,9 @@ const routes = {
     // started another must not finalize (or clobber) the newer one.
     const capture = trackRec.capture;
     // The tap has to be up before the window opens; a panel may already have opened it.
-    engine.tapTrack(label, true);
+    engine.tapTrack(engineTrack(label), true);
     engine
-      .recordTrack(label, trackRec.capture, startSec - REC_PRE_ROLL_SEC, endSec + REC_POST_ROLL_SEC)
+      .recordTrack(engineTrack(label), trackRec.capture, startSec - REC_PRE_ROLL_SEC, endSec + REC_POST_ROLL_SEC)
       .then((wrote) => {
         if (trackRec?.capture === capture) finalizeTrackRec(wrote);
       })
@@ -2766,7 +3159,7 @@ const routes = {
     if (timer) clearInterval(timer);
     trackRec = null;
     if (phase !== 'done' && engine) {
-      engine.tapTrack(label, false); // frees the DiskOut synth and closes the file mid-flight
+      engine.tapTrack(engineTrack(label), false); // frees the DiskOut synth and closes the file mid-flight
       recTapped.delete(label);
       try {
         fs.unlinkSync(capture);
@@ -2864,7 +3257,7 @@ const routes = {
     saveSettings();
     const { deleted, freed } = months > 0 ? pruneWipSessions(months) : { deleted: 0, freed: 0 };
     // The states those sessions were holding alive can go with them, if nothing else names them.
-    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds] });
+    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] });
     return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
   },
 

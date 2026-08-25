@@ -26,6 +26,8 @@
 function makeStore(what) {
   const layers = { buffer: new Map(), prebake: new Map() };
   let current = 'buffer'; // which layer register writes to (the host sets this around prebake)
+  let owner = 'a'; // which deck's evaluation buffer definitions belong to (see setOwner)
+  const owners = new Map(); // buffer id -> the deck that defined it
   const pick = (layer) => layers[layer === 'prebake' ? 'prebake' : 'buffer'];
 
   return {
@@ -34,20 +36,59 @@ function makeStore(what) {
       current = layer === 'prebake' ? 'prebake' : 'buffer';
     },
     /**
+     * Which performance deck subsequent buffer definitions belong to (see the host's decks).
+     * Two decks share one registry - lookups don't care who defined a name - but each deck's
+     * eval clears and refills only ITS OWN definitions, so evaluating one song can't silence
+     * the rolls the other song is playing.
+     */
+    setOwner(deck) {
+      owner = deck;
+    },
+    /** Re-attribute every buffer definition `from` owns to `to` (complete-mix - see adoptDefs). */
+    adopt(from, to) {
+      for (const [id, o] of owners) if (o === from) owners.set(id, to);
+    },
+    /**
      * Drops every name in one layer and hands back what was in it, so a host that clears the
      * buffer to rebuild it can put the old definitions back if the rebuild never finishes (see
      * restoreRolls).
      */
-    clear(layer = 'buffer') {
+    clear(layer = 'buffer', only = null) {
       const store = pick(layer);
+      if (only != null && layer !== 'prebake') {
+        // Owner-scoped: drop only what `only`'s evaluations defined; the other deck's stand.
+        const had = new Map();
+        for (const [id, value] of store) if ((owners.get(id) ?? 'a') === only) had.set(id, value);
+        for (const id of had.keys()) {
+          store.delete(id);
+          owners.delete(id);
+        }
+        return had;
+      }
       const had = new Map(store);
       store.clear();
+      if (layer !== 'prebake') owners.clear();
       return had;
     },
     /** Puts a layer back exactly as `had` (from clear) left it. */
-    restore(had, layer = 'buffer') {
+    restore(had, layer = 'buffer', only = null) {
       const store = pick(layer);
+      if (only != null && layer !== 'prebake') {
+        // Undo an owner-scoped clear: drop whatever that owner registered since, put back its own.
+        for (const [id, o] of [...owners]) {
+          if (o === only) {
+            store.delete(id);
+            owners.delete(id);
+          }
+        }
+        for (const [id, value] of had ?? []) {
+          store.set(id, value);
+          owners.set(id, only);
+        }
+        return;
+      }
       store.clear();
+      if (layer !== 'prebake') owners.clear();
       for (const [id, value] of had ?? []) store.set(id, value);
     },
     /**
@@ -59,8 +100,14 @@ function makeStore(what) {
     register(id, sig) {
       const store = layers[current];
       const replaced = store.has(id);
+      const prevOwner = current === 'prebake' ? null : owners.get(id);
       store.set(id, sig);
-      return replaced ? `[signal] ${what} ${JSON.stringify(id)} is defined twice - the later definition wins` : null;
+      if (current !== 'prebake') owners.set(id, owner);
+      if (!replaced) return null;
+      if (prevOwner != null && prevOwner !== owner) {
+        return `[signal] ${what} ${JSON.stringify(id)} is defined by both decks - the later definition wins for both`;
+      }
+      return `[signal] ${what} ${JSON.stringify(id)} is defined twice - the later definition wins`;
     },
     /** What a name means, buffer first, or null if nothing defines it. */
     lookup(id) {
@@ -88,6 +135,20 @@ export function setRollLayer(layer) {
   for (const store of Object.values(stores)) store.setLayer(layer);
 }
 
+/** Which deck's evaluations subsequent buffer definitions belong to ('a' at rest - see makeStore). */
+export function setDefOwner(deck) {
+  for (const store of Object.values(stores)) store.setOwner(deck);
+}
+
+/**
+ * Re-attribute one deck's buffer definitions to another - the complete-mix promotion: the
+ * incoming song's definitions become the main deck's, so its next eval AS the main deck clears
+ * and refills them like its own (which they now are).
+ */
+export function adoptDefs(from, to) {
+  for (const store of Object.values(stores)) store.adopt(from, to);
+}
+
 /**
  * Empties one layer of every store, and returns what was in them - hand that back to restoreRolls
  * to undo the clear.
@@ -101,15 +162,15 @@ export function setRollLayer(layer) {
  * transaction - the host restores what it took out when the evaluation building the replacement
  * doesn't reach the end.
  */
-export function clearRolls(layer = 'buffer') {
+export function clearRolls(layer = 'buffer', only = null) {
   const had = {};
-  for (const [kind, store] of Object.entries(stores)) had[kind] = store.clear(layer);
+  for (const [kind, store] of Object.entries(stores)) had[kind] = store.clear(layer, only);
   return had;
 }
 
-/** Puts back what a clearRolls(layer) took out, definition for definition. */
-export function restoreRolls(had, layer = 'buffer') {
-  for (const [kind, store] of Object.entries(stores)) store.restore(had?.[kind], layer);
+/** Puts back what a clearRolls(layer, only) took out, definition for definition. */
+export function restoreRolls(had, layer = 'buffer', only = null) {
+  for (const [kind, store] of Object.entries(stores)) store.restore(had?.[kind], layer, only);
 }
 
 export const registerRoll = (id, sig) => stores.roll.register(id, sig);

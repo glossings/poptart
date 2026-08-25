@@ -283,10 +283,11 @@ export class Transport {
 }
 
 export class Scheduler {
-  constructor(engine, { cps = 0.5, trackId = 'default', transport = null } = {}) {
+  constructor(engine, { cps = 0.5, trackId = 'default', label = null, transport = null } = {}) {
     this.engine = engine;
     this.transport = transport ?? new Transport(() => engine.getTime(), { cps });
     this.trackId = trackId;
+    this.label = label ?? trackId; // what user-facing lines call this track (trackId may be an opaque engine id)
     this.pattern = null;
     this._scheduledUntilCycle = 0;
     this._timer = null;
@@ -514,7 +515,7 @@ export class Scheduler {
         // loads over it at the next onset, two program changes for one keystroke. Said once per
         // evaluation, because a leftover blob is megabytes of buffer that no longer does anything.
         if (slot in (sig.presetPatterns ?? {})) {
-          warnPattern(`[scheduler] track "${this.trackId}" slot ${slot}: .preset(...) drives this plugin, so its pinned { state } is ignored - delete it.`);
+          warnPattern(`[scheduler] track "${this.label}" slot ${slot}: .preset(...) drives this plugin, so its pinned { state } is ignored - delete it.`);
           continue;
         }
         // Being edited by hand: the plugin holds a newer program than this string (see
@@ -750,7 +751,7 @@ export class Scheduler {
       // avoids re-throwing every 30ms) and report; other tracks keep playing.
       this.stop();
       // eslint-disable-next-line no-console
-      console.error(`[scheduler] track "${this.trackId}" stopped - pattern threw during playback: ${err.message ?? err}`);
+      console.error(`[scheduler] track "${this.label}" stopped - pattern threw during playback: ${err.message ?? err}`);
     }
   }
 
@@ -856,7 +857,7 @@ export class Scheduler {
   // One .log() line: which track, the event's onset and end as absolute cycle positions (so it
   // lines up with the transport and with the other tracks), then the event itself.
   _logEvent(fromCycle, toCycle, body) {
-    eventLogger(`[${this.trackId}] ${cyc(fromCycle)} -> ${cyc(toCycle)}  ${body}`);
+    eventLogger(`[${this.label}] ${cyc(fromCycle)} -> ${cyc(toCycle)}  ${body}`);
   }
 
   // The velocity of one note event, read uniformly (all-signals model): the value merged onto the
@@ -939,7 +940,7 @@ export class Scheduler {
           const why = this._applyPreset(slot, name, atSec - PRESET_SWAP_LEAD_SEC);
           if (why && !this._presetWarned.has(`${slot} ${name}`)) {
             this._presetWarned.add(`${slot} ${name}`);
-            warnPattern(`[scheduler] track "${this.trackId}" slot ${slot}: ${why}`);
+            warnPattern(`[scheduler] track "${this.label}" slot ${slot}: ${why}`);
           }
         }
       }
@@ -1005,7 +1006,7 @@ export class Scheduler {
       shiftSec = -MAX_EARLY_SHIFT_SEC;
       if (!this._earlyShiftWarned) {
         this._earlyShiftWarned = true;
-        warnPattern(`[scheduler] track "${this.trackId}": an early nudge asks for more than ${Math.round(MAX_EARLY_SHIFT_SEC * 1000)}ms, which is as far ahead as a note can be scheduled - playing it ${Math.round(MAX_EARLY_SHIFT_SEC * 1000)}ms early instead. Late shifts (swing, shuffle) have no such limit.`);
+        warnPattern(`[scheduler] track "${this.label}": an early nudge asks for more than ${Math.round(MAX_EARLY_SHIFT_SEC * 1000)}ms, which is as far ahead as a note can be scheduled - playing it ${Math.round(MAX_EARLY_SHIFT_SEC * 1000)}ms early instead. Late shifts (swing, shuffle) have no such limit.`);
       }
     }
     // The absolute floor the budget above normally keeps well clear of: a timestamp in the past

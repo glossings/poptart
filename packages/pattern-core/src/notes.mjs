@@ -137,6 +137,12 @@ let currentScale = null;
  * rather than silently at the first note. Returns the name as stored.
  */
 export function setGlobalScale(scaleName) {
+  if (scaleName == null) {
+    // The host clears the key when entering a deck that never set one (per-deck scale - the
+    // global is swapped around each deck's evaluation and holds the main deck's at rest).
+    currentScale = null;
+    return null;
+  }
   parseScaleName(scaleName); // throws on an unknown mode/root
   currentScale = String(scaleName).trim();
   return currentScale;

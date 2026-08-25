@@ -91,6 +91,20 @@
           <div id="saveFlash" class="save-flash" aria-hidden="true"></div>
         </div>
 
+        <!-- Deck B - the incoming song of a mix (mix mode, Cmd/Ctrl+Shift+X). Evaluated as
+             deck "b" server-side: same clock (it joins in phase), namespaced labels (its kick
+             and yours are separate tracks), silent on arrival (the crossfader owns its gain). -->
+        <div id="deckBPane" class="hidden">
+          <div id="deckBHead">
+            <span class="deck-b-title">deck B</span>
+            <select id="deckBFile" title="the saved song to bring in"></select>
+            <button id="deckBLoad" class="small" title="load the picked song into this pane">load</button>
+            <button id="deckBPlay" class="small" title="Cmd/Ctrl+Enter in this pane">▶ play</button>
+            <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
+          </div>
+          <textarea id="deckBEditor" spellcheck="false"></textarea>
+        </div>
+
         <aside id="sidebar">
           <div class="side-tabs">
             <button class="side-tab active" data-tab="session">session</button>
@@ -235,6 +249,49 @@
           </div>
         </aside>
       </main>
+
+      <!-- The mix strip (mix mode): per-track DJ controls for both decks around the crossfader.
+           Every control here is ephemeral performance state - nothing writes into song code. -->
+      <div id="mixStrip" class="hidden">
+        <div class="mix-deck">
+          <div class="mix-deck-head"><strong>deck A</strong> <span id="mixBpmA"></span><span class="spacer"></span>
+            <label title="trim (deck-wide input gain) - double-click resets">trim
+              <input id="mixTrimA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="low (0 is a true kill) - double-click resets">low
+              <input id="mixEqloA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="mid (0 is a true kill) - double-click resets">mid
+              <input id="mixEqmidA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="high (0 is a true kill) - double-click resets">high
+              <input id="mixEqhiA" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="one-knob filter: left sweeps a low-pass down, right a high-pass up; double-click resets">filter
+              <input id="mixDjfA" class="mix-djf" type="range" min="-1" max="1" step="0.01" value="0" /></label></div>
+          <div class="mix-tracks" id="mixTracksA"></div>
+        </div>
+        <div class="mix-center">
+          <label class="mix-clobber-label" title="gating a stem in throws the other deck's same-named stem out - the phase-continuous stem swap">
+            <input id="mixClobber" type="checkbox" /> clobber</label>
+          <input id="crossfader" type="range" min="-1" max="1" step="0.01" value="-1"
+            title="crossfader (equal power) - hard left is all deck A" />
+          <div class="mix-actions">
+            <button id="mixEject" class="small" title="abort the mix: stop deck B, destroy its tracks, reset the desk">eject</button>
+            <button id="mixComplete" class="small" title="the incoming song becomes the set (Shift+Cmd/Ctrl+Enter in deck B)">complete</button>
+          </div>
+        </div>
+        <div class="mix-deck">
+          <div class="mix-deck-head"><strong>deck B</strong> <span id="mixBpmB"></span><span class="spacer"></span>
+            <label title="trim (deck-wide input gain) - double-click resets">trim
+              <input id="mixTrimB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="low (0 is a true kill) - double-click resets">low
+              <input id="mixEqloB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="mid (0 is a true kill) - double-click resets">mid
+              <input id="mixEqmidB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="high (0 is a true kill) - double-click resets">high
+              <input id="mixEqhiB" class="mix-deck-ctl" type="range" min="0" max="2" step="0.01" value="1" /></label>
+            <label title="one-knob filter: left sweeps a low-pass down, right a high-pass up; double-click resets">filter
+              <input id="mixDjfB" class="mix-djf" type="range" min="-1" max="1" step="0.01" value="0" /></label></div>
+          <div class="mix-tracks" id="mixTracksB"></div>
+        </div>
+      </div>
 
       <footer id="console">
         <div class="console-head">

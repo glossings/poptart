@@ -3357,3 +3357,169 @@ li.CodeMirror-hint-active {
 .pack-note.error {
   color: var(--err);
 }
+
+
+/* --- mix mode: deck B pane + the mix strip (see client.js's mix section) --- */
+
+#deckBPane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+}
+#deckBPane.hidden,
+#mixStrip.hidden {
+  display: none;
+}
+#deckBHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+#deckBHead .deck-b-title {
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+#deckBHead select {
+  flex: 1;
+  min-width: 0;
+}
+
+#mixStrip {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 6px 10px;
+}
+.mix-deck {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mix-deck-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.mix-djf {
+  width: 90px;
+}
+.mix-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 128px;
+  overflow-y: auto;
+}
+.mix-track {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.mix-name {
+  width: 70px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.mix-gate {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+.mix-gate.on {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+.mix-ctl {
+  height: 14px;
+}
+.mix-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 6px;
+}
+#crossfader {
+  width: 180px;
+}
+.mix-actions {
+  display: flex;
+  gap: 6px;
+}
+.mix-clobber-label {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* The new scrollable surfaces carry the theme's colors instead of stock scrollbars, and the
+   deck B editor sizes by flex (the global .CodeMirror height:100% overflowed the pane past its
+   header, which is what put a stray scrollbar on the pane itself). */
+#deckBPane .CodeMirror {
+  height: auto;
+  min-height: 0;
+}
+.mix-tracks,
+#deckBPane .CodeMirror-scroll,
+#deckBPane .CodeMirror-vscrollbar,
+#deckBPane .CodeMirror-hscrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.mix-tracks::-webkit-scrollbar,
+#deckBPane .CodeMirror-scroll::-webkit-scrollbar,
+#deckBPane .CodeMirror-vscrollbar::-webkit-scrollbar,
+#deckBPane .CodeMirror-hscrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.mix-tracks::-webkit-scrollbar-thumb,
+#deckBPane .CodeMirror-scroll::-webkit-scrollbar-thumb,
+#deckBPane .CodeMirror-vscrollbar::-webkit-scrollbar-thumb,
+#deckBPane .CodeMirror-hscrollbar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.mix-tracks::-webkit-scrollbar-track,
+#deckBPane .CodeMirror-scroll::-webkit-scrollbar-track,
+#deckBPane .CodeMirror-vscrollbar::-webkit-scrollbar-track,
+#deckBPane .CodeMirror-hscrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mix-deck-ctl {
+  width: 46px;
+  height: 14px;
+}
+.mix-deck-head label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.mix-fader {
+  width: 130px;
+}

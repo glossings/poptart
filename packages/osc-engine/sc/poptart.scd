@@ -105,6 +105,7 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
 var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
+var destroyTrack;
 var slotKey, waitForLoad, flushNotes, clearPending;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
@@ -217,12 +218,14 @@ buildTrackDef = { |key|
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
+        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, fader = 1, deck = 1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
         scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
         var sig = Silent.ar(2);
         var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
         var mid, side; // the channel strip's mid/side pair (see the width control below)
+        var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv; // the DJ stage (see below)
         maxSlots.do { |i|
             if (i == 0) {
                 // The instrument slot's output, plus whatever the track's sample synths wrote
@@ -289,18 +292,54 @@ buildTrackDef = { |key|
         // so its meter shows what moving that fader changes, and a .bsend() track still meters
         // what it makes. Not lagged either: the tap only switches while the mixer opens/closes.
         Out.ar(mixOut, sig * mixSend);
+        // DJ stage (performance mixing - see TODO.md): trim -> 3-band isolator EQ -> one-knob
+        // filter -> fader x deck gain, applied ONLY to the direct output path below. The sends
+        // and taps above stay pre-DJ-stage deliberately: every routed path ends at some track's
+        // own output (so a crossfade applies each deck's gain exactly once, never squared through
+        // a bus), a bounce records what the SONG makes, and the ctrl+g mixer keeps metering the
+        // channel strip its faders control. All seven controls are channel controls (pseudo-slot
+        // -1) like gain/pan: settable via setParam, modulatable via the slot -1 LFO/env path,
+        // neutral by default so a track sounds identical until a mix session touches them.
+        //
+        // The EQ is a subtraction isolator: lo and hi are pulled out with cascaded filters and
+        // the mid is what remains (live - lo - hi), so at neutral (1/1/1) the bands sum back to
+        // the input BIT-EXACTLY - no biquad coloration while nobody is mixing - and 0 is a true
+        // kill, which shelving EQs can't give. Crossovers fixed at 250 Hz / 2.5 kHz.
+        live = sig * trim.lag(0.08).clip(0, 4);
+        djLow = LPF.ar(LPF.ar(live, 250), 250);
+        djHigh = HPF.ar(HPF.ar(live, 2500), 2500);
+        djMid = live - djLow - djHigh;
+        // Lags of 80ms+ here and below: these controls stream from the mix UI at ~20 values a
+        // second, and a 20ms lag reproduced the steps (a stepped resonant cutoff reads as
+        // tremolo). The lag must SPAN the posting gap, not just soften it.
+        live = (djLow * eqlo.lag(0.08).clip(0, 2))
+            + (djMid * eqmid.lag(0.08).clip(0, 2))
+            + (djHigh * eqhi.lag(0.08).clip(0, 2));
+        // One-knob filter: 0 is untouched (crossfaded out below, so center is bit-exact), negative
+        // sweeps a low-pass down from 18 kHz toward 20 Hz, positive sweeps a high-pass up from
+        // 20 Hz toward 18 kHz - both exponential, with a touch of resonance for the classic move.
+        // 18 kHz cap because near-Nyquist biquads misbehave; the crossfade hides the parked ends.
+        djv = djf.lag(0.15).clip(-1, 1);
+        djLpf = (18000 * (900 ** djv.min(0))).clip(20, 18000); // -1 -> 20 Hz, 0 -> open
+        djHpf = (20 * (900 ** djv.max(0))).clip(20, 18000); // 0 -> open, 1 -> 18 kHz
+        djWet = RHPF.ar(RLPF.ar(live, djLpf, 0.7), djHpf, 0.7);
+        live = LinXFade2.ar(live, djWet, ((djv.abs > 0.005) * 2 - 1).lag(0.05));
+        live = live * fader.lag(0.08).clip(0, 1) * deck.lag(0.08).clip(0, 1);
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
         // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by
         // `dry` (Sig#dry, channel control, default 1) so .dry(0)/.bsend() can mute the dry path
         // while the bus sends carry the signal.
-        Out.ar((out.round - 1).mod(numPairs) * 2, sig * dry.lag(0.02));
+        Out.ar((out.round - 1).mod(numPairs) * 2, live * dry.lag(0.02));
     });
 };
 
 // Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
-// unity gain, center pan, first output pair.
+// unity gain, center pan, first output pair - and for the DJ stage, unity trim/bands/fader/deck
+// (djf's neutral is 0, the filter's center detent).
 channelDefault = { |name|
-    if ((name == "gain") or: { name == "out" } or: { name == "dry" } or: { name == "width" }) { 1 } { 0 };
+    if ((name == "gain") or: { name == "out" } or: { name == "dry" } or: { name == "width" }
+        or: { name == "trim" } or: { name == "fader" } or: { name == "deck" }
+        or: { name == "eqlo" } or: { name == "eqmid" } or: { name == "eqhi" }) { 1 } { 0 };
 };
 
 // Parked sidechain args for a freshly created track synth: every fx-slot aux input reads the
@@ -900,6 +939,41 @@ OSCdef(\poptartCreateTrack, { |msg|
         };
     };
 }, '/poptart/createTrack');
+
+// Destroy a track outright - the performance mixer's complete-mix drops the outgoing song's
+// tracks so a set doesn't accumulate a silent song of idle plugins per transition. (There was
+// deliberately no destroy before this: an eval that drops a label keeps its track warm for the
+// label's return.) Everything the track owns goes: its mix tap, edit watchers, every modulator
+// synth and bus, sidechain routes in AND out, bus-send refs, the group (track synth, sample
+// synths, feeders) and the input bus. Freeing the synth is what closes the VSTPlugin instances
+// (and any open editor windows). The def stays in the SynthDescLib - a later track under the
+// same key rebuilds and re-adds it anyway.
+destroyTrack = { |key|
+    fork {
+        var track = awaitTrack.(key); // \pending: let the birth finish, then take it down
+        track !? {
+            stopMixTap.(key);
+            maxSlots.do { |slot|
+                unwireAudio.(key, slot); // routes INTO this track
+                track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free }; track[\editWatch][slot] = nil };
+            };
+            sidechainBySource[key] !? { |e| unwireAudio.(e[\targetKey], e[\slot]) }; // ...and out of it
+            [track[\lfos], track[\envs]].do { |dict|
+                dict.do { |e| e[\synth] !? { |s| s.free }; e[\bus] !? { |b| b.free } };
+            };
+            track[\ccs].do { |e| MIDIdef.all[e[\defKey]] !? { |d| d.free }; e[\bus] !? { |b| b.free } };
+            track[\busSends] !? { |names| names.do { |bn| releaseBus.(bn) } };
+            track[\group].free;
+            track[\inBus].free;
+            tracks[key] = nil;
+            ("poptart: destroyed track " ++ key).postln;
+        };
+    };
+};
+
+OSCdef(\poptartDestroyTrack, { |msg|
+    destroyTrack.(msg[1].asSymbol);
+}, '/poptart/destroyTrack');
 
 // Auto-pin + "conf" capture: everything we watch on a freshly opened plugin. Called once per
 // successful open, for both instrument and effect slots.

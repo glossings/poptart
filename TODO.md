@@ -165,3 +165,49 @@ no completion notes.
     - Open question: `.param("Cutoff", …)` addresses a slot. With several instances in it, fan the
       modulation out to ALL of them — a param is that plugin's, and presets are variations of one
       plugin; targeting only the sounding one drops the modulation at every swap.
+
+[ ] Performance mixing - two decks, one engine (designed 2026-08-24, all decisions settled with
+    Aria; build phases below are separate entries). One shared Transport: evaling a deck joins the
+    absolute cycle count in phase, and multi-cycle structures land on the same mod grid
+    automatically - there is no "launch", no quantization machinery, no sync button. Settled:
+    - "Silent" deck = the mixer state it arrives with (crossfader fully at the playing deck), NOT
+      a mute mechanism; the queued song runs in full, ~2x plugin CPU accepted for predictability.
+    - Deck-scoped song settings (scale/setbpm/swing become per-deck facts); Signal.prototype stays
+      shared, warn on redefinition, last eval wins; consts already per-buffer.
+    - Global equal-power crossfader over deck gains + per-track faders; no third fader type.
+      Clobber mode = same-label stems linked as one-gesture toggle swaps (never literal track
+      sharing - both kicks are separate engine tracks; swapping chains mid-mix would reload
+      plugins audibly).
+    - Tempo migration, not matching: the ramp/slider moves master cps between the songs' native
+      bpms (natives tracked per deck). Transport needs cps ramps w/ continuous cycle position;
+      VST bpm mirroring + engine LFO rates follow.
+    - Samples keep natural rate through migrations (chop feel; whole-cycle loops get .slice()d);
+      per-track repitch-follow flag is a possible later add on the existing repitch channel.
+    - Performance state (XF, deck gains, EQ, filter, gates) is EPHEMERAL - never written into song
+      code, deliberately unlike mixctl's .gain() edits. Dies with the mix session.
+    - Deferred: per-deck cycle rotation (deck-wide .late(k)); repitch-follow; cue/master blend.
+
+[ ] Mixing phase 1 - label→trackId indirection: engine tracks get opaque ids (t1, t2, ...);
+    server.js owns label↔id registry (persists per label for the server's life - no destroyTrack
+    exists, tracks are forever). Scheduler takes the id as trackId plus a display label for warn
+    strings. Translate at every boundary: API handlers (labels in), wireEngine callbacks (ids
+    out - note feed, param gestures, pluginEdited, mixer meters), recordings filenames stay
+    label-named. This is what makes complete-mix pure re-labeling with zero engine churn.
+
+[ ] Mixing phase 5 - tempo migration: Transport cps ramp (integrate 1/cps, cycle position stays
+    continuous), instant/timed/slider forms, native-bpm detents; setbpm intercepted per deck.
+
+[ ] Mixing phase 6 - playlists + organize: port fizzle's library.json model + three-pane organize
+    modal (see ~/td-livecode/src/{library,organize,sidebar}.js) to ~/.poptart/patterns/
+    library.json, paths owned by pattern-files.js, items reference named saves, @tags from
+    pattern-meta as the tag source, native bpm stored per item. Wire deck B's song picker (mix
+    mode - today it lists ALL saved patterns) to the active playlist, with next-in-list as the
+    default queue and a hotkey to step it.
+
+[ ] Mixing polish - deck B playback highlighting (the grid machinery is single-pane today);
+    MIDI-learn for the mix strip's controls (crossfader first) via the existing midi.mjs CC
+    path; a wip autosave for deck B edits (today its edits live only in the pane).
+
+[ ] Mixing phase 7 - headphone cue: aggregate main interface + monitor device (audio-devices.js
+    machinery, outputs this time), cue bus routes the queued deck pre-fader to the extra output
+    pair. A before-the-gig settings choice (engine reboot to change devices), say so in the UI.

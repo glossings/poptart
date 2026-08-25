@@ -370,6 +370,9 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
     if (e.shiftKey) savePatternFileAs();
     else savePatternFile();
+  } else if (e.key.toLowerCase() === 'x' && e.shiftKey) {
+    e.preventDefault();
+    toggleMixMode(); // the performance mixer's split (see the mix section at the foot of this file)
   }
 });
 
@@ -10188,6 +10191,7 @@ async function evaluate(start, { byHand = false } = {}) {
     logLine(`${start ? 'playing' : 'updated'} (${nActive}/${result.tracks.length} pattern(s))`);
     loadChainParams();
     commitQueue.push(...filed); // the programs are in the store now; their slots can swap again
+    if (mixModeOn) mixRefresh(); // the strip mirrors what's playing
   } catch (e) {
     commitOnEval.push(...filed); // nothing was filed, so nothing is thawed
     logLine(e.message ?? String(e), true);
@@ -13570,3 +13574,287 @@ coreReady
   .then(() => api('GET', '/api/prebake'))
   .then(({ code }) => runUserPrebake(code))
   .catch(() => {});
+
+// ---------------------------------------------------------------------------------------------
+// Mix mode - the performance mixer (Cmd/Ctrl+Shift+X). The screen splits into two decks: the
+// main editor keeps playing as deck A while the second pane holds the INCOMING song, evaluated
+// as deck "b" (same clock, so it joins in phase; namespaced labels, so its kick and yours are
+// separate tracks; born wearing the crossfader's gain, so it arrives silent). Between them the
+// strip: per-track gate / trim / 3-band EQ / fader, a one-knob filter per deck, the equal-power
+// crossfader, clobber mode, eject and complete.
+//
+// All of it is EPHEMERAL performance state (server.js's mixState): nothing here ever writes
+// into song code - deliberately unlike the ctrl+g mixer, whose faders edit .gain() calls. A DJ
+// move must not rewrite the song.
+//
+// Opening or closing the split never touches the sound (hide the desk, keep the music); eject
+// and complete are the two ways a mix ends. Deck B's pane is a plain editor for now: no playback
+// highlighting (the grid machinery is single-pane), and its edits live only in the pane - a mix
+// plays saved songs. Complete hands its buffer (and file name) to the main editor, whose re-eval
+// finds every promoted track already playing under its new name and reprograms nothing.
+// ---------------------------------------------------------------------------------------------
+
+let mixModeOn = false;
+let deckBCM = null; // CodeMirror in the deck B pane, created on first open
+let deckBFileName = null; // the saved pattern deck B holds - what complete hands the files tab
+
+const mixStripEl = document.getElementById('mixStrip');
+const deckBPaneEl = document.getElementById('deckBPane');
+const MIX_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, fader: 1 };
+const escMix = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+// One POST per ~50ms however fast the sliders stream: each control keeps only its latest value,
+// and the batch goes out together (the crossfader is two targets in one).
+const mixPending = new Map();
+let mixFlushTimer = null;
+function mixPost(throttleKey, body) {
+  mixPending.set(throttleKey, body);
+  if (mixFlushTimer) return;
+  mixFlushTimer = setTimeout(() => {
+    mixFlushTimer = null;
+    const batch = [...mixPending.values()].flatMap((b) => b.targets ?? [b]);
+    mixPending.clear();
+    api('POST', '/api/mix/set', { targets: batch }).catch((e) => logLine(e.message ?? String(e), true));
+  }, 50);
+}
+
+function toggleMixMode() {
+  if (mixModeOn) closeMixMode();
+  else openMixMode();
+}
+
+async function openMixMode() {
+  mixModeOn = true;
+  document.body.classList.add('mix-on');
+  deckBPaneEl.classList.remove('hidden');
+  mixStripEl.classList.remove('hidden');
+  if (!deckBCM) {
+    deckBCM = CodeMirror.fromTextArea(document.getElementById('deckBEditor'), {
+      mode: { name: 'javascript' },
+      theme: 'poptart',
+      keyMap: 'sublime',
+      lineNumbers: true,
+      matchBrackets: true,
+      autoCloseBrackets: true,
+      viewportMargin: Infinity,
+      extraKeys: {
+        'Cmd-Enter': () => evalDeckB(true),
+        'Ctrl-Enter': () => evalDeckB(true),
+        'Shift-Cmd-Enter': () => completeMix(),
+        'Shift-Ctrl-Enter': () => completeMix(),
+        'Cmd-.': doStop,
+        'Ctrl-.': doStop,
+      },
+    });
+  }
+  deckBCM.refresh();
+  cm.refresh();
+  // The crossfader's position becomes real state NOW, before anything plays on deck B: hard at
+  // A means deck b's gain is 0 in mixState, so the first eval's tracks are BORN silent (see
+  // server.js's applyMixTo) - the whole "arrives silent" design in one post.
+  sendCrossfader();
+  refreshDeckBFiles();
+  mixRefresh();
+}
+
+function closeMixMode() {
+  mixModeOn = false;
+  document.body.classList.remove('mix-on');
+  deckBPaneEl.classList.add('hidden');
+  mixStripEl.classList.add('hidden');
+  cm.refresh();
+}
+
+async function refreshDeckBFiles() {
+  try {
+    const { patterns } = await api('GET', '/api/patterns?q=');
+    const sel = document.getElementById('deckBFile');
+    const had = sel.value;
+    sel.innerHTML = '<option value="">— pick a song —</option>'
+      + patterns.map((p) => `<option value="${escMix(p.name)}">${escMix(p.title || p.name)}</option>`).join('');
+    if (had) sel.value = had;
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function loadDeckBFile() {
+  const name = document.getElementById('deckBFile').value;
+  if (!name || !deckBCM) return;
+  try {
+    const { code } = await api('POST', '/api/patterns/load', { name });
+    deckBCM.setValue(code);
+    deckBFileName = name;
+    logLine(`deck B loaded "${name}" - play it when ready (it arrives silent)`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function evalDeckB(start) {
+  if (!deckBCM) return;
+  try {
+    const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start });
+    if (result.transport) transport = result.transport;
+    const n = result.tracks.filter((t) => t.active).length;
+    logLine(`deck B ${start ? 'playing' : 'updated'} (${n}/${result.tracks.length} pattern(s)`
+      + (result.deckBpm ? `, native ${result.deckBpm} bpm` : '') + ')');
+    if (start) playing = true;
+    updateTransportButtons();
+    mixRefresh();
+  } catch (e) {
+    logLine(`deck B: ${e.message ?? String(e)}`, true);
+  }
+}
+
+// A transition (constant-gain) curve over the two decks' `deck` gains, the club-mixer shape:
+// each side holds FULL from its end through the CENTER and only cuts on the far half - so at
+// center both decks are wide open and the per-stem gates decide what sounds (the clobber
+// workflow), while a full sweep is still a smooth fade. (The first cut was equal-power, and it
+// made stem swaps inaudible: a gated-in stem sat under a -3dB-or-worse deck gain until the
+// fader crossed - the desk fought its own gates.)
+function sendCrossfader() {
+  const x = Number(document.getElementById('crossfader').value);
+  const t = (x + 1) / 2;
+  const gain = (u) => Math.round(Math.sin((Math.PI / 2) * Math.min(1, u * 2)) * 1000) / 1000;
+  mixPost('xf', {
+    targets: [
+      { deck: 'a', name: 'deck', value: gain(1 - t) },
+      { deck: 'b', name: 'deck', value: gain(t) },
+    ],
+  });
+}
+
+const MIX_TRACK_CONTROLS = [
+  ['fader', 0, 1, 'fader'],
+];
+// Trim and the 3-band EQ are DECK-WIDE on the desk (broadcast into every track's own DJ stage,
+// so multitrack outs still carry them per track engine-side); only the fader is per stem.
+const MIX_DECK_CONTROLS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf'];
+const mixDeckCtl = (deck, ctl) => document.getElementById(
+  `mix${ctl === 'djf' ? 'Djf' : ctl.charAt(0).toUpperCase() + ctl.slice(1)}${deck.toUpperCase()}`,
+);
+
+async function mixRefresh() {
+  if (!mixModeOn) return;
+  let state;
+  try {
+    state = await api('GET', '/api/mix');
+  } catch {
+    return; // the strip just doesn't refresh; the next action retries
+  }
+  for (const deck of ['a', 'b']) {
+    const host = document.getElementById(deck === 'a' ? 'mixTracksA' : 'mixTracksB');
+    host.innerHTML = '';
+    for (const t of state.tracks.filter((x) => x.deck === deck)) host.appendChild(mixTrackRow(t));
+    const bpm = state.deckBpm[deck];
+    document.getElementById(deck === 'a' ? 'mixBpmA' : 'mixBpmB').textContent = bpm ? `${bpm} bpm` : '';
+    for (const ctl of MIX_DECK_CONTROLS) {
+      const el = mixDeckCtl(deck, ctl);
+      if (document.activeElement !== el) el.value = state.perDeck[deck][ctl] ?? MIX_NEUTRAL[ctl];
+    }
+  }
+  document.getElementById('mixClobber').checked = !!state.clobber;
+}
+
+function mixTrackRow(t) {
+  const row = document.createElement('div');
+  row.className = 'mix-track';
+  const fader = t.controls.fader ?? 1;
+
+  const gate = document.createElement('button');
+  gate.className = 'mix-gate' + (fader > 0 ? ' on' : '');
+  gate.title = 'gate this stem in/out (fader to 1/0)'
+    + '; with clobber on, gating IN throws the other deck\'s same-named stem out';
+  gate.addEventListener('click', async () => {
+    try {
+      await api('POST', '/api/mix/gate', { key: t.key, on: !gate.classList.contains('on') });
+      mixRefresh(); // a countered stem's row changes too
+    } catch (e) {
+      logLine(e.message ?? String(e), true);
+    }
+  });
+
+  const name = document.createElement('span');
+  name.className = 'mix-name';
+  name.textContent = t.deck === 'b' ? t.key.slice(t.key.indexOf(':') + 1) : t.key;
+  name.title = t.key;
+  row.append(gate, name);
+
+  for (const [ctl, min, max, title] of MIX_TRACK_CONTROLS) {
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = min;
+    input.max = max;
+    input.step = 0.01;
+    input.value = t.controls[ctl] ?? MIX_NEUTRAL[ctl];
+    input.className = `mix-ctl mix-${ctl}`;
+    input.title = `${title} - double-click resets`;
+    input.addEventListener('input', () => mixPost(`${t.key}|${ctl}`, { key: t.key, name: ctl, value: Number(input.value) }));
+    input.addEventListener('dblclick', () => {
+      input.value = MIX_NEUTRAL[ctl];
+      mixPost(`${t.key}|${ctl}`, { key: t.key, name: ctl, value: MIX_NEUTRAL[ctl] });
+    });
+    row.appendChild(input);
+  }
+  return row;
+}
+
+async function ejectDeckB() {
+  try {
+    await api('POST', '/api/mix/eject');
+    deckBFileName = null;
+    document.getElementById('crossfader').value = -1;
+    sendCrossfader(); // re-arm: the next queued song is born silent again
+    logLine('deck B ejected - the desk is reset');
+    mixRefresh();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function completeMix() {
+  if (!deckBCM) return;
+  try {
+    const res = await api('POST', '/api/mix/complete');
+    // The incoming song IS the set now: its buffer moves to the main editor (and its file name
+    // to the files tab), and the re-eval below finds every promoted track already playing under
+    // its new name - nothing reloads, the music doesn't blink.
+    cm.setValue(deckBCM.getValue());
+    setCurrentSavedName(deckBFileName);
+    deckBCM.setValue('');
+    deckBFileName = null;
+    document.getElementById('crossfader').value = -1;
+    sendCrossfader();
+    logLine(`mix complete - promoted: ${res.promoted.join(', ')}`);
+    await evaluate(true);
+    mixRefresh();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+document.getElementById('crossfader').addEventListener('input', sendCrossfader);
+document.getElementById('crossfader').addEventListener('dblclick', (e) => {
+  e.target.value = -1; // home: all deck A
+  sendCrossfader();
+});
+document.getElementById('mixClobber').addEventListener('change', (e) => {
+  api('POST', '/api/mix/clobber', { on: e.target.checked }).catch((err) => logLine(err.message ?? String(err), true));
+});
+for (const deck of ['a', 'b']) {
+  for (const ctl of MIX_DECK_CONTROLS) {
+    const el = mixDeckCtl(deck, ctl);
+    el.addEventListener('input', () => mixPost(`${ctl}-${deck}`, { deck, name: ctl, value: Number(el.value) }));
+    el.addEventListener('dblclick', () => {
+      el.value = MIX_NEUTRAL[ctl];
+      mixPost(`${ctl}-${deck}`, { deck, name: ctl, value: MIX_NEUTRAL[ctl] });
+    });
+  }
+}
+document.getElementById('deckBLoad').addEventListener('click', loadDeckBFile);
+document.getElementById('deckBFile').addEventListener('change', loadDeckBFile);
+document.getElementById('deckBPlay').addEventListener('click', () => evalDeckB(true));
+document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
+document.getElementById('mixEject').addEventListener('click', ejectDeckB);
+document.getElementById('mixComplete').addEventListener('click', completeMix);
