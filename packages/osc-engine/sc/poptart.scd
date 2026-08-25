@@ -107,6 +107,9 @@ var noteQueues = IdentityDictionary.new;
 var stateWaitMax = 0.3;
 var coldWaitMax = 20;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
+// Song decks (see server.js's song section): one full-length audio file per DJ deck track,
+// played by a poptart_song_* synth into the track's input bus. trackId -> (buf:, synth:).
+var songs = IdentityDictionary.new;
 var confWant = IdentityDictionary.new; // trackId -> latest requested conf state (see setConfMode)
 // Host tempo (bpm) mirrored into every open VST as emulated DAW transport, so plugin-internal
 // synced LFOs/delays/arps follow setbpm instead of assuming their own default. Updated by
@@ -883,6 +886,22 @@ server.waitForBoot {
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
+        // Song-deck player (see the songLoad/songStart OSCdefs): one long file, played straight
+        // through at `rate` into the track's input bus, so the whole DJ stage (EQ, filter,
+        // crossfader, cue, meters) applies to a real song exactly as to a pattern track. One
+        // persistent synth per deck rather than per-event voices: it pauses (run), seeks
+        // (t_seek/seekFrame - Phasor's resetPos applies only on a trigger, so spawning mid-song
+        // passes t_seek: 1 with the entry frame), and dies on gate for a declicked stop. `run`
+        // is lagged, so pause/resume is a tiny turntable-style slew instead of a click. The
+        // Phasor would wrap at EOF and replay from the top - Node schedules a pause at the
+        // song's end instead (see server.js's song end timer; a self-gate is a deferred oddment).
+        SynthDef(("poptart_song_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
+            var step = rate.lag(0.05) * BufRateScale.ir(buf) * run.lag(0.02);
+            var idx = Phasor.ar(t_seek, step, 0, BufFrames.ir(buf), seekFrame);
+            var sig = BufRd.ar(nc, buf, idx, loop: 0, interpolation: 4);
+            var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
+            Out.ar(out, toStereo.(sig) * env * amp.lag(0.02));
+        }).add;
     };
     // Feeder for a hardware audio input as a sidechain/chain source (input(...) / audio("dev:...")):
     // reads two channels off the booted device's inputs (SoundIn, 0-indexed) and writes them to a
@@ -1024,6 +1043,9 @@ destroyTrack = { |key|
             };
             track[\ccs].do { |e| MIDIdef.all[e[\defKey]] !? { |d| d.free }; e[\bus] !? { |b| b.free } };
             track[\busSends] !? { |names| names.do { |bn| releaseBus.(bn) } };
+            // A song deck's player synth dies with the group below; its buffer (the whole file,
+            // real RAM) must not outlive the track.
+            songs[key] !? { |e| e[\buf] !? { |b| b.free }; songs[key] = nil };
             track[\group].free;
             track[\inBus].free;
             tracks[key] = nil;
@@ -2148,6 +2170,107 @@ OSCdef(\poptartPlaySample, { |msg|
         });
     };
 }, '/poptart/playSample');
+
+// --- song decks ---
+// A full-length audio file on a DJ deck track (server.js's song section drives these). The
+// file loads into ONE buffer per track; a persistent poptart_song_* synth walks it into the
+// track's input bus. Node owns all the musical bookkeeping (position, quantized starts, the
+// end-of-file pause) - these handlers only hold the buffer and the synth.
+
+// Load (or replace) a track's song: [requestId, key, path]. Replies with the buffer's shape so
+// Node can compute duration and schedule ends. Any playing synth for the old file is freed
+// first - a load IS a stop.
+OSCdef(\poptartSongLoad, { |msg|
+    var requestId = msg[1], key = msg[2].asSymbol, path = msg[3].asString;
+    fork {
+        var old = songs[key], buf, done = false, tries = 0;
+        old !? { old[\synth] !? { |s| s.free }; old[\buf] !? { |b| b.free }; songs[key] = nil };
+        try {
+            buf = Buffer.read(server, path, action: { done = true });
+        } { |err|
+            replyErr.("/poptart/songLoad", requestId, "couldn't read " ++ path ++ ": " ++ err.errorString);
+            buf = nil;
+        };
+        buf !? {
+            // Same cap style as loadSamplePack: reply inside Node's timeout even on a failure.
+            while { done.not and: { tries < 1100 } } { 0.05.wait; tries = tries + 1 };
+            if (done.not or: { (buf.numFrames ? 0) <= 0 }) {
+                buf.free;
+                replyErr.("/poptart/songLoad", requestId, "couldn't read " ++ path ++ " (not an audio file scsynth can decode?)");
+            } {
+                songs[key] = (buf: buf, synth: nil);
+                ("poptart: song loaded on " ++ key ++ ": " ++ path).postln;
+                replyOk.("/poptart/songLoad", requestId, toJson.((
+                    frames: buf.numFrames ? 0, sampleRate: buf.sampleRate ? 0, channels: buf.numChannels ? 0
+                )));
+            };
+        };
+    };
+}, '/poptart/songLoad');
+
+// Start (or restart) playback: [key, posSec, rate, latency]. Spawns the player at the track
+// group's head (the track synth at the tail mixes the input bus) in a timestamped bundle, so a
+// cycle-quantized start lands sample-accurately. An already-running player is replaced - a
+// start is also how a hard seek-while-playing could be done, but songSeek below is the
+// click-free path for that.
+OSCdef(\poptartSongStart, { |msg|
+    var key = msg[1].asSymbol, posSec = msg[2].asFloat;
+    var rate = msg[3].asFloat, latency = msg[4].asFloat;
+    var track = tracks[key], song = songs[key];
+    if (track.isKindOf(Event) and: { song.notNil }) {
+        var buf = song[\buf];
+        var frame = (posSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
+        song[\synth] !? { |s| s.set(\gate, 0) }; // released, not freed: let the old one fade out
+        bundleNow.(latency, {
+            song[\synth] = Synth(("poptart_song_" ++ buf.numChannels).asSymbol,
+                [\out, track[\inBus].index, \buf, buf, \rate, rate, \run, 1,
+                 \t_seek, 1, \seekFrame, frame],
+                target: track[\group], addAction: \addToHead);
+        });
+    };
+}, '/poptart/songStart');
+
+// Set one control on the running player: [key, name, value, latency]. `run` 0/1 is
+// pause/resume; `rate` is the tempo-sync/nudge handle.
+OSCdef(\poptartSongSet, { |msg|
+    var key = msg[1].asSymbol, name = msg[2].asSymbol;
+    var value = msg[3].asFloat, latency = msg[4].asFloat;
+    songs[key] !? { |song|
+        song[\synth] !? { |s| bundleNow.(latency, { s.set(name, value) }) };
+    };
+}, '/poptart/songSet');
+
+// Seek the running player: [key, posSec, latency]. One set so the frame and its trigger can't
+// arrive apart (Phasor applies resetPos only on the t_seek trigger).
+OSCdef(\poptartSongSeek, { |msg|
+    var key = msg[1].asSymbol, posSec = msg[2].asFloat, latency = msg[3].asFloat;
+    songs[key] !? { |song|
+        var buf = song[\buf];
+        var frame = (posSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
+        song[\synth] !? { |s| bundleNow.(latency, { s.set(\seekFrame, frame, \t_seek, 1) }) };
+    };
+}, '/poptart/songSeek');
+
+// Stop playback (declicked via the player's gate); the buffer stays for the next start:
+// [key, latency].
+OSCdef(\poptartSongStop, { |msg|
+    var key = msg[1].asSymbol, latency = msg[2].asFloat;
+    songs[key] !? { |song|
+        song[\synth] !? { |s| bundleNow.(latency, { s.set(\gate, 0) }) };
+        song[\synth] = nil;
+    };
+}, '/poptart/songStop');
+
+// Unload the song entirely: player released, buffer freed. The track itself stays (it's
+// destroyTrack's to take down): [key].
+OSCdef(\poptartSongFree, { |msg|
+    var key = msg[1].asSymbol;
+    songs[key] !? { |song|
+        song[\synth] !? { |s| s.set(\gate, 0) };
+        song[\buf] !? { |b| b.free };
+        songs[key] = nil;
+    };
+}, '/poptart/songFree');
 
 // --- introspection ---
 

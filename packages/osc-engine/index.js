@@ -228,6 +228,9 @@ const SCAN_TIMEOUT_MS = 600000;
 // Reading a whole pack into buffers is disk-bound - a gigabyte-scale folder of full-length
 // WAVs can legitimately take a minute-plus. The .scd's own read-wait cap stays just under this.
 const PACK_LOAD_TIMEOUT_MS = 120000;
+// One song file into one buffer: a fraction of a pack, but still a full-length file off disk.
+// The .scd's songLoad read-wait cap stays just under this.
+const SONG_LOAD_TIMEOUT_MS = 60000;
 // How long a missing exact file / recording stays missing before the sampler looks again. An
 // `sr("bass")` written before its bounce exists has to start playing once it does, without an
 // eval - but not at the cost of a filesystem look per sample event. See _ensurePack.
@@ -676,6 +679,42 @@ class OscEngine {
   }
   getParams(trackId, slotIndex) {
     return this._request('/poptart/getParams', [trackId, slotIndex]);
+  }
+
+  // --- song decks ---
+  // A full-length audio file played straight through on a DJ deck's track (see server.js's song
+  // section). The engine holds one buffer + one persistent player synth per track; all musical
+  // bookkeeping (position, quantized starts, end-of-file) is the caller's. `targetTime` on the
+  // playback methods is on getTime()'s clock, like every other timestamped send.
+
+  /** Load (replacing any previous song on the track). Resolves { frames, sampleRate, channels }. */
+  songLoad(trackId, filePath) {
+    return this._request('/poptart/songLoad', [trackId, filePath], SONG_LOAD_TIMEOUT_MS);
+  }
+
+  /** Start (or restart) playback at posSec, at `rate` (1 = native). */
+  songStart(trackId, posSec, rate = 1, targetTime = 0) {
+    this._send('/poptart/songStart', [trackId, posSec, rate, this._latency(targetTime)]);
+  }
+
+  /** Set one player control: 'run' (0/1 = pause/resume), 'rate', 'amp'. */
+  songSet(trackId, name, value, targetTime = 0) {
+    this._send('/poptart/songSet', [trackId, name, value, this._latency(targetTime)]);
+  }
+
+  /** Jump the playhead to posSec (click-free; no-op unless playing). */
+  songSeek(trackId, posSec, targetTime = 0) {
+    this._send('/poptart/songSeek', [trackId, posSec, this._latency(targetTime)]);
+  }
+
+  /** Stop playback (declicked). The song stays loaded for the next songStart. */
+  songStop(trackId, targetTime = 0) {
+    this._send('/poptart/songStop', [trackId, this._latency(targetTime)]);
+  }
+
+  /** Unload the song and free its buffer. The track itself is destroyTrack's business. */
+  songFree(trackId) {
+    this._send('/poptart/songFree', [trackId]);
   }
   // Records the master bus to a WAV at `filePath` for `seconds`; resolves when done.
   record(filePath, seconds) {

@@ -86,6 +86,7 @@ var maxSlots = 8, numPairs = 2, key = "probe";
 var trackDefName = { |k| ("poptart_probe_" ++ k).asSymbol };
 var channelDefault, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks;
+var songs = IdentityDictionary.new; // the song decks' buffer registry, swept by destroyTrack
 var birthParse;
 var waitForLoad, flushNotes, clearPending, now, fired;
 var cueOffset; // nil = the no-cue build; reassigned before the cue-armed build below

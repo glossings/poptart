@@ -61,8 +61,9 @@ const schedulers = new Map(); // pattern label -> Scheduler (one engine track pe
 const trackIds = new Map(); // label -> engine track id
 const trackLabels = new Map(); // engine track id -> label
 let nextTrackNum = 1;
-// The eval loop is the one place tracks come into being, so it is the one caller allowed to mint
-// an id; everything else must use engineTrack, or a typo'd label would allocate a ghost track.
+// Tracks come into being in exactly two places - the eval loop, and /api/song/load (the song
+// decks' fixed '#song' keys) - so those are the only callers allowed to mint an id; everything
+// else must use engineTrack, or a typo'd label would allocate a ghost track.
 function claimEngineTrack(label) {
   let id = trackIds.get(label);
   if (!id) {
@@ -140,6 +141,88 @@ const mixState = {
   // by complete (the promoted song's own setbpm takes over on its promotion re-eval).
   tempoOverride: null,
 };
+
+// ---------------------------------------------------------------------------------------------
+// Song decks: a real audio file (a bought track, a bounce) playing on a DJ deck, mixed through
+// the same desk as the pattern decks. The song is ONE ordinary engine track - key '#song'
+// (deck a) or 'b:#song' - whose input is a persistent player synth (sc/poptart.scd's
+// poptart_song_*) instead of a scheduler, which is what makes the whole strip (crossfader, EQ,
+// filter, faders, meters, cue, per-deck stop) apply to it unchanged. '#' can't appear in a
+// block label, so the key can never collide with user code. Node owns the musical bookkeeping:
+// position, quantized starts, and the end-of-file pause (the engine-side Phasor would wrap and
+// replay). See TODO.md's song-deck phases for what's still to come (waveform pane, tempo sync,
+// nudge, metadata).
+// ---------------------------------------------------------------------------------------------
+const { resolveSongFile } = require('@poptart/osc-engine/songs');
+const SONG_KEYS = { a: '#song', b: 'b:#song' };
+const SONG_START_LEAD_SEC = 0.15; // enough for the timestamped start bundle to arrive early
+const songDecks = { a: null, b: null };
+// each: { path, title, duration, sampleRate, channels, frames, decoded, rate,
+//         playing, posSec ("the playhead as of startSec" while playing; the resting playhead
+//         while paused), startSec (engine-clock moment posSec was current), endTimer }
+
+const songKeysLive = () => ['a', 'b'].filter((d) => songDecks[d]).map((d) => SONG_KEYS[d]);
+// The desk's full population: every scheduler-driven track plus any song tracks - what deck
+// broadcasts, per-track mix sets and the strip's track list enumerate. A song is a stem too.
+const isMixKey = (key) => schedulers.has(key) || songKeysLive().includes(key);
+function* mixKeys() {
+  yield* schedulers.keys();
+  yield* songKeysLive();
+}
+
+/** The playhead in song-seconds at engine time `at` (defaults to now). */
+function songPlayheadSec(deck, at = null) {
+  const s = songDecks[deck];
+  if (!s) return 0;
+  const t = at ?? (engine ? engine.getTime() : s.startSec);
+  const pos = s.playing ? s.posSec + Math.max(0, t - s.startSec) * s.rate : s.posSec;
+  return Math.min(Math.max(0, pos), s.duration);
+}
+
+// Pause bookkeeping shared by pause/per-deck stop/end-of-file: fold the running playhead into
+// posSec and disarm the end timer. The engine-side `run` gate is the caller's to close.
+function songMarkPaused(deck, posSec = null) {
+  const s = songDecks[deck];
+  if (!s) return;
+  s.posSec = posSec ?? songPlayheadSec(deck);
+  s.playing = false;
+  if (s.endTimer) clearTimeout(s.endTimer);
+  s.endTimer = null;
+}
+
+// The player's Phasor would wrap at EOF and replay from the top - pause it just as it gets
+// there instead. Re-armed on every start and seek (and, later, rate change).
+function songArmEndTimer(deck) {
+  const s = songDecks[deck];
+  if (!s) return;
+  if (s.endTimer) clearTimeout(s.endTimer);
+  s.endTimer = null;
+  if (!s.playing || !(s.rate > 0) || !engine) return;
+  const now = engine.getTime();
+  const begin = Math.max(now, s.startSec); // a quantized start may not have begun yet
+  const secondsLeft = (begin - now) + (s.duration - songPlayheadSec(deck, begin)) / s.rate;
+  s.endTimer = setTimeout(() => {
+    s.endTimer = null;
+    if (!s.playing) return;
+    if (engine) {
+      try { engine.songSet(engineTrack(SONG_KEYS[deck]), 'run', 0, 0); } catch { /* engine between restarts */ }
+    }
+    songMarkPaused(deck, s.duration);
+    mixNotify();
+  }, Math.max(0, secondsLeft * 1000));
+}
+
+// Forget one deck's song: player released and buffer freed engine-side, Node state dropped.
+// The TRACK stays warm (it's dropTrack's to take down) - a new load reuses it.
+function songUnload(deck) {
+  const s = songDecks[deck];
+  if (!s) return;
+  if (s.endTimer) clearTimeout(s.endTimer);
+  songDecks[deck] = null;
+  if (engine) {
+    try { engine.songFree(engineTrack(SONG_KEYS[deck])); } catch { /* engine between restarts */ }
+  }
+}
 
 // --- mix-strip MIDI (learn + drive) ---
 //
@@ -242,14 +325,14 @@ function applyMixTargets(targets) {
     if (!(name in DJ_NEUTRAL)) throw new Error(`"${name}" is not a mix control`);
     if (t.deck === 'a' || t.deck === 'b') {
       mixState.perDeck[t.deck].set(name, value);
-      for (const key of schedulers.keys()) {
+      for (const key of mixKeys()) {
         if (deckOfKey(key) === t.deck && !mixState.perTrack.get(key)?.has(name)) {
           engine.setParam(engineTrack(key), -1, name, value, 0);
         }
       }
     } else {
       const key = String(t.key ?? '');
-      if (!schedulers.has(key)) throw new Error(`mix/set: no playing track "${key}"`);
+      if (!isMixKey(key)) throw new Error(`mix/set: no playing track "${key}"`);
       let per = mixState.perTrack.get(key);
       if (!per) mixState.perTrack.set(key, (per = new Map()));
       per.set(name, value);
@@ -278,6 +361,22 @@ function mixDeskBody() {
     cue: activeCue ? { name: activeCue.name } : null,
     midi: settings.mixMidi ?? {},
     neutral: DJ_NEUTRAL,
+    // The song decks (files on a deck - see the song section). The client mirrors the playhead
+    // itself: posSec + (now - startSec) * rate while playing (engine time is Date.now()/1000).
+    song: Object.fromEntries(['a', 'b'].map((d) => {
+      const s = songDecks[d];
+      return [d, s && {
+        key: SONG_KEYS[d],
+        path: s.path,
+        title: s.title,
+        duration: s.duration,
+        decoded: s.decoded,
+        playing: s.playing,
+        rate: s.rate,
+        posSec: s.posSec,
+        startSec: s.startSec,
+      }];
+    })),
   };
 }
 
@@ -374,6 +473,14 @@ const PIPED_MAPS = () => [presetHolds, channelHolds, uncaptured, autoPinDirty, a
 // a dropped label's track warm for the label's return.
 function dropTrack(key) {
   const id = trackIds.get(key);
+  // A song track's Node-side state goes with it (the engine side - player synth, buffer - is
+  // destroyTrack's; see sc/poptart.scd). Usually already cleared by songUnload; this is the net.
+  for (const d of ['a', 'b']) {
+    if (SONG_KEYS[d] === key && songDecks[d]) {
+      if (songDecks[d].endTimer) clearTimeout(songDecks[d].endTimer);
+      songDecks[d] = null;
+    }
+  }
   if (recTapped.has(key)) {
     recTapped.delete(key);
     if (id && engine) {
@@ -763,6 +870,13 @@ async function restartEngine() {
       mappedEngine?.removeChain(label);
     }
     schedulers.clear();
+    // The song buffers and player synths died with the old scsynth; the deck states describe
+    // sound that no longer exists. Cleared rather than reloaded - re-queuing a song after an
+    // engine restart is a deliberate act, like re-evaling a pattern deck.
+    for (const d of ['a', 'b']) {
+      if (songDecks[d]?.endTimer) clearTimeout(songDecks[d].endTimer);
+      songDecks[d] = null;
+    }
     // The replacement engine has no tracks and no held notes - drop the held-key bookkeeping so
     // a stale held note isn't "released" against the new engine, and the live note log with it
     // (its times are the old clock's).
@@ -2853,14 +2967,26 @@ const routes = {
     // nothing is left playing anywhere does it fall through to the full stop below - so
     // stopping the last playing deck behaves exactly like a normal stop.
     const deck = body?.deck === 'a' || body?.deck === 'b' ? body.deck : null;
+    // A deck's song pauses where it stands (a stop is not an unload - play resumes from here).
+    const pauseSong = (d) => {
+      if (!songDecks[d]?.playing) return;
+      if (engine) {
+        try { engine.songSet(engineTrack(SONG_KEYS[d]), 'run', 0, 0); } catch { /* engine between restarts */ }
+      }
+      songMarkPaused(d);
+    };
     if (deck) {
       for (const [key, sch] of schedulers) if (deckOfKey(key) === deck) sch.stop();
+      pauseSong(deck);
       for (const id of [...kbHeld.keys()]) if (deckOfKey(id) === deck) releaseKbNotes(id);
-      if ([...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)) {
+      const otherPlaying = [...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)
+        || ['a', 'b'].some((d) => d !== deck && songDecks[d]?.playing);
+      if (otherPlaying) {
         return { status: 200, body: { deck, transport: null } };
       }
     }
     for (const sch of schedulers.values()) sch.stop();
+    for (const d of ['a', 'b']) pauseSong(d);
     // Release any live-keyboard notes still held so nothing rings through the stop.
     for (const id of [...kbHeld.keys()]) releaseKbNotes(id);
     // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top. The
@@ -3337,7 +3463,7 @@ const routes = {
     status: 200,
     body: {
       ...mixDeskBody(),
-      tracks: query?.desk ? undefined : [...schedulers.keys()].map((key) => ({
+      tracks: query?.desk ? undefined : [...mixKeys()].map((key) => ({
         key,
         deck: deckOfKey(key),
         controls: Object.fromEntries(mixState.perTrack.get(key) ?? []),
@@ -3428,7 +3554,7 @@ const routes = {
   'POST /api/mix/gate': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const key = String(body.key ?? '');
-    if (!schedulers.has(key)) throw new Error(`mix/gate: no playing track "${key}"`);
+    if (!isMixKey(key)) throw new Error(`mix/gate: no playing track "${key}"`);
     const setFader = (k, v) => {
       let per = mixState.perTrack.get(k);
       if (!per) mixState.perTrack.set(k, (per = new Map()));
@@ -3461,6 +3587,7 @@ const routes = {
   'POST /api/mix/clear': async (body) => {
     if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     const deck = body.deck === 'b' ? 'b' : 'a';
+    songUnload(deck); // buffer freed before the track sweep below destroys the track itself
     for (const [key, sch] of [...schedulers]) {
       if (deckOfKey(key) !== deck) continue;
       sch.stop();
@@ -3482,6 +3609,7 @@ const routes = {
   // forgotten, and the performance state resets: deck a comes back to a clean desk.
   'POST /api/mix/eject': async () => {
     if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    songUnload('b'); // the queued song goes with its deck; the track dies in the sweep below
     for (const [key, sch] of [...schedulers]) {
       if (deckOfKey(key) !== 'b') continue;
       sch.stop();
@@ -3502,7 +3630,7 @@ const routes = {
       if (typeof decks.a.bpm === 'number') transport?.rampBpm(decks.a.bpm, 2);
       else if (decks.a.bpm) transport?.setBpm(decks.a.bpm);
     }
-    for (const key of schedulers.keys()) neutralizeMix(key);
+    for (const key of mixKeys()) neutralizeMix(key);
     decks.b = { scale: null, bpm: null };
     liveStateIds.b = new Set();
     patternCore.clearRolls('buffer', 'b');
@@ -3520,12 +3648,21 @@ const routes = {
     if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     const promoted = [...schedulers.keys()].filter((k) => deckOfKey(k) === 'b');
     if (!promoted.length) throw new Error('deck b has nothing playing - nothing to promote');
+    songUnload('a'); // the outgoing song (if any) goes with its deck...
     for (const [key, sch] of [...schedulers]) {
       if (deckOfKey(key) !== 'a') continue;
       sch.stop();
       schedulers.delete(key);
       mappedEngine.removeChain(engineTrack(key));
       dropTrack(key);
+    }
+    if (trackIds.has(SONG_KEYS.a)) dropTrack(SONG_KEYS.a); // ...its track too (it has no scheduler)
+    // A song riding deck b is promoted alongside the stems: re-keyed BEFORE the leftovers sweep
+    // below, or it would be destroyed as never-promoted. Playback and the engine never blink.
+    if (songDecks.b) {
+      rekeyTrack(SONG_KEYS.b, SONG_KEYS.a);
+      songDecks.a = songDecks.b;
+      songDecks.b = null;
     }
     for (const key of promoted) rekeyTrack(key, key.slice(key.indexOf(':') + 1));
     for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'b') dropTrack(key); // never-promoted leftovers
@@ -3545,9 +3682,127 @@ const routes = {
     // The promoted song's declared tempo takes over on the client's promotion re-eval (override
     // gone, its setbpm drives again) - a no-op when the migration already landed on its native.
     mixState.tempoOverride = null;
-    for (const key of schedulers.keys()) neutralizeMix(key);
+    for (const key of mixKeys()) neutralizeMix(key);
     mixNotify();
     return { status: 200, body: { promoted: promoted.map((k) => k.slice(k.indexOf(':') + 1)) } };
+  },
+
+  // --- song decks (files on a DJ deck - see the song section near mixState) ---
+
+  // Load a file onto a deck's song track, replacing whatever song it held. Body: { deck, path,
+  // bpm?, title? }. wav/aiff/flac load directly; mp3/m4a/aac/caf go through the afconvert cache
+  // (~/.poptart/cache/songs). The track is created (or reused) wearing the desk's current
+  // state, so a song queued onto deck b arrives silent exactly like a queued pattern deck.
+  // `bpm` (until phase 4 reads it from tags) records the song's native tempo, which is what
+  // lets /api/mix/tempo migrate toward it.
+  'POST /api/song/load': async (body) => {
+    if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    const key = SONG_KEYS[deck];
+    const srcPath = String(body.path ?? '');
+    const resolved = await resolveSongFile(srcPath);
+    if (songDecks[deck]) songMarkPaused(deck); // stop the old song's timers before its buffer goes
+    const tid = claimEngineTrack(key);
+    mappedEngine.createTrack(tid, mixBirthFor(key)); // idempotent - a reload keeps the track warm
+    const meta = await mappedEngine.songLoad(tid, resolved.path);
+    const duration = meta.sampleRate > 0 ? meta.frames / meta.sampleRate : 0;
+    songDecks[deck] = {
+      path: srcPath,
+      title: String(body.title ?? '').trim() || path.basename(srcPath),
+      duration,
+      sampleRate: meta.sampleRate,
+      channels: meta.channels,
+      frames: meta.frames,
+      decoded: resolved.decoded,
+      rate: 1,
+      playing: false,
+      posSec: 0,
+      startSec: 0,
+      endTimer: null,
+    };
+    const bpm = Number(body.bpm);
+    if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) decks[deck].bpm = bpm;
+    mixNotify();
+    return {
+      status: 200,
+      body: { deck, key, duration, sampleRate: meta.sampleRate, channels: meta.channels, decoded: resolved.decoded },
+    };
+  },
+
+  // Start playback. Body: { deck, pos? (seconds; default: resume where it stands, or the top
+  // after EOF), rate? (1 = native), now? (skip quantization) }. With the shared clock running,
+  // the start lands on the next cycle boundary - a song against a playing deck joins the grid
+  // the way a deck-b eval does; with the clock frozen (nothing else playing) it just starts.
+  'POST /api/song/play': async (body) => {
+    if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    const s = songDecks[deck];
+    if (!s) throw new Error(`deck ${deck} has no song loaded`);
+    const rate = Number(body.rate);
+    if (Number.isFinite(rate) && rate > 0.01 && rate <= 4) s.rate = rate;
+    const pos = Number(body.pos);
+    const from = Number.isFinite(pos)
+      ? Math.min(Math.max(0, pos), s.duration)
+      : (s.posSec >= s.duration ? 0 : s.posSec);
+    const now = engine.getTime();
+    let startSec = now + SONG_START_LEAD_SEC;
+    if (!transport.paused && !body.now) {
+      startSec = transport.secAt(Math.ceil(transport.cycleAt(now + SONG_START_LEAD_SEC)));
+    }
+    engine.songStart(engineTrack(SONG_KEYS[deck]), from, s.rate, startSec);
+    s.posSec = from;
+    s.startSec = startSec;
+    s.playing = true;
+    songArmEndTimer(deck);
+    mixNotify();
+    return { status: 200, body: { deck, pos: from, rate: s.rate, startSec } };
+  },
+
+  // Pause where it stands; /api/song/play resumes from there. Body: { deck }.
+  'POST /api/song/pause': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    if (!songDecks[deck]) throw new Error(`deck ${deck} has no song loaded`);
+    if (songDecks[deck].playing && engine) {
+      engine.songSet(engineTrack(SONG_KEYS[deck]), 'run', 0, 0);
+    }
+    songMarkPaused(deck);
+    mixNotify();
+    return { status: 200, body: { deck, pos: songDecks[deck].posSec } };
+  },
+
+  // Jump the playhead. Body: { deck, pos (seconds) }. Click-free while playing (the player
+  // seeks in place); while paused it just moves the resume point.
+  'POST /api/song/seek': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    const s = songDecks[deck];
+    if (!s) throw new Error(`deck ${deck} has no song loaded`);
+    const pos = Number(body.pos);
+    if (!Number.isFinite(pos)) throw new Error('song/seek needs pos (seconds)');
+    const to = Math.min(Math.max(0, pos), s.duration);
+    if (s.playing && engine) {
+      engine.songSeek(engineTrack(SONG_KEYS[deck]), to, 0);
+      s.posSec = to;
+      s.startSec = engine.getTime();
+      songArmEndTimer(deck);
+    } else {
+      s.posSec = to;
+    }
+    mixNotify();
+    return { status: 200, body: { deck, pos: to } };
+  },
+
+  // Stop and rewind to the top (the song stays loaded); { unload: true } forgets it entirely
+  // (buffer freed - the track stays warm for the next load). Body: { deck, unload? }.
+  'POST /api/song/stop': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    if (!songDecks[deck]) throw new Error(`deck ${deck} has no song loaded`);
+    if (engine) {
+      try { engine.songStop(engineTrack(SONG_KEYS[deck]), 0); } catch { /* engine between restarts */ }
+    }
+    songMarkPaused(deck, 0);
+    if (body.unload) songUnload(deck);
+    mixNotify();
+    return { status: 200, body: { deck, unloaded: !!body.unload } };
   },
 
   'POST /api/trackRecord/start': async (body) => {

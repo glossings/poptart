@@ -5,6 +5,47 @@ no completion notes.
 
 ---
 
+[ ] Song decks - real audio files (a bought track, a bounce) on a DJ deck, mixed through the same
+    desk as pattern decks. Settled 2026-08-25: the song is ONE ordinary engine track (key `#song`,
+    deck b `b:#song`) whose input is a long-file player synth instead of a scheduler, so the whole
+    strip (xf, EQ, djf, fader, meters, cue, per-deck stop) applies unchanged. Phases below are
+    separate entries; delete each as it lands.
+
+[ ] Songs phase 1 - engine + endpoints: poptart_song_* player defs (Phasor/BufRd; rate/run/seek
+    controls), songLoad/Start/Set/Seek/Stop/Free engine methods (forwarded through MappedEngine),
+    /api/song/* (load/play/pause/seek/stop), afconvert decode cache for mp3/m4a under
+    ~/.poptart/cache/songs (wav/aif/flac go to Buffer.read directly), cycle-quantized start, and
+    mix-desk integration (deck broadcasts, clear/eject/stop reach the song track). Whole file
+    RAM-resident (a 5-min song ~50MB stereo) - no streaming; scrubbing wants random access anyway.
+
+[ ] Songs phase 2 - playlists hold disk files: typed items ({ kind: 'file', path, title, bpm, key })
+    beside saved-name strings in library.json; a server-side file browser to pick them (the client
+    can't produce disk paths); deck B's queue offers both kinds; a missing file renders as missing,
+    same contract as a deleted save.
+
+[ ] Songs phase 3 - the song deck pane: when the queued item is a file, the deck shows a
+    rekordbox-style waveform instead of CodeMirror - band-colored peak/RMS columns (generalize the
+    recorder's canvas renderer + analysis-worker pass, which already do exactly this), full-track
+    overview + zoomed scrolling strip, beatgrid + playhead overlays (client mirrors the transport
+    clock - engine getTime is Date.now()/1000), click/drag scrub -> songSeek, audition via cue.
+
+[ ] Songs phase 4 - tempo/key + sync + nudge: parse tags (ID3 TBPM/TKEY, vorbis comments, m4a
+    tmpo) for bpm/key; native bpm feeds decks[].bpm so /api/mix/tempo migration works unchanged;
+    rate lock (rate = master/native; repitch default, Warp1 keylock as an option), beatgrid-anchored
+    quantized start, drift servo (expected vs actual playhead, gently trim rate - Node clock and
+    scsynth's sample clock drift over minutes); nudge = momentary rate offset + phase jog buttons,
+    MIDI-learnable via mixMidi. bpm and grid anchor always user-editable.
+
+[ ] Songs phase 5 - detection fallback when tags are absent: BPM via onset-envelope
+    autocorrelation, key via chroma + Krumhansl profiles, in analysis-worker (transient detection
+    already lives there); show confidence, keep manual override. Everything earlier works without
+    this via manual entry.
+
+[ ] Songs - deferred oddments: complete-mix with a song-ONLY deck b (the promote guard wants
+    schedulers today); end-of-file stop is a Node-side timer (the Phasor would wrap and replay
+    otherwise - give the def a self-gate later); decode-cache eviction (cache/songs grows
+    unbounded); song-deck rows in the strip's per-stem gate list.
+
 [ ] Preset morph: `preset("A").morph("B", sig)` interpolates the plugin's *parameter vector*
     (VSTPlugin getn/setn), not the opaque .fxp chunk - the chunk (wavetables etc.) is why a Serum
     preset is 5MB and it can't be interpolated. Capture the vector with getn at preset-save time
