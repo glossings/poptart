@@ -270,6 +270,12 @@ function othersPlaying(deck) {
 function songBaseRate(deck) {
   const s = songDecks[deck];
   if (!s) return 1;
+  // Paused with nothing else on the clock, a synced song will take the grid when it plays
+  // (see /api/song/play: the clock adopts ITS tempo, so it runs at 1) - say so now, or the pane
+  // draws the strip at master/native against a clock the play is about to replace and the
+  // waveform visibly rescales on the first press. The hand's tempo override is the exception:
+  // play leaves the clock where it was put.
+  if (!s.playing && s.sync && s.bpm && !othersPlaying(deck) && mixState.tempoOverride == null) return 1;
   if (s.sync && s.bpm && transport) {
     return songSync.syncRate(transport.cps * 240, s.bpm, deck === songMasterDeck ? 1 : s.syncMult) ?? s.manualRate;
   }
@@ -662,9 +668,21 @@ function applyMixTargets(targets) {
 
 // The desk's state as one plain object - what GET /api/mix returns (minus the track rows) and
 // what the push channel below frames. One builder so the two can never drift.
+// Is this deck sounding - a running pattern scheduler or its song playing? What the deck
+// head's play/stop toggle reads (the browser's one `playing` flag is the whole set's).
+function deckPlaying(deck) {
+  return [...schedulers].some(([key, sch]) => deckOfKey(key) === deck && sch.running)
+    || !!songDecks[deck]?.playing;
+}
+
 function mixDeskBody() {
+  // A paused song's predicted rate depends on whether anything else is playing (songBaseRate),
+  // and every start/stop builds a frame here - settle them so the strip's scale is right
+  // before the frame goes out. The paused branch of songApplyRate never notifies back.
+  for (const d of ['a', 'b']) if (songDecks[d] && !songDecks[d].playing) songApplyRate(d);
   return {
     swap: mixState.swap,
+    playing: { a: deckPlaying('a'), b: deckPlaying('b') },
     perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
     // Never '-' for a loaded deck: an unspecified track reads as the 120 default, so the tempo
     // slider and detents always have two real endpoints to ride between.
@@ -3215,6 +3233,7 @@ const routes = {
       console.warn(`[poptart] evaluate (deck ${deck}) took ${Math.round(evalMs)}ms`);
     }
 
+    mixNotify(); // the deck head's play/stop toggle follows the desk stream
     return {
       status: 200,
       body: {

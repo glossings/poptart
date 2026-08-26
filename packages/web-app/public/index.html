@@ -95,11 +95,12 @@
                get the same head - load a song, play it, or leave DJ mode keeping this pane. -->
           <div id="deckAHead" class="deck-head">
             <span class="deck-b-title">deck A</span>
-            <select id="deckAFile" title="the song to play on this deck - saved patterns and playlist files alike"></select>
-            <button id="deckALoad" class="small" title="load the picked song into this pane (this deck's current tracks are cleared)">load</button>
+            <!-- The picker is the organize window (→A / →B on its rows); the select behind it
+                 is the set's queue bookkeeping (nextInSet / stepDeckBQueue), never shown. -->
+            <select id="deckAFile" hidden></select>
+            <button id="deckASong" class="small deck-song" title="the song on this deck - click to pick another (opens organize; loading clears this deck's current tracks)">pick a song…</button>
             <button id="deckAPlay" class="small" title="Cmd/Ctrl+Enter">&#9654; play</button>
             <button id="deckAUpdate" class="small" title="evaluate without changing play state">&#8635;</button>
-            <button id="deckAOrganize" class="small" title="playlists - organize the set">&#8801;</button>
             <button id="deckAKeep" class="small" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
           </div>
           <textarea id="editor" spellcheck="false">keys: n("0 2 3 <5 7>")
@@ -145,12 +146,11 @@
         <div id="deckBPane" class="hidden">
           <div id="deckBHead">
             <span class="deck-b-title">deck B</span>
-            <select id="deckBFile" title="the saved song to bring in - the active playlist leads, everything else below"></select>
-            <button id="deckBLoad" class="small" title="load the picked song into this pane">load</button>
+            <select id="deckBFile" hidden></select>
+            <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>
             <button id="deckBNext" class="small" title="queue the next song in the active playlist (⇧⌘/Ctrl+Shift+.)">⏭</button>
             <button id="deckBPlay" class="small" title="Cmd/Ctrl+Enter in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
-            <button id="deckBOrganize" class="small" title="playlists - organize the set">≡</button>
             <button id="deckBKeep" class="small" title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn (Shift+Cmd/Ctrl+Enter)">&#9167; keep</button>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
@@ -362,7 +362,7 @@
             <input id="mixSwap" type="checkbox" /> swap</label>
           <div class="mix-tempo">
             <button id="mixTempoA" class="small mix-tempo-detent" title="migrate the clock to deck A's native tempo (over the ramp time)">—</button>
-            <input id="mixTempoSlider" type="range" min="0" max="1" step="0.001" value="0"
+            <input id="mixTempoSlider" class="dj-fader" type="range" min="0" max="1" step="0.001" value="0"
               title="tempo migration: ride the shared clock between the decks' native tempos" />
             <button id="mixTempoB" class="small mix-tempo-detent" title="migrate the clock to deck B's native tempo (over the ramp time)">—</button>
           </div>
@@ -371,8 +371,10 @@
             <label title="how long a detent migration takes; the slider is always instant">ramp
               <input id="mixTempoSecs" type="number" min="0" max="300" step="1" value="16" /> s</label>
           </div>
-          <input id="crossfader" type="range" min="-1" max="1" step="0.01" value="-1"
-            title="crossfader - constant power (each deck ~-3 dB at center, energy stays level); with swap on it holds both decks full through center instead" />
+          <div class="xf-scale">
+            <input id="crossfader" class="dj-fader" type="range" min="-1" max="1" step="0.01" value="-1"
+              title="crossfader - constant power (each deck ~-3 dB at center, energy stays level); with swap on it holds both decks full through center instead" />
+          </div>
           <div class="mix-actions">
             <button id="mixStack" class="small" title="stack the decks: deck B's waveform directly under deck A's, playheads on one vertical line, so the beats of the two can be read against each other (side by side again with another press)">&#8645;</button>
             <button id="mixLearn" class="small" title="MIDI learn: arm this, then click desk controls and turn hardware knobs, one after another; click again or press esc to finish. Alt+click a control to unbind it">midi</button>

@@ -284,6 +284,38 @@ select:hover {
   border-color: var(--border-strong);
 }
 
+/* Text-shaped inputs carry the theme everywhere - the stock white box with black text was
+   what every unscoped field (a bpm box, the ramp seconds) fell back to. :where() keeps this at
+   zero specificity, so a panel's own tighter rule (mono digits, a width) still wins. */
+input:where(:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file'])) {
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+  transition: border-color 0.12s;
+}
+input:where(:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file'])):focus {
+  border-color: var(--accent);
+}
+input::placeholder {
+  color: var(--text-dim);
+}
+/* Plain boxes for numbers: the stock spinner buttons are a few pixels wide and nobody steps a
+   rate or a bpm by clicking them - you type it. */
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 button.primary {
   background: var(--accent-soft);
   border-color: var(--accent);
@@ -313,13 +345,17 @@ button.primary:hover {
   background: color-mix(in srgb, var(--ok) 28%, transparent);
 }
 
-#playBtn.is-playing {
+#playBtn.is-playing,
+#deckAPlay.is-playing,
+#deckBPlay.is-playing {
   background: color-mix(in srgb, var(--err) 16%, transparent);
   border-color: var(--err);
   color: var(--err);
 }
 
-#playBtn.is-playing:hover {
+#playBtn.is-playing:hover,
+#deckAPlay.is-playing:hover,
+#deckBPlay.is-playing:hover {
   background: color-mix(in srgb, var(--err) 28%, transparent);
 }
 
@@ -3583,10 +3619,51 @@ body.mix-on #deckAHead {
   color: var(--accent);
   white-space: nowrap;
 }
-#deckBHead select,
-#deckAHead select {
+/* The set's queue bookkeeping - never shown (the song button below is the picker). */
+#deckAFile,
+#deckBFile {
+  display: none;
+}
+/* The deck heads' play/stop: the main button's colours (green at rest, red while playing) at
+   .small size, on a fixed width so the flip doesn't reflow the head around it. */
+#deckAPlay,
+#deckBPlay {
+  min-width: 62px;
+  text-align: center;
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+#deckAPlay:hover,
+#deckBPlay:hover {
+  background: color-mix(in srgb, var(--ok) 28%, transparent);
+}
+/* The song on the deck, as a button: pressing it opens organize, whose rows carry →A / →B.
+   Reads left-aligned like a menu, ellipsizes a long title, dims while nothing is picked. */
+.deck-song {
   flex: 1;
   min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deck-song.empty {
+  color: var(--text-dim);
+}
+/* "keep" while the pane holds a song file (the single-editor world can't hold one) and the
+   tempo slider before both decks have a tempo: dimmed, not clickable, no hover. */
+#deckBHead button:disabled,
+#deckAHead button:disabled,
+.mix-center button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+#deckBHead button:disabled:hover,
+#deckAHead button:disabled:hover,
+.mix-center button:disabled:hover {
+  background: var(--bg-panel);
+  border-color: var(--border);
 }
 
 #mixStrip {
@@ -3640,9 +3717,6 @@ body.mix-on #deckAHead {
   background: var(--ok);
   border-color: var(--ok);
 }
-.mix-ctl {
-  height: 14px;
-}
 .mix-center {
   display: flex;
   flex-direction: column;
@@ -3651,19 +3725,165 @@ body.mix-on #deckAHead {
   gap: 6px;
   padding: 0 6px;
 }
+/* --- the desk's horizontal faders: crossfader, tempo migration and the per-stem mini-faders.
+   The same look as the channel faders (mix-dfader): a recessed groove with a capped grip whose
+   index line is the accent. The stock range control was the one piece of chrome on the desk
+   that wasn't drawn by the theme. Each has a size (cap width x height, groove height); the
+   crossfader's groove also carries its center detent. --- */
+.dj-fader {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  background: transparent;
+  cursor: default;
+  --cap-w: 10px;
+  --cap-h: 18px;
+  --groove: 4px;
+  height: var(--cap-h);
+}
+.dj-fader::-webkit-slider-runnable-track {
+  height: var(--groove);
+  border-radius: calc(var(--groove) / 2);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+}
+.dj-fader::-moz-range-track {
+  height: var(--groove);
+  border-radius: calc(var(--groove) / 2);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+}
+.dj-fader::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: var(--cap-w);
+  height: var(--cap-h);
+  margin-top: calc((var(--groove) - var(--cap-h)) / 2 - 1px);
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  /* the cap's index line: a 2px accent stripe down the middle of the cap */
+  background: linear-gradient(var(--accent), var(--accent)) center / 2px 60% no-repeat, var(--bg-panel);
+  box-shadow: 0 1px 2px var(--shadow);
+  transition: border-color 0.12s;
+}
+.dj-fader::-moz-range-thumb {
+  width: var(--cap-w);
+  height: var(--cap-h);
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: linear-gradient(var(--accent), var(--accent)) center / 2px 60% no-repeat, var(--bg-panel);
+  box-shadow: 0 1px 2px var(--shadow);
+}
+.dj-fader:hover::-webkit-slider-thumb,
+.dj-fader:active::-webkit-slider-thumb,
+.dj-fader:focus-visible::-webkit-slider-thumb {
+  border-color: var(--accent);
+}
+.dj-fader:hover::-moz-range-thumb,
+.dj-fader:active::-moz-range-thumb,
+.dj-fader:focus-visible::-moz-range-thumb {
+  border-color: var(--accent);
+}
+.dj-fader:focus {
+  outline: none;
+}
+.dj-fader:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* The crossfader in its scale: a row of ticks above and below the slot, like the printed
+   scale beside a desk's crossfader - taller at the ends and the center. The ticks span the
+   CAP CENTER's travel (width minus one cap), so the grip's index line lands exactly on a tick
+   at each end and at the detent, and the position reads off the scale even though the cap
+   hides the groove beneath it. */
+.xf-scale {
+  --xf-w: 180px;
+  --xf-cap: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.xf-scale::before,
+.xf-scale::after {
+  content: '';
+  width: calc(var(--xf-w) - var(--xf-cap));
+  height: 8px;
+  --t: var(--border-strong);
+  background:
+    linear-gradient(var(--t), var(--t)) 0 0 / 1px 100% no-repeat,
+    linear-gradient(var(--t), var(--t)) 50% 0 / 1px 100% no-repeat,
+    linear-gradient(var(--t), var(--t)) 100% 0 / 1px 100% no-repeat,
+    linear-gradient(to right, var(--t) 1px, transparent 1px) 0 100% / calc(100% / 10) 45% repeat-x;
+}
+.xf-scale::after {
+  /* below the slot the short ticks hang from the top edge instead */
+  background:
+    linear-gradient(var(--t), var(--t)) 0 0 / 1px 100% no-repeat,
+    linear-gradient(var(--t), var(--t)) 50% 0 / 1px 100% no-repeat,
+    linear-gradient(var(--t), var(--t)) 100% 0 / 1px 100% no-repeat,
+    linear-gradient(to right, var(--t) 1px, transparent 1px) 0 0 / calc(100% / 10) 45% repeat-x;
+}
 #crossfader {
-  width: 180px;
+  width: var(--xf-w);
+  --cap-w: var(--xf-cap);
+  --cap-h: 24px;
+  --groove: 6px;
+}
+#mixTempoSlider {
+  --cap-w: 10px;
+  --cap-h: 20px;
+}
+/* The per-stem mini-faders: a hand-sized cap on a slot that takes the width the row has. */
+.mix-ctl {
+  --cap-w: 12px;
+  --cap-h: 20px;
+  --groove: 4px;
+  flex: 1;
+  min-width: 90px;
 }
 .mix-actions {
   display: flex;
   gap: 6px;
 }
+/* Swap is a toggle button, drawn like the desk's other latching buttons (stack, cue, midi).
+   The checkbox is still there - client.js reads .checked and listens for change - it just
+   isn't painted; the label wearing the button look is what you press. */
 .mix-swap-label {
-  display: flex;
-  gap: 4px;
+  position: relative;
+  display: inline-flex;
   align-items: center;
+  padding: 2px 8px;
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+.mix-swap-label:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+}
+.mix-swap-label input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+  pointer-events: none;
+}
+.mix-swap-label:has(input:checked) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.mix-swap-label:has(input:focus-visible) {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 .mix-cue.on {
   color: var(--ok);
@@ -3853,9 +4073,6 @@ body.mix-on #deckAHead {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg-panel);
-}
-.mix-fader {
-  width: 130px;
 }
 
 /* --- the per-deck knob columns (trim / low / mid / high / filter), mirrored around center --- */
@@ -4085,7 +4302,8 @@ body.mix-on #deckAHead {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 1.2fr 1.4fr;
+  /* the tracks are written by orgApplyCols (col | seam | col | seam | col) */
+  grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1.2fr) 7px minmax(0, 1.4fr);
 }
 .org-col {
   min-width: 0;
@@ -4095,10 +4313,59 @@ body.mix-on #deckAHead {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
+  position: relative;
 }
-.org-col:last-child {
-  border-right: none;
+/* The seam between two columns: the DJ seams' grip, turned on its side. */
+.org-seam {
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.org-seam::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3px;
+  height: 46px;
+  border-radius: 2px;
+  transform: translate(-50%, -50%);
+  background: var(--border);
+}
+.org-seam:hover::before,
+.org-seam.dragging::before {
+  background: var(--accent);
+}
+.org-seam.dragging {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-panel));
+}
+/* Folded to a rail: the column's contents go, its name stands on end; a click brings it back. */
+.org-rail {
+  display: none;
+}
+.org-col.min > * {
+  display: none;
+}
+.org-col.min > .org-rail {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  height: 100%;
+  padding-top: 10px;
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.org-col.min > .org-rail:hover {
+  color: var(--accent);
 }
 .org-col h3 {
   display: flex;
@@ -4167,18 +4434,41 @@ body.mix-on #deckAHead {
 .org-col li .org-bpm {
   font-family: var(--mono);
 }
+/* A row's buttons (✎ ↑ ↓ ✕, +, the star) float over the row's tail on hover instead of
+   holding a lane open: four hidden-but-present buttons were costing every title ~110px.
+   Slotted from the right by nth-last-of-type, so however many a row has they pack the same. */
+.org-col li {
+  position: relative;
+  padding-right: 30px; /* the always-on star's lane */
+}
 .org-col li button {
-  visibility: hidden;
+  display: none;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  padding: 1px 0;
+  text-align: center;
 }
 .org-col li:hover button,
 .org-col li button.org-star {
-  visibility: visible;
+  display: inline-block;
 }
+.org-col li button:nth-last-of-type(1) { right: 4px; }
+.org-col li button:nth-last-of-type(2) { right: 28px; }
+.org-col li button:nth-last-of-type(3) { right: 52px; }
+.org-col li button:nth-last-of-type(4) { right: 76px; }
 .org-col li button:disabled {
   opacity: 0.35;
 }
 .org-del:hover {
   color: var(--err);
+}
+.org-col li.org-pick {
+  cursor: pointer;
+}
+.org-col li.org-pick:hover {
+  color: var(--accent);
 }
 .org-star {
   color: var(--ok);

@@ -13906,7 +13906,7 @@ async function exitDjMode(keep = 'restore') {
       if (songPanes.b.song) {
         // The main editor can't hold a song file - promoting one is the complete-mix oddment
         // still in TODO.md. Until then the mix ends by exiting and letting the song play on.
-        logLine('deck B holds a song file - promoting a file to the main deck isn\'t built yet; exit with restore instead', true);
+        logLine('deck B holds a song file - a file can\'t be kept as the main editor; stop it and leave DJ mode with restore');
         return;
       }
       const res = await api('POST', '/api/mix/complete');
@@ -13921,7 +13921,7 @@ async function exitDjMode(keep = 'restore') {
     if (keep === 'a' && songPanes.a.song) {
       // "Keep this pane" promises the main editor survives - but this pane is a FILE, and the
       // single-editor world can't hold one (the complete-mix oddment, from the other side).
-      logLine('deck A holds a song file - the single-editor world can\'t hold one; stop it and leave with the hotkey instead', true);
+      logLine('deck A holds a song file - a file can\'t be kept as the main editor; stop it and leave DJ mode with restore');
       return;
     }
     if (deckBCM?.getValue().trim() && !confirm('Leave DJ mode? Deck B is dropped.')) return;
@@ -14084,8 +14084,7 @@ async function stepDeckBQueue() {
   await loadDeckBFile();
 }
 
-async function loadDeckBFile() {
-  const value = document.getElementById('deckBFile').value;
+async function loadDeckBFile(value = document.getElementById('deckBFile').value) {
   if (!value || !deckBCM) return;
   try {
     // Loading a song is a song SWITCH: whatever this deck was playing is cleared engine-side
@@ -14130,8 +14129,7 @@ async function loadDeckBFile() {
 // it is the buffer you may livecode next. A disk FILE loads onto the deck's song track and its
 // waveform pane covers the editor; the buffer underneath is left strictly alone (it is your
 // autosaved wip, not a descriptor card - unlike deck B's split editor).
-async function loadDeckAFile() {
-  const value = document.getElementById('deckAFile').value;
+async function loadDeckAFile(value = document.getElementById('deckAFile').value) {
   if (!value || !mixModeOn) return;
   try {
     await api('POST', '/api/mix/clear', { deck: 'a' });
@@ -14153,6 +14151,38 @@ async function loadDeckAFile() {
     if (mixModeOn) mixRefresh(); // its old stems left the strip; a song track may have arrived
   } catch (e) {
     logLine(e.message ?? String(e), true);
+  }
+}
+
+// The organize window's →A / →B: load a library item (a saved pattern's name or a playlist's
+// file item) onto a deck. A file from any playlist is made loadable (deckFileItems only holds
+// the active set's), the hidden select is pointed at it so the set's queue keeps its place,
+// and the modal closes - the deck head now says the song.
+async function loadDeckSong(deck, item) {
+  const key = libItemKey(item);
+  if (libItemIsFile(item)) deckFileItems.set(key, item);
+  document.getElementById(deck === 'a' ? 'deckAFile' : 'deckBFile').value = key;
+  closeOrganize();
+  await (deck === 'a' ? loadDeckAFile : loadDeckBFile)(key);
+}
+
+// The deck heads' song buttons say what each deck holds; the play buttons read play/stop for
+// THEIR deck (the server's per-deck truth, pushed on every desk frame - see mixSyncValues).
+const deckPlayingNow = { a: false, b: false };
+function deckHeadRender(state) {
+  for (const d of ['a', 'b']) {
+    const U = d.toUpperCase();
+    const song = songPanes[d].song;
+    const held = song ? `♪ ${song.title}` : (d === 'a' ? currentSavedName : deckBFileName);
+    const songBtn = document.getElementById(`deck${U}Song`);
+    songBtn.textContent = held || 'pick a song…';
+    songBtn.classList.toggle('empty', !held);
+    const on = !!state?.playing?.[d];
+    deckPlayingNow[d] = on;
+    const playBtnD = document.getElementById(`deck${U}Play`);
+    playBtnD.innerHTML = on ? '&#9632; stop' : '&#9654; play';
+    playBtnD.classList.toggle('is-playing', on);
+    playBtnD.title = on ? `stop deck ${U} (Cmd/Ctrl+. in this pane)` : 'Cmd/Ctrl+Enter in this pane';
   }
 }
 
@@ -14239,6 +14269,8 @@ function makeSongPane(deck) {
   const nudgeDnEl = byId('songNudgeDn');
   const nudgeUpEl = byId('songNudgeUp');
   const hostEl = deck === 'a' ? document.getElementById('editorPane') : deckBPaneEl;
+  const keepBtn = document.getElementById(deck === 'a' ? 'deckAKeep' : 'deckBKeep');
+  const updBtn = document.getElementById(deck === 'a' ? 'deckAUpdate' : 'deckBUpdate');
   const hostCM = () => (deck === 'a' ? cm : deckBCM);
   const D = `deck ${U}`;
 
@@ -14385,6 +14417,8 @@ function makeSongPane(deck) {
   // editor holds your wip), so a failure there keeps the pane up and says so on the strip.
   P.open = async () => {
     hostEl.classList.add('song-on');
+    keepBtn.disabled = true; // a file can't be promoted to the single editor (see exitDjMode)
+    updBtn.disabled = true; // a file has nothing to re-evaluate
     paneEl.classList.remove('hidden');
     detailEl.classList.remove('hidden');
     ctlRender(); // title, toggles, bpm - whatever the mirror already knows
@@ -14411,6 +14445,8 @@ function makeSongPane(deck) {
   P.close = () => {
     P.cueUp(); // a pane going away under a held cue would otherwise leave the deck previewing
     hostEl.classList.remove('song-on');
+    keepBtn.disabled = false;
+    updBtn.disabled = false;
     paneEl.classList.add('hidden');
     detailEl.classList.add('hidden'); // in the stack it would otherwise sit there blank
     wave = null;
@@ -15468,6 +15504,7 @@ function mixSyncValues(state) {
   }
   mixTempoRender(state);
   songPaneSync(state); // after the tempo render: adoption reads mixNativeBpm for its beatgrid
+  deckHeadRender(state);
 }
 
 // The desk push channel: the server frames every desk change (throttled to ~30ms) over SSE,
@@ -15616,7 +15653,7 @@ function mixTrackRow(t) {
     input.max = max;
     input.step = 0.01;
     input.value = t.controls[ctl] ?? MIX_NEUTRAL[ctl];
-    input.className = `mix-ctl mix-${ctl}`;
+    input.className = `dj-fader mix-ctl mix-${ctl}`;
     input.title = `${title} - double-click resets`;
     input.addEventListener('input', () => mixPost(`${t.key}|${ctl}`, { key: t.key, name: ctl, value: Number(input.value) }));
     input.addEventListener('dblclick', () => {
@@ -15712,16 +15749,15 @@ for (const deck of ['a', 'b']) {
     });
   }
 }
-document.getElementById('deckBLoad').addEventListener('click', loadDeckBFile);
-document.getElementById('deckBFile').addEventListener('change', loadDeckBFile);
-document.getElementById('deckBPlay').addEventListener('click', () => evalDeckB(true));
+document.getElementById('deckBSong').addEventListener('click', () => openOrganize('b'));
+document.getElementById('deckBPlay').addEventListener('click', () => (deckPlayingNow.b ? doStop('b') : evalDeckB(true)));
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
 document.getElementById('deckAKeep').addEventListener('click', () => exitDjMode('a'));
 document.getElementById('deckBKeep').addEventListener('click', () => exitDjMode('b'));
-document.getElementById('deckALoad').addEventListener('click', loadDeckAFile);
-document.getElementById('deckAFile').addEventListener('change', loadDeckAFile);
+document.getElementById('deckASong').addEventListener('click', () => openOrganize('a'));
 document.getElementById('deckAPlay').addEventListener('click', () => (
-  mixModeOn && songPanes.a.song ? songPlay('a') : evaluate(true, { byHand: true })));
+  deckPlayingNow.a ? doStop('a')
+    : mixModeOn && songPanes.a.song ? songPlay('a') : evaluate(true, { byHand: true })));
 document.getElementById('deckAUpdate').addEventListener('click', () => {
   if (mixModeOn && songPanes.a.song) {
     logLine('deck A holds a song - nothing to re-evaluate; ▶ plays/resumes, drag the waveform to scrub');
@@ -15729,9 +15765,7 @@ document.getElementById('deckAUpdate').addEventListener('click', () => {
   }
   evaluate(false, { byHand: true });
 });
-document.getElementById('deckAOrganize').addEventListener('click', () => openOrganize());
 document.getElementById('deckBNext').addEventListener('click', stepDeckBQueue);
-document.getElementById('deckBOrganize').addEventListener('click', () => openOrganize());
 document.getElementById('fileOrganizeBtn').addEventListener('click', () => openOrganize());
 
 // ---------------------------------------------------------------------------------------------
@@ -15777,7 +15811,12 @@ let orgSort = 'saved'; // 'saved' (newest first, the API's order) | 'name'
 let orgSongs = []; // saved patterns, refreshed on open
 let orgHeld = null; // what a drag is carrying: { from: 'all'|'items', item, index? } - item is a name or a file item
 
-async function openOrganize() {
+// Opened from a deck head (`forDeck`), the window is that deck's picker: clicking a song in
+// the playlist or all-songs pane loads it there and closes the window. From the files tab it
+// is the library editor it always was.
+let orgForDeck = null;
+async function openOrganize(forDeck = null) {
+  orgForDeck = forDeck;
   try {
     await loadLibraryDoc();
     await refreshSongFileStat(libDoc); // file items render as missing when their path is gone
@@ -15791,17 +15830,114 @@ async function openOrganize() {
   if (!orgSelected) orgSelected = libDoc.playlists.find((p) => p.id === libDoc.active)?.id ?? libDoc.playlists[0]?.id ?? null;
   orgEl.classList.remove('hidden');
   window.addEventListener('keydown', orgOnKey);
-  orgSay(ORG_HINT);
+  orgSay(orgForDeck ? `click a song to load it onto deck ${orgForDeck.toUpperCase()}` : ORG_HINT);
   orgRender();
   orgEl.querySelector('#orgSearch').focus();
 }
 
 function closeOrganize() {
   orgHeld = null;
+  orgForDeck = null;
   orgPlayerStopSource();
   orgRenderTransport();
   orgEl?.classList.add('hidden');
   window.removeEventListener('keydown', orgOnKey);
+}
+
+// --- the three columns' widths: two draggable seams, a column dragged below its minimum
+// collapses to a labelled rail (click it, or its seam, to bring it back), double-click a seam
+// to reset. Stored widths are px; the LAST open column takes whatever is left, so the panel
+// is always exactly filled. Remembered across sessions. ---
+const ORG_COLS_KEY = 'poptart.orgCols';
+const ORG_COL_MIN = 90; // narrower than this and the column folds to a rail
+const ORG_RAIL = 22;
+const ORG_SEAM = 7;
+let orgCols = { w: [null, null, null], min: [false, false, false] };
+try {
+  const saved = JSON.parse(localStorage.getItem(ORG_COLS_KEY) ?? 'null');
+  if (saved?.w?.length === 3 && saved?.min?.length === 3) orgCols = saved;
+} catch { /* a damaged entry is the default */ }
+
+function orgApplyCols(save) {
+  const cols = orgEl.querySelectorAll('.org-col');
+  const last = [2, 1, 0].find((i) => !orgCols.min[i]);
+  const defaults = ['minmax(0, 1fr)', 'minmax(0, 1.2fr)', 'minmax(0, 1.4fr)'];
+  const track = (i) => {
+    if (orgCols.min[i]) return `${ORG_RAIL}px`;
+    if (i === last) return 'minmax(0, 1fr)';
+    return orgCols.w[i] ? `${orgCols.w[i]}px` : defaults[i];
+  };
+  orgEl.querySelector('#orgCols').style.gridTemplateColumns =
+    `${track(0)} ${ORG_SEAM}px ${track(1)} ${ORG_SEAM}px ${track(2)}`;
+  cols.forEach((c, i) => c.classList.toggle('min', !!orgCols.min[i]));
+  if (save) {
+    try { localStorage.setItem(ORG_COLS_KEY, JSON.stringify(orgCols)); } catch { /* fine */ }
+  }
+}
+
+function orgInitCols() {
+  const grid = orgEl.querySelector('#orgCols');
+  const cols = [...orgEl.querySelectorAll('.org-col')];
+  cols.forEach((c, i) => c.querySelector('.org-rail').addEventListener('click', () => {
+    orgCols.min[i] = false;
+    orgApplyCols(true);
+  }));
+  for (const seam of orgEl.querySelectorAll('.org-seam')) {
+    const k = Number(seam.dataset.seam); // the column to this seam's left
+    seam.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const g = grid.getBoundingClientRect();
+      const lastOpen = () => [2, 1, 0].find((i) => !orgCols.min[i]);
+      // A seam trades width between its two neighbours only: their combined width is fixed
+      // for the drag and split at the pointer. Every other open column is frozen at its
+      // measured px so nothing else moves (the last open column is fr and fills the rest,
+      // which comes to the same thing once the pair's total is held).
+      cols.forEach((c, i) => {
+        if (!orgCols.min[i] && i !== lastOpen()) orgCols.w[i] = c.getBoundingClientRect().width;
+      });
+      const leftEdge = cols[k].getBoundingClientRect().left - g.left;
+      const pair = cols[k].getBoundingClientRect().width + cols[k + 1].getBoundingClientRect().width;
+      const startX = e.clientX;
+      let moved = false;
+      seam.classList.add('dragging');
+      seam.setPointerCapture(e.pointerId);
+      const onMove = (ev) => {
+        if (Math.abs(ev.clientX - startX) > 3) moved = true;
+        if (!moved) return;
+        const w = Math.max(0, Math.min(pair, ev.clientX - g.left - leftEdge - ORG_SEAM / 2));
+        // Under the minimum on either side, that side folds to its rail; pull back and it
+        // returns (dragging this seam is a gesture on exactly these two columns).
+        orgCols.min[k] = w < ORG_COL_MIN;
+        orgCols.min[k + 1] = pair - w < ORG_COL_MIN;
+        const rightW = orgCols.min[k + 1] ? ORG_RAIL : Math.max(ORG_COL_MIN, pair - w);
+        orgCols.w[k] = orgCols.min[k] ? null : pair - rightW;
+        orgCols.w[k + 1] = orgCols.min[k + 1] ? null : rightW;
+        orgApplyCols();
+      };
+      const onUp = (ev) => {
+        seam.classList.remove('dragging');
+        if (seam.hasPointerCapture?.(ev.pointerId)) seam.releasePointerCapture(ev.pointerId);
+        seam.removeEventListener('pointermove', onMove);
+        seam.removeEventListener('pointerup', onUp);
+        seam.removeEventListener('pointercancel', onUp);
+        // A press that never became a drag is a click: the way back for a folded neighbour.
+        if (!moved) {
+          if (orgCols.min[k]) orgCols.min[k] = false;
+          else if (orgCols.min[k + 1]) orgCols.min[k + 1] = false;
+        }
+        orgApplyCols(true);
+      };
+      seam.addEventListener('pointermove', onMove);
+      seam.addEventListener('pointerup', onUp);
+      seam.addEventListener('pointercancel', onUp);
+    });
+    seam.addEventListener('dblclick', () => {
+      orgCols = { w: [null, null, null], min: [false, false, false] };
+      orgApplyCols(true);
+    });
+  }
+  orgApplyCols();
 }
 
 function orgOnKey(e) {
@@ -15826,11 +15962,15 @@ function buildOrganize() {
         <section class="org-col">
           <h3>playlists <button id="orgAdd" class="small" title="new playlist">+</button></h3>
           <ul id="orgLists"></ul>
+          <div class="org-rail" title="click to bring the playlists back">playlists</div>
         </section>
+        <div class="org-seam" data-seam="0" title="drag to resize (all the way left minimizes, double-click resets)"></div>
         <section class="org-col">
           <h3 id="orgItemsTitle">contents</h3>
           <ul id="orgItems"></ul>
+          <div class="org-rail" title="click to bring the playlist's contents back">contents</div>
         </section>
+        <div class="org-seam" data-seam="1" title="drag to resize (past either end minimizes a column, double-click resets)"></div>
         <section class="org-col">
           <h3>
             <button id="orgTabSongs" class="org-tab on" title="every saved pattern">all songs</button>
@@ -15844,6 +15984,7 @@ function buildOrganize() {
             <button id="orgDiskAdd" class="small" title="add the selection to the open playlist (←)">←</button>
           </div>
           <ul id="orgAll" tabindex="-1"></ul>
+          <div class="org-rail" title="click to bring the songs back">songs</div>
         </section>
       </div>
       <footer id="orgFoot">
@@ -15857,6 +15998,7 @@ function buildOrganize() {
       </footer>
     </div>`;
   document.body.appendChild(orgEl);
+  orgInitCols();
   orgEl.addEventListener('click', (e) => { if (e.target === orgEl) closeOrganize(); });
   orgEl.querySelector('#orgClose').addEventListener('click', closeOrganize);
   orgEl.querySelector('#orgAdd').addEventListener('click', () => {
@@ -15933,6 +16075,13 @@ function orgMove(p, from, to) {
   const [item] = p.items.splice(from, 1);
   if (item == null) return;
   p.items.splice(from < to ? to - 1 : to, 0, item);
+}
+
+/** A deck's picker: the row itself loads the song onto the deck that opened the window. */
+function orgPickRow(li, item) {
+  li.classList.add('org-pick');
+  li.title = `load onto deck ${orgForDeck.toUpperCase()}`;
+  li.addEventListener('click', () => loadDeckSong(orgForDeck, item));
 }
 
 function orgIconBtn(glyph, title, onClick) {
@@ -16076,6 +16225,7 @@ function orgRenderItems() {
     down.disabled = i === p.items.length - 1;
     const del = orgIconBtn('✕', 'remove from playlist', () => { p.items.splice(i, 1); saveLibraryDoc(); orgRender(); });
     del.classList.add('org-del');
+    if (orgForDeck && !missing) orgPickRow(li, item);
     li.append(up, down, del);
     li.addEventListener('dragstart', (e) => {
       orgHeld = { from: 'items', item, index: i };
@@ -16169,6 +16319,7 @@ function orgRenderAll() {
       orgRender();
     });
     add.disabled = !orgSelected;
+    if (orgForDeck) orgPickRow(li, s.name);
     li.appendChild(add);
     li.addEventListener('dragstart', (e) => {
       orgHeld = { from: 'all', item: s.name };
