@@ -15863,7 +15863,7 @@ function mixTrackRow(t, soloed) {
   gate.className = 'mix-gate' + (fader > 0 ? ' on' : '') + (soloed ? ' solo' : '');
   gate.title = 'gate this stem in/out (fader to 1/0)'
     + '; with swap on, gating IN throws the other deck\'s same-named stem out and gating OUT brings it back - toggle to audition either'
-    + '; cmd+click solos it within its deck (blue), cmd+shift+click adds it to the solo, cmd+click a soloed stem to un-solo it (the last one out restores the deck)';
+    + '; cmd+click solos it within its deck (blue) - cmd+click another to move the solo there, cmd+shift+click to add one, cmd+click a soloed stem to drop it. A plain click on any soloed stem ends the solo and puts the deck back as it was';
   gate.addEventListener('click', async (e) => {
     try {
       // cmd (ctrl elsewhere) + click: solo within the deck rather than toggle this one gate.

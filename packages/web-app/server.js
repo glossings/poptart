@@ -198,23 +198,24 @@ function mixSetFader(key, value) {
   engine.setParam(engineTrack(key), -1, 'fader', value, 0);
 }
 
-// The plain gate gesture on one stem. Outside solo it is just the fader. While the deck is
-// soloing: gating a soloed stem out un-solos it (and, if it was the last, the deck comes back
-// to its pre-solo state with that one stem out - the click asked for silence, the exit asked
-// for the original); gating any other stem is also recorded into the snapshot, so an edit made
-// while auditioning survives the solo's end.
+// The plain gate gesture on one stem. Outside solo it is just the fader.
+//
+// A plain click on a SOLOED stem means "done auditioning": the whole solo ends and the deck
+// returns to the faders it had before it started - and nothing else. It deliberately does not
+// also toggle the stem that was clicked; the gesture asked to leave the solo, not to make an
+// edit on the way out, and a stem that vanished as you dismissed the audition would be a
+// surprise. Leaving one stem of a solo at a time is cmd+click's job.
+//
+// Gating a stem that ISN'T soloed while a solo runs is a real edit, and goes into the snapshot
+// too, so it survives the solo's end.
 function mixGateSet(key, on) {
   const deck = deckOfKey(key);
-  const value = on ? 1 : 0;
   if (mixState.solo[deck].has(key)) {
-    mixState.solo[deck].delete(key);
-    if (mixState.solo[deck].size === 0) mixSoloEnd(deck);
-    if (!on) mixSetFader(key, 0);
-    else if (mixState.solo[deck].size > 0) mixSetFader(key, 1); // still soloing others: it stays audible
+    mixSoloEnd(deck);
     return;
   }
-  mixSetFader(key, value);
-  mixState.soloPrev[deck]?.set(key, value);
+  mixSetFader(key, on ? 1 : 0);
+  mixState.soloPrev[deck]?.set(key, on ? 1 : 0);
 }
 
 // End a deck's solo: every stem back to the fader it had before the first solo (stems born
@@ -3994,10 +3995,12 @@ const routes = {
   },
 
   // Solo within a deck (cmd+click a gate). Body: { key, add }.
-  //   - a stem not yet soloed: it becomes THE solo (every other stem on the deck gates out), or
-  //     with `add` joins the stems already soloed (cmd+shift+click);
+  //   - a stem not yet soloed: it becomes THE solo, every other stem on the deck gating out -
+  //     so cmd+clicking another stem mid-solo SWAPS the solo over to it, however many were in
+  //     it. With `add` (cmd+shift+click) it joins them instead.
   //   - a soloed stem: it leaves the solo. If others remain they keep playing without it; if it
-  //     was the last, the deck returns to the faders it had before the first solo.
+  //     was the last, the deck returns to the faders it had before the first solo - so taking a
+  //     multi-solo apart one stem at a time ends exactly where dismissing it whole does.
   // Deck-local: the other deck is never touched, swap mode or not - a solo is for auditioning
   // a part, not for swapping it. -> { key, deck, solo: [keys soloed after the gesture] }.
   'POST /api/mix/solo': async (body) => {

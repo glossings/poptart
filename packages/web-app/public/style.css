@@ -3450,6 +3450,7 @@ li.CodeMirror-hint-active {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  position: relative; /* the active-deck ring overlays it (#editorPane is already relative) */
   border-left: 1px solid var(--border);
 }
 #deckBPane.hidden,
@@ -3579,10 +3580,20 @@ body.mix-on.mix-stacked #djStackResize {
   display: block;
 }
 /* The armed deck - the one Cmd+Enter plays and Cmd+. stops (see djSetActiveDeck). A ring rather
-   than a fill: it has to read at a glance across the room without competing with the waveform. */
-body.mix-on #editorPane.deck-active,
-body.mix-on #deckBPane.deck-active {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+   than a fill: it has to read at a glance across the room without competing with the waveform.
+   Drawn as an OVERLAY on top of the pane's own children rather than as an inset shadow on the
+   pane: the editor and the waveform pane paint their own backgrounds over the whole pane, which
+   swallowed three sides of the ring and all of it on a deck holding code. The pane, not the
+   editor inside it, so the ring takes in the deck's head - its title and its buttons. */
+body.mix-on #editorPane.deck-active::after,
+body.mix-on #deckBPane.deck-active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 3px;
+  pointer-events: none; /* it sits over the editor - it must not eat a single click */
+  z-index: 6; /* over CodeMirror's own layers and the song pane's canvases */
 }
 body.mix-on .deck-active .deck-b-title {
   color: var(--accent);

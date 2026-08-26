@@ -822,7 +822,14 @@ server.waitForBoot {
     // begin/end are normalized 0..1 positions; rate is signed (negative = reversed); dur is the
     // precomputed natural length in seconds (Node does that math - it knows file duration, fit
     // and stretch). Plain defs repitch via BufRd index speed; warp defs (stretch != 1) keep
-    // pitch and time independent via Warp1 granulation. atk/dec/rel are the amplitude ADSR times
+    // pitch and time independent via Warp1 granulation - at the same level as the plain ones,
+    // which takes an explicit correction: Warp1 sums `overlaps` Hann-windowed copies, and Hann
+    // overlap-added at hop = window/overlaps adds up to overlaps/2, so at 8 overlaps a warp def
+    // ran 4x (+12 dB) hotter than the plain def beside it (fixed 2026-08-26 - patterns that had
+    // a .gain() on a .stretch() to tame it will want it taken back off). `2 / overlaps` is that
+    // factor exactly back off. These keep windowRandRatio at 0.1, unlike the keylock player
+    // below: their grains are pitch-shifted (freqScale is the rate), so they do not line up the
+    // way a transparent keylock's do, and a little scatter is what keeps a stretch from combing. atk/dec/rel are the amplitude ADSR times
     // scaled by dur (atk 2 = attack over 2*dur, so it never reaches full before the note ends);
     // sus is a 0..1 level. All default to 0/0/1/0, which floors down to the old tiny declick fade.
     [1, 2].do { |nc|
@@ -870,9 +877,11 @@ server.waitForBoot {
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
         SynthDef(("poptart_sample_warp_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0|
+            var overlaps = 8;
             var from = Select.kr(rate < 0, [begin, end]);
             var to = Select.kr(rate < 0, [end, begin]);
-            var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs, 0.1, -1, 8, 0.1, 2);
+            var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs, 0.1, -1, overlaps, 0.1, 2)
+                * (2 / overlaps);
             // atk/dec/rel are the play duration (dur) times their input, so .attack(2) ramps over
             // 2*dur and never reaches 1 before the note ends. A gate held open for exactly dur runs
             // attack->decay->sustain across playback, then releases when the region ends; a cut
@@ -887,6 +896,7 @@ server.waitForBoot {
         // play time, which cancel down to "normalized units per second" - independent of where the
         // loop bounds are, so a file-wrapping loop still moves at the rate .speed()/.fit() asked for.
         SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0|
+            var overlaps = 8;
             var span = max(0.001, end - begin);
             var step = (span / max(0.001, dur)) * rate.sign / ControlRate.ir;
             var lo = loopLo, hi = max(loopLo + 0.001, loopHi);
@@ -898,7 +908,7 @@ server.waitForBoot {
             var bouncePh = (Phasor.kr(0, step.abs, 0, 2 * loopSpan, 0) + bounceFrom) % (2 * loopSpan);
             var bounced = lo + loopSpan - absdif(bouncePh, loopSpan);
             var ptr = Select.kr(pingpong, [lo + walk, bounced]);
-            var sig = Warp1.ar(nc, buf, ptr, rate.abs, 0.1, -1, 8, 0.1, 2);
+            var sig = Warp1.ar(nc, buf, ptr, rate.abs, 0.1, -1, overlaps, 0.1, 2) * (2 / overlaps);
             // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
             // the loop's gate-off, then released. Floors preserve the original declick fade.
             var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.008, rel * dur);
@@ -930,11 +940,26 @@ server.waitForBoot {
         // instead of BufRd, so a rate change (tempo sync riding the master clock, a nudge)
         // moves time without moving pitch. Same controls, same reports - the two defs are
         // interchangeable, and toggling keylock is a declicked player swap via songStart.
-        // Same Warp1 recipe as the loop player above.
+        //
+        // NOT the same Warp1 settings as the sample players above, which granulate for effect.
+        // What keylock has to be is TRANSPARENT - a deck riding at its native rate must sound
+        // the same with the button in or out, and only then is the correction it applies at
+        // other rates something you can trust mid-mix. Two things follow from that:
+        //
+        //  - windowRandRatio 0, not 0.1. Scattering each grain's start is what granular texture
+        //    wants; here it means every transient arrives eight slightly different times, which
+        //    is audible as flamming and phasing on drums. At 0 the grains stay coherent, and at
+        //    rate 1 the overlap-add reconstructs the source exactly.
+        //  - the overlap gain taken back out. Warp1 sums `overlaps` Hann-windowed copies, and
+        //    Hann at hop = window/overlaps adds up to overlaps/2 - so at 8 overlaps the player
+        //    ran 4x (+12 dB) hotter than the plain one beside it, which is why turning keylock
+        //    on made a deck jump and clip. `2 / overlaps` is exactly that factor back off.
         SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
+            var overlaps = 8;
             var step = rate.lag(0.05) * BufRateScale.ir(buf) * run.lag(0.02);
             var idx = Phasor.ar(t_seek, step, 0, BufFrames.ir(buf), seekFrame);
-            var sig = Warp1.ar(nc, buf, idx / BufFrames.ir(buf), 1, 0.1, -1, 8, 0.1, 2);
+            var sig = Warp1.ar(nc, buf, idx / BufFrames.ir(buf), 1, 0.1, -1, overlaps, 0, 2)
+                * (2 / overlaps);
             var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
             SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / BufSampleRate.ir(buf));
             Out.ar(out, toStereo.(sig) * env * amp.lag(0.02));
