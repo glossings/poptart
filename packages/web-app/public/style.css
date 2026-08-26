@@ -615,7 +615,7 @@ aside section {
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: ns-resize;
+  cursor: default;
   user-select: none;
   touch-action: none;
   background:
@@ -3024,7 +3024,7 @@ li.CodeMirror-hint-active {
 .mixer-knob {
   width: 30px;
   height: 30px;
-  cursor: ns-resize;
+  cursor: default;
   touch-action: none;
 }
 
@@ -3935,6 +3935,27 @@ body.mix-on #deckAHead {
   width: 44px;
 }
 
+/* The ctrl+hover tooltip (see tipBox in client.js): every title in the app, shown only while
+   ctrl is held over the control - never a wall of text over what you are reaching for. */
+#tipBox {
+  position: fixed;
+  z-index: 200;
+  max-width: 360px;
+  padding: 6px 9px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px var(--shadow);
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+#tipBox.hidden {
+  display: none;
+}
+
 /* Every scrollable surface in the app carries the theme (thin, border-colored thumb) - stock
    scrollbars were the one bit of chrome the theme didn't reach, and each new pane was picking
    them back up one at a time. */
@@ -4133,7 +4154,7 @@ body.mix-on #deckAHead {
   border: 1px solid var(--border);
   background: var(--bg-raised);
   position: relative;
-  cursor: ns-resize;
+  cursor: default;
   touch-action: none;
 }
 .mix-knob::after {
@@ -4173,7 +4194,7 @@ body.mix-on #deckAHead {
   min-height: 0;
   width: 24px;
   position: relative;
-  cursor: ns-resize;
+  cursor: default;
   touch-action: none;
 }
 .mix-dfader::before {

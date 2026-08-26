@@ -11235,6 +11235,84 @@ audioInputApply.addEventListener('click', async () => {
   }
 });
 
+// --- tooltips on ctrl+hover: the whole app's `title`s live in data-tip instead, and one box
+// shows the hovered control's while ctrl is held. The `title` property itself is rerouted on
+// HTMLElement's prototype, so every `el.title = ...` in this file (and the HTML's own
+// title="..." attributes, moved on load and as markup is added) lands in data-tip without a
+// single call site changing; reading `el.title` gives it back. Off, titles are put back and the
+// browser shows them as ever. ---
+const CTRL_TIPS_KEY = 'poptart-ctrl-tooltips';
+let ctrlTipsOn = localStorage.getItem(CTRL_TIPS_KEY) !== '0'; // default on
+{
+  const native = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'title');
+  Object.defineProperty(HTMLElement.prototype, 'title', {
+    configurable: true,
+    get() { return this.dataset.tip ?? native.get.call(this); },
+    set(v) {
+      if (!ctrlTipsOn) { delete this.dataset.tip; native.set.call(this, v); return; }
+      if (v == null || v === '') delete this.dataset.tip; else this.dataset.tip = String(v);
+      this.removeAttribute('title');
+    },
+  });
+}
+const tipBox = document.createElement('div');
+tipBox.id = 'tipBox';
+tipBox.className = 'hidden';
+document.body.appendChild(tipBox);
+let tipPointer = { x: 0, y: 0, target: null };
+let tipCtrl = false;
+function tipMoveTitles(el, on) {
+  const nodes = [el, ...(el.querySelectorAll?.(on ? '[title]' : '[data-tip]') ?? [])];
+  for (const n of nodes) {
+    if (!(n instanceof HTMLElement)) continue;
+    if (on && n.hasAttribute('title')) { n.dataset.tip = n.getAttribute('title'); n.removeAttribute('title'); }
+    else if (!on && n.dataset.tip != null) { n.setAttribute('title', n.dataset.tip); delete n.dataset.tip; }
+  }
+}
+function tipRender() {
+  const el = tipCtrl && ctrlTipsOn ? tipPointer.target?.closest?.('[data-tip]') : null;
+  const text = el?.dataset.tip;
+  if (!text) { tipBox.classList.add('hidden'); return; }
+  tipBox.textContent = text;
+  tipBox.classList.remove('hidden');
+  const r = tipBox.getBoundingClientRect();
+  const x = Math.min(tipPointer.x + 14, window.innerWidth - r.width - 8);
+  const y = tipPointer.y + 18 + r.height > window.innerHeight ? tipPointer.y - r.height - 10 : tipPointer.y + 18;
+  tipBox.style.left = `${Math.max(4, x)}px`;
+  tipBox.style.top = `${Math.max(4, y)}px`;
+}
+new MutationObserver((muts) => {
+  if (!ctrlTipsOn) return;
+  for (const m of muts) {
+    if (m.type === 'attributes') tipMoveTitles(m.target, true);
+    else for (const n of m.addedNodes) if (n instanceof HTMLElement) tipMoveTitles(n, true);
+  }
+}).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['title'] });
+function setCtrlTips(on) {
+  ctrlTipsOn = on;
+  localStorage.setItem(CTRL_TIPS_KEY, on ? '1' : '0');
+  tipMoveTitles(document.documentElement, on);
+  tipRender();
+}
+if (ctrlTipsOn) tipMoveTitles(document.documentElement, true);
+window.addEventListener('pointermove', (e) => {
+  tipPointer = { x: e.clientX, y: e.clientY, target: e.target };
+  if (tipCtrl) tipRender();
+}, { passive: true });
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Control' || tipCtrl) return;
+  tipCtrl = true;
+  tipRender();
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'Control' || !e.ctrlKey) { tipCtrl = false; tipRender(); }
+});
+window.addEventListener('blur', () => { tipCtrl = false; tipRender(); });
+window.addEventListener('pointerdown', () => { tipCtrl = false; tipRender(); }, { capture: true });
+const ctrlTooltipsToggle = document.getElementById('ctrlTooltipsToggle');
+ctrlTooltipsToggle.checked = ctrlTipsOn;
+ctrlTooltipsToggle.addEventListener('change', () => setCtrlTips(ctrlTooltipsToggle.checked));
+
 // Editor settings. The docs toggle governs both documentation tooltips - the panel beside the
 // autocomplete popup and the ctrl-hover one (see the tooltips section above).
 const docTooltipsToggle = document.getElementById('docTooltipsToggle');
