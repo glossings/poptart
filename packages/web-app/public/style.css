@@ -3670,6 +3670,10 @@ body.mix-on #deckAHead {
   display: flex;
   gap: 12px;
   align-items: stretch;
+  /* nothing on the desk is text to copy - the labels between the knobs would otherwise flip
+     the cursor to an I-beam every few pixels */
+  user-select: none;
+  -webkit-user-select: none;
   /* the seam above is the drag handle's border, not the strip's */
   background: var(--bg-panel);
   padding: 6px 10px;
