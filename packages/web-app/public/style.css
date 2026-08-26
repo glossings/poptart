@@ -3541,6 +3541,12 @@ body.mix-on.mix-stacked #songStack {
 #songStack .song-detail.active {
   border-color: var(--accent);
 }
+/* The livecoded decks' strip: sized by the .song-detail rules above, but there is nothing here to
+   scrub - a pattern is code, not a recording - so it gives back that class's grab cursor. The
+   wheel still zooms (both strips share one scale). */
+.dj-live-wave {
+  cursor: default;
+}
 body.mix-on.mix-stacked #editorPane {
   grid-row: 3;
   grid-column: 1;

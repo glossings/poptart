@@ -272,6 +272,11 @@ function songPlayheadSec(deck, at = null) {
 // resume spawns a fresh player at posSec regardless (see /api/song/play), so nothing is lost
 // by letting the old one go.
 const SONG_PAUSE_RELEASE_SEC = 0.25;
+// The player's OWN release - sc/poptart.scd's poptart_song_* / poptart_songwarp_*, whose envelope
+// is Env.asr(0.005, 1, 0.05), so a gate 0 takes this long to reach silence and free the synth.
+// Node needs the number because the fade at the END of a file has to be finished by the last
+// sample rather than started at it (see songEndOfFile).
+const SONG_RELEASE_SEC = 0.05;
 function songPause(deck, posSec = null) {
   if (!songDecks[deck]?.playing) return;
   if (engine) {
@@ -295,8 +300,34 @@ function songMarkPaused(deck, posSec = null) {
   s.endTimer = null;
 }
 
-// The player's Phasor would wrap at EOF and replay from the top - pause it just as it gets
-// there instead. Re-armed on every start and seek (and, later, rate change).
+// End of file, and NOT a pause. Pausing halts the Phasor (`run` 0, ~20ms of slew) and leaves the
+// player holding a frozen sample - but doing that AT the end means the Phasor is still moving as
+// it arrives there, and Phasor wraps: the deck jumps from the last sample to frame 0, which is a
+// click, and then plays a few ms of the track's own beginning on the way down. It was audible on
+// anything that doesn't happen to end in silence.
+//
+// So the end is a plain gate 0, sent one release EARLY: the player's own envelope fades the last
+// 50ms out, reaches zero on the final sample, and frees the synth itself (doneAction 2). There is
+// nothing left holding a loud sample to click, and nothing still moving to wrap.
+//
+// `endAt` is the engine moment the last sample plays, worked out when the timer was ARMED rather
+// than measured on arrival, so a late event loop still fades at the right sample - and _latency
+// clamps a moment already past to "now", which is the worst case rather than a wrong one.
+function songEndOfFile(deck, endAt) {
+  const s = songDecks[deck];
+  if (!s?.playing) return;
+  if (engine) {
+    try {
+      engine.songStop(engineTrack(SONG_KEYS[deck]), endAt - SONG_RELEASE_SEC);
+    } catch { /* engine between restarts */ }
+  }
+  // The playhead is pinned to the duration rather than measured: this is where it got to, and the
+  // model must land exactly on the end, not a millisecond either side of it.
+  songMarkPaused(deck, s.duration);
+  mixNotify();
+}
+
+// Arm the end of the file. Re-armed on every start and seek (and, later, rate change).
 function songArmEndTimer(deck) {
   const s = songDecks[deck];
   if (!s) return;
@@ -306,13 +337,14 @@ function songArmEndTimer(deck) {
   const now = engine.getTime();
   const begin = Math.max(now, s.startSec); // a quantized start may not have begun yet
   const secondsLeft = (begin - now) + (s.duration - songPlayheadSec(deck, begin)) / s.rate;
+  // Fired one release early, because the fade has to be OVER by the last sample rather than
+  // beginning at it. songEndOfFile is handed the true end so the timer's own jitter doesn't move
+  // where the fade lands.
+  const endAt = now + secondsLeft;
   s.endTimer = setTimeout(() => {
     s.endTimer = null;
-    // The playhead is pinned to the duration rather than measured: this is the moment it got
-    // there, and the model must land exactly on the end, not a millisecond either side of it.
-    songPause(deck, s.duration);
-    mixNotify();
-  }, Math.max(0, secondsLeft * 1000));
+    songEndOfFile(deck, endAt);
+  }, Math.max(0, (secondsLeft - SONG_RELEASE_SEC) * 1000));
 }
 
 // --- tempo sync + nudge + drift servo (songs phase 4; the math lives in song-sync.js) ---

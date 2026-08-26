@@ -14959,6 +14959,198 @@ function makeSongPane(deck) {
 
 const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
 
+// --- the livecoded decks' strip: what a deck playing CODE shows in the waveform stack ---------
+//
+// A song deck's waveform is analysed from a file. A pattern deck has no file, so this draws the
+// two things a running pattern does have: the deck's LEVEL, and the BAR LINES.
+//
+// The level is the ~20/sec pre-fader meter the channel meters already stream (server.js's
+// deckLevelNotify), kept as a short timestamped history rather than only its latest value - so
+// the past's amplitude costs no engine work, no request and no analysis. It is the loose part
+// though: a reading reaches here some tens of ms after the sound it measures, so it is slid back
+// by DJ_LIVE_TRACE_LAG, which is an estimate and the only guessed number on the strip.
+//
+// The bar lines are exact, straight off the clock, and they are what this is really for: the same
+// downbeats and beats a song deck draws from its own detected tempo, so a pattern stacked over a
+// song can be lined up by eye. Deliberately NOT drawn from the pattern's events - the grid is
+// already in the browser (patternRegions[].gates, the editor's highlighting) and an early version
+// drew every stem's onsets from it, but a screenful of ticks says less about where the bar is
+// than the bar line does, and the code itself is right there underneath saying what plays.
+//
+// Stacked layout only. A pattern deck's editor IS the instrument, and covering it with a waveform
+// - which is what a song deck does to its own editor - would take the instrument away.
+
+const DJ_LIVE_TRACE_LAG = 90; // ms: the meter's analysis window plus the SSE coalesce (see above)
+const DJ_LIVE_TRACE_MAX = 2000; // ~80s of history at the feed's ~25/sec - past the widest zoom
+const djLiveTrace = { a: [], b: [] }; // [{ t: performance.now() as it landed, p, r }]
+
+/** Every level frame kept with the moment it arrived, rather than only the latest. */
+function djLiveTracePush(frame) {
+  const t = performance.now();
+  for (const deck of ['a', 'b']) {
+    const v = frame?.[deck];
+    if (!v) continue;
+    const ring = djLiveTrace[deck];
+    ring.push({ t, p: v.p ?? 0, r: v.r ?? 0 });
+    if (ring.length > DJ_LIVE_TRACE_MAX) ring.splice(0, ring.length - DJ_LIVE_TRACE_MAX);
+  }
+}
+
+// Built here rather than in the markup: they only ever live in the stack, which applyMixStack
+// fills. `.song-detail` for the stack's own sizing rules (flex basis 0, the hidden state); the
+// livecoded strip has nothing to scrub, so .dj-live-wave drops that class's grab cursor.
+const djLiveWaveEls = {};
+for (const deck of ['a', 'b']) {
+  const canvas = document.createElement('canvas');
+  canvas.className = 'song-detail dj-live-wave hidden';
+  canvas.id = `djLiveWave${deck.toUpperCase()}`;
+  canvas.title = `deck ${deck.toUpperCase()}: the deck's level as it played, under the clock's `
+    + 'bars and beats. Wheel to zoom (both strips share one scale, which is what lets them be '
+    + 'read against each other)';
+  // The song strips' wheel zoom, on the same control: the scale is shared, so zooming here moves
+  // the song deck above it too (setZoom propagates while stacked).
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    songPanes[deck].setZoom(songPanes[deck].zoomSec() * Math.exp(e.deltaY * 0.0015));
+  }, { passive: false });
+  djLiveWaveEls[deck] = canvas;
+}
+
+/**
+ * The strip's window, in cycles, and where any cycle position falls across `w` pixels of it.
+ * Pure geometry, and the one invariant that matters is that xOf(cycNow) is the exact centre: the
+ * playhead is pinned there on the song strips too, and that shared pin is what lets a livecoded
+ * deck and a song deck stacked one above the other be read against each other at all.
+ */
+function djLiveWindow(cycNow, cps, spanSec, w) {
+  const spanCyc = spanSec * cps;
+  const cyc0 = cycNow - spanCyc / 2;
+  return { cyc0, cyc1: cycNow + spanCyc / 2, xOf: (cyc) => ((cyc - cyc0) / spanCyc) * w };
+}
+
+/**
+ * The cycle a meter frame belongs on. `t` is when the frame ARRIVED; the sound it measured
+ * happened DJ_LIVE_TRACE_LAG earlier than that, so the trace is slid further back into the past,
+ * never forward. Getting this sign wrong is the failure that looks like a working strip whose
+ * beats sit twice the lag off the grid.
+ */
+function djLiveTraceCycle(t, nowMs, cycNow, cps) {
+  return cycNow - ((nowMs - t + DJ_LIVE_TRACE_LAG) / 1000) * cps;
+}
+
+/** A deck draws this strip when it is playing CODE - a deck holding a file has its own waveform. */
+function djLiveWaveOn(deck) {
+  return mixModeOn && mixStacked && !songPanes[deck].song
+    && patternRegions.some((r) => r.deck === deck);
+}
+
+function djLiveWaveDraw(deck) {
+  const canvas = djLiveWaveEls[deck];
+  songSizeCanvas(canvas);
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const { accent, dim, text } = songThemeColors();
+  const mid = h / 2;
+  const maxAmp = mid - 6;
+
+  // One scale with the song decks, and the playhead pinned at centre exactly as theirs is: the
+  // stack exists so the strips can be read against each other, which needs both to be true.
+  const cps = transport.cps || 0.5;
+  const cycNow = currentCyclePos();
+  const { cyc0, cyc1, xOf } = djLiveWindow(cycNow, cps, songPanes[deck].zoomSec(), w);
+
+  ctx.strokeStyle = dim;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, mid + 0.5);
+  ctx.lineTo(w, mid + 0.5);
+  ctx.stroke();
+
+  // Every line here is SCROLLING, and none of them are snapped to whole pixels. Rounding an x to
+  // get a crisp 1px line quantizes a smooth slide into 1px jumps - and since the lines are not an
+  // integer number of pixels apart, each one jumps at a different moment, which is read as the
+  // whole grid shimmering rather than moving. Fractional fills antialias their edges and slide.
+  const vline = (x, y0, y1) => ctx.fillRect(x - 0.5, y0, 1, y1 - y0);
+
+  // The bar/beat grid, straight off the clock - a cycle IS a bar here (bpm is cps x 240, so four
+  // beats to the cycle). Same marks as a song deck's own beatgrid: downbeats full height, beats
+  // as ticks off the top and bottom, so a strip drawn from the clock and one drawn from a file's
+  // detected tempo can be lined up by eye.
+  for (let c = Math.floor(cyc0); c <= cyc1; c++) {
+    for (let b = 0; b < 4; b++) {
+      const x = xOf(c + b / 4);
+      if (x < -1 || x > w + 1) continue;
+      ctx.fillStyle = b === 0 ? rgbaFrom(ctx, accent, 0.4) : rgbaFrom(ctx, text, 0.35);
+      if (b === 0) vline(x, 2, h - 2);
+      else {
+        vline(x, 2, 8);
+        vline(x, h - 8, h - 2);
+      }
+    }
+  }
+
+  // The level trace, mirrored around the centre like a song's waveform: translucent peak with the
+  // solid rms body inside it, one column per meter frame. Columns are placed by the timestamp
+  // each frame arrived under, not by their position in the ring, so a stalled feed leaves a gap
+  // rather than quietly sliding the whole history off the beat. Normalized to the loudest thing
+  // still on screen, with a floor so a silent deck doesn't magnify its own noise into a waveform.
+  const ring = djLiveTrace[deck];
+  const nowMs = performance.now();
+  const cycOfT = (t) => djLiveTraceCycle(t, nowMs, cycNow, cps);
+  let loudest = 0;
+  for (const s of ring) if (s.p > loudest) loudest = s.p;
+  const norm = loudest < 0.02 ? 1 : Math.min(6, 1 / loudest);
+  const cols = [];
+  for (let i = 0; i < ring.length; i++) {
+    const x = xOf(cycOfT(ring[i].t));
+    if (x < -8 || x > w + 8) continue;
+    const to = xOf(cycOfT(i + 1 < ring.length ? ring[i + 1].t : nowMs));
+    cols.push({ x, cw: Math.max(1, to - x) + 0.6, s: ring[i] });
+  }
+  for (const [alpha, key] of [[0.28, 'p'], [0.7, 'r']]) {
+    ctx.fillStyle = rgbaFrom(ctx, accent, alpha);
+    for (const col of cols) {
+      const amp = Math.min(1, col.s[key] * norm) * maxAmp;
+      ctx.fillRect(col.x, mid - amp, col.cw, amp * 2 || 1);
+    }
+  }
+
+  // The playhead is the one line that does NOT move, so it is the one line worth snapping to
+  // whole pixels: it stays hard-edged while everything else slides under it.
+  ctx.fillStyle = accent;
+  ctx.fillRect(Math.round(w / 2) - 1, 0, 2, h);
+}
+
+// One loop for both strips, running for as long as the stack is up. It decides visibility itself
+// every frame rather than being told: what makes a deck livecoded (an eval, a song loading or
+// leaving, a deck being cleared) happens in half a dozen places, and a strip that works out its
+// own answer each frame cannot be left behind by a path that forgot to say so.
+let djLiveWaveRaf = null;
+function djLiveWaveFrame() {
+  djLiveWaveRaf = null;
+  if (!mixModeOn || !mixStacked) return; // applyMixStack starts it again
+  for (const deck of ['a', 'b']) {
+    const on = djLiveWaveOn(deck);
+    djLiveWaveEls[deck].classList.toggle('hidden', !on);
+    if (on) djLiveWaveDraw(deck);
+  }
+  djLiveWaveRaf = requestAnimationFrame(djLiveWaveFrame);
+}
+function djLiveWaveStart() {
+  if (djLiveWaveRaf == null) djLiveWaveRaf = requestAnimationFrame(djLiveWaveFrame);
+}
+function djLiveWaveStop() {
+  if (djLiveWaveRaf != null) cancelAnimationFrame(djLiveWaveRaf);
+  djLiveWaveRaf = null;
+  for (const deck of ['a', 'b']) djLiveWaveEls[deck].classList.add('hidden');
+  djLiveTrace.a = [];
+  djLiveTrace.b = [];
+}
+
 // --- stacked decks: deck B's pane under deck A's rather than beside it (the ⇅ strip button) ---
 // A per-browser preference, not desk state: nothing about the sound changes. The canvases
 // re-measure themselves every frame (songSizeCanvas), so the reflow needs no extra plumbing.
@@ -14976,10 +15168,15 @@ function applyMixStack() {
   if (on) {
     // The two detail canvases move up into the stack, A over B; the panes' draw loops keep
     // drawing them wherever they are (they hold the element, not a place in the DOM).
-    stack.append(songPanes.a.detailEl, songPanes.b.detailEl);
+    // Four elements, two per deck, A's pair then B's: only one of each pair is ever visible (a
+    // deck holds a file or it holds code), so this fixed order is the visual order either way -
+    // and no path that changes what a deck holds has to reorder the stack.
+    stack.append(songPanes.a.detailEl, djLiveWaveEls.a, songPanes.b.detailEl, djLiveWaveEls.b);
     songPanes.b.setZoom(songPanes.a.zoomSec(), { propagate: false }); // one scale from here on
+    djLiveWaveStart();
   } else {
     for (const d of ['a', 'b']) songPanes[d].reattachDetail();
+    djLiveWaveStop();
   }
 }
 document.getElementById('mixStack').addEventListener('click', () => {
@@ -15761,6 +15958,7 @@ function mixPushStart() {
       const { a, b } = JSON.parse(e.data);
       mixMeterFeed.a = a;
       mixMeterFeed.b = b;
+      djLiveTracePush({ a, b }); // the same frames, kept as history for the livecoded strips
     } catch { /* a torn frame; the next one corrects */ }
   });
   mixMeterStart();
