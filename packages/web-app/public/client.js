@@ -14872,9 +14872,138 @@ function applyMixStack() {
 document.getElementById('mixStack').addEventListener('click', () => {
   mixStacked = !mixStacked;
   localStorage.setItem(MIX_STACK_KEY, mixStacked ? '1' : '0');
+  if (mixStacked) djRegions.stackMin = false; // stacking on with the region minimized reads as a dead button
+  djApplyRegionSizes(true);
   applyMixStack();
 });
 applyMixStack();
+
+// --- DJ mode's three regions: drag the seams to divide the height -----------------------------
+//
+// Waveforms on top (only while stacked), both decks in the middle, the mixer at the bottom - and
+// a drag handle on each of the two seams. The decks are the springy region: they take whatever
+// the other two leave, so two handles size all three, and a deck is never sized on its own (the
+// panes are columns of one grid row, so a row height is always both decks at once - same for the
+// two waveforms in the stack). Dragging a handle past its region's minimum minimizes that region
+// away; the handle stays behind as a labelled bar, and a click on it brings the region back.
+//
+// Sizes are px in localStorage, per browser, like the stack preference itself - desk furniture,
+// not song state. The canvases re-measure every frame (songSizeCanvas, mixMeterPaint), so the
+// only thing a drag has to tell anyone about is CodeMirror.
+const DJ_REGION_KEY = 'poptartDjRegions';
+const DJ_STACK_MIN_PX = 90; // waveform stack: below this a drag minimizes instead of shrinking
+const DJ_STRIP_MIN_PX = 74; // mix strip: likewise
+const DJ_DECKS_MIN_PX = 170; // the decks always keep at least this much
+const djRegions = { stack: null, strip: null, stackMin: false, stripMin: false };
+try {
+  Object.assign(djRegions, JSON.parse(localStorage.getItem(DJ_REGION_KEY) || '{}'));
+} catch {
+  /* a corrupt entry just means the default division */
+}
+
+function djApplyRegionSizes(save) {
+  const root = document.documentElement;
+  // The sizes are px dragged in whatever window they were dragged in, and that window may since
+  // have shrunk: cap them here (without rewriting what's stored, so a window back at its old
+  // height comes back to the old division) or the decks and the console get squeezed off.
+  const room = Math.max(240, window.innerHeight - 220); // minus header, console, decks' minimum
+  let stack = djRegions.stack ? Math.min(djRegions.stack, room) : null;
+  let strip = djRegions.strip ? Math.min(djRegions.strip, room) : null;
+  if (stack && strip && stack + strip > room) {
+    const k = room / (stack + strip);
+    stack = Math.round(stack * k);
+    strip = Math.round(strip * k);
+  }
+  root.style.setProperty('--dj-stack-h', stack ? `${Math.round(stack)}px` : 'minmax(160px, 45%)');
+  root.style.setProperty('--dj-strip-h', strip ? `${Math.round(strip)}px` : 'auto');
+  document.body.classList.toggle('dj-stack-min', !!djRegions.stackMin);
+  document.body.classList.toggle('dj-strip-min', !!djRegions.stripMin);
+  if (save) localStorage.setItem(DJ_REGION_KEY, JSON.stringify(djRegions));
+}
+
+/** The editors don't re-measure themselves when their pane changes height. */
+function djRegionsReflow() {
+  cm.refresh();
+  deckBCM?.refresh();
+}
+
+/**
+ * Wire one seam. `heightAt(clientY, geom)` turns a pointer position into the height its region
+ * would have (the two regions grow in opposite directions); `geom` is measured once per drag,
+ * off elements that don't move while it runs, so a minimized region is still draggable open.
+ */
+function djInitResizeHandle(id, { sizeKey, minKey, minPx, heightAt, maxPx }) {
+  const el = document.getElementById(id);
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const mainTop = document.querySelector('main').getBoundingClientRect().top;
+    const bottom = document.getElementById('console').getBoundingClientRect().top;
+    // The other two regions' current heights, so a max can leave the decks their minimum.
+    const stackEl = document.getElementById('songStack');
+    const geom = {
+      mainTop,
+      bottom,
+      stripH: mixStripEl.getBoundingClientRect().height,
+      stackH: stackEl.getBoundingClientRect().height,
+      seams: 24, // both handles
+    };
+    const startY = e.clientY;
+    let moved = false;
+    el.classList.add('dragging');
+    el.setPointerCapture(e.pointerId);
+    const onMove = (ev) => {
+      if (Math.abs(ev.clientY - startY) > 3) moved = true;
+      if (!moved) return;
+      const h = heightAt(ev.clientY, geom);
+      if (h < minPx) {
+        djRegions[minKey] = true; // still dragging: pull back past the minimum and it returns
+      } else {
+        djRegions[minKey] = false;
+        djRegions[sizeKey] = Math.min(h, maxPx(geom));
+      }
+      djApplyRegionSizes();
+    };
+    const onUp = (ev) => {
+      el.classList.remove('dragging');
+      if (el.hasPointerCapture?.(ev.pointerId)) el.releasePointerCapture(ev.pointerId);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+      // A press that never became a drag is a click - which is the way back from minimized.
+      if (!moved && djRegions[minKey]) djRegions[minKey] = false;
+      djApplyRegionSizes(true);
+      djRegionsReflow();
+    };
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+  });
+  // Double-click: back to the default division for this region.
+  el.addEventListener('dblclick', () => {
+    djRegions[sizeKey] = null;
+    djRegions[minKey] = false;
+    djApplyRegionSizes(true);
+    djRegionsReflow();
+  });
+}
+
+djInitResizeHandle('djStackResize', {
+  sizeKey: 'stack',
+  minKey: 'stackMin',
+  minPx: DJ_STACK_MIN_PX,
+  heightAt: (y, g) => y - g.mainTop, // the stack starts at the top of main and grows down
+  maxPx: (g) => Math.max(DJ_STACK_MIN_PX, g.bottom - g.mainTop - DJ_DECKS_MIN_PX - g.stripH - g.seams),
+});
+djInitResizeHandle('djStripResize', {
+  sizeKey: 'strip',
+  minKey: 'stripMin',
+  minPx: DJ_STRIP_MIN_PX,
+  heightAt: (y, g) => g.bottom - y, // the strip ends above the console and grows up
+  maxPx: (g) => Math.max(DJ_STRIP_MIN_PX, g.bottom - g.mainTop - DJ_DECKS_MIN_PX - g.stackH - g.seams),
+});
+djApplyRegionSizes();
+window.addEventListener('resize', () => djApplyRegionSizes()); // re-cap, never re-store
 
 /** The deck whose song pane is the clicked-last "window" - what Cmd+Enter / Cmd+. target. */
 function songActiveDeck() {

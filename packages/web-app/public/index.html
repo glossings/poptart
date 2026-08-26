@@ -84,6 +84,12 @@
              beat-comparison view. The panes below keep their rows (title, overview, controls),
              squashed, side by side. client.js moves the canvases; nothing is duplicated. -->
         <div id="songStack" class="hidden"></div>
+        <!-- The waveform region's bottom edge: drag it to trade height between the stacked
+             waveforms and the decks below, drag it to the top to minimize the waveforms away
+             (the bar then says so, and a click brings them back). Double-click resets. -->
+        <div id="djStackResize" class="dj-resize" role="separator" aria-orientation="horizontal"
+             title="drag to resize the waveforms (all the way up minimizes them, double-click resets)"><span
+             class="dj-resize-label">waveforms</span></div>
         <div id="editorPane">
           <!-- Shown only in DJ mode (body.mix-on): the main editor IS deck A, and both decks
                get the same head - load a song, play it, or leave DJ mode keeping this pane. -->
@@ -327,6 +333,12 @@
             </section>
           </div>
         </aside>
+
+      <!-- The mixer's top edge: same gesture as the waveform handle - drag to trade height with
+           the decks, all the way down to minimize the strip away. -->
+      <div id="djStripResize" class="dj-resize" role="separator" aria-orientation="horizontal"
+           title="drag to resize the mixer (all the way down minimizes it, double-click resets)"><span
+           class="dj-resize-label">mixer</span></div>
 
       <!-- The mix strip (mix mode): per-track DJ controls for both decks around the crossfader.
            Every control here is ephemeral performance state - nothing writes into song code. -->
