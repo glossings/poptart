@@ -7,7 +7,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  syncRate, syncOctave, effectiveRate, snapToGrid, alignToGrid, snapToOnset, gridPhase, servoTrim,
+  syncRate, syncOctave, effectiveRate, snapToGrid, alignToGrid, gridPhase, servoTrim,
   NUDGE_PCT, RATE_MIN, RATE_MAX, BEATS_PER_CYCLE,
 } = require('./song-sync');
 
@@ -21,15 +21,17 @@ test('syncRate: master over native, clamped, null without a native tempo', () =>
   assert.equal(syncRate(128, 0), null);
 });
 
-test('syncOctave / syncRate: half- and double-time pairings lock at the nearest octave', () => {
-  assert.equal(syncOctave(140, 70), 2, 'a 70 under a 140 clock counts its eighths');
-  assert.equal(syncOctave(70, 140), 0.5);
+test('syncOctave / syncRate: the ratio is the song\'s tempo over the clock\'s', () => {
+  assert.equal(syncOctave(140, 70), 0.5, 'a 70 under a 140 clock runs half-time');
+  assert.equal(syncOctave(70, 140), 2, 'a 140 under a 70 clock runs double-time');
   assert.equal(syncOctave(128, 126), 1);
-  assert.equal(syncOctave(100, 140), 1, 'a wide but sub-octave gap still stretches (0.71)');
+  assert.equal(syncOctave(100, 140), 1, 'a wide but sub-octave gap still stretches (1.4)');
   assert.equal(syncOctave(140, 70, 1), 1, 'pinned');
   assert.equal(syncRate(140, 70), 1, 'so the 70 plays at its own speed');
-  assert.equal(syncRate(140, 70, 1), 2, 'unless told to double');
+  assert.equal(syncRate(140, 70, 1), 2, 'unless pinned to beat-match, which doubles it');
   assert.equal(syncRate(70, 140), 1);
+  // The case that was backwards: an 84.7 under a 115 clock pinned to half-time must SLOW down.
+  assert.ok(Math.abs(syncRate(115, 84.7, 0.5) - 0.679) < 0.001, `half-time = 0.68, got ${syncRate(115, 84.7, 0.5)}`);
 });
 
 test('effectiveRate: ±4% while a nudge is held, exactly the base otherwise', () => {
@@ -67,15 +69,6 @@ test('alignToGrid: the nearest position with the wanted bar phase', () => {
   assert.equal(alignToGrid(0.1, 120, 0, Infinity, 0.5), 1, 'never lands before the file');
   assert.equal(alignToGrid(9.9, 120, 0, 10, 0.5), 9, 'nor past its end');
   assert.equal(alignToGrid(5, null, 0, 10, 0.5), 5, 'no bpm, no grid');
-});
-
-test('snapToOnset: the nearest transient inside the window, else the hand\'s position', () => {
-  const onsets = [0, 0.5, 1.02, 1.5];
-  assert.equal(snapToOnset(1.0, onsets), 1.02);
-  assert.equal(snapToOnset(0.53, onsets), 0.5);
-  assert.equal(snapToOnset(0.75, onsets), 0.75, 'nothing within 80ms');
-  assert.equal(snapToOnset(1.7, onsets), 1.7);
-  assert.equal(snapToOnset(0.3, []), 0.3);
 });
 
 test('gridPhase: the bar position a grid-master song hands the transport', () => {

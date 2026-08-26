@@ -28,10 +28,13 @@ const SERVO_CLOSE_SEC = 8;
 const SERVO_MAX = 0.003;
 
 /**
- * The tempo octave a sync locks to: ×½, ×1 or ×2 on the song's native bpm - whichever brings
- * the rate nearest ×1. A 70 bpm song under a 140 clock plays at its own speed with its beats
- * on the clock's eighths (half-time), not doubled; a 140 under a 70 clock likewise. A pinned
- * `mult` (0.5 | 1 | 2) overrides the choice.
+ * The tempo ratio a sync locks a song to, relative to the CLOCK: 1 beat-matches (the song's
+ * beats on the clock's beats), ½ is half-time (one song beat every two clock beats - a 70 bpm
+ * song under a 140 clock plays at its own speed), 2 is double-time. 'auto' picks whichever of
+ * the three brings the playing rate nearest ×1; a pinned ratio (0.5 | 1 | 2) is taken as is.
+ *
+ * Read it as "this song runs at <ratio> × the clock's tempo". (Until 2026-08-26 the number
+ * meant the opposite - a multiplier on the song's own bpm - so ½ played a track double speed.)
  */
 function syncOctave(masterBpm, nativeBpm, mult = 'auto') {
   if (mult === 0.5 || mult === 1 || mult === 2) return mult;
@@ -39,7 +42,7 @@ function syncOctave(masterBpm, nativeBpm, mult = 'auto') {
   let best = 1;
   let bestErr = Infinity;
   for (const m of [0.5, 1, 2]) {
-    const err = Math.abs(Math.log(masterBpm / (nativeBpm * m)));
+    const err = Math.abs(Math.log((masterBpm * m) / nativeBpm));
     if (err < bestErr - 1e-9) {
       bestErr = err;
       best = m;
@@ -48,10 +51,10 @@ function syncOctave(masterBpm, nativeBpm, mult = 'auto') {
   return best;
 }
 
-/** rate = master/(native × octave), clamped. Null when the song's native tempo isn't known. */
+/** rate = (master × ratio) / native, clamped. Null when the song's native tempo isn't known. */
 function syncRate(masterBpm, nativeBpm, mult = 'auto') {
   if (!Number.isFinite(masterBpm) || !Number.isFinite(nativeBpm) || nativeBpm <= 0 || masterBpm <= 0) return null;
-  return Math.min(RATE_MAX, Math.max(RATE_MIN, masterBpm / (nativeBpm * syncOctave(masterBpm, nativeBpm, mult))));
+  return Math.min(RATE_MAX, Math.max(RATE_MIN, (masterBpm * syncOctave(masterBpm, nativeBpm, mult)) / nativeBpm));
 }
 
 /** The playing rate: base with the momentary nudge (hold = -1 | 0 | 1) applied. */
@@ -100,25 +103,6 @@ function alignToGrid(posSec, bpm, anchorSec = 0, durationSec = Infinity, phase01
 }
 
 /**
- * Snap a hand-placed position to the nearest transient when one is within `windowSec` - what
- * a "quantize" light does for a cue or anchor press: the finger says which hit, the audio
- * says exactly when it is. `onsets` is sorted seconds; a position with no hit nearby is
- * returned as it was.
- */
-function snapToOnset(posSec, onsets, windowSec = 0.08) {
-  if (!Array.isArray(onsets) || !onsets.length) return posSec;
-  let lo = 0;
-  let hi = onsets.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (onsets[mid] < posSec) lo = mid + 1; else hi = mid;
-  }
-  let best = onsets[lo];
-  if (lo > 0 && Math.abs(onsets[lo - 1] - posSec) < Math.abs(best - posSec)) best = onsets[lo - 1];
-  return Math.abs(best - posSec) <= windowSec ? best : posSec;
-}
-
-/**
  * Where a song position sits inside its own bar, as a fraction of a cycle. This is the phase a
  * deck hands the transport when it takes the grid over (see Transport#startAt): the clock's
  * cycle boundaries become the song's bar lines, so every later start that quantizes to a cycle
@@ -149,6 +133,6 @@ function servoTrim(errSec) {
 }
 
 module.exports = {
-  syncRate, syncOctave, effectiveRate, snapToGrid, alignToGrid, snapToOnset, gridPhase, servoTrim,
+  syncRate, syncOctave, effectiveRate, snapToGrid, alignToGrid, gridPhase, servoTrim,
   NUDGE_PCT, RATE_MIN, RATE_MAX, SERVO_HARD_SEC, BEATS_PER_CYCLE,
 };

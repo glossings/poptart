@@ -270,19 +270,26 @@ function othersPlaying(deck) {
 function songBaseRate(deck) {
   const s = songDecks[deck];
   if (!s) return 1;
-  if (s.sync && s.bpm && transport) return songSync.syncRate(transport.cps * 240, s.bpm, s.syncMult) ?? s.manualRate;
+  if (s.sync && s.bpm && transport) {
+    return songSync.syncRate(transport.cps * 240, s.bpm, deck === songMasterDeck ? 1 : s.syncMult) ?? s.manualRate;
+  }
   return s.manualRate;
 }
 
-// The tempo octave a deck's sync is riding (0.5 | 1 | 2), and the bpm its GRID counts in at
-// that octave: a 70 bpm song locked ×2 under a 140 clock is aligned as a 140 - its eighths are
-// the clock's beats, its half-bars the clock's cycles.
+// The tempo ratio a deck's sync is riding (0.5 | 1 | 2 - song tempo over clock tempo; see
+// songSync.syncOctave), and the bpm its GRID counts in at that ratio: a 70 bpm song running
+// half-time under a 140 clock is aligned as a 140 - its eighths are the clock's beats, its
+// half-bars the clock's cycles. The deck whose song set the clock is the clock: its ratio is
+// 1 whatever the button says (the button is greyed for it), or a press there would re-pitch
+// the master against itself.
+let songMasterDeck = null; // the deck whose song last took the grid (see /api/song/play)
 function songOctave(deck) {
   const s = songDecks[deck];
   if (!s || !s.bpm) return 1;
+  if (deck === songMasterDeck) return 1;
   return songSync.syncOctave(transport ? transport.cps * 240 : s.bpm, s.bpm, s.syncMult);
 }
-const songGridBpm = (deck) => (songDecks[deck]?.bpm ?? 0) * songOctave(deck);
+const songGridBpm = (deck) => (songDecks[deck]?.bpm ?? 0) / songOctave(deck);
 
 // What the engine's `rate` control is actually set to: the musical rate plus the drift servo's
 // trim. The trim never enters Node's playhead model - it exists precisely to make the engine's
@@ -408,9 +415,10 @@ function songCue(deck, hold) {
       // Parked somewhere new: the cue is here now - and it IS the downbeat. A cue point is
       // where the hand says "one" is, so it anchors the beatgrid too: the two used to be
       // separate gestures, and a cue snapped to a grid whose downbeat was wrong went to the
-      // wrong place. The audio places it exactly (nearest transient, never the grid), so
-      // every later start waits for the clock's downbeat and enters right here.
-      const at = songSync.snapToOnset(songPlayheadSec(deck), s.onsets);
+      // wrong place. Taken EXACTLY where the pane shows the playhead - never moved at press
+      // time (a jump under the finger is jarring); the pane's scrub magnet is what pulls the
+      // playhead onto a transient beforehand, and a hand that wants to be between hits can be.
+      const at = songPlayheadSec(deck);
       s.cueSec = at;
       s.anchorSec = at;
       s.anchorByHand = true;
@@ -489,7 +497,10 @@ async function songDetectKick(deck) {
     }
     if (songDecks[deck] !== s || !facts) return;
     let changed = false;
-    s.onsets = facts.onsets ?? null;
+    // The detector's list opens with a synthetic hit at 0:00 (its slice-0 convention); as a
+    // snap target that would pull every cue placed near the top of a track onto the file
+    // start rather than the first real transient just after it.
+    s.onsets = facts.onsets ? facts.onsets.filter((t) => t > 0.002) : null;
     if (facts.bpm != null && s.bpm !== facts.bpm) {
       // Within a few percent of the hint it's the same tempo measured properly (the fit never
       // strays further - see fitBeatGrid); with no hint it's the estimate, and marked as one.
@@ -691,6 +702,7 @@ function mixDeskBody() {
         sync: s.sync,
         syncMult: s.syncMult ?? 'auto',
         syncMultEffective: songOctave(d),
+        master: d === songMasterDeck, // this song set the clock - its ratio is 1 by definition
         keylock: s.keylock,
         nudge: s.nudge,
         // Confidence (0..1) when a fact is a phase 5 ESTIMATE rather than a tag/typed value -
@@ -4141,10 +4153,11 @@ const routes = {
     // it doesn't (no bpm, or sync deliberately off) it runs free and the response says so -
     // the next deck up will have nothing to lock onto, and that is worth a word.
     const takeGrid = !others && s.sync && !!s.bpm;
-    // Before the rate is read. A pinned octave carries into the clock (×½ on a 140 makes a 70
-    // clock); auto has nothing to pin against yet and takes the native.
-    const clockBpm = s.bpm * (s.syncMult === 0.5 || s.syncMult === 2 ? s.syncMult : 1);
-    if (takeGrid && mixState.tempoOverride == null) transport.setBpm(clockBpm);
+    // Before the rate is read: the master's native tempo IS the clock.
+    if (takeGrid) {
+      songMasterDeck = deck;
+      if (mixState.tempoOverride == null) transport.setBpm(s.bpm);
+    }
     if (others && !body.now) {
       const earliest = transport.cycleAt(now + SONG_START_LEAD_SEC);
       let startCycle;
@@ -4281,12 +4294,9 @@ const routes = {
       delete s.keyDetected;
     }
     if ('anchorSec' in body) {
-      let a = Number(body.anchorSec);
+      const a = Number(body.anchorSec);
       if (!Number.isFinite(a)) throw new Error('song/meta: anchorSec must be a number (seconds)');
-      // The hand says which hit is the downbeat; the audio says exactly when it is (the
-      // quantize light). { snap: false } takes the number as typed.
-      if (body.snap !== false) a = songSync.snapToOnset(a, s.onsets);
-      s.anchorSec = Math.min(Math.max(0, a), s.duration);
+      s.anchorSec = Math.min(Math.max(0, a), s.duration); // as given - the pane's magnet did any snapping
       s.anchorByHand = true;
       s.gridDetected = null;
     }
@@ -4331,6 +4341,15 @@ const routes = {
   'POST /api/song/nudge': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
     return { status: 200, body: songNudge(deck, body) };
+  },
+
+  // The song's transient times (seconds, ascending) - what the pane's scrub magnet pulls the
+  // playhead onto. Empty until the analysis has run; `ready` says which.
+  'GET /api/song/onsets': async (q) => {
+    const deck = q.deck === 'b' ? 'b' : 'a';
+    const s = songDecks[deck];
+    if (!s) throw new Error(`deck ${deck} has no song loaded`);
+    return { status: 200, body: { deck, ready: s.onsets != null, onsets: s.onsets ?? [] } };
   },
 
   // The waveform pane's data (songs phase 3): a high-resolution detail strip plus a full-track

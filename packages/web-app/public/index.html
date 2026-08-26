@@ -117,7 +117,7 @@
             <canvas id="songDetailA" class="song-detail"></canvas>
             <canvas id="songOverviewA" class="song-overview"></canvas>
             <div class="song-ctl-row">
-              <button id="songCueA" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point at the playhead (snapped to the nearest hit) and makes it the beatgrid's downbeat; pressing while playing takes the deck back to it">cue</button>
+              <button id="songCueA" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnA" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
               <button id="songNudgeDnA" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
@@ -127,7 +127,7 @@
               <label class="song-bpm-label">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
               <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
               <button id="songSyncA" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
-              <button id="songMultA" class="small song-mult" title="tempo octave for sync: auto picks the nearest (a 70 bpm song under a 140 clock plays at ×1, half-time); click to pin ×½ / ×1 / ×2">auto</button>
+              <button id="songMultA" class="small song-mult" title="tempo ratio to the clock: 1× beat-matched, ½× half-time, 2× double-time; chosen automatically, click to pin">1×</button>
               <button id="songKeylockA" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
             </div>
           </div>
@@ -160,7 +160,7 @@
             <canvas id="songDetailB" class="song-detail"></canvas>
             <canvas id="songOverviewB" class="song-overview"></canvas>
             <div class="song-ctl-row">
-              <button id="songCueB" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point at the playhead (snapped to the nearest hit) and makes it the beatgrid's downbeat; pressing while playing takes the deck back to it">cue</button>
+              <button id="songCueB" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnB" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
               <button id="songNudgeDnB" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
@@ -170,7 +170,7 @@
               <label class="song-bpm-label">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
               <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
               <button id="songSyncB" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
-              <button id="songMultB" class="small song-mult" title="tempo octave for sync: auto picks the nearest (a 70 bpm song under a 140 clock plays at ×1, half-time); click to pin ×½ / ×1 / ×2">auto</button>
+              <button id="songMultB" class="small song-mult" title="tempo ratio to the clock: 1× beat-matched, ½× half-time, 2× double-time; chosen automatically, click to pin">1×</button>
               <button id="songKeylockB" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
             </div>
           </div>

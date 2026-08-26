@@ -14188,6 +14188,31 @@ function makeSongPane(deck) {
   let raf = null;
   let overviewImage = null; // the full track pre-rendered once; per-frame work is a blit + overlays
   let detectSaid = null; // path whose phase 5 estimate was already announced - it logs once
+  let onsets = []; // transient times (seconds, ascending) - the scrub magnet's targets
+  const SONG_MAGNET_PX = 8; // how close (on screen) a drag has to come to a hit to be pulled onto it
+
+  /** Fetch the deck's transients (after the analysis lands; empty until then). */
+  P.loadOnsets = async () => {
+    const forPath = P.song?.path;
+    if (!forPath) return;
+    try {
+      const r = await api('GET', `/api/song/onsets?deck=${deck}`);
+      if (P.song?.path === forPath) onsets = r.onsets ?? [];
+    } catch { /* the magnet is a nicety - scrubbing works without it */ }
+  };
+  /** Nearest transient to `pos` when one lies within `windowSec`, else `pos` itself. */
+  function magnetize(pos, windowSec) {
+    if (!onsets.length) return pos;
+    let lo = 0;
+    let hi = onsets.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (onsets[mid] < pos) lo = mid + 1; else hi = mid;
+    }
+    let best = onsets[lo];
+    if (lo > 0 && Math.abs(onsets[lo - 1] - pos) < Math.abs(best - pos)) best = onsets[lo - 1];
+    return Math.abs(best - pos) <= windowSec ? best : pos;
+  }
 
   /** Where this deck's playhead is right now, in song seconds. */
   P.playheadNow = () => {
@@ -14244,6 +14269,13 @@ function makeSongPane(deck) {
       nudge: sb.nudge ?? 0,
       bpmDetected: sb.bpmDetected ?? null,
       keyDetected: sb.keyDetected ?? null,
+      gridDetected: sb.gridDetected ?? null,
+      // The tempo-ratio state the ×-button renders and cycles from (left out of this list
+      // once, which had the button reading 1× over a deck the server had at ½× - and every
+      // click "cycling" from auto to ½× again).
+      syncMult: sb.syncMult ?? 'auto',
+      syncMultEffective: sb.syncMultEffective ?? 1,
+      master: !!sb.master,
     });
     // A phase 5 estimate landing (bpm/key read from the audio because the tags said nothing)
     // gets one console line; the facts themselves just appear in the control row, marked.
@@ -14254,7 +14286,8 @@ function makeSongPane(deck) {
         sb.gridDetected != null && `beatgrid at ${songFmt(sb.anchorSec ?? 0, true)} (~${Math.round(sb.gridDetected * 100)}%)`,
         sb.keyDetected != null && `${sb.musicalKey} (~${Math.round(sb.keyDetected * 100)}%)`,
       ].filter(Boolean).join(' · ');
-      logLine(`${D} ♪ analyzed: ${bits} - estimates; typing a bpm or pressing ⚓ on a downbeat overrides`);
+      logLine(`${D} ♪ analyzed: ${bits} - estimates; typing a bpm or cueing on a downbeat overrides`);
+      P.loadOnsets(); // the transients came with the analysis - the scrub magnet is live from here
     }
     ctlRender();
     if (!P.song) {
@@ -14273,6 +14306,7 @@ function makeSongPane(deck) {
   /** A fresh /api/song/load response becomes this pane's song. */
   P.tookLoad = (res, filePath, title) => {
     P.song = { path: filePath, title, bpm: res.bpm ?? null };
+    onsets = []; // the old song's hits must not pull on the new one
     P.mirror = { playing: false, posSec: 0, startSec: 0, rate: 1, duration: res.duration, cueSec: 0 };
     detectSaid = null;
     P.open();
@@ -14297,6 +14331,7 @@ function makeSongPane(deck) {
       if (P.song?.path !== forPath) return; // a later load took the deck while this ran
       wave = w;
       overviewImage = null;
+      P.loadOnsets(); // usually not ready yet - the analysis line re-asks when it lands
     } catch (e) {
       if (P.song?.path !== forPath) return;
       logLine(`${D} waveform: ${e.message ?? String(e)}`, true);
@@ -14538,7 +14573,10 @@ function makeSongPane(deck) {
   detailEl.addEventListener('pointermove', (e) => {
     if (!drag) return;
     const pxPerSec = detailEl.clientWidth / (zoomSec * P.rateNow()); // per song second, as drawn
-    seek(drag.pos - (e.clientX - drag.x) / pxPerSec);
+    // The magnet: within a few screen pixels of a transient the playhead lands ON it (so a
+    // cue placed by feel sits on the hit), further away it goes exactly where the hand is.
+    // Zooming in shrinks the window in seconds - fine placement between hits is a zoom away.
+    seek(magnetize(drag.pos - (e.clientX - drag.x) / pxPerSec, SONG_MAGNET_PX / pxPerSec));
   });
   for (const ev of ['pointerup', 'pointercancel']) {
     detailEl.addEventListener(ev, () => {
@@ -14607,12 +14645,18 @@ function makeSongPane(deck) {
     titleEl.title = m?.keyDetected != null
       ? `key estimated from the audio (~${Math.round(m.keyDetected * 100)}% sure)` : '';
     syncEl.classList.toggle('on', !!m?.sync);
-    // The tempo octave: what the sync actually locks to. "auto" picks the nearest (a 70 under a
-    // 140 clock runs at ×1, its beats on the clock's eighths); a click pins it.
+    // The tempo ratio the sync is riding - the song's tempo over the clock's: 1× beat-matched,
+    // ½× half-time, 2× double-time. Dim when chosen automatically (nearest to native speed),
+    // lit when pinned; greyed on the master, whose tempo IS the clock.
     const mult = m?.syncMult ?? 'auto';
-    const eff = m?.syncMultEffective ?? 1;
-    multEl.textContent = mult === 'auto' ? `auto ×${eff === 0.5 ? '½' : eff}` : `×${mult === 0.5 ? '½' : mult}`;
-    multEl.classList.toggle('on', mult !== 'auto');
+    const eff = m?.master ? 1 : (m?.syncMultEffective ?? 1);
+    const show = (v) => (v === 0.5 ? '½×' : `${v}×`);
+    multEl.textContent = show(eff);
+    multEl.classList.toggle('on', mult !== 'auto' && !m?.master);
+    multEl.disabled = !!m?.master;
+    multEl.title = m?.master
+      ? 'this deck set the clock - it plays at its own tempo; the ratio is the other deck\'s to choose'
+      : `tempo ratio to the clock: 1× beat-matched, ½× half-time, 2× double-time. ${mult === 'auto' ? 'chosen automatically (nearest native speed)' : `pinned to ${show(mult)}`}; click to cycle ½× → 1× → 2× → auto`;
     keylockEl.classList.toggle('on', !!m?.keylock);
     nudgeDnEl.classList.toggle('held', (m?.nudge ?? 0) < 0); // a MIDI nudge lights the button too
     nudgeUpEl.classList.toggle('held', (m?.nudge ?? 0) > 0);
@@ -14648,10 +14692,12 @@ function makeSongPane(deck) {
   });
   multEl.addEventListener('click', () => {
     if (!P.song) return;
+    if (P.mirror?.master) return;
     const order = ['auto', 0.5, 1, 2];
     const cur = P.mirror?.syncMult ?? 'auto';
     const next = order[(order.indexOf(cur) + 1) % order.length];
-    metaPost({ syncMult: next }, (r) => `${D} tempo octave ${next === 'auto' ? 'auto' : `×${next}`} (rate ${r.rate.toFixed(3)})`);
+    const name = next === 'auto' ? 'auto' : { 0.5: '½× (half-time)', 1: '1× (beat-matched)', 2: '2× (double-time)' }[next];
+    metaPost({ syncMult: next }, (r) => `${D} tempo ratio ${name} - rate ${r.rate.toFixed(3)}`);
   });
   keylockEl.addEventListener('click', () => {
     if (!P.song) return;
