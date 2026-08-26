@@ -87,9 +87,11 @@
         <!-- The waveform region's bottom edge: drag it to trade height between the stacked
              waveforms and the decks below, drag it to the top to minimize the waveforms away
              (the bar then says so, and a click brings them back). Double-click resets. -->
+        <!-- Folded away, a region leaves this rail behind saying what is down there; a click on
+             it (or on the seam beside it) brings the region back. -->
+        <div id="djStackRail" class="dj-rail" title="the stacked waveforms - click to bring them back">waveforms</div>
         <div id="djStackResize" class="dj-resize" role="separator" aria-orientation="horizontal"
-             title="drag to resize the waveforms (all the way up minimizes them, double-click resets)"><span
-             class="dj-resize-label">waveforms</span></div>
+             title="drag to divide the height between the waveforms and the decks - push past either and it folds to a rail (double-click resets)"></div>
         <div id="editorPane">
           <!-- Shown only in DJ mode (body.mix-on): the main editor IS deck A, and both decks
                get the same head - load a song, play it, or leave DJ mode keeping this pane. -->
@@ -126,10 +128,10 @@
             <div class="song-ctl-row">
               <button id="songCueA" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
-              <button id="songJogDnA" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
-              <button id="songNudgeDnA" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
-              <button id="songNudgeUpA" class="small" title="hold: push the platter (+4% while held)">&#9654;</button>
-              <button id="songJogUpA" class="small" title="jog forward one beat">&#9654;|</button>
+              <button id="songJogDnA" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
+              <button id="songNudgeDnA" class="small" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
+              <button id="songNudgeUpA" class="small" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
+              <button id="songJogUpA" class="small" title="jog forward one beat"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
               <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
@@ -168,10 +170,10 @@
             <div class="song-ctl-row">
               <button id="songCueB" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
-              <button id="songJogDnB" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
-              <button id="songNudgeDnB" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
-              <button id="songNudgeUpB" class="small" title="hold: push the platter (+4% while held)">&#9654;</button>
-              <button id="songJogUpB" class="small" title="jog forward one beat">&#9654;|</button>
+              <button id="songJogDnB" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
+              <button id="songNudgeDnB" class="small" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
+              <button id="songNudgeUpB" class="small" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
+              <button id="songJogUpB" class="small" title="jog forward one beat"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
               <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
@@ -181,6 +183,7 @@
             </div>
           </div>
         </div>
+        <div id="djDecksRail" class="dj-rail" title="the decks - click to bring them back">decks</div>
       </main>
 
         <!-- A .layout grid child (NOT inside main): the sidebar spans the main row AND the
@@ -342,8 +345,8 @@
       <!-- The mixer's top edge: same gesture as the waveform handle - drag to trade height with
            the decks, all the way down to minimize the strip away. -->
       <div id="djStripResize" class="dj-resize" role="separator" aria-orientation="horizontal"
-           title="drag to resize the mixer (all the way down minimizes it, double-click resets)"><span
-           class="dj-resize-label">mixer</span></div>
+           title="drag to divide the height between the decks and the mixer - push past either and it folds to a rail (double-click resets)"></div>
+      <div id="djStripRail" class="dj-rail" title="the mixer - click to bring it back">mixer</div>
 
       <!-- The mix strip (mix mode): per-track DJ controls for both decks around the crossfader.
            Every control here is ephemeral performance state - nothing writes into song code. -->
@@ -351,7 +354,7 @@
         <div class="mix-tracks-col">
           <div class="mix-deck-head"><strong>deck A</strong><span class="spacer"></span>
             <button id="mixCueA" class="small mix-cue" title="cue deck A in the headphones (post-EQ, pre-fader) - needs a cue device (settings tab)">&#127911;</button></div>
-          <div class="mix-tracks" id="mixTracksA"></div>
+          <div class="mix-tracks-wrap"><div class="mix-tracks" id="mixTracksA"></div></div>
         </div>
         <!-- The per-deck knob columns (trim / low / mid / high / filter) mirror each other around
              the center, like a mixer's channel strips. Knobs are built by client.js with the same
@@ -390,7 +393,7 @@
         <div class="mix-knobs" id="mixKnobsB"></div>
         <div class="mix-tracks-col">
           <div class="mix-deck-head"><button id="mixCueB" class="small mix-cue" title="cue deck B in the headphones (post-EQ, pre-fader) - needs a cue device (settings tab)">&#127911;</button><span class="spacer"></span><strong>deck B</strong></div>
-          <div class="mix-tracks" id="mixTracksB"></div>
+          <div class="mix-tracks-wrap"><div class="mix-tracks" id="mixTracksB"></div></div>
         </div>
       </div>
 

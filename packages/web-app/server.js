@@ -138,6 +138,11 @@ function noteProtoOwnership(deck) {
 const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1, deck: 1, cue: 0 };
 const mixState = {
   swap: false, // swap mode: gating a stem in throws the SAME-NAMED stem on the other deck out
+  // Solo, per deck: the SET of soloed stems (cmd+click a gate; cmd+shift+click adds another) and
+  // the faders as they stood before the first solo, restored when the last soloed stem leaves -
+  // a solo is an audition, not an edit, so ending it returns the deck to what it was.
+  solo: { a: new Set(), b: new Set() },
+  soloPrev: { a: null, b: null }, // key -> fader snapshot while solo is on, else null
   perDeck: { a: new Map(), b: new Map() }, // deck-broadcast values (the crossfader's `deck`, a deck-wide djf)
   perTrack: new Map(), // key -> Map(name -> value): faders, per-track EQ, trim
   xf: -1, // crossfader position (-1 = hard at deck A) - the source of the two `deck` gains
@@ -185,6 +190,43 @@ const songKeysLive = () => ['a', 'b'].filter((d) => songDecks[d]).map((d) => SON
 // The desk's full population: every scheduler-driven track plus any song tracks - what deck
 // broadcasts, per-track mix sets and the strip's track list enumerate. A song is a stem too.
 const isMixKey = (key) => schedulers.has(key) || songKeysLive().includes(key);
+// One stem's DJ fader (the gate's control): remembered per track so a re-eval re-applies it.
+function mixSetFader(key, value) {
+  let per = mixState.perTrack.get(key);
+  if (!per) mixState.perTrack.set(key, (per = new Map()));
+  per.set('fader', value);
+  engine.setParam(engineTrack(key), -1, 'fader', value, 0);
+}
+
+// The plain gate gesture on one stem. Outside solo it is just the fader. While the deck is
+// soloing: gating a soloed stem out un-solos it (and, if it was the last, the deck comes back
+// to its pre-solo state with that one stem out - the click asked for silence, the exit asked
+// for the original); gating any other stem is also recorded into the snapshot, so an edit made
+// while auditioning survives the solo's end.
+function mixGateSet(key, on) {
+  const deck = deckOfKey(key);
+  const value = on ? 1 : 0;
+  if (mixState.solo[deck].has(key)) {
+    mixState.solo[deck].delete(key);
+    if (mixState.solo[deck].size === 0) mixSoloEnd(deck);
+    if (!on) mixSetFader(key, 0);
+    else if (mixState.solo[deck].size > 0) mixSetFader(key, 1); // still soloing others: it stays audible
+    return;
+  }
+  mixSetFader(key, value);
+  mixState.soloPrev[deck]?.set(key, value);
+}
+
+// End a deck's solo: every stem back to the fader it had before the first solo (stems born
+// during the solo have no entry - they come in at 1, like any fresh stem).
+function mixSoloEnd(deck) {
+  const prev = mixState.soloPrev[deck];
+  mixState.solo[deck].clear();
+  mixState.soloPrev[deck] = null;
+  if (!prev) return;
+  for (const k of mixKeys()) if (deckOfKey(k) === deck) mixSetFader(k, prev.get(k) ?? 1);
+}
+
 function* mixKeys() {
   yield* schedulers.keys();
   yield* songKeysLive();
@@ -682,6 +724,8 @@ function mixDeskBody() {
   for (const d of ['a', 'b']) if (songDecks[d] && !songDecks[d].playing) songApplyRate(d);
   return {
     swap: mixState.swap,
+    // A solo whose stem has since gone (re-eval dropped it, the song unloaded) reads as none.
+    solo: { a: [...mixState.solo.a].filter(isMixKey), b: [...mixState.solo.b].filter(isMixKey) },
     playing: { a: deckPlaying('a'), b: deckPlaying('b') },
     perDeck: { a: Object.fromEntries(mixState.perDeck.a), b: Object.fromEntries(mixState.perDeck.b) },
     // Never '-' for a loaded deck: an unspecified track reads as the 120 default, so the tempo
@@ -3931,14 +3975,8 @@ const routes = {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const key = String(body.key ?? '');
     if (!isMixKey(key)) throw new Error(`mix/gate: no playing track "${key}"`);
-    const setFader = (k, v) => {
-      let per = mixState.perTrack.get(k);
-      if (!per) mixState.perTrack.set(k, (per = new Map()));
-      per.set('fader', v);
-      engine.setParam(engineTrack(k), -1, 'fader', v, 0);
-    };
     const on = !!body.on;
-    setFader(key, on ? 1 : 0);
+    mixGateSet(key, on);
     // The swap counter runs BOTH ways: gating a stem IN throws its same-named twin out, and
     // gating it back OUT brings the twin back in - so a swap can be toggled back and forth to
     // audition either song's version of the stem.
@@ -3947,12 +3985,43 @@ const routes = {
       const base = deckOfKey(key) === 'a' ? key : key.slice(key.indexOf(':') + 1);
       const other = deckOfKey(key) === 'a' ? `b:${base}` : base;
       if (schedulers.has(other)) {
-        setFader(other, on ? 0 : 1);
+        mixGateSet(other, !on);
         countered = other;
       }
     }
     mixNotify();
     return { status: 200, body: { key, on, countered } };
+  },
+
+  // Solo within a deck (cmd+click a gate). Body: { key, add }.
+  //   - a stem not yet soloed: it becomes THE solo (every other stem on the deck gates out), or
+  //     with `add` joins the stems already soloed (cmd+shift+click);
+  //   - a soloed stem: it leaves the solo. If others remain they keep playing without it; if it
+  //     was the last, the deck returns to the faders it had before the first solo.
+  // Deck-local: the other deck is never touched, swap mode or not - a solo is for auditioning
+  // a part, not for swapping it. -> { key, deck, solo: [keys soloed after the gesture] }.
+  'POST /api/mix/solo': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    const key = String(body.key ?? '');
+    if (!isMixKey(key)) throw new Error(`mix/solo: no playing track "${key}"`);
+    const deck = deckOfKey(key);
+    const solo = mixState.solo[deck];
+    if (solo.has(key)) {
+      solo.delete(key);
+      if (solo.size === 0) mixSoloEnd(deck);
+      else mixSetFader(key, 0);
+    } else {
+      if (!mixState.soloPrev[deck]) { // first solo on this deck: remember what to come back to
+        const prev = new Map();
+        for (const k of mixKeys()) if (deckOfKey(k) === deck) prev.set(k, mixState.perTrack.get(k)?.get('fader') ?? 1);
+        mixState.soloPrev[deck] = prev;
+      }
+      if (!body.add) solo.clear();
+      solo.add(key);
+      for (const k of mixKeys()) if (deckOfKey(k) === deck) mixSetFader(k, solo.has(k) ? 1 : 0);
+    }
+    mixNotify();
+    return { status: 200, body: { key, deck, solo: [...solo] } };
   },
 
   // Empty ONE deck - a pane is loading a different song (DJ mode's load button). The old song's
@@ -3972,6 +4041,8 @@ const routes = {
       dropTrack(key);
     }
     for (const key of [...trackIds.keys()]) if (deckOfKey(key) === deck) dropTrack(key);
+    mixState.solo[deck].clear();
+    mixState.soloPrev[deck] = null;
     decks[deck] = { scale: null, bpm: null };
     if (deck === 'a') patternCore.setGlobalScale(null); // the resting scale was this deck's fact
     liveStateIds[deck] = new Set();

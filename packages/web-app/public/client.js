@@ -362,15 +362,14 @@ document.addEventListener('keydown', (e) => {
   if (document.querySelector('.dir-picker-backdrop:not(.hidden)')) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    // A song pane is the active "window" when it was clicked last: enter plays ITS deck. With
-    // no pane claimed, enter is the main deck's - a song play when deck A holds a file (the
-    // hidden editor underneath is not the sound).
-    const songDeck = mixModeOn ? (songActiveDeck() ?? (songPanes.a.song ? 'a' : null)) : null;
-    if (songDeck) songPlay(songDeck);
+    // Whichever deck was clicked into last (see djSetActiveDeck): its song if it holds one, its
+    // code if it doesn't. Outside DJ mode that is always the one editor there is.
+    if (mixModeOn) djPlayActive();
     else evaluate(true, { byHand: true });
   } else if (e.key === '.' && !e.shiftKey) {
     e.preventDefault();
-    doStop(mixModeOn ? songActiveDeck() : null);
+    // The active deck alone; outside DJ mode (no deck) it is the whole set, as ever.
+    doStop(mixModeOn ? djActiveDeck : null);
   } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
     e.preventDefault();
     stepDeckBQueue(); // mix mode: load the active set's next song into deck B
@@ -13937,6 +13936,8 @@ async function openMixMode() {
   deckBPaneEl.classList.remove('hidden');
   mixStripEl.classList.remove('hidden');
   applyMixStack(); // the stacked layout, if it's this browser's preference
+  djApplyRegionSizes(); // which region is springy depends on that (and on mix-on)
+  djSetActiveDeck('a'); // deck A is armed until the other pane is clicked
   if (!deckBCM) {
     deckBCM = CodeMirror.fromTextArea(document.getElementById('deckBEditor'), {
       mode: { name: 'javascript' },
@@ -14045,6 +14046,8 @@ function closeMixMode() {
   deckBPaneEl.classList.add('hidden');
   mixStripEl.classList.add('hidden');
   applyMixStack(); // canvases back into their panes, stack region away
+  djApplyRegionSizes();
+  djSetActiveDeck('a'); // one editor again: the rings come off
   cm.refresh();
 }
 
@@ -14800,22 +14803,18 @@ function makeSongPane(deck) {
   // nudge pair is the platter (±4% while held) and the jog pair steps a beat. All four platter
   // buttons are MIDI-learnable, same gesture as the desk knobs.
   //
-  // Clicking into the pane makes it the active "window", the way clicking an editor focuses it:
-  // Cmd+Enter then plays/resumes the song and Cmd+. stops ITS deck (see the transport hotkey
-  // handler near the top). The pane has no focusable editor underneath, so this is tracked by
-  // pointer: any click inside claims it, any click outside releases it.
-
+  // Whether this pane's DECK is the active one - the claim itself is made a deck at a time, by
+  // clicking anywhere in either deck's pane (see djSetActiveDeck); this is how the song pane
+  // wears it. The detail canvas gets it too because in the stacked layout it lives up in
+  // #songStack, away from its pane.
   P.setActive = (on) => {
     if (P.active === on) return;
     P.active = on;
     paneEl.classList.toggle('active', on);
-    detailEl.classList.toggle('active', on); // it may be living in the stack, away from the pane
+    detailEl.classList.toggle('active', on);
   };
-  paneEl.addEventListener('pointerdown', () => P.setActive(true), true);
-  detailEl.addEventListener('pointerdown', () => P.setActive(true), true);
-  document.addEventListener('pointerdown', (e) => {
-    if (!paneEl.contains(e.target) && !detailEl.contains(e.target)) P.setActive(false);
-  }, true);
+  // The stacked canvas is outside both deck panes, so it claims its deck itself.
+  detailEl.addEventListener('pointerdown', () => djSetActiveDeck(deck), true);
   // For the stacked layout (applyMixStack): the canvas and where it goes back to.
   P.detailEl = detailEl;
   P.reattachDetail = () => overviewEl.before(detailEl);
@@ -14987,40 +14986,128 @@ document.getElementById('mixStack').addEventListener('click', () => {
   mixStacked = !mixStacked;
   localStorage.setItem(MIX_STACK_KEY, mixStacked ? '1' : '0');
   if (mixStacked) djRegions.stackMin = false; // stacking on with the region minimized reads as a dead button
+  applyMixStack(); // first: which region is springy is read off the stacked class
   djApplyRegionSizes(true);
-  applyMixStack();
 });
-applyMixStack();
+
+// One seam drag, shared by DJ mode's stacked regions and organize's columns (settleSeamDrag is
+// called by both). A row of regions sharing a fixed total, with a draggable seam between each
+// pair: the pointer names ONE boundary, the regions nearest it give way first, and one squeezed
+// below its minimum folds to a rail and hands the squeeze on to the next one out - so a single
+// grip, pushed far enough, folds everything ahead of it in turn.
+//
+// Every move resolves from the sizes as they were when the drag STARTED, never from the last
+// frame. That is what makes the gesture reversible (pull back and regions unfold in the order
+// they folded, at the sizes they had) and what stops it oscillating - the DJ seams used to
+// compute against a layout their own last frame had changed, which is why one, having folded the
+// decks, then jumped upwards as it was dragged further down.
+//
+// `start`/`fold0` are the starting sizes and fold flags, `mins` the sizes below which a region
+// folds, `rail` a folded region's size, `k` the seam (between region k and k+1), `want` the
+// boundary the pointer asks for - measured from region 0's leading edge, with the seams
+// themselves left out of every size - and `total` all the regions' sizes added up.
+function settleSeamDrag({ start, fold0, mins, rail, k, want, total }) {
+  const n = start.length;
+  const boxOf = (i) => (fold0[i] ? rail : start[i]);
+  // A rail is as small as anything gets, so that is how far the boundary can be pushed.
+  const left = Math.max((k + 1) * rail, Math.min(want, total - (n - 1 - k) * rail));
+  const size = new Array(n).fill(0);
+  const fold = new Array(n).fill(false);
+  // One side of the seam: `order` runs from the seam outward, so the region against it absorbs
+  // the change and the ones beyond keep the size they started the drag with.
+  const run = (order, budget) => {
+    let remaining = budget;
+    for (let j = 0; j < order.length; j++) {
+      const i = order[j];
+      let beyond = 0;
+      for (let m = j + 1; m < order.length; m++) beyond += boxOf(order[m]);
+      const mine = remaining - beyond;
+      if (mine >= mins[i] || j === order.length - 1) {
+        fold[i] = mine < mins[i];
+        size[i] = fold[i] ? rail : mine;
+        for (let m = j + 1; m < order.length; m++) {
+          const o = order[m];
+          fold[o] = fold0[o];
+          size[o] = boxOf(o);
+        }
+        return remaining - (size[i] + beyond);
+      }
+      fold[i] = true; // no room for it at its minimum: it folds and the next one out absorbs
+      size[i] = rail;
+      remaining -= rail;
+    }
+    return remaining;
+  };
+  const before = [];
+  for (let i = k; i >= 0; i--) before.push(i);
+  const after = [];
+  for (let i = k + 1; i < n; i++) after.push(i);
+  const slack = run(before, left) + run(after, total - left);
+  // Folding rather than sitting under a minimum leaves a sliver over; the nearest open region
+  // takes it, so the seam simply stops where it is instead of a gap opening beside it.
+  const taker = [k, ...after, ...before.slice(1)].find((i) => !fold[i]);
+  if (taker != null) size[taker] += slack;
+  else fold[k] = false, size[k] = left; // a window too small for even one region: keep this one
+  return { size, fold };
+}
 
 // --- DJ mode's three regions: drag the seams to divide the height -----------------------------
 //
-// Waveforms on top (only while stacked), both decks in the middle, the mixer at the bottom - and
-// a drag handle on each of the two seams. The decks are the springy region: they take whatever
-// the other two leave, so two handles size all three, and a deck is never sized on its own (the
-// panes are columns of one grid row, so a row height is always both decks at once - same for the
-// two waveforms in the stack). Dragging a handle past its region's minimum minimizes that region
-// away; the handle stays behind as a labelled bar, and a click on it brings the region back.
+// Waveforms on top (only while stacked), both decks in the middle, the mixer at the bottom - with
+// a drag handle on each of the two seams. Both handles stay handles however little is left: a
+// region dragged past its minimum folds to a labelled RAIL saying what is down there, which a
+// click (on the rail, or on the seam beside it) opens again. Pushing a handle further than that
+// goes on folding whatever is next in its path, so either seam can end up owning the whole
+// height. The regions still left open share it, the last one open taking the remainder.
 //
 // Sizes are px in localStorage, per browser, like the stack preference itself - desk furniture,
 // not song state. The canvases re-measure every frame (songSizeCanvas, mixMeterPaint), so the
 // only thing a drag has to tell anyone about is CodeMirror.
 const DJ_REGION_KEY = 'poptartDjRegions';
-const DJ_STACK_MIN_PX = 90; // waveform stack: below this a drag minimizes instead of shrinking
-const DJ_STRIP_MIN_PX = 74; // mix strip: likewise
-const DJ_DECKS_MIN_PX = 170; // the decks always keep at least this much
-const djRegions = { stack: null, strip: null, stackMin: false, stripMin: false };
+const DJ_RAIL_PX = 18; // a folded region: the labelled rail, and .dj-rail's height in the css
+const DJ_SEAM_PX = 7; // .dj-resize - a constant now that a folded region has a rail of its own
+// Below these a drag folds the region instead of shrinking it further. Deliberately small: every
+// region degrades gracefully (the two waveforms shrink together, the strip and the decks clip),
+// so all these have to be is small enough that folding reads as a deliberate shove past the end.
+const DJ_MIN_PX = { stack: 28, decks: 56, strip: 28 };
+const djRegions = { stack: null, strip: null, stackMin: false, stripMin: false, decksMin: false };
 try {
   Object.assign(djRegions, JSON.parse(localStorage.getItem(DJ_REGION_KEY) || '{}'));
 } catch {
   /* a corrupt entry just means the default division */
 }
+const djStacked = () => document.body.classList.contains('mix-stacked');
+
+/**
+ * The regions, top to bottom, as the drag sees them: without the stack (unstacked DJ mode) there
+ * are only two. The decks are never stored as a size - they are the springy region, so their
+ * height is always whatever the other two leave.
+ */
+function djRegionList() {
+  return djStacked() ? ['stack', 'decks', 'strip'] : ['decks', 'strip'];
+}
 
 function djApplyRegionSizes(save) {
   const root = document.documentElement;
+  // Outside DJ mode the page grid is the plain one: main springy, the strip its natural height.
+  // The properties are written on :root, so leaving DJ mode has to put them back - a deck folded
+  // away in a set must not come back as a collapsed editor the next time the app opens.
+  if (!document.body.classList.contains('mix-on')) {
+    for (const prop of ['--dj-row-stack', '--dj-row-decks', '--dj-row-main', '--dj-row-strip', '--dj-strip-h']) {
+      root.style.removeProperty(prop);
+    }
+    for (const cls of ['dj-stack-min', 'dj-decks-min', 'dj-strip-min']) document.body.classList.remove(cls);
+    if (save) localStorage.setItem(DJ_REGION_KEY, JSON.stringify(djRegions));
+    return;
+  }
+  const stacked = djStacked();
+  const stackMin = stacked && djRegions.stackMin;
+  const { decksMin, stripMin } = djRegions;
   // The sizes are px dragged in whatever window they were dragged in, and that window may since
   // have shrunk: cap them here (without rewriting what's stored, so a window back at its old
   // height comes back to the old division) or the decks and the console get squeezed off.
-  const room = Math.max(240, window.innerHeight - 220); // minus header, console, decks' minimum
+  const chrome = 50 + (decksMin ? DJ_RAIL_PX : DJ_MIN_PX.decks);
+  const room = Math.max(120, window.innerHeight - chrome);
   let stack = djRegions.stack ? Math.min(djRegions.stack, room) : null;
   let strip = djRegions.strip ? Math.min(djRegions.strip, room) : null;
   if (stack && strip && stack + strip > room) {
@@ -15028,11 +15115,25 @@ function djApplyRegionSizes(save) {
     stack = Math.round(stack * k);
     strip = Math.round(strip * k);
   }
-  root.style.setProperty('--dj-stack-h', stack ? `${Math.round(stack)}px` : 'minmax(160px, 45%)');
-  root.style.setProperty('--dj-strip-h', strip ? `${Math.round(strip)}px` : 'auto');
+  // Which region is springy - takes the remainder rather than a size of its own. The decks when
+  // they are open; otherwise the waveforms; otherwise the mixer, which then owns the height. The
+  // rest of the layout follows from that, so the css needs no combination selectors: it reads
+  // these four properties and the three fold classes.
+  const springy = !decksMin ? 'decks' : (stacked && !stackMin ? 'stack' : 'strip');
+  root.style.setProperty('--dj-row-stack', stackMin ? 'auto'
+    : springy === 'stack' ? 'minmax(0, 1fr)'
+      : stack ? `${Math.round(stack)}px` : 'minmax(160px, 45%)');
+  root.style.setProperty('--dj-row-decks', decksMin ? 'auto' : 'minmax(0, 1fr)');
+  // main holds the stack and the decks; it is only a fixed height when everything in it is.
+  root.style.setProperty('--dj-row-main', springy === 'strip' ? 'auto' : 'minmax(0, 1fr)');
+  root.style.setProperty('--dj-row-strip', springy === 'strip' ? 'minmax(0, 1fr)' : 'auto');
+  root.style.setProperty('--dj-strip-h', stripMin || springy === 'strip' ? 'auto'
+    : strip ? `${Math.round(strip)}px` : 'auto');
   document.body.classList.toggle('dj-stack-min', !!djRegions.stackMin);
-  document.body.classList.toggle('dj-strip-min', !!djRegions.stripMin);
+  document.body.classList.toggle('dj-strip-min', !!stripMin);
+  document.body.classList.toggle('dj-decks-min', !!decksMin);
   if (save) localStorage.setItem(DJ_REGION_KEY, JSON.stringify(djRegions));
+  mixTracksHintAll();
 }
 
 /** The editors don't re-measure themselves when their pane changes height. */
@@ -15041,27 +15142,42 @@ function djRegionsReflow() {
   deckBCM?.refresh();
 }
 
+/** Fold or open one region by name - what a rail's click, and a seam's, come down to. */
+function djSetFolded(name, folded) {
+  djRegions[`${name}Min`] = folded;
+  djApplyRegionSizes(true);
+  djRegionsReflow();
+}
+for (const [id, name] of [['djStackRail', 'stack'], ['djDecksRail', 'decks'], ['djStripRail', 'strip']]) {
+  document.getElementById(id).addEventListener('click', () => djSetFolded(name, false));
+}
+
 /**
- * Wire one seam. `heightAt(clientY, geom)` turns a pointer position into the height its region
- * would have (the two regions grow in opposite directions); `geom` is measured once per drag,
- * off elements that don't move while it runs, so a minimized region is still draggable open.
+ * Wire one seam. `k` is the region above it in djRegionList(); the geometry is measured once per
+ * drag, off the two elements that don't move while it runs (main's top edge and the console's),
+ * so a folded region is still draggable open.
  */
-function djInitResizeHandle(id, { sizeKey, minKey, minPx, heightAt, maxPx }) {
+function djInitResizeHandle(id, above) {
   const el = document.getElementById(id);
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
-    const mainTop = document.querySelector('main').getBoundingClientRect().top;
+    const names = djRegionList();
+    const k = names.indexOf(above);
+    if (k < 0 || k + 1 >= names.length) return; // this seam isn't in play (the stack, unstacked)
+    const top = document.querySelector('main').getBoundingClientRect().top;
     const bottom = document.getElementById('console').getBoundingClientRect().top;
-    // The other two regions' current heights, so a max can leave the decks their minimum.
-    const stackEl = document.getElementById('songStack');
-    const geom = {
-      mainTop,
-      bottom,
-      stripH: mixStripEl.getBoundingClientRect().height,
-      stackH: stackEl.getBoundingClientRect().height,
-      seams: 24, // both handles
+    const total = bottom - top - (names.length - 1) * DJ_SEAM_PX;
+    // Every region's box as this drag begins. The decks are never stored, so they are read as
+    // what is left - which is exactly what the layout gives them.
+    const measured = {
+      stack: djRegions.stackMin ? DJ_RAIL_PX : document.getElementById('songStack').getBoundingClientRect().height,
+      strip: djRegions.stripMin ? DJ_RAIL_PX : mixStripEl.getBoundingClientRect().height,
     };
+    measured.decks = Math.max(DJ_RAIL_PX, total - names.reduce((s, n) => s + (n === 'decks' ? 0 : measured[n]), 0));
+    const start = names.map((n) => measured[n]);
+    const fold0 = names.map((n) => !!djRegions[`${n}Min`]);
+    const mins = names.map((n) => DJ_MIN_PX[n]);
     const startY = e.clientY;
     let moved = false;
     el.classList.add('dragging');
@@ -15069,13 +15185,14 @@ function djInitResizeHandle(id, { sizeKey, minKey, minPx, heightAt, maxPx }) {
     const onMove = (ev) => {
       if (Math.abs(ev.clientY - startY) > 3) moved = true;
       if (!moved) return;
-      const h = heightAt(ev.clientY, geom);
-      if (h < minPx) {
-        djRegions[minKey] = true; // still dragging: pull back past the minimum and it returns
-      } else {
-        djRegions[minKey] = false;
-        djRegions[sizeKey] = Math.min(h, maxPx(geom));
-      }
+      // The boundary this seam owns, in the drag's own coordinates: everything above it, with
+      // the seams above it taken out (they are not part of any region's size).
+      const want = ev.clientY - top - k * DJ_SEAM_PX;
+      const { size, fold } = settleSeamDrag({ start, fold0, mins, rail: DJ_RAIL_PX, k, want, total });
+      names.forEach((n, i) => {
+        djRegions[`${n}Min`] = fold[i];
+        if (!fold[i] && n !== 'decks') djRegions[n] = Math.round(size[i]); // a fold keeps its old size to come back to
+      });
       djApplyRegionSizes();
     };
     const onUp = (ev) => {
@@ -15084,8 +15201,12 @@ function djInitResizeHandle(id, { sizeKey, minKey, minPx, heightAt, maxPx }) {
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
       el.removeEventListener('pointercancel', onUp);
-      // A press that never became a drag is a click - which is the way back from minimized.
-      if (!moved && djRegions[minKey]) djRegions[minKey] = false;
+      // A press that never became a drag is a click: the way back for a folded neighbour, the
+      // one above first (the same rule as organize's seams).
+      if (!moved) {
+        const folded = [names[k], names[k + 1]].find((n) => djRegions[`${n}Min`]);
+        if (folded) djRegions[`${folded}Min`] = false;
+      }
       djApplyRegionSizes(true);
       djRegionsReflow();
     };
@@ -15093,36 +15214,51 @@ function djInitResizeHandle(id, { sizeKey, minKey, minPx, heightAt, maxPx }) {
     el.addEventListener('pointerup', onUp);
     el.addEventListener('pointercancel', onUp);
   });
-  // Double-click: back to the default division for this region.
+  // Double-click: back to the default division, everything open.
   el.addEventListener('dblclick', () => {
-    djRegions[sizeKey] = null;
-    djRegions[minKey] = false;
+    Object.assign(djRegions, { stack: null, strip: null, stackMin: false, stripMin: false, decksMin: false });
     djApplyRegionSizes(true);
     djRegionsReflow();
   });
 }
 
-djInitResizeHandle('djStackResize', {
-  sizeKey: 'stack',
-  minKey: 'stackMin',
-  minPx: DJ_STACK_MIN_PX,
-  heightAt: (y, g) => y - g.mainTop, // the stack starts at the top of main and grows down
-  maxPx: (g) => Math.max(DJ_STACK_MIN_PX, g.bottom - g.mainTop - DJ_DECKS_MIN_PX - g.stripH - g.seams),
-});
-djInitResizeHandle('djStripResize', {
-  sizeKey: 'strip',
-  minKey: 'stripMin',
-  minPx: DJ_STRIP_MIN_PX,
-  heightAt: (y, g) => g.bottom - y, // the strip ends above the console and grows up
-  maxPx: (g) => Math.max(DJ_STRIP_MIN_PX, g.bottom - g.mainTop - DJ_DECKS_MIN_PX - g.stackH - g.seams),
-});
+djInitResizeHandle('djStackResize', 'stack'); // waveforms | decks
+djInitResizeHandle('djStripResize', 'decks'); // decks | mixer
+applyMixStack(); // here rather than beside its own definition: it now settles the region sizes
+
 djApplyRegionSizes();
 window.addEventListener('resize', () => djApplyRegionSizes()); // re-cap, never re-store
 
-/** The deck whose song pane is the clicked-last "window" - what Cmd+Enter / Cmd+. target. */
+// --- the active deck: which one Cmd+Enter and Cmd+. mean --------------------------------------
+//
+// Clicking anywhere in a deck's pane claims it, the way clicking an editor focuses it - the head,
+// the waveform, the code, the empty space beside it. The claim STAYS until the other deck is
+// clicked (touching the mixer, the sidebar or the console doesn't give it up: they belong to
+// neither deck), and the pane wears an accent ring so which one is armed is never a guess.
+// Deck A outside DJ mode, always - there is no other deck to mean.
+let djActiveDeck = 'a';
+
+function djSetActiveDeck(deck) {
+  djActiveDeck = deck === 'b' && mixModeOn ? 'b' : 'a';
+  for (const d of ['a', 'b']) {
+    songPanes[d].setActive(d === djActiveDeck);
+    document.getElementById(d === 'a' ? 'editorPane' : 'deckBPane')
+      .classList.toggle('deck-active', mixModeOn && d === djActiveDeck);
+  }
+}
+document.getElementById('editorPane').addEventListener('pointerdown', () => djSetActiveDeck('a'), true);
+document.getElementById('deckBPane').addEventListener('pointerdown', () => djSetActiveDeck('b'), true);
+
+/** The active deck if it is holding a SONG - what the waveform hotkeys (cue, zoom) need. */
 function songActiveDeck() {
-  for (const d of ['a', 'b']) if (songPanes[d].active && songPanes[d].song) return d;
-  return null;
+  return songPanes[djActiveDeck].song ? djActiveDeck : null;
+}
+
+/** Play/resume the active deck: its song if it holds one, otherwise its code. */
+function djPlayActive() {
+  if (songActiveDeck()) songPlay(djActiveDeck);
+  else if (djActiveDeck === 'b') evalDeckB(true);
+  else evaluate(true, { byHand: true });
 }
 
 // --- Ctrl+C: the CUE button on the keyboard ---
@@ -15530,10 +15666,28 @@ async function mixRefresh() {
   for (const deck of ['a', 'b']) {
     const host = document.getElementById(deck === 'a' ? 'mixTracksA' : 'mixTracksB');
     host.innerHTML = '';
-    for (const t of state.tracks.filter((x) => x.deck === deck)) host.appendChild(mixTrackRow(t));
+    for (const t of state.tracks.filter((x) => x.deck === deck)) host.appendChild(mixTrackRow(t, !!state.solo?.[deck]?.includes(t.key)));
+    mixTracksHint(host);
   }
   document.getElementById('mixSwap').checked = !!state.swap;
   mixSyncValues(state);
+}
+
+// The stem lists scroll inside whatever height the strip has; these mark the edges that hide
+// more rows (see .mix-tracks-col::before/::after) from the scroll position - re-read on scroll,
+// on every rebuild, and whenever the strip changes height.
+function mixTracksHint(host) {
+  const wrap = host.parentElement; // .mix-tracks-wrap - the hints are its ::before/::after
+  wrap.classList.toggle('more-above', host.scrollTop > 1);
+  wrap.classList.toggle('more-below', host.scrollTop + host.clientHeight < host.scrollHeight - 1);
+}
+function mixTracksHintAll() {
+  for (const id of ['mixTracksA', 'mixTracksB']) mixTracksHint(document.getElementById(id));
+}
+for (const id of ['mixTracksA', 'mixTracksB']) {
+  const host = document.getElementById(id);
+  host.addEventListener('scroll', () => mixTracksHint(host), { passive: true });
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => mixTracksHint(host)).observe(host);
 }
 
 // A short visual glide toward `target`, so the pushed frames (~30ms apart under a moving
@@ -15700,19 +15854,22 @@ mixTempoSliderEl.addEventListener('input', () => {
 document.getElementById('mixTempoA').addEventListener('click', () => mixTempoDetent('a'));
 document.getElementById('mixTempoB').addEventListener('click', () => mixTempoDetent('b'));
 
-function mixTrackRow(t) {
+function mixTrackRow(t, soloed) {
   const row = document.createElement('div');
   row.className = 'mix-track';
   const fader = t.controls.fader ?? 1;
 
   const gate = document.createElement('button');
-  gate.className = 'mix-gate' + (fader > 0 ? ' on' : '');
+  gate.className = 'mix-gate' + (fader > 0 ? ' on' : '') + (soloed ? ' solo' : '');
   gate.title = 'gate this stem in/out (fader to 1/0)'
-    + '; with swap on, gating IN throws the other deck\'s same-named stem out and gating OUT brings it back - toggle to audition either';
-  gate.addEventListener('click', async () => {
+    + '; with swap on, gating IN throws the other deck\'s same-named stem out and gating OUT brings it back - toggle to audition either'
+    + '; cmd+click solos it within its deck (blue), cmd+shift+click adds it to the solo, cmd+click a soloed stem to un-solo it (the last one out restores the deck)';
+  gate.addEventListener('click', async (e) => {
     try {
-      await api('POST', '/api/mix/gate', { key: t.key, on: !gate.classList.contains('on') });
-      mixRefresh(); // a countered stem's row changes too
+      // cmd (ctrl elsewhere) + click: solo within the deck rather than toggle this one gate.
+      if (e.metaKey || e.ctrlKey) await api('POST', '/api/mix/solo', { key: t.key, add: e.shiftKey });
+      else await api('POST', '/api/mix/gate', { key: t.key, on: !gate.classList.contains('on') });
+      mixRefresh(); // a countered stem's row (or, for a solo, the whole deck) changes too
     } catch (e) {
       logLine(e.message ?? String(e), true);
     }
@@ -15966,16 +16123,14 @@ function orgInitCols() {
       if (e.button !== 0) return;
       e.preventDefault();
       const g = grid.getBoundingClientRect();
-      const lastOpen = () => [2, 1, 0].find((i) => !orgCols.min[i]);
-      // A seam trades width between its two neighbours only: their combined width is fixed
-      // for the drag and split at the pointer. Every other open column is frozen at its
-      // measured px so nothing else moves (the last open column is fr and fills the rest,
-      // which comes to the same thing once the pair's total is held).
-      cols.forEach((c, i) => {
-        if (!orgCols.min[i] && i !== lastOpen()) orgCols.w[i] = c.getBoundingClientRect().width;
-      });
-      const leftEdge = cols[k].getBoundingClientRect().left - g.left;
-      const pair = cols[k].getBoundingClientRect().width + cols[k + 1].getBoundingClientRect().width;
+      // Every column's width as this drag begins: the seam resolves against these rather than
+      // against its own last frame, and a column squeezed past its minimum folds and hands the
+      // squeeze on to the next one out - so one seam, pushed far enough, folds both of the
+      // columns ahead of it (see settleSeamDrag, shared with DJ mode's seams).
+      const start = cols.map((c) => c.getBoundingClientRect().width);
+      const fold0 = orgCols.min.slice();
+      const mins = cols.map(() => ORG_COL_MIN);
+      const total = start.reduce((a, b) => a + b, 0);
       const startX = e.clientX;
       let moved = false;
       seam.classList.add('dragging');
@@ -15983,14 +16138,14 @@ function orgInitCols() {
       const onMove = (ev) => {
         if (Math.abs(ev.clientX - startX) > 3) moved = true;
         if (!moved) return;
-        const w = Math.max(0, Math.min(pair, ev.clientX - g.left - leftEdge - ORG_SEAM / 2));
-        // Under the minimum on either side, that side folds to its rail; pull back and it
-        // returns (dragging this seam is a gesture on exactly these two columns).
-        orgCols.min[k] = w < ORG_COL_MIN;
-        orgCols.min[k + 1] = pair - w < ORG_COL_MIN;
-        const rightW = orgCols.min[k + 1] ? ORG_RAIL : Math.max(ORG_COL_MIN, pair - w);
-        orgCols.w[k] = orgCols.min[k] ? null : pair - rightW;
-        orgCols.w[k + 1] = orgCols.min[k + 1] ? null : rightW;
+        // Where the pointer puts this seam's boundary, measured from the first column's edge
+        // with the seams themselves left out (they are not part of any column's width).
+        const want = ev.clientX - g.left - k * ORG_SEAM - ORG_SEAM / 2;
+        const { size, fold } = settleSeamDrag({ start, fold0, mins, rail: ORG_RAIL, k, want, total });
+        cols.forEach((c, i) => {
+          orgCols.min[i] = fold[i];
+          if (!fold[i]) orgCols.w[i] = Math.round(size[i]); // a folded one keeps its old width to come back to
+        });
         orgApplyCols();
       };
       const onUp = (ev) => {

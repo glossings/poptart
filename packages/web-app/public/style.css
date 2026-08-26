@@ -15,6 +15,7 @@
   --text-dim: #8189a0;
   --accent: #ff7a9c;
   --ok: #7ed896;
+  --solo: #82aaff; /* a soloed stem's gate (cmd+click) */
   --err: #ff8080;
   --warn: #ffcb6b;
   --selection: #2a2f3d;
@@ -38,6 +39,7 @@
   --text-dim: #7e88ab;
   --accent: #7aa2ff;
   --ok: #9ece6a;
+  --solo: #7dcfff; /* a soloed stem's gate (cmd+click) */
   --err: #f7768e;
   --warn: #e0af68;
   --selection: #283457;
@@ -61,6 +63,7 @@
   --text-dim: #869686;
   --accent: #a7c080;
   --ok: #a7c080;
+  --solo: #7fbbb3; /* a soloed stem's gate (cmd+click) */
   --err: #e67e80;
   --warn: #dbbc7f;
   --selection: #2d3b2d;
@@ -84,6 +87,7 @@
   --text-dim: #8a867a;
   --accent: #c04c6e;
   --ok: #2f855a;
+  --solo: #2563eb; /* a soloed stem's gate (cmd+click) */
   --err: #c53030;
   --warn: #b7791f;
   --selection: #d8e4f5;
@@ -110,6 +114,7 @@
   --text-dim: #838a97;
   --accent: #ff3040;
   --ok: #45b98f;
+  --solo: #4c8dff; /* a soloed stem's gate (cmd+click) */
   --err: #ff4b56;
   --warn: #d8a24a;
   --selection: #1b2540;
@@ -156,8 +161,10 @@ body {
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  /* header / main / the mixer's drag handle / the mix strip / console */
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  /* header / main / the mixer's drag handle / the mix strip / console. The two sized rows are
+     properties rather than values because DJ mode moves the springy one between them as its
+     regions fold (see djApplyRegionSizes); outside DJ mode they hold these defaults. */
+  grid-template-rows: auto var(--dj-row-main) auto var(--dj-row-strip) auto;
   height: 100vh;
 }
 .layout > header {
@@ -175,7 +182,8 @@ aside {
   grid-column: 1;
   grid-row: 3;
 }
-#mixStrip {
+#mixStrip,
+#djStripRail {
   grid-column: 1;
   grid-row: 4;
 }
@@ -3459,14 +3467,51 @@ li.CodeMirror-hint-active {
 body.mix-on.mix-stacked main {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  /* waveforms / their drag handle / the decks - the first row is what the handle rides */
-  grid-template-rows: var(--dj-stack-h) auto minmax(0, 1fr);
+  /* waveforms / their drag handle / the decks - both sized rows are properties, so which one is
+     springy can move as regions fold (see djApplyRegionSizes). */
+  grid-template-rows: var(--dj-row-stack) auto var(--dj-row-decks);
 }
-body.mix-on.mix-stacked.dj-stack-min main {
-  grid-template-rows: 0 auto minmax(0, 1fr);
-}
-body.mix-on.mix-stacked.dj-stack-min #songStack {
+/* A folded region is gone and its rail stands in its place - which is the whole difference
+   between folding and hiding: the row is still there, saying what is down there. */
+body.dj-stack-min #songStack,
+body.dj-strip-min #mixStrip {
   display: none;
+}
+body.mix-on.dj-decks-min #editorPane,
+body.mix-on.dj-decks-min #deckBPane {
+  display: none;
+}
+.dj-rail {
+  display: none;
+  height: 18px; /* DJ_RAIL_PX - the drag arithmetic counts on this */
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  user-select: none;
+}
+.dj-rail:hover {
+  color: var(--accent);
+}
+body.mix-on.dj-stack-min.mix-stacked #djStackRail,
+body.mix-on.dj-decks-min #djDecksRail,
+body.mix-on.dj-strip-min #djStripRail {
+  display: flex;
+}
+/* In the stacked grid the rails stand in their region's row, across both deck columns. */
+body.mix-on.mix-stacked #djStackRail {
+  grid-row: 1;
+  grid-column: 1 / -1;
+}
+body.mix-on.mix-stacked #djDecksRail {
+  grid-row: 3;
+  grid-column: 1 / -1;
 }
 body.mix-on.mix-stacked #songStack {
   grid-row: 1;
@@ -3476,11 +3521,18 @@ body.mix-on.mix-stacked #songStack {
   gap: 4px;
   padding: 8px 8px 0;
   min-height: 0;
+  /* Clipped, so a region dragged below what two canvases can draw shows less waveform rather
+     than spilling the lower one over the seam. */
+  overflow: hidden;
   /* no border of its own: the drag handle right below is the seam */
 }
+/* Basis 0 with NO floor: the two waveforms give up height together, all the way down. A
+   min-height here (60px until 2026-08-26) stops both of them shrinking at the same moment, and
+   since the region goes on getting shorter the lower one is simply pushed out of it - which
+   read as "the bottom one squashes while the top keeps its size". */
 #songStack .song-detail {
-  flex: 1;
-  min-height: 60px;
+  flex: 1 1 0;
+  min-height: 0;
 }
 #songStack .song-detail.hidden {
   display: none; /* that deck holds no song - the other's waveform takes the whole stack */
@@ -3498,14 +3550,18 @@ body.mix-on.mix-stacked #deckBPane {
 }
 
 /* ---------------------------------------------------- DJ mode: resizable regions
-   Three stacked regions in DJ mode - waveforms, decks, mixer - with a drag handle on each
-   seam. The decks are the springy one (they take whatever the other two leave), which is why
-   only two handles are needed and why neither deck is ever sized on its own: the panes are
-   grid COLUMNS of one row, so a row height is always both decks at once. Dragging a handle
-   past its region's minimum minimizes that region away; the handle stays as the way back. */
+   Three stacked regions in DJ mode - waveforms, decks, mixer - with a drag handle on each seam.
+   Neither deck is ever sized on its own: the panes are grid COLUMNS of one row, so a row height
+   is always both decks at once. A region dragged past its minimum folds to a labelled rail
+   (.dj-rail) that a click reopens; the handle stays a handle either way, and pushing it further
+   folds whatever is next in its path. Which region is springy moves as they fold, which is why
+   both sized rows here are properties written by djApplyRegionSizes. */
 :root {
-  --dj-stack-h: minmax(160px, 45%); /* the stacked waveforms; a px value once dragged */
-  --dj-strip-h: auto; /* the mix strip - its natural height until dragged */
+  --dj-row-stack: minmax(160px, 45%); /* the stacked waveforms; a px value once dragged */
+  --dj-row-decks: minmax(0, 1fr); /* the decks: the springy region until they fold */
+  --dj-row-main: minmax(0, 1fr); /* main (waveforms + decks) in the page grid */
+  --dj-row-strip: auto; /* the mix strip's page-grid row - 1fr once it is the springy one */
+  --dj-strip-h: auto; /* the strip's own height - its natural one until dragged */
 }
 .dj-resize {
   display: none;
@@ -3521,6 +3577,15 @@ body.mix-on.mix-stacked #deckBPane {
 body.mix-on #djStripResize,
 body.mix-on.mix-stacked #djStackResize {
   display: block;
+}
+/* The armed deck - the one Cmd+Enter plays and Cmd+. stops (see djSetActiveDeck). A ring rather
+   than a fill: it has to read at a glance across the room without competing with the waveform. */
+body.mix-on #editorPane.deck-active,
+body.mix-on #deckBPane.deck-active {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+body.mix-on .deck-active .deck-b-title {
+  color: var(--accent);
 }
 /* the stack seam spans both deck columns - it divides the whole A+B region, not deck A's */
 body.mix-on.mix-stacked #djStackResize {
@@ -3546,38 +3611,9 @@ body.mix-on.mix-stacked #djStackResize {
 .dj-resize.dragging {
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-panel));
 }
-/* Minimized: the seam grows into a labelled bar that says what a click brings back. */
-.dj-resize-label {
-  display: none;
-}
-body.dj-stack-min #djStackResize,
-body.dj-strip-min #djStripResize {
-  height: 17px;
-  cursor: pointer;
-}
-body.dj-stack-min #djStackResize::before,
-body.dj-strip-min #djStripResize::before {
-  display: none;
-}
-body.dj-stack-min #djStackResize .dj-resize-label,
-body.dj-strip-min #djStripResize .dj-resize-label {
-  display: block;
-  text-align: center;
-  font-size: 10px;
-  line-height: 15px;
-  letter-spacing: 0.06em;
-  color: var(--text-dim);
-}
-body.dj-stack-min #djStackResize .dj-resize-label::after {
-  content: ' \25BE';
-}
-body.dj-strip-min #djStripResize .dj-resize-label::after {
-  content: ' \25B4';
-}
-body.dj-stack-min #djStackResize:hover .dj-resize-label,
-body.dj-strip-min #djStripResize:hover .dj-resize-label {
-  color: var(--accent);
-}
+
+/* Nothing here turns a seam into a chip: a handle stays a handle however little is left on
+   either side of it, and the folded region's own rail is what says so (see .dj-rail). */
 /* The strip's dragged height clips its contents rather than reflowing them - the knob rows
    keep their positions as the desk gets shorter. Minimized, it is gone entirely. */
 body.mix-on #mixStrip {
@@ -3691,8 +3727,62 @@ body.mix-on #deckAHead {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 128px;
+  /* Takes whatever height the strip has (basis 0: a long list must not make the strip taller
+     on its own - the knob columns set the natural height, a drag sets any other) and scrolls
+     inside it. The scroll gutter is padded out of the way of the controls: on deck A the
+     scrollbar sits at the right, over the fader's end; deck B is mirrored (its rows pack to
+     the right), so its list runs right-to-left and the scrollbar sits at the LEFT instead. */
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
+  padding-right: 10px;
+}
+#mixTracksB {
+  direction: rtl;
+  padding-right: 0;
+  padding-left: 10px;
+}
+#mixTracksB .mix-track {
+  direction: ltr;
+}
+/* More stems than fit: a fade over the hidden edge with a chevron, set by client.js from the
+   list's scroll position (mixTracksHint) - a bare cut-off row read as "that's all of them".
+   The wrap exists for these: the list itself scrolls, so anything absolute inside it would
+   scroll away with the rows. */
+.mix-tracks-wrap {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mix-tracks-wrap::before,
+.mix-tracks-wrap::after {
+  content: '\25BE';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 18px;
+  line-height: 22px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: linear-gradient(transparent, var(--bg-panel) 70%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.mix-tracks-wrap::before {
+  content: '\25B4';
+  top: 0;
+  bottom: auto;
+  line-height: 14px;
+  background: linear-gradient(var(--bg-panel) 30%, transparent);
+}
+.mix-tracks-wrap.more-below::after,
+.mix-tracks-wrap.more-above::before {
+  opacity: 1;
 }
 .mix-track {
   display: flex;
@@ -3720,6 +3810,10 @@ body.mix-on #deckAHead {
 .mix-gate.on {
   background: var(--ok);
   border-color: var(--ok);
+}
+.mix-gate.solo {
+  background: var(--solo);
+  border-color: var(--solo);
 }
 .mix-center {
   display: flex;
@@ -3999,7 +4093,7 @@ body.mix-on #deckAHead {
   flex-direction: column;
   min-height: 0;
   gap: 6px;
-  padding: 8px;
+  padding: 8px 8px 3px; /* the control row is the bottom edge - no ledge under it */
 }
 .song-pane.hidden {
   display: none;
@@ -4035,6 +4129,22 @@ body.mix-on #deckAHead {
   align-items: center;
   gap: 6px;
   flex: none;
+}
+/* The transport glyphs (jog |◀ ▶| and nudge ◀ ▶) are drawn, not typed: as text, the bar and
+   the arrow are two characters of a font with no say in how they line up - the bar sat off the
+   arrow's point, and at enough zoom wrapped onto its own line. One grid for all four. */
+.song-ctl-row .small:has(.song-ctl-icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 7px;
+  padding-right: 7px;
+}
+.song-ctl-icon {
+  display: block;
+  width: 12px;
+  height: 1.2em; /* the text line's height, so these buttons stand as tall as `cue` and `sync` */
+  fill: currentColor;
 }
 .song-ctl-row .small.on {
   color: var(--accent);
@@ -4106,6 +4216,7 @@ body.mix-on #deckAHead {
      keeps the shared center controls straddling the exact midline between the two panes. */
   flex: 1 1 0;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 3px;

@@ -219,6 +219,41 @@ test('each name pushes its state at its own onset', () => {
   ]);
 });
 
+test('a window opening mid-pattern applies the preset already in force, now', () => {
+  // DJ mode's deck B: its first eval comes against a clock deck A has been running for a while,
+  // so the schedule window opens mid-cycle and the onset that named the current preset is
+  // behind it. Before 2026-08-26 nothing was sent until the NEXT onset, and the freshly opened
+  // plugin sounded its init program until then.
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch.start(3.7);
+  sch._schedulePresetSwaps(3.7, 4.2);
+  sch.stop();
+
+  assert.deepEqual(argsTo('setPluginState'), [
+    ['lead', 0, 'H4sIb', null], // cycle 3 named b - in force at 3.7, pushed untimed (immediately)
+    ['lead', 0, 'H4sIa', at(sch.transport.secAt(4))], // then the window's own onset at cycle 4
+  ]);
+});
+
+test('the catch-up never reaches back past the downbeat', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  _preset('b', 'Serum 2', 'H4sIb');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('<a b>'));
+  sch.start(0);
+  sch._schedulePresetSwaps(0, 1);
+  sch.stop();
+  // A cyclic pattern would answer 'b' for cycle -1; nothing was in force before cycle 0.
+  assert.deepEqual(argsTo('setPluginState'), [['lead', 0, 'H4sIa', at(0)]]);
+});
+
 test('a state the plugin already holds is not pushed again', () => {
   clearRolls('buffer');
   _preset('a', 'Serum 2', 'H4sIa');

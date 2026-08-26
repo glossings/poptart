@@ -37,6 +37,9 @@ function hwChannels(hw) {
 }
 
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
+// How far back a window opening mid-pattern looks for the preset already in force (see
+// _schedulePresetSwaps): enough for a slow preset pattern, cheap enough to not matter.
+const PRESET_CATCH_UP_CYCLES = 64;
 // How far ahead of its onset a preset swap is APPLIED. Loading a program is not instant and not
 // sample-accurate: it suspends the plugin and resets its voices, in the language, while the notes
 // at that same onset arrive as timestamped bundles the audio thread plays exactly on time. A swap
@@ -595,6 +598,7 @@ export class Scheduler {
       if (!(slot in (sig.presetPatterns ?? {}))) this._livePresets.delete(slot);
     }
     this._presetWarned.clear();
+    this._presetCatchUp = true; // a changed name takes effect now, not at its next onset
     this._earlyShiftWarned = false;
 
     // A channel control the new pattern dropped (`.gain(...)` deleted mid-session, or `.bsend()`
@@ -747,6 +751,7 @@ export class Scheduler {
   start(fromCycle = null) {
     if (this._running) return;
     this._running = true;
+    this._presetCatchUp = true; // the window may open mid-pattern (see _schedulePresetSwaps)
     this._scheduledUntilCycle = fromCycle ?? this.transport.cycleAt(this.engine.getTime());
     this._timer = setInterval(() => this._tick(), POLL_INTERVAL_MS);
   }
@@ -981,8 +986,21 @@ export class Scheduler {
   // argument uses, so a state the plugin already holds costs nothing: a re-eval that changed no
   // preset sends nothing, and neither does the eval right after auto-pin captured a state OUT of
   // the plugin (see markStateApplied) - which would otherwise make it reload what it just gave us.
+  //
+  // A window that opens MID-pattern - a deck started against a clock that is already running
+  // (DJ mode's deck B coming in while deck A plays), or a re-eval that changed a name - has
+  // missed the onset of the preset that is in force right now, and would leave the plugin on
+  // whatever it holds (init, on a freshly opened one) until the pattern's next onset came round,
+  // up to a whole cycle later. So the first window after a start or a setPattern also applies
+  // the most recent name at or before its opening edge, immediately (an untimed push, which on
+  // a cold plugin also holds the notes until the program is in - see the engine's
+  // setPluginState). The window's own onsets follow as usual. Never reaches back past cycle 0:
+  // a cyclic pattern would happily answer for cycle -1, and nothing was in force before the
+  // downbeat.
   _schedulePresetSwaps(fromCycle, toCycle) {
     if (typeof this.engine.setPluginState !== 'function') return;
+    const catchUp = this._presetCatchUp;
+    this._presetCatchUp = false;
     for (const [slotStr, sig] of Object.entries(this.pattern.presetPatterns ?? {})) {
       if (!sig.stepsForCycle) continue; // a preset name has to come from a step grid to have an onset
       const slot = Number(slotStr);
@@ -991,6 +1009,19 @@ export class Scheduler {
       // holdPluginState). Nothing is queued either, so livePreset goes on naming the preset that
       // is really sounding - which is the one a knob turned now belongs to.
       if (this._presetHold.has(slot) || this._stateHold.has(slot)) continue;
+      if (catchUp) {
+        const inForce = this._presetInForceBefore(sig, fromCycle);
+        if (inForce) {
+          const queue = this._presetQueue(slot);
+          queue.push({ atSec: this.transport.secAt(inForce.at), name: inForce.name });
+          this._livePresets.set(slot, queue);
+          const why = this._applyPreset(slot, inForce.name, null);
+          if (why && !this._presetWarned.has(`${slot} ${inForce.name}`)) {
+            this._presetWarned.add(`${slot} ${inForce.name}`);
+            warnPattern(`[scheduler] track "${this.label}" slot ${slot}: ${why}`);
+          }
+        }
+      }
       for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
         for (const step of sig.stepsForCycle(cycle)) {
           const at = cycle + step.start;
@@ -1019,8 +1050,29 @@ export class Scheduler {
     }
   }
 
-  // Puts one named preset into a slot at `atSec`, unless the plugin already holds exactly that
-  // program (see _appliedStates) or the preset has nothing to say. Returns the reason it didn't,
+  // The latest named step strictly before `fromCycle` (the one whose program should be in when a
+  // window opens there), or null. Null too when a named step sits exactly ON the opening edge:
+  // the window itself applies that one, and the previous program would only be loaded to be
+  // replaced in the same breath. Looks back a bounded number of cycles, never below cycle 0.
+  _presetInForceBefore(sig, fromCycle) {
+    const named = (step) => step.value != null && !step.cont && String(step.value).trim();
+    const first = Math.floor(fromCycle);
+    for (let cycle = first; cycle >= Math.max(0, first - PRESET_CATCH_UP_CYCLES); cycle--) {
+      let best = null;
+      for (const step of sig.stepsForCycle(cycle)) {
+        const at = cycle + step.start;
+        const name = named(step);
+        if (!name) continue;
+        if (at === fromCycle) return null;
+        if (at < fromCycle && (!best || at > best.at)) best = { at, name };
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  // Puts one named preset into a slot at `atSec` (null = now), unless the plugin already holds
+  // exactly that program (see _appliedStates) or the preset has nothing to say. Returns the reason it didn't,
   // or null - the caller decides whether that is worth a line, since the pattern's swaps come
   // round every cycle and the editor's hold happens once.
   _applyPreset(slot, name, atSec) {
