@@ -3407,6 +3407,57 @@ li.CodeMirror-hint-active {
 #mixStrip.hidden {
   display: none;
 }
+/* Stacked decks (the ⇅ button on the strip): the two detail waveforms leave their panes for
+   #songStack, a full-width region above both, one directly over the other at one scale - with
+   the playhead pinned at centre in both, the two songs' beats line up (or don't) on a single
+   vertical line, which is the whole reason to look at two waveforms at once. The panes keep
+   their side-by-side rows underneath (title, overview, controls), squashed to what's left. */
+#songStack.hidden {
+  display: none;
+}
+body.mix-on.mix-stacked main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: minmax(160px, 45%) minmax(0, 1fr);
+}
+body.mix-on.mix-stacked #songStack {
+  grid-row: 1;
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 8px 0;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+#songStack .song-detail {
+  flex: 1;
+  min-height: 60px;
+}
+#songStack .song-detail.hidden {
+  display: none; /* that deck holds no song - the other's waveform takes the whole stack */
+}
+#songStack .song-detail.active {
+  border-color: var(--accent);
+}
+body.mix-on.mix-stacked #editorPane {
+  grid-row: 2;
+  grid-column: 1;
+}
+body.mix-on.mix-stacked #deckBPane {
+  grid-row: 2;
+  grid-column: 2;
+}
+body.mix-on.mix-stacked .song-pane {
+  flex: none; /* nothing left to grow into - the stack has the waveform */
+}
+body.mix-on.mix-stacked .song-overview {
+  height: 48px;
+}
+#mixStack.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 #deckBHead,
 #deckAHead {
   display: flex;

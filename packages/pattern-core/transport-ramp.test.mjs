@@ -68,3 +68,27 @@ test('a ramp cancels a tempo signal (and its poll timer)', async () => {
   assert.equal(tr.cps, 0.5);
   tr.dispose();
 });
+
+// Grid handover (DJ mode's song decks): startAt un-freezes the clock with the caller's phase, so
+// a song deck can make the shared cycle grid its own bar grid and everything that quantizes to a
+// cycle afterwards lands on that record's downbeats.
+test('startAt un-freezes with the caller\'s position, and cycles run from there', () => {
+  const tr = new Transport(now, { cps: 0.5, paused: true }); // 120 bpm, 2s cycles
+  assert.equal(tr.paused, true);
+  const at = now() + 0.15;
+  tr.startAt(at, 0.25); // a start a quarter of the way into a bar
+  assert.equal(tr.paused, false);
+  assert.ok(Math.abs(tr.cycleAt(at) - 0.25) < 1e-9);
+  assert.ok(Math.abs(tr.cycleAt(at + 2) - 1.25) < 1e-9, 'one cycle later is one cycle on');
+  // The next boundary a joining deck quantizes to is exactly 0.75 cycles (1.5s) after the start.
+  assert.ok(Math.abs(tr.secAt(Math.ceil(tr.cycleAt(at))) - (at + 1.5)) < 1e-9);
+  tr.dispose();
+});
+
+test('startAt ignores junk rather than corrupting a running clock', () => {
+  const tr = new Transport(now, { cps: 0.5 });
+  const base = tr.cycleAt(now());
+  tr.startAt(NaN, 0);
+  assert.ok(Math.abs(tr.cycleAt(now()) - base) < 0.05, 'still where it was');
+  tr.dispose();
+});

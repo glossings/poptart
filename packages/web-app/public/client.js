@@ -374,6 +374,11 @@ document.addEventListener('keydown', (e) => {
   } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
     e.preventDefault();
     stepDeckBQueue(); // mix mode: load the active set's next song into deck B
+  } else if ((e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') && mixModeOn && songActiveDeck()) {
+    // Cmd ± zooms the active song pane's waveform (the piano roll's own handler takes these
+    // first when it has focus; this is the pane's turn).
+    e.preventDefault();
+    songPanes[songActiveDeck()].zoomBy(e.key === '-' || e.key === '_' ? 1 / PR_BTN_ZOOM : PR_BTN_ZOOM);
   } else if (e.key.toLowerCase() === 'c' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
     && songCueTarget(e)) {
     // Ctrl+C is the CUE button, held until the key comes up. Ctrl specifically, and only where
@@ -13789,6 +13794,7 @@ async function openMixMode() {
   document.body.classList.add('mix-on');
   deckBPaneEl.classList.remove('hidden');
   mixStripEl.classList.remove('hidden');
+  applyMixStack(); // the stacked layout, if it's this browser's preference
   if (!deckBCM) {
     deckBCM = CodeMirror.fromTextArea(document.getElementById('deckBEditor'), {
       mode: { name: 'javascript' },
@@ -13892,6 +13898,7 @@ function closeMixMode() {
   document.body.classList.remove('mix-on');
   deckBPaneEl.classList.add('hidden');
   mixStripEl.classList.add('hidden');
+  applyMixStack(); // canvases back into their panes, stack region away
   cm.refresh();
 }
 
@@ -14158,6 +14165,7 @@ function makeSongPane(deck) {
   const rateEl = byId('songRate');
   const bpmEl = byId('songBpm');
   const syncEl = byId('songSync');
+  const multEl = byId('songMult');
   const keylockEl = byId('songKeylock');
   const cueEl = byId('songCue');
   const nudgeDnEl = byId('songNudgeDn');
@@ -14189,6 +14197,23 @@ function makeSongPane(deck) {
     const at = s.playing ? s.posSec + Math.max(0, Date.now() / 1000 - s.startSec) * (s.rate || 1) : s.posSec;
     return Math.min(Math.max(0, at), dur);
   };
+
+  /** Zoom the detail strip by a factor (>1 = closer) - cmd ± while this pane is active. */
+  P.zoomBy = (factor) => P.setZoom(zoomSec / factor);
+  /**
+   * Set the strip's span outright. Stacked decks share one zoom - two waveforms at different
+   * scales one above the other say nothing about each other - so any zoom on either pane
+   * lands on both while the layout is stacked.
+   */
+  P.setZoom = (sec, { propagate = true } = {}) => {
+    zoomSec = Math.min(60, Math.max(0.25, sec)); // down to a quarter second: single hits
+    if (propagate && typeof mixStacked !== 'undefined' && mixStacked) {
+      songPanes[deck === 'a' ? 'b' : 'a'].setZoom(zoomSec, { propagate: false });
+    }
+  };
+  P.zoomSec = () => zoomSec;
+  /** The deck's playing rate (the sync/nudge rate even while paused - what a start would use). */
+  P.rateNow = () => (P.mirror && Number.isFinite(P.mirror.rate) && P.mirror.rate > 0 ? P.mirror.rate : 1);
 
   // The desk state's song half for this deck, run on every SSE frame and every mixRefresh.
   // Keeps the mirror current, and adopts a song this page never loaded (a reload mid-set: the
@@ -14222,13 +14247,14 @@ function makeSongPane(deck) {
     });
     // A phase 5 estimate landing (bpm/key read from the audio because the tags said nothing)
     // gets one console line; the facts themselves just appear in the control row, marked.
-    if ((sb.bpmDetected != null || sb.keyDetected != null) && detectSaid !== sb.path) {
+    if ((sb.bpmDetected != null || sb.keyDetected != null || sb.gridDetected != null) && detectSaid !== sb.path) {
       detectSaid = sb.path;
       const bits = [
         sb.bpmDetected != null && `${sb.bpm} bpm (~${Math.round(sb.bpmDetected * 100)}%)`,
+        sb.gridDetected != null && `beatgrid at ${songFmt(sb.anchorSec ?? 0, true)} (~${Math.round(sb.gridDetected * 100)}%)`,
         sb.keyDetected != null && `${sb.musicalKey} (~${Math.round(sb.keyDetected * 100)}%)`,
       ].filter(Boolean).join(' · ');
-      logLine(`${D} ♪ detected ${bits} - estimates; typing a bpm overrides`);
+      logLine(`${D} ♪ analyzed: ${bits} - estimates; typing a bpm or pressing ⚓ on a downbeat overrides`);
     }
     ctlRender();
     if (!P.song) {
@@ -14258,6 +14284,7 @@ function makeSongPane(deck) {
   P.open = async () => {
     hostEl.classList.add('song-on');
     paneEl.classList.remove('hidden');
+    detailEl.classList.remove('hidden');
     ctlRender(); // title, toggles, bpm - whatever the mirror already knows
     timeEl.textContent = '';
     wave = null;
@@ -14282,6 +14309,7 @@ function makeSongPane(deck) {
     P.cueUp(); // a pane going away under a held cue would otherwise leave the deck previewing
     hostEl.classList.remove('song-on');
     paneEl.classList.add('hidden');
+    detailEl.classList.add('hidden'); // in the stack it would otherwise sit there blank
     wave = null;
     overviewImage = null;
     if (raf != null) cancelAnimationFrame(raf);
@@ -14325,8 +14353,13 @@ function makeSongPane(deck) {
     const mid = h / 2;
     const maxAmp = mid - 6;
     const pos = P.playheadNow();
-    const pxPerSec = w / zoomSec;
-    const t0 = pos - zoomSec / 2; // the playhead is pinned at centre; time scrolls under it
+    // The strip is `zoomSec` of PLAYBACK time across, not song time: a deck synced down to
+    // 0.82 shows 0.82 song-seconds per real second, so its beats sit exactly as far apart on
+    // screen as the other deck's and scroll at the same speed - which is what lets two stacked
+    // waveforms be read against each other at all (and, paused, what a sync will produce).
+    const span = zoomSec * P.rateNow();
+    const pxPerSec = w / span; // per SONG second
+    const t0 = pos - span / 2; // the playhead is pinned at centre; time scrolls under it
     const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
 
     ctx.strokeStyle = dim;
@@ -14345,7 +14378,7 @@ function makeSongPane(deck) {
     const anchor = P.mirror?.anchorSec ?? 0;
     if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
       const beat = 60 / bpm;
-      const kEnd = (Math.min(dur, t0 + zoomSec) - anchor) / beat;
+      const kEnd = (Math.min(dur, t0 + span) - anchor) / beat;
       ctx.lineWidth = 1;
       for (let k = Math.ceil((Math.max(0, t0) - anchor) / beat); k <= kEnd; k++) {
         if (anchor + k * beat < 0) continue;
@@ -14371,7 +14404,7 @@ function makeSongPane(deck) {
       wave._norm ??= songNormOf(det);
       const per = det.perSec;
       const i0 = Math.max(0, Math.floor(t0 * per));
-      const i1 = Math.min(det.peaks.length - 1, Math.ceil((t0 + zoomSec) * per));
+      const i1 = Math.min(det.peaks.length - 1, Math.ceil((t0 + span) * per));
       const colW = Math.max(1, pxPerSec / per) + 0.6;
       songDrawColumns(ctx, det, i0, i1, (i) => (i / per - t0) * pxPerSec, colW, mid, maxAmp, wave._norm);
     } else {
@@ -14387,7 +14420,7 @@ function makeSongPane(deck) {
       ctx.strokeStyle = rgbaFrom(ctx, text, 0.7);
       ctx.lineWidth = 1;
       for (const tEdge of [0, dur]) {
-        if (tEdge < t0 || tEdge > t0 + zoomSec) continue;
+        if (tEdge < t0 || tEdge > t0 + span) continue;
         const x = Math.round((tEdge - t0) * pxPerSec) + 0.5;
         ctx.beginPath();
         ctx.moveTo(x, 0);
@@ -14400,7 +14433,7 @@ function makeSongPane(deck) {
     // is visible before it is pressed. Warn-coloured rather than accent - it must not read as
     // another playhead - with a flag at the top the way a hardware waveform display marks it.
     const cue = P.mirror?.cueSec ?? 0;
-    if (dur && cue >= t0 && cue <= t0 + zoomSec) {
+    if (dur && cue >= t0 && cue <= t0 + span) {
       const x = Math.round((cue - t0) * pxPerSec) + 0.5;
       ctx.strokeStyle = warn;
       ctx.lineWidth = 1;
@@ -14504,7 +14537,7 @@ function makeSongPane(deck) {
   });
   detailEl.addEventListener('pointermove', (e) => {
     if (!drag) return;
-    const pxPerSec = detailEl.clientWidth / zoomSec;
+    const pxPerSec = detailEl.clientWidth / (zoomSec * P.rateNow()); // per song second, as drawn
     seek(drag.pos - (e.clientX - drag.x) / pxPerSec);
   });
   for (const ev of ['pointerup', 'pointercancel']) {
@@ -14515,7 +14548,7 @@ function makeSongPane(deck) {
   }
   detailEl.addEventListener('wheel', (e) => {
     e.preventDefault();
-    zoomSec = Math.min(60, Math.max(3, zoomSec * Math.exp(e.deltaY * 0.0015)));
+    P.setZoom(zoomSec * Math.exp(e.deltaY * 0.0015));
   }, { passive: false });
 
   // The overview jumps: click (or drag along it) seeks to that point of the track.
@@ -14556,11 +14589,16 @@ function makeSongPane(deck) {
     if (P.active === on) return;
     P.active = on;
     paneEl.classList.toggle('active', on);
+    detailEl.classList.toggle('active', on); // it may be living in the stack, away from the pane
   };
   paneEl.addEventListener('pointerdown', () => P.setActive(true), true);
+  detailEl.addEventListener('pointerdown', () => P.setActive(true), true);
   document.addEventListener('pointerdown', (e) => {
-    if (!paneEl.contains(e.target)) P.setActive(false);
+    if (!paneEl.contains(e.target) && !detailEl.contains(e.target)) P.setActive(false);
   }, true);
+  // For the stacked layout (applyMixStack): the canvas and where it goes back to.
+  P.detailEl = detailEl;
+  P.reattachDetail = () => overviewEl.before(detailEl);
 
   function ctlRender() {
     const m = P.mirror;
@@ -14569,6 +14607,12 @@ function makeSongPane(deck) {
     titleEl.title = m?.keyDetected != null
       ? `key estimated from the audio (~${Math.round(m.keyDetected * 100)}% sure)` : '';
     syncEl.classList.toggle('on', !!m?.sync);
+    // The tempo octave: what the sync actually locks to. "auto" picks the nearest (a 70 under a
+    // 140 clock runs at ×1, its beats on the clock's eighths); a click pins it.
+    const mult = m?.syncMult ?? 'auto';
+    const eff = m?.syncMultEffective ?? 1;
+    multEl.textContent = mult === 'auto' ? `auto ×${eff === 0.5 ? '½' : eff}` : `×${mult === 0.5 ? '½' : mult}`;
+    multEl.classList.toggle('on', mult !== 'auto');
     keylockEl.classList.toggle('on', !!m?.keylock);
     nudgeDnEl.classList.toggle('held', (m?.nudge ?? 0) < 0); // a MIDI nudge lights the button too
     nudgeUpEl.classList.toggle('held', (m?.nudge ?? 0) > 0);
@@ -14593,13 +14637,21 @@ function makeSongPane(deck) {
   byId('songAnchor').addEventListener('click', () => {
     if (!P.song) return;
     const at = P.playheadNow();
-    metaPost({ anchorSec: at }, () => `beatgrid anchored at ${songFmt(at, true)}`);
+    metaPost({ anchorSec: at }, (r) => `beatgrid anchored at ${songFmt(r.anchorSec, true)}`
+      + (Math.abs(r.anchorSec - at) > 0.002 ? ' (snapped to the transient)' : ''));
   });
   syncEl.addEventListener('click', () => {
     if (!P.song) return;
     metaPost({ sync: !P.mirror?.sync }, (r) => (r.sync
       ? `sync on - ${D} rides the master clock (rate ${r.rate.toFixed(3)})`
       : `sync off - ${D} back to its own rate`));
+  });
+  multEl.addEventListener('click', () => {
+    if (!P.song) return;
+    const order = ['auto', 0.5, 1, 2];
+    const cur = P.mirror?.syncMult ?? 'auto';
+    const next = order[(order.indexOf(cur) + 1) % order.length];
+    metaPost({ syncMult: next }, (r) => `${D} tempo octave ${next === 'auto' ? 'auto' : `×${next}`} (rate ${r.rate.toFixed(3)})`);
   });
   keylockEl.addEventListener('click', () => {
     if (!P.song) return;
@@ -14620,7 +14672,10 @@ function makeSongPane(deck) {
     if (!P.song || cueHeld) return;
     cueHeld = true;
     cueEl.classList.add('held');
-    api('POST', '/api/song/cue', { deck, hold: true }).catch((e) => {
+    // The paused playhead as THIS pane shows it rides along: the cue must land where the eye
+    // put it, not where a seek that never arrived left the server's model.
+    const pos = P.mirror && !P.mirror.playing ? P.playheadNow() : undefined;
+    api('POST', '/api/song/cue', { deck, hold: true, pos }).catch((e) => {
       cueHeld = false;
       cueEl.classList.remove('held');
       logLine(`${D} cue: ${e.message ?? String(e)}`, true);
@@ -14676,6 +14731,36 @@ function makeSongPane(deck) {
 }
 
 const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
+
+// --- stacked decks: deck B's pane under deck A's rather than beside it (the ⇅ strip button) ---
+// A per-browser preference, not desk state: nothing about the sound changes. The canvases
+// re-measure themselves every frame (songSizeCanvas), so the reflow needs no extra plumbing.
+const MIX_STACK_KEY = 'poptartMixStacked';
+let mixStacked = localStorage.getItem(MIX_STACK_KEY) === '1';
+function applyMixStack() {
+  // Only ever engaged inside DJ mode: outside it the stack is empty and hidden and the canvases
+  // live in their panes - a page reloaded with the preference set must not come up with a
+  // blank region holding two canvases beside the editor (which is exactly what it did).
+  const on = mixStacked && mixModeOn;
+  document.body.classList.toggle('mix-stacked', on);
+  document.getElementById('mixStack').classList.toggle('on', mixStacked);
+  const stack = document.getElementById('songStack');
+  stack.classList.toggle('hidden', !on);
+  if (on) {
+    // The two detail canvases move up into the stack, A over B; the panes' draw loops keep
+    // drawing them wherever they are (they hold the element, not a place in the DOM).
+    stack.append(songPanes.a.detailEl, songPanes.b.detailEl);
+    songPanes.b.setZoom(songPanes.a.zoomSec(), { propagate: false }); // one scale from here on
+  } else {
+    for (const d of ['a', 'b']) songPanes[d].reattachDetail();
+  }
+}
+document.getElementById('mixStack').addEventListener('click', () => {
+  mixStacked = !mixStacked;
+  localStorage.setItem(MIX_STACK_KEY, mixStacked ? '1' : '0');
+  applyMixStack();
+});
+applyMixStack();
 
 /** The deck whose song pane is the clicked-last "window" - what Cmd+Enter / Cmd+. target. */
 function songActiveDeck() {
@@ -14740,8 +14825,16 @@ async function songPlay(deck) {
   if (!pane.song) return;
   const U = deck.toUpperCase();
   try {
-    const res = await api('POST', '/api/song/play', { deck });
-    logLine(`deck ${U} ♪ playing "${pane.song.title}" from ${res.pos.toFixed(1)}s`);
+    // Same as the cue: a paused deck resumes from where its pane shows the playhead.
+    const pos = pane.mirror && !pane.mirror.playing ? pane.playheadNow() : undefined;
+    const res = await api('POST', '/api/song/play', { deck, pos });
+    logLine(`deck ${U} ♪ playing "${pane.song.title}" from ${res.pos.toFixed(1)}s`
+      + (res.master ? ` - master: the clock is its grid at ${res.bpm.toFixed(2)} bpm` : ''));
+    // Nothing else was playing and this song couldn't take the clock over, so it is running
+    // free: the other deck will start whenever it is asked to, not on a downbeat.
+    if (res.gridless) {
+      logLine(`deck ${U} is playing unsynced - give it a bpm and press sync, or the other deck has no grid to land on`, true);
+    }
     // A deck faded fully out plays into a closed crossfader (meter lit, nothing heard) - that
     // earns a pointer, whichever side it is.
     const xf = Number(document.getElementById('crossfader').value);

@@ -79,6 +79,11 @@
       </header>
 
       <main>
+        <!-- Stacked decks (the ⇅ strip button): both decks' detail waveforms move up here, one
+             directly above the other at the same scale, playheads on one vertical line - the
+             beat-comparison view. The panes below keep their rows (title, overview, controls),
+             squashed, side by side. client.js moves the canvases; nothing is duplicated. -->
+        <div id="songStack" class="hidden"></div>
         <div id="editorPane">
           <!-- Shown only in DJ mode (body.mix-on): the main editor IS deck A, and both decks
                get the same head - load a song, play it, or leave DJ mode keeping this pane. -->
@@ -112,7 +117,7 @@
             <canvas id="songDetailA" class="song-detail"></canvas>
             <canvas id="songOverviewA" class="song-overview"></canvas>
             <div class="song-ctl-row">
-              <button id="songCueA" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point at the playhead; pressing while playing takes the deck back to it">cue</button>
+              <button id="songCueA" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point at the playhead (snapped to the nearest hit) and makes it the beatgrid's downbeat; pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnA" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
               <button id="songNudgeDnA" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
@@ -120,8 +125,9 @@
               <button id="songJogUpA" class="small" title="jog forward one beat">&#9654;|</button>
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
-              <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead (scrub a downbeat under the centre line first)">&#9875;</button>
+              <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
               <button id="songSyncA" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
+              <button id="songMultA" class="small song-mult" title="tempo octave for sync: auto picks the nearest (a 70 bpm song under a 140 clock plays at ×1, half-time); click to pin ×½ / ×1 / ×2">auto</button>
               <button id="songKeylockA" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
             </div>
           </div>
@@ -154,7 +160,7 @@
             <canvas id="songDetailB" class="song-detail"></canvas>
             <canvas id="songOverviewB" class="song-overview"></canvas>
             <div class="song-ctl-row">
-              <button id="songCueB" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point at the playhead; pressing while playing takes the deck back to it">cue</button>
+              <button id="songCueB" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point at the playhead (snapped to the nearest hit) and makes it the beatgrid's downbeat; pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnB" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)">|&#9664;</button>
               <button id="songNudgeDnB" class="small" title="hold: drag the platter (&minus;4% while held)">&#9664;</button>
@@ -162,8 +168,9 @@
               <button id="songJogUpB" class="small" title="jog forward one beat">&#9654;|</button>
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="0.1" placeholder="&mdash;" /></label>
-              <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead (scrub a downbeat under the centre line first)">&#9875;</button>
+              <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
               <button id="songSyncB" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
+              <button id="songMultB" class="small song-mult" title="tempo octave for sync: auto picks the nearest (a 70 bpm song under a 140 clock plays at ×1, half-time); click to pin ×½ / ×1 / ×2">auto</button>
               <button id="songKeylockB" class="small" title="keylock: rate changes stretch time, not pitch (Warp1 player)">key</button>
             </div>
           </div>
@@ -355,6 +362,7 @@
           <input id="crossfader" type="range" min="-1" max="1" step="0.01" value="-1"
             title="crossfader - constant power (each deck ~-3 dB at center, energy stays level); with swap on it holds both decks full through center instead" />
           <div class="mix-actions">
+            <button id="mixStack" class="small" title="stack the decks: deck B's waveform directly under deck A's, playheads on one vertical line, so the beats of the two can be read against each other (side by side again with another press)">&#8645;</button>
             <button id="mixLearn" class="small" title="MIDI learn: arm this, then click desk controls and turn hardware knobs, one after another; click again or press esc to finish. Alt+click a control to unbind it">midi</button>
           </div>
         </div>

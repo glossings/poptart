@@ -16,7 +16,7 @@ const JOBS = {
   slices: ({ path }) => detectSlices(path),
   trim: ({ srcPath, destPath, ...opts }) => trimRecording(srcPath, destPath, opts),
   songwave: ({ path, ...opts }) => songWaveform(path, opts),
-  songdetect: ({ path }) => detectSongFacts(path),
+  songdetect: ({ path, ...opts }) => detectSongFacts(path, opts),
 };
 
 parentPort.on('message', ({ id, kind, args }) => {

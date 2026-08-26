@@ -316,5 +316,6 @@ module.exports = {
   walkAudioFiles,
   matchAudioPaths,
   detectSlices,
+  detectOnsets,
   readWav,
 };

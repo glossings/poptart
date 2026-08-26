@@ -226,6 +226,20 @@ export class Transport {
     this._paused = false;
   }
 
+  /**
+   * Un-freeze with the grid's phase DEFINED by the caller: the clock resumes with `sec` sitting
+   * at `cycle`. A DJ deck's first song does this - nothing else is on the clock, so the shared
+   * cycle grid becomes that song's own bar grid, and everything joining later (the other deck's
+   * song, an eval) quantizes onto its bars. Unlike start(), this rebases a clock that is
+   * already running too, so the caller has to mean it.
+   */
+  startAt(sec, cycle = 0) {
+    if (!Number.isFinite(sec) || !Number.isFinite(cycle)) return;
+    this._baseSec = sec;
+    this._baseCycle = cycle;
+    this._paused = false;
+  }
+
   setCps(cps) {
     if (!(cps > 0) || !Number.isFinite(cps)) return; // ignore junk (a tempo signal mid-rest, 0, NaN)
     if (cps === this.cps) return;

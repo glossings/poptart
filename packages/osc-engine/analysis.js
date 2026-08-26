@@ -95,12 +95,12 @@ function songWaveform(wavPath, opts = {}) {
 }
 
 /**
- * song-detect.js's detectSongFacts (the songs phase 5 bpm/key fallback), off-thread. Same
- * arguments and same return. `wavPath` must already be a WAV.
- * @returns {Promise<{ bpm: number|null, bpmConfidence: number|null, key: string|null, keyConfidence: number|null } | null>}
+ * song-detect.js's detectSongFacts (bpm, beatgrid, key, onsets), off-thread. Same arguments
+ * and same return. `wavPath` must already be a WAV.
+ * @returns {Promise<{ bpm: number|null, bpmConfidence: number|null, anchorSec: number|null, gridConfidence: number|null, key: string|null, keyConfidence: number|null, onsets: number[] } | null>}
  */
-function songDetect(wavPath) {
-  return run('songdetect', { path: wavPath });
+function songDetect(wavPath, opts = {}) {
+  return run('songdetect', { path: wavPath, ...opts });
 }
 
 /**

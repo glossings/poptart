@@ -258,14 +258,31 @@ function songArmEndTimer(deck) {
 
 // --- tempo sync + nudge + drift servo (songs phase 4; the math lives in song-sync.js) ---
 
+// Is anything besides this deck's song sounding - a pattern deck, the other song? That is
+// what a start has to lock onto; with nothing, the start defines the grid instead.
+function othersPlaying(deck) {
+  return [...schedulers.values()].some((sch) => sch.running)
+    || ['a', 'b'].some((d) => d !== deck && songDecks[d]?.playing);
+}
+
 // The rate a deck's song should run at before the momentary nudge: locked to the master clock
 // when synced (rate = master/native), the manual rate otherwise.
 function songBaseRate(deck) {
   const s = songDecks[deck];
   if (!s) return 1;
-  if (s.sync && s.bpm && transport) return songSync.syncRate(transport.cps * 240, s.bpm) ?? s.manualRate;
+  if (s.sync && s.bpm && transport) return songSync.syncRate(transport.cps * 240, s.bpm, s.syncMult) ?? s.manualRate;
   return s.manualRate;
 }
+
+// The tempo octave a deck's sync is riding (0.5 | 1 | 2), and the bpm its GRID counts in at
+// that octave: a 70 bpm song locked ×2 under a 140 clock is aligned as a 140 - its eighths are
+// the clock's beats, its half-bars the clock's cycles.
+function songOctave(deck) {
+  const s = songDecks[deck];
+  if (!s || !s.bpm) return 1;
+  return songSync.syncOctave(transport ? transport.cps * 240 : s.bpm, s.bpm, s.syncMult);
+}
+const songGridBpm = (deck) => (songDecks[deck]?.bpm ?? 0) * songOctave(deck);
 
 // What the engine's `rate` control is actually set to: the musical rate plus the drift servo's
 // trim. The trim never enters Node's playhead model - it exists precisely to make the engine's
@@ -319,14 +336,19 @@ function handleSongPos(trackId, pos) {
   if (!s || !s.playing || !engine) return;
   const now = engine.getTime();
   if (now - s.startSec < SONG_SERVO_SETTLE_SEC) return;
-  const trim = songSync.servoTrim(pos - songPlayheadSec(deck, now));
+  const expected = songPlayheadSec(deck, now);
+  const trim = songSync.servoTrim(pos - expected);
   if (trim == null) {
-    s.posSec = pos;
-    s.startSec = now;
+    // Too far to trim. The MODEL is the one on the grid (it is what every start was quantized
+    // against), so the engine is put back on it - a seek, audible as a skip, but in time -
+    // rather than the model adopting the engine and every deck silently falling out of phase.
+    // Loud on purpose: this should only ever follow a dropout; anything else is a bug worth
+    // the line in the pane.
+    // eslint-disable-next-line no-console
+    console.warn(`[song] deck ${deck} servo: engine at ${pos.toFixed(3)}s, model at ${expected.toFixed(3)}s (${(pos - expected).toFixed(3)}s off, ${(now - s.startSec).toFixed(2)}s after start) - seeking the engine back onto the grid`);
     s.servo = 0;
     songSendRate(deck);
-    songArmEndTimer(deck);
-    mixNotify();
+    try { engine.songSeek(engineTrack(SONG_KEYS[deck]), songPlayheadSec(deck, now + SONG_START_LEAD_SEC), now + SONG_START_LEAD_SEC); } catch { /* engine between restarts */ }
   } else if (trim !== s.servo) {
     s.servo = trim;
     songSendRate(deck);
@@ -380,7 +402,20 @@ function songCue(deck, hold) {
   if (!engine) throw new Error(engineError ?? 'engine not loaded');
   const tid = engineTrack(SONG_KEYS[deck]);
   if (hold) {
-    if (!s.playing) s.cueSec = songPlayheadSec(deck); // parked somewhere new: the cue is here now
+    const wasPlaying = s.playing;
+    const before = songPlayheadSec(deck);
+    if (!s.playing) {
+      // Parked somewhere new: the cue is here now - and it IS the downbeat. A cue point is
+      // where the hand says "one" is, so it anchors the beatgrid too: the two used to be
+      // separate gestures, and a cue snapped to a grid whose downbeat was wrong went to the
+      // wrong place. The audio places it exactly (nearest transient, never the grid), so
+      // every later start waits for the clock's downbeat and enters right here.
+      const at = songSync.snapToOnset(songPlayheadSec(deck), s.onsets);
+      s.cueSec = at;
+      s.anchorSec = at;
+      s.anchorByHand = true;
+      s.gridDetected = null;
+    }
     // A playing deck comes home the same way a paused one previews - one songStart, which the
     // engine already handles as a swap (the old player releases exactly at the new one's start,
     // fading under it) rather than a stop followed by a start.
@@ -394,6 +429,8 @@ function songCue(deck, hold) {
     s.playing = true;
     s.cueHeld = true;
     songArmEndTimer(deck);
+    // eslint-disable-next-line no-console
+    console.log(`[song] deck ${deck} cue press: ${wasPlaying ? 'playing -> back to cue' : 'paused -> cue set'} at ${s.cueSec.toFixed(3)}s (playhead was ${before.toFixed(3)}s, anchor ${s.anchorSec.toFixed(3)}s, bpm ${s.bpm})`);
   } else if (s.cueHeld) {
     s.cueHeld = false;
     songPause(deck);
@@ -428,13 +465,17 @@ function songUnload(deck) {
 // untagged song re-reads a Map, not ninety seconds of audio.
 const songFactsCache = new Map();
 
+// Every load is analyzed, tags or no tags: the beatgrid (bpm to a hundredth, the downbeat
+// offset) is what tempo sync stands on, and a tag only ever says "128". A tagged/typed bpm
+// goes in as the hint - it pins the octave, and the fit refines it.
 async function songDetectKick(deck) {
   const s = songDecks[deck];
-  if (!s || (s.bpm != null && s.musicalKey != null)) return;
+  if (!s) return;
   const srcPath = s.path;
+  const bpmHint = s.bpm;
   try {
     const st = fs.statSync(srcPath);
-    const cacheKey = `${srcPath}|${Math.round(st.mtimeMs)}|${st.size}`;
+    const cacheKey = `${srcPath}|${Math.round(st.mtimeMs)}|${st.size}|${bpmHint ?? ''}`;
     let facts = songFactsCache.get(cacheKey);
     if (facts === undefined) {
       // Give the pane's waveform fetch first crack at the shared analysis worker - the picture
@@ -442,19 +483,30 @@ async function songDetectKick(deck) {
       await new Promise((r) => { setTimeout(r, 1500); });
       if (songDecks[deck] !== s) return;
       const resolved = await resolveSongFile(srcPath, { wav: true });
-      facts = await analysis.songDetect(resolved.path);
+      facts = await analysis.songDetect(resolved.path, { bpmHint });
       songFactsCache.set(cacheKey, facts);
       while (songFactsCache.size > 24) songFactsCache.delete(songFactsCache.keys().next().value);
     }
     if (songDecks[deck] !== s || !facts) return;
     let changed = false;
-    if (s.bpm == null && facts.bpm != null) {
-      s.bpm = facts.bpm;
-      s.bpmDetected = facts.bpmConfidence ?? 0;
-      decks[deck].bpm = facts.bpm; // the native tempo slot the desk's migration slider rides to
-      // The same default a tagged load gets - but never mid-play: flipping sync under a song
-      // already running at manual rate would lurch it.
-      if (!s.playing && !s.sync) s.sync = true;
+    s.onsets = facts.onsets ?? null;
+    if (facts.bpm != null && s.bpm !== facts.bpm) {
+      // Within a few percent of the hint it's the same tempo measured properly (the fit never
+      // strays further - see fitBeatGrid); with no hint it's the estimate, and marked as one.
+      const refining = s.bpm != null;
+      if (!refining || Math.abs(facts.bpm / s.bpm - 1) < 0.03) {
+        s.bpm = facts.bpm;
+        if (!refining) s.bpmDetected = facts.bpmConfidence ?? 0;
+        decks[deck].bpm = facts.bpm; // the native tempo slot the desk's migration slider rides to
+        // The same default a tagged load gets - but never mid-play: flipping sync under a song
+        // already running at manual rate would lurch it.
+        if (!refining && !s.playing && !s.sync) s.sync = true;
+        changed = true;
+      }
+    }
+    if (facts.anchorSec != null && !s.anchorByHand) {
+      s.anchorSec = Math.min(Math.max(0, facts.anchorSec), s.duration);
+      s.gridDetected = facts.gridConfidence ?? 0;
       changed = true;
     }
     if (s.musicalKey == null && facts.key != null) {
@@ -637,12 +689,15 @@ function mixDeskBody() {
         anchorSec: s.anchorSec,
         cueSec: s.cueSec ?? 0, // the CUE gesture's home - the pane draws it on both waveforms
         sync: s.sync,
+        syncMult: s.syncMult ?? 'auto',
+        syncMultEffective: songOctave(d),
         keylock: s.keylock,
         nudge: s.nudge,
         // Confidence (0..1) when a fact is a phase 5 ESTIMATE rather than a tag/typed value -
         // the pane marks these; a manual edit clears them (see /api/song/meta).
         bpmDetected: s.bpmDetected ?? null,
         keyDetected: s.keyDetected ?? null,
+        gridDetected: s.gridDetected ?? null,
       }];
     })),
   };
@@ -4020,7 +4075,11 @@ const routes = {
       bpm,
       musicalKey: String(body.key ?? '').trim() || tags.key,
       anchorSec: 0,
+      anchorByHand: false, // an anchor pressed by hand outlives the analysis' guess
+      gridDetected: null, // confidence of the fitted beatgrid (null until analyzed / when it failed)
+      onsets: null, // transient times (seconds) the anchor and cue gestures snap to
       sync: bpm != null,
+      syncMult: 'auto', // tempo octave for sync: 'auto' | 0.5 | 1 | 2 (see songSync.syncOctave)
       keylock: false,
       manualRate: 1,
       nudge: 0,
@@ -4043,11 +4102,27 @@ const routes = {
 
   // Start playback. Body: { deck, pos? (seconds; default: resume where it stands, or the top
   // after EOF), rate? (manual rate when not synced; 1 = native), now? (skip quantization) }.
+  //
   // With the shared clock running, the start lands on the next cycle boundary - a song against
-  // a playing deck joins the grid the way a deck-b eval does; with the clock frozen (nothing
-  // else playing) it just starts. A synced song (phase 4) additionally snaps its own entry
-  // point to the nearest gridpoint of its beatgrid, so the material entering at that cycle
-  // boundary is a beat - with rate locked to master/native, the two grids then stay in step.
+  // a playing deck joins the grid the way a deck-b eval does - and a synced song (phase 4)
+  // snaps its own entry point to the nearest BAR of its beatgrid, so the material entering at
+  // that boundary is a downbeat. With rate locked to master/native the two grids then stay in
+  // step, bar for bar.
+  //
+  // With NOTHING ELSE PLAYING there is no grid to join, so a synced song becomes the master:
+  // it starts immediately, the clock takes its native tempo (so it plays at rate 1 and the
+  // other deck stretches to it - unless the hand has already moved the tempo), and the
+  // transport is re-based with its cycle boundaries on this song's bar lines
+  // (Transport#startAt). This is what makes two songs mix. Only patterns used to start the
+  // clock, so a pair of song decks left it frozen forever: the second deck found
+  // `transport.paused` true, skipped the quantization AND the beat snap, and started the
+  // instant the key was pressed - the two decks could only ever be in time by luck.
+  //
+  // A joining deck starts FROM ITS CUE, exactly - never from somewhere near it - and waits
+  // for the moment the clock's bar phase equals the cue's own (a downbeat cue waits for the
+  // next downbeat; a beat-three cue for the next beat three): a bar at most, bar-aligned. An
+  // earlier cut moved the entry point instead to shorten the wait, and a play that jumps
+  // ahead of the cue you just set is exactly the wrong kind of surprise.
   'POST /api/song/play': async (body) => {
     if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
     const deck = body.deck === 'b' ? 'b' : 'a';
@@ -4061,9 +4136,28 @@ const routes = {
       : (s.posSec >= s.duration ? 0 : s.posSec);
     const now = engine.getTime();
     let startSec = now + SONG_START_LEAD_SEC;
-    if (!transport.paused && !body.now) {
-      startSec = transport.secAt(Math.ceil(transport.cycleAt(now + SONG_START_LEAD_SEC)));
-      if (s.sync && s.bpm) from = songSync.snapToBeat(from, s.bpm, s.anchorSec, s.duration);
+    const others = othersPlaying(deck);
+    // Grid-master: nothing else is on the clock, and this song knows where its bars are. When
+    // it doesn't (no bpm, or sync deliberately off) it runs free and the response says so -
+    // the next deck up will have nothing to lock onto, and that is worth a word.
+    const takeGrid = !others && s.sync && !!s.bpm;
+    // Before the rate is read. A pinned octave carries into the clock (×½ on a 140 makes a 70
+    // clock); auto has nothing to pin against yet and takes the native.
+    const clockBpm = s.bpm * (s.syncMult === 0.5 || s.syncMult === 2 ? s.syncMult : 1);
+    if (takeGrid && mixState.tempoOverride == null) transport.setBpm(clockBpm);
+    if (others && !body.now) {
+      const earliest = transport.cycleAt(now + SONG_START_LEAD_SEC);
+      let startCycle;
+      if (s.sync && s.bpm) {
+        // The next clock position with the cue's bar phase.
+        const phase = songSync.gridPhase(from, songGridBpm(deck), s.anchorSec);
+        startCycle = Math.floor(earliest - phase) + phase;
+        if (startCycle < earliest) startCycle += 1;
+      } else {
+        const beat = 1 / songSync.BEATS_PER_CYCLE; // no grid: at least land on a beat
+        startCycle = Math.ceil(earliest / beat) * beat;
+      }
+      startSec = transport.secAt(startCycle);
     }
     s.nudge = 0;
     s.servo = 0;
@@ -4073,15 +4167,37 @@ const routes = {
     s.posSec = from;
     s.startSec = startSec;
     s.playing = true;
+    if (takeGrid) {
+      // The clock resumes with this song's bar position AS its cycle position, so from here the
+      // shared grid is this record's grid: the other deck's song quantizes onto its downbeats,
+      // and so does any eval. The entry point itself is left exactly where the hand put it -
+      // it's the grid that moves to the music, not the music to the grid.
+      // Cycle 1, not 0: the start is a lead ahead of `now`, and reading the clock in that
+      // window (an eval landing between the two) must not come back with a negative position.
+      transport.startAt(startSec, 1 + songSync.gridPhase(from, songGridBpm(deck), s.anchorSec));
+      syncVstTransport(); // plugins' host transport just jumped - don't wait out the 4s timer
+    }
     songArmEndTimer(deck);
     mixNotify();
-    return { status: 200, body: { deck, pos: from, rate: s.rate, startSec } };
+    return {
+      status: 200,
+      body: { deck, pos: from, rate: s.rate, startSec, master: takeGrid, bpm: transport.cps * 240, gridless: !others && !takeGrid },
+    };
   },
 
   // The CUE gesture: press-and-hold previews from the cue point, release drops the playhead
-  // back on it, paused. Body: { deck, hold (true = press, false = release) }. See songCue.
+  // back on it, paused. Body: { deck, hold (true = press, false = release), pos? }. `pos` is
+  // where the PANE shows the playhead - on a paused deck that is where the cue goes, whatever
+  // this side's model says: the hand acted on what it saw. See songCue.
   'POST /api/song/cue': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
+    const s = songDecks[deck];
+    const pos = Number(body.pos);
+    if (s && !s.playing && body.hold && Number.isFinite(pos) && Math.abs(pos - s.posSec) > 0.001) {
+      // eslint-disable-next-line no-console
+      console.warn(`[song] deck ${deck} pane showed ${pos.toFixed(3)}s but the model had ${s.posSec.toFixed(3)}s - taking the pane's`);
+      s.posSec = Math.min(Math.max(0, pos), s.duration);
+    }
     return { status: 200, body: songCue(deck, !!body.hold) };
   },
 
@@ -4116,6 +4232,8 @@ const routes = {
     } else {
       s.posSec = to;
     }
+    // eslint-disable-next-line no-console
+    console.log(`[song] deck ${deck} seek -> ${to.toFixed(3)}s (${s.playing ? 'playing' : 'paused'})`);
     mixNotify();
     return { status: 200, body: { deck, pos: to } };
   },
@@ -4155,6 +4273,7 @@ const routes = {
         if (!Number.isFinite(bpm) || bpm < 20 || bpm > 400) throw new Error('song/meta: bpm must be 20..400 (or null to clear)');
         s.bpm = bpm;
         decks[deck].bpm = bpm; // the native tempo the desk's migration slider/detents ride to
+        songDetectKick(deck); // re-fit the grid around the typed tempo (it pins the octave; the fit refines)
       }
     }
     if ('key' in body) {
@@ -4162,13 +4281,23 @@ const routes = {
       delete s.keyDetected;
     }
     if ('anchorSec' in body) {
-      const a = Number(body.anchorSec);
+      let a = Number(body.anchorSec);
       if (!Number.isFinite(a)) throw new Error('song/meta: anchorSec must be a number (seconds)');
+      // The hand says which hit is the downbeat; the audio says exactly when it is (the
+      // quantize light). { snap: false } takes the number as typed.
+      if (body.snap !== false) a = songSync.snapToOnset(a, s.onsets);
       s.anchorSec = Math.min(Math.max(0, a), s.duration);
+      s.anchorByHand = true;
+      s.gridDetected = null;
     }
     if ('sync' in body) {
       if (body.sync && s.bpm == null) throw new Error('sync needs a bpm - set one first (the tags had none)');
       s.sync = !!body.sync;
+    }
+    if ('syncMult' in body) {
+      const m = body.syncMult === 'auto' ? 'auto' : Number(body.syncMult);
+      if (m !== 'auto' && m !== 0.5 && m !== 1 && m !== 2) throw new Error('song/meta: syncMult must be "auto", 0.5, 1 or 2');
+      s.syncMult = m;
     }
     if ('keylock' in body && !!body.keylock !== s.keylock) {
       s.keylock = !!body.keylock;
