@@ -228,6 +228,22 @@ function mixSoloEnd(deck) {
   for (const k of mixKeys()) if (deckOfKey(k) === deck) mixSetFader(k, prev.get(k) ?? 1);
 }
 
+// Every gate on one deck OUT in a single gesture (the deck head's `mute all`). Named for what it
+// is FOR, not for what it holds: there is no mute state here and no unmute, it is the gate click
+// you would have made on every stem, made on all of them at once. What it is for is the blank canvas - empty the deck, then
+// bring parts back one gate at a time as the mix builds - so it takes out the stems that exist
+// at the moment it is pressed and has no opinion about anything evaled afterwards.
+//
+// A solo on that deck ends first, or its snapshot would put back the very stems this took out.
+// And it goes through mixGateSet rather than the /api/mix/gate route, so swap mode's counter
+// never runs: emptying deck A must not throw all of deck B's stems in.
+function mixGateAll(deck) {
+  mixSoloEnd(deck);
+  const gated = [...mixKeys()].filter((k) => deckOfKey(k) === deck);
+  for (const key of gated) mixGateSet(key, false);
+  return gated;
+}
+
 function* mixKeys() {
   yield* schedulers.keys();
   yield* songKeysLive();
@@ -4025,6 +4041,16 @@ const routes = {
     }
     mixNotify();
     return { status: 200, body: { key, deck, solo: [...solo] } };
+  },
+
+  // Gate every stem on one deck out at once (the deck head's `mute all`) - see mixGateAll.
+  // Body: { deck }.
+  'POST /api/mix/gateall': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    const gated = mixGateAll(deck);
+    mixNotify();
+    return { status: 200, body: { deck, gated } };
   },
 
   // Empty ONE deck - a pane is loading a different song (DJ mode's load button). The old song's

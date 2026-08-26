@@ -15966,6 +15966,24 @@ for (const deck of ['a', 'b']) {
   });
 }
 
+// The `mute all` buttons: every gate on that deck out in one press (see mixGateAll in
+// server.js). A plain action despite the name - nothing lights up and there is no unmute, since
+// what it leaves behind is a set of ordinary gates you bring back one at a time. Every row on
+// the deck just changed, and rows only come from GET /api/mix, so it takes a real refresh
+// rather than a pushed desk frame.
+for (const deck of ['a', 'b']) {
+  const btn = document.getElementById(deck === 'a' ? 'mixMuteAllA' : 'mixMuteAllB');
+  btn.addEventListener('click', async () => {
+    try {
+      const { gated } = await api('POST', '/api/mix/gateall', { deck });
+      logLine(`deck ${deck.toUpperCase()}: ${gated.length} stem${gated.length === 1 ? '' : 's'} muted`);
+    } catch (e) {
+      logLine(e.message ?? String(e), true);
+    }
+    mixRefresh();
+  });
+}
+
 document.getElementById('crossfader').addEventListener('input', sendCrossfader);
 document.getElementById('crossfader').addEventListener('dblclick', (e) => {
   e.target.value = -1; // home: all deck A
