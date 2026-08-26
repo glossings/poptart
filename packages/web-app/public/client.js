@@ -343,7 +343,7 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Shift-Alt-Up': (cm) => copyLines(cm, 'up'),
     'Alt-Up': 'swapLineUp',
     'Alt-Down': 'swapLineDown',
-    'Ctrl-Space': () => showPoptartHint(),
+    'Ctrl-Space': (ed) => showPoptartHint(ed),
   },
 });
 // Show the editor pane: CodeMirror is up and the buffer this URL opens with is in it. Called from
@@ -1679,10 +1679,11 @@ function hintResult(cur, typed, completions) {
 
 // Which labeled block is the cursor inside? Scopes `.param(` autocomplete to that block's
 // track chain. Falls back to a whole-buffer view if the label splitter isn't loaded yet.
-function blockAtCursor() {
+// `editor` is whichever pane is being completed in - the main buffer, or deck B's in DJ mode.
+function blockAtCursor(editor = cm) {
   if (!labelsMod) return null;
-  const idx = cm.indexFromPos(cm.getCursor());
-  const blocks = labelsMod.splitLabeledBlocks(cm.getValue());
+  const idx = editor.indexFromPos(editor.getCursor());
+  const blocks = labelsMod.splitLabeledBlocks(editor.getValue());
   return blocks.find((b) => idx >= b.start && idx <= b.end) ?? null;
 }
 
@@ -1695,11 +1696,11 @@ function withParamAddrs(params) {
   return params.map((p) => ({ ...p, addr: counts.get(p.name) > 1 ? `${p.name}#${p.index}` : p.name }));
 }
 
-function paramHints(cur, typed, textBefore) {
+function paramHints(cur, typed, textBefore, editor) {
   // A `.param(` call targets whatever is last in the chain at that point of the method chain:
   // slot 0 (the instrument) before any .fx(), then slot 1, 2, … after each. Count `.fx(`
   // occurrences between the block start and the cursor to mirror that rule.
-  const block = blockAtCursor();
+  const block = blockAtCursor(editor);
   const sinceBlockStart = block ? textBefore.slice(block.start) : textBefore;
   const slot = (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
   const entry =
@@ -1905,12 +1906,15 @@ function samplePackHints(cur, typed) {
 }
 
 // Named packs for sp(" - what this buffer defines and what the library holds (see packDefs).
-function packNameHints(cur, typed) {
+function packNameHints(cur, typed, editor) {
   const token = typed.match(/[A-Za-z0-9_:#-]*$/)[0];
   const word = token.split(':')[0];
-  const pool = packDefs.allIds().map((r) => {
+  // Buffer-local packs come from the pane being typed in: deck B's `sp("` must offer deck B's
+  // own definitions, not the main editor's.
+  const code = editor.getValue();
+  const pool = packDefs.allIds(null, code).map((r) => {
     const files = r.own
-      ? packEntriesOf(cm.getValue(), packDefs.findDef(cm.getValue(), r.id)) ?? []
+      ? packEntriesOf(code, packDefs.findDef(code, r.id)) ?? []
       : prPrebakePacks.find((p) => p.id === r.id)?.files ?? [];
     return { key: r.id, count: files.length, note: r.note };
   });
@@ -1981,13 +1985,15 @@ function renderHintRow(el, data, completion) {
   }
 }
 
-function poptartHint(cm) {
-  const cur = cm.getCursor();
-  const before = cm.getRange(CodeMirror.Pos(0, 0), cur);
+// CodeMirror hands the hint source the editor asking for completions, so every branch below
+// reads (and completes into) whichever pane has focus - the main buffer or deck B's.
+function poptartHint(editor) {
+  const cur = editor.getCursor();
+  const before = editor.getRange(CodeMirror.Pos(0, 0), cur);
 
   // Inside the name string of .param(" → real VST parameter names.
   let m = before.match(/\.param\s*\(\s*["']([^"']*)$/);
-  if (m) return paramHints(cur, m[1], before);
+  if (m) return paramHints(cur, m[1], before, editor);
 
   // Inside the name string of synth(" or .fx(" → scanned plugin names. \b instead of a literal
   // dot: chains can *start* with synth(...), so the call isn't always in method position.
@@ -2014,7 +2020,7 @@ function poptartHint(cm) {
   // Inside sp(" → named packs, this buffer's and the library's. Like s(", the string is mini
   // notation, so only the word under the cursor is completed, and the method form is allowed.
   m = before.match(/(?<![\w$])\.?sp\s*\(\s*["']([^"']*)$/);
-  if (m) return packNameHints(cur, m[1]);
+  if (m) return packNameHints(cur, m[1], editor);
 
   // Inside s(" → sample packs (and their files after a ":"). `s` is both a builder and a chain
   // method (`n("0").s("clap")`), so a leading dot is allowed where se(/sr( forbid it.
@@ -2031,16 +2037,6 @@ function poptartHint(cm) {
 
   return { list: [], from: cur, to: cur };
 }
-
-// Auto-open the hint popup while typing (quotes/parens/word chars, plus spaces so multi-word
-// param names like "Filter 1 Freq" keep the popup alive).
-cm.on('inputRead', (cm, change) => {
-  if (cm.state.completionActive) return;
-  const typedChar = change.text[change.text.length - 1].slice(-1);
-  if (/[\w"'( ]/.test(typedChar)) {
-    showPoptartHint();
-  }
-});
 
 // ---------------------------------------------------------------------------------------------
 // Documentation tooltips - the same api-docs.js entries in two places: a panel beside the
@@ -2145,13 +2141,9 @@ function withDocPanel(hintFn) {
   };
 }
 
-function showPoptartHint() {
-  cm.showHint({ hint: withDocPanel(poptartHint), completeSingle: false });
+function showPoptartHint(editor = cm) {
+  editor.showHint({ hint: withDocPanel(poptartHint), completeSingle: false });
 }
-
-// Backstop for the same asymmetry: a completion session that already lost its popup closes without
-// signalling its result, so hang the panel's last word on the editor-level event instead.
-cm.on('endCompletion', hideHintDoc);
 
 // --- ctrl-hover over a name in the buffer ---
 
@@ -2185,19 +2177,19 @@ const IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
 
 // The documented name under the pointer, if any. CodeMirror's coordsChar snaps to the nearest
 // character, so the pointer is checked against the token's own box before we call it a hover.
-function docAtCoords(clientX, clientY) {
-  const pos = cm.coordsChar({ left: clientX, top: clientY }, 'window');
-  const line = cm.getLine(pos.line);
+function docAtCoords(editor, clientX, clientY) {
+  const pos = editor.coordsChar({ left: clientX, top: clientY }, 'window');
+  const line = editor.getLine(pos.line);
   if (line == null) return null;
-  let token = cm.getTokenAt(pos, true);
+  let token = editor.getTokenAt(pos, true);
   // getTokenAt returns the token ENDING at pos, so on the left edge of a name we get whatever
   // precedes it (the dot, a space) - look one character right before giving up.
   if ((!token || !IDENTIFIER_RE.test(token.string)) && pos.ch < line.length) {
-    token = cm.getTokenAt(CodeMirror.Pos(pos.line, pos.ch + 1), true);
+    token = editor.getTokenAt(CodeMirror.Pos(pos.line, pos.ch + 1), true);
   }
   if (!token || !IDENTIFIER_RE.test(token.string)) return null;
-  const startBox = cm.charCoords(CodeMirror.Pos(pos.line, token.start), 'window');
-  const endBox = cm.charCoords(CodeMirror.Pos(pos.line, token.end), 'window');
+  const startBox = editor.charCoords(CodeMirror.Pos(pos.line, token.start), 'window');
+  const endBox = editor.charCoords(CodeMirror.Pos(pos.line, token.end), 'window');
   if (clientY < startBox.top || clientY > startBox.bottom) return null;
   if (clientX < startBox.left || clientX > endBox.left) return null;
   const context = /\.\s*$/.test(line.slice(0, token.start)) ? 'method' : 'builder';
@@ -2205,30 +2197,56 @@ function docAtCoords(clientX, clientY) {
   return doc ? { doc, key: `${token.string}:${context}`, box: startBox } : null;
 }
 
-const editorWrapper = cm.getWrapperElement();
-let lastHoverPoint = null; // so holding ctrl without moving the mouse still opens the tooltip
+// The pane the pointer was last over, so holding ctrl without moving the mouse still opens the
+// tooltip - and opens it over the right editor when two are on screen.
+let lastHover = null; // { editor, x, y }
 
-function updateHoverDoc(point, ctrlHeld) {
-  lastHoverPoint = point;
-  if (!point || !ctrlHeld || !docTooltipsEnabled || cm.state.completionActive) {
+function updateHoverDoc(editor, point, ctrlHeld) {
+  lastHover = point ? { editor, x: point.x, y: point.y } : null;
+  if (!point || !ctrlHeld || !docTooltipsEnabled || editor.state.completionActive) {
     hideHoverDoc();
     return;
   }
-  const hit = docAtCoords(point.x, point.y);
+  const hit = docAtCoords(editor, point.x, point.y);
   if (!hit) hideHoverDoc();
   else showHoverDoc(hit.doc, hit.key, hit.box);
 }
 
-editorWrapper.addEventListener('mousemove', (e) => updateHoverDoc({ x: e.clientX, y: e.clientY }, e.ctrlKey));
-editorWrapper.addEventListener('mouseleave', () => updateHoverDoc(null, false));
 // Ctrl pressed with the pointer already parked over a name, and released again.
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Control') updateHoverDoc(lastHoverPoint, true);
+  if (e.key === 'Control' && lastHover) updateHoverDoc(lastHover.editor, { x: lastHover.x, y: lastHover.y }, true);
 });
 document.addEventListener('keyup', (e) => {
   if (e.key === 'Control' || !e.ctrlKey) hideHoverDoc();
 });
-cm.on('scroll', hideHoverDoc); // the code moved out from under the pointer
+
+// ---------------------------------------------------------------------------------------------
+// Everything that makes a CodeMirror instance a poptart live-coding pane rather than a text box -
+// the completion popup, the ctrl-hover docs, and the focus bookkeeping activeCM() reads - wired
+// onto ONE editor. All of it is per-editor state (the buffer, the cursor, the wrapper's box), so
+// DJ mode's deck B gets the same treatment the moment its CodeMirror is built (see openMixMode).
+// ---------------------------------------------------------------------------------------------
+let lastFocusedCM = null; // the caret's last home; see activeCM
+
+function attachEditorWiring(editor) {
+  editor.on('focus', () => { lastFocusedCM = editor; });
+  // Auto-open the hint popup while typing (quotes/parens/word chars, plus spaces so multi-word
+  // param names like "Filter 1 Freq" keep the popup alive).
+  editor.on('inputRead', (ed, change) => {
+    if (ed.state.completionActive) return;
+    const typedChar = change.text[change.text.length - 1].slice(-1);
+    if (/[\w"'( ]/.test(typedChar)) showPoptartHint(ed);
+  });
+  // Backstop for show-hint's asymmetry: a completion session that already lost its popup closes
+  // without signalling its result, so hang the panel's last word on the editor-level event.
+  editor.on('endCompletion', hideHintDoc);
+  editor.on('scroll', hideHoverDoc); // the code moved out from under the pointer
+  const wrapper = editor.getWrapperElement();
+  wrapper.addEventListener('mousemove', (e) => updateHoverDoc(editor, { x: e.clientX, y: e.clientY }, e.ctrlKey));
+  wrapper.addEventListener('mouseleave', () => updateHoverDoc(editor, null, false));
+}
+
+attachEditorWiring(cm);
 
 // ---------------------------------------------------------------------------------------------
 // Widget handles - DOUBLE-CLICK a call's name to open its editor.
@@ -4331,8 +4349,8 @@ function makeDefRegistry(opts) {
    * scoped kind to one owner, which is what the preset picker lists - offering a slot the presets
    * of some other plugin would only ever be offering it names it can't load.
    */
-  function allIds(sc = null) {
-    const own = defsInBuffer().map((d) => ({ id: d.id, scope: d.scope, note: '', own: true }));
+  function allIds(sc = null, code = cm.getValue()) {
+    const own = defsInBuffer(code).map((d) => ({ id: d.id, scope: d.scope, note: '', own: true }));
     const rows = [
       ...own,
       ...library()
@@ -13481,11 +13499,21 @@ function addHotkey(list, combo, handler, label) {
   list.push({ spec: comboToSpec(combo), handler, combo, label });
 }
 
+// The editor whichever hotkey is running resolved to, held for the whole handler (activeCM
+// returns it in preference to live focus). Saved and restored rather than cleared: a chord
+// pressed while an earlier async handler is parked on a prompt() must give that one its deck
+// back when it finishes.
+let gestureCM = null;
+
 async function runHotkey(hk, e) {
+  const outerCM = gestureCM;
+  gestureCM = activeCM();
   try {
     await hk.handler(e);
   } catch (err) {
     logLine(`hotkey ${hk.combo}: ${err.message ?? err}`, true);
+  } finally {
+    gestureCM = outerCM;
   }
 }
 
@@ -13545,36 +13573,72 @@ function makeChainStub() {
   return stub;
 }
 
-// editor: a thin, offset-based facade over the main CodeMirror instance, close to Strudel's `repl`
-// so ports read the same. Offsets are character indices into the whole document.
+// Is deck B a code pane right now? Only while the split is open and the pane isn't showing a
+// song file - a deck holding a file has its editor hidden, and its (readOnly) buffer is a
+// descriptor card, so a hotkey aimed there would write into something nobody can see.
+function deckBIsCode() {
+  return mixModeOn && !!deckBCM && !deckBPaneEl.classList.contains('song-on');
+}
+
+/**
+ * The editor an editor-scripting gesture belongs to. Outside DJ mode that is only ever the main
+ * buffer; with the split open it's the pane holding the caret, so a prebake hotkey writes into
+ * the deck you are typing in rather than always into deck A.
+ *
+ * Three answers, in order: the editor a running hotkey resolved to when it fired (see runHotkey -
+ * a handler that awaits a prompt() has lost focus by the time it resumes, and must still land
+ * where it started); the editor focused right now; and failing both - a hotkey pressed with the
+ * caret in a button or the sidebar - the last editor that held it.
+ */
+function activeCM() {
+  if (gestureCM) return gestureCM;
+  if (deckBIsCode() && deckBCM.hasFocus()) return deckBCM;
+  if (cm.hasFocus()) return cm;
+  return lastFocusedCM === deckBCM && deckBIsCode() ? deckBCM : cm;
+}
+
+// editor: a thin, offset-based facade over the focused CodeMirror instance, close to Strudel's
+// `repl` so ports read the same. Offsets are character indices into the whole document. Every
+// method re-resolves the editor rather than closing over one, so the same handle scripts deck A
+// or deck B depending on where the gesture came from.
 const editor = {
-  get cm() { return cm; },
-  get code() { return cm.getValue(); },
-  getCode() { return cm.getValue(); },
-  setCode(str) { cm.setValue(str); },
+  get cm() { return activeCM(); },
+  get code() { return activeCM().getValue(); },
+  getCode() { return activeCM().getValue(); },
+  setCode(str) { activeCM().setValue(str); },
   appendCode(str) {
-    const end = cm.posFromIndex(cm.getValue().length);
-    cm.replaceRange(str, end);
+    const ed = activeCM();
+    ed.replaceRange(str, ed.posFromIndex(ed.getValue().length));
   },
   insertCode(str, at) {
-    const pos = at == null ? cm.getCursor() : cm.posFromIndex(at);
-    cm.replaceRange(str, pos);
+    const ed = activeCM();
+    ed.replaceRange(str, at == null ? ed.getCursor() : ed.posFromIndex(at));
   },
   replaceCode(str, from, to) {
-    cm.replaceRange(str, cm.posFromIndex(from), cm.posFromIndex(to));
+    const ed = activeCM();
+    ed.replaceRange(str, ed.posFromIndex(from), ed.posFromIndex(to));
   },
   sliceCode(from, to) {
-    return cm.getRange(cm.posFromIndex(from), cm.posFromIndex(to));
+    const ed = activeCM();
+    return ed.getRange(ed.posFromIndex(from), ed.posFromIndex(to));
   },
-  getCursorLocation() { return cm.indexFromPos(cm.getCursor()); },
-  setCursorLocation(at) { cm.setCursor(cm.posFromIndex(at)); cm.focus(); },
+  getCursorLocation() {
+    const ed = activeCM();
+    return ed.indexFromPos(ed.getCursor());
+  },
+  setCursorLocation(at) {
+    const ed = activeCM();
+    ed.setCursor(ed.posFromIndex(at));
+    ed.focus();
+  },
   // { from, to, text } as character offsets; from === to when nothing is selected.
   getSelection() {
-    const from = cm.indexFromPos(cm.getCursor('from'));
-    const to = cm.indexFromPos(cm.getCursor('to'));
-    return { from, to, text: cm.getRange(cm.posFromIndex(from), cm.posFromIndex(to)) };
+    const ed = activeCM();
+    const from = ed.indexFromPos(ed.getCursor('from'));
+    const to = ed.indexFromPos(ed.getCursor('to'));
+    return { from, to, text: ed.getRange(ed.posFromIndex(from), ed.posFromIndex(to)) };
   },
-  focus() { cm.focus(); },
+  focus() { activeCM().focus(); },
 };
 
 // Euclidean rhythm (Bjorklund): `pulses` hits spread as evenly as possible over `steps`,
@@ -13811,8 +13875,12 @@ async function openMixMode() {
         'Shift-Ctrl-Enter': () => exitDjMode('b'),
         'Cmd-.': () => doStop('b'), // this pane's deck only; deck A plays on
         'Ctrl-.': () => doStop('b'),
+        'Ctrl-Space': (ed) => showPoptartHint(ed),
       },
     });
+    // Deck B is a live-coding pane, not a text box: same completions, ctrl-hover docs and
+    // prebake-hotkey targeting as the main buffer, all resolved against ITS code.
+    attachEditorWiring(deckBCM);
   }
   deckBCM.refresh();
   cm.refresh();

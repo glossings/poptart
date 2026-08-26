@@ -878,6 +878,10 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
   editor.replaceCode(rotate(text.trim().split(/\s+/), 1).join(<span class="s">" "</span>), from, to);
 });</code></pre>
           <p>
+            The <code>editor</code> handle follows the caret: in DJ mode a hotkey pressed while
+            you're typing in deck B reads and writes deck B's code, not deck A's.
+          </p>
+          <p>
             Combos are <code>+</code>-joined — <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>/<code>mod</code>
             plus one key. <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>, <code>prompt</code>
             and <code>log</code> are on hand. <code>ctrl+p</code>/<code>r</code>/<code>m</code>/<code>g</code>
