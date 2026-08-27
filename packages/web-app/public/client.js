@@ -1106,6 +1106,31 @@ function presetCallForSlot(code, trackLabel, slot) {
   return null;
 }
 
+// Applies [from, to, text] edits to the buffer as ONE undo step, last-first so every offset still
+// holds against the `code` they were computed from.
+//
+// Two of them can land on the SAME offset: a chain call that ends at the very end of the buffer is
+// exactly where defsEdit appends a new definition, and then nothing about the offsets says which
+// text comes first. Array order breaks the tie - an earlier entry goes in first and so ends up
+// LOWER in the document - which is why the definition is always listed before the `.preset(...)`
+// that names it. Sorted the other way, the definition was threaded through the middle of the
+// `.preset(…)` call and the call came out dangling off the definition instead of off the .fx():
+// `_preset("bass", "ValhallaRoom", "@…").preset("bass")` on one line, with the track above it
+// untouched. A buffer whose last line had no newline after it was all it took.
+//
+// The `+`-prefixed origin is what makes CodeMirror merge consecutive writes into a single undo
+// step (same trick as the copy-line edits): a knob drag can't bury your last real edit under a run
+// of them.
+function applyBufferEdits(edits, origin) {
+  const order = new Map(edits.map((e, i) => [e, i]));
+  const inOrder = [...edits].sort((a, b) => (b[0] - a[0]) || (order.get(a) - order.get(b)));
+  cm.operation(() => {
+    for (const [from, to, text] of inOrder) {
+      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), origin);
+    }
+  });
+}
+
 function writePluginState(trackLabel, slot, state, plugin, preset) {
   if (!labelsMod) return null;
   const code = cm.getValue();
@@ -1151,19 +1176,14 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   const wantedId = preferredDefId(trackLabel, 'preset');
   const fromLibrary = rows.find((r) => r.id === wantedId && !r.own);
   if (fromLibrary) libraryBumpNote('preset', wantedId, id, fromLibrary.note ?? 'prebake');
+  // Definition first, `.preset(...)` second - see applyBufferEdits for what rides on that order.
   const edits = [
-    [call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`],
     presetDefs.defsEdit(code, [id], () => `${JSON.stringify(plugin ?? '')}, ${JSON.stringify(state)}`),
+    [call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`],
   ];
   // The legacy `{ state }` argument, if this call still carries one.
   if (call.afterFirstArg < call.closeParen) edits.push([call.afterFirstArg, call.closeParen, '']);
-  // One `+`-prefixed origin so CodeMirror merges consecutive writes into a single undo step (same
-  // trick as the copy-line edits): a knob drag can't bury your last real edit under a run of them.
-  cm.operation(() => {
-    for (const [from, to, text] of [...edits].sort((a, b) => b[0] - a[0])) {
-      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), '+autopin');
-    }
-  });
+  applyBufferEdits(edits, '+autopin');
   refoldAll();
   logLine(`captured ${plugin ?? 'plugin'} into new preset "${id}"`);
   presetScheduleEval();
@@ -1235,11 +1255,7 @@ function convertLegacyStates() {
       presetDefs.defsEdit(code, [id], () => `${JSON.stringify(plugin)}, ${JSON.stringify(state)}`),
     ];
     if (!driven) edits.push([call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`]);
-    cm.operation(() => {
-      for (const [from, to, text] of edits.sort((a, b) => b[0] - a[0])) {
-        cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), '+legacyState');
-      }
-    });
+    applyBufferEdits(edits, '+legacyState');
     converted.push(`"${label}" ${slot === 0 ? 'synth' : `fx slot ${slot}`} → preset "${id}"${driven ? ' (filed only: that slot is already driven by .preset(…))' : ''}`);
   }
   if (!converted.length) return;
@@ -1489,9 +1505,17 @@ async function pollConf(labelOverride) {
 // same label, and the engine only knows the one that is playing: the gesture came out of ITS
 // plugin, so that is the block the write belongs in. The muted one is only the fallback when
 // nothing by that name plays (a capture landing just after the track was muted).
+//
+// The LAST such block, not the first, because that is the one the engine is playing: a label is a
+// key, and /api/evaluate walks the buffer in document order calling setPattern on one scheduler
+// per key - so writing `bass:` a second time to try something else overrides the first, exactly
+// the way redeclaring anything else does. Taking the first instead aimed every write at the
+// version that had been overridden, which is what made a `bass:` re-stated as a pianoroll report
+// "auto-pin: no synth(...) call" against the line above it.
 function blockForTrack(code, label) {
-  const blocks = labelsMod.splitLabeledBlocks(code);
-  return blocks.find((b) => b.label === label && !b.muted) ?? blocks.find((b) => b.label === label) ?? null;
+  const named = labelsMod.splitLabeledBlocks(code).filter((b) => b.label === label);
+  const live = named.filter((b) => !b.muted);
+  return live[live.length - 1] ?? named[named.length - 1] ?? null;
 }
 
 function upsertParam(trackLabel, slot, name, value) {

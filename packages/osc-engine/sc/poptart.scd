@@ -122,12 +122,14 @@ var destroyTrack;
 var slotKey, waitForLoad, flushNotes, clearPending;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
-// Audio sidechain routing (Sig#sidechain / '/poptart/setSidechain'). silentBus is the read-only
-// default for every fx slot's aux input (never written -> silence); trashBus is the write-only
-// default for a track's sidechain send when it feeds nothing (parked, never read). scArgsFor
-// builds the per-track defaults. The two dicts track live routes both ways for teardown.
+// Cross-track audio routing (the audio() head source and the .audio(...) sidechain injector).
+// silentBus is the read-only default for every fx slot's aux input (never written -> silence);
+// trashBus is the write-only default for a track's send when it feeds nothing (parked, never
+// read). scArgsFor builds the per-track defaults. sidechainByTarget/BySource track live routes
+// both ways for teardown, and sourceFeeds holds the per-source bus that lets ONE source feed
+// several sinks (see acquireSourceFeed).
 var silentBus, trashBus, scArgsFor, scKey, wireAudio, unwireAudio;
-var sidechainByTarget, sidechainBySource;
+var sidechainByTarget, sidechainBySource, sourceFeeds, acquireSourceFeed, releaseSourceFeed;
 // Named audio buses (Sig#bus / '/poptart/setBusOut'): a track can divert its output to a bus,
 // where any number of tracks sum, and another track reads the sum via the audio("name") head
 // source. busGroup sits at the head of the node tree so bus-writer tracks execute before the
@@ -434,12 +436,47 @@ releaseBus = { |name|
     };
 };
 
+// The bus a source track's output is offered on, so that any number of routes can read it.
+//
+// A track synth has exactly ONE send (\scSend, see buildTrackDef), so pointing it straight at a
+// sink limited each source to a single sink - and silently, because wiring the second route just
+// moved the send off the first. `audio("kick").fx("ValhallaRoom").fx("Kickstart 2").audio("kick")`
+// is the ordinary case that hits it: the kick feeds this track's chain input AND slot 2's
+// sidechain, and the sidechain route stole the head input, so the chain went quiet. The send now
+// writes here instead and each route runs its own \poptart_busread reader off it.
+//
+// Refcounted like a named bus, so the send parks itself again once the last route goes.
+acquireSourceFeed = { |nameKey, source|
+    var entry = sourceFeeds[nameKey];
+    if (entry.isNil) {
+        entry = (bus: Bus.audio(server, 2), refs: 0);
+        sourceFeeds[nameKey] = entry;
+        // Unity at the source: each reader scales its own copy, so two sinks can ask for
+        // different amounts of the same track.
+        source[\synth].set(\scSend, entry[\bus].index, \scSendGain, 1);
+    };
+    entry[\refs] = entry[\refs] + 1;
+    entry[\bus];
+};
+releaseSourceFeed = { |nameKey|
+    sourceFeeds[nameKey] !? { |entry|
+        entry[\refs] = entry[\refs] - 1;
+        if (entry[\refs] <= 0) {
+            tracks[nameKey] !? { |s| if (s.isKindOf(Event)) { s[\synth].set(\scSend, trashBus.index, \scSendGain, 1) } };
+            entry[\bus].free;
+            sourceFeeds[nameKey] = nil;
+        };
+    };
+};
+
 // Wire an audio route into a sink on `targetKey`: slot >= 1 is an fx aux (sidechain) input, slot
 // 0 is the chain input (a head audio() source). `rawName` is a source track ("label"/"track:label")
-// or a hardware input ("dev:..."). A track source sends its output to the sink bus and is ordered
-// ahead of the target; a device source runs a SoundIn feeder at the head writing that bus. The fx
-// aux gets a freshly allocated bus (pointed at via \scBusN); the chain input reuses the track's
-// own inBus. Idempotent: an existing route on the same sink is torn down first.
+// or a hardware input ("dev:..."). A track source offers its output on a shared feed bus that this
+// route reads a copy of, and is ordered ahead of the target (see acquireSourceFeed - that shared
+// bus is what lets one source feed several sinks); a device source runs a SoundIn feeder at the
+// head writing the sink bus directly. The fx aux gets a freshly allocated bus (pointed at via
+// \scBusN); the chain input reuses the track's own inBus. Idempotent: an existing route on the
+// same sink is torn down first.
 // `inA`/`inB` are the hardware channels a device source reads, absolute and 0-indexed (inB -1 =
 // mono, duplicated to both sides); ignored for a track/bus source. pattern-core resolves them from
 // input()'s 1-indexed, optionally device-relative form before they get here.
@@ -516,15 +553,17 @@ wireAudio = { |targetKey, slot, rawName, gain, inA = 0, inB = 1|
                 useBus = source.isKindOf(Event).not and: { namedBuses[nameKey].notNil };
                 case
                 { source.isKindOf(Event) } {
-                    // A track source pushes its output to the sink via its own \scSend (one per
-                    // source): retire its previous sink if different, then order source ahead.
-                    sidechainBySource[nameKey] !? { |p|
-                        if ((p[\targetKey] != targetKey) or: { p[\slot] != slot }) { unwireAudio.(p[\targetKey], p[\slot]) };
-                    };
-                    source[\synth].set(\scSend, destBus.index, \scSendGain, gain);
+                    // A track source offers its output on a shared feed bus (acquireSourceFeed)
+                    // and this route reads a copy of it into the sink - so the same source can
+                    // feed a chain input and a sidechain, or two tracks' duckers, at once. The
+                    // reader sits at the head of the sink's group and the sink's group is ordered
+                    // after the source's, so the copy lands the same block, as before.
+                    var feedBus = acquireSourceFeed.(nameKey, source);
+                    var feeder = Synth(\poptart_busread, [\out, destBus.index, \in, feedBus.index, \gain, gain],
+                        target: target[\group], addAction: \addToHead);
                     if (nameKey != targetKey) { target[\group].moveAfter(source[\group]) };
-                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nameKey, feeder: nil, busName: nil, owns: ownsBus);
-                    sidechainBySource[nameKey] = (targetKey: targetKey, slot: slot);
+                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nameKey, feeder: feeder, busName: nil, owns: ownsBus);
+                    sidechainBySource[nameKey] = (sidechainBySource[nameKey] ?? { [] }).add((targetKey: targetKey, slot: slot));
                     ("poptart: audio route: " ++ name ++ " -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
                 }
                 { useBus } {
@@ -555,8 +594,13 @@ unwireAudio = { |targetKey, slot|
         var target = tracks[targetKey];
         if ((slot >= 1) and: { target.isKindOf(Event) }) { target[\synth].set(("scBus" ++ slot).asSymbol, silentBus.index) };
         entry[\source] !? { |src|
-            tracks[src] !? { |s| if (s.isKindOf(Event)) { s[\synth].set(\scSend, trashBus.index) } };
-            sidechainBySource[src] = nil;
+            // One route off a source that may still feed others: drop this sink from its list and
+            // let the refcount decide whether the source's send goes back to the trash bus.
+            var left = (sidechainBySource[src] ?? { [] }).reject { |e|
+                (e[\targetKey] == targetKey) and: { e[\slot] == slot }
+            };
+            sidechainBySource[src] = if (left.isEmpty) { nil } { left };
+            releaseSourceFeed.(src);
         };
         entry[\busName] !? { |bn| releaseBus.(bn) }; // a bus reader held a ref - drop it
         entry[\feeder] !? { |f| f.free };
@@ -1032,8 +1076,9 @@ server.waitForBoot {
     // The DJ deck meter buses (see the var declaration): one 4-channel block so A and B are
     // guaranteed adjacent and the track def can address B as `.index + 2`.
     deckMeterBus = Bus.audio(server, 4);
-    sidechainByTarget = IdentityDictionary.new; // scKey -> (bus:, target:, slot:, source:)
-    sidechainBySource = IdentityDictionary.new; // sourceKey (Symbol) -> scKey it currently feeds
+    sidechainByTarget = IdentityDictionary.new; // scKey -> (bus:, target:, slot:, source:, feeder:)
+    sidechainBySource = IdentityDictionary.new; // sourceKey (Symbol) -> [(targetKey:, slot:)] it feeds
+    sourceFeeds = IdentityDictionary.new; // sourceKey (Symbol) -> (bus: Bus, refs: Int)
     // Named-bus registry + the head group its writer tracks live in (see the var declaration).
     namedBuses = IdentityDictionary.new; // busName (Symbol) -> (bus: Bus, refs: Int)
     busGroup = Group.new(server, \addToHead);
@@ -1115,7 +1160,9 @@ destroyTrack = { |key|
                 unwireAudio.(key, slot); // routes INTO this track
                 track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free }; track[\editWatch][slot] = nil };
             };
-            sidechainBySource[key] !? { |e| unwireAudio.(e[\targetKey], e[\slot]) }; // ...and out of it
+            // ...and every route OUT of it - one source may feed several sinks. Over a copy:
+            // unwireAudio rewrites this very list as it goes.
+            sidechainBySource[key] !? { |routes| routes.copy.do { |e| unwireAudio.(e[\targetKey], e[\slot]) } };
             [track[\lfos], track[\envs], track[\ramps]].do { |dict|
                 dict.do { |e| e[\synth] !? { |s| s.free }; e[\bus] !? { |b| b.free } };
             };
