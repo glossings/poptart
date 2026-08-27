@@ -106,6 +106,29 @@ var noteQueues = IdentityDictionary.new;
 // note - the alternative was every synth playing its init preset for the length of the load.
 var stateWaitMax = 0.3;
 var coldWaitMax = 20;
+// '<track>_<slot>' -> the time until which an edit reported by that slot's plugin is OUR doing
+// rather than the user's. Loading a program makes plugins fire the very callbacks auto-pin
+// watches - /vst_update above all, since a plugin that redraws when its program changes cannot
+// tell a host load from a click in its own preset browser - so every push of a captured state
+// came straight back as "the user just edited this slot".
+//
+// On a slot whose preset only IT plays that was merely wasteful: the program came back as the
+// code already described it and the editor stopped there. Two slots sharing one preset made it a
+// LOOP. A capture from `pluck` is filed in `_preset("pluckSC", ...)`, which the next evaluation
+// pushes into `pluck2`'s own copy of the plugin - it must, they name one preset and one sound -
+// whose update captured ITS program; and a plugin that does not serialize byte-for-byte
+// identically after a round trip then wrote a DIFFERENT state into that same definition, which
+// was pushed back to `pluck`, forever (Kickstart 2 on two tracks, reported 2026-08-27).
+//
+// Same reasoning as not listening to '/vst_param' (see watchPluginEdits): what we did to a plugin
+// is not something to capture out of it. The window is bounded by coldWaitMax so a load that
+// never reports back cannot deafen a slot for good.
+var selfLoads = IdentityDictionary.new;
+// How long after a load reports in its plugin may still be redrawing because of it. Long enough
+// for a callback the load itself caused, short enough that the next knob you turn is heard - and
+// hand-editing a plugin freezes this slot's pushes anyway (see holdPluginState), so a gesture is
+// only ever this near a load we made if the window was opened behind poptart's back.
+var selfLoadTail = 0.5;
 var samplePacks = IdentityDictionary.new; // pack (Symbol) -> Array of Buffers, filename order
 // Song decks (see server.js's song section): one full-length audio file per DJ deck track,
 // played by a poptart_song_* synth into the track's input bus. trackId -> (buf:, synth:).
@@ -120,6 +143,7 @@ var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued;
 var destroyTrack;
 var slotKey, waitForLoad, flushNotes, clearPending;
+var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
 // Cross-track audio routing (the audio() head source and the .audio(...) sidechain injector).
@@ -685,6 +709,29 @@ clearPending = { |seqKey, seq|
     };
 };
 
+// The three ends of the self-load window (see selfLoads). `running` is what lets the tail be the
+// real end of it: the deadline taken at the start is only the failsafe for a load that never
+// reports, and a second load arriving on the slot before the first one lands must not have the
+// first one's completion open the slot's ears mid-program.
+beginSelfLoad = { |seqKey|
+    var e = selfLoads[seqKey] ?? { (running: 0, until: 0) };
+    e[\running] = e[\running] + 1;
+    e[\until] = max(e[\until], Main.elapsedTime + coldWaitMax);
+    selfLoads[seqKey] = e;
+};
+
+endSelfLoad = { |seqKey|
+    selfLoads[seqKey] !? { |e|
+        e[\running] = (e[\running] - 1).max(0);
+        if (e[\running] == 0) { e[\until] = Main.elapsedTime + selfLoadTail };
+    };
+};
+
+// Whether what this slot's plugin is reporting is a program we handed it.
+selfLoading = { |key, slot|
+    ((selfLoads[slotKey.(key, slot)] !? { |e| e[\until] }) ? 0) > Main.elapsedTime;
+};
+
 // `.synth("Serum 2")` uses the display name, but VSTPlugin's dict keys carry the file extension
 // ('Serum 2.vst3') - accept exact key, display name, or a literal file path.
 resolvePlugin = { |pluginId|
@@ -1198,9 +1245,15 @@ OSCdef(\poptartDestroyTrack, { |msg|
 // listening to /vst_param: that also fires for parameters *we* modulate, which would have a
 // running lfo() re-capturing the state forever.
 watchPluginEdits = { |track, key, slot, ctl|
-    var notify = { nodeAddr.sendMsg("/poptart/pluginEdited", key, slot) };
+    // ...and a fourth signal, the one this must NOT hear: a program we loaded into the slot
+    // ourselves fires all three (see selfLoads), and capturing that back is a feedback loop.
+    var ours = { selfLoading.(key, slot) };
+    var notify = { if (ours.value.not) { nodeAddr.sendMsg("/poptart/pluginEdited", key, slot) } };
     ctl.parameterAutomated = { |index, value|
-        if (track[\confMode] == true) {
+        // Conf mode is deaf to our own loads for the same reason: a plugin that re-announces every
+        // parameter when its program changes would drop its whole panel into the code as
+        // .param(...) calls, none of which anyone touched.
+        if (track[\confMode] == true and: { ours.value.not }) {
             ctl.info.parameters[index] !? { |p|
                 nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, index, value.asFloat);
             };
@@ -2615,12 +2668,16 @@ OSCdef(\poptartSetPluginState, { |msg|
             var ctl;
             if (track.notNil and: { awaitLoaded.(track, slot) }) {
                 ctl = track[\controllers][slot];
+                // From here until a little after it lands, whatever this plugin says about itself
+                // is this program arriving, not a pair of hands (see selfLoads).
+                beginSelfLoad.(seqKey);
                 ctl.readProgram(path, action: { |self, ok|
                     if (ok) {
                         ("poptart: restored plugin state for " ++ key ++ " slot " ++ slot).postln;
                     } {
                         ("poptart: FAILED to restore plugin state for " ++ key ++ " slot " ++ slot).warn;
                     };
+                    endSelfLoad.(seqKey);
                     clearPending.(seqKey, seq);
                     File.delete(path);
                 });
