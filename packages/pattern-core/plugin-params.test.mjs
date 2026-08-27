@@ -7,14 +7,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, lfo, Sig } from './src/signal.mjs';
+import { s, lfo, env, _shape, Sig } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 function mockEngine(now = 0) {
   const calls = [];
   const engine = new Proxy(
     { getTime: () => now },
-    { get: (t, p) => (p in t ? t[p] : (...args) => { calls.push({ method: p, args }); }) },
+    {
+      get: (t, p) => (p in t ? t[p] : (...args) => { calls.push({ method: p, args }); }),
+      set: (t, p, v) => { t[p] = v; return true; },
+    },
   );
   return { engine, argsTo: (m) => calls.filter((c) => c.method === m).map((c) => c.args) };
 }
@@ -82,4 +85,71 @@ test('a cycle remap carries the parameter signal, entry and all', () => {
   assert.equal(entry.slot, 1);
   assert.equal(entry.name, 'Mix');
   assert.ok(entry.sig instanceof Sig);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Combining two modulators on one parameter. The engine runs ONE native modulator per parameter
+// (a synth on a control bus mapped onto it), so an expression made of two is polled instead -
+// and a modulator is a signal like any other, so that just works. The note-gated ones (env(),
+// lfo() in retrigger/envelope mode) read their timing off the track's note grid when sampled in
+// JS (see sampleEnvIR / withNoteGate). Before 2026-08-26 the composed expression silently sampled
+// as a constant, the parameter pinned, and the scheduler's clear of the native it replaced freed
+// a synth the notes in flight were still gating - "/n_set Node not found" on every note.
+// ---------------------------------------------------------------------------------------------
+
+_shape('sweepA', '0,1 1,0');
+_shape('sweepB', '0,0 0.5,1 1,0');
+
+test('two modulators multiply like any two signals, and the product is polled', () => {
+  const t = s('bd').fx('Pro-Q')
+    .param('Frequency', lfo('sweepA', { rate: 1, mode: 'envelope' }).mul(lfo('sweepB')).mul(0.7));
+  const sig = t.paramSignals['1:Frequency'].sig;
+  assert.equal(sig.lfoIR, null, 'a product of two modulators is not itself native');
+  const argsTo = sent(t);
+  assert.equal(argsTo('setParamLFO').length, 0, 'nothing is programmed natively');
+  assert.equal(argsTo('clearParamLFO').length, 0, 'and nothing was there to clear');
+  const polled = argsTo('setParam').filter(([, slot]) => slot >= 0);
+  assert.equal(polled.length, 1, 'the product is polled as one parameter');
+  assert.deepEqual(polled[0].slice(1, 3), [1, 'Frequency']);
+});
+
+test('the polled product actually moves with the notes', () => {
+  // s("bd") fires at cycle 0; the envelope-mode shape falls from 1 over its one-cycle pass, the
+  // free one rises to its midpoint - so the product is neither frozen nor a constant.
+  const { engine, argsTo } = mockEngine(0);
+  const sched = new Scheduler(engine, { trackId: 'kick' });
+  sched.setPattern(s('bd').fx('Q').param('F', lfo('sweepA', { rate: 1, mode: 'envelope' }).mul(lfo('sweepB'))));
+  sched.start();
+  for (let i = 0; i < 6; i++) { engine.getTime = () => i * 0.1; sched._tick(); }
+  sched.stop();
+  const values = argsTo('setParam').filter(([, slot]) => slot === 1).map(([, , , v]) => v);
+  assert.ok(values.length >= 5);
+  assert.ok(new Set(values.map((v) => v.toFixed(3))).size > 3, `the product should vary, got ${values}`);
+});
+
+test('a plain number still folds into a note-gated lfo() symbolically', () => {
+  // The native fast path: .mul(0.7) rewrites the IR's bounds, so a lone modulator stays native.
+  const scaled = lfo('sweepA', { rate: 1, mode: 'envelope' }).mul(0.7);
+  assert.ok(scaled.lfoIR, 'scaling by a number must keep the modulator native');
+  assert.equal(scaled.lfoIR.mode, 'envelope');
+  assert.equal(scaled.lfoIR.max, 0.7);
+});
+
+test('env() composes too', () => {
+  const t = s('bd').fx('Q').param('F', env().mul(lfo('sweepB')));
+  assert.equal(t.paramSignals['1:F'].sig.envIR, null);
+  const argsTo = sent(t);
+  assert.equal(argsTo('setParamEnv').length, 0);
+  assert.equal(argsTo('setParam').filter(([, slot]) => slot === 1).length, 1);
+});
+
+test('a lone modulator with a signal-valued bound is still native and dynamic', () => {
+  const t = s('bd').fx('Pro-Q')
+    .param('Frequency', lfo('sweepA', { rate: 1, mode: 'envelope' }).range(0, lfo('sweepB').mul(0.7)));
+  const sig = t.paramSignals['1:Frequency'].sig;
+  assert.equal(sig.lfoIR.mode, 'envelope');
+  assert.ok(sig.lfoIR.max instanceof Sig, 'the upper bound stays a signal the scheduler polls');
+  const argsTo = sent(t);
+  assert.equal(argsTo('setParamLFO').length, 1);
+  assert.equal(argsTo('setParam').filter(([, slot]) => slot >= 0).length, 0);
 });

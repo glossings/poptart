@@ -904,16 +904,7 @@ export class Sig {
   // keeps "0 3 5"'s step grid. The right side may be a number, a mini string, or another Sig.
   // -------------------------------------------------------------------------------------------
 
-  _assertSampleable(op) {
-    if (this.envIR) {
-      throw new Error(
-        `[signal] .${op}() on an envelope isn't supported - an envelope's value only exists inside the engine. Shape it with .range()/env({curve}) instead`,
-      );
-    }
-  }
-
   _unop(op, fn) {
-    this._assertSampleable(op);
     return this.mapValue((v) => fn(Number(v)));
   }
 
@@ -940,7 +931,11 @@ export class Sig {
       if (this.envIR) return withEnvIR({ ...this.envIR, min: mapBound(this.envIR.min), max: mapBound(this.envIR.max) });
       if (this.ccIR) return withCcIR({ ...this.ccIR, min: mapBound(this.ccIR.min), max: mapBound(this.ccIR.max) });
     }
-    this._assertSampleable(op);
+    // Anything else - another modulator included - is the generic product/sum below, a polled
+    // signal. env() and the note-gated lfo() modes sample from the track's own note grid (see
+    // sampleEnvIR), so a modulator composed with another loses only the native fast path, never
+    // its shape: the engine runs one native synth per parameter, and an expression it can't
+    // express as one is polled and ramped instead (see Scheduler#_pollGenericParams).
     const otherSig = toSignal(other);
     // Steps only know cycle positions (not seconds), so for step values the right side is
     // sampled in cycle-time (t=cyclePos, cps=1) - exact for mini/constant operands, approximate
@@ -1268,7 +1263,6 @@ export class Sig {
    * the universal "freeze this continuous thing into strudel-cycle updates" operator.
    */
   hold(trig) {
-    this._assertSampleable('hold');
     const truthy = (v) => v != null && Number(v) !== 0;
     let trigSig;
     if (trig === undefined) {
@@ -1353,7 +1347,6 @@ export class Sig {
    * even grid is `.hold()`, which this is the evenly-spaced shorthand for.
    */
   seg(n) {
-    this._assertSampleable('seg');
     return this.hold(segTrigger(n));
   }
 
@@ -2991,17 +2984,15 @@ export const CHANNEL_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0, out: 1
 // holding whatever the other branch last sent. It falls back to the control's neutral default
 // instead, which is what the track would have read had the callback never touched it.
 //
-// A control a Tier-2 modulator drives (LFO/env/cc) still can't be switched: the engine runs those
-// as a persistent synth mapped onto the control rather than polling them (and env() can't be
-// sampled in JS at all), so there the callback's version stands unconditionally, as the whole
-// strip used to.
+// A modulator (LFO/env/cc) switches like anything else. The switched control is polled rather
+// than run natively - the engine's native path takes one whole modulator per control - but it
+// is the same signal either way (see sampleEnvIR for how a note-gated one is read here).
 function condSwitchChannel(before, after, condAt, truthy) {
-  const native = (sig) => !!(sig && (sig.lfoIR || sig.envIR || sig.ccIR));
   const out = {};
   for (const key of new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])) {
     const off = before?.[key] ?? null;
     const on = after?.[key] ?? null;
-    if (off === on || native(off) || native(on)) {
+    if (off === on) {
       const kept = on ?? off;
       if (kept != null) out[key] = kept;
       continue;
@@ -3031,11 +3022,9 @@ function fillCondGaps(steps) {
 }
 
 // Chainable .gain() multiplies factors together (see Sig#gain). The engine drives one Sig per
-// track-gain control, so factors must fold into a single Sig - and a Tier-2 modulator (LFO/env/
-// cc) must survive the fold, since demoting it would lose the native fast path (and env() can't
-// be sampled in JS at all). A plain-number factor folds into a modulator's bounds symbolically;
-// two native modulators can't share one gain control, so that's a clear error rather than a
-// silent demotion.
+// track-gain control, so factors fold into a single Sig. A plain-number factor folds into a
+// modulator's bounds symbolically, which keeps the modulator on the engine's native path; any
+// other pair is the generic product, polled like every other composed signal.
 function multiplyGain(a, b) {
   const ac = a.constVal;
   const bc = b.constVal;
@@ -3044,15 +3033,7 @@ function multiplyGain(a, b) {
   if (ac != null && bc != null) return toSignal(ac * bc); // constant * constant
   if (aMod && bc != null) return a.mul(bc); // modulator * scalar -> rewrite bounds (either order)
   if (bMod && ac != null) return b.mul(ac);
-  if (aMod && bMod) {
-    throw new Error(
-      "[signal] .gain(): can't multiply two native modulators (LFO/env/cc) on one track's gain - combine them in a single expression instead, e.g. .gain(env().range(0.2, 1).mul(sine(2).range(0.5, 1)))",
-    );
-  }
-  if (a.envIR || b.envIR) {
-    throw new Error("[signal] .gain(): an env() gain can only be multiplied by a constant here - shape it with .range() first, or fold the other factor into a single expression");
-  }
-  return productGain(a, b); // generic product (Tier-1 polled) - mini strings, LFOs sampled in JS, etc.
+  return productGain(a, b);
 }
 
 // The product of two gain factors, where a *resting* factor (null - e.g. a cc/mini before its
@@ -4192,11 +4173,26 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
       break;
     }
     case 'custom': {
-      // lfo() shapes: only free mode has a JS-side value - retrigger/envelope depend on note
-      // gates only the engine sees, so (like env()) they just hold the shape's start level.
       // Read through lfoShapes, so a named shape is looked up now rather than when lfo() was built.
       const points = lfoPoints(ir);
-      unipolar = ir.mode === 'free' || ir.mode == null ? sampleShape(points, phase) : points[0].y;
+      if (ir.mode === 'free' || ir.mode == null) {
+        unipolar = sampleShape(points, phase);
+        break;
+      }
+      // The note-gated modes run from the last note onset, exactly as the engine's Sweep does from
+      // its t_trig (retrigger: loops from the onset at the LFO's rate; envelope: one pass over
+      // 1/rate seconds, then holds the final level). The onset comes from the track's note grid,
+      // handed in by the scheduler (see withNoteGate); with no gate in scope - nothing has played
+      // yet, or the signal is being read outside a track - the shape rests at its start level.
+      const onset = lastNoteOnset(pos ?? tSeconds * cps);
+      if (onset == null) {
+        unipolar = points[0].y;
+        break;
+      }
+      const turns = ((pos ?? tSeconds * cps) - onset) / cps * lfoRateHz(ir, cps);
+      unipolar = ir.mode === 'envelope'
+        ? sampleShape(points, Math.min(turns, 1))
+        : sampleShape(points, (((turns + (ir.phaseCycles ?? 0)) % 1) + 1) % 1);
       break;
     }
     case 'sine':
@@ -4436,15 +4432,155 @@ export function patternNames(sig, cycles = NAME_SCAN_CYCLES) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Envelope generator - an ADSR retriggered by the track's own note on/offs. Like the LFO
-// builders it's purely symbolic (`envIR`): the engine compiles it to a native EnvGen gated by
-// the same sample-accurate note events driving the instrument (see "Tier 2" in ARCHITECTURE.md
-// and the poptart_env SynthDef). It can't be sampled from JS - an envelope's value depends on
-// note onsets, which only the engine sees - so `sample()` just holds the floor value.
+// Envelope generator - an ADSR gated by the track's own note on/offs. Like the LFO builders it
+// carries a symbolic IR (`envIR`): assigned whole to a control, the engine runs it as a native
+// EnvGen gated by the same sample-accurate note events driving the instrument (the poptart_env
+// SynthDef). It is a signal like any other, though: composed into arithmetic, a .when(), a
+// signal-valued bound, it samples the same ADSR in JS off the track's note grid (sampleEnvIR
+// below), and the scheduler polls the result. Same shape either way; the native path is only
+// the higher-resolution way of running it.
 // ---------------------------------------------------------------------------------------------
 
 function withEnvIR(ir) {
-  return new Sig((t, cps, pos) => sampleBound(ir.min, t, cps, pos) ?? 0, { envIR: ir });
+  return new Sig((t, cps, pos) => {
+    const lo = sampleBound(ir.min, t, cps, pos) ?? 0;
+    const hi = sampleBound(ir.max, t, cps, pos) ?? 1;
+    return lo + sampleEnvIR(ir, pos ?? t * cps, cps) * (hi - lo);
+  }, { envIR: ir });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The note gate: what a note-gated modulator (env(), lfo() in retrigger/envelope mode) reads its
+// timing from when it is sampled in JS.
+//
+// The engine gates its native modulators from the note events as they play. Those events are
+// the scheduler's own output - it walks the track's step grid and emits every onset and end - so
+// the same gate is a pure function of (pattern, position), and a modulator sampled here can read
+// it off the grid directly. The scheduler binds the track's grid for the duration of a poll
+// (withNoteGate); the samplers below read whatever gate is in scope. Outside a track (a test, a
+// panel drawing a shape) there is none, and a gated modulator rests at its start level.
+//
+// The one note source that is NOT on the grid is live midikeys() input, which the engine plays
+// by itself: a gated modulator composed with something else on such a track reads no onsets.
+// ---------------------------------------------------------------------------------------------
+
+/** How far back a sample looks for the notes that gate it, in cycles. Bounds the cost of a read;
+ * a note held, or a release ringing, longer than this reads as finished. */
+export const NOTE_GATE_LOOKBACK_CYCLES = 8;
+
+let noteGate = null; // { intervalsUpTo(pos) -> [[onsetCycle, endCycle], ...] sorted by onset }
+
+/** Runs `fn` with `gate` as the note gate every gated modulator samples against (see above). */
+export function withNoteGate(gate, fn) {
+  const prev = noteGate;
+  noteGate = gate;
+  try {
+    return fn();
+  } finally {
+    noteGate = prev;
+  }
+}
+
+/**
+ * Builds a note gate from a step grid: `stepsForCycle(cycle)` is the track's grid, `spanOf(step,
+ * cycle)` its sounding interval in absolute cycles (or null for an event that doesn't sound - a
+ * rest, a tie continuation, a zero-velocity note). Cycles are read once and cached, since a poll
+ * reads the same few cycles thirty times a second. The gate's `since` is the cycle playback
+ * began (the scheduler sets it on start): the grid is periodic and would happily report the
+ * notes of cycle -1, but the engine never heard those, and neither should a release tail.
+ */
+export function noteGateFromGrid(stepsForCycle, spanOf) {
+  const cache = new Map();
+  const cycleIntervals = (cycle) => {
+    let out = cache.get(cycle);
+    if (!out) {
+      out = [];
+      for (const step of stepsForCycle(cycle)) {
+        const span = spanOf(step, cycle);
+        if (span) out.push(span);
+      }
+      out.sort((a, b) => a[0] - b[0]);
+      cache.set(cycle, out);
+    }
+    return out;
+  };
+  return {
+    since: -Infinity,
+    intervalsUpTo(pos) {
+      const last = Math.floor(pos);
+      const out = [];
+      for (let c = Math.max(last - NOTE_GATE_LOOKBACK_CYCLES, Math.floor(this.since)); c <= last; c++) {
+        for (const span of cycleIntervals(c)) if (span[0] <= pos && span[0] >= this.since) out.push(span);
+      }
+      return out;
+    },
+  };
+}
+
+// The most recent note onset at or before `pos` (absolute cycles), or null with no gate in scope
+// or nothing played yet - what a retrigger/envelope lfo() shape counts its pass from.
+function lastNoteOnset(pos) {
+  if (!noteGate) return null;
+  let onset = null;
+  for (const [start] of noteGate.intervalsUpTo(pos)) if (onset == null || start > onset) onset = start;
+  return onset;
+}
+
+// One segment of the SC envelope curve, 0..1 in x, with SuperCollider's `curve` convention:
+// negative scoops (fast start), 0 is linear, positive bulges. This is Env's own formula, so a
+// JS-sampled env() and the native EnvGen trace the same line.
+function envCurve(x, curve) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  if (Math.abs(curve) < 0.001) return x;
+  return (1 - Math.exp(x * curve)) / (1 - Math.exp(curve));
+}
+
+// The engine's gate is a held-note COUNT: open on the first sounding note, closed when the last
+// ends. In grid terms that is the union of overlapping sounding intervals - a note starting
+// exactly where the previous one ends does NOT join it (the scheduler ends notes a hair early, so
+// the gate closes and reopens, and the envelope retriggers - see NOTE_OFF_EARLY_SEC).
+function gateSegments(intervals) {
+  const segs = [];
+  for (const [start, end] of intervals) {
+    const last = segs[segs.length - 1];
+    if (last && start < last[1]) last[1] = Math.max(last[1], end);
+    else segs.push([start, end]);
+  }
+  return segs;
+}
+
+/**
+ * The unipolar value of an ADSR `ir` at `pos` (absolute cycles) against the note gate in scope -
+ * the JS reading of what poptart_env plays. Times are in seconds, so the tempo converts. A gate
+ * reopening inside the previous release restarts the attack from the level the release had got
+ * to, as EnvGen does, so overlapping and tightly repeated notes don't step.
+ */
+export function sampleEnvIR(ir, pos, cps = 1) {
+  if (!noteGate) return 0;
+  const segs = gateSegments(noteGate.intervalsUpTo(pos));
+  if (!segs.length) return 0;
+  const secs = (cycles) => cycles / cps;
+  // Level reached at the end of segment i's sustain phase (or wherever `at` cuts it off), starting
+  // from the level `from`; and the level of segment i's release `at` some later position.
+  const holdLevel = (seg, from, at) => {
+    const dt = secs(at - seg[0]);
+    if (dt < ir.attack) return from + (1 - from) * envCurve(dt / ir.attack, ir.curve);
+    if (dt < ir.attack + ir.decay) return 1 + (ir.sustain - 1) * envCurve((dt - ir.attack) / ir.decay, ir.curve);
+    return ir.sustain;
+  };
+  const releaseLevel = (seg, from, at) => {
+    const peak = holdLevel(seg, from, seg[1]);
+    const dt = secs(at - seg[1]);
+    return dt >= ir.release ? 0 : peak * (1 - envCurve(dt / ir.release, ir.curve));
+  };
+  // Where the attack of segment i starts from: 0, unless the previous segment's release is still
+  // sounding at that moment (bounded to one look back - a release inside a release inside a
+  // release is below anything audible).
+  const startLevel = (i) => (i === 0 ? 0 : releaseLevel(segs[i - 1], 0, segs[i][0]));
+  const i = segs.length - 1;
+  const seg = segs[i];
+  return pos < seg[1] ? holdLevel(seg, startLevel(i), pos) : releaseLevel(seg, startLevel(i), pos);
 }
 
 /**

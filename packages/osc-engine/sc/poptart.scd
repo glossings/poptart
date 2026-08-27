@@ -162,6 +162,12 @@ var deckMeterBus, deckMeterSynths;
 // makeBundle with a timestamp only when there is real lead - see the definition by the events
 // section.
 var bundleNow;
+// Deferred teardown for a dropped Tier-2 modulator's synth+bus - see the definition next to
+// clearParamLFO.
+var modFreeDelay = 0.3, freeModulatorLater;
+// The ramp behind every polled control - see poptartSetParam.
+var rampTo, dropRamp, dropSlotRamps;
+var steppedChannelControls = #[\out, \cue, \mdeck]; // selectors, not levels: set outright, never ramped
 // Bundle time for a message aimed at a song-deck player - clamped so it can never land before
 // the player's (possibly future, cycle-quantized) spawn. See the song decks section.
 var songLat;
@@ -816,6 +822,15 @@ server.waitForBoot {
         var envSig = EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate);
         Out.kr(out, lo + (envSig * (hi - lo)));
     }).add;
+    // The writer behind every POLLED control (see rampTo / poptartSetParam). Node re-sends a
+    // polled value every poll interval, and this glides the bus linearly from one value to the
+    // next over that interval, so a parameter driven from JS moves as a line rather than a
+    // staircase - no zipper on a filter sweep, no step in a fade. Its bus is mapped onto the
+    // parameter exactly as a native modulator's is: to the plugin the two are the same thing,
+    // and a control can pass between them without the mapping ever being torn down.
+    SynthDef(\poptart_ramp, { |out, target = 0, time = 0.03|
+        Out.kr(out, Ramp.kr(target, time));
+    }).add;
     // Sampler voices, one per (loop?, timestretch?, buffer channels) combination - the
     // combination is fixed per event, so picking a def beats building Select spaghetti with
     // conflicting doneActions. All write to the track's private input bus (see buildTrackDef).
@@ -1072,6 +1087,7 @@ OSCdef(\poptartCreateTrack, { |msg|
                 lfos: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, shape:, index:)
                 envs: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, index:)
                 ccs: IdentityDictionary.new,      // \slotN_param -> (bus:, index:, lo:, hi:, last:, binding:, defKey:)
+                ramps: IdentityDictionary.new,    // \slotN_param -> (synth:, bus:, index:, slot:) - polled controls (see rampTo)
                 editWatch: Array.newClear(maxSlots), // slot -> [OSCFunc] watching for plugin edits
                 held: 0                           // active-note count, drives env gates
             );
@@ -1100,7 +1116,7 @@ destroyTrack = { |key|
                 track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free }; track[\editWatch][slot] = nil };
             };
             sidechainBySource[key] !? { |e| unwireAudio.(e[\targetKey], e[\slot]) }; // ...and out of it
-            [track[\lfos], track[\envs]].do { |dict|
+            [track[\lfos], track[\envs], track[\ramps]].do { |dict|
                 dict.do { |e| e[\synth] !? { |s| s.free }; e[\bus] !? { |b| b.free } };
             };
             track[\ccs].do { |e| MIDIdef.all[e[\defKey]] !? { |d| d.free }; e[\bus] !? { |b| b.free } };
@@ -1199,6 +1215,7 @@ OSCdef(\poptartLoadInstrument, { |msg|
                         // at the current tempo (position re-syncs via '/poptart/setTempo').
                         self.setPlaying(true);
                         self.setTempo(currentTempo);
+                        dropSlotRamps.(key, track, 0); // the open cleared their mappings (see dropRamp)
                         watchPluginEdits.(track, key, 0, self);
                         ("poptart: loaded instrument " ++ pluginId).postln;
                     } {
@@ -1243,6 +1260,7 @@ OSCdef(\poptartLoadEffect, { |msg|
                             self.setPlaying(true); // see loadInstrument
                             self.setTempo(currentTempo);
                             track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
+                            dropSlotRamps.(key, track, slot); // the open cleared their mappings (see dropRamp)
                             watchPluginEdits.(track, key, slot, self);
                             ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
                         };
@@ -1274,6 +1292,7 @@ OSCdef(\poptartUnloadEffect, { |msg|
                 if (track[\loaded][slot].notNil or: { ctl.notNil }) {
                     track[\synth].set(("active" ++ slot).asSymbol, 0); // bypass before the close
                     ctl !? { ctl.close };
+                    dropSlotRamps.(key, track, slot); // nothing left to drive
                     // A closed plugin can't be edited - drop its auto-pin watchers (see
                     // watchPluginEdits) so they don't outlive it or fire on a reused node id.
                     track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free } };
@@ -1405,32 +1424,74 @@ OSCdef(\poptartNoteOffSlot, { |msg|
     };
 }, '/poptart/noteOffSlot');
 
+// A polled control writes through a ramp synth on a control bus of its own, mapped onto the
+// parameter (or the track synth's control input) as a native modulator's bus is - see the
+// poptart_ramp SynthDef. The first value creates the ramp, born AT that value so nothing glides
+// in from zero; every later one just moves its target. `index` is nil for a channel control.
+rampTo = { |track, rampKey, slot, paramName, index, value|
+    var r = track[\ramps][rampKey];
+    if (r.isNil) {
+        var bus = Bus.control(server, 1);
+        var syn = Synth(\poptart_ramp, [\out, bus, \target, value], target: track[\group], addAction: \addToHead);
+        if (slot == -1) { track[\synth].map(paramName.asSymbol, bus) } { track[\controllers][slot].map(index, bus) };
+        track[\ramps][rampKey] = (synth: syn, bus: bus, index: index, slot: slot);
+    } {
+        // The plugin in this slot may have been swapped for one where the name is a different
+        // index: follow it. (An open also clears the UGen's mappings - see dropSlotRamps.)
+        if (index != r[\index]) { r[\index] = index; track[\controllers][slot].map(index, r[\bus]) };
+        r[\synth].set(\target, value);
+    };
+};
+
+// A ramp's control passing to a native modulator (whose map replaces the ramp's, leaving it
+// writing a bus nothing reads), or its plugin re-opening under it (the open cleared the UGen's
+// mappings, and the new instance may not even have the parameter): the ramp goes, deferred like
+// any dropped modulator since the values already sent to it are timestamped ahead, and the poll
+// makes a fresh one if the control is still polled.
+dropRamp = { |key, track, rampKey|
+    track[\ramps][rampKey] !? { |r|
+        track[\ramps].removeAt(rampKey);
+        freeModulatorLater.(key, track[\group], r[\synth], r[\bus]);
+    };
+};
+dropSlotRamps = { |key, track, slot|
+    track[\ramps].keys.copy.do { |k| if (track[\ramps][k][\slot] == slot) { dropRamp.(key, track, k) } };
+};
+
 OSCdef(\poptartSetParam, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger;
     var paramName = msg[3].asString, value = msg[4].asFloat, latency = msg[5].asFloat;
     var track = tracks[key];
-    var ctl;
+    var ctl, rampKey;
     if (track.isKindOf(Event)) {
+        rampKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
         if (slot == -1) {
             // Channel controls (gain/pan) live on the track synth itself, not a plugin. Not
             // clipped to 0..1 - gain may exceed unity, pan is -1..1 (the SynthDef clips sanely).
-            bundleNow.(latency, { track[\synth].set(paramName.asSymbol, value) });
+            // The selectors among them (which stereo pair, the cue switch) are set outright: a
+            // ramp passing through 1.5 is neither pair.
+            if (steppedChannelControls.includes(paramName.asSymbol)) {
+                bundleNow.(latency, { track[\synth].set(paramName.asSymbol, value) });
+            } {
+                bundleNow.(latency, { rampTo.(track, rampKey, -1, paramName, nil, value) });
+            };
         } {
             ctl = track[\controllers][slot];
             if (ctl.notNil) {
-                // Resolve by name (or a "Name#N" index suffix - see resolveParamIndex) and set
+                // Resolve by name (or a "Name#N" index suffix - see resolveParamIndex) and drive
                 // that specific parameter; values are normalized 0..1.
                 bundleNow.(latency, {
                     var index = resolveParamIndex.(ctl.info, paramName);
-                    if (index.notNil) { ctl.set(index, value.clip(0, 1)) };
+                    if (index.notNil) { rampTo.(track, rampKey, slot, paramName, index, value.clip(0, 1)) };
                 });
             };
         };
     };
 }, '/poptart/setParam');
 
-// Tier 2: map a control bus to the VST parameter once, drive the bus with a UGen oscillator
-// running in scsynth's audio callback - zero further OSC traffic, genuinely continuous.
+// Native modulators: map a control bus to the VST parameter once, drive the bus with a UGen
+// oscillator running in scsynth's audio callback - zero further OSC traffic, genuinely
+// continuous. (A polled control is the same bus with a ramp synth writing it - see rampTo.)
 // Re-eval with the same shape updates the running LFO's args in place, so its phase carries
 // across livecoding edits with no glitch/reset (same behavior the old native LFO.h had).
 // (Node also re-sends this at poll rate when .range() has signal-valued bounds - same in-place
@@ -1478,6 +1539,9 @@ OSCdef(\poptartSetParamLFO, { |msg|
                         existing[\synth].set(\freq, rateHz, \lo, lo, \hi, hi); // phase preserved
                     }
                     { existing.notNil } { // shape changed: new oscillator, same bus + mapping
+                        // Freed immediately, unlike a DROPPED modulator (see freeModulatorLater):
+                        // the replacement writes to this same bus, and two live synths summing
+                        // into it would be a worse parameter than one stale-node warning.
                         existing[\synth].free;
                         existing[\synth] = Synth(("poptart_lfo_" ++ shape).asSymbol,
                             [\out, existing[\bus], \freq, rateHz, \phase, phaseCycles, \lo, lo, \hi, hi],
@@ -1489,6 +1553,7 @@ OSCdef(\poptartSetParamLFO, { |msg|
                         var lfoSynth = Synth(("poptart_lfo_" ++ shape).asSymbol,
                             [\out, bus, \freq, rateHz, \phase, phaseCycles, \lo, lo, \hi, hi],
                             target: track[\group], addAction: \addToHead);
+                        dropRamp.(key, track, lfoKey);
                         if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                         track[\lfos][lfoKey] = (synth: lfoSynth, bus: bus, shape: shape, index: index);
                     };
@@ -1614,6 +1679,8 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
                         };
                         server.sync;
                         if (existing.notNil) {
+                            // Immediate, for the reason setParamLFO's shape swap gives above: the
+                            // new synth takes over this very bus.
                             existing[\synth].free;
                             bus = existing[\bus];
                         } {
@@ -1624,6 +1691,7 @@ OSCdef(\poptartSetParamShapeLFO, { |msg|
                              \t_trig, if ((mode != \free) and: { track[\held] > 0 }) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
                         if (existing.isNil) {
+                            dropRamp.(key, track, lfoKey);
                             if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                             track[\lfos][lfoKey] = (synth: shapeSynth, bus: bus, shape: \custom,
                                 index: index, mode: mode, spec: spec,
@@ -1736,6 +1804,7 @@ OSCdef(\poptartSetParamEnv, { |msg|
                             [\out, bus, \atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi,
                              \gate, if (track[\held] > 0) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
+                        dropRamp.(key, track, envKey);
                         if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                         track[\envs][envKey] = (synth: envSynth, bus: bus, index: index);
                     };
@@ -1759,11 +1828,36 @@ OSCdef(\poptartClearParamEnv, { |msg|
         } {
             track[\controllers][slot].unmap(existing[\index]);
         };
-        existing[\synth].free;
-        existing[\bus].free;
         track[\envs].removeAt(envKey);
+        freeModulatorLater.(key, track[\group], existing[\synth], existing[\bus]);
     };
 }, '/poptart/clearParamEnv');
+
+// Takes a dropped modulator's synth and bus down a beat AFTER it was unmapped, rather than the
+// instant the pattern let go of it. Note events are sent up to a lookahead ahead of time and gate
+// these synths from inside a TIMESTAMPED bundle (see poptartNoteOn: `set(\gate, 1)` for env(),
+// `set(\t_trig, 1)` for the note-gated lfo() modes) - so freeing the node right away pulls it out
+// from under every note already in flight, and scsynth prints "FAILURE IN SERVER /n_set Node not
+// found" once per note in that window. Dropping a note-gated modulator off a playing track hit
+// that every time (found 2026-08-26, via `.param(name, lfo(mode: 'envelope').mul(lfo(...)))`,
+// where the second modulator demotes the parameter to a polled value and so clears the first).
+//
+// The UNMAP still happens immediately - the parameter has to stop being driven the moment the
+// pattern says so; only the node waits. Its bus waits with it, since a bus freed while its synth
+// is still writing can be handed straight to the next allocation.
+// Only for a DROPPED modulator, whose bus goes with it. A rebuild (a changed shape) hands the same
+// bus to its replacement, so waiting there would leave two synths summing into it - those free the
+// old node immediately and wear the occasional stale-node warning instead.
+freeModulatorLater = { |key, group, synth, bus|
+    SystemClock.sched(modFreeDelay, {
+        // A track destroyed (or rebuilt) inside the window already took the node down with its
+        // group, so there is nothing left to free there - but the bus is a client-side allocation
+        // that destroyTrack can no longer see, and always has to be handed back here.
+        if (tracks[key].isKindOf(Event) and: { tracks[key][\group] === group }) { synth.free };
+        bus !? { |b| b.free };
+        nil;
+    });
+};
 
 OSCdef(\poptartClearParamLFO, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
@@ -1777,9 +1871,8 @@ OSCdef(\poptartClearParamLFO, { |msg|
         } {
             track[\controllers][slot].unmap(existing[\index]);
         };
-        existing[\synth].free;
-        existing[\bus].free;
         track[\lfos].removeAt(lfoKey);
+        freeModulatorLater.(key, track[\group], existing[\synth], existing[\bus]);
     };
 }, '/poptart/clearParamLFO');
 
@@ -1883,6 +1976,7 @@ OSCdef(\poptartSetParamCC, { |msg|
                                 binding: binding, defKey: defKey);
                             bus.set(lo); // hardware position unknown until the knob moves - start at the floor
                             registerDef.(entry);
+                            dropRamp.(key, track, ccKey);
                             if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
                             track[\ccs][ccKey] = entry;
                         };

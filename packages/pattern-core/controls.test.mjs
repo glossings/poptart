@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, s, note, rand, speed, flip, begin, fit, i, sine, vel, clip, env } from './src/signal.mjs';
+import { n, s, note, rand, speed, flip, begin, fit, i, sine, vel, clip, env, withNoteGate, noteGateFromGrid } from './src/signal.mjs';
 
 // What the scheduler would read off a sampler channel at a given cycle position.
 const cfgAt = (sig, key, cyclePos) => sig.sampler[key].sample(cyclePos, 1, cyclePos);
@@ -187,11 +187,20 @@ test('a strip control switches on the same onsets the notes read the condition o
   );
 });
 
-test("a strip control a native modulator drives keeps the callback's version", () => {
-  // An env() gain is programmed into the engine once, not polled, so it can't follow a condition -
-  // wrapping it would demote it to a JS-sampled signal that env() can't even answer.
-  const track = s('bd').gain(env()).when('<1 0>', (x) => x.gain(0.5));
-  assert.ok(track.channel.gain.envIR, 'still the native env gain');
+test('a strip control a modulator drives switches like any other', () => {
+  // An env() is a signal like anything else: under a .when() it is sampled in JS off the track's
+  // note grid (see sampleEnvIR) rather than run natively, and follows the condition. Cycle 0 is
+  // the callback's 0.5; cycle 1 reads the envelope, which just after the onset is on its attack.
+  // The callback's .gain(0.5) MULTIPLIES the envelope (chained gains fold), so cycle 0 reads the
+  // envelope at half scale and cycle 1 the envelope itself - halfway up a linear 0.1s attack.
+  const track = s('bd').gain(env({ attack: 0.1, curve: 0 })).when('<1 0>', (x) => x.gain(0.5));
+  assert.equal(track.channel.gain.envIR, null, 'the switched control is a plain polled signal');
+  const gate = noteGateFromGrid(track.stepsForCycle, (step, c) => [c + step.start, c + step.start + 0.5]);
+  withNoteGate(gate, () => {
+    const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-6, `${a} vs ${b}`);
+    near(track.channel.gain.sample(0.05, 1, 0.05), 0.25);
+    near(track.channel.gain.sample(1.05, 1, 1.05), 0.5);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

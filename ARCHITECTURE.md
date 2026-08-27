@@ -127,9 +127,17 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - **Real plugin parameter names, no alias layer.** `.param("Filter 1 Freq", …)` addresses the VST
   directly. Optional `mappings/*.json` files add real-world units on top; absent a mapping,
   parameters are normalized `0..1`. Avoids maintaining a translation table per plugin.
-- **Native LFOs/envelopes inside the SynthDef.** Sample-accurate and cheap, but constrains what can
-  modulate: engine-side oscillators take fixed lo/hi, so signal-valued bounds fall back to a polled
-  path.
+- **Modulation: one signal algebra, two ways of running it.** Every modulator (`sine`, `lfo`,
+  `env`, `midicc`) is an ordinary signal — it samples in JS, composes with arithmetic, `.when()`,
+  signal-valued bounds, anything. A control assigned one *whole* modulator is programmed into the
+  engine once and runs natively on the audio thread; a control assigned anything else is polled at
+  30 ms. Engine-side both are the same thing: a control bus mapped onto the parameter, written by
+  a UGen in the native case and by a ramp synth (linear glide between polls) in the polled case,
+  so a polled sweep is a line rather than a staircase and a control can pass between the two
+  without its mapping being torn down. The note-gated modulators (`env()`, `lfo()` in
+  retrigger/envelope mode) sample in JS off the track's own note grid — the scheduler emits those
+  notes, so the gate is a pure function of (pattern, position) and both paths hear the same notes.
+  The one source that isn't on the grid is live `midikeys()` input, which only the engine sees.
 - **Fixed 8-slot chain per track (1 instrument + 7 effects).** `VSTPlugin~` instances live inside a
   `SynthDef`'s UGen graph and can't be added to a running `Synth`, so chain length is baked in.
   Swapping which plugin occupies a slot is fine; growing past 8 is not handled yet.

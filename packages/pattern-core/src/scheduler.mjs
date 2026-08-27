@@ -15,12 +15,14 @@
 //    plain step objects instead of Strudel Haps. Sampler patterns (sig.sampler set) go through
 //    the same walk but emit playSample events (config signals sampled at each onset) instead of
 //    noteOn/noteOff pairs.
-//  - Parameter modulation: LFO-builder signals (`.lfoIR` set) are hinted once to the engine and
-//    then run entirely on its own audio thread (see ARCHITECTURE.md's "Tier 2"). Any other
-//    signal assigned to a control is polled at a fixed rate instead ("Tier 1") - simple,
-//    general, and fine for musical modulation rates.
+//  - Parameter modulation: a control assigned one whole modulator (an `lfoIR`/`envIR`/`ccIR`
+//    signal) is programmed into the engine once and runs natively on its audio thread. Any
+//    other signal - a product of two modulators, a .when() over one, a mini string - is polled
+//    at a fixed rate, and the engine ramps between polls (see ARCHITECTURE.md's "Modulation").
+//    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
+//    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
-import { sampleBound, CHANNEL_DEFAULTS, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -527,6 +529,14 @@ export class Scheduler {
 
   setPattern(sig) {
     this.pattern = sig;
+    // The note gate every JS-sampled modulator on this track reads (see withNoteGate): the same
+    // sounding spans _scheduleNoteEdges emits, so a polled env() and a native one hear the same
+    // notes. Rebuilt per eval, since the grid it caches is this pattern's.
+    const since = this._noteGate?.since ?? -Infinity; // a re-eval mid-play keeps where playback began
+    this._noteGate = sig.stepsForCycle
+      ? noteGateFromGrid(sig.stepsForCycle, (step, cycle) => this._soundingSpan(step, cycle))
+      : null;
+    if (this._noteGate) this._noteGate.since = since;
     this.engine.createTrack(this.trackId);
 
     if (sig.instrument) {
@@ -692,7 +702,29 @@ export class Scheduler {
     // on. The one exception is signal-valued .range() bounds, which _tick re-resolves and
     // re-sends (an in-place engine-side update - phase/gate state is preserved).
     const nowSec = this.engine.getTime();
-    for (const m of this._activeModulators.values()) this._sendModulator(m, nowSec, true);
+    this._withNoteGate(() => {
+      for (const m of this._activeModulators.values()) this._sendModulator(m, nowSec, true);
+    });
+  }
+
+  /** Runs `fn` with this track's note grid bound as the gate its modulators sample against. */
+  _withNoteGate(fn) {
+    return withNoteGate(this._noteGate, fn);
+  }
+
+  // One event's sounding span in absolute cycles, or null where nothing sounds (a rest, a tie's
+  // continuation, a note at zero velocity - what _scheduleNoteEdges skips). Read at the grid
+  // position like the emitter does; the nudge/swing shift is a matter of milliseconds against a
+  // modulator whose times are set in tens of them.
+  _soundingSpan(step, cycle) {
+    if (step.value == null || step.cont) return null;
+    const onset = cycle + step.start;
+    const onsetSec = this.transport.secAt(onset);
+    if (!this.pattern.sampler) {
+      const vel = this._velAt(step, onsetSec, onset) ?? 1.0;
+      if (vel <= 0) return null;
+    }
+    return [onset, cycle + this._soundingEnd(step, onsetSec, onset)];
   }
 
   /**
@@ -753,6 +785,7 @@ export class Scheduler {
     this._running = true;
     this._presetCatchUp = true; // the window may open mid-pattern (see _schedulePresetSwaps)
     this._scheduledUntilCycle = fromCycle ?? this.transport.cycleAt(this.engine.getTime());
+    if (this._noteGate) this._noteGate.since = this._scheduledUntilCycle; // nothing before this played
     this._timer = setInterval(() => this._tick(), POLL_INTERVAL_MS);
   }
 
@@ -817,10 +850,12 @@ export class Scheduler {
       this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
       this._scheduledUntilCycle = targetCycle;
 
-      this._pollGenericParams(nowSec);
-      for (const m of this._activeModulators.values()) {
-        if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
-      }
+      this._withNoteGate(() => {
+        this._pollGenericParams(nowSec);
+        for (const m of this._activeModulators.values()) {
+          if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
+        }
+      });
       this._anchorLFOs(nowSec);
     } catch (err) {
       // Patterns evaluate lazily, so a bad value can first throw here, inside the timer -
@@ -1217,7 +1252,7 @@ export class Scheduler {
     const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
     const applyCycle = this.transport.cycleAt(applySec);
     for (const c of this._controlEntries(this.pattern)) {
-      if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // native Tier 2 already owns this, set once in setPattern()
+      if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // runs natively, programmed once in setPattern()
       // A mixer control being dragged holds this one at the value under your finger (see
       // holdChannel); the pattern's own value is what it returns to when you let go. Read with a
       // conditional rather than `&&` so a plugin param can't come out as `false ?? sample`.

@@ -239,3 +239,35 @@ no completion notes.
     shipped 2026-08-24): per-stem faders (needs stable addressing across songs - maybe "the Nth
     stem of deck B"), buttons for gates/swap/tempo detents (CC 127/0 edges), and a MIDI map
     panel showing what is bound where (today it's the console lines + settings.json).
+
+[ ] Modulation phase 2 - compile composed modulator expressions to a UGen graph, so a composed
+    envelope is as snappy as a lone one. Since 2026-08-26 every modulator is an honest Sig: a
+    control assigned ONE whole modulator runs natively (sample-accurate), anything composed -
+    env().mul(lfo()), an env() under .when(), env().add("0 0.1") - is polled at 30 ms and ramped
+    engine-side (poptart_ramp bus). Right resolution for a slow product, wrong for a 1 ms pitch blip.
+    The fix is a general mechanism, not a special case: (1) pattern-core records an `expr` tree
+    beside every combinator's sample() closure (named ops add/sub/mul/div/min/max/pow, the unops,
+    range/clamp/when/seg; leaves = the existing lfoIR/envIR/ccIR, constants, and a JS leaf for
+    anything else - mini strings, irand, an arbitrary mapValue); sample() stays the source of truth.
+    (2) A JS leaf compiles to a Ramp.kr control input the scheduler polls - the ramp bus already IS
+    a JS-driven control input - so nothing is uncompilable: env().mul("0.5 1") runs the envelope at
+    audio rate and only the step pattern at 30 ms. (3) One sclang handler setParamExpr(track, slot,
+    name, tree) walks the JSON into UGens (the poptart_lfo_* bodies refactored into a function;
+    IEnvGen for drawn shapes; EnvGen on \gate for env; In.kr of the cc bus; Select.kr for .when();
+    Latch/Impulse for .seg()), leaf tunables as named control args so a same-shape re-eval is a .set
+    (phase/gate preserved), a changed shape recompiles async and swaps on the same bus with the
+    shape-swap glide; def name = hash of the tree; one unified track[\mods] dict absorbs
+    lfos/envs/ccs/ramps and the noteOn hooks gate every entry. (4) Scheduler: one entry per control
+    holding the tree, polls JS-leaf inputs + dynamic args, anchors per free-LFO leaf (t_trigN);
+    forward the new method through MappedEngine. Then delete setParamLFO/ShapeLFO/Env/CC. Risks:
+    JS-vs-UGen numeric agreement per op (pin both in tests, as the shapes already are), compile
+    latency on structure change (ms, async - same as a shape edit). About a focused week. Not urgent
+    until the 30 ms composed case actually bites in practice.
+
+[ ] Stepped plugin parameters - the ramp bus glides every polled control over 30 ms, which passes a
+    selector-type parameter (filter type, wavetable index, an on/off normalized to 0..1) through
+    every intermediate value: `.param("Mode", "0 1")` momentarily selects a wrong mode, possibly with
+    a click. Channel selectors (out/cue/mdeck) are already set outright (steppedChannelControls in
+    poptart.scd); plugin parameters need a `stepped` flag per parameter in mappings/*.json (preferred
+    - it's a property of the parameter, not of one pattern) so setParam bypasses the ramp for them.
+
