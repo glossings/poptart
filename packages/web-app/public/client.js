@@ -6259,29 +6259,55 @@ function prOpenLaneMenu(clientX, clientY) {
   const key = prLaneKey();
   const n = prLaneTargets().length;
   const scope = prState.sel.size ? `selection (${n})` : `all notes (${n})`;
-  prMenu.innerHTML = '';
-  const head = document.createElement('div');
-  head.className = 'pr-menu-head';
-  head.textContent = `${key} · ${scope}`;
-  prMenu.appendChild(head);
-  const item = (label, fn) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    b.addEventListener('click', () => { prCloseLaneMenu(); fn(); prRefocus(); });
-    prMenu.appendChild(b);
-  };
-  item(`randomize ${key}`, () => prSetLane(() => prLaneDenorm(Math.random(), key)));
-  item(`reset ${key} to ${PR_LANE_DEFAULT[key]}`, () => prSetLane(() => PR_LANE_DEFAULT[key]));
-  prMenu.classList.remove('hidden');
-  // On screen where the pointer is, nudged back in if that would run off the window's edge.
-  const w = prMenu.offsetWidth, h = prMenu.offsetHeight;
-  prMenu.style.left = `${Math.min(clientX, window.innerWidth - w - 8)}px`;
-  prMenu.style.top = `${Math.min(clientY, window.innerHeight - h - 8)}px`;
+  openCtxMenu(prMenu, clientX, clientY, {
+    head: `${key} · ${scope}`,
+    after: () => prRefocus(),
+    items: [
+      [`randomize ${key}`, () => prSetLane(() => prLaneDenorm(Math.random(), key))],
+      [`reset ${key} to ${PR_LANE_DEFAULT[key]}`, () => prSetLane(() => PR_LANE_DEFAULT[key])],
+    ],
+  });
 }
 
 function prCloseLaneMenu() {
   prMenu.classList.add('hidden');
+}
+
+/**
+ * Fills one of the app's context menus and puts it on screen under the pointer. Two callers so far
+ * - the piano roll's value lane and the editor's own menu - and the widget, the placement and the
+ * dismissal are the same for both; only the items differ.
+ *
+ *   head   the small uppercase line above the items (optional)
+ *   items  [label, fn, title?] entries, or the string '-' for a rule between groups
+ *   after  run once an item has been chosen, for a caller that has focus to give back
+ */
+function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null } = {}) {
+  el.innerHTML = '';
+  if (head) {
+    const h = document.createElement('div');
+    h.className = 'ctx-menu-head';
+    h.textContent = head;
+    el.appendChild(h);
+  }
+  for (const entry of items) {
+    if (entry === '-') {
+      el.appendChild(document.createElement('hr'));
+      continue;
+    }
+    const [label, fn, title] = entry;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    if (title) b.title = title;
+    b.addEventListener('click', () => { el.classList.add('hidden'); fn(); after?.(); });
+    el.appendChild(b);
+  }
+  el.classList.remove('hidden');
+  // On screen where the pointer is, nudged back in if that would run off the window's edge.
+  const w = el.offsetWidth, h = el.offsetHeight;
+  el.style.left = `${Math.min(clientX, window.innerWidth - w - 8)}px`;
+  el.style.top = `${Math.min(clientY, window.innerHeight - h - 8)}px`;
 }
 
 // The note whose lane column contains px - grabbing anywhere under a note works, like Live. When
@@ -13758,7 +13784,8 @@ async function runHotkey(hk, e) {
 // through it.
 function anyModalOpen() {
   // askEl only exists once something has asked; it is built shown, so "not hidden" means open.
-  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, askEl].some((el) => el && !el.classList.contains('hidden'));
+  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, askEl]
+    .some((el) => el && !el.classList.contains('hidden'));
 }
 
 window.addEventListener(
@@ -14115,6 +14142,45 @@ function askSelect(message, { label, options, value, confirm = 'ok' }) {
       done(pick());
     });
     return sel;
+  });
+}
+
+// ...and the same dialog with a text field in it, for a question whose answer is a word - a
+// rename. `problem(value)` is what greys the confirm button out, with the reason on the button's
+// own title, so a name the server would refuse is refused here first.
+function askText(message, { label, value = '', confirm = 'ok', problem = null } = {}) {
+  return askShell((panel, done) => {
+    const msg = document.createElement('p');
+    msg.textContent = message;
+    const field = document.createElement('label');
+    field.className = 'ask-field';
+    field.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.value = value;
+    field.appendChild(input);
+    const row = askButtons([
+      { label: 'cancel', value: () => null },
+      { label: confirm, value: () => input.value.trim(), primary: true },
+    ], done);
+    const ok = row.querySelector('button.primary');
+    const sync = () => {
+      const why = problem?.(input.value.trim()) ?? null;
+      ok.disabled = !!why;
+      ok.title = why ?? '';
+    };
+    input.addEventListener('input', sync);
+    panel.append(msg, field, row);
+    panel.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || ok.disabled) return;
+      e.preventDefault();
+      done(input.value.trim());
+    });
+    sync();
+    setTimeout(() => input.select(), 0); // after askShell has focused it
+    return input;
   });
 }
 
@@ -17508,3 +17574,677 @@ function orgRenderDisk(ul) {
     ul.appendChild(li);
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Snippets - a phrase kept for re-use, and everything it needs to play.
+//
+// The ★ library generalises one DEFINITION across projects: a roll, a shape, a preset, a pack. What
+// it can't hold is the code between them - the four-line acid bass, the sidechain-pump chain, the
+// dub-delay send. Reusing one of those meant loading the old patch, copying the lines, loading
+// yours back, and finding the paste broken: the lines said `pianoroll("bass")` and the notes stayed
+// behind in the other file.
+//
+// So a snippet carries its sidecar. Select code, right-click, name it; the definitions the
+// selection NAMES are copied in beside it (see snippetCarriesFor) - including ones that live in the
+// ★ library, so unpinning something later can never break a snippet made before. Putting one back
+// writes the body where you clicked and files the definitions in the block at the bottom of the
+// buffer, the same place every other definition goes.
+//
+// The gesture is the right-click rather than a hotkey for three reasons: it is discoverable, it
+// already carries WHERE (which is the one argument insertion needs), and the menu has room to grow.
+// ctrl+J is the same two entry points from the keyboard, for when the mouse is on a knob.
+//
+// The collision rules - what happens when a snippet's `bass` meets a buffer that has one - live in
+// public/snippet-code.js and are unit-tested there. This file's job is reading them off the buffer
+// and writing the answer back.
+// ---------------------------------------------------------------------------------------------
+
+const snippetSaveBackdrop = document.getElementById('snippetSaveBackdrop');
+const snippetSaveNameEl = document.getElementById('snippetSaveName');
+const snippetSaveTagsEl = document.getElementById('snippetSaveTags');
+const snippetSaveCarriesEl = document.getElementById('snippetSaveCarries');
+const snippetSaveNote = document.getElementById('snippetSaveNote');
+const snippetSaveConfirm = document.getElementById('snippetSaveConfirm');
+const snippetBrowseBackdrop = document.getElementById('snippetBrowseBackdrop');
+const snippetBrowseSearch = document.getElementById('snippetBrowseSearch');
+const snippetBrowseList = document.getElementById('snippetBrowseList');
+const snippetBrowsePreview = document.getElementById('snippetBrowsePreview');
+const snippetBrowseCarriesEl = document.getElementById('snippetBrowseCarries');
+const snippetBrowseNote = document.getElementById('snippetBrowseNote');
+const snippetBrowseInsert = document.getElementById('snippetBrowseInsert');
+const editorMenu = document.getElementById('editorMenu');
+
+// The drag type the browser's rows carry. text/plain rides along too, so CodeMirror draws its own
+// drop cursor as the pointer crosses the code; this private one is how the drop handler knows the
+// text has a sidecar to file with it rather than being a plain paste.
+const SNIPPET_DND = 'application/x-poptart-snippet';
+
+let snippetSaveState = null; // { ed, carries: [{ kind, id, scope, code, why, off }], names }
+let snippetBrowseState = null; // { ed, at, entries, sel }
+let snippetSaveCM = null;
+
+// --------------------------------------------------------------------------------- what it carries
+
+/**
+ * Every definition the code in [from, to) NAMES, in the order it names them.
+ *
+ * Read against the WHOLE buffer and then filtered to the calls inside the selection - because a
+ * preset's owner is the plugin at the end of its block (see presetTargetAt), so a selected
+ * `.preset("growl")` whose `.synth("Serum 2")` sits just above the selection still belongs to
+ * Serum. Cutting the text out first and parsing that would lose the owner.
+ */
+function snippetRefsIn(code, from, to) {
+  const out = [];
+  const seen = new Set();
+  for (const reg of DEF_REGISTRIES) {
+    for (const call of reg.idCalls(code)) {
+      if (call.start < from || call.close >= to) continue;
+      for (const id of idsNamedIn(call.str)) {
+        const scope = call.scope ?? '';
+        const key = `${reg.kind} ${id} ${reg.kind === 'preset' ? scope : ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ reg, kind: reg.kind, id, scope });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Those definitions as code to write into the snippet file. The buffer's own are read straight off
+ * it; anything else is a library name, and the server is asked for its source - the browser knows
+ * the library's NAMES but has no source for them (openRollById says as much when you try to open a
+ * prebake roll). A name nothing can produce a definition for comes back carrying `why`, and shows
+ * struck through in the dialog rather than being quietly dropped.
+ */
+async function snippetCarriesFor(code, from, to) {
+  const carries = [];
+  const ask = [];
+  for (const r of snippetRefsIn(code, from, to)) {
+    const def = r.reg.findDef(code, r.id, r.scope);
+    if (def) {
+      carries.push({ kind: r.kind, id: r.id, scope: def.scope ?? '', code: code.slice(def.start, def.close + 1) });
+    } else {
+      carries.push({ kind: r.kind, id: r.id, scope: r.scope, code: null, pending: true });
+      ask.push({ kind: r.kind, id: r.id, scope: r.scope });
+    }
+  }
+  if (!ask.length) return carries;
+  let found = [];
+  try {
+    ({ defs: found } = await api('POST', '/api/snippets/resolveDefs', { want: ask }));
+  } catch (e) {
+    logLine(`couldn't look up the library definitions this names: ${e.message ?? e}`, true);
+  }
+  for (const c of carries) {
+    if (!c.pending) continue;
+    delete c.pending;
+    const hit = found.find((d) => d.kind === c.kind && d.id === c.id);
+    c.code = hit?.code ?? null;
+    c.scope = hit?.scope ?? c.scope;
+    if (!c.code) c.why = hit?.why ?? `nothing defines the ${c.kind} "${c.id}" to copy`;
+  }
+  return carries;
+}
+
+/** The chip row both dialogs show: one per definition riding along, droppable in the save dialog. */
+function renderSnippetCarries(el, carries, { onToggle = null } = {}) {
+  el.innerHTML = '';
+  for (const c of carries) {
+    const chip = document.createElement('span');
+    chip.className = `snippet-chip${c.off || !c.code ? ' off' : ''}`;
+    const kind = document.createElement('span');
+    kind.textContent = `${c.kind} `;
+    const name = document.createElement('b');
+    name.textContent = c.id;
+    chip.append(kind, name);
+    if (c.scope) {
+      const owner = document.createElement('span');
+      owner.textContent = ` · ${c.scope}`;
+      chip.appendChild(owner);
+    }
+    // The definition itself on hover - which is where the SIZE of a captured program shows up,
+    // so a snippet about to carry one says so rather than surprising you with the file.
+    chip.title = c.code
+      ? (c.code.length > 300 ? `${c.code.slice(0, 300)}…` : c.code)
+      : (c.why ?? "this one can't be carried");
+    if (onToggle && c.code) {
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = c.off ? '+' : '✕';
+      x.title = c.off ? 'carry this one after all' : "don't carry this one";
+      x.addEventListener('click', () => onToggle(c));
+      chip.appendChild(x);
+    }
+    el.appendChild(chip);
+  }
+}
+
+// ------------------------------------------------------------------------------------- saving one
+
+function ensureSnippetSaveCM() {
+  if (!snippetSaveCM) {
+    snippetSaveCM = CodeMirror.fromTextArea(document.getElementById('snippetSaveEditor'), {
+      mode: { name: 'javascript' },
+      theme: 'poptart',
+      keyMap: 'sublime',
+      matchBrackets: true,
+      viewportMargin: Infinity,
+      extraKeys: {
+        'Cmd-Enter': saveSnippet,
+        'Ctrl-Enter': saveSnippet,
+        'Cmd-S': saveSnippet,
+        'Ctrl-S': saveSnippet,
+      },
+    });
+  }
+  return snippetSaveCM;
+}
+
+function setSnippetSaveNote(text, isError = false) {
+  snippetSaveNote.textContent = text;
+  snippetSaveNote.classList.toggle('error', !!isError);
+  snippetSaveNote.classList.toggle('warn', !isError && !!text);
+}
+
+/** The name to offer: what the selection's first block calls itself. */
+function suggestedSnippetName(body) {
+  const label = (/^[ \t]*([A-Za-z_$][\w$]*)[ \t]*:(?!:)/m.exec(body) ?? [])[1] ?? '';
+  return label === '$' ? '' : label.replace(/^[_S](?=[A-Za-z_$])/, '').toLowerCase();
+}
+
+async function openSnippetSave(ed = activeCM()) {
+  const code = ed.getValue();
+  const from = ed.indexFromPos(ed.getCursor('from'));
+  const to = ed.indexFromPos(ed.getCursor('to'));
+  const body = code.slice(from, to).replace(/^\s*\n|\s+$/g, '');
+  if (!body.trim()) {
+    logLine('select the code you want to keep first - a snippet is a piece of a patch, not the whole buffer', true);
+    return;
+  }
+  const state = { ed, carries: [], names: new Set(), loading: true };
+  snippetSaveState = state;
+  const box = ensureSnippetSaveCM();
+  box.setValue(body);
+  snippetSaveNameEl.value = suggestedSnippetName(body);
+  snippetSaveTagsEl.value = '';
+  snippetSaveCarriesEl.innerHTML = '';
+  snippetSaveBackdrop.classList.remove('hidden');
+  box.refresh(); // laid out while hidden - size it now that it is visible
+  snippetSaveNameEl.focus();
+  snippetSaveNameEl.select();
+  syncSnippetSaveState(); // down, and saying so, until the lookups below land
+
+  // The two lookups the dialog needs, together: what rides along, and which names are taken.
+  const [carries, names] = await Promise.all([
+    snippetCarriesFor(code, from, to),
+    api('GET', '/api/snippets?q=').then((r) => new Set((r.snippets ?? []).map((s) => s.name))).catch(() => new Set()),
+  ]);
+  if (snippetSaveState !== state) return; // superseded while we were away
+  state.carries = carries;
+  state.names = names;
+  state.loading = false;
+  drawSnippetSaveCarries();
+  syncSnippetSaveState();
+}
+
+function drawSnippetSaveCarries() {
+  renderSnippetCarries(snippetSaveCarriesEl, snippetSaveState?.carries ?? [], {
+    onToggle: (c) => { c.off = !c.off; drawSnippetSaveCarries(); syncSnippetSaveState(); },
+  });
+}
+
+// The save button carries its own reason for being off, the way the pattern naming dialog does - a
+// disabled button that says why beats a request that comes back refused.
+function syncSnippetSaveState() {
+  if (!snippetSaveState) return;
+  const name = snippetSaveNameEl.value.trim();
+  const problem = patternNameProblem(name);
+  const lost = snippetSaveState.carries.filter((c) => !c.code);
+  // `loading` keeps the button down while the sidecar is still being worked out - typing a name
+  // must not be a way past that, or the code gets kept with its definitions left behind.
+  snippetSaveConfirm.disabled = !!problem || snippetSaveState.loading;
+  const collides = !problem && snippetSaveState.names.has(name);
+  snippetSaveConfirm.textContent = collides ? 'overwrite' : 'save';
+  if (problem) return setSnippetSaveNote(problem, true);
+  if (snippetSaveState.loading) return setSnippetSaveNote('reading what this names…');
+  if (collides) return setSnippetSaveNote(`"${name}" already exists - saving replaces it`);
+  if (lost.length) {
+    const s = lost.length === 1 ? '' : 's';
+    return setSnippetSaveNote(`${lost.length} name${s} couldn't be copied in - see the struck-through chip${s}`);
+  }
+  setSnippetSaveNote('');
+}
+
+async function saveSnippet() {
+  if (!snippetSaveState || snippetSaveConfirm.disabled) return;
+  const name = snippetSaveNameEl.value.trim();
+  const defs = snippetSaveState.carries.filter((c) => c.code && !c.off);
+  snippetSaveConfirm.disabled = true;
+  setSnippetSaveNote('saving…');
+  try {
+    await api('POST', '/api/snippets/save', {
+      name,
+      tags: snippetSaveTagsEl.value,
+      body: ensureSnippetSaveCM().getValue(),
+      defs: defs.map(({ kind, id, scope, code }) => ({ kind, id, scope, code })),
+    });
+    closeSnippetSave();
+    const rode = defs.length ? ` (carrying ${defs.map((d) => `${d.kind} "${d.id}"`).join(', ')})` : '';
+    logLine(`kept snippet "${name}"${rode}`);
+  } catch (e) {
+    // No `finally`: a save that worked has already closed the dialog, and re-enabling the button
+    // there would only overwrite the message this one leaves on it.
+    snippetSaveConfirm.disabled = false;
+    setSnippetSaveNote(e.message ?? String(e), true);
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+function closeSnippetSave() {
+  snippetSaveBackdrop.classList.add('hidden');
+  const ed = snippetSaveState?.ed;
+  snippetSaveState = null;
+  ed?.focus();
+}
+
+// -------------------------------------------------------------------------------- putting one back
+
+/** Does the shared library hold this name? A buffer definition of it would shadow that one. */
+function snippetLibraryHas(kind, id, scope) {
+  const reg = DEF_REGISTRIES.find((r) => r.kind === kind);
+  // Asked against an EMPTY buffer, so allIds answers with the library alone.
+  return !!reg && reg.allIds(null, '').some((r) => r.id === id
+    && (kind !== 'preset' || !r.scope || !scope || r.scope === scope));
+}
+
+/** Every definition already in `code`, flattened across the kinds, as planInjection wants them. */
+function snippetBufferDefs(code) {
+  const out = [];
+  for (const reg of DEF_REGISTRIES) {
+    for (const d of reg.defsInBuffer(code)) {
+      out.push({ kind: reg.kind, id: d.id, scope: d.scope ?? '', code: code.slice(d.start, d.close + 1) });
+    }
+  }
+  return out;
+}
+
+/** The spans of the id STRINGS inside a snippet body - what a rename has to rewrite. */
+function snippetBodyIdCalls(body) {
+  const out = [];
+  for (const reg of DEF_REGISTRIES) {
+    for (const call of reg.idCalls(body)) {
+      out.push({ kind: reg.kind, from: call.from, to: call.to, scope: call.scope ?? '' });
+    }
+  }
+  return out;
+}
+
+/** The block labels `code` already uses - a snippet's own `bass:` must not land on top of one. */
+function snippetBufferLabels(code) {
+  if (!labelsMod) return [];
+  return labelsMod.splitLabeledBlocks(code).map((b) => b.label).filter(Boolean);
+}
+
+/**
+ * Puts a snippet into `ed` at `at` (the caret when null), definitions and all.
+ *
+ * The library's own copies of the names it carries are fetched first and handed to planInjection
+ * alongside the buffer's, so a definition that is still exactly what it was resolves against the
+ * library instead of being filed a second time - and one that has DRIFTED is filed under a fresh
+ * name rather than quietly playing something else.
+ */
+async function insertSnippet(entry, ed = activeCM(), at = null) {
+  const code = ed.getValue();
+  const carried = (entry.carries ?? []).filter((c) => c.code);
+  // Only the carried names the library holds; the rest cannot collide with it by definition.
+  const ask = carried
+    .filter((c) => snippetLibraryHas(c.kind, c.id, c.scope))
+    .map(({ kind, id, scope }) => ({ kind, id, scope }));
+  let known = [];
+  if (ask.length) {
+    try {
+      ({ defs: known } = await api('POST', '/api/snippets/resolveDefs', { want: ask }));
+    } catch {
+      // No answer is no proof the library's copy is the same one, so those names are treated as
+      // taken-by-something-different and stepped over - the safe way round.
+      known = ask.map((w) => ({ ...w, code: null }));
+    }
+  }
+  const body = entry.body ?? '';
+  const plan = planInjection({
+    body,
+    carried,
+    idCalls: snippetBodyIdCalls(body),
+    bufferDefs: [...snippetBufferDefs(code), ...known],
+    labels: snippetBufferLabels(code),
+  });
+  const cursor = at == null ? ed.indexFromPos(ed.getCursor()) : at;
+  const [where, text] = placeSnippet(code, plan.body, cursor, firstDefRunStart(code));
+  ed.operation(() => {
+    ed.replaceRange(text, ed.posFromIndex(where), ed.posFromIndex(where));
+    // Recomputed against the buffer as it now stands: the body just moved everything below it
+    // along, so an offset taken before the insert would land in the wrong place. Same sequencing
+    // as materialize's, and for the same reason.
+    for (const reg of DEF_REGISTRIES) {
+      const mine = plan.defs.filter((d) => d.kind === reg.kind);
+      if (!mine.length) continue;
+      const bodies = new Map(mine.map((d) => [d.id, defBody(d.code)]));
+      const [from, to, str] = reg.defsEdit(
+        ed.getValue(),
+        mine.map((d) => ({ id: d.id, scope: d.scope })),
+        (id) => bodies.get(id),
+      );
+      ed.replaceRange(str, ed.posFromIndex(from), ed.posFromIndex(to));
+    }
+  });
+  if (ed === cm) refoldAll(); // the new definitions arrive folded, like every other block
+  ed.focus();
+  for (const r of plan.renames) logLine(renameNote(r));
+  const n = plan.defs.length;
+  logLine(`inserted snippet "${entry.name}"${n ? `, filing ${n} definition${n === 1 ? '' : 's'}` : ''}`);
+}
+
+// ------------------------------------------------------------------------------------ the browser
+
+function snippetRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'snippet-row';
+  row.draggable = true;
+  row.title = 'click to insert it at the caret - or drag it to where you want it';
+
+  const main = document.createElement('div');
+  main.className = 'snippet-row-main';
+  const label = document.createElement('span');
+  label.className = 'snippet-row-label';
+  label.textContent = entry.label;
+  const meta = document.createElement('span');
+  meta.className = 'snippet-row-meta';
+  const bits = [];
+  if (entry.name !== entry.label) bits.push(entry.name);
+  for (const t of entry.tags ?? []) bits.push(`#${t}`);
+  if (entry.carries?.length) bits.push(`carries ${entry.carries.length}`);
+  bits.push(new Date(entry.mtime).toLocaleDateString([], { dateStyle: 'short' }));
+  meta.textContent = bits.join(' · ');
+  main.append(label, meta);
+  row.appendChild(main);
+
+  for (const [glyph, title, fn] of [
+    ['✎', 'rename', () => renameSnippetFile(entry)],
+    ['✕', 'delete', () => deleteSnippetFile(entry)],
+  ]) {
+    const b = document.createElement('button');
+    b.className = 'small';
+    b.textContent = glyph;
+    b.title = title;
+    b.onclick = (e) => { e.stopPropagation(); fn(); };
+    row.appendChild(b);
+  }
+
+  row.addEventListener('mouseenter', () => selectSnippetRow(entry));
+  row.addEventListener('click', () => { selectSnippetRow(entry); insertSelectedSnippet(); });
+  // text/plain as well as the private type, so CodeMirror draws its own drop cursor all the way
+  // in; the private one is what tells the drop handler there are definitions to file with it.
+  row.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', entry.body ?? '');
+    e.dataTransfer.setData(SNIPPET_DND, entry.name);
+    e.dataTransfer.effectAllowed = 'copy';
+    // Out of the way, so the drop lands on the code rather than on the overlay covering it. Only
+    // HIDDEN, not closed: a drag let go somewhere that isn't the editor has to leave the browser
+    // where it was, not dismiss it (see dragend below).
+    snippetBrowseBackdrop.classList.add('hidden');
+  });
+  row.addEventListener('dragend', () => {
+    // The drop handler closes the browser for real; anything still open here was abandoned.
+    if (snippetBrowseState) snippetBrowseBackdrop.classList.remove('hidden');
+  });
+  return row;
+}
+
+function selectSnippetRow(entry) {
+  if (!snippetBrowseState) return;
+  snippetBrowseState.sel = entry?.name ?? null;
+  for (const el of snippetBrowseList.querySelectorAll('.snippet-row')) {
+    el.classList.toggle('current', el.dataset.name === snippetBrowseState.sel);
+  }
+  snippetBrowsePreview.textContent = entry?.body ?? '';
+  renderSnippetCarries(snippetBrowseCarriesEl, entry?.carries ?? []);
+  snippetBrowseInsert.disabled = !entry;
+}
+
+function renderSnippetList() {
+  const entries = snippetBrowseState?.entries ?? [];
+  snippetBrowseList.innerHTML = '';
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'snippet-empty';
+    empty.textContent = snippetBrowseSearch.value.trim()
+      ? 'no snippets match'
+      : 'nothing kept yet - select some code in the editor and right-click it to keep it here';
+    snippetBrowseList.appendChild(empty);
+    selectSnippetRow(null);
+    return;
+  }
+  for (const entry of entries) {
+    const row = snippetRow(entry);
+    row.dataset.name = entry.name;
+    snippetBrowseList.appendChild(row);
+  }
+  selectSnippetRow(entries.find((e) => e.name === snippetBrowseState.sel) ?? entries[0]);
+}
+
+async function refreshSnippetList() {
+  if (!snippetBrowseState) return;
+  const q = snippetBrowseSearch.value.trim();
+  try {
+    const { snippets } = await api('GET', `/api/snippets?q=${encodeURIComponent(q)}`);
+    if (!snippetBrowseState) return;
+    snippetBrowseState.entries = snippets ?? [];
+    renderSnippetList();
+    snippetBrowseNote.textContent = '';
+  } catch (e) {
+    snippetBrowseNote.textContent = e.message ?? String(e);
+  }
+}
+
+/**
+ * `at` is where an insert will land, remembered on the way IN: opening the overlay takes the
+ * caret's focus, so clicking a row afterwards would otherwise write wherever the editor was left.
+ */
+function openSnippetBrowser(ed = activeCM(), at = null) {
+  snippetBrowseState = { ed, at: at ?? ed.indexFromPos(ed.getCursor()), entries: [], sel: null };
+  snippetBrowseSearch.value = '';
+  snippetBrowsePreview.textContent = '';
+  snippetBrowseCarriesEl.innerHTML = '';
+  snippetBrowseNote.textContent = '';
+  snippetBrowseInsert.disabled = true;
+  snippetBrowseBackdrop.classList.remove('hidden');
+  snippetBrowseSearch.focus();
+  refreshSnippetList();
+}
+
+function closeSnippetBrowser({ refocus = true } = {}) {
+  const ed = snippetBrowseState?.ed;
+  snippetBrowseBackdrop.classList.add('hidden');
+  snippetBrowseState = null;
+  if (refocus) ed?.focus();
+}
+
+function insertSelectedSnippet() {
+  if (!snippetBrowseState) return;
+  const entry = snippetBrowseState.entries.find((e) => e.name === snippetBrowseState.sel);
+  if (!entry) return;
+  const { ed, at } = snippetBrowseState;
+  closeSnippetBrowser();
+  insertSnippet(entry, ed, at).catch((e) => logLine(e.message ?? String(e), true));
+}
+
+async function renameSnippetFile(entry) {
+  const to = await askText(`Rename the snippet "${entry.name}".`, {
+    label: 'name',
+    value: entry.name,
+    confirm: 'rename',
+    problem: (v) => patternNameProblem(v),
+  });
+  if (!to || to === entry.name) return;
+  try {
+    await api('POST', '/api/snippets/rename', { from: entry.name, to });
+    if (snippetBrowseState?.sel === entry.name) snippetBrowseState.sel = to;
+    logLine(`renamed snippet "${entry.name}" to "${to}"`);
+    refreshSnippetList();
+  } catch (e) {
+    snippetBrowseNote.textContent = e.message ?? String(e);
+  }
+}
+
+async function deleteSnippetFile(entry) {
+  const go = await askDialog(`Delete the snippet "${entry.name}"?`, [
+    { label: 'cancel', value: null },
+    { label: 'delete', value: 'go', primary: true },
+  ]);
+  if (go !== 'go') return;
+  try {
+    await api('POST', '/api/snippets/delete', { name: entry.name });
+    if (snippetBrowseState?.sel === entry.name) snippetBrowseState.sel = null;
+    logLine(`deleted snippet "${entry.name}"`);
+    refreshSnippetList();
+  } catch (e) {
+    snippetBrowseNote.textContent = e.message ?? String(e);
+  }
+}
+
+// ------------------------------------------------------------------------------- the editor's menu
+
+/** The CodeMirror an event happened inside, when that is one of the two the player writes in. */
+function editorAt(target) {
+  const ed = target?.closest?.('.CodeMirror')?.CodeMirror ?? null;
+  return ed === cm || ed === deckBCM ? ed : null;
+}
+
+function openEditorMenu(ed, e) {
+  const selected = ed.somethingSelected();
+  const items = [selected
+    ? ['save as snippet…', () => openSnippetSave(ed), 'keep this selection - and the rolls, shapes, presets and packs it names - for every project']
+    : ['insert snippet…', () => openSnippetBrowser(ed), 'put a kept phrase in here, sidecar and all']];
+  items.push('-');
+  if (selected) {
+    items.push(['cut', () => { writeClipboard(ed.getSelection()); ed.replaceSelection(''); ed.focus(); }]);
+    items.push(['copy', () => { writeClipboard(ed.getSelection()); ed.focus(); }]);
+  }
+  // Offered only where the browser will actually hand the text over: a dead menu item is worse
+  // than no menu item, and Cmd/Ctrl+V works regardless.
+  if (navigator.clipboard?.readText) {
+    items.push(['paste', async () => {
+      try {
+        ed.replaceSelection(await navigator.clipboard.readText());
+        ed.focus();
+      } catch {
+        logLine("the browser wouldn't hand over the clipboard - use Cmd/Ctrl+V", true);
+      }
+    }]);
+  }
+  // No blanket `after` handing focus back: two of these items open a dialog and would have it
+  // taken away again the moment they returned at their first await. The clipboard items below ask
+  // for the editor back themselves, because they are the ones that want it.
+  openCtxMenu(editorMenu, e.clientX, e.clientY, { items });
+}
+
+function writeClipboard(text) {
+  navigator.clipboard?.writeText(text).catch(() => logLine("couldn't reach the clipboard - use Cmd/Ctrl+C", true));
+}
+
+document.addEventListener('contextmenu', (e) => {
+  const ed = editorAt(e.target);
+  if (!ed) return;
+  // Shift+right-click is the way through to the browser's own menu - spellcheck, inspect, and
+  // whatever else it offers. A page that takes the right button over should leave one.
+  if (e.shiftKey) return;
+  e.preventDefault();
+  // With nothing selected the caret goes where the click landed, which is what makes "insert
+  // snippet…" put the code where you pointed rather than wherever you were last typing. A
+  // selection is left alone: right-clicking one is a gesture ABOUT it, not a place to go.
+  if (!ed.somethingSelected()) {
+    ed.setCursor(ed.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+  }
+  openEditorMenu(ed, e);
+});
+
+// The menu goes away on any press outside it (its items act on click, so a press ON it must not
+// hide them first) and on Escape - the same pair the piano roll's lane menu keeps.
+document.addEventListener('pointerdown', (e) => {
+  if (!editorMenu.contains(e.target)) editorMenu.classList.add('hidden');
+}, true);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!editorMenu.classList.contains('hidden')) { editorMenu.classList.add('hidden'); e.stopPropagation(); return; }
+  if (snippetSaveState) { closeSnippetSave(); e.stopPropagation(); return; }
+  if (snippetBrowseState) { closeSnippetBrowser(); e.stopPropagation(); }
+}, true);
+
+// A row dropped onto the code. CodeMirror has been drawing the cursor for it the whole way in (the
+// drag carries text/plain), and this is where the definitions catch up with the text. Capture and
+// preventDefault, so CodeMirror's own drop doesn't paste the body a second time.
+document.addEventListener('drop', (e) => {
+  if (!Array.from(e.dataTransfer?.types ?? []).includes(SNIPPET_DND)) return;
+  const ed = editorAt(e.target);
+  if (!ed) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const name = e.dataTransfer.getData(SNIPPET_DND);
+  const at = ed.indexFromPos(ed.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+  closeSnippetBrowser({ refocus: false }); // before the round trip, so dragend has nothing to undo
+  api('GET', '/api/snippets?q=')
+    .then(({ snippets }) => {
+      const entry = (snippets ?? []).find((s) => s.name === name);
+      if (!entry) throw new Error(`the snippet "${name}" is gone`);
+      return insertSnippet(entry, ed, at);
+    })
+    .catch((err) => logLine(err.message ?? String(err), true));
+}, true);
+
+// -------------------------------------------------------------------------------------- the wiring
+
+snippetSaveNameEl.addEventListener('input', syncSnippetSaveState);
+snippetSaveConfirm.addEventListener('click', saveSnippet);
+document.getElementById('snippetSaveClose').addEventListener('click', closeSnippetSave);
+snippetSaveBackdrop.addEventListener('click', (e) => { if (e.target === snippetSaveBackdrop) closeSnippetSave(); });
+// On the dialog rather than the fields, so the editor's chords never fire from inside it - the
+// same guard the naming dialog keeps. Enter in a FIELD saves; inside the code window it is a
+// newline, which is what it should be.
+snippetSaveBackdrop.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.target === snippetSaveNameEl || e.target === snippetSaveTagsEl)) {
+    e.preventDefault();
+    saveSnippet();
+  }
+  e.stopPropagation();
+});
+
+snippetBrowseInsert.addEventListener('click', insertSelectedSnippet);
+document.getElementById('snippetBrowseClose').addEventListener('click', () => closeSnippetBrowser());
+snippetBrowseBackdrop.addEventListener('click', (e) => { if (e.target === snippetBrowseBackdrop) closeSnippetBrowser(); });
+snippetBrowseSearch.addEventListener('input', () => refreshSnippetList());
+snippetBrowseBackdrop.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const entries = snippetBrowseState?.entries ?? [];
+    if (!entries.length) return;
+    const i = entries.findIndex((x) => x.name === snippetBrowseState.sel);
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    selectSnippetRow(entries[Math.max(0, Math.min(entries.length - 1, (i < 0 ? 0 : i) + step))]);
+    snippetBrowseList.querySelector('.snippet-row.current')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    insertSelectedSnippet();
+  }
+  e.stopPropagation();
+});
+
+// ctrl+J - the same two entry points from the keyboard, for when the mouse is somewhere else: with
+// a selection it keeps one, with none it opens the browser.
+addHotkey(builtinHotkeys, 'ctrl+j', () => {
+  const ed = activeCM();
+  if (ed.somethingSelected()) openSnippetSave(ed);
+  else openSnippetBrowser(ed);
+}, 'keep the selection as a snippet / open the snippet browser');

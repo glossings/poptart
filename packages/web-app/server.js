@@ -14,6 +14,7 @@ const { preferVst3 } = require('./plugin-filter');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
 const pinnedDefs = require('./pinned-defs');
+const snippets = require('./snippets');
 const recordings = require('@poptart/osc-engine/recordings');
 const analysis = require('@poptart/osc-engine/analysis');
 
@@ -1816,6 +1817,33 @@ function writePinnedFile(text) {
   fs.writeFileSync(PINNED_FILE, text, 'utf8');
 }
 
+/**
+ * A definition written back out of the live registry, for a library name whose SOURCE is nowhere to
+ * be found - a prebake file that builds its definitions in a loop, say. Only for the kinds a
+ * registry entry says everything about: a shape is its points, a preset is its plugin and its
+ * program, a pack is its files. A roll's entry is a Sig, which is a pattern rather than the note
+ * string it was drawn from, so there is nothing faithful to write - that one answers null and the
+ * save dialog says the name couldn't be carried.
+ */
+function rebuildDef(kind, id, scope) {
+  const line = (call, ...args) => ({ kind, id, scope, code: `${call}(${args.map((a) => JSON.stringify(a)).join(', ')})` });
+  if (kind === 'shape') {
+    const points = patternCore.lookupShape(id);
+    return points ? line('_shape', id, patternCore.serializeShapePoints(points)) : null;
+  }
+  if (kind === 'preset') {
+    const entry = patternCore.lookupPreset(id, scope || null);
+    return entry ? { ...line('_preset', id, entry.plugin ?? '', entry.state ?? ''), scope: entry.plugin ?? '' } : null;
+  }
+  if (kind === 'pack') {
+    const entry = patternCore.lookupPack(id);
+    if (!entry) return null;
+    const files = (entry.files ?? []).map(String);
+    return { kind, id, scope, code: `_pack(${JSON.stringify(id)}, ${JSON.stringify(files)})` };
+  }
+  return null;
+}
+
 // The single ~/.poptart/prebake.js file, read for the browser's prebake editor ('' if missing).
 // The optional prebake/ folder is a disk-only power feature, so only this file is edited in-app.
 function readPrebakeFile() {
@@ -2852,7 +2880,7 @@ function schedulePrune() {
     // but pointless.
     Promise.resolve(expireWipSessions())
       .then(() => pruneSnapshots())
-      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] }))
+      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] }))
       .then(({ deleted, freed }) => {
         if (deleted) console.log(`[poptart] released ${deleted} captured plugin state(s), ${(freed / 1048576).toFixed(1)}MB`);
       })
@@ -3418,6 +3446,76 @@ const routes = {
     const had = pinnedList().find((e) => e.kind === kind && e.id === id && (kind !== 'preset' || e.scope === scope)) ?? null;
     if (had) writePinnedFile(pinnedDefs.removePinned(readPinnedFile(), { kind, id, scope }));
     return { status: 200, body: { errors: had ? runPrebake() : [], pinned: pinnedList(), code: had?.code ?? null } };
+  },
+
+  // --- snippets (see snippets.js) ---
+  //
+  // Where the ★ library generalises one DEFINITION across projects, a snippet generalises a phrase
+  // plus the definitions it names. The file is a whole poptart buffer, so the split into body and
+  // sidecar happens here rather than in the browser - snippets.js owns that format, and the editor
+  // is handed the two halves already apart.
+
+  // Query: { q } - the same free text the files tab takes (`tag:bass`, a word from the code).
+  // `code` is dropped on the way out: the browser wants the body and what rides with it, and a
+  // snippet carrying a captured program is megabytes it has no use for.
+  'GET /api/snippets': async (query) => ({
+    status: 200,
+    body: { snippets: snippets.listSnippets(query?.q ?? '').map(({ code, ...rest }) => rest) },
+  }),
+
+  // Body: { name, title?, tags?, body, defs } - `defs` are whole `_roll(…)`/`_preset(…)` lines,
+  // the ones the selection named. Overwrites silently, like saving a pattern.
+  //
+  // Stored DEHYDRATED (handles, not bytes), which is why SNIPPETS_DIR is one of the folders the
+  // blob sweep scans - see the note at the top of snippets.js.
+  'POST /api/snippets/save': async (body) => {
+    const composed = snippets.composeSnippet({
+      title: String(body?.title ?? ''),
+      tags: body?.tags ?? [],
+      body: String(body?.body ?? ''),
+      defs: Array.isArray(body?.defs) ? body.defs : [],
+    });
+    const { code } = await blobs.dehydrate(composed);
+    snippets.writeSnippet(body?.name, code);
+    return { status: 200, body: { name: String(body?.name ?? '').trim() } };
+  },
+
+  // Body: { name }.
+  'POST /api/snippets/delete': async (body) => {
+    snippets.deleteSnippet(body?.name);
+    return { status: 200, body: {} };
+  },
+
+  // Body: { from, to }.
+  'POST /api/snippets/rename': async (body) => {
+    snippets.renameSnippet(body?.from, body?.to);
+    return { status: 200, body: {} };
+  },
+
+  // Body: { want: [{ kind, id, scope? }] } -> the same entries with `code` filled in.
+  //
+  // This is what lets a snippet CARRY a library definition rather than merely point at one, so it
+  // can never be broken later by an unpin or a hand-edit of prebake. The editor can't do it for
+  // itself: it knows the library's names (see /api/rolls) but has no source for them - openRollById
+  // says as much when you try to open a prebake roll. Answered in order of how faithful the answer
+  // is: the ★ file, then the prebake sources, then rebuilt from the registry for the kinds where
+  // that is lossless. A roll that exists only as a registered Sig has no source anywhere, and says
+  // so rather than being quietly dropped.
+  'POST /api/snippets/resolveDefs': async (body) => {
+    const want = Array.isArray(body?.want) ? body.want : [];
+    const sources = [{ code: readPinnedFile() }, ...prebakeSources()];
+    const found = sources.flatMap((s) => pinnedDefs.parsePinned(s.code));
+    const out = want.map((w) => {
+      const kind = String(w?.kind ?? '');
+      const id = String(w?.id ?? '');
+      const scope = String(w?.scope ?? '');
+      const match = (e) => e.kind === kind && e.id === id && (kind !== 'preset' || !e.scope || !scope || e.scope === scope);
+      const hit = found.find(match);
+      if (hit) return { kind, id, scope: hit.scope, code: hit.code };
+      const rebuilt = rebuildDef(kind, id, scope);
+      return rebuilt ?? { kind, id, scope, code: null, why: `no ${kind} definition named "${id}" to copy` };
+    });
+    return { status: 200, body: { defs: out } };
   },
 
   'GET /api/highlight': async (q) => {
@@ -4727,7 +4825,7 @@ const routes = {
     saveSettings();
     const { deleted, freed } = months > 0 ? pruneWipSessions(months) : { deleted: 0, freed: 0 };
     // The states those sessions were holding alive can go with them, if nothing else names them.
-    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] });
+    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] });
     return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
   },
 

@@ -868,6 +868,28 @@ pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Seru
             star dims — click to update, ⇧click to take it out.
           </p>
 
+          <h4>Snippets: keep a phrase, not just a definition</h4>
+          <p>
+            The library holds one <em>definition</em>. A <strong>snippet</strong> holds a
+            <em>phrase</em> — the four lines of acid bass, the sidechain chain, the delay send — and
+            everything it needs to play. Select some code and <strong>right-click → save as
+            snippet…</strong>: the rolls, shapes, presets and packs it names are copied in beside it,
+            shown as chips you can drop individually. Right-click with nothing selected for
+            <strong>insert snippet…</strong>, then click a row to put it at the caret, or drag one and
+            let go where you want it. <code>ctrl+J</code> is the same two gestures from the keyboard.
+          </p>
+          <p>
+            The body lands where you clicked and the definitions join the block at the bottom, as
+            always. Names are settled on the way in: a definition your buffer already has, identical,
+            is reused — so inserting the same snippet twice changes nothing the second time — and one
+            that clashes is renamed (<code>bass</code> → <code>bass2</code>, references and all), with
+            a line in the console saying so. A snippet is a plain file in
+            <code>~/.poptart/snippets/</code>, readable and playable on its own.
+          </p>
+          <p>
+            <strong>Shift+right-click</strong> anywhere in the editor gets the browser's own menu back.
+          </p>
+
           <h4>Hotkeys &amp; editor scripting</h4>
           <p>
             The prebake runs in the browser too, so it's where you bind keys with
@@ -886,7 +908,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
           <p>
             Combos are <code>+</code>-joined — <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>/<code>mod</code>
             plus one key. <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>, <code>prompt</code>
-            and <code>log</code> are on hand. <code>ctrl+p</code>/<code>r</code>/<code>m</code>/<code>g</code>/<code>q</code>
+            and <code>log</code> are on hand. <code>ctrl+p</code>/<code>r</code>/<code>m</code>/<code>g</code>/<code>q</code>/<code>j</code>
             are taken.
           </p>
         </section>
@@ -939,6 +961,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
             <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code> · <code>ctrl+b</code> · <code>ctrl+g</code></td><td>eval · stop · bounce · mixer</td></tr>
+            <tr><td>right-click · <code>ctrl+J</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>
 

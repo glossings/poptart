@@ -548,7 +548,11 @@
 
     <!-- Outside #pianorollPanel on purpose: the panel is transform:translate-d, which would make
          this fixed menu position against the panel and be clipped away by its overflow:hidden. -->
-    <div id="pianorollMenu" class="pr-menu hidden" role="menu"></div>
+    <div id="pianorollMenu" class="ctx-menu hidden" role="menu"></div>
+
+    <!-- The editor's own right-click menu: save the selection as a snippet, or put one back.
+         Same widget and placement as the piano roll's (see openCtxMenu). -->
+    <div id="editorMenu" class="ctx-menu hidden" role="menu"></div>
 
     <div id="themePanel" class="theme-panel hidden">
       <div class="theme-panel-head">
@@ -646,6 +650,56 @@
       </div>
     </div>
 
+    <!-- Snippets: a phrase kept for re-use, with the definitions it names riding along.
+         dir-picker-backdrop on purpose, like the pack and prebake dialogs: the global hotkeys
+         stand down while one of these is up (see anyModalOpen). -->
+    <div id="snippetSaveBackdrop" class="dir-picker-backdrop hidden">
+      <div class="dir-picker snippet-dialog" role="dialog" aria-label="save snippet">
+        <div class="dir-picker-head">
+          <span>save snippet</span>
+          <span class="spacer"></span>
+          <button id="snippetSaveClose" class="small">✕</button>
+        </div>
+        <div class="snippet-fields">
+          <input id="snippetSaveName" class="name-dialog-input" type="text" spellcheck="false"
+            placeholder="snippet name…" autocomplete="off" />
+          <input id="snippetSaveTags" class="name-dialog-input" type="text" spellcheck="false"
+            placeholder="tags…" autocomplete="off" title="space or comma separated — the browser searches these" />
+        </div>
+        <textarea id="snippetSaveEditor" spellcheck="false"></textarea>
+        <div id="snippetSaveCarries" class="snippet-carries"></div>
+        <div class="dir-picker-foot">
+          <span id="snippetSaveNote" class="name-dialog-note"></span>
+          <span class="spacer"></span>
+          <button id="snippetSaveConfirm" class="small primary">save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="snippetBrowseBackdrop" class="dir-picker-backdrop hidden">
+      <div class="dir-picker snippet-browser" role="dialog" aria-label="snippets">
+        <div class="dir-picker-head">
+          <span>snippets</span>
+          <span class="spacer"></span>
+          <button id="snippetBrowseClose" class="small">✕</button>
+        </div>
+        <input id="snippetBrowseSearch" class="name-dialog-input" type="text" spellcheck="false"
+          placeholder="search…" autocomplete="off" title="a word from the code, or tag:bass" />
+        <div class="snippet-browse-body">
+          <div id="snippetBrowseList" class="snippet-list" tabindex="0"></div>
+          <div class="snippet-side">
+            <pre id="snippetBrowsePreview" class="snippet-preview"></pre>
+            <div id="snippetBrowseCarries" class="snippet-carries"></div>
+          </div>
+        </div>
+        <div class="dir-picker-foot">
+          <span id="snippetBrowseNote" class="dir-picker-note"></span>
+          <span class="spacer"></span>
+          <button id="snippetBrowseInsert" class="small primary">insert</button>
+        </div>
+      </div>
+    </div>
+
     <!-- The pack panel: a named sample pack (sp("kit")) is a list of files picked off the disk, so
          its editor is three lists - the packs there are, the files in this one (index order), and a
          folder browser to pick from. dir-picker-backdrop on purpose: the global hotkeys stand down. -->
@@ -731,6 +785,7 @@
     <script src="/vendor/codemirror/keymap/sublime.js"></script>
     <script src="api-docs.js"></script>
     <script src="pattern-meta.js"></script>
+    <script src="snippet-code.js"></script>
     <script src="client.js"></script>
   </body>
 </html>

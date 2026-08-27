@@ -103,6 +103,17 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - `public/pattern-meta.js` — parses the `@title`/`@by`/`@tags` a pattern carries in its own
   comments, and the files tab's search. Loaded in the browser *and* required by the server, so
   the tab title and the file list agree on what a pattern is called.
+- `pinned-defs.js` + `snippets.js` — the two ways a piece of work outlives the buffer it was made
+  in. `pinned-defs.js` owns the ★ library: one *definition* (a roll, shape, preset or pack) copied
+  into a prebake file, so its name resolves in every project. `snippets.js` owns the folder above
+  that layer: a whole *phrase* under `~/.poptart/snippets`, with the definitions it names copied in
+  beside it, so re-using a part doesn't leave its notes behind in the file it came from. A snippet
+  file is a valid buffer — body on top, definitions block below — which is the shape the editor
+  already writes and folds, so nothing new parses it. Its captured programs are handles, so the
+  folder is one of the roots `sweepBlobs` scans.
+- `public/snippet-code.js` — what a snippet's names have to become in the buffer it lands in
+  (reuse the identical one, rename the clashing one, rewrite the body to match). Loaded in the
+  browser and required by its test, like `pattern-meta.js`.
 
 ## How a pattern becomes sound (data flow)
 
