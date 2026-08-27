@@ -3540,7 +3540,12 @@ function initPresetPanel() {
 // snaps to the height you're holding it at (see prPaintLane). Right-click the lane for randomize /
 // reset of the channel - the selection, or the roll. A note dropped on one already sounding at that pitch keeps its own
 // length and the one underneath gives way - cut short, or hidden if it was landed on square - and
-// gets everything back the moment the note on top moves away (see prClipOverlaps). Wheel scrolls
+// gets everything back the moment the note on top moves away (see prClipOverlaps). ctrl+Q
+// QUANTIZES - a dialog asks which division (the roll's grid one notch coarser, by default), onsets
+// snap onto it and every drawn nudge goes back to 0. It is also the one edit that settles the
+// overlap rule for keeps: buried notes are deleted outright and a clipped one gives up the tail
+// that was hiding behind the note in front of it, so afterwards the roll says exactly what it
+// plays (see prQuantize). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
 // zooms in on fine grids. Every note carries a pitch AND a sample index, and the `note`/`index`
 // button says which of them the rows are showing - a piano keyboard, or a plain 0, 1, 2, … count of
@@ -3711,6 +3716,7 @@ function setPatchScale(name) {
   if (next === patchScale) return;
   patchScale = next;
   if (prScaleLabel) prScaleLabel.textContent = prIndexMode() ? '' : (patchScale ?? '');
+  prSyncKeyboardBtn(); // the ⌨ tooltip names the tonic when the keyboard is transposed to the key
   if (prState) drawPianoroll();
 }
 
@@ -3727,7 +3733,9 @@ function prScaleInfo() {
     let info = null;
     try {
       const { rootMidi, intervals } = notesMod.parseScaleName(patchScale);
-      info = { tonic: pitchClass(rootMidi), pcs: new Set(intervals.map((iv) => pitchClass(rootMidi + iv))) };
+      // `intervals` (semitones above the root, ascending from 0) is what the ⌨'s in-key layout is
+      // built from; `pcs` is what the roll's lanes are coloured by.
+      info = { tonic: pitchClass(rootMidi), intervals, pcs: new Set(intervals.map((iv) => pitchClass(rootMidi + iv))) };
     } catch {
       info = null; // the server already reported the bad name at the setscale call
     }
@@ -3807,12 +3815,12 @@ function prSyncMode() {
  * Switch which channel the axis shows. Nothing about the roll moves: the notes are the same
  * events, drawn against a different ruler, and each keeps the channel you can't currently see. The
  * view is re-framed around wherever they land on the new axis, which is the only thing that has to
- * change.
+ * change - and a selection is a set of those same events, so what you had selected stays selected
+ * on the other axis.
  */
 function prSetMode(mode) {
   if (!prState || prState.mode === mode) return;
   prState.mode = mode;
-  prState.sel.clear(); // a selection is a set of rows to nudge, and the rows just changed meaning
   prPreviewOff();
   prSyncMode();
   prFramePitch();
@@ -5785,9 +5793,9 @@ function syncPianorollFromCode() {
   prState.swing = parsed.swing;
   prState.swinggrid = parsed.swinggrid;
   if (parsed.mode !== prState.mode) {
-    // Typed `mode: "index"` into the call by hand - the same change of view the button makes.
+    // Typed `mode: "index"` into the call by hand - the same change of view the button makes,
+    // selection included (see prSetMode).
     prState.mode = parsed.mode;
-    prState.sel.clear();
     prPreviewOff();
     prSyncMode();
   }
@@ -6610,6 +6618,56 @@ function prTouch(notes) {
   const raised = new Set(notes);
   if (!raised.size) return;
   prState.notes = [...prState.notes.filter((n) => !raised.has(n)), ...prState.notes.filter((n) => raised.has(n))];
+}
+
+// The names the quantize dialog puts on a division, by cells per cycle. A grid with no name (an
+// unusual roll) is offered as its own count, which is the honest thing to call it.
+const PR_DIV_NAMES = { 1: '1/1', 2: '1/2', 3: '1/2T', 4: '1/4', 6: '1/4T', 8: '1/8', 12: '1/8T', 16: '1/16', 24: '1/16T', 32: '1/32', 48: '1/32T', 64: '1/64' };
+const prDivLabel = (n) => PR_DIV_NAMES[n] ?? `${n}/cycle`;
+
+/**
+ * ctrl+Q: straighten the roll out. A small dialog asks which division to snap to - the roll's own
+ * grid one notch coarser, by default, since quantizing to the grid you drew on moves nothing - and
+ * quantizePianoRoll does the rest: onsets snap, nudges go back to 0, buried notes are deleted and
+ * clipped ones lose the tail that was hiding behind the note in front of them.
+ *
+ * The selection is what moves when there is one, like every other edit here; with nothing selected
+ * it is the whole roll. Deleting is the one thing this does that no other roll edit does - the
+ * overlap rule is otherwise always recoverable - which is why it asks first rather than being a
+ * bare keystroke, and why it lands as one undo step like anything else.
+ */
+async function prQuantize() {
+  if (!prState || !pianorollMod) return;
+  const sel = [...prState.sel];
+  const count = sel.length || prLiveNotes(prState.notes).length;
+  const scope = `${sel.length ? 'the selection' : 'the whole roll'} (${count} note${count === 1 ? '' : 's'})`;
+  const grid = prState.grid;
+  const div = await askSelect(`Quantize ${scope}`, {
+    label: 'to',
+    options: pianorollMod.pianoRollQuantizeDivs(grid).map((d) => [d === grid ? `${prDivLabel(d)} (the roll's grid)` : prDivLabel(d), d]),
+    value: pianorollMod.pianoRollDefaultQuantizeDiv(grid),
+    confirm: 'quantize',
+  });
+  prRefocus(); // the dialog took the keyboard - the grid gets it back either way
+  if (div == null || !prState) return; // cancelled, or the panel closed while the dialog was up
+  const { notes, dropped, snipped } = pianorollMod.quantizePianoRoll(prState.notes, {
+    grid,
+    div,
+    only: sel.length ? sel : null, // ...and the tidy-up is the whole roll regardless; see there
+  });
+  prState.notes = notes;
+  const kept = new Set(notes);
+  for (const n of [...prState.sel]) if (!kept.has(n)) prState.sel.delete(n); // deleted for good
+  writePianorollCall();
+  drawPianoroll();
+  const lost = [
+    dropped ? `${dropped} note${dropped === 1 ? '' : 's'} deleted` : null,
+    snipped ? `${snipped} shortened` : null,
+  ].filter(Boolean);
+  if (lost.length) logLine(`piano roll: quantized to ${prDivLabel(div)} - ${lost.join(', ')} (cmd-Z with the grid focused puts them back)`);
+  // The notes are on the grid now, and the knob still pushes them off it as they play - which is
+  // worth saying, since "quantize" and "still swinging" look like a contradiction on screen.
+  if (prState.swing) logLine(`piano roll: the swing knob is still at ${prState.swing} - the notes are quantized, but the roll's groove is still applied to them as they play.`);
 }
 
 // Live's `0`: switch notes off without deleting them. They stay on the grid greyed out - still
@@ -7497,9 +7555,11 @@ function initPianorollEditor() {
   // The header's recorder (● rec and its options) is the one outside thing that is ABOUT the open
   // roll - arming a take you then watch land on it - so reaching for it leaves the roll up. The lane
   // menu is the roll's OWN ui and only sits outside the panel so it can position itself against the
-  // viewport (see index.html), so it doesn't count as off the panel either.
+  // viewport (see index.html), so it doesn't count as off the panel either - and neither does the
+  // app's modal (askShell), which ctrl+Q puts up ABOUT the roll: clicking its `quantize` button
+  // would otherwise close the roll out from under the answer.
   document.addEventListener('pointerdown', (e) => {
-    if (prState && !prPanel.contains(e.target) && !prMenu.contains(e.target) && !e.target.closest?.('.rec-wrap')) closePianorollEditor();
+    if (prState && !prPanel.contains(e.target) && !prMenu.contains(e.target) && !askEl?.contains(e.target) && !e.target.closest?.('.rec-wrap')) closePianorollEditor();
   }, true);
 
   // Panel-wide keys while it's open: Escape (when the code has focus - the canvas handles its own),
@@ -10303,23 +10363,106 @@ async function doStop(deck = null) {
 //
 // Layout (à la Ableton/tracker typing keyboards): the home row a s d f g h j k l are the white
 // keys and the row above (w e t y u o p) the black keys; z / x shift octave, c / v nudge
-// velocity. On an INDEX roll the same keys count files instead - `a` is the pack's first, `w` its
+// velocity. The settings tab picks between that piano and the same keyboard laid out IN KEY - see
+// KB_GAP_KEYS below. On an INDEX roll the same keys count files instead - `a` is the pack's first, `w` its
 // second… - struck at the roll's default pitch with the index riding along, so a drum roll records
 // from the keys the way it is drawn. (Nothing sounds for those yet: a sampler is triggered by
 // playSample, not noteOn, and keyNote only knows the latter - they record, and play back from the
 // roll on its next pass.)
 // ---------------------------------------------------------------------------------------------
 
+// The INDEX axis's table - there the keys count a pack's files, so they stay a plain 0, 1, 2, …
+// with no duplicates and no note below the first. The note layouts are built from the rule below
+// instead; kb-layout.test.js pins that the piano one still agrees with this on every key here.
 const KB_SEMITONES = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12, o: 13, l: 14, p: 15 };
 const KB_BASE_NOTE = 48; // MIDI note the home-row `a` plays at octave shift 0 (c2, this package's c3 = 60)
 const KB_OCT_MIN = -3;
 const KB_OCT_MAX = 4;
 const KB_CONTROL_KEYS = new Set(['z', 'x', 'c', 'v']); // octave -/+, velocity -/+ (never notes)
 
+// --- how both note layouts are built ---
+// KB_SEMITONES is not an arbitrary table: it is one rule applied to the major scale. The home row
+// is the scale's own notes, root first, and the row above bends them by a semitone, by where it
+// sits: the key up-and-RIGHT of a home key plays it a semitone SHARP, the key up-and-LEFT of it a
+// semitone FLAT. `w` is `a` sharpened; it is also `s` flattened, and in major those are the same
+// note - which is what makes the black keys land where a piano puts them.
+//
+// Both layouts come out of that one rule; only the scale fed to it differs. `piano` feeds it C
+// major and so reproduces the classic map. `in key` feeds it whatever setscale() last set, so the
+// home row becomes the notes of the buffer's key and the row above still bends them.
+//
+// EVERY upper key plays, always - no key is ever dead. Where a scale steps by a semitone the two
+// bends collide on a note the home row already has (`r` in major is just `f` again); redundancy is
+// the price of the rule holding everywhere, and it is worth paying, because a layout where some
+// keys are silent in some keys makes you think about the scale mid-phrase. `q` is the one key with
+// no home key to its lower left, so it is only ever the flat one: a semitone below the root.
+//
+// The two bends only disagree where a scale steps by THREE, leaving two notes in one gap: there
+// the unshifted key is the sharp one, and SHIFT - which raises any key a semitone - reaches the
+// flat one. That covers every scale in notes.mjs, none of which steps by more than 3 (a step of 4
+// would strand the note in its middle; kb-layout.test.js fails if such a scale is ever added).
+const KB_LAYOUT_KEY = 'poptart-kb-layout';
+let kbLayout = localStorage.getItem(KB_LAYOUT_KEY) === 'key' ? 'key' : 'piano';
+
+const KB_HOME_KEYS = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l']; // the scale's notes, root first
+// The row above, in the order it sits over the home row: KB_UPPER_KEYS[i + 1] is up-and-right of
+// KB_HOME_KEYS[i] (and up-and-left of KB_HOME_KEYS[i + 1]); `q` hangs off the left end.
+const KB_UPPER_KEYS = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
+const KB_PIANO_INTERVALS = [0, 2, 4, 5, 7, 9, 11]; // major - what the `piano` layout is the rule applied to
+
 let prKbOn = false; // the roll panel's ⌨ toggle - the keyboard plays the open roll's track while set
 let kbOctave = 0; // octave shift in whole octaves (z/x)
 let kbVelocity = 0.8; // 0.1..1 (c/v)
 const kbHeldKeys = new Map(); // key char -> [{ trackId, note, index }] currently sounding, for keyup/release
+
+/** The key's tonic as a note name, or null when there is no (parseable) key in force. */
+const kbTonicName = () => { const info = prScaleInfo(); return info ? NOTE_NAMES[info.tonic] : null; };
+
+/**
+ * key -> semitones above KB_BASE_NOTE for a scale, by the rule in the comment above: the home row
+ * takes the scale's degrees from its tonic, and each upper key sharpens the home key below-left of
+ * it (`q`, having none, flattens the root instead). Degrees past the scale's length wrap into the
+ * octave above, so the row keeps climbing rather than stopping at the seventh.
+ */
+function kbBuildScaleMap({ tonic, intervals }) {
+  const len = intervals.length;
+  const degree = (d) => intervals[((d % len) + len) % len] + 12 * Math.floor(d / len);
+  const map = {};
+  KB_HOME_KEYS.forEach((key, i) => { map[key] = tonic + degree(i); });
+  map[KB_UPPER_KEYS[0]] = tonic + degree(0) - 1; // `q`: nothing below-left to sharpen, so flatten the root
+  KB_HOME_KEYS.forEach((_, i) => { map[KB_UPPER_KEYS[i + 1]] = tonic + degree(i) + 1; });
+  return map;
+}
+
+// Rebuilt only when the key changes - the map is the same for every keystroke in a given key.
+let kbScaleMapCache = { name: null, map: null };
+const kbPianoMap = kbBuildScaleMap({ tonic: 0, intervals: KB_PIANO_INTERVALS });
+
+/**
+ * Is the in-key layout actually playing right now? It needs to be chosen AND to have a key to be
+ * in: with no setscale() there is no scale to lay out, so the keys stay on the piano. The index
+ * axis keeps the piano map too - there the numbers are file indices, and a pack has no key.
+ */
+const kbInKey = () => kbLayout === 'key' && !prIndexMode() && !!prScaleInfo();
+
+/** The map in force: the buffer's key, or C major. */
+function kbSemitones() {
+  if (!kbInKey()) return kbPianoMap;
+  if (kbScaleMapCache.name !== patchScale) kbScaleMapCache = { name: patchScale, map: kbBuildScaleMap(prScaleInfo()) };
+  return kbScaleMapCache.map;
+}
+
+/** The settings choice. Anything held was struck on the old layout, so release it first. */
+function setKbLayout(layout) {
+  kbLayout = layout === 'key' ? 'key' : 'piano';
+  localStorage.setItem(KB_LAYOUT_KEY, kbLayout);
+  kbReleaseAll();
+  prSyncKeyboardBtn();
+  const tonic = kbTonicName();
+  if (kbLayout !== 'key') logLine('⌨ piano layout - a plays C');
+  else if (tonic) logLine(`⌨ in key - a plays ${tonic}, the home row is ${patchScale}; the row above bends it (up-right sharpens, up-left flattens)`);
+  else logLine('⌨ in key - no key set yet, so the keys stay on the piano until a setscale() runs');
+}
 
 /** The track the keyboard plays right now - the open roll's, with ⌨ on - or null. */
 function kbTarget() {
@@ -10332,13 +10475,15 @@ function prSetKeyboard(on) {
   prKbOn = !!on && !!prState;
   if (!prKbOn) kbReleaseAll();
   prSyncKeyboardBtn();
-  if (prState) logLine(prKbOn ? `computer keyboard on - playing "${prPlayingTrack() ?? '?'}" from the keys (a s d f… / w e t y…, z/x octave, c/v velocity)` : 'computer keyboard off');
+  const tonic = kbInKey() ? kbTonicName() : null;
+  if (prState) logLine(prKbOn ? `computer keyboard on - playing "${prPlayingTrack() ?? '?'}" from the keys (a s d f…, z/x octave, c/v velocity${tonic ? `, in key: a = ${tonic}, shift raises a semitone` : ''})` : 'computer keyboard off');
 }
 
 function prSyncKeyboardBtn() {
   prKeysBtn.classList.toggle('active', prKbOn);
+  const tonic = kbInKey() ? kbTonicName() : null;
   prKeysBtn.title = prKbOn
-    ? 'computer keyboard: on - the keys play this roll\'s track (ctrl+m)'
+    ? `computer keyboard: on - the keys play this roll's track (ctrl+m)${tonic ? `, in the key: a = ${tonic}, shift raises a semitone` : ''}`
     : 'computer keyboard: play this roll\'s track from the typing keyboard (ctrl+m)';
 }
 
@@ -10411,17 +10556,24 @@ function onKbKeyDown(e) {
     swallow();
     return;
   }
-  if (!(key in KB_SEMITONES)) return;
+  // On the index axis only some of these keys are files; on either note layout all of q…p and
+  // a…l play something, so nothing in the top two rows reaches the editor while ⌨ is on.
+  const semitones = prIndexMode() ? KB_SEMITONES : kbSemitones();
+  if (!(key in semitones)) return;
   if (e.repeat || kbHeldKeys.has(key)) {
     // Already sounding (OS auto-repeat) - keep swallowing, but don't retrigger.
     swallow();
     return;
   }
+  // Shift is the accidental: it raises the key a semitone. It only ever finds a new note where a
+  // scale steps by three and one upper key has to stand for two - elsewhere it lands on a note the
+  // layout already has, which is harmless and keeps the rule one sentence long.
+  const accidental = e.shiftKey && !prIndexMode() ? 1 : 0;
   // On the index axis a key is a FILE of the pack, struck at the roll's default pitch; on the
   // piano it is the pitch itself.
   const struck = prIndexMode()
     ? { note: pianorollMod.PIANOROLL_DEFAULT_NOTE, index: Math.max(0, KB_SEMITONES[key] + kbOctave * 12) }
-    : { note: KB_BASE_NOTE + kbOctave * 12 + KB_SEMITONES[key], index: null };
+    : { note: KB_BASE_NOTE + kbOctave * 12 + semitones[key] + accidental, index: null };
   kbSend(trackId, struck.note, true, struck.index);
   kbHeldKeys.set(key, [{ trackId, ...struck }]);
   swallow();
@@ -11318,6 +11470,12 @@ const docTooltipsToggle = document.getElementById('docTooltipsToggle');
 docTooltipsToggle.checked = docTooltipsEnabled;
 docTooltipsToggle.addEventListener('change', () => setDocTooltips(docTooltipsToggle.checked));
 
+// Piano roll: whether the ⌨ keys are a piano or the buffer's key (see the computer-keyboard
+// section).
+const kbLayoutSelect = document.getElementById('kbLayoutSelect');
+kbLayoutSelect.value = kbLayout;
+kbLayoutSelect.addEventListener('change', () => setKbLayout(kbLayoutSelect.value));
+
 
 // Sample-library folder. The saved folder is what `s(...)` reads packs from; when
 // POPTART_SAMPLES_DIR is set in the environment it overrides this, so the field goes read-only
@@ -11374,7 +11532,9 @@ async function refreshWipRetention() {
     const { months, preview } = await api('GET', '/api/patterns/wip/retention');
     wipRetentionSelect.value = String(months);
     wipRetentionNote.textContent = months
-      ? `sessions older than ${months} month${months === 1 ? '' : 's'} are deleted; ${sessionCost(preview.sessions, preview.bytes)} would go on the next sweep`
+      ? `sessions untouched for ${months} month${months === 1 ? '' : 's'} are deleted; ${preview.sessions
+        ? `${sessionCost(preview.sessions, preview.bytes)} past that now`
+        : 'nothing is that old right now'}`
       : 'every session is kept until you delete it in the files tab';
   } catch (e) {
     logLine(e.message ?? String(e), true);
@@ -13597,7 +13757,8 @@ async function runHotkey(hk, e) {
 // A blocking modal (prebake editor, folder picker, midi import) is open - don't let chords reach
 // through it.
 function anyModalOpen() {
-  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop].some((el) => !el.classList.contains('hidden'));
+  // askEl only exists once something has asked; it is built shown, so "not hidden" means open.
+  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, askEl].some((el) => el && !el.classList.contains('hidden'));
 }
 
 window.addEventListener(
@@ -13629,6 +13790,10 @@ addHotkey(builtinHotkeys, 'ctrl+b', () => bounceBlockAtCursor(), 'bounce block t
 
 // ctrl+m - toggle the open piano roll's computer keyboard (its ⌨ button).
 addHotkey(builtinHotkeys, 'ctrl+m', () => { if (prState) prSetKeyboard(!prKbOn); else logLine('open a piano roll first - ⌨ plays the roll on screen', true); }, 'toggle the roll\'s computer keyboard');
+
+// ctrl+q - quantize the open roll (a dialog asks which division). Ctrl, not cmd: cmd+Q is the
+// browser quitting, and no page gets to intercept that.
+addHotkey(builtinHotkeys, 'ctrl+q', () => (prState ? prQuantize() : logLine('open a piano roll first - ctrl+Q quantizes the roll on screen', true)), 'quantize the roll');
 
 // ctrl+g - open/close the mixer (mirrors settings → open mixer…).
 addHotkey(builtinHotkeys, 'ctrl+g', () => toggleMixer(), 'toggle mixer');
@@ -13861,11 +14026,12 @@ function toggleMixMode() {
   else openMixMode();
 }
 
-// A small in-style choice dialog - what native confirm() can't be: three-way, styled like the
-// app, and honest about which button does what. Resolves the picked choice's value; esc or a
-// click on the backdrop resolve null (the "cancel" answer, so give no choice the value null).
+// The app's own modal, one at a time: a backdrop over everything, esc or a click outside it
+// answering null. `build(panel, done)` fills the panel in and closes through `done`; whatever it
+// returns is focused once the thing is on screen. The two dialogs below are all this is for -
+// anything bigger gets its own panel.
 let askEl = null;
-function askDialog(message, choices) {
+function askShell(build) {
   return new Promise((resolve) => {
     if (!askEl) {
       askEl = document.createElement('div');
@@ -13875,10 +14041,6 @@ function askDialog(message, choices) {
     askEl.innerHTML = '';
     const panel = document.createElement('div');
     panel.id = 'askPanel';
-    const msg = document.createElement('p');
-    msg.textContent = message;
-    const row = document.createElement('div');
-    row.className = 'ask-row';
     const done = (v) => {
       askEl.classList.add('hidden');
       window.removeEventListener('keydown', onKey, true);
@@ -13890,19 +14052,69 @@ function askDialog(message, choices) {
       e.preventDefault();
       done(null);
     }
-    for (const c of choices) {
-      const b = document.createElement('button');
-      b.textContent = c.label;
-      if (c.primary) b.className = 'primary';
-      b.addEventListener('click', () => done(c.value));
-      row.appendChild(b);
-    }
-    panel.append(msg, row);
+    const focus = build(panel, done);
     askEl.appendChild(panel);
     askEl.classList.remove('hidden');
     askEl.onclick = (e) => { if (e.target === askEl) done(null); };
     window.addEventListener('keydown', onKey, true); // capture: esc must not fall through to the editor
-    row.querySelector('button.primary')?.focus();
+    focus?.focus();
+  });
+}
+
+/** The row of buttons every dialog ends with; the primary one is the default answer. */
+function askButtons(choices, done) {
+  const row = document.createElement('div');
+  row.className = 'ask-row';
+  for (const c of choices) {
+    const b = document.createElement('button');
+    b.textContent = c.label;
+    if (c.primary) b.className = 'primary';
+    b.addEventListener('click', () => done(c.value()));
+    row.appendChild(b);
+  }
+  return row;
+}
+
+// A small in-style choice dialog - what native confirm() can't be: three-way, styled like the
+// app, and honest about which button does what. Resolves the picked choice's value; esc or a
+// click on the backdrop resolve null (the "cancel" answer, so give no choice the value null).
+function askDialog(message, choices) {
+  return askShell((panel, done) => {
+    const msg = document.createElement('p');
+    msg.textContent = message;
+    const row = askButtons(choices.map((c) => ({ ...c, value: () => c.value })), done);
+    panel.append(msg, row);
+    return row.querySelector('button.primary');
+  });
+}
+
+// The same dialog with one control in it: a labelled <select>, for a question whose answer is a
+// value rather than a button. Resolves the SELECT's value (options are [label, value] pairs), or
+// null for cancel / esc / the backdrop. Enter answers it from the keyboard, which is what makes
+// having a sensible default worth anything.
+function askSelect(message, { label, options, value, confirm = 'ok' }) {
+  return askShell((panel, done) => {
+    const msg = document.createElement('p');
+    msg.textContent = message;
+    const field = document.createElement('label');
+    field.className = 'ask-field';
+    field.textContent = label;
+    const sel = document.createElement('select');
+    for (const [text, v] of options) sel.add(new Option(text, String(v)));
+    sel.value = String(value);
+    field.appendChild(sel);
+    const pick = () => (typeof value === 'number' ? Number(sel.value) : sel.value);
+    const row = askButtons([
+      { label: 'cancel', value: () => null },
+      { label: confirm, value: pick, primary: true },
+    ], done);
+    panel.append(msg, field, row);
+    panel.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      done(pick());
+    });
+    return sel;
   });
 }
 

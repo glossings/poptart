@@ -430,6 +430,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><td>velocity</td><td><strong>cmd</strong>-drag up/down</td></tr>
             <tr><td>mute a note</td><td><strong>0</strong> — it greys out and stays (a <code>!</code> in the code); <strong>0</strong> again un-mutes</td></tr>
             <tr><td>clipboard</td><td><strong>cmd-C / X / V / D</strong> — into another roll too</td></tr>
+            <tr><td>quantize</td><td><strong>ctrl+Q</strong> — pick a division; onsets snap, nudges clear, buried notes go</td></tr>
             <tr><td>undo</td><td><strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> while the grid has focus</td></tr>
             <tr><td>zoom · close</td><td><strong>cmd −/+</strong> · <strong>Esc</strong>, <strong>✕</strong>, or click outside</td></tr>
           </table>
@@ -460,7 +461,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <code>0, 1, 2, …</code> — a pack's files — so
             <code>pianoroll("chops").s("breaks")</code> sequences a break by file, with lengths, velocity
             and probability meaning exactly what they do on the keyboard. Switching views moves
-            nothing: draw a rhythm on one axis, set the pitches on the other.
+            nothing and keeps your selection: draw a rhythm on one axis, set the pitches of those
+            same notes on the other.
           </p>
           <h4>In key</h4>
           <p>
@@ -884,7 +886,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
           <p>
             Combos are <code>+</code>-joined — <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>/<code>mod</code>
             plus one key. <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>, <code>prompt</code>
-            and <code>log</code> are on hand. <code>ctrl+p</code>/<code>r</code>/<code>m</code>/<code>g</code>
+            and <code>log</code> are on hand. <code>ctrl+p</code>/<code>r</code>/<code>m</code>/<code>g</code>/<code>q</code>
             are taken.
           </p>
         </section>

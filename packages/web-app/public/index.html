@@ -297,6 +297,15 @@
                 tooltips only with ctrl held
               </label>
             </section>
+            <section id="pianorollSection">
+              <h2>piano roll</h2>
+              <label class="settings-row">⌨ keyboard layout
+                <select id="kbLayoutSelect" title="what the roll's ⌨ keys play. piano: the home row is the white keys, a = C. in key: the home row is the notes of the key setscale() set, a = its tonic. Either way the row above bends the home row a semitone - the key up-right of a note sharpens it, the key up-left flattens it - and shift raises any key a semitone further">
+                  <option value="piano">piano (a = C)</option>
+                  <option value="key">in key (a = the tonic)</option>
+                </select>
+              </label>
+            </section>
             <section id="storageSection">
               <h2>sessions</h2>
               <label class="settings-row">keep unnamed sessions

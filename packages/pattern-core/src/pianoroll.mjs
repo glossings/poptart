@@ -329,6 +329,79 @@ export function clipOverlaps(notes) {
 }
 
 /**
+ * The divisions a roll drawn on `grid` can be quantized to, coarsest first: the grid's own
+ * divisors, and nothing else. A note's onset is a whole cell (see the format above), so a division
+ * the grid doesn't contain has no cells to land on - quantizing a 16-grid to eighth TRIPLETS would
+ * ask for a note at cell 1.33, which the roll cannot write down. Changing the grid is what reaches
+ * those (regridPianoRoll re-meshes without moving the music); this list is what quantize can offer
+ * honestly. `grid` itself is always in it - snapping to the grid you are drawn on moves nothing,
+ * but it still straightens the nudges and settles the overlaps, which is a thing to want.
+ */
+export function pianoRollQuantizeDivs(grid) {
+  const g = normalizePianoRollSteps(grid);
+  const divs = [];
+  for (let d = 1; d <= g; d++) if (g % d === 0) divs.push(d);
+  return divs;
+}
+
+/**
+ * The division a quantize starts on: one step COARSER than the roll's own grid - the largest
+ * divisor that still fits twice, so a 1/16 roll offers 1/8 and a 1/8T roll offers 1/4T. Quantizing
+ * to the grid you drew on is the identity on the onsets, so the useful default is the next notch
+ * up. (A grid of 1 has nowhere coarser to go and offers itself.)
+ */
+export function pianoRollDefaultQuantizeDiv(grid) {
+  const g = normalizePianoRollSteps(grid);
+  return pianoRollQuantizeDivs(g).filter((d) => d <= g / 2).pop() ?? g;
+}
+
+/**
+ * Snap notes onto `div` (a division of the cycle, one of pianoRollQuantizeDivs) and settle the
+ * overlap rule for good - the editor's ctrl+Q. Three things happen, and they belong together
+ * because they are all "make the roll say plainly what it plays":
+ *
+ *   - every onset moves to the nearest cell of the division, and every NUDGE goes back to 0. A
+ *     nudge is a deliberate offset from the grid, so a quantize that left it in place would snap
+ *     the note and then push it straight back off again; quantizing is how you undo a groove you
+ *     drew (or recorded), including one that was committed from the swing knob.
+ *   - notes the overlap rule buries are DELETED. Everywhere else a hidden note is kept, because the
+ *     note on top may move away and give it back (see clipOverlaps) - but two notes rounded onto
+ *     one cell of one lane are not a stack waiting to be recovered, they are a duplicate, and
+ *     leaving them in the string would keep re-hiding one of them on every later edit.
+ *   - a note that was merely CLIPPED keeps its clipped length as its authored one (`full` = `len`),
+ *     so the tail that used to hide behind the note in front of it is gone rather than waiting to
+ *     spring back. After this, nothing in the roll is hidden and no part of any note is either.
+ *
+ * `only` (a Set/array of notes, or null for the whole roll) is what MOVES - the selection, when
+ * there is one. The tidy-up is always the whole roll: whether a note is buried is a fact about its
+ * lane, not about what happened to be selected.
+ *
+ * Notes are mutated in place; the SURVIVORS come back as a new array (the caller replaces its own,
+ * since the deleted ones are gone for good), with a count of what was dropped and what was cut.
+ */
+export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
+  const g = normalizePianoRollSteps(grid);
+  const step = Math.max(1, Math.round(g / normalizePianoRollSteps(div ?? g)));
+  const moving = only ? new Set(only) : null;
+  for (const nt of notes) {
+    if (moving && !moving.has(nt)) continue;
+    nt.start = Math.round(nt.start / step) * step;
+    nt.nudge = 0;
+  }
+  clipOverlaps(notes);
+  let dropped = 0;
+  let snipped = 0;
+  const kept = [];
+  for (const nt of notes) {
+    if (nt.hidden) { dropped++; continue; }
+    if (nt.len < nt.full) snipped++;
+    nt.full = nt.len; // the clip IS the note now - there is no tail left behind the one in front
+    kept.push(nt);
+  }
+  return { notes: kept, dropped, snipped };
+}
+
+/**
  * Convert a drawn roll to the equivalent mini-notation, in the same multi-line `<…>*grid` form the
  * MIDI recorder writes: `len` cells (one per grid column) between `<` and `>`, multiplied by `grid`,
  * so the whole thing loops every `len` grid-th notes. The cells are the loop WINDOW - `len` of them

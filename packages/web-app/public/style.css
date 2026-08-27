@@ -4415,6 +4415,24 @@ body.mix-on #deckAHead {
   justify-content: flex-end;
 }
 
+/* One labelled control between the question and the buttons (askSelect) - how the piano roll's
+   ctrl+Q asks which division to snap to. */
+.ask-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ask-field select {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
 #orgModal {
   position: fixed;
   inset: 0;

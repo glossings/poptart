@@ -25,6 +25,9 @@ import {
   regridPianoRoll,
   retimePianoRoll,
   duplicatePianoRollLoop,
+  quantizePianoRoll,
+  pianoRollQuantizeDivs,
+  pianoRollDefaultQuantizeDiv,
   PIANOROLL_DEFAULT_STEPS,
   PIANOROLL_DEFAULT_NOTE,
   PIANOROLL_DEFAULT_INDEX,
@@ -910,4 +913,68 @@ test('the division a roll\'s notes sit on is their spacing, not the grid or thei
   assert.equal(pianoRollNoteGrid(parsePianoRoll('36,0,1'), 16), null, 'nothing off the downbeat to measure');
   assert.equal(pianoRollNoteGrid([], 16), null);
   assert.equal(pianoRollNoteGrid(parsePianoRoll('!42,0,1 !42,1,1'), 16), null, 'muted notes are not notes');
+});
+
+test('quantize offers only divisions the grid can actually land on', () => {
+  assert.deepEqual(pianoRollQuantizeDivs(16), [1, 2, 4, 8, 16]);
+  assert.deepEqual(pianoRollQuantizeDivs(12), [1, 2, 3, 4, 6, 12], 'a triplet grid quantizes to triplets');
+  assert.deepEqual(pianoRollQuantizeDivs(1), [1]);
+  // one notch coarser than the roll's own grid, which is where the dialog opens
+  assert.equal(pianoRollDefaultQuantizeDiv(16), 8);
+  assert.equal(pianoRollDefaultQuantizeDiv(12), 6);
+  assert.equal(pianoRollDefaultQuantizeDiv(1), 1, 'nowhere coarser to go');
+});
+
+test('quantize snaps onsets to the division and straightens every nudge', () => {
+  const notes = parsePianoRoll('60,1,1 60,6,1,1,1,0.25 62,3,1');
+  const { notes: out } = quantizePianoRoll(notes, { grid: 16, div: 4 });
+  assert.equal(serializePianoRoll(out), '60,0,1 62,4,1 60,8,1');
+  assert.deepEqual(out.map(noteNudge), [0, 0, 0], 'a quantize undoes the groove it snapped through');
+});
+
+test('quantize moves only the selection, but tidies the whole roll', () => {
+  const notes = parsePianoRoll('60,1,1 62,3,1');
+  const { notes: out } = quantizePianoRoll(notes, { grid: 16, div: 4, only: [notes[1]] });
+  assert.equal(serializePianoRoll(out), '60,1,1 62,4,1');
+});
+
+test('quantize deletes what the overlap rule buries instead of keeping it hidden', () => {
+  // both round onto cell 4 of the same lane: the later note wins and the earlier one is gone for good
+  const notes = parsePianoRoll('60,3,4 60,5,4');
+  const { notes: out, dropped } = quantizePianoRoll(notes, { grid: 16, div: 4 });
+  assert.equal(dropped, 1);
+  assert.equal(out.length, 1);
+  assert.equal(serializePianoRoll(out), '60,4,4');
+  // ...and it stays gone through a later edit that would have brought a hidden note back
+  out[0].start = 8;
+  clipOverlaps(out);
+  assert.equal(serializePianoRoll(out.filter((nt) => !nt.hidden)), '60,8,4');
+});
+
+test('quantize snips a clipped note rather than leaving the tail hiding behind the next one', () => {
+  const notes = parsePianoRoll('60,0,8 60,5,2'); // a long note with a short one dropped in its middle
+  const { notes: out, dropped, snipped } = quantizePianoRoll(notes, { grid: 16, div: 4 });
+  assert.equal(dropped, 0);
+  assert.equal(snipped, 1);
+  assert.equal(serializePianoRoll(out), '60,0,4 60,4,2', 'the long note now ENDS where the short one starts');
+  // moving the short note away used to spring the long one back to 8 cells; after a quantize the
+  // roll says what it plays, so it stays 4
+  out[1].start = 12;
+  clipOverlaps(out);
+  assert.equal(serializePianoRoll(out), '60,0,4 60,12,2');
+});
+
+test('quantize leaves other lanes, and a different sample index, alone', () => {
+  const notes = parsePianoRoll('60,0,8 62,5,2 60:1,4,2');
+  const { notes: out, dropped, snipped } = quantizePianoRoll(notes, { grid: 16, div: 4 });
+  assert.equal(dropped, 0);
+  assert.equal(snipped, 0, 'a lane is a pitch AND an index');
+  assert.equal(serializePianoRoll(out), '60,0,8 60:1,4,2 62,4,2');
+});
+
+test('quantizing to a division finer than the grid moves nothing but still settles the roll', () => {
+  const notes = parsePianoRoll('60,3,8,1,1,0.3 60,5,2');
+  const { notes: out, snipped } = quantizePianoRoll(notes, { grid: 16, div: 16 });
+  assert.equal(snipped, 1);
+  assert.equal(serializePianoRoll(out), '60,3,2 60,5,2');
 });
