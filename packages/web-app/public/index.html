@@ -695,7 +695,10 @@
         <div class="dir-picker-foot">
           <span id="snippetBrowseNote" class="dir-picker-note"></span>
           <span class="spacer"></span>
-          <button id="snippetBrowseInsert" class="small primary">insert</button>
+          <!-- insert while browsing; cancel/save while an edit is open (.editing on the backdrop) -->
+          <button id="snippetBrowseInsert" class="small primary snippet-when-browsing">insert</button>
+          <button id="snippetBrowseCancel" class="small snippet-when-editing">cancel</button>
+          <button id="snippetBrowseSave" class="small primary snippet-when-editing" title="Cmd/Ctrl+S">save</button>
         </div>
       </div>
     </div>

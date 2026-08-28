@@ -976,15 +976,17 @@ aside h2 {
 /* A fault light for the audio device, not a hint: it only ever has text when the combined device
    has actually degraded, and :empty collapses it away entirely the rest of the time. Wraps, unlike
    .settings-note - this one is a sentence you have to be able to read all of. */
+/* Amber, like the console line it echoes (#log .warn): every message that lands here is
+   something still playing that wants rebuilding, not something that failed. */
 .settings-warning {
   font-size: 11px;
   line-height: 1.45;
-  color: var(--err);
+  color: var(--warn);
   margin-top: 8px;
   padding: 6px 8px;
-  border: 1px solid color-mix(in srgb, var(--err) 40%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--err) 8%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
 
 .settings-warning:empty {
@@ -1154,6 +1156,11 @@ footer#console {
 
 #log .error {
   color: var(--err);
+}
+
+/* Something worked, differently than you'd expect - not the red that means it did not happen. */
+#log .warn {
+  color: var(--warn);
 }
 
 [data-console-collapsed] #log {
@@ -2132,7 +2139,9 @@ li.CodeMirror-hint-active {
   cursor: pointer;
 }
 
-/* One highlight for both ways of getting here - the arrow keys and the pointer. */
+/* One highlight for both ways of getting here - the arrow keys and the pointer. The chosen row
+   also carries the glow every browser in the app shares (see .row-picked, under the organize
+   modal) - so a selection reads the same here, in organize and in the snippet browser. */
 .def-pick-row.on,
 .def-pick-row:hover {
   background: var(--accent-soft);
@@ -4594,13 +4603,15 @@ body.mix-on #deckAHead {
   border-bottom: 2px solid transparent;
 }
 .org-col li.on {
-  background: var(--selection);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 .org-col li:hover {
   background: var(--bg-raised);
 }
-.org-col li.on:hover {
-  background: var(--selection);
+.org-col li.on:hover,
+.org-col li.selected:hover {
+  background: var(--accent-soft);
 }
 .org-col li > span {
   flex: 1;
@@ -4701,6 +4712,23 @@ body.mix-on #deckAHead {
 #orgSort.hidden {
   display: none;
 }
+/* Scoped, like every other panel here - there is no global .hidden utility, so a bare `hidden`
+   class on one of these would do nothing at all. */
+#orgSongAdd.hidden {
+  display: none;
+}
+/* Outranks the always-on `.org-col li button.org-star` above, which is what makes the star the
+   one row button that does not wait for a hover. */
+.org-col li button.org-star.hidden {
+  display: none;
+}
+/* The ← add buttons sit in a flex row that can get narrow - without this the arrow and the word
+   land on separate lines. */
+#orgSongAdd,
+#orgDiskAdd {
+  flex: none;
+  white-space: nowrap;
+}
 #orgDiskBar {
   display: flex;
   align-items: center;
@@ -4731,17 +4759,35 @@ body.mix-on #deckAHead {
 }
 /* The disk tab picks like the pack browser: focus ring off (the selection IS the focus),
    selected rows in the accent wash, the playing row's name in the accent. */
-#orgAll:focus {
+#orgAll:focus,
+#orgItems:focus {
   outline: none;
 }
-#orgAll li.selected {
+.org-col li.selected {
   background: var(--accent-soft);
   color: var(--accent);
 }
-#orgAll li.playing > span:first-child {
+
+/* THE selected row, wherever a browser has one - the preset picker's highlighted row, organize's
+   selection, the snippet browser's current row. The accent wash all three already had, plus a
+   glow: a hairline in the accent and a soft halo, so the chosen row reads as lit rather than
+   merely tinted, and reads the same from one window to the next. */
+.def-pick-row.on,
+.org-col li.selected,
+.org-col li.on,
+.snippet-row.current {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 0 8px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+/* The row being auditioned, in either list. In the contents pane the first child is the slot
+   number, so the marker goes on the name - the child that carries the title in both. */
+#orgAll li.playing > span:first-child,
+#orgItems li.playing > span {
   color: var(--accent);
 }
-#orgAll li.playing > span:first-child::before {
+#orgAll li.playing > span:first-child::before,
+#orgItems li.playing > span::before {
   content: '▶ ';
   font-size: 9px;
 }
@@ -4900,8 +4946,8 @@ body.mix-on #deckAHead {
   background: var(--bg-panel);
 }
 
-/* The browser's right-hand pane: the snippet's body, edited in place and written back (see
-   flushSnippetEdit). Borderless and flush to the column - the seam beside the list is the divider,
+/* The browser's right-hand pane: the snippet's body, a read-only preview until a click on a row
+   unlocks it (see unlockSnippetEditor). Borderless and flush to the column - the seam beside the list is the divider,
    so a second frame around this would only draw a box inside a box. */
 .snippet-browser .CodeMirror {
   flex: 1;
@@ -4922,9 +4968,27 @@ body.mix-on #deckAHead {
   cursor: pointer;
 }
 
-.snippet-row:hover,
+.snippet-row:hover {
+  background: var(--bg-raised);
+}
+
 .snippet-row.current {
-  background: var(--hover-bg);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.snippet-row.current .snippet-row-meta {
+  color: var(--accent);
+  opacity: 0.7;
+}
+
+/* Pinned (clicked): a hover elsewhere no longer moves the highlight, and the row says so with a
+   solid edge on the left where the hover-only highlight has none. */
+.snippet-row.pinned {
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 0 8px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .snippet-row-main {
@@ -4934,8 +4998,9 @@ body.mix-on #deckAHead {
   min-width: 0;
 }
 
-/* Clicking the row selects it; clicking the NAME renames it - so the name is sized to its own
-   text rather than stretching over the whole row and swallowing clicks meant for the row. */
+/* Clicking the row opens it; clicking the NAME renames it in place - so the name is sized to its
+   own text rather than stretching over the whole row and swallowing clicks meant for the row. The
+   affordance is the preset picker's (a text cursor, no underline: .def-pick-renamable). */
 .snippet-row-label {
   align-self: flex-start;
   max-width: 100%;
@@ -4943,10 +5008,35 @@ body.mix-on #deckAHead {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text;
 }
 
-.snippet-row-label:hover {
-  text-decoration: underline;
+.snippet-row-rename {
+  width: 100%;
+  margin: 0;
+  padding: 0 4px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  outline: none;
+}
+
+/* An edit under way on the right: the list goes quiet (no hover preview, no insert - see
+   snippetEditDirty) and the footer swaps insert for cancel/save. */
+.snippet-when-editing,
+.editing .snippet-when-browsing {
+  display: none;
+}
+
+.editing .snippet-when-editing {
+  display: inline-block;
+}
+
+.editing .snippet-list {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .snippet-row-meta {

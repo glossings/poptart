@@ -216,9 +216,20 @@ async function api(method, path, body) {
   return data;
 }
 
-function logLine(text, isError = false) {
+/**
+ * A line on the in-app console. `level` is falsy for an ordinary line, 'warn' for something that
+ * went differently than you'd expect but still works, and true (or 'error') for something that
+ * did not happen at all.
+ *
+ * The middle one earns its own level rather than borrowing the red: a rig whose channel numbers
+ * have shifted is still playing, and a console that shouts the same way about that as it does
+ * about a refusal teaches you to stop reading it. `true` stays the error spelling because most of
+ * the calls in this file predate the third level.
+ */
+function logLine(text, level = false) {
+  const kind = level === 'warn' ? 'warn' : level ? 'error' : '';
   const line = document.createElement('div');
-  if (isError) line.className = 'error';
+  if (kind) line.className = kind;
   line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
   log.prepend(line);
   // Newest first, so the tail is what gets dropped. A .log()'d track writes a line per event -
@@ -226,12 +237,14 @@ function logLine(text, isError = false) {
   while (log.childElementCount > LOG_MAX_LINES) log.lastElementChild.remove();
   // Mirror everything to the devtools console too, so the log is still there when the in-app
   // console is minimized (and gets devtools' filtering/timestamps).
-  (isError ? console.error : console.log)(`[poptart] ${text}`);
+  (kind === 'error' ? console.error : kind === 'warn' ? console.warn : console.log)(`[poptart] ${text}`);
   // With the console collapsed, a refusal is silent - you press a button, nothing happens, and the
   // line saying why is behind a panel you aren't looking at. So pulse the buffer red: not the
   // message, just the fact that there IS one, and somewhere to go for it. Open, the line is already
-  // on screen (newest first, at the top) and a flash would be noise on top of it.
-  if (isError && document.documentElement.hasAttribute('data-console-collapsed')) {
+  // on screen (newest first, at the top) and a flash would be noise on top of it. A warning does
+  // not pulse: nothing was refused, and it has already been said where it matters (the settings
+  // tab carries the short version beside the control it is about).
+  if (kind === 'error' && document.documentElement.hasAttribute('data-console-collapsed')) {
     pulse(document.getElementById('saveFlash'), 'error-flash');
   }
 }
@@ -10948,6 +10961,88 @@ let previewRow = null; // the row element marked 'previewing', so we can clear i
 let previewGen = 0; // bumped on every press, so a slow fetch/decode from an older press is dropped
 let previewHeld = false; // true between pointerdown and release - hold-to-preview gate
 
+// ---------------------------------------------------------------------------------------------
+// Where an audition comes out.
+//
+// Every preview in the app - the sounds browser's hold-to-hear, the pack panel's player, the
+// organize window's - shares the AudioContext above, and a Web Audio context plays to whatever
+// the OS calls the default output. Off the DJ desk that is exactly right.
+//
+// ON it, the default output is the PA. Auditioning the next track through the speakers the room
+// is listening to is the one mistake a DJ tool must not make easy - so in DJ mode an audition
+// plays ONLY into the headphone cue: previewCtx is pointed at the cue device with setSinkId, and
+// where that cannot be done the audition is refused, with the reason, instead of played anyway.
+//
+// The cue device is the ENGINE's (settings -> headphone cue); this only follows it. Matching it
+// to a browser output device is by name, and browsers hide output-device labels until the page
+// has been granted device access - so "cannot route" is an ordinary outcome here rather than an
+// error, and it says what to do about it.
+// ---------------------------------------------------------------------------------------------
+
+let previewCue = null; // the engine's cue device name, as of the last sync
+let previewSink = { for: undefined, id: null, label: '', why: 'auditions have not been routed yet' };
+
+const auditionNorm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+/**
+ * Point previewCtx at the headphone cue (in DJ mode) or back at the default (out of it). Called
+ * on the DJ transitions, when the cue device changes, and when a window that auditions opens -
+ * never from the play path itself, which stays synchronous and only reads the result.
+ */
+async function syncPreviewRouting() {
+  try {
+    ({ cueSelected: previewCue } = await api('GET', '/api/audioDevices'));
+  } catch {
+    previewCue = null; // no answer is no cue: the guard below then refuses, which is the safe way
+  }
+  const want = mixModeOn ? (previewCue || null) : null;
+  if (previewSink.for === want && previewCtx) return previewSink;
+  // Made here rather than on the first audition: the guard below is synchronous, so the routing
+  // has to be settled BEFORE anything asks to play, not while it is asking. Every caller is a
+  // user gesture, and a context nothing has played through yet is suspended and cheap.
+  previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+  previewSink = { for: want, id: null, label: '', why: null };
+  if (!want) {
+    try { await previewCtx.setSinkId(''); } catch { /* already the default */ }
+    return previewSink;
+  }
+  if (typeof previewCtx.setSinkId !== 'function') {
+    previewSink.why = "this browser can't send auditions to a chosen output";
+    return previewSink;
+  }
+  try {
+    const outs = (await navigator.mediaDevices.enumerateDevices())
+      .filter((d) => d.kind === 'audiooutput' && d.label);
+    if (!outs.length) {
+      previewSink.why = 'the browser is not sharing its output devices - allow this page device access';
+      return previewSink;
+    }
+    const w = auditionNorm(want);
+    const hit = outs.find((d) => auditionNorm(d.label) === w)
+      ?? outs.find((d) => auditionNorm(d.label).includes(w) || w.includes(auditionNorm(d.label)));
+    if (!hit) {
+      previewSink.why = `no output the browser can see matches the cue device "${want}"`;
+      return previewSink;
+    }
+    await previewCtx.setSinkId(hit.deviceId);
+    previewSink.id = hit.deviceId;
+    previewSink.label = hit.label;
+  } catch (e) {
+    previewSink.why = e.message ?? String(e);
+  }
+  return previewSink;
+}
+
+/** The reason an audition must not play right now, or null when it may. Cheap and synchronous. */
+function auditionBlocked() {
+  if (!mixModeOn) return null;
+  if (previewSink.id) return null;
+  const why = previewCue
+    ? previewSink.why ?? 'the cue device is not routed'
+    : 'no headphone cue is set (settings → headphone cue)';
+  return `DJ mode is on, so an audition would play to the main output - ${why}`;
+}
+
 // Release anywhere ends the audition, even if the pointer drifted off the row first. Also
 // cancels a press that's released before its fetch/decode has started playing (see previewSample).
 window.addEventListener('pointerup', () => { previewHeld = false; stopPreview(); });
@@ -10969,6 +11064,8 @@ function previewSample(pack, i, row) {
 
 async function previewSampleUrl(url, row) {
   stopPreview();
+  const blocked = auditionBlocked();
+  if (blocked) return logLine(blocked, true);
   const gen = ++previewGen;
   previewHeld = true;
   previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
@@ -11228,6 +11325,8 @@ audioCueSelect.addEventListener('change', async () => {
         ? `cue device saved, but the engine came up WITHOUT a cue pair - check it is plugged in`
         : 'headphone cue is off - re-evaluate (Cmd/Ctrl+Enter) to resume playback', device && !res.active);
     setAudioDeviceWarning(res.warning);
+    previewSink.for = undefined; // a new cue device: the audition routing is re-derived
+    syncPreviewRouting();
   } catch (e) {
     logLine(e.message ?? String(e), true);
   } finally {
@@ -11342,7 +11441,10 @@ function setAudioDeviceWarning(warning) {
   const message = warning?.message ?? '';
   audioDeviceWarningEl.textContent = message;
   audioDeviceWarningEl.title = warning?.detail ?? '';
-  if (message && message !== lastAudioDeviceWarning) logLine(warning.detail ?? message, true);
+  // A warning, not an error: in every one of these the audio is still playing - the aggregate has
+  // fallen back, or the channel numbers have moved - and the settings tab is already showing the
+  // short version next to the control that fixes it.
+  if (message && message !== lastAudioDeviceWarning) logLine(warning.detail ?? message, 'warn');
   lastAudioDeviceWarning = message;
 }
 
@@ -11846,6 +11948,7 @@ function openPackById(id, from = {}) {
   packState = { id: key, entries: def ? packEntriesOf(cm.getValue(), def) : [...lib.files], own: !!def, source };
   packSel.entries.clear();
   packSel.entriesAnchor = null;
+  syncPreviewRouting(); // the panel auditions - settle where that comes out before it can
   packBackdrop.classList.remove('hidden');
   packSyncHead();
   packRenderEntries();
@@ -12351,6 +12454,8 @@ async function packLoadBuffer(abs) {
 }
 
 async function packPlay(abs, name = packBasename(abs)) {
+  const blocked = auditionBlocked();
+  if (blocked) { packPlayerStopSource(); return packSay(blocked, true); }
   const gen = ++packPlayer.gen;
   packPlayerStopSource();
   Object.assign(packPlayer, { abs, name, buffer: null, offset: 0 });
@@ -12380,6 +12485,8 @@ function packPlayerStopSource() {
 function packPlayerStart(offset) {
   const buf = packPlayer.buffer;
   if (!buf) return;
+  const blocked = auditionBlocked(); // DJ mode may have come on since this buffer was decoded
+  if (blocked) return packSay(blocked, true);
   packPlayerStopSource();
   if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
   const at = Math.max(0, Math.min(offset, buf.duration));
@@ -14234,6 +14341,7 @@ async function openMixMode() {
   preMix = { code: cm.getValue(), savedName: currentSavedName, wipSession: wipSessionId };
   if (mixerState) closeMixer(); // the modal's meter load is the audio glitch openMixer refuses
   mixModeOn = true;
+  syncPreviewRouting(); // auditions move to the headphone cue, or stop being allowed at all
   document.body.classList.add('mix-on');
   deckBPaneEl.classList.remove('hidden');
   mixStripEl.classList.remove('hidden');
@@ -14343,6 +14451,7 @@ function finishDjExit() {
 
 function closeMixMode() {
   mixModeOn = false;
+  syncPreviewRouting(); // back to the default output - off the desk there is nothing to protect
   mixPushStop();
   document.body.classList.remove('mix-on');
   deckBPaneEl.classList.add('hidden');
@@ -16580,10 +16689,16 @@ async function openOrganize(forDeck = null) {
     return;
   }
   if (!orgEl) buildOrganize();
+  syncPreviewRouting(); // the window auditions, so settle where that comes out before it can
   if (!orgSelected) orgSelected = libDoc.playlists.find((p) => p.id === libDoc.active)?.id ?? libDoc.playlists[0]?.id ?? null;
   orgEl.classList.remove('hidden');
   window.addEventListener('keydown', orgOnKey);
-  orgSay(orgForDeck ? `click a song to load it onto deck ${orgForDeck.toUpperCase()}` : ORG_HINT);
+  orgSongSel.clear();
+  orgSongAnchor = null;
+  orgItemSel.clear();
+  orgItemAnchor = null;
+  orgPickKey = null;
+  orgSay(''); // the footer reports what happens - it is not a standing instruction
   orgRender();
   orgEl.querySelector('#orgSearch').focus();
 }
@@ -16692,10 +16807,38 @@ function orgInitCols() {
 }
 
 function orgOnKey(e) {
+  if (e.key === 'Enter' && orgForDeck && orgPickKey != null && !/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(e.target?.tagName ?? '')) {
+    e.preventDefault();
+    e.stopPropagation();
+    orgLoadPicked();
+    return;
+  }
   if (e.key !== 'Escape') return;
   e.stopPropagation();
   closeOrganize();
 }
+
+/**
+ * The deck picker's load. A row is SELECTED on click and loaded on Enter, a double-click or the
+ * footer's → deck button - the same two-step shape as every other list in the app, and what lets
+ * a set be built (shift/⌘-click, ←) from the same window without a stray click swapping the song
+ * out on a live deck.
+ */
+let orgPickKey = null; // libItemKey of the row a load acts on; null when nothing is picked
+function orgLoadPicked() {
+  if (!orgForDeck || orgPickKey == null) return;
+  const item = orgPickItem(orgPickKey);
+  if (item != null) loadDeckSong(orgForDeck, item);
+}
+function orgPickItem(key) {
+  if (!String(key).startsWith('file:')) return orgSongs.some((x) => x.name === key) ? key : null;
+  for (const p of libDoc.playlists) {
+    const hit = p.items.find((it) => libItemKey(it) === key);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 
 function buildOrganize() {
   orgEl = document.createElement('div');
@@ -16718,7 +16861,7 @@ function buildOrganize() {
         <div class="org-seam" data-seam="0" title="drag to resize (all the way left minimizes, double-click resets)"></div>
         <section class="org-col">
           <h3 id="orgItemsTitle">contents</h3>
-          <ul id="orgItems"></ul>
+          <ul id="orgItems" tabindex="-1"></ul>
           <div class="org-rail" title="click to bring the playlist's contents back">contents</div>
         </section>
         <div class="org-seam" data-seam="1" title="drag to resize (past either end minimizes a column, double-click resets)"></div>
@@ -16727,6 +16870,7 @@ function buildOrganize() {
             <button id="orgTabSongs" class="org-tab on" title="every saved pattern">all songs</button>
             <button id="orgTabDisk" class="org-tab" title="audio files on this computer">disk</button>
             <span class="spacer"></span>
+            <button id="orgSongAdd" class="small" title="add the selection to the open playlist (←)">← add</button>
             <select id="orgSort" title="order of this list"></select>
           </h3>
           <div id="orgDiskBar" class="hidden">
@@ -16776,12 +16920,12 @@ function buildOrganize() {
       orgQuery = '';
       if (orgPane3 === 'disk') orgDiskFindClear();
       else orgRenderAll();
-    } else if (orgPane3 === 'disk' && (e.key === 'ArrowDown' || e.key === 'Enter')) {
-      // drop into the results to hear them, exactly like the pack browser's search
+    } else if (e.key === 'ArrowDown' || e.key === 'Enter') {
+      // drop into the results, exactly like the pack browser's search
       e.preventDefault();
-      if (orgDiskRows().length) {
+      if (orgPane3 === 'disk' ? orgDiskRows().length : orgSongHits().length) {
         orgEl.querySelector('#orgAll').focus({ preventScroll: true });
-        orgDiskStep(1, false);
+        if (orgPane3 === 'disk') orgDiskStep(1, false); else orgSongStep(1, false);
       }
     }
   });
@@ -16797,6 +16941,7 @@ function buildOrganize() {
     if (orgDisk?.parent) orgBrowseTo(orgDisk.parent);
   });
   orgEl.querySelector('#orgDiskAdd').addEventListener('click', () => orgDiskAddSelected());
+  orgEl.querySelector('#orgSongAdd').addEventListener('click', () => orgSongAddSelected());
   orgEl.querySelector('#orgPlayBtn').addEventListener('click', () => orgPlayerToggle());
   const orgBar = orgEl.querySelector('#orgPlayBar');
   const orgBarSeek = (e) => {
@@ -16806,6 +16951,8 @@ function buildOrganize() {
   orgBar.addEventListener('pointerdown', (e) => { orgBar.setPointerCapture(e.pointerId); orgBarSeek(e); });
   orgBar.addEventListener('pointermove', (e) => { if (e.buttons) orgBarSeek(e); });
   orgEl.querySelector('#orgAll').addEventListener('keydown', orgDiskKeys);
+  orgEl.querySelector('#orgAll').addEventListener('keydown', orgSongKeys);
+  orgEl.querySelector('#orgItems').addEventListener('keydown', orgItemKeys);
   orgEl.addEventListener('dragend', () => { orgHeld = null; });
   // the empty space under the contents rows appends to the open playlist
   const items = orgEl.querySelector('#orgItems');
@@ -16828,11 +16975,106 @@ function orgMove(p, from, to) {
   p.items.splice(from < to ? to - 1 : to, 0, item);
 }
 
-/** A deck's picker: the row itself loads the song onto the deck that opened the window. */
+/** A deck's picker, on a playlist row: the click selects (below), a double-click loads. */
 function orgPickRow(li, item) {
   li.classList.add('org-pick');
-  li.title = `load onto deck ${orgForDeck.toUpperCase()}`;
-  li.addEventListener('click', () => loadDeckSong(orgForDeck, item));
+  li.addEventListener('dblclick', (e) => { e.preventDefault(); loadDeckSong(orgForDeck, item); });
+}
+
+// --- pane 2's selection: the same picking the other two panes do -------------------
+//
+// By INDEX, not by name: the same song may sit in a playlist twice, and the two slots are two
+// different rows. Removing renumbers everything below, so the selection is cleared on any edit
+// rather than left pointing a slot too far down.
+
+const orgItemSel = new Set(); // indices into the open playlist
+let orgItemAnchor = null;
+
+function orgItemClick(at, e) {
+  const p = orgOpenPlaylist();
+  if (!p || at >= p.items.length) return;
+  if (e.shiftKey && orgItemAnchor != null) {
+    if (!(e.metaKey || e.ctrlKey)) orgItemSel.clear();
+    const [a, b] = [Math.min(orgItemAnchor, at), Math.max(orgItemAnchor, at)];
+    for (let i = a; i <= b; i++) orgItemSel.add(i);
+  } else if (e.metaKey || e.ctrlKey) {
+    if (orgItemSel.has(at)) orgItemSel.delete(at);
+    else orgItemSel.add(at);
+    orgItemAnchor = at;
+  } else {
+    orgItemSel.clear();
+    orgItemSel.add(at);
+    orgItemAnchor = at;
+  }
+  // A pick for the deck follows the last row touched, so Enter loads what you just clicked.
+  orgPickKey = orgItemSel.size === 1 ? libItemKey(p.items[at]) : null;
+  orgRenderItems();
+  orgRenderAll(); // the songs pane's own selection is no longer the pick
+  orgItemAudition(p.items[at]);
+}
+
+/**
+ * Selecting a track in a set auditions it, the same gesture the disk tab uses - a playlist is
+ * mostly listened through, not read. Only real audio has anything to play: a saved pattern is
+ * code, so picking one stops whatever was auditioning rather than leaving it running under a
+ * row that has nothing to do with it.
+ */
+function orgItemAudition(item) {
+  if (item != null && libItemIsFile(item) && songFileExists[item.path] !== false) {
+    if (item.path !== orgPlayer.abs) orgPlay(item.path, libFileTitle(item));
+    return;
+  }
+  orgPlayerStopSource();
+  orgPlayer.abs = null;
+  orgRenderTransport();
+  orgMarkPlaying();
+}
+
+function orgItemStep(delta, extend) {
+  const p = orgOpenPlaylist();
+  if (!p?.items.length) return;
+  const from = orgItemAnchor ?? (delta > 0 ? -1 : p.items.length);
+  const to = Math.max(0, Math.min(p.items.length - 1, from + delta));
+  if (!extend) orgItemSel.clear();
+  orgItemSel.add(to);
+  orgItemAnchor = to;
+  orgPickKey = libItemKey(p.items[to]);
+  orgRenderItems();
+  orgRenderAll();
+  orgEl.querySelector(`#orgItems li[data-at="${to}"]`)?.scrollIntoView({ block: 'nearest' });
+  orgItemAudition(p.items[to]); // ↑/↓ walk the set playing as they go, like the disk tab's
+}
+
+/** Slots out of the open playlist. The songs themselves are untouched - this is the set's list. */
+function orgItemRemove(at) {
+  const p = orgOpenPlaylist();
+  if (!p || !at.length) return;
+  const gone = at.length === 1 ? null : at.length;
+  for (const i of [...at].sort((a, b) => b - a)) p.items.splice(i, 1); // last first, so the rest hold
+  orgItemSel.clear();
+  orgItemAnchor = null;
+  saveLibraryDoc();
+  orgRender();
+  orgSay(gone ? `removed ${gone} from ${p.name}` : `removed it from ${p.name} - the song itself is still saved`);
+}
+
+function orgItemKeys(e) {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    orgItemStep(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
+  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    orgItemRemove([...orgItemSel]);
+  } else if (e.key === ' ') {
+    e.preventDefault();
+    orgPlayerToggle();
+  } else if (e.key === 'Enter' && orgForDeck) {
+    e.preventDefault();
+    orgLoadPicked();
+  } else {
+    return;
+  }
+  e.stopPropagation();
 }
 
 function orgIconBtn(glyph, title, onClick) {
@@ -16865,12 +17107,15 @@ function orgRenderLists() {
     const li = document.createElement('li');
     li.className = p.id === orgSelected ? 'on' : '';
     const star = orgIconBtn(p.id === libDoc.active ? '●' : '○',
-      p.id === libDoc.active ? 'the active set (deck B follows it) - click to clear' : 'make this the active set', () => {
+      p.id === libDoc.active
+        ? "the active set - both decks' pickers list it, and ⏭ steps deck B through it. click to clear"
+        : 'make this the active set', () => {
         libDoc.active = libDoc.active === p.id ? null : p.id;
         saveLibraryDoc();
         orgRenderLists();
       });
     star.classList.add('org-star');
+    star.classList.toggle('hidden', !mixModeOn); // deck B's set marker - nothing outside DJ mode
     const name = document.createElement('span');
     name.textContent = p.name;
     const count = document.createElement('em');
@@ -16892,7 +17137,12 @@ function orgRenderLists() {
     });
     del.classList.add('org-del');
     li.append(star, name, count, rename, del);
-    li.addEventListener('click', () => { orgSelected = p.id; orgRender(); });
+    li.addEventListener('click', () => {
+      orgSelected = p.id;
+      orgItemSel.clear(); // different playlist, different slots
+      orgItemAnchor = null;
+      orgRender();
+    });
     // dropping a song on a playlist row adds it to the end, whichever list is open
     li.addEventListener('dragover', (e) => {
       if (orgHeld?.from !== 'all') return;
@@ -16929,6 +17179,9 @@ function orgRenderItems() {
   if (!p.items.length) {
     ul.innerHTML = '<li class="org-empty">empty — drag songs in from the right</li>';
   }
+  // A selection that outlived its list (a removal, a different playlist) is dropped rather than
+  // left pointing at whatever slid into those slots.
+  for (const i of [...orgItemSel]) if (i >= p.items.length) orgItemSel.delete(i);
   p.items.forEach((item, i) => {
     const isFile = libItemIsFile(item);
     const s = isFile ? null : orgSongs.find((x) => x.name === item);
@@ -16937,6 +17190,11 @@ function orgRenderItems() {
     const missing = isFile ? songFileExists[item.path] === false : !s;
     const li = document.createElement('li');
     li.draggable = true;
+    li.dataset.at = i;
+    if (orgItemSel.has(i)) li.classList.add('selected');
+    li.title = orgForDeck
+      ? `click to select · Enter or double-click loads onto deck ${orgForDeck.toUpperCase()} · ⌫ removes it from the playlist`
+      : 'click to select (shift/⌘-click for more) · ⌫ removes it from the playlist';
     const n = document.createElement('i');
     n.className = 'org-n';
     n.textContent = i + 1;
@@ -16974,10 +17232,21 @@ function orgRenderItems() {
     const down = orgIconBtn('↓', 'move down', () => { orgMove(p, i, i + 2); saveLibraryDoc(); orgRender(); });
     up.disabled = i === 0;
     down.disabled = i === p.items.length - 1;
-    const del = orgIconBtn('✕', 'remove from playlist', () => { p.items.splice(i, 1); saveLibraryDoc(); orgRender(); });
+    const del = orgIconBtn('✕', 'remove from playlist (⌫)', () => orgItemRemove([i]));
     del.classList.add('org-del');
     if (orgForDeck && !missing) orgPickRow(li, item);
     li.append(up, down, del);
+    if (isFile) {
+      li.dataset.abs = item.path;
+      if (item.path === orgPlayer.abs) li.classList.add('playing');
+    }
+    li.addEventListener('mousedown', (e) => {
+      if (e.detail > 1) return; // the double-click's second press belongs to the dblclick handler
+      if (e.target.tagName === 'BUTTON') return; // the row's own ↑ ↓ ✕ are their own gestures
+      e.preventDefault();
+      ul.focus({ preventScroll: true });
+      orgItemClick(i, e);
+    });
     li.addEventListener('dragstart', (e) => {
       orgHeld = { from: 'items', item, index: i };
       e.dataTransfer.setData('text/plain', libItemKey(item)); // Firefox won't start a drag without it
@@ -17027,15 +17296,18 @@ function orgRenderAll() {
   orgEl.querySelector('#orgTabDisk').classList.toggle('on', orgPane3 === 'disk');
   orgEl.querySelector('#orgDiskBar').classList.toggle('hidden', orgPane3 !== 'disk');
   orgEl.querySelector('#orgSort').classList.toggle('hidden', orgPane3 === 'disk');
+  orgEl.querySelector('#orgSongAdd').classList.toggle('hidden', orgPane3 === 'disk');
   if (orgPane3 === 'disk') {
     orgRenderDisk(ul);
     return;
   }
   orgEl.querySelector('#orgSort').value = orgSort;
-  const list = orgSort === 'name'
-    ? [...orgSongs].sort((a, b) => (a.title || a.name).localeCompare(b.title || b.name))
-    : orgSongs; // the API's order: last saved first
-  const hits = list.filter(orgMatches);
+  const hits = orgSongHits();
+  // The ← button reads like the disk tab's: the selection, or nothing to add.
+  const addBtn = orgEl.querySelector('#orgSongAdd');
+  const nSel = [...orgSongSel].filter((n) => hits.some((s) => s.name === n)).length;
+  addBtn.disabled = !orgSelected || !nSel;
+  addBtn.textContent = `← add ${nSel > 1 ? nSel : ''}`.trimEnd();
   if (!hits.length) {
     ul.innerHTML = '<li class="org-empty">nothing matches that</li>';
     return;
@@ -17043,6 +17315,12 @@ function orgRenderAll() {
   for (const s of hits) {
     const li = document.createElement('li');
     li.draggable = true;
+    li.dataset.key = s.name;
+    if (orgSongSel.has(s.name)) li.classList.add('selected');
+    if (orgForDeck) li.classList.add('org-pick');
+    li.title = orgForDeck
+      ? `click to select · Enter or double-click loads onto deck ${orgForDeck.toUpperCase()} · ← adds to the open playlist`
+      : 'click to select (shift/⌘-click for more) · ← or double-click adds to the open playlist';
     const name = document.createElement('span');
     name.textContent = s.title || s.name;
     li.appendChild(name);
@@ -17070,14 +17348,117 @@ function orgRenderAll() {
       orgRender();
     });
     add.disabled = !orgSelected;
-    if (orgForDeck) orgPickRow(li, s.name);
     li.appendChild(add);
+    li.addEventListener('mousedown', (e) => {
+      if (e.detail > 1) return; // the double-click's second press: the dblclick handler has it
+      if (e.target.tagName === 'BUTTON') return; // the row's + is its own gesture
+      e.preventDefault();
+      ul.focus({ preventScroll: true });
+      orgSongClick(s.name, e);
+    });
+    li.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      if (orgForDeck) loadDeckSong(orgForDeck, s.name);
+      else orgSongAddNames([s.name]);
+    });
     li.addEventListener('dragstart', (e) => {
       orgHeld = { from: 'all', item: s.name };
       e.dataTransfer.setData('text/plain', s.name);
     });
     ul.appendChild(li);
   }
+}
+
+// --- pane 3's songs mode: picking, the disk tab's way ---
+//
+// Clicking a row SELECTS it (shift-click a range, ⌘-click to toggle, ⌘A for all), ↑/↓ walk the
+// list, and ← (or the header's ← add) puts the selection into the open playlist - so a set can be
+// built in a few gestures rather than one drag per song. Opened as a deck's picker, the last row
+// clicked is what Enter / → deck loads; a click never loads by itself.
+
+const orgSongSel = new Set(); // names
+let orgSongAnchor = null; // the end a shift-range extends from
+
+function orgSongHits() {
+  const list = orgSort === 'name'
+    ? [...orgSongs].sort((a, b) => (a.title || a.name).localeCompare(b.title || b.name))
+    : orgSongs; // the API's order: last saved first
+  return list.filter(orgMatches);
+}
+
+function orgSongClick(name, e) {
+  const rows = orgSongHits();
+  const at = rows.findIndex((r) => r.name === name);
+  if (at < 0) return;
+  if (e.shiftKey && orgSongAnchor != null) {
+    const from = rows.findIndex((r) => r.name === orgSongAnchor);
+    if (!(e.metaKey || e.ctrlKey)) orgSongSel.clear();
+    const [a, b] = from < 0 ? [at, at] : [Math.min(from, at), Math.max(from, at)];
+    for (let i = a; i <= b; i++) orgSongSel.add(rows[i].name);
+  } else if (e.metaKey || e.ctrlKey) {
+    if (orgSongSel.has(name)) orgSongSel.delete(name);
+    else orgSongSel.add(name);
+    orgSongAnchor = name;
+  } else {
+    orgSongSel.clear();
+    orgSongSel.add(name);
+    orgSongAnchor = name;
+  }
+  orgSongAfterSelect(name);
+}
+
+function orgSongStep(delta, extend) {
+  const rows = orgSongHits();
+  if (!rows.length) return;
+  const from = rows.findIndex((r) => r.name === orgSongAnchor);
+  const to = Math.max(0, Math.min(rows.length - 1, (from < 0 ? (delta > 0 ? -1 : rows.length) : from) + delta));
+  if (!extend) orgSongSel.clear();
+  orgSongSel.add(rows[to].name);
+  orgSongAnchor = rows[to].name;
+  orgSongAfterSelect(rows[to].name);
+}
+
+function orgSongAfterSelect(name) {
+  orgPickKey = name;
+  orgRenderItems(); // a pick here unmarks one in the playlist pane
+  orgRenderAll();
+  orgDiskScrollTo(name);
+}
+
+function orgSongAddSelected() {
+  orgSongAddNames(orgSongHits().map((s) => s.name).filter((n) => orgSongSel.has(n)));
+}
+
+function orgSongAddNames(names) {
+  const p = orgOpenPlaylist();
+  if (!p || !names.length) return;
+  p.items.push(...names);
+  saveLibraryDoc();
+  orgRender();
+  orgSay(`added ${names.length === 1 ? orgSongSay(names[0]) : `${names.length} songs`} to ${p.name}`);
+}
+
+function orgSongKeys(e) {
+  if (orgPane3 !== 'songs') return;
+  const meta = e.metaKey || e.ctrlKey;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    orgSongStep(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
+  } else if (meta && e.key.toLowerCase() === 'a') {
+    e.preventDefault();
+    for (const s of orgSongHits()) orgSongSel.add(s.name);
+    orgRenderAll();
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    orgSongAddSelected();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    // As a deck's picker Enter loads; as the library editor it adds, like ←.
+    if (orgForDeck) orgLoadPicked(); else orgSongAddSelected();
+  } else {
+    return;
+  }
+  e.stopPropagation();
 }
 
 function orgRender() {
@@ -17117,8 +17498,6 @@ const ORG_FIND_DEBOUNCE_MS = 200;
 const ORG_FIND_SHOW = 500;
 const ORG_WALK_LIMIT = 20000;
 const ORG_WALK_TTL_MS = 30000;
-const ORG_HINT = 'drag songs into a playlist, or select on the disk tab and ← inserts (shift/⌘-click multiselect, ⌘A all, click plays); ● marks the ACTIVE set deck B follows';
-
 function orgSay(text, isError = false) {
   const note = orgEl?.querySelector('#orgNote');
   if (!note) return;
@@ -17409,6 +17788,8 @@ async function orgLoadBuffer(abs) {
 }
 
 async function orgPlay(abs, name) {
+  const blocked = auditionBlocked();
+  if (blocked) { orgPlayerStopSource(); return orgSay(blocked, true); }
   const gen = ++orgPlayer.gen;
   orgPlayerStopSource();
   Object.assign(orgPlayer, { abs, name, buffer: null, offset: 0 });
@@ -17438,6 +17819,8 @@ function orgPlayerStopSource() {
 function orgPlayerStart(offset) {
   const buf = orgPlayer.buffer;
   if (!buf) return;
+  const blocked = auditionBlocked(); // DJ mode may have come on since this buffer was decoded
+  if (blocked) return orgSay(blocked, true);
   orgPlayerStopSource();
   if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
   const at = Math.max(0, Math.min(offset, buf.duration));
@@ -17502,9 +17885,12 @@ function orgRenderTransport() {
 /** The row that IS the playing file lights up without a redraw. */
 function orgMarkPlaying() {
   if (!orgEl) return;
-  for (const el of orgEl.querySelector('#orgAll').children) {
-    if (el.dataset.key == null) continue;
-    el.classList.toggle('playing', el.dataset.abs === orgPlayer.abs);
+  // Both lists hold auditionable rows now - the disk tab's files and a set's own tracks.
+  for (const list of ['#orgAll', '#orgItems']) {
+    for (const el of orgEl.querySelector(list).children) {
+      if (el.dataset.abs == null) continue;
+      el.classList.toggle('playing', el.dataset.abs === orgPlayer.abs);
+    }
   }
 }
 
@@ -17643,7 +18029,7 @@ const editorMenu = document.getElementById('editorMenu');
 const SNIPPET_DND = 'application/x-poptart-snippet';
 
 let snippetSaveState = null; // { ed, carries: [{ kind, id, scope, code, why, off }], names }
-let snippetBrowseState = null; // { ed, at, entries, sel, editing, dirty }
+let snippetBrowseState = null; // { ed, at, entries, sel, pinned, unlocked, dirty }
 let snippetSaveCM = null;
 let snippetBrowseCM = null;
 
@@ -17976,17 +18362,17 @@ function snippetRow(entry) {
   const row = document.createElement('div');
   row.className = 'snippet-row';
   row.draggable = true;
-  row.title = 'click to select it - → or Enter puts it in at the caret, or drag it where you want it';
+  row.title = 'hover to preview, click to pin it and edit on the right - → (or Enter) puts it in at the caret, or drag it where you want it';
 
   const main = document.createElement('div');
   main.className = 'snippet-row-main';
   const label = document.createElement('span');
   label.className = 'snippet-row-label';
   label.textContent = entry.label;
-  label.title = 'click to rename it';
-  // The name IS the rename handle, now that the row itself only selects. Sized to its own text in
-  // the stylesheet, so the rest of the row is still somewhere to click without renaming anything.
-  label.addEventListener('click', (e) => { e.stopPropagation(); renameSnippetFile(entry); });
+  label.title = 'click to rename';
+  // The name renames in place: it turns into a field on click and back into text on Enter, blur or
+  // Escape. Sized to its own text in the stylesheet, so the rest of the row is still the row.
+  label.addEventListener('click', (e) => { e.stopPropagation(); renameSnippetInline(entry, label); });
   const meta = document.createElement('span');
   meta.className = 'snippet-row-meta';
   const bits = [];
@@ -18010,10 +18396,23 @@ function snippetRow(entry) {
     row.appendChild(b);
   }
 
-  row.addEventListener('click', () => selectSnippetRow(entry));
+  // Hover peeks, click PINS - the Quick Look shape. Once a row is pinned the pointer can cross
+  // every other row on its way to the code pane without the preview swapping out from under it,
+  // and the pane is already unlocked when it gets there; the next click pins something else. An edit under way pins harder still (see
+  // snippetEditDirty): then even a click on another row is ignored until it is saved or dropped.
+  row.addEventListener('mouseenter', () => {
+    if (!snippetBrowseState?.pinned && !snippetBrowseState?.dirty) selectSnippetRow(entry);
+  });
+  row.addEventListener('click', () => {
+    if (snippetBrowseState?.dirty) return;
+    selectSnippetRow(entry);
+    pinSnippetRow();
+    snippetBrowseList.focus();
+  });
   // text/plain as well as the private type, so CodeMirror draws its own drop cursor all the way
   // in; the private one is what tells the drop handler there are definitions to file with it.
   row.addEventListener('dragstart', (e) => {
+    if (snippetBrowseState?.dirty) { e.preventDefault(); return; }
     e.dataTransfer.setData('text/plain', entry.body ?? '');
     e.dataTransfer.setData(SNIPPET_DND, entry.name);
     e.dataTransfer.effectAllowed = 'copy';
@@ -18029,10 +18428,49 @@ function snippetRow(entry) {
   return row;
 }
 
+/** The row's name turned into a field, and back again - Enter or blur renames, Escape leaves it. */
+function renameSnippetInline(entry, label) {
+  if (!snippetBrowseState || snippetBrowseState.dirty || label.querySelector('input')) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'snippet-row-rename';
+  input.value = entry.name;
+  input.spellcheck = false;
+  label.textContent = '';
+  label.appendChild(input);
+  let done = false;
+  const finish = async (commit) => {
+    if (done) return;
+    done = true;
+    const to = input.value.trim();
+    label.textContent = entry.label;
+    if (!commit || !to || to === entry.name) return;
+    const problem = patternNameProblem(to);
+    if (problem) { snippetBrowseNote.textContent = problem; return; }
+    try {
+      await api('POST', '/api/snippets/rename', { from: entry.name, to });
+      if (snippetBrowseState?.sel === entry.name) snippetBrowseState.sel = to;
+      logLine(`renamed snippet "${entry.name}" to "${to}"`);
+      refreshSnippetList();
+    } catch (e) {
+      snippetBrowseNote.textContent = e.message ?? String(e);
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    e.stopPropagation(); // arrows and Enter are the field's here, not the list's
+  });
+  input.addEventListener('blur', () => finish(true));
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.focus();
+  input.select();
+}
+
 /**
- * The right-hand pane is a real editor, not a preview: what a snippet does is mostly a matter of
- * one number in it, and having to insert it, fix it, re-select it and keep it again to change that
- * is the long way round something the browser is already showing you.
+ * The right-hand pane: a CodeMirror, a read-only preview until a row is clicked and editable from
+ * then on. A real editor even for the preview, so the code is highlighted the way it is in the
+ * buffer and unlocking it changes nothing about how it looks.
  */
 function ensureSnippetBrowseCM() {
   if (!snippetBrowseCM) {
@@ -18042,38 +18480,82 @@ function ensureSnippetBrowseCM() {
       keyMap: 'sublime',
       matchBrackets: true,
       viewportMargin: Infinity,
-      extraKeys: { 'Cmd-S': flushSnippetEdit, 'Ctrl-S': flushSnippetEdit },
+      readOnly: true,
+      extraKeys: {
+        'Cmd-S': saveSnippetEdit,
+        'Ctrl-S': saveSnippetEdit,
+        'Cmd-Enter': saveSnippetEdit,
+        'Ctrl-Enter': saveSnippetEdit,
+        'Shift-Tab': () => snippetBrowseList.focus(),
+        Esc: () => {
+          if (snippetBrowseState?.dirty) cancelSnippetEdit();
+          else { unpinSnippetRow(); snippetBrowseList.focus(); }
+        },
+      },
     });
-    // `setValue` is this code putting a row up, not somebody typing - it must not mark the row dirty
-    // and write it straight back.
+    // `setValue` is this code putting a row up, not somebody typing - only a real edit counts.
     snippetBrowseCM.on('change', (_cm, ch) => {
-      if (ch.origin === 'setValue' || !snippetBrowseState) return;
-      snippetBrowseState.dirty = true;
-      snippetBrowseNote.textContent = '';
+      if (ch.origin !== 'setValue' && snippetBrowseState) snippetEditDirty(true);
     });
-    snippetBrowseCM.on('blur', () => flushSnippetEdit());
   }
   return snippetBrowseCM;
 }
 
+/** The selected row stays put under the pointer, and the code pane is open for it. */
+function pinSnippetRow() {
+  if (!snippetBrowseState?.sel) return;
+  snippetBrowseState.pinned = true;
+  snippetBrowseState.unlocked = true;
+  ensureSnippetBrowseCM().setOption('readOnly', false);
+  for (const el of snippetBrowseList.querySelectorAll('.snippet-row')) {
+    el.classList.toggle('pinned', el.dataset.name === snippetBrowseState.sel);
+  }
+}
+
+function unpinSnippetRow() {
+  if (!snippetBrowseState) return;
+  snippetBrowseState.pinned = false;
+  for (const el of snippetBrowseList.querySelectorAll('.snippet-row.pinned')) el.classList.remove('pinned');
+}
+
+/** Tab off the list: pin the row and put the caret at the end of its code. */
+function editSnippetRow() {
+  if (!snippetBrowseState || snippetBrowseState.dirty || !snippetBrowseState.sel) return;
+  pinSnippetRow();
+  const box = ensureSnippetBrowseCM();
+  box.focus();
+  box.setCursor(box.lineCount(), 0);
+}
+
 /**
- * The edit, written back to the snippet file. Quiet and automatic - on the way out of the code
- * window, off to another row, or out of the browser - because a code pane that throws away what
- * you typed is worse than one that saves a comma too eagerly.
- *
- * Deliberately does NOT refresh the list afterwards: saving bumps the file's mtime and the list is
- * sorted by it, so a refresh would make the row you are working on jump out from under you.
+ * An edit under way: the footer shows save and cancel, and the list goes quiet so a hover can't
+ * swap the code out from under it. Clears again on save or cancel.
  */
-async function flushSnippetEdit() {
+function snippetEditDirty(on) {
+  if (!snippetBrowseState) return;
+  snippetBrowseState.dirty = !!on;
+  snippetBrowseBackdrop.classList.toggle('editing', !!on);
+  snippetBrowseNote.textContent = on ? `editing "${snippetBrowseState.sel}"` : '';
+}
+
+function cancelSnippetEdit() {
   const st = snippetBrowseState;
   if (!st?.dirty) return;
-  st.dirty = false;
-  const entry = st.entries.find((e) => e.name === st.editing);
+  const entry = st.entries.find((e) => e.name === st.sel);
+  snippetEditDirty(false);
+  selectSnippetRow(entry); // the code as it was, back in the pane
+}
+
+async function saveSnippetEdit() {
+  const st = snippetBrowseState;
+  if (!st?.dirty) return;
+  const entry = st.entries.find((e) => e.name === st.sel);
   const body = ensureSnippetBrowseCM().getValue();
-  if (!entry || body === entry.body) return;
+  if (!entry || body === entry.body) return cancelSnippetEdit();
+  snippetBrowseNote.textContent = 'saving…';
   try {
-    // Title, tags and sidecar go back exactly as they came: this pane edits the body and nothing
-    // else, and composeSnippet rebuilds the file from all four.
+    // Title, tags and sidecar go back exactly as they came: this edits the body and nothing else,
+    // and composeSnippet rebuilds the file from all four.
     await api('POST', '/api/snippets/save', {
       name: entry.name,
       title: entry.title ?? '',
@@ -18083,28 +18565,27 @@ async function flushSnippetEdit() {
         .filter((c) => c.code)
         .map(({ kind, id, scope, code }) => ({ kind, id, scope, code })),
     });
+    if (snippetBrowseState !== st) return;
     entry.body = body;
-    snippetBrowseNote.textContent = `saved "${entry.name}"`;
+    snippetEditDirty(false);
+    logLine(`kept snippet "${entry.name}"`);
+    // Deliberately no list refresh: it sorts by mtime, and a save would send the row you were on
+    // to the top - the entry has already been updated in place above.
   } catch (e) {
-    st.dirty = true; // still unsaved - another blur or the close will try again
-    snippetBrowseNote.textContent = "couldn't save the edit";
-    logLine(`couldn't save the edit to snippet "${entry.name}" - ${e.message ?? String(e)}`, true);
+    snippetBrowseNote.textContent = "couldn't save";
+    logLine(`couldn't save snippet "${entry.name}" - ${e.message ?? String(e)}`, true);
   }
 }
 
 function selectSnippetRow(entry) {
   if (!snippetBrowseState) return;
-  // Leaving a row keeps it, the same as leaving the code window does.
-  if (entry?.name !== snippetBrowseState.editing) flushSnippetEdit();
   snippetBrowseState.sel = entry?.name ?? null;
   for (const el of snippetBrowseList.querySelectorAll('.snippet-row')) {
     el.classList.toggle('current', el.dataset.name === snippetBrowseState.sel);
   }
   const box = ensureSnippetBrowseCM();
   box.setValue(entry?.body ?? '');
-  box.setOption('readOnly', !entry);
-  snippetBrowseState.editing = entry?.name ?? null;
-  snippetBrowseState.dirty = false;
+  box.setOption('readOnly', !(entry && snippetBrowseState.unlocked));
   renderSnippetCarries(snippetBrowseCarriesEl, entry?.carries ?? []);
   snippetBrowseInsert.disabled = !entry;
 }
@@ -18127,15 +18608,15 @@ function renderSnippetList() {
     row.dataset.name = entry.name;
     snippetBrowseList.appendChild(row);
   }
-  selectSnippetRow(entries.find((e) => e.name === snippetBrowseState.sel) ?? entries[0]);
+  const keep = entries.find((e) => e.name === snippetBrowseState.sel);
+  selectSnippetRow(keep ?? entries[0]);
+  if (keep && snippetBrowseState.pinned) pinSnippetRow(); else unpinSnippetRow();
 }
 
 async function refreshSnippetList() {
   if (!snippetBrowseState) return;
-  // Before the fetch: the rows are about to be replaced, and a save landing after them would be
-  // written from an entry that is no longer the one on screen.
-  await flushSnippetEdit();
-  if (!snippetBrowseState) return;
+  // The rows are about to be replaced; an edit open against one of them has nowhere to go back to.
+  cancelSnippetEdit();
   const q = snippetBrowseSearch.value.trim();
   try {
     const { snippets } = await api('GET', `/api/snippets?q=${encodeURIComponent(q)}`);
@@ -18153,55 +18634,35 @@ async function refreshSnippetList() {
  * caret's focus, so clicking a row afterwards would otherwise write wherever the editor was left.
  */
 function openSnippetBrowser(ed = activeCM(), at = null) {
-  snippetBrowseState = { ed, at: at ?? ed.indexFromPos(ed.getCursor()), entries: [], sel: null, editing: null, dirty: false };
+  snippetBrowseState = { ed, at: at ?? ed.indexFromPos(ed.getCursor()), entries: [], sel: null, pinned: false, unlocked: false, dirty: false };
   snippetBrowseSearch.value = '';
   const box = ensureSnippetBrowseCM();
   box.setValue('');
+  box.setOption('readOnly', true);
   snippetBrowseCarriesEl.innerHTML = '';
   snippetBrowseNote.textContent = '';
   snippetBrowseInsert.disabled = true;
-  snippetBrowseBackdrop.classList.remove('hidden');
+  snippetBrowseBackdrop.classList.remove('hidden', 'editing');
   box.refresh(); // laid out while hidden - size it now that it is visible
   snippetBrowseSearch.focus();
   refreshSnippetList();
 }
 
 function closeSnippetBrowser({ refocus = true } = {}) {
-  flushSnippetEdit();
   const ed = snippetBrowseState?.ed;
   snippetBrowseBackdrop.classList.add('hidden');
+  snippetBrowseBackdrop.classList.remove('editing');
   snippetBrowseState = null;
   if (refocus) ed?.focus();
 }
 
 function insertSelectedSnippet() {
-  if (!snippetBrowseState) return;
+  if (!snippetBrowseState || snippetBrowseState.dirty) return;
   const entry = snippetBrowseState.entries.find((e) => e.name === snippetBrowseState.sel);
   if (!entry) return;
-  // What is on screen is what goes in - and it is kept, too, rather than being an edit that only
-  // this one insert ever saw.
-  const body = snippetBrowseState.editing === entry.name ? ensureSnippetBrowseCM().getValue() : entry.body;
   const { ed, at } = snippetBrowseState;
   closeSnippetBrowser();
-  insertSnippet({ ...entry, body }, ed, at).catch((e) => logLine(e.message ?? String(e), true));
-}
-
-async function renameSnippetFile(entry) {
-  const to = await askText(`Rename the snippet "${entry.name}".`, {
-    label: 'name',
-    value: entry.name,
-    confirm: 'rename',
-    problem: (v) => patternNameProblem(v),
-  });
-  if (!to || to === entry.name) return;
-  try {
-    await api('POST', '/api/snippets/rename', { from: entry.name, to });
-    if (snippetBrowseState?.sel === entry.name) snippetBrowseState.sel = to;
-    logLine(`renamed snippet "${entry.name}" to "${to}"`);
-    refreshSnippetList();
-  } catch (e) {
-    snippetBrowseNote.textContent = e.message ?? String(e);
-  }
+  insertSnippet(entry, ed, at).catch((e) => logLine(e.message ?? String(e), true));
 }
 
 async function deleteSnippetFile(entry) {
@@ -18286,7 +18747,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!editorMenu.classList.contains('hidden')) { editorMenu.classList.add('hidden'); e.stopPropagation(); return; }
   if (snippetSaveState) { closeSnippetSave(); e.stopPropagation(); return; }
-  if (snippetBrowseState) { closeSnippetBrowser(); e.stopPropagation(); }
+  if (snippetBrowseState) {
+    if (snippetBrowseState.dirty) cancelSnippetEdit(); else closeSnippetBrowser();
+    e.stopPropagation();
+  }
 }, true);
 
 // A row dropped onto the code. CodeMirror has been drawing the cursor for it the whole way in (the
@@ -18328,15 +18792,24 @@ snippetSaveBackdrop.addEventListener('keydown', (e) => {
 });
 
 snippetBrowseInsert.addEventListener('click', insertSelectedSnippet);
+document.getElementById('snippetBrowseSave').addEventListener('click', saveSnippetEdit);
+document.getElementById('snippetBrowseCancel').addEventListener('click', cancelSnippetEdit);
 document.getElementById('snippetBrowseClose').addEventListener('click', () => closeSnippetBrowser());
 snippetBrowseBackdrop.addEventListener('click', (e) => { if (e.target === snippetBrowseBackdrop) closeSnippetBrowser(); });
 snippetBrowseSearch.addEventListener('input', () => refreshSnippetList());
 snippetBrowseBackdrop.addEventListener('keydown', (e) => {
-  // Inside the code window the arrows and Enter belong to it - it is an editor now, not a preview.
-  // Everything is still stopped from reaching the page's own chords, as in the save dialog.
-  const inCode = !!e.target?.closest?.('.CodeMirror');
-  if (inCode) {
+  // The code window and the rename field own their keys (Cmd/Ctrl+S saves, Esc cancels or hands
+  // focus back - see ensureSnippetBrowseCM's extraKeys). Nothing reaches the page's own chords
+  // either way, as in the save dialog.
+  if (e.target?.closest?.('.CodeMirror') || e.target?.tagName === 'INPUT' && e.target !== snippetBrowseSearch) {
     e.stopPropagation();
+    return;
+  }
+  // Tab off the list goes to the code, and nowhere the browser's tab order might otherwise wander.
+  if (e.key === 'Tab' && !e.shiftKey && e.target === snippetBrowseList) {
+    e.preventDefault();
+    e.stopPropagation();
+    editSnippetRow();
     return;
   }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -18346,8 +18819,12 @@ snippetBrowseBackdrop.addEventListener('keydown', (e) => {
     const i = entries.findIndex((x) => x.name === snippetBrowseState.sel);
     const step = e.key === 'ArrowDown' ? 1 : -1;
     selectSnippetRow(entries[Math.max(0, Math.min(entries.length - 1, (i < 0 ? 0 : i) + step))]);
+    pinSnippetRow(); // the arrows are as deliberate as a click
     snippetBrowseList.querySelector('.snippet-row.current')?.scrollIntoView({ block: 'nearest' });
   } else if (e.key === 'Enter') {
+    // Enter inserts, like the row's → button. Not the → KEY: in organize that is the gesture for
+    // moving a song OUT of a playlist, and one arrow meaning two things across two browsers is
+    // one too many.
     e.preventDefault();
     insertSelectedSnippet();
   }
