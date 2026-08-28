@@ -23,6 +23,10 @@
 //   len   - loop length in cycles (default: the last clip's end, rounded up)
 //   snap  - the painter's grid, in cells per cycle (default 1 - one cell is one bar)
 //   lanes - lane names, an array indexed by lane (a hole or an empty string is an unnamed lane)
+//   loops - loop regions, [[name, start, end], …] in cycles: while a region is ARMED, playback
+//           entering it loops it until the player releases it (ctrl+L), then runs on to the next
+//           armed region. Reaching the song's end and wrapping to the top re-arms every region.
+//           See ArrangeClock below for the timing.
 
 export const ARRANGE_DEFAULT_SNAP = 1;
 export const ARRANGE_MIN_LANES = 4;
@@ -79,7 +83,18 @@ export function normalizeArrangeOpts(opts = {}) {
   const rawLen = num(o.len);
   const len = rawLen != null && rawLen > 0 ? rawLen : null;
   const lanes = Array.isArray(o.lanes) ? o.lanes.map((n) => (n == null ? '' : String(n))) : [];
-  return { snap, len, lanes };
+  const loops = [];
+  if (Array.isArray(o.loops)) {
+    for (const item of o.loops) {
+      const [name, start, end] = Array.isArray(item) ? item : [item?.name, item?.start, item?.end];
+      const a = num(start);
+      const b = num(end);
+      if (a == null || b == null || b <= a) continue;
+      loops.push({ name: String(name ?? '').trim() || `loop${loops.length + 1}`, start: a, end: b });
+    }
+    loops.sort((x, y) => x.start - y.start || x.end - y.end);
+  }
+  return { snap, len, lanes, loops };
 }
 
 /**
@@ -136,4 +151,105 @@ export function arrangementLaneCount(clips, opts = {}) {
   let n = Math.max(ARRANGE_MIN_LANES, lanes.length);
   for (const c of clips) n = Math.max(n, c.lane + 1);
   return n;
+}
+
+/**
+ * The song clock: where in the arrangement the transport's cycle IS, once loop regions are taken
+ * into account. Without regions it is `cycle mod len`; with them, playback entering an armed
+ * region wraps back to its start every time it reaches the end, until the region is released,
+ * and wrapping at the song's end re-arms every region.
+ *
+ * The map is kept as ANCHORS - (cycle, position, released set) triples, one per wrap or release -
+ * and a position is read by walking forward from the last anchor before it. That makes it a pure
+ * function of the anchors, so the host (which gates the patterns by it) and the editor (which
+ * draws the playhead by it) agree exactly when handed the same snapshot, and a release lands as
+ * one more anchor rather than as state the two would have to keep in step. Walking ahead of real
+ * time (the highlight grid asks cycles early) simply records the wraps early; a release cuts the
+ * anchors past its cycle and they are walked again.
+ */
+export class ArrangeClock {
+  constructor({ len = 1, regions = [], anchors = null } = {}) {
+    this.len = Math.max(1e-9, Number(len) || 1);
+    this.regions = (regions ?? [])
+      .map((r) => ({ name: String(r.name), start: Math.max(0, Number(r.start)), end: Math.min(this.len, Number(r.end)) }))
+      .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start + EPS)
+      .sort((a, b) => a.start - b.start || a.end - b.end);
+    this.anchors = anchors?.length
+      ? anchors.map((a) => ({ cycle: Number(a.cycle), pos: Number(a.pos), released: new Set(a.released ?? []) }))
+      : [{ cycle: 0, pos: 0, released: new Set() }];
+  }
+
+  /** Back to the top, every region armed - what a transport stop means. */
+  reset() {
+    this.anchors = [{ cycle: 0, pos: 0, released: new Set() }];
+  }
+
+  /** What the editor needs to run an identical clock: plain data, sets as arrays. */
+  snapshot() {
+    return {
+      len: this.len,
+      regions: this.regions.map((r) => ({ ...r })),
+      anchors: this.anchors.map((a) => ({ cycle: a.cycle, pos: a.pos, released: [...a.released] })),
+    };
+  }
+
+  _anchorIndexAt(cycle) {
+    let i = 0;
+    while (i + 1 < this.anchors.length && this.anchors[i + 1].cycle <= cycle + EPS) i++;
+    return i;
+  }
+
+  /** The region that will next wrap the playhead moving forward from `pos` under `released`, if any. */
+  _loopFrom(pos, released) {
+    let best = null;
+    for (const r of this.regions) {
+      if (released.has(r.name)) continue;
+      if (r.end > pos + EPS && (!best || r.end < best.end)) best = r;
+    }
+    return best;
+  }
+
+  /** Song position (0 <= p < len) at transport cycle `cycle`, recording the wraps on the way. */
+  posAt(cycle) {
+    let i = this._anchorIndexAt(cycle);
+    for (let guard = 0; guard < 100000; guard++) {
+      const a = this.anchors[i];
+      const p = a.pos + (cycle - a.cycle);
+      if (p < a.pos - EPS) return Math.max(0, p); // before the first anchor (cycle < 0): nothing to wrap
+      const region = this._loopFrom(a.pos, a.released);
+      const boundary = region ? region.end : this.len;
+      if (p < boundary - EPS) return p;
+      const next = { cycle: a.cycle + (boundary - a.pos), pos: region ? region.start : 0, released: region ? new Set(a.released) : new Set() };
+      const existing = this.anchors[i + 1];
+      if (existing && Math.abs(existing.cycle - next.cycle) < EPS) {
+        i++;
+      } else {
+        this.anchors.splice(i + 1, this.anchors.length, next);
+        i++;
+      }
+    }
+    return 0;
+  }
+
+  /** The playhead's state at `cycle`: its position, the region it is looping (if any), the released names. */
+  stateAt(cycle) {
+    const pos = this.posAt(cycle);
+    const a = this.anchors[this._anchorIndexAt(cycle)];
+    const region = this._loopFrom(pos, a.released);
+    return { pos, looping: region && region.start <= pos + EPS ? region.name : null, released: [...a.released] };
+  }
+
+  /**
+   * ctrl+L: release the region the playhead is looping at `cycle`, so playback runs on past its
+   * end. Returns the name released, or null when nothing was looping there. Recorded as an
+   * anchor at that cycle; whatever had been walked beyond it is dropped and walked again.
+   */
+  release(cycle) {
+    const { pos, looping, released } = this.stateAt(cycle);
+    if (!looping) return null;
+    const i = this._anchorIndexAt(cycle);
+    const next = { cycle, pos, released: new Set([...released, looping]) };
+    this.anchors.splice(i + 1, this.anchors.length, next);
+    return looping;
+  }
 }

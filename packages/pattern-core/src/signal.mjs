@@ -1498,13 +1498,15 @@ export class Sig {
    */
   _arrangeGate(spans, len) {
     if (!this.stepsForCycle) return this; // nothing event-shaped to gate - a bare control signal
+    // `len` is the loop length, or the song clock's own cycle -> position function when the
+    // arrangement has loop regions (see arrange.mjs's ArrangeClock).
     const loop = Math.max(1e-9, Number(len) || 1);
+    const posOf = typeof len === 'function' ? len : (c) => ((c % loop) + loop) % loop;
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) =>
       base(cycle).map((s) => {
         if (s.value == null) return s;
-        const pos = (((cycle + s.start) % loop) + loop) % loop;
-        return inSpans(spans, pos) ? s : { ...s, value: null };
+        return inSpans(spans, posOf(cycle + s.start)) ? s : { ...s, value: null };
       });
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }

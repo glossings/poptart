@@ -53,6 +53,7 @@ const coreReady = Promise.all([
     mixctlMod = mx;
     recordMod = rc;
     arrangeMod = ar;
+    arSetClock(arClockSnap); // a clock snapshot that arrived before the module did gets its twin now
     initLfoEditor();
     initPianorollEditor();
     initArrangeEditor();
@@ -401,6 +402,9 @@ document.addEventListener('keydown', (e) => {
     // the gesture has a target that isn't someone trying to copy - Cmd+C is never touched.
     e.preventDefault();
     if (!e.repeat) songCueKeyDown(e);
+  } else if (e.key.toLowerCase() === 'l' && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    arrangeUnlock(); // release the loop region the arrangement is in (see the arrange section)
   } else if (e.key.toLowerCase() === 's') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
     if (e.shiftKey) savePatternFileAs();
@@ -3705,16 +3709,24 @@ const PR_DIV_MIN_PX = 5; // a division whose lines crowd closer than this drops 
 // - they're already reachable by cell.
 const PR_SNAP_PX = [18, 12, 8];
 
-// Cursors that echo the tool under the pointer (Ableton's pencil / bracket / up-down), as inline
+// Cursors that echo the tool under the pointer (a pencil, a bracket, an up-down arrow), as inline
 // SVGs so no asset files are needed. The trailing two numbers are the hotspot.
 const svgCursor = (svg, x, y, fallback) => `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${x} ${y}, ${fallback}`;
 const CUR_PENCIL = svgCursor(
   '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><path d="M2.5 17.5l1.2-3.2 9-9 2 2-9 9-3.2 1.2z" fill="#fff" stroke="#111" stroke-width="1.1" stroke-linejoin="round"/><path d="M13 4.5l2-2 2 2-2 2z" fill="#7aa2ff" stroke="#111" stroke-width="1.1" stroke-linejoin="round"/></svg>',
   2, 18, 'crosshair',
 );
-const CUR_BRACKET = svgCursor(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="20" viewBox="0 0 18 20"><g fill="none" stroke="#111" stroke-width="3"><path d="M5 3H3v14h2"/><path d="M13 3h2v14h-2"/></g><g fill="none" stroke="#fff" stroke-width="1.3"><path d="M5 3H3v14h2"/><path d="M13 3h2v14h-2"/></g></svg>',
-  9, 10, 'ew-resize',
+// The trim cursors are ONE bracket each, facing the edge under the pointer: `[` on a left edge,
+// `]` on a right one. A symmetric double arrow says "this resizes" but not which end you have
+// hold of, and with notes, clips and loop regions all trimming from either side, that is the
+// half of the answer worth showing.
+const CUR_BRACKET_L = svgCursor(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="20" viewBox="0 0 18 20"><path d="M11 3H7v14h4" fill="none" stroke="#111" stroke-width="3.2" stroke-linejoin="round"/><path d="M11 3H7v14h4" fill="none" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>',
+  7, 10, 'ew-resize',
+);
+const CUR_BRACKET_R = svgCursor(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="20" viewBox="0 0 18 20"><path d="M7 3h4v14H7" fill="none" stroke="#111" stroke-width="3.2" stroke-linejoin="round"/><path d="M7 3h4v14H7" fill="none" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>',
+  11, 10, 'ew-resize',
 );
 const CUR_UPDOWN = svgCursor(
   '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="22" viewBox="0 0 16 22"><g fill="#fff" stroke="#111" stroke-width="1.1" stroke-linejoin="round"><path d="M8 1l4 5H9v10h3l-4 5-4-5h3V6H4z"/></g></svg>',
@@ -6659,7 +6671,8 @@ function prScrollTo(notes) {
 function prCursorFor(px, py, m, velMod) {
   if (py < PR_TOPBAR) { // loop ruler: the ends resize the window, its body slides it
     if (px < PR_GUTTER) return 'default';
-    return prLoopEdgeAt(px, m) === 'move' ? 'grab' : 'ew-resize';
+    const edge = prLoopEdgeAt(px, m);
+    return edge === 'move' ? 'grab' : edge === 'start' ? CUR_BRACKET_L : CUR_BRACKET_R;
   }
   if (py >= m.laneTop) { // value lane: markers drag up/down, the gutter label is the channel switch
     if (px < PR_GUTTER) return 'pointer';
@@ -6674,7 +6687,7 @@ function prCursorFor(px, py, m, velMod) {
   if (hit == null) return emptyCursor;
   const nt = prState.notes[hit];
   if (velMod) return CUR_UPDOWN; // cmd/ctrl over a note = a drag on whichever channel the lane shows
-  if (px >= prCellToX(nt.start + nt.len, m) - PR_EDGE_PX) return CUR_BRACKET; // right-edge = length
+  if (px >= prCellToX(nt.start + nt.len, m) - PR_EDGE_PX) return CUR_BRACKET_R; // right-edge = length
   return 'move';
 }
 
@@ -6883,8 +6896,8 @@ function initPianorollCanvas() {
   const setCursor = (c) => { if (prCanvas.style.cursor !== c) prCanvas.style.cursor = c; };
   const dragCursor = (d) =>
     (d.kind === 'loop'
-      ? (d.edge === 'move' ? 'grabbing' : 'ew-resize')
-      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
+      ? (d.edge === 'move' ? 'grabbing' : d.edge === 'start' ? CUR_BRACKET_L : CUR_BRACKET_R)
+      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET_R, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
 
   // ctrl-drag (mac) = velocity, not a menu - except over the value lane, which has one of its own
   // (randomize / reset the channel it shows; see prOpenLaneMenu).
@@ -10384,6 +10397,7 @@ async function evaluate(start, { byHand = false } = {}) {
     const result = await pending;
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     setPatchScale(result.scale); // a setscale() in the buffer re-colours (and re-folds) the roll
+    arSetClock(result.arrange ?? null); // the arrangement's song clock, for the painter's playhead
     renderTracks(result);
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
     refoldAll();
@@ -18887,7 +18901,10 @@ const arCloseBtn = document.getElementById('arrangeClose');
 const arLaneNameInput = document.getElementById('arrangeLaneName');
 const arMenu = document.getElementById('arrangeMenu');
 
-const AR_RULER = 20; // px: the bar numbers along the top
+const AR_LOOPS_H = 22; // px: the loops strip along the top, where loop regions live
+const AR_RULER = 20; // px: the bar numbers, under the strip and directly against the lanes they label
+const AR_RULER_TOP = AR_LOOPS_H;
+const AR_LANES_TOP = AR_LOOPS_H + AR_RULER; // where the lanes start
 const AR_ROW = 36; // px per lane
 const AR_VISIBLE_LANES = 8; // the canvas shows this many; lanes are unbounded and scroll under it
 const AR_GUTTER = 96; // px: the lane names down the left
@@ -18895,7 +18912,7 @@ const AR_PAD_BOTTOM = 6;
 const AR_DEFAULT_PX_PER_CYCLE = 44; // one bar is comfortably wide by default: the unit you paint in
 const AR_MIN_PX_PER_CYCLE = 6;
 const AR_MAX_PX_PER_CYCLE = 400;
-const AR_EDGE_PX = 7; // how close to a clip's right edge counts as grabbing it to resize
+const AR_EDGE_PX = 8; // how close to a clip's (or region's) edge counts as grabbing it to resize
 const AR_SNAPS = [1, 2, 4, 8, 16]; // cells per bar the snap menu offers
 const AR_HISTORY_MAX = 200;
 const AR_EVAL_DEBOUNCE_MS = 120;
@@ -18951,6 +18968,7 @@ function arCallOpts(state) {
   const lanes = state.lanes.slice();
   while (lanes.length && !lanes[lanes.length - 1]) lanes.pop();
   if (lanes.length) opts.lanes = lanes.map((n) => n || '');
+  if (state.loops.length) opts.loops = state.loops.map((r) => [r.name, r.start, r.end]);
   return opts;
 }
 
@@ -18988,8 +19006,9 @@ function writeArrangeCall(record = true) {
 
 // --- history ---
 
-const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, lanes: arState.lanes.slice() });
-const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.lanes.join(',')}`;
+const arRegionData = (r) => ({ name: r.name, start: r.start, end: r.end }); // without the drawn-geometry scratch fields
+const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, lanes: arState.lanes.slice(), loops: arState.loops.map(arRegionData) });
+const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.lanes.join(',')}|${JSON.stringify(s.loops.map(arRegionData))}`;
 
 function arPushHistory() {
   const snap = arSnapshot();
@@ -19010,6 +19029,8 @@ function arHistoryStep(delta) {
   arState.len = snap.len;
   arState.snap = snap.snap;
   arState.lanes = snap.lanes.slice();
+  arState.loops = snap.loops.map(arRegionData);
+  arState.selRegion = null;
   arState.sel.clear();
   arSyncControls();
   writeArrangeCall(false);
@@ -19033,11 +19054,13 @@ function openArrangeEditor(call) {
     snap: opts.snap, // cells per bar the painter snaps to (editor metadata, written to the call)
     len: opts.len, // explicit loop length in bars, or null for "the last clip's end"
     lanes: opts.lanes, // lane names by index ('' = unnamed)
+    loops: opts.loops.map((r) => ({ ...r })), // loop regions [{ name, start, end }] - see ArrangeClock
     pxPerCycle: AR_DEFAULT_PX_PER_CYCLE,
     scroll: 0, // leftmost visible bar
     scrollLane: 0, // topmost visible lane (fractional while scrolling) - lanes are unbounded
     brush: null, // the label the next paint lays down
     sel: new Set(), // selected clip objects (transient, never serialized)
+    selRegion: null, // the selected loop region (its name and × become live in the ruler)
     drag: null,
     hover: null,
     history: [],
@@ -19050,6 +19073,8 @@ function openArrangeEditor(call) {
   arSizeCanvas();
   drawArrange();
   if (!arRaf) arRaf = requestAnimationFrame(arPlayheadLoop);
+  // The song clock the server is running: the painter opened after the eval that built it.
+  if (!arClockSnap) api('GET', '/api/arrange').then((res) => arSetClock(res.arrange ?? null)).catch(() => {});
 }
 
 function closeArrangeEditor() {
@@ -19148,9 +19173,11 @@ const arCell = () => 1 / arState.snap; // one snap cell, in bars
 const arSnapTo = (bars) => Math.round(bars * arState.snap) / arState.snap;
 const arXOf = (bars) => AR_GUTTER + (bars - arState.scroll) * arState.pxPerCycle;
 const arBarsOf = (x) => arState.scroll + (x - AR_GUTTER) / arState.pxPerCycle;
-const arLaneOf = (y) => Math.floor((y - AR_RULER) / AR_ROW + arState.scrollLane);
-const arYOf = (lane) => AR_RULER + (lane - arState.scrollLane) * AR_ROW;
-const arGridBottom = () => AR_RULER + AR_VISIBLE_LANES * AR_ROW;
+const arLaneOf = (y) => Math.floor((y - AR_LANES_TOP) / AR_ROW + arState.scrollLane);
+const arYOf = (lane) => AR_LANES_TOP + (lane - arState.scrollLane) * AR_ROW;
+const arGridBottom = () => AR_LANES_TOP + AR_VISIBLE_LANES * AR_ROW;
+const arInLoops = (y) => y < AR_LOOPS_H;
+const arInRuler = (y) => y >= AR_RULER_TOP && y < AR_LANES_TOP;
 
 function arSizeCanvas() {
   if (!arState) return;
@@ -19158,7 +19185,7 @@ function arSizeCanvas() {
   if (!w) return;
   const dpr = Math.min(3, window.devicePixelRatio || 1);
   arW = w;
-  arH = AR_RULER + AR_VISIBLE_LANES * AR_ROW + AR_PAD_BOTTOM;
+  arH = AR_LANES_TOP + AR_VISIBLE_LANES * AR_ROW + AR_PAD_BOTTOM;
   arCanvas._dpr = dpr;
   arCanvas.width = w * dpr;
   arCanvas.height = arH * dpr;
@@ -19180,9 +19207,27 @@ function arClipAt(x, y) {
     const x2 = arXOf(c.start + c.len);
     if (x < x1 || x > x2) continue;
     if (bars < c.start || bars > c.start + c.len) continue;
-    return { clip: c, edge: x2 - x <= AR_EDGE_PX && x2 - x1 > AR_EDGE_PX * 2 };
+    // Either edge is a handle when the clip is wide enough to leave a body between them.
+    const wide = x2 - x1 > AR_EDGE_PX * 3;
+    const edge = wide && x2 - x <= AR_EDGE_PX ? 'right' : wide && x - x1 <= AR_EDGE_PX ? 'left' : null;
+    return { clip: c, edge };
   }
   return null;
+}
+
+/** What is under x in the ruler: a region and which part of it - an edge, its name, its ×, or the body. */
+function arRegionHit(x) {
+  const region = arRegionAt(x);
+  if (!region) return null;
+  const x1 = region._x1 ?? arXOf(region.start);
+  const x2 = region._x2 ?? arXOf(region.end);
+  const selected = arState.selRegion === region;
+  if (x2 - x1 > AR_EDGE_PX * 3) {
+    if (x - x1 <= AR_EDGE_PX) return { region, part: 'left' };
+    if (x2 - x <= AR_EDGE_PX) return { region, part: 'right' };
+  }
+  if (selected && x2 - x <= 18) return { region, part: 'close' };
+  return { region, part: 'body' };
 }
 
 function arVisibleBars() {
@@ -19212,7 +19257,7 @@ function drawArrange() {
   ctx.textBaseline = 'middle';
 
   const loopLen = arLoopLen();
-  const gridTop = AR_RULER;
+  const gridTop = AR_LANES_TOP;
   const gridBottom = arGridBottom();
   const firstLane = Math.floor(arState.scrollLane);
   const lastLane = Math.ceil(arState.scrollLane + AR_VISIBLE_LANES);
@@ -19260,6 +19305,7 @@ function drawArrange() {
 
   // clips
   const text = col('--text');
+  const hoverClip = !arState.drag && arState.hover && arState.hover.y >= AR_LANES_TOP && arState.hover.x >= AR_GUTTER ? arClipAt(arState.hover.x, arState.hover.y) : null;
   for (const c of arState.clips) {
     const x1 = arXOf(c.start);
     const x2 = arXOf(c.start + c.len);
@@ -19276,6 +19322,13 @@ function drawArrange() {
     ctx.lineWidth = selected ? 1.5 : 1;
     prRoundRect(ctx, dx + 0.5, y + 3, w, AR_ROW - 6, 4); ctx.stroke();
     ctx.lineWidth = 1;
+    // the edge under the pointer shows as a handle, so a resize is offered before it is tried
+    if (hoverClip?.clip === c && hoverClip.edge) {
+      ctx.fillStyle = col('--accent');
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(hoverClip.edge === 'left' ? dx + 1 : dx2 - 4, y + 5, 3, AR_ROW - 10);
+      ctx.globalAlpha = 1;
+    }
     if (w > 18) {
       ctx.save();
       ctx.beginPath(); ctx.rect(dx + 2, y, w - 4, AR_ROW); ctx.clip();
@@ -19300,36 +19353,105 @@ function drawArrange() {
 
   // ruler: bar numbers, and the loop's end as a marker you can drag
   ctx.fillStyle = col('--bg-panel');
-  ctx.fillRect(0, 0, W, AR_RULER);
+  ctx.fillRect(0, AR_RULER_TOP, W, AR_RULER);
   ctx.strokeStyle = col('--border');
-  ctx.beginPath(); ctx.moveTo(0, AR_RULER - 0.5); ctx.lineTo(W, AR_RULER - 0.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, AR_LANES_TOP - 0.5); ctx.lineTo(W, AR_LANES_TOP - 0.5); ctx.stroke();
   const every = arState.pxPerCycle >= 28 ? 1 : arState.pxPerCycle >= 12 ? 4 : arState.pxPerCycle >= 4 ? 8 : 16;
   ctx.fillStyle = col('--text-dim');
   for (let bar = Math.ceil(arState.scroll); bar <= arState.scroll + arVisibleBars(); bar++) {
     if (bar % every) continue;
     const x = arXOf(bar);
     if (x < AR_GUTTER) continue;
-    ctx.fillText(String(bar + 1), x + 3, AR_RULER / 2);
+    ctx.fillText(String(bar + 1), x + 3, AR_RULER_TOP + AR_RULER / 2);
+  }
+  // loop regions: bands in the ruler, the one looping now lit, released ones dimmed
+  const clockState = arClockState();
+  // the loops strip: its own row above the ruler, so the bar numbers stay readable and stay
+  // against the lanes they label
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, 0, W, AR_LOOPS_H);
+  ctx.strokeStyle = col('--border');
+  ctx.beginPath(); ctx.moveTo(0, AR_LOOPS_H - 0.5); ctx.lineTo(W, AR_LOOPS_H - 0.5); ctx.stroke();
+  const stripMid = AR_LOOPS_H / 2;
+  const hoverRegion = !arState.drag && arState.hover && arInLoops(arState.hover.y) && arState.hover.x >= AR_GUTTER ? arRegionHit(arState.hover.x) : null;
+  for (const r of arState.loops) {
+    const x1 = Math.max(AR_GUTTER, arXOf(r.start));
+    const x2 = Math.min(W, arXOf(r.end));
+    r._x1 = x1; r._x2 = x2; // where it was drawn, for the ruler's hit-testing
+    if (x2 <= x1) continue;
+    const looping = clockState?.looping === r.name;
+    const released = clockState?.released.includes(r.name);
+    const selected = arState.selRegion === r;
+    ctx.fillStyle = col('--accent');
+    ctx.globalAlpha = looping ? 0.55 : released ? 0.12 : 0.28;
+    ctx.fillRect(x1, 3, x2 - x1, AR_LOOPS_H - 6);
+    ctx.globalAlpha = 1;
+    if (selected) {
+      ctx.strokeStyle = col('--accent');
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x1 + 0.75, 3.75, x2 - x1 - 1.5, AR_LOOPS_H - 7.5);
+      ctx.lineWidth = 1;
+    }
+    const label = `${looping ? '↻ ' : ''}${r.name}`;
+    r._nameW = ctx.measureText(label).width;
+    if (x2 - x1 > 24) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x1, 0, x2 - x1 - (selected ? 18 : 4), AR_LOOPS_H); ctx.clip();
+      ctx.fillStyle = text;
+      ctx.globalAlpha = released ? 0.5 : 0.95;
+      ctx.fillText(label, x1 + 4, stripMid);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+    if (selected && x2 - x1 > 30) {
+      // the × that removes it, at the right end - live only while the region is selected
+      ctx.fillStyle = text;
+      ctx.globalAlpha = hoverRegion?.region === r && hoverRegion.part === 'close' ? 1 : 0.7;
+      ctx.fillText('×', x2 - 12, stripMid);
+      ctx.globalAlpha = 1;
+    }
+    if (hoverRegion?.region === r && (hoverRegion.part === 'left' || hoverRegion.part === 'right')) {
+      ctx.fillStyle = col('--accent');
+      ctx.fillRect(hoverRegion.part === 'left' ? x1 : x2 - 3, 3, 3, AR_LOOPS_H - 6);
+    }
+    // its bounds down the lanes, faint, so a clip can be lined up with it
+    ctx.strokeStyle = col('--accent');
+    ctx.globalAlpha = 0.25;
+    for (const x of [x1, x2]) { ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, gridTop); ctx.lineTo(Math.round(x) + 0.5, gridBottom); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  }
+  if (arState.drag?.kind === 'region') {
+    const d = arState.drag;
+    const x1 = arXOf(Math.min(d.a, d.b)), x2 = arXOf(Math.max(d.a, d.b));
+    ctx.fillStyle = col('--accent');
+    ctx.globalAlpha = 0.4;
+    ctx.fillRect(x1, 3, x2 - x1, AR_LOOPS_H - 6);
+    ctx.globalAlpha = 1;
   }
   // loop end
   if (loopX >= AR_GUTTER && loopX <= W + 1) {
     ctx.strokeStyle = col('--accent');
     ctx.setLineDash([4, 3]);
     ctx.globalAlpha = arState.len == null ? 0.5 : 0.9;
-    ctx.beginPath(); ctx.moveTo(Math.round(loopX) + 0.5, 0); ctx.lineTo(Math.round(loopX) + 0.5, gridBottom); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(Math.round(loopX) + 0.5, AR_RULER_TOP); ctx.lineTo(Math.round(loopX) + 0.5, gridBottom); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = col('--accent');
-    ctx.beginPath(); ctx.moveTo(loopX, AR_RULER - 1); ctx.lineTo(loopX - 5, 1); ctx.lineTo(loopX + 5, 1); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(loopX, AR_LANES_TOP - 1); ctx.lineTo(loopX - 5, AR_RULER_TOP + 1); ctx.lineTo(loopX + 5, AR_RULER_TOP + 1); ctx.closePath(); ctx.fill();
     ctx.globalAlpha = 1;
   }
 
   // gutter: lane names
   ctx.fillStyle = col('--bg-panel');
-  ctx.fillRect(0, AR_RULER, AR_GUTTER, gridBottom - AR_RULER);
+  ctx.fillRect(0, 0, AR_GUTTER, gridBottom);
+  ctx.fillStyle = col('--text-dim');
+  ctx.globalAlpha = 0.7;
+  ctx.fillText('loops', 8, stripMid);
+  ctx.fillText('bar', 8, AR_RULER_TOP + AR_RULER / 2);
+  ctx.globalAlpha = 1;
   ctx.strokeStyle = col('--border');
   ctx.beginPath(); ctx.moveTo(AR_GUTTER - 0.5, 0); ctx.lineTo(AR_GUTTER - 0.5, gridBottom); ctx.stroke();
   ctx.save();
-  ctx.beginPath(); ctx.rect(0, AR_RULER, AR_GUTTER, gridBottom - AR_RULER); ctx.clip();
+  ctx.beginPath(); ctx.rect(0, AR_LANES_TOP, AR_GUTTER, gridBottom - AR_LANES_TOP); ctx.clip();
   for (let lane = firstLane; lane <= lastLane; lane++) {
     const name = arState.lanes[lane] || '';
     const y = arYOf(lane) + AR_ROW / 2;
@@ -19349,7 +19471,7 @@ function drawArrange() {
   // playhead
   arPlayheadOn = false;
   if (!transport.paused) {
-    const pos = ((currentCyclePos() % loopLen) + loopLen) % loopLen;
+    const pos = clockState ? clockState.pos : ((currentCyclePos() % loopLen) + loopLen) % loopLen;
     const x = arXOf(pos);
     if (x >= AR_GUTTER && x <= W) {
       ctx.strokeStyle = col('--accent');
@@ -19367,10 +19489,19 @@ function drawArrange() {
 
 function arCursorFor(x, y) {
   if (!arState) return 'default';
-  if (y < AR_RULER) return x >= AR_GUTTER ? 'col-resize' : 'default';
+  if (arInRuler(y)) return x >= AR_GUTTER ? 'col-resize' : 'default'; // anywhere in the ruler sets the length
+  if (arInLoops(y)) {
+    if (x < AR_GUTTER) return 'default';
+    const rh = arRegionHit(x);
+    if (rh?.part === 'left') return CUR_BRACKET_L;
+    if (rh?.part === 'right') return CUR_BRACKET_R;
+    if (rh?.part === 'close') return 'pointer';
+    if (rh) return 'grab';
+    return arTool === 'draw' ? CUR_PENCIL : 'default';
+  }
   if (x < AR_GUTTER) return 'default';
   const hit = arClipAt(x, y);
-  if (hit) return hit.edge ? 'ew-resize' : 'grab';
+  if (hit) return hit.edge === 'left' ? CUR_BRACKET_L : hit.edge === 'right' ? CUR_BRACKET_R : 'grab';
   return arTool === 'draw' && arState.brush ? CUR_PENCIL : 'crosshair';
 }
 
@@ -19385,6 +19516,13 @@ function arDeleteClips(clips) {
   if (!gone.size) return;
   arState.clips = arState.clips.filter((c) => !gone.has(c));
   for (const c of gone) arState.sel.delete(c);
+  writeArrangeCall();
+  drawArrange();
+}
+
+function arRemoveRegion(region) {
+  arState.loops = arState.loops.filter((r) => r !== region);
+  if (arState.selRegion === region) arState.selRegion = null;
   writeArrangeCall();
   drawArrange();
 }
@@ -19427,30 +19565,101 @@ function arDuplicate(clips) {
   drawArrange();
 }
 
-function arRenameLane(lane) {
+/** The one text box the painter has, laid over whatever is being named: a lane, or a loop region. */
+function arShowNameInput({ left, top, width, value, placeholder, edit }) {
   const r = arCanvas.getBoundingClientRect();
   const body = arCanvas.parentElement.getBoundingClientRect();
-  arLaneNameInput.style.left = `${r.left - body.left + 4}px`;
-  arLaneNameInput.style.top = `${r.top - body.top + arYOf(lane) + (AR_ROW - 22) / 2}px`;
-  arLaneNameInput.style.width = `${AR_GUTTER - 8}px`;
-  arLaneNameInput.value = arState.lanes[lane] || '';
-  arLaneNameInput.dataset.lane = String(lane);
+  arLaneNameInput.style.left = `${r.left - body.left + left}px`;
+  arLaneNameInput.style.top = `${r.top - body.top + top}px`;
+  arLaneNameInput.style.width = `${width}px`;
+  arLaneNameInput.value = value;
+  arLaneNameInput.placeholder = placeholder;
+  arNameEdit = edit;
   arLaneNameInput.classList.remove('hidden');
   arLaneNameInput.focus();
   arLaneNameInput.select();
 }
+let arNameEdit = null; // { kind: 'lane', lane } | { kind: 'region', region, fresh }
+
+function arRenameLane(lane) {
+  arShowNameInput({ left: 4, top: arYOf(lane) + (AR_ROW - 22) / 2, width: AR_GUTTER - 8, value: arState.lanes[lane] || '', placeholder: 'lane name', edit: { kind: 'lane', lane } });
+}
+
+function arNameRegion(region, fresh = false) {
+  const x1 = Math.max(AR_GUTTER, arXOf(region.start));
+  const x2 = Math.min(arW, arXOf(region.end));
+  arShowNameInput({ left: x1, top: 0, width: Math.max(90, x2 - x1), value: fresh ? '' : region.name, placeholder: 'loop name', edit: { kind: 'region', region, fresh } });
+}
 
 function arCommitLaneName(save) {
   if (arLaneNameInput.classList.contains('hidden')) return;
-  const lane = Number(arLaneNameInput.dataset.lane);
+  const edit = arNameEdit;
+  arNameEdit = null;
   arLaneNameInput.classList.add('hidden');
-  if (!save || !arState) return;
+  if (!arState || !edit) return;
   const name = arLaneNameInput.value.trim();
-  while (arState.lanes.length <= lane) arState.lanes.push('');
-  if (arState.lanes[lane] === name) return;
-  arState.lanes[lane] = name;
+  if (edit.kind === 'lane') {
+    if (!save) return;
+    while (arState.lanes.length <= edit.lane) arState.lanes.push('');
+    if (arState.lanes[edit.lane] === name) return;
+    arState.lanes[edit.lane] = name;
+  } else {
+    if (!save && edit.fresh) {
+      arState.loops = arState.loops.filter((r) => r !== edit.region); // escaped out of a new one: no region
+      drawArrange();
+      return;
+    }
+    if (!save) return;
+    // A name that is one word, unique among the regions: it is what the console names on ctrl+L.
+    const taken = new Set(arState.loops.filter((r) => r !== edit.region).map((r) => r.name));
+    let candidate = name.replace(/\s+/g, '_') || `loop${arState.loops.indexOf(edit.region) + 1}`;
+    while (taken.has(candidate)) candidate += '_';
+    if (edit.region.name === candidate && !edit.fresh) return;
+    edit.region.name = candidate;
+  }
   writeArrangeCall();
   drawArrange();
+}
+
+/** The loop region under x in the ruler, the shortest winning when they nest. */
+function arRegionAt(x) {
+  const bars = arBarsOf(x);
+  let best = null;
+  for (const r of arState.loops) {
+    if (bars >= r.start && bars < r.end && (!best || r.end - r.start < best.end - best.start)) best = r;
+  }
+  return best;
+}
+
+const arNearLoopEnd = (x) => Math.abs(x - arXOf(arLoopLen())) <= 6;
+
+// --- the song clock ---
+// The server gates the tracks by its ArrangeClock; the painter draws the playhead by a twin built
+// from the same snapshot (see arrange.mjs), refreshed by every eval and every ctrl+L.
+
+let arClockSnap = null;
+let arClockTwin = null;
+
+function arSetClock(snap) {
+  arClockSnap = snap;
+  arClockTwin = snap && arrangeMod ? new arrangeMod.ArrangeClock(snap) : null;
+}
+
+/** Where the song is now, by the clock: { pos, looping, released }, or null without an arrangement. */
+function arClockState() {
+  if (!arClockTwin) return null;
+  return arClockTwin.stateAt(currentCyclePos());
+}
+
+/** ctrl+L: release the loop region playback is in. Works from anywhere in the editor. */
+function arrangeUnlock() {
+  api('POST', '/api/arrangeUnlock', { deck: mixModeOn ? djActiveDeck : 'a' })
+    .then((res) => {
+      arSetClock(res.arrange ?? null);
+      logLine(res.released ? `[arrange] loop ${res.released} released` : '[arrange] no loop to release');
+      if (arState) drawArrange();
+    })
+    .catch((e) => logLine(`[arrange] ${e.message}`, true));
 }
 
 function arReflectTool() {
@@ -19479,9 +19688,10 @@ function initArrangeCanvas() {
     arCommitLaneName(true);
     const { x, y } = arPoint(e);
     const lane = arLaneOf(y);
-    const hit = y >= AR_RULER && x >= AR_GUTTER ? arClipAt(x, y) : null;
+    const hit = y >= AR_LANES_TOP && x >= AR_GUTTER ? arClipAt(x, y) : null;
     if (e.button === 2) {
       e.preventDefault();
+      if (y < AR_LANES_TOP) return; // the ruler and loops strip have no menu: a selected region carries its own name and ×
       arOpenMenu(e.clientX, e.clientY, hit, x < AR_GUTTER ? lane : null);
       return;
     }
@@ -19489,8 +19699,8 @@ function initArrangeCanvas() {
     arCanvas.focus({ preventScroll: true });
     arCanvas.setPointerCapture(e.pointerId);
 
-    if (y < AR_RULER) {
-      // the ruler: drag to set the loop length, which is where the song wraps
+    if (arInRuler(y)) {
+      // the ruler: drag anywhere in it to set the length, which is where the song wraps
       if (x < AR_GUTTER) return;
       arState.drag = { kind: 'len', moved: false };
       arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
@@ -19498,8 +19708,33 @@ function initArrangeCanvas() {
       drawArrange();
       return;
     }
+    if (arInLoops(y)) {
+      if (x < AR_GUTTER) return;
+      const rh = arRegionHit(x);
+      if (rh) {
+        const { region, part } = rh;
+        if (arState.selRegion === region && part === 'close') { arRemoveRegion(region); return; }
+        // selecting a region (either tool) - and from there its edges resize, its body moves
+        arState.selRegion = region;
+        arState.sel.clear();
+        const orig = { start: region.start, end: region.end };
+        arState.drag = part === 'left' || part === 'right'
+          ? { kind: 'regionEdge', region, orig, side: part, x0: x, moved: false }
+          : { kind: 'regionMove', region, orig, x0: x, moved: false };
+      } else if (arTool === 'draw') {
+        // the pencil on an empty stretch of the strip: drag out a loop region
+        arState.selRegion = null;
+        const a = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
+        arState.drag = { kind: 'region', a, b: a + arCell() };
+      } else {
+        arState.selRegion = null; // the arrow on an empty stretch: nothing selected
+      }
+      drawArrange();
+      return;
+    }
     if (x < AR_GUTTER || lane < 0 || y >= arGridBottom()) return;
 
+    arState.selRegion = null; // anything selected in the lanes is instead of a region
     if (hit) {
       if (e.altKey) { arDeleteClips([hit.clip]); return; }
       if (e.shiftKey) {
@@ -19511,7 +19746,7 @@ function initArrangeCanvas() {
       const targets = [...arState.sel];
       const orig = new Map(targets.map((c) => [c, { start: c.start, lane: c.lane, len: c.len }]));
       arState.drag = hit.edge
-        ? { kind: 'resize', targets, orig, x0: x, moved: false }
+        ? { kind: 'resize', targets, orig, x0: x, side: hit.edge, moved: false }
         : { kind: 'move', targets, orig, x0: x, lane0: lane, moved: false };
       drawArrange();
       return;
@@ -19529,7 +19764,7 @@ function initArrangeCanvas() {
     const clip = { label: arState.brush, lane, start: Math.max(0, start), len: arCell() };
     arState.clips.push(clip);
     arState.sel = new Set([clip]);
-    arState.drag = { kind: 'resize', targets: [clip], orig: new Map([[clip, { ...clip }]]), x0: x, moved: false, painted: true };
+    arState.drag = { kind: 'resize', targets: [clip], orig: new Map([[clip, { ...clip }]]), x0: x, side: 'right', moved: false, painted: true };
     drawArrange();
   });
 
@@ -19546,6 +19781,9 @@ function initArrangeCanvas() {
       arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
       d.moved = true;
       arSyncControls();
+    } else if (d.kind === 'region') {
+      const bars = arBarsOf(x);
+      d.b = bars >= d.a ? Math.max(d.a + arCell(), arSnapTo(bars)) : Math.max(0, Math.floor(bars / arCell()) * arCell());
     } else if (d.kind === 'move') {
       const dBars = arSnapTo(arBarsOf(x) - arBarsOf(d.x0));
       const dLane = arLaneOf(y) - d.lane0;
@@ -19564,8 +19802,24 @@ function initArrangeCanvas() {
       for (const c of d.targets) {
         const o = d.orig.get(c);
         // the edge snaps to the grid, and a clip is never thinner than one cell
-        c.len = Math.max(arCell(), arSnapTo(o.start + o.len + dBars) - o.start);
+        if (d.side === 'left') {
+          const start = Math.max(0, Math.min(arSnapTo(o.start + dBars), o.start + o.len - arCell()));
+          c.start = start;
+          c.len = o.start + o.len - start;
+        } else {
+          c.len = Math.max(arCell(), arSnapTo(o.start + o.len + dBars) - o.start);
+        }
       }
+      d.moved = true;
+    } else if (d.kind === 'regionMove') {
+      const shift = Math.max(arSnapTo(arBarsOf(x) - arBarsOf(d.x0)), -d.orig.start);
+      d.region.start = d.orig.start + shift;
+      d.region.end = d.orig.end + shift;
+      d.moved = d.moved || shift !== 0;
+    } else if (d.kind === 'regionEdge') {
+      const dBars = arBarsOf(x) - arBarsOf(d.x0);
+      if (d.side === 'left') d.region.start = Math.max(0, Math.min(arSnapTo(d.orig.start + dBars), d.orig.end - arCell()));
+      else d.region.end = Math.max(d.orig.start + arCell(), arSnapTo(d.orig.end + dBars));
       d.moved = true;
     } else if (d.kind === 'marquee') {
       d.x1 = x;
@@ -19579,10 +19833,10 @@ function initArrangeCanvas() {
       }
     }
     // a drag near the right or bottom edge scrolls the timeline / the lanes along
-    if (d.kind !== 'marquee') {
+    if (d.kind === 'move' || d.kind === 'resize' || d.kind === 'regionMove' || d.kind === 'regionEdge') {
       if (x > arW - 12) arState.scroll += arCell();
-      if (y > arGridBottom() - 8) arState.scrollLane += 0.25;
-      else if (y < AR_RULER + 8 && arState.scrollLane > 0) arState.scrollLane = Math.max(0, arState.scrollLane - 0.25);
+      if (y > arGridBottom() - 8 && d.kind === 'move') arState.scrollLane += 0.25;
+      else if (y < AR_LANES_TOP + 8 && arState.scrollLane > 0) arState.scrollLane = Math.max(0, arState.scrollLane - 0.25);
     }
     drawArrange();
   });
@@ -19593,6 +19847,24 @@ function initArrangeCanvas() {
     arState.drag = null;
     try { arCanvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
     if (d.kind === 'marquee') { drawArrange(); return; }
+    if (d.kind === 'region') {
+      const region = { name: '', start: Math.min(d.a, d.b), end: Math.max(d.a, d.b) };
+      arState.loops.push(region);
+      arState.loops.sort((p, q) => p.start - q.start || p.end - q.end);
+      arState.selRegion = region;
+      drawArrange();
+      arNameRegion(region, true); // the name lands the region (esc lets it go)
+      return;
+    }
+    if (d.kind === 'regionMove' || d.kind === 'regionEdge') {
+      if (d.moved) {
+        arState.loops.sort((p, q) => p.start - q.start || p.end - q.end);
+        writeArrangeCall();
+      }
+      drawArrange();
+      arRefreshCursor();
+      return;
+    }
     if (d.kind === 'len' || d.moved || d.painted) writeArrangeCall();
     drawArrange();
     arRefreshCursor();
@@ -19606,7 +19878,7 @@ function initArrangeCanvas() {
     const { x, y } = arPoint(e);
     const lane = arLaneOf(y);
     if (x < AR_GUTTER && lane >= 0 && y < arGridBottom()) arRenameLane(lane);
-    else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_RULER && y < arGridBottom() && arState.brush && !arClipAt(x, y)) {
+    else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_LANES_TOP && y < arGridBottom() && arState.brush && !arClipAt(x, y)) {
       // double-click empty in the arrow tool paints one cell, as the roll does
       const start = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
       const clip = { label: arState.brush, lane, start, len: arCell() };
@@ -19615,7 +19887,15 @@ function initArrangeCanvas() {
       writeArrangeCall();
       drawArrange();
     }
-    else if (y < AR_RULER && arState.len != null) {
+    else if (arInLoops(y) && x >= AR_GUTTER && arRegionAt(x)) {
+      // double-click a loop region to rename it (a single click is for dragging it)
+      const region = arRegionAt(x);
+      arState.selRegion = region;
+      arState.sel.clear();
+      drawArrange();
+      arNameRegion(region);
+    }
+    else if (arInRuler(y) && arState.len != null && arNearLoopEnd(x)) {
       // the ruler: back to an automatic length
       arState.len = null;
       arSyncControls();
@@ -19645,7 +19925,28 @@ function initArrangeCanvas() {
     if (!arState) return;
     const mod = e.metaKey || e.ctrlKey;
     if (e.key === 'Escape') { closeArrangeEditor(); e.preventDefault(); return; }
-    if (e.key === 'Delete' || e.key === 'Backspace') { arDeleteClips([...arState.sel]); e.preventDefault(); return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (arState.selRegion) arRemoveRegion(arState.selRegion);
+      else arDeleteClips([...arState.sel]);
+      e.preventDefault();
+      return;
+    }
+    if (arState.selRegion && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      // the selected region: arrows move it a cell, shift+arrows move its END (its length)
+      const r = arState.selRegion;
+      const step = (e.key === 'ArrowLeft' ? -1 : 1) * arCell();
+      if (e.shiftKey) r.end = Math.max(r.start + arCell(), r.end + step);
+      else {
+        const shift = Math.max(step, -r.start);
+        r.start += shift;
+        r.end += shift;
+      }
+      arState.loops.sort((p, q) => p.start - q.start || p.end - q.end);
+      writeArrangeCall();
+      drawArrange();
+      e.preventDefault();
+      return;
+    }
     if (mod && e.key.toLowerCase() === 'z') { arHistoryStep(e.shiftKey ? 1 : -1); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'd') { arDuplicate([...arState.sel]); e.preventDefault(); return; }

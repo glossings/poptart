@@ -1616,6 +1616,12 @@ function arrange(str = '', opts = {}) {
 
 const HOST_BUILDERS = { setbpm, setscale, arrange };
 
+// Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
+// with the loop regions' wraps and releases recorded in it. Built by the arrangement pass of
+// /api/evaluate and KEPT across evals whose length and regions are unchanged, so editing a clip
+// mid-song doesn't forget which loop the playhead is in. Null while the deck has no arrangement.
+const arrangeClocks = { a: null, b: null };
+
 // One block of editor code (see labels.mjs) -> its value, evaluated with the builders in
 // scope. Evaluated via direct eval rather than wrapping the code in `return (...)` so a block
 // may contain *statements*, not just one expression. eval's completion value (the last
@@ -3273,9 +3279,18 @@ const routes = {
       for (const label of spans.keys()) {
         if (!labels.has(label)) eventLogQueue.push(`[arrange] no block called ${JSON.stringify(label)} - its clips play nothing`);
       }
-      for (const b of built) {
-        if (spans.has(b.label)) b.sig = b.sig._arrangeGate(spans.get(b.label), loopLen);
+      const regions = arrangements.flatMap((a) => a.opts.loops);
+      const clockKey = JSON.stringify([loopLen, regions]);
+      if (arrangeClocks[deck]?.key !== clockKey) {
+        arrangeClocks[deck] = new patternCore.ArrangeClock({ len: loopLen, regions });
+        arrangeClocks[deck].key = clockKey;
       }
+      const clock = arrangeClocks[deck];
+      for (const b of built) {
+        if (spans.has(b.label)) b.sig = b.sig._arrangeGate(spans.get(b.label), (c) => clock.posAt(c));
+      }
+    } else {
+      arrangeClocks[deck] = null;
     }
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
@@ -3390,6 +3405,7 @@ const routes = {
         cps: transport.cps,
         transport: transport.snapshot(),
         scale: deckScale, // what setscale() left in force for this deck - the piano roll colours by it
+        arrange: arrangeClocks[deck]?.snapshot() ?? null, // the song clock the painter's playhead runs
         deck,
         deckBpm: deckNativeBpm(deck),
         gridFrom,
@@ -3431,6 +3447,19 @@ const routes = {
       pinned: pinnedList(),
     },
   }),
+
+  // The arrangement's song clock, for a painter opened after the eval that built it.
+  'GET /api/arrange': async () => ({ status: 200, body: { arrange: arrangeClocks.a?.snapshot() ?? null } }),
+
+  // ctrl+L: release the loop region the playhead is in, so playback runs on to the next armed one.
+  // Body: { deck? }. Returns the region released (null if none was looping) and the clock after.
+  'POST /api/arrangeUnlock': async (body) => {
+    const deck = body?.deck === 'b' ? 'b' : 'a';
+    const clock = arrangeClocks[deck];
+    if (!clock || !engine || !transport) return { status: 200, body: { released: null, arrange: clock?.snapshot() ?? null } };
+    const released = clock.release(transport.cycleAt(engine.getTime()));
+    return { status: 200, body: { released, arrange: clock.snapshot() } };
+  },
 
   // Body: { id, notes, opts } - re-files one roll definition from the piano roll panel while a
   // gesture is still in the hand (a lane drag, the swing slider). Because a pattern resolves the
@@ -3588,6 +3617,7 @@ const routes = {
     // live note log counts in that clock's cycles, so it goes too.
     transport?.stop();
     clearLiveLog();
+    for (const d of ['a', 'b']) arrangeClocks[d]?.reset(); // back to the top, every loop armed
     // Now that nothing is playing, any plugin edit held back during the performance is free to
     // capture (the suspension it costs has nothing left to interrupt).
     flushPluginCaptures();

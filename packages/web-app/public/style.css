@@ -2632,7 +2632,7 @@ li.CodeMirror-hint-active {
 #arrangeCanvas {
   display: block;
   width: 100%;
-  height: 314px; /* AR_RULER + 8 lanes of AR_ROW + padding - lanes scroll under it, so it never resizes */
+  height: 336px; /* AR_LANES_TOP (ruler + loops strip) + 8 lanes of AR_ROW + padding - lanes scroll under it, so it never resizes */
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
