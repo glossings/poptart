@@ -560,15 +560,15 @@
           <label class="pianoroll-ctl">len <input id="arrangeLen" type="number" step="1" min="1" placeholder="auto" title="loop length in bars — blank loops at the last clip's end (drag in the ruler to set it)" /></label>
         </div>
         <div class="pianoroll-head-tools">
+          <button id="arrangeTool" class="small" title="tool">✏️</button>
           <button id="arrangeZoomOut" class="small" title="zoom out (ctrl+wheel)">−</button>
           <button id="arrangeZoomIn" class="small" title="zoom in (ctrl+wheel)">+</button>
-          <button id="arrangeAddLane" class="small pr-text-btn" title="add a lane (double-click a lane's name to rename it)">+ lane</button>
           <button id="arrangeClose" class="small">✕</button>
         </div>
       </div>
       <div id="arrangeChips" class="arrange-chips" title="the brush — click a label, then paint it onto a lane"></div>
       <div class="arrange-body">
-        <canvas id="arrangeCanvas" tabindex="0" width="880" height="200"></canvas>
+        <canvas id="arrangeCanvas" tabindex="0" width="880" height="314"></canvas>
         <input id="arrangeLaneName" class="arrange-lane-name hidden" type="text" spellcheck="false" placeholder="lane name" />
       </div>
     </div>

@@ -841,7 +841,7 @@ function foldConfigBlobs() {
     pianoroll: 'piano roll notes — click to expand, or use the piano roll editor',
     arrange: 'arrangement clips — click to expand, or double-click arrange to paint',
   };
-  const dataArgRe = /\b(lfo|pianoroll|arrange)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
+  const dataArgRe = /\b(lfo|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
   while ((m = dataArgRe.exec(code))) {
     const str = m[2];
     if (str.length <= 2) continue; // "" - already as small as it gets
@@ -855,6 +855,15 @@ function foldConfigBlobs() {
     // Keyed by where the CALL starts: drawing into a roll rewrites what is inside it and leaves
     // its own offset alone, which is exactly the run of edits this has to hold across.
     foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]], `data@${m.index}`);
+  }
+  // arrange(...): the WHOLE argument list folds - clips, loop length and lane names are all the
+  // painter's, and none of it is meant to be edited by hand.
+  const arrangeRe = /\barrange\s*\(/g;
+  while ((m = arrangeRe.exec(code))) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0 || !code.slice(open + 1, close).trim()) continue;
+    foldSpan(open + 1, close, '⋯', DATA_ARG_TITLES.arrange, `data@${m.index}`);
   }
   // The same blob one call along, as a named preset's third argument. This is for the definitions
   // no run covers - one that chains, or shares its line with code - since inside a folded run the
@@ -18873,13 +18882,14 @@ const arSnapSelect = document.getElementById('arrangeSnap');
 const arLenInput = document.getElementById('arrangeLen');
 const arZoomInBtn = document.getElementById('arrangeZoomIn');
 const arZoomOutBtn = document.getElementById('arrangeZoomOut');
-const arAddLaneBtn = document.getElementById('arrangeAddLane');
+const arToolBtn = document.getElementById('arrangeTool');
 const arCloseBtn = document.getElementById('arrangeClose');
 const arLaneNameInput = document.getElementById('arrangeLaneName');
 const arMenu = document.getElementById('arrangeMenu');
 
 const AR_RULER = 20; // px: the bar numbers along the top
 const AR_ROW = 36; // px per lane
+const AR_VISIBLE_LANES = 8; // the canvas shows this many; lanes are unbounded and scroll under it
 const AR_GUTTER = 96; // px: the lane names down the left
 const AR_PAD_BOTTOM = 6;
 const AR_DEFAULT_PX_PER_CYCLE = 44; // one bar is comfortably wide by default: the unit you paint in
@@ -18897,6 +18907,7 @@ let arW = 0;
 let arH = 0;
 let arEvalTimer = null;
 let arSuppressClose = false; // set while the panel's own write is changing the buffer
+let arTool = localStorage.getItem('poptartArrangeTool') === 'select' ? 'select' : 'draw'; // pencil vs arrow, sticky like the roll's
 
 // --- the call in the buffer ---
 
@@ -18977,8 +18988,8 @@ function writeArrangeCall(record = true) {
 
 // --- history ---
 
-const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, lanes: arState.lanes.slice(), laneCount: arState.laneCount });
-const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.lanes.join(',')}|${s.laneCount}`;
+const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, lanes: arState.lanes.slice() });
+const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.lanes.join(',')}`;
 
 function arPushHistory() {
   const snap = arSnapshot();
@@ -18999,11 +19010,9 @@ function arHistoryStep(delta) {
   arState.len = snap.len;
   arState.snap = snap.snap;
   arState.lanes = snap.lanes.slice();
-  arState.laneCount = snap.laneCount;
   arState.sel.clear();
   arSyncControls();
   writeArrangeCall(false);
-  arSizeCanvas();
   drawArrange();
 }
 
@@ -19024,9 +19033,9 @@ function openArrangeEditor(call) {
     snap: opts.snap, // cells per bar the painter snaps to (editor metadata, written to the call)
     len: opts.len, // explicit loop length in bars, or null for "the last clip's end"
     lanes: opts.lanes, // lane names by index ('' = unnamed)
-    laneCount: arrangeMod.arrangementLaneCount(clips, opts),
     pxPerCycle: AR_DEFAULT_PX_PER_CYCLE,
     scroll: 0, // leftmost visible bar
+    scrollLane: 0, // topmost visible lane (fractional while scrolling) - lanes are unbounded
     brush: null, // the label the next paint lays down
     sel: new Set(), // selected clip objects (transient, never serialized)
     drag: null,
@@ -19139,8 +19148,9 @@ const arCell = () => 1 / arState.snap; // one snap cell, in bars
 const arSnapTo = (bars) => Math.round(bars * arState.snap) / arState.snap;
 const arXOf = (bars) => AR_GUTTER + (bars - arState.scroll) * arState.pxPerCycle;
 const arBarsOf = (x) => arState.scroll + (x - AR_GUTTER) / arState.pxPerCycle;
-const arLaneOf = (y) => Math.floor((y - AR_RULER) / AR_ROW);
-const arYOf = (lane) => AR_RULER + lane * AR_ROW;
+const arLaneOf = (y) => Math.floor((y - AR_RULER) / AR_ROW + arState.scrollLane);
+const arYOf = (lane) => AR_RULER + (lane - arState.scrollLane) * AR_ROW;
+const arGridBottom = () => AR_RULER + AR_VISIBLE_LANES * AR_ROW;
 
 function arSizeCanvas() {
   if (!arState) return;
@@ -19148,8 +19158,7 @@ function arSizeCanvas() {
   if (!w) return;
   const dpr = Math.min(3, window.devicePixelRatio || 1);
   arW = w;
-  arH = AR_RULER + arState.laneCount * AR_ROW + AR_PAD_BOTTOM;
-  arCanvas.style.height = `${arH}px`;
+  arH = AR_RULER + AR_VISIBLE_LANES * AR_ROW + AR_PAD_BOTTOM;
   arCanvas._dpr = dpr;
   arCanvas.width = w * dpr;
   arCanvas.height = arH * dpr;
@@ -19204,10 +19213,14 @@ function drawArrange() {
 
   const loopLen = arLoopLen();
   const gridTop = AR_RULER;
-  const gridBottom = AR_RULER + arState.laneCount * AR_ROW;
+  const gridBottom = arGridBottom();
+  const firstLane = Math.floor(arState.scrollLane);
+  const lastLane = Math.ceil(arState.scrollLane + AR_VISIBLE_LANES);
 
-  // lanes: alternate fills, a rule between
-  for (let lane = 0; lane < arState.laneCount; lane++) {
+  // lanes: alternate fills, a rule between (unbounded - whichever are scrolled into view)
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, gridTop, W, gridBottom - gridTop); ctx.clip();
+  for (let lane = firstLane; lane <= lastLane; lane++) {
     const y = arYOf(lane);
     ctx.fillStyle = lane % 2 ? col('--bg') : col('--bg-panel');
     ctx.fillRect(AR_GUTTER, y, W - AR_GUTTER, AR_ROW);
@@ -19240,7 +19253,7 @@ function drawArrange() {
   }
   // lane rules
   ctx.strokeStyle = col('--border');
-  for (let lane = 0; lane <= arState.laneCount; lane++) {
+  for (let lane = firstLane; lane <= lastLane; lane++) {
     const y = Math.round(arYOf(lane)) + 0.5;
     ctx.beginPath(); ctx.moveTo(AR_GUTTER, y); ctx.lineTo(W, y); ctx.stroke();
   }
@@ -19250,7 +19263,7 @@ function drawArrange() {
   for (const c of arState.clips) {
     const x1 = arXOf(c.start);
     const x2 = arXOf(c.start + c.len);
-    if (x2 <= AR_GUTTER || x1 >= W) continue;
+    if (x2 <= AR_GUTTER || x1 >= W || c.lane < firstLane || c.lane > lastLane) continue;
     const dx = Math.max(AR_GUTTER, x1);
     const dx2 = Math.min(W, x2);
     const y = arYOf(c.lane);
@@ -19283,6 +19296,7 @@ function drawArrange() {
     ctx.fillRect(rx, ry, Math.abs(r.x1 - r.x0), Math.abs(r.y1 - r.y0));
     ctx.strokeRect(rx + 0.5, ry + 0.5, Math.abs(r.x1 - r.x0), Math.abs(r.y1 - r.y0));
   }
+  ctx.restore();
 
   // ruler: bar numbers, and the loop's end as a marker you can drag
   ctx.fillStyle = col('--bg-panel');
@@ -19314,7 +19328,9 @@ function drawArrange() {
   ctx.fillRect(0, AR_RULER, AR_GUTTER, gridBottom - AR_RULER);
   ctx.strokeStyle = col('--border');
   ctx.beginPath(); ctx.moveTo(AR_GUTTER - 0.5, 0); ctx.lineTo(AR_GUTTER - 0.5, gridBottom); ctx.stroke();
-  for (let lane = 0; lane < arState.laneCount; lane++) {
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, AR_RULER, AR_GUTTER, gridBottom - AR_RULER); ctx.clip();
+  for (let lane = firstLane; lane <= lastLane; lane++) {
     const name = arState.lanes[lane] || '';
     const y = arYOf(lane) + AR_ROW / 2;
     ctx.fillStyle = name ? text : col('--text-dim');
@@ -19328,6 +19344,7 @@ function drawArrange() {
     ctx.strokeStyle = col('--border');
     ctx.beginPath(); ctx.moveTo(0, y2); ctx.lineTo(AR_GUTTER, y2); ctx.stroke();
   }
+  ctx.restore();
 
   // playhead
   arPlayheadOn = false;
@@ -19354,16 +19371,13 @@ function arCursorFor(x, y) {
   if (x < AR_GUTTER) return 'default';
   const hit = arClipAt(x, y);
   if (hit) return hit.edge ? 'ew-resize' : 'grab';
-  return arState.brush ? 'crosshair' : 'default';
+  return arTool === 'draw' && arState.brush ? CUR_PENCIL : 'crosshair';
 }
 
-function arEnsureLane(lane) {
-  if (lane >= arState.laneCount) arState.laneCount = lane + 1;
-}
-
-/** Enough lanes for every clip and name - a clip dragged below the last lane made a new one. Lanes only grow: an empty one you added stays. */
-function arTrimLanes() {
-  arState.laneCount = Math.max(arState.laneCount, arrangeMod.arrangementLaneCount(arState.clips, { lanes: arState.lanes }));
+function arRefreshCursor() {
+  if (!arState || arState.drag) return;
+  const h = arState.hover;
+  arCanvas.style.cursor = h ? arCursorFor(h.x, h.y) : 'default';
 }
 
 function arDeleteClips(clips) {
@@ -19389,7 +19403,7 @@ function arOpenMenu(clientX, clientY, hit, lane) {
         items.push([`→ ${l}`, () => { for (const c of targets) c.label = l; writeArrangeCall(); drawArrange(); }, `repaint as ${l}`]);
       }
     }
-  } else if (lane != null && lane >= 0 && lane < arState.laneCount) {
+  } else if (lane != null && lane >= 0) {
     items.push(['rename lane', () => arRenameLane(lane)]);
     if (arState.clips.some((c) => c.lane === lane)) items.push(['clear lane', () => arDeleteClips(arState.clips.filter((c) => c.lane === lane))]);
   }
@@ -19439,6 +19453,18 @@ function arCommitLaneName(save) {
   drawArrange();
 }
 
+function arReflectTool() {
+  arToolBtn.textContent = arTool === 'draw' ? '✏️' : '⬚';
+  arToolBtn.title = `${arTool} (B)`;
+}
+
+function arToggleTool() {
+  arTool = arTool === 'draw' ? 'select' : 'draw';
+  localStorage.setItem('poptartArrangeTool', arTool);
+  arReflectTool();
+  arRefreshCursor();
+}
+
 function initArrangeCanvas() {
   for (const n of AR_SNAPS) {
     const o = document.createElement('option');
@@ -19472,7 +19498,7 @@ function initArrangeCanvas() {
       drawArrange();
       return;
     }
-    if (x < AR_GUTTER || lane < 0 || lane >= arState.laneCount) return;
+    if (x < AR_GUTTER || lane < 0 || y >= arGridBottom()) return;
 
     if (hit) {
       if (e.altKey) { arDeleteClips([hit.clip]); return; }
@@ -19491,8 +19517,8 @@ function initArrangeCanvas() {
       return;
     }
 
-    if (e.shiftKey || !arState.brush) {
-      // empty space with shift (or nothing to paint): rubber-band a selection
+    if (arTool === 'select' || e.shiftKey || !arState.brush) {
+      // the arrow tool (or shift, or nothing to paint): rubber-band a selection
       arState.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y };
       if (!e.shiftKey) arState.sel.clear();
       drawArrange();
@@ -19510,9 +19536,10 @@ function initArrangeCanvas() {
   arCanvas.addEventListener('pointermove', (e) => {
     if (!arState) return;
     const { x, y } = arPoint(e);
+    arState.hover = { x, y };
     const d = arState.drag;
     if (!d) {
-      arCanvas.style.cursor = arCursorFor(x, y);
+      arRefreshCursor();
       return;
     }
     if (d.kind === 'len') {
@@ -19530,10 +19557,8 @@ function initArrangeCanvas() {
         const o = d.orig.get(c);
         c.start = o.start + shift;
         c.lane = o.lane + laneShift;
-        arEnsureLane(c.lane);
       }
       d.moved = d.moved || shift !== 0 || laneShift !== 0;
-      if (laneShift > 0) arSizeCanvas();
     } else if (d.kind === 'resize') {
       const dBars = arBarsOf(x) - arBarsOf(d.x0);
       for (const c of d.targets) {
@@ -19553,8 +19578,12 @@ function initArrangeCanvas() {
         else if (!e.shiftKey) arState.sel.delete(c);
       }
     }
-    // drag near the right edge scrolls the timeline along
-    if (x > arW - 12 && d.kind !== 'marquee') arState.scroll += arCell();
+    // a drag near the right or bottom edge scrolls the timeline / the lanes along
+    if (d.kind !== 'marquee') {
+      if (x > arW - 12) arState.scroll += arCell();
+      if (y > arGridBottom() - 8) arState.scrollLane += 0.25;
+      else if (y < AR_RULER + 8 && arState.scrollLane > 0) arState.scrollLane = Math.max(0, arState.scrollLane - 0.25);
+    }
     drawArrange();
   });
 
@@ -19564,12 +19593,9 @@ function initArrangeCanvas() {
     arState.drag = null;
     try { arCanvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
     if (d.kind === 'marquee') { drawArrange(); return; }
-    if (d.kind === 'len' || d.moved || d.painted) {
-      arTrimLanes();
-      arSizeCanvas();
-      writeArrangeCall();
-    }
+    if (d.kind === 'len' || d.moved || d.painted) writeArrangeCall();
     drawArrange();
+    arRefreshCursor();
   };
   arCanvas.addEventListener('pointerup', finish);
   arCanvas.addEventListener('pointercancel', finish);
@@ -19579,7 +19605,16 @@ function initArrangeCanvas() {
     if (!arState) return;
     const { x, y } = arPoint(e);
     const lane = arLaneOf(y);
-    if (x < AR_GUTTER && lane >= 0 && lane < arState.laneCount) arRenameLane(lane);
+    if (x < AR_GUTTER && lane >= 0 && y < arGridBottom()) arRenameLane(lane);
+    else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_RULER && y < arGridBottom() && arState.brush && !arClipAt(x, y)) {
+      // double-click empty in the arrow tool paints one cell, as the roll does
+      const start = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
+      const clip = { label: arState.brush, lane, start, len: arCell() };
+      arState.clips.push(clip);
+      arState.sel = new Set([clip]);
+      writeArrangeCall();
+      drawArrange();
+    }
     else if (y < AR_RULER && arState.len != null) {
       // the ruler: back to an automatic length
       arState.len = null;
@@ -19597,8 +19632,12 @@ function initArrangeCanvas() {
       arZoomAt(Math.exp(-e.deltaY * 0.01), x);
       return;
     }
-    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-    arState.scroll = Math.max(0, arState.scroll + delta / arState.pxPerCycle);
+    if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      const delta = e.shiftKey ? e.deltaY : e.deltaX;
+      arState.scroll = Math.max(0, arState.scroll + delta / arState.pxPerCycle);
+    } else {
+      arState.scrollLane = Math.max(0, arState.scrollLane + e.deltaY / AR_ROW);
+    }
     drawArrange();
   }, { passive: false });
 
@@ -19610,6 +19649,7 @@ function initArrangeCanvas() {
     if (mod && e.key.toLowerCase() === 'z') { arHistoryStep(e.shiftKey ? 1 : -1); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'd') { arDuplicate([...arState.sel]); e.preventDefault(); return; }
+    if (!mod && e.key.toLowerCase() === 'b') { arToggleTool(); e.preventDefault(); return; }
     if (e.key === '+' || e.key === '=') { arZoomAt(1.25); e.preventDefault(); return; }
     if (e.key === '-') { arZoomAt(0.8); e.preventDefault(); return; }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -19630,9 +19670,7 @@ function initArrangeCanvas() {
       const minLane = Math.min(...[...arState.sel].map((c) => c.lane));
       const shift = Math.max(step, -minLane);
       if (shift) {
-        for (const c of arState.sel) { c.lane += shift; arEnsureLane(c.lane); }
-        arTrimLanes();
-        arSizeCanvas();
+        for (const c of arState.sel) c.lane += shift;
         writeArrangeCall();
       }
       drawArrange();
@@ -19669,12 +19707,8 @@ function initArrangeEditor() {
   });
   arZoomInBtn.addEventListener('click', () => arState && arZoomAt(1.25));
   arZoomOutBtn.addEventListener('click', () => arState && arZoomAt(0.8));
-  arAddLaneBtn.addEventListener('click', () => {
-    if (!arState) return;
-    arState.laneCount++;
-    arSizeCanvas();
-    drawArrange();
-  });
+  arReflectTool();
+  arToolBtn.addEventListener('click', arToggleTool);
   arCloseBtn.addEventListener('click', closeArrangeEditor);
   window.addEventListener('resize', () => { if (arState) { arSizeCanvas(); drawArrange(); } });
   // The call the panel is editing can be deleted, or typed over, from the buffer side: the panel
