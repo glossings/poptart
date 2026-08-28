@@ -90,6 +90,8 @@ test('injectLocations leaves every name-lookup argument a plain string', () => {
     // below). "0 1 0" is neither a breakpoint list nor a note string, so it reads as names now.
     ['lfo("0,0 0.5,1 1,0")', 'lfo("0,0 0.5,1 1,0")'],
     ['pianoroll("60,0,4")', 'pianoroll("60,0,4")'],
+    // the arrangement painter's clips and lane names are drawn data, never mini
+    ['arrange("drums,0,0,8 bass,1,4,4", { lanes: ["kit"] })', 'arrange("drums,0,0,8 bass,1,4,4", { lanes: ["kit"] })'],
     ['x.param("Filter Freq", 0.5)', '.param("Filter Freq", 0.5)'],
     // a name-only call's LATER arguments too - a captured plugin-state blob is not mini notation
     ['synth("Serum 2", "STATEBLOB")', 'synth("Serum 2", "STATEBLOB")'],

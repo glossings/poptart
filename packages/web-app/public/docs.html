@@ -478,6 +478,25 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <code>midi[:index],start,len[,vel]</code> per note, and it chains like
             <code>note()</code>: <code>.scale()</code>, <code>.add()</code>, and the rest.
           </p>
+          <h4>Arranging: painting parts into a song</h4>
+          <p>
+            Every labelled block loops forever. To turn loops into a song, add a line
+            <code>$: arrange()</code> anywhere and double-click <strong>arrange</strong>: a playlist
+            opens with lanes down the side and bars along the top. The buffer's labels are the
+            brushes — pick one, then click-drag on a lane to paint a clip. A block with any clip
+            painted plays <em>only</em> inside its clips; blocks you never paint keep looping as
+            before, so you can arrange the drums and leave the pad running.
+          </p>
+          <p>
+            Clips move like notes: drag the body (between lanes too), drag the right edge to
+            resize, right-click for delete / duplicate / repaint as another label, ⌘Z to undo.
+            Lanes are just rows to read the song on — any label may go on any lane, and a lane may
+            hold several. Double-click a lane's name to name it. The arrangement loops at the last
+            clip's end, or drag in the ruler (or type <strong>len</strong>) to set the length;
+            <strong>snap</strong> sets how finely clips land, <strong>+</strong>/<strong>−</strong>
+            and ctrl+wheel zoom. Inside a clip the pattern runs on absolute bar time, so a
+            <code>&lt;a b&gt;</code> keeps alternating through the bars it is painted out of.
+          </p>
         </section>
 
         <!-- ================================================================= -->
@@ -927,6 +946,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
+            <tr><td><code>$: arrange()</code></td><td>the arrangement painter (double-click to open): painted blocks play only where painted</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
             <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>

@@ -57,6 +57,11 @@ the most unit-testable part.
   the key it's in, and writing each lane out as the arguments of a roll — which the editor files
   under the lane's name and plays with `pianoroll("name")` — so an import lands in the editable form
   and the roll's own →♪ converts it to mini-notation when that's wanted.
+- `arrange.mjs` — the arrangement painter's clip format (`label,lane,start,len`, in cycles) and
+  span math. `$: arrange()` opens a playlist in the editor; a block painted into it plays only
+  inside its clips (the host gates its Sig with `_arrangeGate`, on absolute cycle time, looping
+  over the arrangement's length), and a block never painted keeps looping as before. Lanes are
+  display only - any label on any lane - so a section is a set of blocks, not a token.
 - `index.mjs` — the public surface that stitches these together.
 
 ### `packages/osc-engine` — the engine adapter

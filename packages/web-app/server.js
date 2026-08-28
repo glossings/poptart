@@ -1605,7 +1605,16 @@ function setscale(name) {
 // The builders the HOST provides (as opposed to pattern-core's), bound alongside BUILDER_NAMES in
 // every evaluated block. Read out of this source by api-docs.test.js, so adding one here is what
 // makes the editor's reference cover it.
-const HOST_BUILDERS = { setbpm, setscale };
+// What an `arrange(...)` block evaluates to: the painted clips, which /api/evaluate applies to the
+// blocks they name once every block is built (see the arrangement pass there). A plain object like
+// TEMPO_BLOCK/SCALE_BLOCK so a `$: arrange()` block is a setup block, not a voice.
+function arrange(str = '', opts = {}) {
+  if (typeof str !== 'string') throw new Error('[arrange] arrange() takes the clip string the painter writes - double-click the arrange name to open it');
+  if (!patternCore.looksLikeArrangeString(str)) throw new Error('[arrange] arrange() takes "label,lane,start,len …" clips - double-click the arrange name to paint them');
+  return { poptartArrangeBlock: true, clips: patternCore.parseArrangement(str), opts: patternCore.normalizeArrangeOpts(opts) };
+}
+
+const HOST_BUILDERS = { setbpm, setscale, arrange };
 
 // One block of editor code (see labels.mjs) -> its value, evaluated with the builders in
 // scope. Evaluated via direct eval rather than wrapping the code in `return (...)` so a block
@@ -3187,7 +3196,7 @@ const routes = {
           // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
           // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
           const isPattern = value instanceof patternCore.Sig;
-          if (!isPattern && value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !b.label.startsWith('$')) {
+          if (!isPattern && value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !value?.poptartArrangeBlock && !b.label.startsWith('$')) {
             throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
           }
           return { ...b, sig: value };
@@ -3248,6 +3257,26 @@ const routes = {
     // signal.mjs's isDef). Anything derived from one (`roll(0, "…").synth(…)`) has lost the mark
     // and plays as normal.
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
+
+    // The arrangement pass: a block painted into an arrange() plays only inside its clips, so the
+    // bare loop it was is gated to the part it has become (see pattern-core's arrange.mjs). Every
+    // arrangement in the buffer contributes clips to ONE timeline - they are one song - and its
+    // length is the longest of them. A clip naming a block that isn't here is worth a line: the
+    // painter offers only the labels it can see, so this is a rename or a deleted block, and the
+    // part it stood for is silently gone.
+    const arrangements = evaluated.map((b) => b.sig).filter((v) => v?.poptartArrangeBlock);
+    if (arrangements.length) {
+      const clips = arrangements.flatMap((a) => a.clips);
+      const loopLen = Math.max(...arrangements.map((a) => patternCore.arrangementLength(a.clips, a.opts)));
+      const spans = patternCore.arrangementSpans(clips);
+      const labels = new Set(built.map((b) => b.label));
+      for (const label of spans.keys()) {
+        if (!labels.has(label)) eventLogQueue.push(`[arrange] no block called ${JSON.stringify(label)} - its clips play nothing`);
+      }
+      for (const b of built) {
+        if (spans.has(b.label)) b.sig = b.sig._arrangeGate(spans.get(b.label), loopLen);
+      }
+    }
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
     const anySolo = built.some((b) => b.soloed && !b.muted);

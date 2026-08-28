@@ -2563,6 +2563,102 @@ li.CodeMirror-hint-active {
   touch-action: none;
 }
 
+/* --------------------------------------------- arrangement painter */
+
+/* Wider than the roll: the horizontal axis is whole bars and a song is many of them. */
+.arrange-panel {
+  width: 940px;
+}
+
+/* The brush palette: one chip per labelled block in the buffer, tinted with the colour its clips
+   are painted in. The active chip is what the next paint lays down. */
+.arrange-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.arrange-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  cursor: pointer;
+}
+
+.arrange-chip .arrange-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--chip);
+  opacity: 0.55;
+}
+
+.arrange-chip.painted .arrange-chip-dot {
+  opacity: 1;
+}
+
+.arrange-chip:hover {
+  border-color: var(--chip);
+}
+
+.arrange-chip.active {
+  border-color: var(--chip);
+  box-shadow: inset 0 0 0 1px var(--chip);
+  background: color-mix(in srgb, var(--chip) 14%, var(--bg));
+}
+
+.arrange-chips .arrange-chips-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.arrange-body {
+  position: relative;
+  padding: 12px;
+}
+
+#arrangeCanvas {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: crosshair;
+  outline: none;
+  touch-action: none;
+}
+
+/* The lane-rename box, laid over the lane's name in the gutter. */
+.arrange-lane-name {
+  position: absolute;
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  outline: none;
+}
+
+.arrange-lane-name.hidden {
+  display: none;
+}
+
 /* --------------------------------------------- phrase position + midi record (header) */
 
 /* Its options are added by script (presets, saved themes, an unsaved draft), so it starts out

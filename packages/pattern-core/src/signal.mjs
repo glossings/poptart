@@ -15,6 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
+import { inSpans } from './arrange.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
@@ -1483,6 +1484,27 @@ export class Sig {
         if (s.value == null) return s;
         const p = Number(probSig.sample(cycle + (s.start + s.end) / 2, 1));
         return Number.isFinite(p) && rngAtPos(cycle, s.start, hashSeed) < p ? { ...s, value: null } : s;
+      });
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * The arrangement painter's gate (see arrange.mjs): keeps only the events whose onset falls
+   * inside one of `spans` ([start, end) in cycles, sorted and merged), the position taken modulo
+   * `len` so the arrangement loops. Everything else becomes a rest, so the step grid keeps its
+   * shape and the highlighter simply has nothing to light. The pattern still runs on ABSOLUTE
+   * cycle time - a `<a b>` keeps alternating through the bars it is gated out of - which is what
+   * makes painting a part in and out leave its own rhythm alone. Host-applied, not userland.
+   */
+  _arrangeGate(spans, len) {
+    if (!this.stepsForCycle) return this; // nothing event-shaped to gate - a bare control signal
+    const loop = Math.max(1e-9, Number(len) || 1);
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) =>
+      base(cycle).map((s) => {
+        if (s.value == null) return s;
+        const pos = (((cycle + s.start) % loop) + loop) % loop;
+        return inSpans(spans, pos) ? s : { ...s, value: null };
       });
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }

@@ -28,6 +28,7 @@ let miniMod = null;
 let labelsMod = null;
 let shapeMod = null;
 let pianorollMod = null;
+let arrangeMod = null; // arrange.mjs - the arrangement painter's clip format and span math
 let notesMod = null; // notes.mjs - pure music-theory helpers piped up to the userland prebake scope
 let mixctlMod = null; // mixctl.mjs - the mixer's gain/pan trim reads and code edits
 let recordMod = null; // record.mjs - a live take into a roll (the ● rec and capture paths)
@@ -41,8 +42,9 @@ const coreReady = Promise.all([
   import('/pattern-core/notes.mjs'),
   import('/pattern-core/mixctl.mjs'),
   import('/pattern-core/record.mjs'),
+  import('/pattern-core/arrange.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar]) => {
     miniMod = m;
     labelsMod = l;
     shapeMod = s;
@@ -50,8 +52,10 @@ const coreReady = Promise.all([
     notesMod = nt;
     mixctlMod = mx;
     recordMod = rc;
+    arrangeMod = ar;
     initLfoEditor();
     initPianorollEditor();
+    initArrangeEditor();
     initRecordPanel();
     initPresetPanel();
     initPackPanel();
@@ -835,8 +839,9 @@ function foldConfigBlobs() {
   const DATA_ARG_TITLES = {
     lfo: 'lfo shape — click to expand, or use the shape editor',
     pianoroll: 'piano roll notes — click to expand, or use the piano roll editor',
+    arrange: 'arrangement clips — click to expand, or double-click arrange to paint',
   };
-  const dataArgRe = /\b(lfo|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
+  const dataArgRe = /\b(lfo|pianoroll|arrange)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
   while ((m = dataArgRe.exec(code))) {
     const str = m[2];
     if (str.length <= 2) continue; // "" - already as small as it gets
@@ -2309,6 +2314,12 @@ function initWidgetHandles() {
 
 /** Opens whichever editor `idx` is the handle for. True if one of them took it. */
 function openWidgetAt(code, idx) {
+  const arr = arrangeMod && findArrangeCallAt(code, idx);
+  if (arr?.onName) {
+    if (!arState || arr.start !== arState.callStart) openArrangeEditor(arr);
+    arCanvas.focus({ preventScroll: true }); // the keys (delete, undo) belong to the clips now
+    return true;
+  }
   const lfo = shapeMod && findLfoCallAt(code, idx);
   if (lfo?.onName) {
     // An empty lfo() has neither a shape nor a name yet. Give it both, then open whatever it
@@ -18838,3 +18849,842 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
   if (ed.somethingSelected()) openSnippetSave(ed);
   else openSnippetBrowser(ed);
 }, 'keep the selection as a snippet / open the snippet browser');
+
+// ---------------------------------------------------------------------------------------------
+// The arrangement painter - `$: arrange()`, double-click the name.
+//
+// A playlist: lanes down the side, bars along the top, and the buffer's labelled blocks as a
+// palette of brushes. Painting a block onto a lane makes a CLIP, and a block with any clip at all
+// plays only inside them - its bare loop has become a part (the server gates it, see the
+// arrangement pass in /api/evaluate and pattern-core's arrange.mjs). Lanes are display only: a
+// lane may hold any number of labels, and a label may sit on any lane, so the rows are for laying
+// the song out to read rather than one-track-per-row. The whole thing loops over its length.
+//
+// Clips edit like the roll's notes: click-drag to paint one, drag its body to move it (between
+// lanes too), drag its right edge to resize, right-click or delete to remove it. Every edit is
+// written straight back into the arrange("…", { … }) call - the data folds to a chip like a roll's
+// notes - and re-evaluates the buffer, so what is painted is what plays.
+// ---------------------------------------------------------------------------------------------
+
+const arPanel = document.getElementById('arrangePanel');
+const arCanvas = document.getElementById('arrangeCanvas');
+const arChips = document.getElementById('arrangeChips');
+const arSnapSelect = document.getElementById('arrangeSnap');
+const arLenInput = document.getElementById('arrangeLen');
+const arZoomInBtn = document.getElementById('arrangeZoomIn');
+const arZoomOutBtn = document.getElementById('arrangeZoomOut');
+const arAddLaneBtn = document.getElementById('arrangeAddLane');
+const arCloseBtn = document.getElementById('arrangeClose');
+const arLaneNameInput = document.getElementById('arrangeLaneName');
+const arMenu = document.getElementById('arrangeMenu');
+
+const AR_RULER = 20; // px: the bar numbers along the top
+const AR_ROW = 36; // px per lane
+const AR_GUTTER = 96; // px: the lane names down the left
+const AR_PAD_BOTTOM = 6;
+const AR_DEFAULT_PX_PER_CYCLE = 44; // one bar is comfortably wide by default: the unit you paint in
+const AR_MIN_PX_PER_CYCLE = 6;
+const AR_MAX_PX_PER_CYCLE = 400;
+const AR_EDGE_PX = 7; // how close to a clip's right edge counts as grabbing it to resize
+const AR_SNAPS = [1, 2, 4, 8, 16]; // cells per bar the snap menu offers
+const AR_HISTORY_MAX = 200;
+const AR_EVAL_DEBOUNCE_MS = 120;
+
+let arState = null;
+let arRaf = null;
+let arPlayheadOn = false;
+let arW = 0;
+let arH = 0;
+let arEvalTimer = null;
+let arSuppressClose = false; // set while the panel's own write is changing the buffer
+
+// --- the call in the buffer ---
+
+function findArrangeCallAt(code, idx) {
+  return findNamedCallAt(code, idx, /\barrange\s*\(/g, 'arrange');
+}
+
+/**
+ * The arguments of an arrange(...) call -> its clips and options. The first argument is the clip
+ * string; whatever follows the comma after it is the options object, read as the JavaScript it is
+ * (an object literal, which is all the painter ever writes) and ignored if it doesn't read.
+ */
+function parseArrangeCall(inner) {
+  const text = inner.trim();
+  let clipStr = '';
+  let optsText = '';
+  const m = /^("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')\s*(?:,\s*([\s\S]*))?$/.exec(text);
+  if (m) {
+    clipStr = m[1].slice(1, -1);
+    optsText = (m[2] ?? '').trim();
+  } else if (text.startsWith('{')) {
+    optsText = text;
+  }
+  let opts = {};
+  if (optsText) {
+    try {
+      // eslint-disable-next-line no-new-func
+      opts = new Function(`return (${optsText})`)() ?? {};
+    } catch {
+      opts = {};
+    }
+  }
+  return { clips: arrangeMod.parseArrangement(clipStr), opts: arrangeMod.normalizeArrangeOpts(opts) };
+}
+
+function arCallOpts(state) {
+  const opts = {};
+  if (state.snap !== arrangeMod.ARRANGE_DEFAULT_SNAP) opts.snap = state.snap;
+  if (state.len != null) opts.len = state.len;
+  // Names are written up to the last lane that has one; a hole is an unnamed lane in between.
+  const lanes = state.lanes.slice();
+  while (lanes.length && !lanes[lanes.length - 1]) lanes.pop();
+  if (lanes.length) opts.lanes = lanes.map((n) => n || '');
+  return opts;
+}
+
+function serializeArrangeCall(state) {
+  const clips = arrangeMod.serializeArrangement(state.clips);
+  const opts = arCallOpts(state);
+  const optsText = Object.entries(opts)
+    .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+    .join(', ');
+  if (!clips && !optsText) return 'arrange()';
+  return optsText ? `arrange(${JSON.stringify(clips)}, { ${optsText} })` : `arrange(${JSON.stringify(clips)})`;
+}
+
+function writeArrangeCall(record = true) {
+  if (!arState) return;
+  const range = arState.marker.find();
+  if (!range) return;
+  if (record) arPushHistory();
+  const text = serializeArrangeCall(arState);
+  arSuppressClose = true;
+  try {
+    cm.replaceRange(text, range.from, range.to);
+    arState.marker.clear();
+    const startIdx = cm.indexFromPos(range.from);
+    arState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    arState.callStart = startIdx;
+  } finally {
+    arSuppressClose = false;
+  }
+  refoldAll(); // the rewrite cleared the data chip; put it (and everything else) back in one frame
+  arRenderChips();
+  clearTimeout(arEvalTimer);
+  arEvalTimer = setTimeout(() => { arEvalTimer = null; evaluate(false); }, AR_EVAL_DEBOUNCE_MS);
+}
+
+// --- history ---
+
+const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, lanes: arState.lanes.slice(), laneCount: arState.laneCount });
+const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.lanes.join(',')}|${s.laneCount}`;
+
+function arPushHistory() {
+  const snap = arSnapshot();
+  const current = arState.history[arState.histIdx];
+  if (current && arSnapKey(current) === arSnapKey(snap)) return;
+  arState.history.length = arState.histIdx + 1;
+  arState.history.push(snap);
+  if (arState.history.length > AR_HISTORY_MAX) arState.history.shift();
+  arState.histIdx = arState.history.length - 1;
+}
+
+function arHistoryStep(delta) {
+  const next = arState.histIdx + delta;
+  if (next < 0 || next >= arState.history.length) return;
+  arState.histIdx = next;
+  const snap = arState.history[next];
+  arState.clips = snap.clips.map((c) => ({ ...c }));
+  arState.len = snap.len;
+  arState.snap = snap.snap;
+  arState.lanes = snap.lanes.slice();
+  arState.laneCount = snap.laneCount;
+  arState.sel.clear();
+  arSyncControls();
+  writeArrangeCall(false);
+  arSizeCanvas();
+  drawArrange();
+}
+
+// --- open / close ---
+
+function openArrangeEditor(call) {
+  if (!arrangeMod) return;
+  const wasOpen = !!arState;
+  if (wasOpen) closeArrangeEditor();
+  const code = cm.getValue();
+  const from = cm.posFromIndex(call.start);
+  const to = cm.posFromIndex(call.close + 1);
+  const { clips, opts } = parseArrangeCall(code.slice(call.open + 1, call.close));
+  arState = {
+    marker: cm.markText(from, to, {}),
+    callStart: call.start,
+    clips,
+    snap: opts.snap, // cells per bar the painter snaps to (editor metadata, written to the call)
+    len: opts.len, // explicit loop length in bars, or null for "the last clip's end"
+    lanes: opts.lanes, // lane names by index ('' = unnamed)
+    laneCount: arrangeMod.arrangementLaneCount(clips, opts),
+    pxPerCycle: AR_DEFAULT_PX_PER_CYCLE,
+    scroll: 0, // leftmost visible bar
+    brush: null, // the label the next paint lays down
+    sel: new Set(), // selected clip objects (transient, never serialized)
+    drag: null,
+    hover: null,
+    history: [],
+    histIdx: -1,
+  };
+  arPushHistory();
+  arSyncControls();
+  arRenderChips();
+  arPanel.classList.remove('hidden');
+  arSizeCanvas();
+  drawArrange();
+  if (!arRaf) arRaf = requestAnimationFrame(arPlayheadLoop);
+}
+
+function closeArrangeEditor() {
+  arCloseMenu();
+  arLaneNameInput.classList.add('hidden');
+  if (arRaf) { cancelAnimationFrame(arRaf); arRaf = null; }
+  if (arState?.marker) arState.marker.clear();
+  arState = null;
+  arPanel.classList.add('hidden');
+}
+
+function arPlayheadLoop() {
+  if (!arState) { arRaf = null; return; }
+  if (!transport.paused || arPlayheadOn) drawArrange();
+  arRaf = requestAnimationFrame(arPlayheadLoop);
+}
+
+// --- the palette ---
+
+/** The labels a clip may name: every labelled block in the buffer, in document order. */
+function arLabels() {
+  if (!labelsMod) return [];
+  const seen = new Set();
+  const out = [];
+  for (const b of labelsMod.splitLabeledBlocks(cm.getValue())) {
+    if (!b.label || b.label.startsWith('$') || seen.has(b.label)) continue;
+    seen.add(b.label);
+    out.push(b.label);
+  }
+  return out;
+}
+
+/** A label's colour: a hue hashed from its name, so `bass` is the same colour in every song. */
+function arHue(label) {
+  let h = 0;
+  for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+const arColor = (label, alpha = 1) => `hsla(${arHue(label)}, 62%, 58%, ${alpha})`;
+
+function arRenderChips() {
+  if (!arState) return;
+  const labels = arLabels();
+  const painted = new Set(arState.clips.map((c) => c.label));
+  // Labels that are painted but no longer in the buffer still get a chip, so their clips can be
+  // seen for what they are (and repainted or deleted) rather than being invisible orphans.
+  for (const l of painted) if (!labels.includes(l)) labels.push(l);
+  if (!labels.includes(arState.brush)) arState.brush = labels[0] ?? null;
+  arChips.innerHTML = '';
+  if (!labels.length) {
+    const e = document.createElement('span');
+    e.className = 'arrange-chips-empty';
+    e.textContent = 'no labelled blocks to paint yet';
+    arChips.appendChild(e);
+    return;
+  }
+  for (const label of labels) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `arrange-chip${label === arState.brush ? ' active' : ''}${painted.has(label) ? ' painted' : ''}`;
+    b.style.setProperty('--chip', arColor(label));
+    b.title = painted.has(label) ? `${label} — painted: plays only inside its clips` : `${label} — plays as written until painted`;
+    const dot = document.createElement('span');
+    dot.className = 'arrange-chip-dot';
+    b.appendChild(dot);
+    b.appendChild(document.createTextNode(label));
+    b.addEventListener('click', () => {
+      arState.brush = label;
+      arRenderChips();
+      arCanvas.focus({ preventScroll: true });
+    });
+    arChips.appendChild(b);
+  }
+}
+
+// --- controls ---
+
+function arSyncControls() {
+  if (!arState) return;
+  if (![...arSnapSelect.options].some((o) => Number(o.value) === arState.snap)) {
+    const o = document.createElement('option');
+    o.value = String(arState.snap);
+    o.textContent = `1/${arState.snap}`;
+    arSnapSelect.appendChild(o);
+  }
+  arSnapSelect.value = String(arState.snap);
+  arLenInput.value = arState.len == null ? '' : String(arState.len);
+}
+
+/** The loop length the painter shows and the server plays: explicit, or the last clip's end. */
+const arLoopLen = () => arrangeMod.arrangementLength(arState.clips, { len: arState.len });
+
+// --- geometry ---
+
+const arCell = () => 1 / arState.snap; // one snap cell, in bars
+const arSnapTo = (bars) => Math.round(bars * arState.snap) / arState.snap;
+const arXOf = (bars) => AR_GUTTER + (bars - arState.scroll) * arState.pxPerCycle;
+const arBarsOf = (x) => arState.scroll + (x - AR_GUTTER) / arState.pxPerCycle;
+const arLaneOf = (y) => Math.floor((y - AR_RULER) / AR_ROW);
+const arYOf = (lane) => AR_RULER + lane * AR_ROW;
+
+function arSizeCanvas() {
+  if (!arState) return;
+  const w = arCanvas.clientWidth;
+  if (!w) return;
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  arW = w;
+  arH = AR_RULER + arState.laneCount * AR_ROW + AR_PAD_BOTTOM;
+  arCanvas.style.height = `${arH}px`;
+  arCanvas._dpr = dpr;
+  arCanvas.width = w * dpr;
+  arCanvas.height = arH * dpr;
+}
+
+function arPoint(e) {
+  const r = arCanvas.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+/** The clip under (x, y), the topmost drawn (last in the list) winning, and whether its right edge is. */
+function arClipAt(x, y) {
+  const lane = arLaneOf(y);
+  const bars = arBarsOf(x);
+  for (let i = arState.clips.length - 1; i >= 0; i--) {
+    const c = arState.clips[i];
+    if (c.lane !== lane) continue;
+    const x1 = arXOf(c.start);
+    const x2 = arXOf(c.start + c.len);
+    if (x < x1 || x > x2) continue;
+    if (bars < c.start || bars > c.start + c.len) continue;
+    return { clip: c, edge: x2 - x <= AR_EDGE_PX && x2 - x1 > AR_EDGE_PX * 2 };
+  }
+  return null;
+}
+
+function arVisibleBars() {
+  return (arW - AR_GUTTER) / arState.pxPerCycle;
+}
+
+function arZoomAt(factor, x = AR_GUTTER) {
+  const barsUnder = arBarsOf(x);
+  arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, arState.pxPerCycle * factor));
+  arState.scroll = Math.max(0, barsUnder - (x - AR_GUTTER) / arState.pxPerCycle);
+  drawArrange();
+}
+
+// --- drawing ---
+
+function drawArrange() {
+  if (!arState || !arrangeMod) return;
+  const css = getComputedStyle(document.documentElement);
+  const col = (v) => css.getPropertyValue(v).trim();
+  const dpr = arCanvas._dpr || 1;
+  const ctx = arCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = arW;
+  const H = arH;
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textBaseline = 'middle';
+
+  const loopLen = arLoopLen();
+  const gridTop = AR_RULER;
+  const gridBottom = AR_RULER + arState.laneCount * AR_ROW;
+
+  // lanes: alternate fills, a rule between
+  for (let lane = 0; lane < arState.laneCount; lane++) {
+    const y = arYOf(lane);
+    ctx.fillStyle = lane % 2 ? col('--bg') : col('--bg-panel');
+    ctx.fillRect(AR_GUTTER, y, W - AR_GUTTER, AR_ROW);
+  }
+  // past the loop's end: dimmed, nothing there plays
+  const loopX = arXOf(loopLen);
+  if (loopX < W) {
+    ctx.fillStyle = col('--bg');
+    ctx.globalAlpha = 0.55;
+    ctx.fillRect(Math.max(AR_GUTTER, loopX), gridTop, W - Math.max(AR_GUTTER, loopX), gridBottom - gridTop);
+    ctx.globalAlpha = 1;
+  }
+
+  // vertical grid: snap cells faint, bars stronger, every 4 bars stronger still
+  const cell = arCell();
+  const firstCell = Math.floor(arState.scroll / cell);
+  const lastCell = Math.ceil((arState.scroll + arVisibleBars()) / cell);
+  const cellPx = cell * arState.pxPerCycle;
+  for (let k = firstCell; k <= lastCell; k++) {
+    const bars = k * cell;
+    const x = Math.round(arXOf(bars)) + 0.5;
+    if (x < AR_GUTTER) continue;
+    const onBar = Math.abs(bars - Math.round(bars)) < 1e-9;
+    if (!onBar && cellPx < 5) continue; // too fine to draw
+    const onPhrase = onBar && Math.round(bars) % 4 === 0;
+    ctx.strokeStyle = col('--border');
+    ctx.globalAlpha = onPhrase ? 1 : onBar ? 0.7 : 0.3;
+    ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, gridBottom); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  // lane rules
+  ctx.strokeStyle = col('--border');
+  for (let lane = 0; lane <= arState.laneCount; lane++) {
+    const y = Math.round(arYOf(lane)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(AR_GUTTER, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // clips
+  const text = col('--text');
+  for (const c of arState.clips) {
+    const x1 = arXOf(c.start);
+    const x2 = arXOf(c.start + c.len);
+    if (x2 <= AR_GUTTER || x1 >= W) continue;
+    const dx = Math.max(AR_GUTTER, x1);
+    const dx2 = Math.min(W, x2);
+    const y = arYOf(c.lane);
+    const w = Math.max(2, dx2 - dx - 1);
+    const selected = arState.sel.has(c);
+    const past = c.start >= loopLen - 1e-9;
+    ctx.fillStyle = arColor(c.label, past ? 0.18 : 0.42);
+    prRoundRect(ctx, dx + 0.5, y + 3, w, AR_ROW - 6, 4); ctx.fill();
+    ctx.strokeStyle = selected ? col('--accent') : arColor(c.label, 0.95);
+    ctx.lineWidth = selected ? 1.5 : 1;
+    prRoundRect(ctx, dx + 0.5, y + 3, w, AR_ROW - 6, 4); ctx.stroke();
+    ctx.lineWidth = 1;
+    if (w > 18) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(dx + 2, y, w - 4, AR_ROW); ctx.clip();
+      ctx.fillStyle = text;
+      ctx.globalAlpha = past ? 0.5 : 0.95;
+      ctx.fillText(c.label, dx + 6, y + AR_ROW / 2);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+  }
+
+  // the paint in progress, hollow, so what a drag is about to make is visible before it lands
+  if (arState.drag?.kind === 'marquee') {
+    const r = arState.drag;
+    ctx.fillStyle = col('--accent-soft');
+    ctx.strokeStyle = col('--accent');
+    const rx = Math.min(r.x0, r.x1), ry = Math.min(r.y0, r.y1);
+    ctx.fillRect(rx, ry, Math.abs(r.x1 - r.x0), Math.abs(r.y1 - r.y0));
+    ctx.strokeRect(rx + 0.5, ry + 0.5, Math.abs(r.x1 - r.x0), Math.abs(r.y1 - r.y0));
+  }
+
+  // ruler: bar numbers, and the loop's end as a marker you can drag
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, 0, W, AR_RULER);
+  ctx.strokeStyle = col('--border');
+  ctx.beginPath(); ctx.moveTo(0, AR_RULER - 0.5); ctx.lineTo(W, AR_RULER - 0.5); ctx.stroke();
+  const every = arState.pxPerCycle >= 28 ? 1 : arState.pxPerCycle >= 12 ? 4 : arState.pxPerCycle >= 4 ? 8 : 16;
+  ctx.fillStyle = col('--text-dim');
+  for (let bar = Math.ceil(arState.scroll); bar <= arState.scroll + arVisibleBars(); bar++) {
+    if (bar % every) continue;
+    const x = arXOf(bar);
+    if (x < AR_GUTTER) continue;
+    ctx.fillText(String(bar + 1), x + 3, AR_RULER / 2);
+  }
+  // loop end
+  if (loopX >= AR_GUTTER && loopX <= W + 1) {
+    ctx.strokeStyle = col('--accent');
+    ctx.setLineDash([4, 3]);
+    ctx.globalAlpha = arState.len == null ? 0.5 : 0.9;
+    ctx.beginPath(); ctx.moveTo(Math.round(loopX) + 0.5, 0); ctx.lineTo(Math.round(loopX) + 0.5, gridBottom); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = col('--accent');
+    ctx.beginPath(); ctx.moveTo(loopX, AR_RULER - 1); ctx.lineTo(loopX - 5, 1); ctx.lineTo(loopX + 5, 1); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // gutter: lane names
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, AR_RULER, AR_GUTTER, gridBottom - AR_RULER);
+  ctx.strokeStyle = col('--border');
+  ctx.beginPath(); ctx.moveTo(AR_GUTTER - 0.5, 0); ctx.lineTo(AR_GUTTER - 0.5, gridBottom); ctx.stroke();
+  for (let lane = 0; lane < arState.laneCount; lane++) {
+    const name = arState.lanes[lane] || '';
+    const y = arYOf(lane) + AR_ROW / 2;
+    ctx.fillStyle = name ? text : col('--text-dim');
+    ctx.globalAlpha = name ? 0.95 : 0.55;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, arYOf(lane), AR_GUTTER - 4, AR_ROW); ctx.clip();
+    ctx.fillText(name || `${lane + 1}`, 8, y);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    const y2 = Math.round(arYOf(lane + 1)) + 0.5;
+    ctx.strokeStyle = col('--border');
+    ctx.beginPath(); ctx.moveTo(0, y2); ctx.lineTo(AR_GUTTER, y2); ctx.stroke();
+  }
+
+  // playhead
+  arPlayheadOn = false;
+  if (!transport.paused) {
+    const pos = ((currentCyclePos() % loopLen) + loopLen) % loopLen;
+    const x = arXOf(pos);
+    if (x >= AR_GUTTER && x <= W) {
+      ctx.strokeStyle = col('--accent');
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, gridBottom); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
+      arPlayheadOn = true;
+    }
+  }
+}
+
+// --- gestures ---
+
+function arCursorFor(x, y) {
+  if (!arState) return 'default';
+  if (y < AR_RULER) return x >= AR_GUTTER ? 'col-resize' : 'default';
+  if (x < AR_GUTTER) return 'default';
+  const hit = arClipAt(x, y);
+  if (hit) return hit.edge ? 'ew-resize' : 'grab';
+  return arState.brush ? 'crosshair' : 'default';
+}
+
+function arEnsureLane(lane) {
+  if (lane >= arState.laneCount) arState.laneCount = lane + 1;
+}
+
+/** Enough lanes for every clip and name - a clip dragged below the last lane made a new one. Lanes only grow: an empty one you added stays. */
+function arTrimLanes() {
+  arState.laneCount = Math.max(arState.laneCount, arrangeMod.arrangementLaneCount(arState.clips, { lanes: arState.lanes }));
+}
+
+function arDeleteClips(clips) {
+  const gone = new Set(clips);
+  if (!gone.size) return;
+  arState.clips = arState.clips.filter((c) => !gone.has(c));
+  for (const c of gone) arState.sel.delete(c);
+  writeArrangeCall();
+  drawArrange();
+}
+
+function arOpenMenu(clientX, clientY, hit, lane) {
+  const items = [];
+  if (hit) {
+    const targets = arState.sel.has(hit.clip) ? [...arState.sel] : [hit.clip];
+    const labels = arLabels();
+    items.push([`delete${targets.length > 1 ? ` ${targets.length} clips` : ''}`, () => arDeleteClips(targets)]);
+    items.push(['duplicate after', () => arDuplicate(targets)]);
+    if (labels.length > 1) {
+      items.push('-');
+      for (const l of labels) {
+        if (l === hit.clip.label && targets.length === 1) continue;
+        items.push([`→ ${l}`, () => { for (const c of targets) c.label = l; writeArrangeCall(); drawArrange(); }, `repaint as ${l}`]);
+      }
+    }
+  } else if (lane != null && lane >= 0 && lane < arState.laneCount) {
+    items.push(['rename lane', () => arRenameLane(lane)]);
+    if (arState.clips.some((c) => c.lane === lane)) items.push(['clear lane', () => arDeleteClips(arState.clips.filter((c) => c.lane === lane))]);
+  }
+  if (!items.length) return;
+  openCtxMenu(arMenu, clientX, clientY, { items });
+}
+
+function arCloseMenu() {
+  arMenu.classList.add('hidden');
+}
+
+function arDuplicate(clips) {
+  if (!clips.length) return;
+  const end = Math.max(...clips.map((c) => c.start + c.len));
+  const start = Math.min(...clips.map((c) => c.start));
+  const shift = end - start;
+  const made = clips.map((c) => ({ ...c, start: c.start + shift }));
+  arState.clips.push(...made);
+  arState.sel = new Set(made);
+  writeArrangeCall();
+  drawArrange();
+}
+
+function arRenameLane(lane) {
+  const r = arCanvas.getBoundingClientRect();
+  const body = arCanvas.parentElement.getBoundingClientRect();
+  arLaneNameInput.style.left = `${r.left - body.left + 4}px`;
+  arLaneNameInput.style.top = `${r.top - body.top + arYOf(lane) + (AR_ROW - 22) / 2}px`;
+  arLaneNameInput.style.width = `${AR_GUTTER - 8}px`;
+  arLaneNameInput.value = arState.lanes[lane] || '';
+  arLaneNameInput.dataset.lane = String(lane);
+  arLaneNameInput.classList.remove('hidden');
+  arLaneNameInput.focus();
+  arLaneNameInput.select();
+}
+
+function arCommitLaneName(save) {
+  if (arLaneNameInput.classList.contains('hidden')) return;
+  const lane = Number(arLaneNameInput.dataset.lane);
+  arLaneNameInput.classList.add('hidden');
+  if (!save || !arState) return;
+  const name = arLaneNameInput.value.trim();
+  while (arState.lanes.length <= lane) arState.lanes.push('');
+  if (arState.lanes[lane] === name) return;
+  arState.lanes[lane] = name;
+  writeArrangeCall();
+  drawArrange();
+}
+
+function initArrangeCanvas() {
+  for (const n of AR_SNAPS) {
+    const o = document.createElement('option');
+    o.value = String(n);
+    o.textContent = n === 1 ? 'bar' : `1/${n}`;
+    arSnapSelect.appendChild(o);
+  }
+
+  arCanvas.addEventListener('pointerdown', (e) => {
+    if (!arState) return;
+    arCloseMenu();
+    arCommitLaneName(true);
+    const { x, y } = arPoint(e);
+    const lane = arLaneOf(y);
+    const hit = y >= AR_RULER && x >= AR_GUTTER ? arClipAt(x, y) : null;
+    if (e.button === 2) {
+      e.preventDefault();
+      arOpenMenu(e.clientX, e.clientY, hit, x < AR_GUTTER ? lane : null);
+      return;
+    }
+    if (e.button !== 0) return;
+    arCanvas.focus({ preventScroll: true });
+    arCanvas.setPointerCapture(e.pointerId);
+
+    if (y < AR_RULER) {
+      // the ruler: drag to set the loop length, which is where the song wraps
+      if (x < AR_GUTTER) return;
+      arState.drag = { kind: 'len', moved: false };
+      arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
+      arSyncControls();
+      drawArrange();
+      return;
+    }
+    if (x < AR_GUTTER || lane < 0 || lane >= arState.laneCount) return;
+
+    if (hit) {
+      if (e.altKey) { arDeleteClips([hit.clip]); return; }
+      if (e.shiftKey) {
+        if (arState.sel.has(hit.clip)) arState.sel.delete(hit.clip);
+        else arState.sel.add(hit.clip);
+      } else if (!arState.sel.has(hit.clip)) {
+        arState.sel = new Set([hit.clip]);
+      }
+      const targets = [...arState.sel];
+      const orig = new Map(targets.map((c) => [c, { start: c.start, lane: c.lane, len: c.len }]));
+      arState.drag = hit.edge
+        ? { kind: 'resize', targets, orig, x0: x, moved: false }
+        : { kind: 'move', targets, orig, x0: x, lane0: lane, moved: false };
+      drawArrange();
+      return;
+    }
+
+    if (e.shiftKey || !arState.brush) {
+      // empty space with shift (or nothing to paint): rubber-band a selection
+      arState.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y };
+      if (!e.shiftKey) arState.sel.clear();
+      drawArrange();
+      return;
+    }
+    // paint: the clip lands one cell wide and grows with the drag
+    const start = Math.floor(arBarsOf(x) / arCell()) * arCell();
+    const clip = { label: arState.brush, lane, start: Math.max(0, start), len: arCell() };
+    arState.clips.push(clip);
+    arState.sel = new Set([clip]);
+    arState.drag = { kind: 'resize', targets: [clip], orig: new Map([[clip, { ...clip }]]), x0: x, moved: false, painted: true };
+    drawArrange();
+  });
+
+  arCanvas.addEventListener('pointermove', (e) => {
+    if (!arState) return;
+    const { x, y } = arPoint(e);
+    const d = arState.drag;
+    if (!d) {
+      arCanvas.style.cursor = arCursorFor(x, y);
+      return;
+    }
+    if (d.kind === 'len') {
+      arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
+      d.moved = true;
+      arSyncControls();
+    } else if (d.kind === 'move') {
+      const dBars = arSnapTo(arBarsOf(x) - arBarsOf(d.x0));
+      const dLane = arLaneOf(y) - d.lane0;
+      const minStart = Math.min(...d.targets.map((c) => d.orig.get(c).start));
+      const minLane = Math.min(...d.targets.map((c) => d.orig.get(c).lane));
+      const shift = Math.max(dBars, -minStart);
+      const laneShift = Math.max(dLane, -minLane);
+      for (const c of d.targets) {
+        const o = d.orig.get(c);
+        c.start = o.start + shift;
+        c.lane = o.lane + laneShift;
+        arEnsureLane(c.lane);
+      }
+      d.moved = d.moved || shift !== 0 || laneShift !== 0;
+      if (laneShift > 0) arSizeCanvas();
+    } else if (d.kind === 'resize') {
+      const dBars = arBarsOf(x) - arBarsOf(d.x0);
+      for (const c of d.targets) {
+        const o = d.orig.get(c);
+        // the edge snaps to the grid, and a clip is never thinner than one cell
+        c.len = Math.max(arCell(), arSnapTo(o.start + o.len + dBars) - o.start);
+      }
+      d.moved = true;
+    } else if (d.kind === 'marquee') {
+      d.x1 = x;
+      d.y1 = y;
+      const bx0 = arBarsOf(Math.min(d.x0, d.x1)), bx1 = arBarsOf(Math.max(d.x0, d.x1));
+      const l0 = arLaneOf(Math.min(d.y0, d.y1)), l1 = arLaneOf(Math.max(d.y0, d.y1));
+      for (const c of arState.clips) {
+        const inside = c.lane >= l0 && c.lane <= l1 && c.start < bx1 && c.start + c.len > bx0;
+        if (inside) arState.sel.add(c);
+        else if (!e.shiftKey) arState.sel.delete(c);
+      }
+    }
+    // drag near the right edge scrolls the timeline along
+    if (x > arW - 12 && d.kind !== 'marquee') arState.scroll += arCell();
+    drawArrange();
+  });
+
+  const finish = (e) => {
+    if (!arState?.drag) return;
+    const d = arState.drag;
+    arState.drag = null;
+    try { arCanvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+    if (d.kind === 'marquee') { drawArrange(); return; }
+    if (d.kind === 'len' || d.moved || d.painted) {
+      arTrimLanes();
+      arSizeCanvas();
+      writeArrangeCall();
+    }
+    drawArrange();
+  };
+  arCanvas.addEventListener('pointerup', finish);
+  arCanvas.addEventListener('pointercancel', finish);
+  arCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  arCanvas.addEventListener('dblclick', (e) => {
+    if (!arState) return;
+    const { x, y } = arPoint(e);
+    const lane = arLaneOf(y);
+    if (x < AR_GUTTER && lane >= 0 && lane < arState.laneCount) arRenameLane(lane);
+    else if (y < AR_RULER && arState.len != null) {
+      // the ruler: back to an automatic length
+      arState.len = null;
+      arSyncControls();
+      writeArrangeCall();
+      drawArrange();
+    }
+  });
+
+  arCanvas.addEventListener('wheel', (e) => {
+    if (!arState) return;
+    e.preventDefault();
+    const { x } = arPoint(e);
+    if (e.ctrlKey || e.metaKey) {
+      arZoomAt(Math.exp(-e.deltaY * 0.01), x);
+      return;
+    }
+    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    arState.scroll = Math.max(0, arState.scroll + delta / arState.pxPerCycle);
+    drawArrange();
+  }, { passive: false });
+
+  arCanvas.addEventListener('keydown', (e) => {
+    if (!arState) return;
+    const mod = e.metaKey || e.ctrlKey;
+    if (e.key === 'Escape') { closeArrangeEditor(); e.preventDefault(); return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') { arDeleteClips([...arState.sel]); e.preventDefault(); return; }
+    if (mod && e.key.toLowerCase() === 'z') { arHistoryStep(e.shiftKey ? 1 : -1); e.preventDefault(); return; }
+    if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
+    if (mod && e.key.toLowerCase() === 'd') { arDuplicate([...arState.sel]); e.preventDefault(); return; }
+    if (e.key === '+' || e.key === '=') { arZoomAt(1.25); e.preventDefault(); return; }
+    if (e.key === '-') { arZoomAt(0.8); e.preventDefault(); return; }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const step = (e.key === 'ArrowLeft' ? -1 : 1) * arCell();
+      if (arState.sel.size) {
+        const minStart = Math.min(...[...arState.sel].map((c) => c.start));
+        const shift = Math.max(step, -minStart);
+        if (shift) { for (const c of arState.sel) c.start += shift; writeArrangeCall(); }
+      } else {
+        arState.scroll = Math.max(0, arState.scroll + step * 4);
+      }
+      drawArrange();
+      e.preventDefault();
+      return;
+    }
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && arState.sel.size) {
+      const step = e.key === 'ArrowUp' ? -1 : 1;
+      const minLane = Math.min(...[...arState.sel].map((c) => c.lane));
+      const shift = Math.max(step, -minLane);
+      if (shift) {
+        for (const c of arState.sel) { c.lane += shift; arEnsureLane(c.lane); }
+        arTrimLanes();
+        arSizeCanvas();
+        writeArrangeCall();
+      }
+      drawArrange();
+      e.preventDefault();
+    }
+  });
+
+  arLaneNameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { arCommitLaneName(true); arCanvas.focus({ preventScroll: true }); e.preventDefault(); }
+    else if (e.key === 'Escape') { arCommitLaneName(false); arCanvas.focus({ preventScroll: true }); e.preventDefault(); }
+    e.stopPropagation();
+  });
+  arLaneNameInput.addEventListener('blur', () => arCommitLaneName(true));
+
+  document.addEventListener('pointerdown', (e) => { if (!arMenu.contains(e.target)) arCloseMenu(); }, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !arMenu.classList.contains('hidden')) { arCloseMenu(); e.stopPropagation(); } }, true);
+}
+
+function initArrangeEditor() {
+  initArrangeCanvas();
+  arSnapSelect.addEventListener('change', () => {
+    if (!arState) return;
+    arState.snap = Math.max(1, Math.round(Number(arSnapSelect.value) || 1));
+    writeArrangeCall();
+    drawArrange();
+  });
+  arLenInput.addEventListener('change', () => {
+    if (!arState) return;
+    const v = Number(arLenInput.value);
+    arState.len = Number.isFinite(v) && v > 0 ? v : null;
+    arSyncControls();
+    writeArrangeCall();
+    drawArrange();
+  });
+  arZoomInBtn.addEventListener('click', () => arState && arZoomAt(1.25));
+  arZoomOutBtn.addEventListener('click', () => arState && arZoomAt(0.8));
+  arAddLaneBtn.addEventListener('click', () => {
+    if (!arState) return;
+    arState.laneCount++;
+    arSizeCanvas();
+    drawArrange();
+  });
+  arCloseBtn.addEventListener('click', closeArrangeEditor);
+  window.addEventListener('resize', () => { if (arState) { arSizeCanvas(); drawArrange(); } });
+  // The call the panel is editing can be deleted, or typed over, from the buffer side: the panel
+  // then has nothing to write into, so it goes. Its own writes are the exception.
+  cm.on('change', () => {
+    if (!arState || arSuppressClose) return;
+    const range = arState.marker.find();
+    if (!range) { closeArrangeEditor(); return; }
+    const text = cm.getRange(range.from, range.to);
+    if (!/^arrange\s*\(/.test(text)) closeArrangeEditor();
+    else arRenderChips(); // a label added or renamed shows up in the palette as you type
+  });
+}

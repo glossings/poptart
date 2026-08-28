@@ -59,6 +59,7 @@ export function injectLocations(code, base = 0) {
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
   'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'input', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  'arrange', // the painter's clips, then its options - drawn data, never mini (see arrange.mjs)
   // The editor's own definition calls: an id to look one up by, then the drawn data the matching
   // builder takes. Underscored because nobody types them (see server.js's INTERNAL_BUILDERS); the
   // bare spellings stay listed so a buffer written before the rename still transpiles correctly.
@@ -77,7 +78,7 @@ const NAME_ARG_CALLS = new Set([
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', '_roll', 'roll', '_shape', 'shape', '_preset', '_pack', 'midicc', 'midikeys', 'input']);
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'arrange', '_roll', 'roll', '_shape', 'shape', '_preset', '_pack', 'midicc', 'midikeys', 'input']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain

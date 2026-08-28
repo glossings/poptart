@@ -188,6 +188,12 @@ const API_DOCS = {
     desc: 'Sets the key every .sc() reads. Hoisted, so the last one in the buffer re-keys the whole buffer.',
     eg: 'setscale("F minor")',
   },
+  arrange: {
+    kind: 'builder',
+    sig: 'arrange()',
+    desc: 'The arrangement painter - double-click the arrange name to open it. Paint any labelled block onto its lanes, playlist-style; a block painted anywhere plays ONLY where it is painted, and the arrangement loops over its length. Blocks left unpainted play as before.',
+    eg: '$: arrange()',
+  },
 
   // ----------------------------------------------------------------- music-theory helpers
   noteToMidi: { kind: 'builder', sig: 'noteToMidi(name)', desc: 'Note name → MIDI number ("c3" → 60), the c3 = 60 convention. Plain helper, handy inside your own methods.', eg: 'noteToMidi("f#3")' },
