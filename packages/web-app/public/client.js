@@ -19650,11 +19650,29 @@ function initArrangeCanvas() {
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'd') { arDuplicate([...arState.sel]); e.preventDefault(); return; }
     if (!mod && e.key.toLowerCase() === 'b') { arToggleTool(); e.preventDefault(); return; }
+    if (e.key === 'Tab') {
+      // tab / shift+tab step the brush through the palette, so a part can be picked without
+      // leaving the canvas (the chips are in the palette's order: document order, then orphans)
+      const labels = [...arChips.querySelectorAll('.arrange-chip')].map((b) => b.textContent);
+      if (labels.length) {
+        const at = labels.indexOf(arState.brush);
+        arState.brush = labels[(at + (e.shiftKey ? -1 : 1) + labels.length) % labels.length];
+        arRenderChips();
+        arRefreshCursor();
+      }
+      e.preventDefault();
+      return;
+    }
     if (e.key === '+' || e.key === '=') { arZoomAt(1.25); e.preventDefault(); return; }
     if (e.key === '-') { arZoomAt(0.8); e.preventDefault(); return; }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       const step = (e.key === 'ArrowLeft' ? -1 : 1) * arCell();
-      if (arState.sel.size) {
+      if (arState.sel.size && e.shiftKey) {
+        // Shift is the roll's length nudge: the onset stays put and the END moves one cell -
+        // right lengthens, left shortens back down to a single cell.
+        for (const c of arState.sel) c.len = Math.max(arCell(), c.len + step);
+        writeArrangeCall();
+      } else if (arState.sel.size) {
         const minStart = Math.min(...[...arState.sel].map((c) => c.start));
         const shift = Math.max(step, -minStart);
         if (shift) { for (const c of arState.sel) c.start += shift; writeArrangeCall(); }
