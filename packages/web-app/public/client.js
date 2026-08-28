@@ -17632,7 +17632,6 @@ const snippetSaveConfirm = document.getElementById('snippetSaveConfirm');
 const snippetBrowseBackdrop = document.getElementById('snippetBrowseBackdrop');
 const snippetBrowseSearch = document.getElementById('snippetBrowseSearch');
 const snippetBrowseList = document.getElementById('snippetBrowseList');
-const snippetBrowsePreview = document.getElementById('snippetBrowsePreview');
 const snippetBrowseCarriesEl = document.getElementById('snippetBrowseCarries');
 const snippetBrowseNote = document.getElementById('snippetBrowseNote');
 const snippetBrowseInsert = document.getElementById('snippetBrowseInsert');
@@ -17644,8 +17643,9 @@ const editorMenu = document.getElementById('editorMenu');
 const SNIPPET_DND = 'application/x-poptart-snippet';
 
 let snippetSaveState = null; // { ed, carries: [{ kind, id, scope, code, why, off }], names }
-let snippetBrowseState = null; // { ed, at, entries, sel }
+let snippetBrowseState = null; // { ed, at, entries, sel, editing, dirty }
 let snippetSaveCM = null;
+let snippetBrowseCM = null;
 
 // --------------------------------------------------------------------------------- what it carries
 
@@ -17976,13 +17976,17 @@ function snippetRow(entry) {
   const row = document.createElement('div');
   row.className = 'snippet-row';
   row.draggable = true;
-  row.title = 'click to insert it at the caret - or drag it to where you want it';
+  row.title = 'click to select it - → or Enter puts it in at the caret, or drag it where you want it';
 
   const main = document.createElement('div');
   main.className = 'snippet-row-main';
   const label = document.createElement('span');
   label.className = 'snippet-row-label';
   label.textContent = entry.label;
+  label.title = 'click to rename it';
+  // The name IS the rename handle, now that the row itself only selects. Sized to its own text in
+  // the stylesheet, so the rest of the row is still somewhere to click without renaming anything.
+  label.addEventListener('click', (e) => { e.stopPropagation(); renameSnippetFile(entry); });
   const meta = document.createElement('span');
   meta.className = 'snippet-row-meta';
   const bits = [];
@@ -17995,7 +17999,7 @@ function snippetRow(entry) {
   row.appendChild(main);
 
   for (const [glyph, title, fn] of [
-    ['✎', 'rename', () => renameSnippetFile(entry)],
+    ['→', 'insert it at the caret', () => { selectSnippetRow(entry); insertSelectedSnippet(); }],
     ['✕', 'delete', () => deleteSnippetFile(entry)],
   ]) {
     const b = document.createElement('button');
@@ -18006,8 +18010,7 @@ function snippetRow(entry) {
     row.appendChild(b);
   }
 
-  row.addEventListener('mouseenter', () => selectSnippetRow(entry));
-  row.addEventListener('click', () => { selectSnippetRow(entry); insertSelectedSnippet(); });
+  row.addEventListener('click', () => selectSnippetRow(entry));
   // text/plain as well as the private type, so CodeMirror draws its own drop cursor all the way
   // in; the private one is what tells the drop handler there are definitions to file with it.
   row.addEventListener('dragstart', (e) => {
@@ -18026,13 +18029,82 @@ function snippetRow(entry) {
   return row;
 }
 
+/**
+ * The right-hand pane is a real editor, not a preview: what a snippet does is mostly a matter of
+ * one number in it, and having to insert it, fix it, re-select it and keep it again to change that
+ * is the long way round something the browser is already showing you.
+ */
+function ensureSnippetBrowseCM() {
+  if (!snippetBrowseCM) {
+    snippetBrowseCM = CodeMirror.fromTextArea(document.getElementById('snippetBrowseEditor'), {
+      mode: { name: 'javascript' },
+      theme: 'poptart',
+      keyMap: 'sublime',
+      matchBrackets: true,
+      viewportMargin: Infinity,
+      extraKeys: { 'Cmd-S': flushSnippetEdit, 'Ctrl-S': flushSnippetEdit },
+    });
+    // `setValue` is this code putting a row up, not somebody typing - it must not mark the row dirty
+    // and write it straight back.
+    snippetBrowseCM.on('change', (_cm, ch) => {
+      if (ch.origin === 'setValue' || !snippetBrowseState) return;
+      snippetBrowseState.dirty = true;
+      snippetBrowseNote.textContent = '';
+    });
+    snippetBrowseCM.on('blur', () => flushSnippetEdit());
+  }
+  return snippetBrowseCM;
+}
+
+/**
+ * The edit, written back to the snippet file. Quiet and automatic - on the way out of the code
+ * window, off to another row, or out of the browser - because a code pane that throws away what
+ * you typed is worse than one that saves a comma too eagerly.
+ *
+ * Deliberately does NOT refresh the list afterwards: saving bumps the file's mtime and the list is
+ * sorted by it, so a refresh would make the row you are working on jump out from under you.
+ */
+async function flushSnippetEdit() {
+  const st = snippetBrowseState;
+  if (!st?.dirty) return;
+  st.dirty = false;
+  const entry = st.entries.find((e) => e.name === st.editing);
+  const body = ensureSnippetBrowseCM().getValue();
+  if (!entry || body === entry.body) return;
+  try {
+    // Title, tags and sidecar go back exactly as they came: this pane edits the body and nothing
+    // else, and composeSnippet rebuilds the file from all four.
+    await api('POST', '/api/snippets/save', {
+      name: entry.name,
+      title: entry.title ?? '',
+      tags: entry.tags ?? [],
+      body,
+      defs: (entry.carries ?? [])
+        .filter((c) => c.code)
+        .map(({ kind, id, scope, code }) => ({ kind, id, scope, code })),
+    });
+    entry.body = body;
+    snippetBrowseNote.textContent = `saved "${entry.name}"`;
+  } catch (e) {
+    st.dirty = true; // still unsaved - another blur or the close will try again
+    snippetBrowseNote.textContent = "couldn't save the edit";
+    logLine(`couldn't save the edit to snippet "${entry.name}" - ${e.message ?? String(e)}`, true);
+  }
+}
+
 function selectSnippetRow(entry) {
   if (!snippetBrowseState) return;
+  // Leaving a row keeps it, the same as leaving the code window does.
+  if (entry?.name !== snippetBrowseState.editing) flushSnippetEdit();
   snippetBrowseState.sel = entry?.name ?? null;
   for (const el of snippetBrowseList.querySelectorAll('.snippet-row')) {
     el.classList.toggle('current', el.dataset.name === snippetBrowseState.sel);
   }
-  snippetBrowsePreview.textContent = entry?.body ?? '';
+  const box = ensureSnippetBrowseCM();
+  box.setValue(entry?.body ?? '');
+  box.setOption('readOnly', !entry);
+  snippetBrowseState.editing = entry?.name ?? null;
+  snippetBrowseState.dirty = false;
   renderSnippetCarries(snippetBrowseCarriesEl, entry?.carries ?? []);
   snippetBrowseInsert.disabled = !entry;
 }
@@ -18060,6 +18132,10 @@ function renderSnippetList() {
 
 async function refreshSnippetList() {
   if (!snippetBrowseState) return;
+  // Before the fetch: the rows are about to be replaced, and a save landing after them would be
+  // written from an entry that is no longer the one on screen.
+  await flushSnippetEdit();
+  if (!snippetBrowseState) return;
   const q = snippetBrowseSearch.value.trim();
   try {
     const { snippets } = await api('GET', `/api/snippets?q=${encodeURIComponent(q)}`);
@@ -18077,18 +18153,21 @@ async function refreshSnippetList() {
  * caret's focus, so clicking a row afterwards would otherwise write wherever the editor was left.
  */
 function openSnippetBrowser(ed = activeCM(), at = null) {
-  snippetBrowseState = { ed, at: at ?? ed.indexFromPos(ed.getCursor()), entries: [], sel: null };
+  snippetBrowseState = { ed, at: at ?? ed.indexFromPos(ed.getCursor()), entries: [], sel: null, editing: null, dirty: false };
   snippetBrowseSearch.value = '';
-  snippetBrowsePreview.textContent = '';
+  const box = ensureSnippetBrowseCM();
+  box.setValue('');
   snippetBrowseCarriesEl.innerHTML = '';
   snippetBrowseNote.textContent = '';
   snippetBrowseInsert.disabled = true;
   snippetBrowseBackdrop.classList.remove('hidden');
+  box.refresh(); // laid out while hidden - size it now that it is visible
   snippetBrowseSearch.focus();
   refreshSnippetList();
 }
 
 function closeSnippetBrowser({ refocus = true } = {}) {
+  flushSnippetEdit();
   const ed = snippetBrowseState?.ed;
   snippetBrowseBackdrop.classList.add('hidden');
   snippetBrowseState = null;
@@ -18099,9 +18178,12 @@ function insertSelectedSnippet() {
   if (!snippetBrowseState) return;
   const entry = snippetBrowseState.entries.find((e) => e.name === snippetBrowseState.sel);
   if (!entry) return;
+  // What is on screen is what goes in - and it is kept, too, rather than being an edit that only
+  // this one insert ever saw.
+  const body = snippetBrowseState.editing === entry.name ? ensureSnippetBrowseCM().getValue() : entry.body;
   const { ed, at } = snippetBrowseState;
   closeSnippetBrowser();
-  insertSnippet(entry, ed, at).catch((e) => logLine(e.message ?? String(e), true));
+  insertSnippet({ ...entry, body }, ed, at).catch((e) => logLine(e.message ?? String(e), true));
 }
 
 async function renameSnippetFile(entry) {
@@ -18250,6 +18332,13 @@ document.getElementById('snippetBrowseClose').addEventListener('click', () => cl
 snippetBrowseBackdrop.addEventListener('click', (e) => { if (e.target === snippetBrowseBackdrop) closeSnippetBrowser(); });
 snippetBrowseSearch.addEventListener('input', () => refreshSnippetList());
 snippetBrowseBackdrop.addEventListener('keydown', (e) => {
+  // Inside the code window the arrows and Enter belong to it - it is an editor now, not a preview.
+  // Everything is still stopped from reaching the page's own chords, as in the save dialog.
+  const inCode = !!e.target?.closest?.('.CodeMirror');
+  if (inCode) {
+    e.stopPropagation();
+    return;
+  }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     const entries = snippetBrowseState?.entries ?? [];

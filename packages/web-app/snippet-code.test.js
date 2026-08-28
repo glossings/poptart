@@ -226,6 +226,14 @@ test('placeSnippet drops a chain fragment in exactly where the caret is', () => 
   assert.equal(text, '.room(0.3)'); // no newlines - it continues the line it landed on
 });
 
+test('placeSnippet keeps a chain fragment inline however many lines it wraps over', () => {
+  const code = 'a: s("vox")';
+  // A .fx() chain broken over indented lines is still one expression continuing the caret's line -
+  // padding it off with a blank line above would sever it from the track it attaches to.
+  const body = '.speed(1).gain(2)\n  .fx("Pro-C 2").preset("voxreal")';
+  assert.deepEqual(placeSnippet(code, body, code.length), [code.length, body]);
+});
+
 test('placeSnippet never writes into the definitions block', () => {
   //                0123456789...
   const code = 'a: pianoroll("x")\n\n_roll("x", "60,0,4")\n';

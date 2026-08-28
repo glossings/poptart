@@ -4900,16 +4900,17 @@ body.mix-on #deckAHead {
   background: var(--bg-panel);
 }
 
-.snippet-preview {
+/* The browser's right-hand pane: the snippet's body, edited in place and written back (see
+   flushSnippetEdit). Borderless and flush to the column - the seam beside the list is the divider,
+   so a second frame around this would only draw a box inside a box. */
+.snippet-browser .CodeMirror {
   flex: 1;
+  min-height: 0;
+  height: auto;
   margin: 0;
-  padding: 10px 12px;
-  overflow: auto;
-  font-family: var(--mono, ui-monospace, monospace);
+  border: 0;
+  border-radius: 0;
   font-size: 11.5px;
-  line-height: 1.5;
-  white-space: pre;
-  color: var(--text);
 }
 
 .snippet-row {
@@ -4933,11 +4934,19 @@ body.mix-on #deckAHead {
   min-width: 0;
 }
 
+/* Clicking the row selects it; clicking the NAME renames it - so the name is sized to its own
+   text rather than stretching over the whole row and swallowing clicks meant for the row. */
 .snippet-row-label {
+  align-self: flex-start;
+  max-width: 100%;
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.snippet-row-label:hover {
+  text-decoration: underline;
 }
 
 .snippet-row-meta {

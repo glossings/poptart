@@ -207,10 +207,12 @@ function labelCollisions(body, labelSet) {
 /**
  * Where a snippet's body goes in, and how it is spaced: [offset, text to write there].
  *
- * A one-line body beginning with `.` is a CHAIN FRAGMENT - `.lpf(sine.range(200, 2000))` off the
- * end of somebody's track - and belongs exactly where the caret is, inline and unpadded. Everything
- * else is a statement or a whole block, and gets a blank line above it and its own line below,
- * without stacking up a second blank line where the buffer already had one.
+ * A body beginning with `.` is a CHAIN FRAGMENT - `.lpf(sine.range(200, 2000))` off the end of
+ * somebody's track - and belongs exactly where the caret is, inline and unpadded. However many
+ * lines it runs to: a `.fx().preset()` chain broken over five indented lines is still one
+ * expression continuing the line it lands on, and padding it off would sever it from that line.
+ * Everything else is a statement or a whole block, and gets a blank line above it and its own line
+ * below, without stacking up a second blank line where the buffer already had one.
  *
  * `floor` is where the definitions block begins (null when there isn't one). The offset is clamped
  * above it: the bottom of the buffer is definitions, and code written into the middle of them would
@@ -220,7 +222,7 @@ function placeSnippet(code, body, at, floor = null) {
   const src = String(code ?? '');
   const text = String(body ?? '');
   const where = Math.max(0, Math.min(floor === null ? src.length : floor, at));
-  if (!text.includes('\n') && /^\s*\./.test(text)) return [where, text];
+  if (/^\s*\./.test(text)) return [where, text];
   const before = src.slice(0, where);
   const after = src.slice(where);
   const lead = !before || before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n');
