@@ -1042,34 +1042,155 @@ server.waitForBoot {
             SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / BufSampleRate.ir(buf));
             Out.ar(out, toStereo.(sig) * env * amp.lag(0.02));
         }).add;
-        // Keylock variant (songs phase 4): the same player with Warp1 reading at the pointer
-        // instead of BufRd, so a rate change (tempo sync riding the master clock, a nudge)
-        // moves time without moving pitch. Same controls, same reports - the two defs are
-        // interchangeable, and toggling keylock is a declicked player swap via songStart.
+        // Keylock variant (songs phase 4): same controls and reports as the repitch player, so
+        // the two are interchangeable and toggling keylock is a declicked player swap via
+        // songStart. Two implementations, chosen at boot:
         //
-        // NOT the same Warp1 settings as the sample players above, which granulate for effect.
-        // What keylock has to be is TRANSPARENT - a deck riding at its native rate must sound
-        // the same with the button in or out, and only then is the correction it applies at
-        // other rates something you can trust mid-mix. Two things follow from that:
-        //
-        //  - windowRandRatio 0, not 0.1. Scattering each grain's start is what granular texture
-        //    wants; here it means every transient arrives eight slightly different times, which
-        //    is audible as flamming and phasing on drums. At 0 the grains stay coherent, and at
-        //    rate 1 the overlap-add reconstructs the source exactly.
-        //  - the overlap gain taken back out. Warp1 sums `overlaps` Hann-windowed copies, and
-        //    Hann at hop = window/overlaps adds up to overlaps/2 - so at 8 overlaps the player
-        //    ran 4x (+12 dB) hotter than the plain one beside it, which is why turning keylock
-        //    on made a deck jump and clip. `2 / overlaps` is exactly that factor back off.
-        SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
-            var overlaps = 8;
-            var step = rate.lag(0.05) * BufRateScale.ir(buf) * run.lag(0.02);
-            var idx = Phasor.ar(t_seek, step, 0, BufFrames.ir(buf), seekFrame);
-            var sig = Warp1.ar(nc, buf, idx / BufFrames.ir(buf), 1, 0.1, -1, overlaps, 0, 2)
-                * (2 / overlaps);
-            var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
-            SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / BufSampleRate.ir(buf));
-            Out.ar(out, toStereo.(sig) * env * amp.lag(0.02));
-        }).add;
+        //  - PoptartPitchShift (native/rubberband/, installed into the user's SC Extensions by
+        //    extensions.js): the repitched read goes through a Rubber Band Live Shifter at
+        //    1/rate, putting the pitch back - phase-vocoder quality, the way commercial "master
+        //    tempo" keylocks work. The shifter has a fixed pipeline delay (`delay`, in samples;
+        //    sclang measures it once at boot with a probe synth and passes it in), and the deck
+        //    hides it: the pointer runs `delay` samples AHEAD of what is heard - applied at seeks
+        //    only, so a rate change never jumps it - and songStart spawns this player `delay`
+        //    early with its pointer set back by as much, so the first real sample lands on time.
+        //    `run` follows the same pipeline: pausing mutes once the last real audio is out,
+        //    resuming unmutes once the first is - no lost tail, no held-sample DC.
+        //  - the in-graph SOLA player below, for an engine without the extension. A time-domain
+        //    stretcher, audibly rougher on dense mixes, but it needs nothing installed.
+        if (\PoptartPitchShift.asClass.notNil) {
+            SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0, delay = 0, window = 0|
+                var brs = BufRateScale.ir(buf), frames = BufFrames.ir(buf), bufSr = BufSampleRate.ir(buf);
+                var rateL = rate.lag(0.05), runL = run.lag(0.02);
+                var step = rateL * brs * runL;
+                var idx = Phasor.ar(t_seek, step, 0, frames, seekFrame + (delay * rate * brs));
+                var dry = BufRd.ar(nc, buf, idx, 0, 4);
+                var sh = \PoptartPitchShift.asClass.ar(dry, 1 / rateL.max(0.01), window);
+                var sig = sh.keep(nc);
+                var heard = idx - (delay * rateL * brs);
+                var runOut = DelayN.kr(run, 0.5, delay / SampleRate.ir).lag(0.02);
+                var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
+                SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(heard) / bufSr);
+                Out.ar(out, toStereo.(sig) * env * amp.lag(0.02) * runOut);
+            }).add;
+        } {
+            // Keylock variant (songs phase 4): same controls and reports as the repitch player, so
+            // the two are interchangeable and toggling keylock is a declicked player swap via
+            // songStart - but the read is a SOLA time-stretch (synchronized overlap-add), not a
+            // granulator.
+            //
+            // What a keylock has to be is TRANSPARENT: a deck at its native rate must sound the same
+            // with the button in or out, and a few percent either way must still sound like the
+            // record. The Warp1 player this replaces (2026-08-28) was exactly transparent at rate 1
+            // and a comb filter everywhere else: an evenly spaced overlap-add launches native-pitch
+            // grains from positions that drift by (rate-1)*hop each, so a component at f only sums
+            // coherently while f*(rate-1)*window is small - modelled at 5% it sat at -32 dB at
+            // 500 Hz and -76 dB at 1 kHz, and the bass it kept was merely repitched (60 -> 63 Hz).
+            // Randomizing the grains (windowRandRatio) swaps that comb for a -7 dB incoherent wash.
+            // The fix is the standard one: align every new grain to what is already playing.
+            //
+            // Mechanics - everything here is sample-accurate and block-aligned, because Convolution2
+            // reads its trigger once per block and transforms in frames counted from the synth's start:
+            //  - a sample counter of period hop (2048; 46 ms at 44.1k) drives it all. Two readers
+            //    alternate; each plays win = 2*hop at native speed under a Hann window, so the
+            //    overlap-add sums to exactly 1 and an unbroken read reconstructs the source bit-exact
+            //    - which is what rate 1 is.
+            //  - the output's last kLen samples (low-passed at 1.5 kHz so bass and mids steer the
+            //    lock, not hats) are kept time-reversed in a ring. At the wrap the ring is snapshotted
+            //    as a Convolution2 kernel, which turns the convolution of a native-speed read of the
+            //    source into a running cross-correlation with the output tail. Convolution2 is an
+            //    overlap-add of kLen-sample frames: its output runs one frame late, and the frame
+            //    after a kernel swap still carries the previous frame's tail under the OLD kernel, so
+            //    the scan reads its outputs over the third and fourth frames after the wrap (count
+            //    2*kLen .. 4*kLen), where both halves of the sum are under the new kernel. That read
+            //    sweeps scan = 2*half source samples around where the pointer will be at the next
+            //    wrap; the normalized correlation, minus a small centring penalty (silence falls
+            //    back to the pointer, not an edge), is tracked by RunningMax and the winning source
+            //    position latched.
+            //  - at the next wrap the idle reader starts there, advanced by the hop+1 samples between
+            //    the tail the kernel captured and now. While the drift is within +-half the best match
+            //    is the running grain's own continuation, so the read stays continuous; past that the
+            //    new grain lands a whole period (of whatever dominates the low band) away, where the
+            //    join is inaudible. Content is only ever dropped or repeated in those period-sized
+            //    jumps - the SOLA compromise.
+            //  - at the first wrap both readers start from the pointer, one already at the top of its
+            //    window, so a start or a keylock swap opens at full level instead of fading in.
+            //  - run pauses the pointer AND mutes. A paused pointer would otherwise be a granular
+            //    freeze; the repitch player's turntable slew has no equivalent here.
+            //  - a seek takes effect at the next wrap (up to 46 ms) under the Hann crossfade; the
+            //    correlation then aligns the new region to whatever periodicity it can find.
+            // The numbers were chosen on a per-sample model of this graph: the search must exceed
+            // half a bass period (half = 512 samples = 11.6 ms covers 43 Hz) or the bass loses its
+            // lock, kLen is bounded by Convolution2's frame, and hop = 4*kLen is the pipeline's
+            // length - a snapshot, two frames of settling, two frames of scan.
+            SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
+                var kLen = 512, half = 512, scan = 2 * half, hop = 4 * kLen, win = 2 * hop;
+                var brs = BufRateScale.ir(buf), frames = BufFrames.ir(buf), bufSr = BufSampleRate.ir(buf);
+                var sr = SampleRate.ir, winSec = win / sr;
+                var mono = { |sig| if (nc == 1) { sig } { sig.sum * 0.5 } };
+                var lpCoef = exp(-2pi * 1500 / sr);
+                var runL = run.lag(0.02), rateL = rate.lag(0.05);
+                var step = rateL * brs * runL;
+                var idx = Phasor.ar(t_seek, step, 0, frames, seekFrame);
+                // The counter. Triggers are exact-integer comparisons on it, so they can never drift
+                // off the block boundary the way an Impulse.ar with a fractional period would.
+                var count = Phasor.ar(0, 1, 0, hop, 0);
+                var at = { |n| (count - n).abs < 0.5 };
+                var wrap = at.(0);
+                var inScan = count >= (2 * kLen);
+                var ring = LocalBuf(hop).clear;
+                // Scan reader: a native-speed read positioned so that the scan's midpoint (allowing
+                // for Convolution2's lag) maps onto the pointer at the next wrap.
+                // Convolution2's output resumes inside the block that completes a frame, so its lag
+                // is a frame less a block.
+                var lag = kLen - BlockSize.ir;
+                var r0 = Latch.ar(idx, wrap) + (brs * ((hop * (rateL - 1)) - (2 * kLen) - 1 - BlockSize.ir));
+                var rPos = r0 + (brs * Sweep.ar(wrap, sr));
+                var s = OnePole.ar(mono.(BufRd.ar(nc, buf, rPos, 0, 4)), lpCoef);
+                var corr = Convolution2.ar(s, ring, wrap, kLen);
+                // The correlation at n covers the read `lag` samples earlier; normalize over that window.
+                var sNorm = DelayN.ar(RunningSum.ar(s * s, kLen), lag / sr, lag / sr).sqrt + 1e-6;
+                // The output tail's energy comes back through LocalIn (a wire would be a cycle); one
+                // block late is nothing to a normalization that only has to hold within a scan.
+                var fb = LocalIn.ar(1);
+                var kNorm = Latch.ar(RunningSum.ar(fb * fb, kLen), wrap).sqrt + 1e-6;
+                var scanT = count - (2 * kLen);
+                var score = (corr / (sNorm * kNorm)) - (0.1 * (scanT - half).abs / half);
+                var isNew = (score >= RunningMax.ar(score, at.(2 * kLen))) * inScan;
+                // Gate, not Latch: a new maximum is a LEVEL that holds for runs of samples, and Latch
+                // would only take the first of each run.
+                var bestR = Gate.ar(rPos - (brs * lag), isNew);
+                // A grain is placed against the tail captured a wrap earlier - the peak of the grain
+                // started TWO wraps back - so the two readers form interleaved chains, each continuing
+                // itself. They only agree if they are seeded as one continuous read: the first wrap
+                // sits on the pointer (there is no tail yet), the second continues it at native
+                // speed (its own scan ran against an empty ring), and from the third on the scans
+                // carry it. The chains then drift identically and jump by the same period.
+                var nth = PulseCount.ar(wrap);
+                var seed = Select.ar(nth > 1, [idx, Delay1.ar(Latch.ar(idx, wrap)) + (brs * hop)]);
+                var startPos = Latch.ar(Select.ar(nth > 2, [seed, bestR + (brs * (hop + 1))]), wrap);
+                // Two alternating Hann-windowed native-speed readers. At the first wrap BOTH start
+                // from the pointer: B rising as usual, A pulled a hop back and aged a hop forward so
+                // it is the falling half - their windows sum to 1 from the first sample. B then rises
+                // again at every odd wrap, A at every even one.
+                var first = nth <= 1;
+                var sel = ToggleFF.ar(wrap);
+                var reader = { |trig, isA|
+                    var early = Latch.ar(first * isA, trig);
+                    var start = Latch.ar(startPos, trig) - (early * hop * brs);
+                    var age = Sweep.ar(trig, 1) + (early * (hop / sr));
+                    var w = (age < winSec) * (0.5 - (0.5 * cos(2pi * age / winSec))) * (PulseCount.ar(trig) > 0);
+                    BufRd.ar(nc, buf, start + (age * bufSr), 0, 4) * w
+                };
+                var sig = reader.(wrap * ((1 - sel) + first), 1) + reader.(wrap * sel, 0);
+                var lpOut = OnePole.ar(mono.(sig), lpCoef);
+                var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
+                BufWr.ar(lpOut, ring, hop - 1 - count, 1);
+                LocalOut.ar(lpOut);
+                SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / bufSr);
+                Out.ar(out, toStereo.(sig) * env * amp.lag(0.02) * runL);
+            }).add;
+        };
     };
     // Feeder for a hardware audio input as a sidechain/chain source (input(...) / audio("dev:...")):
     // reads two channels off the booted device's inputs (SoundIn, 0-indexed) and writes them to a
@@ -1139,6 +1260,22 @@ server.waitForBoot {
     // scsynth's pid rides along with the ready: node spawned US, not scsynth, so this is its only
     // handle on the process that actually holds the audio device and scsynth's UDP port. It uses
     // it to clean up after a stack that didn't shut down properly - see osc-engine/orphans.js.
+    // The keylock pitch shifter's pipeline delay (samples), measured once here: it is fixed for
+    // a sample rate but only the plugin knows it, so a throwaway synth reports it and every
+    // keylocked songStart passes it to the player. 0 without the extension (SOLA fallback).
+    ~rbDelay = 0;
+    if (\PoptartPitchShift.asClass.notNil) {
+        var probe = SynthDef(\poptart_rbprobe, {
+            var sh = \PoptartPitchShift.asClass.ar(Silent.ar(2), 1, 0);
+            SendReply.kr(Impulse.kr(0), '/poptart/rbDelay', A2K.kr(sh[2]));
+            Line.kr(0, 1, 0.05, doneAction: 2);
+        });
+        OSCFunc({ |m|
+            ~rbDelay = m[3].asFloat;
+            ("poptart: keylock pitch shifter delay " ++ ~rbDelay.asInteger ++ " samples").postln;
+        }, '/poptart/rbDelay', server.addr).oneShot;
+        probe.add(completionMsg: Synth.basicNew(\poptart_rbprobe, server).newMsg);
+    };
     nodeAddr.sendMsg("/poptart/ready", server.pid ? -1);
     // Populate the plugin dict in the background so .synth("Name") can resolve names. Cached
     // plugins re-verify instantly; only new/changed ones get probed (out-of-process, with a
@@ -2489,22 +2626,32 @@ OSCdef(\poptartSongLoad, { |msg|
 // click-free path for that.
 OSCdef(\poptartSongStart, { |msg|
     var key = msg[1].asSymbol, posSec = msg[2].asFloat;
-    var rate = msg[3].asFloat, latency = msg[4].asFloat;
-    var warp = (msg[5] ? 0).asInteger; // 1 = keylock (Warp1) player, 0 = repitch (BufRd)
+    var rate = msg[3].asFloat, latency = max(msg[4].asFloat, 0);
+    var warp = (msg[5] ? 0).asInteger; // 1 = keylock player, 0 = repitch (BufRd)
     var track = tracks[key], song = songs[key];
     if (track.isKindOf(Event) and: { song.notNil }) {
         var buf = song[\buf];
-        var frame = (posSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
         var defName = ((if (warp > 0) { "poptart_songwarp_" } { "poptart_song_" }) ++ buf.numChannels).asSymbol;
-        // The old player releases AT THE NEW START (clamped past its own spawn - it may itself
+        // The keylock player has a pipeline delay (~rbDelay, see the boot probe): it is spawned
+        // that much EARLY with its pointer set back by as much, so its first real sample lands
+        // at the start. When the start is closer than that (a keylock toggle is "now"), it
+        // spawns now and the old player instead holds on for the difference - the handover
+        // then happens on time, a pipeline later. The repitch player has no delay: spawnAt is
+        // the start and the handover is immediate, as before.
+        var rbLat = if (warp > 0) { (~rbDelay ? 0) / server.sampleRate } { 0 };
+        var spawnAt = max(0, latency - rbLat);
+        var seekSec = posSec - ((latency - spawnAt) * rate);
+        var handover = max(latency, spawnAt + rbLat);
+        var frame = (seekSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
+        // The old player releases AT THE HANDOVER (clamped past its own spawn - it may itself
         // still be a pending quantized start): released, not freed, so it fades under the new one.
-        song[\synth] !? { |s| bundleNow.(songLat.(song, latency), { s.set(\gate, 0) }) };
+        song[\synth] !? { |s| bundleNow.(songLat.(song, handover), { s.set(\gate, 0) }) };
         song[\posFunc] !? { |f| f.free };
-        song[\spawnUntil] = Main.elapsedTime + max(latency ? 0, 0);
-        bundleNow.(latency, {
+        song[\spawnUntil] = Main.elapsedTime + spawnAt;
+        bundleNow.(spawnAt, {
             song[\synth] = Synth(defName,
                 [\out, track[\inBus].index, \buf, buf, \rate, rate, \run, 1,
-                 \t_seek, 1, \seekFrame, frame],
+                 \t_seek, 1, \seekFrame, frame, \delay, if (warp > 0) { ~rbDelay ? 0 } { 0 }],
                 target: track[\group], addAction: \addToHead);
         });
         // The player's position reports answer to sclang; forward them to Node tagged with the

@@ -15244,7 +15244,7 @@ function makeSongPane(deck) {
   // The song's musical facts are server truth (tags at load, playlist item, edits here, phase 5
   // estimates) and ride every SSE frame; this row just renders them and posts edits back. bpm
   // feeds the desk's tempo migration; ⚓ drops the beatgrid anchor at the playhead; sync
-  // rate-locks to the master clock; keylock swaps the player for the Warp1 timestretcher; the
+  // rate-locks to the master clock; keylock swaps the player for the pitch-shifting one; the
   // nudge pair is the platter (±4% while held) and the jog pair steps a beat. All four platter
   // buttons are MIDI-learnable, same gesture as the desk knobs.
   //

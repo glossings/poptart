@@ -4577,7 +4577,7 @@ const routes = {
   // Edit a song's musical facts (songs phase 4) - all of them user-editable, always: the tags
   // are a convenience, not an authority. Body: { deck, bpm? (20..400, or null to clear - which
   // also drops sync), key?, anchorSec? (the beatgrid's downbeat anchor, clamped to the file),
-  // sync? (rate-lock to the master clock; needs a bpm), keylock? (Warp1 timestretch player -
+  // sync? (rate-lock to the master clock; needs a bpm), keylock? (Rubber Band pitch-shift player -
   // rate moves time, not pitch; toggling mid-song is a declicked player swap at the playhead) }.
   'POST /api/song/meta': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';

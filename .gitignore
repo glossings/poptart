@@ -12,3 +12,6 @@ tmp/
 
 # Local userland hotkey repro - paste into ~/.poptart/prebake.js; not part of the repo
 packages/web-app/prebake.hotkeys.js
+
+# Rubber Band + SC headers fetched by native/rubberband/build.sh
+packages/osc-engine/native/rubberband/.deps/

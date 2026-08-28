@@ -22,6 +22,7 @@ const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, kill
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
+const { ensurePoptartExtension } = require('./extensions');
 
 // Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
 // this process also runs the note scheduler against a 150ms lookahead - gzipSync of that is
@@ -493,6 +494,16 @@ class OscEngine {
           // eslint-disable-next-line no-console
           console.warn(`[poptart] killed leftover engine processes from an earlier run: ${reaped.join(', ')}`);
         }
+        // poptart's own UGen (the keylock pitch shifter) must be in the SC Extensions folder
+        // before sclang compiles its class library, which it does on the way up.
+        const ext = ensurePoptartExtension();
+        if (ext.skipped) {
+          // eslint-disable-next-line no-console
+          console.warn(`[poptart] keylock pitch shifter not installed (${ext.skipped}); decks fall back to the SOLA keylock`);
+        } else if (ext.installed.length) {
+          // eslint-disable-next-line no-console
+          console.log(`[poptart] installed SC extension: ${ext.installed.join(', ')}`);
+        }
         this._sclangProcess = spawn(
           this.sclangPath,
           // -u makes sclang listen for our commands on scPort (its default 57120 would clash
@@ -694,7 +705,7 @@ class OscEngine {
 
   /** Start (or restart) playback at posSec, at `rate` (1 = native). */
   songStart(trackId, posSec, rate = 1, targetTime = 0, warp = 0) {
-    // warp = 1 spawns the Warp1 keylock player instead of the repitch one (songs phase 4);
+    // warp = 1 spawns the keylock player (Rubber Band pitch shifter, or SOLA without the extension) instead of the repitch one;
     // restarting with the other flag at the current playhead is how keylock toggles mid-song.
     this._send('/poptart/songStart', [trackId, posSec, rate, this._latency(targetTime), warp ? 1 : 0]);
   }
