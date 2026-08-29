@@ -2318,11 +2318,50 @@ attachEditorWiring(cm);
 // ---------------------------------------------------------------------------------------------
 
 function initWidgetHandles() {
-  cm.on('mousedown', (_cm, e) => {
+  attachWidgetHandles(cm);
+  if (deckBCM) attachWidgetHandles(deckBCM); // DJ mode was open before the modules finished loading
+}
+
+// Handles are attached from two directions - initWidgetHandles when the modules land, and deck B's
+// pane when it is created - and whichever comes second must not double up the listener.
+const widgetHandlesOn = new WeakSet();
+
+function attachWidgetHandles(editor) {
+  if (widgetHandlesOn.has(editor)) return;
+  widgetHandlesOn.add(editor);
+  editor.on('mousedown', (_ed, e) => {
     if (e.detail !== 2 || e.button !== 0) return;
-    const idx = cm.indexFromPos(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
-    if (openWidgetAt(cm.getValue(), idx)) e.preventDefault(); // the double-click WAS the gesture
+    const idx = editor.indexFromPos(editor.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+    const took = editor === cm ? openWidgetAt(editor.getValue(), idx) : openDeckBWidgetAt(editor.getValue(), idx);
+    if (took) e.preventDefault(); // the double-click WAS the gesture
   });
+}
+
+/**
+ * Deck B's widget handles. The plugin editors (synth/fx names) are the engine's own windows, so
+ * they open for either deck - the split pane's tracks are keyed "b:<label>" server-side, exactly
+ * as the highlighter already addresses them. The text-editing panels (roll, arrange, preset, …)
+ * are a different story: they write back into the buffer, and everything under them - the
+ * definition registries, their debounced evals, the fold machinery - still reads and writes deck
+ * A's buffer only. Opening one against deck B would edit the wrong deck's code, so until they are
+ * taught the split, the handle says what to do instead of silently doing nothing.
+ */
+function openDeckBWidgetAt(code, idx) {
+  const chain = findChainHandleAt(code, idx);
+  if (chain) {
+    showPluginEditor(`b:${chain.label}`, chain.slot);
+    return true;
+  }
+  const panel = [
+    ['arrange', arrangeMod && findArrangeCallAt(code, idx)],
+    ['lfo', shapeMod && findLfoCallAt(code, idx)],
+    ['piano roll', pianorollMod && findPianorollCallAt(code, idx)],
+    ['preset', findPresetCallAt(code, idx)],
+    ['sample pack', findSpCallAt(code, idx)],
+    ['record', findRecordCallAt(code, idx)],
+  ].find(([, call]) => call?.onName);
+  if (panel) logLine(`deck B: the ${panel[0]} panel can only edit deck A's buffer so far - move the pattern there to open it`);
+  return false;
 }
 
 /** Opens whichever editor `idx` is the handle for. True if one of them took it. */
@@ -3731,6 +3770,11 @@ const CUR_BRACKET_R = svgCursor(
 const CUR_UPDOWN = svgCursor(
   '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="22" viewBox="0 0 16 22"><g fill="#fff" stroke="#111" stroke-width="1.1" stroke-linejoin="round"><path d="M8 1l4 5H9v10h3l-4 5-4-5h3V6H4z"/></g></svg>',
   8, 11, 'ns-resize',
+);
+// The magnifying glass the arrange ruler shows: drag vertically there to zoom (see the 'zoom' drag).
+const CUR_ZOOM = svgCursor(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><circle cx="8" cy="8" r="5.5" fill="#fff" fill-opacity="0.85" stroke="#111" stroke-width="1.4"/><path d="M12.2 12.2l4.8 4.8" fill="none" stroke="#111" stroke-width="2.6" stroke-linecap="round"/><path d="M12.4 12.4l4.4 4.4" fill="none" stroke="#fff" stroke-width="1" stroke-linecap="round"/></svg>',
+  8, 8, 'zoom-in',
 );
 
 let prState = null; // see openPianorollEditor for the full shape (notes, steps, pitchTop, zoom, scroll, sel, tool, cmdMode, trackLabel)
@@ -14404,6 +14448,10 @@ async function openMixMode() {
     // Deck B is a live-coding pane, not a text box: same completions, ctrl-hover docs and
     // prebake-hotkey targeting as the main buffer, all resolved against ITS code.
     attachEditorWiring(deckBCM);
+    attachWidgetHandles(deckBCM); // double-click a synth/fx name to open its plugin window
+    // "back in the code" reads the same from either pane: a click in deck B releases hand-held
+    // plugin slots exactly as a click in the main buffer does (see releaseSlotsHeldByHand).
+    deckBCM.getWrapperElement().addEventListener('mousedown', releaseSlotsHeldByHand, true);
   }
   deckBCM.refresh();
   cm.refresh();
@@ -18884,7 +18932,8 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
 // the song out to read rather than one-track-per-row. The whole thing loops over its length.
 //
 // Clips edit like the roll's notes: click-drag to paint one, drag its body to move it (between
-// lanes too), drag its right edge to resize, right-click or delete to remove it. Every edit is
+// lanes too), option-drag to duplicate, drag its right edge to resize, right-click or delete to
+// remove it. Every edit is
 // written straight back into the arrange("…", { … }) call - the data folds to a chip like a roll's
 // notes - and re-evaluates the buffer, so what is painted is what plays.
 // ---------------------------------------------------------------------------------------------
@@ -19489,7 +19538,8 @@ function drawArrange() {
 
 function arCursorFor(x, y) {
   if (!arState) return 'default';
-  if (arInRuler(y)) return x >= AR_GUTTER ? 'col-resize' : 'default'; // anywhere in the ruler sets the length
+  // the ruler: the loop-end marker sets the length; everywhere else is the zoom/pan magnifier
+  if (arInRuler(y)) return x < AR_GUTTER ? 'default' : arNearLoopEnd(x) ? 'col-resize' : CUR_ZOOM;
   if (arInLoops(y)) {
     if (x < AR_GUTTER) return 'default';
     const rh = arRegionHit(x);
@@ -19691,7 +19741,8 @@ function initArrangeCanvas() {
     const hit = y >= AR_LANES_TOP && x >= AR_GUTTER ? arClipAt(x, y) : null;
     if (e.button === 2) {
       e.preventDefault();
-      if (y < AR_LANES_TOP) return; // the ruler and loops strip have no menu: a selected region carries its own name and ×
+      // the ruler, loops strip and bottom slider have no menu: a selected region carries its own name and ×
+      if (y < AR_LANES_TOP || y >= arGridBottom()) return;
       arOpenMenu(e.clientX, e.clientY, hit, x < AR_GUTTER ? lane : null);
       return;
     }
@@ -19700,12 +19751,18 @@ function initArrangeCanvas() {
     arCanvas.setPointerCapture(e.pointerId);
 
     if (arInRuler(y)) {
-      // the ruler: drag anywhere in it to set the length, which is where the song wraps
       if (x < AR_GUTTER) return;
-      arState.drag = { kind: 'len', moved: false };
-      arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
-      arSyncControls();
-      drawArrange();
+      // the loop-end marker: drag it to set the length, which is where the song wraps
+      if (arNearLoopEnd(x)) {
+        arState.drag = { kind: 'len', moved: false };
+        arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
+        arSyncControls();
+        drawArrange();
+        return;
+      }
+      // the rest of the ruler is a magnifier, Ableton-style: drag down to zoom in, up to zoom
+      // out, and the bar you grabbed stays under the pointer, so a sideways drag pans as well
+      arState.drag = { kind: 'zoom', bar: arBarsOf(x), y0: y, px0: arState.pxPerCycle };
       return;
     }
     if (arInLoops(y)) {
@@ -19736,7 +19793,6 @@ function initArrangeCanvas() {
 
     arState.selRegion = null; // anything selected in the lanes is instead of a region
     if (hit) {
-      if (e.altKey) { arDeleteClips([hit.clip]); return; }
       if (e.shiftKey) {
         if (arState.sel.has(hit.clip)) arState.sel.delete(hit.clip);
         else arState.sel.add(hit.clip);
@@ -19747,7 +19803,8 @@ function initArrangeCanvas() {
       const orig = new Map(targets.map((c) => [c, { start: c.start, lane: c.lane, len: c.len }]));
       arState.drag = hit.edge
         ? { kind: 'resize', targets, orig, x0: x, side: hit.edge, moved: false }
-        : { kind: 'move', targets, orig, x0: x, lane0: lane, moved: false };
+        // alt: option-drag duplicates, as in the roll - the copies are made on the first movement
+        : { kind: 'move', targets, orig, x0: x, lane0: lane, moved: false, alt: e.altKey };
       drawArrange();
       return;
     }
@@ -19777,7 +19834,10 @@ function initArrangeCanvas() {
       arRefreshCursor();
       return;
     }
-    if (d.kind === 'len') {
+    if (d.kind === 'zoom') {
+      arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, d.px0 * Math.exp((y - d.y0) * 0.015)));
+      arState.scroll = Math.max(0, d.bar - (x - AR_GUTTER) / arState.pxPerCycle);
+    } else if (d.kind === 'len') {
       arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
       d.moved = true;
       arSyncControls();
@@ -19787,6 +19847,18 @@ function initArrangeCanvas() {
     } else if (d.kind === 'move') {
       const dBars = arSnapTo(arBarsOf(x) - arBarsOf(d.x0));
       const dLane = arLaneOf(y) - d.lane0;
+      // Option-drag duplicates, Live's copy-drag - the roll's altCopy, clip-shaped: the originals
+      // stay where they were and the drag carries fresh copies instead. Made on the first real
+      // movement, so an option-click that never travels is just a click, not a clip stacked
+      // exactly on itself.
+      if (d.alt && !d.copied && (dBars !== 0 || dLane !== 0)) {
+        d.copied = true;
+        const copies = d.targets.map((c) => ({ ...c, ...d.orig.get(c) }));
+        arState.clips.push(...copies);
+        arState.sel = new Set(copies);
+        d.orig = new Map(copies.map((c, i) => [c, d.orig.get(d.targets[i])]));
+        d.targets = copies;
+      }
       const minStart = Math.min(...d.targets.map((c) => d.orig.get(c).start));
       const minLane = Math.min(...d.targets.map((c) => d.orig.get(c).lane));
       const shift = Math.max(dBars, -minStart);
@@ -19902,6 +19974,12 @@ function initArrangeCanvas() {
       writeArrangeCall();
       drawArrange();
     }
+    else if (arInRuler(y)) {
+      // double-click the ruler: back to the top of the song, first lane at the top
+      arState.scroll = 0;
+      arState.scrollLane = 0;
+      drawArrange();
+    }
   });
 
   arCanvas.addEventListener('wheel', (e) => {
@@ -19966,6 +20044,13 @@ function initArrangeCanvas() {
     }
     if (e.key === '+' || e.key === '=') { arZoomAt(1.25); e.preventDefault(); return; }
     if (e.key === '-') { arZoomAt(0.8); e.preventDefault(); return; }
+    if (e.key === 'Home') { // back to the top of the song, like double-clicking the slider
+      arState.scroll = 0;
+      arState.scrollLane = 0;
+      drawArrange();
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       const step = (e.key === 'ArrowLeft' ? -1 : 1) * arCell();
       if (arState.sel.size && e.shiftKey) {

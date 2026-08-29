@@ -3500,10 +3500,28 @@ function slotAt(slots, phase) {
  *   - a child step whose ONSET is outside the slot doesn't sound. A note already ringing when its
  *     slot opens is not restarted mid-flight, and one that started in the slot before is not
  *     adopted by the slot after.
- *   - a child step running past its slot's end is clipped to it, so the outgoing child stops
- *     being heard the instant the next one takes over.
+ *   - a child step running past its slot's end is clipped where another child TAKES OVER - the
+ *     outgoing child stops being heard the instant the next one starts. Only a switch cuts: the
+ *     slot grid repeats every cycle, so with one id - the bare pianoroll("roll") - the same child
+ *     "follows itself" at every bar line, and a note longer than the bar rings straight through
+ *     exactly as it would played inline. The walk crosses slot and cycle edges alike, cutting at
+ *     the first span the same child doesn't hold (a different id, a rest, or a gap).
  */
 function selectorJoin(slotsForCycle, resolve) {
+  // Where a ring past `from` (cycle-relative to `cycle`, may exceed 1) is cut: the first point
+  // before `until` not covered by a slot resolving to this same child.
+  const takeoverAt = (child, cycle, from, until) => {
+    let p = from;
+    // Guarded: each covering slot has positive width so `p` always advances, but a pathological
+    // grid shouldn't be able to spin this loop - past the guard the ring keeps its full length.
+    for (let guard = 0; p < until - SLOT_EPS && guard < 128; guard++) {
+      const rel = Math.floor(p + SLOT_EPS);
+      const sl = slotAt(slotsForCycle(cycle + rel), p - rel);
+      if (!sl || resolve(sl.value) !== child) return p;
+      p = rel + sl.end;
+    }
+    return until;
+  };
   const sample = (t, cps, pos) => {
     const cyclePos = pos ?? t * cps;
     const cycle = Math.floor(cyclePos);
@@ -3529,7 +3547,8 @@ function selectorJoin(slotsForCycle, resolve) {
       const slotLocs = stepLocs(slot);
       for (const s of child.stepsForCycle(cycle)) {
         if (s.value == null || s.start < slot.start || s.start >= slot.end) continue;
-        const clipped = s.end > slot.end ? { ...s, end: slot.end } : s;
+        const end = s.end > slot.end + SLOT_EPS ? takeoverAt(child, cycle, slot.end, s.end) : s.end;
+        const clipped = end < s.end ? { ...s, end } : s;
         out.push(slotLocs.length ? { ...clipped, locs: [...stepLocs(s), ...slotLocs] } : clipped);
       }
     }

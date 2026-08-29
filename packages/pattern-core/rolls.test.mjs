@@ -364,3 +364,33 @@ test('liveRoll rejects an id that could never be named in a pattern', () => {
   fresh();
   assert.throws(() => liveRoll('two words', '60,0,4'), /one plain word/);
 });
+
+test('a named roll\'s note longer than a bar rings past the bar line', () => {
+  // The selector's slot grid repeats every cycle, so with one id the same roll "follows itself"
+  // at every bar - and following yourself is not a takeover. A 2-bar note in a 2-bar window used
+  // to be clipped to [0, 1) by the slot edge (found 2026-08-29); it must keep its full end.
+  fresh();
+  _roll('roll', '70,0,32,0.8', { grid: 16, len: 32 });
+  const steps = pianoroll('roll').stepsForCycle(0);
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0].value, 70);
+  assert.equal(round10(steps[0].end), 2, 'the note rings its drawn 2 cycles');
+  assert.deepEqual(values(pianoroll('roll'), 1), [], 'cycle 1 is inside the window - no retrigger');
+});
+
+test('a switch between DIFFERENT rolls still cuts the ringing note', () => {
+  fresh();
+  _roll('a', '60,0,32', { grid: 16 }); // 2-bar note, 1-bar window: rings into the next slot
+  _roll('b', '67,0,4', { grid: 16 });
+  const p = pianoroll('<a b>');
+  const st = p.stepsForCycle(0)[0];
+  assert.equal(round10(st.end), 1, 'roll b takes over at the bar line, so the ring is cut there');
+});
+
+test('the same roll under two ids is still a switch - identity is the child, not the notes', () => {
+  fresh();
+  _roll('a', '60,0,32', { grid: 16 });
+  _roll('b', '60,0,32', { grid: 16 });
+  const st = pianoroll('<a b>').stepsForCycle(0)[0];
+  assert.equal(round10(st.end), 1);
+});
