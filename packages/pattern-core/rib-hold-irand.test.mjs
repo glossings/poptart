@@ -152,12 +152,30 @@ test('.rib() with a patterned time subdivides a held note into fresh strikes (co
   assert.ok(!g[0].cont && !g[1].cont, 'both halves are fresh strikes, not a tie');
 });
 
-test('.rib() with a resting/zero patterned length plays straight (identity)', () => {
-  // length "0" is ill-defined -> remap is the identity, so cycles pass through unlooped.
+test('.rib() with a zero patterned length plays straight (identity)', () => {
+  // length "0" is a BAD VALUE, not an absence -> remap is the identity, so cycles pass through
+  // unlooped rather than dividing by zero. Contrast the rest below, which is silence.
   const sig = n('<0 1 2 3>').rib(0, '0');
   assert.deepEqual(valuesAt(sig, 0), [0]);
   assert.deepEqual(valuesAt(sig, 2), [2], 'no looping - cycle 2 is its own value');
   assert.deepEqual(valuesAt(sig, 3), [3]);
+});
+
+test('a rest in .rib()\'s band silences that bar', () => {
+  // "~" is an absence, not a bad value: there is no band, so nothing sounds - the same thing a rest
+  // means in every other control. The bars either side of it still loop their band.
+  const sig = n('0 1 2 3').rib('<29 ~ 29 34>', 1);
+  assert.equal(valuesAt(sig, 1).length, 0, 'the rest bar is silent');
+  assert.equal(valuesAt(sig, 5).length, 0, 'and again next time round the alternation');
+  assert.deepEqual(valuesAt(sig, 0), [0, 1, 2, 3], 'the bars around it still play');
+  assert.deepEqual(valuesAt(sig, 2), [0, 1, 2, 3]);
+  assert.equal(sig.sample(1.5, 1, 1.5), null, 'sample() rests through the silent bar too');
+});
+
+test('a rest in .rib()\'s length silences as well as a rest in its time', () => {
+  const sig = n('0 1 2 3').rib(0, '<1 ~>');
+  assert.equal(valuesAt(sig, 0).length, 4);
+  assert.equal(valuesAt(sig, 1).length, 0, 'resting length is an absent band, not a zero one');
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -199,6 +217,59 @@ test('.rib(29, 1) freezes sampler-config randomness into a repeating bar', () =>
       );
     }
   }
+});
+
+test('ribbing INSIDE a control matches ribbing outside it', () => {
+  // Randomness is a function of time and .rib() is a remap of time, so the two spellings have to
+  // land on the same values; they differ only in what ELSE loops. This is what the per-onset reader
+  // (Sig#eventAt) surviving the remap buys - without it the inner form stamped cycle 29's phase-0
+  // draw onto all four events.
+  const g = irand(16).div(16); // ONE instance, so both spellings share its seed
+  const outer = s('breaks*4').begin(g).rib(29, 1);
+  const inner = s('breaks*4').begin(g.rib(29, 1));
+  const begins = (sig, c) => sig.stepsForCycle(c).map((st) => st.cfg?.begin);
+  const want = [0, 0.25, 0.5, 0.75].map((p) => g.sample(29 + p, 1, 29 + p));
+  assert.equal(new Set(want).size > 1, true, 'cycle 29 really does draw more than one begin');
+  for (const c of [0, 30, 41]) {
+    assert.deepEqual(begins(outer, c), want, `outer rib replays cycle 29's begins (cycle ${c})`);
+    assert.deepEqual(begins(inner, c), want, `inner rib replays the same ones (cycle ${c})`);
+  }
+});
+
+test('a per-onset control still lights the rib/bite atom that moved it', () => {
+  // crossMerge takes an event's highlight spans from ONE of its two paths - the control's step grid
+  // or its per-onset reader - so a combinator that folds its own atoms into the grid has to fold
+  // them into the reader too, or switching paths silently puts the editor's highlight out.
+  const has = (steps, span) => steps.every((st) => (st.locs ?? []).some((l) => l[0] === span[0] && l[1] === span[1]));
+  const rib = s('bd*4').begin(irand(8).div(8).rib(mini('<29 34>', 10), mini('<1 2>', 30))).stepsForCycle(0);
+  assert.ok(has(rib, [11, 13]), 'the band start atom lights with the notes it moved');
+  assert.ok(has(rib, [31, 32]), 'and so does the length atom');
+  assert.ok(has(rib, [0, 2]), 'without losing the note\'s own atom');
+  // .bite() reads its index per onset now, so each event lights the atom that actually moved IT.
+  const bit = s('bd*4').begin(irand(8).div(8).bite(mini('0 1', 5))).stepsForCycle(0);
+  assert.ok(has(bit.slice(0, 2), [5, 6]), 'first half lights the "0"');
+  assert.ok(has(bit.slice(2), [7, 8]), 'second half lights the "1"');
+});
+
+test('every time remap carries a per-onset reader through - rib, bite and fast alike', () => {
+  // A remap that only MOVES time must not flatten a within-cycle signal into one draw per bar. A
+  // grid-IMPOSING combinator (.hold()/.seg()) still drops the reader - that is its whole job.
+  const g = () => irand(16).div(16);
+  for (const [name, sig] of [['rib', g().rib(29, 1)], ['bite', g().bite('0 1')], ['fast', g().fast(2)]]) {
+    assert.ok(sig.eventAt, `.${name}() keeps the per-onset reader`);
+    const drawn = [0, 0.25, 0.5, 0.75].map((p) => sig.eventAt(4 + p).value);
+    assert.ok(new Set(drawn).size > 1, `.${name}() still draws per onset, not once per cycle`);
+    for (const p of [0, 0.25, 0.5, 0.75]) {
+      assert.equal(sig.sample(4 + p, 1, 4 + p), sig.eventAt(4 + p).value, `.${name}() sample() agrees at ${p}`);
+    }
+  }
+  assert.equal(g().hold('1*4').eventAt, null, '.hold() imposes a grid, so it drops the reader');
+});
+
+test('a rest in the band rests the reader too', () => {
+  const sig = irand(16).div(16).rib('<29 ~>', 1);
+  assert.ok(sig.eventAt(0.5).value != null, 'the looping bar still draws');
+  assert.equal(sig.eventAt(1.5).value, null, 'the resting bar reads as a rest, not a stale draw');
 });
 
 test('.rib() remaps channel-strip signals and their highlight grid', () => {

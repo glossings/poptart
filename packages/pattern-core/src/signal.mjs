@@ -427,10 +427,14 @@ export class Sig {
     // .vel()/sampler configs) inside its own source step: reversed, an onset maps exactly onto
     // its source step's exclusive END boundary, which would otherwise read the neighbour.
     const srcTime = (x) => x * f - (f < 0 ? 1e-6 : 0);
+    // srcTime is a pure map of position, so a per-onset reader (Sig#eventAt) rides through it like
+    // everything else - warping a control must not flatten `.begin(irand(16).div(16).fast(2))` into
+    // one draw per bar (see rib's remapEventAt for the same rule).
     const warp = (sig) =>
       sig instanceof Sig
         ? new Sig((t, cps, pos) => sig.sample(srcTime(t), cps, pos == null ? undefined : srcTime(pos)), {
             stepsForCycle: warpSteps(sig.stepsForCycle, f),
+            ...(sig.eventAt ? { eventAt: (cyclePos) => sig.eventAt(srcTime(cyclePos)) } : {}),
             ...sig._meta(),
           })
         : sig;
@@ -1364,9 +1368,11 @@ export class Sig {
    * deterministic random signal - `irand(8).rib(0, 2)` is a repeating 2-cycle random melody.
    *
    * Both arguments may be signals/patterns, sampled at the OUTER (pre-remap) cycle position so the
-   * band can move: `.rib("<0 8>", 2)` loops cycles 0-1 for a while, then jumps to loop 8-9. An
-   * ill-defined band (non-finite start or non-positive length) falls through as the identity, so a
-   * resting/zero patterned length just plays straight rather than dividing by zero.
+   * band can move: `.rib("<0 8>", 2)` loops cycles 0-1 for a while, then jumps to loop 8-9. A REST
+   * in either argument is SILENCE - `.rib("<29 ~ 29 34>", 1)` plays nothing on its second bar -
+   * which is what a rest means in every other control. An ill-defined band (a non-finite start, a
+   * zero or negative length) is a bad value rather than an absence, so it falls through as the
+   * identity and plays straight rather than dividing by zero.
    *
    * A FRACTIONAL length loops a sub-cycle window: `.rib(14, 0.5)` plays the first half of cycle 14
    * twice per measure. The grid is remapped phase-aware (not floored to a whole source cycle) so the
@@ -1376,6 +1382,11 @@ export class Sig {
    * .param() signals - so `.begin(irand(16).div(16)).rib(29, 1)` freezes cycle 29's random begins
    * into a repeating bar. Controls chained after the .rib() stay outside the loop and keep
    * evolving. Native engine-side modulators (lfo()/env()/cc()) can't be remapped and run free.
+   *
+   * Randomness is a function of time and this is a remap of time, so ribbing INSIDE a control means
+   * the same as ribbing outside it: `.begin(irand(16).div(16).rib(29, 1))` freezes the same sixteen
+   * begins as the line above (see remapEventAt). The two spellings differ only in what ELSE loops -
+   * the outer one takes the notes and every other channel with it, the inner one just that control.
    */
   rib(time, length) {
     const timeSig = toSignal(time);
@@ -1392,12 +1403,45 @@ export class Sig {
     // Remap an absolute cycle position into the loop band [t0, t0+len). t0/len are sampled at the
     // outer position c so patterned args shift the band over time. Frac keeps whole-cycle bands
     // landing exactly on integer cycles (no float drift into the neighbour).
+    //
+    // Two ways an argument can fail to name a band, kept deliberately apart. A REST ("~") is an
+    // absence - there is no band here, so nothing sounds - and returns null, the rest every reader
+    // in this file already understands. A BAD VALUE (a non-finite start, a zero or negative length)
+    // is a value that can't be used, and falls through as the identity so the pattern plays straight
+    // rather than dividing by zero. Collapsing the two would make `~` mean "play unlooped".
     const remap = (c) => {
-      const t0 = Number(timeSig.sample(c, 1, c));
-      const len = Number(lenSig.sample(c, 1, c));
+      const t0Raw = timeSig.sample(c, 1, c);
+      const lenRaw = lenSig.sample(c, 1, c);
+      if (t0Raw == null || lenRaw == null) return null; // a rest in the band -> silence
+      const t0 = Number(t0Raw);
+      const len = Number(lenRaw);
       if (!Number.isFinite(t0) || !(len > 0)) return c; // ill-defined band -> identity (play straight)
       return Frac.fromNumber(c).sub(t0).mod(len).add(t0).toNumber();
     };
+    // The band's own atoms, read at the OUTER position like remap reads their values. A patterned
+    // time/length lights alongside the events it moved - the per-onset half of what ribMergeArg
+    // folds into the grid. crossMerge takes locs from whichever path the control travels, ONE of
+    // the two, so a reader that returned only the source's spans would leave the "<29 34>" dark.
+    const bandLocs = (c) => [
+      ...(timeSig.stepsForCycle ? readEvent(timeSig, c).locs : []),
+      ...(lenSig.stepsForCycle ? readEvent(lenSig, c).locs : []),
+    ];
+    // A per-onset reader (Sig#eventAt - irand()/choose() and anything built from them) is part of a
+    // signal's read contract, not an optimization: crossMerge branches on it, and a signal that
+    // loses it stops being read at each event and gets its phase-0 draw stamped across the whole
+    // bar instead. rib only MOVES time, so the reader survives through the same remap that sample()
+    // uses - for the carried control channels below AND for rib's own return value, which is what
+    // makes `.begin(irand(16).div(16).rib(29, 1))` draw per note like its outer-rib spelling.
+    const remapEventAt = (sig) =>
+      sig.eventAt
+        ? (cyclePos) => {
+            const rc = remap(cyclePos);
+            const locs = bandLocs(cyclePos);
+            if (rc == null) return { value: null, locs };
+            const ev = sig.eventAt(rc);
+            return locs.length ? { ...ev, locs: [...ev.locs, ...locs] } : ev;
+          }
+        : null;
     // The grid is built phase-aware (remapGrid): each output cycle is walked in sub-windows split at
     // the loop-band wraps, so a fractional band loops within the cycle exactly as sample() does. For
     // a whole-cycle band this collapses to one window = one source cycle (the old fast path).
@@ -1416,7 +1460,7 @@ export class Sig {
     const sample = (t, cps, pos) => {
       const c = pos ?? t * cps;
       const rc = remap(c);
-      return this.sample(rc / cps, cps, rc);
+      return rc == null ? null : this.sample(rc / cps, cps, rc); // resting band -> nothing sounds
     };
     // rib re-times WHICH cycle sounds, and the scheduler samples sampler config, note channels,
     // the channel strip and generic params at OUTPUT positions - so every carried control signal
@@ -1430,11 +1474,11 @@ export class Sig {
         (t, cps, pos) => {
           const c = pos ?? t * cps;
           const rc = remap(c);
-          return sig.sample(rc / cps, cps, rc);
+          return rc == null ? null : sig.sample(rc / cps, cps, rc);
         },
         {
           ...(sig.stepsForCycle ? { stepsForCycle: (cycle) => remapGrid(cycle, sig.stepsForCycle, timeSig, lenSig) } : {}),
-          ...(sig.eventAt ? { eventAt: (cyclePos) => sig.eventAt(remap(cyclePos)) } : {}),
+          ...(sig.eventAt ? { eventAt: remapEventAt(sig) } : {}),
         },
       );
     };
@@ -1444,6 +1488,7 @@ export class Sig {
       Object.entries(obj).map(([k, e]) => [k, { ...e, sig: remapSig(e.sig) }]));
     return new Sig(sample, {
       stepsForCycle,
+      eventAt: remapEventAt(this),
       ...this._meta(),
       sampler: remapObj(this.sampler),
       noteChannels: remapObj(this.noteChannels),
@@ -1797,17 +1842,36 @@ export class Sig {
     // before the .bite() follows, exactly as rib's remap does. Controls are sampled at note
     // ONSETS, which always land inside an index event; an uncovered position (an index rest) maps
     // to itself, so continuous streams (a pre-bite .gain(sine)) stay defined everywhere.
-    const remapPos = (c) => {
+    // The index event covering output position c, or null where the playhead has none (an index
+    // rest). Its `locs` are the index atom's own spans, which light with the events it moved.
+    const coveringEvent = (c) => {
       const cyc = Math.floor(c);
       for (let b = cyc; b >= cyc - BITE_LOOKBACK; b--) {
         let best = null;
         for (const ev of events(b)) {
           if (ev.onset <= c + BITE_EPS && ev.end > c + BITE_EPS) best = ev; // latest onset wins
         }
-        if (best) return best.src + (c - best.onset);
+        if (best) return best;
       }
-      return c;
+      return null;
     };
+    const remapPos = (c) => {
+      const ev = coveringEvent(c);
+      return ev ? ev.src + (c - ev.onset) : c;
+    };
+    // A per-onset reader (Sig#eventAt) read through the playhead's map, with the index atom that
+    // moved it lighting alongside - rib's remapEventAt, said with bites instead of a band. Both
+    // halves matter: without the remap a control freezes to its source's phase-0 draw, and without
+    // the locs the "0 1" goes dark, because crossMerge reads spans from the grid or the reader but
+    // never both.
+    const remapEventAt = (sig) =>
+      sig.eventAt
+        ? (cyclePos) => {
+            const idx = coveringEvent(cyclePos);
+            const ev = sig.eventAt(idx ? idx.src + (cyclePos - idx.onset) : cyclePos);
+            return idx?.locs?.length ? { ...ev, locs: [...ev.locs, ...idx.locs] } : ev;
+          }
+        : null;
     // Carried control signals loop through the same jumps as the notes (see rib's remapSig):
     // constants are position-independent and engine-side IR modulators run on the server's clock,
     // so both pass through untouched. A control's own step grid is remapped by COVERAGE (clipped at
@@ -1822,7 +1886,7 @@ export class Sig {
         },
         {
           ...(sig.stepsForCycle ? { stepsForCycle: (cycle) => biteCoverSteps(cycle, events, sig.stepsForCycle) } : {}),
-          ...(sig.eventAt ? { eventAt: (cyclePos) => sig.eventAt(remapPos(cyclePos)) } : {}),
+          ...(sig.eventAt ? { eventAt: remapEventAt(sig) } : {}),
         },
       );
     };
@@ -1830,8 +1894,21 @@ export class Sig {
     // paramSignals holds { slot, name, sig } entries rather than bare Sigs (see the constructor).
     const remapParams = (obj) => obj && Object.fromEntries(
       Object.entries(obj).map(([k, e]) => [k, { ...e, sig: remapSig(e.sig) }]));
-    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), {
+    // A bare per-onset signal (Sig#eventAt - irand()/choose()) has no note grid to bite into: it IS
+    // a control, so .bite() on it means what it means on a carried channel above - read through the
+    // playhead's map, per onset. Sampling it through the step grid instead would hand every event
+    // in a bite the source's phase-0 draw, the same flattening rib() used to do (see remapEventAt).
+    const readsPerOnset = Boolean(this.eventAt);
+    const sample = readsPerOnset
+      ? (t, cps, pos) => {
+          const c = pos ?? t * cps;
+          const rc = remapPos(c);
+          return this.sample(rc / cps, cps, rc);
+        }
+      : (t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos);
+    return new Sig(sample, {
       stepsForCycle,
+      ...(readsPerOnset ? { eventAt: remapEventAt(this) } : {}),
       ...this._meta(),
       sampler: remapObj(this.sampler),
       noteChannels: remapObj(this.noteChannels),
@@ -2803,17 +2880,13 @@ function remapGrid(N, srcStepsFor, timeSig, lenSig) {
 
 // Folds a patterned rib() argument (time/length) into the note grid: the arg's step edges combine
 // into the trigger and its atom spans light with the note (via crossMerge, channel-less so no value
-// merges - only structure + loc union). Unlike a note channel, a resting arg must NOT drop the note
-// (crossMerge drops events a control rest covers), so a cycle where the arg has no atoms passes the
-// base grid straight through - matching rib()'s ill-defined-band-plays-straight fallback. A constant
-// arg (no stepsForCycle) is returned untouched, so plain .rib(0, 2) keeps its exact old behaviour.
+// merges - only structure + loc union). A REST in the arg drops the events it covers, which is
+// crossMerge's own rule for a resting control and the grid half of remap()'s resting-band null - a
+// `~` in "<29 ~ 29 34>" silences that bar. An ill-defined value ("0" length) is not a rest: it is an
+// atom like any other, so the event survives here and remap plays it straight. A constant arg (no
+// stepsForCycle) is returned untouched, so plain .rib(0, 2) keeps its exact old behaviour.
 function ribMergeArg(baseStepsForCycle, argSig) {
-  if (!argSig.stepsForCycle) return baseStepsForCycle;
-  const merged = crossMerge(baseStepsForCycle, argSig);
-  return (cycle) => {
-    const hasAtoms = argSig.stepsForCycle(cycle).some((s) => s.value != null);
-    return hasAtoms ? merged(cycle) : baseStepsForCycle(cycle);
-  };
+  return argSig.stepsForCycle ? crossMerge(baseStepsForCycle, argSig) : baseStepsForCycle;
 }
 
 /**
