@@ -3645,7 +3645,9 @@ function initPresetPanel() {
 // snap onto it and every drawn nudge goes back to 0. It is also the one edit that settles the
 // overlap rule for keeps: buried notes are deleted outright and a clipped one gives up the tail
 // that was hiding behind the note in front of it, so afterwards the roll says exactly what it
-// plays (see prQuantize). Wheel scrolls
+// plays (see prQuantize). cmd+shift+D and cmd+shift+backspace are the TIME-selection ops - they
+// duplicate or delete a span of the timeline itself, across every lane (see prTimeRegion, where
+// the region and its ruler band are defined). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
 // zooms in on fine grids. Every note carries a pitch AND a sample index, and the `note`/`index`
 // button says which of them the rows are showing - a piano keyboard, or a plain 0, 1, 2, … count of
@@ -5197,6 +5199,7 @@ function openPianorollEditor(call, carry = null) {
     zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
     scrollCells: 0, // leftmost visible cell when zoomed in
     sel: new Set(), // currently selected note objects (transient; mutated in place, never reserialized)
+    regionSpan: null, // the last marquee's quantized [a, b) cells - half of the time selection (see prTimeRegion)
     ghost: [], // keys still down in a take being recorded into this roll, drawn where they will land (see prRecGhosts); never serialized
     take: null, // the recording under way's books - which events are in, which notes are the take's (see prRecTake)
     history: [], // undo snapshots, oldest first (see prPushHistory); seeded with the opening state
@@ -6212,6 +6215,19 @@ function drawLoopBar(ctx, col, m) {
     ctx.fillText(String(c / prState.grid + 1), x + 3, PR_TOPBAR / 2);
   }
 
+  // the time selection, as a highlighted band on the ruler (see prTimeRegion)
+  const region = prTimeRegion();
+  if (region) {
+    const rx0 = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(region[0], m)));
+    const rx1 = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(region[1], m)));
+    if (rx1 > rx0) {
+      ctx.fillStyle = accent;
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(rx0, 0, rx1 - rx0, PR_TOPBAR);
+      ctx.globalAlpha = 1;
+    }
+  }
+
   // a grab handle at each end, pointing into the window
   ctx.fillStyle = accent;
   if (prCellToX(prState.start, m) >= PR_GUTTER) {
@@ -6874,6 +6890,99 @@ function prPaste() {
   drawPianoroll();
 }
 
+// ---------------------------------------------------------------------------------------------
+// Time-selection operations - editing a REGION of the timeline rather than a set of notes:
+// cmd+shift+D duplicates the region of time after itself, cmd+shift+backspace deletes that span
+// of the timeline. The region is the union of the selected notes' extent (a long note extends
+// the right edge by ringing there) and the last marquee's span, quantized to whole cells - so it
+// covers the square you drew, not just what the square happened to catch - and it is drawn as a
+// band on the loop ruler. Both act on the WHOLE time slice, every lane, selected or not: they
+// edit the timeline, where cmd+D and delete (no shift) act on the notes you picked.
+// ---------------------------------------------------------------------------------------------
+
+/** The active time region as [a, b) in cells, or null when nothing marks one. */
+function prTimeRegion() {
+  if (!prState) return null;
+  let a = Infinity;
+  let b = -Infinity;
+  for (const n of prState.sel) {
+    a = Math.min(a, n.start);
+    b = Math.max(b, n.start + n.len);
+  }
+  if (prState.regionSpan) {
+    a = Math.min(a, prState.regionSpan[0]);
+    b = Math.max(b, prState.regionSpan[1]);
+  }
+  return b > a ? [a, b] : null;
+}
+
+function prTimeHint() {
+  logLine('the time ops need a region - select notes or drag one out with the arrow tool first', true);
+}
+
+// Open `w` empty cells at `at`: every onset at or past it moves right, and the loop window rides
+// along - wholly-after windows shift, a window whose end is at or past the seam grows. The
+// timeline opens rather than overwrites, which is what makes the duplicate safe to aim into the
+// middle of a bar.
+function prInsertTime(at, w) {
+  for (const n of prState.notes) if (n.start >= at) n.start += w;
+  if (prState.start >= at) prState.start += w;
+  else if (prState.start + prState.len >= at) prState.len += w;
+  prSyncGridLenInputs();
+}
+
+// Close the [a, b) span: notes starting in it go, later onsets slide left, a note ringing into
+// (or across) it is trimmed by exactly what the span took, and the loop window's edges map the
+// same way. The trim is authored (`full` follows `len`): the removed time is gone, not a tail
+// waiting behind a neighbour.
+function prRemoveTime(a, b) {
+  const w = b - a;
+  const pt = (t) => (t <= a ? t : t >= b ? t - w : a);
+  prState.notes = prState.notes.filter((n) => n.start < a || n.start >= b);
+  const kept = new Set(prState.notes);
+  for (const n of [...prState.sel]) if (!kept.has(n)) prState.sel.delete(n);
+  for (const n of prState.notes) {
+    if (n.start >= b) { n.start -= w; continue; }
+    const end = n.start + n.len;
+    if (end > a) {
+      n.len = Math.max(1, pt(end) - n.start);
+      n.full = n.len;
+    }
+  }
+  const s = pt(prState.start);
+  prState.len = Math.max(1, pt(prState.start + prState.len) - s);
+  prState.start = s;
+  prSyncGridLenInputs();
+}
+
+function prTimeDuplicate() {
+  const region = prTimeRegion();
+  if (!region) return prTimeHint();
+  const [a, b] = region;
+  const w = b - a;
+  prInsertTime(b, w);
+  const copies = prLiveNotes(prState.notes)
+    .filter((n) => n.start >= a && n.start < b)
+    .map((n) => ({ ...n, start: n.start + w }));
+  prState.notes.push(...copies);
+  prState.sel = new Set(copies);
+  prState.regionSpan = [b, b + w]; // the copy is the new region, so the gesture repeats down the timeline
+  prClipOverlaps();
+  writePianorollCall();
+  drawPianoroll();
+}
+
+function prTimeDelete() {
+  const region = prTimeRegion();
+  if (!region) return prTimeHint();
+  prRemoveTime(region[0], region[1]);
+  prState.regionSpan = null;
+  prClipOverlaps();
+  writePianorollCall();
+  drawPianoroll();
+}
+
+
 // Either fold on/off, keeping the view where it was: the axis changes length underneath, so the
 // row at the middle of the window is re-centered in the new coordinates rather than letting the
 // raw lane index carry over (which would jump the roll somewhere unrelated).
@@ -7018,6 +7127,9 @@ function initPianorollCanvas() {
     }
     const hit = prNoteAt(cell, row);
     const velMod = e.metaKey || e.ctrlKey; // cmd (mac) / ctrl - velocity or probability drag
+    // Any press in the note grid supersedes the drawn time span: the region follows what is under
+    // the hand now - the clicked note's extent, or the marquee about to be drawn (see prTimeRegion).
+    prState.regionSpan = null;
     if (hit != null) {
       const nt = prState.notes[hit];
       if (e.shiftKey && !velMod) { // shift-click toggles this note in/out of the selection
@@ -7138,7 +7250,20 @@ function initPianorollCanvas() {
   // player as it went (prLiveSync), so this is also the moment the two stop being able to differ.
   const endDrag = (e) => {
     if (drag && prState) {
-      if (drag.kind === 'marquee') prState.marquee = null;
+      if (drag.kind === 'marquee') {
+        // The rectangle outlives the drag as half the TIME selection (see prTimeRegion): its span
+        // quantized out to whole cells, so the region covers the square that was drawn, not just
+        // the notes it caught. A rectangle too thin to be deliberate marks nothing - that was a
+        // click, and a click is how a region is dismissed.
+        const r = prState.marquee;
+        if (r && r.w >= 3) {
+          const m2 = prMetrics();
+          const a = Math.floor(prCellFloat(r.x, m2));
+          const b = Math.ceil(prCellFloat(r.x + r.w, m2));
+          prState.regionSpan = b > a ? [a, b] : null;
+        }
+        prState.marquee = null;
+      }
       // A pencil click that landed on empty lane changed nothing - and a write that changes nothing
       // still costs the buffer a re-eval, so it doesn't get one.
       // prWriteNow, not writePianorollCall: it flushes whatever the gesture last pushed and cancels
@@ -7230,7 +7355,13 @@ function initPianorollCanvas() {
       e.preventDefault();
       prState.sel = new Set(prLiveNotes(prState.notes));
       drawPianoroll();
-    } else if (mod && (e.key === 'd' || e.key === 'D')) {
+    } else if (mod && e.shiftKey && (e.key === 'd' || e.key === 'D')) {
+      e.preventDefault();
+      prTimeDuplicate(); // the time-selection ops - see prTimeRegion and friends
+    } else if (mod && e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      prTimeDelete();
+    } else if (mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) {
       e.preventDefault();
       prDuplicate();
     } else if (mod && !e.shiftKey && (e.key === 'c' || e.key === 'C' || e.key === 'x' || e.key === 'X')) {
@@ -7260,7 +7391,11 @@ function initPianorollCanvas() {
       drawPianoroll();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      if (prState.sel.size) { prState.sel.clear(); drawPianoroll(); } else closePianorollEditor();
+      if (prState.sel.size || prState.regionSpan) {
+        prState.sel.clear();
+        prState.regionSpan = null;
+        drawPianoroll();
+      } else closePianorollEditor();
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (!sel.length) return;
       e.preventDefault();
@@ -18933,7 +19068,8 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
 //
 // Clips edit like the roll's notes: click-drag to paint one, drag its body to move it (between
 // lanes too), option-drag to duplicate, drag its right edge to resize, right-click or delete to
-// remove it. Every edit is
+// remove it; cmd+shift+D and cmd+shift+backspace are the roll's time-selection ops on the song's
+// own timeline (see arTimeRegion). Every edit is
 // written straight back into the arrange("…", { … }) call - the data folds to a chip like a roll's
 // notes - and re-evaluates the buffer, so what is painted is what plays.
 // ---------------------------------------------------------------------------------------------
@@ -19109,6 +19245,7 @@ function openArrangeEditor(call) {
     scrollLane: 0, // topmost visible lane (fractional while scrolling) - lanes are unbounded
     brush: null, // the label the next paint lays down
     sel: new Set(), // selected clip objects (transient, never serialized)
+    regionSpan: null, // the last marquee's snap-quantized [a, b) bars - half of the time selection (see arTimeRegion)
     selRegion: null, // the selected loop region (its name and × become live in the ruler)
     drag: null,
     hover: null,
@@ -19413,6 +19550,18 @@ function drawArrange() {
     if (x < AR_GUTTER) continue;
     ctx.fillText(String(bar + 1), x + 3, AR_RULER_TOP + AR_RULER / 2);
   }
+  // the time selection, as a highlighted band on the ruler (see arTimeRegion)
+  const timeRegion = arTimeRegion();
+  if (timeRegion) {
+    const rx0 = Math.min(W, Math.max(AR_GUTTER, arXOf(timeRegion[0])));
+    const rx1 = Math.min(W, Math.max(AR_GUTTER, arXOf(timeRegion[1])));
+    if (rx1 > rx0) {
+      ctx.fillStyle = col('--accent');
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(rx0, AR_RULER_TOP, rx1 - rx0, AR_RULER);
+      ctx.globalAlpha = 1;
+    }
+  }
   // loop regions: bands in the ruler, the one looping now lit, released ones dimmed
   const clockState = arClockState();
   // the loops strip: its own row above the ruler, so the bar numbers stay readable and stay
@@ -19615,6 +19764,96 @@ function arDuplicate(clips) {
   drawArrange();
 }
 
+// ---------------------------------------------------------------------------------------------
+// Time-selection operations - the roll's prTimeRegion family, painter-shaped: cmd+shift+D
+// duplicates the region of song after itself, cmd+shift+backspace closes that span of the
+// timeline. The region is the union of the selected clips' extent and the last marquee's span
+// quantized out to snap cells, drawn as a band on the bar ruler; the ops act on the whole time
+// slice - every lane, plus the loop regions and the explicit length, which ride the timeline
+// like everything else.
+// ---------------------------------------------------------------------------------------------
+
+/** The active time region as [a, b) in bars, or null when nothing marks one. */
+function arTimeRegion() {
+  if (!arState) return null;
+  let a = Infinity;
+  let b = -Infinity;
+  for (const c of arState.sel) {
+    a = Math.min(a, c.start);
+    b = Math.max(b, c.start + c.len);
+  }
+  if (arState.regionSpan) {
+    a = Math.min(a, arState.regionSpan[0]);
+    b = Math.max(b, arState.regionSpan[1]);
+  }
+  return b > a ? [a, b] : null;
+}
+
+function arTimeHint() {
+  logLine('the time ops need a region - select clips or drag one out with the arrow tool first', true);
+}
+
+// Open `w` bars of empty time at `at`: clips at or past it move right, loop-region edges and the
+// explicit length ride along (an edge at or past the seam shifts, so a region straddling it
+// stretches rather than losing its tail).
+function arInsertTime(at, w) {
+  for (const c of arState.clips) if (c.start >= at) c.start += w;
+  for (const r of arState.loops) {
+    if (r.start >= at) r.start += w;
+    if (r.end >= at) r.end += w;
+  }
+  if (arState.len != null && arState.len >= at) arState.len += w;
+}
+
+// Close the [a, b) span: clips starting in it go, later ones slide left, a clip running into it
+// is trimmed by what the span took, and loop-region edges and the explicit length map the same
+// way (a region squeezed to nothing is dropped).
+function arRemoveTime(a, b) {
+  const w = b - a;
+  const pt = (t) => (t <= a ? t : t >= b ? t - w : a);
+  arState.clips = arState.clips.filter((c) => c.start < a || c.start >= b);
+  const kept = new Set(arState.clips);
+  for (const c of [...arState.sel]) if (!kept.has(c)) arState.sel.delete(c);
+  for (const c of arState.clips) {
+    if (c.start >= b) { c.start -= w; continue; }
+    const end = c.start + c.len;
+    if (end > a) c.len = Math.max(arCell(), pt(end) - c.start);
+  }
+  arState.loops = arState.loops.filter((r) => {
+    r.start = pt(r.start);
+    r.end = pt(r.end);
+    return r.end - r.start > 1e-9;
+  });
+  if (arState.selRegion && !arState.loops.includes(arState.selRegion)) arState.selRegion = null;
+  if (arState.len != null) arState.len = Math.max(arCell(), pt(arState.len));
+}
+
+function arTimeDuplicate() {
+  const region = arTimeRegion();
+  if (!region) return arTimeHint();
+  const [a, b] = region;
+  const w = b - a;
+  arInsertTime(b, w);
+  const copies = arState.clips.filter((c) => c.start >= a && c.start < b).map((c) => ({ ...c, start: c.start + w }));
+  arState.clips.push(...copies);
+  arState.sel = new Set(copies);
+  arState.regionSpan = [b, b + w]; // the copy is the new region, so the gesture repeats down the song
+  arSyncControls();
+  writeArrangeCall();
+  drawArrange();
+}
+
+function arTimeDelete() {
+  const region = arTimeRegion();
+  if (!region) return arTimeHint();
+  arRemoveTime(region[0], region[1]);
+  arState.regionSpan = null;
+  arSyncControls();
+  writeArrangeCall();
+  drawArrange();
+}
+
+
 /** The one text box the painter has, laid over whatever is being named: a lane, or a loop region. */
 function arShowNameInput({ left, top, width, value, placeholder, edit }) {
   const r = arCanvas.getBoundingClientRect();
@@ -19760,8 +19999,8 @@ function initArrangeCanvas() {
         drawArrange();
         return;
       }
-      // the rest of the ruler is a magnifier, Ableton-style: drag down to zoom in, up to zoom
-      // out, and the bar you grabbed stays under the pointer, so a sideways drag pans as well
+      // the rest of the ruler is a magnifier: drag down to zoom in, up to zoom out, and the bar
+      // you grabbed stays under the pointer, so a sideways drag pans as well
       arState.drag = { kind: 'zoom', bar: arBarsOf(x), y0: y, px0: arState.pxPerCycle };
       return;
     }
@@ -19792,6 +20031,9 @@ function initArrangeCanvas() {
     if (x < AR_GUTTER || lane < 0 || y >= arGridBottom()) return;
 
     arState.selRegion = null; // anything selected in the lanes is instead of a region
+    // ...and any press in the lanes supersedes the drawn time span: the region follows what is
+    // under the hand now - the clicked clip's extent, or the marquee about to be drawn.
+    arState.regionSpan = null;
     if (hit) {
       if (e.shiftKey) {
         if (arState.sel.has(hit.clip)) arState.sel.delete(hit.clip);
@@ -19847,10 +20089,9 @@ function initArrangeCanvas() {
     } else if (d.kind === 'move') {
       const dBars = arSnapTo(arBarsOf(x) - arBarsOf(d.x0));
       const dLane = arLaneOf(y) - d.lane0;
-      // Option-drag duplicates, Live's copy-drag - the roll's altCopy, clip-shaped: the originals
-      // stay where they were and the drag carries fresh copies instead. Made on the first real
-      // movement, so an option-click that never travels is just a click, not a clip stacked
-      // exactly on itself.
+      // Option-drag duplicates - the roll's altCopy, clip-shaped: the originals stay where they
+      // were and the drag carries fresh copies instead. Made on the first real movement, so an
+      // option-click that never travels is just a click, not a clip stacked exactly on itself.
       if (d.alt && !d.copied && (dBars !== 0 || dLane !== 0)) {
         d.copied = true;
         const copies = d.targets.map((c) => ({ ...c, ...d.orig.get(c) }));
@@ -19918,7 +20159,19 @@ function initArrangeCanvas() {
     const d = arState.drag;
     arState.drag = null;
     try { arCanvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
-    if (d.kind === 'marquee') { drawArrange(); return; }
+    if (d.kind === 'marquee') {
+      // The rectangle outlives the drag as half the TIME selection (see arTimeRegion): its span
+      // quantized out to snap cells. A rectangle too thin to be deliberate marks nothing - that
+      // was a click, and a click is how a region is dismissed.
+      if (Math.abs(d.x1 - d.x0) >= 3) {
+        const cell = arCell();
+        const a = Math.max(0, Math.floor(arBarsOf(Math.min(d.x0, d.x1)) / cell) * cell);
+        const b = Math.ceil(arBarsOf(Math.max(d.x0, d.x1)) / cell) * cell;
+        arState.regionSpan = b > a ? [a, b] : null;
+      }
+      drawArrange();
+      return;
+    }
     if (d.kind === 'region') {
       const region = { name: '', start: Math.min(d.a, d.b), end: Math.max(d.a, d.b) };
       arState.loops.push(region);
@@ -20002,7 +20255,20 @@ function initArrangeCanvas() {
   arCanvas.addEventListener('keydown', (e) => {
     if (!arState) return;
     const mod = e.metaKey || e.ctrlKey;
-    if (e.key === 'Escape') { closeArrangeEditor(); e.preventDefault(); return; }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      // like the roll: first let go of what is held, then the panel itself
+      if (arState.regionSpan || arState.sel.size) {
+        arState.regionSpan = null;
+        arState.sel.clear();
+        drawArrange();
+      } else closeArrangeEditor();
+      return;
+    }
+    // the time-selection ops (see arTimeRegion and friends) - before the plain delete below, which
+    // would otherwise take cmd+shift+backspace as a note-level delete
+    if (mod && e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) { arTimeDelete(); e.preventDefault(); return; }
+    if (mod && e.shiftKey && e.key.toLowerCase() === 'd') { arTimeDuplicate(); e.preventDefault(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (arState.selRegion) arRemoveRegion(arState.selRegion);
       else arDeleteClips([...arState.sel]);
@@ -20027,7 +20293,7 @@ function initArrangeCanvas() {
     }
     if (mod && e.key.toLowerCase() === 'z') { arHistoryStep(e.shiftKey ? 1 : -1); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
-    if (mod && e.key.toLowerCase() === 'd') { arDuplicate([...arState.sel]); e.preventDefault(); return; }
+    if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { arDuplicate([...arState.sel]); e.preventDefault(); return; }
     if (!mod && e.key.toLowerCase() === 'b') { arToggleTool(); e.preventDefault(); return; }
     if (e.key === 'Tab') {
       // tab / shift+tab step the brush through the palette, so a part can be picked without
