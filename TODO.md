@@ -216,8 +216,8 @@ no completion notes.
     there (Harmony / Melody / Rhythm submenus, reusing prMenu/openCtxMenu), hotkeys later as
     accelerators into its top items; in-roll plain letters are mostly free (b = tool, 0 = mute).
     Non-negotiable UX: hover a menu entry auditions the result through the track's synth
-    (prPreview machinery), commit on click, Escape reverts. Phases 1-3 (theory module, chord/
-    voicing menu, rollops.mjs transforms + chance ops behind parameter popovers) are in; delete each remaining phase as
+    (prPreview machinery), commit on click, Escape reverts. Phases 1-4 (theory module, chord/
+    voicing menu, rollops.mjs transforms + chance ops behind parameter popovers, generators) are in; delete each remaining phase as
     it lands:
 
 [ ] Cascara for RHYTHM_FIGURES (pattern-core/src/rollops.mjs): the timbale-shell pattern is the
@@ -228,11 +228,6 @@ no completion notes.
     half-cycle rotation sources disagree on as the default. To ship: either the 7-stroke under the
     hedged name "palito" (it's 3-2 son clave + two pickups), or transcribe the 10-stroke from the
     Dicciani engraving by eye (accents carry the risk). Aria's call which.
-
-[ ] Harmony phase 4 - generators: arpeggiate a chord destructively (up/down/updown/converge/
-    random(seeded)/as-drawn, rate from the roll grid); random in-scale melody (seeded constrained
-    walk, chord-tone bias on strong beats); design together with roadmap "mutate" (same tool with
-    a keep-mask); "same rhythm, new pitches" contour-preserving re-pitch.
 
 [ ] Harmony phase 5 - next-chord suggestions: functional-harmony transition table (T->S->D->T,
     circle-of-fifths pull, secondary dominants + modal interchange as a "borrowed" section),

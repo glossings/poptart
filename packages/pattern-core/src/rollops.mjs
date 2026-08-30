@@ -1,6 +1,6 @@
 // rollops.mjs - geometry on a piano roll's notes: strum, retrograde, pitch inversion, spread/
 // contract, rhythmize, conform-to-key, humanize, legato, and the seeded ones - degrade, augment,
-// variation. Every function here is
+// variation - and the generators, arpeggiate and melodize. Every function here is
 // notes -> notes over the roll's own note objects ({ midi, start, len, vel, prob, nudge, mute }),
 // never mutating its input: the roll editor swaps the result in for the selection, so undo,
 // overlap clipping and serialization all come from the editor as they do for any other edit.
@@ -15,7 +15,7 @@
 // midiToDegree/degreeToMidi; a note that isn't in the key takes its nearest degree and comes out
 // in key, which is the honest reading of "invert this melody in C major".
 
-import { degreeToMidi, midiToDegree, quantizeToScale } from './notes.mjs';
+import { degreeToMidi, midiToDegree, quantizeToScale, scalePitchClasses } from './notes.mjs';
 
 const MAX_NUDGE = 0.5; // mirrors pianoroll.mjs's PIANOROLL_MAX_NUDGE
 const clampNudge = (v) => Math.min(MAX_NUDGE, Math.max(-MAX_NUDGE, v));
@@ -436,4 +436,161 @@ export function rotateFigure(figure, rotation = 0) {
   const r = ((Math.round(rotation) % steps) + steps) % steps;
   const pairs = hits.map((h, i) => [(h + r) % steps, accents[i] ?? 1]).sort((a, b) => a[0] - b[0]);
   return { steps, hits: pairs.map((p) => p[0]), accents: pairs.map((p) => p[1]) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Generators. Destructive in the roll's spirit: a chord becomes the run of notes an arpeggiator
+// would have played, a rhythm keeps its every cell and takes a freshly walked melody. Seeded like
+// the chance ops - one seed per popover, reroll throws new dice.
+
+/**
+ * Arpeggiate: each chord (notes sharing an onset) becomes a run of single notes over the chord's
+ * own span, one every `rate` cells, cycling through the chord in `direction` order - 'up',
+ * 'down', 'up-down' (no repeated turnaround), 'converge' (outside in), 'as drawn' (the order the
+ * notes were added), or 'random' (seeded, never the same note twice in a row). Each hit keeps its
+ * source note's velocity, fractional rates land in nudges, and a hit that would double a pitch in
+ * a cell - or run past the chord's end - is dropped (a lane holds one note per cell). Lone notes
+ * pass through untouched.
+ */
+export function arpeggiate(notes, { rate = 1, direction = 'up', seed = 1 } = {}) {
+  const r = Math.max(0.25, rate);
+  const rand = seededRandom(seed);
+  const groups = new Map();
+  for (const nt of notes) {
+    if (!groups.has(nt.start)) groups.set(nt.start, []);
+    groups.get(nt.start).push(nt);
+  }
+  const out = [];
+  for (const group of groups.values()) {
+    if (group.length < 2) { out.push({ ...group[0] }); continue; }
+    const start = group[0].start + Math.min(...group.map(noteNudge)); // an offbeat chord arps from where it sat
+    const span = Math.max(...group.map((nt) => nt.len));
+    const asc = [...group].sort((a, b) => a.midi - b.midi);
+    const cycle = direction === 'down' ? [...asc].reverse()
+      : direction === 'up-down' ? [...asc, ...asc.slice(1, -1).reverse()]
+      : direction === 'converge' ? asc.map((_, i) => (i % 2 ? asc[asc.length - 1 - (i >> 1)] : asc[i >> 1]))
+      : direction === 'as drawn' ? [...group]
+      : asc; // 'up'; 'random' re-picks per hit below
+    const seen = new Set();
+    let prevPick = -1;
+    for (let i = 0; i * r < span - 1e-9; i++) {
+      let src = cycle[i % cycle.length];
+      if (direction === 'random') {
+        let idx = Math.floor(rand() * asc.length);
+        if (idx === prevPick) idx = (idx + 1) % asc.length;
+        prevPick = idx;
+        src = asc[idx];
+      }
+      const hit = placeAt(src, start + i * r);
+      const key = `${hit.start}:${hit.midi}`;
+      if (hit.start >= group[0].start + span || seen.has(key)) continue;
+      seen.add(key);
+      out.push(withLen(hit, Math.min(r, span - i * r)));
+    }
+  }
+  return out;
+}
+
+/**
+ * Melodize: same rhythm, new pitches - every cell, length, velocity and nudge stays put, the
+ * pitches are a seeded walk in `scale`. Four dials; the last two both read as "adherence to the
+ * original", 0 ignoring it and 1 preserving it:
+ *
+ *   range   the walk's window in scale steps, centred on the selection's own midpoint. Unset, it
+ *           is the selection's span, widened to an octave when narrower - so one repeated pitch
+ *           still yields a melody. A window wider than an octave also walks bolder - the leaps
+ *           scale with it - so widening the range audibly spreads the line, not just its limits.
+ *   offset  moves the whole window up or down in scale steps.
+ *   shape   each re-pitched note's chance of tracing the original's shape: pulled to its own
+ *           position mapped into the window (so range magnifies the drawn contour), wiggled a
+ *           step for fresh notes, and held to the original's direction sign for sign (a repeat
+ *           staying a repeat); otherwise the walk chooses freely - steps over leaps, leaning
+ *           back toward the middle of the window. 1 is "same shape, new notes".
+ *   keep    each note's chance of not being re-pitched at all, kept notes anchoring the walk -
+ *           0 is a whole new melody, ~0.65 mutates a familiar one.
+ *
+ * Free-walking notes on the strong beats of the bar (`grid` cells, its quarters the beats) land
+ * on tonic-triad tones - the chord-tone bias that keeps a random line sounding intentional; a
+ * shape-following note is exempt (the shape is the constraint there). Notes sharing an onset
+ * always come out on distinct pitches, since a duplicate would collapse into one note. Each
+ * note's dice are drawn up front, so dragging any one dial never rescrambles the others' work.
+ */
+export function melodize(notes, { scale, seed = 1, keep = 0, shape = 0, range = null, offset = 0, grid = 16 } = {}) {
+  if (!notes.length) return [];
+  const rand = seededRandom(seed);
+  const size = scalePitchClasses(scale).length || 7;
+  const triad = size >= 6 ? [0, 2, 4] : null; // in a pentatonic everything is a chord tone already
+  const ordered = notes.map((nt, i) => [nt, i]).sort((a, b) => byTime(a[0], b[0]));
+  const dice = ordered.map(() => [rand(), rand(), rand(), rand(), rand()]);
+  const degs = ordered.map(([nt]) => midiToDegree(nt.midi, scale));
+  let lo = Math.min(...degs), hi = Math.max(...degs);
+  const origLo = lo, origSpan = hi - lo; // the drawn shape's own span, for contour mapping
+  if (range != null) {
+    const width = Math.max(1, Math.round(range));
+    const mid = Math.round((lo + hi) / 2);
+    lo = mid - (width >> 1);
+    hi = lo + width;
+  } else if (hi - lo < size) { // a narrow selection - one repeated pitch included - gets an octave
+    const mid = Math.round((lo + hi) / 2);
+    lo = mid - (size >> 1);
+    hi = lo + size;
+  }
+  lo += Math.round(offset);
+  hi += Math.round(offset);
+  const center = (lo + hi) / 2;
+  const stretch = Math.max(1, (hi - lo) / size); // a wide window walks bolder, so range is heard
+  const clampDeg = (d) => Math.min(hi, Math.max(lo, d));
+  const beat = grid >= 4 && Number.isInteger(grid / 4) ? grid / 4 : null;
+  const snapTriad = (d, dir) => {
+    if (!triad) return d;
+    for (let k = 0; k <= size; k++) {
+      for (const cand of (dir < 0 ? [d - k, d + k] : [d + k, d - k])) {
+        if (cand >= lo && cand <= hi && triad.includes(((cand % size) + size) % size)) return cand;
+      }
+    }
+    return d;
+  };
+  const result = new Array(notes.length);
+  let prev = clampDeg(degs[0] + Math.round(offset));
+  let onsetKey = null;
+  let atOnset = new Set();
+  ordered.forEach(([nt, idx], i) => {
+    const pos = nt.start + noteNudge(nt);
+    if (pos !== onsetKey) { onsetKey = pos; atOnset = new Set(); }
+    const [keepRoll, dirRoll, magRoll, magRoll2, shapeRoll] = dice[i];
+    if (keepRoll < keep) {
+      atOnset.add(degs[i]);
+      prev = degs[i];
+      result[idx] = { ...nt };
+      return;
+    }
+    const follow = shapeRoll < shape;
+    let d;
+    if (follow) {
+      // Trace the original: its position mapped into the window (range magnifies the shape),
+      // wiggled a step for new notes, then held to the original's direction sign for sign.
+      const t = origSpan ? (degs[i] - origLo) / origSpan : 0.5;
+      d = Math.round(lo + t * (hi - lo)) + (magRoll < 0.4 ? 0 : magRoll < 0.7 ? 1 : -1);
+      const sign = i === 0 ? null : Math.sign(degs[i] - degs[i - 1]);
+      if (sign === 0) d = prev;
+      else if (sign > 0 && d <= prev) d = prev + 1;
+      else if (sign < 0 && d >= prev) d = prev - 1;
+      d = clampDeg(d);
+    } else {
+      const up = dirRoll < (prev < center ? 0.65 : prev > center ? 0.35 : 0.5) ? 1 : -1;
+      const mag = magRoll < 0.15 ? 0 : magRoll < 0.65 ? 1
+        : magRoll < 0.9 ? Math.round(2 * stretch) : Math.round((3 + Math.floor(magRoll2 * 2)) * stretch);
+      d = clampDeg(prev + up * mag);
+      const barPos = ((pos % grid) + grid) % grid;
+      if (beat && Math.abs(barPos / beat - Math.round(barPos / beat)) < 0.02) {
+        d = snapTriad(d, Math.sign(up * mag) || -1);
+      }
+    }
+    let guard = 0;
+    while (atOnset.has(d) && guard++ < 12) d += 1;
+    atOnset.add(d);
+    prev = d;
+    result[idx] = { ...nt, midi: clampMidi(degreeToMidi(d, scale)) };
+  });
+  return result;
 }

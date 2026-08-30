@@ -5307,3 +5307,30 @@ body.mix-on #deckAHead {
   font-size: 11.5px;
   color: var(--text-dim);
 }
+
+/* Context-menu categories: hovering a trigger unfolds a nested menu beside it. The nested menu
+   keeps the ctx-menu skin but sits absolutely inside its row, so dismissal sees one DOM tree;
+   .flip swaps it to the left when the right edge would run off screen. */
+.ctx-menu .ctx-sub-holder {
+  position: relative;
+}
+
+.ctx-menu .ctx-sub-trigger::after {
+  content: '▸';
+  float: right;
+  margin-left: 1.5em;
+  opacity: 0.6;
+}
+
+.ctx-menu .ctx-sub {
+  position: absolute;
+  left: calc(100% - 2px);
+  top: -5px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.ctx-menu .ctx-sub.flip {
+  left: auto;
+  right: calc(100% - 2px);
+}

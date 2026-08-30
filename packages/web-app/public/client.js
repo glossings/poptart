@@ -6584,7 +6584,9 @@ let prHarmonySeed = Date.now() % 100000; // the seeded transforms' dice: one rol
  *           hovering an option PREVIEWS it the way the menu's entries preview, and clicking
  *           picks it; min/max/step are for the numeric types. A param's optional onChange(values, rows) runs when its value is
  *           picked or typed (not on hover), for cross-param bookkeeping - hiding rows, resizing
- *           another param's range.
+ *           another param's range. A param's optional `title` becomes its row's tooltip, and a
+ *           numeric param's optional `reset` value snaps back on double-click, and its optional
+ *           `fmt(value)` renders the readout (units, say).
  *   make    (values, seed) -> the spec prHarmonyApply takes (a targets -> notes function)
  */
 function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
@@ -6674,7 +6676,7 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
       input.min = p.min; input.max = p.max; input.step = p.step ?? (p.type === 'int' ? 1 : 0.01);
       input.value = p.value;
       const readout = document.createElement('output');
-      const show = () => { readout.textContent = Number.isInteger(p.step ?? (p.type === 'int' ? 1 : 0)) ? String(values[p.key]) : Number(values[p.key]).toFixed(2).replace(/\.?0+$/, ''); };
+      const show = () => { readout.textContent = p.fmt ? p.fmt(values[p.key]) : Number.isInteger(p.step ?? (p.type === 'int' ? 1 : 0)) ? String(values[p.key]) : Number(values[p.key]).toFixed(2).replace(/\.?0+$/, ''); };
       input.addEventListener('input', () => {
         const v = Number(input.value);
         values[p.key] = p.type === 'int' ? Math.round(v) : v;
@@ -6683,12 +6685,14 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
         syncReroll();
         preview();
       });
+      if (p.reset != null) input.addEventListener('dblclick', () => { input.value = p.reset; input.dispatchEvent(new Event('input')); });
       row.appendChild(input);
       row.appendChild(readout);
       show();
       row.show = show; // so another param's onChange can move this one and keep the readout honest
       first ??= input;
     }
+    if (p.title) row.title = p.title;
     row.dataset.key = p.key;
     el.appendChild(row);
   }
@@ -6737,9 +6741,10 @@ function prHarmonyTransformItems(items, targets, scale, at) {
   const outOfKey = pitched && targets.some((nt) => notesMod?.quantizeToScale(nt.midi, scale) !== nt.midi);
   const t = (label, fn, title) => [label, () => prHarmonyCommit(fn), title, () => prHarmonyPreview(fn)];
   const popover = (label, title, def) => [`${label}…`, () => prOpenHarmonyParams(at, def), title];
-  const section = [];
+  const melody = [];
+  const rhythm = []; // index mode flattens everything into this one
   if (chords) {
-    section.push(popover('strum', 'fan each chord out in time', {
+    rhythm.push(popover('strum', 'fan each chord out in time', {
       title: 'strum',
       params: [
         { key: 'direction', label: 'direction', type: 'choice', options: pitched ? ['up', 'down'] : ['top row first', 'bottom row first'], value: pitched ? 'up' : 'top row first' },
@@ -6748,19 +6753,64 @@ function prHarmonyTransformItems(items, targets, scale, at) {
       ],
       make: (v) => (ns) => T.strum(ns, { spread: v.spread, direction: v.direction === 'down' || v.direction === 'top row first' ? 'down' : 'up', velRamp: v.fade, key: pitched ? 'midi' : 'index' }),
     }));
+    if (pitched) {
+      rhythm.push(popover('arpeggiate', 'each chord broken into a run of single notes', {
+        title: 'arpeggiate', reroll: (v) => v.direction === 'random',
+        params: [
+          { key: 'direction', label: 'direction', type: 'choice', options: ['up', 'down', 'up-down', 'converge', 'random', 'as drawn'], value: 'up' },
+          { key: 'rate', label: 'rate', type: 'range', min: 0.25, max: 4, step: 0.25, value: 1 },
+        ],
+        make: (v, seed) => (ns) => T.arpeggiate(ns, { rate: v.rate, direction: v.direction, seed }),
+      }));
+    }
   }
-  if (onsets > 1) section.push(t('retrograde', (ns) => T.retrograde(ns), 'the phrase backwards, in its own span'));
+  if (onsets > 1) rhythm.push(t('retrograde', (ns) => T.retrograde(ns), 'the phrase backwards, in its own span'));
   if (n > 1 && pitched) {
-    section.push(t('invert pitch', (ns) => T.invertPitch(ns, { scale }), `upside down in ${scale}`));
-    section.push(popover('spread', 'wider or tighter around the centre, in key', {
+    melody.push(t('invert pitch', (ns) => T.invertPitch(ns, { scale }), `upside down in ${scale}`));
+    melody.push(popover('spread', 'wider or tighter around the centre, in key', {
       title: `spread in ${scale}`,
       params: [{ key: 'steps', label: 'steps', type: 'range', min: -4, max: 4, step: 1, value: 1 }],
       make: (v) => (ns) => T.spreadPitch(ns, { scale, steps: v.steps }),
     }));
+    // Melodize's presets are just settings of the shape/keep dials; dragging either away from
+    // the picked preset drops the pick back to 'none', the name of the custom mix.
+    const size = notesMod?.scalePitchClasses?.(scale)?.length ?? 7;
+    const ds = targets.map((nt) => notesMod.midiToDegree(nt.midi, scale));
+    const degSpan = Math.max(...ds) - Math.min(...ds);
+    const PRESETS = { 'new melody': { shape: 0, keep: 0 }, 'same shape': { shape: 1, keep: 0 }, mutate: { shape: 0, keep: 0.65 } };
+    const unpreset = (v, rows) => {
+      const p = PRESETS[v.preset];
+      if (!p || (p.shape === v.shape && p.keep === v.keep)) return;
+      v.preset = 'none';
+      const trig = rows.preset.querySelector('.ctx-drop-trigger');
+      if (trig) trig.textContent = 'none';
+      for (const b of rows.preset.querySelectorAll('.ctx-choice button')) b.classList.toggle('on', b.textContent === 'none');
+    };
+    const setSlider = (rows, key, val) => { const r = rows[key]; r.querySelector('input').value = val; r.show(); };
+    melody.push(popover('melodize', 'new pitches for your rhythm, walked in key', {
+      title: `melodize in ${scale}`, reroll: true,
+      params: [
+        { key: 'preset', label: 'preset', type: 'choice', options: ['none', ...Object.keys(PRESETS)], value: 'none',
+          onChange: (v, rows) => {
+            const p = PRESETS[v.preset];
+            if (!p) return; // 'none' names the custom mix - picking it moves nothing
+            v.shape = p.shape; v.keep = p.keep; v.offset = 0;
+            setSlider(rows, 'shape', p.shape); setSlider(rows, 'keep', p.keep); setSlider(rows, 'offset', 0);
+          } },
+        { key: 'range', label: 'range', title: "the walk's room in octaves, centred on the selection's middle", type: 'range', min: 0.25, max: 3, step: 0.25, value: Math.min(3, Math.max(1, Math.round((degSpan / size) * 4) / 4)), fmt: (x) => `${x} oct` },
+        { key: 'offset', label: 'offset', title: 'the whole window up or down, in scale steps - double-click for 0', type: 'range', min: -14, max: 14, step: 1, value: 0, reset: 0 },
+        { key: 'shape', label: 'same shape', title: "how faithfully the new line follows the original's ups and downs", type: 'range', min: 0, max: 1, step: 0.02, value: 0, onChange: unpreset },
+        { key: 'keep', label: 'same notes', title: 'the share of notes kept exactly as they were', type: 'range', min: 0, max: 1, step: 0.02, value: 0, onChange: unpreset },
+      ],
+      make: (v, seed) => (ns) => {
+        const p = PRESETS[v.preset] ?? {}; // hovering a preset previews its mix before any click
+        return T.melodize(ns, { scale, seed, keep: p.keep ?? v.keep, shape: p.shape ?? v.shape, range: Math.round(v.range * size), offset: v.offset, grid });
+      },
+    }));
   }
-  if (outOfKey) section.push(t('conform to key', (ns) => T.conformToScale(ns, scale), `every note to its nearest in ${scale}`));
-  if (onsets > 1) section.push(t('legato', (ns) => T.legato(ns), 'each note lasts until the next onset'));
-  section.push(popover('accent', 'reshape velocities by where each note sits in the bar', {
+  if (outOfKey) melody.push(t('conform to key', (ns) => T.conformToScale(ns, scale), `every note to its nearest in ${scale}`));
+  if (onsets > 1) rhythm.push(t('legato', (ns) => T.legato(ns), 'each note lasts until the next onset'));
+  rhythm.push(popover('accent', 'reshape velocities by where each note sits in the bar', {
     title: 'accent', reroll: (v) => v.shape === 'random',
     params: [
       { key: 'shape', label: 'shape', type: 'choice', options: [...T.ACCENT_SHAPES], value: 'downbeats',
@@ -6778,19 +6828,19 @@ function prHarmonyTransformItems(items, targets, scale, at) {
       waves: { half: v.half, quarter: v.quarter, eighth: v.eighth, dotted: v.dotted },
     }),
   }));
-  section.push(popover('humanize', 'seeded velocity and timing jitter', {
+  rhythm.push(popover('humanize', 'seeded velocity and timing jitter', {
     title: 'humanize', reroll: true,
     params: [{ key: 'amount', label: 'amount', type: 'range', min: 0, max: 1, step: 0.02, value: 0.3 }],
     make: (v, seed) => (ns) => T.humanize(ns, { seed, vel: 0.2 * v.amount, time: 0.15 * v.amount }),
   }));
   if (n > 1) {
-    section.push(popover('degrade', 'drop a share of the notes at random', {
+    rhythm.push(popover('degrade', 'drop a share of the notes at random', {
       title: 'degrade', reroll: true,
       params: [{ key: 'amount', label: 'chance', type: 'range', min: 0, max: 1, step: 0.02, value: 0.3 }],
       make: (v, seed) => (ns) => T.degrade(ns, { seed, amount: v.amount }),
     }));
   }
-  section.push(popover('add notes', 'fill some of the empty cells, modelled on their neighbours', {
+  (pitched ? melody : rhythm).push(popover('add notes', 'fill some of the empty cells, modelled on their neighbours', {
     title: 'add notes', reroll: true,
     params: [{ key: 'amount', label: 'density', type: 'range', min: 0, max: 1, step: 0.02, value: 0.3 }],
     make: (v, seed) => (ns) => T.augment(ns, { seed, amount: v.amount, scale, repitch: pitched }),
@@ -6810,7 +6860,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
       resize(rows.hits, 'hits', stepsOf(v), v);
       resize(rows.rotation, 'rotation', stepsOf(v) - 1, v);
     };
-    section.push(popover('rhythmize', "a rhythm played over each note's own length", {
+    rhythm.push(popover('rhythmize', "a rhythm played over each note's own length", {
       title: 'rhythmize',
       params: [
         { key: 'rhythm', label: 'rhythm', type: 'choice', options: figures, value: 'divide',
@@ -6835,9 +6885,15 @@ function prHarmonyTransformItems(items, targets, scale, at) {
       },
     }));
   }
-  if (section.length) {
+  const head = { head: n === 1 ? 'transform the note' : `transform ${n} notes` };
+  if (pitched && (melody.length || rhythm.length)) {
     if (items.length) items.push('-');
-    items.push({ head: n === 1 ? 'transform the note' : `transform ${n} notes` }, ...section);
+    items.push(head);
+    if (melody.length) items.push({ sub: 'melody', title: 'invert, spread, melodize, add notes, ...', items: melody });
+    if (rhythm.length) items.push({ sub: 'rhythm & feel', title: 'strum, arpeggiate, rhythmize, accent, ...', items: rhythm });
+  } else if (!pitched && rhythm.length) {
+    if (items.length) items.push('-');
+    items.push(head, ...rhythm);
   }
   // The whole roll, whatever is selected: twice as long, the second half a variation of the first.
   items.push('-', { head: 'the roll' }, popover('double with variation', 'double the loop, the copy varied by temperature', {
@@ -6883,33 +6939,37 @@ function prOpenHarmonyMenu(e) {
   const chordItem = (label, midis, title) =>
     [label, () => { prHarmonyCommit(midis); prOpenHarmonyMenu(at); }, title, () => prHarmonyPreview(midis)];
   const items = [];
+  const chordItems = [];
   if (index) {
     // no chords for a drum roll
   } else if (pitches.length === 1) {
-    items.push({ head: `${midiName(pitches[0])} · chords in ${scale}` });
+    chordItems.push({ head: `${midiName(pitches[0])} · chords in ${scale}` });
     for (const sevenths of [false, true]) {
-      if (sevenths) items.push('-');
+      if (sevenths) chordItems.push('-');
       for (const c of harmonyMod.chordsForNote(pitches[0], scale, { sevenths })) {
         const label = `${c.name ?? c.midis.map(midiName).join(' ')}${c.roman ? ` · ${c.roman}` : ''}`;
-        items.push(chordItem(label, c.midis, `${midiName(pitches[0])} is the ${c.role}`));
+        chordItems.push(chordItem(label, c.midis, `${midiName(pitches[0])} is the ${c.role}`));
       }
     }
     // Taller stacks, the note as root only - degrees whose diatonic 9/11/13 has no name (the b9
     // stacks) simply aren't offered, so this section can be empty.
     const extended = harmonyMod.extendedChordsOnNote(pitches[0], scale);
     if (extended.length) {
-      items.push('-');
+      chordItems.push('-');
       for (const c of extended) {
-        items.push(chordItem(`${c.name}${c.roman ? ` · ${c.roman}` : ''}`, c.midis, `the diatonic ${c.kind} on ${midiName(pitches[0])}`));
+        chordItems.push(chordItem(`${c.name}${c.roman ? ` · ${c.roman}` : ''}`, c.midis, `the diatonic ${c.kind} on ${midiName(pitches[0])}`));
       }
     }
   } else {
     const a = harmonyMod.analyzeChord(pitches, patchScale);
-    items.push({ head: a ? `${a.name}${a.roman ? ` · ${a.roman}` : ''} · voicings` : `${pitches.length} pitches · voicings` });
+    chordItems.push({ head: a ? `${a.name}${a.roman ? ` · ${a.roman}` : ''} · voicings` : `${pitches.length} pitches · voicings` });
     for (const v of harmonyMod.chordVoicings(pitches)) {
-      items.push(item(v.name, v.midis, v.midis.map(midiName).join(' ')));
+      chordItems.push(item(v.name, v.midis, v.midis.map(midiName).join(' ')));
     }
-    if (items.length === 1) items.pop(); // no voicings to offer: no head for them either
+    if (chordItems.length === 1) chordItems.pop(); // no voicings to offer: no head for them either
+  }
+  if (chordItems.length) {
+    items.push({ sub: 'harmony', title: pitches.length === 1 ? `chords on ${midiName(pitches[0])}` : 'voicings of the chord', items: chordItems });
   }
   prHarmonyTransformItems(items, targets, index ? null : scale, at);
   if (!items.length) { prHarmony = null; return; } // nothing to offer this selection
@@ -6926,11 +6986,12 @@ function prOpenHarmonyMenu(e) {
  * dismissal are the same for both; only the items differ.
  *
  *   head       the small uppercase line above the items (optional)
- *   items      [label, fn, title?, hover?] entries, the string '-' for a rule between groups, or
- *              { head } for a section line mid-list; `hover` (optional) runs when the pointer
- *              enters the entry - the harmony menu's live preview. An entry with no hover puts
- *              the caller's preview away (onHoverOut) when entered, so a "…" entry that opens a
- *              popover shows the roll as it is.
+ *   items      [label, fn, title?, hover?] entries, the string '-' for a rule between groups,
+ *              { head } for a section line mid-list, or { sub, items, title? } for a category
+ *              that unfolds a nested menu beside it on hover (folding back on leave); `hover`
+ *              (optional) runs when the pointer enters the entry - the harmony menu's live
+ *              preview. An entry with no hover puts the caller's preview away (onHoverOut) when
+ *              entered, so a "…" entry that opens a popover shows the roll as it is.
  *   after      run once an item has been chosen, for a caller that has focus to give back
  *   onHoverOut run when the pointer leaves the menu itself, for a caller previewing on hover
  */
@@ -6942,27 +7003,55 @@ function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null
     h.textContent = head;
     el.appendChild(h);
   }
-  for (const entry of items) {
-    if (entry === '-') {
-      el.appendChild(document.createElement('hr'));
-      continue;
+  const fill = (container, entries) => {
+    for (const entry of entries) {
+      if (entry === '-') {
+        container.appendChild(document.createElement('hr'));
+        continue;
+      }
+      if (!Array.isArray(entry)) {
+        if (entry.sub) {
+          // A category row: hovering unfolds its menu beside the entry (leaving folds it back);
+          // the nested menu lives INSIDE the root element, so dismissal and Escape see one tree.
+          const holder = document.createElement('div');
+          holder.className = 'ctx-sub-holder';
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'ctx-sub-trigger';
+          b.textContent = entry.sub;
+          if (entry.title) b.title = entry.title;
+          const sub = document.createElement('div');
+          sub.className = 'ctx-menu ctx-sub hidden';
+          fill(sub, entry.items);
+          holder.appendChild(b);
+          holder.appendChild(sub);
+          holder.addEventListener('mouseenter', () => {
+            onHoverOut?.(); // entering a category puts any entry preview away
+            for (const open of el.querySelectorAll('.ctx-sub')) if (open !== sub) open.classList.add('hidden');
+            sub.classList.remove('hidden');
+            sub.classList.toggle('flip', holder.getBoundingClientRect().right + sub.offsetWidth + 8 > window.innerWidth);
+          });
+          holder.addEventListener('mouseleave', () => sub.classList.add('hidden'));
+          container.appendChild(holder);
+          continue;
+        }
+        const h = document.createElement('div');
+        h.className = 'ctx-menu-head';
+        h.textContent = entry.head;
+        container.appendChild(h);
+        continue;
+      }
+      const [label, fn, title, hover] = entry;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      if (title) b.title = title;
+      b.addEventListener('mouseenter', hover ?? (() => onHoverOut?.()));
+      b.addEventListener('click', () => { el.classList.add('hidden'); fn(); after?.(); });
+      container.appendChild(b);
     }
-    if (!Array.isArray(entry)) {
-      const h = document.createElement('div');
-      h.className = 'ctx-menu-head';
-      h.textContent = entry.head;
-      el.appendChild(h);
-      continue;
-    }
-    const [label, fn, title, hover] = entry;
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    if (title) b.title = title;
-    b.addEventListener('mouseenter', hover ?? (() => onHoverOut?.()));
-    b.addEventListener('click', () => { el.classList.add('hidden'); fn(); after?.(); });
-    el.appendChild(b);
-  }
+  };
+  fill(el, items);
   el.onmouseleave = onHoverOut; // assignment, not addEventListener: the element is reused across opens
   el.classList.remove('hidden');
   // On screen where the pointer is, nudged back in if that would run off the window's edge.

@@ -4,10 +4,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  ACCENT_SHAPES, accentuate, accentWeight, augment, conformToScale, degrade, divideFigure, euclid,
-  euclidFigure, humanize, invertPitch, legato, retrograde, rhythmize, rhythmizeAll, RHYTHM_FIGURES,
-  rotateFigure, seededRandom, spreadPitch, strum, swingFigure, variation,
+  ACCENT_SHAPES, accentuate, accentWeight, arpeggiate, augment, conformToScale, degrade,
+  divideFigure, euclid, euclidFigure, humanize, invertPitch, legato, melodize, retrograde,
+  rhythmize, rhythmizeAll, RHYTHM_FIGURES, rotateFigure, seededRandom, spreadPitch, strum,
+  swingFigure, variation,
 } from './src/rollops.mjs';
+import { midiToDegree, quantizeToScale } from './src/notes.mjs';
 
 const N = (midi, start, len = 1, extra = {}) => ({ midi, start, len, vel: 1, prob: 1, nudge: 0, mute: false, ...extra });
 const pick = (notes, ...keys) => notes.map((nt) => Object.fromEntries(keys.map((k) => [k, nt[k]])));
@@ -256,4 +258,131 @@ test('accentuate: timing lays weak notes back, length clips them, chords stay ch
     accentuate(line, { grid: 16, shape: 'random', vel: 1, seed: 9 }).map((n) => n.vel),
     accentuate(line, { grid: 16, shape: 'random', vel: 1, seed: 10 }).map((n) => n.vel),
     'a new seed is a new roll of the dice');
+});
+
+test('arpeggiate: up cycles the chord over its span at the rate', () => {
+  const chord = [N(60, 0, 4), N(64, 0, 4), N(67, 0, 4)];
+  const out = arpeggiate(chord, { rate: 1 });
+  assert.deepEqual(pick(out, 'midi', 'start', 'len'), [
+    { midi: 60, start: 0, len: 1 }, { midi: 64, start: 1, len: 1 }, { midi: 67, start: 2, len: 1 }, { midi: 60, start: 3, len: 1 },
+  ]);
+  assert.equal(chord[0].len, 4, 'input untouched');
+});
+
+test('arpeggiate: every direction orders the run its own way', () => {
+  const chord = [N(64, 0, 4), N(60, 0, 4), N(67, 0, 4)]; // drawn 64, 60, 67
+  const seq = (direction) => arpeggiate(chord, { rate: 1, direction }).map((nt) => nt.midi);
+  assert.deepEqual(seq('down'), [67, 64, 60, 67]);
+  assert.deepEqual(seq('up-down'), [60, 64, 67, 64]);
+  assert.deepEqual(seq('converge'), [60, 67, 64, 60]);
+  assert.deepEqual(seq('as drawn'), [64, 60, 67, 64]);
+});
+
+test('arpeggiate: fractional rates land in nudges; doubled pitches and overruns are dropped', () => {
+  const out = arpeggiate([N(60, 2, 2), N(64, 2, 2)], { rate: 0.5 });
+  assert.deepEqual(pick(out, 'midi', 'start', 'nudge', 'len'), [
+    { midi: 60, start: 2, nudge: 0, len: 1 }, { midi: 64, start: 2, nudge: 0.5, len: 1 },
+    { midi: 60, start: 3, nudge: 0, len: 1 }, { midi: 64, start: 3, nudge: 0.5, len: 1 },
+  ]);
+  // rate 0.25 over one cell: the third hit doubles 60 in cell 0, the fourth rounds past the end.
+  const tight = arpeggiate([N(60, 0, 1), N(64, 0, 1)], { rate: 0.25 });
+  assert.deepEqual(pick(tight, 'midi', 'start', 'nudge'), [
+    { midi: 60, start: 0, nudge: 0 }, { midi: 64, start: 0, nudge: 0.25 },
+  ]);
+});
+
+test('arpeggiate: lone notes pass; random is seeded and never repeats back to back', () => {
+  const notes = [N(55, 0, 2), N(60, 4, 4), N(64, 4, 4), N(67, 4, 4)];
+  const out = arpeggiate(notes, { rate: 1, direction: 'random', seed: 5 });
+  assert.deepEqual(pick([out[0]], 'midi', 'start', 'len'), [{ midi: 55, start: 0, len: 2 }]);
+  const run = out.slice(1);
+  assert.equal(run.length, 4);
+  for (const nt of run) assert.ok([60, 64, 67].includes(nt.midi));
+  for (let i = 1; i < run.length; i++) assert.notEqual(run[i].midi, run[i - 1].midi);
+  assert.deepEqual(out, arpeggiate(notes, { rate: 1, direction: 'random', seed: 5 }));
+});
+
+test('melodize: same rhythm, in key, in register; seeded; amount 0 is identity', () => {
+  const line = [N(60, 0, 2, { vel: 0.7, nudge: 0.1 }), N(64, 2), N(67, 4), N(72, 6), N(65, 8), N(60, 10)];
+  const out = melodize(line, { scale: 'c major', seed: 11, grid: 16 });
+  assert.deepEqual(pick(out, 'start', 'len', 'vel', 'nudge'), pick(line, 'start', 'len', 'vel', 'nudge'));
+  for (const nt of out) {
+    assert.equal(quantizeToScale(nt.midi, 'c major'), nt.midi, 'in key');
+    assert.ok(nt.midi >= 60 && nt.midi <= 72, 'stays in the register');
+  }
+  assert.deepEqual(out, melodize(line, { scale: 'c major', seed: 11, grid: 16 }));
+  assert.notDeepEqual(out.map((nt) => nt.midi), melodize(line, { scale: 'c major', seed: 12, grid: 16 }).map((nt) => nt.midi));
+  assert.deepEqual(melodize(line, { scale: 'c major', seed: 11, keep: 1 }), line.map((nt) => ({ ...nt })));
+});
+
+test('melodize: strong beats land on tonic-triad tones', () => {
+  const line = Array.from({ length: 16 }, (_, i) => N(60 + (i % 8), i));
+  const out = melodize(line, { scale: 'c major', seed: 3, grid: 16 });
+  for (const nt of out.filter((x) => x.start % 4 === 0)) {
+    const deg = ((midiToDegree(nt.midi, 'c major') % 7) + 7) % 7;
+    assert.ok([0, 2, 4].includes(deg), `cell ${nt.start} on a chord tone (degree ${deg})`);
+  }
+});
+
+test('melodize: follow keeps the original contour sign for sign', () => {
+  const line = [N(60, 0), N(64, 1), N(62, 2), N(62, 3), N(67, 4), N(65, 5)];
+  const origDeg = line.map((nt) => midiToDegree(nt.midi, 'c major'));
+  const out = melodize(line, { scale: 'c major', seed: 9, shape: 1, grid: 16 });
+  const newDeg = out.map((nt) => midiToDegree(nt.midi, 'c major'));
+  for (let i = 1; i < line.length; i++) {
+    const want = Math.sign(origDeg[i] - origDeg[i - 1]);
+    const got = Math.sign(newDeg[i] - newDeg[i - 1]);
+    if (want === 0) assert.equal(got, 0, 'a repeated note stays repeated');
+    else assert.ok(got === want || got === 0, 'never moves against the original');
+  }
+});
+
+test('melodize: same-onset notes stay distinct; amount is a keep-mask', () => {
+  const chord = [N(60, 0, 4), N(64, 0, 4), N(67, 0, 4)];
+  const out = melodize(chord, { scale: 'c major', seed: 21 });
+  assert.equal(new Set(out.map((nt) => nt.midi)).size, 3);
+  const line = Array.from({ length: 12 }, (_, i) => N(60 + ((i * 2) % 8), i));
+  const some = melodize(line, { scale: 'c major', seed: 4, keep: 0.6 });
+  const kept = some.filter((nt, i) => nt.midi === line[i].midi).length;
+  assert.ok(kept > 0 && kept < 12, `keep-mask keeps some, changes some (kept ${kept})`);
+});
+
+test('melodize: one repeated pitch still yields a melody (an octave to walk in)', () => {
+  const line = Array.from({ length: 8 }, (_, i) => N(60, i));
+  const out = melodize(line, { scale: 'c major', seed: 6, grid: 8 });
+  assert.ok(new Set(out.map((nt) => nt.midi)).size > 1, 'pitches actually move');
+  for (const nt of out) {
+    assert.equal(quantizeToScale(nt.midi, 'c major'), nt.midi, 'in key');
+    assert.ok(Math.abs(nt.midi - 60) <= 12, 'stays around the original note');
+  }
+});
+
+test('melodize: range and offset move the walk window', () => {
+  const line = [0, 4, 7, 2, 5, 9, 4, 0].map((iv, i) => N(60 + iv, i));
+  const up = melodize(line, { scale: 'c major', seed: 5, grid: 8, offset: 7 });
+  for (const nt of up) assert.ok(nt.midi >= 72 && nt.midi <= 84, `an octave up (got ${nt.midi})`);
+  const tight = melodize(line, { scale: 'c major', seed: 5, grid: 8, range: 2 });
+  for (const nt of tight) assert.ok(nt.midi >= 64 && nt.midi <= 67, `squeezed to the middle (got ${nt.midi})`);
+});
+
+test('melodize: a wider range audibly spreads the walk', () => {
+  const line = Array.from({ length: 16 }, (_, i) => N(62 + (i % 5), i));
+  const span = (ns) => Math.max(...ns.map((nt) => nt.midi)) - Math.min(...ns.map((nt) => nt.midi));
+  let widest = 0;
+  for (let seed = 1; seed <= 6; seed++) {
+    const out = melodize(line, { scale: 'c major', seed, grid: 16, range: 21 });
+    widest = Math.max(widest, span(out));
+    for (const nt of out) assert.ok(nt.midi >= 43 && nt.midi <= 84, 'stays inside the window');
+  }
+  assert.ok(widest > 14, `leaps scale with the window (widest span ${widest})`);
+});
+
+test('melodize: shape 1 with a wide range magnifies the drawn contour', () => {
+  const arp = [55, 57, 60, 62, 67, 69].map((m, i) => N(m, i)); // an upward arpeggio
+  for (const seed of [2, 7]) {
+    const out = melodize(arp, { scale: 'c major', seed, shape: 1, range: 21, grid: 8 });
+    for (let i = 1; i < out.length; i++) assert.ok(out[i].midi > out[i - 1].midi, 'still strictly rising');
+    const span = out[out.length - 1].midi - out[0].midi;
+    assert.ok(span >= 24, `stretched across the window (span ${span})`);
+  }
 });
