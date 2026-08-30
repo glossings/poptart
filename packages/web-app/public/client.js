@@ -6553,6 +6553,12 @@ function prOpenHarmonyMenu(e) {
   const pitches = [...new Set(targets.map((nt) => nt.midi))].sort((a, b) => a - b);
   prHarmony = { origNotes: prState.notes.slice(), origSel: new Set(prState.sel), targets };
   const item = (label, midis, title) => [label, () => prHarmonyCommit(midis), title, () => prHarmonyPreview(midis)];
+  // Picking a chord flows straight into voicing it: the commit leaves the new chord selected, so
+  // reopening the menu right where it was IS the voicings menu - no re-select, no second
+  // right-click. Voicing picks themselves close for good (the roll is the result).
+  const at = { clientX: e.clientX, clientY: e.clientY };
+  const chordItem = (label, midis, title) =>
+    [label, () => { prHarmonyCommit(midis); prOpenHarmonyMenu(at); }, title, () => prHarmonyPreview(midis)];
   const items = [];
   if (pitches.length === 1) {
     items.push({ head: `${midiName(pitches[0])} · chords in ${scale}` });
@@ -6560,7 +6566,16 @@ function prOpenHarmonyMenu(e) {
       if (sevenths) items.push('-');
       for (const c of harmonyMod.chordsForNote(pitches[0], scale, { sevenths })) {
         const label = `${c.name ?? c.midis.map(midiName).join(' ')}${c.roman ? ` · ${c.roman}` : ''}`;
-        items.push(item(label, c.midis, `${midiName(pitches[0])} is the ${c.role}`));
+        items.push(chordItem(label, c.midis, `${midiName(pitches[0])} is the ${c.role}`));
+      }
+    }
+    // Taller stacks, the note as root only - degrees whose diatonic 9/11/13 has no name (the b9
+    // stacks) simply aren't offered, so this section can be empty.
+    const extended = harmonyMod.extendedChordsOnNote(pitches[0], scale);
+    if (extended.length) {
+      items.push('-');
+      for (const c of extended) {
+        items.push(chordItem(`${c.name}${c.roman ? ` · ${c.roman}` : ''}`, c.midis, `the diatonic ${c.kind} on ${midiName(pitches[0])}`));
       }
     }
   } else {
@@ -6739,10 +6754,13 @@ function prUpdateChordLabel() {
     const pitches = [...new Set([...prState.sel].filter((nt) => !nt.hidden).map((nt) => nt.midi))];
     if (pitches.length >= 2) {
       const a = harmonyMod.analyzeChord(pitches, patchScale);
-      if (a) text = a.roman ? `${a.name} · ${a.roman}` : a.name;
+      // The bare numeral - the name beside it already spells the quality, so "Bbmaj7 · III",
+      // not "Bbmaj7 · IIImaj7".
+      if (a) text = a.numeral ? `${a.name} · ${a.numeral}` : a.name;
     }
   }
   prChordLabel.textContent = text;
+  prChordLabel.title = text; // the pill ellipsizes when squeezed; hovering shows the whole name
 }
 
 function drawPianoroll() {

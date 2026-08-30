@@ -35,6 +35,18 @@ export const CHORD_QUALITIES = Object.freeze([
   { symbol: '9', quality: 'dominant 9th', intervals: [0, 2, 4, 7, 10] },
   { symbol: 'maj9', quality: 'major 9th', intervals: [0, 2, 4, 7, 11] },
   { symbol: 'm9', quality: 'minor 9th', intervals: [0, 2, 3, 7, 10] },
+  { symbol: '6/9', quality: 'six-nine', intervals: [0, 2, 4, 7, 9] },
+  { symbol: '11', quality: 'dominant 11th', intervals: [0, 2, 4, 5, 7, 10] },
+  { symbol: 'm11', quality: 'minor 11th', intervals: [0, 2, 3, 5, 7, 10] },
+  { symbol: 'maj11', quality: 'major 11th', intervals: [0, 2, 4, 5, 7, 11] },
+  // 13ths both ways: the full diatonic stack, and the way they're actually played - 11th
+  // omitted. Same symbol either way; a 13 chord doesn't stop being one for dropping its 11.
+  { symbol: '13', quality: 'dominant 13th', intervals: [0, 2, 4, 7, 9, 10] },
+  { symbol: 'm13', quality: 'minor 13th', intervals: [0, 2, 3, 7, 9, 10] },
+  { symbol: 'maj13', quality: 'major 13th', intervals: [0, 2, 4, 7, 9, 11] },
+  { symbol: '13', quality: 'dominant 13th', intervals: [0, 2, 4, 5, 7, 9, 10] },
+  { symbol: 'm13', quality: 'minor 13th', intervals: [0, 2, 3, 5, 7, 9, 10] },
+  { symbol: 'maj13', quality: 'major 13th', intervals: [0, 2, 4, 5, 7, 9, 11] },
   { symbol: '5', quality: 'power chord', intervals: [0, 7] },
 ]);
 
@@ -88,15 +100,20 @@ const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'];
 // third, so the minor 'm' drops out of the tail; dim/half-dim/aug get their markers.
 const ROMAN_TAIL = {
   '': '', m: '', dim: '°', aug: '+', dim7: '°7', m7b5: 'ø7', mMaj7: 'maj7',
-  m7: '7', m6: '6', m9: '9', madd9: 'add9',
+  m7: '7', m6: '6', m9: '9', madd9: 'add9', m11: '11', m13: '13',
 };
+// The bare numeral's markers: what survives when the quality tail is dropped - case already says
+// major/minor, but °/ø/+ are identity, not extension, so "vii°" keeps its ring without its 7.
+const ROMAN_MARKER = { dim: '°', dim7: '°', m7b5: 'ø', aug: '+' };
 
 /**
- * The roman numeral for a chord root + quality in `scaleName`: "V7", "ii7", "vii°", "IVmaj7".
+ * The roman numeral for a chord root + quality in `scaleName`: "V7", "ii7", "vii°", "IVmaj7" -
+ * or, with `bare`, just the cased numeral and its °/ø/+ marker ("V", "ii", "viiø"), for a slot
+ * (the roll header's readout) where the chord name beside it already spells the quality out.
  * Only 7-note scales get numerals (they're what the notation means); other lengths, and roots
  * that aren't scale tones, return null - a menu just shows nothing in that slot.
  */
-export function romanNumeral(rootPc, qualityEntry, scaleName) {
+export function romanNumeral(rootPc, qualityEntry, scaleName, { bare = false } = {}) {
   if (scaleName == null || !qualityEntry) return null;
   const { rootMidi, intervals } = parseScaleName(scaleName);
   if (intervals.length !== 7) return null;
@@ -104,6 +121,7 @@ export function romanNumeral(rootPc, qualityEntry, scaleName) {
   if (degree < 0) return null;
   const upper = qualityEntry.intervals.includes(4) || !qualityEntry.intervals.includes(3);
   const numeral = upper ? ROMAN[degree] : ROMAN[degree].toLowerCase();
+  if (bare) return numeral + (ROMAN_MARKER[qualityEntry.symbol] ?? '');
   return numeral + (ROMAN_TAIL[qualityEntry.symbol] ?? qualityEntry.symbol);
 }
 
@@ -117,7 +135,8 @@ const uniqSorted = (midis) => [...new Set(midis.map((m) => Math.round(m)))].sort
  * Returns null when nothing matches (fewer than 2 pitch classes, or an unnamed cluster);
  * `scaleName` (optional) picks sharp/flat spelling and adds the roman numeral.
  *
- * Shape: { rootPc, rootName, symbol, quality, name, bassMidi, bassPc, inversion, roman }.
+ * Shape: { rootPc, rootName, symbol, quality, name, bassMidi, bassPc, inversion, roman,
+ * numeral } - `roman` is the full numeral ("viiø7"), `numeral` the bare one ("viiø").
  * `inversion` counts chord tones below the root's octave-position: 0 = root position, 1 = first
  * inversion (the slash in "C/E"), etc.
  */
@@ -152,6 +171,7 @@ export function analyzeChord(midis, scaleName = null) {
     rootPc, rootName, symbol: entry.symbol, quality: entry.quality, name,
     bassMidi, bassPc, inversion,
     roman: romanNumeral(rootPc, entry, scaleName),
+    numeral: romanNumeral(rootPc, entry, scaleName, { bare: true }),
   };
 }
 
@@ -201,6 +221,31 @@ export function chordsForNote(midi, scaleName, { sevenths = false } = {}) {
       name: a?.name ?? null, roman: a?.roman ?? null, symbol: a?.symbol ?? null,
     };
   });
+}
+
+/**
+ * Extended chords with the held note as ROOT: the diatonic 9th, 11th and 13th stacked up from
+ * its degree - the menu's "go taller" section. Unlike chordsForNote this offers only the root
+ * role: a note as the 11th of something is a spelling, not a suggestion. Stacks that don't
+ * analyze to a name are dropped rather than offered as note-soup - in a major key that's the
+ * b9 stacks on iii and vii, which is the tables agreeing with the ear. Returns
+ * [{ kind, midis, name, roman, symbol, degree }], possibly empty.
+ */
+export function extendedChordsOnNote(midi, scaleName) {
+  const { intervals } = parseScaleName(scaleName);
+  const len = intervals.length;
+  const noteDegree = midiToDegree(midi, scaleName);
+  const out = [];
+  for (const [kind, height] of [['9th', 5], ['11th', 6], ['13th', 7]]) {
+    const midis = Array.from({ length: height }, (_, s) => degreeToMidi(noteDegree + 2 * s, scaleName));
+    const a = analyzeChord(midis, scaleName);
+    if (!a || a.rootPc !== pc(midis[0])) continue; // unnamed, or named as something else entirely
+    out.push({
+      kind, midis, name: a.name, roman: a.roman, symbol: a.symbol,
+      degree: ((noteDegree % len) + len) % len,
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------

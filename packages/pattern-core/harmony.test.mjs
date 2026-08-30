@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 
 import {
   analyzeChord, chordsForNote, chordVoicings, closeVoicing, diatonicChords, doubleBassOctave,
-  drop2, drop3, invertChord, pcName, preferFlats, romanNumeral, shellVoicing, spreadVoicing,
+  drop2, drop3, extendedChordsOnNote, invertChord, pcName, preferFlats, romanNumeral,
+  shellVoicing, spreadVoicing,
 } from './src/harmony.mjs';
 
 const C3 = 60, E3 = 64, G3 = 67, A3 = 69, B3 = 71;
@@ -69,9 +70,36 @@ test('analyze: roman numerals in key', () => {
   assert.equal(analyzeChord([59, 62, 65], 'c major').roman, 'vii°');
   assert.equal(analyzeChord([59, 62, 65, 69], 'c major').roman, 'viiø7');
   assert.equal(analyzeChord([68, 72, 75], 'f minor').roman, 'III');
+  // The bare numeral drops the quality tail but keeps identity markers.
+  assert.equal(analyzeChord([55, 59, 62, 65], 'c major').numeral, 'V');
+  assert.equal(analyzeChord([59, 62, 65, 69], 'c major').numeral, 'viiø');
+  assert.equal(analyzeChord([59, 62, 65], 'c major').numeral, 'vii°');
+  assert.equal(analyzeChord([60, 64, 67, 71], 'c major').numeral, 'I');
   // A root outside the key, and a non-7-note scale, get no numeral.
   assert.equal(analyzeChord([61, 65, 68], 'c major').roman, null);
   assert.equal(analyzeChord([60, 64, 67], 'c pentatonic').roman, null);
+});
+
+test('analyze: extended qualities - 11ths, 13ths, six-nine', () => {
+  assert.equal(analyzeChord([55, 59, 62, 65, 69, 72]).name, 'G11'); // G B D F A C
+  assert.equal(analyzeChord([62, 65, 69, 72, 76, 79]).name, 'Dm11'); // D F A C E G
+  assert.equal(analyzeChord([55, 59, 62, 65, 69, 76]).name, 'G13'); // G B D F A E - no 11th, still a 13th
+  assert.equal(analyzeChord([55, 59, 62, 65, 69, 76], 'c major').roman, 'V13');
+  assert.equal(analyzeChord([60, 62, 64, 67, 69]).name, 'C6/9'); // C D E G A
+  assert.equal(analyzeChord([60, 64, 67, 71, 74, 77, 81]).name, 'Cmaj13'); // the whole scale, stacked
+});
+
+test('extendedChordsOnNote: diatonic 9/11/13 rooted on the note, unnamed stacks dropped', () => {
+  const onC = extendedChordsOnNote(C3, 'c major');
+  assert.deepEqual(onC.map((c) => [c.kind, c.name]), [['9th', 'Cmaj9'], ['11th', 'Cmaj11'], ['13th', 'Cmaj13']]);
+  for (const c of onC) assert.equal(c.midis[0], C3); // the drawn note stays the root
+  const onG = extendedChordsOnNote(55, 'c major');
+  assert.deepEqual(onG.map((c) => c.name), ['G9', 'G11', 'G13']);
+  assert.deepEqual(onG.map((c) => c.roman), ['V9', 'V11', 'V13']);
+  const onD = extendedChordsOnNote(62, 'c major');
+  assert.deepEqual(onD.map((c) => c.name), ['Dm9', 'Dm11', 'Dm13']);
+  // iii's diatonic stacks all carry the b9 - nothing nameable, nothing offered.
+  assert.deepEqual(extendedChordsOnNote(E3, 'c major'), []);
 });
 
 // ---------------------------------------------------------------------------------------------

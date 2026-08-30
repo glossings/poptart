@@ -5,42 +5,6 @@ no completion notes.
 
 ---
 
-[ ] Song decks - real audio files (a bought track, a bounce) on a DJ deck, mixed through the same
-    desk as pattern decks. Settled 2026-08-25: the song is ONE ordinary engine track (key `#song`,
-    deck b `b:#song`) whose input is a long-file player synth instead of a scheduler, so the whole
-    strip (xf, EQ, djf, fader, meters, cue, per-deck stop) applies unchanged. Phases below are
-    separate entries; delete each as it lands.
-
-[ ] Songs phase 1 - engine + endpoints: poptart_song_* player defs (Phasor/BufRd; rate/run/seek
-    controls), songLoad/Start/Set/Seek/Stop/Free engine methods (forwarded through MappedEngine),
-    /api/song/* (load/play/pause/seek/stop), afconvert decode cache for mp3/m4a under
-    ~/.poptart/cache/songs (wav/aif/flac go to Buffer.read directly), cycle-quantized start, and
-    mix-desk integration (deck broadcasts, clear/eject/stop reach the song track). Whole file
-    RAM-resident (a 5-min song ~50MB stereo) - no streaming; scrubbing wants random access anyway.
-
-[ ] Songs phase 2 - playlists hold disk files: typed items ({ kind: 'file', path, title, bpm, key })
-    beside saved-name strings in library.json; a server-side file browser to pick them (the client
-    can't produce disk paths); deck B's queue offers both kinds; a missing file renders as missing,
-    same contract as a deleted save.
-
-[ ] Songs phase 3 - the song deck pane: when the queued item is a file, the deck shows a
-    high-resolution DJ waveform instead of CodeMirror - band-colored peak/RMS columns (generalize the
-    recorder's canvas renderer + analysis-worker pass, which already do exactly this), full-track
-    overview + zoomed scrolling strip, beatgrid + playhead overlays (client mirrors the transport
-    clock - engine getTime is Date.now()/1000), click/drag scrub -> songSeek, audition via cue.
-
-[ ] Songs phase 4 - tempo/key + sync + nudge: parse tags (ID3 TBPM/TKEY, vorbis comments, m4a
-    tmpo) for bpm/key; native bpm feeds decks[].bpm so /api/mix/tempo migration works unchanged;
-    rate lock (rate = master/native; repitch default, Rubber Band keylock as an option), beatgrid-anchored
-    quantized start, drift servo (expected vs actual playhead, gently trim rate - Node clock and
-    scsynth's sample clock drift over minutes); nudge = momentary rate offset + phase jog buttons,
-    MIDI-learnable via mixMidi. bpm and grid anchor always user-editable.
-
-[ ] Songs phase 5 - detection fallback when tags are absent: BPM via onset-envelope
-    autocorrelation, key via chroma + Krumhansl profiles, in analysis-worker (transient detection
-    already lives there); show confidence, keep manual override. Everything earlier works without
-    this via manual entry.
-
 [ ] Keylock on Linux/Windows: the decks' keylock is the PoptartPitchShift UGen (Rubber Band Live
     Shifter, packages/osc-engine/native/rubberband/) and only the macOS universal .scx is built
     and committed; elsewhere extensions.js finds no prebuilt, logs it at boot, and the def falls
@@ -198,70 +162,6 @@ no completion notes.
     is decided, the data has to end up on the events. The question is only whether the outer
     pattern's later word can still clear it, the way `crossMerge`'s clear-then-restamp does today.
 
-[ ] Instance-based presets — considered and deferred 2026-08-19, on CPU/RAM. Written down so it
-    isn't re-derived from scratch, not because it's queued.
-
-    `.preset("<a b>")` currently swaps a plugin's whole state by pushing a different program into
-    ONE instance (`readProgram`, see `_schedulePresetSwaps` in pattern-core/src/scheduler.mjs). The
-    alternative is one live plugin per named preset, where a swap is just "route notes to the other
-    instance".
-
-    What it buys: swaps stop clicking (routing is instant and sample-accurate, a program load is
-    not); `a`'s release tail rings out while `b` starts, instead of being cut by a reprogram of the
-    synth underneath it; editing is unambiguous by construction, since `a`'s plugin window *is* `a`.
-    And it deletes the machinery that only exists because one instance is time-shared —
-    `Scheduler#holdPreset`/`_presetHold`, server.js's `presetHolds` lease + TTL + renewal on the
-    pluginEdits poll, `heldSlotsFor`'s highlight suppression, the gesture-time preset attribution
-    in `handlePluginEdited`, and the whole hand-editing freeze (`Scheduler#holdPluginState`,
-    server.js's `handTaken`/`uncaptured`, the editor's held marks and commit reporting, and
-    poptart.scd's `waitForLoad` note queue and the `/poptart/statePending` announce that arms it) —
-    all of which exists because a knob turn, a swap and a note fight over the one instance.
-
-    What it costs, and why it lost: one live plugin per name — `<a b c d>` of a heavy synth is four
-    of it, on the machine already running the whole stack. Adding a name to a pattern becomes a
-    plugin open (hundreds of ms) rather than a data change. And sc/poptart.scd bakes a fixed
-    `maxSlots` grid of `VSTPlugin.ar` UGens per track, whose own header notes that growing a chain
-    "would need a def rebuild (not handled yet)" — instances-per-slot lands squarely on that.
-
-    Shape to build if it's ever revisited:
-    - Instrument slot only. An fx slot processes the chain signal, so N instances is N× the CPU
-      *and* switching still cuts the unselected one's tail — most of the win, all of the cost.
-      Keep reprogramming (and therefore the hold) for fx.
-    - A fixed number of instance sockets baked into the SynthDef (`slot0`, `slot0_1`, …), summed —
-      no gating needed, since only the active socket is sent notes and the rest are silent. Fixed,
-      not sized-to-pattern: a def rebuild whenever a name count changes would fire mid-set.
-    - Names past the cap share the last socket and reprogram it, with one warning.
-    - The Node scheduler picks the socket per onset and sends it with noteOn/noteOff — a
-      language-side "active socket" would race the lookahead, since notes and swaps arrive early
-      and out of order. A noteOff must go to the socket its noteOn went to, so pair them rather
-      than recomputing at offset time.
-    - New engine args (`loadInstrument`, `noteOn`/`noteOff`, `setPluginState`) must be forwarded
-      through web-app/param-mapping.js's MappedEngine or they silently no-op.
-    - Open question: `.param("Cutoff", …)` addresses a slot. With several instances in it, fan the
-      modulation out to ALL of them — a param is that plugin's, and presets are variations of one
-      plugin; targeting only the sounding one drops the modulation at every swap.
-
-[ ] Performance mixing - two decks, one engine (designed 2026-08-24, all decisions settled with
-    Aria; build phases below are separate entries). One shared Transport: evaling a deck joins the
-    absolute cycle count in phase, and multi-cycle structures land on the same mod grid
-    automatically - there is no "launch", no quantization machinery, no sync button. Settled:
-    - "Silent" deck = the mixer state it arrives with (crossfader fully at the playing deck), NOT
-      a mute mechanism; the queued song runs in full, ~2x plugin CPU accepted for predictability.
-    - Deck-scoped song settings (scale/setbpm/swing become per-deck facts); Signal.prototype stays
-      shared, warn on redefinition, last eval wins; consts already per-buffer.
-    - Global equal-power crossfader over deck gains + per-track faders; no third fader type.
-      Clobber mode = same-label stems linked as one-gesture toggle swaps (never literal track
-      sharing - both kicks are separate engine tracks; swapping chains mid-mix would reload
-      plugins audibly).
-    - Tempo migration, not matching: the ramp/slider moves master cps between the songs' native
-      bpms (natives tracked per deck). Transport needs cps ramps w/ continuous cycle position;
-      VST bpm mirroring + engine LFO rates follow.
-    - Samples keep natural rate through migrations (chop feel; whole-cycle loops get .slice()d);
-      per-track repitch-follow flag is a possible later add on the existing repitch channel.
-    - Performance state (XF, deck gains, EQ, filter, gates) is EPHEMERAL - never written into song
-      code, deliberately unlike mixctl's .gain() edits. Dies with the mix session.
-    - Deferred: per-deck cycle rotation (deck-wide .late(k)); repitch-follow; cue/master blend.
-
 [ ] Mixing phase 1 - label→trackId indirection: engine tracks get opaque ids (t1, t2, ...);
     server.js owns label↔id registry (persists per label for the server's life - no destroyTrack
     exists, tracks are forever). Scheduler takes the id as trackId plus a display label for warn
@@ -317,23 +217,6 @@ no completion notes.
     accelerators into its top items; in-roll plain letters are mostly free (b = tool, 0 = mute).
     Non-negotiable UX: hover a menu entry auditions the result through the track's synth
     (prPreview machinery), commit on click, Escape reverts. Phases; delete each as it lands:
-
-[ ] Harmony phase 1 - harmony.mjs foundation (LANDED pending review, with harmony.test.mjs):
-    CHORD_QUALITIES dictionary, analyzeChord (pc-set match, bass-preferred root, slash/inversion,
-    flats-vs-sharps via preferFlats, roman numerals), diatonicChords, chordsForNote (chords
-    containing the held note, note kept literally in the voicing, role root/3rd/5th/7th), voicing
-    transforms (invertChord/closeVoicing/drop2/drop3/spreadVoicing/shellVoicing/doubleBassOctave +
-    chordVoicings menu enumerator).
-
-[ ] Harmony phase 2 - the transform menu + chord UI in the roll (LANDED pending manual check):
-    #pianorollChord readout in the panel header (analyzeChord of the selection, updated from
-    drawPianoroll); right-click over the note grid -> prOpenHarmonyMenu (lane menu keeps the value
-    lane): one pitch = chordsForNote triads + sevenths, 2+ = chordVoicings, applied via
-    prHarmonyApply's pc-based pitch remap (timing kept, unclaimed pitches cloned from nearest
-    target, dropped pcs deleted); hover previews by swapping prState.notes against a stash
-    (prHarmony) + prPreviewChord audition, click commits (one undo step), leave/close restores;
-    openCtxMenu grew hover callbacks + mid-list heads + onHoverOut; canvas keys are dead while a
-    prMenu is open (modality guard).
 
 [ ] Harmony phase 3 - cheap pure-geometry ops on the selection: strum (nudge ramp within the
     +/-0.5-cell clamp, whole-cell starts for wider strums, optional vel ramp + direction);

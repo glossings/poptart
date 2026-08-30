@@ -2251,10 +2251,11 @@ li.CodeMirror-hint-active {
 }
 
 .pianoroll-head-main #pianorollTitle,
-.pianoroll-head-main .pianoroll-scale {
+.pianoroll-head-main .pianoroll-scale,
+.pianoroll-head-main .pianoroll-chord {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: nowrap; /* one row always - a long chord name truncates rather than wrapping */
 }
 
 /* Squeezed, the name gives up its fixed width before the buttons beside it give up anything. */
