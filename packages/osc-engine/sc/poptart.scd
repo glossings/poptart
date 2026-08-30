@@ -972,6 +972,25 @@ server.waitForBoot {
         // Looping voice. Node decides WHERE the loop runs (loopLo..loopHi - the whole file or just
         // the begin..end window, see .loop()'s wrap option) and where it enters (entry); this only
         // has to walk it. pingpong swaps the wrap-around for a bounce off each edge.
+        //
+        // The walk is split across two accumulators, for the same float32-wire precision reason as
+        // the one-shot def above - but a loop cannot simply BE a PlayBuf, because PlayBuf only
+        // wraps at the buffer's own edges and only runs one way. So:
+        //  - the TRAJECTORY (where the playhead ought to be) is the old phasor pair, kept at frame
+        //    accuracy on its float32 wires - good enough to time a corner and to name a position,
+        //    useless to read audio through on a long file;
+        //  - the AUDIO is a PlayBuf free-running at the walk's own step, integrating in a double
+        //    inside the UGen, re-anchored onto the trajectory at every corner (a wrap or a bounce)
+        //    by a trigger with the mirror's own position as startPos. Between corners it tracks
+        //    the mirror exactly (same step), so the anchor's frame-rounding is a once-per-pass
+        //    nudge, never per-sample jitter;
+        //  - PlayBuf reads its trigger at each block's first sample, so after a mid-block corner
+        //    it flies past the edge for the rest of that block. Those samples are patched with a
+        //    BufRd of the mirror itself: on a short file that read is still exact (identical to
+        //    what this def always was), on a long one it is frame-quantized for at most one block
+        //    once per pass - a 1.3ms brush with the old bug in exchange for losing it everywhere
+        //    else. A loop shorter than a block degenerates to the patch path, which IS the old
+        //    graph.
         SynthDef(("poptart_sample_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0|
             var frames = BufFrames.ir(buf);
             var startF = loopLo * frames, endF = max((loopLo * frames) + 1, (loopHi * frames) - 1);
@@ -987,9 +1006,28 @@ server.waitForBoot {
             // is which half of that period it enters, which is why the rate here is unsigned.
             var bounceFrom = Select.kr(rate < 0, [from - startF, (2 * span) - (from - startF)]);
             var bouncePh = (Phasor.ar(0, step.abs, 0, 2 * span, 0) + bounceFrom) % (2 * span);
-            var bounced = startF + span - absdif(bouncePh, span);
-            var idx = Select.ar(pingpong, [startF + walk, bounced]);
-            var sig = BufRd.ar(nc, buf, idx, loop: 1, interpolation: 4);
+            var bounced = span - absdif(bouncePh, span);
+            var mirror = Select.ar(pingpong, [walk, bounced]);
+            var pos = startF + mirror;
+            // Which way the playhead travels right now: the loop's own sign, except a ping-pong
+            // reverses through each half of its doubled period.
+            var dirPing = ((bouncePh < span) * 2) - 1;
+            var dir = (pingpong * dirPing) + ((1 - pingpong) * step.sign);
+            // A corner - a wrap (the walk jumps by a span) or a bounce (the direction flips) - is
+            // where the trajectory bends and the PlayBuf has to be re-aimed.
+            var corner = ((1 - pingpong) * (absdif(walk, Delay1.ar(walk)) > (span * 0.5)))
+                + (pingpong * (absdif(dirPing, Delay1.ar(dirPing)) > 0.5));
+            var hold = Trig1.ar(corner, ControlDur.ir);
+            // PlayBuf reads its trigger every sample but startPos only at each block's first
+            // sample (measured 2026-08-29: a mid-block trigger reset onto the value from before
+            // the corner, exactly one block-offset stale). So the re-aim fires exactly ON the
+            // next block boundary - hold spans one block, so a boundary always falls inside it -
+            // where the startPos PlayBuf reads is the post-corner mirror. The patch below is the
+            // output until then either way.
+            var reAim = hold * Impulse.ar(ControlRate.ir);
+            var play = PlayBuf.ar(nc, buf, step.abs * dir, reAim, pos, loop: 1);
+            var patch = BufRd.ar(nc, buf, pos, loop: 1, interpolation: 4);
+            var sig = (play * (1 - hold)) + (patch * hold);
             // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
             // the loop's gate-off, then released. Floors preserve the original declick fade.
             var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.008, rel * dur);
@@ -1012,7 +1050,10 @@ server.waitForBoot {
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
         // Timestretched loop - same loopLo/loopHi/entry/pingpong contract as the plain loop above,
-        // on Warp1's normalized 0..1 pointer. The step comes from the begin..end window and its
+        // on Warp1's normalized 0..1 pointer. The warp defs are exempt from the float32 precision
+        // treatment: a normalized pointer's resolution is ~a frame on even a 10M-frame file, and it
+        // only places grain STARTS - 46ms Hann grains with deliberate random scatter, whose own
+        // read phase Warp1 keeps internally - so a frame of pointer round-off never reaches the ear. The step comes from the begin..end window and its
         // play time, which cancel down to "normalized units per second" - independent of where the
         // loop bounds are, so a file-wrapping loop still moves at the rate .speed()/.fit() asked for.
         SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0|
@@ -1159,14 +1200,20 @@ server.waitForBoot {
             // lock, kLen is bounded by Convolution2's frame, and hop = 4*kLen is the pipeline's
             // length - a snapshot, two frames of settling, two frames of scan.
             //
-            // KNOWN, and not fixed: every read here is a BufRd on a float32 phase, so past ~190s
-            // into a 44.1k file the reads quantize to whole frames (the precision note on the
-            // repitch player). The other two song players moved to PlayBuf; this one can't - its
-            // grain readers and its correlation scan all seek to arbitrary positions, which is the
-            // one thing PlayBuf's internal phase cannot be told to do. It is the fallback for an
-            // engine without the PoptartPitchShift extension, which extensions.js installs by
-            // default, so nobody should be on this path; fixing it means an offset-plus-local
-            // phase scheme through the whole graph.
+            // Precision (the float32-wire story on the repitch player): every read here is
+            // "seek to a computed position, then run linearly at native speed" - which is exactly
+            // PlayBuf's trigger + startPos contract - so all three readers are PlayBufs. The
+            // computed positions still ride float32 wires, but a position only has to be right at
+            // its trigger, and every wrap sits on a block boundary (hop is a multiple of the
+            // block), so PlayBuf's block-read trigger fires exactly on time. Past ~190s of file
+            // this removes the per-sample read quantization (measured as hop-harmonic sidebands:
+            // -20 dB before, -33 after, at 3 kHz) but NOT the anchors' rounding to whole frames -
+            // a random half-frame per hop that ripples the crossfades into ~-18 dB of broadband
+            // noise at 3 kHz (proportionally less at lower frequencies), and which the old graph
+            // had identically underneath its aliasing. That floor is what stock UGens can reach:
+            // sub-frame anchors mean either a custom reader UGen or carrying every position as a
+            // latched coarse frame plus a small precise remainder applied as a fractional delay -
+            // a real refinement, deliberately not taken for the no-extension fallback path.
             SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
                 var kLen = 512, half = 512, scan = 2 * half, hop = 4 * kLen, win = 2 * hop;
                 var brs = BufRateScale.ir(buf), frames = BufFrames.ir(buf), bufSr = BufSampleRate.ir(buf);
@@ -1188,9 +1235,12 @@ server.waitForBoot {
                 // Convolution2's output resumes inside the block that completes a frame, so its lag
                 // is a frame less a block.
                 var lag = kLen - BlockSize.ir;
-                var r0 = Latch.ar(idx, wrap) + (brs * ((hop * (rateL - 1)) - (2 * kLen) - 1 - BlockSize.ir));
+                // Latched whole at the wrap (not just the pointer half): rateL keeps slewing
+                // mid-scan, and the PlayBuf below freezes its start at the trigger - the position
+                // the score is attached to has to agree with the read it is scoring.
+                var r0 = Latch.ar(Latch.ar(idx, wrap) + (brs * ((hop * (rateL - 1)) - (2 * kLen) - 1 - BlockSize.ir)), wrap);
                 var rPos = r0 + (brs * Sweep.ar(wrap, sr));
-                var s = OnePole.ar(mono.(BufRd.ar(nc, buf, rPos, 0, 4)), lpCoef);
+                var s = OnePole.ar(mono.(PlayBuf.ar(nc, buf, brs, wrap, r0, loop: 1)), lpCoef);
                 var corr = Convolution2.ar(s, ring, wrap, kLen);
                 // The correlation at n covers the read `lag` samples earlier; normalize over that window.
                 var sNorm = DelayN.ar(RunningSum.ar(s * s, kLen), lag / sr, lag / sr).sqrt + 1e-6;
@@ -1221,10 +1271,13 @@ server.waitForBoot {
                 var sel = ToggleFF.ar(wrap);
                 var reader = { |trig, isA|
                     var early = Latch.ar(first * isA, trig);
-                    var start = Latch.ar(startPos, trig) - (early * hop * brs);
                     var age = Sweep.ar(trig, 1) + (early * (hop / sr));
                     var w = (age < winSec) * (0.5 - (0.5 * cos(2pi * age / winSec))) * (PulseCount.ar(trig) > 0);
-                    BufRd.ar(nc, buf, start + (age * bufSr), 0, 4) * w
+                    // PlayBuf latches startPos at the trigger itself and integrates in a double.
+                    // The old `early` pull-back on the start cancelled exactly against the aged
+                    // read offset (early*hop*brs both ways), so only the window keeps the head
+                    // start and the read starts from startPos as-is.
+                    PlayBuf.ar(nc, buf, brs, trig, startPos, loop: 1) * w
                 };
                 var sig = reader.(wrap * ((1 - sel) + first), 1) + reader.(wrap * sel, 0);
                 var lpOut = OnePole.ar(mono.(sig), lpCoef);
