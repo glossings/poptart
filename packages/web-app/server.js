@@ -921,7 +921,7 @@ function neutralizeMix(key) {
 // The "trackId|..."-keyed lease/capture maps, re-keyed or dropped together when a track changes
 // name (promotion) or dies (eject / complete-mix). A function, not a const list: several are
 // declared further down the file.
-const PIPED_MAPS = () => [presetHolds, channelHolds, uncaptured, autoPinDirty, autoPinReady];
+const PIPED_MAPS = () => [presetHolds, channelHolds, uncaptured, autoPinDirty, autoPinReady, lastCapturedState];
 
 // Forget a track completely: its engine side is destroyed (plugins closed - see destroyTrack in
 // sc/poptart.scd), its registry ids freed, and every server-side trace of the key dropped. Used
@@ -1343,6 +1343,9 @@ async function restartEngine() {
     // nothing can take any more (see the hand-editing section).
     handTaken.clear();
     uncaptured.clear();
+    // New plugin instances, so nothing captured out of the old ones says anything about what they
+    // are holding now (see captureOpenEditors).
+    lastCapturedState.clear();
     // The taps and any in-flight bounce died with the old scsynth. Dropping the state here is what
     // stops the editor from polling a recording that can never finish; the panel re-taps on its
     // next poll.
@@ -2532,6 +2535,12 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
 // doesn't offer it: its events are /vst_param, /vst_auto, /vst_program*, /vst_latency, /vst_midi,
 // /vst_sysex, /vst_update and /vst_crash (see the UGen reference). Nothing reports a closed editor.
 //
+// Nor is the list above a promise that a plugin will use any of them. Omnisphere changes its whole
+// program from its own editor and emits none - not /vst_param, not /vst_update, not
+// /vst_program_index - so waiting to be told meant a sound designed in it was never pinned at all,
+// and went away with the server. A host only hears what a plugin chooses to say, so for the slots
+// where the answer can't be misread, poptart asks instead: see captureOpenEditors.
+//
 // Debounced either way: sclang reports every gesture, so an undebounced capture would run that
 // round trip dozens of times a second during a knob drag. One capture per gesture is enough
 // anyway - the state is a full snapshot, so intermediate ones are pure waste.
@@ -2667,6 +2676,8 @@ function expireChannelHolds() {
 //     nothing else - so the first attempt guessed the end of a session from the browser regaining
 //     focus, and guessed wrong constantly: a window that opens behind the browser never takes the
 //     focus away, so holds ended a second or two after they started, in the middle of a knob turn.
+//     Focus does have a job here, just not that one: it is what asks an open plugin window for its
+//     program (see captureOpenEditors), where guessing wrong costs one message and changes nothing.
 //
 //     Kept HERE rather than in the browser because it outlives a tab: reload the page and the
 //     plugin window is still up, still holding, and the editor is told so on its first poll.
@@ -2744,6 +2755,11 @@ function takeSlotByHand(trackId, slot) {
 function releaseSlotsHeldByHand() {
   const keys = [...handTaken];
   handTaken.clear();
+  // Last chance to ask: a plugin that never reports its edits has been reporting nothing this
+  // whole session, and this is the gesture that ends it (see captureOpenEditors). Queued before
+  // the slots are handed back so the capture reads the sound you made, not whatever the pattern
+  // puts there next.
+  captureOpenEditors(keys);
   for (const key of keys) syncStateHold(key);
   return keys.length;
 }
@@ -2782,6 +2798,23 @@ function expireStateHolds() {
 }
 
 const autoPinReady = new Map(); // same key -> { trackId, slot, plugin, preset, state, seq } - editor drains it
+// The last program we captured out of each slot, by blob handle. A SPECULATIVE capture (see
+// captureOpenEditors) has nothing to compare against but this: if the plugin hands back the same
+// bytes it handed back last time, nobody touched anything and the capture goes no further - no
+// write into the code, no freeze on the slot, no line in the log. Handles, not programs, so this
+// costs a dozen bytes a slot. Content addressing is what makes the comparison exact (see blobs.js).
+const lastCapturedState = new Map();
+
+/**
+ * One state as a blob handle, whichever form it arrived in. States reach the scheduler as handles
+ * from the buffer and in full from a saved or shared file, and both have to compare equal to a
+ * capture of the same program - which is only possible because handles are the content's hash.
+ */
+function stateHandle(state) {
+  if (state == null) return undefined;
+  const s = String(state);
+  return s.startsWith('@') ? s : `@${blobs.blobId(s)}`;
+}
 // Sig#log() lines waiting for the editor to drain them (see init's setEventLogger). Capped, so a
 // .log() left running with no browser attached can't grow without bound: the oldest lines go,
 // which is the right end to lose - the interesting one is what just played.
@@ -2791,29 +2824,76 @@ let autoPinTimer = null;
 let autoPinRun = null; // the capture pass in flight, so a flush can wait for it instead of racing
 
 function handlePluginEdited(trackId, slot) {
+  const key = markSlotDirty(trackId, slot, false);
+  // Frozen from the GESTURE, not from the capture: the swap that would overwrite this edit can come
+  // round long before the debounce has even fired (see the hand-editing section). A speculative
+  // capture can't do this - it doesn't know yet that anything was edited - and freezes on the way
+  // out instead, once the bytes say so.
+  if (key) noteHandEdit(key);
+}
+
+/**
+ * Queues one slot for capture. `speculative` says we have no report that it was edited and are
+ * asking the plugin anyway (see captureOpenEditors); a reported edit outranks one and is never
+ * downgraded to it, because it carries the preset that was live AT the gesture and has already
+ * frozen the slot. Returns the key, or null for a slot auto-pin doesn't write.
+ */
+function markSlotDirty(trackId, slot, speculative) {
   // Not for the queued deck's tracks: at mix time the songs are ~done (mixing is playback, per
   // the design), deck b's code lives in the other pane under UNPREFIXED labels the pin-writer
   // can't target - every capture ended in "auto-pin: no .fx(...) call for b:kick - state not
   // written" (and a loaded song's own preset restores fire these edit events too, so mixing
   // sprayed that warning constantly). A promoted track re-keys to a plain label on complete-mix
   // and pins normally again from there.
-  if (deckOfKey(trackId) === 'b') return;
+  if (deckOfKey(trackId) === 'b') return null;
   const key = `${trackId}|${slot}`;
+  if (speculative && autoPinDirty.get(key)?.speculative === false) return key;
   autoPinDirty.set(key, {
     trackId,
     slot,
     plugin: pluginInSlot(trackId, slot),
     preset: schedulers.get(trackId)?.livePreset(slot) ?? null,
+    speculative,
   });
-  // Frozen from the GESTURE, not from the capture: the swap that would overwrite this edit can come
-  // round long before the debounce below has even fired (see the hand-editing section).
-  noteHandEdit(key);
   clearTimeout(autoPinTimer);
   // In deferred mode, capture on the gesture only while the clock is frozen - nothing to interrupt.
   // A running clock leaves the slot dirty until something flushes it.
   if (AUTOPIN_MODE === 'immediate' || (transport?.paused ?? true)) {
     autoPinTimer = setTimeout(flushPluginCaptures, AUTOPIN_DEBOUNCE_MS);
   }
+  return key;
+}
+
+/**
+ * Capture every slot whose plugin window is open, WITHOUT having been told it was edited.
+ *
+ * Auto-pin's normal trigger is the plugin reporting a gesture, and not every plugin reports one:
+ * Omnisphere's editor changes its program without emitting /vst_param, /vst_update or
+ * /vst_program_index, so a sound designed in it existed nowhere but the plugin and went away with
+ * the server. There is nothing to fix at that end - a host only hears what a plugin chooses to
+ * say - so the other end asks instead, at the moment a person's attention comes back to the code:
+ * the browser regaining focus, and the click in the buffer that hands a held slot back.
+ *
+ * Asking is only free because the answer is comparable: the program comes back content-addressed,
+ * and one identical to the last capture of that slot stops right there (see captureDirtyPlugins).
+ * So a speculative capture of an untouched plugin costs one writeProgram and changes nothing -
+ * no write into the buffer, no freeze, no log line - while one of a plugin that WAS touched is
+ * indistinguishable from a reported edit from that point on.
+ *
+ * Only slots held by hand are asked, which is to say only plugins whose window poptart opened and
+ * that you have not clicked away from yet. That is the one window where the slot's sound is
+ * unambiguously yours: nothing else can have pushed a program into it (the freeze holds those
+ * off), so anything that came back different came from your hands. Outside it a preset pattern is
+ * driving the slot, and capturing there would file the pattern's own sound back into the code as
+ * though someone had dialled it in.
+ */
+function captureOpenEditors(keys = handTaken) {
+  let queued = 0;
+  for (const key of [...keys]) {
+    const at = key.lastIndexOf('|'); // a label may contain a pipe; the slot never does
+    if (markSlotDirty(key.slice(0, at), Number(key.slice(at + 1)), true)) queued += 1;
+  }
+  return queued;
 }
 
 function pluginInSlot(trackId, slot) {
@@ -2838,14 +2918,16 @@ function flushPluginCaptures() {
 async function captureDirtyPlugins() {
   if (!engine) return;
   while (autoPinDirty.size) {
-    const [key, { trackId, slot, plugin, preset }] = autoPinDirty.entries().next().value;
+    const [key, { trackId, slot, plugin, preset, speculative }] = autoPinDirty.entries().next().value;
     autoPinDirty.delete(key);
     // Reordering a chain moves which plugin a slot holds. A pending capture for slot 2 would then
     // read - and the editor would write - the wrong plugin's program, so drop it instead. The
     // plugin still holds the edit; touching it again captures it where it now lives.
     const now = pluginInSlot(trackId, slot);
     if (plugin && now !== plugin) {
-      console.log(`[auto-pin] skipped ${trackId} slot ${slot}: it held ${plugin} when it was edited and holds ${now ?? 'nothing'} now`);
+      // Only worth a line for an edit someone actually made: a speculative capture is asking on
+      // the off-chance, and "the slot you didn't say you'd changed has changed hands" is noise.
+      if (!speculative) console.log(`[auto-pin] skipped ${trackId} slot ${slot}: it held ${plugin} when it was edited and holds ${now ?? 'nothing'} now`);
       continue;
     }
     try {
@@ -2863,6 +2945,23 @@ async function captureDirtyPlugins() {
       // blobs.js). Nothing downstream can tell the difference - the scheduler compares states as
       // opaque strings, and the engine resolves the handle when it loads one.
       const handle = await blobs.putBlob(state);
+      // A capture nobody asked for answers its own question here: the same bytes as last time mean
+      // the plugin was not touched, and the whole point of asking was to find out (see
+      // captureOpenEditors). Nothing further happens - the buffer is already right about this slot.
+      // Two baselines, because either alone leaves a hole. The last capture is the direct one. The
+      // scheduler's is what it last PUSHED into the slot (a `.preset(...)` swap, a `{ state }`
+      // argument): it covers the first speculative capture of a slot never captured before, and a
+      // program the pattern put there after the gesture that queued this one - without it, either
+      // would read as an edit and file a sound nobody dialled in back into the code.
+      const unchanged = handle === lastCapturedState.get(key)
+        || handle === stateHandle(schedulers.get(trackId)?.appliedState(slot, now));
+      lastCapturedState.set(key, handle);
+      if (speculative) {
+        if (unchanged) continue;
+        // It WAS an edit, just an unreported one. From here it is one: frozen until the code has
+        // it, exactly as if the plugin had said so itself.
+        noteHandEdit(key);
+      }
       // The time the editor has to file this starts HERE, not at the gesture: in deferred mode the
       // capture itself may have been held back for a whole performance.
       const held = uncaptured.get(key);
@@ -2875,8 +2974,9 @@ async function captureDirtyPlugins() {
       schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(engineTrack(trackId))?.[slot], handle);
     } catch (e) {
       // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
-      // all self-correcting on the next edit. Log once per slot so it's diagnosable.
-      console.log(`[auto-pin] could not capture ${trackId} slot ${slot}: ${e.message ?? e}`);
+      // all self-correcting on the next edit. Log once per slot so it's diagnosable, but not for a
+      // capture nobody asked for: an empty slot answering "no plugin" is the expected answer there.
+      if (!speculative) console.log(`[auto-pin] could not capture ${trackId} slot ${slot}: ${e.message ?? e}`);
       // Nothing will ever file this one, so it must not go on freezing the slot: the plugin's
       // window being open is the only reason left to, and the next edit captures again.
       uncaptured.delete(key);
@@ -3823,6 +3923,13 @@ const routes = {
   // held by hand goes back to its pattern (see the hand-editing section). No body: a click is not
   // about one slot, it is about which of the two places you are working in.
   'POST /api/releaseEditors': async () => ({ status: 200, body: { released: releaseSlotsHeldByHand() } }),
+
+  // "I'm looking at the browser again" - the editor sends this when the window regains focus, and
+  // every plugin window it has open is asked for its program whether or not it ever said it had
+  // changed (see captureOpenEditors). This is the only thing that pins a plugin which reports no
+  // edits at all. No body, and nothing to say back: a capture that finds no change is meant to be
+  // invisible.
+  'POST /api/captureEditors': async () => ({ status: 200, body: { queued: captureOpenEditors() } }),
 
   // Turn "conf" (configure) capture on/off for a track (see handleParamAutomated). Only one
   // track configures at a time; turning it on for a track supersedes any previous one. Body:

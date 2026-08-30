@@ -527,6 +527,14 @@ export class Scheduler {
     this._appliedStates.set(`${slot}:${pluginId}`, state);
   }
 
+  // The program this slot's plugin was last given or last handed over - what it should still be
+  // holding if nobody has touched it since. A speculative capture (see the server's
+  // captureOpenEditors) has no report of an edit to go on and compares against this to decide
+  // whether one happened at all.
+  appliedState(slot, pluginId) {
+    return pluginId == null ? undefined : this._appliedStates.get(`${slot}:${pluginId}`);
+  }
+
   setPattern(sig) {
     this.pattern = sig;
     // The note gate every JS-sampled modulator on this track reads (see withNoteGate): the same

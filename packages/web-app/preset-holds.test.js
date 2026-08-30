@@ -110,15 +110,20 @@ function loadHoldFns() {
   const autoPinDirty = new Map(); // slots whose capture hasn't been taken yet (deferred mode holds them)
   const ttl = num('PRESET_HOLD_TTL_MS');
   const uncapTtl = num('UNCAPTURED_TTL_MS');
+  // Releasing a slot also asks its plugin for its program on the way out (see captureOpenEditors,
+  // covered by autopin-speculative.test.js). Recorded here rather than run: what these tests are
+  // about is the freeze, and a capture must not be able to change it.
+  const asked = [];
+  const captureOpenEditors = (keys) => { asked.push(...keys); return keys.length; };
   const names = ['stateHeld', 'syncStateHold', 'stateHeldSlotsFor', 'noteHandEdit', 'takeSlotByHand',
     'releaseSlotsHeldByHand', 'commitCapture', 'currentHolds', 'expireStateHolds', 'setPresetHold',
     'expirePresetHolds'];
   // eslint-disable-next-line no-new-func
   const make = new Function('presetHolds', 'schedulers', 'handTaken', 'uncaptured', 'autoPinDirty',
-    'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS',
+    'captureOpenEditors', 'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS',
     `let editSeq = 0;\n${names.map(take).join('\n')}\nreturn { ${names.join(', ')} };`);
-  const fns = make(presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, ttl, uncapTtl);
-  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, ttl, uncapTtl, ...fns };
+  const fns = make(presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, captureOpenEditors, ttl, uncapTtl);
+  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, asked, ttl, uncapTtl, ...fns };
 }
 
 // Records every hold/release the Scheduler is actually asked to perform. holdPreset() LOADS a
@@ -258,6 +263,18 @@ test('one click hands back every slot held by hand, not just the last one', () =
 
   assert.deepEqual(lead.frozen.slice(-2), [[0, false], [2, false]]);
   assert.deepEqual(bass.frozen.at(-1), [1, false]);
+});
+
+test('the click that ends a plugin session asks each of those plugins what it holds', () => {
+  // Last chance: a plugin that never reports its edits has reported nothing all session, and this
+  // is the gesture that ends it. Asked BEFORE the slots go back to their patterns, so the capture
+  // reads the sound you made rather than whatever the pattern puts there next.
+  const { takeSlotByHand, releaseSlotsHeldByHand, schedulers, asked } = loadHoldFns();
+  schedulers.set('lead', fakeScheduler());
+  takeSlotByHand('lead', 0);
+  takeSlotByHand('lead', 2);
+  releaseSlotsHeldByHand();
+  assert.deepEqual(asked, ['lead|0', 'lead|2']);
 });
 
 test('a hold outlives a browser reload - the plugin window is still up', () => {

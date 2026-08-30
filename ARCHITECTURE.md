@@ -210,6 +210,20 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   would be the signal worth waiting for and isn't available: VSTPlugin's events are `/vst_param`,
   `/vst_auto`, `/vst_program*`, `/vst_latency`, `/vst_midi`, `/vst_sysex`, `/vst_update` and
   `/vst_crash` — nothing reports an editor being closed.
+- **Some plugins report nothing at all, so poptart asks.** That event list is what a host can
+  hear, not what a plugin will say. Omnisphere rewrites its whole program from its own editor and
+  emits none of them, so waiting to be told meant a sound designed in it was never pinned — it
+  lived in the plugin and went away with the server. The other end of the exchange is available:
+  when your attention comes back to the code (the browser regaining focus, and the click in the
+  buffer that hands a held slot back), every plugin window poptart has open is *asked* for its
+  program. Asking is affordable only because the answer is comparable — states are
+  content-addressed, so one identical to the last program seen from that slot ends there, with no
+  write into the buffer, no freeze and no log line, and one that differs is an edit and is treated
+  as exactly that from there on. Only slots **held by hand** are asked, and that restriction is
+  the whole safety argument: while a plugin window is held nothing else can have pushed a program
+  in, so a program that comes back different came from your hands. Ask a slot a `.preset(...)` is
+  driving and the reasoning inverts — you would be filing the pattern's own sound into the code as
+  though someone had dialled it in.
 - **A pending capture is bound to a plugin, not just a slot.** A chain slot is a position, and
   reordering `.fx(...)` calls moves which plugin sits at one. A capture records what occupied the
   slot when the gesture happened, and both ends check it — the server drops a capture whose slot

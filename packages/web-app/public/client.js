@@ -1311,7 +1311,8 @@ let pinsPending = 0; // slots the server is holding uncaptured, so we mention it
 //
 // Inferring the end of it instead (the browser regaining focus, an idle timer) was tried first and
 // is what made this feel random: a plugin window that opens behind the browser never takes the
-// focus away, so holds ended a second after they started, mid-knob-turn.
+// focus away, so holds ended a second after they started, mid-knob-turn. Focus is used below, for
+// something a wrong guess doesn't cost anything: asking an open plugin what it holds.
 //
 // A hold is never silent: while one is on, the preset it is holding is marked in the code (see
 // syncHeldPresets), so "why has this stopped swapping" is answered on screen rather than from
@@ -1350,6 +1351,28 @@ function releaseSlotsHeldByHand() {
 }
 
 cm.getWrapperElement().addEventListener('mousedown', releaseSlotsHeldByHand, true);
+
+/**
+ * Back at the browser: ask every open plugin window what it is holding now.
+ *
+ * Auto-pin normally waits to be TOLD a plugin was edited, and some plugins never say - Omnisphere
+ * changes its whole program without emitting one of the events VSTPlugin forwards, so a sound made
+ * in it lived nowhere but the plugin. Coming back to the browser is the moment to ask instead: you
+ * were just at the plugin, and the server compares what comes back against the last program it saw
+ * from that slot, so asking about an untouched one changes nothing at all (see captureOpenEditors).
+ *
+ * Focus is a poor signal for ENDING a hold and a good one for this, which is worth keeping straight
+ * - the note above is about the first, and the difference is what a wrong guess costs. A hold that
+ * ends early drops a slot mid-knob-turn; a capture that finds nothing costs one message.
+ *
+ * Only sent while something is actually held by hand, so alt-tabbing with no plugin window open is
+ * free. Serialized with the other hold ops: the click that both focuses the window and lands in the
+ * buffer would otherwise race its own release, and the release hands the slot back.
+ */
+window.addEventListener('focus', () => {
+  if (!heldSlots.some((h) => h.why === 'hand')) return;
+  queueHandOp(() => api('POST', '/api/captureEditors', {}).catch(() => {}));
+});
 
 // A held slot is a place where the code says one thing and the plugin is doing another, so it is
 // drawn ON the code: the preset name that is really loaded gets a held mark, and the playback
