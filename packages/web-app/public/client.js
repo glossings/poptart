@@ -6764,7 +6764,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
       }));
     }
   }
-  if (onsets > 1) rhythm.push(t('retrograde', (ns) => T.retrograde(ns), 'the phrase backwards, in its own span'));
+  if (onsets > 1) rhythm.push(t('reverse', (ns) => T.retrograde(ns), 'the phrase backwards, in its own span'));
   if (n > 1 && pitched) {
     melody.push(t('invert pitch', (ns) => T.invertPitch(ns, { scale }), `upside down in ${scale}`));
     melody.push(popover('spread', 'wider or tighter around the centre, in key', {
