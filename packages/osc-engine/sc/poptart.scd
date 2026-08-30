@@ -1039,15 +1039,32 @@ server.waitForBoot {
         // through at `rate` into the track's input bus, so the whole DJ stage (EQ, filter,
         // crossfader, cue, meters) applies to a real song exactly as to a pattern track. One
         // persistent synth per deck rather than per-event voices: it pauses (run), seeks
-        // (t_seek/seekFrame - Phasor's resetPos applies only on a trigger, so spawning mid-song
+        // (t_seek/seekFrame - a reset position applies only on a trigger, so spawning mid-song
         // passes t_seek: 1 with the entry frame), and dies on gate for a declicked stop. `run`
-        // is lagged, so pause/resume is a tiny turntable-style slew instead of a click. The
-        // Phasor would wrap at EOF and replay from the top - Node schedules a pause at the
-        // song's end instead (see server.js's song end timer; a self-gate is a deferred oddment).
+        // is lagged, so pause/resume is a tiny turntable-style slew instead of a click. PlayBuf
+        // with loop 0 falls silent at EOF - Node schedules a pause at the song's end before that
+        // (see server.js's song end timer; a self-gate is a deferred oddment).
+        //
+        // The read is PlayBuf and the position is a Phasor, which looks like two accumulators for
+        // one job and is: see the precision note in the def. They are fed the same `step` and both
+        // integrate it in a double, so they stay locked - and where they can differ at all (a rate
+        // change lands across a block slightly differently) the difference telescopes rather than
+        // accumulating, bounded at a few frames over any session.
         SynthDef(("poptart_song_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
             var step = rate.lag(0.05) * BufRateScale.ir(buf) * run.lag(0.02);
+            // PlayBuf rather than BufRd walked by the Phasor, for precision: a phase handed to
+            // BufRd travels an audio wire, which is float32, and past 2^23 frames (~190s at 44.1k)
+            // its resolution is a whole frame - so the last minutes of a long track read as a
+            // nearest-neighbour hold with irregularly repeated frames instead of an interpolated
+            // one. A 44.1k file on a 48k server steps 0.91875 frames per sample, and there is no
+            // such number out there. PlayBuf keeps its phase in a double inside the UGen, so the
+            // step stays exact wherever in the file it is. (The one-shot sampler def above was the
+            // same bug, found first - 2026-08-29.)
+            var sig = PlayBuf.ar(nc, buf, step, t_seek, seekFrame, loop: 0);
+            // ...and the Phasor stays, but only to REPORT the playhead below. Nothing reads audio
+            // through it, so its float32 output costs at most a frame of accuracy (23us) on a
+            // number the drift servo compares against Node's own model with a deadband.
             var idx = Phasor.ar(t_seek, step, 0, BufFrames.ir(buf), seekFrame);
-            var sig = BufRd.ar(nc, buf, idx, loop: 0, interpolation: 4);
             var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
             // Position report for the drift servo (songs phase 4): the actual playhead in song
             // seconds, on the sample clock. sclang tags it with the track key and forwards it
@@ -1077,8 +1094,12 @@ server.waitForBoot {
                 var brs = BufRateScale.ir(buf), frames = BufFrames.ir(buf), bufSr = BufSampleRate.ir(buf);
                 var rateL = rate.lag(0.05), runL = run.lag(0.02);
                 var step = rateL * brs * runL;
-                var idx = Phasor.ar(t_seek, step, 0, frames, seekFrame + (delay * rate * brs));
-                var dry = BufRd.ar(nc, buf, idx, 0, 4);
+                var start = seekFrame + (delay * rate * brs);
+                // PlayBuf for the read and a Phasor for the position, exactly as the repitch player
+                // above does it, and for the same reason - a BufRd phase is float32 and cannot hold
+                // a fractional frame past ~190s into a 44.1k file.
+                var dry = PlayBuf.ar(nc, buf, step, t_seek, start, loop: 0);
+                var idx = Phasor.ar(t_seek, step, 0, frames, start);
                 var sh = \PoptartPitchShift.asClass.ar(dry, 1 / rateL.max(0.01), window);
                 var sig = sh.keep(nc);
                 var heard = idx - (delay * rateL * brs);
@@ -1137,6 +1158,15 @@ server.waitForBoot {
             // half a bass period (half = 512 samples = 11.6 ms covers 43 Hz) or the bass loses its
             // lock, kLen is bounded by Convolution2's frame, and hop = 4*kLen is the pipeline's
             // length - a snapshot, two frames of settling, two frames of scan.
+            //
+            // KNOWN, and not fixed: every read here is a BufRd on a float32 phase, so past ~190s
+            // into a 44.1k file the reads quantize to whole frames (the precision note on the
+            // repitch player). The other two song players moved to PlayBuf; this one can't - its
+            // grain readers and its correlation scan all seek to arbitrary positions, which is the
+            // one thing PlayBuf's internal phase cannot be told to do. It is the fallback for an
+            // engine without the PoptartPitchShift extension, which extensions.js installs by
+            // default, so nobody should be on this path; fixing it means an offset-plus-local
+            // phase scheme through the whole graph.
             SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
                 var kLen = 512, half = 512, scan = 2 * half, hop = 4 * kLen, win = 2 * hop;
                 var brs = BufRateScale.ir(buf), frames = BufFrames.ir(buf), bufSr = BufSampleRate.ir(buf);
