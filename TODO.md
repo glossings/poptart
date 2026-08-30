@@ -305,3 +305,50 @@ no completion notes.
     poptart.scd); plugin parameters need a `stepped` flag per parameter in mappings/*.json (preferred
     - it's a property of the parameter, not of one pattern) so setParam bypasses the ramp for them.
 
+
+[ ] Harmony & melody tools - phased plan settled 2026-08-30. Everything operates on the ROLL'S OWN
+    NOTES (prState.sel or hovered note -> pure notes->notes function -> writePianorollCall +
+    drawPianoroll, exactly the prToggleMute/prDuplicate shape) so results stay hand-editable;
+    undo/overlap/serialize come free. Theory lives in pattern-core/src/harmony.mjs (dependency-free
+    beyond notes.mjs, served under /pattern-core/ like notes.mjs, unit-tested; the roll already has
+    prScaleInfo + the global scale for "in key"). UI surface: right-click over the NOTE GRID is
+    unbound (the contextmenu handler only opens the lane menu below laneTop) - one transform menu
+    there (Harmony / Melody / Rhythm submenus, reusing prMenu/openCtxMenu), hotkeys later as
+    accelerators into its top items; in-roll plain letters are mostly free (b = tool, 0 = mute).
+    Non-negotiable UX: hover a menu entry auditions the result through the track's synth
+    (prPreview machinery), commit on click, Escape reverts. Phases; delete each as it lands:
+
+[ ] Harmony phase 1 - harmony.mjs foundation (LANDED pending review, with harmony.test.mjs):
+    CHORD_QUALITIES dictionary, analyzeChord (pc-set match, bass-preferred root, slash/inversion,
+    flats-vs-sharps via preferFlats, roman numerals), diatonicChords, chordsForNote (chords
+    containing the held note, note kept literally in the voicing, role root/3rd/5th/7th), voicing
+    transforms (invertChord/closeVoicing/drop2/drop3/spreadVoicing/shellVoicing/doubleBassOctave +
+    chordVoicings menu enumerator).
+
+[ ] Harmony phase 2 - the transform menu + chord UI in the roll (LANDED pending manual check):
+    #pianorollChord readout in the panel header (analyzeChord of the selection, updated from
+    drawPianoroll); right-click over the note grid -> prOpenHarmonyMenu (lane menu keeps the value
+    lane): one pitch = chordsForNote triads + sevenths, 2+ = chordVoicings, applied via
+    prHarmonyApply's pc-based pitch remap (timing kept, unclaimed pitches cloned from nearest
+    target, dropped pcs deleted); hover previews by swapping prState.notes against a stash
+    (prHarmony) + prPreviewChord audition, click commits (one undo step), leave/close restores;
+    openCtxMenu grew hover callbacks + mid-list heads + onHoverOut; canvas keys are dead while a
+    prMenu is open (modality guard).
+
+[ ] Harmony phase 3 - cheap pure-geometry ops on the selection: strum (nudge ramp within the
+    +/-0.5-cell clamp, whole-cell starts for wider strums, optional vel ramp + direction);
+    retrograde; invert pitch (chromatic AND in-scale via midiToDegree/degreeToMidi); spread/
+    contract (stepwise in-scale); rhythmize one note (euclid k/n, son/rumba clave, tresillo,
+    four-on-floor, swung ride; optional accent shape); conform-to-key (quantizeToScale);
+    humanize (seeded vel+nudge jitter); legato/staccato; echo (decaying-vel repeats).
+
+[ ] Harmony phase 4 - generators: arpeggiate a chord destructively (up/down/updown/converge/
+    random(seeded)/as-drawn, rate from the roll grid); random in-scale melody (seeded constrained
+    walk, chord-tone bias on strong beats); design together with roadmap "mutate" (same tool with
+    a keep-mask); "same rhythm, new pitches" contour-preserving re-pitch.
+
+[ ] Harmony phase 5 - next-chord suggestions: functional-harmony transition table (T->S->D->T,
+    circle-of-fifths pull, secondary dominants + modal interchange as a "borrowed" section),
+    deterministic ranking + seeded tiebreak, repeated invoke cycles alternatives; add a
+    voice-leading pass (minimal total movement picks the suggested chord's inversion) which also
+    improves the phase-2 voicing menu's ordering. Build last - most design-heavy.

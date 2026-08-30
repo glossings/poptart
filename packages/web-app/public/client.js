@@ -30,6 +30,7 @@ let shapeMod = null;
 let pianorollMod = null;
 let arrangeMod = null; // arrange.mjs - the arrangement painter's clip format and span math
 let notesMod = null; // notes.mjs - pure music-theory helpers piped up to the userland prebake scope
+let harmonyMod = null; // harmony.mjs - chord analysis/naming + voicings for the roll's harmony menu
 let mixctlMod = null; // mixctl.mjs - the mixer's gain/pan trim reads and code edits
 let recordMod = null; // record.mjs - a live take into a roll (the ● rec and capture paths)
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
@@ -43,8 +44,9 @@ const coreReady = Promise.all([
   import('/pattern-core/mixctl.mjs'),
   import('/pattern-core/record.mjs'),
   import('/pattern-core/arrange.mjs'),
+  import('/pattern-core/harmony.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm]) => {
     miniMod = m;
     labelsMod = l;
     shapeMod = s;
@@ -53,6 +55,7 @@ const coreReady = Promise.all([
     mixctlMod = mx;
     recordMod = rc;
     arrangeMod = ar;
+    harmonyMod = hm;
     arSetClock(arClockSnap); // a clock snapshot that arrived before the module did gets its twin now
     initLfoEditor();
     initPianorollEditor();
@@ -3719,6 +3722,7 @@ const prModeBtn = document.getElementById('pianorollMode');
 const prScaleFoldBtn = document.getElementById('pianorollScaleFold');
 const prFoldBtn = document.getElementById('pianorollFold');
 const prScaleLabel = document.getElementById('pianorollScale');
+const prChordLabel = document.getElementById('pianorollChord'); // what the selection spells as a chord
 const prPreviewBtn = document.getElementById('pianorollPreview');
 const prMenu = document.getElementById('pianorollMenu'); // right-click menu over the value lane
 const prToMiniBtn = document.getElementById('pianorollToMini');
@@ -4066,9 +4070,27 @@ function prPreview(midi) {
   prSounding = midi;
 }
 function prPreviewOff() {
-  if (prSounding == null) return;
-  prPreviewSend(prSounding, false);
-  prSounding = null;
+  if (prSounding != null) {
+    prPreviewSend(prSounding, false);
+    prSounding = null;
+  }
+  prChordOff();
+}
+
+// Chord audition for the harmony menu: several notes down at once, on their own channel beside
+// the single-note preview (which stays edge-triggered on prSounding). Always paired with an off -
+// prChordOff, or the next prPreviewChord, or any prPreviewOff.
+let prChordSounding = []; // MIDI notes currently held down as a chord preview
+function prChordOff() {
+  for (const m of prChordSounding) prPreviewSend(m, false);
+  prChordSounding = [];
+}
+function prPreviewChord(midis) {
+  prChordOff();
+  if (!prPreviewEnabled || prIndexMode()) return;
+  if (prSounding != null) { prPreviewSend(prSounding, false); prSounding = null; }
+  prChordSounding = [...new Set(midis)].slice(0, 12);
+  for (const m of prChordSounding) prPreviewSend(m, true);
 }
 // Audition the top note of a group being dragged or nudged. Muted notes are skipped: one is
 // switched off, and moving it around is no reason to hear it.
@@ -5746,6 +5768,7 @@ function closePianorollEditor() {
   if (prState?.marker) prState.marker.clear();
   if (prState?.source) prState.source.clear();
   prState = null;
+  prUpdateChordLabel(); // no roll, no selection to read
   prPanel.classList.add('hidden');
 }
 
@@ -6433,6 +6456,126 @@ function prOpenLaneMenu(clientX, clientY) {
 
 function prCloseLaneMenu() {
   prMenu.classList.add('hidden');
+  if (prHarmony) { prHarmonyHoverOut(); prHarmony = null; } // closing uncommitted = never happened
+}
+
+// ---------------------------------------------------------------------------------------------
+// The harmony menu - right-click over the NOTE GRID (the lane menu keeps the value lane). One
+// note: the diatonic chords that contain it, voiced so the note you drew stays put. Two or more:
+// the chord's voicings (inversions, drop-2/3, spread, shell, bass octave) as a pitch remap that
+// keeps every note's own timing - so it re-voices a block chord and an arpeggiated figure alike.
+// Hovering an entry PREVIEWS it: the roll redraws with the result and the track's synth sounds
+// it (the 🎧 toggle willing); leaving the entry puts everything back, clicking commits it as one
+// ordinary undo step. Nothing touches the buffer until the click - previews only ever swap
+// prState.notes between the stashed original and freshly-built copies.
+// ---------------------------------------------------------------------------------------------
+
+let prHarmony = null; // { origNotes, origSel, targets } while the menu is up; null = no preview to unwind
+
+/**
+ * Rebuilds the roll so the targets' pitch set becomes `midis`, timing untouched: each target
+ * keeps its cells/vel/prob/nudge and takes the nearest new pitch of its own pitch class (none
+ * left = the note is gone - a shell voicing dropping the 5th), and each new pitch nobody claimed
+ * becomes a copy of its nearest target (how a single note grows into a chord). Returns the new
+ * note objects (appended last, so they win the overlap rule on commit), or null when every new
+ * pitch fell outside MIDI range.
+ */
+function prHarmonyApply(midis) {
+  const { origNotes, targets } = prHarmony;
+  const pitches = [...new Set(midis.map((m) => Math.round(m)))].filter((m) => m >= 0 && m <= 127).sort((a, b) => a - b);
+  if (!pitches.length) return null;
+  const claimed = new Set();
+  const out = [];
+  for (const nt of targets) {
+    const cands = pitches.filter((m) => pitchClass(m) === pitchClass(nt.midi));
+    if (!cands.length) continue;
+    const m = cands.reduce((a, b) => (Math.abs(b - nt.midi) < Math.abs(a - nt.midi) ? b : a));
+    claimed.add(m);
+    out.push({ ...nt, midi: m });
+  }
+  for (const m of pitches) {
+    if (claimed.has(m)) continue;
+    const src = targets.reduce((a, b) => (Math.abs(b.midi - m) < Math.abs(a.midi - m) ? b : a));
+    out.push({ ...src, midi: m });
+  }
+  const inTargets = new Set(targets);
+  prState.notes = [...origNotes.filter((nt) => !inTargets.has(nt)), ...out];
+  prState.sel = new Set(out);
+  return out;
+}
+
+/** Hover an entry: show and sound the result without committing anything. */
+function prHarmonyPreview(midis) {
+  if (!prHarmony) return;
+  const out = prHarmonyApply(midis);
+  drawPianoroll();
+  if (out) prPreviewChord([...new Set(out.filter((nt) => !nt.mute).map((nt) => nt.midi))]);
+}
+
+/** The pointer left the entry (or the menu): put the roll back the way it was. */
+function prHarmonyHoverOut() {
+  if (!prHarmony) return;
+  prState.notes = prHarmony.origNotes.slice();
+  prState.sel = new Set(prHarmony.origSel);
+  prPreviewOff();
+  drawPianoroll();
+}
+
+/** Click an entry: make the previewed result real - one undo step, like any other roll edit. */
+function prHarmonyCommit(midis) {
+  if (!prHarmony) return;
+  const out = prHarmonyApply(midis);
+  prHarmony = null;
+  prPreviewOff();
+  if (!out) return;
+  prClipOverlaps();
+  prScrollTo(out); // a dropped bass octave may land off-screen
+  writePianorollCall();
+  drawPianoroll();
+}
+
+function prOpenHarmonyMenu(e) {
+  if (!prState || prIndexMode() || !harmonyMod) return;
+  let targets = [...prState.sel].filter((nt) => !nt.hidden);
+  if (!targets.length) {
+    // Nothing selected: the note under the pointer, selected so the menu's scope is visible -
+    // the same reach prToggleMute has.
+    const m = prMetrics();
+    const { px, py } = prCanvasPos(e);
+    const cell = prCellAt(px, m);
+    const hit = cell == null ? null : prNoteAt(cell, prMidiAt(py, m));
+    if (hit == null) return;
+    targets = [prState.notes[hit]];
+    prState.sel = new Set(targets);
+    drawPianoroll();
+  }
+  const scale = patchScale ?? notesMod?.DEFAULT_SCALE ?? 'c major';
+  const pitches = [...new Set(targets.map((nt) => nt.midi))].sort((a, b) => a - b);
+  prHarmony = { origNotes: prState.notes.slice(), origSel: new Set(prState.sel), targets };
+  const item = (label, midis, title) => [label, () => prHarmonyCommit(midis), title, () => prHarmonyPreview(midis)];
+  const items = [];
+  if (pitches.length === 1) {
+    items.push({ head: `${midiName(pitches[0])} · chords in ${scale}` });
+    for (const sevenths of [false, true]) {
+      if (sevenths) items.push('-');
+      for (const c of harmonyMod.chordsForNote(pitches[0], scale, { sevenths })) {
+        const label = `${c.name ?? c.midis.map(midiName).join(' ')}${c.roman ? ` · ${c.roman}` : ''}`;
+        items.push(item(label, c.midis, `${midiName(pitches[0])} is the ${c.role}`));
+      }
+    }
+  } else {
+    const a = harmonyMod.analyzeChord(pitches, patchScale);
+    items.push({ head: a ? `${a.name}${a.roman ? ` · ${a.roman}` : ''} · voicings` : `${pitches.length} pitches · voicings` });
+    for (const v of harmonyMod.chordVoicings(pitches)) {
+      items.push(item(v.name, v.midis, v.midis.map(midiName).join(' ')));
+    }
+    if (items.length === 1) { prHarmony = null; return; } // nothing to offer this selection
+  }
+  openCtxMenu(prMenu, e.clientX, e.clientY, {
+    after: () => prRefocus(),
+    onHoverOut: () => prHarmonyHoverOut(),
+    items,
+  });
 }
 
 /**
@@ -6440,11 +6583,14 @@ function prCloseLaneMenu() {
  * - the piano roll's value lane and the editor's own menu - and the widget, the placement and the
  * dismissal are the same for both; only the items differ.
  *
- *   head   the small uppercase line above the items (optional)
- *   items  [label, fn, title?] entries, or the string '-' for a rule between groups
- *   after  run once an item has been chosen, for a caller that has focus to give back
+ *   head       the small uppercase line above the items (optional)
+ *   items      [label, fn, title?, hover?] entries, the string '-' for a rule between groups, or
+ *              { head } for a section line mid-list; `hover` (optional) runs when the pointer
+ *              enters the entry - the harmony menu's live preview
+ *   after      run once an item has been chosen, for a caller that has focus to give back
+ *   onHoverOut run when the pointer leaves the menu itself, for a caller previewing on hover
  */
-function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null } = {}) {
+function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null, onHoverOut = null } = {}) {
   el.innerHTML = '';
   if (head) {
     const h = document.createElement('div');
@@ -6457,14 +6603,23 @@ function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null
       el.appendChild(document.createElement('hr'));
       continue;
     }
-    const [label, fn, title] = entry;
+    if (!Array.isArray(entry)) {
+      const h = document.createElement('div');
+      h.className = 'ctx-menu-head';
+      h.textContent = entry.head;
+      el.appendChild(h);
+      continue;
+    }
+    const [label, fn, title, hover] = entry;
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = label;
     if (title) b.title = title;
+    if (hover) b.addEventListener('mouseenter', hover);
     b.addEventListener('click', () => { el.classList.add('hidden'); fn(); after?.(); });
     el.appendChild(b);
   }
+  el.onmouseleave = onHoverOut; // assignment, not addEventListener: the element is reused across opens
   el.classList.remove('hidden');
   // On screen where the pointer is, nudged back in if that would run off the window's edge.
   const w = el.offsetWidth, h = el.offsetHeight;
@@ -6575,8 +6730,24 @@ function drawValueLane(ctx, col, m) {
   ctx.beginPath(); ctx.moveTo(0, laneTop + 0.5); ctx.lineTo(W, laneTop + 0.5); ctx.stroke();
 }
 
+// The header's chord readout: what the selected notes spell, in the key if one is set. Redrawn
+// with the roll (every selection change redraws), empty unless 2+ selected pitches analyze.
+function prUpdateChordLabel() {
+  if (!prChordLabel) return;
+  let text = '';
+  if (prState && harmonyMod && !prIndexMode()) {
+    const pitches = [...new Set([...prState.sel].filter((nt) => !nt.hidden).map((nt) => nt.midi))];
+    if (pitches.length >= 2) {
+      const a = harmonyMod.analyzeChord(pitches, patchScale);
+      if (a) text = a.roman ? `${a.name} · ${a.roman}` : a.name;
+    }
+  }
+  prChordLabel.textContent = text;
+}
+
 function drawPianoroll() {
   if (!prState || !pianorollMod) return;
+  prUpdateChordLabel();
   const css = getComputedStyle(document.documentElement);
   const col = (v) => css.getPropertyValue(v).trim();
   const ctx = prCanvas.getContext('2d');
@@ -7086,12 +7257,14 @@ function initPianorollCanvas() {
       : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET_R, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
 
   // ctrl-drag (mac) = velocity, not a menu - except over the value lane, which has one of its own
-  // (randomize / reset the channel it shows; see prOpenLaneMenu).
+  // (randomize / reset the channel it shows; see prOpenLaneMenu), and the note grid, whose
+  // right-click is the harmony menu (see prOpenHarmonyMenu).
   prCanvas.addEventListener('contextmenu', (e) => {
     if (!prState) return;
     e.preventDefault();
     const { py } = prCanvasPos(e);
     if (py >= prMetrics().laneTop) prOpenLaneMenu(e.clientX, e.clientY);
+    else if (py >= PR_TOPBAR) prOpenHarmonyMenu(e);
   });
   // The menu goes away on any press outside it (its items act on click, so a press ON it must not
   // hide them first), and on Escape.
@@ -7374,6 +7547,10 @@ function initPianorollCanvas() {
 
   prCanvas.addEventListener('keydown', (e) => {
     if (!prState) return;
+    // A context menu on screen is modal for the canvas: with a harmony preview swapped in, a key
+    // edit would write the buffer and then be silently unwound by the menu's close-restore.
+    // (A pointer press is safe - the document's capture-phase dismiss restores first.)
+    if (!prMenu.classList.contains('hidden')) return;
     const sel = [...prState.sel];
     const mod = e.metaKey || e.ctrlKey;
     if (mod && (e.key === 'z' || e.key === 'Z')) {

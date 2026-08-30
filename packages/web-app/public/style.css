@@ -2438,6 +2438,22 @@ li.CodeMirror-hint-active {
   transform: translateY(1px);
 }
 
+/* What the selected notes spell as a chord, next to the key - a readout, not a button. Empty
+   (and so invisible) unless 2+ pitches are selected and they analyze to a name. */
+.pianoroll-chord {
+  font-family: var(--mono);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.pianoroll-chord:not(:empty) {
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--text-dim) 35%, transparent);
+  border-radius: 999px;
+}
+
 .pianoroll-ctl {
   display: flex;
   align-items: center;
