@@ -216,14 +216,18 @@ no completion notes.
     there (Harmony / Melody / Rhythm submenus, reusing prMenu/openCtxMenu), hotkeys later as
     accelerators into its top items; in-roll plain letters are mostly free (b = tool, 0 = mute).
     Non-negotiable UX: hover a menu entry auditions the result through the track's synth
-    (prPreview machinery), commit on click, Escape reverts. Phases; delete each as it lands:
+    (prPreview machinery), commit on click, Escape reverts. Phases 1-3 (theory module, chord/
+    voicing menu, rollops.mjs transforms + chance ops behind parameter popovers) are in; delete each remaining phase as
+    it lands:
 
-[ ] Harmony phase 3 - cheap pure-geometry ops on the selection: strum (nudge ramp within the
-    +/-0.5-cell clamp, whole-cell starts for wider strums, optional vel ramp + direction);
-    retrograde; invert pitch (chromatic AND in-scale via midiToDegree/degreeToMidi); spread/
-    contract (stepwise in-scale); rhythmize one note (euclid k/n, son/rumba clave, tresillo,
-    four-on-floor, swung ride; optional accent shape); conform-to-key (quantizeToScale);
-    humanize (seeded vel+nudge jitter); legato/staccato; echo (decaying-vel repeats).
+[ ] Cascara for RHYTHM_FIGURES (pattern-core/src/rollops.mjs): the timbale-shell pattern is the
+    most-heard groove missing from rhythmize, skipped 2026-08-30 because no source commits to one
+    canonical form: the only explicit grid found (Soundbrenner) is a 7-stroke X--X--X-|-XX-X--X,
+    drum pedagogy (Malabe/Weiner lineage; Dicciani's Afro-Cuban PDF engravings) teaches a
+    10-stroke shell pattern and presents SEVEN variants per clave direction, and 2-3 vs 3-2 is a
+    half-cycle rotation sources disagree on as the default. To ship: either the 7-stroke under the
+    hedged name "palito" (it's 3-2 son clave + two pickups), or transcribe the 10-stroke from the
+    Dicciani engraving by eye (accents carry the risk). Aria's call which.
 
 [ ] Harmony phase 4 - generators: arpeggiate a chord destructively (up/down/updown/converge/
     random(seeded)/as-drawn, rate from the roll grid); random in-scale melody (seeded constrained

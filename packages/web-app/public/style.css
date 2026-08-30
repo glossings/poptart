@@ -2556,6 +2556,143 @@ li.CodeMirror-hint-active {
   background: var(--hover-bg);
 }
 
+.ctx-menu .ctx-param {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 9px;
+  color: var(--text-dim);
+}
+
+.ctx-menu .ctx-menu-head.ctx-drag {
+  cursor: grab;
+  user-select: none;
+}
+
+.ctx-menu .ctx-menu-head.ctx-drag.dragging {
+  cursor: grabbing;
+}
+
+.ctx-menu .ctx-param[hidden] {
+  display: none;
+}
+
+.ctx-menu .ctx-param > span {
+  width: 6em;
+}
+
+.ctx-menu .ctx-param input[type=range] {
+  width: 9em;
+  --cap-w: 8px;
+  --cap-h: 14px;
+  --groove: 3px;
+}
+
+.ctx-menu .ctx-param input[type=number] {
+  width: 4em;
+  font: inherit;
+  color: var(--text);
+}
+
+.ctx-menu .ctx-param select {
+  font: inherit;
+  color: var(--text);
+}
+
+.ctx-menu .ctx-param output {
+  width: 2.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.ctx-menu .ctx-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.ctx-menu .ctx-choice button {
+  display: inline-block;
+  width: auto;
+  padding: 3px 8px;
+  color: var(--text-dim);
+}
+
+.ctx-menu .ctx-choice-col {
+  flex-direction: column;
+}
+
+.ctx-menu .ctx-choice-col button {
+  width: 100%;
+  text-align: left;
+}
+
+/* A choice with more than a few options folds into a dropdown: the picked word, and the list
+   absolutely below it so opening it never reflows the popover. */
+.ctx-menu .ctx-drop-holder {
+  position: relative;
+  flex: 1;
+}
+
+.ctx-menu .ctx-drop-trigger {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+}
+
+.ctx-menu .ctx-drop-trigger::after {
+  content: '\25BE';
+  float: right;
+  opacity: 0.6;
+}
+
+.ctx-menu .ctx-drop-trigger.open::after {
+  content: '\25B4';
+}
+
+.ctx-menu .ctx-drop {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px var(--shadow);
+}
+
+.ctx-menu .ctx-drop.hidden {
+  display: none;
+}
+
+.ctx-menu .ctx-choice button.on {
+  color: var(--accent);
+  background: var(--hover-bg);
+}
+
+.ctx-menu .ctx-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 6px 4px 2px;
+}
+
+.ctx-menu .ctx-actions button {
+  display: inline-block;
+  width: auto;
+}
+
+.ctx-menu .ctx-actions button.primary {
+  color: var(--accent);
+}
+
 .ctx-menu hr {
   height: 0;
   margin: 4px 6px;
