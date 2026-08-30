@@ -329,6 +329,28 @@ export function shellVoicing(midis) {
   return uniqSorted([root, t, above(t, seventh)]);
 }
 
+/**
+ * The same voicing moved by whole octaves to sit as close as possible to `reference` - its mean
+ * pitch lands nearest the reference's mean (ties resolve downward, like every tie here). This is
+ * what keeps a cycled inversion IN PLACE: bare invertChord only ever climbs, so the menu centers
+ * each inversion back around the chord it came from rather than walking it up the keyboard.
+ */
+export function centerVoicing(midis, reference) {
+  const notes = uniqSorted(midis ?? []);
+  const ref = uniqSorted(reference ?? []);
+  if (!notes.length || !ref.length) return notes;
+  const mean = (a) => a.reduce((s, m) => s + m, 0) / a.length;
+  const target = mean(ref);
+  let best = notes;
+  let bestDist = Infinity;
+  for (let oct = -2; oct <= 2; oct++) {
+    const moved = notes.map((m) => m + 12 * oct);
+    const dist = Math.abs(mean(moved) - target);
+    if (dist < bestDist) { best = moved; bestDist = dist; } // strict: a tie keeps the lower octave
+  }
+  return best;
+}
+
 /** Doubles the bass an octave down. */
 export function doubleBassOctave(midis) {
   const notes = uniqSorted(midis ?? []);
@@ -338,17 +360,25 @@ export function doubleBassOctave(midis) {
 
 /**
  * The voicing menu for one chord: every transform above that applies, named, with the plain
- * inversions numbered. Entries that land exactly on the input voicing are skipped (offering
- * "close" on an already-close chord says nothing). Returns [{ name, midis }].
+ * inversions numbered - each inversion centered back around the original (see centerVoicing), so
+ * cycling through them re-voices the chord in place instead of marching it up the keyboard.
+ * Entries that land exactly on the input voicing are skipped (offering "close" on an
+ * already-close chord says nothing), and so are duplicates of an entry already offered - two
+ * roads to the same voicing (closing an open chord, and cycling it round then centering it back)
+ * are one choice, under the first road's name. Returns [{ name, midis }].
  */
 export function chordVoicings(midis) {
   const notes = uniqSorted(midis ?? []);
   if (notes.length < 2) return [];
-  const same = (a) => a && a.length === notes.length && a.every((m, i) => m === notes[i]);
+  const seen = new Set([notes.join(',')]);
   const out = [];
-  const push = (name, voiced) => { if (voiced && !same(voiced)) out.push({ name, midis: voiced }); };
+  const push = (name, voiced) => {
+    if (!voiced || seen.has(voiced.join(','))) return;
+    seen.add(voiced.join(','));
+    out.push({ name, midis: voiced });
+  };
   push('close', closeVoicing(notes));
-  for (let i = 1; i < notes.length; i++) push(`inversion ${i}`, invertChord(notes, i));
+  for (let i = 1; i < notes.length; i++) push(`inversion ${i}`, centerVoicing(invertChord(notes, i), notes));
   push('drop 2', drop2(notes));
   push('drop 3', drop3(notes));
   push('spread', spreadVoicing(notes));

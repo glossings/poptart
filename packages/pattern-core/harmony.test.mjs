@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 import {
   analyzeChord, chordsForNote, chordVoicings, closeVoicing, diatonicChords, doubleBassOctave,
-  drop2, drop3, extendedChordsOnNote, invertChord, pcName, preferFlats, romanNumeral,
+  centerVoicing, drop2, drop3, extendedChordsOnNote, invertChord, pcName, preferFlats, romanNumeral,
   shellVoicing, spreadVoicing,
 } from './src/harmony.mjs';
 
@@ -190,6 +190,12 @@ test('doubleBassOctave prepends the bass an octave down', () => {
   assert.deepEqual(doubleBassOctave([C3, E3, G3]), [48, C3, E3, G3]);
 });
 
+test('centerVoicing: whole-octave shift toward the reference mean, ties downward', () => {
+  assert.deepEqual(centerVoicing([67, 72, 76], [C3, E3, G3]), [55, C3, E3]); // 2nd inv drops in place
+  assert.deepEqual(centerVoicing([E3, G3, 72], [C3, E3, G3]), [E3, G3, 72]); // 1st inv is already closest
+  assert.deepEqual(centerVoicing([C3, E3, G3], [C3, E3, G3]), [C3, E3, G3]);
+});
+
 test('chordVoicings: names what applies, skips no-ops and inapplicable ops', () => {
   const list = chordVoicings([C3, E3, G3]);
   const names = list.map((v) => v.name);
@@ -202,7 +208,19 @@ test('chordVoicings: names what applies, skips no-ops and inapplicable ops', () 
   assert.ok(!names.includes('shell (3 & 7)')); // no 7th
   const inv1 = list.find((v) => v.name === 'inversion 1');
   assert.deepEqual(inv1.midis, [E3, G3, 72]);
+  // Inversions stay centered on the original chord - inversion 2 lands BELOW it, not two up.
+  const inv2 = list.find((v) => v.name === 'inversion 2');
+  assert.deepEqual(inv2.midis, [55, C3, E3]);
   assert.deepEqual(chordVoicings([60]), []);
+});
+
+test('chordVoicings: two roads to one voicing offer it once', () => {
+  // C3 A3 F4 - an open F/C: closing it and centering its 2nd cycle both give C-F-A.
+  const list = chordVoicings([60, 69, 77]);
+  assert.deepEqual(list.find((v) => v.name === 'close')?.midis, [60, 65, 69]);
+  assert.equal(list.find((v) => v.name === 'inversion 2'), undefined);
+  const keys = list.map((v) => v.midis.join(','));
+  assert.equal(new Set(keys).size, keys.length, 'no duplicate voicings offered');
 });
 
 // ---------------------------------------------------------------------------------------------
