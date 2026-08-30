@@ -363,6 +363,73 @@ export function variation(notes, { len, start = 0, temperature = 0.35, seed = 1,
   return { notes: [...notes.map((nt) => ({ ...nt })), ...copy], len: span * 2 };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Accents. A weight curve over the BAR (accents are metric - where a note sits in the bar decides
+// its weight, not where it sits in the selection), sampled at each note's own moment and applied
+// to velocity - and, at the caller's option, to timing (weak notes laid back, the accented ones
+// dead on: most of what a groove template is) and length (weak notes clipped shorter). The
+// 'waves' shape superposes independent cosine cycles at the half, quarter, eighth and
+// dotted-eighth of the bar - the dotted one is what pushes 3+3+2.
+
+export const ACCENT_SHAPES = Object.freeze(['waves', 'downbeats', 'offbeats', '3+3+2', 'clave', 'ramp up', 'ramp down', 'random']);
+
+const nearInt = (x) => Math.abs(x - Math.round(x)) < 0.02;
+
+/** The accent weight at `t` (fraction of the bar, 0..1): 1 = strongest, -1 = weakest. */
+export function accentWeight(t, shape, { waves = null, rand = null } = {}) {
+  switch (shape) {
+    case 'waves': {
+      const { half = 0, quarter = 0, eighth = 0, dotted = 0 } = waves ?? {};
+      const total = half + quarter + eighth + dotted;
+      if (!total) return 0;
+      const tau = 2 * Math.PI;
+      return (half * Math.cos(tau * 2 * t) + quarter * Math.cos(tau * 4 * t)
+        + eighth * Math.cos(tau * 8 * t) + dotted * Math.cos(tau * t * 16 / 3)) / total;
+    }
+    case 'downbeats':
+    case 'offbeats': {
+      // The metric hierarchy by binary subdivision, so it reads the same on a triplet grid: the
+      // bar's start, then halves, quarters, eighth-offs, sixteenth-offs, then everything between.
+      const w = nearInt(t) ? 1 : nearInt(t * 2) ? 0.7 : nearInt(t * 4) ? 0.4 : nearInt(t * 8) ? 0 : nearInt(t * 16) ? -0.6 : -0.8;
+      return shape === 'offbeats' ? -w : w;
+    }
+    case '3+3+2': return nearInt(t * 8) && [0, 3, 6].includes(((Math.round(t * 8) % 8) + 8) % 8) ? 1 : -0.5;
+    case 'clave': return nearInt(t * 16) && [0, 3, 6, 10, 12].includes(((Math.round(t * 16) % 16) + 16) % 16) ? 1 : -0.5;
+    case 'ramp up': return 2 * t - 1;
+    case 'ramp down': return 1 - 2 * t;
+    case 'random': return 2 * (rand?.(Math.round(t * 32)) ?? 0.5) - 1;
+    default: return 0;
+  }
+}
+
+/**
+ * Accentuate: reshape the selection's dynamics by where each note sits in the bar. `vel` is the
+ * depth (bipolar - negative accents the weak pulses instead), scaling each velocity by up to
+ * ±75% at full depth so existing dynamics shape through rather than being replaced. `time` lays
+ * weak notes back by up to that many cells (negative rushes them); `length` clips weak notes up
+ * to half their cells. `grid` is the bar (the roll's cells per cycle); 'random' rolls one seeded
+ * weight per bar position, so a chord stays a chord.
+ */
+export function accentuate(notes, { grid = 16, shape = 'downbeats', waves = null, vel = 0.6, time = 0, length = 0, seed = 1 } = {}) {
+  const g = Math.max(1, Math.round(grid));
+  const rand = (i) => seededRandom(((seed * 131071) ^ (i * 7919)) >>> 0)();
+  return notes.map((nt) => {
+    const pos = nt.start + noteNudge(nt);
+    const t = (((pos % g) + g) % g) / g;
+    const w = accentWeight(t, shape, { waves, rand });
+    const weak = (1 - w) / 2; // 0 on the strongest pulse, 1 on the weakest
+    const out = { ...nt };
+    if (vel) out.vel = clampVel(noteVel(nt) * (1 + 0.75 * vel * w));
+    if (time) out.nudge = clampNudge(noteNudge(nt) + time * weak);
+    if (length && nt.len > 1) {
+      const l = Math.max(1, Math.round(nt.len * (1 - 0.5 * length * weak)));
+      out.len = l;
+      out.full = l;
+    }
+    return out;
+  });
+}
+
 /** A figure turned `rotation` steps later (negative = earlier), accents riding along. */
 export function rotateFigure(figure, rotation = 0) {
   const { steps, hits, accents = [] } = figure;

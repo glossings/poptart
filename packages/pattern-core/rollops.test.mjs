@@ -4,9 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  augment, conformToScale, degrade, divideFigure, euclid, euclidFigure, humanize, invertPitch,
-  legato, retrograde, rhythmize, rhythmizeAll, RHYTHM_FIGURES, rotateFigure, seededRandom,
-  spreadPitch, strum, swingFigure, variation,
+  ACCENT_SHAPES, accentuate, accentWeight, augment, conformToScale, degrade, divideFigure, euclid,
+  euclidFigure, humanize, invertPitch, legato, retrograde, rhythmize, rhythmizeAll, RHYTHM_FIGURES,
+  rotateFigure, seededRandom, spreadPitch, strum, swingFigure, variation,
 } from './src/rollops.mjs';
 
 const N = (midi, start, len = 1, extra = {}) => ({ midi, start, len, vel: 1, prob: 1, nudge: 0, mute: false, ...extra });
@@ -196,4 +196,64 @@ test('the distinguished timelines all have five onsets over sixteen, starting on
     assert.equal(f.accents.length, 5, name);
   }
   for (const [name, f] of Object.entries(RHYTHM_FIGURES)) assert.equal(f.hits.length, f.accents.length, name);
+});
+
+test('accentWeight: metric hierarchy, presets, waves', () => {
+  // downbeats on a 16-cell bar: bar start > beats > eighth-offs > sixteenth-offs
+  const down = (t) => accentWeight(t, 'downbeats');
+  assert.equal(down(0), 1);
+  assert.equal(down(4 / 16), 0.4);
+  assert.equal(down(8 / 16), 0.7);
+  assert.equal(down(2 / 16), 0);
+  assert.equal(down(1 / 16), -0.6);
+  assert.equal(accentWeight(1 / 16, 'offbeats'), 0.6, 'offbeats is the mirror');
+  assert.equal(down(1 / 12), -0.8, 'a triplet position sits below the binary grid');
+  assert.equal(down(3 / 12), 0.4, 'the second beat of a triplet grid is still a beat');
+  // 3+3+2 peaks on the tresillo eighths; clave on 3-2 son
+  for (const t of [0, 3 / 8, 6 / 8]) assert.equal(accentWeight(t, '3+3+2'), 1);
+  assert.equal(accentWeight(2 / 8, '3+3+2'), -0.5);
+  for (const t of [0, 3 / 16, 6 / 16, 10 / 16, 12 / 16]) assert.equal(accentWeight(t, 'clave'), 1);
+  assert.equal(accentWeight(4 / 16, 'clave'), -0.5);
+  // ramps and waves
+  assert.equal(accentWeight(0, 'ramp up'), -1);
+  assert.equal(accentWeight(1, 'ramp up'), 1);
+  assert.equal(accentWeight(0, 'ramp down'), 1);
+  const q = { quarter: 1 };
+  assert.ok(Math.abs(accentWeight(4 / 16, 'waves', { waves: q }) - 1) < 1e-9, 'quarter wave peaks on the beats');
+  assert.ok(Math.abs(accentWeight(2 / 16, 'waves', { waves: q }) + 1) < 1e-9, 'and troughs between them');
+  assert.equal(accentWeight(0.3, 'waves', { waves: {} }), 0, 'no waves, no shape');
+  assert.ok(Math.abs(accentWeight(3 / 16, 'waves', { waves: { dotted: 1 } }) - 1) < 1e-9, 'the dotted wave peaks at 3 sixteenths');
+  assert.equal(ACCENT_SHAPES.length, 8);
+});
+
+test('accentuate: velocity shaped by bar position, existing dynamics scale through', () => {
+  const notes = Array.from({ length: 16 }, (_, i) => N(60, i, 1, { vel: 0.5 }));
+  const out = accentuate(notes, { grid: 16, shape: 'downbeats', vel: 1 });
+  assert.ok(Math.abs(out[0].vel - 0.875) < 1e-9, 'bar start boosted');
+  assert.ok(Math.abs(out[4].vel - 0.65) < 1e-9, 'beats lifted less');
+  assert.equal(out[2].vel, 0.5, 'eighth-offs untouched');
+  assert.ok(Math.abs(out[1].vel - 0.275) < 1e-9, 'sixteenth-offs cut');
+  const inverted = accentuate(notes, { grid: 16, shape: 'downbeats', vel: -1 });
+  assert.ok(inverted[0].vel < 0.5 && inverted[1].vel > 0.5, 'negative depth accents the weak pulses');
+  assert.deepEqual(accentuate(notes, { grid: 16, vel: 0 }).map((n) => n.vel), notes.map((n) => n.vel), 'zero depth leaves velocity alone');
+});
+
+test('accentuate: timing lays weak notes back, length clips them, chords stay chords on random', () => {
+  const notes = [N(60, 0, 2), N(60, 1, 2), N(60, 4, 2)];
+  const out = accentuate(notes, { grid: 16, shape: 'downbeats', vel: 0, time: 0.2 });
+  assert.equal(out[0].nudge, 0, 'the bar start stays dead on');
+  assert.ok(Math.abs(out[1].nudge - 0.16) < 1e-9, 'a weak note is laid back');
+  const clipped = accentuate(notes, { grid: 16, shape: 'downbeats', vel: 0, length: 1 });
+  assert.equal(clipped[0].len, 2);
+  assert.equal(clipped[1].len, 1);
+  assert.equal(clipped[1].full, 1);
+  const chord = [N(60, 3, 1, { vel: 0.5 }), N(64, 3, 1, { vel: 0.5 }), N(67, 3, 1, { vel: 0.5 })];
+  const r = accentuate(chord, { grid: 16, shape: 'random', vel: 1, seed: 9 });
+  assert.ok(r[0].vel === r[1].vel && r[1].vel === r[2].vel, 'one weight per bar position');
+  assert.deepEqual(r, accentuate(chord, { grid: 16, shape: 'random', vel: 1, seed: 9 }), 'seeded');
+  const line = Array.from({ length: 8 }, (_, i) => N(60, i * 2, 1, { vel: 0.5 }));
+  assert.notDeepEqual(
+    accentuate(line, { grid: 16, shape: 'random', vel: 1, seed: 9 }).map((n) => n.vel),
+    accentuate(line, { grid: 16, shape: 'random', vel: 1, seed: 10 }).map((n) => n.vel),
+    'a new seed is a new roll of the dice');
 });

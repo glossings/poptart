@@ -2689,6 +2689,10 @@ li.CodeMirror-hint-active {
   width: auto;
 }
 
+.ctx-menu .ctx-actions button[hidden] {
+  display: none;
+}
+
 .ctx-menu .ctx-actions button.primary {
   color: var(--accent);
 }

@@ -6573,7 +6573,8 @@ let prHarmonySeed = Date.now() % 100000; // the seeded transforms' dice: one rol
  * transform through the same stash the hover previews use, so a slider is heard as it moves.
  * Apply (or Enter) commits as one undo step; cancel, Escape or a press outside reverts, exactly
  * like closing the menu. Seeded transforms keep ONE seed for the popover's life - dragging the
- * amount re-runs the same dice - and get a "reroll" button for new ones. The title bar is a
+ * amount re-runs the same dice - and get a "reroll" button for new ones (`reroll` may be a
+ * predicate over the values, for a popover where only some shapes roll dice). The title bar is a
  * handle: the popover opens under the pointer, which is often on top of the very notes it is
  * changing, so it can be dragged out of the way.
  *
@@ -6590,6 +6591,8 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
   if (!prHarmony) return;
   const values = Object.fromEntries(params.map((p) => [p.key, p.value]));
   let seed = prHarmonySeed++;
+  let rerollBtn = null;
+  const syncReroll = () => { if (rerollBtn) rerollBtn.hidden = typeof reroll === 'function' && !reroll(values); };
   const preview = (over = null) => prHarmonyPreview(make(over ? { ...values, ...over } : values, seed));
   const commit = () => { prMenu.classList.add('hidden'); prHarmonyCommit(make(values, seed)); prRefocus(); };
   const el = prMenu;
@@ -6640,6 +6643,7 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
           if (trigger) trigger.textContent = o;
           close();
           p.onChange?.(values, rows);
+          syncReroll();
           preview();
         });
         group.appendChild(b);
@@ -6676,6 +6680,7 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
         values[p.key] = p.type === 'int' ? Math.round(v) : v;
         show();
         p.onChange?.(values, rows);
+        syncReroll();
         preview();
       });
       row.appendChild(input);
@@ -6698,8 +6703,10 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
     if (primary) b.className = 'primary';
     b.addEventListener('click', fn);
     actions.appendChild(b);
+    return b;
   };
-  if (reroll) button('reroll', () => { seed = prHarmonySeed++; preview(); });
+  if (reroll) rerollBtn = button('reroll', () => { seed = prHarmonySeed++; preview(); });
+  syncReroll();
   button('cancel', () => prCloseLaneMenu());
   button('apply', commit, true);
   el.appendChild(actions);
@@ -6753,6 +6760,24 @@ function prHarmonyTransformItems(items, targets, scale, at) {
   }
   if (outOfKey) section.push(t('conform to key', (ns) => T.conformToScale(ns, scale), `every note to its nearest in ${scale}`));
   if (onsets > 1) section.push(t('legato', (ns) => T.legato(ns), 'each note lasts until the next onset'));
+  section.push(popover('accent', 'reshape velocities by where each note sits in the bar', {
+    title: 'accent', reroll: (v) => v.shape === 'random',
+    params: [
+      { key: 'shape', label: 'shape', type: 'choice', options: [...T.ACCENT_SHAPES], value: 'downbeats',
+        onChange: (v, rows) => { const on = v.shape === 'waves'; for (const k of ['half', 'quarter', 'eighth', 'dotted']) rows[k].hidden = !on; } },
+      { key: 'half', label: 'half', type: 'range', min: 0, max: 1, step: 0.02, value: 0 },
+      { key: 'quarter', label: 'quarter', type: 'range', min: 0, max: 1, step: 0.02, value: 1 },
+      { key: 'eighth', label: 'eighth', type: 'range', min: 0, max: 1, step: 0.02, value: 0 },
+      { key: 'dotted', label: 'dotted 8th', type: 'range', min: 0, max: 1, step: 0.02, value: 0 },
+      { key: 'vel', label: 'velocity', type: 'range', min: -1, max: 1, step: 0.02, value: 0.6 },
+      { key: 'time', label: 'timing', type: 'range', min: -0.3, max: 0.3, step: 0.01, value: 0 },
+      { key: 'length', label: 'length', type: 'range', min: 0, max: 1, step: 0.02, value: 0 },
+    ],
+    make: (v, seed) => (ns) => T.accentuate(ns, {
+      grid, shape: v.shape, seed, vel: v.vel, time: v.time, length: v.length,
+      waves: { half: v.half, quarter: v.quarter, eighth: v.eighth, dotted: v.dotted },
+    }),
+  }));
   section.push(popover('humanize', 'seeded velocity and timing jitter', {
     title: 'humanize', reroll: true,
     params: [{ key: 'amount', label: 'amount', type: 'range', min: 0, max: 1, step: 0.02, value: 0.3 }],
