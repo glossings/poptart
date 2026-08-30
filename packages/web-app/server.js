@@ -599,7 +599,11 @@ async function songDetectKick(deck) {
     // snap target that would pull every cue placed near the top of a track onto the file
     // start rather than the first real transient just after it.
     s.onsets = facts.onsets ? facts.onsets.filter((t) => t > 0.002) : null;
-    if (facts.bpm != null && s.bpm !== facts.bpm) {
+    // A tempo TYPED into the pane is the last word on the tempo: the fit still runs (the typed
+    // number is its hint, and its anchor is wanted either way), but refining 133 to the 132.95 the
+    // audio measures at is exactly the correction the person just overrode by hand - so the edit
+    // would appear to be ignored (reported 2026-08-29). Same rule anchorByHand has kept below.
+    if (facts.bpm != null && s.bpm !== facts.bpm && !s.bpmByHand) {
       // Within a few percent of the hint it's the same tempo measured properly (the fit never
       // strays further - see fitBeatGrid); with no hint it's the estimate, and marked as one.
       const refining = s.bpm != null;
@@ -4393,6 +4397,7 @@ const routes = {
       // The musical facts (songs phase 4) - the playlist item's word beats the file's tags,
       // and /api/song/meta edits any of it later.
       bpm,
+      bpmByHand: false, // a tempo typed by hand outlives the analysis' guess, as an anchor does
       musicalKey: String(body.key ?? '').trim() || tags.key,
       anchorSec: 0,
       anchorByHand: false, // an anchor pressed by hand outlives the analysis' guess
@@ -4587,14 +4592,16 @@ const routes = {
       delete s.bpmDetected; // whatever the hand says, it is no longer an estimate
       if (body.bpm == null || body.bpm === '') {
         s.bpm = null;
+        s.bpmByHand = false; // cleared - the detector is welcome to fill it in again
         s.sync = false;
         decks[deck].bpm = null; // native slot back to the 120 default
       } else {
         const bpm = Number(body.bpm);
         if (!Number.isFinite(bpm) || bpm < 20 || bpm > 400) throw new Error('song/meta: bpm must be 20..400 (or null to clear)');
         s.bpm = bpm;
+        s.bpmByHand = true; // this number stands until it is cleared - see songDetectKick
         decks[deck].bpm = bpm; // the native tempo the desk's migration slider/detents ride to
-        songDetectKick(deck); // re-fit the grid around the typed tempo (it pins the octave; the fit refines)
+        songDetectKick(deck); // re-fit the grid around the typed tempo (which is the fit's hint)
       }
     }
     if ('key' in body) {

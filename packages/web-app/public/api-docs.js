@@ -80,9 +80,9 @@ const API_DOCS = {
     eg: 'note("c2*4").synth("Serum 2")',
   },
   pianoroll: {
-    kind: 'builder',
+    kind: 'both',
     sig: 'pianoroll(names)',
-    desc: 'A note pattern you draw - double-click the pianoroll name to open the roll. Bare pianoroll() makes a new roll named after its track; rolls are named and patterned like anything else: pianoroll("<lead alt>") alternates two. The roll\'s ⌨ plays its track from the typing keyboard, ● rec and capture record into it.',
+    desc: 'A note pattern you draw - double-click the pianoroll name to open the roll. Bare pianoroll() makes a new roll named after its track; rolls are named and patterned like anything else: pianoroll("<lead alt>") alternates two. As a method it MIXES the roll into what is already playing - kb(1).pianoroll() draws under a live keyboard - and the roll\'s ⌨, ● rec and capture record into it either way.',
     eg: 'lead: pianoroll().synth("Serum 2")',
   },
 

@@ -4138,9 +4138,19 @@ function prCallOpts({ grid, len, start, mode, swing, swinggrid }) {
 const prOptsText = (opts) =>
   Object.entries(opts).map(([k, v]) => `${k}: ${typeof v === 'string' ? JSON.stringify(v) : v}`).join(', ');
 
+/**
+ * The arguments a roll is written with - its notes and its options, without the call around them.
+ * This is what a `_roll(id, …)` definition takes after its id, which is what defsEdit's `bodyFor`
+ * is asked for, so the recorder writing a NEW named roll and the panel writing an existing one
+ * form their text the same way.
+ */
+function serializePianorollBody(state) {
+  return `"${pianorollMod.serializePianoRoll(prLiveNotes(state.notes))}", { ${prOptsText(prCallOpts(state))} }`;
+}
+
 function serializePianorollCall(state) {
-  const { notes, idLiteral } = state;
-  const body = `"${pianorollMod.serializePianoRoll(prLiveNotes(notes))}", { ${prOptsText(prCallOpts(state))} }`;
+  const { idLiteral } = state;
+  const body = serializePianorollBody(state);
   // The roll being edited is either drawn inline or kept under an id - same notes, same options,
   // one argument apart. The id is written back exactly as it was found, so _roll(0, …) doesn't
   // become _roll("0", …) the first time you move a note.
@@ -8106,8 +8116,8 @@ function updatePhraseViz() {
 // chosen number of cycles, and serves the events as absolute cycle times; this side turns them
 // into roll notes (pattern-core's record.mjs), draws the take into the open roll AS IT HAPPENS, and
 // on 'done' writes each track's take into that track's roll - the open roll, the block's own
-// pianoroll(...) or the definition it names, or a fresh roll in place of the kb()/midikeys() call
-// - and re-evaluates so the loop takes over from the live keys seamlessly. Where the roll was
+// pianoroll(...) or the definition it names, or a fresh NAMED roll in place of the kb()/midikeys()
+// call - and re-evaluates so the loop takes over from the live keys seamlessly. Where the roll was
 // playing when a note sounded is the cell it lands on, so a take longer than the roll overdubs
 // (see recordingToRoll), and what was played during the count-in goes in before cell 0.
 // ---------------------------------------------------------------------------------------------
@@ -8300,6 +8310,11 @@ function prRecWrite(events, opts, take, scroll = true) {
  *      (the old mini-notation replacement, as a roll).
  * A fresh roll takes the quantize as its grid (UNQUANTIZED_ROLL_GRID with quantize off); an
  * existing roll keeps its own, re-meshed only if the quantize is finer (see recordingToRoll).
+ *
+ * Case 3 writes it NAMED - `kb: pianoroll("kb")` with the notes in the definitions block - rather
+ * than inline, which is where the .mid import already lands and what the panel, the roll picker and
+ * a second track naming the same roll all expect. Cases 1 and 2 keep whatever shape the roll they
+ * are writing into already had: a take is not the moment to move someone's data.
  */
 function applyRecording(results, take) {
   if (!results.length) {
@@ -8347,14 +8362,23 @@ function applyRecording(results, take) {
       logLine(`midi record: ${what} into ${target.idLiteral ? `roll ${target.idLiteral}` : 'the roll'} of "${label}"`);
       continue;
     }
-    // 3. a fresh roll for the live-keys call
+    // 3. a fresh roll for the live-keys call - written NAMED, the same shape a .mid import lands
+    // in: `kb: pianoroll("kb")` where the keys were played, and the notes themselves in the
+    // definitions block at the foot of the buffer. A take is a part, and a part reads better as
+    // its name than as a screenful of note data threaded through the middle of the track.
     const grid = quantize > 0 ? quantize : recordMod.UNQUANTIZED_ROLL_GRID;
     const fresh = { notes: [], grid, len: grid * take.cycles, start: 0 };
     const out = recordMod.recordingToRoll(events, fresh, { window, quantize });
-    const text = serializePianorollCall({ notes: out.notes, grid: out.grid, len: out.len, start: out.start, mode: 'note', swing: 0, swinggrid: null, idLiteral: null });
-    if (replaceKbCall(label, text)) {
+    const state = { notes: out.notes, grid: out.grid, len: out.len, start: out.start, mode: 'note', swing: 0, swinggrid: null };
+    const rollId = freeRollId(label, new Set(rollDefs.allIds().map((r) => r.id)));
+    if (replaceKbCall(label, `pianoroll(${JSON.stringify(rollId)})`)) {
+      // Against the buffer as replaceKbCall left it - the call it rewrote sits above the block
+      // this appends to, so its offsets have to be read after that edit, not before.
+      const [defFrom, defTo, defText] = rollDefs.defsEdit(cm.getValue(), [rollId], () => serializePianorollBody(state));
+      cm.replaceRange(defText, cm.posFromIndex(defFrom), cm.posFromIndex(defTo));
+      refoldAll(); // the definitions block starts life folded to its one chip
       evalNeeded = true;
-      logLine(`midi record: ${what} into a new roll in "${label}" - double-click pianoroll to open it`);
+      logLine(`midi record: ${what} into a new roll "${rollId}" in "${label}" - double-click the pianoroll name to open it`);
     } else {
       logLine(`midi record ("${label}"): no pianoroll or midikeys/kb call found to write ${what} into - it was: ${pianorollMod.serializePianoRoll(out.notes.filter((nt) => !nt.hidden))}`, true);
     }
@@ -13680,12 +13704,13 @@ function midiLaneLabel(name, taken) {
 }
 
 /**
- * The name a lane's roll is filed under: the lane's own label, so the picker lists the parts of the
- * file by name. `$` (an anonymous lane) can't be a roll name - it has to survive being written
- * inside a mini pattern - so those fall back to the kind's own word. A name already taken by a roll
- * in the buffer (or in prebake) is bumped with an `_2` suffix rather than quietly overwritten.
+ * The name a track's roll is filed under: the track's own label, so the picker lists the parts by
+ * name. Used by the .mid import for each lane and by the recorder for a fresh take. `$` (an
+ * anonymous block) can't be a roll name - it has to survive being written inside a mini pattern -
+ * so those fall back to the kind's own word. A name already taken by a roll in the buffer (or in
+ * prebake) is bumped with an `_2` suffix rather than quietly overwritten.
  */
-function midiRollId(label, taken) {
+function freeRollId(label, taken) {
   const base = /^[A-Za-z_][\w]*$/.test(label) ? label : 'roll';
   let id = base;
   for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
@@ -13716,7 +13741,7 @@ function runMidiImport() {
     });
     for (const entry of entries) {
       const label = midiLaneLabel(entry.name, taken);
-      const rollId = midiRollId(label, takenRolls);
+      const rollId = freeRollId(label, takenRolls);
       names.push(label);
       lines.push(`${label}: pianoroll(${JSON.stringify(rollId)})`);
       drawn.set(rollId, entry.body);

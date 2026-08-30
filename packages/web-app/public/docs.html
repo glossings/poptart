@@ -748,6 +748,18 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
             Live notes gate <code>env()</code> and retrigger note-synced <code>lfo()</code> shapes like
             pattern notes do, and <code>.scale()</code> snaps them to the key.
           </p>
+          <p>
+            Written <em>after</em> something, <code>.pianoroll()</code> <strong>mixes</strong> a roll into
+            it rather than replacing it — the one note method that layers. So a roll can sit under a live
+            keyboard, or under a pattern, and you keep hearing what is already there while you draw:
+          </p>
+          <pre><code><span class="k">const</span> kb = <span class="f">midikeys</span>(<span class="s">"KeyStep"</span>)
+keys: kb(1).<span class="f">pianoroll</span>().synth(<span class="s">"Serum 2"</span>)      <span class="c">// play live over a drawn part</span>
+riff: <span class="f">n</span>(<span class="s">"&lt;0 1 2&gt;"</span>).sc(3).<span class="f">pianoroll</span>()            <span class="c">// draw a counter-line under a pattern</span></code></pre>
+          <p>
+            <strong>● rec</strong> and <strong>capture</strong> below write into that roll, so the take
+            lands in the part you are already playing.
+          </p>
           <div class="callout">
             <span class="tag">record &amp; capture</span>
             The header's <strong>● rec</strong> records live playing <em>into the piano roll</em>: it

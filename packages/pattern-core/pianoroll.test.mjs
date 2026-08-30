@@ -32,7 +32,7 @@ import {
   PIANOROLL_DEFAULT_NOTE,
   PIANOROLL_DEFAULT_INDEX,
 } from './src/pianoroll.mjs';
-import { pianoroll, note, n, i, vel, mini, s, channelAt, soundingEnd, timeShift, setPatternWarn } from './src/signal.mjs';
+import { pianoroll, note, n, i, vel, mini, s, midikeys, channelAt, soundingEnd, timeShift, setPatternWarn } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 test('parsePianoRoll: fields, defaults, and empty input', () => {
@@ -977,4 +977,84 @@ test('quantizing to a division finer than the grid moves nothing but still settl
   const { notes: out, snipped } = quantizePianoRoll(notes, { grid: 16, div: 16 });
   assert.equal(snipped, 1);
   assert.equal(serializePianoRoll(out), '60,3,2 60,5,2');
+});
+
+// ---------------------------------------------------------------------------------------------
+// .pianoroll() as a METHOD: a roll mixed into whatever is already playing the track, rather than
+// swapping the pattern out the way .note()/.n() do. The point of it is a roll under a live
+// keyboard (kb(1).pianoroll("kb")) - so the live route has to survive, and the roll's own grid has
+// to arrive alongside it - and a roll under a pattern (n("<0 1 2>").sc(3).pianoroll()).
+// ---------------------------------------------------------------------------------------------
+
+test('.pianoroll(): the roll sounds alongside the pattern it is written after', () => {
+  const roll = '67,8,4';
+  const mixed = note('c3 e3').pianoroll(roll, { grid: 16, len: 16 });
+  const steps = mixed.stepsForCycle(0);
+  // Both layers, each on its own timing: the two-note pattern plus the roll's one note at cell 8.
+  assert.deepEqual(steps.map((st) => st.value).sort((a, b) => a - b), [60, 64, 67]);
+  const drawn = steps.find((st) => st.value === 67);
+  assert.equal(drawn.start, 0.5);
+  // ...and the pattern's own steps are untouched by the roll joining them.
+  assert.deepEqual(
+    steps.filter((st) => st.value !== 67).map((st) => [st.start, st.end]),
+    note('c3 e3').stepsForCycle(0).map((st) => [st.start, st.end]),
+  );
+});
+
+test('.pianoroll(): a live midikeys() route survives the mix, and gains the roll\'s grid', () => {
+  const kb = midikeys('KeyStep 32');
+  const live = kb(1);
+  assert.equal(live.stepsForCycle, null); // a bare live route plays nothing on the clock
+  const mixed = live.pianoroll('60,0,4', { grid: 16, len: 16 });
+  // The route still reaches the scheduler (which is what sets up engine-side playing)...
+  assert.deepEqual(mixed.midiNotes, { device: 'KeyStep 32', channel: 1 });
+  // ...and the roll now plays on the clock underneath it.
+  assert.deepEqual(mixed.stepsForCycle(0).map((st) => st.value), [60]);
+});
+
+test('.pianoroll(): the track chain carries across the mix', () => {
+  const mixed = note('c3').synth('Serum 2').pianoroll('67,0,4', { grid: 16, len: 16 });
+  assert.equal(mixed.instrument, 'Serum 2');
+  assert.deepEqual(mixed.stepsForCycle(0).map((st) => st.value).sort((a, b) => a - b), [60, 67]);
+});
+
+test('.pianoroll(): the mix keeps the track\'s note channels, and the roll keeps its own', () => {
+  const mixed = note('c3').vel(0.25).pianoroll('67,0,4,0.9 69,4,4', { grid: 16, len: 16 });
+  const velOf = (v) => {
+    const st = mixed.stepsForCycle(0).find((x) => x.value === v);
+    return channelAt('vel', st, mixed.noteChannels, st.start, 1, st.start);
+  };
+  // The channel survives the mix and still covers the pattern it was written on...
+  assert.equal(velOf(60), 0.25);
+  // ...while every roll note plays the velocity it was DRAWN at, default included - a stamped
+  // value wins over a channel (channelAt), which is how a roll has always read against a
+  // track-wide .vel(). The mix changes nothing about either side's velocities.
+  assert.equal(velOf(67), 0.9);
+  assert.equal(velOf(69), 1);
+});
+
+test('.pianoroll(): a control in head position plays the roll, it does not stack onto it', () => {
+  // vel("1 1") is a trigger + a channel, not a note layer - so this is the roll at those
+  // velocities (what .note() does with a head control), not the roll plus two phantom events.
+  const mixed = vel('1 0.5').pianoroll('60,0,4', { grid: 16, len: 16 });
+  assert.deepEqual(mixed.stepsForCycle(0).map((st) => st.value), [60]);
+});
+
+test('.pianoroll(): mixing a roll into a degree pattern warns rather than misreading it', () => {
+  const said = [];
+  setPatternWarn((line) => said.push(line));
+  try {
+    // n() is degrees, a roll is always absolute MIDI - .scale() cannot read both one way.
+    const bad = n('0 2').pianoroll('60,0,4', { grid: 16, len: 16 });
+    assert.equal(bad.pitchKind, null);
+    assert.equal(said.length, 1);
+    assert.match(said[0], /absolute notes/);
+    // Resolving the degrees first (the fix the warning names) is silent, and note-kind throughout.
+    said.length = 0;
+    const good = n('0 2').scale('c3 major').pianoroll('60,0,4', { grid: 16, len: 16 });
+    assert.equal(good.pitchKind, 'note');
+    assert.deepEqual(said, []);
+  } finally {
+    setPatternWarn(null);
+  }
 });

@@ -944,8 +944,22 @@ server.waitForBoot {
             var frames = BufFrames.ir(buf);
             var startF = begin * frames, endF = max(begin * frames, (end * frames) - 1);
             var from = Select.kr(rate < 0, [startF, endF]);
-            var to = Select.kr(rate < 0, [endF, startF]);
-            var sig = BufRd.ar(nc, buf, Line.ar(from, to, dur), loop: 0, interpolation: 4);
+            // PlayBuf, not BufRd walked by a Line - and the reason is precision, not convenience.
+            // A phase handed to BufRd travels down an audio-rate wire, which is float32: above
+            // 2^23 frames (~190s at 44.1k, and already lossy from ~47s) its resolution is a whole
+            // frame, so the interpolation has nothing to interpolate and the read degrades into a
+            // nearest-neighbour hold that repeats frames at irregular intervals - gritty aliasing
+            // on the back half of any long file, and the whole of one played from a late .begin()
+            // or .slice() (reported 2026-08-29 on a 4-minute acapella). PlayBuf keeps its phase in
+            // a double INSIDE the UGen, so nothing is ever quantized to a bus. Its rate is frames
+            // per output sample, so the span/dur the Line ran over becomes the step, sign and all -
+            // the read is the same read, just measured accurately.
+            var step = ((endF - startF) / max(dur, 1e-6) / SampleRate.ir) * Select.kr(rate < 0, [1, -1]);
+            // PlayBuf stops at the BUFFER's edge, not at `end`, so past the region it reads on
+            // instead of holding the last frame. Only the release tail is ever out there (the env
+            // below closes the gate at `dur`), and a few ms of the next slice under a fade beats a
+            // few ms of held DC.
+            var sig = PlayBuf.ar(nc, buf, step, 1, from, loop: 0);
             // atk/dec/rel are the play duration (dur) times their input, so .attack(2) ramps over
             // 2*dur and never reaches 1 before the note ends. A gate held open for exactly dur runs
             // attack->decay->sustain across playback, then releases when the region ends; a cut

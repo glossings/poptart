@@ -2062,6 +2062,61 @@ export class Sig {
   }
 
   /**
+   * A drawn roll played ALONGSIDE what this signal already plays, rather than in place of it:
+   * `kb(1).pianoroll("kb")` puts a roll under a live keyboard, `n("<0 1 2>").sc(3).pianoroll()`
+   * under a pattern. Takes exactly what the builder takes - drawn notes, a name, a pattern of
+   * names, options - and a bare `.pianoroll()` gets a roll named after its track, same as a bare
+   * `pianoroll()` does.
+   *
+   * This is the ONE note method that layers instead of replacing (.note()/.n() swap the pattern
+   * out; see _noteLike), because it is the one whose data you go on to edit by hand: the point of
+   * writing it after a source is to keep hearing the source while you draw. Both sides keep their
+   * own timing and their own note channels, exactly as a `,`-stack does.
+   *
+   * A live midikeys() route survives the mix (it rides the track's metadata and plays engine-side,
+   * so the roll and the keys sound together), which is what makes the roll's ● rec and capture
+   * buttons work on a keyboard track: they find this call and write what was played into it.
+   */
+  pianoroll(str = '', opts = {}) {
+    // `pianoroll` here is the builder, not this method - a class method's name is not a binding in
+    // its own body.
+    const roll = pianoroll(str, opts);
+    // A bare control in head position (`vel("1!4").pianoroll(…)`) has no note layer of its own, so
+    // there is nothing to mix WITH: the roll is simply the pattern those velocities play, which is
+    // what .note()/.n() already do with a head control. See _fromHeadCtl.
+    return this.ctl ? this._noteLike(roll) : this._mixNotes(roll);
+  }
+
+  /**
+   * `this` and `sig` sounding at once, keeping THIS signal's track metadata - the instrument, the
+   * chain, the channel strip, the note channels, and (the reason this exists) a live midikeys()
+   * route. A stack is a concatenation of step grids and nothing more, which is exactly what mini's
+   * `,` builds.
+   *
+   * The channels are deliberately NOT merged onto the incoming grid here: they are read against
+   * each step at emit time (see channelAt), and a value the step already carries wins - so a
+   * track-wide `.vel(0.6)` covers both layers while the roll's own drawn velocities still stand.
+   */
+  _mixNotes(sig) {
+    const mine = this.stepsForCycle;
+    const theirs = sig.stepsForCycle;
+    const stepsForCycle = mine ? (cycle) => [...mine(cycle), ...theirs(cycle)] : theirs;
+    // A layer that rests where the other sounds is silent there, not a rest for both.
+    const sample = (t, cps, pos) => this.sample(t, cps, pos) ?? sig.sample(t, cps, pos);
+    const out = new Sig(sample, { ...this._meta(), stepsForCycle });
+    // Same rule the cat()/seq() join follows: a unanimous kind survives, a mixed one has no honest
+    // answer. Worth saying out loud here, though - a roll is always absolute notes, so mixing one
+    // into a degree pattern and then asking for a scale would read its MIDI numbers as degrees.
+    if (this.pitchKind && sig.pitchKind && this.pitchKind !== sig.pitchKind) {
+      out.pitchKind = null;
+      warnUser(`[signal] .pianoroll() mixed a roll (absolute notes) into a ${this.pitchKind} pattern - a later .scale()/.sc() has no one way to read both. Put .sc() before .pianoroll() so the degrees are notes by the time the roll joins them.`);
+    } else {
+      out.pitchKind = this.pitchKind ?? sig.pitchKind;
+    }
+    return out;
+  }
+
+  /**
    * Destructures multi-field tokens into separate note/velocity/duration controls, Strudel-style:
    * `"<36:1:4 ~ 47:0.5:3 ~>*8".as("note:vel:clip")`. Each token's fields are split on ":" and
    * read in the order the spec names them. Fields: `note` (MIDI number or note name), `n`
