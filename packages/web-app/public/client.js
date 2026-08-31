@@ -6530,12 +6530,28 @@ function prHarmonyApply(spec) {
   return out;
 }
 
+/**
+ * The preview through the PLAYER: a named roll is re-filed live (see prPushRoll), so the entry
+ * being hovered - or the slider being dragged - is heard IN PLACE, in time, on the next cycle.
+ * That is the only way to judge an arpeggio or a variation, which are about rhythm as much as
+ * pitch and say nothing in a chord blip. Cancelling pushes the original back the same way, so
+ * the transport never keeps a transform that was only ever hovered. An inline roll carries its
+ * notes in the call itself, with nothing to re-file, so it stays as it was until the commit
+ * writes it (the same split prLiveSync makes for a held gesture).
+ */
+function prHarmonyLive() {
+  if (prState?.idLiteral) prPushSoon();
+}
+
 /** Hover an entry: show and sound the result without committing anything. */
 function prHarmonyPreview(spec) {
   if (!prHarmony) return;
   const out = prHarmonyApply(spec);
   drawPianoroll();
-  if (out) prPreviewChord([...new Set(out.filter((nt) => !nt.mute).map((nt) => nt.midi))]);
+  // While the roll is playing live, the transform sounds in time - a chord of every note in it
+  // on top of that is noise, not an audition. The blip is what a STOPPED roll has instead.
+  if (out && !(playing && prState.idLiteral)) prPreviewChord([...new Set(out.filter((nt) => !nt.mute).map((nt) => nt.midi))]);
+  prHarmonyLive();
 }
 
 function prHarmonyRestore() {
@@ -6550,6 +6566,7 @@ function prHarmonyHoverOut() {
   if (!prHarmony) return;
   prHarmonyRestore();
   prPreviewOff();
+  prHarmonyLive();
   drawPianoroll();
 }
 
@@ -6559,6 +6576,7 @@ function prHarmonyCommit(spec) {
   const out = prHarmonyApply(spec);
   prHarmony = null;
   prPreviewOff();
+  prHarmonyLive(); // nothing made: the live roll goes back with the drawn one
   if (!out) return;
   prClipOverlaps();
   prScrollTo(out); // a dropped bass octave may land off-screen
@@ -6723,6 +6741,36 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
   setTimeout(() => first?.focus(), 0); // after the menu's own refocus hands focus to the canvas
 }
 
+// A popover whose sliders are a MIX has a preset dropdown over them (melodize, and the roll's
+// variation): picking a preset moves its sliders, and dragging any slider away from what the
+// preset says drops the pick back to 'none' - the name of the custom mix. Both directions are
+// the same two moves for every such popover, so they live here rather than in each one.
+
+/** Move one numeric param's slider (and its readout) to `val`, as if it had been dragged there. */
+function prSetParam(rows, key, val) {
+  const r = rows[key];
+  if (!r) return; // a row this popover left out (no pitch axis on a drum roll)
+  r.querySelector('input').value = val;
+  r.show();
+}
+
+/** Push a preset's values onto the popover: whatever of it this popover actually put on screen. */
+function prApplyPreset(values, rows, preset) {
+  for (const [k, val] of Object.entries(preset)) {
+    if (!rows[k]) continue;
+    values[k] = val;
+    prSetParam(rows, k, val);
+  }
+}
+
+/** The pick no longer describes what the sliders say: rename it 'none', dropdown and buttons. */
+function prClearPreset(values, rows) {
+  values.preset = 'none';
+  const trig = rows.preset.querySelector('.ctx-drop-trigger');
+  if (trig) trig.textContent = 'none';
+  for (const b of rows.preset.querySelectorAll('.ctx-choice button')) b.classList.toggle('on', b.textContent === 'none');
+}
+
 /**
  * The transform section of the harmony menu (rollops.mjs over the selection): only what applies
  * to THIS selection is offered - one note gets no retrograde, a chord no strum without a second
@@ -6781,12 +6829,8 @@ function prHarmonyTransformItems(items, targets, scale, at) {
     const unpreset = (v, rows) => {
       const p = PRESETS[v.preset];
       if (!p || (p.shape === v.shape && p.keep === v.keep)) return;
-      v.preset = 'none';
-      const trig = rows.preset.querySelector('.ctx-drop-trigger');
-      if (trig) trig.textContent = 'none';
-      for (const b of rows.preset.querySelectorAll('.ctx-choice button')) b.classList.toggle('on', b.textContent === 'none');
+      prClearPreset(v, rows);
     };
-    const setSlider = (rows, key, val) => { const r = rows[key]; r.querySelector('input').value = val; r.show(); };
     melody.push(popover('melodize', 'new pitches for your rhythm, walked in key', {
       title: `melodize in ${scale}`, reroll: true,
       params: [
@@ -6794,8 +6838,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
           onChange: (v, rows) => {
             const p = PRESETS[v.preset];
             if (!p) return; // 'none' names the custom mix - picking it moves nothing
-            v.shape = p.shape; v.keep = p.keep; v.offset = 0;
-            setSlider(rows, 'shape', p.shape); setSlider(rows, 'keep', p.keep); setSlider(rows, 'offset', 0);
+            prApplyPreset(v, rows, { ...p, offset: 0 });
           } },
         { key: 'range', label: 'range', title: "the walk's room in octaves, centred on the selection's middle", type: 'range', min: 0.25, max: 3, step: 0.25, value: Math.min(3, Math.max(1, Math.round((degSpan / size) * 4) / 4)), fmt: (x) => `${x} oct` },
         { key: 'offset', label: 'offset', title: 'the whole window up or down, in scale steps - double-click for 0', type: 'range', min: -14, max: 14, step: 1, value: 0, reset: 0 },
@@ -6895,18 +6938,74 @@ function prHarmonyTransformItems(items, targets, scale, at) {
     if (items.length) items.push('-');
     items.push(head, ...rhythm);
   }
-  // The whole roll, whatever is selected: twice as long, the second half a variation of the first.
-  items.push('-', { head: 'the roll' }, popover('double with variation', 'double the loop, the copy varied by temperature', {
+}
+
+/**
+ * The section that acts on the WHOLE roll, whatever is selected - so it is offered on a
+ * right-click over empty grid too, with no selection at all (see prOpenHarmonyMenu). Its entries
+ * read prHarmony.origNotes rather than the targets, and return `all: true` to say so.
+ */
+function prHarmonyRollItems(items, scale, at) {
+  const T = rollopsMod;
+  if (!T || !prState.notes.some((nt) => !nt.hidden)) return; // an empty roll has nothing to double
+  const pitched = scale != null;
+  const popover = (label, title, def) => [`${label}…`, () => prOpenHarmonyParams(at, def), title];
+  // Temperature says HOW MUCH of the copy changes; the axes say what changing is allowed to mean,
+  // as relative shares of one die (see variation in rollops.mjs) - which is what makes "vary the
+  // melody, keep the rhythm" and "same line, a few notes in and out" different settings of the
+  // same control rather than two transforms. The presets are just mixes of those dials, so
+  // dragging one drops the pick back to 'none' the way melodize's do.
+  const PRESETS = {
+    melody: { pitch: 1, time: 0, drop: 0, vel: 0, add: 0 },
+    rhythm: { pitch: 0, time: 1, drop: 0.5, vel: 0, add: 0.5 },
+    'fill & thin': { pitch: 0, time: 0, drop: 1, vel: 0, add: 1 },
+    everything: { pitch: 0.3, time: 0.3, drop: 0.3, vel: 0.1, add: 0.34 },
+  };
+  if (!pitched) delete PRESETS.melody; // a row is a sound: there are no new pitches to write
+  const unpreset = (v, rows) => {
+    const p = PRESETS[v.preset];
+    if (!p || Object.keys(p).every((k) => !rows[k] || p[k] === v[k])) return;
+    prClearPreset(v, rows);
+  };
+  // Pitch depth has nothing to say about a mix that never writes a new pitch.
+  const syncDepth = (v, rows) => {
+    const p = PRESETS[v.preset] ?? {};
+    if (rows.depth) rows.depth.hidden = !((p.pitch ?? v.pitch) || (p.add ?? v.add));
+  };
+  const axis = (key, label, value, title) => ({ key, label, type: 'range', min: 0, max: 1, step: 0.02, value, title,
+    onChange: (v, rows) => { unpreset(v, rows); syncDepth(v, rows); } });
+  if (items.length) items.push('-');
+  // Twice as long, the second half a variation of the first.
+  items.push({ head: 'the roll' }, popover('double with variation', 'double the loop, the copy varied by temperature', {
     title: 'double with variation', reroll: true,
     params: [
-      { key: 'temperature', label: 'temperature', type: 'range', min: 0, max: 1, step: 0.02, value: 0.35 },
-      { key: 'from', label: 'from', type: 'range', min: 0, max: 1, step: 0.125, value: 0 },
-      { key: 'to', label: 'to', type: 'range', min: 0, max: 1, step: 0.125, value: 1 },
+      { key: 'preset', label: 'preset', type: 'choice', options: ['none', ...Object.keys(PRESETS)], value: 'everything',
+        onChange: (v, rows) => {
+          const p = PRESETS[v.preset];
+          if (!p) return; // 'none' names the custom mix - picking it moves nothing
+          prApplyPreset(v, rows, p);
+          syncDepth(v, rows);
+        } },
+      { key: 'temperature', label: 'temperature', title: 'how much of the copy is up for change at all', type: 'range', min: 0, max: 1, step: 0.02, value: 0.35 },
+      ...(pitched ? [axis('pitch', 'new pitches', 0.3, 'the share of the change that is a note taking a scale step')] : []),
+      axis('time', 'moved', 0.3, 'the share of the change that is a note moving a cell'),
+      axis('drop', 'dropped', 0.3, 'the share of the change that is a note going away'),
+      axis('vel', 'softened', 0.1, 'the share of the change that is a note played quieter'),
+      { key: 'add', label: 'added', title: "the chance an empty cell fills with a note modelled on its neighbour - its own dial, not a share of the others'", type: 'range', min: 0, max: 1, step: 0.02, value: 0.34, onChange: (v, rows) => { unpreset(v, rows); syncDepth(v, rows); } },
+      ...(pitched ? [{ key: 'depth', label: 'pitch depth', title: 'how far a new pitch may step, in scale steps', type: 'range', min: 1, max: 7, step: 1, value: 1 }] : []),
+      { key: 'from', label: 'from', title: 'the start of the window the changes are confined to', type: 'range', min: 0, max: 1, step: 0.125, value: 0 },
+      { key: 'to', label: 'to', title: 'the end of that window - 0.75 to 1 is a fill on the last quarter', type: 'range', min: 0, max: 1, step: 0.125, value: 1 },
     ],
     make: (v, seed) => () => {
       const live = prHarmony.origNotes.filter((nt) => !nt.hidden);
       const from = Math.min(v.from, v.to), to = Math.max(v.from, v.to);
-      const r = T.variation(live, { len: prHarmony.origLen, start: prState.start, temperature: v.temperature, seed, scale, from, to, repitch: pitched });
+      const p = PRESETS[v.preset] ?? {}; // hovering a preset previews its mix before any click
+      const mix = (key) => p[key] ?? v[key] ?? 0;
+      const r = T.variation(live, {
+        len: prHarmony.origLen, start: prState.start, seed, scale, from, to, repitch: pitched,
+        temperature: v.temperature, depth: v.depth ?? 1,
+        pitch: mix('pitch'), time: mix('time'), drop: mix('drop'), vel: mix('vel'), add: mix('add'),
+      });
       return { ...r, all: true };
     },
   }));
@@ -6918,15 +7017,17 @@ function prOpenHarmonyMenu(e) {
   let targets = [...prState.sel].filter((nt) => !nt.hidden);
   if (!targets.length) {
     // Nothing selected: the note under the pointer, selected so the menu's scope is visible -
-    // the same reach prToggleMute has.
+    // the same reach prToggleMute has. Over empty grid there is nothing to select, and the menu
+    // still opens: the roll-wide section acts on the whole roll and never wanted a selection.
     const m = prMetrics();
     const { px, py } = prCanvasPos(e);
     const cell = prCellAt(px, m);
     const hit = cell == null ? null : prNoteAt(cell, prMidiAt(py, m));
-    if (hit == null) return;
-    targets = [prState.notes[hit]];
-    prState.sel = new Set(targets);
-    drawPianoroll();
+    if (hit != null) {
+      targets = [prState.notes[hit]];
+      prState.sel = new Set(targets);
+      drawPianoroll();
+    }
   }
   const scale = patchScale ?? notesMod?.DEFAULT_SCALE ?? 'c major';
   const pitches = [...new Set(targets.map((nt) => nt.midi))].sort((a, b) => a - b);
@@ -6940,8 +7041,8 @@ function prOpenHarmonyMenu(e) {
     [label, () => { prHarmonyCommit(midis); prOpenHarmonyMenu(at); }, title, () => prHarmonyPreview(midis)];
   const items = [];
   const chordItems = [];
-  if (index) {
-    // no chords for a drum roll
+  if (index || !targets.length) {
+    // no chords for a drum roll, and none to name with nothing selected
   } else if (pitches.length === 1) {
     chordItems.push({ head: `${midiName(pitches[0])} · chords in ${scale}` });
     for (const sevenths of [false, true]) {
@@ -6971,7 +7072,8 @@ function prOpenHarmonyMenu(e) {
   if (chordItems.length) {
     items.push({ sub: 'harmony', title: pitches.length === 1 ? `chords on ${midiName(pitches[0])}` : 'voicings of the chord', items: chordItems });
   }
-  prHarmonyTransformItems(items, targets, index ? null : scale, at);
+  if (targets.length) prHarmonyTransformItems(items, targets, index ? null : scale, at);
+  prHarmonyRollItems(items, index ? null : scale, at);
   if (!items.length) { prHarmony = null; return; } // nothing to offer this selection
   openCtxMenu(prMenu, e.clientX, e.clientY, {
     after: () => prRefocus(),

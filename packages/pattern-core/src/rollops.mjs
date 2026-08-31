@@ -322,43 +322,73 @@ export function augment(notes, { amount = 0.3, seed = 1, scale = null, span = nu
 
 /**
  * Variation: the loop doubled, the second half a variation of the first. `temperature` (0..1) is
- * how much of the copy is up for change: each copied note in the region has that chance of being
- * dropped, moved a cell, taken a scale step, or softened, and empty cells in the region fill at a
- * third of that rate. `from`..`to` (fractions of the copy) confine the changes - `from: 0.75` is
- * the classic fill at the end of the second bar; the copy outside the region is verbatim.
- * `repitch: false` (a drum roll) keeps every row - only timing, presence and velocity vary.
+ * the master depth - the chance that a copied note inside the region is up for change at all -
+ * and the AXES say what "change" is allowed to mean. `drop` (the note goes), `time` (it moves a
+ * cell), `pitch` (it takes up to `depth` scale steps) and `vel` (it softens) are relative
+ * weights over ONE die, so a note changes at most one way and turning two axes up never
+ * compounds them on the same note: `{ pitch: 1 }` alone is "your rhythm, new notes", `{ drop: 1,
+ * add: 1 }` alone is "your notes, some missing and some new". `add` is separate - the chance an
+ * empty cell in the region fills with a note modelled on its nearest neighbour in time, keeping
+ * that neighbour's length so a fill sounds like the line it came from.
+ *
+ * Every note spends the same fixed handful of dice whichever axis wins it, so dragging one
+ * weight re-sorts the notes between the axes rather than reshuffling the whole bar: the editor
+ * holds one seed for the life of a popover, and "reroll" is the only thing that changes them.
+ *
+ * `from`..`to` (fractions of the copy) confine the changes - `from: 0.75` is the classic fill at
+ * the end of the second bar; the copy outside the region is verbatim. `repitch: false` (a drum
+ * roll) shuts the pitch axis and shares its weight out over the others in their own ratio: a row
+ * is a sound there, so only timing, presence and velocity can vary.
  * Returns { notes, len }: the originals untouched, then the copy, and the doubled length.
  */
-export function variation(notes, { len, start = 0, temperature = 0.35, seed = 1, scale = null, from = 0, to = 1, repitch = true } = {}) {
+export function variation(notes, {
+  len, start = 0, temperature = 0.35, seed = 1, scale = null,
+  drop = 0.3, time = 0.3, pitch = 0.3, vel = 0.1, add = 1 / 3, depth = 1,
+  from = 0, to = 1, repitch = true,
+} = {}) {
   const span = Math.max(1, Math.round(len));
   const rand = seededRandom(seed);
   const lo = start + span + Math.round(from * span);
   const hi = start + span + Math.round(to * span);
   const inRegion = (c) => c >= lo && c < hi;
+  const steps = Math.max(1, Math.round(depth));
+  const weights = [['drop', drop], ['time', time], ['pitch', repitch ? pitch : 0], ['vel', vel]]
+    .map(([k, v]) => [k, Math.max(0, v) || 0]);
+  const total = weights.reduce((sum, [, v]) => sum + v, 0);
+  /** Which axis a roll of the die lands on. Zero-weight axes take no share of it. */
+  const axisAt = (x) => {
+    let acc = 0;
+    for (const [k, v] of weights) { acc += v / total; if (x < acc) return k; }
+    return weights.filter(([, v]) => v > 0).at(-1)[0]; // the float tail of the last live bucket
+  };
   const originals = notes.filter((nt) => nt.start >= start && nt.start < start + span);
   const copy = [];
   for (const src of originals) {
     const nt = { ...src, start: src.start + span };
-    if (!inRegion(nt.start) || rand() >= temperature) { copy.push(nt); continue; }
-    const op = rand();
-    if (op < 0.3) continue; // dropped
-    if (op < 0.6) { // moved a cell, staying in the region
-      const moved = nt.start + (rand() < 0.5 ? -1 : 1);
+    const [gate, die, dir, mag] = [rand(), rand(), rand(), rand()];
+    if (!total || !inRegion(nt.start) || gate >= temperature) { copy.push(nt); continue; }
+    const axis = axisAt(die);
+    if (axis === 'drop') continue;
+    if (axis === 'time') { // moved a cell, staying in the region
+      const moved = nt.start + (dir < 0.5 ? -1 : 1);
       nt.start = inRegion(moved) ? moved : nt.start;
-    } else if (op < 0.9 && repitch) {
-      nt.midi = stepPitch(nt.midi, rand() < 0.5 ? -1 : 1, scale);
+    } else if (axis === 'pitch') {
+      nt.midi = stepPitch(nt.midi, (dir < 0.5 ? -1 : 1) * (1 + Math.floor(mag * steps)), scale);
     } else {
-      nt.vel = clampVel(noteVel(nt) * (0.6 + rand() * 0.3));
+      nt.vel = clampVel(noteVel(nt) * (0.6 + mag * 0.3));
     }
     copy.push(nt);
   }
   const models = copy.length ? copy : originals.map((nt) => ({ ...nt, start: nt.start + span }));
   const taken = new Set(copy.map((nt) => nt.start));
   for (let c = lo; c < hi; c++) {
-    if (taken.has(c) || !models.length || rand() >= temperature / 3) continue;
+    const [gate, dir, mag] = [rand(), rand(), rand()];
+    if (taken.has(c) || !models.length || gate >= temperature * add) continue;
     const model = nearestInTime(models, c);
-    const dir = !repitch || rand() < 0.5 ? 0 : (rand() < 0.5 ? -1 : 1);
-    copy.push({ ...model, start: c, len: 1, full: 1, nudge: 0, midi: stepPitch(model.midi, dir, scale), vel: clampVel(noteVel(model) * 0.8) });
+    // An addition sounds like its neighbour: its length, a little quieter, its pitch half the
+    // time and within `depth` steps of it otherwise.
+    const step = !repitch || dir < 0.5 ? 0 : (dir < 0.75 ? -1 : 1) * (1 + Math.floor(mag * steps));
+    copy.push({ ...withLen(model, model.len), start: c, nudge: 0, midi: stepPitch(model.midi, step, scale), vel: clampVel(noteVel(model) * 0.8) });
   }
   return { notes: [...notes.map((nt) => ({ ...nt })), ...copy], len: span * 2 };
 }

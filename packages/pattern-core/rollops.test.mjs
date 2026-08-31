@@ -156,6 +156,48 @@ test('variation: doubles the loop, the copy varied only inside the region', () =
   assert.notDeepEqual(copy.filter((n) => n.start >= 24).map((n) => [n.midi, n.start]), bar.slice(4).map((n) => [n.midi, n.start + 16]), 'inside: changed');
   const cold = variation(bar, { len: 16, temperature: 0, seed: 11 });
   assert.deepEqual(cold.notes.slice(8).map((n) => n.start), bar.map((n) => n.start + 16), 'temperature 0 is a plain duplicate');
+  const noAxes = variation(bar, { len: 16, temperature: 1, seed: 11, drop: 0, time: 0, pitch: 0, vel: 0, add: 0 });
+  assert.deepEqual(noAxes.notes.slice(8).map((n) => [n.midi, n.start]), bar.map((n) => [n.midi, n.start + 16]), 'no axis is a plain duplicate too');
+});
+
+test('variation: the axes are what "varied" means - each one alone changes only its own thing', () => {
+  const bar = Array.from({ length: 8 }, (_, i) => N(60 + (i % 4) * 2, i * 2, 1));
+  const opts = { len: 16, temperature: 1, seed: 7, scale: 'c major', drop: 0, time: 0, pitch: 0, vel: 0, add: 0 };
+  const copyOf = (r) => r.notes.slice(8);
+
+  const mel = copyOf(variation(bar, { ...opts, pitch: 1 }));
+  assert.deepEqual(mel.map((n) => n.start), bar.map((n) => n.start + 16), 'pitch alone: the rhythm is untouched');
+  assert.deepEqual(mel.map((n) => n.vel), bar.map((n) => n.vel), 'pitch alone: the dynamics are untouched');
+  assert.ok(mel.some((n, i) => n.midi !== bar[i].midi), 'pitch alone: the pitches moved');
+  for (const nt of mel) assert.ok([0, 2, 4, 5, 7, 9, 11].includes(nt.midi % 12), 'in key');
+
+  const thin = copyOf(variation(bar, { ...opts, drop: 1 }));
+  assert.ok(thin.length < bar.length, 'drop alone: notes went');
+  assert.deepEqual(thin.map((n) => [n.midi, n.start]), thin.map((n) => [n.midi, n.start]).filter(([m, st]) =>
+    bar.some((b) => b.midi === m && b.start + 16 === st)), 'drop alone: the survivors are verbatim');
+
+  const moved = copyOf(variation(bar, { ...opts, time: 1 }));
+  assert.equal(moved.length, bar.length, 'time alone: every note survives');
+  assert.deepEqual([...moved].sort((a, b) => a.midi - b.midi).map((n) => n.midi), [...bar].sort((a, b) => a.midi - b.midi).map((n) => n.midi), 'time alone: the pitches are the set they were');
+  assert.ok(moved.some((n, i) => n.start !== bar[i].start + 16), 'time alone: notes moved');
+
+  const filled = copyOf(variation(bar, { ...opts, add: 1 }));
+  assert.ok(filled.length > bar.length, 'add alone: notes arrived');
+  assert.deepEqual(filled.slice(0, 8).map((n) => [n.midi, n.start]), bar.map((n) => [n.midi, n.start + 16]), 'add alone: the originals are verbatim');
+});
+
+test('variation: pitch depth bounds the step, and an addition takes its neighbour\'s length', () => {
+  const bar = Array.from({ length: 8 }, (_, i) => N(60 + (i % 4) * 2, i * 2, 2));
+  const opts = { len: 16, temperature: 1, seed: 3, scale: 'c major', drop: 0, time: 0, pitch: 0, vel: 0, add: 0 };
+  const near = variation(bar, { ...opts, pitch: 1, depth: 1 }).notes.slice(8);
+  const far = variation(bar, { ...opts, pitch: 1, depth: 5 }).notes.slice(8);
+  const steps = (out) => out.map((n, i) => Math.abs(midiToDegree(n.midi, 'c major') - midiToDegree(bar[i].midi, 'c major')));
+  assert.ok(steps(near).every((d) => d === 1), 'depth 1 is a single scale step');
+  assert.ok(steps(far).every((d) => d >= 1 && d <= 5) && steps(far).some((d) => d > 1), 'depth 5 reaches further');
+  const onsets = new Set(bar.map((n) => n.start + 16));
+  const added = variation(bar, { ...opts, add: 1 }).notes.slice(8).filter((n) => !onsets.has(n.start));
+  assert.ok(added.length, 'something was added');
+  assert.ok(added.every((n) => n.len === 2 && n.full === 2), 'an addition is as long as the note it was modelled on');
 });
 
 test('rotateFigure: hits and accents turn together', () => {
