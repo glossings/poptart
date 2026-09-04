@@ -1978,7 +1978,11 @@ function highlightGrid(sig, start, end, from, count) {
   // the way the scheduler resolves them (a step's own cfg first, then the track's channel - see
   // _sampleConfigAt). The slice editor reads these to light the marker that is sounding; nothing
   // else does, so they ride only on tracks that actually slice.
-  const sampler = sig.sampler?.slice ? sig.sampler : null;
+  // Any sampler track, not just one with a `.slice()` channel: a piano roll in slice mode carries
+  // its chop on each EVENT (step.cfg) and has no channel at all, and those are exactly the steps
+  // the slice panel most wants to follow. chopAt answers null the moment a step has no slice, so
+  // the tracks that don't chop pay for one lookup and nothing else.
+  const sampler = sig.sampler ?? null;
   const samplerKind = sig.samplerKind ?? 'pack';
   const chopAt = (s, at) => {
     const pick = (key) => {

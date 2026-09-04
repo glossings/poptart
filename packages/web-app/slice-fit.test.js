@@ -38,7 +38,7 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const bodies = ['codeOnly', 'matchParen', 'sliceSourceCallAt', 'sliceFitChain', 'sliceFitCall', 'sliceFitCycles']
+const bodies = ['codeOnly', 'matchParen', 'sliceSourceCallAt', 'sliceFitChain', 'sliceFitCall', 'sliceFitCycles', 'prFitCycles']
   .map(grab)
   .join('\n\n');
 
@@ -53,7 +53,7 @@ function panel(code, { duration = 4.8, cps = 0.5 } = {}) {
   // eslint-disable-next-line no-new-func
   return new Function('labelsMod', 'cm', 'sliceState', 'transport', 'sliceAtNow', `
     ${bodies}
-    return { sliceFitCall, sliceFitCycles, sliceFitChain };
+    return { sliceFitCall, sliceFitCycles, sliceFitChain, prFitCycles };
   `)(labelsMod, cm, sliceState, { cps }, () => sliceState.at);
 }
 
@@ -122,4 +122,21 @@ test('a set entry carries the fit, and the two spellings mean the same thing', a
   // ...and a fit with no markers is a real entry: this sample is fitted, and chops on its own
   // transients ("different fits / not fits per sample").
   assert.deepEqual(slices.normalizeSliceEntry({ fit: 'auto', marks: [] }), { fit: 'auto' });
+});
+
+test('no fit at all is the file\'s own length - what the roll lays its chops against', () => {
+  // "slice to notes" has to answer for a sample the pattern never fitted, and the honest answer is
+  // how long it actually plays for: speed 1, so duration seconds is duration*cps cycles. The engine
+  // is asked the same question with no fit in the config at all.
+  for (const [duration, cps] of [[4.8, 0.5], [2, 0.5], [1.9, 1], [0.4, 0.5]]) {
+    const shown = panel('b: s("breaks").slice("0 1")', { duration, cps }).prFitCycles(null, duration);
+    const played = engineCycles(duration, cps, undefined);
+    assert.ok(Math.abs(shown - played) < 1e-9, `${duration}s at ${cps}cps: panel says ${shown}, engine plays ${played}`);
+  }
+  // A fit, on the other hand, is the panel's own reading - and a patterned one has no single answer.
+  const p = panel('b: s("breaks").slice("0 1")', { duration: 4.8, cps: 0.5 });
+  assert.equal(p.prFitCycles(4, 4.8), 4);
+  assert.equal(p.prFitCycles('auto', 4.8), 2);
+  assert.equal(p.prFitCycles('"<2 4>"', 4.8), null);
+  assert.equal(p.prFitCycles(null, 0), null); // still decoding: no answer rather than a wrong one
 });

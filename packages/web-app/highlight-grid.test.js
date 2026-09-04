@@ -133,6 +133,9 @@ test('a track that does not slice carries no chop at all, and neither do its par
   const sig = sigOf([{ start: 0, end: 1, value: 'breaks', locs: [[10, 12]] }]);
   sig.sampler = { index: constSig(2) }; // a sampler, but nothing is chopping it
   assert.equal(gridOf(sig)[0].steps[0].chop, undefined);
+  // ...and neither does a track that isn't a sampler at all
+  const synth = sigOf([{ start: 0, end: 1, value: 60, locs: [[10, 12]] }]);
+  assert.equal(gridOf(synth)[0].steps[0].chop, undefined);
 
   // A param pattern's steps are not triggers of anything, so they are never tagged either.
   const sliced = sigOf([{ start: 0, end: 1, value: 'breaks', locs: [[10, 12]] }]);
@@ -164,4 +167,23 @@ test('a one-file source keeps a colon in its name rather than reading it as an i
   sig.sampler = { slice: constSig(1) };
   sig.samplerKind = 'file';
   assert.deepEqual(gridOf(sig)[0].steps[0].chop, { slice: 1 });
+});
+
+test('a roll in slice mode chops on its EVENTS, with no channel to read at all', () => {
+  // A pianoroll drawn on the slice axis carries each chop on the event (step.cfg) and sets no
+  // `.slice()` channel - so a grid that only tagged tracks with a channel left the panel with
+  // nothing to follow on exactly the rolls it most wants to follow.
+  const sig = sigOf([
+    { start: 0, end: 0.5, value: 'breaks', cfg: { index: 4, slice: 2 }, locs: [[10, 12]] },
+    { start: 0.5, end: 1, value: 'breaks', cfg: { index: 4, slice: 5 }, locs: [[10, 12]] },
+  ]);
+  sig.sampler = {}; // a sampler with no controls set on it - what `pianoroll(...).s("breaks")` is
+  assert.deepEqual(gridOf(sig)[0].steps.map((s) => s.chop), [{ slice: 2, i: 4 }, { slice: 5, i: 4 }]);
+  // A roll that chops only some of its hits tags only those - the rest play the sample whole.
+  const some = sigOf([
+    { start: 0, end: 0.5, value: 'breaks', cfg: { slice: 1 }, locs: [[10, 12]] },
+    { start: 0.5, end: 1, value: 'breaks', locs: [[10, 12]] },
+  ]);
+  some.sampler = {};
+  assert.deepEqual(gridOf(some)[0].steps.map((s) => s.chop?.slice), [1, undefined]);
 });

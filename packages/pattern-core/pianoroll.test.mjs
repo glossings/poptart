@@ -31,25 +31,28 @@ import {
   PIANOROLL_DEFAULT_STEPS,
   PIANOROLL_DEFAULT_NOTE,
   PIANOROLL_DEFAULT_INDEX,
+  PIANOROLL_DEFAULT_SLICE,
+  noteSlice,
+  sliceNotesFor,
 } from './src/pianoroll.mjs';
-import { pianoroll, note, n, i, vel, mini, s, midikeys, channelAt, soundingEnd, timeShift, setPatternWarn } from './src/signal.mjs';
+import { pianoroll, note, n, i, slice, vel, mini, s, midikeys, channelAt, soundingEnd, timeShift, setPatternWarn } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 test('parsePianoRoll: fields, defaults, and empty input', () => {
   assert.deepEqual(parsePianoRoll(''), []);
   assert.deepEqual(parsePianoRoll('   '), []);
-  assert.deepEqual(parsePianoRoll('60,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
-  assert.deepEqual(parsePianoRoll('60,0,4,0.5'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 1, nudge: 0, mute: false }]);
-  assert.deepEqual(parsePianoRoll('60,0,4,0.5,0.25'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 0.25, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4'), [{ midi: 60, index: 0, slice: null, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4,0.5'), [{ midi: 60, index: 0, slice: null, start: 0, len: 4, vel: 0.5, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60,0,4,0.5,0.25'), [{ midi: 60, index: 0, slice: null, start: 0, len: 4, vel: 0.5, prob: 0.25, nudge: 0, mute: false }]);
   // the pitch field carries the sample index behind a ":" when it isn't the default
-  assert.deepEqual(parsePianoRoll('24:3,0,4'), [{ midi: 24, index: 3, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
-  assert.deepEqual(parsePianoRoll('!60:2,0,4,0.5'), [{ midi: 60, index: 2, start: 0, len: 4, vel: 0.5, prob: 1, nudge: 0, mute: true }]);
+  assert.deepEqual(parsePianoRoll('24:3,0,4'), [{ midi: 24, index: 3, slice: null, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('!60:2,0,4,0.5'), [{ midi: 60, index: 2, slice: null, start: 0, len: 4, vel: 0.5, prob: 1, nudge: 0, mute: true }]);
 });
 
 test('parsePianoRoll: clamps out-of-range fields, rejects malformed tokens', () => {
   // start is NOT clamped at 0: a negative cell is a note before the roll's time (a recorded count-in)
-  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, index: 0, start: -3, len: 1, vel: 1, prob: 1, nudge: 0, mute: false }]);
-  assert.deepEqual(parsePianoRoll('60:-2,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('200,-3,0,9,9'), [{ midi: 127, index: 0, slice: null, start: -3, len: 1, vel: 1, prob: 1, nudge: 0, mute: false }]);
+  assert.deepEqual(parsePianoRoll('60:-2,0,4'), [{ midi: 60, index: 0, slice: null, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: false }]);
   assert.throws(() => parsePianoRoll('60,0'), /bad note/);
   assert.equal(parsePianoRoll('60,0,4,0.5,0.5,7')[0].nudge, 0.5, 'six fields is a nudge, clamped');
   assert.throws(() => parsePianoRoll('60,0,4,0.5,0.5,0.1,9'), /bad note/);
@@ -58,9 +61,9 @@ test('parsePianoRoll: clamps out-of-range fields, rejects malformed tokens', () 
 
 // The `!` marker is the muted (Live-deactivated) note: still in the roll, never sounding.
 test('parsePianoRoll / serializePianoRoll: the ! mute marker round-trips', () => {
-  assert.deepEqual(parsePianoRoll('!60,0,4'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: true }]);
+  assert.deepEqual(parsePianoRoll('!60,0,4'), [{ midi: 60, index: 0, slice: null, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: true }]);
   // it rides in front of every other field, and the rest of the token parses exactly as it would
-  assert.deepEqual(parsePianoRoll('!60,0,4,0.5,0.25'), [{ midi: 60, index: 0, start: 0, len: 4, vel: 0.5, prob: 0.25, nudge: 0, mute: true }]);
+  assert.deepEqual(parsePianoRoll('!60,0,4,0.5,0.25'), [{ midi: 60, index: 0, slice: null, start: 0, len: 4, vel: 0.5, prob: 0.25, nudge: 0, mute: true }]);
   assert.equal(serializePianoRoll([{ midi: 60, start: 0, len: 4, vel: 1, prob: 1, mute: true }]), '!60,0,4');
   assert.equal(serializePianoRoll([{ midi: 60, start: 0, len: 4, vel: 0.5, prob: 1, mute: true }]), '!60,0,4,0.5');
   const str = '!60,0,4 64,0,4,0.5 !67,8,8,1,0.3';
@@ -241,7 +244,7 @@ const soundsLike = (sig, cycle) =>
 /** An emitted expression, rebuilt the way the eval sandbox would: a bare template literal is mini. */
 const rebuildMini = (expr) =>
   // eslint-disable-next-line no-new-func
-  new Function('mini', 'note', 'n', `return ${expr.replace(/^`([\s\S]*?)`/, 'mini(`$1`)')};`)(mini, note, n);
+  new Function('mini', 'note', 'n', 'i', 'slice', `return ${expr.replace(/^`([\s\S]*?)`/, 'mini(`$1`)')};`)(mini, note, n, i, slice);
 
 // The whole point of the converter is that what it emits plays the same notes the editor did - and
 // that holds however the fields were split between the cells and the control calls, which is a
@@ -548,11 +551,20 @@ test('normalizePianoRollMode: index, and everything else is the note axis', () =
 
 // The one thing the two modes disagree about: which channel a freshly drawn note sets, and what
 // the other one is left at.
-test('pianoRollEventAt: the drawn channel takes the row, the other its default', () => {
-  assert.deepEqual(pianoRollEventAt(60, 'note'), { midi: 60, index: PIANOROLL_DEFAULT_INDEX });
-  assert.deepEqual(pianoRollEventAt(3, 'index'), { midi: PIANOROLL_DEFAULT_NOTE, index: 3 });
-  assert.deepEqual(pianoRollEventAt(-5, 'index'), { midi: PIANOROLL_DEFAULT_NOTE, index: 0 });
+test('pianoRollEventAt: the drawn channel takes the row, the others their defaults', () => {
+  const dflt = { midi: PIANOROLL_DEFAULT_NOTE, index: PIANOROLL_DEFAULT_INDEX, slice: PIANOROLL_DEFAULT_SLICE };
+  assert.deepEqual(pianoRollEventAt(60, 'note'), { ...dflt, midi: 60 });
+  assert.deepEqual(pianoRollEventAt(3, 'index'), { ...dflt, index: 3 });
+  assert.deepEqual(pianoRollEventAt(-5, 'index'), { ...dflt, index: 0 });
+  // The slice axis is the third of them, and the only one whose resting value is an absence: a note
+  // drawn anywhere else chops nothing at all.
+  assert.deepEqual(pianoRollEventAt(7, 'slice'), { ...dflt, slice: 7 });
+  assert.equal(pianoRollEventAt(2, 'note').slice, null);
   assert.equal(noteIndex({ midi: 60 }), PIANOROLL_DEFAULT_INDEX); // a note from before the channel
+  assert.equal(noteSlice({ midi: 60 }), PIANOROLL_DEFAULT_SLICE);
+  // A mode nobody has heard of opens on the keyboard rather than refusing to open (the caller warns).
+  assert.equal(normalizePianoRollMode('slice'), 'slice');
+  assert.equal(normalizePianoRollMode('chops'), 'note');
 });
 
 // The string is the same string in both modes, so a roll can be switched between them without a
@@ -1057,4 +1069,193 @@ test('.pianoroll(): mixing a roll into a degree pattern warns rather than misrea
   } finally {
     setPatternWarn(null);
   }
+});
+
+// --- the slice channel ---------------------------------------------------------------------------
+// A third channel on the same event, behind the index. It is the one that can honestly say nothing:
+// an unsliced sample plays whole, and slice 0 is a real chop that stops at the first marker, so
+// "unset" cannot be spelt as a number (see PIANOROLL_DEFAULT_SLICE).
+
+test('parsePianoRoll: the slice rides behind the index, and its absence is not slice 0', () => {
+  assert.equal(parsePianoRoll('60,0,1')[0].slice, null);
+  assert.equal(parsePianoRoll('60:3,0,1')[0].slice, null);
+  assert.equal(parsePianoRoll('60:3:0,0,1')[0].slice, 0); // written 0 IS a chop
+  assert.equal(parsePianoRoll('60:0:7,0,1')[0].slice, 7);
+  assert.equal(parsePianoRoll('60::,0,1')[0].slice, null); // an empty field says nothing
+  assert.equal(parsePianoRoll('!60:2:5,4,2,0.5')[0].slice, 5); // behind the mute marker like the rest
+  assert.throws(() => parsePianoRoll('60:0:x,0,1'), /non-numeric slice/);
+});
+
+test('serializePianoRoll: a slice writes the index too, since it holds its place', () => {
+  const str = '60:0:3,0,2 60:0:4,2,2';
+  assert.equal(serializePianoRoll(parsePianoRoll(str)), str);
+  // ...and an event that chops nothing writes neither field, so a roll that never slices reads
+  // exactly as it always did
+  assert.equal(serializePianoRoll(parsePianoRoll('60,0,4 24:3,4,1')), '60,0,4 24:3,4,1');
+  assert.equal(serializePianoRoll(parsePianoRoll('!67:5:2,4,2,0.5,0.25')), '!67:5:2,4,2,0.5,0.25');
+});
+
+test('clipOverlaps: two chops at one onset are a stack, not a collision', () => {
+  // Same pitch, same file, different slice: two real events, exactly as two files at one pitch are.
+  // Keying the lane on the visible axis alone would bury one of them on a mode switch.
+  const stack = clipOverlaps(parsePianoRoll('60:0:1,0,4 60:0:2,0,4'));
+  assert.deepEqual(stack.map((nt) => nt.hidden), [false, false]);
+  // ...and the same chop twice in one lane still resolves the way it always has
+  const same = clipOverlaps(parsePianoRoll('60:0:1,0,8 60:0:1,4,2'));
+  assert.deepEqual(same.map((nt) => nt.len), [4, 2]);
+});
+
+test('pianoroll(): the drawn slice rides on the events that have one, and only those', () => {
+  const steps = pianoroll('60:0:2,0,2 60:0:5,4,2', { grid: 8, len: 8 }).stepsForCycle(0);
+  assert.deepEqual(steps.map((st) => st.cfg), [{ slice: 2 }, { slice: 5 }]);
+  // Not all-or-nothing the way the index is: an event with no chop leaves the channel alone, so a
+  // roll can chop some hits and strike the whole sample on others.
+  const mixed = pianoroll('60:0:2,0,2 60,4,2', { grid: 8, len: 8 }).stepsForCycle(0);
+  assert.deepEqual(mixed.map((st) => st.cfg), [{ slice: 2 }, undefined]);
+  // both channels at once, per event
+  const both = pianoroll('60:3:2,0,2 60:1:5,4,2', { grid: 8, len: 8 }).stepsForCycle(0);
+  assert.deepEqual(both.map((st) => st.cfg), [{ index: 3, slice: 2 }, { index: 1, slice: 5 }]);
+});
+
+test('pianoroll(): the drawn slice carries through .s(), and a later .slice() takes it back', () => {
+  const steps = pianoroll('60:0:1,0,1 60:0:3,2,1', { grid: 4 }).s('breaks').stepsForCycle(0);
+  assert.deepEqual(steps.map((st) => st.cfg.slice), [1, 3]);
+  // A flat .slice() has no grid to stamp from, so it clears the drawn chops off the events and is
+  // sampled off the channel instead - the same rule .i() follows.
+  const flat = pianoroll('60:0:1,0,1 60:0:3,2,1', { grid: 4 }).s('breaks').slice(7);
+  assert.deepEqual(flat.stepsForCycle(0).map((st) => st.cfg?.slice), [undefined, undefined]);
+  assert.equal(flat.sampler.slice.sample(0, 1, 0), 7);
+});
+
+test('pianoroll(): the slice axis changes no sound either', () => {
+  const str = '60:2:4,0,2 67:5:1,4,1,0.5';
+  for (const c of [0, 1]) {
+    assert.deepEqual(
+      pianoroll(str, { grid: 8, len: 8, mode: 'slice' }).stepsForCycle(c),
+      pianoroll(str, { grid: 8, len: 8 }).stepsForCycle(c),
+    );
+  }
+});
+
+test('pianoRollToMini: the slice channel is written whenever it is set', () => {
+  // a roll of pure chops: one field, so it goes out as the control builder itself
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60:0:0,0,1 60:0:3,1,1 60:0:1,2,1'), { grid: 4, len: 4, mode: 'slice' }),
+    'slice(`<\n  0 3 1 ~\n>*4`)',
+  );
+  // with the index as well, in field order
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60:2:0,0,1 60:3:1,1,1'), { grid: 4, len: 2, mode: 'slice' }),
+    '`<\n  2:0 3:1\n>*4`.as("i:slice")',
+  );
+  // An event that chops nothing leaves the field EMPTY, which .as() reads as "leave the channel
+  // alone" - and the pitch comes back into the cells in front of it, since a token has to lead
+  // with a value.
+  assert.equal(
+    pianoRollToMini(parsePianoRoll('60:0:3,0,1 60,1,1'), { grid: 4, len: 2, mode: 'slice' }),
+    '`<\n  60:3 60\n>*4`.as("note:slice")',
+  );
+  // a roll that never chops writes no slice field at all
+  assert.equal(pianoRollToMini(parsePianoRoll('60,0,1 64,1,1'), { grid: 4, len: 2 }), 'note(`<\n  60 64\n>*4`)');
+});
+
+test('pianoroll(): a slice roll plays what its own mini-notation conversion plays', () => {
+  // The equivalence the converter exists for, over the two sampler channels: same onsets, same
+  // lengths, same velocity, same file, same chop - including a hit that chops nothing.
+  for (const str of ['60:1:0,0,2 60:1:3,2,1 60:2:5,3,1,0.6', '60:0:3,0,2 60,2,2', '60:0:0,0,1 60:0:1,1,1']) {
+    const notes = parsePianoRoll(str);
+    // Through the .s() the converted expression is written in front of, since that is where a
+    // head-position control (slice(`…`) on its own) becomes a trigger carrying its channel.
+    const drawn = pianoroll(str, { grid: 4, len: 4, mode: 'slice' }).s('breaks');
+    const written = rebuildMini(pianoRollToMini(notes, { grid: 4, len: 4, mode: 'slice' })).s('breaks');
+    assert.deepEqual(soundsLike(written, 0), soundsLike(drawn, 0), str);
+    // ...and the channels the converter is being tested on, which soundsLike doesn't look at.
+    const chans = (sig) => sig.stepsForCycle(0)
+      .map((st) => [+st.start.toFixed(4), st.cfg?.index, st.cfg?.slice])
+      .sort((a, b) => a[0] - b[0]);
+    assert.deepEqual(chans(written), chans(drawn), str);
+  }
+});
+
+// --- slice to notes ------------------------------------------------------------------------------
+// The break is laid over the ROLL's timeline, not over the note: which part of it a note gets is
+// decided by where the note sits in the bar, so a half note starting half way through takes the
+// break's second half. What says how much break one cycle of roll holds is the fit.
+
+const chops = (out) => out.notes.map((nt) => [nt.slice, nt.start, nt.len]);
+
+test('sliceNotesFor: a whole cycle of a one-cycle break is all of its chops, in place', () => {
+  const src = [{ midi: 60, index: 2, start: 0, len: 16, vel: 0.8, prob: 1 }];
+  const out = sliceNotesFor(src, { marks: [0, 0.25, 0.5, 0.75], cycles: 1, grid: 16 });
+  assert.equal(out.ratio, 1);
+  assert.deepEqual(chops(out), [[0, 0, 4], [1, 4, 4], [2, 8, 4], [3, 12, 4]]);
+  // every hit keeps what the note it came from was
+  assert.ok(out.notes.every((nt) => nt.midi === 60 && nt.index === 2 && nt.vel === 0.8 && !nt.mute));
+});
+
+test('sliceNotesFor: a half note half way through the bar gets the break\'s second half', () => {
+  const half = [{ midi: 60, index: 0, start: 8, len: 8, vel: 1, prob: 1 }];
+  const out = sliceNotesFor(half, { marks: [0, 0.25, 0.5, 0.75], cycles: 1, grid: 16 });
+  // ...still in the second half of the bar, because that is the audio it was already sounding
+  assert.deepEqual(chops(out), [[2, 8, 4], [3, 12, 4]]);
+});
+
+test('sliceNotesFor: the fit says how much break a cycle of roll holds', () => {
+  const bar = [{ midi: 60, index: 0, start: 0, len: 16, vel: 1, prob: 1 }];
+  const marks = [0, 0.25, 0.5, 0.75];
+  // fitted to two cycles, one bar of roll reaches only half way into it
+  assert.deepEqual(chops(sliceNotesFor(bar, { marks, cycles: 2, grid: 16 })), [[0, 0, 8], [1, 8, 8]]);
+  // fitted to half a cycle, the break goes round twice under the same note
+  assert.deepEqual(
+    chops(sliceNotesFor(bar, { marks, cycles: 0.5, grid: 16 })),
+    [[0, 0, 2], [1, 2, 2], [2, 4, 2], [3, 6, 2], [0, 8, 2], [1, 10, 2], [2, 12, 2], [3, 14, 2]],
+  );
+});
+
+test('sliceNotesFor: a chop that lasts two eighths comes out two eighths long', () => {
+  // Uneven markers: the second chop is twice as long as the first, and the hits say so.
+  const bar = [{ midi: 60, index: 0, start: 0, len: 8, vel: 1, prob: 1 }];
+  const out = sliceNotesFor(bar, { marks: [0, 0.25, 0.75], cycles: 1, grid: 8 });
+  assert.deepEqual(chops(out), [[0, 0, 2], [1, 2, 4], [2, 6, 2]]);
+});
+
+test('sliceNotesFor: a chop between two cells keeps its offset, and the grid gets finer to hold it', () => {
+  const bar = [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1 }];
+  // At grid 4 the first two chops both want cell 0; one doubling separates them, losslessly.
+  const out = sliceNotesFor(bar, { marks: [0, 0.1, 0.5, 0.6], cycles: 1, grid: 4 });
+  assert.equal(out.ratio, 2);
+  assert.deepEqual(out.notes.map((nt) => nt.start), [0, 1, 4, 5]);
+  // ...and what the rounding left over rides as a nudge, so the chop still plays where it fell
+  assert.deepEqual(out.notes.map((nt) => +nt.nudge.toFixed(3)), [0, -0.2, 0, -0.2]);
+  // A grid too coarse to be made finer drops the hits it cannot place, and says how many.
+  const tight = sliceNotesFor(bar, { marks: [0, 0.01, 0.5], cycles: 1, grid: 4, maxGrid: 4 });
+  assert.equal(tight.ratio, 1);
+  assert.equal(tight.dropped, 1);
+});
+
+test('sliceNotesFor: minRatio forces the grid a second file already needed', () => {
+  const bar = [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1 }];
+  const out = sliceNotesFor(bar, { marks: [0, 0.5], cycles: 1, grid: 4, minRatio: 4 });
+  assert.equal(out.ratio, 4);
+  assert.deepEqual(out.notes.map((nt) => nt.start), [0, 8]); // cells in the FINER grid
+});
+
+test('sliceNotesFor: nothing to chop, nothing to say', () => {
+  const bar = [{ midi: 60, index: 0, start: 0, len: 4, vel: 1, prob: 1 }];
+  assert.deepEqual(sliceNotesFor(bar, { marks: [], cycles: 1, grid: 4 }).notes, []);
+  assert.deepEqual(sliceNotesFor(bar, { marks: [0, 0.5], cycles: 0, grid: 4 }).notes, []);
+  assert.deepEqual(sliceNotesFor([], { marks: [0, 0.5], cycles: 1, grid: 4 }).notes, []);
+  // a set whose first marker is late simply never plays the pickup before it
+  assert.deepEqual(chops(sliceNotesFor(bar, { marks: [0.5], cycles: 1, grid: 4 })), [[0, 2, 2]]);
+});
+
+test('sliceNotesFor: the hits are a roll that says what it plays', () => {
+  const bar = [{ midi: 60, index: 3, start: 0, len: 4, vel: 1, prob: 1 }];
+  const { notes } = sliceNotesFor(bar, { marks: [0, 0.5], cycles: 1, grid: 4 });
+  assert.equal(serializePianoRoll(notes), '60:3:0,0,2 60:3:1,2,2');
+  // and the roll built from them chops exactly those two
+  assert.deepEqual(
+    pianoroll(serializePianoRoll(notes), { grid: 4 }).stepsForCycle(0).map((st) => st.cfg),
+    [{ index: 3, slice: 0 }, { index: 3, slice: 1 }],
+  );
 });

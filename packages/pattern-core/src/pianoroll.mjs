@@ -4,7 +4,7 @@
 // notes the scheduler plays - and depends on nothing outside this package (notes.mjs, its one
 // import, is served the same way and is itself dependency-free).
 //
-// Format: space-separated note events `[!]midi[:index],start,len[,vel[,prob[,nudge]]]`, e.g.
+// Format: space-separated note events `[!]midi[:index[:slice]],start,len[,vel[,prob[,nudge]]]`, e.g.
 // "60,0,4 64,0,4,0.7 67,8,8" or "24:0,0,1 24:3,4,1".
 //   !     - optional MUTE marker: the note is deactivated (Live's `0` key). It stays in the roll -
 //           drawn greyed out, still movable, still holding its lane against the overlap rule - but
@@ -15,6 +15,12 @@
 //           event plays, the `i` channel. EVERY event has both a pitch and an index - they are two
 //           channels of one event, not two kinds of event - and the roll's mode only says which of
 //           them the editor is drawing on (see below).
+//   slice - optional chop index, >= 0: which slice of that file the event plays, the `slice`
+//           channel. Unlike the other two this one is genuinely ABSENT when unwritten - `.slice()`
+//           has no resting value (an unsliced sample plays whole, and slice 0 is a real chop that
+//           plays only up to the first marker), so there is nothing an omitted field could mean but
+//           "this event doesn't chop". Written third, which is why setting it writes the index
+//           too even at its default: "60:0:3" is slice 3 of the pack's first file.
 //   start - onset cell, an integer (a cell is one column of the grid). Normally 0 or more; the
 //           MIDI recorder writes what was played during the count-in at NEGATIVE cells, before the
 //           roll's own time starts (see record.mjs) - drawn to the left of cell 0, never played, there
@@ -39,21 +45,23 @@
 // can be slid back over a recorded count-in). Notes are written at their drawn cell either way, so
 // sliding the window over them never rewrites a single note.
 //
-// The options also carry the roll's MODE - which of the two channels the EDITOR draws on:
+// The options also carry the roll's MODE - which of the three channels the EDITOR draws on:
 //   note   (the default) - the vertical axis is a piano keyboard and a drawn row is a pitch; the
 //          index of a note drawn there is 0
 //   index  - the vertical axis is a plain 0, 1, 2, … count and a drawn row is a sample index; the
 //          pitch of a note drawn there is PIANOROLL_DEFAULT_NOTE, c2, where a sample plays as
 //          recorded
-// It is EDITOR METADATA and nothing else: playback reads both channels off every event whichever
-// mode the roll is in, so switching modes moves not one note and changes not one sound. It is in
-// the call so that reopening the panel puts you back on the axis you were drawing on.
+//   slice  - the same plain count, over the chops of whatever file the event plays: a drawn row is
+//           a slice number. A note drawn here chops; one drawn on either other axis does not.
+// It is EDITOR METADATA and nothing else: playback reads all three channels off every event
+// whichever mode the roll is in, so switching modes moves not one note and changes not one sound.
+// It is in the call so that reopening the panel puts you back on the axis you were drawing on.
 
 import { DEFAULT_SCALE_OCTAVE, midiToDegree, noteToMidi, scaleAtOctave, scaleParts } from './notes.mjs';
 
 export const PIANOROLL_DEFAULT_STEPS = 16;
 export const PIANOROLL_MAX_GRID = 512; // finest grid the retime buttons will push a roll to
-export const PIANOROLL_MODES = ['note', 'index'];
+export const PIANOROLL_MODES = ['note', 'index', 'slice'];
 // What the channel a roll ISN'T being drawn on is worth. A note drawn on the index axis plays at
 // MIDI 60 - the pitch a sample sounds at unrepitched, and what a note-less pattern fires anyway
 // (DEFAULT_SYNTH_NOTE in signal.mjs) - and a note drawn on the piano keyboard plays the pack's
@@ -61,6 +69,11 @@ export const PIANOROLL_MODES = ['note', 'index'];
 // one axis is silent about the other rather than asserting anything.
 export const PIANOROLL_DEFAULT_NOTE = 60;
 export const PIANOROLL_DEFAULT_INDEX = 0;
+// The slice channel has no such resting value, so its default is the absence of one: a sample with
+// no slice plays whole, where slice 0 plays only as far as the first marker. Two different sounds,
+// so "unset" cannot be spelt as a number - it is null, and an event carrying it simply has no
+// slice field at all.
+export const PIANOROLL_DEFAULT_SLICE = null;
 // How far off its cell one note may be drawn, either way. Half a cell is where a nudge stops being
 // a feel and starts being a different rhythm - past it the note has swapped places with the cell
 // next door, and the honest edit is to move it. (The nudge CHANNEL clamps at half the event's own
@@ -163,27 +176,30 @@ export function normalizePianoRollSteps(steps) {
 }
 
 /**
- * Which axis the editor draws this roll on: 'index' or 'note' (the default, and what every roll
- * written before index mode existed says). Anything unrecognised comes back as 'note' - the caller
- * warns about it, since a roll that opens on the keyboard is a better answer to a typo than one
- * that refuses to open at all.
+ * Which axis the editor draws this roll on: 'index', 'slice', or 'note' (the default, and what
+ * every roll written before the other two existed says). Anything unrecognised comes back as
+ * 'note' - the caller warns about it, since a roll that opens on the keyboard is a better answer to
+ * a typo than one that refuses to open at all.
  */
 export function normalizePianoRollMode(mode) {
-  return String(mode ?? 'note').trim().toLowerCase() === 'index' ? 'index' : 'note';
+  const name = String(mode ?? 'note').trim().toLowerCase();
+  return PIANOROLL_MODES.includes(name) ? name : 'note';
 }
 
-/** The channel `mode` draws on, and the one it leaves at its default. */
-export const PIANOROLL_ROW_FIELD = { note: 'midi', index: 'index' };
+/** The channel `mode` draws on, and the ones it leaves at their defaults. */
+export const PIANOROLL_ROW_FIELD = { note: 'midi', index: 'index', slice: 'slice' };
 
 /**
- * A fresh event drawn at row `row` on `mode`'s axis: the drawn channel takes the row, the other one
- * takes its resting value. This is the whole of what the two modes disagree about.
+ * A fresh event drawn at row `row` on `mode`'s axis: the drawn channel takes the row, the others
+ * take their resting values. This is the whole of what the three modes disagree about.
  */
 export function pianoRollEventAt(row, mode) {
-  const index = normalizePianoRollMode(mode) === 'index';
+  const field = PIANOROLL_ROW_FIELD[normalizePianoRollMode(mode)];
+  const at = Math.max(0, Math.round(row));
   return {
-    midi: index ? PIANOROLL_DEFAULT_NOTE : clampInt(row, 0, 127),
-    index: index ? Math.max(0, Math.round(row)) : PIANOROLL_DEFAULT_INDEX,
+    midi: field === 'midi' ? clampInt(row, 0, 127) : PIANOROLL_DEFAULT_NOTE,
+    index: field === 'index' ? at : PIANOROLL_DEFAULT_INDEX,
+    slice: field === 'slice' ? at : PIANOROLL_DEFAULT_SLICE,
   };
 }
 
@@ -209,19 +225,26 @@ export function parsePianoRoll(str) {
     const mute = tok.startsWith('!');
     const parts = (mute ? tok.slice(1) : tok).split(',');
     if (parts.length < 3 || parts.length > 6) {
-      throw new Error(`[pianoroll] bad note "${tok}" (want "midi[:index],start,len" .. "midi[:index],start,len,vel,prob,nudge")`);
+      throw new Error(`[pianoroll] bad note "${tok}" (want "midi[:index[:slice]],start,len" .. "midi[:index[:slice]],start,len,vel,prob,nudge")`);
     }
-    // The pitch field carries the sample index behind a ":" when it isn't the default - the same
-    // "one token, several channels" spelling .as("note:vel") uses - so a roll that only ever plays
-    // pitches reads exactly as it always did.
-    const [midiStr, indexStr = PIANOROLL_DEFAULT_INDEX] = parts[0].split(':');
+    // The pitch field carries the sample index (and the slice behind it) after a ":" when they
+    // aren't the default - the same "one token, several channels" spelling .as("note:vel") uses -
+    // so a roll that only ever plays pitches reads exactly as it always did.
+    const [midiStr, indexStr = PIANOROLL_DEFAULT_INDEX, sliceStr] = parts[0].split(':');
     const [midi, index, start, len, vel = 1, prob = 1, nudge = 0] = [midiStr, indexStr, ...parts.slice(1)].map(Number);
     if (![midi, index, start, len, vel, prob, nudge].every(Number.isFinite)) {
       throw new Error(`[pianoroll] non-numeric field in note "${tok}"`);
     }
+    // An absent (or empty, "60::") slice field is the absence of a slice, not slice 0 - see the
+    // format notes. A written one that isn't a number is a typo worth stopping on, like the rest.
+    const slice = sliceStr === undefined || sliceStr === '' ? PIANOROLL_DEFAULT_SLICE : Number(sliceStr);
+    if (slice !== null && !Number.isFinite(slice)) {
+      throw new Error(`[pianoroll] non-numeric slice in note "${tok}"`);
+    }
     return {
       midi: clampInt(midi, 0, 127),
       index: Math.max(0, Math.round(index)),
+      slice: slice === null ? null : Math.max(0, Math.round(slice)),
       start: Math.round(start), // may be negative - count-in material sits before cell 0
       len: Math.max(1, Math.round(len)),
       vel: clamp01(vel),
@@ -235,10 +258,14 @@ export function parsePianoRoll(str) {
 export function serializePianoRoll(notes) {
   return [...notes]
     // Left-to-right, low-to-high: stable output so re-serializing an unchanged roll is a no-op.
-    .sort((a, b) => a.start - b.start || a.midi - b.midi || noteIndex(a) - noteIndex(b))
+    .sort((a, b) => a.start - b.start || a.midi - b.midi || noteIndex(a) - noteIndex(b) || (noteSlice(a) ?? -1) - (noteSlice(b) ?? -1))
     .map((nt) => {
       const index = noteIndex(nt);
-      const pitch = index === PIANOROLL_DEFAULT_INDEX ? `${Math.round(nt.midi)}` : `${Math.round(nt.midi)}:${index}`;
+      const slice = noteSlice(nt);
+      // The index holds the slice's place, so an event that chops writes it whatever it is.
+      const pitch = slice !== null ? `${Math.round(nt.midi)}:${index}:${slice}`
+        : index === PIANOROLL_DEFAULT_INDEX ? `${Math.round(nt.midi)}`
+          : `${Math.round(nt.midi)}:${index}`;
       let s = `${nt.mute ? '!' : ''}${pitch},${Math.round(nt.start)},${Math.round(nt.len)}`;
       // Positional fields, so each one holds open the slots before it: a nudge writes vel and prob
       // whatever they are, and a sub-unity prob writes vel even when it's 1.
@@ -253,6 +280,9 @@ export function serializePianoRoll(notes) {
 
 /** A note's sample index, defaulted - notes built before the channel existed simply haven't got one. */
 export const noteIndex = (nt) => (Number.isFinite(nt.index) ? Math.round(nt.index) : PIANOROLL_DEFAULT_INDEX);
+
+/** A note's chop, or null for "this event doesn't slice" - which is most events (see the format). */
+export const noteSlice = (nt) => (Number.isFinite(nt.slice) && nt.slice >= 0 ? Math.round(nt.slice) : PIANOROLL_DEFAULT_SLICE);
 
 /** A note's time offset in CELLS, defaulted and clamped - 0 for every note drawn before it existed. */
 export const noteNudge = (nt) => (Number.isFinite(nt.nudge) ? clampNudge(nt.nudge) : 0);
@@ -273,13 +303,14 @@ export const noteNudgeChannel = (nt) => noteNudge(nt) / Math.max(1, Math.round(n
  * never left ringing together, so a long note with a short one dropped into its middle stops where
  * the short one starts instead of carrying on invisibly behind it.
  *
- * A LANE is a pitch and an index together, not either one alone. Both are drawn on the same rows -
- * whichever axis the roll is on, the other channel is invisible - so keying the lane on the visible
- * axis would make the rule DESTRUCTIVE across a mode switch: a two-file stack drawn on the index
- * axis (one pitch, two indices, one onset) would collapse to a single note the moment the keyboard
- * came back, and switching away and back would have quietly deleted half the roll. Keyed on the
- * pair, an overlap only ever resolves between events that really are the same event twice, which is
- * the same rule as before for any roll that uses only one of the two channels - the usual case.
+ * A LANE is a pitch, an index and a slice together, not any one of them alone. All three are drawn
+ * on the same rows - whichever axis the roll is on, the other channels are invisible - so keying the
+ * lane on the visible axis would make the rule DESTRUCTIVE across a mode switch: a two-file stack
+ * drawn on the index axis (one pitch, two indices, one onset) would collapse to a single note the
+ * moment the keyboard came back, and switching away and back would have quietly deleted half the
+ * roll. Keyed on all three, an overlap only ever resolves between events that really are the same
+ * event twice, which is the same rule as before for any roll that uses only one of the channels -
+ * the usual case.
  *
  * Priority is ARRAY ORDER - later notes win, which is also the order they are drawn in and the
  * order hit-testing scans, so "the note on top" means one thing everywhere. The winner keeps the
@@ -308,7 +339,7 @@ export function clipOverlaps(notes) {
 
   const lanes = new Map();
   notes.forEach((nt, i) => {
-    const key = `${Math.round(nt.midi)}:${noteIndex(nt)}`;
+    const key = `${Math.round(nt.midi)}:${noteIndex(nt)}:${noteSlice(nt)}`;
     if (!lanes.has(key)) lanes.set(key, []);
     lanes.get(key).push({ nt, i });
   });
@@ -442,9 +473,15 @@ export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
  * the field list - nothing about the roll differs from the defaults - the axis it was drawn on goes
  * back into the cells, since something has to carry the rhythm.
  *
- * `i` is the one field that never lifts out of the cells onto a control call the way a constant
- * pitch does: `.i()` only exists once there is a sampler, and the call this replaces comes before
- * the `.s()`. There is no scale form of it either - an index is not a pitch.
+ * The `slice` channel travels the same way - `slice(\`<0 1 2 3>*16\`)` for a roll of pure chops,
+ * `.as("note:i:slice")` where it shares an event with the others - except that its field may be
+ * EMPTY: an event with no slice plays the sample whole, and `.as()` reads an empty field as "unset",
+ * which is exactly that. A roll where only some events chop therefore always keeps a pitch or index
+ * field ahead of the slice, since a token has to lead with something.
+ *
+ * `i` and `slice` are the two fields that never lift out of the cells onto a control call the way a
+ * constant pitch does: `.i()`/`.slice()` only exist once there is a sampler, and the call this
+ * replaces comes before the `.s()`. There is no scale form of either - an index is not a pitch.
  *
  * Muted notes are left out entirely: this writes down what the roll PLAYS, and mini-notation has no
  * spelling for a note that's there but switched off.
@@ -462,8 +499,9 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   const anyClip = notes.some((nt) => nt.len > 1);
   const anyNote = notes.some((nt) => Math.round(nt.midi) !== PIANOROLL_DEFAULT_NOTE);
   const anyIndex = notes.some((nt) => noteIndex(nt) !== PIANOROLL_DEFAULT_INDEX);
+  const anySlice = notes.some((nt) => noteSlice(nt) !== null);
   const anyNudge = notes.some((nt) => noteNudge(nt) !== 0);
-  const drawnIndex = normalizePianoRollMode(mode) === 'index';
+  const drawnField = { note: null, index: 'i', slice: 'slice' }[normalizePianoRollMode(mode)];
   // Degrees are read against the scale AS .sc(octave) will build it, so the two agree exactly.
   // With no pitch to write (every event at the default note) there is no key to write it in either.
   const octave = scale && anyNote ? rollOctave(notes, scale) : null;
@@ -472,6 +510,7 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   const present = [
     ...(anyNote ? [pitchField] : []),
     ...(anyIndex ? ['i'] : []),
+    ...(anySlice ? ['slice'] : []),
     ...(anyVel ? ['vel'] : []),
     ...(anyClip ? ['clip'] : []),
     // Last, because it is the field most often at its default - and the trailing ones are what a
@@ -483,6 +522,9 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   const fieldStr = (nt, f) => {
     if (f === pitchField) return pitchStr(nt);
     if (f === 'i') return String(noteIndex(nt));
+    // Empty for an event that doesn't chop, which .as() reads as "leave the channel alone" - the
+    // one field here that can honestly say nothing.
+    if (f === 'slice') return noteSlice(nt) === null ? '' : String(noteSlice(nt));
     if (f === 'vel') return fmt(nt.vel);
     // Written in CELLS, unconverted - unlike the builder's conversion (noteNudgeChannel), and for
     // the reason that conversion exists at all. `nudge` is a share of the step's own width, and the
@@ -496,21 +538,29 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   // The fields that vary stay in the cells; the ones that don't are lifted onto control calls. An
   // empty roll agrees on nothing (there is nothing to agree), so it keeps writing its pitch field.
   const constant = (f) => notes.length > 0 && notes.every((nt) => fieldStr(nt, f) === fieldStr(notes[0], f));
-  // ...except `i`, which has nowhere to be lifted TO: `.i(4)` needs a sampler, and this expression
-  // is written in the pianoroll() call's place, before the `.s()` that makes one.
-  let pulled = present.filter((f) => constant(f) && f !== 'i');
+  // ...except `i` and `slice`, which have nowhere to be lifted TO: `.i(4)`/`.slice(2)` need a
+  // sampler, and this expression is written in the pianoroll() call's place, before the `.s()` that
+  // makes one.
+  let pulled = present.filter((f) => constant(f) && f !== 'i' && f !== 'slice');
   let fields = present.filter((f) => !pulled.includes(f));
   // The cells are the rhythm, so something has to stay in them: with every field constant (or no
   // field differing from its default at all) the axis the roll was DRAWN on goes back into the
   // tokens - `note(\`<60 ~ 60>*4\`).vel(0.5)` - rather than the whole pattern collapsing to a bare
   // `<x ~ x>` with no field to read it as.
   if (!fields.length) {
-    fields = [drawnIndex ? 'i' : pitchField];
+    fields = [drawnField ?? pitchField];
     pulled = pulled.filter((f) => f !== fields[0]);
+  }
+  // A token has to LEAD with a value, and the slice field is the one that may be empty (an event
+  // that doesn't chop). Where some events chop and some don't, the pitch comes back into the cells
+  // in front of it - it is the field every event can always answer for.
+  if (fields[0] === 'slice' && notes.some((nt) => noteSlice(nt) === null)) {
+    fields = [pitchField, ...fields];
+    pulled = pulled.filter((f) => f !== pitchField);
   }
   const isDefault = (nt, f) =>
     (f === 'vel' && nt.vel === 1) || (f === 'clip' && nt.len === 1) || (f === 'i' && noteIndex(nt) === PIANOROLL_DEFAULT_INDEX)
-    || (f === 'nudge' && noteNudge(nt) === 0);
+    || (f === 'slice' && noteSlice(nt) === null) || (f === 'nudge' && noteNudge(nt) === 0);
   const tok = (nt) => {
     const parts = fields.map((f) => fieldStr(nt, f));
     while (parts.length > 1 && isDefault(nt, fields[parts.length - 1])) parts.pop(); // trim trailing defaults
@@ -535,9 +585,10 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   const seq = `\`<\n${body}\n${indent}>*${g}\``;
   // The lifted fields in the order they would have had in the token, then the key: `.n(4).sc(3)`.
   const tail = `${pulled.map((f) => `.${f}(${fieldStr(notes[0], f)})`).join('')}${keyed ? `.sc(${octave})` : ''}`;
-  // note(`…`) only reads a column of bare pitches, and i(`…`) a column of bare indices - anything
-  // else (several fields, or one field that is neither) needs .as() to say which is which.
-  const head = fields.length === 1 && (fields[0] === pitchField || fields[0] === 'i')
+  // note(`…`) only reads a column of bare pitches, i(`…`) a column of bare indices and slice(`…`)
+  // a column of bare chops - anything else (several fields, or one field that is none of those)
+  // needs .as() to say which is which.
+  const head = fields.length === 1 && (fields[0] === pitchField || fields[0] === 'i' || fields[0] === 'slice')
     ? `${fields[0]}(${seq})`
     : `${seq}.as("${fields.join(':')}")`;
   return `${head}${tail}`;
@@ -618,6 +669,125 @@ export function duplicatePianoRollLoop({ notes = [], len, start = 0 }) {
     .filter((nt) => nt.start >= from && nt.start < from + span)
     .map((nt) => ({ ...nt, start: nt.start + span }));
   return { copies, len: span * 2 };
+}
+
+// The most hits one call will write, over every note it was given. A sample fitted to a fraction of
+// a cycle repeats many times under a long note, and a slip of the fit box should cost a message
+// rather than a roll with ten thousand notes in it.
+const SLICE_HITS_MAX = 2048;
+
+/**
+ * Chop a drawn note into one hit per slice of the sample it plays - the roll's half of "slice to
+ * notes", and what makes a break playable as a rhythm without transcribing its transients by hand.
+ *
+ * The break is laid over the ROLL's timeline, repeating every `cycles` (how long the file lasts
+ * under whatever fit is in force - see playSample), with its head at the loop window's opening. A
+ * note takes the slices whose onsets fall inside it, at the moment they fall there: a half note
+ * starting half way through a one-cycle break gets that break's second half, still in its second
+ * half, because that is the audio the note was already sounding. That is the whole reason the fit
+ * is an input here - it is what says how much break one cycle of roll holds.
+ *
+ * `marks` are the slice start positions in the file (0..1, ascending - the slice set's, or the
+ * detector's); `sources` the notes to replace. Every hit keeps its source's pitch, sample index,
+ * velocity and probability, and takes the slice it plays; its length runs to the next hit, and the
+ * last one to the end of the note - so a slice that lasted two eighths comes out two eighths long.
+ *
+ * A hit rarely lands on a cell exactly, so each one carries the remainder as a NUDGE (the roll's
+ * own sub-cell offset), and the roll is re-gridded finer when two hits of one note would otherwise
+ * round onto the same cell. That is what `ratio` reports: multiply the roll's grid by it and
+ * rescale the notes already in it (regridPianoRoll) BEFORE adding these, whose cells are already
+ * counted in the finer grid. `dropped` is what even `maxGrid` couldn't separate.
+ *
+ * `minRatio` forces that decision from outside: one call can only chop notes that play the SAME
+ * file, and a roll where two of them play different breaks has to end on one grid for both. The
+ * caller runs each file, takes the finest ratio any of them asked for, and runs them again with it.
+ */
+export function sliceNotesFor(sources, { marks, cycles, grid, start = 0, maxGrid = PIANOROLL_MAX_GRID, minRatio = 1 } = {}) {
+  const g = normalizePianoRollSteps(grid);
+  const from = Math.round(start);
+  const span = Number(cycles);
+  const at = normalizeMarks(marks);
+  const empty = { notes: [], ratio: 1, dropped: 0, truncated: false };
+  if (!at.length || !(span > 0)) return empty;
+
+  // Where every hit falls, per source note, in cycles from the loop's opening - the unit the break's
+  // own length is in, so the two can be laid against each other before any grid gets involved.
+  let truncated = false;
+  const runs = [];
+  for (const nt of sources) {
+    const opens = (Math.round(nt.start) - from) / g;
+    const shuts = opens + Math.max(1, Math.round(nt.len)) / g;
+    const hits = [];
+    for (let pass = Math.floor(opens / span); pass * span < shuts && hits.length <= SLICE_HITS_MAX; pass++) {
+      for (let k = 0; k < at.length; k++) {
+        const t = (pass + at[k]) * span;
+        if (t >= opens - SLOT_EPS && t < shuts - SLOT_EPS) hits.push({ t, slice: k });
+      }
+    }
+    if (hits.length > SLICE_HITS_MAX) { truncated = true; hits.length = SLICE_HITS_MAX; }
+    hits.sort((a, b) => a.t - b.t);
+    runs.push({ nt, hits, shuts });
+  }
+
+  // Fine enough that no two hits of one note want the same cell. Doubling is lossless on the notes
+  // already drawn (the grid gets finer, nothing moves), which is what makes this safe to do without
+  // asking - and a note in a different lane may of course share a cell, so runs are checked apart.
+  const cellsOf = (run, r) => run.hits.map((h) => (from + h.t * g) * r);
+  const clashes = (run, r) => {
+    const seen = new Set();
+    for (const c of cellsOf(run, r)) {
+      const cell = Math.round(c);
+      if (seen.has(cell)) return true;
+      seen.add(cell);
+    }
+    return false;
+  };
+  let ratio = Math.max(1, 2 ** Math.round(Math.log2(Math.max(1, Number(minRatio) || 1))));
+  while (g * ratio * 2 <= maxGrid && runs.some((run) => clashes(run, ratio))) ratio *= 2;
+
+  const notes = [];
+  let dropped = 0;
+  for (const run of runs) {
+    const cells = cellsOf(run, ratio);
+    const ends = Math.round((from + run.shuts * g) * ratio);
+    const taken = new Set();
+    const made = [];
+    run.hits.forEach((h, k) => {
+      const cell = Math.round(cells[k]);
+      if (taken.has(cell)) { dropped++; return; } // too fine for this grid even at maxGrid
+      taken.add(cell);
+      made.push({
+        midi: clampInt(run.nt.midi, 0, 127),
+        index: noteIndex(run.nt),
+        slice: h.slice,
+        start: cell,
+        len: 1, // filled in below, once the next hit is known
+        vel: clamp01(run.nt.vel ?? 1),
+        prob: clamp01(run.nt.prob ?? 1),
+        // The remainder of the rounding, so a chop that falls between two cells still plays where
+        // it fell. Half a cell is as far as a nudge reaches, which the finer grid keeps it inside.
+        nudge: clampNudge(cells[k] - cell),
+        mute: false,
+      });
+    });
+    // Each hit rings until the next one, and the last until the note it came from ended: a slice
+    // that occupied two eighths of the break occupies two eighths of the roll.
+    made.forEach((nt, k) => {
+      nt.len = Math.max(1, (made[k + 1]?.start ?? ends) - nt.start);
+      nt.full = nt.len;
+    });
+    notes.push(...made);
+  }
+  return { notes, ratio, dropped, truncated };
+}
+
+/** Slice positions as this needs them: ascending, inside the file, no two on one frame. */
+function normalizeMarks(marks) {
+  const nums = (Array.isArray(marks) ? marks : [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n >= 0 && n <= 1)
+    .sort((a, b) => a - b);
+  return nums.filter((p, k) => k === 0 || p - nums[k - 1] > 1e-6);
 }
 
 /**

@@ -3912,7 +3912,7 @@ function setPatchScale(name) {
   const next = name ?? null;
   if (next === patchScale) return;
   patchScale = next;
-  if (prScaleLabel) prScaleLabel.textContent = prIndexMode() ? '' : (patchScale ?? '');
+  if (prScaleLabel) prScaleLabel.textContent = prNoteMode() ? (patchScale ?? '') : '';
   prSyncKeyboardBtn(); // the ⌨ tooltip names the tonic when the keyboard is transposed to the key
   if (prState) drawPianoroll();
 }
@@ -3941,32 +3941,39 @@ function prScaleInfo() {
   return prScaleCache.info;
 }
 
-// --- the two axes ---
-// Every event in a roll carries BOTH a pitch and a sample index - two channels of one event (see
-// pianoroll.mjs). The mode says which of them the vertical axis is showing you:
+// --- the three axes ---
+// Every event in a roll carries a pitch, a sample index AND a slice - three channels of one event
+// (see pianoroll.mjs). The mode says which of them the vertical axis is showing you:
 //
 //   note   the piano keyboard this editor has always had. A row is a semitone; a note drawn here
-//          gets sample index 0.
+//          gets sample index 0 and no slice.
 //   index  a plain 0, 1, 2, … count of a pack's files, driving `.i()`. A row is a file; a note
 //          drawn here gets pitch c2, where a sample plays as recorded.
+//   slice  the same plain count over the chops of whatever file the event plays, driving
+//          `.slice()`. A row is a chop; a note drawn here gets c2 and file 0. This is the axis a
+//          chopped break is arranged on - and the one "slice to notes" writes into.
 //
 // Switching moves nothing and changes no sound - the timings, lengths, velocity, probability and
-// mute are the same events either way, and the other channel keeps whatever it already had. It is
+// mute are the same events either way, and the channels you can't see keep whatever they had. It is
 // a change of view, so it costs one `mode:` in the call and nothing else.
 //
 // What DOESN'T carry over is the key: a pack has no scale, so `scale` (the tint and its fold) is a
 // note-axis feature. It stays in the toolbar - greyed, not removed, so the buttons never move
-// under the pointer - and `fold`, which hides the rows nothing is drawn on, works on both.
+// under the pointer - and `fold`, which hides the rows nothing is drawn on, works on all three.
 
 const prIndexMode = () => prState?.mode === 'index';
+const prSliceMode = () => prState?.mode === 'slice';
+/** The piano keyboard - the one axis whose rows are pitches, and so the one that can be played. */
+const prNoteMode = () => !prIndexMode() && !prSliceMode();
 
 /** The channel the axis is showing: which key of a note object a drawn ROW reads and writes. */
-const prRowField = () => (prIndexMode() ? 'index' : 'midi');
+const prRowField = () => pianorollMod.PIANOROLL_ROW_FIELD[prState?.mode ?? 'note'] ?? 'midi';
 
 /** Where a note sits on the axis currently on screen. */
-const prRowOf = (nt) => (prIndexMode() ? pianorollMod.noteIndex(nt) : nt.midi);
+const prRowOf = (nt) =>
+  (prIndexMode() ? pianorollMod.noteIndex(nt) : prSliceMode() ? (pianorollMod.noteSlice(nt) ?? 0) : nt.midi);
 
-/** Move a note to row `row` on the axis currently on screen, leaving its other channel alone. */
+/** Move a note to row `row` on the axis currently on screen, leaving its other channels alone. */
 const prSetRow = (nt, row) => { nt[prRowField()] = Math.max(0, Math.min(127, Math.round(row))); };
 
 /** A fresh note at row `row`: the drawn channel takes the row, the other one its resting value. */
@@ -3981,36 +3988,47 @@ const prNewNote = (row, cell) => ({
   mute: false,
 });
 
-/** Rows either side of one another in the axis's own units: an octave, or a group of 4 indices. */
-const prAxisJump = () => (prIndexMode() ? PR_INDEX_GROUP : 12);
+/** Rows either side of one another in the axis's own units: an octave, or a group of 4 numbers. */
+const prAxisJump = () => (prNoteMode() ? 12 : PR_INDEX_GROUP);
 
-/** The mode button's face, and the one control that only means something on one of the two axes. */
+// What each axis calls itself, and what its rows mean - the mode button's face and its tooltip.
+// The button cycles: note -> index -> slice -> note.
+const PR_MODE_NEXT = { note: 'index', index: 'slice', slice: 'note' };
+const PR_MODE_ROWS = {
+  note: 'note names',
+  index: 'sample indices (.i())',
+  slice: 'sample slices (.slice())',
+};
+
+/** The mode button's face, and the controls that only mean something on the keyboard axis. */
 function prSyncMode() {
   if (!prState) return;
-  const index = prIndexMode();
+  const mode = prNoteMode() ? 'note' : prState.mode;
+  const pitched = mode === 'note';
   // The label IS the state - which is why this button never takes the `active` accent the toggles
   // do: switching would flash the accent colour off behind the new word, and the word had already
   // said it.
-  prModeBtn.textContent = index ? 'index' : 'note';
-  prModeBtn.title = index
-    ? 'rows are sample indices (.i()) — click for note names'
-    : 'rows are note names — click for sample indices (.i())';
+  prModeBtn.textContent = mode;
+  prModeBtn.title = `rows are ${PR_MODE_ROWS[mode]} — click for ${PR_MODE_ROWS[PR_MODE_NEXT[mode]]}`;
   // Greyed rather than hidden: a toolbar that reshuffles itself under the pointer is worse than a
   // button that plainly doesn't apply here. Both of these are keyboard things - a key to fold to,
-  // and a pitch to audition - and the index rows have neither. (Preview would happily play the c2
+  // and a pitch to audition - and the numbered rows have neither. (Preview would happily play the c2
   // every index note sits at, which is worse than silence: it would sound the same on every row.)
-  prScaleFoldBtn.disabled = index;
-  prScaleFoldBtn.title = index
-    ? 'a key is a note-axis thing — switch to note rows to fold to the scale'
-    : 'show only the scale set by setscale()';
-  prPreviewBtn.disabled = index;
-  prPreviewBtn.title = index ? 'the index rows name files, not pitches — nothing to audition' : 'preview notes as you draw';
-  prScaleLabel.textContent = index ? '' : (patchScale ?? '');
+  prScaleFoldBtn.disabled = !pitched;
+  prScaleFoldBtn.title = pitched
+    ? 'show only the scale set by setscale()'
+    : 'a key is a note-axis thing — switch to note rows to fold to the scale';
+  prPreviewBtn.disabled = !pitched;
+  prPreviewBtn.title = pitched
+    ? 'preview notes as you draw'
+    : `the ${mode} rows name ${mode === 'index' ? 'files' : 'chops'}, not pitches — nothing to audition`;
+  prScaleLabel.textContent = pitched ? (patchScale ?? '') : '';
+  prSyncKeyboardBtn();
 }
 
 /**
  * Switch which channel the axis shows. Nothing about the roll moves: the notes are the same
- * events, drawn against a different ruler, and each keeps the channel you can't currently see. The
+ * events, drawn against a different ruler, and each keeps the channels you can't currently see. The
  * view is re-framed around wherever they land on the new axis, which is the only thing that has to
  * change - and a selection is a set of those same events, so what you had selected stays selected
  * on the other axis.
@@ -4045,7 +4063,7 @@ function prSetMode(mode) {
 function prLaneList() {
   const used = [...new Set(prLiveNotes(prState.notes).map(prRowOf))].sort((a, b) => a - b);
   if (prState.fold) return used.length ? used : null;
-  const info = prIndexMode() || !prState.scaleFold ? null : prScaleInfo();
+  const info = prNoteMode() && prState.scaleFold ? prScaleInfo() : null;
   if (!info) return null;
   const inUse = new Set(used);
   const lanes = [];
@@ -4119,7 +4137,7 @@ function prPreviewSend(note, isOn) {
 function prPreview(midi) {
   // An index roll's rows are files in a pack, not pitches: there is nothing here that knows what
   // row 3 sounds like, and playing it as MIDI note 3 would be a lie rather than a preview.
-  if (!prPreviewEnabled || prIndexMode() || prSounding === midi) return;
+  if (!prPreviewEnabled || !prNoteMode() || prSounding === midi) return;
   if (prSounding != null) prPreviewSend(prSounding, false);
   prPreviewSend(midi, true);
   prSounding = midi;
@@ -4142,7 +4160,7 @@ function prChordOff() {
 }
 function prPreviewChord(midis) {
   prChordOff();
-  if (!prPreviewEnabled || prIndexMode()) return;
+  if (!prPreviewEnabled || !prNoteMode()) return;
   if (prSounding != null) { prPreviewSend(prSounding, false); prSounding = null; }
   prChordSounding = [...new Set(midis)].slice(0, 12);
   for (const m of prChordSounding) prPreviewSend(m, true);
@@ -4227,7 +4245,7 @@ function parsePianorollCall(inner) {
 function prCallOpts({ grid, len, start, mode, swing, swinggrid }) {
   const opts = { grid, len };
   if (start) opts.start = start; // a window that opens at 0 is the default - don't write it
-  if (mode === 'index') opts.mode = 'index'; // notes are the default - don't write it
+  if (mode && mode !== 'note') opts.mode = mode; // notes are the default - don't write it
   // A straight roll writes no swing at all, and one swinging its own grid writes no division: both
   // are what the builder assumes, and a roll that says nothing about groove should look like one.
   if (swing) opts.swing = Math.round(swing * 100000) / 100000;
@@ -5164,7 +5182,7 @@ function prFramePitch() {
   const m = prMetrics();
   const notes = prLiveNotes(prState.notes);
   if (!notes.length) {
-    prState.pitchTop = prIndexMode() ? PR_INDEX_TOP : prPosOf(PR_DEFAULT_TOP, m);
+    prState.pitchTop = prNoteMode() ? prPosOf(PR_DEFAULT_TOP, m) : PR_INDEX_TOP;
     return;
   }
   const positions = notes.map((nt) => prPosOf(prRowOf(nt), m));
@@ -5297,9 +5315,10 @@ function openPianorollEditor(call, carry = null) {
     grid, // granularity: cells per cycle (the *grid multiplier)
     len, // loop length in cells (grid-th notes)
     start, // where the loop window opens, in cells - drag either end of the loop bar to move it
-    // What the vertical axis MEANS: 'note' (a piano keyboard, MIDI pitches) or 'index' (a plain
-    // 0,1,2… list of a sample pack's files). Per ROLL - it is written into the call - rather than
-    // sticky like the tool, because it is a fact about this roll's data, not a way of working.
+    // What the vertical axis MEANS: 'note' (a piano keyboard, MIDI pitches), 'index' (a plain
+    // 0,1,2… list of a sample pack's files) or 'slice' (the same, over one file's chops). Per ROLL -
+    // it is written into the call - rather than sticky like the tool, because it is a fact about
+    // this roll's data, not a way of working.
     mode,
     // The roll's own groove: how far its offbeats are delayed, and which division counts as an
     // offbeat (null = the roll's own grid). Played as the ordinary swing channel (see the builder),
@@ -6274,10 +6293,11 @@ function drawPianoKeys(ctx, col, m, info) {
   ctx.beginPath(); ctx.moveTo(PR_GUTTER + 0.5, 0); ctx.lineTo(PR_GUTTER + 0.5, H); ctx.stroke();
 }
 
-// The index axis's gutter, in place of the keyboard: just the numbers, right-aligned, one per row,
-// with every fourth called out - the same job the C labels and the heavier octave lines do on the
-// piano, so a row twelve up from the bottom can be counted to rather than squinted at. No keys and
-// no scale tint: an index names a file in a pack, and a pack has neither black notes nor a key.
+// The numbered axes' gutter (index and slice), in place of the keyboard: just the numbers,
+// right-aligned, one per row, with every fourth called out - the same job the C labels and the
+// heavier octave lines do on the piano, so a row twelve up from the bottom can be counted to rather
+// than squinted at. No keys and no scale tint: these rows name a file in a pack or a chop in a
+// file, and neither has black notes or a key.
 function drawIndexRows(ctx, col, m) {
   const { H, gridTop, rowH, laneTop } = m;
   ctx.textBaseline = 'middle';
@@ -6858,7 +6878,10 @@ function prHarmonyTransformItems(items, targets, scale, at) {
         { key: 'spread', label: 'spread', type: 'range', min: 0, max: Math.max(1, grid / 4), step: 0.05, value: 0.5 },
         { key: 'fade', label: 'fade', type: 'range', min: 0, max: 1, step: 0.05, value: 0 },
       ],
-      make: (v) => (ns) => T.strum(ns, { spread: v.spread, direction: v.direction === 'down' || v.direction === 'top row first' ? 'down' : 'up', velRamp: v.fade, key: pitched ? 'midi' : 'index' }),
+      // Fanned out in the order the rows are DRAWN in, whichever axis that is: pitch on the
+      // keyboard, file on the index axis, chop on the slice axis - which is what "top row first"
+      // means when you are looking at it.
+      make: (v) => (ns) => T.strum(ns, { spread: v.spread, direction: v.direction === 'down' || v.direction === 'top row first' ? 'down' : 'up', velRamp: v.fade, key: prRowField() }),
     }));
     if (pitched) {
       rhythm.push(popover('arpeggiate', 'each chord broken into a run of single notes', {
@@ -7072,7 +7095,7 @@ function prHarmonyRollItems(items, scale, at) {
 
 function prOpenHarmonyMenu(e) {
   if (!prState || !harmonyMod) return;
-  const index = prIndexMode(); // a drum roll: no chords, no pitch transforms - rhythm and chance still apply
+  const index = !prNoteMode(); // a drum roll: no chords, no pitch transforms - rhythm and chance still apply
   let targets = [...prState.sel].filter((nt) => !nt.hidden);
   if (!targets.length) {
     // Nothing selected: the note under the pointer, selected so the menu's scope is visible -
@@ -7099,6 +7122,13 @@ function prOpenHarmonyMenu(e) {
   const chordItem = (label, midis, title) =>
     [label, () => { prHarmonyCommit(midis); prOpenHarmonyMenu(at); }, title, () => prHarmonyPreview(midis)];
   const items = [];
+  // Above the harmony, because it is about the SOUND rather than the notes - and because on a
+  // sampler track it is the thing most often wanted. Offered only where there is a sample to chop
+  // and something selected to chop it into.
+  if (targets.length && prSamplerChain()) {
+    items.push(['slice to notes', () => { prHarmony = null; prSliceToNotes(targets); },
+      'replace the selection with one hit per slice of the sample it plays, where each chop falls']);
+  }
   const chordItems = [];
   if (index || !targets.length) {
     // no chords for a drum roll, and none to name with nothing selected
@@ -7129,6 +7159,7 @@ function prOpenHarmonyMenu(e) {
     if (chordItems.length === 1) chordItems.pop(); // no voicings to offer: no head for them either
   }
   if (chordItems.length) {
+    if (items.length) items.push('-');
     items.push({ sub: 'harmony', title: pitches.length === 1 ? `chords on ${midiName(pitches[0])}` : 'voicings of the chord', items: chordItems });
   }
   if (targets.length) prHarmonyTransformItems(items, targets, index ? null : scale, at);
@@ -7139,6 +7170,217 @@ function prOpenHarmonyMenu(e) {
     onHoverOut: () => prHarmonyHoverOut(),
     items,
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice to notes
+//
+// A drawn note that plays a break, replaced by one note per CHOP of that break - at the moment the
+// chop falls, so a slice that lasted two eighths comes out two eighths long. It is how a break
+// becomes something you can rearrange, without transcribing its transients by hand first.
+//
+// The break is laid over the roll's timeline (see pianoroll.mjs sliceNotesFor), so the note's own
+// place in the bar decides which part of the break it gets: a half note starting half way through
+// takes the break's second half, still in its second half. What says how much break a cycle of roll
+// holds is the FIT - the chain's `.fit()` where it has one, and the slice set's own otherwise, in
+// exactly the precedence playSample gives them - and an unfitted sample simply lasts as long as it
+// lasts, which is a thing you may want and is not corrected here.
+//
+// Where the chops come from, in order: the `.slices("name")` set on the chain, if it has an entry
+// for this very file; failing that the sample's own transients, which are then WRITTEN into the set
+// (making one if the chain has none) - because the numbers the roll now holds have to keep meaning
+// the same chops tomorrow, and a detector re-run at a different sensitivity would move them.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Where the chain that PLAYS this roll starts, as a document offset. An inline pianoroll() is its
+ * own chain; a named roll's definition sits at the foot of the buffer, so the chain is wherever it
+ * is played from - the same question prPlayingTrack asks, in offsets rather than labels.
+ */
+function prChainAt() {
+  if (!prState) return null;
+  const src = prState.source?.find();
+  if (src) return cm.indexFromPos(src.from);
+  if (prState.rollId != null) {
+    const call = rollDefs.refCalls(cm.getValue(), prState.rollId)[0];
+    if (call) return call.start;
+  }
+  const range = prState.marker?.find();
+  return range ? cm.indexFromPos(range.from) : prState.callStart ?? null;
+}
+
+/**
+ * The sampler source the roll's track plays, or null for a synth track: the `s()`/`sp()`/`se()`/
+ * `sr()` CALL (what `.fit()` and `.slices()` are read relative to) and the REF it resolves to
+ * (which pack, which file index) - the same two things the slice panel opens on.
+ */
+function prSamplerChain() {
+  const at = prChainAt();
+  if (at == null || !labelsMod) return null;
+  const code = cm.getValue();
+  const call = sliceSourceCallAt(code, at);
+  const ref = call ? sliceChainSourceAt(code, at) : null;
+  return ref ? { code, at, call, ref } : null;
+}
+
+/** The set a `.slices(...)` call on the chain names, with the id it was found under. */
+function prSliceSetOnChain(code, at) {
+  const call = sliceCallOnChain(code, at);
+  if (!call || !slicesMod) return null;
+  // A `<tight loose>` names several; the first is the one written into, which is also the one the
+  // panel opens on. Nothing here changes which of them PLAYS.
+  const id = (code.slice(call.open + 1, call.close).match(/[\w$]+/) ?? [])[0];
+  if (id == null) return null;
+  const def = sliceDefOf(id);
+  const lib = def ? null : prPrebakeSlices.find((p) => p.id === id);
+  if (!def && !lib) return null;
+  return { id, own: !!def, set: def ? sliceSetOf(code, def) : lib.set ?? [] };
+}
+
+/**
+ * How many cycles one pass of `duration` seconds of audio lasts under `fit` - playSample's own
+ * arithmetic, for a file the panel isn't holding. `null` fit is no fit at all: the sample lasts as
+ * long as it lasts. A patterned fit has no single answer and comes back null.
+ */
+function prFitCycles(fit, duration) {
+  const measures = duration * (transport.cps || 0);
+  if (!(measures > 0)) return null;
+  if (fit == null) return measures;
+  return sliceFitCycles(fit, duration);
+}
+
+/**
+ * Files `[{ key, marks }]` into a slice set definition, one entry per sample, leaving every other
+ * file's entry - and each of these files' own fit - exactly as it was.
+ */
+function prWriteSliceEntry(id, entries) {
+  const def = sliceDefOf(id);
+  if (!def || !slicesMod || !entries.length) return;
+  const cur = sliceSetOf(cm.getValue(), def);
+  // A bare list applies to whatever plays, so turning it into a map would change what the files it
+  // wasn't drawn on hear. It only gets here empty (a set that says nothing yet), where there is
+  // nothing to lose.
+  const set = Array.isArray(cur) ? {} : { ...cur };
+  for (const { key, marks } of entries) {
+    set[key] = slicesMod.normalizeSliceEntry({ fit: slicesMod.sliceEntryFor(cur, key)?.fit ?? null, marks });
+  }
+  cm.replaceRange(
+    `${def.idLiteral}, ${slicesMod.serializeSliceSet(set)}`,
+    cm.posFromIndex(def.open + 1),
+    cm.posFromIndex(def.close),
+  );
+  refoldAll();
+}
+
+/**
+ * Give the chain a slice set to chop against, and answer with its id. The `.slices()` goes on right
+ * after the source call and materialize names it, exactly as double-clicking `slice` would - so a
+ * set made this way is the same set the slice editor opens, and can be redrawn there afterwards.
+ */
+function prMakeSliceSet(chain) {
+  cm.replaceRange('.slices()', cm.posFromIndex(chain.call.close + 1));
+  sliceDefs.materialize();
+  const at = prChainAt();
+  return at == null ? null : prSliceSetOnChain(cm.getValue(), at);
+}
+
+async function prSliceToNotes(targets) {
+  const roll = prState; // the panel may be closed, or on another roll, by the time the files arrive
+  const chain = prSamplerChain();
+  if (!chain || !pianorollMod?.sliceNotesFor) return;
+  const { code, at, call, ref } = chain;
+  const live = targets.filter((nt) => !nt.hidden);
+  if (!live.length) return;
+  const named = prSliceSetOnChain(code, at);
+  // Which file each note plays: its own index where the roll sets any (the all-or-nothing rule the
+  // builder applies - see pianoroll() in signal.mjs), otherwise whatever the chain names.
+  const anyIndex = prLiveNotes(prState.notes)
+    .some((nt) => pianorollMod.noteIndex(nt) !== pianorollMod.PIANOROLL_DEFAULT_INDEX);
+  const groups = new Map();
+  for (const nt of live) {
+    const i = anyIndex ? pianorollMod.noteIndex(nt) : ref.index;
+    if (!groups.has(i)) groups.set(i, []);
+    groups.get(i).push(nt);
+  }
+  // A chain whose index is a pattern plays a different file each time round, and the chops are
+  // timed against one of them. The slice NUMBERS still mean the k-th chop of whatever is playing
+  // (a set is per sample), so the other files chop on their own markers - just not necessarily on
+  // these beats. Worth a line, never a reason to refuse.
+  if (!anyIndex && ref.indices.length > 1) {
+    logLine(`slice to notes: this chain names ${ref.indices.length} files - the timing is file ${ref.index}'s; the others chop on their own markers at these numbers`);
+  }
+  const fitCall = sliceFitCall({ code, src: call }); // the pattern's own .fit(), which beats the set's
+
+  const plans = [];
+  const toFile = []; // detected chops that have to be written down, so the numbers stay put
+  try {
+    for (const [i, notes] of groups) {
+      const res = await api('GET', `/api/sampleFile?ref=${encodeURIComponent(ref.ref)}&i=${i}`);
+      if (!res.file) { logLine(`slice to notes: "${ref.ref}" has no file ${i}`, true); continue; }
+      const entry = named && slicesMod ? slicesMod.sliceEntryFor(named.set, res.key) : null;
+      let marks = entry?.marks ?? null;
+      let drawn = true;
+      if (!marks?.length) {
+        drawn = false;
+        marks = (await api('GET', `/api/sampleSlices?file=${encodeURIComponent(res.file)}`)).slices;
+      }
+      if (!marks?.length) {
+        logLine(`slice to notes: nothing to chop in ${res.file.split('/').pop()} - only WAV files are analyzed`, true);
+        continue;
+      }
+      const buffer = await packLoadBuffer(res.file);
+      const fit = fitCall ? fitCall.value : entry?.fit ?? null;
+      const cycles = prFitCycles(fit, buffer.duration);
+      if (!cycles) {
+        const why = fitCall ? `this chain's .fit(${fitCall.value}) is a pattern` : 'the sample has no length yet';
+        logLine(`slice to notes: ${why}, so there is no one span to lay ${res.file.split('/').pop()} against`, true);
+        continue;
+      }
+      plans.push({ notes, opts: { marks, cycles }, file: res.file });
+      if (!drawn) toFile.push({ key: res.key, marks });
+    }
+  } catch (e) {
+    logLine(`slice to notes: ${e.message ?? e}`, true);
+    return;
+  }
+  if (!plans.length || prState !== roll) return;
+
+  // One grid for the whole edit: each plan says how fine IT needs to be, and the roll can only be
+  // on one of them. Re-run at that fineness so every hit is counted in the grid the roll ends on.
+  const on = { grid: prState.grid, start: prState.start };
+  const cutAt = (p, minRatio) => pianorollMod.sliceNotesFor(p.notes, { ...on, ...p.opts, minRatio });
+  const minRatio = plans.reduce((r, p) => Math.max(r, cutAt(p, 1).ratio), 1);
+  const cut = plans.map((p) => cutAt(p, minRatio));
+  const made = cut.flatMap((c) => c.notes);
+  if (!made.length) return logLine('slice to notes: no chop of the sample falls inside the selection', true);
+
+  // The set first: writing a definition below the roll moves nothing above it, and the roll's own
+  // call is rewritten from prState afterwards either way.
+  if (toFile.length) {
+    const set = named ?? prMakeSliceSet(chain);
+    if (!set) logLine('slice to notes: could not file these chops - the roll plays them, but a re-detection would move them', true);
+    else if (!set.own) logLine(`slice to notes: "${set.id}" comes from your library - ★ it into this buffer to keep these chops with it`, true);
+    else prWriteSliceEntry(set.id, toFile);
+  }
+
+  if (minRatio > 1) {
+    // Lossless: the cells get finer and everything already drawn is rescaled to span the same time.
+    Object.assign(prState, pianorollMod.regridPianoRoll(prState, prState.grid * minRatio));
+    prSyncGridLenInputs();
+  }
+  const gone = new Set(live);
+  prState.notes = prState.notes.filter((nt) => !gone.has(nt)).concat(made);
+  prState.sel = new Set(made);
+  prClipOverlaps();
+  if (!prSliceMode()) { prState.mode = 'slice'; prSyncMode(); prFramePitch(); }
+  writePianorollCall();
+  drawPianoroll();
+  const dropped = cut.reduce((n, c) => n + c.dropped, 0);
+  const parts = [`${made.length} hit${made.length === 1 ? '' : 's'} from ${plans.length === 1 ? plans[0].file.split('/').pop() : `${plans.length} files`}`];
+  if (minRatio > 1) parts.push(`grid ${prState.grid}`);
+  if (dropped) parts.push(`${dropped} too close together to place`);
+  if (cut.some((c) => c.truncated)) parts.push('and stopped at the cap - check the fit');
+  logLine(`sliced: ${parts.join(' · ')}`);
 }
 
 /**
@@ -7329,7 +7571,7 @@ function drawValueLane(ctx, col, m) {
 function prUpdateChordLabel() {
   if (!prChordLabel) return;
   let text = '';
-  if (prState && harmonyMod && !prIndexMode()) {
+  if (prState && harmonyMod && prNoteMode()) {
     const pitches = [...new Set([...prState.sel].filter((nt) => !nt.hidden).map((nt) => nt.midi))];
     if (pitches.length >= 2) {
       const a = harmonyMod.analyzeChord(pitches, patchScale);
@@ -7359,9 +7601,10 @@ function drawPianoroll() {
   // tonic in the accent, in-key notes on the plain background, out-of-key ones dimmed - so the
   // key reads off the grid the way it does in Live. Folded, the out-of-key lanes are gone
   // entirely and the dimmed ones left are notes you drew outside the key.
-  // No scale colouring on the index axis: its rows are files in a pack, not pitches in a key.
-  const info = prIndexMode() ? null : prScaleInfo();
-  const index = prIndexMode();
+  // No scale colouring on the numbered axes: their rows are files (or chops) of a pack, not
+  // pitches in a key.
+  const info = prNoteMode() ? prScaleInfo() : null;
+  const index = !prNoteMode();
   const accent = col('--accent');
   ctx.fillStyle = col('--bg');
   ctx.fillRect(PR_GUTTER, gridTop, W - PR_GUTTER, gridH);
@@ -7540,7 +7783,7 @@ function prCursorFor(px, py, m, velMod) {
     if (prTool === 'draw') return CUR_PENCIL; // ...and the pencil paints values across it
     return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
   }
-  if (px < PR_GUTTER) return prIndexMode() ? 'default' : 'pointer'; // over the piano keyboard - the index gutter has nothing to play
+  if (px < PR_GUTTER) return prNoteMode() ? 'pointer' : 'default'; // over the piano keyboard - a numbered gutter has nothing to play
   const cell = prCellAt(px, m);
   const emptyCursor = prTool === 'draw' ? CUR_PENCIL : 'crosshair'; // pencil draws, arrow marquees
   if (cell == null) return emptyCursor;
@@ -7922,7 +8165,7 @@ function initPianorollCanvas() {
     if (cell == null) {
       // clicked the piano keyboard - audition that key, don't edit. There is no key to audition on
       // the index axis, where the gutter is a list of files the engine holds, not pitches.
-      if (!prIndexMode() && px < PR_GUTTER && pos <= prState.pitchTop && pos >= m.bottomPos) {
+      if (prNoteMode() && px < PR_GUTTER && pos <= prState.pitchTop && pos >= m.bottomPos) {
         drag = { kind: 'audition' };
         prPreview(row);
       }
@@ -8455,7 +8698,7 @@ function initPianorollEditor() {
   // quantize `.scale()`/`.sc()` apply to a note pattern, so a drawn line and a written one land on
   // the same pitches. One history entry, so cmd-Z puts the out-of-key notes back.
   prScaleLabel.addEventListener('click', () => {
-    if (!prState || prIndexMode() || !prScaleInfo()) return; // a pack has no key to snap to
+    if (!prState || !prNoteMode() || !prScaleInfo()) return; // a pack has no key to snap to
     prRefocus();
     const live = prLiveNotes(prState.notes);
     const snapped = live.map((nt) => notesMod.quantizeToScale(nt.midi, patchScale));
@@ -8468,12 +8711,13 @@ function initPianorollEditor() {
     logLine(`snapped ${moved} note${moved === 1 ? '' : 's'} to ${patchScale}`);
   });
 
-  // note ⇄ index: show the other channel. Per roll (it is written into the call, and undo walks
-  // back over it), unlike the tool and the folds, which are ways of working and stay sticky. No log
-  // line: nothing happened to the music, and the button's own label says where you now are.
+  // note -> index -> slice: show the next channel round. Per roll (it is written into the call,
+  // and undo walks back over it), unlike the tool and the folds, which are ways of working and stay
+  // sticky. No log line: nothing happened to the music, and the button's own label says where you
+  // now are.
   prModeBtn.addEventListener('click', () => {
     if (!prState) return;
-    prSetMode(prIndexMode() ? 'note' : 'index');
+    prSetMode(PR_MODE_NEXT[prNoteMode() ? 'note' : prState.mode]);
     prRefocus();
   });
 
@@ -8555,7 +8799,7 @@ function initPianorollEditor() {
     // degrees plus a `.sc(octave)`, which re-keys with the setscale line instead of freezing the
     // pitches that happened to be under the pencil. Off, the roll is chromatic and so is what
     // it converts to.
-    const scale = prState.scaleFold && !prIndexMode() && prScaleInfo() ? patchScale : null;
+    const scale = prState.scaleFold && prNoteMode() && prScaleInfo() ? patchScale : null;
     // Each destination gets the expression indented to ITS own line: one roll can be written into
     // several patterns, at whatever depth each of them sits.
     const exprAt = (at) => pianorollMod.pianoRollToMini(notes, {
@@ -11655,8 +11899,11 @@ function onKbKeyDown(e) {
     swallow();
     return;
   }
-  // On the index axis only some of these keys are files; on either note layout all of q…p and
-  // a…l play something, so nothing in the top two rows reaches the editor while ⌨ is on.
+  // On the index axis only some of these keys are files; on every other layout all of q…p and
+  // a…l play something, so nothing in the top two rows reaches the editor while ⌨ is on. The slice
+  // axis keeps the piano: there is no way to strike a chop from here (the key edges carry a note
+  // and a file, and nothing else), so the keys go on playing the track's pitches rather than
+  // pretending a row number is one.
   const semitones = prIndexMode() ? KB_SEMITONES : kbSemitones();
   if (!(key in semitones)) return;
   if (e.repeat || kbHeldKeys.has(key)) {
@@ -14340,9 +14587,10 @@ function sliceFitCall(chain = sliceFitChain()) {
 /**
  * How many cycles the file lasts under `value`, or null while the sample is still decoding.
  * Mirrors playSample: measures = duration / secPerCycle, and auto takes the nearest power of two.
+ * `dur` defaults to the file the panel is holding; the roll's "slice to notes" passes its own,
+ * since it asks about samples this panel has never opened.
  */
-function sliceFitCycles(value) {
-  const dur = sliceState?.buffer?.duration;
+function sliceFitCycles(value, dur = sliceState?.buffer?.duration) {
   const cps = transport.cps || 0;
   if (!dur || cps <= 0) return null;
   const measures = dur * cps;
@@ -14988,11 +15236,20 @@ function sliceStepFile(dir) {
   }
   const at = list.indexOf(sliceState.index);
   sliceState.index = list[(((at < 0 ? 0 : at) + dir) % list.length + list.length) % list.length];
-  // Everything downstream of the file is the file's: its audio, its peaks, its transients, and
-  // which entry of the set is being edited (sliceApplyKey, once the new key comes back).
+  // Everything downstream of the file is the file's: its audio, its peaks, its transients, its fit,
+  // and which entry of the set is being edited (sliceApplyKey, once the new key comes back). The
+  // markers go with them rather than lingering over a blank canvas while the next file decodes -
+  // and a sample this set has never been drawn on comes up on the state a sample with NO set is in:
+  // the detector's own chops, at whatever length the file itself lasts. That is the whole meaning of
+  // an entry that says nothing, and it would be a lie for the panel to show anything else.
   sliceStopAudition();
-  Object.assign(sliceState, { file: null, buffer: null, peaks: null, detected: null, detectWhy: '', sel: 0, fit: null });
+  Object.assign(sliceState, {
+    file: null, buffer: null, peaks: null, detected: null, detectWhy: '', positions: [], sel: 0, fit: null, lit: [],
+  });
   sliceSetView(0, 1);
+  sliceSetHand(false); // nothing on screen has been touched yet; sliceCheckHand corrects it if it has
+  sliceSay('');
+  sliceSyncFit();
   sliceRender();
   sliceLoadSample();
 }

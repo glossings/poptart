@@ -14,7 +14,7 @@ import {
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
-import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
+import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices } from './rolls.mjs';
@@ -2170,7 +2170,8 @@ export class Sig {
    * `"<36:1:4 ~ 47:0.5:3 ~>*8".as("note:vel:clip")`. Each token's fields are split on ":" and
    * read in the order the spec names them. Fields: `note` (MIDI number or note name), `n`
    * (scale degree - map it with .scale() afterwards), `i` (which file of the sample pack, as
-   * .i() sets), `vel` (0..1 velocity for that one event), `clip` (duration as a multiple of the
+   * .i() sets), `slice` (which chop of that file, as .slice() sets - what a slice-mode piano roll
+   * writes), `vel` (0..1 velocity for that one event), `clip` (duration as a multiple of the
    * token's own step width - at *8, clip 3 rings for three eighth-slots), `nudge` (how far off its
    * grid position that one event plays, as a fraction of its own step - `38::0.04` pushes just that
    * snare late). Missing/empty fields keep their defaults (vel 1, clip 1, nudge 0), so a spec only
@@ -2182,19 +2183,19 @@ export class Sig {
    * (as if by .clip()), `nudge` a per-event time offset (as if by .nudge(), and still added to by a
    * later .swing()) - so any of them can be overridden afterwards: `"<0 1 0.5>".as("vel")`
    * carries the velocities and a later .note("f3") (or .s("rave")) supplies the pitch/sound while
-   * the velocities ride along. `i` is the exception: there is no sampler yet for a channel to live
-   * on, so each token's index rides on its own event (step.cfg, the same place a drawn index roll
-   * puts it) and the .s("pack") that follows carries it through.
+   * the velocities ride along. `i`/`slice` are the exception: there is no sampler yet for a channel
+   * to live on, so each token's index and chop ride on its own event (step.cfg, the same place a
+   * drawn roll puts them) and the .s("pack") that follows carries them through.
    * A spec with no pitch field - `.as("vel:clip")`, `.as("i")` - is a note-less pattern: every
    * present token fires the default note (C2, like a note-less synth("X")) at its velocity/clip,
    * until a later .note()/.n() sets the pitch. Rests (`~`) stay rests throughout.
    */
   as(spec) {
     const fields = String(spec).split(':').map((f) => f.trim().toLowerCase());
-    const KNOWN = ['note', 'n', 'i', 'vel', 'clip', 'nudge'];
+    const KNOWN = ['note', 'n', 'i', 'slice', 'vel', 'clip', 'nudge'];
     for (const f of fields) {
       if (!KNOWN.includes(f)) {
-        throw new Error(`[signal] .as(): unknown field "${f}" - fields are note, n, i, vel, clip, nudge (e.g. .as("note:vel:clip"))`);
+        throw new Error(`[signal] .as(): unknown field "${f}" - fields are note, n, i, slice, vel, clip, nudge (e.g. .as("note:vel:clip"))`);
       }
     }
     if (!this.stepsForCycle) {
@@ -2212,6 +2213,7 @@ export class Sig {
     const hasClip = fields.includes('clip');
     const hasNudge = fields.includes('nudge');
     const hasIndex = fields.includes('i');
+    const hasSlice = fields.includes('slice');
     // vel/clip/nudge are split off PER STEP rather than by sampling a parallel signal at each onset,
     // because every field here comes off the same token: a chord cell - `[57:0.8,59:10]`, what the
     // piano roll writes for a chord whose notes differ in length or velocity - puts two steps at the
@@ -2220,7 +2222,7 @@ export class Sig {
     // which is also what lets the notes of one chord be splayed apart by their own nudges.
     // All of them land as plain keys on the event, the same ones .vel()/.clip()/.nudge() merge.
     let base = this;
-    if (hasVel || hasClip || hasNudge || hasIndex) {
+    if (hasVel || hasClip || hasNudge || hasIndex || hasSlice) {
       const split = (s) => {
         if (s.value == null) return s;
         const step = { ...s };
@@ -2229,11 +2231,12 @@ export class Sig {
           const v = fieldOf(s.value, f, Number);
           if (v != null && !Number.isNaN(v)) step[f] = v; // absent -> unset, i.e. the default
         }
-        if (hasIndex) {
-          // Sampler config, so it goes under `cfg` rather than on the step itself - the key the
-          // scheduler reads per event, and the one a later .i() would clear and replace.
-          const v = fieldOf(s.value, 'i', Number);
-          if (v != null && !Number.isNaN(v)) step.cfg = { ...step.cfg, index: v };
+        // Sampler config, so these go under `cfg` rather than on the step itself - the keys the
+        // scheduler reads per event, and the ones a later .i()/.slice() would clear and replace.
+        for (const [f, key] of [['i', 'index'], ['slice', 'slice']]) {
+          if (!fields.includes(f)) continue;
+          const v = fieldOf(s.value, f, Number);
+          if (v != null && !Number.isNaN(v)) step.cfg = { ...step.cfg, [key]: v };
         }
         return step;
       };
@@ -2255,7 +2258,7 @@ export class Sig {
     if (hasVel) noteChannels.vel = fieldSig('vel', Number);
     if (hasClip) noteChannels.clip = fieldSig('clip', Number);
     if (hasNudge) noteChannels.nudge = fieldSig('nudge', Number);
-    // `i` gets no channel of its own: the per-step stamp above is the whole of it.
+    // `i`/`slice` get no channel of their own: the per-step stamp above is the whole of them.
     return hasVel || hasClip || hasNudge ? out._clone({ noteChannels }) : out;
   }
 
@@ -3928,9 +3931,16 @@ export function note(value) {
  * recorded. A roll where nothing sets an index leaves the channel alone entirely, so `.i()` after
  * it still means what it always meant.
  *
- * `mode: "index"` is EDITOR metadata and changes no sound: it says the panel draws this roll on the
- * sample-index axis rather than the piano keyboard, so reopening it puts you back where you were
- * (see pianoroll.mjs). Both channels play whichever mode the roll is in.
+ * A third field behind those two is the SLICE - `"60:0:3,0,2"` is chop 3 of the pack's first file -
+ * which is what `.slice()` sets, per event. Unlike the index it is genuinely optional: an event
+ * that names no slice plays the sample whole (or takes whatever `.slice()` the chain says), so one
+ * roll can chop some hits and strike others in full. The slice editor's "slice to notes" writes
+ * these for you, a hit per chop, where the chop actually falls.
+ *
+ * `mode: "index"` / `mode: "slice"` is EDITOR metadata and changes no sound: it says which of the
+ * three axes the panel draws this roll on - sample indices or chops rather than the piano keyboard
+ * - so reopening it puts you back where you were (see pianoroll.mjs). All three channels play
+ * whichever mode the roll is in.
  *
  * A bare `pianoroll()` (or `pianoroll("")`) is a valid empty roll - silence - so typing the call to
  * open the editor and drawing into it never has to pass through an error state.
@@ -3963,6 +3973,10 @@ export function pianoroll(str = '', opts = {}) {
   // stamping the channel on SOME events would leave a later .i() setting only the others (the
   // stamp wins over the channel - see _sampleConfigAt), which is a roll that half-obeys.
   const anyIndex = notes.some((nt) => noteIndex(nt) !== PIANOROLL_DEFAULT_INDEX);
+  // The slice channel is not all-or-nothing the way the index is, because it has no resting value
+  // to stamp on the events that don't set it: an unsliced sample plays whole. So each event carries
+  // its own chop where it has one, and an event with none reads whatever `.slice()` the chain says
+  // - which is what lets a roll chop some hits and leave others as full hits of the sample.
   // Index onsets by their position WITHIN the loop window, cell `from` being position 0. Playback
   // walks absolute cells m = cycle*grid + j; the cell sounding is (m mod len), so a len-cell loop
   // threads seamlessly across cycles - identical to `<len cells>*grid`. dur is the note's length in
@@ -3978,6 +3992,7 @@ export function pianoroll(str = '', opts = {}) {
       value: nt.midi,
       vel: nt.vel,
       index: noteIndex(nt),
+      slice: noteSlice(nt),
       dur: nt.len / grid,
       // Cells on the roll, a share of the event's own width on the step - the same conversion
       // pianoRollToMini does when it prints the roll out (see noteNudgeChannel).
@@ -4011,10 +4026,14 @@ export function pianoroll(str = '', opts = {}) {
         // - which is exactly what a splayed chord isn't. Only when it's set, so a plain roll leaves
         // the channel alone and a later .nudge()/.swing() still reads normally.
         if (o.nudge) step.nudge = o.nudge;
-        // The sample index rides ON the event (step.cfg, which the scheduler reads ahead of the
-        // channel - see _sampleConfigAt) rather than as a channel, because a chord is two events at
-        // ONE onset and sampling a channel there could only ever tell them both the same index.
-        if (anyIndex) step.cfg = { index: o.index };
+        // The sample index and the chop ride ON the event (step.cfg, which the scheduler reads
+        // ahead of the channel - see _sampleConfigAt) rather than as channels, because a chord is
+        // two events at ONE onset and sampling a channel there could only ever tell them both the
+        // same index. Each key is set on its own, so a later `.i()`/`.slice()` still answers for
+        // whichever of them the roll says nothing about.
+        if (anyIndex || o.slice !== null) {
+          step.cfg = { ...(anyIndex ? { index: o.index } : {}), ...(o.slice === null ? {} : { slice: o.slice }) };
+        }
         out.push(step);
       }
     }

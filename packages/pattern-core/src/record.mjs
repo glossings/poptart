@@ -18,7 +18,7 @@
 // No `@` weight chains on purpose: the slot grid stays visible in the code.
 
 import { parseMini } from './mini.mjs';
-import { clipOverlaps, normalizePianoRollSteps, regridPianoRoll, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_GRID, PIANOROLL_MAX_NUDGE } from './pianoroll.mjs';
+import { clipOverlaps, normalizePianoRollSteps, regridPianoRoll, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_GRID, PIANOROLL_MAX_NUDGE } from './pianoroll.mjs';
 
 /** Slots per cycle used when recording with quantization off - fine enough to keep the feel. */
 export const UNQUANTIZED_GRID = 96;
@@ -257,6 +257,9 @@ export function recordingToRoll(events, roll, { window, quantize = 0, countIn = 
     const nt = {
       midi: Math.min(127, Math.max(0, Math.round(ev.note))),
       index: Number.isFinite(ev.index) ? Math.max(0, Math.round(ev.index)) : PIANOROLL_DEFAULT_INDEX,
+      // Nothing live can strike a chop - a key edge carries a note and a file - so a recorded note
+      // never slices. The key is written all the same, so every note in the app has one shape.
+      slice: PIANOROLL_DEFAULT_SLICE,
       start: drawn,
       len: noteLen,
       full: noteLen,

@@ -19,7 +19,7 @@
 // reports as `timeSig` so the caller can say so.
 
 import { UNQUANTIZED_GRID } from './record.mjs';
-import { serializePianoRoll, PIANOROLL_DEFAULT_INDEX } from './pianoroll.mjs';
+import { serializePianoRoll, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE } from './pianoroll.mjs';
 
 // ---------------------------------------------------------------------------------------------
 // Reading the file
@@ -390,7 +390,7 @@ function laneToRollNotes(events, R, len) {
     // cell, and how far it moved to get there is exactly what a nudge could hold. Writing the field
     // out (rather than leaving it off the object) keeps this note the same shape parsePianoRoll
     // returns, which is what lets the roll be re-read from the string it was written into.
-    const note = { midi, index: PIANOROLL_DEFAULT_INDEX, start, len: length, vel: ev.vel, prob: 1, nudge: 0, mute: false };
+    const note = { midi, index: PIANOROLL_DEFAULT_INDEX, slice: PIANOROLL_DEFAULT_SLICE, start, len: length, vel: ev.vel, prob: 1, nudge: 0, mute: false };
     byCell.set(key, note);
     notes.push(note);
   }

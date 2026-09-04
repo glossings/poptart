@@ -453,16 +453,35 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             mini-notation, written into the pattern — handy when a drawn idea is done and you want to
             bend it in text.
           </p>
-          <h4>Note rows, index rows</h4>
+          <h4>Note rows, index rows, slice rows</h4>
           <p>
-            Every note carries <em>two</em> values: a pitch and a <strong>sample index</strong> (the
-            thing <code>.i()</code> sets). The <strong>note</strong> / <strong>index</strong> button
-            picks which one the rows show. On <strong>index</strong> the keyboard becomes
+            Every note carries <em>three</em> values: a pitch, a <strong>sample index</strong> (the
+            thing <code>.i()</code> sets) and a <strong>slice</strong> (what <code>.slice()</code>
+            sets). The <strong>note</strong> / <strong>index</strong> / <strong>slice</strong> button
+            cycles which one the rows show. On <strong>index</strong> the keyboard becomes
             <code>0, 1, 2, …</code> — a pack's files — so
             <code>pianoroll("chops").s("breaks")</code> sequences a break by file, with lengths, velocity
-            and probability meaning exactly what they do on the keyboard. Switching views moves
-            nothing and keeps your selection: draw a rhythm on one axis, set the pitches of those
-            same notes on the other.
+            and probability meaning exactly what they do on the keyboard. On <strong>slice</strong>
+            the rows are the chops of whatever file the note plays, which is how a break gets
+            rearranged hit by hit. Switching views moves nothing and keeps your selection: draw a
+            rhythm on one axis, set the pitches of those same notes on the other.
+          </p>
+          <h4>Slice to notes</h4>
+          <p>
+            Draw one long note over a break, right-click it and pick <strong>slice to notes</strong>:
+            the note is replaced by one hit per chop, <em>where each chop falls</em> — so a slice
+            that lasted two eighths comes out two eighths long, and you have the break as a rhythm to
+            rearrange rather than a set of transients to transcribe. The break is laid over the roll's
+            timeline, so a half note starting half way through the bar gets the break's second half,
+            still in its second half. How much break one cycle of roll holds is the
+            <strong>fit</strong> — the chain's own <code>.fit()</code> where it has one, the slice
+            set's otherwise, and an unfitted sample simply lasts as long as it lasts.
+          </p>
+          <p>
+            The chops come from the <code>.slices("name")</code> set on the chain. If the chain hasn't
+            got one, the sample's own transients are used <em>and written into a new set</em>, so the
+            slice numbers the roll now holds keep meaning the same chops — open the slice editor
+            (double-click <code>slice</code>) to redraw them, and the roll follows.
           </p>
           <h4>In key</h4>
           <p>
@@ -476,7 +495,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             You never type the note string by hand — it folds to a small pill in the editor — but for
             the curious: <code>pianoroll("60,0,4 64,0,4 67,8,8", { grid: 16 })</code> is
             <code>midi[:index],start,len[,vel]</code> per note, and it chains like
-            <code>note()</code>: <code>.scale()</code>, <code>.add()</code>, and the rest.
+            <code>note()</code>: <code>.scale()</code>, <code>.add()</code>, and the rest. A note that
+            chops writes its slice behind the index — <code>60:0:3</code> is chop 3 of the pack's
+            first file — and one that doesn't writes neither field.
           </p>
           <h4>Arranging: painting parts into a song</h4>
           <p>

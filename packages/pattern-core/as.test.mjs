@@ -180,3 +180,26 @@ test('the scheduler holds each note of a chord for its own clip', () => {
   close(at('noteOff', 57), 0.25 * 0.8 - 0.005);
   close(at('noteOff', 59), 0.25 * 10 - 0.005, 'the long note rings on for cycles, one scheduled off');
 });
+
+// ---------------------------------------------------------------------------------------------
+// the sampler fields
+// ---------------------------------------------------------------------------------------------
+// `i` and `slice` have no channel to live on at .as() time - there is no sampler yet - so each
+// token's values ride on its own event, where the .s() that follows picks them up. An empty field
+// leaves the channel alone, which for `slice` is the difference between "play chop 0" and "play the
+// whole sample".
+
+test('.as("i:slice") stamps both sampler fields onto each event', () => {
+  const sig = mini('0:3 1:0 2').as('i:slice').s('breaks');
+  assert.deepEqual(stepsAt(sig).map((st) => [st.cfg.index, st.cfg.slice]), [[0, 3], [1, 0], [2, undefined]]);
+});
+
+test('.as("note:slice") leaves the channel alone where the field is empty', () => {
+  const sig = mini('60:2 60 60:5').as('note:slice').s('breaks');
+  assert.deepEqual(stepsAt(sig).map((st) => st.cfg?.slice), [2, undefined, 5]);
+  assert.deepEqual(stepsAt(sig).map((st) => st.cfg?.note), [60, 60, 60]);
+});
+
+test('.as(): slice is a known field, and a misspelt one still names them all', () => {
+  assert.throws(() => mini('0').as('slize'), /unknown field "slize".*slice/s);
+});

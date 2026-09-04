@@ -17,6 +17,6 @@ export { parseMini, getStepsForCycle, stepLocs } from './mini.mjs';
 export { splitLabeledBlocks, isBareCallBlock } from './labels.mjs';
 export { injectLocations, isPatternPosition } from './locations.mjs';
 export { parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS } from './shape.mjs';
-export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, noteNudge, noteNudgeChannel, looksLikeNoteString, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_NUDGE, pianoRollSwingCells, commitPianoRollSwing, pianoRollNoteGrid } from './pianoroll.mjs';
+export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, noteSlice, noteNudge, noteNudgeChannel, looksLikeNoteString, sliceNotesFor, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_NUDGE, pianoRollSwingCells, commitPianoRollSwing, pianoRollNoteGrid } from './pianoroll.mjs';
 export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds, lookupSlices, sliceSetIds } from './rolls.mjs';
 export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementLength, arrangementSpans, arrangementLaneCount, inSpans, ArrangeClock, ARRANGE_DEFAULT_SNAP, ARRANGE_MIN_LANES } from './arrange.mjs';
