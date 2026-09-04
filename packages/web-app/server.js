@@ -126,7 +126,7 @@ function noteProtoOwnership(deck) {
 
 // ---------------------------------------------------------------------------------------------
 // Performance-mix state (the DJ layer - see TODO.md). EPHEMERAL by design: none of this is ever
-// written into song code (deliberately unlike the ctrl+g mixer's .gain() edits) - it belongs to
+// written into song code (deliberately unlike the ctrl+g mixer's .postgain() edits) - it belongs to
 // the mix session and dies with it. The engine side is the DJ stage baked into every track
 // SynthDef (trim / eqlo / eqmid / eqhi / djf / djres / fader / deck - see sc/poptart.scd): all are
 // channel controls on pseudo-slot -1, so applying a value is one setParam. What's stored here is
@@ -1520,7 +1520,7 @@ function extendStringPrototype(core) {
   const METHODS = [
     'add', 'sub', 'mul', 'div', 'mod', 'round', 'abs', 'floor', 'ceil', 'clamp',
     'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'seg', 'segment', 'scale', 'range', 'synth', 'fx', 'param',
-    'gain', 'pan', 'o', 'vel', 'clip', 'as', 'sc',
+    'gain', 'postgain', 'pan', 'o', 'vel', 'clip', 'as', 'sc',
   ];
   for (const m of METHODS) {
     Object.defineProperty(String.prototype, m, {
@@ -2356,7 +2356,7 @@ function releaseRecTap(label) {
 // taps every live track plus the master bus (see engine.mixMeters) and streams two feeds back:
 // peak/RMS levels for the strips' meters, and per-band L/R amplitudes serving both the spectrum
 // and the stereo-field display. The mixer's WRITES don't come through here at all - a fader edits
-// the code (`.gain(x)` on the block) and re-evaluates, so the buffer stays the source of truth.
+// the code (`.postgain(x)` on the block) and re-evaluates, so the buffer stays the source of truth.
 // ---------------------------------------------------------------------------------------------
 
 let mixMonitorOn = false;

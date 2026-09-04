@@ -81,7 +81,7 @@ const DEFAULT_CASES = [
   // gains' is 1: clearing a modulator off it must land on a plain sweep, never full whistle.
   ['djres', '0'],
   // And the pre-existing strip, unchanged.
-  ['gain', '1'], ['out', '1'], ['dry', '1'], ['width', '1'], ['pan', '0'], ['bassmono', '0'],
+  ['gain', '1'], ['postgain', '1'], ['out', '1'], ['dry', '1'], ['width', '1'], ['pan', '0'], ['bassmono', '0'],
 ];
 
 function runSclang() {

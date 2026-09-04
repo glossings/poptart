@@ -618,10 +618,14 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
         <section id="s7">
           <h2>Study 7</h2>
           <h3>The channel strip &amp; the mixer</h3>
-          <p>These live after the whole plugin chain, and take numbers, mini strings or any signal:</p>
+          <p>
+            These take numbers, mini strings or any signal. All of them but <code>.gain(v)</code> live
+            after the whole plugin chain; <code>.gain(v)</code> is the level going <em>into</em> it.
+          </p>
           <table>
             <tr><th>Method</th><th>Does</th></tr>
-            <tr><td><code>.gain(v)</code></td><td>Output level, 1 = unity. Chains multiply: <code>.gain(0.5).gain(env())</code> is a level times a VCA.</td></tr>
+            <tr><td><code>.gain(v)</code></td><td>Input level, before the fx chain, 1 = unity — turn it down and the track drives its own compressor and reverb less hard. Chains multiply: <code>.gain(0.5).gain(env())</code> is a level times a VCA, and the reverb it feeds still rings on past the note.</td></tr>
+            <tr><td><code>.postgain(v)</code></td><td>Output level, after the chain and before the sends, 1 = unity — the channel fader, and what the mixer writes. Chains multiply like <code>.gain()</code>.</td></tr>
             <tr><td><code>.pan(v)</code></td><td>−1 left … 1 right.</td></tr>
             <tr><td><code>.width(v)</code></td><td>Stereo width: 0 mono, 1 untouched, up to 4. Applied before the pan.</td></tr>
             <tr><td><code>.bassmono(hz)</code></td><td>Mono below <code>hz</code>, stereo above. The standard club-rig insurance.</td></tr>
@@ -639,7 +643,7 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             A strip per track — meter, fader, pan, width, mute/solo, a <strong>▽ mono</strong> button
             for bass mono — plus a spectrum analyzer and a stereo image where anything spilling into
             the outer <code>ø</code> wedges is what a mono system will lose. The controls
-            <strong>write code</strong>: a fader move rewrites the block's <code>.gain()</code>, mute and
+            <strong>write code</strong>: a fader move rewrites the block's <code>.postgain()</code>, mute and
             solo write <code>_</code> / <code>S</code> on the label, and clicking a strip's
             <strong>name</strong> renames the pattern itself — the label, and any
             <code>audio("…")</code> / <code>midi("…")</code> that reads that track. The mix lives in the
@@ -977,7 +981,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><th>Chain</th><th></th></tr>
             <tr><td><code>.fx("…")</code> · <code>.param("name", v)</code> · <code>.preset("name")</code></td><td>effects, knobs, whole-state presets</td></tr>
             <tr><td><code>.midi("kick")</code> · <code>.audio("kick")</code></td><td>inject MIDI / sidechain audio into the last fx</td></tr>
-            <tr><td><code>.gain(v)</code> · <code>.pan(v)</code> · <code>.width(v)</code> · <code>.bassmono(hz)</code> · <code>.o(n)</code></td><td>channel strip</td></tr>
+            <tr><td><code>.gain(v)</code> · <code>.postgain(v)</code> · <code>.pan(v)</code> · <code>.width(v)</code> · <code>.bassmono(hz)</code> · <code>.o(n)</code></td><td>channel strip (gain in, postgain out)</td></tr>
             <tr><td><code>.bus("name", amt)</code> · <code>.dry(v)</code></td><td>aux send</td></tr>
             <tr><td><code>.vel(v)</code> · <code>.clip(v)</code> · <code>.swing(amt)</code> · <code>.nudge(v)</code></td><td>velocity, length, groove</td></tr>
             <tr><td><code>.scale("…")</code> · <code>.sc(oct)</code></td><td>map degrees / snap notes to a key (<code>.sc</code> = the <code>setscale</code> key)</td></tr>

@@ -9889,9 +9889,11 @@ function bounceBlockAtCursor() {
 // /api/mixer/status ~10x/sec, which doubles as the server's keep-alive.
 //
 // The controls WRITE CODE, not engine state: a fader gesture rewrites the block's trailing
-// `.gain(x)` literal (or appends one - mixctl.mjs owns the edit) and re-evaluates on the same
+// `.postgain(x)` literal (or appends one - mixctl.mjs owns the edit) and re-evaluates on the same
 // debounced update path the LFO editor uses, so what you hear is always what an eval of the
-// buffer plays, and the mix survives in the pattern itself. .gain() chains multiply, which is
+// buffer plays, and the mix survives in the pattern itself. The fader is postgain - the level out
+// of the track's fx chain, which is the one a mixer strip's fader means (`.gain()` is the level
+// going in, and stays the pattern's own). .postgain() chains multiply, which is
 // what makes an appended literal a clean trim even over a patterned gain; a pan write replaces
 // a patterned pan, which is what grabbing the knob means. Mute and solo write the label markers
 // the language already has (`_bass:` / `Sbass:`) - which is why the strip list can't just be
@@ -10293,7 +10295,7 @@ function buildMixerStrip(label) {
   fader.type = 'range';
   fader.className = 'mixer-fader';
   fader.min = 0; fader.max = 1000; fader.step = 1;
-  fader.title = 'gain — writes .gain(x) onto this block';
+  fader.title = 'output level — writes .postgain(x) onto this block';
   const meterCanvas = document.createElement('canvas');
   meterCanvas.className = 'mixer-meter';
   meterCanvas.width = 26 * dpr; meterCanvas.height = 140 * dpr;
@@ -10352,7 +10354,7 @@ function buildMixerStrip(label) {
     strip.gain = gain;
     dbLabel.textContent = mixerFmtDb(gain);
     // Arrow keys raise `input` too, with no pointer and so no hold - those take the code path.
-    mixerDragValue(strip, 'gain', gain);
+    mixerDragValue(strip, 'postgain', gain);
   });
   // Pointer grabs are released by the window-level handler below (a drag can end anywhere), so
   // all this does is take the focus and arm the hold. Arrow keys take the focus too, and only
@@ -10361,7 +10363,7 @@ function buildMixerStrip(label) {
     strip.dragGain = true;
     mixerFocus = label;
     mixerFocusFromPointer = true;
-    armMixerHold(strip, 'gain');
+    armMixerHold(strip, 'postgain');
   });
   fader.addEventListener('keydown', () => {
     mixerFocus = label;
@@ -10375,7 +10377,7 @@ function buildMixerStrip(label) {
     strip.gain = 1;
     fader.value = Math.round(mixerGainToFader(1) * 1000);
     dbLabel.textContent = mixerFmtDb(1);
-    queueMixerWrite(strip, 'gain', 1);
+    queueMixerWrite(strip, 'postgain', 1);
   });
 
   // Bass mono: click toggles it, drag left/right sets the cutoff (and switches it on if it was
@@ -10491,7 +10493,7 @@ function applyMixerTrim(label, name, value) {
 // written once, on release. Both halves of what a mixer wants: the buffer stops being rewritten
 // mid-gesture, and you hear what your hand is doing while you do it.
 //
-// A control the code modulates natively (.gain(env()), .pan(sine(...))) keeps the old path. The
+// A control the code modulates natively (.postgain(env()), .pan(sine(...))) keeps the old path. The
 // engine runs those from a control bus MAPPED onto the channel strip, and holding a scalar there
 // would unmap the bus and kill the modulation until the next eval. mixctl's `patterned` read is the
 // guard: a superset of the native case, so a Tier-1 pattern falls back too - which costs it nothing,
@@ -10675,7 +10677,7 @@ function syncMixerFromCode() {
   // engine was between evals.
   const anySolo = ctx.blocks.some((b) => b.soloed && !b.muted);
   for (const strip of mixerState.strips.values()) {
-    const gain = mixctlMod.readTrim(code, strip.label, 'gain', undefined, ctx);
+    const gain = mixctlMod.readTrim(code, strip.label, 'postgain', undefined, ctx);
     const block = ctx.blocks.find((b) => b.label === strip.label);
     strip.gone = !gain;
     strip.silent = !!block && (block.muted || (anySolo && !block.soloed));
@@ -10704,7 +10706,7 @@ function syncMixerFromCode() {
       continue;
     }
     strip.el.title = '';
-    if (!strip.dragGain && !strip.writeTimer.gain) {
+    if (!strip.dragGain && !strip.writeTimer.postgain) {
       strip.gain = gain.value;
       strip.fader.value = Math.round(mixerGainToFader(gain.value) * 1000);
       strip.dbLabel.textContent = mixerFmtDb(gain.value);
@@ -10712,8 +10714,8 @@ function syncMixerFromCode() {
     // A patterned control keeps modulating under the trim - say so rather than lying flat.
     strip.fader.classList.toggle('mixer-patterned', gain.patterned);
     strip.fader.title = gain.patterned
-      ? 'gain is patterned in the code - the fader writes a trim that multiplies it'
-      : 'gain — writes .gain(x) onto this block';
+      ? 'postgain is patterned in the code - the fader writes a trim that multiplies it'
+      : 'output level — writes .postgain(x) onto this block';
     const bass = mixctlMod.readTrim(code, strip.label, 'bassmono', undefined, ctx);
     if (!strip.dragBass && !strip.writeTimer.bassmono) {
       strip.bassmono = Math.round(bass.value);
@@ -15121,7 +15123,7 @@ coreReady
 // crossfader, swap mode, eject and complete.
 //
 // All of it is EPHEMERAL performance state (server.js's mixState): nothing here ever writes
-// into song code - deliberately unlike the ctrl+g mixer, whose faders edit .gain() calls. A DJ
+// into song code - deliberately unlike the ctrl+g mixer, whose faders edit .postgain() calls. A DJ
 // move must not rewrite the song.
 //
 // Opening or closing the split never touches the sound (hide the desk, keep the music); eject

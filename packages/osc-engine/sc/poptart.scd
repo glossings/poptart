@@ -275,7 +275,7 @@ buildTrackDef = { |key|
     // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
-    SynthDef(trackDefName.(key), { |inBus, gain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
+    SynthDef(trackDefName.(key), { |inBus, gain = 1, postgain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
         trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
@@ -291,6 +291,12 @@ buildTrackDef = { |key|
                 // this synth at its tail, so In.ar sees them) - samples run through the same
                 // fx chain a VST instrument would.
                 sig = VSTPlugin.ar(nil, 2, id: \slot0) + In.ar(inBus, 2);
+                // Input gain (Sig#gain, pseudo-slot -1 like the strip controls below): the level
+                // going INTO the fx chain, which is where a channel strip's gain knob sits and
+                // what it is for - turn a track down and it drives its own compressor, saturator
+                // and reverb less hard, instead of being turned down after them. The level on the
+                // way OUT of the chain is postgain, down at the strip.
+                sig = sig * gain.lag(0.02).clip(0, 4);
             } {
                 // Effect slots take TWO input buses: the chain signal (bus 0, main) and a
                 // sidechain bus (bus 1, aux) read from this slot's scBus arg. The aux bus is
@@ -304,10 +310,12 @@ buildTrackDef = { |key|
                 sig = Select.ar(("active" ++ i).asSymbol.kr(0), [sig, wet]);
             };
         };
-        // Channel strip (post-chain): width, then gain + equal-power pan, addressed from Node as
-        // pseudo-slot -1 (Sig#width/#gain/#pan; setParam sets these controls, setParam[Shape]LFO/Env
-        // map busses to them). Lag smooths the ~30ms Tier-1 polling steps; clip keeps a runaway
-        // signal sane.
+        // Channel strip (post-chain): width, then postgain + equal-power pan, addressed from Node
+        // as pseudo-slot -1 (Sig#width/#postgain/#pan; setParam sets these controls,
+        // setParam[Shape]LFO/Env map busses to them). Lag smooths the ~30ms Tier-1 polling steps;
+        // clip keeps a runaway signal sane. postgain is the chain's OUTPUT level - the fader after
+        // the inserts, and what everything below (the sends, the taps, the DJ stage) is taken
+        // after - where `gain` up at the head is what the chain gets fed.
         //
         // Width is mid/side: the sum is left alone and the difference is scaled, so 0 is mono, 1
         // is untouched, and 4 quadruples the stereo difference. It sits BEFORE the pan because the two
@@ -326,7 +334,7 @@ buildTrackDef = { |key|
             side,
             HPF.ar(side, bassmono.lag(0.05).clip(20, 2000)),
             ((bassmono > 0) * 2 - 1).lag(0.05));
-        sig = Balance2.ar(mid + side, mid - side, pan.lag(0.02).clip(-1, 1), gain.lag(0.02).clip(0, 4));
+        sig = Balance2.ar(mid + side, mid - side, pan.lag(0.02).clip(-1, 1), postgain.lag(0.02).clip(0, 4));
         // Sidechain send: a copy of this track's post-fader output written to another track's
         // aux bus (scSend). Parked to trashBus when this track feeds nothing, so the graph stays
         // static; scSendGain scales the amount. Always-on Out keeps the UGen graph fixed.
@@ -346,7 +354,7 @@ buildTrackDef = { |key|
         // 20ms of every recording up from silence.
         Out.ar(recOut, sig * recSend);
         // Mixer tap (see the mixer section below): the same shape as the recorder's, and like it
-        // taken post-fader but before the `dry` scaling - the mixer's fader IS the gain control,
+        // taken post-fader but before the `dry` scaling - the mixer's fader IS the postgain control,
         // so its meter shows what moving that fader changes, and a .bsend() track still meters
         // what it makes. Not lagged either: the tap only switches while the mixer opens/closes.
         Out.ar(mixOut, sig * mixSend);
@@ -356,7 +364,7 @@ buildTrackDef = { |key|
         // path ends at some track's own output (so a crossfade applies each deck's gain exactly
         // once, never squared through a bus), a bounce records what the SONG makes, and the
         // ctrl+g mixer keeps metering the channel strip its faders control. All eight controls
-        // are channel controls (pseudo-slot -1) like gain/pan: settable via setParam, modulatable
+        // are channel controls (pseudo-slot -1) like postgain/pan: settable via setParam, modulatable
         // via the slot -1 LFO/env path, neutral by default so a track sounds identical until a
         // mix session touches them.
         //
@@ -419,10 +427,10 @@ buildTrackDef = { |key|
 };
 
 // Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
-// unity gain, center pan, first output pair - and for the DJ stage, unity trim/bands/fader/deck
-// (djf's neutral is 0, the filter's center detent; djres's is 0, no resonance).
+// unity gain in and out, center pan, first output pair - and for the DJ stage, unity
+// trim/bands/fader/deck (djf's neutral is 0, the filter's center detent; djres's is 0, no resonance).
 channelDefault = { |name|
-    if ((name == "gain") or: { name == "out" } or: { name == "dry" } or: { name == "width" }
+    if ((name == "gain") or: { name == "postgain" } or: { name == "out" } or: { name == "dry" } or: { name == "width" }
         or: { name == "trim" } or: { name == "fader" } or: { name == "deck" }
         or: { name == "eqlo" } or: { name == "eqmid" } or: { name == "eqhi" }) { 1 } { 0 };
 };

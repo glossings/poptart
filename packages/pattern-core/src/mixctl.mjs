@@ -1,16 +1,16 @@
 // The mixer's code edits: a fader or pan knob in the editor's mixer writes a plain numeric
-// `.gain(x)` / `.pan(x)` onto the end of the track's block, the mute/solo buttons write the
+// `.postgain(x)` / `.pan(x)` onto the end of the track's block, the mute/solo buttons write the
 // label markers (`_bass:` / `Sbass:`) the language already has, and typing over a strip's name
 // rewrites the label itself - so the code stays the one source of truth (an eval later plays
 // exactly what the mixer shows). Pure string-in/edit-out, so the browser applies the edit to
 // CodeMirror and the tests here never need a DOM.
 //
-// The "trim" is the LAST .gain(...)/.pan(...) call in the block, and only when its argument is a
-// bare numeric literal - that's the call the mixer owns. A patterned call (.gain(env()),
+// The "trim" is the LAST .postgain(...)/.pan(...) call in the block, and only when its argument is
+// a bare numeric literal - that's the call the mixer owns. A patterned call (.postgain(env()),
 // .pan(sine(...))) is modulation, not a level, so it is never rewritten: the mixer appends a new
-// literal call after it instead. For gain that composes (chained .gain() multiply - the appended
-// literal is a channel trim scaling the modulation); for pan the appended call replaces the
-// patterned one, which is what grabbing the pan knob means.
+// literal call after it instead. For gain that composes (chained .postgain() multiply - the
+// appended literal is a channel trim scaling the modulation); for pan the appended call replaces
+// the patterned one, which is what grabbing the pan knob means.
 
 import { splitLabeledBlocks, codeMask } from './labels.mjs';
 
@@ -19,7 +19,7 @@ const NUM_ARG_RE = /^\s*(-?(?:\d+\.?\d*|\.\d+))\s*$/;
 
 // What a channel control reads as when the block doesn't set it - the same neutral values the
 // scheduler snaps a dropped control back to (see CHANNEL_DEFAULTS in signal.mjs).
-export const TRIM_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0 };
+export const TRIM_DEFAULTS = { gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0 };
 
 // Matching close paren for the opener at `openIdx`, counting only characters the mask says are
 // code - brackets inside strings and comments don't nest. -1 if unbalanced.
@@ -54,7 +54,7 @@ function lastCall(code, mask, name, from, to) {
 }
 
 // Where an appended call goes: just past the block's last code character, but before a trailing
-// `;` - `.gain(1);` not `;.gain(1)`. Blocks routinely end in blank lines and // comments (the
+// `;` - `.postgain(1);` not `;.postgain(1)`. Blocks routinely end in blank lines and // comments (the
 // splitter keeps them with the block), which the mask skips over.
 function appendIndex(code, mask, block) {
   let i = Math.min(block.end, code.length) - 1;

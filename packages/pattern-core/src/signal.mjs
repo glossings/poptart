@@ -181,7 +181,7 @@ export class Sig {
     // track. Independent of the dry path (Sig#dry, a channel control) - a bus send doesn't change
     // how much still reaches the track's own output pair.
     this.busSends = opts.busSends ?? [];
-    this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'pan'/'out'/'dry' -> Sig
+    this.channel = opts.channel ?? {}; // track-level channel strip: 'gain'/'postgain'/'pan'/'out'/'dry' -> Sig
     // Persistent per-onset note channels (the "bundle" of the all-signals model): 'vel', 'clip' and
     // the time controls 'nudge'/'swing'/'swinggrid' (see timeShift), each a Sig. Unlike a track channel
     // these are sampled at each note ONSET, not streamed. Held separately from the step grid so they
@@ -540,9 +540,13 @@ export class Sig {
   }
 
   /**
-   * Channel strip: the track's output gain (1 = unity, applied after the whole plugin chain).
-   * Accepts numbers, mini strings, or any signal - `.gain(env())` is a per-note VCA,
-   * `.gain("1 0.5 1 0.5")` a stepped tremolo.
+   * Channel strip: the track's INPUT gain (1 = unity), applied BEFORE the fx chain - the level the
+   * plugins get fed. Turning a track down with this drives its own compressor, saturator and
+   * reverb less hard, rather than turning down what they made; `.gain(env())` is a per-note VCA
+   * into the chain, so the reverb tail it feeds still rings on past the note. `.postgain()` is the
+   * same control on the way out, and is the one the mixer's faders write.
+   *
+   * Accepts numbers, mini strings, or any signal - `.gain("1 0.5 1 0.5")` is a stepped tremolo.
    *
    * Chainable: `.gain(a).gain(b)` multiplies (overall gain = a*b), so a base level and a
    * modulator compose - `.gain(0.5).gain(env())`. Multiplying a plain number onto a Tier-2
@@ -553,6 +557,21 @@ export class Sig {
     const incoming = toSignal(value);
     const combined = this.channel.gain ? multiplyGain(this.channel.gain, incoming) : incoming;
     return this._clone({ channel: { ...this.channel, gain: combined } });
+  }
+
+  /**
+   * Channel strip: the track's OUTPUT gain (1 = unity), applied after the whole plugin chain and
+   * before everything fed from it - the bus sends, the sidechain send, the recorder and mixer
+   * taps, the DJ stage. This is the channel fader, and what the ctrl+g mixer writes; `.gain()` is
+   * the level going into the chain.
+   *
+   * Takes the same values as .gain() and chains the same way - `.postgain(a).postgain(b)`
+   * multiplies, so a level and a modulator compose and an appended literal is a clean trim.
+   */
+  postgain(value) {
+    const incoming = toSignal(value);
+    const combined = this.channel.postgain ? multiplyGain(this.channel.postgain, incoming) : incoming;
+    return this._clone({ channel: { ...this.channel, postgain: combined } });
   }
 
   /** Channel strip: stereo pan, -1 (left) .. 1 (right), 0 = center. Signals welcome: `.pan(sine(0.2).range(-1, 1))`. */
@@ -597,7 +616,7 @@ export class Sig {
    * channels 1/2 (the default), .o(2) to 3/4, and so on. Pairs past the last one in use wrap
    * around, and how many are in use is the editor's "output channels" setting - 2 unless raised,
    * so by default .o(2) is channels 1/2 again on any interface. Takes the same value kinds
-   * as .gain()/.pan(): `.o("1 2")` alternates pairs each half-cycle.
+   * as .postgain()/.pan(): `.o("1 2")` alternates pairs each half-cycle.
    */
   o(value) {
     return this._clone({ channel: { ...this.channel, out: toSignal(value) } });
@@ -631,7 +650,7 @@ export class Sig {
 
   /**
    * How much of the dry signal still reaches this track's own output pair, sampled per onset like
-   * .gain()/.pan(). Defaults to 1 (untouched). Independent of .bus() sends, so .dry(0) mutes the
+   * .postgain()/.pan(). Defaults to 1 (untouched). Independent of .bus() sends, so .dry(0) mutes the
    * direct output while any bus sends keep carrying the signal - the basis of .bsend().
    */
   dry(value) {
@@ -1146,7 +1165,7 @@ export class Sig {
    * (Structure the callback adds is still structure - `x => x.ply(4)` retriggers as it says.)
    *
    * Controls the callback set switch WITH the condition - sampler config and velocity per onset,
-   * and the channel strip (.gain()/.pan()/.width()/.o()/.dry()) as a streamed value - so
+   * and the channel strip (.gain()/.postgain()/.pan()/.width()/.o()/.dry()) as a streamed value - so
    * `.when(rand().gte(0.99), x => x.pan(0.49))` moves the hats that one bar in a hundred and
    * leaves `.pan(-0.49)` playing the rest. A strip control only the callback sets returns to its
    * neutral default (pan 0, gain 1, ...) where the condition is falsy.
@@ -3127,8 +3146,8 @@ function condSwitchMap(before, after, condAt, truthy, skip = new Set()) {
 // the scheduler snaps a dropped control back to, and the "off" side of a .when() that only sets
 // one on the truthy branch. out = stereo pair (Sig#o), 1-based; dry = direct-output level
 // (Sig#dry); width = M/S stereo width (Sig#width), 1 = untouched; bassmono = mono-below-this-many-
-// Hz (Sig#bassmono), 0 = off.
-export const CHANNEL_DEFAULTS = { gain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1 };
+// Hz (Sig#bassmono), 0 = off. gain is the level into the fx chain, postgain the level out of it.
+export const CHANNEL_DEFAULTS = { gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1 };
 
 // The track channel strip (Sig#gain/#pan/#width/...) across a .when(): the same switch the
 // per-onset controls get above, with one difference. These are STREAMED values, not per-event
@@ -3173,7 +3192,7 @@ function fillCondGaps(steps) {
   return out;
 }
 
-// Chainable .gain() multiplies factors together (see Sig#gain). The engine drives one Sig per
+// Chainable .gain()/.postgain() multiply their factors together (see Sig#gain). The engine drives one Sig per
 // track-gain control, so factors fold into a single Sig. A plain-number factor folds into a
 // modulator's bounds symbolically, which keeps the modulator on the engine's native path; any
 // other pair is the generic product, polled like every other composed signal.

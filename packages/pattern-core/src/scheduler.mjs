@@ -86,7 +86,7 @@ const MIN_SEND_LEAD_SEC = 0.005;
 // late onset against an early end), and a backwards span would be taken literally.
 const MIN_SOUNDING_SEC = 0.001;
 
-// Track-level channel-strip controls (Sig#gain/#pan) ride the same setParam/setParamLFO/
+// Track-level channel-strip controls (Sig#gain/#postgain/#pan) ride the same setParam/setParamLFO/
 // setParamEnv engine calls as plugin parameters, addressed with this pseudo-slot instead of a
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
 const CHANNEL_SLOT = -1;
@@ -377,19 +377,19 @@ export class Scheduler {
   }
 
   /**
-   * Holds one channel-strip control (gain/pan/width/bassmono/out/dry) at a value while a mixer
+   * Holds one channel-strip control (gain/postgain/pan/width/bassmono/out/dry) at a value while a mixer
    * control is being dragged. `value` null releases it back to the pattern. Returns the reason it
    * couldn't be taken, or null.
    *
-   * This is what makes the mixer's faders mixable. A fader writes `.gain(x)` into the code, and
+   * This is what makes the mixer's faders mixable. A fader writes `.postgain(x)` into the code, and
    * the code only *sounds* once it is evaluated - so without a hold, riding a fader is silent
    * until you let go and the debounced eval lands. The engine side is already continuous (the
    * track SynthDef lags these controls, and _pollGenericParams re-sends them every tick), so all
    * a hold has to do is put the fader's value where the pattern's would have gone. Nothing else
    * stops: the notes play, every other control and every other track carry on.
    *
-   * The value REPLACES the pattern's rather than scaling it. Every .gain() on a track composes
-   * into one post-chain gain (see multiplyGain), so there is no separate trim factor to scale -
+   * The value REPLACES the pattern's rather than scaling it. Every .postgain() on a track composes
+   * into one output gain (see multiplyGain), so there is no separate trim factor to scale -
    * the fader's number IS the whole control, which is what it already shows.
    *
    * A control driven by a Tier-2 modulator is refused. Those don't go through the poll at all -
@@ -619,7 +619,7 @@ export class Scheduler {
     this._presetCatchUp = true; // a changed name takes effect now, not at its next onset
     this._earlyShiftWarned = false;
 
-    // A channel control the new pattern dropped (`.gain(...)` deleted mid-session, or `.bsend()`
+    // A channel control the new pattern dropped (`.postgain(...)` deleted mid-session, or `.bsend()`
     // removed - which drops dry) snaps back to its default. Schedule the reset at the lookahead
     // horizon, NOT at getTime(): the last poll before this eval already queued the OLD value at
     // nowSec+lookahead, so a reset sent at "now" gets overwritten ~150ms later by that stale
