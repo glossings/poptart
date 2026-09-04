@@ -35,6 +35,10 @@
 //                  pulse count. A rest as an argument ("1.e(<3 ~>,8)") is a silent cycle.
 //   "<a b>:x"      field suffix on a group: distributes onto every atom inside, so
 //                  "<18 16>:3" is exactly "<18:3 16:3>" (pairs with .as("n:clip") etc.)
+//   "x:<a b>"      ...and the mirror of it, a patterned FIELD on a name: "breaks:<27 24>" is
+//                  exactly "<breaks:27 breaks:24>", so s("breaks:<27 24>") alternates the file
+//                  the way s("breaks").i("<27 24>") does. The group's structure is the step's -
+//                  "bd:[0 1]" is two events - and the name rides onto each of its atoms.
 //   "a?"  "a?0.3"  degrade: drop this event with 50% (bare) or the given probability. The coin
 //                  flip is deterministic per cycle+onset (see rng), so the scheduler and the
 //                  editor's highlighter agree and a bar replays identically.
@@ -405,6 +409,15 @@ function parseElement(tokens, arith = false) {
     node = { type: 'atom', value: t.text, quoted: true, loc: [t.start, t.end] };
     rest = rest.slice(1);
     lastEnd = t.end;
+  } else if (t.type === 'atom' && t.text.length > 1 && t.text.endsWith(':')
+      && (rest[1]?.type === '<' || rest[1]?.type === '[') && rest[1].start === t.end) {
+    // "breaks:<27 24>" - a name with a PATTERNED field, the mirror of "<27 24>:3". The atom runs
+    // up to and including the colon and the group is glued to it, so the group's own structure is
+    // this step's and the name is distributed onto every atom inside it.
+    const g = rest[1].type === '<' ? parseAngle(rest.slice(1)) : parseGroup(rest.slice(1));
+    node = prependFieldPrefix(g.node, t.text);
+    rest = g.rest;
+    lastEnd = g.end;
   } else if (t.type === 'atom') {
     node = { type: 'atom', value: t.text, loc: [t.start, t.end] };
     rest = rest.slice(1);
@@ -579,9 +592,10 @@ function foldNumericNode(node) {
   return Number.isNaN(n) ? node : n;
 }
 
-// Distributes a group field suffix onto every atom inside the node, so "<18 16>:3" parses as
-// "<18:3 16:3>". Rests pass through; ties ("_") never survive parsing as atoms, so every atom
-// here is a real value.
+// The two directions a field can be distributed over a group. A SUFFIX comes from "<18 16>:3",
+// which parses as "<18:3 16:3>"; a PREFIX from "breaks:<27 24>", which parses as
+// "<breaks:27 breaks:24>". Rests pass through untouched either way (a rest with a field on it is
+// still a rest); ties ("_") never survive parsing as atoms, so every atom here is a real value.
 function appendFieldSuffix(node, suffix) {
   if (node.type === 'atom') {
     return node.value == null ? node : { ...node, value: node.value + suffix };
@@ -597,6 +611,25 @@ function appendFieldSuffix(node, suffix) {
   }
   if (node.item) {
     return { ...node, item: appendFieldSuffix(node.item, suffix) };
+  }
+  return node;
+}
+
+function prependFieldPrefix(node, prefix) {
+  if (node.type === 'atom') {
+    return node.value == null ? node : { ...node, value: prefix + node.value };
+  }
+  if (node.type === 'func') {
+    return { ...node, prefix: prefix + (node.prefix ?? '') };
+  }
+  if (node.type === 'arith') {
+    return { ...node, a: prependFieldPrefix(node.a, prefix), b: prependFieldPrefix(node.b, prefix) };
+  }
+  if (node.items) {
+    return { ...node, items: node.items.map((it) => ({ ...it, node: prependFieldPrefix(it.node, prefix) })) };
+  }
+  if (node.item) {
+    return { ...node, item: prependFieldPrefix(node.item, prefix) };
   }
   return node;
 }
@@ -877,7 +910,7 @@ function astToSteps(node, cycle, salt = 0) {
 
     case 'func': {
       // One computed value spanning the whole element, like an atom but evaluated per cycle.
-      const value = String(evalFunc(node, cycle, salt)) + (node.suffix ?? '');
+      const value = (node.prefix ?? '') + String(evalFunc(node, cycle, salt)) + (node.suffix ?? '');
       return [{ start: 0, end: 1, value, loc: node.loc }];
     }
 

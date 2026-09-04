@@ -668,7 +668,8 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
   .speed(<span class="s">"1 -1"</span>)           <span class="c">// playback rate; negative = backwards</span>
   .flip(<span class="s">"&lt;0 1&gt;"</span>)           <span class="c">// reverse INTO the beat, landing on the next hit</span>
   .stretch(2)               <span class="c">// timestretch, pitch preserved</span>
-  .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// the nth transient (WAV only)</span>
+  .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// the nth chop (auto-detected transients, WAV only)</span>
+  .slices(<span class="s">"break"</span>)          <span class="c">// ...or the chop map you drew for this file — double-click `slice`</span>
   .note(<span class="s">"45 _ 52 57"</span>)       <span class="c">// repitch by MIDI note (c2 = as recorded)</span>
   .vel(<span class="s">"1 .5 ~ 1"</span>)          <span class="c">// per-hit volume (on synths: MIDI velocity)</span>
   .adsr(0.1, 0.2, 0.6, 0.2) <span class="c">// amplitude envelope, as multiples of the hit's length</span></code></pre>
@@ -681,6 +682,30 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             there, so to let it ring longer make the step longer (<code>"long/2"</code>, <code>"long@2"</code>,
             ties).
           </p>
+          <div class="callout">
+            <span class="tag">slice editor</span>
+            <strong>Double-click <code>slice</code></strong> on a sampler chain and the sample opens with
+            its chops drawn on it: drag a numbered tab to move a chop, double-click to add one,
+            right-click to take one away, <code>←</code>/<code>→</code> to walk the slices and hear them.
+            Markers snap to transients (and to zero crossings) unless you hold <kbd>alt</kbd>;
+            <kbd>⌘</kbd> while dragging is the fine adjustment, and turns the magnets off with it. The
+            wheel pans along the sample, <kbd>⌘</kbd>-wheel and <kbd>⌘</kbd><kbd>+</kbd>/<kbd>−</kbd>
+            zoom, <kbd>⌘</kbd><kbd>0</kbd> fits the whole file. The slices the pattern plays light up
+            as it runs. The <strong>sens</strong> slider re-slices the
+            whole file at whatever sensitivity you like — it stands down once you have moved a marker by
+            hand, and <strong>auto-slice</strong> is the way back to detected chops.
+            What you draw is written into the code as
+            <code>_slices("break", { "breaks/amen.wav": [0, 0.131, …] })</code> plus
+            <code>.slices("break")</code>, so a chop map is patternable like anything else:
+            <code>.slices("&lt;tight loose&gt;")</code> swaps maps as it plays, and
+            <code>.slice("3 1 0 2")</code> still says which chop goes where. A set holds markers
+            <em>per sample</em>, so one name covers a whole break folder — <code>.i("&lt;19 3&gt;")</code>
+            (or <code>s("breaks:&lt;19 3&gt;")</code>) moves between chop maps that each fit their own
+            audio. The panel opens on the file you can hear and <kbd>[</kbd>/<kbd>]</kbd> step to the
+            others the chain names, so all of them get their markers under the one name. A sample the set says nothing about
+            (and a set with no markers at all) chops on its own transients, which is where a new one
+            starts.
+          </div>
           <div class="callout">
             <span class="tag">loops &amp; breaks</span>
             <code>.fit()</code> repitches the whole file to a number of cycles (bare, the nearest power

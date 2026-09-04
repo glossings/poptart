@@ -101,3 +101,43 @@ test('every cycle of the window carries its own gates', () => {
   assert.deepEqual(grid.map((g) => g.cycle), [0, 1]);
   for (const g of grid) assert.deepEqual(g.gates, [0]);
 });
+
+// --- what a sliced sampler step chops (the slice editor's playback follow) -----------------------
+//
+// A sampler track that slices tags each step with the slice it plays and the file it plays it from,
+// so the slice editor can light the marker that is sounding without a per-event feed from the
+// engine. Resolved the way the scheduler resolves them: the step's own cfg first, then the track's
+// channel.
+
+const constSig = (v) => ({ sample: () => v });
+
+test('a sliced sampler step says which slice, and which file, it plays', () => {
+  const sig = sigOf([{ start: 0, end: 1, value: 'breaks', locs: [[10, 12]] }]);
+  sig.sampler = { slice: constSig(3), index: constSig(19) };
+  assert.deepEqual(gridOf(sig)[0].steps[0].chop, { slice: 3, i: 19 });
+});
+
+test('a step\'s own config wins over the track\'s channel, as it does in the scheduler', () => {
+  const sig = sigOf([{ start: 0, end: 1, value: 'breaks', cfg: { slice: 2 }, locs: [[10, 12]] }]);
+  sig.sampler = { slice: constSig(0), index: constSig(1) };
+  assert.deepEqual(gridOf(sig)[0].steps[0].chop, { slice: 2, i: 1 });
+});
+
+test('a pack with no index says nothing about one - the panel then lights whatever it drew', () => {
+  const sig = sigOf([{ start: 0, end: 1, value: 'breaks', locs: [[10, 12]] }]);
+  sig.sampler = { slice: constSig(0) };
+  assert.deepEqual(gridOf(sig)[0].steps[0].chop, { slice: 0 });
+});
+
+test('a track that does not slice carries no chop at all, and neither do its params', () => {
+  const sig = sigOf([{ start: 0, end: 1, value: 'breaks', locs: [[10, 12]] }]);
+  sig.sampler = { index: constSig(2) }; // a sampler, but nothing is chopping it
+  assert.equal(gridOf(sig)[0].steps[0].chop, undefined);
+
+  // A param pattern's steps are not triggers of anything, so they are never tagged either.
+  const sliced = sigOf([{ start: 0, end: 1, value: 'breaks', locs: [[10, 12]] }]);
+  sliced.sampler = { slice: constSig(1) };
+  const param = sigOf([{ start: 0, end: 1, value: 0.5, locs: [[20, 21]] }]);
+  const steps = gridOf(sliced, [param])[0].steps;
+  assert.deepEqual(steps.map((s) => s.chop?.slice), [1, undefined]);
+});

@@ -187,6 +187,10 @@ const songDecks = { a: null, b: null };
 // that re-queues a song re-sends bytes, not work; bounded because the payloads are ~1MB each.
 const songWaveCache = new Map();
 
+// The slice editor's detections, keyed the same way plus the sensitivity they were run at (see
+// /api/sampleSlices). Small entries - a few dozen numbers - so this holds more of them.
+const sampleSliceCache = new Map();
+
 const songKeysLive = () => ['a', 'b'].filter((d) => songDecks[d]).map((d) => SONG_KEYS[d]);
 // The desk's full population: every scheduler-driven track plus any song tracks - what deck
 // broadcasts, per-track mix sets and the strip's track list enumerate. A song is a stem too.
@@ -1574,7 +1578,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sy
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -1970,6 +1974,22 @@ function highlightGrid(sig, start, end, from, count) {
   const sigs = patternSigs(sig).filter((s) => s.stepsForCycle);
   const grid = [];
   const base = Math.max(0, from);
+  // What a SLICED sampler step chops: the slice it plays and the file it plays it from, resolved
+  // the way the scheduler resolves them (a step's own cfg first, then the track's channel - see
+  // _sampleConfigAt). The slice editor reads these to light the marker that is sounding; nothing
+  // else does, so they ride only on tracks that actually slice.
+  const sampler = sig.sampler?.slice ? sig.sampler : null;
+  const chopAt = (s, at) => {
+    const pick = (key) => {
+      const raw = s.cfg?.[key] !== undefined ? s.cfg[key] : sampler[key]?.sample(at, 1, at);
+      const v = typeof raw === 'number' ? raw : raw == null ? NaN : Number(raw);
+      return Number.isFinite(v) ? Math.round(v) : undefined;
+    };
+    const slice = pick('slice');
+    if (slice === undefined) return null;
+    const i = pick('index');
+    return { slice, ...(i === undefined ? {} : { i }) };
+  };
   for (let c = base; c < base + count; c++) {
     const out = [];
     const gates = [];
@@ -2010,7 +2030,14 @@ function highlightGrid(sig, start, end, from, count) {
           const endAt = c + soundsTo;
           const endStep = patternCore.endEdgeStep(s, endAt - Math.floor(endAt));
           const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt);
-          out.push({ start: s.start + startShift, end: soundsTo + endShift, ...(s.cont ? { cont: true } : {}), locs });
+          const chop = sampler && sub === sig ? chopAt(s, at) : null;
+          out.push({
+            start: s.start + startShift,
+            end: soundsTo + endShift,
+            ...(s.cont ? { cont: true } : {}),
+            ...(chop ? { chop } : {}),
+            locs,
+          });
         }
       }
     }
@@ -3191,6 +3218,65 @@ const routes = {
     };
   },
 
+  // Which FILE a sampler chain is playing - what the slice editor draws the waveform of. Query:
+  // { ref, i? }, `ref` in the engine's own namespaced spelling (a bare name is a folder pack,
+  // "sp:" a named one, "file:" one path under the samples root, "rec:" a bounce) and `i` the
+  // index within it, wrapped exactly as the sampler wraps it.
+  //
+  // Resolved here rather than in the browser because only this side can read the disk: a pack is
+  // a folder whose contents the editor has never seen. Deliberately mirrors OscEngine's
+  // _resolveSource - the panel must open the file that is actually sounding, not a near miss.
+  'GET /api/sampleFile': async (query) => {
+    const { listPackFiles, resolveSampleFile, expandPackEntries, sampleKey } = require('@poptart/osc-engine/samples');
+    const { resolveRecording } = require('@poptart/osc-engine/recordings');
+    const ref = String(query.ref ?? '').trim();
+    if (!ref) throw new Error('sampleFile needs a source ref');
+    let files = null;
+    if (ref.startsWith('sp:')) files = expandPackEntries(patternCore?.lookupPack(ref.slice(3))?.files ?? []);
+    else if (ref.startsWith('file:')) files = [resolveSampleFile(ref.slice(5))].filter(Boolean);
+    else if (ref.startsWith('rec:')) files = [resolveRecording(ref.slice(4))].filter(Boolean);
+    else files = listPackFiles(ref);
+    if (!files?.length) return { status: 200, body: { ref, file: null, count: 0 } };
+    const n = Number(query.i);
+    const i = ((Math.round(Number.isFinite(n) ? n : 0) % files.length) + files.length) % files.length;
+    // `key` is how a slice set names this file (see samples.js sampleKey). Handed back rather than
+    // derived in the browser so the markers the editor files under it and the ones the engine looks
+    // up while playing are keyed by the same rule.
+    return { status: 200, body: { ref, file: files[i], key: sampleKey(files[i]), index: i, count: files.length } };
+  },
+
+  // The slice editor's auto-slice: one file's transients, at a sensitivity the slider sets.
+  // Query: { file (absolute, or relative to the samples root - the two spellings a pack entry has),
+  // sensitivity? (1 = what .slice() itself chops on) }.
+  //
+  // The same detectOnsets the sampler uses, on the same analysis worker, so at sensitivity 1 the
+  // markers drawn here ARE the slices a pattern with no .slices() would play - the editor starts
+  // from what you were already hearing. WAV-only, like the analysis itself: `slices: null` is an
+  // honest "nothing to detect here", and the panel says so rather than drawing a lie.
+  'GET /api/sampleSlices': async (query) => {
+    const { isAudioName, samplesRoot } = require('@poptart/osc-engine/samples');
+    const raw = String(query.file ?? '').trim();
+    if (!raw || !isAudioName(raw)) throw new Error('sampleSlices needs an audio file');
+    const file = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(samplesRoot(), raw);
+    const sensitivity = Math.min(4, Math.max(0.25, Number(query.sensitivity) || 1));
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      throw new Error(`can't read ${path.basename(file)}`);
+    }
+    // Dragging the slider is a request per frame over the same file; keyed on the file's identity
+    // (an edit in place must not answer from the old analysis) plus the sensitivity it was run at.
+    const cacheKey = `${file}|${Math.round(st.mtimeMs)}|${st.size}|${sensitivity}`;
+    let slices = sampleSliceCache.get(cacheKey);
+    if (slices === undefined) {
+      slices = await analysis.analyzeSlices(file, { sensitivity });
+      sampleSliceCache.set(cacheKey, slices);
+      while (sampleSliceCache.size > 64) sampleSliceCache.delete(sampleSliceCache.keys().next().value);
+    }
+    return { status: 200, body: { file, sensitivity, slices } };
+  },
+
   // Prefer-VST3 toggle (settings tab). Default on; body: { enabled }. Applied on the next
   // plugin-list fetch - no rescan needed, the filter sits on the endpoints above.
   'GET /api/preferVst3': async () => ({
@@ -3548,6 +3634,9 @@ const routes = {
       // A pack's files come too: the pack panel shows a library pack's contents, which - unlike a
       // buffer pack's - are nowhere in the code it can read.
       packs: patternCore.packIds().map((p) => ({ ...p, files: patternCore.lookupPack(p.id)?.files ?? [] })),
+      // A slice set's markers come too, for the same reason a pack's files do: the slice editor
+      // draws a library set, and it is nowhere in the buffer to be read.
+      sliceSets: patternCore.sliceSetIds().map((p) => ({ ...p, set: patternCore.lookupSlices(p.id) ?? [] })),
       pinned: pinnedList(),
     },
   }),
@@ -3579,6 +3668,19 @@ const routes = {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveRoll needs the roll id');
     patternCore.liveRoll(id, String(body.notes ?? ''), body.opts ?? {});
+    return { status: 200, body: { ok: true } };
+  },
+
+  // Body: { id, set } - the same channel for the slice editor's markers, and for the same reason:
+  // a pattern resolves the slice set it NAMES as each event is emitted, so dragging a marker is
+  // heard on the next hit without the buffer being rewritten. The whole set goes over (it is keyed
+  // by file, and the panel is only ever editing one file's entry), and the write to the code, with
+  // the eval behind it, lands once when the gesture is let go.
+  'POST /api/liveSlices': async (body) => {
+    const id = body?.id;
+    if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveSlices needs the slice-set id');
+    const set = body?.set;
+    patternCore.liveSlices(id, Array.isArray(set) || (set && typeof set === 'object') ? set : []);
     return { status: 200, body: { ok: true } };
   },
 

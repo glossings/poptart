@@ -21,7 +21,7 @@ const HEADER = `// poptart's ★ library - definitions pinned from the editor (t
 // Safe to edit by hand; keep one definition per line so the editor can find them by name.
 `;
 
-const KINDS = new Set(['roll', 'shape', 'preset', 'pack']);
+const KINDS = new Set(['roll', 'shape', 'preset', 'pack', 'slices']);
 
 /** String-aware scan from an opening paren to its match; -1 if unbalanced. */
 function matchParen(code, openIdx) {
@@ -78,14 +78,14 @@ function literalValue(literal) {
 
 /**
  * Every pinned definition in `text`: { kind, id, scope, code, start, end }. `kind` is the bare
- * word (roll/shape/preset/pack), `scope` the plugin of a preset ('' otherwise), `code` the whole
+ * word (roll/shape/preset/pack/slices), `scope` the plugin of a preset ('' otherwise), `code` the whole
  * call, [start, end) the span of its line. A line that isn't one definition is left alone (a
  * comment, a blank, something hand-written) - it just isn't an entry.
  */
 function parsePinned(text) {
   const out = [];
   const src = String(text ?? '');
-  const re = /(^|\n)[ \t]*_(roll|shape|preset|pack)\s*\(/g;
+  const re = /(^|\n)[ \t]*_(roll|shape|preset|pack|slices)\s*\(/g;
   let m;
   while ((m = re.exec(src)) !== null) {
     const afterBreak = m[0].slice(m[1].length); // the indentation, then the call
@@ -115,7 +115,7 @@ const same = (e, q) => e.kind === q.kind && e.id === String(q.id) && (e.kind !==
  * is what keeps the file a list of definitions the parser above can find again.
  */
 function upsertPinned(text, { kind, id, scope = '', code }) {
-  if (!KINDS.has(kind)) throw new Error(`can't pin a "${kind}" - only rolls, shapes, presets and packs`);
+  if (!KINDS.has(kind)) throw new Error(`can't pin a "${kind}" - only rolls, shapes, presets, packs and slice sets`);
   const one = String(code ?? '').trim();
   const parsed = parsePinned(one);
   if (parsed.length !== 1 || !same(parsed[0], { kind, id, scope }) || parsed[0].code !== one) {

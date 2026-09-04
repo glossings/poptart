@@ -34,6 +34,7 @@ let harmonyMod = null; // harmony.mjs - chord analysis/naming + voicings for the
 let rollopsMod = null; // rollops.mjs - the roll menu's note transforms (strum, retrograde, rhythmize, ...)
 let mixctlMod = null; // mixctl.mjs - the mixer's gain/pan trim reads and code edits
 let recordMod = null; // record.mjs - a live take into a roll (the ● rec and capture paths)
+let slicesMod = null; // slices.mjs - reading, tidying and writing a _slices() set's positions
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -47,8 +48,10 @@ const coreReady = Promise.all([
   import('/pattern-core/arrange.mjs'),
   import('/pattern-core/harmony.mjs'),
   import('/pattern-core/rollops.mjs'),
+  import('/pattern-core/slices.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl]) => {
+    slicesMod = sl;
     miniMod = m;
     labelsMod = l;
     shapeMod = s;
@@ -66,6 +69,7 @@ const coreReady = Promise.all([
     initRecordPanel();
     initPresetPanel();
     initPackPanel();
+    initSlicePanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
     // Which spans are DATA (rather than roll ids) is a question only pianoroll.mjs can answer, so
@@ -209,8 +213,37 @@ const packDefs = makeDefRegistry({
   },
 });
 
+// Where a sample's chops are, for `.slices("break")`: positions in the file, per file, under a
+// name. Like a pack there is nothing to type - the markers are dragged on the waveform in the
+// slice editor - and like a pack its argument is always names, never the data. The `kind` is the
+// call's own word (`slices`) because that is what a pinned definition is filed under; `label` is
+// how it reads in a sentence.
+const sliceDefs = makeDefRegistry({
+  kind: 'slices',
+  label: 'slice set',
+  section: 'slices',
+  defCall: '_slices',
+  useCall: 'slices',
+  emptyBody: '{}', // a set with no file in it yet - every sample it meets chops on its own transients
+  isData: () => false,
+  library: () => prPrebakeSlices.map((p) => p.id),
+  libraryNote: 'prebake',
+  panel: {
+    current: () => sliceState?.id ?? null,
+    open: (id) => openSliceSetById(id, sliceCarry()),
+    close: () => closeSlicePanel(),
+    carry: () => sliceCarry(),
+    sourceCall: (refs) => sourceCallAmong(refs, sliceState?.source),
+    setCurrent: (from, to) => {
+      if (sliceState?.id === from) sliceState.id = to;
+    },
+    syncHead: () => sliceSyncHead(),
+    scheduleEval: () => sliceScheduleEval(),
+  },
+});
+
 // Every registry, for the passes that have to run over all of them (folding, auto-naming).
-const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs];
+const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs, sliceDefs];
 
 // The ★ library: what ~/.poptart/prebake/pinned.js holds, as last fetched (see prRefreshRollList) -
 // [{ kind, id, scope, code }]. Every registry reads it to draw its stars; see makeDefRegistry's pin.
@@ -381,9 +414,20 @@ setTimeout(editorReady, 2000);
 // the editor has focus CodeMirror handles these first and preventDefaults, so no double-fire.
 // A dialog on screen owns the keyboard, though - not least because Cmd+S inside the prebake editor
 // means "save the prebake".
+//
+// Except the TRANSPORT. A panel you draw, chop or mix in is one you have open while the pattern is
+// playing, and ⌘↵ / ⌘. must never be two keys you have to close a window to reach - the mixer and
+// the piano roll are outside this guard entirely for that reason. A dialog that is that kind of
+// panel says so with `keeps-transport`, and those two keys alone reach past it; everything else
+// (⌘S in particular) still belongs to the dialog.
+const TRANSPORT_KEY = (e) => e.key === 'Enter' || (e.key === '.' && !e.shiftKey);
 document.addEventListener('keydown', (e) => {
   if (e.defaultPrevented || !(e.metaKey || e.ctrlKey)) return;
-  if (document.querySelector('.dir-picker-backdrop:not(.hidden)')) return;
+  const dialogs = [...document.querySelectorAll('.dir-picker-backdrop:not(.hidden)')];
+  if (dialogs.length) {
+    if (dialogs.some((d) => !d.classList.contains('keeps-transport'))) return;
+    if (!TRANSPORT_KEY(e)) return;
+  }
   if (e.key === 'Enter') {
     e.preventDefault();
     // Whichever deck was clicked into last (see djSetActiveDeck): its song if it holds one, its
@@ -2387,6 +2431,7 @@ function openDeckBWidgetAt(code, idx) {
     ['piano roll', pianorollMod && findPianorollCallAt(code, idx)],
     ['preset', findPresetCallAt(code, idx)],
     ['sample pack', findSpCallAt(code, idx)],
+    ['slice', slicesMod && findSliceCallAt(code, idx)],
     ['record', findRecordCallAt(code, idx)],
   ].find(([, call]) => call?.onName);
   if (panel) logLine(`deck B: the ${panel[0]} panel can only edit deck A's buffer so far - move the pattern there to open it`);
@@ -2477,6 +2522,12 @@ function openWidgetAt(code, idx) {
     openPackFromCall(packCall, code);
     return true;
   }
+  // `slice`/`slices` on a sampler chain: the chop markers, drawn on the sample itself. Asked after
+  // the definition panels above because those are all first-argument handles, while this one may
+  // have to WRITE a `.slices()` onto the chain before there is anything to open (see the slice
+  // editor section).
+  const sliceCall = slicesMod && findSliceCallAt(code, idx);
+  if (sliceCall?.onName && openSliceEditorFromCall(sliceCall, code, idx)) return true;
   const rec = findRecordCallAt(code, idx);
   if (rec?.onName) {
     if (!recordState || rec.start !== recordState.callStart) openRecordPanel(rec);
@@ -3839,6 +3890,7 @@ let prPrebakeRolls = []; // ids from ~/.poptart/prebake.js: listed in the picker
 let prPrebakeShapes = []; // the same for shape(...) definitions
 let prPrebakePresets = []; // ...and for captured plugin presets, a sound library shared by every patch
 let prPrebakePacks = []; // ...and for sample packs: [{ id, files }] - the files, since the pack panel shows them
+let prPrebakeSlices = []; // ...and for slice sets: [{ id, set }] - the markers, so the editor can draw a library set
 let prRaf = null; // requestAnimationFrame handle for the playhead sweep
 let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
 let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
@@ -4366,7 +4418,10 @@ function sourceCallAmong(refs, sourceMark) {
  *   panel       the editor panel's hooks - see the roll instance below for the full shape
  */
 function makeDefRegistry(opts) {
-  const { kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null } = opts;
+  // `label` is the kind as a person says it. It is usually the `kind` word itself, but that one is
+  // also the wire name a pinned definition is filed under (`_slices`, not `_sliceSet`), so the two
+  // come apart wherever the call is named for the list it holds rather than for one of them.
+  const { kind, label = kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null } = opts;
   const say = (line, isError) => logLine(line, isError);
 
   // A kind whose names are only unique WITHIN something else. A preset belongs to the plugin it was
@@ -4568,7 +4623,7 @@ function makeDefRegistry(opts) {
       const label = prBlockLabelAt(m.index);
       const id = freshDefId(label, (name) => isTaken(name, sc), kind);
       const wanted = preferredDefId(label, kind);
-      if (inLibrary(wanted, sc)) libraryBumpNote(kind, wanted, id, libraryNote);
+      if (inLibrary(wanted, sc)) libraryBumpNote(label, wanted, id, libraryNote);
       claim(id, sc);
       created.push({ id, scope: sc });
       rewrites.push([m.index, m.index + m[0].length, `${useCall}(${JSON.stringify(id)})`]);
@@ -4592,7 +4647,7 @@ function makeDefRegistry(opts) {
       cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
     });
     refoldAll(); // the new block starts life hidden, like every other one
-    say(`new ${kind}${created.length === 1 ? '' : 's'}: ${created.map((c) => c.id).join(', ')}`);
+    say(`new ${label}${created.length === 1 ? '' : 's'}: ${created.map((c) => c.id).join(', ')}`);
     return true;
   }
 
@@ -4602,7 +4657,7 @@ function makeDefRegistry(opts) {
   function create(id, sc = panelScope()) {
     const code = cm.getValue();
     if (!id || DEF_ID_BAD.test(id)) {
-      return say(`can't create a ${kind} called "${id}": a name has to be one plain word`, true);
+      return say(`can't create a ${label} called "${id}": a name has to be one plain word`, true);
     }
     if (findDef(code, id, sc) || inLibrary(id, sc)) {
       panel.open(id, panel.carry()); // it already exists - showing it is what was meant anyway
@@ -4611,7 +4666,7 @@ function makeDefRegistry(opts) {
     const [from, to, text] = defsEdit(code, [{ id, scope: sc ?? '' }]);
     cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
     refoldAll();
-    say(`new ${kind}: ${id}`);
+    say(`new ${label}: ${id}`);
     panel.open(id, panel.carry());
     panel.scheduleEval();
   }
@@ -4623,7 +4678,7 @@ function makeDefRegistry(opts) {
   function remove(id, sc = panelScope()) {
     const code = cm.getValue();
     const def = findDef(code, id, sc);
-    const refuse = (why) => say(`can't delete ${kind} "${id}": ${why}`, true);
+    const refuse = (why) => say(`can't delete ${label} "${id}": ${why}`, true);
     if (!def) {
       return refuse(inLibrary(id, sc)
         ? "it isn't defined in this buffer - it comes from the shared library"
@@ -4638,7 +4693,7 @@ function makeDefRegistry(opts) {
     const wasOpen = panel.current() === id;
     cm.replaceRange('', cm.posFromIndex(from), cm.posFromIndex(to));
     refoldAll();
-    say(`deleted ${kind} "${id}"`);
+    say(`deleted ${label} "${id}"`);
     panel.scheduleEval();
     // The panel was showing the one that just went: put another up rather than closing, since
     // deleting from the picker is usually one of several tidying gestures.
@@ -4666,7 +4721,7 @@ function makeDefRegistry(opts) {
   // looking at it through one of the patterns playing it, which asks for something else: see fork.
   function rename(from, to, sc = panelScope()) {
     const code = cm.getValue();
-    const refuse = (why) => { say(`can't rename ${kind} "${from}" to "${to}": ${why}`, true); panel.syncHead(); };
+    const refuse = (why) => { say(`can't rename ${label} "${from}" to "${to}": ${why}`, true); panel.syncHead(); };
     if (!to || DEF_ID_BAD.test(to)) return refuse('a name has to be one plain word');
     const def = findDef(code, from, sc);
     if (!def) return refuse('its definition is not in this buffer');
@@ -4688,7 +4743,7 @@ function makeDefRegistry(opts) {
     refoldAll();
     panel.syncHead();
     panel.scheduleEval();
-    say(`renamed ${kind} "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}`);
+    say(`renamed ${label} "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}`);
   }
 
   // Two patterns playing one of these, renamed from inside one of them. Renaming both is the move
@@ -4726,7 +4781,7 @@ function makeDefRegistry(opts) {
     panel.open(to, view); // the same data stays on screen, now under the name just given it
     panel.scheduleEval();
     say(
-      `${kind} "${to}" is this pattern's own copy of "${from}" - ${others} other pattern${others === 1 ? '' : 's'} `
+      `${label} "${to}" is this pattern's own copy of "${from}" - ${others} other pattern${others === 1 ? '' : 's'} `
         + `still play${others === 1 ? 's' : ''} "${from}", which is unchanged`
     );
   }
@@ -4741,7 +4796,7 @@ function makeDefRegistry(opts) {
     const code = cm.getValue();
     const def = findDef(code, id, sc);
     if (!def) {
-      return say(`can't duplicate ${kind} "${id}": ${inLibrary(id, sc) ? 'it comes from the shared library - only what this buffer defines can be copied here' : 'its definition is not in this buffer'}`, true);
+      return say(`can't duplicate ${label} "${id}": ${inLibrary(id, sc) ? 'it comes from the shared library - only what this buffer defines can be copied here' : 'its definition is not in this buffer'}`, true);
     }
     const rows = allIds(def.scope ?? null);
     // Counted from the stem, not the name: duplicating `snare2` gives `snare3`, not `snare22` -
@@ -4755,7 +4810,7 @@ function makeDefRegistry(opts) {
     const indent = /^[ \t]*/.exec(code.slice(lineStart, def.start))[0];
     applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`]]);
     refoldAll();
-    say(`${kind} "${to}" is a copy of "${id}"`);
+    say(`${label} "${to}" is a copy of "${id}"`);
     panel.open(to, panel.carry());
     panel.scheduleEval();
   }
@@ -4786,18 +4841,18 @@ function makeDefRegistry(opts) {
   async function pin(id, sc = null) {
     const code = cm.getValue();
     const def = findDef(code, id, sc);
-    if (!def) return say(`can't pin ${kind} "${id}": its definition is not in this buffer`, true);
+    if (!def) return say(`can't pin ${label} "${id}": its definition is not in this buffer`, true);
     const had = pinnedEntry(id, def.scope);
     try {
       const res = await api('POST', '/api/pinned', { kind, id: String(id), scope: def.scope ?? '', code: defText(code, def) });
       pinnedDefs = res.pinned ?? pinnedDefs;
       for (const msg of res.errors ?? []) say(`library: ${msg}`, true);
       say(had
-        ? `★ ${kind} "${id}" in your library updated to this buffer's copy`
-        : `★ ${kind} "${id}" is in your library - every project can play it now`);
+        ? `★ ${label} "${id}" in your library updated to this buffer's copy`
+        : `★ ${label} "${id}" is in your library - every project can play it now`);
       prRefreshRollList();
     } catch (err) {
-      say(`can't pin ${kind} "${id}": ${err.message ?? err}`, true);
+      say(`can't pin ${label} "${id}": ${err.message ?? err}`, true);
     }
   }
 
@@ -4823,15 +4878,15 @@ function makeDefRegistry(opts) {
       const res = await api('POST', '/api/pinned/remove', { kind, id: String(id), scope: e.scope ?? '' });
       pinnedDefs = res.pinned ?? pinnedDefs;
       for (const msg of res.errors ?? []) say(`library: ${msg}`, true);
-      say(`${kind} "${id}" is out of your library${copied ? ' - this buffer keeps its own copy' : ''}`);
+      say(`${label} "${id}" is out of your library${copied ? ' - this buffer keeps its own copy' : ''}`);
       prRefreshRollList();
       if (copied) panel.scheduleEval();
     } catch (err) {
-      say(`can't take ${kind} "${id}" out of your library: ${err.message ?? err}`, true);
+      say(`can't take ${label} "${id}" out of your library: ${err.message ?? err}`, true);
     }
   }
 
-  return { kind, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate, pinState, pin, unpin };
+  return { kind, label, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate, pinState, pin, unpin };
 }
 
 
@@ -5525,7 +5580,7 @@ function makeNamePicker({
     if (!rows.length) {
       const empty = document.createElement('div');
       empty.className = 'def-pick-empty';
-      empty.textContent = `no ${reg.kind}s yet`;
+      empty.textContent = `no ${reg.label}s yet`;
       els.list.appendChild(empty);
       return;
     }
@@ -5753,9 +5808,13 @@ function prRefreshRollList() {
       prPrebakePacks = (res.packs ?? [])
         .filter((r) => r.layer === 'prebake')
         .map((r) => ({ id: String(r.id), files: (r.files ?? []).map(String) }));
+      prPrebakeSlices = (res.sliceSets ?? [])
+        .filter((r) => r.layer === 'prebake')
+        .map((r) => ({ id: String(r.id), set: slicesMod ? slicesMod.normalizeSliceSet(r.set ?? []) : (r.set ?? []) }));
       pinnedDefs = res.pinned ?? pinnedDefs; // the ★s every picker draws
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
       if (packState) packRenderList();
+      if (sliceState) sliceRenderList();
     })
     .catch(() => {}); // the picker still lists this buffer's rolls without it
 }
@@ -13664,6 +13723,1433 @@ function initPackPanel() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && packState) closePackPanel();
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice editor - double-click `slice` (or `slices`) on a sampler chain and the sample opens with
+// its chop markers drawn on it: one numbered tab per slice, dragged to wherever the chop belongs,
+// and `.slice(n)` plays the nth of them.
+//
+// The markers are a NAMED SET written into the code like every other drawn thing here -
+// `_slices("break", { "breaks/amen.wav": [0, 0.131, …] })` in the folded definitions block,
+// `.slices("break")` on the chain - so export, undo and snapshots need to know nothing about
+// slicing. A set is a MAP of the sample, not a rhythm: it says WHERE the chops are, and the
+// pattern's own `.slice("0 3 2 1")` says which to play when. Nothing here reorders anything,
+// because the pattern language already does that better than a list in a dialog could.
+//
+// The set is keyed BY FILE, and the panel only ever edits the entry for the sample on screen. That
+// is what makes one name usable across a whole break folder: `main` holds a chop map for each of
+// them, and tweaking `.i()` moves between maps that each fit their own audio instead of dragging
+// one break's markers onto another's transients.
+//
+// A new set opens EMPTY, which in the language means "chop on the sample's own transients" - so
+// the panel starts by drawing exactly what was already sounding, and the first marker you move is
+// the first thing that changes. Moving one is heard on the next hit with no evaluation at all
+// (POST /api/liveSlices; resolution is lazy, see slicesSignal), and the code is written once, when
+// you let go.
+//
+// The waveform is decoded in the browser, through the same fetch and AudioContext the pack panel
+// auditions with, so anything the browser can read draws and plays here. The transient TICKS under
+// it come from the server - the very detector `.slice()` chops on, at whatever the sensitivity
+// slider says - which is what makes auto-slice reproduce what the sampler would have done by
+// itself, and what the drag magnet pulls onto.
+// ---------------------------------------------------------------------------------------------
+
+const sliceBackdrop = document.getElementById('sliceBackdrop');
+const sliceTitle = document.getElementById('sliceTitle');
+const slicePickWrap = document.getElementById('slicePickWrap');
+const sliceNameEl = document.getElementById('sliceName');
+const slicePickBtn = document.getElementById('slicePickBtn');
+const slicePicker = document.getElementById('slicePicker');
+const sliceSearch = document.getElementById('sliceSearch');
+const slicePickList = document.getElementById('slicePickList');
+const sliceFileEl = document.getElementById('sliceFile');
+const sliceCanvas = document.getElementById('sliceCanvas');
+const slicePlayBtn = document.getElementById('slicePlayBtn');
+const sliceSensWrap = document.getElementById('sliceSensWrap');
+const sliceSens = document.getElementById('sliceSens');
+const sliceSensVal = document.getElementById('sliceSensVal');
+const sliceAutoBtn = document.getElementById('sliceAutoBtn');
+const sliceClearBtn = document.getElementById('sliceClearBtn');
+const sliceCountEl = document.getElementById('sliceCount');
+const sliceNote = document.getElementById('sliceNote');
+
+const SLICE_TAB_H = 18; // the strip of numbered tabs along the top - the markers' own handles
+const SLICE_TAB_GRAB_PX = 3; // slack around a tab's own rectangle, so grabbing one is not a test of aim
+const SLICE_SNAP_PX = 10; // how near a drag comes to a transient before it is pulled onto it
+const SLICE_ZERO_PX = 6; // ...and to a zero crossing, the finer of the two magnets
+const SLICE_HIT_PX = 6; // how near a press counts as being ON a marker rather than beside it
+const SLICE_FINE = 0.12; // ⌘-drag: this much of the hand's movement, for placing a chop by ear
+const SLICE_LIVE_MS = 60; // throttle on the live re-file while a marker is still moving
+const SLICE_EVAL_DEBOUNCE_MS = 250;
+const SLICE_DETECT_DEBOUNCE_MS = 140;
+const SLICE_PEAK_BUCKET = 64; // frames per pyramid bucket - drawing reduces from these, not the file
+const SLICE_SENS_TITLE = 'how much has to happen for a hit to count — moving this re-slices';
+const SLICE_BTN_ZOOM = 1.4; // per-keypress zoom step for cmd ± (the wheel zooms proportionally)
+
+// { id, set, key, positions, others, own, hand, source, file, label, buffer, peaks, detected, sel,
+// view, drag, lit } - the set on screen. `own`: defined in this buffer (editable); otherwise it is
+// the library's, shown as it is. `source` is a marker over the id string of the .slices() the panel
+// was opened through. `key`/`positions`/`others` are the set split around the file being drawn (see
+// sliceApplyKey); `hand` says the markers have been edited by hand, which is what stands the
+// sensitivity slider down. `lit` is what the pattern is playing right now (sliceFollowTick).
+let sliceState = null;
+let sliceEvalTimer = null;
+let sliceDetectTimer = null;
+let sliceLiveAt = 0;
+let sliceLivePending = null;
+let sliceSuppressSync = false; // our own write-back, which the change listener must not re-read
+let sliceLoadGen = 0; // a newer open supersedes an older one still decoding
+
+function sliceScheduleEval() {
+  clearTimeout(sliceEvalTimer);
+  sliceEvalTimer = setTimeout(() => { sliceEvalTimer = null; evaluate(false); }, SLICE_EVAL_DEBOUNCE_MS);
+}
+
+const sliceHead = makeNamePicker({
+  els: { wrap: slicePickWrap, title: sliceTitle, name: sliceNameEl, btn: slicePickBtn, picker: slicePicker, search: sliceSearch, list: slicePickList },
+  reg: sliceDefs,
+  current: () => sliceState?.id ?? null,
+  open: (id) => openSliceSetById(id, sliceCarry()),
+  canUse: () => !!sliceState?.source?.find(),
+  use: (id) => sliceUseInCall(id),
+  refocus: () => sliceCanvas.focus({ preventScroll: true }),
+});
+
+const sliceRenderList = () => { if (sliceState) sliceHead.renderList(); };
+
+// What a switch between sets keeps: the call the panel is looking through, and the sample it is
+// looking at. Two sets on one chain are two chop maps for the SAME file - the whole point of
+// `.slices("<tight loose>")` - so re-deriving the file (and decoding it again) on every switch
+// would be work for a result that cannot differ.
+function sliceCarry() {
+  if (!sliceState) return {};
+  const { source, at, file, key, label, index, indices, srcName } = sliceState;
+  return { source, at, file, key, label, index, indices, srcName };
+}
+
+function sliceSyncHead() {
+  const named = !!sliceState?.id;
+  sliceFileEl.textContent = sliceState?.label ?? '';
+  sliceFileEl.title = sliceState?.file ?? '';
+  sliceHead.syncHead(named ? sliceDefs.refCalls(cm.getValue(), sliceState.id).length : 0);
+}
+
+// --- the set, split around the file on screen -------------------------------------------------
+//
+// A set holds markers per file; the panel draws ONE file's, and every other file's entry rides
+// along untouched in `others` so that editing amen's chops can't disturb think's. A set written as
+// a bare list has no file in it at all: it is drawn as this file's markers, and becomes this file's
+// entry the moment anything is written back - which is the only reading that keeps what you can
+// see and what you will hear the same thing.
+function sliceApplyKey(state, key) {
+  state.key = key ?? state.key ?? null;
+  const set = state.set;
+  if (Array.isArray(set)) {
+    state.positions = [...set];
+    state.others = {};
+    return;
+  }
+  state.others = {};
+  for (const [k, list] of Object.entries(set ?? {})) {
+    if (k !== state.key) state.others[k] = list;
+  }
+  state.positions = state.key && Array.isArray(set?.[state.key]) ? [...set[state.key]] : [];
+}
+
+/** The whole set as it should be filed: this file's markers back among the others'. */
+function sliceFullSet() {
+  if (!sliceState) return [];
+  const { key, positions, others } = sliceState;
+  if (!key) return [...positions]; // no file identified (an unresolvable chain) - one map, for whatever plays
+  const out = { ...others };
+  if (positions.length) out[key] = [...positions];
+  else delete out[key];
+  return out;
+}
+
+/** How many OTHER samples this set has markers for - said out loud, since they are not on screen. */
+const sliceOtherCount = () => Object.keys(sliceState?.others ?? {}).length;
+
+/** A set as a string that ignores the order its files happen to be written in. */
+const sliceSetSig = (set) => (Array.isArray(set)
+  ? JSON.stringify(set)
+  : JSON.stringify(Object.keys(set ?? {}).sort().map((k) => [k, set[k]])));
+
+// Puts `id` into the .slices(...) the panel is looking through - the slice set's half of
+// packUseInCall. Opening a row EDITS that set; this is how the pattern comes to play it.
+function sliceUseInCall(id) {
+  const span = sliceState?.source?.find();
+  if (!span) return;
+  const was = cm.getRange(span.from, span.to);
+  if (was === id) return;
+  const word = sliceState.id && idWordRe(sliceState.id, '').test(was) ? sliceState.id : null;
+  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  if (word) applyEdits(idOccurrenceEdits({ from: cm.indexFromPos(span.from), str: was }, word, id));
+  else cm.replaceRange(id, span.from, span.to);
+  const after = quoted.find();
+  quoted.clear();
+  sliceState.source.clear();
+  sliceState.source = after
+    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    : null;
+  refoldAll();
+  logLine(`.slices("${was}") now chops on "${id}"`);
+  if (id !== sliceState.id) openSliceSetById(id, sliceCarry());
+  else sliceSyncHead();
+  sliceScheduleEval();
+}
+
+const sliceDefOf = (id) => sliceDefs.findDef(cm.getValue(), String(id));
+
+/** The set a `_slices(...)` definition holds, read off the code: a map of files, or a bare list. */
+function sliceSetOf(code, def) {
+  if (!def || !slicesMod) return [];
+  const [, rest] = splitFirstArg(code.slice(def.open + 1, def.close));
+  return slicesMod.parseSliceSet(rest);
+}
+
+const sliceTidy = (list) => (slicesMod ? slicesMod.normalizeSlicePositions(list) : [...list].sort((a, b) => a - b));
+
+// ---------------------------------------------------------------------------------------------
+// Opening - from a double-click on `slice`/`slices`, and from the picker's rows.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The `.slice(...)` or `.slices(...)` call `idx` sits in, plus whether it is on the name. `slices`
+ * is asked FIRST because `slice` is a prefix of it: the short pattern would otherwise claim the
+ * handle on every `.slices(` too. The bare builder forms (`slice("0 1")` at the head of a chain)
+ * answer as well - the leading dot is optional in both patterns.
+ */
+function findSliceCallAt(code, idx) {
+  const on = findNamedCallAt(code, idx, /\bslices\s*\(/g, 'slices');
+  if (on) return { ...on, kind: 'slices' };
+  const chop = findNamedCallAt(code, idx, /\bslice\s*\(/g, 'slice');
+  return chop ? { ...chop, kind: 'slice' } : null;
+}
+
+/** The `.slices("name")` on the same track as `idx`, if that chain names a set at all. */
+function sliceCallOnChain(code, idx) {
+  if (!labelsMod) return null;
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  if (!block) return null;
+  const isCode = codeOnly(code);
+  const re = /\bslices\s*\(/g;
+  re.lastIndex = block.start;
+  let m;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    if (!code.slice(open + 1, close).trim()) continue; // an empty one has no name in it yet
+    return { start: m.index, open, close };
+  }
+  return null;
+}
+
+/**
+ * Which FILE the chain around `idx` plays, in the engine's own namespaced spelling: a bare name is
+ * a folder pack, "sp:" a named one, "file:" one path, "rec:" a bounce. The index comes from the
+ * `:n` suffix on the source name where there is one, and from `.i(n)` otherwise - the two spellings
+ * of the same thing. A patterned index (`.i("0 3")`) has no single answer, so it reads as 0 and the
+ * head says which file is on screen.
+ */
+function sliceChainSourceAt(code, idx) {
+  if (!labelsMod) return null;
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  if (!block) return null;
+  const isCode = codeOnly(code);
+  const re = /\b(sp|se|sr|s)\s*\(\s*(["'`])((?:\\.|(?!\2)[\s\S])*?)\2/g;
+  re.lastIndex = block.start;
+  let found = null;
+  let m;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue;
+    found = { kind: m[1], str: m[3], at: m.index };
+    break;
+  }
+  if (!found) return null;
+  // `.i(...)` holds a PATTERN, not a number: `.i("<27 24>")` names two files and `.i(19)` one.
+  // Everything it names is collected, since the panel draws one file at a time and `[`/`]` step
+  // between them (see sliceStepFile) - reading only a bare integer here is what used to leave a
+  // patterned index reading as 0, so the panel always opened the pack's first file. Read after the
+  // source call and in code only, so a commented-out `.i()` above the chain isn't the chain's.
+  const iRe = /\.i\s*\(\s*(?:(-?\d+(?:\.\d+)?)|(["'`])((?:\\.|(?!\2)[\s\S])*?)\2)\s*\)/g;
+  iRe.lastIndex = found.at;
+  let iCall = [];
+  let iAt;
+  while ((iAt = iRe.exec(code)) && iAt.index < block.end) {
+    if (!isCode(iAt.index)) continue;
+    iCall = sliceIndexList(iAt[1] ?? iAt[3]);
+    break;
+  }
+  return sliceRefFrom(found.kind, found.str, iCall);
+}
+
+/** Every whole number a mini string names, in the order written: "<27 24>" -> [27, 24]. */
+function sliceIndexList(text) {
+  return [...String(text ?? '').matchAll(/-?\d+/g)].map((m) => Number(m[0]));
+}
+
+/**
+ * The source ref, plus every file index the chain names. A pack is addressed by index two ways -
+ * "breaks:27" says it in the name and .i(27) says it on the chain - and both of them hold PATTERNS:
+ * `s("breaks:<27 24>")` and `.i("<27 24>")` are the same two files. The panel draws one at a time,
+ * so `indices` is the list in the order written and `index` is where it starts; `[`/`]` walk it.
+ */
+function sliceRefFrom(kind, str, iCall) {
+  const raw = String(str).trim();
+  if (!raw) return null;
+  if (kind === 'se') return { ref: `file:${raw}`, name: raw, index: 0, indices: [0] };
+  const first = raw.split(/[\s,<>[\]{}|!*/?@:]+/).filter(Boolean)[0] ?? '';
+  if (!first) return null;
+  if (kind === 'sr') return { ref: `rec:${first}`, name: first, index: 0, indices: [0] };
+  // The field on the name wins over .i(), as it does at emit time (see the scheduler's dispatch:
+  // an explicit .i() wins over the suffix... but only where the suffix names nothing).
+  const sub = /^[^\s:]+:(.+)$/.exec(raw);
+  const fromName = sub ? sliceIndexList(sub[1]) : [];
+  const indices = (fromName.length ? fromName : iCall) ?? [];
+  return {
+    ref: kind === 'sp' ? `sp:${first}` : first,
+    name: first,
+    index: indices[0] ?? 0,
+    indices: indices.length ? indices : [0],
+  };
+}
+
+/** Opens whichever set the double-clicked call plays - making one if the chain has none yet. */
+function openSliceEditorFromCall(call, code, idx) {
+  if (call.kind === 'slices') {
+    // An empty .slices() has no name yet. Give it one, then open whatever it became - a bookmark
+    // carries the handle's position across the rewrite, since a definitions block written below
+    // moves every offset above it not at all and the call's own rewrite moves the rest along. The
+    // same dance as the roll's, the shape's and the pack's.
+    if (!code.slice(call.open + 1, call.close).trim()) return sliceMaterializeAt(idx);
+    if (!sliceDefs.isIdCall(code.slice(call.open + 1, call.close))) {
+      logLine('this .slices([...]) carries its positions inline - the editor writes named sets, so give it a name (.slices("break")) to draw it here', true);
+      return false;
+    }
+    return openSliceFromIdCall(call, code);
+  }
+  // Double-clicked `slice`: that call says WHICH chop to play, not where the chops are. Follow the
+  // chain to the set it plays - or, the usual case the first time, give the chain one.
+  const on = sliceCallOnChain(code, call.start);
+  if (on) return openSliceFromIdCall(on, code);
+  // ...but only where there is a sample to chop. `.slice(` is also an everyday JavaScript method,
+  // and a setup block's `list.slice(2)` must not have `.slices()` written onto it - so a chain with
+  // no sampler source declines the handle and the double-click goes on to whatever else wants it.
+  if (!sliceChainSourceAt(code, call.start)) return false;
+  const at = cm.setBookmark(cm.posFromIndex(idx));
+  cm.replaceRange('.slices()', cm.posFromIndex(call.close + 1));
+  const back = at.find();
+  at.clear();
+  return back ? sliceMaterializeAt(cm.indexFromPos(back)) : false;
+}
+
+function sliceMaterializeAt(idx) {
+  const at = cm.setBookmark(cm.posFromIndex(idx));
+  const named = sliceDefs.materialize();
+  const back = at.find();
+  at.clear();
+  return !!(named && back) && openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+}
+
+/** Double-clicked the name of a .slices("<tight loose>"): open the one sounding, or the first named. */
+function openSliceFromIdCall(call, code) {
+  const range = idStringRange(call, code);
+  if (!range) return false;
+  const [from, to] = range;
+  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  if (id == null) return false;
+  const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
+  if (openSliceSetById(id, { source, at: call.start })) return true;
+  source.clear();
+  return false;
+}
+
+function openSliceSetById(id, from = {}) {
+  const key = String(id);
+  const def = sliceDefOf(key);
+  const lib = def ? null : prPrebakeSlices.find((p) => p.id === key);
+  if (!def && !lib) {
+    logLine(`no slice set called "${key}" is defined in this buffer`, true);
+    return false;
+  }
+  let source = from.source ?? sliceState?.source ?? null;
+  if (!source?.find()) {
+    source = null;
+    const call = sliceDefs.refCalls(cm.getValue(), key)[0];
+    if (call) source = cm.markText(cm.posFromIndex(call.from), cm.posFromIndex(call.to), {});
+  }
+  const at = from.at ?? (source?.find() ? cm.indexFromPos(source.find().from) : null);
+  const keep = from.file
+    ? { file: from.file, key: from.key ?? null, label: from.label ?? '', index: from.index ?? null,
+      indices: from.indices ?? [], srcName: from.srcName ?? '' }
+    : { file: null, key: null, label: '', index: null, indices: [], srcName: '' };
+  sliceState = {
+    id: key,
+    set: def ? sliceSetOf(cm.getValue(), def) : lib.set ?? [],
+    positions: [],
+    others: {},
+    own: !!def,
+    hand: false, // until the markers say otherwise (see sliceCheckHand)
+    source,
+    at,
+    ...keep,
+    buffer: null,
+    peaks: null,
+    detected: null, // the server's transients: null while unknown, [] for "none to be had"
+    detectWhy: '',
+    sel: 0,
+    view: { start: 0, span: 1 },
+    drag: null,
+    lit: [], // the slices the pattern is sounding right now (sliceFollowTick)
+  };
+  sliceApplyKey(sliceState, sliceState.key);
+  syncPreviewRouting(); // the panel auditions - settle where that comes out before it can
+  sliceBackdrop.classList.remove('hidden');
+  sliceSetHand(false);
+  sliceSyncHead();
+  sliceHead.renderList(true);
+  sliceSay('');
+  sliceRender();
+  sliceLoadSample();
+  sliceCanvas.focus({ preventScroll: true });
+  return true;
+}
+
+function closeSlicePanel() {
+  if (!sliceState) return;
+  sliceStopAudition();
+  sliceState.source?.clear();
+  sliceState = null;
+  sliceBackdrop.classList.add('hidden');
+}
+
+const sliceSay = (msg, isError = false) => {
+  sliceNote.textContent = msg ?? '';
+  sliceNote.classList.toggle('error', !!msg && isError); // .pack-note's own red, shared with the pack panel
+};
+
+// ---------------------------------------------------------------------------------------------
+// The sample: which file, its audio, its peaks, its transients.
+// ---------------------------------------------------------------------------------------------
+
+async function sliceLoadSample() {
+  const gen = ++sliceLoadGen;
+  const state = sliceState;
+  if (!state) return;
+  try {
+    if (!state.file) {
+      const src = state.at == null ? null : sliceChainSourceAt(cm.getValue(), state.at);
+      if (!src) {
+        sliceSay('no sampler source on this chain - open the set from a pattern that plays one', true);
+        return;
+      }
+      state.indices = src.indices;
+      state.srcName = src.name;
+      // Which of them to draw. A chain whose index is a pattern names several files and plays one
+      // at a time, so: the one being PLAYED if the transport is running (the same question
+      // activeIdIn answers for a `<tight loose>` of set names), else the first it names - and, once
+      // `[`/`]` have been used, whichever was stepped to.
+      const index = state.index ?? sliceSoundingIndexAt(state.at) ?? src.index;
+      const res = await api('GET', `/api/sampleFile?ref=${encodeURIComponent(src.ref)}&i=${index}`);
+      if (gen !== sliceLoadGen || sliceState !== state) return;
+      if (!res.file) {
+        sliceSay(`nothing to chop: "${src.ref}" has no files`, true);
+        return;
+      }
+      state.file = res.file;
+      state.index = index; // which file of the pack is on screen - see sliceSoundingNow
+      // "breaks:27 · amen.wav" for a pack (the index is half the address); just the name for the
+      // one-file sources, where an index would be a fiction.
+      const paged = !/^(file|rec):/.test(src.ref);
+      state.label = `${paged ? `${src.name}:${index}` : src.name} · ${res.file.split('/').pop()}`;
+      // The set's own name for this file, straight from the side that can read the disk - which is
+      // the whole reason the panel waits for the file before drawing a marker (see sampleKey).
+      sliceApplyKey(state, res.key ?? null);
+      sliceSyncHead();
+      sliceRender();
+    }
+    state.buffer = await packLoadBuffer(state.file); // the pack panel's decode + cache
+    if (gen !== sliceLoadGen || sliceState !== state) return;
+    state.peaks = slicePeakPyramid(state.buffer);
+    sliceRender();
+    await sliceDetect();
+    if (gen === sliceLoadGen && sliceState === state) sliceCheckHand();
+  } catch (e) {
+    if (gen === sliceLoadGen && sliceState === state) sliceSay(e.message ?? String(e), true);
+  }
+}
+
+/**
+ * Per-bucket min/max over the whole file, once. Every draw reduces from THESE rather than from the
+ * samples, so a wheel zoom over a five-minute bounce costs the same as one over a kick - and at the
+ * closest zooms, where a pixel is fewer frames than a bucket, the raw channel is read directly.
+ */
+function slicePeakPyramid(buf) {
+  const chans = [];
+  for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c));
+  const frames = buf.length;
+  const count = Math.max(1, Math.ceil(frames / SLICE_PEAK_BUCKET));
+  const min = new Float32Array(count);
+  const max = new Float32Array(count);
+  for (let b = 0; b < count; b++) {
+    const s = b * SLICE_PEAK_BUCKET;
+    const e = Math.min(frames, s + SLICE_PEAK_BUCKET);
+    let lo = 0;
+    let hi = 0;
+    for (const d of chans) {
+      for (let i = s; i < e; i++) {
+        const v = d[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+    min[b] = lo;
+    max[b] = hi;
+  }
+  return { min, max, count, frames, mono: chans[0] };
+}
+
+/** The server's transients at the current sensitivity - the snap magnet's targets, and auto-slice's. */
+async function sliceDetect() {
+  const state = sliceState;
+  if (!state?.file) return;
+  const sens = Number(sliceSens.value) || 1;
+  try {
+    const res = await api('GET', `/api/sampleSlices?file=${encodeURIComponent(state.file)}&sensitivity=${sens}`);
+    if (sliceState !== state) return;
+    state.detected = res.slices ?? [];
+    state.detectWhy = res.slices ? '' : 'only WAV files can be analyzed, so there is nothing to snap to here';
+    if (!res.slices) sliceSay(state.detectWhy);
+    sliceRender();
+  } catch (e) {
+    if (sliceState !== state) return;
+    state.detected = [];
+    sliceSay(e.message ?? String(e), true);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Auto or hand-drawn.
+//
+// The sensitivity slider re-slices the whole file: every marker it finds replaces every marker
+// there is. That is what you want while the markers ARE the detector's, and the last thing you want
+// once you have moved some - so as soon as the set on screen stops being what the detector would
+// produce, the slider stands down and `auto-slice` becomes the one gesture that throws hand-drawn
+// markers away. Loudly, rather than by a stray slider nudge.
+// ---------------------------------------------------------------------------------------------
+
+function sliceSetHand(on) {
+  if (sliceState) sliceState.hand = !!on;
+  sliceSens.disabled = !!on;
+  sliceSensWrap.classList.toggle('slice-sens-off', !!on);
+  sliceSensWrap.title = on
+    ? 'these markers were drawn by hand — auto-slice to go back to detected ones'
+    : SLICE_SENS_TITLE;
+}
+
+/** Marks the set as hand-drawn from here on - what every marker gesture calls. */
+function sliceHandEdit() {
+  if (!sliceState || sliceState.hand) return;
+  sliceSetHand(true);
+  sliceSay('drawn by hand from here — auto-slice re-detects (and replaces these)');
+}
+
+/**
+ * Are the markers on screen the detector's own, or has someone been at them? Asked when a set is
+ * opened and after a hand edit to the code, so a set you drew last week has the slider stood down
+ * the moment it comes back up. An EMPTY set is auto by definition: it means "the file's own
+ * transients", which is what the detector would say too.
+ */
+function sliceCheckHand() {
+  if (!sliceState) return;
+  const marks = sliceState.positions;
+  if (!marks.length) return sliceSetHand(false);
+  const det = sliceState.detected;
+  const same = det && det.length === marks.length && det.every((p, i) => Math.abs(p - marks[i]) < 1e-6);
+  sliceSetHand(!same);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Writing back - live while a marker moves, into the code when it lands.
+// ---------------------------------------------------------------------------------------------
+
+// Heard on the next hit without an evaluation: the pattern resolves the set it NAMES as each event
+// is emitted, so re-filing under that name is the whole job (see liveSlices in signal.mjs).
+function sliceLivePush() {
+  if (!sliceState?.id) return;
+  const now = Date.now();
+  clearTimeout(sliceLivePending);
+  if (now - sliceLiveAt < SLICE_LIVE_MS) {
+    sliceLivePending = setTimeout(sliceLivePush, SLICE_LIVE_MS);
+    return;
+  }
+  sliceLiveAt = now;
+  api('POST', '/api/liveSlices', { id: sliceState.id, set: sliceFullSet() })
+    .catch(() => { /* the live preview is a nicety - the write on release is what counts */ });
+}
+
+/** The markers into the definition, and an evaluation behind them. Called when a gesture lands. */
+function sliceCommit() {
+  if (!sliceState) return;
+  if (!sliceState.own) {
+    // A library set is shown as it is - editing it here would change every project silently. The ★
+    // on its picker row is how it becomes this buffer's to edit.
+    sliceSay(`"${sliceState.id}" comes from your library - ★ it into this buffer to edit it`, true);
+    return;
+  }
+  const def = sliceDefOf(sliceState.id);
+  if (!def || !slicesMod) return;
+  sliceState.set = sliceFullSet();
+  sliceSuppressSync = true;
+  try {
+    cm.replaceRange(
+      `${def.idLiteral}, ${slicesMod.serializeSliceSet(sliceState.set)}`,
+      cm.posFromIndex(def.open + 1),
+      cm.posFromIndex(def.close),
+    );
+  } finally {
+    sliceSuppressSync = false;
+  }
+  refoldAll();
+  sliceScheduleEval();
+}
+
+// The reverse direction: a hand edit to the definition (or its removal) shows in the panel.
+// Checked after the change settles, since a rename rewrites the id before the panel learns it.
+function sliceSyncFromCode() {
+  if (!sliceState || sliceSuppressSync) return;
+  setTimeout(() => {
+    if (!sliceState) return;
+    const def = sliceDefOf(sliceState.id);
+    if (!def) {
+      if (sliceState.own && !prPrebakeSlices.some((p) => p.id === sliceState.id)) closeSlicePanel();
+      return;
+    }
+    const set = sliceSetOf(cm.getValue(), def);
+    if (sliceState.own && sliceSetSig(set) === sliceSetSig(sliceFullSet())) return;
+    sliceState.set = set;
+    sliceState.own = true;
+    sliceApplyKey(sliceState, sliceState.key);
+    sliceState.sel = Math.min(sliceState.sel, Math.max(0, sliceState.positions.length - 1));
+    sliceCheckHand();
+    sliceRender();
+  }, 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Geometry, snapping, and the drawing.
+// ---------------------------------------------------------------------------------------------
+
+const sliceW = () => Math.max(1, sliceCanvas.clientWidth);
+const sliceXOf = (pos) => ((pos - sliceState.view.start) / sliceState.view.span) * sliceW();
+const slicePosOf = (x) => sliceState.view.start + (x / sliceW()) * sliceState.view.span;
+/** A distance on screen as a distance in the file - what every "within N pixels" test needs. */
+const slicePxSpan = (px) => (px / sliceW()) * sliceState.view.span;
+
+/** Which marker is within `px` of `pos`, nearest first, or -1. */
+function sliceMarkerNear(pos, px = SLICE_HIT_PX) {
+  const within = slicePxSpan(px);
+  let best = -1;
+  let bestD = Infinity;
+  sliceState.positions.forEach((p, k) => {
+    const d = Math.abs(p - pos);
+    if (d <= within && d < bestD) { best = k; bestD = d; }
+  });
+  return best;
+}
+
+/**
+ * The numbered tab under (x, y), or -1. Tested against the tab's own RECTANGLE rather than against
+ * the marker line, because the tab is drawn to the right of its marker and grabbing a thing should
+ * mean putting the pointer on the thing. Two overlapping tabs at a wide zoom go to the nearer
+ * marker, which is the one whose number you can read.
+ */
+function sliceTabAt(x, y) {
+  if (y > SLICE_TAB_H + SLICE_TAB_GRAB_PX) return -1;
+  let best = -1;
+  let bestD = Infinity;
+  sliceState.positions.forEach((p, k) => {
+    const at = sliceXOf(p);
+    const w = sliceTabWidth(k);
+    if (x < at - SLICE_TAB_GRAB_PX || x > at + w + SLICE_TAB_GRAB_PX) return;
+    const d = Math.abs(p - slicePosOf(x));
+    if (d < bestD) { best = k; bestD = d; }
+  });
+  return best;
+}
+
+/** How wide the tab for slice `k` is drawn - shared by the drawing and the hit test. */
+function sliceTabWidth(k) {
+  return Math.max(12, String(k).length * 6 + 8);
+}
+
+/**
+ * Where a dragged marker actually lands: pulled onto a transient when one is close, else onto the
+ * nearest zero crossing, else left exactly where the hand put it. Alt (and ⌘, which is also the
+ * fine drag) turns both magnets off, which is the escape hatch when the chop you want is not where
+ * the audio says it should be.
+ *
+ * The two magnets are different tools, not two strengths of one. The transient is the MUSICAL
+ * target - the hit you are cutting to - and it wins wherever it is in reach; the zero crossing is
+ * the acoustic one, and it exists so a chop that is already where you want it doesn't click.
+ */
+// ⌘ (ctrl on a non-Mac keyboard) is the fine drag: the marker follows a fraction of the hand, so a
+// chop can be placed by ear at any zoom, and the magnets are off while it does - the two belong
+// together, since a magnet would undo the precision the moment you got close to a transient. Alt
+// turns the magnets off on their own, at full speed.
+const sliceFineDrag = (e) => e.metaKey || e.ctrlKey;
+const sliceFreeHand = (e) => e.altKey || sliceFineDrag(e);
+
+/**
+ * Where the marker under the hand should be, given the pointer at `x`. RELATIVE to where the drag
+ * was anchored rather than absolute, so grabbing a tab a few pixels off its line doesn't snatch the
+ * marker under the pointer - and so reaching for ⌘ mid-drag changes the gearing from here on
+ * instead of teleporting the marker.
+ */
+function sliceDragPos(e, x) {
+  const d = sliceState.drag;
+  if (!d) return slicePosOf(x);
+  const fine = sliceFineDrag(e);
+  if (fine !== d.anchor.fine) d.anchor = { x, pos: d.key, fine };
+  return d.anchor.pos + slicePxSpan((x - d.anchor.x) * (fine ? SLICE_FINE : 1));
+}
+
+function sliceSnap(pos, free) {
+  if (free) return pos;
+  const det = sliceState.detected;
+  if (det?.length) {
+    const win = slicePxSpan(SLICE_SNAP_PX);
+    let best = null;
+    for (const t of det) {
+      if (Math.abs(t - pos) <= win && (best === null || Math.abs(t - pos) < Math.abs(best - pos))) best = t;
+    }
+    if (best !== null) return best;
+  }
+  return sliceZeroCrossingNear(pos, slicePxSpan(SLICE_ZERO_PX));
+}
+
+/** The nearest upward zero crossing within `reach` (in file fractions), or `pos` unchanged. */
+function sliceZeroCrossingNear(pos, reach) {
+  const pk = sliceState.peaks;
+  if (!pk?.mono?.length) return pos;
+  const d = pk.mono;
+  const n = d.length;
+  const at = Math.round(pos * n);
+  const radius = Math.max(1, Math.round(reach * n));
+  const rising = (i) => i > 0 && i < n && d[i - 1] <= 0 && d[i] > 0;
+  for (let step = 0; step <= radius; step++) {
+    if (rising(at + step)) return (at + step) / n;
+    if (step && rising(at - step)) return (at - step) / n;
+  }
+  return pos;
+}
+
+function sliceSetView(start, span) {
+  const s = Math.min(1, Math.max(0.0005, span));
+  sliceState.view = { span: s, start: Math.min(1 - s, Math.max(0, start)) };
+}
+
+/**
+ * One keypress worth of zoom, anchored where the eye already is: the selected marker when it is on
+ * screen (it is what the arrows walk and what space plays), and the middle of the view otherwise.
+ * The wheel zooms at the pointer instead - it has one to zoom at.
+ */
+function sliceZoomBy(factor) {
+  const at = sliceState.positions[sliceState.sel];
+  const { start, span } = sliceState.view;
+  const on = at != null && at >= start && at <= start + span;
+  sliceZoomAt(on ? sliceXOf(at) : sliceW() / 2, factor);
+}
+
+function sliceZoomAt(x, factor) {
+  const anchor = slicePosOf(x);
+  const span = sliceState.view.span / factor;
+  sliceSetView(anchor - (x / sliceW()) * span, span);
+  sliceRender();
+}
+
+function sliceThemeColors() {
+  const css = getComputedStyle(document.documentElement);
+  const pick = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+  return {
+    wave: pick('--text-dim', '#888'),
+    accent: pick('--accent', '#6cf'),
+    border: pick('--border', '#333'),
+    text: pick('--text', '#ddd'),
+    warn: pick('--warn', '#dd0'),
+    sel: pick('--selection', '#234'),
+    bg: pick('--bg', '#111'),
+  };
+}
+
+function sliceRender() {
+  if (!sliceState) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(sliceCanvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(sliceCanvas.clientHeight * dpr));
+  if (sliceCanvas.width !== w || sliceCanvas.height !== h) {
+    sliceCanvas.width = w;
+    sliceCanvas.height = h;
+  }
+  const ctx = sliceCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = sliceCanvas.clientWidth;
+  const H = sliceCanvas.clientHeight;
+  const c = sliceThemeColors();
+  ctx.clearRect(0, 0, W, H);
+
+  const top = SLICE_TAB_H;
+  const waveH = Math.max(1, H - top);
+  const mid = top + waveH / 2;
+
+  // The slices as alternating bands, so the chops read as blocks before you look at a single
+  // marker. The selected one is lit: it is what space plays and what the arrows walk. A slice the
+  // PATTERN is playing is lit brighter still, in the accent - that band and the playhead crossing
+  // it are the panel's answer to "which of these am I hearing?" (see sliceFollowTick).
+  const marks = sliceState.positions;
+  const sounding = new Set(sliceState.lit.map((l) => l.k)); // not `playing` - that is the transport's
+  for (let k = 0; k < marks.length; k++) {
+    const x0 = sliceXOf(marks[k]);
+    const x1 = sliceXOf(marks[k + 1] ?? 1);
+    if (x1 < 0 || x0 > W) continue;
+    const on = sounding.has(k);
+    const band = on ? c.accent : k === sliceState.sel ? c.sel : (k % 2 ? 'rgba(127,127,127,0.06)' : null);
+    if (!band) continue;
+    ctx.globalAlpha = on ? 0.22 : 1; // the accent as a wash, not a block - the waveform draws over it
+    ctx.fillStyle = band;
+    ctx.fillRect(Math.max(0, x0), top, Math.min(W, x1) - Math.max(0, x0), waveH);
+    ctx.globalAlpha = 1;
+  }
+
+  if (!sliceState.peaks) {
+    ctx.fillStyle = c.wave;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(sliceState.file ? 'decoding…' : 'finding the sample…', W / 2, mid);
+  } else {
+    sliceDrawWave(ctx, W, top, waveH, c);
+  }
+
+  // The detector's transients, under everything: where auto-slice would put markers, and where a
+  // drag is pulled to. Faint on purpose - they are targets, not chops.
+  if (sliceState.detected?.length) {
+    ctx.strokeStyle = c.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const t of sliceState.detected) {
+      const x = Math.round(sliceXOf(t)) + 0.5;
+      if (x < -1 || x > W + 1) continue;
+      ctx.moveTo(x, top + waveH - 8);
+      ctx.lineTo(x, top + waveH);
+    }
+    ctx.stroke();
+  }
+
+  sliceDrawPlayhead(ctx, W, top, waveH, c);
+  sliceDrawMarkers(ctx, W, top, waveH, c);
+  // The other files this set holds markers for are real and invisible - a set is per sample, and
+  // the panel draws one - so they are counted out loud rather than left to be discovered.
+  const others = sliceOtherCount();
+  const also = others ? ` · ${others} other sample${others === 1 ? '' : 's'} in this set` : '';
+  sliceCountEl.textContent = (marks.length
+    ? `${marks.length} slice${marks.length === 1 ? '' : 's'} · selected ${sliceState.sel}`
+    : 'no markers — this sample chops on its own transients') + also;
+}
+
+function sliceDrawWave(ctx, W, top, waveH, c) {
+  const pk = sliceState.peaks;
+  const half = waveH / 2;
+  const mid = top + half;
+  ctx.strokeStyle = c.wave;
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  for (let x = 0; x < W; x++) {
+    const f0 = Math.floor(slicePosOf(x) * pk.frames);
+    const f1 = Math.max(f0 + 1, Math.floor(slicePosOf(x + 1) * pk.frames));
+    let lo = 0;
+    let hi = 0;
+    if (f1 - f0 <= SLICE_PEAK_BUCKET) {
+      // Closer in than one bucket: read the samples themselves, or the drawing would flatten into
+      // the pyramid's blocks exactly where you zoomed in to see the individual cycles. One channel
+      // rather than the summed peak, because at this zoom you are looking at the wave itself.
+      const d = pk.mono;
+      for (let i = Math.max(0, f0); i < Math.min(pk.frames, f1); i++) {
+        if (d[i] < lo) lo = d[i];
+        if (d[i] > hi) hi = d[i];
+      }
+    } else {
+      const b0 = Math.max(0, Math.floor(f0 / SLICE_PEAK_BUCKET));
+      const b1 = Math.min(pk.count, Math.ceil(f1 / SLICE_PEAK_BUCKET));
+      for (let b = b0; b < b1; b++) {
+        if (pk.min[b] < lo) lo = pk.min[b];
+        if (pk.max[b] > hi) hi = pk.max[b];
+      }
+    }
+    const yTop = mid - Math.min(1, hi) * half;
+    const yBot = mid - Math.max(-1, lo) * half;
+    ctx.moveTo(x + 0.5, yTop);
+    ctx.lineTo(x + 0.5, Math.max(yBot, yTop + 0.7)); // a silent column is still a hairline
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function sliceDrawMarkers(ctx, W, top, waveH, c) {
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.textBaseline = 'middle';
+  sliceState.positions.forEach((p, k) => {
+    const x = Math.round(sliceXOf(p)) + 0.5;
+    if (x < -30 || x > W + 30) return;
+    const on = k === sliceState.sel;
+    ctx.strokeStyle = on ? c.accent : c.text;
+    ctx.globalAlpha = on ? 1 : 0.55;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, top + waveH);
+    ctx.stroke();
+    // The numbered tab - the marker's handle, and the number `.slice(n)` plays. Its width comes
+    // from sliceTabWidth, which is also what the hit test measures: what you can see you can grab.
+    const label = String(k);
+    const tw = sliceTabWidth(k);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = on ? c.accent : c.border;
+    ctx.fillRect(x - 0.5, 1, tw, SLICE_TAB_H - 3);
+    ctx.fillStyle = on ? c.bg : c.text;
+    ctx.textAlign = 'center';
+    ctx.fillText(label, x - 0.5 + tw / 2, SLICE_TAB_H / 2);
+  });
+  ctx.globalAlpha = 1;
+}
+
+function sliceDrawPlayhead(ctx, W, top, waveH, c) {
+  const head = (at, color) => {
+    const x = Math.round(sliceXOf(at)) + 0.5;
+    if (x < 0 || x > W) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, top + waveH);
+    ctx.stroke();
+  };
+  const at = sliceAuditionPosition();
+  if (at != null) head(at, c.warn);
+  // ...and one for every slice the pattern is playing right now. The accent, so it reads as the
+  // track rather than as this panel's own audition.
+  for (const l of sliceState.lit) head(l.at, c.accent);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Editing the markers.
+// ---------------------------------------------------------------------------------------------
+
+function sliceAddMarker(pos) {
+  const p = Math.min(1, Math.max(0, pos));
+  if (sliceMarkerNear(p, SLICE_HIT_PX) >= 0) return -1; // one already there - a second is an empty slice
+  sliceState.positions = sliceTidy([...sliceState.positions, p]);
+  const k = sliceState.positions.indexOf(p);
+  sliceState.sel = k < 0 ? sliceState.sel : k;
+  sliceHandEdit();
+  return k;
+}
+
+function sliceRemoveMarker(k) {
+  if (k < 0 || k >= sliceState.positions.length) return;
+  sliceState.positions = sliceState.positions.filter((_, i) => i !== k);
+  sliceState.sel = Math.max(0, Math.min(sliceState.sel, sliceState.positions.length - 1));
+  sliceHandEdit();
+}
+
+/** Replace every marker with the detector's own - the auto-slice gesture, and what the slider does. */
+function sliceAdoptDetected() {
+  const det = sliceState.detected;
+  if (!det?.length) {
+    sliceSay(sliceState.detectWhy || 'nothing detected at this sensitivity', true);
+    return false;
+  }
+  sliceState.positions = sliceTidy(det);
+  sliceState.sel = Math.min(sliceState.sel, sliceState.positions.length - 1);
+  sliceSetHand(false); // these ARE the detector's markers again, so the slider goes back to driving
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Audition - one slice at a time, straight out of the decoded buffer. The pack panel's routing
+// rules apply (DJ mode wants a headphone cue), which is what auditionBlocked answers.
+// ---------------------------------------------------------------------------------------------
+
+const slicePlayer = { source: null, startedAt: 0, from: 0, to: 0, raf: null };
+
+function sliceStopAudition() {
+  if (slicePlayer.source) {
+    const src = slicePlayer.source;
+    slicePlayer.source = null;
+    src.onended = null;
+    try { src.stop(); } catch { /* already ended */ }
+  }
+  cancelAnimationFrame(slicePlayer.raf);
+  slicePlayBtn.textContent = '▶';
+}
+
+/** Where the audition is now, as a fraction of the file, or null when nothing is playing. */
+function sliceAuditionPosition() {
+  if (!slicePlayer.source || !sliceState?.buffer) return null;
+  const dur = sliceState.buffer.duration;
+  const at = slicePlayer.from + (previewCtx.currentTime - slicePlayer.startedAt) / dur;
+  return at > slicePlayer.to ? null : at;
+}
+
+/** Play slice `k` (or the whole file when there are no markers at all). */
+function sliceAudition(k) {
+  const state = sliceState;
+  if (!state?.buffer) return;
+  const blocked = auditionBlocked();
+  if (blocked) { sliceStopAudition(); return sliceSay(blocked, true); }
+  const marks = state.positions;
+  const from = marks.length ? marks[Math.min(k, marks.length - 1)] : 0;
+  const to = marks.length ? (marks[Math.min(k, marks.length - 1) + 1] ?? 1) : 1;
+  sliceStopAudition();
+  if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
+  const dur = state.buffer.duration;
+  const src = previewCtx.createBufferSource();
+  src.buffer = state.buffer;
+  src.connect(previewCtx.destination);
+  src.start(0, from * dur, Math.max(0.01, (to - from) * dur));
+  Object.assign(slicePlayer, { source: src, startedAt: previewCtx.currentTime, from, to });
+  slicePlayBtn.textContent = '■';
+  src.onended = () => {
+    if (slicePlayer.source !== src) return;
+    sliceStopAudition();
+    sliceRender();
+  };
+  sliceAuditionTick();
+}
+
+function sliceAuditionTick() {
+  cancelAnimationFrame(slicePlayer.raf);
+  sliceRender();
+  if (slicePlayer.source) slicePlayer.raf = requestAnimationFrame(sliceAuditionTick);
+}
+
+/** Select slice `k` and hear it - the arrows' whole gesture, and a click's. */
+function sliceSelect(k, { audition = true } = {}) {
+  const n = sliceState.positions.length;
+  sliceState.sel = n ? ((k % n) + n) % n : 0;
+  sliceScrollTo(sliceState.positions[sliceState.sel] ?? 0);
+  sliceRender();
+  if (audition) sliceAudition(sliceState.sel);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Following the pattern - which slices the track is playing, right now.
+//
+// Read off the SAME step grid the code highlighter lights atoms from (see highlightTick): the
+// server tags every sampler step with the slice it chops and the index it chops it from, so the
+// panel can light the band being played and run a head across it without a per-event feed from
+// the engine. The track is the one whose block the .slices() call sits in - the call the panel was
+// opened through - so a second sliced track playing at the same time lights nothing here.
+//
+// The head is the step's own progress mapped across the slice, which is exactly right under
+// .fit() (the common case for a chopped break) and an approximation under a plain .speed(): a
+// short step over a long slice sweeps the whole slice rather than the part you hear. It says which
+// chop is sounding and roughly where in it, which is what the eye wants; the sample-accurate
+// answer lives in the engine and isn't worth a wire.
+// ---------------------------------------------------------------------------------------------
+
+/** The region whose block holds document offset `at`, or null. */
+function sliceRegionAt(at) {
+  if (at == null) return null;
+  for (const r of patternRegions) {
+    if (r.deck !== 'a' || r.cm !== cm) continue; // the panel reads main-editor offsets only
+    const range = r.anchor.find();
+    if (!range) continue;
+    if (at >= cm.indexFromPos(range.from) && at <= cm.indexFromPos(range.to)) return r;
+  }
+  return null;
+}
+
+/** The region whose block holds the panel's own .slices() call, or null. */
+function sliceRegion() {
+  const span = sliceState?.source?.find();
+  return sliceRegionAt(span ? cm.indexFromPos(span.from) : sliceState?.at);
+}
+
+/**
+ * Which file of the pack the track is playing at this moment, off the same grid the highlighter
+ * lights atoms from - so opening the panel on `s("breaks").i("<27 24>")` draws the break you can
+ * hear rather than whichever the pattern happens to name first. Null while stopped, and null for a
+ * chain that names no index at all (nothing to be right or wrong about).
+ */
+function sliceSoundingIndexAt(at) {
+  if (!playing) return null;
+  const region = sliceRegionAt(at);
+  if (!region) return null;
+  const cyclePos = currentCyclePos();
+  const cycle = Math.floor(cyclePos);
+  let first = null;
+  for (const s of region.grid.get(cycle) ?? []) {
+    if (s.chop?.i === undefined) continue;
+    if (cyclePos >= cycle + s.start && cyclePos < cycle + s.end) return s.chop.i;
+    first = first ?? s.chop.i; // nothing sounding this instant - the cycle's own file will do
+  }
+  return first;
+}
+
+/**
+ * Draw the next file the chain names. A set holds markers per sample, so a chain over four breaks
+ * is four chop maps under one name - this is how you reach the other three without editing the
+ * pattern to get at them.
+ */
+function sliceStepFile(dir) {
+  const list = sliceState?.indices ?? [];
+  if (list.length < 2) {
+    return sliceSay(list.length ? 'this chain plays one file - .i("<27 24>") names more' : '');
+  }
+  const at = list.indexOf(sliceState.index);
+  sliceState.index = list[(((at < 0 ? 0 : at) + dir) % list.length + list.length) % list.length];
+  // Everything downstream of the file is the file's: its audio, its peaks, its transients, and
+  // which entry of the set is being edited (sliceApplyKey, once the new key comes back).
+  sliceStopAudition();
+  Object.assign(sliceState, { file: null, buffer: null, peaks: null, detected: null, detectWhy: '', sel: 0 });
+  sliceSetView(0, 1);
+  sliceRender();
+  sliceLoadSample();
+}
+
+/** The slices sounding at `cyclePos`, as [{ k, at }] - the band to light and where the head is. */
+function sliceSoundingNow(region, cyclePos) {
+  const marks = sliceState.positions;
+  if (!marks.length) return [];
+  const cycle = Math.floor(cyclePos);
+  const out = [];
+  const seen = new Set();
+  const lookback = Math.min(64, Math.ceil(region.maxEnd));
+  for (let back = 0; back <= lookback; back++) {
+    const cyc = cycle - back;
+    if (cyc < gridFrom) break;
+    for (const s of region.grid.get(cyc) ?? []) {
+      if (!s.chop || cyclePos < cyc + s.start || cyclePos >= cyc + s.end) continue;
+      // A pattern playing a different file of the pack is playing different markers - the set is
+      // per sample - so it lights nothing on this one's waveform.
+      if (s.chop.i !== undefined && sliceState.index != null && s.chop.i !== sliceState.index) continue;
+      const k = ((s.chop.slice % marks.length) + marks.length) % marks.length;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const span = Math.max(1e-6, s.end - s.start);
+      const frac = Math.min(1, Math.max(0, (cyclePos - (cyc + s.start)) / span));
+      const from = marks[k];
+      const to = marks[k + 1] ?? 1;
+      out.push({ k, at: from + frac * (to - from) });
+    }
+  }
+  return out;
+}
+
+/**
+ * One frame of following, called from the same 33ms ticker the highlighter runs on. Redraws only
+ * when there is something moving or something has just stopped, so a panel open over a stopped
+ * transport costs nothing.
+ */
+function sliceFollowTick() {
+  if (!sliceState) return;
+  let lit = [];
+  const region = playing ? sliceRegion() : null;
+  if (region) {
+    // A `<tight loose>` names two sets and plays one; the highlighter already knows which, so the
+    // panel lights the pattern only while the set it is DRAWING is the one being played.
+    const span = sliceState.source?.find();
+    const sounding = span
+      ? activeIdIn(cm.indexFromPos(span.from), cm.indexFromPos(span.to))
+      : null;
+    if (!sounding || sounding === sliceState.id) lit = sliceSoundingNow(region, currentCyclePos());
+  }
+  if (!lit.length && !sliceState.lit.length) return;
+  sliceState.lit = lit;
+  sliceRender();
+}
+
+/** Keep the marker being walked to on screen, without moving the view when it already is. */
+function sliceScrollTo(pos) {
+  const { start, span } = sliceState.view;
+  const pad = span * 0.1;
+  if (pos < start + pad) sliceSetView(pos - pad, span);
+  else if (pos > start + span - pad) sliceSetView(pos - span + pad, span);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiring.
+// ---------------------------------------------------------------------------------------------
+
+function initSlicePanel() {
+  sliceNameEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); sliceNameEl.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); sliceHead.revertName(); sliceNameEl.blur(); return; }
+    e.stopPropagation();
+  });
+  sliceNameEl.addEventListener('blur', () => sliceHead.commitName());
+  slicePickBtn.addEventListener('click', () => {
+    if (sliceHead.isOpen()) sliceHead.closePicker();
+    else sliceHead.openPicker();
+  });
+  sliceSearch.addEventListener('input', () => sliceHead.renderList(true));
+  sliceSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); sliceHead.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sliceHead.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); sliceHead.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); sliceHead.closePicker(); return; }
+    e.stopPropagation();
+  });
+  document.addEventListener('mousedown', (e) => {
+    if (sliceHead.isOpen() && !slicePickWrap.contains(e.target)) sliceHead.closePicker(false);
+  });
+
+  // --- the canvas ---
+  sliceCanvas.addEventListener('pointerdown', (e) => {
+    if (!sliceState || e.button === 2) return; // the right button is the contextmenu handler's, below
+    sliceCanvas.focus({ preventScroll: true });
+    const rect = sliceCanvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const pos = slicePosOf(x);
+    const hit = sliceTabAt(x, y);
+    if (hit >= 0) {
+      // On a tab: drag it. The marker keeps its identity through the sort, so a marker dragged
+      // past its neighbour goes on being the one under the hand rather than swapping places with it.
+      sliceState.drag = {
+        key: sliceState.positions[hit],
+        before: JSON.stringify(sliceState.positions),
+        // Where the hand started, so a ⌘ (fine) drag can move a fraction of it. Re-anchored
+        // whenever the modifier changes, or the marker would jump as you reach for the key.
+        anchor: { x, pos: sliceState.positions[hit], fine: sliceFineDrag(e) },
+      };
+      sliceState.sel = hit;
+      sliceCanvas.setPointerCapture(e.pointerId);
+      sliceRender();
+      return;
+    }
+    // Anywhere else on the waveform (the empty tab strip included): pick the slice you clicked in
+    // and hear it. Adding a marker is a DOUBLE click - a single one used to do it, which made
+    // reaching for a tab and missing by a pixel a new chop instead of a grab.
+    const marks = sliceState.positions;
+    let k = 0;
+    for (let i = 0; i < marks.length; i++) if (marks[i] <= pos) k = i;
+    sliceSelect(k, { audition: y > SLICE_TAB_H });
+  });
+
+  // Double-click: a marker where you clicked. In the tab strip because that is where the markers
+  // live; on the waveform too, since that is where your eye is when you spot the chop.
+  sliceCanvas.addEventListener('dblclick', (e) => {
+    if (!sliceState) return;
+    const rect = sliceCanvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (sliceTabAt(x, e.clientY - rect.top) >= 0) return; // a double-click on a tab is two grabs, not a new chop
+    const k = sliceAddMarker(sliceSnap(slicePosOf(x), sliceFreeHand(e)));
+    if (k >= 0) { sliceLivePush(); sliceCommit(); sliceRender(); }
+  });
+
+  sliceCanvas.addEventListener('pointermove', (e) => {
+    if (!sliceState?.drag || !sliceCanvas.hasPointerCapture?.(e.pointerId)) return;
+    const rect = sliceCanvas.getBoundingClientRect();
+    const want = sliceSnap(sliceDragPos(e, e.clientX - rect.left), sliceFreeHand(e));
+    const at = sliceState.positions.indexOf(sliceState.drag.key);
+    if (at < 0) return;
+    const moved = sliceState.positions.slice();
+    moved[at] = Math.min(1, Math.max(0, want));
+    sliceState.drag.key = moved[at];
+    sliceState.positions = sliceTidy(moved);
+    let now = sliceState.positions.indexOf(sliceState.drag.key);
+    if (now < 0) {
+      // Dragged onto a neighbour: the two markers are one now (a slice of no length plays nothing).
+      // The hand carries on with whichever survived, so letting go doesn't leave the drag nowhere.
+      now = Math.max(0, sliceMarkerNear(sliceState.drag.key, SLICE_HIT_PX * 4));
+      sliceState.drag.key = sliceState.positions[now];
+    }
+    sliceState.sel = now;
+    if (JSON.stringify(sliceState.positions) !== sliceState.drag.before) sliceHandEdit();
+    sliceRender();
+    sliceLivePush();
+  });
+
+  const endDrag = (e) => {
+    if (!sliceState?.drag) return;
+    if (sliceCanvas.hasPointerCapture?.(e.pointerId)) sliceCanvas.releasePointerCapture(e.pointerId);
+    const moved = sliceState.drag.before !== JSON.stringify(sliceState.positions);
+    sliceState.drag = null;
+    // A press that selected a tab without moving it wrote nothing, so it costs no undo entry and
+    // no evaluation - only a real move does.
+    if (moved) sliceCommit(); // the code catches up with what you have been hearing all along
+  };
+  sliceCanvas.addEventListener('pointerup', endDrag);
+  sliceCanvas.addEventListener('pointercancel', endDrag);
+
+  // Right-click a marker to take it out. Anywhere else the menu is simply suppressed - the canvas
+  // is a drawing surface, and the browser's menu over it says nothing useful.
+  sliceCanvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (!sliceState) return;
+    const rect = sliceCanvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const onTab = sliceTabAt(x, e.clientY - rect.top);
+    const hit = onTab >= 0 ? onTab : sliceMarkerNear(slicePosOf(x));
+    if (hit < 0) return;
+    sliceRemoveMarker(hit);
+    sliceLivePush();
+    sliceCommit();
+    sliceRender();
+  });
+
+  // The DJ pane's idiom: the wheel moves along the sample, ⌘ (or ctrl) zooms into where it points.
+  sliceCanvas.addEventListener('wheel', (e) => {
+    if (!sliceState) return;
+    e.preventDefault();
+    const rect = sliceCanvas.getBoundingClientRect();
+    if (e.metaKey || e.ctrlKey) {
+      sliceZoomAt(e.clientX - rect.left, Math.exp(-e.deltaY * 0.002));
+      return;
+    }
+    const by = (e.deltaX || e.deltaY) / sliceW();
+    sliceSetView(sliceState.view.start + by * sliceState.view.span, sliceState.view.span);
+    sliceRender();
+  }, { passive: false });
+
+  // The keys belong to the PANEL, not to the canvas: walking the slices is the main thing you do
+  // in here, and having to click the waveform first to be allowed to do it is a rule nobody can
+  // see. Typing somewhere real (the name field, the picker's search) still gets its own keys, and
+  // so does the sensitivity slider - the arrows are its own control while it has focus.
+  sliceBackdrop.addEventListener('keydown', (e) => {
+    if (!sliceState || sliceHead.isOpen()) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const dir = e.key === 'ArrowRight' ? 1 : -1;
+      if (e.shiftKey && sliceState.positions.length) {
+        // shift+arrow nudges the selected marker by a pixel's worth of the view, so the finer the
+        // zoom the finer the nudge - the same relationship a drag already has. ⌘ makes it finer
+        // still, by the same gearing ⌘-drag uses.
+        const step = slicePxSpan(1) * (sliceFineDrag(e) ? SLICE_FINE : 1);
+        const moved = sliceState.positions.slice();
+        moved[sliceState.sel] = Math.min(1, Math.max(0, moved[sliceState.sel] + dir * step));
+        const key = moved[sliceState.sel];
+        sliceState.positions = sliceTidy(moved);
+        // -1 means it was nudged onto its neighbour and the two became one; the selection follows
+        // the survivor rather than pointing past the end of the list.
+        sliceState.sel = Math.max(0, sliceState.positions.indexOf(key));
+        sliceHandEdit();
+        sliceRender();
+        sliceLivePush();
+        sliceCommit();
+        return;
+      }
+      sliceSelect(sliceState.sel + dir);
+      return;
+    }
+    // Space plays the selected slice - unless a button has the focus, where space is that button's
+    // own click and stealing it would make the ▶ do two different things.
+    if (e.key === ' ' && !(e.target instanceof HTMLButtonElement)) {
+      e.preventDefault();
+      sliceAudition(sliceState.sel);
+      return;
+    }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      sliceRemoveMarker(sliceState.sel);
+      sliceLivePush();
+      sliceCommit();
+      sliceRender();
+      return;
+    }
+    if (e.key === '[' || e.key === ']') { e.preventDefault(); sliceStepFile(e.key === ']' ? 1 : -1); return; }
+    if (e.key === '0') { e.preventDefault(); sliceSetView(0, 1); sliceRender(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSlicePanel(); }
+  });
+
+  // --- the foot ---
+  slicePlayBtn.addEventListener('click', () => {
+    if (slicePlayer.source) sliceStopAudition();
+    else sliceAudition(sliceState?.sel ?? 0);
+    sliceRender();
+  });
+  sliceSens.addEventListener('input', () => {
+    sliceSensVal.textContent = Number(sliceSens.value).toFixed(2);
+    if (!sliceState) return;
+    // Live re-slice while the slider moves, which is what makes it a slicing control rather than a
+    // setting: the markers you can see ARE what this sensitivity produces. The write to the code
+    // waits for the release, so the whole sweep is one undo.
+    clearTimeout(sliceDetectTimer);
+    sliceDetectTimer = setTimeout(async () => {
+      await sliceDetect();
+      if (sliceState && sliceAdoptDetected()) { sliceLivePush(); sliceRender(); }
+    }, SLICE_DETECT_DEBOUNCE_MS);
+  });
+  // Letting go writes what is on screen. The pending detection is run out first rather than
+  // waited on: a release that lands inside the debounce would otherwise commit the markers from
+  // the PREVIOUS sensitivity, and the ones that arrived a moment later would never be written at
+  // all. The detection is cached per (file, sensitivity), so running it again costs nothing.
+  sliceSens.addEventListener('change', async () => {
+    if (!sliceState) return;
+    clearTimeout(sliceDetectTimer);
+    await sliceDetect();
+    if (sliceState && sliceAdoptDetected()) { sliceRender(); sliceCommit(); }
+  });
+  // auto-slice is the deliberate way back to detected markers, so it is also the one gesture that
+  // may throw hand-drawn ones away - and the one that hands the sensitivity slider back (see
+  // sliceSetHand). It says what it replaced rather than doing it in silence.
+  sliceAutoBtn.addEventListener('click', async () => {
+    if (!sliceState) return;
+    const had = sliceState.hand ? sliceState.positions.length : 0;
+    await sliceDetect();
+    if (!sliceState || !sliceAdoptDetected()) return;
+    sliceLivePush();
+    sliceCommit();
+    sliceRender();
+    if (had) sliceSay(`re-detected — ${had} hand-drawn marker${had === 1 ? '' : 's'} replaced (⌘Z puts them back)`);
+  });
+  sliceClearBtn.addEventListener('click', () => {
+    if (!sliceState) return;
+    // Emptied, not zeroed: an empty set means "chop on the sample's own transients" (see
+    // slicesSignal), which is where the panel started - so clear is a real undo of everything
+    // drawn rather than a set of one enormous slice.
+    sliceState.positions = [];
+    sliceState.sel = 0;
+    sliceSetHand(false);
+    sliceLivePush();
+    sliceCommit();
+    sliceRender();
+  });
+
+  // ⌘/ctrl +/- zoom the waveform (overriding the browser's page zoom) and ⌘0 fits the whole file
+  // again - the roll's keys, for the same gesture. Capture phase on the document for the reason the
+  // roll's are there too: while the panel is up these belong to the panel wherever the focus
+  // happens to be, so a name field or a button that has it cannot swallow them.
+  document.addEventListener('keydown', (e) => {
+    if (!sliceState || !(e.metaKey || e.ctrlKey) || e.altKey) return;
+    if (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      e.stopPropagation();
+      sliceZoomBy(e.key === '-' || e.key === '_' ? 1 / SLICE_BTN_ZOOM : SLICE_BTN_ZOOM);
+    } else if (e.key === '0') {
+      e.preventDefault();
+      e.stopPropagation();
+      sliceSetView(0, 1);
+      sliceRender();
+    }
+  }, true);
+
+  document.getElementById('sliceClose').addEventListener('click', () => closeSlicePanel());
+  sliceBackdrop.addEventListener('click', (e) => { if (e.target === sliceBackdrop) closeSlicePanel(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && sliceState && !sliceHead.isOpen()) closeSlicePanel();
+  });
+  window.addEventListener('resize', () => { if (sliceState) sliceRender(); });
+  cm.on('change', sliceSyncFromCode);
+  sliceSensVal.textContent = Number(sliceSens.value).toFixed(2);
+  // Follows the pattern at the highlighter's own rate, off the same grid it lights atoms from.
+  setInterval(sliceFollowTick, 33);
 }
 
 // ---------------------------------------------------------------------------------------------

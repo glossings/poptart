@@ -333,3 +333,58 @@ test('a one-shot is unaffected - the loop args go out but nothing reads them', (
   assert.strictEqual(args[ARG.begin], 0.9, 'still starts at begin and stops at the end of the file');
   assert.strictEqual(args[ARG.end], 1);
 });
+
+// --- authored slice sets (.slices(), the slice editor's markers) --------------------------------
+
+test('cfg.slices is chopped on instead of the file\'s own transients', () => {
+  const { engine, sent } = engineWithFile(4);
+  // Nothing has analyzed this file, so without an authored set the event would be skipped while
+  // the detection ran. The set on the event needs no analysis at all.
+  engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.75], secPerCycle: 1 }, 0, 0.25);
+  const args = sent.pop().args;
+  assert.strictEqual(args[ARG.begin], 0.25);
+  assert.strictEqual(args[ARG.end], 0.75);
+});
+
+test('the last slice of an authored set runs to the end of the file', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { slice: 2, slices: [0, 0.25, 0.75], secPerCycle: 1 }, 0, 0.25);
+  const args = sent.pop().args;
+  assert.strictEqual(args[ARG.begin], 0.75);
+  assert.strictEqual(args[ARG.end], 1);
+});
+
+test('a slice index still wraps round an authored set, so sets of different lengths alternate', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { slice: 5, slices: [0, 0.5], secPerCycle: 1 }, 0, 0.25);
+  assert.strictEqual(sent.pop().args[ARG.begin], 0.5);
+});
+
+test('an authored set that starts past 0 never plays the pickup before its first marker', () => {
+  const { engine, sent } = engineWithFile(4);
+  engine.playSample('t1', 'breaks', { slice: 0, slices: [0.1, 0.6], secPerCycle: 1 }, 0, 0.25);
+  assert.strictEqual(sent.pop().args[ARG.begin], 0.1);
+});
+
+test('an empty set is no set - the file\'s own analysis is asked for, as before', () => {
+  const { engine, sent } = engineWithFile(4);
+  const skipped = engine.playSample('t1', 'breaks', { slice: 0, slices: [], secPerCycle: 1 }, 0, 0.25);
+  assert.strictEqual(skipped.skipped, 'analyzing slices');
+  assert.strictEqual(sent.length, 0);
+});
+
+test('a set keyed by file chops only the file it names', () => {
+  // The point of keying: one named set holds a chop map per break, so tweaking .i() moves between
+  // maps that each fit their own audio. The test pack's file is outside any library root, so its
+  // key is its basename (see samples.js sampleKey).
+  const { engine, sent } = engineWithFile(4);
+  const slices = { 'a.wav': [0, 0.25, 0.75] };
+  engine.playSample('t1', 'breaks', { slice: 1, slices, secPerCycle: 1 }, 0, 0.25);
+  assert.strictEqual(sent.pop().args[ARG.begin], 0.25);
+
+  // ...and a set that says nothing about this file falls through to its own transient analysis,
+  // exactly as no set at all would.
+  const skipped = engine.playSample('t1', 'breaks', { slice: 1, slices: { 'other.wav': [0, 0.5] }, secPerCycle: 1 }, 0, 0.25);
+  assert.strictEqual(skipped.skipped, 'analyzing slices');
+  assert.strictEqual(sent.length, 0);
+});

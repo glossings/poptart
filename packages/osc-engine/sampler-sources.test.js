@@ -18,7 +18,7 @@ process.env.POPTART_SAMPLES_DIR = SAMPLES;
 process.env.POPTART_RECORDINGS_DIR = RECORDINGS;
 
 const { OscEngine } = require('./index.js');
-const { resolveSampleFile, browseSamples, expandPackEntries } = require('./samples.js');
+const { resolveSampleFile, browseSamples, expandPackEntries, sampleKey, slicesForFile } = require('./samples.js');
 
 function put(root, rel) {
   const file = path.join(root, rel);
@@ -133,4 +133,37 @@ test('browseSamples lists one folder: subfolders and audio files, sorted', () =>
 
 test('browseSamples refuses to list outside the root', () => {
   assert.strictEqual(browseSamples('../..'), null);
+});
+
+// --- how a slice set names a file (see samples.js sampleKey / slicesForFile) --------------------
+//
+// A set of markers only means anything on the sample it was drawn on, so it is keyed by one. The
+// key has to read as the file, survive being written into a pattern someone else opens, and be the
+// SAME string on both ends - the editor files markers under the key the server hands it, and the
+// engine looks them up under the key it computes from the file it resolved.
+
+test('a sample is keyed by its path under the library, so a set travels with the library', () => {
+  const file = put(SAMPLES, 'breaks/amen brother.wav');
+  assert.strictEqual(sampleKey(file), 'breaks/amen brother.wav');
+});
+
+test('a bounce is keyed in sr()\'s own namespace, and a stray file by its name', () => {
+  const rec = put(RECORDINGS, '2026-09/bass.wav');
+  assert.strictEqual(sampleKey(rec), 'rec:2026-09/bass.wav');
+  assert.strictEqual(sampleKey('/somewhere/else/loop.wav'), 'loop.wav');
+});
+
+test('a set draws only on the files it has markers for - every other sample keeps its own chops', () => {
+  const amen = put(SAMPLES, 'breaks/amen.wav');
+  const think = put(SAMPLES, 'breaks/think.wav');
+  const set = { 'breaks/amen.wav': [0, 0.5] };
+  assert.deepStrictEqual(slicesForFile(set, amen), [0, 0.5]);
+  assert.strictEqual(slicesForFile(set, think), null, 'null = chop on this one\'s own transients');
+});
+
+test('a set written as a bare list is one map, for whatever plays', () => {
+  const amen = put(SAMPLES, 'breaks/amen.wav');
+  assert.deepStrictEqual(slicesForFile([0, 0.25], amen), [0, 0.25]);
+  assert.strictEqual(slicesForFile([], amen), null);
+  assert.strictEqual(slicesForFile(null, amen), null);
 });

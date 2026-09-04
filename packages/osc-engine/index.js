@@ -19,7 +19,7 @@ const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
-const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries } = require('./samples');
+const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, slicesForFile } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension } = require('./extensions');
@@ -1082,7 +1082,9 @@ class OscEngine {
   /**
    * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
    * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, flip,
-   * stretch, fit ('auto' | measures), slice, note, vel, attack, decay, sustain, release,
+   * stretch, fit ('auto' | measures), slice, slices (a hand-drawn set - start positions, or a map
+   * of them keyed by file - which `slice` then indexes instead of the file's own transients),
+   * note, vel, attack, decay, sustain, release,
    * loopWrap (0 file | 1 window), loopDir (0 forward | 1 pingpong), secPerCycle }.
    * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
@@ -1113,7 +1115,14 @@ class OscEngine {
     let begin = clamp01(cfg.begin ?? 0);
     let end = clamp01(cfg.end ?? 1);
     if (cfg.slice != null) {
-      const slices = this._slicesFor(file);
+      // A hand-drawn set (.slices(), the slice editor's markers) says where the chops are and
+      // wins over the automatic analysis - it also arrives ON the event, so an authored set never
+      // waits for a file to be analyzed and never depends on the file being a WAV.
+      // The set is keyed by file (see samples.js slicesForFile), so the markers that play are the
+      // ones drawn on THIS sample - a set that says nothing about it chops on its own transients,
+      // which is what lets one named set follow a .i() across several breaks.
+      const authored = slicesForFile(cfg.slices, file.path);
+      const slices = authored ?? this._slicesFor(file);
       if (slices === undefined) return { skipped: 'analyzing slices' };
       if (slices?.length) {
         const k = wrap(Math.round(cfg.slice), slices.length);

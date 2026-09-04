@@ -771,6 +771,47 @@
       </div>
     </div>
 
+    <!-- The slice editor: double-click `slice` (or `slices`) on a sampler chain. Draws the sample
+         and the chop markers `.slice(n)` indexes into - drag them, add and delete them, or re-detect
+         them at a sensitivity you choose. Its backdrop class is the dialogs' (dir-picker-backdrop),
+         which is what makes the global hotkeys stand down while it is up - but `keeps-transport`
+         holds cmd+enter and cmd+. back out of that, since chopping a break is something you do
+         while it plays and stopping it must never mean closing the window first. -->
+    <div id="sliceBackdrop" class="dir-picker-backdrop keeps-transport hidden">
+      <div class="dir-picker slice-dialog" role="dialog" aria-label="slice editor">
+        <div class="dir-picker-head">
+          <span id="sliceTitle">slices</span>
+          <div id="slicePickWrap" class="def-pick-wrap hidden">set
+            <input id="sliceName" class="def-name" type="text" spellcheck="false" title="slice set name" />
+            <button id="slicePickBtn" class="small" title="find or create">▾</button>
+            <div id="slicePicker" class="def-picker hidden">
+              <input id="sliceSearch" type="text" spellcheck="false" placeholder="slice set name" />
+              <div id="slicePickList" class="def-pick-list"></div>
+            </div>
+          </div>
+          <span id="sliceFile" class="slice-file"></span>
+          <span class="spacer"></span>
+          <button id="sliceClose" class="small">✕</button>
+        </div>
+        <div class="slice-body">
+          <canvas id="sliceCanvas" class="slice-canvas" tabindex="0"
+            title="drag a tab to move it (⌘ for fine, ⌥ to ignore the magnets) · double-click to add one · right-click to remove · ←/→ to walk the slices · [ ] for the other files this chain plays"></canvas>
+        </div>
+        <div class="dir-picker-foot slice-foot">
+          <button id="slicePlayBtn" class="small slice-play" title="play the selected slice (space)">▶</button>
+          <label id="sliceSensWrap" class="slice-sens" title="how much has to happen for a hit to count — moving this re-slices">sens
+            <input id="sliceSens" class="dj-fader" type="range" min="0.25" max="4" step="0.05" value="1" />
+            <span id="sliceSensVal" class="slice-sens-val">1.00</span>
+          </label>
+          <button id="sliceAutoBtn" class="small" title="re-detect at this sensitivity, replacing every marker">auto-slice</button>
+          <button id="sliceClearBtn" class="small" title="remove every marker - the sample goes back to chopping on its own transients">clear</button>
+          <span class="spacer"></span>
+          <span id="sliceCount" class="slice-count"></span>
+          <span id="sliceNote" class="pack-note"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- The mixer (ctrl+g). Its own backdrop class, NOT dir-picker-backdrop: that class makes the
          global hotkey handler stand down, and the transport keys (cmd+enter, cmd+.) must keep
          working while mixing. -->

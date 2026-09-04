@@ -50,6 +50,47 @@ function listPackFiles(pack) {
 }
 
 /**
+ * How a slice set names a file (see pattern-core/slices.mjs): its path relative to the sample
+ * library, so a set of markers reads as the sample it was drawn on and travels with the library
+ * rather than with one machine's home directory. A bounce is keyed "rec:<name>" - the same
+ * namespace sr() addresses it by - and anything outside both roots falls back to its own basename,
+ * which is the most a set can honestly say about a file it can't place.
+ *
+ * The editor writes the key it is given by the server and the engine computes the same key from
+ * the file it resolved (slicesForFile), so the two ends of a set agree by construction.
+ */
+function sampleKey(file) {
+  const abs = path.resolve(String(file ?? ''));
+  const under = (root) => {
+    const r = path.resolve(root);
+    return abs.startsWith(r + path.sep) ? abs.slice(r.length + 1).split(path.sep).join('/') : null;
+  };
+  const inSamples = under(samplesRoot());
+  if (inSamples) return inSamples;
+  const { recordingsRoot } = require('./recordings');
+  const inRecordings = under(recordingsRoot());
+  if (inRecordings) return `rec:${inRecordings}`;
+  return path.basename(abs);
+}
+
+/**
+ * The positions a slice set draws on one file, or null for "it says nothing about this one" - in
+ * which case the caller falls back to the file's own transient analysis. A bare list applies to
+ * whatever is playing; a map applies only where it has an entry for that file, which is what makes
+ * one named set follow a changing .i() across four different breaks.
+ *
+ * pattern-core has the same three lines (slices.mjs slicePositionsFor) because this package is
+ * CommonJS and deliberately doesn't depend on it. They must agree.
+ */
+function slicesForFile(set, file) {
+  if (!set) return null;
+  if (Array.isArray(set)) return set.length ? set : null;
+  if (typeof set !== 'object') return null;
+  const found = set[sampleKey(file)];
+  return Array.isArray(found) && found.length ? found : null;
+}
+
+/**
  * Absolute path of ONE audio file addressed by its path relative to the samples root - what se()
  * plays, as opposed to s()'s pack-plus-index. Returns null if it isn't there or isn't audio.
  *
@@ -255,7 +296,17 @@ function readWav(filePath) {
 const HOP = 256; // ~5ms at 48k - the slice-position resolution
 const MIN_GAP_SEC = 0.05; // two transients closer than this are one hit
 
-function detectOnsets(samples, sampleRate) {
+// How far above its neighbourhood a flux peak has to poke to count as an onset, at the default
+// sensitivity. `sensitivity` scales BOTH thresholds down as it rises, so one control walks the
+// detector from "only the obvious hits" to "every tick in the loop": 1 is what .slice() has always
+// used, and the slice editor's slider moves it (see the /api/sampleSlices endpoint).
+const FLUX_RATIO = 2; // x the local mean flux
+const FLUX_FLOOR = 0.005; // + this share of the file's peak RMS, so near-silence can't qualify
+
+function detectOnsets(samples, sampleRate, { sensitivity = 1 } = {}) {
+  // Half sensitivity doubles what a peak must clear; double it halves it. Clamped so the extremes
+  // stay a detector rather than "one slice" / "a slice per hop".
+  const strictness = 1 / Math.min(4, Math.max(0.25, Number(sensitivity) || 1));
   const nHops = Math.floor(samples.length / HOP);
   if (nHops < 4) return [0];
 
@@ -286,7 +337,7 @@ function detectOnsets(samples, sampleRate) {
       count++;
     }
     const isPeak = flux[h] >= flux[h - 1] && flux[h] >= (flux[h + 1] ?? 0);
-    if (isPeak && flux[h] > (sum / count) * 2 + peak * 0.005 && h - lastOnset >= minGapHops) {
+    if (isPeak && flux[h] > (sum / count) * FLUX_RATIO * strictness + peak * FLUX_FLOOR * strictness && h - lastOnset >= minGapHops) {
       // The flux peak lands on the first fully-loud window, ~one hop after the transient
       // actually starts - back off a hop so the slice keeps its attack.
       onsets.push(Math.max(0, h - 1) * HOP / samples.length);
@@ -298,11 +349,14 @@ function detectOnsets(samples, sampleRate) {
   return onsets;
 }
 
-/** Normalized (0..1) slice-start positions for a WAV file, or null if it can't be analyzed. */
-function detectSlices(filePath) {
+/**
+ * Normalized (0..1) slice-start positions for a WAV file, or null if it can't be analyzed.
+ * `sensitivity` (1 = the default the sampler chops on) trades missed hits against false ones.
+ */
+function detectSlices(filePath, opts = {}) {
   const wav = readWav(filePath);
   if (!wav) return null;
-  return detectOnsets(wav.samples, wav.sampleRate);
+  return detectOnsets(wav.samples, wav.sampleRate, opts);
 }
 
 module.exports = {
@@ -311,6 +365,8 @@ module.exports = {
   listPackFiles,
   resolveSampleFile,
   expandPackEntries,
+  sampleKey,
+  slicesForFile,
   isAudioName,
   browseSamples,
   walkAudioFiles,

@@ -5334,3 +5334,110 @@ body.mix-on #deckAHead {
   left: auto;
   right: calc(100% - 2px);
 }
+
+/* ---------------------------------------------------------------------------------------------
+   Slice editor (see the slice editor section in client.js). One wide canvas and a foot: the
+   waveform IS the panel, so everything else is kept to a strip along the bottom. Sized like the
+   pack dialog because a waveform wants the width for the same reason three lists do. --------- */
+.slice-dialog {
+  width: min(1040px, 94vw);
+  max-height: 80vh;
+  height: min(480px, 80vh);
+}
+
+.slice-dialog .hidden {
+  display: none;
+}
+
+.slice-dialog .dir-picker-head {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.slice-dialog .dir-picker-head > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.slice-dialog .def-pick-wrap {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* The file being chopped, next to the set's name - a chop map means nothing without it. */
+.slice-file {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 34ch;
+}
+
+.slice-body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
+}
+
+.slice-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  cursor: crosshair;
+}
+
+.slice-canvas:focus {
+  border-color: var(--border-strong, var(--border));
+}
+
+.slice-foot {
+  gap: 10px;
+}
+
+/* ▶ and ■ are different widths, so the foot shifted every time the audition started or stopped.
+   The button is sized for the wider of them and the glyph is centred inside it. */
+.slice-play {
+  min-width: 2.4em;
+  text-align: center;
+}
+
+.slice-sens {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+/* The desk's fader (.dj-fader), at the size the ctx-menu's params use - the app draws its own
+   sliders, and this is the small one. */
+.slice-sens input[type='range'] {
+  width: 110px;
+  --cap-w: 8px;
+  --cap-h: 14px;
+  --groove: 3px;
+}
+
+/* Stood down: these markers were drawn by hand, and re-slicing would throw them away (auto-slice
+   is the gesture that says to). Dimmed as a pair, so the label reads as off too. */
+.slice-sens-off {
+  opacity: 0.45;
+}
+
+.slice-sens-val {
+  font-family: var(--mono);
+  min-width: 2.5em;
+}
+
+.slice-count {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}

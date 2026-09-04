@@ -24,6 +24,7 @@
 
 import { sampleBound, CHANNEL_DEFAULTS, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
+import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
 // Resolves an input()'s channel request against the booted device's live layout (see
@@ -1213,6 +1214,16 @@ export class Scheduler {
     // continuous signal drive them. Done here so the engine and the .log() line agree.
     for (const key of ['loopWrap', 'loopDir']) {
       if (cfg[key] !== undefined) cfg[key] = loopModeAt(key, cfg[key]);
+    }
+    // The slice SET is the odd one out: its value is a positions array (or a map of them, keyed by
+    // file), not a number, so it can't go through at() with the rest. Sampled here like any channel
+    // (a `<tight loose>` of names resolves per onset - see slicesSignal) and passed on whole: which
+    // file the map answers for is the engine's to decide, since only it knows what the source and
+    // index resolved to on disk. Left off the event where the pattern defines none, which is what
+    // makes the engine fall back to the file's own transients.
+    if (src.slices) {
+      const set = src.slices.sample(onsetSec, this.transport.cps, onsetCycle);
+      if (set && !sliceSetIsEmpty(set)) cfg.slices = set;
     }
     if (src.fit === 'auto') {
       cfg.fit = 'auto';

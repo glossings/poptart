@@ -16,7 +16,8 @@ import {
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans } from './arrange.mjs';
-import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack } from './rolls.mjs';
+import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
+import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
@@ -2032,6 +2033,33 @@ export class Sig {
   }
   /** Play the nth detected transient slice (wraps past the last one). Needs a WAV sample. */
   slice(v) { return this._samplerOpt('slice', 'slice', toSignal(v)); }
+  /**
+   * WHERE the slices are, replacing the sample's own transient analysis: the start positions
+   * `.slice(n)` indexes into, as fractions of the file (`.slices([0, 0.131, 0.27])`). Slice k runs
+   * from its position to the next one, and the last runs to the end of the file - so three markers
+   * are three slices, and a set that doesn't start at 0 simply never plays the pickup before its
+   * first marker. `.slice()` still wraps past the end of the set.
+   *
+   * A STRING (or any pattern of them) names sets defined by `_slices("break", …)` instead, so
+   * the chop map can change as it plays: `.slice("0 1 2 3").slices("<tight loose>")`. Names are
+   * resolved when the event is emitted, like a preset's, so the definitions can sit anywhere in the
+   * buffer - and an unknown name warns once and falls back to the file's own transients rather than
+   * dropping the sound. The slice editor (double-click `slice`) writes both halves for you.
+   *
+   * A named set holds markers PER FILE, so one name follows a changing `.i()`: `.slices("main")`
+   * over `s("breaks").i("<19 3>")` chops each break where that break was drawn, and a file the set
+   * says nothing about goes back to its own transients (see slices.mjs).
+   *
+   * Unlike the other sampler channels this one adds no structure of its own: the set is a MAP, not
+   * a rhythm, so a `<a b>` of them is sampled at the events the pattern already has rather than
+   * splitting them further. `.slice()` is what plays the chops.
+   */
+  slices(v) {
+    if (!this.sampler) {
+      throw new Error('[signal] .slices() only applies to a sampler pattern - start with s("pack")');
+    }
+    return this._clone({ sampler: { ...this.sampler, slices: slicesSignal(v) } });
+  }
 
   // ADSR amplitude envelope over the voice. attack/decay/release scale the played duration:
   // .attack(0.5) fades in over half the note, .attack(2) ramps over 2x the note (never reaching
@@ -4184,6 +4212,103 @@ export function _pack(id, files = []) {
   if (replaced) warnUser(replaced);
   const sig = new Sig(() => null);
   sig.isDef = key;
+  return sig;
+}
+
+// The value of a `.slices()` call as a signal whose per-onset value is the SET - a list of
+// positions, or a map of file key -> positions (see slices.mjs). Which file the map answers for is
+// the engine's business: only it knows what `s("breaks").i(19)` resolved to on disk.
+//
+// Two spellings land here and both come out the same on the event, which is the point: a literal
+// is one constant set, and anything else is a pattern of set NAMES resolved by lookup. The literal
+// is not passed through toSignal - a list of numbers here is data, not a pattern to fan the event
+// out over.
+//
+// Resolution is LAZY, exactly as rollPattern's is: the registry is read as each event is emitted,
+// so a definition may sit anywhere in the buffer, and re-filing a set under a name a playing
+// pattern already says is heard at the next onset with nothing re-evaluated (see liveSlices).
+function slicesSignal(v) {
+  // `.slices()` with nothing in it is a set not yet named - the moment between the editor writing
+  // the call and naming it. No set is no error: the sample's own transients chop it, as before.
+  if (v === undefined || v === null || v === '') return new Sig(() => null);
+  if (Array.isArray(v) || (v && typeof v === 'object' && !(v instanceof Sig))) {
+    const set = normalizeSliceSet(v);
+    if (sliceSetIsEmpty(set)) {
+      throw new Error('[signal] .slices([...]) takes slice start positions in the file, 0..1 - an empty list defines no slices at all');
+    }
+    return new Sig(() => set);
+  }
+  const selector = toSignal(v);
+  const warned = new Set(); // one line per unknown name, not one per event
+  const cache = new Map(); // a name's normalized set, so a per-event lookup isn't a per-event sort
+  const resolve = (value) => {
+    if (Array.isArray(value)) return normalizeSlicePositions(value); // a Sig that yields lists
+    if (value == null) return null;
+    const key = String(value).trim();
+    if (!key) return null;
+    const found = lookupSlices(key);
+    if (!found) {
+      if (!warned.has(key)) {
+        warned.add(key);
+        // Falls back rather than falling silent: the sample's own transients still chop it, so a
+        // mistyped name costs you the hand-drawn markers, not the part (see warnUser's rule).
+        warnUser(`[signal] .slices(): no slice set called ${JSON.stringify(key)} - chopping on the sample's own transients until a _slices(${JSON.stringify(key)}, [...]) defines it. Double-click the slice name to draw one.`);
+      }
+      return null;
+    }
+    if (!cache.has(key) || cache.get(key).from !== found) {
+      cache.set(key, { from: found, set: normalizeSliceSet(found) });
+    }
+    return cache.get(key).set;
+  };
+  // No stepsForCycle: a set is a map of the file, not a rhythm, so it contributes no events of its
+  // own and is simply read at the onsets the pattern already has.
+  return new Sig((sec, cps, cycle) => resolve(selector.sample(sec, cps, cycle)));
+}
+
+/**
+ * `_slices("break", { "breaks/amen.wav": [0, 0.131, 0.27] })` - files a set of slice positions
+ * under a name, so `.slices("break")` can chop a sample where you said rather than where the
+ * transient detector thinks. Positions are fractions of the file in ascending order; slice k runs
+ * from its position to the next (the last to the end), which is the same shape the automatic
+ * analysis produces.
+ *
+ * Keyed by FILE, so one name holds a chop map for each sample it was drawn on and following a
+ * `.i()` between four breaks follows four sets of markers (see slices.mjs). A bare list
+ * (`_slices("break", [0, 0.5])`) is the other spelling: one map, for whatever plays.
+ *
+ * The slice editor writes these - double-click `slice` on a sampler chain and drag the markers -
+ * so `_slices(` is not a word you need to type. Plays nothing itself: a slice set is a map of a
+ * sample, not a pattern, so like _preset and _pack the value is a silent Sig marked as a
+ * definition, and a block of them is never mistaken for a track.
+ */
+export function _slices(id, set = []) {
+  return defineSlices(id, set, false);
+}
+
+/**
+ * The same definition, re-filed WITHOUT the "defined twice" warning - what the slice editor pushes
+ * while a marker is still under the hand. Resolution is lazy (see slicesSignal), so re-registering
+ * under the name a pattern already says is enough for the next event to chop at the new positions,
+ * with no rewrite of the buffer and no re-evaluation per frame. Same job, and same silence, as
+ * liveRoll.
+ */
+export function liveSlices(id, set = []) {
+  return defineSlices(id, set, true);
+}
+
+function defineSlices(id, set, quiet) {
+  if (typeof id !== 'number' && typeof id !== 'string') {
+    throw new Error('[signal] a slice-set definition takes a number or a name as its id - draw one in the slice editor rather than writing it by hand');
+  }
+  const key = String(id).trim();
+  if (!key || /\s/.test(key) || /[<>[\]{}(),*!?~@]/.test(key)) {
+    throw new Error(`[signal] a slice-set id has to be one plain word - ${JSON.stringify(String(id))} can't be written inside .slices("<...>")`);
+  }
+  const replaced = registerSlices(key, normalizeSliceSet(set));
+  if (replaced && !quiet) warnUser(replaced);
+  const sig = new Sig(() => null);
+  sig.isDef = key; // see _roll(): a definitions block must not become an extra voice
   return sig;
 }
 

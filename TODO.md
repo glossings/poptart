@@ -205,7 +205,6 @@ no completion notes.
     poptart.scd); plugin parameters need a `stepped` flag per parameter in mappings/*.json (preferred
     - it's a property of the parameter, not of one pattern) so setParam bypasses the ramp for them.
 
-
 [ ] Harmony & melody tools - phased plan settled 2026-08-30. Everything operates on the ROLL'S OWN
     NOTES (prState.sel or hovered note -> pure notes->notes function -> writePianorollCall +
     drawPianoroll, exactly the prToggleMute/prDuplicate shape) so results stay hand-editable;

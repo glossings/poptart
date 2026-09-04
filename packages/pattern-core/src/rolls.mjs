@@ -126,7 +126,13 @@ function makeStore(what) {
   };
 }
 
-const stores = { roll: makeStore('roll'), shape: makeStore('shape'), preset: makeStore('preset'), pack: makeStore('sample pack') };
+const stores = {
+  roll: makeStore('roll'),
+  shape: makeStore('shape'),
+  preset: makeStore('preset'),
+  pack: makeStore('sample pack'),
+  slices: makeStore('slice set'),
+};
 
 /** Both stores, for the host passes that treat them alike (clearing per eval, listing). */
 export const DEF_KINDS = Object.keys(stores);
@@ -245,3 +251,12 @@ export const presetPluginsFor = (id) =>
 export const registerPack = (id, entry) => stores.pack.register(id, entry);
 export const lookupPack = (id) => stores.pack.lookup(id);
 export const packIds = () => stores.pack.ids();
+
+// A named slice set's value is the set itself - normalized (0..1) start points in ascending order,
+// one per slice, exactly what the engine's own transient analysis produces, keyed by the file they
+// were drawn on (see slices.mjs). Plain data like a pack's file list, not a Sig: `.slices("break")`
+// looks the name up at emit time and puts the set on the event, the engine picks the entry for the
+// file it resolved, and `.slice(n)` indexes into that (see Sig#slices).
+export const registerSlices = (id, set) => stores.slices.register(id, set);
+export const lookupSlices = (id) => stores.slices.lookup(id);
+export const sliceSetIds = () => stores.slices.ids();

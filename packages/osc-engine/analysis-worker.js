@@ -13,7 +13,7 @@ const { trimRecording, songWaveform } = require('./wav');
 const { detectSongFacts } = require('./song-detect');
 
 const JOBS = {
-  slices: ({ path }) => detectSlices(path),
+  slices: ({ path, ...opts }) => detectSlices(path, opts),
   trim: ({ srcPath, destPath, ...opts }) => trimRecording(srcPath, destPath, opts),
   songwave: ({ path, ...opts }) => songWaveform(path, opts),
   songdetect: ({ path, ...opts }) => detectSongFacts(path, opts),

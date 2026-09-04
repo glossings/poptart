@@ -72,13 +72,17 @@ const NAME_ARG_CALLS = new Set([
   // ...and the named sample pack: an id, then the list of files it is made of. `sp("<kit kit2>")`
   // itself is a pattern of names and stays a pattern, like s().
   '_pack',
+  // ...and the slice editor's markers: an id, then the positions they were drawn at.
+  // `.slices("<tight loose>")` is a pattern of names like `.preset()`, so it is deliberately not
+  // listed - its argument wants highlighting exactly as pianoroll("<a b>") does.
+  '_slices',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'arrange', '_roll', 'roll', '_shape', 'shape', '_preset', '_pack', 'midicc', 'midikeys', 'input']);
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'arrange', '_roll', 'roll', '_shape', 'shape', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'input']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain

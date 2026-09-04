@@ -409,3 +409,37 @@ test('highlight: nested arith with an inner "<...>" still lights just the pick',
   assert.deepEqual(hlText(str, 0), ['5']);
   assert.deepEqual(hlText(str, 1), ['7']);
 });
+
+// --- a field on a name, patterned ("breaks:<27 24>") ---------------------------------------------
+//
+// The mirror of the group suffix ("<18 16>:3"). s("bd:3") is the shorthand for s("bd").i(3), so
+// s("breaks:<27 24>") has to be the shorthand for s("breaks").i("<27 24>") - the sampler splits the
+// index off the value at emit time, and all this does is put the name on each of them.
+
+test('a patterned field distributes the name onto every atom in the group', () => {
+  assert.deepEqual(values('breaks:<27 24>', 0), ['breaks:27']);
+  assert.deepEqual(values('breaks:<27 24>', 1), ['breaks:24']);
+});
+
+test('the group keeps its own structure - the name does not make it one step', () => {
+  assert.deepEqual(values('bd:[0 1]'), ['bd:0', 'bd:1']);
+  // ...and it takes postfix operators like any other element.
+  assert.deepEqual(values('breaks:<27 24>*2'), ['breaks:27', 'breaks:24']);
+});
+
+test('a rest inside keeps being a rest, name or no name', () => {
+  assert.deepEqual(values('bd:[0 ~ 1]'), ['bd:0', 'bd:1']);
+});
+
+test('a computed field gets the name too', () => {
+  const v = values('bd:[i(3,4)]')[0];
+  assert.match(v, /^bd:[34]$/, `a per-cycle random index still comes out named: ${v}`);
+});
+
+test('the two directions compose, and neither disturbs the plain spellings', () => {
+  assert.deepEqual(values('<18 16>:3'), ['18:3'], 'the group suffix still works');
+  assert.deepEqual(values('breaks:19'), ['breaks:19'], 'a plain field is untouched');
+  assert.deepEqual(values('a:b'), ['a:b'], 'a colon that names nothing patterned is just text');
+  // A colon-ending name NOT glued to a group is still an ordinary atom, whatever it looks like.
+  assert.deepEqual(values('bd: [0 1]'), ['bd:', '0', '1']);
+});

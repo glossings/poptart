@@ -70,11 +70,12 @@ function run(kind, args) {
 
 /**
  * Normalized (0..1) slice-start positions for an audio file, or null if it can't be analyzed
- * (non-WAV - see samples.js's detectSlices, which this runs off-thread).
+ * (non-WAV - see samples.js's detectSlices, which this runs off-thread). `sensitivity` (default 1,
+ * what .slice() itself chops on) is the slice editor's auto-slice slider.
  * @returns {Promise<number[] | null>}
  */
-function analyzeSlices(filePath) {
-  return run('slices', { path: filePath });
+function analyzeSlices(filePath, opts = {}) {
+  return run('slices', { path: filePath, ...opts });
 }
 
 /**
