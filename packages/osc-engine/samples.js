@@ -57,7 +57,7 @@ function listPackFiles(pack) {
  * which is the most a set can honestly say about a file it can't place.
  *
  * The editor writes the key it is given by the server and the engine computes the same key from
- * the file it resolved (slicesForFile), so the two ends of a set agree by construction.
+ * the file it resolved (sliceEntryFor), so the two ends of a set agree by construction.
  */
 function sampleKey(file) {
   const abs = path.resolve(String(file ?? ''));
@@ -74,20 +74,32 @@ function sampleKey(file) {
 }
 
 /**
- * The positions a slice set draws on one file, or null for "it says nothing about this one" - in
- * which case the caller falls back to the file's own transient analysis. A bare list applies to
- * whatever is playing; a map applies only where it has an entry for that file, which is what makes
- * one named set follow a changing .i() across four different breaks.
+ * What a slice set says about one file: `{ marks, fit }`, or null for "it says nothing about this
+ * one" - in which case the caller falls back to the file's own transient analysis and to whatever
+ * the pattern says about fit. A bare list applies to whatever is playing; a map applies only where
+ * it has an entry for that file, which is what makes one named set follow a changing .i() across
+ * four different breaks - each with its own markers AND its own fit, since how many cycles a break
+ * lasts is a fact about the break.
  *
- * pattern-core has the same three lines (slices.mjs slicePositionsFor) because this package is
- * CommonJS and deliberately doesn't depend on it. They must agree.
+ * pattern-core has the same few lines (slices.mjs sliceEntryFor) because this package is CommonJS
+ * and deliberately doesn't depend on it. They must agree.
  */
-function slicesForFile(set, file) {
+function sliceEntryFor(set, file) {
   if (!set) return null;
-  if (Array.isArray(set)) return set.length ? set : null;
-  if (typeof set !== 'object') return null;
-  const found = set[sampleKey(file)];
-  return Array.isArray(found) && found.length ? found : null;
+  const raw = Array.isArray(set) ? set : typeof set === 'object' ? set[sampleKey(file)] : null;
+  if (raw == null) return null;
+  const marks = Array.isArray(raw) ? raw : Array.isArray(raw.marks) ? raw.marks : [];
+  const fit = Array.isArray(raw) ? null : normalizeFit(raw.fit);
+  if (!marks.length && fit == null) return null;
+  return { marks: marks.length ? marks : null, fit };
+}
+
+/** A set's fit as playSample takes it: 'auto', a positive number of cycles, or null for none. */
+function normalizeFit(fit) {
+  if (fit == null || fit === '' || fit === false) return null;
+  if (fit === 'auto' || fit === true) return 'auto';
+  const n = Number(fit);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -303,10 +315,19 @@ const MIN_GAP_SEC = 0.05; // two transients closer than this are one hit
 const FLUX_RATIO = 2; // x the local mean flux
 const FLUX_FLOOR = 0.005; // + this share of the file's peak RMS, so near-silence can't qualify
 
+// The range the control runs over. Sensitivity is a RATIO, not a percentage - halving it doubles
+// what a peak has to clear and doubling it halves that - so the useful scale is geometric and 1
+// (what .slice() chops on with no set at all) sits in the middle of it. Three halvings either way:
+// far enough down to keep only the strongest hits in a busy break, far enough up to catch ghost
+// notes, and clamped at both ends so the extremes stay a detector rather than "one slice" or "a
+// slice per hop". The editor's slider is the geometric position along this range (sliceSensOf).
+const SENSITIVITY_MIN = 1 / 8;
+const SENSITIVITY_MAX = 8;
+const clampSensitivity = (v) => Math.min(SENSITIVITY_MAX, Math.max(SENSITIVITY_MIN, Number(v) || 1));
+
 function detectOnsets(samples, sampleRate, { sensitivity = 1 } = {}) {
-  // Half sensitivity doubles what a peak must clear; double it halves it. Clamped so the extremes
-  // stay a detector rather than "one slice" / "a slice per hop".
-  const strictness = 1 / Math.min(4, Math.max(0.25, Number(sensitivity) || 1));
+  // Half sensitivity doubles what a peak must clear; double it halves it.
+  const strictness = 1 / clampSensitivity(sensitivity);
   const nHops = Math.floor(samples.length / HOP);
   if (nHops < 4) return [0];
 
@@ -366,7 +387,10 @@ module.exports = {
   resolveSampleFile,
   expandPackEntries,
   sampleKey,
-  slicesForFile,
+  sliceEntryFor,
+  clampSensitivity,
+  SENSITIVITY_MIN,
+  SENSITIVITY_MAX,
   isAudioName,
   browseSamples,
   walkAudioFiles,

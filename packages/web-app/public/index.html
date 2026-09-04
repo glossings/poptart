@@ -795,16 +795,27 @@
         </div>
         <div class="slice-body">
           <canvas id="sliceCanvas" class="slice-canvas" tabindex="0"
-            title="drag a tab to move it (⌘ for fine, ⌥ to ignore the magnets) · double-click to add one · right-click to remove · ←/→ to walk the slices · [ ] for the other files this chain plays"></canvas>
+            title="drag a tab to move it (⌘ for fine, ⌥ to ignore the magnets) · double-click to add a marker, or on one to remove it · right-click to remove · ←/→ to walk the slices · [ ] for the other files this chain plays"></canvas>
         </div>
         <div class="dir-picker-foot slice-foot">
           <button id="slicePlayBtn" class="small slice-play" title="play the selected slice (space)">▶</button>
+          <!-- The travel is a position, not the sensitivity itself: the value it means is geometric,
+               so 1 sits dead centre and each sixth of the slider is a halving (see sliceSensOf). -->
           <label id="sliceSensWrap" class="slice-sens" title="how much has to happen for a hit to count — moving this re-slices">sens
-            <input id="sliceSens" class="dj-fader" type="range" min="0.25" max="4" step="0.05" value="1" />
+            <input id="sliceSens" class="dj-fader" type="range" min="0" max="1" step="0.01" value="0.5" />
             <span id="sliceSensVal" class="slice-sens-val">1.00</span>
           </label>
           <button id="sliceAutoBtn" class="small" title="re-detect at this sensitivity, replacing every marker">auto-slice</button>
           <button id="sliceClearBtn" class="small" title="remove every marker - the sample goes back to chopping on its own transients">clear</button>
+          <!-- .fit() on the chain, given a face: how many cycles the whole file is repitched to
+               last. Auto picks the nearest power of two and never says which, which is exactly the
+               number you want to know while you are chopping. -->
+          <span id="sliceFitWrap" class="slice-fit">
+            <button id="sliceFitBtn" class="small" title="fit the file to a number of cycles (.fit() on the chain)">fit</button>
+            <button id="sliceFitVal" class="small slice-fit-val" title="back to auto-fit"></button>
+            <button id="sliceFitHalf" class="small" title="half the cycles — twice the speed">÷2</button>
+            <button id="sliceFitDouble" class="small" title="twice the cycles — half the speed">×2</button>
+          </span>
           <span class="spacer"></span>
           <span id="sliceCount" class="slice-count"></span>
           <span id="sliceNote" class="pack-note"></span>

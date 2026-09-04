@@ -19,7 +19,7 @@ const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
-const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, slicesForFile } = require('./samples');
+const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension } = require('./extensions');
@@ -1112,17 +1112,19 @@ class OscEngine {
     const idx = wrap(Math.round(cfg.index ?? 0), entry.files.length);
     const file = entry.files[idx];
 
+    // What the hand-drawn set (.slices(), the slice editor's) says about THIS file: it is keyed by
+    // sample (see samples.js sliceEntryFor), so a set that says nothing about the one playing
+    // leaves it exactly as it was - which is what lets one named set follow a .i() across several
+    // breaks, each with its own chops and its own fit.
+    const authored = cfg.slices ? sliceEntryFor(cfg.slices, file.path) : null;
+
     let begin = clamp01(cfg.begin ?? 0);
     let end = clamp01(cfg.end ?? 1);
     if (cfg.slice != null) {
-      // A hand-drawn set (.slices(), the slice editor's markers) says where the chops are and
-      // wins over the automatic analysis - it also arrives ON the event, so an authored set never
-      // waits for a file to be analyzed and never depends on the file being a WAV.
-      // The set is keyed by file (see samples.js slicesForFile), so the markers that play are the
-      // ones drawn on THIS sample - a set that says nothing about it chops on its own transients,
-      // which is what lets one named set follow a .i() across several breaks.
-      const authored = slicesForFile(cfg.slices, file.path);
-      const slices = authored ?? this._slicesFor(file);
+      // Hand-drawn markers say where the chops are and win over the automatic analysis - they also
+      // arrive ON the event, so an authored set never waits for a file to be analyzed and never
+      // depends on the file being a WAV.
+      const slices = authored?.marks ?? this._slicesFor(file);
       if (slices === undefined) return { skipped: 'analyzing slices' };
       if (slices?.length) {
         const k = wrap(Math.round(cfg.slice), slices.length);
@@ -1144,13 +1146,17 @@ class OscEngine {
     const spanSec = file.duration * (end - begin);
     if (speed === 0 || spanSec <= 0) return { skipped: speed === 0 ? 'speed 0' : 'empty begin..end window' };
 
-    if (cfg.fit != null) {
+    // The chain's own .fit() first, then whatever the slice set drew this sample against. The
+    // pattern always wins: a `.fit()` someone wrote is a statement about the part, while the set's
+    // is a property of the file, and the specific instruction beats the general one.
+    const fit = cfg.fit != null ? cfg.fit : authored?.fit ?? null;
+    if (fit != null) {
       // Fit is a property of the whole sample, not the begin..end window: the rate is set so
       // the FULL file lasts the target number of cycles, and begin/end/slice then select a
       // window at that fixed rate. Basing it on the window instead would make a randomized
       // .begin() (s("breaks").fit().vel("1!16").begin(irand(16).div(16))) repitch every hit.
       const measures = file.duration / cfg.secPerCycle;
-      const target = cfg.fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : cfg.fit;
+      const target = fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : fit;
       if (target > 0) speed *= measures / target;
     }
     // Repitch anchor: MIDI 60 plays the file as recorded (the standard sampler root key). Mirrors

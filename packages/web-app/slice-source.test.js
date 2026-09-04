@@ -36,7 +36,9 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const bodies = ['codeOnly', 'sliceIndexList', 'sliceRefFrom', 'sliceChainSourceAt'].map(grab).join('\n\n');
+const bodies = ['codeOnly', 'matchParen', 'sliceSourceCallAt', 'sliceIndexList', 'sliceRefFrom', 'sliceChainSourceAt']
+  .map(grab)
+  .join('\n\n');
 // eslint-disable-next-line no-new-func
 const load = new Function('labelsMod', `${bodies}\nreturn { sliceChainSourceAt, sliceRefFrom };`);
 
@@ -64,9 +66,11 @@ test('...and so does a patterned field on the name', () => {
   assert.deepEqual(src.indices, [27, 24]);
 });
 
-test('the field on the name wins over .i(), as it does at emit time', () => {
+test('an explicit .i() wins over the field on the name, as it does at emit time', () => {
+  // The scheduler's dispatch only lets the "pack:n" suffix fill in an index the .i() channel left
+  // unset, so a chain carrying both plays what .i() says and the panel has to draw the same file.
   const src = sourceOf('break: s("breaks:9").i("<27 24>").slice("0 1")');
-  assert.deepEqual(src.indices, [9]);
+  assert.deepEqual(src.indices, [27, 24]);
 });
 
 test('a chain with no index at all plays the pack\'s first file', () => {

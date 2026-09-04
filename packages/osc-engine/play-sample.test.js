@@ -388,3 +388,41 @@ test('a set keyed by file chops only the file it names', () => {
   assert.strictEqual(skipped.skipped, 'analyzing slices');
   assert.strictEqual(sent.length, 0);
 });
+
+// --- fit carried by the set (the slice editor writes it there, not onto the chain) ---------------
+
+test('a set entry\'s fit is used where the pattern says nothing about fit', () => {
+  // 4.8s file at 2s/cycle = 2.4 measures; the set says 4 -> speed 0.6, exactly as .fit(4) would.
+  const { engine, sent } = engineWithFile(4.8);
+  const slices = { 'a.wav': { fit: 4, marks: [0, 0.5] } };
+  engine.playSample('t1', 'breaks', { slices, secPerCycle: 2 }, 0, 0.125);
+  assert.ok(Math.abs(sent.pop().args[ARG.speed] - 0.6) < 1e-9);
+});
+
+test('...and the pattern\'s own .fit() overrides it, because the part beats the file', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  const slices = { 'a.wav': { fit: 4, marks: [0, 0.5] } };
+  engine.playSample('t1', 'breaks', { fit: 'auto', slices, secPerCycle: 2 }, 0, 0.125);
+  assert.ok(Math.abs(sent.pop().args[ARG.speed] - 1.2) < 1e-9, 'auto (2 measures) wins over the set\'s 4');
+});
+
+test('an entry may carry a fit and no markers at all - the sample chops on its own transients', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slices: { 'a.wav': { fit: 4 } }, secPerCycle: 2 }, 0, 0.125);
+  assert.ok(Math.abs(sent.pop().args[ARG.speed] - 0.6) < 1e-9, 'the fit still applies');
+  // ...and asking for a slice falls through to the analysis, as an unmarked file does.
+  const skipped = engine.playSample('t1', 'breaks', { slice: 0, slices: { 'a.wav': { fit: 4 } }, secPerCycle: 2 }, 0, 0.125);
+  assert.strictEqual(skipped.skipped, 'analyzing slices');
+});
+
+test('a fit drawn against another sample is that sample\'s business', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slices: { 'other.wav': { fit: 4 } }, secPerCycle: 2 }, 0, 0.125);
+  assert.strictEqual(sent.pop().args[ARG.speed], 1, 'nothing said about this file, so nothing done to it');
+});
+
+test('a set written as a bare list carries no fit, and never has', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slice: 0, slices: [0, 0.5], secPerCycle: 2 }, 0, 0.125);
+  assert.strictEqual(sent.pop().args[ARG.speed], 1);
+});

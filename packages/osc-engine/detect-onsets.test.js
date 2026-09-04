@@ -46,7 +46,7 @@ const foundHit = (positions, k) => positions.some((p) => Math.abs(p * SECONDS - 
 
 test('sensitivity trades missed hits against false ones, monotonically', () => {
   const samples = ladder();
-  const counts = [0.25, 0.5, 1, 2, 4].map((sensitivity) => detectOnsets(samples, RATE, { sensitivity }).length);
+  const counts = [0.125, 0.25, 0.5, 1, 2, 4, 8].map((sensitivity) => detectOnsets(samples, RATE, { sensitivity }).length);
   for (let i = 1; i < counts.length; i++) {
     assert.ok(counts[i] >= counts[i - 1], `sensitivity only ever finds more: ${counts.join(' -> ')}`);
   }
@@ -79,6 +79,9 @@ test('positions come back ascending, inside the file, and always with a start', 
 
 test('a sensitivity out of range is clamped rather than turning the detector off', () => {
   const samples = ladder();
-  assert.deepStrictEqual(detectOnsets(samples, RATE, { sensitivity: 999 }), detectOnsets(samples, RATE, { sensitivity: 4 }));
+  const { SENSITIVITY_MIN, SENSITIVITY_MAX } = require('./samples');
+  assert.deepStrictEqual(detectOnsets(samples, RATE, { sensitivity: 999 }), detectOnsets(samples, RATE, { sensitivity: SENSITIVITY_MAX }));
+  assert.deepStrictEqual(detectOnsets(samples, RATE, { sensitivity: -3 }), detectOnsets(samples, RATE, { sensitivity: SENSITIVITY_MIN }));
+  // 0 is not "as strict as possible" - it's no answer at all, and the default is what it means.
   assert.deepStrictEqual(detectOnsets(samples, RATE, { sensitivity: 0 }), detectOnsets(samples, RATE, { sensitivity: 1 }));
 });

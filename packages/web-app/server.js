@@ -1979,6 +1979,7 @@ function highlightGrid(sig, start, end, from, count) {
   // _sampleConfigAt). The slice editor reads these to light the marker that is sounding; nothing
   // else does, so they ride only on tracks that actually slice.
   const sampler = sig.sampler?.slice ? sig.sampler : null;
+  const samplerKind = sig.samplerKind ?? 'pack';
   const chopAt = (s, at) => {
     const pick = (key) => {
       const raw = s.cfg?.[key] !== undefined ? s.cfg[key] : sampler[key]?.sample(at, 1, at);
@@ -1987,7 +1988,15 @@ function highlightGrid(sig, start, end, from, count) {
     };
     const slice = pick('slice');
     if (slice === undefined) return null;
-    const i = pick('index');
+    let i = pick('index');
+    if (i === undefined && (samplerKind === 'pack' || samplerKind === 'named')) {
+      // s("breaks:19") carries the index in the VALUE, and the scheduler splits it off there - so a
+      // chain with no .i() at all still plays a numbered file, and s("breaks:<19 20>") plays a
+      // different one each cycle. Asked second because an explicit .i() wins over the suffix,
+      // exactly as it does in the scheduler's own dispatch.
+      const m = /^(.+):(-?\d+)$/.exec(String(s.value));
+      if (m) i = Number(m[2]);
+    }
     return { slice, ...(i === undefined ? {} : { i }) };
   };
   for (let c = base; c < base + count; c++) {
@@ -3254,11 +3263,12 @@ const routes = {
   // from what you were already hearing. WAV-only, like the analysis itself: `slices: null` is an
   // honest "nothing to detect here", and the panel says so rather than drawing a lie.
   'GET /api/sampleSlices': async (query) => {
-    const { isAudioName, samplesRoot } = require('@poptart/osc-engine/samples');
+    const { isAudioName, samplesRoot, clampSensitivity } = require('@poptart/osc-engine/samples');
     const raw = String(query.file ?? '').trim();
     if (!raw || !isAudioName(raw)) throw new Error('sampleSlices needs an audio file');
     const file = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(samplesRoot(), raw);
-    const sensitivity = Math.min(4, Math.max(0.25, Number(query.sensitivity) || 1));
+    // Clamped with the detector's own bounds rather than a second copy of them (see samples.js).
+    const sensitivity = clampSensitivity(query.sensitivity);
     let st;
     try {
       st = fs.statSync(file);

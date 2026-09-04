@@ -18,7 +18,7 @@ process.env.POPTART_SAMPLES_DIR = SAMPLES;
 process.env.POPTART_RECORDINGS_DIR = RECORDINGS;
 
 const { OscEngine } = require('./index.js');
-const { resolveSampleFile, browseSamples, expandPackEntries, sampleKey, slicesForFile } = require('./samples.js');
+const { resolveSampleFile, browseSamples, expandPackEntries, sampleKey, sliceEntryFor } = require('./samples.js');
 
 function put(root, rel) {
   const file = path.join(root, rel);
@@ -135,7 +135,7 @@ test('browseSamples refuses to list outside the root', () => {
   assert.strictEqual(browseSamples('../..'), null);
 });
 
-// --- how a slice set names a file (see samples.js sampleKey / slicesForFile) --------------------
+// --- how a slice set names a file (see samples.js sampleKey / sliceEntryFor) --------------------
 //
 // A set of markers only means anything on the sample it was drawn on, so it is keyed by one. The
 // key has to read as the file, survive being written into a pattern someone else opens, and be the
@@ -157,13 +157,25 @@ test('a set draws only on the files it has markers for - every other sample keep
   const amen = put(SAMPLES, 'breaks/amen.wav');
   const think = put(SAMPLES, 'breaks/think.wav');
   const set = { 'breaks/amen.wav': [0, 0.5] };
-  assert.deepStrictEqual(slicesForFile(set, amen), [0, 0.5]);
-  assert.strictEqual(slicesForFile(set, think), null, 'null = chop on this one\'s own transients');
+  assert.deepStrictEqual(sliceEntryFor(set, amen).marks, [0, 0.5]);
+  assert.strictEqual(sliceEntryFor(set, think), null, 'null = chop on this one\'s own transients');
 });
 
 test('a set written as a bare list is one map, for whatever plays', () => {
   const amen = put(SAMPLES, 'breaks/amen.wav');
-  assert.deepStrictEqual(slicesForFile([0, 0.25], amen), [0, 0.25]);
-  assert.strictEqual(slicesForFile([], amen), null);
-  assert.strictEqual(slicesForFile(null, amen), null);
+  assert.deepStrictEqual(sliceEntryFor([0, 0.25], amen).marks, [0, 0.25]);
+  assert.strictEqual(sliceEntryFor([], amen), null);
+  assert.strictEqual(sliceEntryFor(null, amen), null);
+});
+
+test('an entry carries that sample\'s fit beside its markers, and only that sample\'s', () => {
+  // Four breaks under one name, each fitted its own way - which one .fit() on the chain can't say.
+  const amen = put(SAMPLES, 'breaks/amen.wav');
+  const think = put(SAMPLES, 'breaks/think.wav');
+  const set = { 'breaks/amen.wav': { fit: 2, marks: [0, 0.5] }, 'breaks/think.wav': [0, 0.25] };
+  assert.strictEqual(sliceEntryFor(set, amen).fit, 2);
+  assert.strictEqual(sliceEntryFor(set, think).fit, null, 'this one is not fitted at all');
+  // A fit with no markers is still an entry; a fit of nothing is not.
+  assert.deepStrictEqual(sliceEntryFor({ 'breaks/amen.wav': { fit: 'auto' } }, amen), { marks: null, fit: 'auto' });
+  assert.strictEqual(sliceEntryFor({ 'breaks/amen.wav': { fit: 0 } }, amen), null);
 });

@@ -141,3 +141,27 @@ test('a track that does not slice carries no chop at all, and neither do its par
   const steps = gridOf(sliced, [param])[0].steps;
   assert.deepEqual(steps.map((s) => s.chop?.slice), [1, undefined]);
 });
+
+test('a pack that numbers the file in its own name still says which file', () => {
+  // s("breaks:19") puts the index in the VALUE - there is no .i() channel to read - and
+  // s("breaks:<19 20>") makes it a different one each cycle. The slice editor asks the grid which
+  // file is sounding, so a grid that only looked at the channel had it opening on the wrong break
+  // (reported 2026-09-04).
+  const sig = sigOf([{ start: 0, end: 1, value: 'breaks:20', locs: [[10, 12]] }]);
+  sig.sampler = { slice: constSig(0) };
+  assert.deepEqual(gridOf(sig)[0].steps[0].chop, { slice: 0, i: 20 });
+});
+
+test('...but an explicit .i() still wins over it, as it does in the scheduler', () => {
+  const sig = sigOf([{ start: 0, end: 1, value: 'breaks:20', locs: [[10, 12]] }]);
+  sig.sampler = { slice: constSig(0), index: constSig(3) };
+  assert.deepEqual(gridOf(sig)[0].steps[0].chop, { slice: 0, i: 3 });
+});
+
+test('a one-file source keeps a colon in its name rather than reading it as an index', () => {
+  // se()/sr() address one file, so ":" belongs to the name - the same rule the scheduler applies.
+  const sig = sigOf([{ start: 0, end: 1, value: 'odd:name.wav', locs: [[10, 12]] }]);
+  sig.sampler = { slice: constSig(1) };
+  sig.samplerKind = 'file';
+  assert.deepEqual(gridOf(sig)[0].steps[0].chop, { slice: 1 });
+});

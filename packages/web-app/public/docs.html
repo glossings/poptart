@@ -685,17 +685,25 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
           <div class="callout">
             <span class="tag">slice editor</span>
             <strong>Double-click <code>slice</code></strong> on a sampler chain and the sample opens with
-            its chops drawn on it: drag a numbered tab to move a chop, double-click to add one,
-            right-click to take one away, <code>←</code>/<code>→</code> to walk the slices and hear them.
+            its chops drawn on it: drag a numbered tab to move a chop, double-click to add one (or
+            double-click a marker to take it away — right-click does it in one),
+            <code>←</code>/<code>→</code> to walk the slices and hear them.
             Markers snap to transients (and to zero crossings) unless you hold <kbd>alt</kbd>;
             <kbd>⌘</kbd> while dragging is the fine adjustment, and turns the magnets off with it. The
             wheel pans along the sample, <kbd>⌘</kbd>-wheel and <kbd>⌘</kbd><kbd>+</kbd>/<kbd>−</kbd>
             zoom, <kbd>⌘</kbd><kbd>0</kbd> fits the whole file. The slices the pattern plays light up
-            as it runs. The <strong>sens</strong> slider re-slices the
-            whole file at whatever sensitivity you like — it stands down once you have moved a marker by
-            hand, and <strong>auto-slice</strong> is the way back to detected chops.
+            as it runs. <strong>fit</strong> says how many cycles this sample is repitched to last —
+            auto picks the nearest power of two, and this is the only place that tells you which —
+            while <code>÷2</code>/<code>×2</code> try the numbers either side. It is kept
+            <em>with that sample's markers</em>, not on the chain, so four breaks under one name can
+            each be fitted their own way (or not at all); a <code>.fit()</code> you write on the
+            pattern yourself overrides the lot. The <strong>sens</strong> slider re-slices the
+            whole file: the middle is what <code>.slice()</code> chops on by itself, left of it keeps
+            only the strongest hits and right of it finds ghost notes, each sixth of the travel
+            halving or doubling. It stands down once you have moved a marker by hand, and
+            <strong>auto-slice</strong> is the way back to detected chops.
             What you draw is written into the code as
-            <code>_slices("break", { "breaks/amen.wav": [0, 0.131, …] })</code> plus
+            <code>_slices("break", { "breaks/amen.wav": { fit: 2, marks: [0, 0.131, …] } })</code> plus
             <code>.slices("break")</code>, so a chop map is patternable like anything else:
             <code>.slices("&lt;tight loose&gt;")</code> swaps maps as it plays, and
             <code>.slice("3 1 0 2")</code> still says which chop goes where. A set holds markers

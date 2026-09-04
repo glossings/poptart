@@ -13770,6 +13770,11 @@ const sliceSensWrap = document.getElementById('sliceSensWrap');
 const sliceSens = document.getElementById('sliceSens');
 const sliceSensVal = document.getElementById('sliceSensVal');
 const sliceAutoBtn = document.getElementById('sliceAutoBtn');
+const sliceFitWrap = document.getElementById('sliceFitWrap');
+const sliceFitBtn = document.getElementById('sliceFitBtn');
+const sliceFitVal = document.getElementById('sliceFitVal');
+const sliceFitHalf = document.getElementById('sliceFitHalf');
+const sliceFitDouble = document.getElementById('sliceFitDouble');
 const sliceClearBtn = document.getElementById('sliceClearBtn');
 const sliceCountEl = document.getElementById('sliceCount');
 const sliceNote = document.getElementById('sliceNote');
@@ -13784,7 +13789,23 @@ const SLICE_LIVE_MS = 60; // throttle on the live re-file while a marker is stil
 const SLICE_EVAL_DEBOUNCE_MS = 250;
 const SLICE_DETECT_DEBOUNCE_MS = 140;
 const SLICE_PEAK_BUCKET = 64; // frames per pyramid bucket - drawing reduces from these, not the file
-const SLICE_SENS_TITLE = 'how much has to happen for a hit to count — moving this re-slices';
+const SLICE_SENS_TITLE = 'how much has to happen for a hit to count — left keeps only the strongest, '
+  + 'right finds everything, the middle is what .slice() chops on by itself. Moving this re-slices';
+// The slider's travel is a POSITION, 0..1, and the sensitivity it means is geometric: three
+// halvings to the left of centre and three doublings to the right, so 1 - what a sample with no
+// set of its own chops on - sits in the middle instead of a fifth of the way along, and each
+// sixth of the travel is one halving. A linear 0.25..4 was the same range squashed to one side,
+// which put the whole quiet end of it in the first fifth of the slider.
+//
+// The ends are the detector's own clamp (samples.js SENSITIVITY_MIN/MAX), so the slider can reach
+// exactly as far as the detector will go and no further - pinned by a test, since the two live in
+// different packages.
+const SLICE_SENS_OCTAVES = 3;
+const sliceSensOf = (t) => Number((2 ** ((Number(t) - 0.5) * 2 * SLICE_SENS_OCTAVES)).toPrecision(3));
+/** What the slider is asking for right now, as the detector's own unit. */
+const sliceSensNow = () => sliceSensOf(sliceSens.value);
+/** ...and as the readout says it: two figures, so 0.13 and 2.8 read as easily as 1.0 does. */
+const sliceSensText = (v) => Number(v).toPrecision(2);
 const SLICE_BTN_ZOOM = 1.4; // per-keypress zoom step for cmd ± (the wheel zooms proportionally)
 
 // { id, set, key, positions, others, own, hand, source, file, label, buffer, peaks, detected, sel,
@@ -13828,6 +13849,16 @@ function sliceCarry() {
   return { source, at, file, key, label, index, indices, srcName };
 }
 
+/**
+ * Where the panel's chain is in the buffer NOW. The `.slices()` id has a marker on it, which moves
+ * with the text; the offset it was opened at is the fallback and goes stale the moment anything
+ * above it is written (a `.fit()` from this panel included), so the marker is asked first.
+ */
+function sliceAtNow() {
+  const span = sliceState?.source?.find();
+  return span ? cm.indexFromPos(span.from) : sliceState?.at ?? null;
+}
+
 function sliceSyncHead() {
   const named = !!sliceState?.id;
   sliceFileEl.textContent = sliceState?.label ?? '';
@@ -13848,22 +13879,28 @@ function sliceApplyKey(state, key) {
   if (Array.isArray(set)) {
     state.positions = [...set];
     state.others = {};
+    state.fit = null; // a bare list is markers and nothing else
     return;
   }
   state.others = {};
-  for (const [k, list] of Object.entries(set ?? {})) {
-    if (k !== state.key) state.others[k] = list;
+  for (const [k, entry] of Object.entries(set ?? {})) {
+    if (k !== state.key) state.others[k] = entry;
   }
-  state.positions = state.key && Array.isArray(set?.[state.key]) ? [...set[state.key]] : [];
+  const entry = slicesMod && state.key ? slicesMod.sliceEntryFor(set, state.key) : null;
+  state.positions = entry?.marks ? [...entry.marks] : [];
+  state.fit = entry?.fit ?? null;
 }
 
-/** The whole set as it should be filed: this file's markers back among the others'. */
+/** The whole set as it should be filed: this file's entry back among the others'. */
 function sliceFullSet() {
   if (!sliceState) return [];
-  const { key, positions, others } = sliceState;
+  const { key, positions, others, fit } = sliceState;
   if (!key) return [...positions]; // no file identified (an unresolvable chain) - one map, for whatever plays
   const out = { ...others };
-  if (positions.length) out[key] = [...positions];
+  // The entry is the markers plus what this sample is fitted to; normalizeSliceEntry puts it in
+  // whichever of the two spellings says it shortest, and drops it entirely if it says nothing.
+  const entry = slicesMod ? slicesMod.normalizeSliceEntry({ fit, marks: positions }) : (positions.length ? [...positions] : null);
+  if (entry) out[key] = entry;
   else delete out[key];
   return out;
 }
@@ -13949,6 +13986,29 @@ function sliceCallOnChain(code, idx) {
 }
 
 /**
+ * The `s()`/`sp()`/`se()`/`sr()` call on the chain around `idx` - where the chain's file comes
+ * from, and the anchor everything else on it is read relative to. Carries the block it was found
+ * in (and that block's comment test) so a caller doesn't have to split the buffer a second time.
+ */
+function sliceSourceCallAt(code, idx) {
+  if (!labelsMod) return null;
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  if (!block) return null;
+  const isCode = codeOnly(code);
+  const re = /\b(sp|se|sr|s)\s*\(\s*(["'`])((?:\\.|(?!\2)[\s\S])*?)\2/g;
+  re.lastIndex = block.start;
+  let m;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue;
+    const open = code.indexOf('(', m.index);
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    return { kind: m[1], str: m[3], start: m.index, open, close, block, isCode };
+  }
+  return null;
+}
+
+/**
  * Which FILE the chain around `idx` plays, in the engine's own namespaced spelling: a bare name is
  * a folder pack, "sp:" a named one, "file:" one path, "rec:" a bounce. The index comes from the
  * `:n` suffix on the source name where there is one, and from `.i(n)` otherwise - the two spellings
@@ -13956,27 +14016,16 @@ function sliceCallOnChain(code, idx) {
  * head says which file is on screen.
  */
 function sliceChainSourceAt(code, idx) {
-  if (!labelsMod) return null;
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
-  if (!block) return null;
-  const isCode = codeOnly(code);
-  const re = /\b(sp|se|sr|s)\s*\(\s*(["'`])((?:\\.|(?!\2)[\s\S])*?)\2/g;
-  re.lastIndex = block.start;
-  let found = null;
-  let m;
-  while ((m = re.exec(code)) && m.index < block.end) {
-    if (!isCode(m.index)) continue;
-    found = { kind: m[1], str: m[3], at: m.index };
-    break;
-  }
+  const found = sliceSourceCallAt(code, idx);
   if (!found) return null;
+  const { block, isCode } = found;
   // `.i(...)` holds a PATTERN, not a number: `.i("<27 24>")` names two files and `.i(19)` one.
   // Everything it names is collected, since the panel draws one file at a time and `[`/`]` step
   // between them (see sliceStepFile) - reading only a bare integer here is what used to leave a
   // patterned index reading as 0, so the panel always opened the pack's first file. Read after the
   // source call and in code only, so a commented-out `.i()` above the chain isn't the chain's.
   const iRe = /\.i\s*\(\s*(?:(-?\d+(?:\.\d+)?)|(["'`])((?:\\.|(?!\2)[\s\S])*?)\2)\s*\)/g;
-  iRe.lastIndex = found.at;
+  iRe.lastIndex = found.close + 1;
   let iCall = [];
   let iAt;
   while ((iAt = iRe.exec(code)) && iAt.index < block.end) {
@@ -14005,11 +14054,12 @@ function sliceRefFrom(kind, str, iCall) {
   const first = raw.split(/[\s,<>[\]{}|!*/?@:]+/).filter(Boolean)[0] ?? '';
   if (!first) return null;
   if (kind === 'sr') return { ref: `rec:${first}`, name: first, index: 0, indices: [0] };
-  // The field on the name wins over .i(), as it does at emit time (see the scheduler's dispatch:
-  // an explicit .i() wins over the suffix... but only where the suffix names nothing).
+  // An explicit .i() wins over the field on the name, exactly as it does at emit time (see the
+  // scheduler's dispatch: the "pack:n" suffix only fills in cfg.index where the channel left it
+  // unset). The suffix is the common spelling, so it is what answers for most chains.
   const sub = /^[^\s:]+:(.+)$/.exec(raw);
   const fromName = sub ? sliceIndexList(sub[1]) : [];
-  const indices = (fromName.length ? fromName : iCall) ?? [];
+  const indices = (iCall?.length ? iCall : fromName) ?? [];
   return {
     ref: kind === 'sp' ? `sp:${first}` : first,
     name: first,
@@ -14092,6 +14142,7 @@ function openSliceSetById(id, from = {}) {
     set: def ? sliceSetOf(cm.getValue(), def) : lib.set ?? [],
     positions: [],
     others: {},
+    fit: null, // what this sample is fitted to, beside its markers (see sliceSyncFit)
     own: !!def,
     hand: false, // until the markers say otherwise (see sliceCheckHand)
     source,
@@ -14110,6 +14161,7 @@ function openSliceSetById(id, from = {}) {
   syncPreviewRouting(); // the panel auditions - settle where that comes out before it can
   sliceBackdrop.classList.remove('hidden');
   sliceSetHand(false);
+  sliceSyncFit();
   sliceSyncHead();
   sliceHead.renderList(true);
   sliceSay('');
@@ -14142,7 +14194,8 @@ async function sliceLoadSample() {
   if (!state) return;
   try {
     if (!state.file) {
-      const src = state.at == null ? null : sliceChainSourceAt(cm.getValue(), state.at);
+      const at = sliceAtNow();
+      const src = at == null ? null : sliceChainSourceAt(cm.getValue(), at);
       if (!src) {
         sliceSay('no sampler source on this chain - open the set from a pattern that plays one', true);
         return;
@@ -14153,7 +14206,7 @@ async function sliceLoadSample() {
       // at a time, so: the one being PLAYED if the transport is running (the same question
       // activeIdIn answers for a `<tight loose>` of set names), else the first it names - and, once
       // `[`/`]` have been used, whichever was stepped to.
-      const index = state.index ?? sliceSoundingIndexAt(state.at) ?? src.index;
+      const index = state.index ?? sliceSoundingIndexAt(at) ?? src.index;
       const res = await api('GET', `/api/sampleFile?ref=${encodeURIComponent(src.ref)}&i=${index}`);
       if (gen !== sliceLoadGen || sliceState !== state) return;
       if (!res.file) {
@@ -14175,6 +14228,7 @@ async function sliceLoadSample() {
     state.buffer = await packLoadBuffer(state.file); // the pack panel's decode + cache
     if (gen !== sliceLoadGen || sliceState !== state) return;
     state.peaks = slicePeakPyramid(state.buffer);
+    sliceSyncFit(); // it needs the file's length, which is only known now
     sliceRender();
     await sliceDetect();
     if (gen === sliceLoadGen && sliceState === state) sliceCheckHand();
@@ -14217,7 +14271,7 @@ function slicePeakPyramid(buf) {
 async function sliceDetect() {
   const state = sliceState;
   if (!state?.file) return;
-  const sens = Number(sliceSens.value) || 1;
+  const sens = sliceSensNow();
   try {
     const res = await api('GET', `/api/sampleSlices?file=${encodeURIComponent(state.file)}&sensitivity=${sens}`);
     if (sliceState !== state) return;
@@ -14230,6 +14284,123 @@ async function sliceDetect() {
     state.detected = [];
     sliceSay(e.message ?? String(e), true);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fit - how many cycles the whole file is repitched to last.
+//
+// The panel writes this into the SET, beside that sample's markers (`{ fit: 2, marks: [...] }`),
+// not onto the chain. How many cycles a file lasts is a fact about the file: four breaks under one
+// `.slices("main")` will want four different answers and one of them may want none at all, which a
+// single `.fit()` on the chain cannot say. It travels with the markers it was drawn against, and a
+// library set brings its fits with it.
+//
+// A `.fit()` the USER wrote on the chain overrides all of it (see playSample), so the panel reports
+// that and stands down rather than fighting the pattern for the same control.
+//
+// The arithmetic is playSample's, deliberately duplicated across the package boundary (the engine
+// is CommonJS and this is a browser file, and neither can import the other) - and pinned by a test
+// that runs both. Change one and change the other.
+// ---------------------------------------------------------------------------------------------
+
+const SLICE_FIT_MIN = 1 / 16; // a file lasting a sixteenth of a cycle: 16x up, and still a sound
+const SLICE_FIT_MAX = 64;
+
+/** The chain the fit control reports on, or null where the panel has no code to point at. */
+function sliceFitChain() {
+  const at = sliceAtNow();
+  if (at == null) return null;
+  const code = cm.getValue();
+  const src = sliceSourceCallAt(code, at);
+  return src ? { code, src } : null;
+}
+
+/**
+ * The `.fit(...)` the pattern itself carries: `value` is 'auto' (bare), a number, or the text of a
+ * pattern. Read only - this is the thing that overrides the panel, never the thing it writes.
+ */
+function sliceFitCall(chain = sliceFitChain()) {
+  if (!chain) return null;
+  const { code, src } = chain;
+  const re = /\bfit\s*\(/g;
+  re.lastIndex = src.block.start;
+  let m;
+  while ((m = re.exec(code)) && m.index < src.block.end) {
+    if (!src.isCode(m.index)) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    const body = code.slice(open + 1, close).trim();
+    const n = Number(body);
+    return { start: m.index, open, close, value: !body ? 'auto' : Number.isFinite(n) ? n : body };
+  }
+  return null;
+}
+
+/**
+ * How many cycles the file lasts under `value`, or null while the sample is still decoding.
+ * Mirrors playSample: measures = duration / secPerCycle, and auto takes the nearest power of two.
+ */
+function sliceFitCycles(value) {
+  const dur = sliceState?.buffer?.duration;
+  const cps = transport.cps || 0;
+  if (!dur || cps <= 0) return null;
+  const measures = dur * cps;
+  if (value === 'auto') return measures > 0 ? 2 ** Math.round(Math.log2(measures)) : null;
+  return typeof value === 'number' ? value : null;
+}
+
+/** A cycle count as the readout (and the definition) should say it: 2, 0.5, 1.333. */
+const sliceFitNum = (n) => String(Number(n.toFixed(3)));
+
+function sliceSyncFit() {
+  if (!sliceState) return;
+  const override = sliceFitCall(); // what the pattern says, which beats what the set says
+  const patterned = override && override.value !== 'auto' && typeof override.value !== 'number';
+  const value = override ? override.value : sliceState.fit ?? null;
+  const cycles = patterned ? null : sliceFitCycles(value ?? 'off');
+  sliceFitBtn.classList.toggle('on', value !== null);
+  const label = value === null ? 'off'
+    : patterned ? String(value)
+      : cycles == null ? '…'
+        : `${value === 'auto' ? 'auto · ' : ''}${sliceFitNum(cycles)} cy`;
+  const shown = override ? `${label} · chain` : label;
+  if (sliceFitVal.textContent !== shown) sliceFitVal.textContent = shown;
+  // Everything is read-only while the pattern is holding this control: the panel would be writing
+  // a number nothing plays. The title says so, and says what to do about it.
+  sliceFitWrap.title = override
+    ? 'the .fit() on this pattern is in charge — remove it to let the set fit each sample its own way'
+    : 'how many cycles this sample lasts, kept with its markers (the pattern\'s own .fit() overrides it)';
+  sliceFitBtn.disabled = !!override;
+  sliceFitHalf.disabled = !!override;
+  sliceFitDouble.disabled = !!override;
+  // The readout is the way back to auto, so it is only a button while there is something to go
+  // back from.
+  sliceFitVal.disabled = !!override || value === null || value === 'auto';
+}
+
+/** Puts a fit beside this sample's markers - 'auto', a number of cycles, or null for none. */
+function sliceWriteFit(value) {
+  if (!sliceState) return;
+  if (!sliceState.own) return sliceCommit(); // says its piece about library sets and writes nothing
+  // A fit is kept per sample, so there has to be a sample: a set the panel could not resolve a file
+  // for is written as a bare list of markers, which has nowhere to put one.
+  if (!sliceState.key) return sliceSay('no sample identified on this chain - a fit is kept with the sample it was drawn against', true);
+  sliceState.fit = value;
+  sliceLivePush();
+  sliceCommit();
+  sliceSyncFit();
+  const where = sliceState.label ? ` for ${sliceState.label.split(' · ').pop()}` : '';
+  logLine(value === null ? `fit off${where}` : `fit ${value === 'auto' ? 'auto' : sliceFitNum(value)}${where}`);
+}
+
+/** ÷2 / ×2: try the cycle count either side of the one in force, turning fit on if it was off. */
+function sliceFitBy(factor) {
+  const now = sliceFitCycles(sliceState?.fit ?? 'auto');
+  if (now == null) return sliceSay('waiting for the sample before it can be fitted', true);
+  const want = Math.min(SLICE_FIT_MAX, Math.max(SLICE_FIT_MIN, now * factor));
+  if (want === now) return sliceSay(`fit is as ${factor > 1 ? 'long' : 'short'} as it goes`);
+  sliceWriteFit(want);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -14329,6 +14500,7 @@ function sliceSyncFromCode() {
       if (sliceState.own && !prPrebakeSlices.some((p) => p.id === sliceState.id)) closeSlicePanel();
       return;
     }
+    sliceSyncFit(); // a .fit() undo changes the buffer without touching a single marker
     const set = sliceSetOf(cm.getValue(), def);
     if (sliceState.own && sliceSetSig(set) === sliceSetSig(sliceFullSet())) return;
     sliceState.set = set;
@@ -14337,6 +14509,11 @@ function sliceSyncFromCode() {
     sliceState.sel = Math.min(sliceState.sel, Math.max(0, sliceState.positions.length - 1));
     sliceCheckHand();
     sliceRender();
+    // The code moved under the panel - an undo, a redo, an edit from somewhere else - so the set
+    // the ENGINE holds is the one that has just been taken back. Re-filed and re-evaluated on the
+    // spot, or an undo would put the markers back on screen while the old ones went on playing.
+    sliceLivePush();
+    sliceScheduleEval();
   }, 0);
 }
 
@@ -14775,8 +14952,7 @@ function sliceRegionAt(at) {
 
 /** The region whose block holds the panel's own .slices() call, or null. */
 function sliceRegion() {
-  const span = sliceState?.source?.find();
-  return sliceRegionAt(span ? cm.indexFromPos(span.from) : sliceState?.at);
+  return sliceRegionAt(sliceAtNow());
 }
 
 /**
@@ -14815,7 +14991,7 @@ function sliceStepFile(dir) {
   // Everything downstream of the file is the file's: its audio, its peaks, its transients, and
   // which entry of the set is being edited (sliceApplyKey, once the new key comes back).
   sliceStopAudition();
-  Object.assign(sliceState, { file: null, buffer: null, peaks: null, detected: null, detectWhy: '', sel: 0 });
+  Object.assign(sliceState, { file: null, buffer: null, peaks: null, detected: null, detectWhy: '', sel: 0, fit: null });
   sliceSetView(0, 1);
   sliceRender();
   sliceLoadSample();
@@ -14941,15 +15117,25 @@ function initSlicePanel() {
     sliceSelect(k, { audition: y > SLICE_TAB_H });
   });
 
-  // Double-click: a marker where you clicked. In the tab strip because that is where the markers
-  // live; on the waveform too, since that is where your eye is when you spot the chop.
+  // Double-click puts a marker where you clicked, or takes away the one you clicked ON - a chop
+  // and its undoing, on the same gesture, decided by whether there is already a marker under the
+  // pointer. The tab is a marker for this purpose too: it is the marker's handle, and the strip is
+  // where the eye goes. (Right-click still removes, one click, wherever you are.)
   sliceCanvas.addEventListener('dblclick', (e) => {
     if (!sliceState) return;
     const rect = sliceCanvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    if (sliceTabAt(x, e.clientY - rect.top) >= 0) return; // a double-click on a tab is two grabs, not a new chop
-    const k = sliceAddMarker(sliceSnap(slicePosOf(x), sliceFreeHand(e)));
-    if (k >= 0) { sliceLivePush(); sliceCommit(); sliceRender(); }
+    const pos = slicePosOf(x);
+    const onTab = sliceTabAt(x, e.clientY - rect.top);
+    const hit = onTab >= 0 ? onTab : sliceMarkerNear(pos);
+    if (hit >= 0) {
+      sliceRemoveMarker(hit);
+    } else if (sliceAddMarker(sliceSnap(pos, sliceFreeHand(e))) < 0) {
+      return; // nowhere to put one that isn't already taken
+    }
+    sliceLivePush();
+    sliceCommit();
+    sliceRender();
   });
 
   sliceCanvas.addEventListener('pointermove', (e) => {
@@ -15024,6 +15210,19 @@ function initSlicePanel() {
   sliceBackdrop.addEventListener('keydown', (e) => {
     if (!sliceState || sliceHead.isOpen()) return;
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    // ⌘Z / ⌘⇧Z are the BUFFER's undo, because everything this panel does is a buffer edit: a
+    // marker moved, a set cleared, a .fit() written. CodeMirror only sees the key when it has the
+    // focus and here the canvas does, so the panel hands it over rather than leaving the one
+    // gesture nobody expects to be missing. Each write is its own step (no merging origin), so a
+    // drag, a clear and an auto-slice come back one at a time; the panel redraws from the code the
+    // undo restored (see sliceSyncFromCode), which is also what re-files the set for the engine.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.shiftKey) cm.redo();
+      else cm.undo();
+      return;
+    }
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault();
       const dir = e.key === 'ArrowRight' ? 1 : -1;
@@ -15075,7 +15274,7 @@ function initSlicePanel() {
     sliceRender();
   });
   sliceSens.addEventListener('input', () => {
-    sliceSensVal.textContent = Number(sliceSens.value).toFixed(2);
+    sliceSensVal.textContent = sliceSensText(sliceSensNow());
     if (!sliceState) return;
     // Live re-slice while the slider moves, which is what makes it a slicing control rather than a
     // setting: the markers you can see ARE what this sensitivity produces. The write to the code
@@ -15096,6 +15295,13 @@ function initSlicePanel() {
     await sliceDetect();
     if (sliceState && sliceAdoptDetected()) { sliceRender(); sliceCommit(); }
   });
+  sliceFitBtn.addEventListener('click', () => {
+    if (sliceState) sliceWriteFit(sliceFitCall() ? null : 'auto');
+  });
+  sliceFitVal.addEventListener('click', () => { if (sliceState) sliceWriteFit('auto'); });
+  sliceFitHalf.addEventListener('click', () => { if (sliceState) sliceFitBy(0.5); });
+  sliceFitDouble.addEventListener('click', () => { if (sliceState) sliceFitBy(2); });
+
   // auto-slice is the deliberate way back to detected markers, so it is also the one gesture that
   // may throw hand-drawn ones away - and the one that hands the sensitivity slider back (see
   // sliceSetHand). It says what it replaced rather than doing it in silence.
@@ -15147,9 +15353,12 @@ function initSlicePanel() {
   });
   window.addEventListener('resize', () => { if (sliceState) sliceRender(); });
   cm.on('change', sliceSyncFromCode);
-  sliceSensVal.textContent = Number(sliceSens.value).toFixed(2);
+  sliceSensVal.textContent = sliceSensText(sliceSensNow());
   // Follows the pattern at the highlighter's own rate, off the same grid it lights atoms from.
   setInterval(sliceFollowTick, 33);
+  // ...and the fit readout on a slow one: what auto resolves to depends on the tempo, which an
+  // evaluation can change under it. Once a second is well inside "before you could have read it".
+  setInterval(() => { if (sliceState) sliceSyncFit(); }, 1000);
 }
 
 // ---------------------------------------------------------------------------------------------

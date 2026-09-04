@@ -2048,7 +2048,9 @@ export class Sig {
    *
    * A named set holds markers PER FILE, so one name follows a changing `.i()`: `.slices("main")`
    * over `s("breaks").i("<19 3>")` chops each break where that break was drawn, and a file the set
-   * says nothing about goes back to its own transients (see slices.mjs).
+   * says nothing about goes back to its own transients (see slices.mjs). An entry can carry that
+   * sample's `fit` alongside its markers, since how many cycles a break lasts is a fact about the
+   * break - a `.fit()` on the chain overrides it.
    *
    * Unlike the other sampler channels this one adds no structure of its own: the set is a MAP, not
    * a rhythm, so a `<a b>` of them is sampled at the events the pattern already has rather than
@@ -4274,8 +4276,10 @@ function slicesSignal(v) {
  * analysis produces.
  *
  * Keyed by FILE, so one name holds a chop map for each sample it was drawn on and following a
- * `.i()` between four breaks follows four sets of markers (see slices.mjs). A bare list
- * (`_slices("break", [0, 0.5])`) is the other spelling: one map, for whatever plays.
+ * `.i()` between four breaks follows four sets of markers (see slices.mjs). An entry written as
+ * `{ fit: 2, marks: [...] }` also says what that sample is fitted to, which the chain's own
+ * `.fit()` overrides. A bare list (`_slices("break", [0, 0.5])`) is the other spelling: one map of
+ * markers, for whatever plays.
  *
  * The slice editor writes these - double-click `slice` on a sampler chain and drag the markers -
  * so `_slices(` is not a word you need to type. Plays nothing itself: a slice set is a map of a

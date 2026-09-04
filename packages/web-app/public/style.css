@@ -5397,8 +5397,12 @@ body.mix-on #deckAHead {
   border-color: var(--border-strong, var(--border));
 }
 
+/* Enough controls now that a narrow window would push the count and the note off the end of the
+   row: it wraps onto a second line instead, which is the one place the panel can afford the pixels. */
 .slice-foot {
   gap: 10px;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 /* ▶ and ■ are different widths, so the foot shifted every time the audition started or stopped.
@@ -5429,6 +5433,29 @@ body.mix-on #deckAHead {
    is the gesture that says to). Dimmed as a pair, so the label reads as off too. */
 .slice-sens-off {
   opacity: 0.45;
+}
+
+/* The fit group reads as one control: the toggle, what it resolved to, and the two ways to try
+   the number either side of it. */
+.slice-fit {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.slice-fit .small.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.slice-fit-val {
+  font-family: var(--mono);
+  min-width: 6.5em;
+}
+
+.slice-fit-val:disabled {
+  opacity: 1; /* not an "unavailable" look - it is the readout, and already says auto */
+  cursor: default;
 }
 
 .slice-sens-val {

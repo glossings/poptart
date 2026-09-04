@@ -8,7 +8,8 @@ import { s, note, _slices, liveSlices, setPatternWarn } from './src/signal.mjs';
 import { clearRolls, setRollLayer, lookupSlices, sliceSetIds } from './src/rolls.mjs';
 import {
   normalizeSlicePositions, parseSlicePositions, serializeSlicePositions,
-  normalizeSliceSet, parseSliceSet, serializeSliceSet, slicePositionsFor, sliceSetIsEmpty,
+  normalizeSliceSet, normalizeSliceEntry, parseSliceSet, serializeSliceSet,
+  slicePositionsFor, sliceEntryFor, sliceSetIsEmpty,
 } from './src/slices.mjs';
 
 // Each test owns the store: the buffer layer is rebuilt per evaluation in the real host too.
@@ -70,6 +71,49 @@ test('a file with no markers left is dropped from the set, not kept as an empty 
 test('a bare list is still a set - one map, for whatever plays', () => {
   assert.deepEqual(parseSliceSet('[0, 0.5]'), [0, 0.5]);
   assert.deepEqual(slicePositionsFor([0, 0.5], 'anything.wav'), [0, 0.5]);
+});
+
+// --- a fit beside the markers ---------------------------------------------------------------------
+//
+// How many cycles a file is repitched to last is a fact about the FILE, so it rides with the
+// markers drawn against it: four breaks under one name can want four different answers, and one of
+// them can want none. The chain's own .fit() overrides all of it at play time (see playSample).
+
+test('an entry can carry a fit, and round-trips through the definition body', () => {
+  const set = { 'breaks/amen.wav': { fit: 2, marks: [0.5, 0] }, 'breaks/think.wav': [0, 0.25] };
+  const text = serializeSliceSet(set);
+  assert.equal(text, '{ "breaks/amen.wav": { fit: 2, marks: [0, 0.5] }, "breaks/think.wav": [0, 0.25] }');
+  assert.deepEqual(parseSliceSet(text), normalizeSliceSet(set));
+  assert.equal(sliceEntryFor(normalizeSliceSet(set), 'breaks/amen.wav').fit, 2);
+  assert.equal(sliceEntryFor(normalizeSliceSet(set), 'breaks/think.wav').fit, null);
+});
+
+test('auto is a fit like any other, and survives the round trip as a word', () => {
+  const text = serializeSliceSet({ 'a.wav': { fit: 'auto', marks: [0, 0.5] } });
+  assert.match(text, /fit: "auto"/);
+  assert.equal(parseSliceSet(text)['a.wav'].fit, 'auto');
+});
+
+test('a fit with no markers is a real entry - fitted, and chopped on its own transients', () => {
+  assert.deepEqual(normalizeSliceEntry({ fit: 4, marks: [] }), { fit: 4 });
+  const text = serializeSliceSet({ 'a.wav': { fit: 4 } });
+  assert.equal(text, '{ "a.wav": { fit: 4 } }');
+  assert.deepEqual(parseSliceSet(text), { 'a.wav': { fit: 4 } });
+  // ...and it still says nothing about where the chops are.
+  assert.equal(slicePositionsFor(parseSliceSet(text), 'a.wav'), null);
+});
+
+test('an entry with neither is dropped, so "says nothing" has one spelling', () => {
+  assert.equal(normalizeSliceEntry({ fit: null, marks: [] }), null);
+  assert.equal(normalizeSliceEntry({ fit: 0, marks: [] }), null); // 0 cycles is not a fit
+  assert.deepEqual(normalizeSliceSet({ 'a.wav': { fit: null, marks: [] } }), {});
+  // ...and markers with no fit stay the short spelling rather than growing an object.
+  assert.deepEqual(normalizeSliceEntry({ fit: null, marks: [0, 0.5] }), [0, 0.5]);
+});
+
+test('the parser reads past an entry object without mistaking its keys for file names', () => {
+  const set = parseSliceSet('{ "a.wav": { fit: 2, marks: [0, 0.5] }, "b.wav": [0, 0.25] }');
+  assert.deepEqual(Object.keys(set), ['a.wav', 'b.wav']);
 });
 
 test('a keyed set answers for the file it names and for nothing else', () => {
