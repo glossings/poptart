@@ -212,12 +212,13 @@ const CAPTURE_EDGE_TOL = 1 / 32; // cycles
  *               it as its nudge - the distance from where it was played to the cell it sits on, as
  *               far as the half-cell a nudge can say - so a take is quantized on the GRID and plays
  *               with the feel it was played with; resetting the nudges (the lane's menu) is the hard
- *               quantize, one click later. Lengths are never quantized - Live's record quantization
- *               moves onsets and leaves durations alone.
+ *               quantize, one click later. Lengths are never quantized - a record quantize moves
+ *               onsets and leaves durations alone.
  *
  * Velocity is kept as played; an event's `index` (a key struck on an index roll) goes to the note's
  * sample index. The new notes are pushed LAST, so the overlap rule (clipOverlaps) resolves in their
- * favour - the note you just played cuts the one it landed on, as it would have in Live.
+ * favour - the note you just played cuts the one it landed on, which is what recording over a
+ * part means.
  */
 export function recordingToRoll(events, roll, { window, quantize = 0, countIn = true } = {}) {
   const [startCycle] = window;

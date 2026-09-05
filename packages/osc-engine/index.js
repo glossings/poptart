@@ -1215,8 +1215,8 @@ class OscEngine {
       }
     }
     // Sampler events are always gated to their event: a one-shot that would outlast its step
-    // gets a gate-off at the step's end instead of ringing its natural length ("gate mode",
-    // like Ableton Sampler's). The event length is whatever the pattern's step grid computed -
+    // gets a gate-off at the step's end instead of ringing its natural length (a sampler's
+    // "gate" mode). The event length is whatever the pattern's step grid computed -
     // s() alone means whole steps (a bare s("long") cuts at each cycle); patterned config
     // (.vel()/.note()/.slice()/.i()...) subdivides it further. To let a sample ring longer, make its *event* longer
     // ("long/2", "long@2", "long _"). Loops already gate there; the small margin avoids

@@ -59,7 +59,7 @@ test('parsePianoRoll: clamps out-of-range fields, rejects malformed tokens', () 
   assert.throws(() => parsePianoRoll('c,0,4'), /non-numeric/);
 });
 
-// The `!` marker is the muted (Live-deactivated) note: still in the roll, never sounding.
+// The `!` marker is the muted (deactivated, not deleted) note: still in the roll, never sounding.
 test('parsePianoRoll / serializePianoRoll: the ! mute marker round-trips', () => {
   assert.deepEqual(parsePianoRoll('!60,0,4'), [{ midi: 60, index: 0, slice: null, start: 0, len: 4, vel: 1, prob: 1, nudge: 0, mute: true }]);
   // it rides in front of every other field, and the rest of the token parses exactly as it would

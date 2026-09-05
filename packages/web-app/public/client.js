@@ -1554,7 +1554,7 @@ async function settlePluginState() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// "conf" (configure) capture, Ableton-style: toggle it on for a track, then every knob you move
+// "conf" (configure) capture: toggle it on for a track, then every knob you move
 // in that track's plugin editor windows is dropped into the code as .param("Name", value). The
 // server coalesces the touched parameters (latest value per param) and we poll for them; each is
 // inserted right after its slot's synth()/.fx() call (so it targets that plugin) or, if a
@@ -3703,7 +3703,7 @@ function initPresetPanel() {
 
 // ---------------------------------------------------------------------------------------------
 // Interactive piano roll editor - double-click the `pianoroll` name in any `pianoroll(...)` call
-// (just the name: its arguments are code you may want to edit by hand) and an Ableton-style grid opens
+// (just the name: its arguments are code you may want to edit by hand) and a note grid opens
 // over the editor, with a real piano keyboard down the left edge and a playhead that sweeps the
 // steps as it plays. Two tools (pencil draws, arrow marquee-selects); click a note
 // to select it (shift-click extends, ctrl/cmd-A selects all), drag to move, drag a note's right
@@ -3712,9 +3712,9 @@ function initPresetPanel() {
 // duplicates, option-drag drags a copy, cmd-Z / cmd-shift-Z walk the roll's own undo history.
 // Arrow keys nudge the selection (shift-up/down = octave, shift-right/left lengthen/shorten), delete removes
 // it, double-click erases one, and 0 mutes it - greyed out and silent, still there to switch back
-// on with another 0 (Live's deactivate). A value lane along the bottom shows every note's velocity
-// or probability (its gutter label names the channel and clicks through to the other one) as an
-// Ableton-style marker - a dot at the onset, a line running right for the duration, dashed for
+// on with another 0. A value lane along the bottom shows every note's velocity
+// or probability (its gutter label names the channel and clicks through to the other one) as a
+// marker per note - a dot at the onset, a line running right for the duration, dashed for
 // probability. With the arrow tool a marker drags up and down, whole selection at once, keeping the
 // selection's differences; with the pencil you PAINT instead, and every note the drag sweeps over
 // snaps to the height you're holding it at (see prPaintLane). Right-click the lane for randomize /
@@ -3875,7 +3875,7 @@ const PR_MAX_NUDGE = 0.5; // mirrors pianoroll.mjs's PIANOROLL_MAX_NUDGE - half 
 // Switching channels lasts as long as the panel stays open (see openPianorollEditor).
 let prCmdMode = 'vel';
 let prScaleFold = localStorage.getItem('poptartPianorollScaleFold') === '1'; // show only the scale's rows
-let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // Live's Fold: only rows that have notes
+let prFold = localStorage.getItem('poptartPianorollFold') === '1'; // fold: only rows that have notes
 let prSideMin = localStorage.getItem('poptartPianorollSide') === '1'; // timing controls column minimized
 // The grid's logical width in CSS px. PR_W to start with, but the canvas is a flex child now: it
 // takes whatever the control column isn't using, so minimizing the column widens the roll instead
@@ -3905,7 +3905,7 @@ const pitchClass = (m) => ((m % 12) + 12) % 12;
 
 // The buffer's key - whatever `setscale(...)` last set, reported by /api/status at load and by
 // every evaluate. The roll colours its lanes by it (tonic, in-key, out-of-key) and can fold the
-// out-of-key rows away entirely, the way Live's scale-aware piano roll does.
+// out-of-key rows away entirely, the way a scale-aware piano roll does.
 let patchScale = null;
 
 function setPatchScale(name) {
@@ -4048,7 +4048,7 @@ function prSetMode(mode) {
 // a lane index simply *is* its row value (a MIDI note, or a sample index) and all the geometry
 // below is unchanged. Two things narrow it:
 //
-//   fold    Live's Fold - only the rows something is actually drawn on. Works on either axis: on
+//   fold    only the rows something is actually drawn on. Works on either axis: on
 //           the keyboard it collapses a two-octave line to the notes it uses, on the index axis to
 //           the files the pack actually plays. Nothing drawn means nothing to fold to, so it falls
 //           back to the full axis rather than to an empty one.
@@ -4077,7 +4077,7 @@ function prLaneList() {
 const prScaleRank = (midi, info) => (!info ? null : pitchClass(midi) === info.tonic ? 2 : info.pcs.has(pitchClass(midi)) ? 1 : 0);
 
 // How strongly the accent tints a lane / a piano key at each rank. The grid stays faint (notes
-// have to read on top of it); the keyboard can afford to be bolder, the way Live colours the keys.
+// have to read on top of it); the keyboard can afford to be bolder.
 const PR_LANE_TINT = [0, 0.07, 0.18]; // out (unused - dimmed instead), in key, tonic
 const PR_KEY_TINT = [0, 0.26, 0.62];
 
@@ -5191,7 +5191,7 @@ function prFramePitch() {
 }
 
 /**
- * Live's box slider: a control that READS as a value box and WORKS as a slider. Drag it sideways
+ * A box slider: a control that READS as a value box and WORKS as a slider. Drag it sideways
  * and a fill sweeps behind the number, so the amount is legible at a glance without a track and a
  * handle eating a whole row of a 92px column. The drag is relative (it picks up from where the
  * value already was, rather than jumping to wherever the box was grabbed), shift makes it fine, and
@@ -5326,7 +5326,7 @@ function openPianorollEditor(call, carry = null) {
     swing,
     swinggrid,
     pitchTop: PR_DEFAULT_TOP, // replaced by prFramePitch below, which needs prState to exist
-    fold: prFold, // Live's Fold: only the rows something is drawn on (either axis)
+    fold: prFold, // only the rows something is drawn on (either axis)
     scaleFold: prScaleFold, // ...and only the key's rows, on the note axis (both sticky, like the tool)
     zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
     scrollCells: 0, // leftmost visible cell when zoomed in
@@ -6102,7 +6102,7 @@ const prClampToLoop = (cell) => Math.min(prLoopEnd() - 1, Math.max(prState.start
 // The bar's divisions, coarsest first: the bar itself (`grid` cells), then its halves, quarters,
 // … down to a single cell - thirds where a triplet grid can't be halved. A vertical line's weight
 // is the coarsest division it lands on, which is what makes the half-way point of a bar readable
-// at a glance the way Live's does.
+// at a glance.
 function prBarDivisions(grid) {
   const divs = [];
   let d = grid;
@@ -6228,9 +6228,8 @@ function prRoundRect(ctx, x, y, w, h, r) {
 
 // A literal piano down the left edge - white/black keys, note names, C's called out. Fixed
 // key colours (a piano reads the same in any theme); the divider follows the theme. With a scale
-// set, every key IN the scale is tinted with the theme accent and the tonic is tinted hardest -
-// the way Live colours its keyboard - so the key you're in reads off the piano itself rather than
-// off the note names. Black and white keys both take the tint, over their own base colour, so
+// set, every key IN the scale is tinted with the theme accent and the tonic is tinted hardest, so
+// the key you're in reads off the piano itself rather than off the note names. Black and white keys both take the tint, over their own base colour, so
 // the piano still reads as a piano underneath.
 function drawPianoKeys(ctx, col, m, info) {
   const { H, gridTop, rowH, laneTop } = m;
@@ -6425,9 +6424,9 @@ function prSetLoopEdge(edge, cell) {
 }
 
 // --- value lane ---
-// Ableton's velocity/chance editor, along the bottom: every note gets a marker at its value's
+// The velocity/probability editor, along the bottom: every note gets a marker at its value's
 // height - a dot at its onset with a line running right for its duration, drawn dashed when the
-// lane is showing probability (Live's chance style). Drag a marker up or down to set the value; a
+// lane is showing probability. Drag a marker up or down to set the value; a
 // marker in the selection drags the whole selection together, keeping their differences. The label
 // in the lane's gutter names the channel on show, carries a caret to say it's clickable, and
 // steps on to the next channel when clicked - it's the only channel switch there is.
@@ -6469,7 +6468,7 @@ const prLaneValAt = (py, m, key) =>
   prLaneDenorm(Math.min(1, Math.max(0, 1 - (py - m.laneTop - PR_LANE_PAD) / (m.laneH - 2 * PR_LANE_PAD))), key);
 
 /**
- * The pencil in the value lane, Live's draw tool: every note the drag sweeps over takes the
+ * The pencil in the value lane, a draw tool: every note the drag sweeps over takes the
  * ABSOLUTE height the pointer is held at, whatever it was before - so dragging across a bar flattens
  * it to one value and a diagonal drag ramps it. The whole span from the last pointer position is
  * painted rather than just the current one, so a fast drag can't skip a column.
@@ -7463,7 +7462,7 @@ function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null
   el.style.top = `${Math.min(clientY, window.innerHeight - h - 8)}px`;
 }
 
-// The note whose lane column contains px - grabbing anywhere under a note works, like Live. When
+// The note whose lane column contains px - grabbing anywhere under a note works. When
 // several share the column (a chord), the marker nearest the pointer wins; ties go to the topmost
 // note, matching the grid's hit order.
 function prLaneNoteAt(px, py, m) {
@@ -7599,7 +7598,8 @@ function drawPianoroll() {
   // pitchTop scroll smoothly - each lane sits at its own y, partial lanes clipped at the edges.
   // With a scale set the lanes are shaded by their place in it rather than by black/white: the
   // tonic in the accent, in-key notes on the plain background, out-of-key ones dimmed - so the
-  // key reads off the grid the way it does in Live. Folded, the out-of-key lanes are gone
+  // key reads off the grid as colour and not merely as the absence of dimming. Folded, the
+  // out-of-key lanes are gone
   // entirely and the dimmed ones left are notes you drew outside the key.
   // No scale colouring on the numbered axes: their rows are files (or chops) of a pack, not
   // pitches in a key.
@@ -7795,7 +7795,7 @@ function prCursorFor(px, py, m, velMod) {
   return 'move';
 }
 
-// Ableton's overlap rule (see clipOverlaps): no two notes ring at one pitch. The note on top keeps
+// The overlap rule (see clipOverlaps): no two notes ring at one pitch. The note on top keeps
 // its full drawn length; one it merely runs into is cut off at its onset, and one it lands square
 // on top of is hidden outright. Both are non-destructive - the drawn length rides on `full` and a
 // hidden note stays in prState.notes, just out of the roll and out of the code - so this can run
@@ -7870,7 +7870,7 @@ async function prQuantize() {
   if (prState.swing) logLine(`piano roll: the swing knob is still at ${prState.swing} - the notes are quantized, but the roll's groove is still applied to them as they play.`);
 }
 
-// Live's `0`: switch notes off without deleting them. They stay on the grid greyed out - still
+// `0`: switch notes off without deleting them. They stay on the grid greyed out - still
 // selectable, still draggable, still holding their lane against the overlap rule - and simply don't
 // sound, which is a `!` on their token in the code. One key does both directions: a group with any
 // note still playing is muted whole, and a group that's already all muted comes back on, so
@@ -7894,7 +7894,7 @@ function prToggleMute() {
   drawPianoroll();
 }
 
-// Duplicate the selection one block-length to the right (Ableton's cmd-D), selecting the copies.
+// Duplicate the selection one block-length to the right (cmd-D), selecting the copies.
 function prDuplicate() {
   if (!prState.sel.size) return;
   const sel = [...prState.sel];
@@ -7916,7 +7916,7 @@ function prDuplicate() {
 // Pasted notes land where they were copied from - the phrase keeps its place in the bar, which is
 // what carrying it into another roll means - clamped into the loop, and selected, so a paste is one
 // arrow-key or drag away from anywhere else. Within the same roll that puts the copies on top of
-// the originals (Ableton's overlap rule keeps the top ones); cmd-D is the in-roll duplicate.
+// the originals (the overlap rule keeps the top ones); cmd-D is the in-roll duplicate.
 let prClipboard = null; // [{ ...note }], each a detached copy - the roll it came from may be gone
 function prCopy(notes) {
   prClipboard = notes.map((n) => ({ ...n, hidden: false }));
@@ -8078,7 +8078,7 @@ function initPianorollCanvas() {
   // Raise the dragged notes over whatever they land on - but only once the drag has actually moved
   // something, so a click that merely selects a note never reshuffles the lane it sits in.
   const raiseOnce = (d) => { if (!d.raised) { d.raised = true; prTouch(prState.sel); } };
-  // Option-drag duplicates, Live's copy-drag: a copy of the selection is left behind at the position
+  // Option-drag duplicates: a copy of the selection is left behind at the position
   // it started from and the drag carries the copies instead. Like raiseOnce this waits for the drag
   // to actually move something, so an option-CLICK that never travels is just a click - not a note
   // stacked exactly on itself (which the overlap rule would resolve by burying the original).
@@ -8470,7 +8470,7 @@ function initPianorollCanvas() {
       const dir = e.key === 'ArrowRight' ? 1 : -1;
       prTouch(sel);
       if (e.shiftKey) {
-        // Shift is Live's length nudge: the onset stays put and the END moves one cell - right
+        // Shift is the length nudge: the onset stays put and the END moves one cell - right
         // lengthens, left shortens back down to a single cell. It nudges the length you can SEE
         // (the clipped one), same as dragging the visible right edge does.
         for (const n of sel) n.full = Math.max(1, n.len + dir);
@@ -8741,7 +8741,7 @@ function initPianorollEditor() {
     prRefocus();
   });
 
-  // fold: Live's Fold - drop every row nothing is drawn on, so a line spread over two octaves (or a
+  // fold - drop every row nothing is drawn on, so a line spread over two octaves (or a
   // pack sequence using four of its files) closes up to the rows you are actually working in. Both
   // axes, no key needed; an empty roll has nothing to fold to and stays as it is.
   const reflectFold = () => {
@@ -9462,7 +9462,7 @@ function rollTargetForTrack(label) {
 }
 
 /**
- * capture - Live's Capture MIDI, for the roll on screen: what was just played on its track goes
+ * capture, for the roll on screen: what was just played on its track goes
  * into the roll as if record had been on. The server keeps the last minute or so of every track's
  * live notes (midikeys() routes and the ⌨ keyboard both); this asks for the roll's track's, picks
  * the window (captureWindow: the trailing run since the last phrase of silence - one pass of the
@@ -9965,7 +9965,7 @@ function rgbaFrom(ctx, color, alpha) {
   return norm;
 }
 
-// A rekordbox-style mirrored envelope: one filled shape around the centre line rather than a
+// A mirrored envelope: one filled shape around the centre line rather than a
 // picket fence of bars, with the loud part of the range shaded brighter, so the panel reads as a
 // waveform at a glance. Drawn from a plain peak-per-bucket array either way - live (a scrolling
 // meter history, newest at the right) or finished (the whole take, left to right).
@@ -11696,15 +11696,15 @@ async function doStop(deck = null) {
 
 // ---------------------------------------------------------------------------------------------
 // Computer-keyboard instrument - the piano roll's ⌨ button. With it on, the typing keyboard plays
-// the open roll's TRACK (à la Live's "Computer MIDI Keyboard", but aimed by the roll on screen
-// rather than by an armed track): every key edge is POSTed to /api/keyNote and the server turns
+// the open roll's TRACK (aimed by the roll on screen rather than by an armed track): every key
+// edge is POSTed to /api/keyNote and the server turns
 // it into engine.noteOn/noteOff on that track, through its own synth. The server logs the same
 // edges, so a take plays into the recorder and is there for the roll's capture button afterwards.
 // Keys that play are swallowed - they never reach the editor - and everything else types as usual;
 // closing the roll (or toggling ⌨ off) hands the keyboard back. Held keys are tracked so toggling,
 // alt-tabbing, or a stop releases anything still down instead of leaving a note stuck on.
 //
-// Layout (à la Ableton/tracker typing keyboards): the home row a s d f g h j k l are the white
+// Layout (the usual typing-keyboard piano): the home row a s d f g h j k l are the white
 // keys and the row above (w e t y u o p) the black keys; z / x shift octave, c / v nudge
 // velocity. The settings tab picks between that piano and the same keyboard laid out IN KEY - see
 // KB_GAP_KEYS below. On an INDEX roll the same keys count files instead - `a` is the pack's first, `w` its
@@ -14478,10 +14478,38 @@ async function sliceLoadSample() {
     sliceSyncFit(); // it needs the file's length, which is only known now
     sliceRender();
     await sliceDetect();
-    if (gen === sliceLoadGen && sliceState === state) sliceCheckHand();
+    if (gen !== sliceLoadGen || sliceState !== state) return;
+    sliceShowDetected();
+    sliceCheckHand();
   } catch (e) {
     if (gen === sliceLoadGen && sliceState === state) sliceSay(e.message ?? String(e), true);
   }
+}
+
+/**
+ * A sample the set says nothing about takes the detector's markers, drawn AND written down.
+ *
+ * The engine already chops such a file on its own transients - an entry the set hasn't got falls
+ * straight through to the analysis (see playSample) - so it was being sliced correctly while the
+ * panel showed a bare waveform and the definition showed nothing. That is the one state where what
+ * you hear and what you can see come apart, and stepping `.i()` onto a fresh break landed in it
+ * every time: `.slice(3)` played chop 3 and there was no chop 3 anywhere on screen.
+ *
+ * So the detector's answer is adopted as this file's entry, exactly as the sensitivity slider
+ * adopts it on release. At the slider's home position these ARE the markers the engine was already
+ * playing, so nothing changes but the seeing of it; moved off it, the written markers are the ones
+ * on screen, which is what the slider means. A file with nothing to detect (not a WAV) is left
+ * alone rather than given an empty entry - it has no chops to show.
+ */
+function sliceShowDetected() {
+  const state = sliceState;
+  if (!state?.own || !state.id) return; // a library set is read-only here (see sliceCommit)
+  if (state.positions.length || state.hand) return; // it already says something - leave it saying it
+  if (!state.detected?.length) return;
+  sliceAdoptDetected();
+  sliceLivePush();
+  sliceCommit();
+  sliceRender();
 }
 
 /**

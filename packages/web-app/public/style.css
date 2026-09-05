@@ -2020,7 +2020,7 @@ li.CodeMirror-hint-active {
   border-color: var(--err);
 }
 
-/* --------------------------------------------- piano roll editor (Ableton-style, centered) */
+/* --------------------------------------------- piano roll editor (centered modal) */
 
 .pianoroll-panel {
   position: fixed;
@@ -2283,8 +2283,8 @@ li.CodeMirror-hint-active {
   padding: 0 8px;
 }
 
-/* The roll and the controls that shape it sit side by side, Live-style: the timing controls in a
-   column down the left, the grid itself to their right. */
+/* The roll and the controls that shape it sit side by side: the timing controls in a column down
+   the left, the grid itself to their right. */
 .pianoroll-body {
   display: flex;
   align-items: stretch;

@@ -6,7 +6,7 @@
 //
 // Format: space-separated note events `[!]midi[:index[:slice]],start,len[,vel[,prob[,nudge]]]`, e.g.
 // "60,0,4 64,0,4,0.7 67,8,8" or "24:0,0,1 24:3,4,1".
-//   !     - optional MUTE marker: the note is deactivated (Live's `0` key). It stays in the roll -
+//   !     - optional MUTE marker: the note is deactivated (the `0` key). It stays in the roll -
 //           drawn greyed out, still movable, still holding its lane against the overlap rule - but
 //           it never sounds and it isn't converted to mini-notation. Unmuting it is one keypress,
 //           which is the point of keeping it in the string rather than deleting it.
@@ -137,7 +137,7 @@ function gcd(a, b) {
 
 /**
  * Fold a roll's swing into its notes, so they play where they already sounded and the swing can go
- * back to zero - Ableton's "commit groove", and the reason nudge is a per-note field at all.
+ * back to zero - committing the groove, and the reason nudge is a per-note field at all.
  *
  * Each note takes the offset its cell was getting (pianoRollSwingCells) ON TOP of whatever nudge it
  * already carried, which is what makes committing a half-nudged roll leave the hand-made offsets
@@ -299,7 +299,7 @@ export const noteNudge = (nt) => (Number.isFinite(nt.nudge) ? clampNudge(nt.nudg
 export const noteNudgeChannel = (nt) => noteNudge(nt) / Math.max(1, Math.round(nt.len));
 
 /**
- * Ableton-style overlap resolution, one lane at a time: two notes in the same lane are
+ * Overlap resolution, one lane at a time: two notes in the same lane are
  * never left ringing together, so a long note with a short one dropped into its middle stops where
  * the short one starts instead of carrying on invisibly behind it.
  *

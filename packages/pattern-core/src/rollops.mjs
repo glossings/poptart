@@ -94,8 +94,8 @@ export function retrograde(notes) {
 }
 
 /**
- * Legato: every note lasts until the next onset in the selection (any pitch), the way Live's
- * legato works on a monophonic line; notes sharing an onset get the same reach; the last keeps
+ * Legato: every note lasts until the next onset in the selection (any pitch), the way legato
+ * works on a monophonic line; notes sharing an onset get the same reach; the last keeps
  * its length.
  */
 export function legato(notes) {

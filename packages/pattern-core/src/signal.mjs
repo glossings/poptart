@@ -511,7 +511,7 @@ export class Sig {
    * Sets which plugin (by id, from native-engine's scanned plugin list) is this track's instrument.
    *
    * `config.state` is an opaque captured-state string that restores the plugin's full saved state
-   * on load, Ableton-style. It is READ but no longer written: a captured sound now lives under a
+   * on load. It is READ but no longer written: a captured sound now lives under a
    * name, as a preset (see Sig#preset), so that storing one and patterning between several are the
    * same thing rather than two. Patches that carry a `{ state }` go on sounding exactly as they
    * did; the first time the editor captures that slot, the preset replaces it.
@@ -671,8 +671,8 @@ export class Sig {
    * on sampler tracks it scales the sample's volume linearly. A patterned vel also gives the
    * track structure: events are split on vel's step grid (a `~` drops the event), each fresh
    * vel step retriggers, and each event is gated to its step - so s("long").vel("1 1 ~ 1")
-   * plays three quarter-cycle hits that stop ringing at their step ends (Ableton Sampler
-   * "gate" mode), instead of one full-length sample.
+   * plays three quarter-cycle hits that stop ringing at their step ends (a sampler's "gate"
+   * mode), instead of one full-length sample.
    */
   vel(value) {
     const sig = toSignal(value);

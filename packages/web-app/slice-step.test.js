@@ -37,24 +37,28 @@ test.before(async () => {
   slicesMod = await import(require('node:url').pathToFileURL(path.join(dir, 'slices.mjs')).href);
 });
 
-/** The panel's two file-switching functions over a state object, with the rest of it spied on. */
+/** The panel's file-switching functions over a state object, with the rest of it spied on. */
 function panel(state) {
   const calls = [];
   const spy = (name) => (...args) => calls.push([name, ...args]);
+  const setHand = (on) => { state.hand = !!on; calls.push(['setHand', on]); };
+  const bodies = ['sliceStepFile', 'sliceApplyKey', 'sliceShowDetected', 'sliceAdoptDetected'].map(grab).join('\n');
   // eslint-disable-next-line no-new-func
   const fns = new Function(
     'slicesMod', 'sliceState', 'sliceSay', 'sliceStopAudition', 'sliceSetView', 'sliceSetHand',
-    'sliceSyncFit', 'sliceRender', 'sliceLoadSample',
-    `${grab('sliceStepFile')}\n${grab('sliceApplyKey')}\nreturn { sliceStepFile, sliceApplyKey };`,
+    'sliceSyncFit', 'sliceRender', 'sliceLoadSample', 'sliceTidy', 'sliceLivePush', 'sliceCommit',
+    `${bodies}\nreturn { sliceStepFile, sliceApplyKey, sliceShowDetected };`,
   )(
-    slicesMod, state, spy('say'), spy('stopAudition'), spy('setView'), spy('setHand'),
+    slicesMod, state, spy('say'), spy('stopAudition'), spy('setView'), setHand,
     spy('syncFit'), spy('render'), spy('loadSample'),
+    (l) => slicesMod.normalizeSlicePositions(l), spy('livePush'), spy('commit'),
   );
   return { ...fns, calls, state };
 }
 
 const stateFor = (set, over = {}) => ({
   id: 'break',
+  own: true, // this buffer's own definition - a library set is read-only (see the last test)
   set,
   key: 'breaks/amen.wav',
   positions: [0, 0.5],
@@ -125,4 +129,45 @@ test('a file the set has never been drawn on starts on the detector, with no fit
   // The other file's entry rides along untouched either way - editing one break can't disturb another
   p.sliceApplyKey(p.state, 'breaks/think.wav');
   assert.deepEqual(Object.keys(p.state.others), ['breaks/amen.wav']);
+});
+
+// --- what a sample the set says nothing about shows -----------------------------------------------
+//
+// The engine chops such a file on its own transients already (playSample falls through to the
+// analysis when the set has no entry), so leaving the panel blank was the one state where what you
+// HEAR and what you can SEE came apart: `.slice(3)` played chop 3 with no chop 3 anywhere on
+// screen, and no way to see it without clicking auto-slice. Reported 2026-09-05.
+
+test('a file with no entry adopts the detected chops, drawn and written down', () => {
+  const p = panel(stateFor({}, { positions: [], fit: null, hand: false, detected: [0, 0.25, 0.5, 0.75] }));
+  p.sliceShowDetected();
+  assert.deepEqual(p.state.positions, [0, 0.25, 0.5, 0.75], 'what the engine was already playing');
+  const called = p.calls.map((c) => c[0]);
+  assert.ok(called.includes('commit'), 'written into the definition, so it is visible in _slices');
+  assert.ok(called.includes('livePush'), 'and heard without waiting for an eval');
+  assert.equal(p.state.hand, false, 'these are the detector\'s own, so the slider still drives them');
+});
+
+test('a file that already says something is left saying it', () => {
+  // Markers of its own - hand-drawn or not - are never replaced by a re-detection on open. Only
+  // auto-slice does that, and it says so out loud.
+  const drawn = panel(stateFor({}, { positions: [0, 0.4], hand: true, detected: [0, 0.25, 0.5] }));
+  drawn.sliceShowDetected();
+  assert.deepEqual(drawn.state.positions, [0, 0.4]);
+  assert.ok(!drawn.calls.some((c) => c[0] === 'commit'));
+});
+
+test('nothing to detect writes no entry at all', () => {
+  // Not a WAV: an empty entry would claim this sample has no chops, when the truth is that nobody
+  // can say. It keeps saying nothing.
+  const p = panel(stateFor({}, { positions: [], hand: false, detected: [] }));
+  p.sliceShowDetected();
+  assert.deepEqual(p.state.positions, []);
+  assert.ok(!p.calls.some((c) => c[0] === 'commit'));
+});
+
+test('a library set is shown, never written into', () => {
+  const p = panel(stateFor({}, { own: false, positions: [], hand: false, detected: [0, 0.5] }));
+  p.sliceShowDetected();
+  assert.ok(!p.calls.some((c) => c[0] === 'commit'), 'a set from the library belongs to every project');
 });

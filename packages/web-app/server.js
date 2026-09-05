@@ -2480,7 +2480,7 @@ function mixStatus() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// "conf" (configure) capture - Ableton-style. While a track is in conf mode, sclang forwards
+// "conf" (configure) capture. While a track is in conf mode, sclang forwards
 // every parameter a user moves in a plugin's own editor GUI as /poptart/paramAutomated; we
 // coalesce the latest value per (slot, name) and hand them to the editor, which drops each into
 // the code as .param(name, value). Values arrive normalized 0..1 (what VST params take); for a
