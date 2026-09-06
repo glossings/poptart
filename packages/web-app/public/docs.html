@@ -691,6 +691,7 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
   .stretch(2)               <span class="c">// timestretch, pitch preserved</span>
   .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// the nth chop (auto-detected transients, WAV only)</span>
   .slices(<span class="s">"break"</span>)          <span class="c">// ...or the chop map you drew for this file — double-click `slice`</span>
+  .splice(<span class="s">"&lt;0 1 2&gt;*8"</span>)      <span class="c">// slice(), each chop fitted to its own hit — 8ths here, whatever their length (.splicemode("stretch") holds the pitch)</span>
   .note(<span class="s">"45 _ 52 57"</span>)       <span class="c">// repitch by MIDI note (c2 = as recorded)</span>
   .vel(<span class="s">"1 .5 ~ 1"</span>)          <span class="c">// per-hit volume (on synths: MIDI velocity)</span>
   .adsr(0.1, 0.2, 0.6, 0.2) <span class="c">// amplitude envelope, as multiples of the hit's length</span></code></pre>
@@ -722,7 +723,10 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             whole file: the middle is what <code>.slice()</code> chops on by itself, left of it keeps
             only the strongest hits and right of it finds ghost notes, each sixth of the travel
             halving or doubling. It stands down once you have moved a marker by hand, and
-            <strong>auto-slice</strong> is the way back to detected chops.
+            <strong>auto-slice</strong> is the way back to detected chops. <strong>grid</strong>
+            chops the file into even divisions of a <em>cycle</em> — 8ths, 16ths, triplets — laid
+            against the fit in force, so a 2-cycle break gets 32 sixteenths and an unfitted
+            1.03-measure loop gets 16 true ones plus its tail.
             What you draw is written into the code as
             <code>_slices("break", { "breaks/amen.wav": { fit: 2, marks: [0, 0.131, …] } })</code> plus
             <code>.slices("break")</code>, so a chop map is patternable like anything else:

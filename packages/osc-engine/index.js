@@ -1142,14 +1142,37 @@ class OscEngine {
     // voice to the step's end below. Sign is all it touches; fit/note keep scaling the magnitude.
     const flip = (cfg.flip ?? 0) > 0.5;
     if (flip) speed *= -1;
-    const stretch = cfg.stretch > 0 ? cfg.stretch : 1;
+    let stretch = cfg.stretch > 0 ? cfg.stretch : 1;
     const spanSec = file.duration * (end - begin);
     if (speed === 0 || spanSec <= 0) return { skipped: speed === 0 ? 'speed 0' : 'empty begin..end window' };
+    const eventSec = offsetSec - onsetSec;
+    // The enum controls arrive as NUMBERS (.loopwrap()/.loopdir()/.splicemode() are ordinary
+    // patternable channels): 0 = file/forward/repitch, 1 = window/pingpong/stretch. Rounded and
+    // wrapped here as well as in the scheduler, so a direct engine call - or any raw value that
+    // reached here unnormalised - still names a real mode instead of silently reading as the
+    // default.
+    const mode = (v, count) => {
+      const idx = Math.round(Number(v));
+      return Number.isFinite(idx) ? wrap(idx, count) : 0;
+    };
 
+    // .splice(): the begin..end window - usually a slice's - is fitted to ITS OWN event, so
+    // "<0 1 2>*8" plays each chop as an 8th note whatever its natural length. Repitch (mode 0)
+    // bends the rate the way .fit() would; stretch (mode 1) warps the length and holds the pitch
+    // (nonunity stretch routes to the granular defs below). Both are the same factor applied to a
+    // different control, so .speed()/.note()/.stretch() keep multiplying on top exactly as they
+    // do unspliced - double speed fills half the event, .stretch(2) spans two of them.
+    const spliced = (cfg.splice ?? 0) > 0.5 && eventSec > 1e-6;
+    if (spliced) {
+      if (mode(cfg.spliceMode ?? 0, 2) === 1) stretch *= eventSec / spanSec;
+      else speed *= spanSec / eventSec;
+    }
     // The chain's own .fit() first, then whatever the slice set drew this sample against. The
     // pattern always wins: a `.fit()` someone wrote is a statement about the part, while the set's
-    // is a property of the file, and the specific instruction beats the general one.
-    const fit = cfg.fit != null ? cfg.fit : authored?.fit ?? null;
+    // is a property of the file, and the specific instruction beats the general one. A splice
+    // beats both: it and fit each set the rate from a length, and the per-event instruction wins
+    // over the per-file one.
+    const fit = spliced ? null : cfg.fit != null ? cfg.fit : authored?.fit ?? null;
     if (fit != null) {
       // Fit is a property of the whole sample, not the begin..end window: the rate is set so
       // the FULL file lasts the target number of cycles, and begin/end/slice then select a
@@ -1180,14 +1203,6 @@ class OscEngine {
     // begin..end, which is what a .slice() loop wants. Backwards through a WINDOW enters at its far edge, as it always has;
     // wrapping through the file has somewhere to go from `begin` in either direction, so it starts
     // there and reaches the file's edge in its own time.
-    // The two modes arrive as NUMBERS (.loopwrap()/.loopdir() are ordinary patternable channels):
-    // 0 = file/forward, 1 = window/pingpong. Rounded and wrapped here as well as in the scheduler,
-    // so a direct engine call - or any raw value that reached here unnormalised - still names a
-    // real mode instead of silently reading as the default.
-    const mode = (v, count) => {
-      const idx = Math.round(Number(v));
-      return Number.isFinite(idx) ? wrap(idx, count) : 0;
-    };
     const windowed = mode(cfg.loopWrap ?? 0, 2) === 1;
     const pingpong = mode(cfg.loopDir ?? 0, 2);
     const loopLo = windowed ? begin : 0;
@@ -1197,7 +1212,6 @@ class OscEngine {
     // loop: it's the begin..end window's own length, which is what the ADSR times scale by (a
     // loop's audio has no length of its own - it runs until the event's gate-off).
     let durSec = (spanSec * stretch) / Math.abs(speed);
-    const eventSec = offsetSec - onsetSec;
     // .flip() reverses the window AND re-anchors it: playback runs from one step's worth of audio
     // past `begin` back down to `begin`, landing on `begin` exactly at the step's end, so a
     // flipped hit sweeps *into* the next one (s("sd").flip("<1 0>*2")).

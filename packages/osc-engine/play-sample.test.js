@@ -10,7 +10,7 @@ const assert = require('node:assert');
 const { OscEngine } = require('./index.js');
 
 // /poptart/playSample argument order (see playSample's _send call).
-const ARG = { begin: 3, end: 4, loop: 5, speed: 6, dur: 8, onset: 9, offset: 10, cut: 12 };
+const ARG = { begin: 3, end: 4, loop: 5, speed: 6, stretch: 7, dur: 8, onset: 9, offset: 10, cut: 12 };
 
 function engineWithFile(duration) {
   const engine = new OscEngine({ sclangPath: '/usr/bin/false' });
@@ -425,4 +425,65 @@ test('a set written as a bare list carries no fit, and never has', () => {
   const { engine, sent } = engineWithFile(4.8);
   engine.playSample('t1', 'breaks', { slice: 0, slices: [0, 0.5], secPerCycle: 2 }, 0, 0.125);
   assert.strictEqual(sent.pop().args[ARG.speed], 1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// splice - the begin..end window (usually a slice's) fitted to its own event. cfg.splice turns it
+// on, cfg.spliceMode picks how: 0 repitches (rate bends, pitch follows), 1 stretches (granular,
+// pitch holds). The channels' pattern-core half is pinned in pattern-core's log.test.mjs.
+// ---------------------------------------------------------------------------------------------
+
+test('splice repitches a slice to fill exactly its own event', () => {
+  // Markers [0, 0.25, 0.5]: slice 1 is 0.25..0.5 of a 4.8s file = 1.2s of audio. Into a 0.25s
+  // event (an 8th at 2s/cycle) that is speed 4.8 - and no cut, since it ends on the beat.
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.5], splice: 1, secPerCycle: 2 }, 0, 0.25);
+  const args = sent.pop().args;
+  assert.ok(Math.abs(args[ARG.speed] - 4.8) < 1e-9, `speed ${args[ARG.speed]}`);
+  assert.ok(Math.abs(args[ARG.dur] - 0.25) < 1e-9, 'the chop lasts exactly the event');
+  assert.strictEqual(args[ARG.cut], 0);
+});
+
+test('splice mode 1 stretches instead: the rate holds and stretch takes the factor', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.5], splice: 1, spliceMode: 1, secPerCycle: 2 }, 0, 0.25);
+  const args = sent.pop().args;
+  assert.strictEqual(args[ARG.speed], 1, 'pitch untouched');
+  assert.ok(Math.abs(args[ARG.stretch] - 0.25 / 1.2) < 1e-9, `stretch ${args[ARG.stretch]}`);
+  assert.ok(Math.abs(args[ARG.dur] - 0.25) < 1e-9);
+});
+
+test('speed multiplies on top of a splice - double speed fills half the event, either mode', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.5], splice: 1, speed: 2, secPerCycle: 2 }, 0, 0.25);
+  let args = sent.pop().args;
+  assert.ok(Math.abs(args[ARG.speed] - 9.6) < 1e-9);
+  assert.ok(Math.abs(args[ARG.dur] - 0.125) < 1e-9);
+  engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.5], splice: 1, spliceMode: 1, speed: 2, secPerCycle: 2 }, 0, 0.25);
+  args = sent.pop().args;
+  assert.strictEqual(args[ARG.speed], 2);
+  assert.ok(Math.abs(args[ARG.dur] - 0.125) < 1e-9, 'stretch mode shortens the same way');
+});
+
+test('a fit stands down while splice is on - the per-event rate wins', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.5], splice: 1, fit: 4, secPerCycle: 2 }, 0, 0.25);
+  assert.ok(Math.abs(sent.pop().args[ARG.speed] - 4.8) < 1e-9, 'the same rate as with no fit at all');
+});
+
+test('splice fits whatever window is in force - a bare begin..end too', () => {
+  // 0.5..0.75 of 4.8s = 1.2s of audio into a 0.5s event -> speed 2.4.
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { begin: 0.5, end: 0.75, splice: 1, secPerCycle: 2 }, 0, 0.5);
+  const args = sent.pop().args;
+  assert.ok(Math.abs(args[ARG.speed] - 2.4) < 1e-9);
+  assert.strictEqual(args[ARG.begin], 0.5);
+});
+
+test('splice keeps a negative speed negative - the chop plays backwards and still fills the event', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.5], splice: 1, speed: -1, loop: 0, secPerCycle: 2 }, 0, 0.25);
+  const args = sent.pop().args;
+  assert.ok(Math.abs(args[ARG.speed] - -4.8) < 1e-9);
+  assert.ok(Math.abs(args[ARG.dur] - 0.25) < 1e-9);
 });

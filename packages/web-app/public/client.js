@@ -14023,6 +14023,8 @@ const sliceFitVal = document.getElementById('sliceFitVal');
 const sliceFitHalf = document.getElementById('sliceFitHalf');
 const sliceFitDouble = document.getElementById('sliceFitDouble');
 const sliceClearBtn = document.getElementById('sliceClearBtn');
+const sliceGridBtn = document.getElementById('sliceGridBtn');
+const sliceGridSel = document.getElementById('sliceGridSel');
 const sliceCountEl = document.getElementById('sliceCount');
 const sliceNote = document.getElementById('sliceNote');
 
@@ -14033,6 +14035,7 @@ const SLICE_ZERO_PX = 6; // ...and to a zero crossing, the finer of the two magn
 const SLICE_HIT_PX = 6; // how near a press counts as being ON a marker rather than beside it
 const SLICE_FINE = 0.12; // ⌘-drag: this much of the hand's movement, for placing a chop by ear
 const SLICE_LIVE_MS = 60; // throttle on the live re-file while a marker is still moving
+const SLICE_GRID_MAX = 512; // markers one grid chop may write - past this the definition stops being a line
 const SLICE_EVAL_DEBOUNCE_MS = 250;
 const SLICE_DETECT_DEBOUNCE_MS = 140;
 const SLICE_PEAK_BUCKET = 64; // frames per pyramid bucket - drawing reduces from these, not the file
@@ -14677,6 +14680,62 @@ function sliceFitBy(factor) {
   const want = Math.min(SLICE_FIT_MAX, Math.max(SLICE_FIT_MIN, now * factor));
   if (want === now) return sliceSay(`fit is as ${factor > 1 ? 'long' : 'short'} as it goes`);
   sliceWriteFit(want);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The grid chop - a marker every 1/16 (or whatever the select says) OF A CYCLE.
+//
+// The grid is laid in musical time, not file fractions. A file is rarely a whole number of
+// measures - unfitted it lasts duration*cps cycles, fitted it lasts exactly what the fit says -
+// and only when that number is 1 does "divide the length by 16" put sixteenths where sixteenths
+// go. So the step is a division of the CYCLE converted into a fraction of THIS file, walked from
+// the start to wherever the end falls: a 1.03-measure file gets 16 true sixteenths and its tail
+// as the last slice, and a file fitted to 2 cycles gets 32 of them.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Marker positions for that grid, over a file lasting `cycles` cycles: 0..1 fractions, one every
+ * 1/div of a cycle. Null where the grid can't be laid - no length, or more markers than a
+ * definition should wear (SLICE_GRID_MAX).
+ */
+function sliceGridMarks(div, cycles) {
+  if (!(cycles > 0) || !(div > 0)) return null;
+  // Ceil, less a twentieth of a division: a 1.001-measure loop wants 16 sixteenths, not 16 and a
+  // click's worth of tail promoted to a slice of its own by rounding.
+  const count = Math.max(1, Math.ceil(cycles * div - 0.05));
+  if (count > SLICE_GRID_MAX) return null;
+  const step = 1 / (cycles * div);
+  return Array.from({ length: count }, (_, k) => k * step);
+}
+
+/** Chops the file on the select's grid - every marker replaced, like auto-slice, and said so. */
+function sliceGridChop() {
+  if (!sliceState) return;
+  const div = Number(sliceGridSel.value);
+  const name = sliceGridSel.selectedOptions[0]?.textContent ?? `1/${div}`;
+  // The cycles the file spans under whatever fit is in force - the chain's own .fit() first,
+  // exactly as it wins at play time. prFitCycles answers null for a patterned fit (no one grid to
+  // lay) and while the sample is still decoding, which are the two refusals below.
+  const override = sliceFitCall();
+  const fit = override ? override.value : sliceState.fit ?? null;
+  const cycles = prFitCycles(fit, sliceState.buffer?.duration ?? 0);
+  if (!cycles) {
+    const patterned = override && override.value !== 'auto' && typeof override.value !== 'number';
+    return sliceSay(patterned
+      ? `this chain's .fit(${override.value}) is a pattern - there is no one grid to lay against it`
+      : 'waiting for the sample before it can be chopped', true);
+  }
+  const marks = sliceGridMarks(div, cycles);
+  if (!marks) return sliceSay(`${name}s across ${sliceFitNum(cycles)} cycles is over ${SLICE_GRID_MAX} slices - fit the file shorter first`, true);
+  const had = sliceState.hand ? sliceState.positions.length : 0;
+  sliceState.positions = sliceTidy(marks);
+  sliceState.sel = 0;
+  sliceSetHand(true); // a grid is not what the detector would say, so the sens slider stands down
+  sliceLivePush();
+  sliceCommit();
+  sliceRender();
+  sliceSay(`${marks.length} × ${name} across ${sliceFitNum(cycles)} cy`
+    + (had ? ` — ${had} hand-drawn marker${had === 1 ? '' : 's'} replaced (⌘Z puts them back)` : ''));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -15586,6 +15645,15 @@ function initSlicePanel() {
   sliceFitVal.addEventListener('click', () => { if (sliceState) sliceWriteFit('auto'); });
   sliceFitHalf.addEventListener('click', () => { if (sliceState) sliceFitBy(0.5); });
   sliceFitDouble.addEventListener('click', () => { if (sliceState) sliceFitBy(2); });
+
+  // The grid chop. Choosing a division chops right away - the same immediacy as moving sens -
+  // and the button re-chops at the one shown, for after a fit or tempo change moved the grid
+  // under the markers. The focus goes back to the canvas so the keys keep working.
+  sliceGridBtn.addEventListener('click', () => sliceGridChop());
+  sliceGridSel.addEventListener('change', () => {
+    sliceGridChop();
+    sliceCanvas.focus({ preventScroll: true });
+  });
 
   // auto-slice is the deliberate way back to detected markers, so it is also the one gesture that
   // may throw hand-drawn ones away - and the one that hands the sensitivity slider back (see

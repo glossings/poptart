@@ -2135,6 +2135,35 @@ export class Sig {
   /** Play the nth detected transient slice (wraps past the last one). Needs a WAV sample. */
   slice(v) { return this._samplerOpt('slice', 'slice', toSignal(v)); }
   /**
+   * `.slice()`, with each chop fitted to ITS OWN event: `.splice("<0 1 2>*8")` plays those three
+   * slices as 8th notes whatever their natural lengths. How it fits is `.splicemode()` - repitch
+   * (the default: rate bends, pitch follows, Tidal's splice) or stretch (granular, pitch holds) -
+   * and the mode can ride along as the second argument: `.splice("0 1 2 3", "stretch")`.
+   *
+   * It fits the WINDOW in force, so bare `.splice()` (no slice of its own) fits whatever
+   * `.begin()`/`.end()` or an earlier `.slice()` selected - and the on/off is a channel like any
+   * other, so `.splice("0 1").when(...)` and fanned `,`-stacks behave as every control does.
+   * `.speed()` and `.note()` multiply on top (double speed fills half the event); `.stretch()` in
+   * stretch mode multiplies how many events it spans. A `.fit()` stands down while splice is on:
+   * both set the rate from a length, and the per-event instruction beats the per-file one.
+   */
+  splice(v, mode) {
+    const on = (v === undefined ? this : this.slice(v))._samplerOpt('splice', 'splice', toSignal(1));
+    return mode === undefined ? on : on.splicemode(mode);
+  }
+  /**
+   * How `.splice()` fits a chop to its event, as a mode number (bare `.splicemode()` means 1):
+   *
+   *   0 "repitch" (default) - bend the playback rate so the chop lasts the event; pitch follows,
+   *                           the way .fit() repitches. Tidal/Strudel's splice.
+   *   1 "stretch"           - granular timestretch to the event's length; pitch holds. Best on
+   *                           rhythmic material, like .stretch() itself.
+   *
+   * The mode names are accepted as strings, and it is a channel like .loopwrap(): values round to
+   * the nearest mode and wrap, so any signal drives it - .splicemode("<0 1>").
+   */
+  splicemode(v = 1) { return this._samplerOpt('splicemode', 'spliceMode', spliceModeSignal(v)); }
+  /**
    * WHERE the slices are, replacing the sample's own transient analysis: the start positions
    * `.slice(n)` indexes into, as fractions of the file (`.slices([0, 0.131, 0.27])`). Slice k runs
    * from its position to the next one, and the last runs to the end of the file - so three markers
@@ -3281,10 +3310,10 @@ function applyNoteChannels(baseStepsForCycle, noteChannels) {
   return out;
 }
 
-// The enum controls (Sig#loopwrap, Sig#loopdir), by sampler key: the mode names in order, so the
-// index IS the number the control carries. They're ordinary patternable channels - the point of
-// numbering them rather than naming them - so a value can arrive from anywhere a signal can:
-// mini strings, LFOs, rand(). loopModeAt turns whatever arrives into one of these.
+// The enum controls (Sig#loopwrap, Sig#loopdir, Sig#splicemode), by sampler key: the mode names
+// in order, so the index IS the number the control carries. They're ordinary patternable channels
+// - the point of numbering them rather than naming them - so a value can arrive from anywhere a
+// signal can: mini strings, LFOs, rand(). loopModeAt turns whatever arrives into one of these.
 // Said when a document still passes .loop()'s old { wrap, dir } object. The loop plays either way;
 // the modes are their own controls now (see Sig#loopwrap / Sig#loopdir).
 const LOOP_OPTS_MOVED = '[signal] loop()\'s wrap/dir options are their own controls now - ignoring them. Use .loopwrap(1) (0 file, 1 window) and .loopdir(1) (0 forward, 1 pingpong).';
@@ -3296,7 +3325,18 @@ const SWING_GRID_OPERAND = '[signal] top-level swing() sets the amount channel o
 export const LOOP_MODES = {
   loopWrap: ['file', 'window'],
   loopDir: ['forward', 'pingpong'],
+  spliceMode: ['repitch', 'stretch'],
 };
+
+/**
+ * A splicemode value as the channel wants it: the mode names are accepted as strings ('repitch',
+ * 'stretch') and become their index; anything else - a number, a mini string of numbers, an LFO -
+ * goes through toSignal like every other channel and is rounded/wrapped per event (loopModeAt).
+ */
+function spliceModeSignal(v) {
+  const named = typeof v === 'string' ? LOOP_MODES.spliceMode.indexOf(v.trim().toLowerCase()) : -1;
+  return toSignal(named >= 0 ? named : v);
+}
 
 /**
  * The mode index a raw control value selects: rounded to the nearest integer and wrapped into the
@@ -3600,6 +3640,8 @@ const SAMPLER_CONTROLS = {
   stretch: { key: 'stretch', unset: 1 },
   fit: { key: 'fit', unset: 1 },
   slice: { key: 'slice', unset: 0 },
+  splice: { key: 'splice', unset: 0 },
+  splicemode: { key: 'spliceMode', unset: 0 },
   attack: { key: 'attack', unset: 0 },
   decay: { key: 'decay', unset: 0 },
   sustain: { key: 'sustain', unset: 1 },
@@ -3706,6 +3748,16 @@ export const stretch = controlBuilder('stretch');
 export const fit = controlBuilder('fit');
 /** Play the nth detected transient slice - the top-level form of `.slice()`. */
 export const slice = controlBuilder('slice');
+/** Slices fitted to their own events - the top-level form of `.splice()`. At the head of a chain
+ * (`splice("<0 1 2>*8").s("breaks")`) it is exactly `.splice(...)`; the mode rides on
+ * splicemode(), its own control. */
+export const splice = controlBuilder('splice');
+/** How splice() fits: 0 = repitch (default), 1 = stretch - the top-level form of `.splicemode()`. */
+export const splicemode = (v = 1) => {
+  const out = bareSig(spliceModeSignal(v));
+  out.ctl = 'splicemode';
+  return out;
+};
 /** Attack, as a multiple of the played duration - the top-level form of `.attack()`. */
 export const attack = controlBuilder('attack');
 /** Decay, as a multiple of the played duration - the top-level form of `.decay()`. */

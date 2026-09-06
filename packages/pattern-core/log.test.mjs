@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, note, sine, setPatternWarn } from './src/signal.mjs';
+import { s, note, sine, splice, setPatternWarn } from './src/signal.mjs';
 import { Scheduler, setEventLogger } from './src/scheduler.mjs';
 
 // Engine that plays nothing and answers playSample with whatever `resolve` says the numbers came
@@ -196,4 +196,57 @@ test('the loop line names the region and the direction', () => {
 test('the loop line names the modes from the numbers when the engine reports nothing', () => {
   const [line] = linesOf(s('breaks').loop().loopwrap(1).loopdir(1).log());
   assert.match(line, /loop=window\+pingpong/, 'a mode number in a log line would say nothing');
+});
+
+// ---------------------------------------------------------------------------------------------
+// .splice()/.splicemode() - slice() with each chop fitted to its own event. The channels are
+// ordinary ones (splice an on/off, spliceMode a mode number exactly like loopwrap's); the fitting
+// arithmetic is the engine's (pinned in osc-engine's play-sample.test.js) - what's pinned here is
+// what reaches it, and what the log line says.
+// ---------------------------------------------------------------------------------------------
+
+test('.splice(v) is .slice(v) plus the splice channel', () => {
+  const cfg = cfgOf(s('breaks').splice('1'));
+  assert.equal(cfg.slice, 1);
+  assert.equal(cfg.splice, 1);
+  assert.equal(cfg.spliceMode, undefined, 'no mode set - the engine defaults to repitch');
+});
+
+test('bare .splice() fits the window in force without choosing slices', () => {
+  const cfg = cfgOf(s('breaks').begin(0.25).end(0.5).splice());
+  assert.equal(cfg.slice, undefined);
+  assert.equal(cfg.splice, 1);
+  assert.equal(cfg.begin, 0.25);
+  assert.equal(cfg.end, 0.5);
+});
+
+test('the mode is its own channel: named strings, bare calls, rounding and wrapping', () => {
+  assert.equal(cfgOf(s('breaks').splice('0', 'stretch')).spliceMode, 1);
+  assert.equal(cfgOf(s('breaks').splice('0', 'repitch')).spliceMode, 0);
+  assert.equal(cfgOf(s('breaks').splice('0').splicemode()).spliceMode, 1, 'bare means the non-default, like .loopwrap()');
+  assert.equal(cfgOf(s('breaks').splice('0').splicemode(0.7)).spliceMode, 1, 'rounds to the nearest mode');
+  assert.equal(cfgOf(s('breaks').splice('0').splicemode(1.7)).spliceMode, 0, 'and wraps past the last');
+});
+
+test('a patterned splice subdivides events exactly as slice does', () => {
+  const track = s('breaks').splice('0 1');
+  assert.equal(cfgOf(track).slice, 0);
+  assert.equal(track.sampler.slice.sample(0.75, 1, 0.75), 1, 'second half of the cycle: chop 1');
+  // And the channels survive the rest of the chain, like every other sampler control.
+  assert.equal(cfgOf(s('breaks').splice('0 1', 'stretch').fast(2).rib(3, 2)).splice, 1);
+});
+
+test('splice at the head of a chain is the same thing said first', () => {
+  const cfg = cfgOf(splice('0 1').s('breaks'));
+  assert.equal(cfg.slice, 0);
+  assert.equal(cfg.splice, 1);
+});
+
+test('the log line says a splice is on, and names its mode', () => {
+  const [repitched] = linesOf(s('breaks').splice('0').log());
+  assert.match(repitched, /splice=repitch/);
+  const [stretched] = linesOf(s('breaks').splice('0', 'stretch').log());
+  assert.match(stretched, /splice=stretch/);
+  const [plain] = linesOf(s('breaks').slice('0').log());
+  assert.doesNotMatch(plain, /splice=/, 'an unspliced slice says nothing about it');
 });

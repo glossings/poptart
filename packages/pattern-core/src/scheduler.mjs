@@ -142,18 +142,19 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
   const loop = res.loop ?? cfg.loop ?? 0;
   const stretch = res.stretch ?? cfg.stretch ?? 1;
   const bits = [`s=${pack}`, `i=${num(idx)}`, `begin=${num(begin)}`, `end=${num(end)}`, `speed=${num(speed)}`];
+  // An enum control, by name - the modes are half of what a loop (or a splice) sounds like, so a
+  // bare "loop" would leave the line ambiguous. Named rather than numbered here: the engine
+  // reports names, and a mode number in a log line says nothing on its own.
+  const mode = (key) => {
+    const v = res[key] ?? cfg[key];
+    if (v == null) return LOOP_MODES[key][0];
+    return typeof v === 'string' ? v : LOOP_MODES[key][loopModeAt(key, v)];
+  };
   if (loop) {
-    // Which region it loops round and how it turns over - the modes are half of what a loop
-    // sounds like, so a bare "loop" would leave the line ambiguous. Named rather than numbered
-    // here: the engine reports names, and a mode number in a log line says nothing on its own.
-    const mode = (key) => {
-      const v = res[key] ?? cfg[key];
-      if (v == null) return LOOP_MODES[key][0];
-      return typeof v === 'string' ? v : LOOP_MODES[key][loopModeAt(key, v)];
-    };
     const dir = mode('loopDir');
     bits.push(`loop=${mode('loopWrap')}${dir === 'pingpong' ? '+pingpong' : ''}`);
   }
+  if ((cfg.splice ?? 0) > 0.5) bits.push(`splice=${mode('spliceMode')}`);
   if (stretch !== 1) bits.push(`stretch=${num(stretch)}`);
   if (cfg.vel !== undefined) bits.push(`vel=${num(cfg.vel)}`);
   if (cfg.note !== undefined) bits.push(`note=${num(cfg.note)}`);
@@ -1201,7 +1202,7 @@ export class Scheduler {
     const merged = step.cfg;
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
     for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch',
-      'slice', 'note', 'attack', 'decay', 'sustain', 'release']) {
+      'slice', 'splice', 'spliceMode', 'note', 'attack', 'decay', 'sustain', 'release']) {
       if (merged && merged[key] !== undefined) {
         cfg[key] = merged[key];
       } else if (src[key]) {
@@ -1209,10 +1210,10 @@ export class Scheduler {
         if (v !== undefined && !Number.isNaN(v)) cfg[key] = v;
       }
     }
-    // .loopwrap()/.loopdir() carry mode NUMBERS rather than amounts, so whatever the channel
-    // produced picks a mode by rounding and wrapping (see loopModeAt) - that's what lets a
-    // continuous signal drive them. Done here so the engine and the .log() line agree.
-    for (const key of ['loopWrap', 'loopDir']) {
+    // .loopwrap()/.loopdir()/.splicemode() carry mode NUMBERS rather than amounts, so whatever
+    // the channel produced picks a mode by rounding and wrapping (see loopModeAt) - that's what
+    // lets a continuous signal drive them. Done here so the engine and the .log() line agree.
+    for (const key of ['loopWrap', 'loopDir', 'spliceMode']) {
       if (cfg[key] !== undefined) cfg[key] = loopModeAt(key, cfg[key]);
     }
     // The slice SET is the odd one out: its value is a positions array (or a map of them, keyed by

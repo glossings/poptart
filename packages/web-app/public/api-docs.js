@@ -371,6 +371,8 @@ const API_DOCS = {
   stretch: { kind: 'both', sig: 'stretch(factor)', desc: 'Granular timestretch (2 = twice as long at the same pitch). Best on rhythmic material.', eg: '.stretch(2)' },
   fit: { kind: 'both', sig: 'fit(measures)', desc: 'Repitches the sample to last exactly this many cycles; bare .fit() picks the nearest power of two.', eg: 's("breaks:19").fit()' },
   slice: { kind: 'both', sig: 'slice(n)', desc: 'Plays the nth detected transient slice, wrapping past the last. WAV samples only.', eg: '.slice(irand(8))' },
+  splice: { kind: 'both', sig: 'splice(n, mode?)', desc: 'slice(), with each chop fitted to its own event: splice("<0 1 2>*8") plays those slices as 8th notes whatever their natural length. Repitches by default; splicemode() (or the second argument) picks stretch instead. Bare .splice() fits whatever begin()/end() window is in force, and speed()/note() multiply on top. A fit() stands down while it\'s on.', eg: '.splice("<0 1 2>*8")' },
+  splicemode: { kind: 'both', sig: 'splicemode(mode)', desc: 'How splice() fits a chop to its event - 0 = repitch (rate bends, pitch follows), 1 = stretch (granular, pitch holds). Takes the names as strings too, and values round to the nearest mode and wrap, so any signal works: .splicemode("<0 1>").', eg: '.splice("0 1 2 3").splicemode("stretch")' },
   attack: { kind: 'both', sig: 'attack(mult)', desc: 'Sampler envelope attack, as a multiple of the played duration.', eg: '.attack(0.1)' },
   decay: { kind: 'both', sig: 'decay(mult)', desc: 'Sampler envelope decay, as a multiple of the played duration.', eg: '.decay(0.3)' },
   sustain: { kind: 'both', sig: 'sustain(level)', desc: 'Sampler envelope sustain level, 0..1 (a level, not a time).', eg: '.sustain(0.5)' },
