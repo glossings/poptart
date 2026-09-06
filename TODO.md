@@ -5,14 +5,6 @@ no completion notes.
 
 ---
 
-[ ] Automation lane editor — the `auto("name")`/`_auto("name", "0,0 16,0 20,1,-2 32,0.3")` signal
-    now exists (breakpoints on absolute bars, SC curve per segment, holds its ends; polled
-    continuously in .param and mixer channels). What remains is the GUI: a lane in the arrange
-    view to draw/drag breakpoints (same interaction family as the lfo shape editor), writing the
-    `_auto(...)` definition through `liveAuto()` mid-drag exactly as the piano roll panel uses
-    `liveRoll()`. A defs registry entry on the client (`makeDefRegistry({ defCall: '_auto',
-    useCall: 'auto', ... })`) gets folding/pickers for free.
-
 [ ] Per-clip roll binding in arrange — a clip can optionally name WHICH roll it plays (default:
     the track's own), so fills and variants are painted rather than patterned: split a region,
     double-click to fork the roll under an auto-generated name and rebind just that clip; paint

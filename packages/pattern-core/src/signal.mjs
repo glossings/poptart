@@ -541,6 +541,43 @@ export class Sig {
   }
 
   /**
+   * How much of an effect reaches the chain: 1 (the default) is the plugin's output, 0 is the
+   * signal that went in - a bypass that happens to be continuous. Aims at whatever is last in the
+   * chain, like .param()/.preset(), so it belongs right after the .fx(...) it turns down:
+   *
+   *   pad: pianoroll("wash").synth("Diva")
+   *     .fx("ValhallaRoom").wet(0.3)                 // a third of the reverb, dry underneath
+   *     .fx("FilterFreak 1").wet(auto("intro"))      // ...and a filter that only exists in the intro
+   *
+   * This is how an effect comes and goes without being spawned and freed. Plugins can't be added
+   * to a running chain (see the SynthDef scaffold note in poptart.scd), and loading one mid-set
+   * costs a hitch and whatever state it had - so wire the whole song's effects up front and let a
+   * lane decide when each one is there. On a bus track (`audio("drums").fx(...)`) that gives a
+   * section its own processing without touching the tracks feeding it.
+   *
+   * Takes any value a control takes - a number, mini notation, a signal - so `.wet(auto("drop"))`
+   * automates it over the arrangement and `.wet("<1 0>")` alternates by cycle. The crossfade is
+   * linear, so 0 and 1 are EXACTLY the two signals rather than a 3dB-loud blend of them.
+   *
+   * Blending (rather than fully bypassing) an effect that delays its output - a linear-phase EQ, a
+   * lookahead limiter - combs against the dry path, since only the plugin side is late. That is
+   * true of a wet knob in any host; the fix is to use those at wet 1 and automate something else.
+   */
+  wet(value) {
+    const slot = this.fxChain.length; // 0 = instrument, 1..n = effects, in call order
+    if (slot === 0) {
+      throw new Error('[signal] .wet() turns an effect down - put it after an .fx(...), e.g. .fx("ValhallaRoom").wet(0.3)');
+    }
+    if (slot > MAX_FX_SLOTS) {
+      // Warn rather than throw: the chain past this point doesn't run either (see maxSlots in
+      // poptart.scd), and silencing the track over it would be the worse failure.
+      warnUser(`[signal] .wet() only reaches the first ${MAX_FX_SLOTS} effects on a track - the one in slot ${slot} stays fully wet.`);
+      return this;
+    }
+    return this._clone({ channel: { ...this.channel, [`wet${slot}`]: toSignal(value) } });
+  }
+
+  /**
    * Channel strip: the track's INPUT gain (1 = unity), applied BEFORE the fx chain - the level the
    * plugins get fed. Turning a track down with this drives its own compressor, saturator and
    * reverb less hard, rather than turning down what they made; `.gain(env())` is a per-note VCA
@@ -3381,7 +3418,15 @@ function condSwitchMap(before, after, condAt, truthy, skip = new Set()) {
 // one on the truthy branch. out = stereo pair (Sig#o), 1-based; dry = direct-output level
 // (Sig#dry); width = M/S stereo width (Sig#width), 1 = untouched; bassmono = mono-below-this-many-
 // Hz (Sig#bassmono), 0 = off. gain is the level into the fx chain, postgain the level out of it.
-export const CHANNEL_DEFAULTS = { gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1 };
+// ...plus wet1..wet7 (Sig#wet), the per-fx-slot dry/wet mix. They are channel controls like the
+// rest - real controls on the track synth, addressed at pseudo-slot -1 - rather than plugin
+// parameters, which is what lets them ramp, take a modulator and reset on re-eval for free. 1 is
+// the plugin's own output, so a chain nobody has called .wet() on sounds exactly as it always did.
+export const MAX_FX_SLOTS = 7; // must match maxSlots - 1 in poptart.scd (slot 0 is the instrument)
+export const CHANNEL_DEFAULTS = {
+  gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1,
+  ...Object.fromEntries(Array.from({ length: MAX_FX_SLOTS }, (_, i) => [`wet${i + 1}`, 1])),
+};
 
 // The track channel strip (Sig#gain/#pan/#width/...) across a .when(): the same switch the
 // per-onset controls get above, with one difference. These are STREAMED values, not per-event

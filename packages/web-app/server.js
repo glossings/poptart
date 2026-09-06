@@ -1867,6 +1867,10 @@ function rebuildDef(kind, id, scope) {
     const files = (entry.files ?? []).map(String);
     return { kind, id, scope, code: `_pack(${JSON.stringify(id)}, ${JSON.stringify(files)})` };
   }
+  if (kind === 'automation') {
+    const points = patternCore.lookupAuto(id);
+    return points ? line('_auto', id, patternCore.serializeAutoPoints(points)) : null;
+  }
   return null;
 }
 
@@ -3651,6 +3655,9 @@ const routes = {
       // A slice set's markers come too, for the same reason a pack's files do: the slice editor
       // draws a library set, and it is nowhere in the buffer to be read.
       sliceSets: patternCore.sliceSetIds().map((p) => ({ ...p, set: patternCore.lookupSlices(p.id) ?? [] })),
+      // An automation's breakpoints come too, for the reason a slice set's markers do: the arrange
+      // view draws a library lane, and it is nowhere in the buffer to be read.
+      autos: patternCore.autoIds().map((p) => ({ ...p, points: patternCore.lookupAuto(p.id) ?? [] })),
       pinned: pinnedList(),
     },
   }),
@@ -3690,6 +3697,16 @@ const routes = {
   // heard on the next hit without the buffer being rewritten. The whole set goes over (it is keyed
   // by file, and the panel is only ever editing one file's entry), and the write to the code, with
   // the eval behind it, lands once when the gesture is let go.
+  // Body: { id, points } - the same channel again, for the arrange view's automation lane. `auto()`
+  // reads its breakpoints on every sample rather than holding them, so re-filing the definition is
+  // heard within the poll interval, all through a drag, with no re-transpile behind it.
+  'POST /api/liveAuto': async (body) => {
+    const id = body?.id;
+    if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveAuto needs the automation id');
+    patternCore.liveAuto(id, String(body.points ?? ''));
+    return { status: 200, body: { ok: true } };
+  },
+
   'POST /api/liveSlices': async (body) => {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveSlices needs the slice-set id');

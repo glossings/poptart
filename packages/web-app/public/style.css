@@ -2787,10 +2787,19 @@ li.CodeMirror-hint-active {
   padding: 12px;
 }
 
+/* The automation strip's toggle, lit while the strip is open (see arReflectAuto). */
+.arrange-panel .pianoroll-head-tools .small.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 #arrangeCanvas {
   display: block;
   width: 100%;
-  height: 336px; /* AR_LANES_TOP (ruler + loops strip) + 8 lanes of AR_ROW + padding - lanes scroll under it, so it never resizes */
+  /* AR_LANES_TOP (ruler + loops strip) + 8 lanes of AR_ROW + padding. Lanes scroll under it, so
+     this only changes when the automation strip opens underneath - and then arSizeCanvas sets the
+     height inline, over this one. */
+  height: 336px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);

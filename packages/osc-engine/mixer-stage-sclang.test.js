@@ -82,6 +82,9 @@ const DEFAULT_CASES = [
   ['djres', '0'],
   // And the pre-existing strip, unchanged.
   ['gain', '1'], ['postgain', '1'], ['out', '1'], ['dry', '1'], ['width', '1'], ['pan', '0'], ['bassmono', '0'],
+  // The per-fx-slot dry/wet (Sig#wet): neutral is the plugin's own output, so clearing a
+  // modulator off one leaves the effect sounding instead of silently bypassing it.
+  ['wet1', '1'], ['wet7', '1'],
 ];
 
 function runSclang() {

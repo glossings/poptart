@@ -242,8 +242,39 @@ const sliceDefs = makeDefRegistry({
   },
 });
 
+// Automation lanes, for auto("intro"): breakpoints on absolute bars under a name. Like a slice set
+// there is nothing to type - the curve is drawn in the arrange view, against the same bars the
+// clips are painted on - and like one its argument is always a name, never the data. Its "panel"
+// is that strip rather than a window of its own, which is the whole point of the feature: an
+// automation is read against the arrangement, so it is edited there.
+const autoDefs = makeDefRegistry({
+  kind: 'automation',
+  label: 'automation lane',
+  section: 'automation',
+  defCall: '_auto',
+  useCall: 'auto',
+  emptyBody: '"0,0"', // a flat lane at zero: drawn into from the first click, and silent until then
+  isData: () => false,
+  library: () => prPrebakeAutos.map((p) => p.id),
+  libraryNote: 'prebake',
+  panel: {
+    current: () => arState?.autoId ?? null,
+    // Only ever called from the arrange view's own picker, so there is always a panel to show it
+    // in; a create() from anywhere else files the definition and leaves the view alone.
+    open: (id) => { if (arState) arSelectAuto(id); },
+    // Called when the lane on screen was deleted: clear it out rather than just hiding the strip,
+    // which would leave the toggle pointing back at a name that is gone.
+    close: () => { if (arState) arSelectAuto(null); },
+    carry: () => null,
+    sourceCall: () => null, // a rename here is always a plain rename, never a fork
+    setCurrent: (from, to) => { if (arState?.autoId === from) arState.autoId = to; },
+    syncHead: () => { if (arState) drawArrange(); },
+    scheduleEval: () => arScheduleEval(),
+  },
+});
+
 // Every registry, for the passes that have to run over all of them (folding, auto-naming).
-const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs, sliceDefs];
+const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs, sliceDefs, autoDefs];
 
 // The ★ library: what ~/.poptart/prebake/pinned.js holds, as last fetched (see prRefreshRollList) -
 // [{ kind, id, scope, code }]. Every registry reads it to draw its stars; see makeDefRegistry's pin.
@@ -2446,6 +2477,22 @@ function openWidgetAt(code, idx) {
     arCanvas.focus({ preventScroll: true }); // the keys (delete, undo) belong to the clips now
     return true;
   }
+  // auto("intro") - an automation lane is drawn in the arrange view (it is read against the bars,
+  // so that is the only place it means anything), so double-clicking the name opens the painter on
+  // that lane. With no arrange() in the buffer there is nothing to draw it against, and the console
+  // says so rather than the double-click doing nothing at all.
+  const autoCall = arrangeMod && findAutoCallAt(code, idx);
+  if (autoCall?.onName) {
+    if (!code.slice(autoCall.open + 1, autoCall.close).trim()) {
+      const at = cm.setBookmark(cm.posFromIndex(idx));
+      const named = autoDefs.materialize();
+      const back = at.find();
+      at.clear();
+      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+    }
+    openAutoFromIdCall(autoCall, code);
+    return true;
+  }
   const lfo = shapeMod && findLfoCallAt(code, idx);
   if (lfo?.onName) {
     // An empty lfo() has neither a shape nor a name yet. Give it both, then open whatever it
@@ -3891,6 +3938,7 @@ let prPrebakeShapes = []; // the same for shape(...) definitions
 let prPrebakePresets = []; // ...and for captured plugin presets, a sound library shared by every patch
 let prPrebakePacks = []; // ...and for sample packs: [{ id, files }] - the files, since the pack panel shows them
 let prPrebakeSlices = []; // ...and for slice sets: [{ id, set }] - the markers, so the editor can draw a library set
+let prPrebakeAutos = []; // ...and for automation lanes: [{ id, points }] - the breakpoints, so the arrange view can draw a library lane
 let prRaf = null; // requestAnimationFrame handle for the playhead sweep
 let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
 let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
@@ -5330,6 +5378,7 @@ function openPianorollEditor(call, carry = null) {
     scaleFold: prScaleFold, // ...and only the key's rows, on the note axis (both sticky, like the tool)
     zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
     scrollCells: 0, // leftmost visible cell when zoomed in
+    focusCell: null, // the cell the last gesture touched - what a keyboard zoom aims at (prZoomFocusPx)
     sel: new Set(), // currently selected note objects (transient; mutated in place, never reserialized)
     regionSpan: null, // the last marquee's quantized [a, b) cells - half of the time selection (see prTimeRegion)
     ghost: [], // keys still down in a take being recorded into this roll, drawn where they will land (see prRecGhosts); never serialized
@@ -5830,10 +5879,14 @@ function prRefreshRollList() {
       prPrebakeSlices = (res.sliceSets ?? [])
         .filter((r) => r.layer === 'prebake')
         .map((r) => ({ id: String(r.id), set: slicesMod ? slicesMod.normalizeSliceSet(r.set ?? []) : (r.set ?? []) }));
+      prPrebakeAutos = (res.autos ?? [])
+        .filter((r) => r.layer === 'prebake')
+        .map((r) => ({ id: String(r.id), points: Array.isArray(r.points) ? r.points : [] }));
       pinnedDefs = res.pinned ?? pinnedDefs; // the ★s every picker draws
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
       if (packState) packRenderList();
       if (sliceState) sliceRenderList();
+      if (arState) drawArrange();
     })
     .catch(() => {}); // the picker still lists this buffer's rolls without it
 }
@@ -8040,11 +8093,21 @@ function prSetFold(key, on) {
 }
 
 // Horizontal zoom that keeps the cell currently under `anchorPx` pinned to that same screen x, so
-// it zooms toward the pointer; anchorPx defaults to the view's center. (scrollCells is clamped in
-// prMetrics, so the pin gives way gracefully at the edges.)
+// it zooms toward the pointer. With no anchor - the +/- keys - it aims at the last cell a gesture
+// touched instead, which is the note you were just working on; see arZoomFocusX in the arrangement
+// painter for the same rule and why the pointer's own position won't do. An off-screen focus falls
+// back to the middle of the view, so a zoom stays a zoom and never becomes a jump. (scrollCells is
+// clamped in prMetrics, so the pin gives way gracefully at the edges.)
+function prZoomFocusPx(m) {
+  const mid = PR_GUTTER + m.gridW / 2;
+  if (prState.focusCell == null) return mid;
+  const px = PR_GUTTER + (prState.focusCell - m.scroll) * m.cellW;
+  return px >= PR_GUTTER && px <= PR_GUTTER + m.gridW ? px : mid;
+}
+
 function prZoomBy(factor, anchorPx) {
   const m = prMetrics();
-  const px = anchorPx ?? PR_GUTTER + m.gridW / 2;
+  const px = anchorPx ?? prZoomFocusPx(m);
   const cell = prCellFloat(px, m); // the cell under the pointer before zooming
   prState.zoom = Math.min(PR_MAX_ZOOM, Math.max(1, prState.zoom * factor));
   const m2 = prMetrics();
@@ -8123,6 +8186,9 @@ function initPianorollCanvas() {
     const m = prMetrics();
     const { px, py } = prCanvasPos(e);
     prPointer = { px, py };
+    // What a keyboard zoom aims at from here (see prZoomFocusPx): the cell this gesture is on,
+    // recorded once for every kind of gesture there is.
+    if (px >= PR_GUTTER) prState.focusCell = prCellFloat(px, m);
     if (py < PR_TOPBAR) { // loop ruler - drag either end, or the window itself (written on pointerup)
       if (px >= PR_GUTTER) {
         const edge = prLoopEdgeAt(px, m);
@@ -8224,6 +8290,7 @@ function initPianorollCanvas() {
     const { px, py } = prCanvasPos(e);
     prPointer = { px, py };
     if (!drag) { setCursor(prCursorFor(px, py, m, e.metaKey || e.ctrlKey)); return; }
+    if (px >= PR_GUTTER) prState.focusCell = prCellFloat(px, m); // a drag carries the focus with it
     if (drag.kind === 'loop') {
       // The window's ends - and its start when the whole thing is being slid - snap to the bar and
       // its halves unless shift is held (see prSnapCell).
@@ -21895,6 +21962,7 @@ const arLenInput = document.getElementById('arrangeLen');
 const arZoomInBtn = document.getElementById('arrangeZoomIn');
 const arZoomOutBtn = document.getElementById('arrangeZoomOut');
 const arToolBtn = document.getElementById('arrangeTool');
+const arAutoBtn = document.getElementById('arrangeAuto');
 const arCloseBtn = document.getElementById('arrangeClose');
 const arLaneNameInput = document.getElementById('arrangeLaneName');
 const arMenu = document.getElementById('arrangeMenu');
@@ -21912,8 +21980,20 @@ const AR_MIN_PX_PER_CYCLE = 6;
 const AR_MAX_PX_PER_CYCLE = 400;
 const AR_EDGE_PX = 8; // how close to a clip's (or region's) edge counts as grabbing it to resize
 const AR_SNAPS = [1, 2, 4, 8, 16]; // cells per bar the snap menu offers
+// How wide a snap cell has to be on screen for `auto` to divide down to it. The grid you snap to
+// is then always a grid you can see and hit: zoom in and the division gets finer, zoom out and it
+// coarsens back to whole bars. 10px puts the default zoom (AR_DEFAULT_PX_PER_CYCLE) on quarters,
+// which is where the painter has always sat - so auto starts out feeling like nothing changed.
+const AR_AUTO_SNAP_PX = 10;
 const AR_HISTORY_MAX = 200;
 const AR_EVAL_DEBOUNCE_MS = 120;
+// The automation strip under the lanes (auto("name") - see the automation lane section below).
+// One lane at a time, on the same bar axis as the clips: reading a curve against the sections it
+// shapes is the whole reason it lives here rather than in a window of its own.
+const AR_AUTO_H = 88; // px, when a lane is open
+const AR_AUTO_PAD = 9; // px of headroom inside it, so a breakpoint at either extreme is still grabbable
+const AR_AUTO_HIT = 7; // px: how close to a breakpoint counts as grabbing it
+const AR_AUTO_LIVE_MS = 40; // how often a drag re-files the definition with the engine
 
 let arState = null;
 let arRaf = null;
@@ -21928,6 +22008,35 @@ let arTool = localStorage.getItem('poptartArrangeTool') === 'select' ? 'select' 
 
 function findArrangeCallAt(code, idx) {
   return findNamedCallAt(code, idx, /\barrange\s*\(/g, 'arrange');
+}
+
+// `_auto` is not matched here: the `_` is a word character, so there is no boundary before `auto`.
+function findAutoCallAt(code, idx) {
+  return findNamedCallAt(code, idx, /\bauto\s*\(/g, 'auto');
+}
+
+/**
+ * Double-clicking the name in `auto("intro")`: open the painter (on the buffer's arrangement, or
+ * the one already up) with that lane in its strip. A lane's whole meaning is where it sits against
+ * the song, so there is nowhere else to draw it - and a buffer with no arrange() call is a buffer
+ * with no bars to draw it against, which is worth a line rather than a dead double-click.
+ */
+function openAutoFromIdCall(call, code) {
+  const range = idStringRange(call, code);
+  const id = range && (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0];
+  if (id == null) return false;
+  if (!arState) {
+    const arr = findArrangeCallAt(code, code.search(/\barrange\s*\(/));
+    if (!arr) {
+      logLine(`automation lanes are drawn in the arrangement - add an arrange() call, then double-click ${id} again`, true);
+      return false;
+    }
+    openArrangeEditor(arr);
+  }
+  if (!arState) return false;
+  arSelectAuto(id);
+  arCanvas.focus({ preventScroll: true });
+  return true;
 }
 
 /**
@@ -21998,6 +22107,11 @@ function writeArrangeCall(record = true) {
   }
   refoldAll(); // the rewrite cleared the data chip; put it (and everything else) back in one frame
   arRenderChips();
+  arScheduleEval();
+}
+
+/** One evaluation behind a burst of edits - a drag writes many times and should eval once. */
+function arScheduleEval() {
   clearTimeout(arEvalTimer);
   arEvalTimer = setTimeout(() => { arEvalTimer = null; evaluate(false); }, AR_EVAL_DEBOUNCE_MS);
 }
@@ -22005,8 +22119,12 @@ function writeArrangeCall(record = true) {
 // --- history ---
 
 const arRegionData = (r) => ({ name: r.name, start: r.start, end: r.end }); // without the drawn-geometry scratch fields
-const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, lanes: arState.lanes.slice(), loops: arState.loops.map(arRegionData) });
-const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.lanes.join(',')}|${JSON.stringify(s.loops.map(arRegionData))}`;
+// The automation strip's points ride in the snapshot too, so cmd+Z in the painter undoes a curve
+// the same way it undoes a clip - the panel owns the keystroke, and a gesture it can't undo would
+// read as the shortcut being broken. The lane's NAME is in the key as well: switching lanes is not
+// itself an edit, but two lanes' points are not comparable, so a snapshot has to say which one.
+const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, lanes: arState.lanes.slice(), loops: arState.loops.map(arRegionData), autoId: arState.autoId, autoPts: arState.autoPts.map((p) => ({ ...p })) });
+const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.lanes.join(',')}|${JSON.stringify(s.loops.map(arRegionData))}|${s.autoId}|${JSON.stringify(s.autoPts)}`;
 
 function arPushHistory() {
   const snap = arSnapshot();
@@ -22021,6 +22139,7 @@ function arPushHistory() {
 function arHistoryStep(delta) {
   const next = arState.histIdx + delta;
   if (next < 0 || next >= arState.history.length) return;
+  const prevAuto = arSnapKey(arSnapshot()).split('|').slice(-2).join('|');
   arState.histIdx = next;
   const snap = arState.history[next];
   arState.clips = snap.clips.map((c) => ({ ...c }));
@@ -22032,6 +22151,13 @@ function arHistoryStep(delta) {
   arState.sel.clear();
   arSyncControls();
   writeArrangeCall(false);
+  // The lane's own definition is a separate write, and only worth making when this step actually
+  // moved a curve: the strip may be showing a lane no step in the history ever touched.
+  if (snap.autoId === arState.autoId && `${snap.autoId}|${JSON.stringify(snap.autoPts)}` !== prevAuto) {
+    arState.autoPts = snap.autoPts.map((p) => ({ ...p }));
+    arRefreshAutoRange();
+    arWriteAuto(false);
+  }
   drawArrange();
 }
 
@@ -22056,15 +22182,27 @@ function openArrangeEditor(call) {
     pxPerCycle: AR_DEFAULT_PX_PER_CYCLE,
     scroll: 0, // leftmost visible bar
     scrollLane: 0, // topmost visible lane (fractional while scrolling) - lanes are unbounded
+    focus: null, // the bar the last gesture touched - what a button zoom moves toward (arZoomFocusX)
     brush: null, // the label the next paint lays down
     sel: new Set(), // selected clip objects (transient, never serialized)
     regionSpan: null, // the last marquee's snap-quantized [a, b) bars - half of the time selection (see arTimeRegion)
     selRegion: null, // the selected loop region (its name and × become live in the ruler)
+    // The automation strip: which lane it shows, that lane's breakpoints (edited in place, written
+    // back to its own _auto(...) definition - NOT to the arrange call), and the value range the
+    // strip is drawn against, held still while a drag is in the hand so the curve can't rescale
+    // under the finger. `autoOwn` is false for a library lane, which is shown but not edited.
+    autoId: null,
+    autoPts: [],
+    autoOwn: false,
+    autoOpen: false,
+    autoRange: [0, 1],
     drag: null,
     hover: null,
     history: [],
     histIdx: -1,
   };
+  arRestoreAuto(); // before the first snapshot, so the open lane's points are in the history
+  arReflectAuto();
   arPushHistory();
   arSyncControls();
   arRenderChips();
@@ -22153,7 +22291,9 @@ function arRenderChips() {
 
 function arSyncControls() {
   if (!arState) return;
-  if (![...arSnapSelect.options].some((o) => Number(o.value) === arState.snap)) {
+  // A pinned division the menu doesn't offer (hand-typed into the call) gets an entry of its own,
+  // so selecting something else doesn't silently throw it away.
+  if (arState.snap !== 'auto' && ![...arSnapSelect.options].some((o) => Number(o.value) === arState.snap)) {
     const o = document.createElement('option');
     o.value = String(arState.snap);
     o.textContent = `1/${arState.snap}`;
@@ -22161,6 +22301,22 @@ function arSyncControls() {
   }
   arSnapSelect.value = String(arState.snap);
   arLenInput.value = arState.len == null ? '' : String(arState.len);
+  arReflectSnap();
+}
+
+/**
+ * The auto entry says what it is currently worth - "auto · 1/8" - because the whole point of it is
+ * that the answer moves, and a menu that just said "auto" would leave you guessing what a drag is
+ * about to land on. Called from drawArrange, so it follows a zoom without anything else having to
+ * remember to ask; the text is only touched when it actually changes.
+ */
+function arReflectSnap() {
+  if (!arState) return;
+  const opt = [...arSnapSelect.options].find((o) => o.value === 'auto');
+  if (!opt) return;
+  const n = arSnapAuto();
+  const text = `auto · ${n === 1 ? 'bar' : `1/${n}`}`;
+  if (opt.textContent !== text) opt.textContent = text;
 }
 
 /** The loop length the painter shows and the server plays: explicit, or the last clip's end. */
@@ -22168,8 +22324,22 @@ const arLoopLen = () => arrangeMod.arrangementLength(arState.clips, { len: arSta
 
 // --- geometry ---
 
-const arCell = () => 1 / arState.snap; // one snap cell, in bars
-const arSnapTo = (bars) => Math.round(bars * arState.snap) / arState.snap;
+/**
+ * The division `auto` is worth at the current zoom: the finest one whose cells are still at least
+ * AR_AUTO_SNAP_PX wide. Whole bars when nothing finer fits, which is what the far end of a zoom-out
+ * should give you - at 6px a bar there is no sixteenth to aim at anyway.
+ */
+function arSnapAuto() {
+  let best = AR_SNAPS[0];
+  for (const n of AR_SNAPS) if (arState.pxPerCycle / n >= AR_AUTO_SNAP_PX) best = Math.max(best, n);
+  return best;
+}
+
+/** The division actually in force - the pinned one, or what auto makes of the zoom. */
+const arSnap = () => (arState.snap === 'auto' ? arSnapAuto() : arState.snap);
+
+const arCell = () => 1 / arSnap(); // one snap cell, in bars
+const arSnapTo = (bars) => { const n = arSnap(); return Math.round(bars * n) / n; };
 const arXOf = (bars) => AR_GUTTER + (bars - arState.scroll) * arState.pxPerCycle;
 const arBarsOf = (x) => arState.scroll + (x - AR_GUTTER) / arState.pxPerCycle;
 const arLaneOf = (y) => Math.floor((y - AR_LANES_TOP) / AR_ROW + arState.scrollLane);
@@ -22178,16 +22348,55 @@ const arGridBottom = () => AR_LANES_TOP + AR_VISIBLE_LANES * AR_ROW;
 const arInLoops = (y) => y < AR_LOOPS_H;
 const arInRuler = (y) => y >= AR_RULER_TOP && y < AR_LANES_TOP;
 
+// --- the automation strip's own geometry ---
+
+const arAutoShown = () => !!(arState?.autoOpen && arState.autoId);
+const arAutoTop = () => arGridBottom();
+const arAutoBottom = () => arAutoTop() + AR_AUTO_H;
+const arInAuto = (y) => arAutoShown() && y >= arAutoTop() && y < arAutoBottom();
+/** Where a value sits in the strip, and back. Both read the held range, never the live points. */
+function arAutoYOf(v) {
+  const [lo, hi] = arState.autoRange;
+  const span = hi - lo || 1;
+  return arAutoTop() + AR_AUTO_PAD + (1 - (v - lo) / span) * (AR_AUTO_H - 2 * AR_AUTO_PAD);
+}
+function arAutoValAt(y) {
+  const [lo, hi] = arState.autoRange;
+  const t = (y - arAutoTop() - AR_AUTO_PAD) / (AR_AUTO_H - 2 * AR_AUTO_PAD);
+  return lo + (1 - Math.min(1, Math.max(0, t))) * (hi - lo);
+}
+
+/**
+ * The value range the strip is drawn against: 0..1 - the range of a normalized plugin parameter,
+ * and what a lane is nearly always for - stretched to fit anything drawn outside it, since a lane
+ * feeding `.add()` deals in semitones and one feeding `.gain()` may go past unity. 0 and 1 are
+ * therefore always on the strip, which is what makes its three rules mean something: whatever else
+ * a lane is doing, you can see where "off" and "all the way" are. That also makes the range at
+ * least 1 wide, so the mapping can never divide by zero.
+ *
+ * Recomputed when a lane is picked and when an edit lands, never mid-drag: a curve that rescaled
+ * under the hand would move the very point being dragged.
+ */
+function arRefreshAutoRange() {
+  let lo = 0;
+  let hi = 1;
+  for (const p of arState.autoPts ?? []) { lo = Math.min(lo, p.y); hi = Math.max(hi, p.y); }
+  arState.autoRange = [lo, hi];
+}
+
 function arSizeCanvas() {
   if (!arState) return;
   const w = arCanvas.clientWidth;
   if (!w) return;
   const dpr = Math.min(3, window.devicePixelRatio || 1);
   arW = w;
-  arH = AR_LANES_TOP + AR_VISIBLE_LANES * AR_ROW + AR_PAD_BOTTOM;
+  arH = (arAutoShown() ? arAutoBottom() : arGridBottom()) + AR_PAD_BOTTOM;
   arCanvas._dpr = dpr;
   arCanvas.width = w * dpr;
   arCanvas.height = arH * dpr;
+  // The canvas's CSS height follows the drawn height rather than being pinned in the stylesheet,
+  // so opening the strip grows the panel instead of squashing the lanes into fewer pixels.
+  arCanvas.style.height = `${arH}px`;
 }
 
 function arPoint(e) {
@@ -22233,11 +22442,28 @@ function arVisibleBars() {
   return (arW - AR_GUTTER) / arState.pxPerCycle;
 }
 
-function arZoomAt(factor, x = AR_GUTTER) {
+function arZoomAt(factor, x = arZoomFocusX()) {
   const barsUnder = arBarsOf(x);
   arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, arState.pxPerCycle * factor));
   arState.scroll = Math.max(0, barsUnder - (x - AR_GUTTER) / arState.pxPerCycle);
   drawArrange();
+}
+
+/**
+ * What a zoom with no pointer behind it - the +/- buttons - moves TOWARDS: the last place a
+ * gesture touched, which is what you were working on and so what you want more of. The pointer's
+ * own position is no good for this: reaching for the button drags it off the canvas, and the last
+ * hover would be wherever it happened to leave, not the clip or breakpoint you were just holding.
+ *
+ * Only while that place is still on screen. Zooming has to stay a zoom - a jump to somewhere
+ * scrolled out of view is a navigation you didn't ask for - so an off-screen focus falls back to
+ * the middle of what you ARE looking at.
+ */
+function arZoomFocusX() {
+  const mid = AR_GUTTER + (arW - AR_GUTTER) / 2;
+  if (arState.focus == null) return mid;
+  const x = arXOf(arState.focus);
+  return x >= AR_GUTTER && x <= arW ? x : mid;
 }
 
 // --- drawing ---
@@ -22255,6 +22481,7 @@ function drawArrange() {
   ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.textBaseline = 'middle';
 
+  arReflectSnap(); // the auto division follows the zoom, and every zoom comes through here
   const loopLen = arLoopLen();
   const gridTop = AR_LANES_TOP;
   const gridBottom = arGridBottom();
@@ -22479,6 +22706,10 @@ function drawArrange() {
   }
   ctx.restore();
 
+  // the automation strip, on the same bar axis as the clips above it
+  const autoBottom = arAutoShown() ? arAutoBottom() : gridBottom;
+  if (arAutoShown()) drawArrangeAuto(ctx, col, W, text);
+
   // playhead
   arPlayheadOn = false;
   if (!transport.paused) {
@@ -22488,7 +22719,7 @@ function drawArrange() {
       ctx.strokeStyle = col('--accent');
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = 0.85;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, gridBottom); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, autoBottom); ctx.stroke();
       ctx.globalAlpha = 1;
       ctx.lineWidth = 1;
       arPlayheadOn = true;
@@ -22496,10 +22727,118 @@ function drawArrange() {
   }
 }
 
+/**
+ * The automation strip: the open lane's curve across the visible bars, its breakpoints as handles,
+ * and the range it is drawn against down the gutter. Sampled through sampleAutoPoints rather than
+ * drawn as straight segments, so a curved segment looks on screen like the value that will be read.
+ */
+function drawArrangeAuto(ctx, col, W, text) {
+  const top = arAutoTop();
+  const bottom = arAutoBottom();
+  const pts = arState.autoPts;
+
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, top, W, AR_AUTO_H);
+  ctx.strokeStyle = col('--border');
+  ctx.beginPath(); ctx.moveTo(0, top + 0.5); ctx.lineTo(W, top + 0.5); ctx.stroke();
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(AR_GUTTER, top, W - AR_GUTTER, AR_AUTO_H); ctx.clip();
+
+  // the bars, carried down from the grid above so the curve can be read against the sections
+  const cell = arCell();
+  const cellPx = cell * arState.pxPerCycle;
+  for (let k = Math.floor(arState.scroll / cell); k <= Math.ceil((arState.scroll + arVisibleBars()) / cell); k++) {
+    const bars = k * cell;
+    const x = Math.round(arXOf(bars)) + 0.5;
+    if (x < AR_GUTTER) continue;
+    const onBar = Math.abs(bars - Math.round(bars)) < 1e-9;
+    if (!onBar && cellPx < 5) continue;
+    ctx.strokeStyle = col('--border');
+    ctx.globalAlpha = onBar && Math.round(bars) % 4 === 0 ? 0.9 : onBar ? 0.55 : 0.25;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  // the range's ends and its middle, so a value can be read off the strip without a number on it
+  ctx.strokeStyle = col('--border');
+  for (const v of [0, 0.5, 1]) {
+    const [lo, hi] = arState.autoRange;
+    const y = Math.round(arAutoYOf(lo + (hi - lo) * v)) + 0.5;
+    ctx.globalAlpha = v === 0.5 ? 0.35 : 0.7;
+    ctx.beginPath(); ctx.moveTo(AR_GUTTER, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  if (pts.length && shapeMod) {
+    // The curve, sampled per pixel. A lane holds its end levels either side of its breakpoints
+    // (see sampleAutoPoints), so the line runs the full width - the flat stretches are the lane
+    // saying what it is doing there, not an absence of one.
+    ctx.strokeStyle = col('--accent');
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = arState.autoOwn ? 1 : 0.55; // a library lane is shown, not edited
+    ctx.beginPath();
+    for (let x = AR_GUTTER; x <= W; x++) {
+      const y = arAutoYOf(shapeMod.sampleAutoPoints(pts, arBarsOf(x)));
+      if (x === AR_GUTTER) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.lineWidth = 1;
+
+    const held = arState.drag?.kind === 'autoPoint' ? arState.drag.index : null;
+    for (let i = 0; i < pts.length; i++) {
+      const x = arXOf(pts[i].x);
+      if (x < AR_GUTTER - 6 || x > W + 6) continue;
+      const y = arAutoYOf(pts[i].y);
+      ctx.beginPath();
+      ctx.arc(x, y, i === held ? 5.5 : 4, 0, 2 * Math.PI);
+      ctx.fillStyle = col('--bg-panel');
+      ctx.fill();
+      ctx.strokeStyle = col('--accent');
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+
+  // gutter: the lane's name, and the value under the pointer while it is in the strip
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, top, AR_GUTTER, AR_AUTO_H);
+  ctx.strokeStyle = col('--border');
+  ctx.beginPath(); ctx.moveTo(AR_GUTTER - 0.5, top); ctx.lineTo(AR_GUTTER - 0.5, bottom); ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, top, AR_GUTTER - 4, AR_AUTO_H); ctx.clip();
+  ctx.fillStyle = text;
+  ctx.globalAlpha = arState.autoOwn ? 0.95 : 0.6;
+  ctx.fillText(arState.autoId ?? '', 8, top + AR_AUTO_H / 2 - 7);
+  ctx.globalAlpha = 0.6;
+  ctx.fillStyle = col('--text-dim');
+  const hoverV = arState.drag?.kind?.startsWith('auto') || (arState.hover && arInAuto(arState.hover.y))
+    ? arAutoValAt(arState.hover?.y ?? 0)
+    : null;
+  const [lo, hi] = arState.autoRange;
+  ctx.fillText(hoverV == null ? `${arFmtVal(lo)}..${arFmtVal(hi)}` : arFmtVal(hoverV), 8, top + AR_AUTO_H / 2 + 8);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+/** A lane value as few digits as say it - 0.25, 1, -12. */
+const arFmtVal = (v) => String(Math.round(v * 1000) / 1000);
+
 // --- gestures ---
 
 function arCursorFor(x, y) {
   if (!arState) return 'default';
+  // the automation strip: a breakpoint is grabbed, the curve is bent, empty space is drawn into
+  if (arInAuto(y)) {
+    if (x < AR_GUTTER) return 'pointer';
+    if (!arState.autoOwn) return 'default';
+    if (arAutoPointAt(x, y) != null) return 'grab';
+    const onCurve = shapeMod && Math.abs(arAutoYOf(shapeMod.sampleAutoPoints(arState.autoPts, arBarsOf(x))) - y) <= AR_AUTO_HIT;
+    return onCurve && arAutoSegmentAt(x) != null ? 'ns-resize' : CUR_PENCIL;
+  }
   // the ruler: the loop-end marker sets the length; everywhere else is the zoom/pan magnifier
   if (arInRuler(y)) return x < AR_GUTTER ? 'default' : arNearLoopEnd(x) ? 'col-resize' : CUR_ZOOM;
   if (arInLoops(y)) {
@@ -22509,7 +22848,8 @@ function arCursorFor(x, y) {
     if (rh?.part === 'right') return CUR_BRACKET_R;
     if (rh?.part === 'close') return 'pointer';
     if (rh) return 'grab';
-    return arTool === 'draw' ? CUR_PENCIL : 'default';
+    // empty strip: the pencil draws a loop, the arrow drags out a span to edit
+    return arTool === 'draw' ? CUR_PENCIL : 'crosshair';
   }
   if (x < AR_GUTTER) return 'default';
   const hit = arClipAt(x, y);
@@ -22557,6 +22897,21 @@ function arOpenMenu(clientX, clientY, hit, lane) {
     items.push(['rename lane', () => arRenameLane(lane)]);
     if (arState.clips.some((c) => c.lane === lane)) items.push(['clear lane', () => arDeleteClips(arState.clips.filter((c) => c.lane === lane))]);
   }
+  // The time ops, on whatever span is marked - the same set the keys reach, spelled out so the
+  // shortcuts are discoverable rather than folklore.
+  const span = arTimeRegion();
+  if (span) {
+    if (items.length) items.push('-');
+    const bars = arFmtBars(span[1] - span[0]);
+    items.push([`copy ${bars}`, () => arCopyTime(), 'cmd-C']);
+    items.push([`cut ${bars}`, () => arCopyTime({ cut: true }), 'cmd-X — clears the span, leaves the time']);
+    items.push(['duplicate after', () => arTimeDuplicate(), 'cmd-shift-D — opens time for the copy']);
+    items.push(['delete time', () => arTimeDelete(), 'cmd-shift-backspace — closes the span up']);
+  }
+  if (arClipboard?.clips.length) {
+    if (items.length && !span) items.push('-');
+    items.push(['paste here', () => arPasteTime(), 'cmd-V']);
+  }
   if (!items.length) return;
   openCtxMenu(arMenu, clientX, clientY, { items });
 }
@@ -22599,11 +22954,100 @@ function arTimeRegion() {
     a = Math.min(a, arState.regionSpan[0]);
     b = Math.max(b, arState.regionSpan[1]);
   }
+  // A selected loop region is a NAMED span of the song, which is the shortest way there is to say
+  // what a time op should act on: click `chorus`, copy, click where it goes, paste. Only the
+  // time ops read this - a plain delete still takes the marker off and leaves the music alone.
+  if (arState.selRegion) {
+    a = Math.min(a, arState.selRegion.start);
+    b = Math.max(b, arState.selRegion.end);
+  }
   return b > a ? [a, b] : null;
 }
 
 function arTimeHint() {
-  logLine('the time ops need a region - select clips or drag one out with the arrow tool first', true);
+  logLine('the time ops need a region - select clips, pick a loop, or drag a span out in the loops strip with the arrow tool', true);
+}
+
+// The painter's clipboard: a span of song, its clips cut to the span's edges and their starts
+// measured from it, so pasting is a translation and nothing carries an absolute position it got
+// from somewhere else. Module-level like the roll's, so it survives the panel closing and moving
+// a section between two songs is one copy and one paste.
+let arClipboard = null; // { width, clips: [{ label, lane, start, len }] }
+
+const arFmtBars = (n) => `${Math.round(n * 100) / 100} bar${Math.abs(n - 1) < 1e-9 ? '' : 's'}`;
+
+/** The clips inside [a, b), trimmed to it, with starts relative to `a`. */
+function arClipsIn(a, b) {
+  const out = [];
+  for (const c of arState.clips) {
+    const start = Math.max(a, c.start);
+    const end = Math.min(b, c.start + c.len);
+    if (end - start <= 1e-9) continue;
+    out.push({ label: c.label, lane: c.lane, start: start - a, len: end - start });
+  }
+  return out;
+}
+
+/**
+ * Copy the region, and with `cut` clear it afterwards. A clip crossing an edge of the region is
+ * TRIMMED rather than taken whole - copying bars 8..16 of a 32-bar clip has to give you eight bars,
+ * or the clipboard is describing something other than the span you drew.
+ */
+function arCopyTime({ cut = false } = {}) {
+  const region = arTimeRegion();
+  if (!region) return arTimeHint();
+  const [a, b] = region;
+  const clips = arClipsIn(a, b);
+  arClipboard = { width: b - a, clips };
+  logLine(`${cut ? 'cut' : 'copied'} ${clips.length} clip${clips.length === 1 ? '' : 's'} over ${arFmtBars(b - a)} - cmd-V pastes them`);
+  if (!cut) return;
+  arClearTime(a, b);
+  arSyncControls();
+  writeArrangeCall();
+  drawArrange();
+}
+
+/**
+ * Empty [a, b) without closing it: the span stays in the song as silence. A clip lying across the
+ * whole region is SPLIT in two, which is the only honest answer - it was sounding either side of
+ * what was taken. This is the counterpart to arRemoveTime, which takes the time itself away.
+ */
+function arClearTime(a, b) {
+  const kept = [];
+  for (const c of arState.clips) {
+    const end = c.start + c.len;
+    if (end <= a + 1e-9 || c.start >= b - 1e-9) { kept.push(c); continue; } // clear of the region
+    if (c.start < a - 1e-9) kept.push({ ...c, len: a - c.start }); // the head that survives
+    if (end > b + 1e-9) kept.push({ ...c, start: b, len: end - b }); // ...and the tail
+  }
+  arState.clips = kept;
+  arState.sel.clear();
+}
+
+/**
+ * Paste the clipboard at the region's start (or, with nothing selected, wherever the last gesture
+ * was - see arState.focus). It lands ON TOP of what is there, like the roll's paste and like every
+ * host's: opening time for it is what cmd+shift+D is, and laying the same block down the song
+ * repeatedly is what that op already does, walking as it goes. So this one stays still and stays
+ * predictable - cmd+V puts the block where you are pointing, once.
+ */
+function arPasteTime() {
+  if (!arState) return;
+  if (!arClipboard?.clips.length) {
+    logLine('nothing on the painter\'s clipboard yet - select a span and cmd-C first', true);
+    return;
+  }
+  const region = arTimeRegion();
+  const at = Math.max(0, arSnapTo(region ? region[0] : arState.focus ?? 0));
+  const made = arClipboard.clips.map((c) => ({ ...c, start: at + c.start }));
+  arState.clips.push(...made);
+  arState.sel = new Set(made);
+  arState.selRegion = null;
+  arState.regionSpan = null; // the pasted clips ARE the region now, so cmd+shift+D repeats them
+  arState.focus = at;
+  arSyncControls();
+  writeArrangeCall();
+  drawArrange();
 }
 
 // Open `w` bars of empty time at `at`: clips at or past it move right, loop-region edges and the
@@ -22651,6 +23095,10 @@ function arTimeDuplicate() {
   arState.clips.push(...copies);
   arState.sel = new Set(copies);
   arState.regionSpan = [b, b + w]; // the copy is the new region, so the gesture repeats down the song
+  // ...and the loop region that may have MARKED the span is let go, or it would still be part of
+  // the region on the next press - the insert stretched it over both copies - and the gesture
+  // would double its span every time instead of walking one block at a time.
+  arState.selRegion = null;
   arSyncControls();
   writeArrangeCall();
   drawArrange();
@@ -22661,6 +23109,7 @@ function arTimeDelete() {
   if (!region) return arTimeHint();
   arRemoveTime(region[0], region[1]);
   arState.regionSpan = null;
+  arState.selRegion = null; // the span it marked is gone; nothing is selected any more
   arSyncControls();
   writeArrangeCall();
   drawArrange();
@@ -22700,6 +23149,15 @@ function arCommitLaneName(save) {
   arLaneNameInput.classList.add('hidden');
   if (!arState || !edit) return;
   const name = arLaneNameInput.value.trim();
+  if (edit.kind === 'auto') {
+    // An automation lane is a DEFINITION, so the rename goes through the registry - it moves every
+    // auto("...") that names it too, which a lane name written into the arrange call could not.
+    if (!save || !name || name === edit.from) return;
+    autoDefs.rename(edit.from, name);
+    if (arState.autoId === name) localStorage.setItem('poptartArrangeAuto', name);
+    drawArrange();
+    return;
+  }
   if (edit.kind === 'lane') {
     if (!save) return;
     while (arState.lanes.length <= edit.lane) arState.lanes.push('');
@@ -22721,6 +23179,192 @@ function arCommitLaneName(save) {
   }
   writeArrangeCall();
   drawArrange();
+}
+
+// ---------------------------------------------------------------------------------------------
+// The automation lane - auto("name") drawn against the arrangement.
+//
+// A lane is a list of breakpoints on ABSOLUTE bars (see parseAutoPoints in shape.mjs), kept in its
+// own `_auto(...)` definition like a roll's notes or a shape's points - not in the arrange call,
+// because a lane belongs to no one arrangement: any number of patterns read it by name, and it
+// keeps its meaning in a buffer that never opens the painter at all.
+//
+// What the strip adds is only the VIEW: the same bar axis as the clips, so the filter opening over
+// bars 16-20 is drawn against the section it opens over. Everything else is the same gesture set as
+// the LFO's shape editor (drag a point, vertical-drag a segment to bend it, double-click to add or
+// delete), and the same live-push as the roll and slice panels - the definition is re-filed with
+// the engine through the drag, so the curve is heard while it is being drawn, and written to the
+// buffer once when the hand comes off.
+// ---------------------------------------------------------------------------------------------
+
+const arAutoDefOf = (id) => autoDefs.findDef(cm.getValue(), String(id));
+
+/** The breakpoints behind a name: this buffer's definition, else the prebake library's copy. */
+function arAutoPointsOf(id) {
+  const def = arAutoDefOf(id);
+  if (!def) {
+    const lib = prPrebakeAutos.find((p) => p.id === String(id));
+    return lib ? lib.points.map((p) => ({ ...p })) : null;
+  }
+  if (!shapeMod) return null;
+  const body = splitFirstArg(cm.getValue().slice(def.open + 1, def.close))[1].trim();
+  let str = null;
+  try {
+    str = JSON.parse(body); // what the editor writes, every time
+  } catch {
+    str = /^(["'`])((?:\\.|(?!\1)[\s\S])*?)\1$/.exec(body)?.[2] ?? null; // hand-typed, single-quoted
+  }
+  if (typeof str !== 'string') return null;
+  try {
+    return shapeMod.parseAutoPoints(str);
+  } catch {
+    return null; // half-typed breakpoints: show the lane empty rather than throwing at every frame
+  }
+}
+
+/** Shows `id` in the strip (null closes it), reading its points out of the buffer. */
+function arSelectAuto(id) {
+  if (!arState) return;
+  const name = id == null ? null : String(id);
+  arState.autoId = name;
+  arState.autoOwn = !!(name && arAutoDefOf(name));
+  arState.autoPts = name ? (arAutoPointsOf(name) ?? [{ x: 0, y: 0, c: 0 }]) : [];
+  arState.autoOpen = !!name;
+  if (name) localStorage.setItem('poptartArrangeAuto', name);
+  arRefreshAutoRange();
+  arSizeCanvas();
+  arReflectAuto();
+  drawArrange();
+}
+
+function arSetAutoOpen(on) {
+  if (!arState) return;
+  if (on && !arState.autoId) {
+    const first = autoDefs.allIds()[0];
+    if (!first) return arNewAuto();
+    return arSelectAuto(first.id);
+  }
+  arState.autoOpen = !!on;
+  arSizeCanvas();
+  arReflectAuto();
+  drawArrange();
+}
+
+/** The strip comes back up on whichever lane it was last showing, when that one still exists. */
+function arRestoreAuto() {
+  const want = localStorage.getItem('poptartArrangeAuto');
+  if (!want || !autoDefs.allIds().some((r) => r.id === want)) return;
+  arSelectAuto(want);
+}
+
+/** A new lane, named after the arrangement's own label where that reads as one. */
+function arNewAuto() {
+  const taken = new Set(autoDefs.allIds().map((r) => r.id));
+  autoDefs.create(freshDefId(prBlockLabelAt(arState.callStart), taken, 'auto'));
+}
+
+// Re-filed with the engine mid-drag, so a curve is heard as it is drawn: auto() looks its points up
+// on every sample (see the auto() builder), so re-registering the name is the whole job. Throttled -
+// a pointermove per frame would be a request per frame - and best-effort, since the write on
+// release is what actually counts.
+let arAutoLiveAt = 0;
+let arAutoLivePending = null;
+function arAutoLivePush() {
+  if (!arState?.autoId || !arState.autoOwn || !shapeMod) return;
+  const now = Date.now();
+  clearTimeout(arAutoLivePending);
+  if (now - arAutoLiveAt < AR_AUTO_LIVE_MS) {
+    arAutoLivePending = setTimeout(arAutoLivePush, AR_AUTO_LIVE_MS);
+    return;
+  }
+  arAutoLiveAt = now;
+  api('POST', '/api/liveAuto', { id: arState.autoId, points: shapeMod.serializeAutoPoints(arState.autoPts) })
+    .catch(() => { /* the live preview is a nicety - the write on release is what counts */ });
+}
+
+/** The drawn points into the definition, with an evaluation behind them. Called when a gesture lands. */
+function arWriteAuto(record = true) {
+  if (!arState?.autoId || !shapeMod) return;
+  if (!arState.autoOwn) {
+    // A library lane is shown as it is: editing it here would silently change every project that
+    // plays it. The ★ on its picker row is how it becomes this buffer's to edit.
+    logLine(`automation lane "${arState.autoId}" comes from your library - ★ it into this buffer to edit it`, true);
+    return;
+  }
+  const def = arAutoDefOf(arState.autoId);
+  if (!def) return;
+  if (record) arPushHistory();
+  arSuppressClose = true; // the panel's own write, in a definition rather than the arrange call
+  try {
+    cm.replaceRange(
+      `${def.idLiteral}, ${JSON.stringify(shapeMod.serializeAutoPoints(arState.autoPts))}`,
+      cm.posFromIndex(def.open + 1),
+      cm.posFromIndex(def.close),
+    );
+  } finally {
+    arSuppressClose = false;
+  }
+  refoldAll();
+  arScheduleEval();
+}
+
+/** The breakpoint under (x, y), nearest first. */
+function arAutoPointAt(x, y) {
+  let best = null;
+  for (let i = 0; i < arState.autoPts.length; i++) {
+    const p = arState.autoPts[i];
+    const d = Math.hypot(arXOf(p.x) - x, arAutoYOf(p.y) - y);
+    if (d <= AR_AUTO_HIT && (!best || d < best.d)) best = { index: i, d };
+  }
+  return best ? best.index : null;
+}
+
+/** Which segment x falls in - what a vertical drag bends (see the LFO shape editor). */
+function arAutoSegmentAt(x) {
+  const bars = arBarsOf(x);
+  const pts = arState.autoPts;
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (bars >= pts[i].x && bars <= pts[i + 1].x && pts[i + 1].x > pts[i].x) return i;
+  }
+  return null;
+}
+
+/** Adds a breakpoint at (bar, value), keeping the list in ascending bar order. Returns its index. */
+function arAutoAddPoint(bar, value) {
+  const at = arState.autoPts.findIndex((p) => p.x > bar);
+  const index = at === -1 ? arState.autoPts.length : at;
+  arState.autoPts.splice(index, 0, { x: bar, y: value, c: 0 });
+  return index;
+}
+
+function arOpenAutoMenu(clientX, clientY) {
+  const rows = autoDefs.allIds();
+  const items = [];
+  for (const row of rows) {
+    const mark = row.id === arState.autoId ? '● ' : '  ';
+    items.push([`${mark}${row.id}`, () => arSelectAuto(row.id), row.own ? `show ${row.id}` : `${row.id} — from your library`]);
+  }
+  if (rows.length) items.push('-');
+  items.push(['new lane', () => arNewAuto()]);
+  if (arState.autoId && arState.autoOwn) {
+    items.push(['rename lane', () => arRenameAuto()]);
+    items.push([`delete "${arState.autoId}"`, () => autoDefs.remove(arState.autoId)]);
+  }
+  items.push('-');
+  items.push(['hide lane', () => arSetAutoOpen(false)]);
+  openCtxMenu(arMenu, clientX, clientY, { items });
+}
+
+function arRenameAuto() {
+  if (!arState?.autoId) return;
+  arShowNameInput({
+    left: 4,
+    top: arAutoTop() + (AR_AUTO_H - 22) / 2,
+    width: AR_GUTTER - 8,
+    value: arState.autoId,
+    placeholder: 'lane name',
+    edit: { kind: 'auto', from: arState.autoId },
+  });
 }
 
 /** The loop region under x in the ruler, the shortest winning when they nest. */
@@ -22769,6 +23413,15 @@ function arReflectTool() {
   arToolBtn.title = `${arTool} (B)`;
 }
 
+/** The automation button says whether the strip is open, and on what. */
+function arReflectAuto() {
+  const on = arAutoShown();
+  arAutoBtn.classList.toggle('on', on);
+  arAutoBtn.title = on
+    ? `automation: ${arState.autoId} — right-click the lane to pick another`
+    : 'automation lane — draw auto("name") against the bars';
+}
+
 function arToggleTool() {
   arTool = arTool === 'draw' ? 'select' : 'draw';
   localStorage.setItem('poptartArrangeTool', arTool);
@@ -22777,6 +23430,10 @@ function arToggleTool() {
 }
 
 function initArrangeCanvas() {
+  const autoOpt = document.createElement('option');
+  autoOpt.value = 'auto';
+  autoOpt.textContent = 'auto'; // filled in with the division it is worth right now - see arReflectSnap
+  arSnapSelect.appendChild(autoOpt);
   for (const n of AR_SNAPS) {
     const o = document.createElement('option');
     o.value = String(n);
@@ -22789,11 +23446,24 @@ function initArrangeCanvas() {
     arCloseMenu();
     arCommitLaneName(true);
     const { x, y } = arPoint(e);
+    // Where the buttons' zoom will aim from now on (see arZoomFocusX) - every gesture starts here,
+    // whichever strip it lands in, so this is the one place it needs recording.
+    if (x >= AR_GUTTER) arState.focus = arBarsOf(x);
     const lane = arLaneOf(y);
     const hit = y >= AR_LANES_TOP && x >= AR_GUTTER ? arClipAt(x, y) : null;
     if (e.button === 2) {
       e.preventDefault();
-      // the ruler, loops strip and bottom slider have no menu: a selected region carries its own name and ×
+      // the automation strip's menu is the lane picker, wherever in the strip it is opened
+      if (arInAuto(y)) { arOpenAutoMenu(e.clientX, e.clientY); return; }
+      // The loops strip is where a span is marked, so it is also where the ops on one belong -
+      // right-clicking a loop picks it first, so the menu is about the span you aimed at.
+      if (arInLoops(y) && x >= AR_GUTTER) {
+        const region = arRegionAt(x);
+        if (region) { arState.selRegion = region; arState.sel.clear(); drawArrange(); }
+        arOpenMenu(e.clientX, e.clientY, null, null);
+        return;
+      }
+      // the ruler has no menu of its own: a selected region carries its own name and ×
       if (y < AR_LANES_TOP || y >= arGridBottom()) return;
       arOpenMenu(e.clientX, e.clientY, hit, x < AR_GUTTER ? lane : null);
       return;
@@ -22836,8 +23506,37 @@ function initArrangeCanvas() {
         const a = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
         arState.drag = { kind: 'region', a, b: a + arCell() };
       } else {
-        arState.selRegion = null; // the arrow on an empty stretch: nothing selected
+        // ...and the arrow on the same stretch drags out a TIME SELECTION: the span the copy /
+        // cut / paste / duplicate / delete ops act on. Same strip, same drag - the tool says
+        // whether you are marking a loop to play or an area to edit.
+        arState.selRegion = null;
+        arState.sel.clear();
+        arState.regionSpan = null;
+        arState.drag = { kind: 'timeSel', a: Math.max(0, arBarsOf(x)), x0: x };
       }
+      drawArrange();
+      return;
+    }
+    if (arInAuto(y)) {
+      // the gutter cell is the lane picker; the strip itself is the curve
+      if (x < AR_GUTTER) { arOpenAutoMenu(e.clientX, e.clientY); return; }
+      if (!arState.autoOwn) return; // a library lane is shown, not edited (see arWriteAuto)
+      const idx = arAutoPointAt(x, y);
+      if (idx != null) {
+        arState.drag = { kind: 'autoPoint', index: idx, moved: false };
+        return;
+      }
+      // A press on the curve with no point under it bends that segment (the LFO editor's gesture);
+      // anywhere else drops a new breakpoint and drags it, so one press is one edit either way.
+      const seg = arAutoSegmentAt(x);
+      const onCurve = shapeMod && Math.abs(arAutoYOf(shapeMod.sampleAutoPoints(arState.autoPts, arBarsOf(x))) - y) <= AR_AUTO_HIT;
+      if (seg != null && onCurve) {
+        arState.drag = { kind: 'autoCurve', index: seg, moved: false };
+        return;
+      }
+      const index = arAutoAddPoint(Math.max(0, arSnapTo(arBarsOf(x))), arAutoValAt(y));
+      arState.drag = { kind: 'autoPoint', index, moved: true }; // a new point is already an edit
+      arAutoLivePush();
       drawArrange();
       return;
     }
@@ -22883,13 +23582,49 @@ function initArrangeCanvas() {
   arCanvas.addEventListener('pointermove', (e) => {
     if (!arState) return;
     const { x, y } = arPoint(e);
+    const wasInAuto = arState.hover ? arInAuto(arState.hover.y) : false;
     arState.hover = { x, y };
     const d = arState.drag;
+    // A drag carries the focus with it: having dragged a clip out to bar 60, that is where you
+    // were working, not where the drag started.
+    if (d && x >= AR_GUTTER) arState.focus = arBarsOf(x);
     if (!d) {
       arRefreshCursor();
+      // the strip's gutter reads out the value under the pointer, so hovering it has to redraw
+      if (arAutoShown() && (wasInAuto || arInAuto(y))) drawArrange();
       return;
     }
-    if (d.kind === 'zoom') {
+    if (d.kind === 'timeSel') {
+      // Quantized OUT to whole cells, like the lanes' marquee: the span you meant is the cells you
+      // dragged across, not the fraction of one the pointer stopped on.
+      const cell = arCell();
+      const lo = Math.max(0, Math.min(d.a, arBarsOf(x)));
+      const hi = Math.max(0, Math.max(d.a, arBarsOf(x)));
+      const a = Math.floor(lo / cell) * cell;
+      const b = Math.ceil(hi / cell) * cell;
+      arState.regionSpan = b > a ? [a, b] : null;
+      d.moved = Math.abs(x - d.x0) >= 3;
+    } else if (d.kind === 'autoPoint') {
+      // Bars snap to the painter's own grid (a curve turns where a clip starts), the value doesn't -
+      // there is no grid worth having down the value axis. Neighbours cage it, so the list stays in
+      // ascending bar order however far the drag travels; the value is held inside the strip's
+      // range, which is why that range doesn't move mid-drag (see arRefreshAutoRange).
+      const pts = arState.autoPts;
+      const p = pts[d.index];
+      const [lo, hi] = arState.autoRange;
+      const bar = Math.max(0, arSnapTo(arBarsOf(x)));
+      p.x = Math.min(pts[d.index + 1]?.x ?? Infinity, Math.max(pts[d.index - 1]?.x ?? 0, bar));
+      p.y = Math.min(hi, Math.max(lo, arAutoValAt(y)));
+      d.moved = true;
+      arAutoLivePush();
+    } else if (d.kind === 'autoCurve') {
+      // vertical drag bends the segment, exactly as it does in the LFO's shape editor
+      const seg = arState.autoPts[d.index];
+      const rising = arState.autoPts[d.index + 1].y >= seg.y;
+      seg.c = Math.max(-12, Math.min(12, (seg.c ?? 0) + (e.movementY ?? 0) * 0.08 * (rising ? 1 : -1)));
+      d.moved = true;
+      arAutoLivePush();
+    } else if (d.kind === 'zoom') {
       arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, d.px0 * Math.exp((y - d.y0) * 0.015)));
       arState.scroll = Math.max(0, d.bar - (x - AR_GUTTER) / arState.pxPerCycle);
     } else if (d.kind === 'len') {
@@ -22972,6 +23707,23 @@ function initArrangeCanvas() {
     const d = arState.drag;
     arState.drag = null;
     try { arCanvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+    if (d.kind === 'timeSel') {
+      // A press that never travelled is a click, and a click in the strip clears the selection
+      // rather than marking a cell-wide sliver of it.
+      if (!d.moved) arState.regionSpan = null;
+      drawArrange();
+      arRefreshCursor();
+      return;
+    }
+    if (d.kind === 'autoPoint' || d.kind === 'autoCurve') {
+      if (d.moved) {
+        arWriteAuto();
+        arRefreshAutoRange(); // the drawn range follows the data again now the hand is off
+      }
+      drawArrange();
+      arRefreshCursor();
+      return;
+    }
     if (d.kind === 'marquee') {
       // The rectangle outlives the drag as half the TIME selection (see arTimeRegion): its span
       // quantized out to snap cells. A rectangle too thin to be deliberate marks nothing - that
@@ -23015,6 +23767,20 @@ function initArrangeCanvas() {
     if (!arState) return;
     const { x, y } = arPoint(e);
     const lane = arLaneOf(y);
+    if (arInAuto(y)) {
+      // double-click a breakpoint to take it out, as the slice editor's markers and the shape
+      // editor's points both go. (Adding one is a single click here - the strip has nothing else
+      // a plain click could mean.) The press that opened this already added one, so the pair
+      // reads as: click to place, click again to change your mind.
+      if (x < AR_GUTTER || !arState.autoOwn) return;
+      const idx = arAutoPointAt(x, y);
+      if (idx == null || arState.autoPts.length <= 1) return;
+      arState.autoPts.splice(idx, 1);
+      arWriteAuto();
+      arRefreshAutoRange();
+      drawArrange();
+      return;
+    }
     if (x < AR_GUTTER && lane >= 0 && y < arGridBottom()) arRenameLane(lane);
     else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_LANES_TOP && y < arGridBottom() && arState.brush && !arClipAt(x, y)) {
       // double-click empty in the arrow tool paints one cell, as the roll does
@@ -23070,9 +23836,12 @@ function initArrangeCanvas() {
     const mod = e.metaKey || e.ctrlKey;
     if (e.key === 'Escape') {
       e.preventDefault();
-      // like the roll: first let go of what is held, then the panel itself
-      if (arState.regionSpan || arState.sel.size) {
+      // like the roll: first let go of what is held, then the panel itself. A picked loop region
+      // counts as held now that it marks a span for the time ops - otherwise the band it lights
+      // would be undismissable.
+      if (arState.regionSpan || arState.sel.size || arState.selRegion) {
         arState.regionSpan = null;
+        arState.selRegion = null;
         arState.sel.clear();
         drawArrange();
       } else closeArrangeEditor();
@@ -23082,6 +23851,14 @@ function initArrangeCanvas() {
     // would otherwise take cmd+shift+backspace as a note-level delete
     if (mod && e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) { arTimeDelete(); e.preventDefault(); return; }
     if (mod && e.shiftKey && e.key.toLowerCase() === 'd') { arTimeDuplicate(); e.preventDefault(); return; }
+    // ...and the clipboard ops on that same span. cmd+X clears the area but leaves it in the song;
+    // closing the span up is cmd+shift+backspace, above.
+    if (mod && !e.shiftKey && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
+      arCopyTime({ cut: e.key.toLowerCase() === 'x' });
+      e.preventDefault();
+      return;
+    }
+    if (mod && !e.shiftKey && e.key.toLowerCase() === 'v') { arPasteTime(); e.preventDefault(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (arState.selRegion) arRemoveRegion(arState.selRegion);
       else arDeleteClips([...arState.sel]);
@@ -23176,7 +23953,7 @@ function initArrangeEditor() {
   initArrangeCanvas();
   arSnapSelect.addEventListener('change', () => {
     if (!arState) return;
-    arState.snap = Math.max(1, Math.round(Number(arSnapSelect.value) || 1));
+    arState.snap = arSnapSelect.value === 'auto' ? 'auto' : Math.max(1, Math.round(Number(arSnapSelect.value) || 1));
     writeArrangeCall();
     drawArrange();
   });
@@ -23192,6 +23969,13 @@ function initArrangeEditor() {
   arZoomOutBtn.addEventListener('click', () => arState && arZoomAt(0.8));
   arReflectTool();
   arToolBtn.addEventListener('click', arToggleTool);
+  // The strip's toggle. With no lane open it picks the last one (or makes the first), so the
+  // button is also how a buffer with no automation in it gets some.
+  arAutoBtn.addEventListener('click', () => {
+    if (!arState) return;
+    arSetAutoOpen(!arAutoShown());
+    arCanvas.focus({ preventScroll: true });
+  });
   arCloseBtn.addEventListener('click', closeArrangeEditor);
   window.addEventListener('resize', () => { if (arState) { arSizeCanvas(); drawArrange(); } });
   // The call the panel is editing can be deleted, or typed over, from the buffer side: the panel

@@ -79,7 +79,14 @@ export function parseAutoPoints(str) {
     .split(/\s+/)
     .filter(Boolean)
     .map((tok) => {
-      const [x, y, c = 0] = tok.split(',').map(Number);
+      // The fields are checked for being non-empty before they are converted, because Number("")
+      // is 0: a half-typed "16," would otherwise read as a breakpoint pulling the lane down to
+      // zero, which on a wet lane is the effect vanishing while you are still typing the value.
+      const parts = tok.split(',');
+      if (parts.length < 2 || parts.length > 3 || parts.some((p) => !p.trim())) {
+        throw new Error(`[auto] bad breakpoint "${tok}" (want "bar,value" or "bar,value,c")`);
+      }
+      const [x, y, c = 0] = parts.map(Number);
       if (![x, y, c].every(Number.isFinite)) throw new Error(`[auto] bad breakpoint "${tok}" (want "bar,value" or "bar,value,c")`);
       return { x, y, c };
     });

@@ -305,9 +305,20 @@ buildTrackDef = { |key|
                 // wrapping is how VSTPlugin.ar takes multi-bus input.
                 var scIn = In.ar(scBuses[i - 1], 2);
                 var wet = VSTPlugin.ar(Ref([[sig[0], sig[1]], [scIn[0], scIn[1]]]), 2, id: ("slot" ++ i).asSymbol);
-                // An empty VSTPlugin slot outputs silence, not pass-through - so each fx slot
-                // gets a bypass switch, flipped on only once a plugin actually loads into it.
-                sig = Select.ar(("active" ++ i).asSymbol.kr(0), [sig, wet]);
+                // How much of this slot reaches the rest of the chain. Two things multiplied:
+                // `active`, the bypass flipped on only once a plugin actually loads (an empty
+                // VSTPlugin slot outputs silence, not pass-through, so an unloaded slot must read
+                // as fully dry whatever else says), and `wet`, the user's own mix control
+                // (Sig#wet, a channel control named wet1..wet7 - see CHANNEL_DEFAULTS).
+                //
+                // Linear rather than equal-power: a wet knob's endpoints have to be EXACTLY the
+                // dry signal and EXACTLY the plugin's, which is what makes wet 0 a true bypass
+                // and what an equal-power law - 3dB up in the middle, and neither signal at the
+                // ends - would spoil. Lagged like the other streamed controls (the Tier-1 poll
+                // steps at ~30ms), which also turns a plugin load/close into a short fade
+                // instead of the click Select.ar gave it.
+                var mix = (("active" ++ i).asSymbol.kr(0) * ("wet" ++ i).asSymbol.kr(1)).lag(0.02).clip(0, 1);
+                sig = (sig * (1 - mix)) + (wet * mix);
             };
         };
         // Channel strip (post-chain): width, then postgain + equal-power pan, addressed from Node
@@ -430,9 +441,13 @@ buildTrackDef = { |key|
 // unity gain in and out, center pan, first output pair - and for the DJ stage, unity
 // trim/bands/fader/deck (djf's neutral is 0, the filter's center detent; djres's is 0, no resonance).
 channelDefault = { |name|
+    // wet1..wet7 (Sig#wet, the per-fx-slot dry/wet) belong with the unity controls: neutral for a
+    // wet control is the plugin's own output, and a modulator cleared off one must leave the
+    // effect sounding rather than silently bypassing it.
     if ((name == "gain") or: { name == "postgain" } or: { name == "out" } or: { name == "dry" } or: { name == "width" }
         or: { name == "trim" } or: { name == "fader" } or: { name == "deck" }
-        or: { name == "eqlo" } or: { name == "eqmid" } or: { name == "eqhi" }) { 1 } { 0 };
+        or: { name == "eqlo" } or: { name == "eqmid" } or: { name == "eqhi" }
+        or: { name.asString.beginsWith("wet") }) { 1 } { 0 };
 };
 
 // Parked sidechain args for a freshly created track synth: every fx-slot aux input reads the

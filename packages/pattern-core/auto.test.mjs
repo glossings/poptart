@@ -42,6 +42,15 @@ test('parseAutoPoints rejects descending bars and malformed breakpoints', () => 
   assert.throws(() => parseAutoPoints(''), /at least 1/);
 });
 
+test('a half-typed breakpoint is refused, not read as a zero', () => {
+  // Number("") is 0, so "16," would otherwise be a silent breakpoint pulling the lane to the
+  // floor - on a wet lane, the effect disappearing while the value is still being typed.
+  assert.throws(() => parseAutoPoints('0,0 16,'), /bad breakpoint/);
+  assert.throws(() => parseAutoPoints('0,0 ,1'), /bad breakpoint/);
+  assert.throws(() => parseAutoPoints('0,0 16,1,'), /bad breakpoint/);
+  assert.throws(() => parseAutoPoints('0,0 16,1,2,3'), /bad breakpoint/);
+});
+
 test('a single breakpoint is a constant', () => {
   assert.equal(sampleAutoPoints(parseAutoPoints('4,0.7'), 0), 0.7);
   assert.equal(sampleAutoPoints(parseAutoPoints('4,0.7'), 100), 0.7);

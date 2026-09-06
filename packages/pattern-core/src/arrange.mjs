@@ -28,7 +28,11 @@
 //           armed region. Reaching the song's end and wrapping to the top re-arms every region.
 //           See ArrangeClock below for the timing.
 
-export const ARRANGE_DEFAULT_SNAP = 1;
+// The paint grid is editor metadata - nothing about playback reads it - and it defaults to
+// 'auto': the painter picks a division from how far it is zoomed in, so the grid you snap to is
+// always the grid you can see (see arSnapAuto in the web app). A number here pins it instead, and
+// is written into the call only when it has been pinned, so the default stays absent.
+export const ARRANGE_DEFAULT_SNAP = 'auto';
 export const ARRANGE_MIN_LANES = 4;
 const EPS = 1e-9;
 
@@ -79,7 +83,10 @@ export function looksLikeArrangeString(str) {
 /** The options as the builder and the editor both read them, defaults filled in. */
 export function normalizeArrangeOpts(opts = {}) {
   const o = opts && typeof opts === 'object' ? opts : {};
-  const snap = Math.max(1, Math.round(num(o.snap) ?? ARRANGE_DEFAULT_SNAP));
+  // 'auto' (or nothing, or anything unreadable) leaves the division to the painter's zoom; a
+  // number pins it to that many cells per bar.
+  const snapNum = num(o.snap);
+  const snap = snapNum == null ? ARRANGE_DEFAULT_SNAP : Math.max(1, Math.round(snapNum));
   const rawLen = num(o.len);
   const len = rawLen != null && rawLen > 0 ? rawLen : null;
   const lanes = Array.isArray(o.lanes) ? o.lanes.map((n) => (n == null ? '' : String(n))) : [];

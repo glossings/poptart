@@ -40,9 +40,19 @@ test('looksLikeArrangeString tells data from anything else', () => {
 });
 
 test('options: snap/len/lanes with defaults', () => {
-  assert.deepEqual(normalizeArrangeOpts(), { snap: 1, len: null, lanes: [], loops: [] });
+  assert.deepEqual(normalizeArrangeOpts(), { snap: 'auto', len: null, lanes: [], loops: [] });
   assert.deepEqual(normalizeArrangeOpts({ snap: 4, len: 16, lanes: ['drums', null, 'bass'] }), { snap: 4, len: 16, lanes: ['drums', '', 'bass'], loops: [] });
   assert.equal(normalizeArrangeOpts({ len: 0 }).len, null);
+});
+
+test('the paint grid defaults to auto - the painter divides it by how far it is zoomed in', () => {
+  assert.equal(normalizeArrangeOpts({ snap: 'auto' }).snap, 'auto');
+  assert.equal(normalizeArrangeOpts({ snap: 'nonsense' }).snap, 'auto', 'unreadable reads as auto, not as 1');
+  // A pinned division still pins: a number is a number however it was written.
+  assert.equal(normalizeArrangeOpts({ snap: 8 }).snap, 8);
+  assert.equal(normalizeArrangeOpts({ snap: '8' }).snap, 8);
+  assert.equal(normalizeArrangeOpts({ snap: 0 }).snap, 1, 'and one cell a bar is as coarse as it gets');
+  assert.equal(normalizeArrangeOpts({ snap: 3.4 }).snap, 3);
 });
 
 test('length: explicit, else the last clip end rounded up, never below one', () => {

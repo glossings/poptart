@@ -250,6 +250,12 @@ const API_DOCS = {
     eg: '.bus("reverb", 0.3)',
   },
   dry: { kind: 'method', sig: 'dry(value)', desc: 'How much dry signal still reaches the track\'s own output, 1 by default. .dry(0) leaves only the bus sends.', eg: '.dry(0)' },
+  wet: {
+    kind: 'method',
+    sig: 'wet(value)',
+    desc: 'Dry/wet for the effect before it in the chain - 1 (default) is the plugin, 0 is a true bypass. Takes any signal, so .wet(auto("intro")) is how an effect comes and goes over a song without being spawned mid-set. Linear crossfade; blending a latency-inducing plugin (linear-phase EQ, lookahead limiter) combs against the dry path.',
+    eg: '.fx("ValhallaRoom").wet(auto("breakdown"))',
+  },
   bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Bus send with the dry killed - exactly .bus(name, amount).dry(0).', eg: '.bsend("reverb")' },
   vel: {
     kind: 'both',
