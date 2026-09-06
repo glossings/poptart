@@ -13,11 +13,11 @@ import {
   parseNoteValue, noteToMidi, degreeToMidi, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
-import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape } from './shape.mjs';
+import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
-import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices } from './rolls.mjs';
+import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
@@ -4390,6 +4390,66 @@ export function _shape(id, str = '') {
   const sig = lfo(serializeShapePoints(points));
   sig.isDef = key; // see _roll(): a definitions block must not become an extra voice
   return sig;
+}
+
+/**
+ * `_auto("intro", "0,0 16,0 20,1,-2 32,0.3")` - files an AUTOMATION LANE under a name: breakpoints
+ * on absolute bars (see shape.mjs parseAutoPoints), one pass over the whole arrangement where a
+ * shape repeats every period. `auto("intro")` reads it back as an ordinary signal, so one lane can
+ * drive any number of controls on any number of tracks. Outside its breakpoints the lane holds its
+ * nearest end.
+ */
+export function _auto(id, str = '') {
+  return defineAuto(id, str, false);
+}
+
+/** The same definition without the "defined twice" warning - a lane drag mid-gesture (see liveRoll). */
+export function liveAuto(id, str = '') {
+  return defineAuto(id, str, true);
+}
+
+function defineAuto(id, str, quiet) {
+  if (typeof id !== 'number' && typeof id !== 'string') {
+    throw new Error('[signal] an automation definition takes a number or a name as its id');
+  }
+  const key = String(id).trim();
+  if (!key || /\s/.test(key) || /[<>[\]{}(),*!?~@]/.test(key)) {
+    throw new Error(`[signal] an automation id has to be one plain word - ${JSON.stringify(String(id))} can't be read back by auto("...")`);
+  }
+  // Parsed here rather than at use time so a typo in the breakpoints is reported against the line
+  // that has them, not against every auto() that happens to name it.
+  const points = parseAutoPoints(String(str).trim() || '0,0');
+  const replaced = registerAuto(key, points);
+  if (replaced && !quiet) warnUser(replaced);
+  const sig = auto(key);
+  sig.isDef = key; // see _roll(): a definitions block must not become an extra voice
+  return sig;
+}
+
+/**
+ * `auto("intro")` - a named automation lane as a signal of ABSOLUTE song position: bar 20 reads
+ * bar 20 of the lane wherever the pattern reading it sits, which is what makes one lane a single
+ * source of truth for a whole arrangement. An ordinary signal like any other - scale it, and hand
+ * it to any control: .param("Freq", auto("intro")), .gain(auto("fade").mul(0.8)). In a .param or a
+ * mixer channel it is polled continuously (see Scheduler#_pollGenericParams), so the curve is
+ * heard between notes too. Resolution is LAZY like pianoroll's - the registry is read every
+ * sample - so the definition may sit anywhere in the buffer, and a lane being redrawn is heard
+ * without a re-eval.
+ */
+export function auto(id) {
+  const key = String(id).trim();
+  let warned = false; // one line per unknown name, not one per poll tick
+  return new Sig((t, cps, pos) => {
+    const points = lookupAuto(key);
+    if (!points) {
+      if (!warned) {
+        warned = true;
+        warnUser(`[signal] auto(): no automation called ${JSON.stringify(key)} - it holds nothing until an _auto(${JSON.stringify(id)}, ...) defines it.`);
+      }
+      return null;
+    }
+    return sampleAutoPoints(points, pos ?? t * cps);
+  });
 }
 
 /**

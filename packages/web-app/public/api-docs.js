@@ -149,6 +149,12 @@ const API_DOCS = {
     desc: 'An ADSR retriggered by the track\'s own notes - times in seconds, sustain 0..1, curve < 0 scoops.',
     eg: 'gain(env({ attack: 0.01, release: 0.3 }))',
   },
+  auto: {
+    kind: 'builder',
+    sig: 'auto(name)',
+    desc: 'A named automation lane on ABSOLUTE song time - breakpoints per bar (_auto("intro", "0,0 16,0 20,1,-2 32,0.3")), one pass over the arrangement where an lfo() repeats. Holds its nearest end outside the breakpoints. An ordinary signal: hand it to any control, scale it, share one lane across tracks.',
+    eg: 'param("Filter 1 Freq", auto("intro"))',
+  },
 
   // ----------------------------------------------------------------- pattern-of-patterns
   cat: {

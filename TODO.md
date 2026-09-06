@@ -5,6 +5,32 @@ no completion notes.
 
 ---
 
+[ ] Automation lane editor — the `auto("name")`/`_auto("name", "0,0 16,0 20,1,-2 32,0.3")` signal
+    now exists (breakpoints on absolute bars, SC curve per segment, holds its ends; polled
+    continuously in .param and mixer channels). What remains is the GUI: a lane in the arrange
+    view to draw/drag breakpoints (same interaction family as the lfo shape editor), writing the
+    `_auto(...)` definition through `liveAuto()` mid-drag exactly as the piano roll panel uses
+    `liveRoll()`. A defs registry entry on the client (`makeDefRegistry({ defCall: '_auto',
+    useCall: 'auto', ... })`) gets folding/pickers for free.
+
+[ ] Per-clip roll binding in arrange — a clip can optionally name WHICH roll it plays (default:
+    the track's own), so fills and variants are painted rather than patterned: split a region,
+    double-click to fork the roll under an auto-generated name and rebind just that clip; paint
+    the same fill roll at other phrase ends, or fork it again into an alternate. Pairs with
+    making the roll<->track association unique plus a GUI "copy from / link to another track"
+    so cross-track reuse survives; would also let the inline vs named-roll build paths converge.
+    `pianoroll("<a!7 b>")` head patterning stays for loop-level cycling.
+
+[ ] LUFS metering in the ctrl+g console — short-term and integrated, alongside the existing
+    stereo/spectral views.
+
+[ ] Patternable pitch bend — `.bend(sig)` sending MIDI pitch bend to a track's synth. The SC
+    message path already exists (the live-MIDI pass-through calls ctl.midi.bend); the new piece
+    is a poller bridging a modulator signal/bus to bend messages at ~50-100 Hz, plus the engine
+    method, MappedEngine forwarding, re-eval teardown, and per-plugin bend-range config (VSTs
+    default to ±2 semitones). ~a day. Until then patch portamento + in-patch pitch envelopes
+    cover glides, and .param on a pitch parameter covers performed bends.
+
 [ ] Keylock on Linux/Windows: the decks' keylock is the PoptartPitchShift UGen (Rubber Band Live
     Shifter, packages/osc-engine/native/rubberband/) and only the macOS universal .scx is built
     and committed; elsewhere extensions.js finds no prebuilt, logs it at boot, and the def falls

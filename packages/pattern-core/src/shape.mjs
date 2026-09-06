@@ -68,6 +68,54 @@ export function sampleShape(points, phase) {
   return points[points.length - 1].y;
 }
 
+// Automation breakpoints - the same `x,y[,c]` text as a shape, but x is an ABSOLUTE bar (cycle)
+// rather than a phase: "0,0 16,0 20,1,-2 32,0.3" holds 0 until bar 16, curves up to 1 by bar 20,
+// falls to 0.3 by bar 32. One pass over the arrangement, no period. Neither axis is clamped - x
+// runs as long as the song, and y is the literal value handed to whatever control reads it (a
+// normalized param wants 0..1, but auto() is an ordinary signal and can be scaled like one).
+export function parseAutoPoints(str) {
+  const points = String(str)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((tok) => {
+      const [x, y, c = 0] = tok.split(',').map(Number);
+      if (![x, y, c].every(Number.isFinite)) throw new Error(`[auto] bad breakpoint "${tok}" (want "bar,value" or "bar,value,c")`);
+      return { x, y, c };
+    });
+  if (points.length < 1) throw new Error('[auto] an automation needs at least 1 breakpoint');
+  for (let i = 1; i < points.length; i++) {
+    if (points[i].x < points[i - 1].x) throw new Error('[auto] breakpoints must be in ascending bar order');
+  }
+  return points;
+}
+
+export function serializeAutoPoints(points) {
+  // Finer rounding than a shape's: x is in bars, where 3 decimals can't write a 16th (0.0625).
+  const fmt = (v) => String(Math.round(v * 1e6) / 1e6);
+  return points.map((p) => (p.c ? `${fmt(p.x)},${fmt(p.y)},${fmt(p.c)}` : `${fmt(p.x)},${fmt(p.y)}`)).join(' ');
+}
+
+/**
+ * Value of an automation at an absolute bar. Outside the breakpoints it HOLDS the nearest end -
+ * the lane before its first point sits at that point's level, and the last level stands for the
+ * rest of the song (an automation is a setting over time, and a setting keeps its value until
+ * something moves it). Duplicate-x points read as a vertical step, like a shape's.
+ */
+export function sampleAutoPoints(points, bar) {
+  if (bar <= points[0].x) return points[0].y;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (bar >= a.x && bar < b.x) {
+      const span = b.x - a.x;
+      if (span <= 0) continue; // zero-width step: fall through to the segment after it
+      return curveInterp(a.y, b.y, (bar - a.x) / span, a.c ?? 0);
+    }
+  }
+  return points[points.length - 1].y;
+}
+
 export const SHAPE_PRESETS = {
   triangle: '0,0 0.5,1 1,0',
   ramp: '0,0 1,1',

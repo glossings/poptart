@@ -132,6 +132,7 @@ const stores = {
   preset: makeStore('preset'),
   pack: makeStore('sample pack'),
   slices: makeStore('slice set'),
+  auto: makeStore('automation'),
 };
 
 /** Both stores, for the host passes that treat them alike (clearing per eval, listing). */
@@ -260,3 +261,10 @@ export const packIds = () => stores.pack.ids();
 export const registerSlices = (id, set) => stores.slices.register(id, set);
 export const lookupSlices = (id) => stores.slices.lookup(id);
 export const sliceSetIds = () => stores.slices.ids();
+
+// A named automation's value is its breakpoint list ({x: bar, y: value, c: curve}, ascending x -
+// see shape.mjs parseAutoPoints). Plain data like a shape's points: `auto("intro")` samples the
+// list by name at read time, so a lane drag re-registering the id is heard without a re-eval.
+export const registerAuto = (id, points) => stores.auto.register(id, points);
+export const lookupAuto = (id) => stores.auto.lookup(id);
+export const autoIds = () => stores.auto.ids();

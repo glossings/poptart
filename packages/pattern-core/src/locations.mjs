@@ -65,6 +65,10 @@ const NAME_ARG_CALLS = new Set([
   // bare spellings stay listed so a buffer written before the rename still transpiles correctly.
   '_roll', 'roll',
   '_shape', 'shape',
+  // ...and the automation lane: auto("intro") reads one by name (never a pattern of names - a
+  // lane is absolute song time, so alternating lanes per cycle would mean nothing), and _auto's
+  // later argument is drawn breakpoint data.
+  '_auto', 'auto',
   // ...and the preset definition: an id, the plugin the state came from, then the state blob.
   // `.preset("<a b>")` itself is deliberately NOT here - its argument is always a pattern of
   // names, so it wants highlighting exactly as pianoroll("<a b>") does.
@@ -82,7 +86,7 @@ const NAME_ARG_CALLS = new Set([
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'arrange', '_roll', 'roll', '_shape', 'shape', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'input']);
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', 'arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'input']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain
