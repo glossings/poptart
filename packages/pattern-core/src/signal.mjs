@@ -1058,17 +1058,31 @@ export class Sig {
    *
    * Note channels work identically - `"0:2".as("n:clip").mul(clip(2))` rings each note for four
    * steps instead of two - which is the whole point of them being ordinary keys.
+   *
+   * ...but a note channel's value doesn't only live on the channel. It can sit on the EVENT itself -
+   * a pianoroll's drawn velocities, a chord token's `57:0.8` - where a channel can't reach it,
+   * because two events at one onset would have to share one value and a splayed chord is exactly
+   * what that isn't. So the composition happens per EVENT (composeOnSteps), against whatever is in
+   * force there: the event's own value, else the channel, else the resting default. Going through
+   * the setter instead would clear the drawn values off first (crossMerge's replace-the-channel
+   * rule) and play the whole roll at the operand's own value.
    */
   _ctlBinop(ctl, other, fn) {
     const note = NOTE_CONTROLS[ctl];
     if (note) {
       const otherSig = bareSig(toSignal(other));
       const current = this.noteChannels[note.key];
+      // The channel half of the composition: what an event with no value of its own reads, and what
+      // survives onto a later pitch swap (see applyNoteChannels).
       const combined =
         current instanceof Sig
           ? bareSig(current)._binop(ctl, otherSig, fn, false)
           : otherSig.mapValue((v) => fn(note.unset, Number(v)));
-      return this[ctl](combined);
+      // With no events at all (a bare control signal) there is nowhere for a per-event value to be,
+      // and the setter is both correct and the thing that reports .clip()/.swing()'s own errors.
+      if (!this.stepsForCycle) return this[ctl](combined);
+      const stepsForCycle = composeOnSteps(this.stepsForCycle, otherSig, note.key, note.unset, current, fn);
+      return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, [note.key]: combined }, stepsForCycle }));
     }
     const spec = SAMPLER_CONTROLS[ctl];
     if (!this.sampler) {
@@ -1180,7 +1194,7 @@ export class Sig {
     const condSig = toSignal(cond);
     const transformed = fn(this);
     if (!(transformed instanceof Sig)) throw new Error('[signal] .when() callback must return a pattern');
-    const truthy = (v) => v != null && Number(v) !== 0;
+    const truthy = gateOn; // a condition is a gate, read as .mask()/.struct()/.hold() read one
 
     const sample = (t, cps, pos) => (truthy(condSig.sample(t, cps, pos)) ? transformed : this).sample(t, cps, pos);
 
@@ -1288,7 +1302,7 @@ export class Sig {
    * the universal "freeze this continuous thing into strudel-cycle updates" operator.
    */
   hold(trig) {
-    const truthy = (v) => v != null && Number(v) !== 0;
+    const truthy = gateOn; // a trigger pattern is a gate, like .mask()/.struct()'s
     let trigSig;
     if (trig === undefined) {
       // Naked: trigger on this signal's own onsets (every non-rest step), or once per cycle when it
@@ -1550,6 +1564,93 @@ export class Sig {
         const p = Number(probSig.sample(cycle + (s.start + s.end) / 2, 1));
         return Number.isFinite(p) && rngAtPos(cycle, s.start, hashSeed) < p ? { ...s, value: null } : s;
       });
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Gates this pattern with a boolean one WITHOUT touching its rhythm (Strudel's `mask`): an event
+   * whose onset falls where the mask is off becomes a rest, and one still ringing when the mask
+   * closes stops there. Nothing retriggers and nothing is subdivided - which is the whole
+   * difference from gating with a control, since `.vel("1 1 ~ 1")` cuts the events it covers into
+   * its own steps and re-strikes each one.
+   *
+   *   hats: pianoroll("hats").synth("XO").mask("<1@7 0>")   // drops out every eighth bar
+   *   s("hh*16").mask("1 0 1 1")                            // hats in three quarters of the bar
+   *   s("hh*16").mask(rand().gte(0.5).seg(4))               // ...or wherever a signal says so
+   *
+   * Off is a rest (`~`), a `0`, or the word `f`/`false`; anything else that sounds is on, so the
+   * mask can be another pattern's rhythm - `.mask(s("bd ~ ~ bd"))`. A masked-out event stays in the
+   * grid as a rest rather than being dropped, so the highlighter simply has nothing to light there
+   * and the pattern's own structure (a `<a b>` alternating through the bars it is gated out of) is
+   * untouched - the same rule .degrade() and the arrangement painter follow.
+   */
+  mask(bool) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .mask() needs a step pattern, e.g. s("hh*8").mask("1 0 1 1")');
+    }
+    const maskSig = toSignal(bool);
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => {
+      // A mask with no honest grid (a bare 0/1, an LFO, a within-cycle signal like irand()) is read
+      // at each onset instead, exactly as a control with no grid is.
+      const on = mixableSteps(maskSig, cycle)?.filter((m) => gateOn(m.value)) ?? null;
+      return base(cycle).map((s) => {
+        if (s.value == null) return s;
+        if (!on) return gateOn(readEvent(maskSig, cycle + s.start).value) ? s : { ...s, value: null };
+        const cover = on.find((m) => s.start >= m.start - MIX_EPS && s.start < m.end - MIX_EPS);
+        if (!cover) return { ...s, value: null };
+        // Still sounding when the mask closes: the note ends there. Shortening a tail adds no
+        // trigger, which is the one thing a mask must not do - it never picks the note back up at
+        // the next opening.
+        return cover.end < s.end - MIX_EPS ? { ...s, end: cover.end } : s;
+      });
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Takes the RHYTHM from a boolean pattern and the values from this one (Strudel's `struct`): every
+   * `on` step fires a fresh event carrying whatever this pattern is worth at that instant, and every
+   * off step is a silence. The mirror image of `.mask()`, which keeps this pattern's own rhythm and
+   * only gates it.
+   *
+   *   note("c3 g3").struct("1 ~ 1 1")        // those two notes, drummed out on that rhythm
+   *   s("breaks:19").fit().struct("t*8")     // the break re-struck eight times a bar
+   *   pianoroll("chords").struct("1 ~ 1 ~")  // the roll's chords, on a new rhythm
+   *
+   * The whole event bundle travels with the value - the velocity, clip, nudge and sampler config in
+   * force at that instant come with it - so struct'ing a drawn roll keeps its velocities and its
+   * chosen slices. Each trigger is its own attack and lasts its own width, so `"1@3 1"` is a long
+   * hit then a short one, and a trigger landing over a rest sounds nothing. `.hold()` is the same
+   * trigger grid used the other way round: it stretches each value to the NEXT trigger instead.
+   */
+  struct(bool) {
+    const trigSig = toSignal(bool);
+    if (!trigSig.stepsForCycle) {
+      throw new Error('[signal] .struct() needs a step pattern of triggers, e.g. note("c3").struct("1 ~ 1 1")');
+    }
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => {
+      const srcSteps = base ? base(cycle) : null;
+      const out = [];
+      for (const t of trigSig.stepsForCycle(cycle)) {
+        if (!gateOn(t.value)) continue;
+        // The source event SOUNDING at the trigger, taken WHOLE: its value plus every channel
+        // already merged onto it (vel/clip/nudge, and the sampler's step.cfg), so the bundle a roll
+        // or an .as() spec drew rides through onto the new rhythm rather than being re-sampled
+        // field by field. Last covering step wins, as everywhere else. A structureless source
+        // (rand(), an LFO) has no steps to take, so it is read as one event at the onset.
+        const src = srcSteps ? coveringSteps(srcSteps, t.start).at(-1) ?? null : null;
+        const ev = src ? { value: src.value, locs: stepLocs(src) } : readEvent(this, cycle + t.start);
+        if (ev.value == null) continue;
+        // A fresh attack every time, never a tie: the trigger is what says "strike now".
+        const step = { ...(src ?? {}), start: t.start, end: t.end, value: ev.value, cont: undefined };
+        const locs = [...ev.locs, ...stepLocs(t)];
+        if (locs.length) step.locs = locs;
+        out.push(step);
+      }
+      return out;
+    };
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
@@ -2555,6 +2656,19 @@ function mixableSteps(sig, cycle) {
   return sig.stepsForCycle && !sig.eventAt ? sig.stepsForCycle(cycle) : null;
 }
 
+// Reading a step's value as a GATE - what .mask()/.struct()/.hold() ask of a boolean pattern. Off
+// is a rest (a `~` emits no step at all, so this only meets an explicit null), a `0`, or the word
+// `f`/`false`, which mini keeps as a bare string and Number() would otherwise turn into a NaN that
+// counts as on. Anything else that sounds is on - so a gate can just be another pattern's rhythm,
+// `.mask(s("bd ~ ~ bd"))`, with no conversion in between.
+const GATE_OFF_WORDS = new Set(['f', 'false', 'off', 'no']);
+function gateOn(value) {
+  if (value == null) return false;
+  if (typeof value === 'string' && GATE_OFF_WORDS.has(value.trim().toLowerCase())) return false;
+  const n = Number(value);
+  return Number.isNaN(n) ? true : n !== 0;
+}
+
 // Every step of `steps` sounding at cycle-phase `phase` (fraction of a cycle) - one for an ordinary
 // sequence, several for a `,`-stack, none over a rest. _binop reads the right operand this way so a
 // stacked operand fans the event out per layer (and so both operands' highlight spans survive the
@@ -2806,6 +2920,53 @@ function stampField(name) {
   };
   return stamp;
 }
+
+// A note-channel control used as an OPERAND (`.mul(vel(0.5))`) composes with whatever value is in
+// force rather than replacing it - and "in force" is a per-EVENT question, because a channel is
+// only one of the places the value can be. A pianoroll's drawn velocities, an .as("note:vel")
+// token's field and a chord's per-note velocity all ride on the event itself, since a channel would
+// have to give two events at one onset the same answer. So the left operand is read per event, in
+// the order the scheduler itself reads a channel (channelAt): the event's own value first, then the
+// channel, then the resting default - and the result is stamped back onto the event.
+//
+// An operand WITH a grid mixes its triggers in exactly as the setter's crossMerge does, so
+// `.mul(vel("1 0.5"))` still subdivides, retriggers and drops what a `~` covers - only the stamp
+// composes instead of replacing, and nothing is cleared off the event first (the value already
+// there is this operation's LEFT operand, not stale state from a previous setting). An operand with
+// no grid adds no edges, so each event just takes its own value combined with whatever the operand
+// is worth at that onset. An event with NO value of its own and a continuous channel behind it is
+// left alone either way: the composed channel already carries it, and reading it there keeps it a
+// real-time read instead of freezing an LFO at grid-build time.
+function composeOnSteps(baseStepsForCycle, otherSig, name, unset, channel, fn) {
+  const hasChannel = channel instanceof Sig;
+  const own = (step) => (typeof step[name] === 'number' && !Number.isNaN(step[name]) ? step[name] : null);
+  // No `clear` on the stamp: the value already on the event is this operation's LEFT operand, not
+  // stale state to take off (which is what makes SETTING a control twice mean the second one).
+  if (otherSig.stepsForCycle || otherSig.eventAt) {
+    const stamp = (step, value) => {
+      const v = Number(value);
+      if (Number.isNaN(v)) return;
+      const cur = own(step);
+      // Nothing on the event: a channel with a grid was already merged onto it, so a channel still
+      // standing here is a continuous one - leave that to `combined`, which composed the same way
+      // and gets read in real time. With no channel either, the resting default is the left side.
+      if (cur === null && hasChannel) return;
+      step[name] = fn(cur ?? unset, v);
+    };
+    return crossMerge(baseStepsForCycle, otherSig, stamp);
+  }
+  // An operand with no grid adds no edges and no fan-out, so an event carrying no value of its own
+  // has nothing here that `combined` doesn't already say - and leaving it there keeps an LFO
+  // operand a real-time read rather than freezing it at each onset's cycle position.
+  return (cycle) =>
+    baseStepsForCycle(cycle).map((s) => {
+      const cur = s.value == null ? null : own(s);
+      if (cur === null) return s;
+      const v = Number(otherSig.sample(cycle + s.start, 1, cycle + s.start));
+      return Number.isNaN(v) ? s : { ...s, [name]: fn(cur, v) };
+    });
+}
+
 function stampCfg(key) {
   const stamp = (step, value) => {
     const v = Number(value);

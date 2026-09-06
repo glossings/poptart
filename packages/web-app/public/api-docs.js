@@ -315,6 +315,18 @@ const API_DOCS = {
     eg: '"<36:1:4 ~>*8".as("note:vel:clip")',
   },
   degrade: { kind: 'method', sig: 'degrade(prob, seed)', desc: 'Randomly drops events (default 50%), deterministic per cycle. The mini-notation "?" postfix is the same operation.', eg: '.degrade(0.3)' },
+  mask: {
+    kind: 'method',
+    sig: 'mask(bool)',
+    desc: 'Gates the pattern with a boolean one without changing its rhythm - an event starting where the mask is off is silenced, one still ringing when it closes stops there. Nothing retriggers. Off is ~, 0 or f; anything else that sounds is on.',
+    eg: '.mask("<1@7 0>")',
+  },
+  struct: {
+    kind: 'method',
+    sig: 'struct(bool)',
+    desc: 'Takes the rhythm from a boolean pattern and the values from this one - each on step fires a fresh event carrying whatever is sounding then, bundle and all. The mirror of .mask(); .hold() uses the same triggers to stretch instead.',
+    eg: 'note("c3 g3").struct("1 ~ 1 1")',
+  },
   ply: { kind: 'method', sig: 'ply(reps, fn)', desc: 'Retriggers each event `reps` times; the optional (x, n) => signal transforms each repetition.', eg: '.ply(3, (x, n) => x.add(n * 12))' },
   echo: { kind: 'method', sig: 'echo(reps, time, fn)', desc: 'Repeats each event `reps` times, `time` cycles apart; the optional (x, n) => signal shapes each copy.', eg: '.echo(4, 1/8, (x, n) => x.gain(0.6 ** n))' },
   arp: { kind: 'method', sig: 'arp(indices)', desc: 'Spreads each chord over the index pattern - indices past the top wrap up an octave. Apply .scale() first on degrees.', eg: 'note("[c3,e3,g3]").arp("0 1 2 1")' },
