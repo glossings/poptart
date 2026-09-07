@@ -1578,7 +1578,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sy
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_arrange'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -1616,16 +1616,15 @@ function setscale(name) {
 // The builders the HOST provides (as opposed to pattern-core's), bound alongside BUILDER_NAMES in
 // every evaluated block. Read out of this source by api-docs.test.js, so adding one here is what
 // makes the editor's reference cover it.
-// What an `arrange(...)` block evaluates to: the painted clips, which /api/evaluate applies to the
-// blocks they name once every block is built (see the arrangement pass there). A plain object like
-// TEMPO_BLOCK/SCALE_BLOCK so a `$: arrange()` block is a setup block, not a voice.
-function arrange(str = '', opts = {}) {
-  if (typeof str !== 'string') throw new Error('[arrange] arrange() takes the clip string the painter writes - double-click the arrange name to open it');
-  if (!patternCore.looksLikeArrangeString(str)) throw new Error('[arrange] arrange() takes "label,lane,start,len …" clips - double-click the arrange name to paint them');
-  return { poptartArrangeBlock: true, clips: patternCore.parseArrangement(str), opts: patternCore.normalizeArrangeOpts(opts) };
-}
+const HOST_BUILDERS = { setbpm, setscale };
 
-const HOST_BUILDERS = { setbpm, setscale, arrange };
+// `arrange(...)` was the arrangement back when it was a call you wrote - a `$: arrange("…")` block
+// you could comment out, forget to evaluate, or have two of. It is `_arrange(...)` now (pattern-
+// core's arrange.mjs): an editor-owned definition like a roll's, always in force, painted with
+// ctrl+A. Bound, undocumented, and identical in effect, purely so a patch written before the change
+// still plays; the painter rewrites the call the first time it opens one (see arMigrateLegacy in
+// client.js), and nothing writes this spelling any more.
+const LEGACY_BUILDERS = { arrange: (str = '', opts = {}) => patternCore._arrange(str, opts) };
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
 // with the loop regions' wraps and releases recorded in it. Built by the arrangement pass of
@@ -1684,7 +1683,7 @@ const PREBAKE_BROWSER_SHIMS = {
   },
 };
 
-function makeBlockEvaluator(defs = new Map(), hostBuilders = HOST_BUILDERS) {
+function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS, ...LEGACY_BUILDERS }) {
   // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
   // top-level bindings are in scope for every user block too (see runPrebake).
   const evalBlock = function evalBlock(code, locBase) {
@@ -3356,6 +3355,7 @@ const routes = {
     // build below gets to the end (see the catch): an evaluation that throws applies nothing, so
     // the tracks still playing must still find the definitions they resolve by name each cycle.
     patternCore.setDefOwner(deck);
+    patternCore.clearRollOwners(); // which tracks draw a roll is answered by THIS evaluation
     const definitionsBefore = patternCore.clearRolls('buffer', deck);
     // Enter the eval with NO key in force: the buffer's own setscale (hoisted below, so it
     // runs before any pattern is built) is the only thing that sets one. Starting from the
@@ -3370,6 +3370,7 @@ const routes = {
     let sawSetbpm = false;
     const hostBuilders = {
       ...HOST_BUILDERS,
+      ...LEGACY_BUILDERS,
       setbpm: (value) => {
         const v = typeof value === 'string' ? patternCore.mini(value) : value;
         if (typeof v !== 'number' && typeof v?.sample !== 'function') {
@@ -3403,6 +3404,9 @@ const routes = {
 
       evaluated = blocks.map((b) => {
         try {
+          // Which track is being built, for the pieces of a pattern that belong to the track rather
+          // than to the call - the arrangement's per-clip roll rebinding (see signal.mjs).
+          patternCore.setBlockLabel(b.label, deck);
           const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
           // Only an explicitly *named* block promises sound. Anything anonymous (bare code
           // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
@@ -3416,6 +3420,8 @@ const routes = {
           return { ...b, sig: value };
         } catch (err) {
           throw new Error(`${b.label}: ${err.message ?? err}`);
+        } finally {
+          patternCore.setBlockLabel(null, deck);
         }
       });
 
@@ -3472,10 +3478,14 @@ const routes = {
     // and plays as normal.
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
 
-    // The arrangement pass: a block painted into an arrange() plays only inside its clips, so the
-    // bare loop it was is gated to the part it has become (see pattern-core's arrange.mjs). Every
-    // arrangement in the buffer contributes clips to ONE timeline - they are one song - and its
-    // length is the longest of them. A clip naming a block that isn't here is worth a line: the
+    // The arrangement pass: with an arrangement in the buffer every TRACK is one of its rows, so
+    // each plays only inside its clips - the bare loop it was is gated to the part it has become
+    // (see pattern-core's arrange.mjs) - and a track with no clips at all is silent, which is what
+    // a row you emptied has to mean. Only real tracks: an anonymous block (`$: …`, a bare
+    // statement) is never a row, so it is left playing whatever it plays.
+    //
+    // Every arrangement in the buffer contributes clips to ONE timeline - they are one song - and
+    // its length is the longest of them. A clip naming a block that isn't here is worth a line: the
     // painter offers only the labels it can see, so this is a rename or a deleted block, and the
     // part it stood for is silently gone.
     const arrangements = evaluated.map((b) => b.sig).filter((v) => v?.poptartArrangeBlock);
@@ -3494,11 +3504,27 @@ const routes = {
         arrangeClocks[deck].key = clockKey;
       }
       const clock = arrangeClocks[deck];
+      const posAt = (c) => clock.posAt(c);
       for (const b of built) {
-        if (spans.has(b.label)) b.sig = b.sig._arrangeGate(spans.get(b.label), (c) => clock.posAt(c));
+        if (b.label.startsWith('$')) continue;
+        b.sig = b.sig._arrangeGate(spans.get(b.label) ?? [], posAt);
       }
+      // ...and the clips that name a roll of their own rebind their track's, cycle by cycle (see
+      // withArrangeRoll in signal.mjs). Filed rather than built in, so painting a fill re-files a
+      // map instead of rebuilding the track - and read lazily, so a roll drawn after the clip that
+      // names it is found anyway. A binding on a track with no roll to swap can only be a mistake
+      // worth naming: it plays exactly as if the clip had never been bound.
+      const bindings = patternCore.arrangementRollBindings(clips);
+      const owners = patternCore.rollOwners();
+      for (const label of bindings.keys()) {
+        if (labels.has(label) && !owners.has(label)) {
+          eventLogQueue.push(`[arrange] ${JSON.stringify(label)} has clips bound to a roll, but its block plays no pianoroll() - the bindings do nothing`);
+        }
+      }
+      patternCore.setArrangeRolls(bindings, posAt, deck);
     } else {
       arrangeClocks[deck] = null;
+      patternCore.setArrangeRolls(null, null, deck);
     }
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.

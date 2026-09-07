@@ -15,7 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
-import { inSpans } from './arrange.mjs';
+import { inSpans, arrangementRollAt } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
@@ -4210,6 +4210,103 @@ export function note(value) {
  * on the definitions, not on this call.
  */
 export function pianoroll(str = '', opts = {}) {
+  // Which TRACK this roll belongs to, so the arrangement can rebind it clip by clip (below). The
+  // host sets the label around each block's evaluation; a definition block (`_roll(...)`) is
+  // anonymous, so its rolls are never anyone's to rebind - which is what keeps a rebound roll from
+  // being rebound again on the way in.
+  const label = currentBlockLabel && !currentBlockLabel.startsWith('$') ? currentBlockLabel : null;
+  if (label) rollOwnersSeen.add(label);
+  return withArrangeRoll(buildPianoroll(str, opts), label, currentBlockOwner);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-clip roll binding: which roll a track plays is a property of the ARRANGEMENT, so a fill is
+// painted at the phrase ends rather than patterned into the track (see arrange.mjs).
+//
+// Two pieces of host state, both lazy on purpose. The label is set around each block's evaluation
+// and captured by the pianoroll() above; the bindings are filed AFTER every block is built (the
+// arrangement pass can't run before the blocks exist), and read per cycle - so a roll swap needs
+// no rebuild, and editing a clip re-files a map rather than re-evaluating the track.
+// ---------------------------------------------------------------------------------------------
+
+let currentBlockLabel = null;
+let currentBlockOwner = 'a';
+let rollOwnersSeen = new Set();
+// Per DECK, like the definition registry's owners: two songs are up at once in a mix, and one
+// deck's evaluation must not take the other's arrangement out from under the tracks playing it.
+const arrangeRolls = { a: null, b: null }; // deck -> { bindings: Map, posOf }
+
+/**
+ * The label of the block being evaluated, and which deck's buffer it is from. `null` between
+ * blocks, and at the top of an eval.
+ *
+ * Deliberately does NOT clear the filed bindings: an evaluation that throws half way leaves the
+ * tracks that are still playing on their old signals, and those read the bindings live. The
+ * arrangement pass files them (or files null) once every block is built, which is the only moment
+ * the two can be made to agree.
+ */
+export function setBlockLabel(label, owner = 'a') {
+  currentBlockLabel = label == null ? null : String(label);
+  currentBlockOwner = owner === 'b' ? 'b' : 'a';
+}
+
+/** The tracks whose blocks built a piano roll this evaluation - who a clip can rebind at all. */
+export function rollOwners() {
+  return new Set(rollOwnersSeen);
+}
+
+/** Forget the tracks seen so far. The host calls this at the top of an evaluation. */
+export function clearRollOwners() {
+  rollOwnersSeen = new Set();
+}
+
+/**
+ * File one deck's per-clip roll rebindings (see arrangementRollBindings), with the song clock they
+ * are read against. Null clears them - a buffer with no arrangement rebinds nothing.
+ */
+export function setArrangeRolls(bindings, posOf = null, owner = 'a') {
+  arrangeRolls[owner === 'b' ? 'b' : 'a'] = bindings && bindings.size ? { bindings, posOf } : null;
+}
+
+/**
+ * The roll `label`'s track plays at `cycle`, or null for its own. A clip's binding covers the whole
+ * cycle it starts in as far as this is concerned - it is read once per cycle, at the cycle's own
+ * position - because a roll is a LOOP: swapping one mid-bar would play the second half of a
+ * different loop, which is not what painting a fill over bar 12 means.
+ */
+function arrangeRollFor(owner, label, cycle) {
+  const filed = arrangeRolls[owner];
+  if (!filed || !label) return null;
+  const list = filed.bindings.get(label);
+  if (!list) return null;
+  return arrangementRollAt(list, filed.posOf ? filed.posOf(cycle) : cycle);
+}
+
+/**
+ * The roll a track plays, with the arrangement allowed a word per cycle. Wrapped around every
+ * pianoroll() a track builds, and a no-op for every one of them until a clip actually rebinds -
+ * the lookup is one Map miss per cycle, and the wrapper hands back the roll's own steps.
+ *
+ * The substitute plays on ABSOLUTE cycle time, exactly like the track it stands in for: a 2-bar
+ * fill painted at bar 13 is heard from its second bar, the same as if the track had been playing
+ * it all along. That is the rule the gate already follows, and the one that makes a clip a WINDOW
+ * onto a running pattern rather than a trigger.
+ */
+function withArrangeRoll(sig, label, owner) {
+  if (!label || !sig?.stepsForCycle) return sig;
+  const base = sig.stepsForCycle;
+  const stepsForCycle = (cycle) => {
+    const id = arrangeRollFor(owner, label, cycle);
+    if (id == null) return base(cycle);
+    const bound = lookupRoll(String(id));
+    // A binding naming a roll that no longer exists plays the track's own rather than silence: the
+    // clip is still a clip, and a deleted definition should not take the part with it.
+    return bound?.stepsForCycle ? bound.stepsForCycle(cycle) : base(cycle);
+  };
+  return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...sig._meta() });
+}
+
+function buildPianoroll(str, opts) {
   // A Sig here is an id pattern the location transpile already tagged for highlighting (see
   // locations.mjs) - drawn notes are only ever a bare string.
   if (str instanceof Sig) return rollPattern(str, opts);

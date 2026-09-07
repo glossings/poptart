@@ -552,7 +552,8 @@
     <div id="pianorollMenu" class="ctx-menu hidden" role="menu"></div>
 
     <!-- The arrangement painter (see the arrange section of client.js). Shares the piano roll's
-         panel chrome; its own body is a palette of the buffer's labels and one canvas of lanes. -->
+         panel chrome; its own body is one canvas - a row per track, the track names down the
+         left, and the pinned automation lanes stacked underneath. -->
     <div id="arrangePanel" class="pianoroll-panel arrange-panel hidden">
       <div class="pianoroll-panel-head">
         <div class="pianoroll-head-main">
@@ -562,14 +563,20 @@
         </div>
         <div class="pianoroll-head-tools">
           <button id="arrangeTool" class="small" title="tool">✏️</button>
-          <button id="arrangeAuto" class="small" title="automation lane — draw auto(&quot;name&quot;) against the bars">〜</button>
           <button id="arrangeZoomOut" class="small" title="zoom out (ctrl+wheel)">−</button>
           <button id="arrangeZoomIn" class="small" title="zoom in (ctrl+wheel)">+</button>
           <button id="arrangeClose" class="small">✕</button>
         </div>
       </div>
-      <div id="arrangeChips" class="arrange-chips" title="the brush — click a label, then paint it onto a lane"></div>
       <div class="arrange-body">
+        <!-- The lane picker, anchored to the lane it is about: zero-sized, moved to the gutter cell
+             whose ▾ was pressed, with the popover hanging off it (see arOpenLanePicker). -->
+        <div id="arrangePickWrap" class="arrange-pick-anchor">
+          <div id="arrangePicker" class="def-picker hidden">
+            <input id="arrangeAutoSearch" type="text" spellcheck="false" placeholder="lane name" />
+            <div id="arrangePickList" class="def-pick-list"></div>
+          </div>
+        </div>
         <canvas id="arrangeCanvas" tabindex="0" width="880" height="336"></canvas>
         <input id="arrangeLaneName" class="arrange-lane-name hidden" type="text" spellcheck="false" placeholder="lane name" />
       </div>

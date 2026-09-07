@@ -5,14 +5,6 @@ no completion notes.
 
 ---
 
-[ ] Per-clip roll binding in arrange — a clip can optionally name WHICH roll it plays (default:
-    the track's own), so fills and variants are painted rather than patterned: split a region,
-    double-click to fork the roll under an auto-generated name and rebind just that clip; paint
-    the same fill roll at other phrase ends, or fork it again into an alternate. Pairs with
-    making the roll<->track association unique plus a GUI "copy from / link to another track"
-    so cross-track reuse survives; would also let the inline vs named-roll build paths converge.
-    `pianoroll("<a!7 b>")` head patterning stays for loop-level cycling.
-
 [ ] LUFS metering in the ctrl+g console — short-term and integrated, alongside the existing
     stereo/spectral views.
 
@@ -81,14 +73,6 @@ no completion notes.
 [ ] `mutate()` - for presets: a seeded random walk over a subset of params (reuses the A/B param
     diff from morph to decide what to touch), evolving per cycle, diff shown in the preset panel.
     For patterns: seeded per-cycle variation of the pattern's events.
-
-[ ] Arrangement: `arrange()` opens an arrangement painter - rows are labeled blocks,
-    columns are cycles, paint cells to say when a block is audible. Stored like a pianoroll
-    (registry object serialized into the file, panel in the sidebar) and round-trips to a text form
-    (`arrange({ kick: "0-8 16-", pad: "8-16" })`). The scheduler masks each label's pattern by its
-    painted ranges. NOT a label-token mini string - a section is a *set* of blocks, which is why
-    muting several tracks at once was the blocker. To settle: blocks not referenced by the
-    arrangement keep playing live (probably yes - that's what keeps it livecoding).
 
 [ ] Alt+drag scrubbing in the editor: on a numeric literal, drag scrubs the value (hot reload
     applies it live); on a string literal in a known list (sound names, presets, scales, lfo

@@ -1,4 +1,4 @@
-// arrange(): the painter's clip format, the span/length math both sides read, and the gate the
+// _arrange(): the painter's clip format, the span/length math both sides read, and the gate the
 // host applies to a painted block - events keep their absolute cycle time and are simply rested
 // wherever the block isn't painted, looping over the arrangement's length.
 
@@ -14,35 +14,97 @@ import {
   normalizeArrangeOpts,
   arrangementLength,
   arrangementSpans,
-  arrangementLaneCount,
+  arrangementLabels,
+  arrangementRollBindings,
+  arrangementRollAt,
+  reconcileArrangement,
   inSpans,
   ArrangeClock,
 } from './src/index.mjs';
 
 test('parse/serialize round-trip, malformed tokens dropped', () => {
-  const clips = parseArrangement('bass,1,4,4 drums,0,0,8  nope,x,1,1 drums,0,12,4 hats,2,0.5,0.25');
+  const clips = parseArrangement('bass,4,4 drums,0,8  nope,x,1 drums,12,4 hats,0.5,0.25');
   assert.deepEqual(clips, [
-    { label: 'bass', lane: 1, start: 4, len: 4 },
-    { label: 'drums', lane: 0, start: 0, len: 8 },
-    { label: 'drums', lane: 0, start: 12, len: 4 },
-    { label: 'hats', lane: 2, start: 0.5, len: 0.25 },
+    { label: 'bass', start: 4, len: 4, roll: null },
+    { label: 'drums', start: 0, len: 8, roll: null },
+    { label: 'drums', start: 12, len: 4, roll: null },
+    { label: 'hats', start: 0.5, len: 0.25, roll: null },
   ]);
-  assert.equal(serializeArrangement(clips), 'drums,0,0,8 drums,0,12,4 bass,1,4,4 hats,2,0.5,0.25');
+  assert.equal(serializeArrangement(clips), 'bass,4,4 drums,0,8 drums,12,4 hats,0.5,0.25');
   assert.equal(parseArrangement('').length, 0);
-  assert.equal(parseArrangement('a,0,0,0').length, 0, 'a zero-length clip is nothing');
+  assert.equal(parseArrangement('a,0,0').length, 0, 'a zero-length clip is nothing');
+});
+
+test('a clip may name the roll its track plays over those bars', () => {
+  const clips = parseArrangement('drums,0,8 drums:fill,12,4');
+  assert.deepEqual(clips[1], { label: 'drums', start: 12, len: 4, roll: 'fill' });
+  assert.equal(serializeArrangement(clips), 'drums,0,8 drums:fill,12,4', 'and round-trips');
+  const bindings = arrangementRollBindings(clips);
+  assert.deepEqual(bindings.get('drums'), [{ start: 12, end: 16, roll: 'fill' }]);
+  assert.equal(arrangementRollAt(bindings.get('drums'), 13), 'fill');
+  assert.equal(arrangementRollAt(bindings.get('drums'), 4), null, 'the track\'s own roll elsewhere');
+  assert.equal(arrangementRollBindings(parseArrangement('drums,0,8')).size, 0, 'no bindings, no entry');
+});
+
+test('an older arrangement\'s lane column parses and is dropped', () => {
+  assert.deepEqual(parseArrangement('drums,0,0,8 bass,1,4,4'), [
+    { label: 'drums', start: 0, len: 8, roll: null },
+    { label: 'bass', start: 4, len: 4, roll: null },
+  ]);
+  assert.ok(looksLikeArrangeString('drums,0,0,8 bass,1,4,4'));
 });
 
 test('looksLikeArrangeString tells data from anything else', () => {
   assert.ok(looksLikeArrangeString(''));
-  assert.ok(looksLikeArrangeString('drums,0,0,8 bass,1,4.5,2'));
+  assert.ok(looksLikeArrangeString('drums,0,8 bass:fill,4.5,2'));
   assert.ok(!looksLikeArrangeString('<a b>'));
   assert.ok(!looksLikeArrangeString('drums'));
 });
 
-test('options: snap/len/lanes with defaults', () => {
-  assert.deepEqual(normalizeArrangeOpts(), { snap: 'auto', len: null, lanes: [], loops: [] });
-  assert.deepEqual(normalizeArrangeOpts({ snap: 4, len: 16, lanes: ['drums', null, 'bass'] }), { snap: 4, len: 16, lanes: ['drums', '', 'bass'], loops: [] });
+test('labels come back in the order the clips first name them', () => {
+  assert.deepEqual(arrangementLabels(parseArrangement('b,0,4 a,0,8 b,8,4')), ['b', 'a']);
+});
+
+test('options: snap/len/tracks/autos with defaults', () => {
+  assert.deepEqual(normalizeArrangeOpts(), { snap: 'auto', len: null, tracks: [], autos: [], loops: [] });
+  assert.deepEqual(
+    normalizeArrangeOpts({ snap: 4, len: 16, tracks: ['kick', 'kick'], autos: ['filter', 'filter', ''] }),
+    { snap: 4, len: 16, tracks: ['kick'], autos: ['filter'], loops: [] },
+  );
   assert.equal(normalizeArrangeOpts({ len: 0 }).len, null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Membership: which tracks are in the arrangement, and what that makes a new one do
+// ---------------------------------------------------------------------------------------------
+
+test('a track that has never been arranged joins it filled', () => {
+  const clips = parseArrangement('kick,0,4');
+  const out = reconcileArrangement(clips, { len: 16, tracks: ['kick'] }, ['kick', 'bass']);
+  assert.ok(out.changed);
+  assert.deepEqual(out.tracks, ['kick', 'bass']);
+  assert.deepEqual(out.added, [{ label: 'bass', start: 0, len: 16, roll: null }], 'the whole song, so it sounds as it did');
+  assert.equal(out.clips.length, 2);
+});
+
+test('a track whose clips you deleted stays empty - that is what membership is FOR', () => {
+  const out = reconcileArrangement(parseArrangement('kick,0,4'), { len: 16, tracks: ['kick', 'bass'] }, ['kick', 'bass']);
+  assert.equal(out.changed, false, 'nothing to do: bass is in the arrangement, and silent on purpose');
+  assert.deepEqual(out.added, []);
+});
+
+test('an old arrangement with no membership recorded fills every unpainted track', () => {
+  // Exactly the migration off `$: arrange(…)`: back then an unpainted block played throughout, so
+  // the tracks it never mentioned have to come out of this playing throughout too.
+  const out = reconcileArrangement(parseArrangement('kick,0,8'), { len: 8 }, ['kick', 'bass', 'pad']);
+  assert.deepEqual(out.added.map((c) => c.label), ['bass', 'pad'], 'kick was painted already - it keeps its clips');
+  assert.deepEqual(out.added.map((c) => [c.start, c.len]), [[0, 8], [0, 8]]);
+  assert.deepEqual(out.tracks, ['kick', 'bass', 'pad'], 'and all three are in it from now on');
+});
+
+test('a label that has left the buffer keeps its place only while clips still name it', () => {
+  const withClips = reconcileArrangement(parseArrangement('ghost,0,4'), { tracks: ['ghost', 'gone'] }, []);
+  assert.deepEqual(withClips.tracks, ['ghost'], 'the orphan stays, the empty one is forgotten');
 });
 
 test('the paint grid defaults to auto - the painter divides it by how far it is zoomed in', () => {
@@ -56,25 +118,19 @@ test('the paint grid defaults to auto - the painter divides it by how far it is 
 });
 
 test('length: explicit, else the last clip end rounded up, never below one', () => {
-  const clips = parseArrangement('a,0,0,3.5 b,1,2,1');
+  const clips = parseArrangement('a,0,3.5 b,2,1');
   assert.equal(arrangementLength(clips), 4);
   assert.equal(arrangementLength(clips, { len: 8 }), 8);
   assert.equal(arrangementLength([]), 1);
 });
 
-test('spans merge per label across lanes and touching clips', () => {
-  const spans = arrangementSpans(parseArrangement('a,0,0,2 a,1,2,2 a,0,6,1 b,2,1,1'));
+test('spans merge per label across touching clips', () => {
+  const spans = arrangementSpans(parseArrangement('a,0,2 a,2,2 a,6,1 b,1,1'));
   assert.deepEqual(spans.get('a'), [[0, 4], [6, 7]]);
   assert.deepEqual(spans.get('b'), [[1, 2]]);
   assert.ok(inSpans(spans.get('a'), 3.99));
   assert.ok(!inSpans(spans.get('a'), 4));
   assert.ok(inSpans(spans.get('a'), 6));
-});
-
-test('lane count covers every clip and named lane', () => {
-  assert.equal(arrangementLaneCount([]), 4);
-  assert.equal(arrangementLaneCount(parseArrangement('a,6,0,1')), 7);
-  assert.equal(arrangementLaneCount([], { lanes: ['x', 'y', 'z', 'w', 'v'] }), 5);
 });
 
 test('_arrangeGate rests events outside the spans and loops over len', () => {

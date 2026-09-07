@@ -1811,9 +1811,9 @@ li.CodeMirror-hint-active {
   border-bottom: 1px solid var(--border);
 }
 
+/* Header dropdowns share ONE treatment - see the rule beside .pianoroll-ctl select. Only the type
+   size is this panel's own. */
 .lfo-panel-head select {
-  padding: 3px 22px 3px 8px;
-  background-position: right 8px center;
   font-size: 11px;
 }
 
@@ -2477,11 +2477,18 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
+/* Every dropdown that sits in a panel's HEADER row - the arrangement's snap, the LFO's shape
+   presets - is this one shape, so two panels open side by side don't show two different chevron
+   insets. Anything new in a header joins this list rather than inventing its own metrics. */
+.pianoroll-ctl select,
+.lfo-panel-head select {
+  padding: 3px 22px 3px 8px;
+  background-position: right 8px center;
+}
+
 .pianoroll-ctl select {
-  padding: 3px 20px 3px 7px;
   font-size: 12px;
   font-family: var(--mono);
-  background-position: right 6px center;
 }
 
 .pianoroll-ctl input[type='number']:focus {
@@ -2726,60 +2733,8 @@ li.CodeMirror-hint-active {
 /* Wider than the roll: the horizontal axis is whole bars and a song is many of them. */
 .arrange-panel {
   width: 940px;
-}
-
-/* The brush palette: one chip per labelled block in the buffer, tinted with the colour its clips
-   are painted in. The active chip is what the next paint lays down. */
-.arrange-chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  min-height: 24px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.arrange-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 22px;
-  padding: 0 9px;
-  font-size: 11px;
-  font-family: inherit;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  cursor: pointer;
-}
-
-.arrange-chip .arrange-chip-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--chip);
-  opacity: 0.55;
-}
-
-.arrange-chip.painted .arrange-chip-dot {
-  opacity: 1;
-}
-
-.arrange-chip:hover {
-  border-color: var(--chip);
-}
-
-.arrange-chip.active {
-  border-color: var(--chip);
-  box-shadow: inset 0 0 0 1px var(--chip);
-  background: color-mix(in srgb, var(--chip) 14%, var(--bg));
-}
-
-.arrange-chips .arrange-chips-empty {
-  font-size: 11px;
-  color: var(--text-dim);
+  /* A backstop under arSizeCanvas's own budget: whatever it computes, the panel stays on screen. */
+  max-height: calc(100vh - 24px);
 }
 
 .arrange-body {
@@ -2787,19 +2742,31 @@ li.CodeMirror-hint-active {
   padding: 12px;
 }
 
-/* The automation strip's toggle, lit while the strip is open (see arReflectAuto). */
-.arrange-panel .pianoroll-head-tools .small.on {
-  color: var(--accent);
-  border-color: var(--accent);
+/* The lane picker's anchor: no size of its own, moved over the gutter cell of whichever lane was
+   asked (see arOpenLanePicker), with .def-picker hanging off it as it does off a panel head. The
+   anchor itself must never take a click - it sits over the canvas. */
+.arrange-pick-anchor {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.arrange-pick-anchor .def-picker {
+  pointer-events: auto;
+  /* Rises from the anchor instead of hanging off it: the strips are the bottom of the panel, and
+     the panel clips what runs past its edge. */
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 
 #arrangeCanvas {
   display: block;
   width: 100%;
-  /* AR_LANES_TOP (ruler + loops strip) + 8 lanes of AR_ROW + padding. Lanes scroll under it, so
-     this only changes when the automation strip opens underneath - and then arSizeCanvas sets the
-     height inline, over this one. */
-  height: 336px;
+  /* A first frame's worth: AR_LANES_TOP (ruler + loops strip) + rows + one automation strip.
+     arSizeCanvas sets the real height inline over this one, and keeps the whole panel inside the
+     window - rows and pinned lanes both scroll, so nothing here has to grow past the display. */
+  height: 424px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);

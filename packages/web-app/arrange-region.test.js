@@ -37,8 +37,8 @@ function painter({ clips = [], sel = [], regionSpan = null, selRegion = null } =
   return { fns, arState };
 }
 
-const clip = (label, lane, start, len) => ({ label, lane, start, len });
-const shape = (cs) => cs.map((c) => [c.label, c.lane, c.start, c.len]);
+const clip = (label, start, len, roll = null) => ({ label, start, len, roll });
+const shape = (cs) => cs.map((c) => [c.label, c.start, c.len]);
 
 // ---------------------------------------------------------------------------------------------
 // What marks a region
@@ -49,13 +49,13 @@ test('nothing marked is no region at all', () => {
 });
 
 test('selected clips mark the span they cover', () => {
-  const a = clip('drums', 0, 4, 4);
-  const b = clip('bass', 1, 12, 2);
+  const a = clip('drums', 4, 4);
+  const b = clip('bass', 12, 2);
   assert.deepEqual(painter({ clips: [a, b], sel: [a, b] }).fns.arTimeRegion(), [4, 14]);
 });
 
 test('a dragged span marks one, and unions with any selected clips', () => {
-  const a = clip('drums', 0, 4, 4);
+  const a = clip('drums', 4, 4);
   assert.deepEqual(painter({ regionSpan: [16, 24] }).fns.arTimeRegion(), [16, 24]);
   assert.deepEqual(painter({ clips: [a], sel: [a], regionSpan: [16, 24] }).fns.arTimeRegion(), [4, 24]);
 });
@@ -64,7 +64,7 @@ test('a picked loop region marks one too - that is the point of picking it', () 
   const chorus = { name: 'chorus', start: 8, end: 16 };
   assert.deepEqual(painter({ selRegion: chorus }).fns.arTimeRegion(), [8, 16]);
   // and it unions like the rest, so a loop plus a clip past it covers both
-  const tail = clip('outro', 0, 20, 4);
+  const tail = clip('outro', 20, 4);
   assert.deepEqual(painter({ clips: [tail], sel: [tail], selRegion: chorus }).fns.arTimeRegion(), [8, 24]);
 });
 
@@ -80,30 +80,32 @@ test('a zero-width mark is not a region', () => {
 test('clips are trimmed to the span and their starts measured from it', () => {
   const { fns } = painter({
     clips: [
-      clip('long', 0, 0, 32), // straddles the whole span
-      clip('inside', 1, 10, 2), // wholly within
-      clip('head', 2, 6, 4), // overlaps the front edge
-      clip('tail', 3, 14, 4), // overlaps the back edge
-      clip('before', 4, 0, 4), // clear of it
-      clip('after', 5, 20, 4),
+      clip('long', 0, 32), // straddles the whole span
+      clip('inside', 10, 2), // wholly within
+      clip('head', 6, 4), // overlaps the front edge
+      clip('tail', 14, 4), // overlaps the back edge
+      clip('before', 0, 4), // clear of it
+      clip('after', 20, 4),
     ],
   });
   assert.deepEqual(shape(fns.arClipsIn(8, 16)), [
-    ['long', 0, 0, 8], // eight bars, not thirty-two
-    ['inside', 1, 2, 2],
-    ['head', 2, 0, 2], // only the part inside, at the span's start
-    ['tail', 3, 6, 2],
+    ['long', 0, 8], // eight bars, not thirty-two
+    ['inside', 2, 2],
+    ['head', 0, 2], // only the part inside, at the span's start
+    ['tail', 6, 2],
   ]);
 });
 
 test('a clip merely touching an edge is not in the span', () => {
-  const { fns } = painter({ clips: [clip('a', 0, 4, 4), clip('b', 0, 16, 4)] });
+  const { fns } = painter({ clips: [clip('a', 4, 4), clip('b', 16, 4)] });
   assert.deepEqual(fns.arClipsIn(8, 16), [], 'ending exactly at 8 and starting exactly at 16');
 });
 
-test('lanes survive the round trip - a copied section keeps its layout', () => {
-  const { fns } = painter({ clips: [clip('kick', 3, 8, 4), clip('hat', 7, 8, 4)] });
-  assert.deepEqual(fns.arClipsIn(8, 12).map((c) => c.lane), [3, 7]);
+test('a copied section keeps each clip on its own track, roll binding and all', () => {
+  const { fns } = painter({ clips: [clip('kick', 8, 4), clip('hat', 8, 4, 'fill')] });
+  const copied = fns.arClipsIn(8, 12);
+  assert.deepEqual(copied.map((c) => c.label), ['kick', 'hat'], 'the label IS the row now');
+  assert.deepEqual(copied.map((c) => c.roll), [null, 'fill'], 'a bound clip pastes still bound');
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -112,32 +114,32 @@ test('lanes survive the round trip - a copied section keeps its layout', () => {
 
 test('clearing empties the span without moving anything else', () => {
   const { fns, arState } = painter({
-    clips: [clip('before', 0, 0, 4), clip('inside', 1, 10, 2), clip('after', 2, 20, 4)],
+    clips: [clip('before', 0, 4), clip('inside', 10, 2), clip('after', 20, 4)],
   });
   fns.arClearTime(8, 16);
-  assert.deepEqual(shape(arState.clips), [['before', 0, 0, 4], ['after', 2, 20, 4]],
+  assert.deepEqual(shape(arState.clips), [['before', 0, 4], ['after', 20, 4]],
     'the clips outside stay exactly where they were - this is not a ripple delete');
 });
 
 test('a clip lying across the whole span is split in two', () => {
-  const { fns, arState } = painter({ clips: [clip('long', 0, 0, 32)] });
+  const { fns, arState } = painter({ clips: [clip('long', 0, 32)] });
   fns.arClearTime(8, 16);
-  assert.deepEqual(shape(arState.clips), [['long', 0, 0, 8], ['long', 0, 16, 16]],
+  assert.deepEqual(shape(arState.clips), [['long', 0, 8], ['long', 16, 16]],
     'it was sounding either side of what was taken, so both ends have to remain');
 });
 
 test('a clip overlapping one edge is trimmed to what survives', () => {
-  const head = painter({ clips: [clip('head', 0, 4, 8)] }); // 4..12, region 8..16
+  const head = painter({ clips: [clip('head', 4, 8)] }); // 4..12, region 8..16
   head.fns.arClearTime(8, 16);
-  assert.deepEqual(shape(head.arState.clips), [['head', 0, 4, 4]]);
+  assert.deepEqual(shape(head.arState.clips), [['head', 4, 4]]);
 
-  const tail = painter({ clips: [clip('tail', 0, 12, 8)] }); // 12..20
+  const tail = painter({ clips: [clip('tail', 12, 8)] }); // 12..20
   tail.fns.arClearTime(8, 16);
-  assert.deepEqual(shape(tail.arState.clips), [['tail', 0, 16, 4]]);
+  assert.deepEqual(shape(tail.arState.clips), [['tail', 16, 4]]);
 });
 
 test('clearing drops the selection, since what was selected may no longer exist', () => {
-  const c = clip('gone', 0, 10, 2);
+  const c = clip('gone', 10, 2);
   const { fns, arState } = painter({ clips: [c], sel: [c] });
   fns.arClearTime(8, 16);
   assert.equal(arState.clips.length, 0);

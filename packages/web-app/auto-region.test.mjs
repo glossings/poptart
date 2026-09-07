@@ -348,7 +348,7 @@ test('a paste goes to whichever clipboard was filled last, not to whatever is ma
   // click does - and paste. Routing on the marked span alone put clips there instead.
   assert.match(SRC, /arClipSource = 'auto';/);
   assert.match(SRC, /arClipSource = 'clips';/);
-  assert.match(SRC, /&& arAutoShown\(\) && \(arClipSource \? arClipSource === 'auto' : !!arState\.autoSel\)\) \{/);
+  assert.match(SRC, /&& arAutoCount\(\) && \(arClipSource \? arClipSource === 'auto' : !!arState\.autoSel\)\) \{/);
 });
 
 test('an op with no target yet warns rather than erroring', () => {

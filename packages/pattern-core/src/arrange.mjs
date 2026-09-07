@@ -1,28 +1,41 @@
-// The arrangement painter's data - the textual format `arrange()` carries, its parser/serializer,
+// The arrangement painter's data - the textual format `_arrange()` carries, its parser/serializer,
 // and the span math both the editor (which draws it) and the host (which gates tracks by it)
 // read. Like pianoroll.mjs this is served verbatim to the browser and imports nothing.
 //
-// An arrangement is a set of CLIPS painted onto lanes, playlist-style: each clip says "this
-// labelled block sounds here". Format: space-separated `label,lane,start,len`, e.g.
-// "drums,0,0,8 bass,1,4,4 drums,0,12,4".
-//   label - the block's label (`drums:` in the buffer). No commas or whitespace, which a label
+// An arrangement is a set of CLIPS, playlist-style: each clip says "this labelled block sounds
+// here". Format: space-separated `label,start,len`, e.g. "drums,0,8 bass,4,4 drums,12,4".
+//   label - the block's label (`drums:` in the buffer), optionally `label:roll` to say WHICH roll
+//           the block plays over this clip (see below). No commas or whitespace, which a label
 //           can't hold anyway.
-//   lane  - which row it is painted on, an integer >= 0. Lanes are display only: the same label
-//           may sit on any number of lanes, and a lane may hold any number of labels. They are
-//           there so a painter can lay parts out the way a playlist does.
 //   start - onset, in CYCLES (decimals allowed: 4.5 is halfway through bar 4)
 //   len   - length in cycles, > 0
 //
-// What a clip MEANS at playback time: a block painted anywhere in an arrangement plays ONLY inside
-// its clips - the bare `label: pattern` stops being a loop and becomes a part. The arrangement
-// loops over its length (`len` option, or the end of the last clip rounded up to a whole cycle),
-// and the pattern inside a clip runs on absolute cycle time, so a `<a b>` alternation keeps its
-// place whether or not its block was sounding the bar before. Blocks never painted play as before.
+// ONE ROW PER TRACK. A clip names its track and nothing else: the painter draws the buffer's
+// labelled blocks as rows, in the order they appear in it, and a clip is drawn on its own track's
+// row. (Older arrangements carried a `lane` column - `drums,0,0,8` - back when rows were free-form
+// and a label could sit on any number of them. Those still parse; the lane is simply dropped.)
+//
+// What a clip MEANS at playback time: a block plays ONLY inside its clips - the bare
+// `label: pattern` stops being a loop and becomes a part - and a track with no clips at all is
+// silent. That is only safe because every track is FILLED when it joins the arrangement (the
+// painter paints it edge to edge, see arReconcileTracks in the web app), so a row is empty only
+// because it was emptied. The arrangement loops over its length (`len` option, or the end of the
+// last clip rounded up to a whole cycle), and the pattern inside a clip runs on absolute cycle
+// time, so a `<a b>` alternation keeps its place whether or not its block was sounding the bar
+// before.
+//
+// A clip may also REBIND the roll its track plays: `drums:fill,12,4` plays the roll called `fill`
+// over bars 12-16 and the track's own roll everywhere else, so a variation is painted rather than
+// patterned (see the roll-binding helpers below, and pianoroll() in signal.mjs, which reads them).
 //
 // The options are editor metadata plus the loop length:
-//   len   - loop length in cycles (default: the last clip's end, rounded up)
-//   snap  - the painter's grid, in cells per cycle (default 1 - one cell is one bar)
-//   lanes - lane names, an array indexed by lane (a hole or an empty string is an unnamed lane)
+//   len    - loop length in cycles (default: the last clip's end, rounded up)
+//   snap   - the painter's grid, in cells per cycle (default 1 - one cell is one bar)
+//   tracks - the tracks that are IN the arrangement, by label. Membership, not order (the rows
+//            follow the buffer): it is what tells a track that has never been arranged - fill it -
+//            from one whose clips you deleted on purpose - leave it silent. See
+//            reconcileArrangement.
+//   autos  - the automation lanes PINNED into the painter's strip, by name, top to bottom
 //   loops - loop regions, [[name, start, end], …] in cycles: while a region is ARMED, playback
 //           entering it loops it until the player releases it (ctrl+L), then runs on to the next
 //           armed region. Reaching the song's end and wrapping to the top re-arms every region.
@@ -33,7 +46,6 @@
 // always the grid you can see (see arSnapAuto in the web app). A number here pins it instead, and
 // is written into the call only when it has been pinned, so the default stays absent.
 export const ARRANGE_DEFAULT_SNAP = 'auto';
-export const ARRANGE_MIN_LANES = 4;
 const EPS = 1e-9;
 
 const num = (s) => {
@@ -41,20 +53,34 @@ const num = (s) => {
   return Number.isFinite(v) ? v : null;
 };
 
+/** "drums" / "drums:fill" -> { label, roll }. The roll is null unless the clip rebinds one. */
+function splitLabel(text) {
+  const at = String(text).indexOf(':');
+  if (at < 0) return { label: text, roll: null };
+  const label = text.slice(0, at);
+  const roll = text.slice(at + 1);
+  return { label, roll: roll || null };
+}
+
 /**
- * "drums,0,0,8 bass,1,4,4" -> [{ label, lane, start, len }]. Malformed tokens are skipped rather
+ * "drums,0,8 bass:fill,4,4" -> [{ label, start, len, roll }]. Malformed tokens are skipped rather
  * than thrown on: a half-typed clip should cost a missing clip, not the whole arrangement.
+ *
+ * A four-field token is an older arrangement's `label,lane,start,len` - the lane is read off and
+ * dropped, since a clip's row is now its track's (see the header).
  */
 export function parseArrangement(str) {
   const out = [];
   for (const tok of String(str ?? '').trim().split(/\s+/)) {
     if (!tok) continue;
-    const [label, laneS, startS, lenS] = tok.split(',');
-    const lane = num(laneS);
-    const start = num(startS);
-    const len = num(lenS);
-    if (!label || lane == null || start == null || len == null || len <= 0) continue;
-    out.push({ label, lane: Math.max(0, Math.round(lane)), start, len });
+    const parts = tok.split(',');
+    if (parts.length === 4) parts.splice(1, 1); // legacy lane column
+    if (parts.length !== 3) continue;
+    const { label, roll } = splitLabel(parts[0]);
+    const start = num(parts[1]);
+    const len = num(parts[2]);
+    if (!label || start == null || len == null || len <= 0) continue;
+    out.push({ label, start, len, roll });
   }
   return out;
 }
@@ -64,12 +90,12 @@ const fmt = (v) => {
   return String(r);
 };
 
-/** The inverse of parseArrangement, clips ordered by lane then time so a diff reads. */
+/** The inverse of parseArrangement, clips ordered by track then time so a diff reads. */
 export function serializeArrangement(clips) {
   return [...clips]
     .filter((c) => c && c.label && c.len > 0)
-    .sort((a, b) => a.lane - b.lane || a.start - b.start || (a.label < b.label ? -1 : 1))
-    .map((c) => `${c.label},${c.lane},${fmt(c.start)},${fmt(c.len)}`)
+    .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) || a.start - b.start)
+    .map((c) => `${c.label}${c.roll ? `:${c.roll}` : ''},${fmt(c.start)},${fmt(c.len)}`)
     .join(' ');
 }
 
@@ -77,7 +103,8 @@ export function serializeArrangement(clips) {
 export function looksLikeArrangeString(str) {
   const s = String(str ?? '').trim();
   if (!s) return true;
-  return s.split(/\s+/).every((tok) => /^[^,\s]+,\d+,-?[\d.]+,[\d.]+$/.test(tok));
+  // Three fields, or an older arrangement's four with the lane still in.
+  return s.split(/\s+/).every((tok) => /^[^,\s]+(,\d+)?,-?[\d.]+,[\d.]+$/.test(tok));
 }
 
 /** The options as the builder and the editor both read them, defaults filled in. */
@@ -89,7 +116,24 @@ export function normalizeArrangeOpts(opts = {}) {
   const snap = snapNum == null ? ARRANGE_DEFAULT_SNAP : Math.max(1, Math.round(snapNum));
   const rawLen = num(o.len);
   const len = rawLen != null && rawLen > 0 ? rawLen : null;
-  const lanes = Array.isArray(o.lanes) ? o.lanes.map((n) => (n == null ? '' : String(n))) : [];
+  // The pinned automation lanes, by name, in the order they are stacked under the clips. Editor
+  // metadata like `snap`: nothing about playback reads it, but it belongs to the song rather than
+  // to the browser, so a patch opened anywhere comes up showing the lanes it was being written
+  // against. Blanks and duplicates are dropped - a lane is pinned once or not at all.
+  const autos = [];
+  if (Array.isArray(o.autos)) {
+    for (const a of o.autos) {
+      const id = String(a ?? '').trim();
+      if (id && !autos.includes(id)) autos.push(id);
+    }
+  }
+  const tracks = [];
+  if (Array.isArray(o.tracks)) {
+    for (const t of o.tracks) {
+      const label = String(t ?? '').trim();
+      if (label && !tracks.includes(label)) tracks.push(label);
+    }
+  }
   const loops = [];
   if (Array.isArray(o.loops)) {
     for (const item of o.loops) {
@@ -101,7 +145,35 @@ export function normalizeArrangeOpts(opts = {}) {
     }
     loops.sort((x, y) => x.start - y.start || x.end - y.end);
   }
-  return { snap, len, lanes, loops };
+  return { snap, len, tracks, autos, loops };
+}
+
+/**
+ * Bring the arrangement up to date with the buffer's tracks: every track that has never been in it
+ * joins, FILLED - a clip over the whole song, so it plays exactly as it did before there was an
+ * arrangement. A track already in it is left exactly as it is, empty clips and all: that is the
+ * whole reason `tracks` is written down. Without it, "this track is silent" and "this track is new"
+ * look identical, and a row you emptied would fill itself again on the next evaluation.
+ *
+ * `labels` are the buffer's tracks, in document order. A label that has left the buffer is dropped
+ * from the membership unless clips still name it - an orphan keeps its row until its clips go.
+ *
+ * Pure: hands back what to write, and writes nothing. The editor applies it (see arReconcileTracks
+ * in the web app), which is also what makes it testable without a browser.
+ */
+export function reconcileArrangement(clips, opts = {}, labels = []) {
+  const o = normalizeArrangeOpts(opts);
+  const named = new Set(clips.map((c) => c.label));
+  const kept = o.tracks.filter((l) => labels.includes(l) || named.has(l));
+  const joining = labels.filter((l) => !kept.includes(l));
+  // Only a track with nothing painted is filled. One that already has clips is in the arrangement
+  // whatever the membership says - which is what makes an old `arrange(…)`, written before any of
+  // this was recorded, come through as the song it already was.
+  const len = arrangementLength(clips, opts);
+  const added = joining.filter((l) => !named.has(l)).map((label) => ({ label, start: 0, len, roll: null }));
+  const tracks = [...kept, ...joining];
+  const changed = added.length > 0 || tracks.length !== o.tracks.length || tracks.some((t, i) => t !== o.tracks[i]);
+  return { clips: added.length ? [...clips, ...added] : clips, tracks, added, changed };
 }
 
 /**
@@ -152,12 +224,60 @@ export function inSpans(spans, pos) {
   return false;
 }
 
-/** How many lanes the painter shows: enough for every clip and every named lane, never fewer than the minimum. */
-export function arrangementLaneCount(clips, opts = {}) {
-  const { lanes } = normalizeArrangeOpts(opts);
-  let n = Math.max(ARRANGE_MIN_LANES, lanes.length);
-  for (const c of clips) n = Math.max(n, c.lane + 1);
-  return n;
+/** Every label the arrangement mentions, in the order it first mentions them. */
+export function arrangementLabels(clips) {
+  const out = [];
+  for (const c of clips) if (c.label && !out.includes(c.label)) out.push(c.label);
+  return out;
+}
+
+/**
+ * The per-clip roll REBINDINGS: label -> sorted [{ start, end, roll }] for the clips that name a
+ * roll of their own. A track with none of these is absent from the map entirely, which is what
+ * lets the pianoroll builder skip the lookup for the tracks that never rebind.
+ *
+ * Overlapping clips are left as they are rather than merged the way spans are: two clips saying
+ * different rolls over one bar disagree, and the first of them (earliest onset) answers - see
+ * arrangementRollAt. Merging could only pick one anyway, and doing it here would hide which.
+ */
+export function arrangementRollBindings(clips) {
+  const byLabel = new Map();
+  for (const c of clips) {
+    if (!c.roll || !(c.len > 0)) continue;
+    const list = byLabel.get(c.label) ?? [];
+    list.push({ start: c.start, end: c.start + c.len, roll: c.roll });
+    byLabel.set(c.label, list);
+  }
+  for (const list of byLabel.values()) list.sort((a, b) => a.start - b.start || a.end - b.end);
+  return byLabel;
+}
+
+/** Which roll `bindings` puts at song position `pos` (already reduced), or null for the track's own. */
+export function arrangementRollAt(bindings, pos) {
+  for (const b of bindings) {
+    if (b.start > pos + EPS) break; // sorted, so nothing later can hold it
+    if (pos >= b.start - EPS && pos < b.end - EPS) return b.roll;
+  }
+  return null;
+}
+
+/**
+ * What an `_arrange(...)` definition evaluates to: the painted clips and options, which the host
+ * applies to the blocks they name once every block is built (see the arrangement pass in the web
+ * app's /api/evaluate). A plain object rather than a Sig, so the line is a definition and not an
+ * extra voice - the same trick setbpm()/setscale() blocks use.
+ *
+ * The editor writes this call and nobody types it: the arrangement is painted (ctrl+A), and the
+ * clip string is what the painter serializes.
+ */
+export function _arrange(str = '', opts = {}) {
+  if (typeof str !== 'string') {
+    throw new Error('[arrange] _arrange() takes the clip string the painter writes - press ctrl+A to paint one');
+  }
+  if (!looksLikeArrangeString(str)) {
+    throw new Error('[arrange] _arrange() takes "label,start,len …" clips - press ctrl+A to paint them');
+  }
+  return { poptartArrangeBlock: true, clips: parseArrangement(str), opts: normalizeArrangeOpts(opts) };
 }
 
 /**

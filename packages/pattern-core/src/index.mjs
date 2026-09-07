@@ -5,6 +5,9 @@ export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, 
 export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, vel, clip, nudge, swing, swinggrid, SAMPLER_CONTROL_NAMES } from './signal.mjs';
 export { channelAt, soundingEnd, timeShift, endEdgeStep, withSoundingSpan } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
+// The arrangement's hooks into pattern building: which track a roll belongs to, and which roll the
+// painted clips give it (see arrange.mjs and the pianoroll builder).
+export { setBlockLabel, rollOwners, clearRollOwners, setArrangeRolls } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveInputChannels } from './audio-inputs.mjs';
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';
@@ -19,4 +22,4 @@ export { injectLocations, isPatternPosition } from './locations.mjs';
 export { parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS, parseAutoPoints, serializeAutoPoints, sampleAutoPoints } from './shape.mjs';
 export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, noteSlice, noteNudge, noteNudgeChannel, looksLikeNoteString, sliceNotesFor, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_NUDGE, pianoRollSwingCells, commitPianoRollSwing, pianoRollNoteGrid } from './pianoroll.mjs';
 export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds, lookupSlices, sliceSetIds, lookupAuto, autoIds } from './rolls.mjs';
-export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementLength, arrangementSpans, arrangementLaneCount, inSpans, ArrangeClock, ARRANGE_DEFAULT_SNAP, ARRANGE_MIN_LANES } from './arrange.mjs';
+export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementLength, arrangementSpans, arrangementLabels, arrangementRollBindings, arrangementRollAt, reconcileArrangement, inSpans, ArrangeClock, _arrange, ARRANGE_DEFAULT_SNAP } from './arrange.mjs';

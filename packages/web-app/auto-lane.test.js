@@ -49,18 +49,28 @@ const LIFTED = ['arAutoYOf', 'arAutoValAt', 'arRefreshAutoRange', 'arAutoPointAt
  */
 function harness({ points = [], range = null, pxPerCycle = 40, scroll = 0, def = null, prebake = [] } = {}) {
   const GUTTER = 96;
-  const TOP = 400; // wherever the lanes happen to end - the strip's own math is relative to it
+  const TOP = 400; // wherever the rows happen to end - the strip's own math is relative to it
+  // The panel pins a LIST of lanes and works on whichever is focused, reaching it through these
+  // accessors (see arState in client.js) - so the fake has to have the same shape, or the lifted
+  // functions would be reading a lane that isn't there.
+  const lane = { id: 'lane', own: !!def, pts: points.map((p) => ({ ...p })), range: range ?? [0, 1] };
   const arState = {
-    autoPts: points.map((p) => ({ ...p })),
-    autoRange: range ?? [0, 1],
-    autoId: 'lane',
+    autos: [lane],
+    autoAt: 0,
+    get auto() { return this.autos[this.autoAt] ?? null; },
+    get autoId() { return this.auto?.id ?? null; },
+    get autoOwn() { return !!this.auto?.own; },
+    get autoPts() { return this.auto?.pts ?? []; },
+    set autoPts(pts) { if (this.auto) this.auto.pts = pts; },
+    get autoRange() { return this.auto?.range ?? [0, 1]; },
+    set autoRange(r) { if (this.auto) this.auto.range = r; },
   };
   const env = {
     arState,
     AR_AUTO_H,
     AR_AUTO_PAD,
     AR_AUTO_HIT,
-    arAutoTop: () => TOP,
+    arAutoTop: (i = 0) => TOP + i * AR_AUTO_H,
     arXOf: (bars) => GUTTER + (bars - scroll) * pxPerCycle,
     arBarsOf: (x) => scroll + (x - GUTTER) / pxPerCycle,
     arAutoDefOf: () => def,
@@ -239,8 +249,48 @@ test('the automation registry is one of the def registries, so folding and auto-
   assert.ok(m[1].includes('autoDefs'), 'autoDefs must be in DEF_REGISTRIES');
 });
 
-test('the strip only adds to the canvas height when it is open', () => {
+test('the canvas is as tall as the rows plus the strips ON SCREEN, never taller', () => {
   const size = grab('arSizeCanvas');
-  assert.match(size, /arAutoShown\(\) \? arAutoBottom\(\) : arGridBottom\(\)/);
+  assert.match(size, /arAutoAreaBottom\(\)/, 'the strips are part of the drawn height');
   assert.match(size, /arCanvas\.style\.height/, 'the CSS height has to follow, or the strip is clipped');
+  // The area is the grid plus the strips that FIT (arAutoVisible), not one per pin: pinning a
+  // fourth lane scrolls the strips instead of pushing the panel off the bottom of the display.
+  assert.match(SRC, /const arAutoAreaBottom = \(\) => arGridBottom\(\) \+ arAutoVisible\(\) \* AR_AUTO_H;/);
+  assert.match(SRC, /const arAutoVisible = \(\) => Math\.min\(AR_AUTO_MAX_VISIBLE, Math\.max\(1, arAutoCount\(\)\)\);/);
+  // ...and the rows take what is left of a budget measured off the window, so they give way first.
+  assert.match(grab('arVisibleRows'), /window\.innerHeight/);
+});
+
+test('the strip area is always there, at least one lane tall', () => {
+  // No toggle: automation belongs to the arrangement the way the ruler does. With nothing pinned
+  // the one strip is the empty state, and pressing it opens the lane picker.
+  assert.ok(!/getElementById\('arrangeAuto'\)/.test(SRC), 'the automation toggle button is gone');
+  assert.match(SRC, /function drawArrangeAutoEmpty\(/);
+  // ...and the handle is a CLICK: the press is what dismisses an open list, so opening on the
+  // press would open and shut it in one gesture.
+  assert.match(SRC, /function arOnLaneChevron\(x, y\)/);
+  assert.match(SRC, /if \(!arAutoCount\(\)\) return true; \/\/ the empty strip is all handle/);
+  assert.match(grab('initArrangeCanvas'), /arCanvas\.addEventListener\('click'/);
+});
+
+test('a lane is named, pinned and thrown away by direct gestures', () => {
+  // The head is the roll's own picker widget, so a lane renames, stars and deletes like every other
+  // named thing in the app; the gutter cell carries the rest.
+  assert.match(SRC, /const arAutoHead = makeNamePicker\(\{/);
+  assert.match(SRC, /alwaysShow: true/, 'a song with no lanes still needs the picker');
+  // ...and the list is anchored to the LANE, not to the panel's header: a name lives in its own
+  // gutter cell, so the list of names belongs beside it.
+  assert.match(SRC, /function arOpenLanePicker\(cellTop\)/);
+  assert.match(SRC, /if \(x >= AR_GUTTER - AR_AUTO_X_W\) \{ arUnpinAuto\(arState\.autos\[at\]\.id\); return; \}/);
+  assert.match(SRC, /if \(at != null && x < AR_GUTTER - AR_AUTO_X_W\) \{ arFocusAuto\(at\); arRenameAuto\(\); \}/);
+  assert.match(SRC, /if \(arState\.autoPicked != null && \(e\.key === 'Delete' \|\| e\.key === 'Backspace'\)\)/);
+});
+
+test('pinning is a list, and unpinning is how the space comes back', () => {
+  // The pins live in the arrangement's own options, so they travel with the song rather than with
+  // this browser (see arCallOpts / normalizeArrangeOpts).
+  assert.match(SRC, /function arPinAuto\(id\)/);
+  assert.match(SRC, /function arUnpinAuto\(id\)/);
+  assert.match(SRC, /function arUnpinAll\(\)/);
+  assert.match(SRC, /if \(autos\.length\) opts\.autos = autos;/);
 });

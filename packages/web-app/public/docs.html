@@ -501,22 +501,33 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           </p>
           <h4>Arranging: painting parts into a song</h4>
           <p>
-            Every labelled block loops forever. To turn loops into a song, add a line
-            <code>$: arrange()</code> anywhere and double-click <strong>arrange</strong>: a playlist
-            opens with lanes down the side and bars along the top. The buffer's labels are the
-            brushes — pick one, then click-drag on a lane to paint a clip. A block with any clip
-            painted plays <em>only</em> inside its clips; blocks you never paint keep looping as
-            before, so you can arrange the drums and leave the pad running.
+            Every labelled block loops forever. To turn loops into a song, press
+            <strong>ctrl+A</strong>: a playlist opens with one row per track — your labelled blocks,
+            in the order you wrote them — and bars along the top. The first time, every track is
+            filled edge to edge, so nothing sounds different until you carve: click-drag on a row to
+            paint a clip, and that track plays <em>only</em> inside its clips. A row you empty is
+            silent. A track you type later joins the arrangement filled, the same way, so arranging
+            never quietly takes a part away from you.
           </p>
           <p>
-            Clips move like notes: drag the body (between lanes too), drag the right edge to
-            resize, right-click for delete / duplicate / repaint as another label, ⌘Z to undo.
-            Lanes are just rows to read the song on — any label may go on any lane, and a lane may
-            hold several. Double-click a lane's name to name it. The arrangement loops at the last
-            clip's end, or drag in the ruler (or type <strong>len</strong>) to set the length;
+            Clips move like notes: drag the body (onto another track's row too, which is how a part
+            moves between tracks), drag the right edge to resize, option-drag to duplicate,
+            right-click for delete / duplicate / fill / clear, ⌘Z to undo. Click a track's name to
+            select its row, double-click the name to jump to its code. The arrangement loops at the
+            last clip's end, or drag in the ruler (or type <strong>len</strong>) to set the length;
             <strong>snap</strong> sets how finely clips land, <strong>+</strong>/<strong>−</strong>
             and ctrl+wheel zoom. Inside a clip the pattern runs on absolute bar time, so a
             <code>&lt;a b&gt;</code> keeps alternating through the bars it is painted out of.
+          </p>
+          <p>
+            <strong>A clip can play a different roll.</strong> Double-click a clip and the roll its
+            track plays is forked — copied under a name of its own — and bound to that clip alone;
+            the piano roll opens on the copy, so drawing there changes those bars and nothing else.
+            That is how a fill, a variation or an alternate chorus is <em>painted</em>: split the
+            clip where the change happens, double-click the piece, draw. Paint the same fork at the
+            other phrase ends (right-click a clip → <strong>play <em>name</em></strong>) and it
+            repeats exactly; right-click → <strong>back to…</strong> unbinds. The fork is an ordinary
+            drawn roll, so it renames, duplicates and stars into your library like any other.
           </p>
           <p>
             <strong>Loop regions</strong> make a song you can hold. Drag across the ruler to mark a
@@ -525,6 +536,23 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             runs on to the next region and loops that instead. When the song reaches its end and
             wraps to the top, every region is armed again. Right-click a region in the ruler to
             rename or remove it.
+          </p>
+          <p>
+            <strong>Automation lanes</strong> live under the clips, on the same bars, and the strip
+            is always there. The <strong>lane</strong> box in the header names the one you are
+            drawing on: type over it to rename, or press <strong>▾</strong> to search every lane
+            there is — picking one <em>pins</em> it under the clips, ★ keeps it in your library, ✕
+            deletes it, and a name that matches nothing offers to create it. On a lane's own name
+            cell: double-click to rename, ✕ at its right to unpin, and click then
+            <strong>delete</strong> to throw the lane away.
+          </p>
+          <p>
+            Several pinned at once is the point: a filter curve reads against a gain curve as much
+            as against the sections, and a span copied out of one lane (⌘C) pastes straight into
+            another (⌘V). Past three, the strips scroll (wheel over them, or pick a lane and it
+            comes into view) and the track rows give up height first, so the panel stays on screen
+            however many you pin. Which lanes are pinned travels with the song, not with the
+            browser.
           </p>
         </section>
 
@@ -1028,7 +1056,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
-            <tr><td><code>$: arrange()</code></td><td>the arrangement painter (double-click to open): painted blocks play only where painted</td></tr>
+            <tr><td><strong>ctrl+A</strong></td><td>the arrangement painter: a row per track, painted clips say when each one sounds</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
             <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>
@@ -1068,6 +1096,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
             <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code> · <code>ctrl+b</code> · <code>ctrl+g</code></td><td>eval · stop · bounce · mixer</td></tr>
+            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code></td><td>the arrangement · release the loop region it is in</td></tr>
             <tr><td>right-click · <code>ctrl+J</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>
