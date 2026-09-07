@@ -445,12 +445,21 @@ test('a variation is titled by its #name and colored a step off its base', () =>
     'and only chosen colors are written into the call');
 });
 
-test('renaming a base in the block window carries its variations and their clips along', () => {
-  const src = grab('arRenameLabel');
-  assert.match(src, /const renamed = `\$\{to\}#\$\{b\.variant\}`;/);
+test('renaming from a clip or the mixer goes through one path, and the painter follows', () => {
+  // mixctl's renameEdits rewrites the code AND the clips in the buffer (a base taking its
+  // variations along); the painter's own copy of the clips has to follow either way in.
   const apply = grab('arApplyRename');
   assert.match(apply, /for \(const c of arState\.clips\) if \(map\.has\(c\.label\)\) c\.label = map\.get\(c\.label\);/);
   assert.match(apply, /arState\.tracks = arState\.tracks\.map\(\(t\) => map\.get\(t\) \?\? t\);/);
-  // ...and the mixer's rename, which rewrites the clips in the buffer itself, brings the painter along
-  assert.match(SRC, /const res = mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]{0,900}arApplyRename\(map\);/);
+  assert.match(grab('arRenameBlock'), /const res = mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]{0,900}arApplyRename\(map\);/);
+  assert.match(grab('applyMixerRename'), /mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]*arApplyRename\(map\);/);
+  // the gesture: the clip menu and cmd+R put the name box over the clip's title
+  assert.match(SRC, /items\.push\(\['rename…', \(\) => arRenameClip\(targets\[0\]\)/);
+  assert.match(SRC, /if \(mod && e\.key\.toLowerCase\(\) === 'r'\) \{/);
+  assert.match(grab('arCommitLaneName'), /if \(edit\.kind === 'clip'\) \{\n\s+if \(save && name && name !== edit\.from\) arRenameBlock\(edit\.from, name\);/);
+});
+
+test('double-clicking a clip flips to the code on its block - there is no second editor', () => {
+  assert.ok(!/blockEdit/.test(SRC), 'the block window is gone');
+  assert.match(grab('arEditBlock'), /closeArrangeEditor\(\);[\s\S]{0,200}arGotoBlock\(label\);/);
 });

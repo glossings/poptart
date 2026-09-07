@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 import * as arrangeMod from '../pattern-core/src/arrange.mjs';
 import * as labelsMod from '../pattern-core/src/labels.mjs';
+import * as mixctlMod from '../pattern-core/src/mixctl.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(HERE, 'public', 'client.js'), 'utf8');
@@ -73,7 +74,7 @@ function fakeCm(text) {
 
 const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arMigrateLegacy', 'arMigrateOneLegacy', 'arReadDef', 'parseArrangeCall',
   'arCallOpts', 'serializeArrangeCall', 'arRefreshRows', 'arBlocks', 'arLabels', 'arTrackLabels', 'arRowOfLabel',
-  'arReconcileTracks', 'arWriteDefText']
+  'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arFollowHandRenames']
   .map(grab)
   .concat([grabConst('arRowLabel'), grabConst('arFillClip')])
   .join('\n\n');
@@ -87,6 +88,9 @@ function panel({ code = '', arState = null } = {}) {
     arState,
     arrangeMod,
     labelsMod,
+    mixctlMod,
+    arBlocksAtLastEval: null, // what the last evaluation saw (see arFollowHandRenames)
+    arApplyRename: () => {},
     arSuppressClose: false,
     logLine: (line) => logged.push(line),
     refoldAll: () => {},
@@ -94,9 +98,12 @@ function panel({ code = '', arState = null } = {}) {
     arSyncBrushHead: () => {}, // the head is DOM; the brush it shows is on arState, which is what is tested
     writeArrangeCall: () => {},
     drawArrange: () => {},
+    arScheduleEval: () => {},
+    // a variation of an existing base is the brush's copy; here it just records that it was asked
+    arCreateVariation: (base, name) => { logged.push(`variation ${base}#${name}`); return `${base}#${name}`; },
   };
   // eslint-disable-next-line no-new-func
-  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel };`);
+  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames };`);
   return { fns: build(...Object.values(env)), cm, logged, arState };
 }
 
@@ -279,6 +286,85 @@ test('a buffer already on _arrange is left alone', () => {
   assert.equal(p.fns.arMigrateLegacy(), false);
   assert.match(p.cm.text, /_arrange\("kick,0,8"\)/);
   assert.ok(p.fns.arFindDef(), 'and it is found as the buffer\'s arrangement');
+});
+
+// ---------------------------------------------------------------------------------------------
+// An orphan row's block, written on demand
+// ---------------------------------------------------------------------------------------------
+
+test('a missing base becomes a silent stub after the last track, above the foot', () => {
+  const p = panel({ code: 'kick: s("bd*4")\n\nhats: s("hh*8")\n\n_arrange("kick,0,8 pad,0,8")\n_roll("x", "")\n' });
+  assert.equal(p.fns.arCreateBlock('pad'), true);
+  assert.equal(p.cm.text, 'kick: s("bd*4")\n\nhats: s("hh*8")\n\npad: note("~")\n\n_arrange("kick,0,8 pad,0,8")\n_roll("x", "")\n');
+  assert.match(p.logged.join('\n'), /new track pad/);
+});
+
+test('a missing variation of a track that exists is a copy of its base', () => {
+  const p = panel({ code: 'keys2: n("0 2").synth("Diva")\n' });
+  assert.equal(p.fns.arCreateBlock('keys2#1'), true);
+  assert.match(p.logged.join('\n'), /^variation keys2#1$/m);
+  assert.ok(!/note\("~"\)/.test(p.cm.text), 'not a stub - the base is what it starts from');
+});
+
+test('a missing variation of a missing base is a stub under the full name', () => {
+  const p = panel({ code: 'hats: s("hh*8")\n' });
+  assert.equal(p.fns.arCreateBlock('keys2#1'), true);
+  assert.match(p.cm.text, /\n\nkeys2#1: note\("~"\)\n$/);
+});
+
+test('an empty buffer gets the stub as its first line', () => {
+  const p = panel({ code: '' });
+  assert.equal(p.fns.arCreateBlock('pad'), true);
+  assert.equal(p.cm.text, 'pad: note("~")\n');
+});
+
+// ---------------------------------------------------------------------------------------------
+// A base renamed by hand takes its family with it - at the evaluation, once the typing has settled
+// ---------------------------------------------------------------------------------------------
+
+const FAMILY_ARR = '\n\n_arrange("kick,0,8 kick#fill,6,2 hats,0,8 kick#outro,8,4")\n';
+
+test('renaming a base by hand carries its variations and their clips, on the next evaluation', () => {
+  const p = panel({ code: FAMILY + FAMILY_ARR });
+  p.fns.arFollowHandRenames(); // the evaluation that saw `kick`
+  p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'mainKick: s("mbd*4")'); // the hand edit
+  p.fns.arFollowHandRenames(); // the next one
+  assert.equal(p.cm.text, [
+    'mainKick#fill: s("mbd*8")',
+    'setbpm(140)',
+    'mainKick: s("mbd*4")',
+    'mainKick#outro: s("mbd*4").fx("FilterFreak 1")',
+    'hats: s("hh*8")',
+    '',
+    '_arrange("mainKick,0,8 mainKick#fill,6,2 hats,0,8 mainKick#outro,8,4")',
+    '',
+  ].join('\n'));
+  assert.match(p.logged.join('\n'), /kick is mainKick now - its 2 variations and their clips followed/);
+});
+
+test('a rename that also changed the body is left alone - it might be a new track', () => {
+  const p = panel({ code: FAMILY });
+  p.fns.arFollowHandRenames();
+  p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'mainKick: s("mbd*2")');
+  p.fns.arFollowHandRenames();
+  assert.match(p.cm.text, /^kick#fill: /m, 'the family is untouched');
+  assert.equal(p.logged.length, 0);
+});
+
+test('two new bases with the same body is ambiguous, so nothing moves', () => {
+  const p = panel({ code: FAMILY });
+  p.fns.arFollowHandRenames();
+  p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'a: s("mbd*4")\n\nb: s("mbd*4")');
+  p.fns.arFollowHandRenames();
+  assert.match(p.cm.text, /^kick#fill: /m);
+});
+
+test('the first evaluation has nothing to compare against, and a base without variations is nobody\'s business', () => {
+  const p = panel({ code: 'hats: s("hh*8")\n\n_arrange("hats,0,8")\n' });
+  p.fns.arFollowHandRenames();
+  p.cm.text = p.cm.text.replace('hats:', 'hh:');
+  p.fns.arFollowHandRenames();
+  assert.match(p.cm.text, /_arrange\("hats,0,8"\)/, 'no family, no follow - the orphan row says so instead');
 });
 
 test('the word arrange inside a comment or a string is not a call', () => {

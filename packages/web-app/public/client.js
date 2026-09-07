@@ -11787,6 +11787,7 @@ async function evaluate(start, { byHand = false } = {}) {
   // every track of an arrangement is in it, so the tracks an old song left unpainted have to be
   // filled (arReconcileTracks, below) or they would fall silent on the first evaluation.
   arMigrateLegacy();
+  arFollowHandRenames(); // a base renamed by hand takes its variations and their clips along, as cmd+R would
   // A pack named for the first time (`sp("kit")`, or a bare `sp()` that materialize just named)
   // has no files yet, so it plays silence - and the one thing you want at that moment is the
   // panel to fill it. Noted before materialize writes the definitions and opened once the eval
@@ -17126,7 +17127,7 @@ async function runHotkey(hk, e) {
 // through it.
 function anyModalOpen() {
   // askEl only exists once something has asked; it is built shown, so "not hidden" means open.
-  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, blockEditBackdrop, askEl]
+  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, askEl]
     .some((el) => el && !el.classList.contains('hidden'));
 }
 
@@ -22569,13 +22570,12 @@ function openArrangeEditor(call) {
 /**
  * Leaving the arrangement lands you in the code - on the block of the clip you had selected, if
  * you had one. A clip IS its block, so closing with one in hand is the "take me to it" gesture
- * (the same place the block window's "in code" goes); closing with nothing selected leaves the
- * cursor where it was.
+ * (double-clicking a clip is the same, with the selecting done for you); closing with nothing
+ * selected leaves the cursor where it was.
  */
 function closeArrangeEditor() {
   const picked = arState ? [...arState.sel][0]?.label ?? null : null;
   arCloseMenu();
-  closeBlockEdit();
   arLaneNameInput.classList.add('hidden');
   if (arRaf) { cancelAnimationFrame(arRaf); arRaf = null; }
   if (arState?.marker) arState.marker.clear();
@@ -23851,7 +23851,8 @@ function arVariationMenuItems(targets) {
     'a variation of its own - a copy of the block - so editing what these bars play changes nothing else',
   ]);
   if (one) {
-    items.push([`edit ${one}…`, () => arEditBlock(one), 'just this block, in a window - double-clicking the clip is the same']);
+    items.push([`edit ${one}`, () => arEditBlock(one), 'the code, on this block - double-clicking the clip is the same (ctrl+A comes back)']);
+    items.push(['rename…', () => arRenameClip(targets[0]), 'cmd-R — the block, its clips and (for a base) its variations']);
     items.push([`color…`, () => arPickColor(one), 'a color of your own for every clip of this variation']);
     if (arState.colors[one]) items.push(['default color', () => arSetColor(one, null)]);
   }
@@ -24241,13 +24242,43 @@ let arNameEdit = null; // { kind: 'auto', from } | { kind: 'region', region, fre
  */
 function arRevealTrack(label) {
   if (!labelsMod) return;
-  const block = labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => b.label === label);
-  if (!block) {
-    logLine(`no block called ${JSON.stringify(label)} in this buffer - its clips are an orphan row`, 'warn');
-    return;
-  }
+  let block = labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => b.label === label);
+  // An orphan row - clips whose block has gone - is a block waiting to be written. Write it.
+  if (!block && arCreateBlock(label)) block = labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => b.label === label);
+  if (!block) return;
   cm.scrollIntoView({ from: cm.posFromIndex(block.start), to: cm.posFromIndex(block.end) }, 80);
   arSelectTrack(label);
+}
+
+/**
+ * The block an orphan row's clips are waiting for, written into the buffer: a variation of a track
+ * that exists is a copy of its base (the same thing the brush makes); anything else is a silent
+ * stub, `label: note("~")`, placed after the last track so it reads where a track goes. Returns
+ * true once the block is there.
+ */
+function arCreateBlock(label) {
+  if (!labelsMod || !arrangeMod) return false;
+  const base = arrangeMod.baseOf(label);
+  const variant = arrangeMod.variantOf(label);
+  const blocks = labelsMod.splitLabeledBlocks(cm.getValue());
+  if (variant != null && blocks.some((b) => b.label === base)) return arCreateVariation(base, variant) != null;
+  const tracks = blocks.filter((b) => b.kind !== 'bare');
+  const code = cm.getValue();
+  const text = `${label}: note("~")`;
+  if (tracks.length) {
+    // after the last track's own lines, with the blank line that separated it from what follows
+    const last = tracks[tracks.length - 1];
+    const at = code.slice(0, last.end).replace(/\s+$/, '').length;
+    cm.replaceRange(`\n\n${text}`, cm.posFromIndex(at));
+  } else {
+    const gap = code.trim() ? '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length)) : '';
+    cm.replaceRange(`${gap}${text}\n`, cm.posFromIndex(code.length));
+  }
+  refoldAll();
+  logLine(`new track ${label}: silent until you give it a sound (its clips were waiting for it)`);
+  if (arState) arRefreshRows();
+  arScheduleEval();
+  return true;
 }
 
 /**
@@ -24265,208 +24296,25 @@ function arGotoBlock(label) {
   cm.focus();
 }
 
-// ---------------------------------------------------------------------------------------------
-// One block, on its own, to edit: double-click a clip and the block it names comes up in a small
-// window - label line and all - so a variation gets its difference without leaving the song, and
-// gets its new name the same way, since the label is the first thing in the box.
-//
-// The window is a VIEW of the buffer, not a copy of it. What you type is written back to the
-// block whenever you leave the box (and when the window closes, and before a handle opens a
-// panel); what a panel writes into the block - the piano roll drawing notes, a preset being
-// captured - shows up in the box the moment it lands. So the roll can be open in front of the
-// window with both of them alive, which is how a variation is usually worked on. The block's
-// place in the buffer is a CodeMirror mark, so it follows every edit above it.
-//
-// A changed label renames the block's clips with it (and, for a base, its variations and theirs)
-// - at a write-back, never per keystroke, so a name typed letter by letter renames once.
-// ---------------------------------------------------------------------------------------------
-
-const blockEditBackdrop = document.getElementById('blockEditBackdrop');
-const blockEditTitle = document.getElementById('blockEditTitle');
-const blockEditNote = document.getElementById('blockEditNote');
-let blockEditCM = null;
-let blockEdit = null; // { label, marker } - which block, and the mark over its text in the buffer
-let blockEditSyncing = false; // a write of ours is landing; the change handler must not echo it back
-
-function ensureBlockEditCM() {
-  if (!blockEditCM) {
-    blockEditCM = CodeMirror.fromTextArea(document.getElementById('blockEditEditor'), {
-      mode: { name: 'javascript' },
-      theme: 'poptart',
-      keyMap: 'sublime',
-      matchBrackets: true,
-      autoCloseBrackets: true,
-      viewportMargin: Infinity,
-      extraKeys: {
-        // Play, exactly as in the editor - the block written back first, the window staying up.
-        // Esc and the ✕ are how you leave; there is nothing to confirm, since the box is live.
-        'Cmd-Enter': () => playBlockEdit(),
-        'Ctrl-Enter': () => playBlockEdit(),
-        'Ctrl-Space': (ed) => showPoptartHint(ed),
-        Esc: () => closeBlockEdit(),
-      },
-    });
-    // The editor's own manners - completion as you type, the ctrl-hover docs - since this is the
-    // same code, only cut out of the buffer for a moment.
-    attachEditorWiring(blockEditCM);
-    blockEditCM.on('blur', () => commitBlockEdit());
-    // The double-click handles (the roll, a plugin's window, a preset, an lfo, a pack). Every one
-    // of those panels reads and writes the MAIN buffer, so the box is written back first and the
-    // handle is opened at the same character in the buffer - which is where the block is. The
-    // window stays up behind the panel, and follows what the panel writes (see the change hook).
-    blockEditCM.on('mousedown', (ed, e) => {
-      if (e.detail !== 2 || e.button !== 0 || !blockEdit) return;
-      const inner = ed.indexFromPos(ed.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
-      commitBlockEdit();
-      const range = blockEditRange();
-      if (!range) return;
-      if (openWidgetAt(cm.getValue(), range[0] + inner)) e.preventDefault(); // the double-click WAS the gesture
-    });
-    // A panel's write into the block reaches the box. Only a change that touched the block: an
-    // unrelated write elsewhere in the buffer (the painter filing a clip) must not clobber what
-    // is being typed in here ahead of its write-back.
-    cm.on('change', (_ed, change) => {
-      if (!blockEdit || blockEditSyncing || blockEditBackdrop.classList.contains('hidden')) return;
-      const range = blockEditRange();
-      if (!range) { closeBlockEdit(); return; } // the block was deleted out from under the window
-      const at = cm.indexFromPos(change.from);
-      if (at < range[0] || at > range[1]) return;
-      const text = cm.getRange(cm.posFromIndex(range[0]), cm.posFromIndex(range[1])).replace(/\s+$/, '');
-      if (text === blockEditCM.getValue().replace(/\s+$/, '')) return;
-      const cur = blockEditCM.getCursor();
-      blockEditCM.setValue(text);
-      blockEditCM.setCursor(cur);
-    });
-  }
-  return blockEditCM;
-}
-
-/** Where the block is in the buffer right now, as [from, to) indices - or null if it has gone. */
-function blockEditRange() {
-  const r = blockEdit?.marker.find();
-  if (!r) return null;
-  const from = cm.indexFromPos(r.from);
-  const to = cm.indexFromPos(r.to);
-  return to > from ? [from, to] : null;
-}
-
+/**
+ * Edit the block a clip plays: leave the arrangement for the code, landing on it. A clip IS its
+ * block, and the code is the one place a block is edited - with the editor's own completion, keys
+ * and handles rather than a stand-in's. ctrl+A comes straight back to the song. (A window holding
+ * just the block was tried and taken out: it had to impersonate the whole editor to be usable.)
+ */
 function arEditBlock(label) {
   if (!labelsMod) return;
-  const code = cm.getValue();
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label);
-  if (!block) {
-    logLine(`no block called ${JSON.stringify(label)} in this buffer - its clips are an orphan row`, 'warn');
-    return;
-  }
-  const ed = ensureBlockEditCM();
-  if (blockEdit) blockEdit.marker.clear();
-  // The mark covers the block's text and not the blank lines after it, so the gap under the block
-  // is never part of what the box shows or writes.
-  const text = code.slice(block.start, block.end).replace(/\s+$/, '');
-  blockEdit = { label, marker: cm.markText(cm.posFromIndex(block.start), cm.posFromIndex(block.start + text.length), {}) };
-  blockEditTitle.textContent = label;
-  blockEditNote.textContent = '';
-  blockEditBackdrop.classList.remove('hidden');
-  ed.setValue(text);
-  ed.refresh();
-  ed.focus();
-  ed.setCursor({ line: 0, ch: ed.getLine(0).length });
-}
-
-/**
- * Write the box back over the block. A no-op when they already agree, so the blur that follows a
- * handle's double-click, or the close after a write-back, costs nothing. Returns the block's label
- * as it now reads, having renamed if the label line changed.
- */
-function commitBlockEdit() {
-  if (!blockEdit || !blockEditCM) return null;
-  const range = blockEditRange();
-  if (!range) return blockEdit.label;
-  const [from, to] = range;
-  const text = blockEditCM.getValue().replace(/\s+$/, '');
-  if (text !== cm.getRange(cm.posFromIndex(from), cm.posFromIndex(to))) {
-    blockEditSyncing = true;
-    try {
-      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-    } finally {
-      blockEditSyncing = false;
-    }
-    // A mark collapses when everything inside it is replaced at once; put it back over the new text.
-    blockEdit.marker.clear();
-    blockEdit.marker = cm.markText(cm.posFromIndex(from), cm.posFromIndex(from + text.length), {});
-    refoldAll();
-    // A write-back is an edit to the song, and it plays like one - the same debounced eval the
-    // painter's own writes get. It is also what loads a variation's plugins, so that `.param("`
-    // completion in here offers ITS parameters rather than a guess (see paramHints).
-    arScheduleEval();
-  }
-  const after = labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => b.start === from);
-  const now = after?.label ?? blockEdit.label;
-  if (now !== blockEdit.label) {
-    arRenameLabel(blockEdit.label, now);
-    blockEdit.label = now;
-    blockEditTitle.textContent = now;
-  }
-  return now;
-}
-
-/** cmd+enter in the window: write the block back and play the buffer, the way the editor's does. */
-function playBlockEdit() {
-  commitBlockEdit();
-  clearTimeout(arEvalTimer); // the write-back's debounced eval - this IS that eval, now
-  arEvalTimer = null;
-  evaluate(true, { byHand: true });
-}
-
-function closeBlockEdit({ goto = false } = {}) {
-  if (blockEditBackdrop.classList.contains('hidden')) return;
-  const now = commitBlockEdit();
-  blockEditBackdrop.classList.add('hidden');
-  blockEdit?.marker.clear();
-  blockEdit = null;
+  if (!labelsMod.splitLabeledBlocks(cm.getValue()).some((b) => b.label === label) && !arCreateBlock(label)) return;
   if (arState) {
-    arRefreshRows();
-    if (now) arSetBrush(now);
-    drawArrange();
+    arState.sel = new Set(arState.clips.filter((c) => c.label === label && arState.sel.has(c)));
+    closeArrangeEditor(); // lands on the selected clip's block by itself (see closeArrangeEditor)
   }
-  if (goto && now) {
-    closeArrangeEditor();
-    arGotoBlock(now);
-  } else if (arState) {
-    arCanvas.focus({ preventScroll: true });
-  }
+  arGotoBlock(label);
 }
 
 /**
- * `from` is now called `to`: every clip that named it follows, and so does its color. For a BASE,
- * the family goes with it - `kick#fill` becomes `drums#fill` in the code and in the clips - since
- * a variation with no base is an orphan, and renaming a track is not meant to orphan its parts.
- */
-function arRenameLabel(from, to) {
-  if (!labelsMod || !arrangeMod || from === to) return;
-  const fromBase = arrangeMod.variantOf(from) == null;
-  const toBase = arrangeMod.variantOf(to) == null;
-  const map = new Map([[from, to]]);
-  if (fromBase && toBase) {
-    // the family's blocks, renamed in the code from the bottom up so the offsets above hold
-    const blocks = labelsMod.splitLabeledBlocks(cm.getValue()).filter((b) => b.base === from && b.variant != null);
-    for (const b of [...blocks].reverse()) {
-      const renamed = `${to}#${b.variant}`;
-      map.set(b.label, renamed);
-      const code = cm.getValue();
-      const m = /^\s*([A-Za-z_$][\w$]*(?:#[\w$]+)?)(\s*:)/.exec(code.slice(b.start, b.end));
-      if (!m) continue;
-      const at = b.start + m[0].length - m[2].length - m[1].length;
-      cm.replaceRange(renamed, cm.posFromIndex(at), cm.posFromIndex(at + m[1].length));
-    }
-  }
-  arApplyRename(map);
-  logLine(`renamed ${from} to ${to}${map.size > 1 ? ` (and its ${map.size - 1} variation${map.size === 2 ? '' : 's'})` : ''}`);
-}
-
-/**
- * The painter's side of a rename, whoever made it - the block window above, or the mixer typing
- * over a strip's name (which rewrites the clips in the buffer itself; see mixctl's renameEdits).
+ * The painter's side of a rename made from the mixer - typing over a strip's name rewrites the
+ * clips in the buffer itself (see mixctl's renameEdits), and the painter's copy has to follow.
  * Every clip, the membership, the colors, the brush and the selected row follow `map`, and the
  * call is written so the painter's marker and the buffer agree again.
  */
@@ -24482,6 +24330,112 @@ function arApplyRename(map) {
   writeArrangeCall(true, { evaluate: false }); // the eval is the caller's, once
 }
 
+/**
+ * Rename the block a clip plays, from the clip: the name box over its title (right-click → rename,
+ * or cmd+R with it selected). A base carries its variations and every clip along; a variation
+ * moves alone - the same edits the mixer's rename makes (see mixctl's renameEdits), since a label
+ * is one thing however you got to it. Type `kick#roll` to turn a base into a variation of
+ * something, or a variation into one of something else.
+ */
+function arRenameClip(clip) {
+  const x1 = Math.max(AR_GUTTER, arXOf(clip.start));
+  const x2 = Math.min(arW, arXOf(clip.start + clip.len));
+  const top = arYOf(arRowOfLabel(clip.label)) + 3;
+  arShowNameInput({ left: x1, top, width: Math.max(120, x2 - x1), value: clip.label, placeholder: 'name, or base#variation', edit: { kind: 'clip', from: clip.label } });
+}
+
+/** `from` is now called `to`, in the code, in the clips and in the painter. */
+function arRenameBlock(from, to) {
+  if (!mixctlMod) return;
+  const res = mixctlMod.renameEdits(cm.getValue(), from, to);
+  if (res.error) { logLine(res.error, true); return; }
+  arSuppressClose = true; // the edits touch the arrangement's own call; that is not it being deleted
+  try {
+    for (const edit of [...res.edits].reverse()) {
+      cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+    }
+  } finally {
+    arSuppressClose = false;
+  }
+  const map = new Map([[from, to]]);
+  if (!from.includes('#') && !to.includes('#')) {
+    for (const l of arState.rows.flatMap((r) => r.variants)) {
+      if (arrangeMod.baseOf(l) === from && l !== from) map.set(l, `${to}#${arrangeMod.variantOf(l)}`);
+    }
+  }
+  arApplyRename(map);
+  arRefreshRows();
+  refoldAll();
+  arScheduleEval();
+  drawArrange();
+  logLine(`renamed ${from} to ${to}${res.family ? ` (and its ${res.family} variation${res.family === 1 ? '' : 's'})` : ''}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A base renamed BY HAND - `kick:` typed over as `mainKick:` - would leave `kick#1`, `kick#outro`
+// and every clip of theirs orphaned, which cmd+R and the mixer's rename both take care not to do.
+// Typing can't be followed keystroke by keystroke (`kic`, `ki`, `k` are each a rename), so the
+// settled moment is the evaluation: a base that had variations and is gone, and a base that wasn't
+// there before whose BODY is byte-identical, is that block under a new name. Exactly one
+// candidate, or nothing is touched - and what is done is said, and is one cmd+Z away.
+// ---------------------------------------------------------------------------------------------
+
+let arBlocksAtLastEval = null; // [{ label, variant, base, body }] - what the last evaluation saw
+
+function arFollowHandRenames() {
+  if (!labelsMod || !mixctlMod || !arrangeMod) return;
+  const snapshot = () => labelsMod.splitLabeledBlocks(cm.getValue())
+    .filter((b) => b.kind === 'labeled')
+    .map((b) => ({ label: b.label, base: b.base, variant: b.variant, body: b.code.trim() }));
+  const before = arBlocksAtLastEval;
+  let now = snapshot();
+  arBlocksAtLastEval = now;
+  if (!before) return;
+  const nowLabels = new Set(now.map((b) => b.label));
+  const beforeLabels = new Set(before.map((b) => b.label));
+  for (const old of before) {
+    if (old.variant != null || nowLabels.has(old.label)) continue;
+    const family = before.filter((b) => b.base === old.label && b.variant != null && nowLabels.has(b.label));
+    if (!family.length) continue;
+    const cands = now.filter((b) => b.variant == null && !beforeLabels.has(b.label) && b.body === old.body);
+    if (cands.length !== 1) continue;
+    const to = cands[0].label;
+    const map = new Map();
+    // The base's own clips first: its label line is already the new name, so only the clips
+    // that name it are still saying the old one.
+    const own = mixctlMod.arrangeClipEdits(cm.getValue(), new Map([[old.label, to]]));
+    if (own.length) {
+      arSuppressClose = true;
+      try {
+        for (const edit of [...own].reverse()) cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+      } finally {
+        arSuppressClose = false;
+      }
+      map.set(old.label, to);
+    }
+    for (const v of family) {
+      const renamed = `${to}#${v.variant}`;
+      const res = mixctlMod.renameEdits(cm.getValue(), v.label, renamed);
+      if (res.error) { logLine(`${v.label}: ${res.error}`, true); continue; }
+      arSuppressClose = true;
+      try {
+        for (const edit of [...res.edits].reverse()) cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+      } finally {
+        arSuppressClose = false;
+      }
+      map.set(v.label, renamed);
+    }
+    if (!map.size) continue;
+    if (arState) { arApplyRename(map); arRefreshRows(); drawArrange(); }
+    const moved = family.filter((v) => map.has(v.label)).length;
+    logLine(`${old.label} is ${to} now - its ${moved} variation${moved === 1 ? '' : 's'} and their clips followed (cmd+Z undoes)`);
+    now = snapshot();
+    arBlocksAtLastEval = now;
+    nowLabels.clear();
+    for (const b of now) nowLabels.add(b.label);
+  }
+}
+
 function arNameRegion(region, fresh = false) {
   const x1 = Math.max(AR_GUTTER, arXOf(region.start));
   const x2 = Math.min(arW, arXOf(region.end));
@@ -24495,6 +24449,11 @@ function arCommitLaneName(save) {
   arLaneNameInput.classList.add('hidden');
   if (!arState || !edit) return;
   const name = arLaneNameInput.value.trim();
+  if (edit.kind === 'clip') {
+    if (save && name && name !== edit.from) arRenameBlock(edit.from, name);
+    arCanvas.focus({ preventScroll: true });
+    return;
+  }
   if (edit.kind === 'auto') {
     // An automation lane is a DEFINITION, so the rename goes through the registry - it moves every
     // auto("...") that names it too, which a lane name written into the arrange call could not.
@@ -25668,14 +25627,14 @@ function initArrangeCanvas() {
       arRevealTrack(arRowLabel(row));
     }
     else if (clipHit) {
-      // A clip is a block: double-clicking it puts just that block up to edit (see arEditBlock),
+      // A clip is a block: double-clicking it flips to the code on that block (see arEditBlock),
       // which is where a variation gets its difference - and where it gets renamed, since the
-      // label is the first thing in it.
+      // label is the first thing in it. ctrl+A comes back.
       const clip = clipHit.clip;
       arState.sel = new Set([clip]);
       arSelectTrack(clip.label, { brush: clip.label });
       arEditBlock(clip.label);
-      drawArrange();
+      return; // the painter is gone; nothing left to draw
     }
     else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_LANES_TOP && y < arGridBottom() && arRowLabel(row) != null) {
       // double-click empty in the arrow tool paints one cell, as the roll does - with the brush,
@@ -25847,6 +25806,14 @@ function initArrangeCanvas() {
     // arrangement is mostly made of, on the keys a playlist has always used for them.
     if (mod && e.key.toLowerCase() === 'e') { arSplitClips(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'j') { arJoinClips(); e.preventDefault(); return; }
+    if (mod && e.key.toLowerCase() === 'r') {
+      // rename the block a selected clip plays; several of one block is still one rename
+      e.preventDefault();
+      const labels = [...new Set([...arState.sel].map((c) => c.label))];
+      if (labels.length === 1) arRenameClip([...arState.sel][0]);
+      else logLine(labels.length ? 'select clips of one block to rename it' : 'select a clip to rename the block it plays', 'warn');
+      return;
+    }
     if (mod && e.key.toLowerCase() === 'z') { arHistoryStep(e.shiftKey ? 1 : -1); e.preventDefault(); return; }
     // ctrl+A shuts the painter (the key that opened it), cmd+A takes every clip in it. Guarded by
     // editMod so this only claims ctrl where ctrl isn't the editing modifier: off macOS ctrl+A IS
@@ -25966,10 +25933,6 @@ function initArrangeEditor() {
     if (!arBrushPicker.classList.contains('hidden') && !arBrushWrap.contains(e.target)) arBrushHead.closePicker(false);
   });
 
-  // The block window (see arEditBlock): every way out writes the block back.
-  blockEditBackdrop.addEventListener('click', (e) => { if (e.target === blockEditBackdrop) closeBlockEdit(); });
-  document.getElementById('blockEditClose').addEventListener('click', () => closeBlockEdit());
-  document.getElementById('blockEditGoto').addEventListener('click', () => closeBlockEdit({ goto: true }));
   arAutoSearch.addEventListener('input', () => arAutoHead.renderList(true));
   arAutoSearch.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); arAutoHead.move(1); }

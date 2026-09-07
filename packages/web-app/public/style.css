@@ -1315,9 +1315,8 @@ footer#console {
   font-size: 12px;
   padding: 4px;
   max-height: 22em;
-  /* Over everything, including the dialogs (40) and the panels (30 and up): the addon's own 10
-     put the list BEHIND a dialog's backdrop, so completing inside the block window showed the
-     doc box floating beside a list nobody could see. The doc box rides at the same height. */
+  /* Over the dialogs (40) and the panels (30 and up): the addon's own 10 put the list behind any
+     dialog's backdrop. The doc box rides at the same height. */
   z-index: 100;
 }
 
@@ -2741,8 +2740,8 @@ li.CodeMirror-hint-active {
    a centered floating box is undone here. The view switch in the header is how you flip. */
 .arrange-panel {
   position: static;
-  z-index: auto; /* a flex item stacks by z-index even when static - the chrome's 30 would put the page over the block window (29) */
-  transform: none;
+  z-index: auto; /* a flex item stacks by z-index even when static; the chrome's 30 would float the page over the dialogs */
+  transform: none; /* the chrome centers a floating panel by translating it half its size; a page stays put */
   flex: 1;
   width: auto;
   max-width: none;
@@ -2912,6 +2911,12 @@ body.arrange-on #editorPane {
   background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* A segment after the first has no left border of its own (it borrows its neighbor's right one),
+   so a lit middle segment's left edge is the neighbor's to paint. */
+.view-switch > button:has(+ button.active) {
+  border-right-color: var(--accent);
 }
 
 /* The arrangement is the code's arrangement; in DJ mode there are two decks and no one buffer to
@@ -5158,21 +5163,6 @@ body.mix-on #deckAHead {
   width: min(720px, 94vw);
   height: min(560px, 84vh);
   max-height: none;
-}
-
-/* A block on its own is a few lines: the same dialog, shorter, sized to what it holds. */
-.block-dialog {
-  height: auto;
-  min-height: 180px;
-  max-height: 60vh;
-}
-
-/* The block window sits UNDER the panels (the piano roll, the LFO, a preset - z-index 30 and up,
-   see bringPanelToFront): a handle double-clicked in it opens its panel in front while the window
-   stays up behind, alive to what the panel writes. The other dialogs keep their 40 - they are
-   modal, this one is a view. */
-#blockEditBackdrop {
-  z-index: 29;
 }
 
 /* The arrangement's color chooser: the platform's own input, kept out of sight and opened

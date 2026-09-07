@@ -190,6 +190,16 @@ function sourceRefEdits(code, mask, from, to) {
 // renamed (see `map`) is rewritten in place; the numbers after it are untouched.
 const ARRANGE_CALL_RE = /\b_?arrange\s*\(\s*(['"])((?:[^'"\\\n]|\\.)*)\1/g;
 
+/**
+ * The clip edits alone, for a block whose label has ALREADY changed - a base renamed by hand in the
+ * code, which the editor notices at the next evaluation and whose clips it then brings along.
+ * `map` is old label -> new. Same shape as renameEdits' edits: ascending, apply back to front.
+ */
+export function arrangeClipEdits(code, map, ctx = null) {
+  const { mask } = ctx ?? analyze(code);
+  return arrangeRefEdits(code, mask, map instanceof Map ? map : new Map(Object.entries(map)));
+}
+
 function arrangeRefEdits(code, mask, map) {
   const edits = [];
   ARRANGE_CALL_RE.lastIndex = 0;
