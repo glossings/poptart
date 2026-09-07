@@ -115,7 +115,7 @@ function parseMeta(code) {
   return meta;
 }
 
-// The first labelled block's name (`bass: note(…)` -> "bass") - a last resort for a
+// The first labeled block's name (`bass: note(…)` -> "bass") - a last resort for a
 // work-in-progress session that has neither an `@title` nor a name of its own. Mute/solo
 // prefixes are part of the spelling, not the name, so `_bass:` and `Sbass:` both read as "bass";
 // `$:` setup blocks aren't names at all, so they're skipped. Display only - it never has to be

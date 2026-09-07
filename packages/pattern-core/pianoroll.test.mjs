@@ -752,7 +752,7 @@ test('nudge is the sixth field, and holds the ones before it open', () => {
   // nudge anywhere is written exactly as it was before the field existed.
   assert.equal(serializePianoRoll(notes), '60,0,1 62,4,1,1,1,0.1 64,8,4,0.8,0.5,-0.05');
   assert.equal(serializePianoRoll(parsePianoRoll('60,0,1 62,4,1,0.5')), '60,0,1 62,4,1,0.5');
-  // Past half a cell the note has changed places with its neighbour, so that is where it stops.
+  // Past half a cell the note has changed places with its neighbor, so that is where it stops.
   assert.equal(parsePianoRoll('60,0,1,1,1,3')[0].nudge, 0.5);
   assert.equal(parsePianoRoll('60,0,1,1,1,-3')[0].nudge, -0.5);
 });

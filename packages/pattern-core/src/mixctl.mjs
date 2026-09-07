@@ -119,7 +119,7 @@ export function formatTrim(value) {
 // The raw label token a labeled block starts with. A bare-statement anonymous block has none
 // (that's what MADE it anonymous), so flagEdit can't mark it; a `$:` block does (`$`), and takes
 // markers like any named label (`_$:` is a muted anonymous block).
-const LABEL_TOKEN_RE = /^([A-Za-z_$][\w$]*)\s*:(?!:)/; // same shape (and `::` exclusion) as the splitter's
+const LABEL_TOKEN_RE = /^([A-Za-z_$][\w$]*(?:#[\w$]+)?)\s*:(?!:)/; // same shape (and `::` exclusion, and `#variation`) as the splitter's
 
 // The token with its mute/solo markers stripped, exactly as the splitter's parseLabel strips
 // them (leading/trailing `_` mutes, then leading/trailing capital `S` solos, repeatedly, never
@@ -159,7 +159,7 @@ export function flagEdit(code, label, { muted = false, soloed = false } = {}, ct
 // A name that can be written as a label and read back as itself. The identifier shape is the
 // splitter's; the marker check is what stops `Snare` (which parses as a SOLOED `nare`) and
 // `bass_` (a muted `bass`) from becoming names you can't get rid of.
-const NAME_RE = /^[A-Za-z_$][\w$]*$/;
+const NAME_RE = /^[A-Za-z_$][\w$]*(?:#[\w$]+)?$/; // a name, or a variation's `base#name`
 
 // The calls that take a TRACK LABEL as a string: `audio("drums")` reads another track's output,
 // `midi("kick")` re-triggers off its notes - both also as methods (`.audio(…)` for a sidechain,
@@ -181,6 +181,33 @@ function sourceRefEdits(code, mask, from, to) {
     const name = raw.trim();
     if (name === from) edits.push({ from: close - raw.length, to: close, text: to });
     else if (name === `track:${from}`) edits.push({ from: close - raw.length, to: close, text: `track:${to}` });
+  }
+  return edits;
+}
+
+// The arrangement's clip string names blocks too - `_arrange("kick,0,8 kick#fill,12,4")` - and a
+// clip left naming the old label is an orphan row playing nothing. Each clip token whose label is
+// renamed (see `map`) is rewritten in place; the numbers after it are untouched.
+const ARRANGE_CALL_RE = /\b_?arrange\s*\(\s*(['"])((?:[^'"\\\n]|\\.)*)\1/g;
+
+function arrangeRefEdits(code, mask, map) {
+  const edits = [];
+  ARRANGE_CALL_RE.lastIndex = 0;
+  let m;
+  while ((m = ARRANGE_CALL_RE.exec(code))) {
+    if (!mask[m.index]) continue;
+    const raw = m[2];
+    const open = m.index + m[0].length - 1 - raw.length; // the first character inside the quotes
+    const tokenRe = /(^|\s)([^\s,]+),/g; // each clip's label: the token before its first comma
+    let t;
+    while ((t = tokenRe.exec(raw))) {
+      // an older `label:roll` token renames by its label alone
+      const label = t[2].split(':')[0];
+      const to = map.get(label);
+      if (to == null) continue;
+      const at = open + t.index + t[1].length;
+      edits.push({ from: at, to: at + label.length, text: to });
+    }
   }
   return edits;
 }
@@ -211,10 +238,22 @@ export function renameEdits(code, label, newName, ctx = null) {
   if (blocks.some((b) => b !== block && b.label === name)) {
     return { error: `"${name}" is already another pattern's name` };
   }
-  const m = LABEL_TOKEN_RE.exec(code.slice(block.start, block.start + 256));
-  const head = m
-    ? { from: block.start, to: block.start + m[1].length, text: `${block.muted ? '_' : ''}${block.soloed ? 'S' : ''}${name}` }
-    : { from: block.start, to: block.start, text: `${name}: ` };
+  // Renaming a BASE takes its variations with it: `kick#fill` becomes `drums#fill`, in the code
+  // and in the arrangement's clips, since a variation whose base has gone is an orphan and a
+  // rename is not meant to make one. Renaming a variation, or renaming a base INTO a variation
+  // (`kick` -> `drums#fill`), moves that one block alone.
+  const family = block.variant == null && !name.includes('#')
+    ? blocks.filter((b) => b.base === label && b.variant != null)
+    : [];
+  const map = new Map([[label, name], ...family.map((b) => [b.label, `${name}#${b.variant}`])]);
+  const headOf = (b, to) => {
+    const m = LABEL_TOKEN_RE.exec(code.slice(b.start, b.start + 256));
+    return m
+      ? { from: b.start, to: b.start + m[1].length, text: `${(b.ownMuted ?? b.muted) ? '_' : ''}${(b.ownSoloed ?? b.soloed) ? 'S' : ''}${to}` }
+      : { from: b.start, to: b.start, text: `${to}: ` };
+  };
+  const heads = [headOf(block, name), ...family.map((b) => headOf(b, map.get(b.label)))];
   const refs = sourceRefEdits(code, mask, label, name);
-  return { edits: [head, ...refs].sort((a, b) => a.from - b.from), refs: refs.length };
+  const clips = arrangeRefEdits(code, mask, map);
+  return { edits: [...heads, ...refs, ...clips].sort((a, b) => a.from - b.from), refs: refs.length, family: family.length };
 }

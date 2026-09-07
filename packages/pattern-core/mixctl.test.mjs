@@ -204,6 +204,35 @@ test('renameEdits: refuses a name that is taken, malformed, or reads as a marker
   assert.match(renameEdits(code, 'gone', 'x').error, /no block named/);
 });
 
+test('renameEdits: renaming a base carries its variations, in the code and in the clips', () => {
+  const code = [
+    'kick#fill: s("mbd*8")', // written above its base, and group-muted by it below
+    '_kick: s("mbd*4")',
+    'kick#outro: s("mbd*4").fx("FilterFreak 1")',
+    'hats: s("hh*8").audio("kick")',
+    '_arrange("kick,0,8 kick#fill,6,2 hats,0,8 kick#outro,8,4")',
+  ].join('\n');
+  const res = renameEdits(code, 'kick', 'drums');
+  assert.equal(res.family, 2);
+  const out = appliedAll(code, res);
+  assert.equal(out, [
+    'drums#fill: s("mbd*8")', // its OWN marker is none - the mute it inherits is not written onto it
+    '_drums: s("mbd*4")',
+    'drums#outro: s("mbd*4").fx("FilterFreak 1")',
+    'hats: s("hh*8").audio("drums")',
+    '_arrange("drums,0,8 drums#fill,6,2 hats,0,8 drums#outro,8,4")',
+  ].join('\n'));
+});
+
+test('renameEdits: renaming a variation moves that block alone, clips included', () => {
+  const code = 'kick: s("mbd*4")\nkick#fill: s("mbd*8")\n_arrange("kick,0,8 kick#fill,6,2")';
+  const out = appliedAll(code, renameEdits(code, 'kick#fill', 'kick#roll'));
+  assert.equal(out, 'kick: s("mbd*4")\nkick#roll: s("mbd*8")\n_arrange("kick,0,8 kick#roll,6,2")');
+  // ...and a base renamed INTO a variation takes nobody with it
+  const alone = appliedAll(code, renameEdits(code, 'kick', 'drums#a'));
+  assert.equal(alone, 'drums#a: s("mbd*4")\nkick#fill: s("mbd*8")\n_arrange("drums#a,0,8 kick#fill,6,2")');
+});
+
 test('renameEdits: the new name is what the splitter reads back', () => {
   const code = '_Sbass: s("bd*4").audio("bass")';
   const out = appliedAll(code, renameEdits(code, 'bass', 'sub2'));

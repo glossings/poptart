@@ -181,7 +181,7 @@ function tone(hz, frames = SR) {
 }
 
 test('bands put a tone in the band it belongs to', () => {
-  // The colour split only has to be right in the obvious cases: a bass note is not a hi-hat.
+  // The color split only has to be right in the obvious cases: a bass note is not a hi-hat.
   const dominant = (audio) => {
     const b = bands(audio, 8)[4]; // a bucket well past the filters' settling time
     return b.indexOf(Math.max(...b));
@@ -251,7 +251,7 @@ test('trimRecording carries the band balance alongside the peaks', () => {
 
 // --- the song deck's waveform (songs phase 3) ---
 
-test('reduceEnvelope folds buckets: peak keeps the max, rms averages energy, colour follows the loud part', () => {
+test('reduceEnvelope folds buckets: peak keeps the max, rms averages energy, color follows the loud part', () => {
   const env = {
     peaks: [0.2, 1.0, 0.1, 0.1],
     rms: [0.1, 0.8, 0.05, 0.05],
@@ -261,7 +261,7 @@ test('reduceEnvelope folds buckets: peak keeps the max, rms averages energy, col
   assert.equal(out.peaks.length, 2);
   assert.equal(out.peaks[0], 1.0, 'the folded bucket keeps the loudest peak');
   assert.ok(Math.abs(out.rms[0] - Math.sqrt((0.1 ** 2 + 0.8 ** 2) / 2)) < 1e-3, 'rms folds as energy, not as an average of readings');
-  assert.ok(out.bands[0][2] > out.bands[0][0], "the loud bucket's colour wins over its quiet neighbour's");
+  assert.ok(out.bands[0][2] > out.bands[0][0], "the loud bucket's color wins over its quiet neighbor's");
   assert.ok(out.peaks[1] <= 0.1 + 1e-9);
 });
 

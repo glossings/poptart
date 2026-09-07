@@ -11,7 +11,7 @@
 // place them. Block-relative offsets (not document-absolute) match splitLabeledBlocks' convention,
 // where positions inside a block's `code` equal positions in the source minus the block `start`.
 //
-// This is behaviour-preserving: the pattern builders (n/note/s/mini and the chain methods that
+// This is behavior-preserving: the pattern builders (n/note/s/mini and the chain methods that
 // take mini) already accept a Sig, and `mini("…")` of a genuine mini string is exactly what they
 // build internally - we've just tagged it with a location. A literal we MISS simply isn't
 // highlighted (graceful); the predicate is deliberately conservative so a non-mini string

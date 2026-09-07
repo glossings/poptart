@@ -114,7 +114,7 @@ const API_DOCS = {
   input: {
     kind: 'builder',
     sig: 'input(device?, ch, ch2?)',
-    desc: 'A hardware audio input as a track source. Channels are numbered from 1, as on the interface; one is mono and lands centred, two make a stereo pair. The optional device name picks which interface\'s channels those are (only meaningful with a poptart aggregate - see settings). Pass it to .audio() after an .fx() to sidechain off a live input.',
+    desc: 'A hardware audio input as a track source. Channels are numbered from 1, as on the interface; one is mono and lands centered, two make a stereo pair. The optional device name picks which interface\'s channels those are (only meaningful with a poptart aggregate - see settings). Pass it to .audio() after an .fx() to sidechain off a live input.',
     eg: 'input("Scarlett", 1).fx("Pro-Q 4")',
   },
   macro: {

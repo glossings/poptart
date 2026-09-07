@@ -143,7 +143,7 @@ export function invertPitch(notes, { scale = null } = {}) {
 
 /**
  * Spread / contract: every note moves one step (a scale degree in key, a semitone otherwise)
- * away from the selection's centre (`steps` > 0) or toward it (< 0), notes AT the centre staying
+ * away from the selection's center (`steps` > 0) or toward it (< 0), notes AT the center staying
  * put and contracting notes never crossing it. Widens or tightens a voicing - or a melody's
  * ambitus - without changing its shape.
  */
@@ -158,7 +158,7 @@ export function spreadPitch(notes, { scale = null, steps = 1 } = {}) {
     if (d === center) return { ...nt };
     const dir = Math.sign(d - center);
     let moved = d + dir * steps;
-    if ((moved - center) * dir < 0) moved = Number.isInteger(center) ? center : center + dir * 0.5; // stop AT the centre
+    if ((moved - center) * dir < 0) moved = Number.isInteger(center) ? center : center + dir * 0.5; // stop AT the center
     return { ...nt, midi: clampMidi(fromStep(moved)) };
   });
 }
@@ -300,7 +300,7 @@ export function degrade(notes, { amount = 0.3, seed = 1 } = {}) {
 
 /**
  * Augment: new notes in a share (`amount`) of the empty cells of the selection's span, each a
- * cell long, modelled on its nearest neighbour - the same pitch half the time, a scale step
+ * cell long, modelled on its nearest neighbor - the same pitch half the time, a scale step
  * either way otherwise (`repitch: false` for a drum roll, where a row is a sound) - and a little
  * quieter, so additions read as ghost notes until raised. Originals come first, additions after.
  */
@@ -328,8 +328,8 @@ export function augment(notes, { amount = 0.3, seed = 1, scale = null, span = nu
  * weights over ONE die, so a note changes at most one way and turning two axes up never
  * compounds them on the same note: `{ pitch: 1 }` alone is "your rhythm, new notes", `{ drop: 1,
  * add: 1 }` alone is "your notes, some missing and some new". `add` is separate - the chance an
- * empty cell in the region fills with a note modelled on its nearest neighbour in time, keeping
- * that neighbour's length so a fill sounds like the line it came from.
+ * empty cell in the region fills with a note modelled on its nearest neighbor in time, keeping
+ * that neighbor's length so a fill sounds like the line it came from.
  *
  * Every note spends the same fixed handful of dice whichever axis wins it, so dragging one
  * weight re-sorts the notes between the axes rather than reshuffling the whole bar: the editor
@@ -385,7 +385,7 @@ export function variation(notes, {
     const [gate, dir, mag] = [rand(), rand(), rand()];
     if (taken.has(c) || !models.length || gate >= temperature * add) continue;
     const model = nearestInTime(models, c);
-    // An addition sounds like its neighbour: its length, a little quieter, its pitch half the
+    // An addition sounds like its neighbor: its length, a little quieter, its pitch half the
     // time and within `depth` steps of it otherwise.
     const step = !repitch || dir < 0.5 ? 0 : (dir < 0.75 ? -1 : 1) * (1 + Math.floor(mag * steps));
     copy.push({ ...withLen(model, model.len), start: c, nudge: 0, midi: stepPitch(model.midi, step, scale), vel: clampVel(noteVel(model) * 0.8) });
@@ -526,7 +526,7 @@ export function arpeggiate(notes, { rate = 1, direction = 'up', seed = 1 } = {})
  * pitches are a seeded walk in `scale`. Four dials; the last two both read as "adherence to the
  * original", 0 ignoring it and 1 preserving it:
  *
- *   range   the walk's window in scale steps, centred on the selection's own midpoint. Unset, it
+ *   range   the walk's window in scale steps, centered on the selection's own midpoint. Unset, it
  *           is the selection's span, widened to an octave when narrower - so one repeated pitch
  *           still yields a melody. A window wider than an octave also walks bolder - the leaps
  *           scale with it - so widening the range audibly spreads the line, not just its limits.

@@ -939,7 +939,7 @@ function foldConfigBlobs() {
   const DATA_ARG_TITLES = {
     lfo: 'lfo shape — click to expand, or use the shape editor',
     pianoroll: 'piano roll notes — click to expand, or use the piano roll editor',
-    arrange: 'arrangement clips — click to expand, or press ctrl+A to paint',
+    arrange: 'the arrangement — click to expand, or press ctrl+A to paint it',
   };
   const dataArgRe = /\b(lfo|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
   while ((m = dataArgRe.exec(code))) {
@@ -956,14 +956,21 @@ function foldConfigBlobs() {
     // its own offset alone, which is exactly the run of edits this has to hold across.
     foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]], `data@${m.index}`);
   }
-  // _arrange(...): the WHOLE argument list folds - clips, loop length, loops and pinned lanes are
-  // all the painter's, and none of it is meant to be edited by hand.
+  // _arrange(...): the WHOLE CALL folds, the way a definitions run does. The clips, the loop length,
+  // the loops and the pinned lanes are all the painter's - and so is the call around them, which
+  // nobody types either. Leaving `_arrange(⋯)` on screen showed the one part of it that says
+  // nothing; a chip naming what it is says the same thing in less room.
   const arrangeRe = /\b_?arrange\s*\(/g;
+  let arrangeN = 0;
   while ((m = arrangeRe.exec(code))) {
+    // Keyed by WHICH arrangement it is rather than by where, like a definitions run: the painter
+    // rewrites this call on every drag and anything typed above it moves the lot, so an offset key
+    // would forget it had been opened.
+    const key = `arrange:${arrangeN++}`;
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0 || !code.slice(open + 1, close).trim()) continue;
-    foldSpan(open + 1, close, '⋯', DATA_ARG_TITLES.arrange, `data@${m.index}`);
+    foldSpan(m.index, close + 1, '⋯ arrangement', DATA_ARG_TITLES.arrange, key);
   }
   // The same blob one call along, as a named preset's third argument. This is for the definitions
   // no run covers - one that chains, or shares its line with code - since inside a folded run the
@@ -1876,8 +1883,13 @@ function paramHints(cur, typed, textBefore, editor) {
   const block = blockAtCursor(editor);
   const sinceBlockStart = block ? textBefore.slice(block.start) : textBefore;
   const slot = (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
+  // This track's slot; failing that its BASE's (a variation starts as a copy of its base, so
+  // before the engine has loaded `kick#fill` the kick's own chain is the right guess, and some
+  // other track's would be a wrong one); failing both, whatever is loaded at that slot anywhere.
+  const base = block && arrangeMod ? arrangeMod.baseOf(block.label) : null;
   const entry =
     (block && chainSlots.find((s) => s.track === block.label && s.slot === slot)) ??
+    (base && base !== block.label && chainSlots.find((s) => s.track === base && s.slot === slot)) ??
     chainSlots.find((s) => s.slot === slot);
   // Fall back to every loaded plugin's params (tagged by plugin) if the slot isn't loaded yet.
   const pool = entry?.params?.length
@@ -3775,7 +3787,7 @@ function initPresetPanel() {
 // label has picked), cmd-D
 // duplicates, option-drag drags a copy, cmd-Z / cmd-shift-Z walk the roll's own undo history.
 // Arrow keys nudge the selection (shift-up/down = octave, shift-right/left lengthen/shorten), delete removes
-// it, double-click erases one, and 0 mutes it - greyed out and silent, still there to switch back
+// it, double-click erases one, and 0 mutes it - grayed out and silent, still there to switch back
 // on with another 0. A value lane along the bottom shows every note's velocity
 // or probability (its gutter label names the channel and clicks through to the other one) as a
 // marker per note - a dot at the onset, a line running right for the duration, dashed for
@@ -3797,7 +3809,7 @@ function initPresetPanel() {
 // button says which of them the rows are showing - a piano keyboard, or a plain 0, 1, 2, … count of
 // a pack's files driving .i(). Switching moves nothing and changes no sound (see prSetMode). `fold`
 // hides the rows nothing is drawn on, on either axis; `scale` hides everything outside the key, and
-// greys out on the index rows, where there is no key. The loop bar along the top carries the playing window: drag either end
+// grays out on the index rows, where there is no key. The loop bar along the top carries the playing window: drag either end
 // anywhere on the timeline - so a loop can open half way through bar 1 and close half way through
 // bar 2, the note it opens on being the pattern's first beat - or drag its body to slide the whole
 // window over the notes (its ends snap to bar lines and their halves - hold shift for exact cells),
@@ -3969,7 +3981,7 @@ const isBlackKey = (m) => [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
 const pitchClass = (m) => ((m % 12) + 12) % 12;
 
 // The buffer's key - whatever `setscale(...)` last set, reported by /api/status at load and by
-// every evaluate. The roll colours its lanes by it (tonic, in-key, out-of-key) and can fold the
+// every evaluate. The roll colors its lanes by it (tonic, in-key, out-of-key) and can fold the
 // out-of-key rows away entirely, the way a scale-aware piano roll does.
 let patchScale = null;
 
@@ -3996,7 +4008,7 @@ function prScaleInfo() {
     try {
       const { rootMidi, intervals } = notesMod.parseScaleName(patchScale);
       // `intervals` (semitones above the root, ascending from 0) is what the ⌨'s in-key layout is
-      // built from; `pcs` is what the roll's lanes are coloured by.
+      // built from; `pcs` is what the roll's lanes are colored by.
       info = { tonic: pitchClass(rootMidi), intervals, pcs: new Set(intervals.map((iv) => pitchClass(rootMidi + iv))) };
     } catch {
       info = null; // the server already reported the bad name at the setscale call
@@ -4023,7 +4035,7 @@ function prScaleInfo() {
 // a change of view, so it costs one `mode:` in the call and nothing else.
 //
 // What DOESN'T carry over is the key: a pack has no scale, so `scale` (the tint and its fold) is a
-// note-axis feature. It stays in the toolbar - greyed, not removed, so the buttons never move
+// note-axis feature. It stays in the toolbar - grayed, not removed, so the buttons never move
 // under the pointer - and `fold`, which hides the rows nothing is drawn on, works on all three.
 
 const prIndexMode = () => prState?.mode === 'index';
@@ -4071,11 +4083,11 @@ function prSyncMode() {
   const mode = prNoteMode() ? 'note' : prState.mode;
   const pitched = mode === 'note';
   // The label IS the state - which is why this button never takes the `active` accent the toggles
-  // do: switching would flash the accent colour off behind the new word, and the word had already
+  // do: switching would flash the accent color off behind the new word, and the word had already
   // said it.
   prModeBtn.textContent = mode;
   prModeBtn.title = `rows are ${PR_MODE_ROWS[mode]} — click for ${PR_MODE_ROWS[PR_MODE_NEXT[mode]]}`;
-  // Greyed rather than hidden: a toolbar that reshuffles itself under the pointer is worse than a
+  // Grayed rather than hidden: a toolbar that reshuffles itself under the pointer is worse than a
   // button that plainly doesn't apply here. Both of these are keyboard things - a key to fold to,
   // and a pitch to audition - and the numbered rows have neither. (Preview would happily play the c2
   // every index note sits at, which is worse than silence: it would sound the same on every row.)
@@ -4138,7 +4150,7 @@ function prLaneList() {
 
 // Where a pitch sits in the key: 2 = the tonic, 1 = in the scale, 0 = out of it. null when no
 // scale is set, which leaves the roll on its plain black/white lanes. Both the grid and the piano
-// gutter shade by this, so "in key" is visible as colour and not merely as the absence of dimming.
+// gutter shade by this, so "in key" is visible as color and not merely as the absence of dimming.
 const prScaleRank = (midi, info) => (!info ? null : pitchClass(midi) === info.tonic ? 2 : info.pcs.has(pitchClass(midi)) ? 1 : 0);
 
 // How strongly the accent tints a lane / a piano key at each rank. The grid stays faint (notes
@@ -4340,7 +4352,7 @@ function serializePianorollCall(state) {
   //
   // rollDefs.defCall, not the bare `roll(` this used to write. The marker being replaced covers
   // the leading underscore, so writing the legacy name dropped it - and for the moment before the
-  // next eval put it back, the buffer held no definition the editor could recognise: the run's
+  // next eval put it back, the buffer held no definition the editor could recognize: the run's
   // chip fell off, and the data argument got chipped on its own instead. Every write is now the
   // same shape the definition already had, so a note drawn into a roll changes only the notes.
   return idLiteral ? `${rollDefs.defCall}(${idLiteral}, ${body})` : `pianoroll(${body})`;
@@ -5112,16 +5124,29 @@ function firstDefRunStart(code) {
 // all, and a run nested in a function body doesn't count: it is scoped to that body, and appending
 // to it would write a definition into a scope the buffer can't see.
 function lastDefRunEnd(code) {
-  const isCode = codeOnly(code);
   let end = null;
+  for (const [, to] of footSpans(code)) if (end === null || to > end) end = to;
+  return end;
+}
+
+/**
+ * The FOOT of the buffer: every top-level definition run, and the `_arrange(...)` call - which is
+ * editor-written data of the same kind (folded to a chip, never typed) and stacks flush with the
+ * rest. As [start, end) spans, in buffer order. Both the placement of a new block and the pass
+ * that closes the gaps between blocks read this, so the two can't disagree about what a block is.
+ */
+function footSpans(code) {
+  const isCode = codeOnly(code);
+  const spans = [];
   for (const reg of DEF_REGISTRIES) {
     for (const run of reg.runs(code)) {
       if (!atTopLevel(code, isCode, run[0].start)) continue;
-      const at = run[run.length - 1].close + 1;
-      if (end === null || at > end) end = at;
+      spans.push([run[0].start, run[run.length - 1].close + 1]);
     }
   }
-  return end;
+  const arrange = arFindDef(code);
+  if (arrange && atTopLevel(code, isCode, arrange.start)) spans.push([arrange.start, arrange.close + 1]);
+  return spans.sort((a, b) => a[0] - b[0]);
 }
 
 // Pass five: the blank lines an older patch has between one definition block and the next - two
@@ -5132,15 +5157,7 @@ function lastDefRunEnd(code) {
 // what tells them apart, and it is above the first run.
 function tightenDefRuns() {
   const code = cm.getValue();
-  const isCode = codeOnly(code);
-  const spans = [];
-  for (const reg of DEF_REGISTRIES) {
-    for (const run of reg.runs(code)) {
-      if (!atTopLevel(code, isCode, run[0].start)) continue;
-      spans.push([run[0].start, run[run.length - 1].close + 1]);
-    }
-  }
-  spans.sort((a, b) => a[0] - b[0]);
+  const spans = footSpans(code); // the definition runs and the arrangement, which stacks with them
   const edits = [];
   for (let i = 1; i < spans.length; i++) {
     const [from, to] = [spans[i - 1][1], spans[i][0]];
@@ -6327,9 +6344,9 @@ function prRoundRect(ctx, x, y, w, h, r) {
 }
 
 // A literal piano down the left edge - white/black keys, note names, C's called out. Fixed
-// key colours (a piano reads the same in any theme); the divider follows the theme. With a scale
+// key colors (a piano reads the same in any theme); the divider follows the theme. With a scale
 // set, every key IN the scale is tinted with the theme accent and the tonic is tinted hardest, so
-// the key you're in reads off the piano itself rather than off the note names. Black and white keys both take the tint, over their own base colour, so
+// the key you're in reads off the piano itself rather than off the note names. Black and white keys both take the tint, over their own base color, so
 // the piano still reads as a piano underneath.
 function drawPianoKeys(ctx, col, m, info) {
   const { H, gridTop, rowH, laneTop } = m;
@@ -6996,7 +7013,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
   if (onsets > 1) rhythm.push(t('reverse', (ns) => T.retrograde(ns), 'the phrase backwards, in its own span'));
   if (n > 1 && pitched) {
     melody.push(t('invert pitch', (ns) => T.invertPitch(ns, { scale }), `upside down in ${scale}`));
-    melody.push(popover('spread', 'wider or tighter around the centre, in key', {
+    melody.push(popover('spread', 'wider or tighter around the center, in key', {
       title: `spread in ${scale}`,
       params: [{ key: 'steps', label: 'steps', type: 'range', min: -4, max: 4, step: 1, value: 1 }],
       make: (v) => (ns) => T.spreadPitch(ns, { scale, steps: v.steps }),
@@ -7021,7 +7038,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
             if (!p) return; // 'none' names the custom mix - picking it moves nothing
             prApplyPreset(v, rows, { ...p, offset: 0 });
           } },
-        { key: 'range', label: 'range', title: "the walk's room in octaves, centred on the selection's middle", type: 'range', min: 0.25, max: 3, step: 0.25, value: Math.min(3, Math.max(1, Math.round((degSpan / size) * 4) / 4)), fmt: (x) => `${x} oct` },
+        { key: 'range', label: 'range', title: "the walk's room in octaves, centered on the selection's middle", type: 'range', min: 0.25, max: 3, step: 0.25, value: Math.min(3, Math.max(1, Math.round((degSpan / size) * 4) / 4)), fmt: (x) => `${x} oct` },
         { key: 'offset', label: 'offset', title: 'the whole window up or down, in scale steps - double-click for 0', type: 'range', min: -14, max: 14, step: 1, value: 0, reset: 0 },
         { key: 'shape', label: 'same shape', title: "how faithfully the new line follows the original's ups and downs", type: 'range', min: 0, max: 1, step: 0.02, value: 0, onChange: unpreset },
         { key: 'keep', label: 'same notes', title: 'the share of notes kept exactly as they were', type: 'range', min: 0, max: 1, step: 0.02, value: 0, onChange: unpreset },
@@ -7064,7 +7081,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
       make: (v, seed) => (ns) => T.degrade(ns, { seed, amount: v.amount }),
     }));
   }
-  (pitched ? melody : rhythm).push(popover('add notes', 'fill some of the empty cells, modelled on their neighbours', {
+  (pitched ? melody : rhythm).push(popover('add notes', 'fill some of the empty cells, modelled on their neighbors', {
     title: 'add notes', reroll: true,
     params: [{ key: 'amount', label: 'density', type: 'range', min: 0, max: 1, step: 0.02, value: 0.3 }],
     make: (v, seed) => (ns) => T.augment(ns, { seed, amount: v.amount, scale, repitch: pitched }),
@@ -7172,7 +7189,7 @@ function prHarmonyRollItems(items, scale, at) {
       axis('time', 'moved', 0.3, 'the share of the change that is a note moving a cell'),
       axis('drop', 'dropped', 0.3, 'the share of the change that is a note going away'),
       axis('vel', 'softened', 0.1, 'the share of the change that is a note played quieter'),
-      { key: 'add', label: 'added', title: "the chance an empty cell fills with a note modelled on its neighbour - its own dial, not a share of the others'", type: 'range', min: 0, max: 1, step: 0.02, value: 0.34, onChange: (v, rows) => { unpreset(v, rows); syncDepth(v, rows); } },
+      { key: 'add', label: 'added', title: "the chance an empty cell fills with a note modelled on its neighbor - its own dial, not a share of the others'", type: 'range', min: 0, max: 1, step: 0.02, value: 0.34, onChange: (v, rows) => { unpreset(v, rows); syncDepth(v, rows); } },
       ...(pitched ? [{ key: 'depth', label: 'pitch depth', title: 'how far a new pitch may step, in scale steps', type: 'range', min: 1, max: 7, step: 1, value: 1 }] : []),
       { key: 'from', label: 'from', title: 'the start of the window the changes are confined to', type: 'range', min: 0, max: 1, step: 0.125, value: 0 },
       { key: 'to', label: 'to', title: 'the end of that window - 0.75 to 1 is a fill on the last quarter', type: 'range', min: 0, max: 1, step: 0.125, value: 1 },
@@ -7698,10 +7715,10 @@ function drawPianoroll() {
   // pitchTop scroll smoothly - each lane sits at its own y, partial lanes clipped at the edges.
   // With a scale set the lanes are shaded by their place in it rather than by black/white: the
   // tonic in the accent, in-key notes on the plain background, out-of-key ones dimmed - so the
-  // key reads off the grid as colour and not merely as the absence of dimming. Folded, the
+  // key reads off the grid as color and not merely as the absence of dimming. Folded, the
   // out-of-key lanes are gone
   // entirely and the dimmed ones left are notes you drew outside the key.
-  // No scale colouring on the numbered axes: their rows are files (or chops) of a pack, not
+  // No scale coloring on the numbered axes: their rows are files (or chops) of a pack, not
   // pitches in a key.
   const info = prNoteMode() ? prScaleInfo() : null;
   const index = !prNoteMode();
@@ -7752,7 +7769,7 @@ function drawPianoroll() {
 
   // notes: fill opacity encodes velocity; a dashed outline marks a sub-unity probability; selected
   // notes get a bright solid outline. A muted note drops out of the accent entirely and is drawn in
-  // flat grey - it's still on the grid, and still selectable, but it reads as switched off.
+  // flat gray - it's still on the grid, and still selectable, but it reads as switched off.
   // Rectangles are clipped to the grid when scrolled.
   const selCol = col('--text');
   const muteCol = col('--text-dim');
@@ -7799,8 +7816,8 @@ function drawPianoroll() {
   }
 
   // A take being recorded into this roll, as it happens (see prRecGhosts): the notes the recorder
-  // has so far, where they will land - count-in notes in the armed colour, the window's in the
-  // recording colour, a key still down drawn hollow. Ghosts until the take is written.
+  // has so far, where they will land - count-in notes in the armed color, the window's in the
+  // recording color, a key still down drawn hollow. Ghosts until the take is written.
   if (prState.ghost.length) {
     const armCol = col('--warn');
     const liveCol = col('--err');
@@ -7913,7 +7930,7 @@ function prClipOverlaps() {
 
 // Put `notes` on top: priority is array order, so the notes an edit just placed go last and are
 // the ones that keep their length. Called before the edit, so clipping afterwards resolves in
-// their favour.
+// their favor.
 function prTouch(notes) {
   const raised = new Set(notes);
   if (!raised.size) return;
@@ -7970,7 +7987,7 @@ async function prQuantize() {
   if (prState.swing) logLine(`piano roll: the swing knob is still at ${prState.swing} - the notes are quantized, but the roll's groove is still applied to them as they play.`);
 }
 
-// `0`: switch notes off without deleting them. They stay on the grid greyed out - still
+// `0`: switch notes off without deleting them. They stay on the grid grayed out - still
 // selectable, still draggable, still holding their lane against the overlap rule - and simply don't
 // sound, which is a `!` on their token in the code. One key does both directions: a group with any
 // note still playing is muted whole, and a group that's already all muted comes back on, so
@@ -8078,7 +8095,7 @@ function prInsertTime(at, w) {
 // Close the [a, b) span: notes starting in it go, later onsets slide left, a note ringing into
 // (or across) it is trimmed by exactly what the span took, and the loop window's edges map the
 // same way. The trim is authored (`full` follows `len`): the removed time is gone, not a tail
-// waiting behind a neighbour.
+// waiting behind a neighbor.
 function prRemoveTime(a, b) {
   const w = b - a;
   const pt = (t) => (t <= a ? t : t >= b ? t - w : a);
@@ -8675,7 +8692,7 @@ function initPianorollEditor() {
   // every note and the loop window are rescaled so they span the time they did before, so a quarter
   // note on the 1/4 grid becomes four cells of the 1/16 grid rather than a sixteenth. (Coarsening
   // rounds - that's the "do our best" part - and the overlap rule settles anything that rounds onto
-  // a neighbour.) The ×2 / ÷2 buttons are the other axis: same cells, different amount of time.
+  // a neighbor.) The ×2 / ÷2 buttons are the other axis: same cells, different amount of time.
   prGridSelect.addEventListener('change', () => {
     if (!prState) return;
     const grid = Math.max(1, Math.round(Number(prGridSelect.value) || 16));
@@ -8927,7 +8944,7 @@ function initPianorollEditor() {
       mode: prState.mode,
     });
     // Degrees can only name notes that are IN the key, so anything out of it lands on its nearest
-    // neighbour - a real pitch change, and the one thing about this rewrite that isn't lossless.
+    // neighbor - a real pitch change, and the one thing about this rewrite that isn't lossless.
     // Counted before the close, which drops the notes.
     // Muted notes aren't written out at all, so they can't be moved by the rounding either.
     const off = scale
@@ -9378,7 +9395,7 @@ function updateRecButton() {
  * through the same conversion that 'done' uses - and the buffer re-evaluated on the panel's usual
  * debounce, so what you played on the first pass is PLAYING by the second: the overdub you hear is
  * the overdub you get. Keys still down are drawn as ghosts in the meantime - where they will land,
- * growing, count-in ones in the armed colour, the window's in the recording colour - and become
+ * growing, count-in ones in the armed color, the window's in the recording color - and become
  * notes the moment they are released. The notes of the take stay selected as one, so it can be
  * moved or undone together; the roll's history takes it as a single step at 'done' (prRecFinish).
  *
@@ -9730,7 +9747,7 @@ let trackRecPoll = null;
 let recordScope = [];
 let recordWave = null; // peaks of the finished bounce, drawn instead of the meter once there is one
 let recordWaveRms = null; // matching rms per bucket - the body drawn inside the peak envelope
-let recordWaveBands = null; // matching [low, mid, high] balance per bucket - what colours it
+let recordWaveBands = null; // matching [low, mid, high] balance per bucket - what colors it
 let recordWaveCycles = 0; // how many cycles that finished take spans, for its gridlines
 // The engine meters 20x/sec and every reading is kept, so this is the last ~30 seconds of the
 // track - long enough that a whole phrase plus its count-in is on screen at once.
@@ -9970,7 +9987,7 @@ async function pollTrackRecord() {
 // The settings are locked in the moment a bounce is armed - the window's length and where it
 // starts are already decided by then, so an edit during the count-in would describe a take that
 // isn't the one being made. Also inert when the panel has no `.record()` call to write back into
-// (a ctrl+b panel), where a change would silently vanish. CSS greys them either way.
+// (a ctrl+b panel), where a change would silently vanish. CSS grays them either way.
 function syncRecordControls() {
   const locked = !recordState?.marker || !!trackRecState;
   for (const el of [recordCycles, recordName, recordWrapTail]) {
@@ -10060,9 +10077,9 @@ function trimmedBlockEnd(code, block) {
 
 // --- the meter / waveform canvas ---
 
-// A theme colour at a given alpha. Canvas gradients don't take `color-mix`, and the theme's
+// A theme color at a given alpha. Canvas gradients don't take `color-mix`, and the theme's
 // --accent may be a hex or an rgb(), so let the canvas itself normalize it and rebuild from the
-// channels. Falls back to the colour as given if it normalized to something unexpected.
+// channels. Falls back to the color as given if it normalized to something unexpected.
 function rgbaFrom(ctx, color, alpha) {
   const prev = ctx.fillStyle;
   ctx.fillStyle = color;
@@ -10080,7 +10097,7 @@ function rgbaFrom(ctx, color, alpha) {
   return norm;
 }
 
-// A mirrored envelope: one filled shape around the centre line rather than a
+// A mirrored envelope: one filled shape around the center line rather than a
 // picket fence of bars, with the loud part of the range shaded brighter, so the panel reads as a
 // waveform at a glance. Drawn from a plain peak-per-bucket array either way - live (a scrolling
 // meter history, newest at the right) or finished (the whole take, left to right).
@@ -10155,15 +10172,15 @@ function drawRecordScope() {
     }
   }
 
-  // One column per bucket, coloured by what's IN it rather than a flat accent - the reason a DJ
-  // waveform is readable at a glance. A finished take colours by its low/mid/high energy balance;
+  // One column per bucket, colored by what's IN it rather than a flat accent - the reason a DJ
+  // waveform is readable at a glance. A finished take colors by its low/mid/high energy balance;
   // a live meter has no spectrum, so it uses crest factor (peak against rms) instead, which
   // separates a transient from a sustained sound in much the same way.
   for (let i = 0; i < data.length; i++) {
     const [r, g, b] = live ? crestColor(data[i]) : bandColor(recordWaveBands?.[i]);
     const peakAmp = ampOf(at(i));
     const rmsAmp = Math.min(peakAmp, ampOf(rmsAt(i)));
-    const cw = colW + 0.6; // a hair of overlap, so neighbouring columns leave no seam
+    const cw = colW + 0.6; // a hair of overlap, so neighboring columns leave no seam
     ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.32)`;
     ctx.fillRect(x(i), mid - peakAmp, cw, peakAmp * 2 || 1);
     ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.95)`;
@@ -10184,7 +10201,7 @@ function drawRecordScope() {
     ctx.stroke();
   }
 
-  // Anything at full scale is marked in the error colour - a bounce that clipped is worth seeing
+  // Anything at full scale is marked in the error color - a bounce that clipped is worth seeing
   // before it goes into the code, not after. Against the TRUE value, not the normalized one:
   // "this hit 0 dBFS" is a fact about the file, not about how it's being drawn.
   ctx.fillStyle = hot;
@@ -10215,7 +10232,7 @@ function drawRecordScope() {
   }
 }
 
-// The three colours a bucket is mixed from, by where its energy sits. Chosen to stay legible on
+// The three colors a bucket is mixed from, by where its energy sits. Chosen to stay legible on
 // both a light and a dark panel, and to read in the same order a DJ waveform does: deep for bass,
 // through the middle, to bright for the top end.
 const BAND_COLORS = [
@@ -10227,7 +10244,7 @@ const BAND_COLORS = [
 function bandColor(balance) {
   if (!balance) return BAND_COLORS[1];
   // Weight by energy share, but lift the top end: a hat carries little energy next to a kick and
-  // would otherwise never show its colour at all.
+  // would otherwise never show its color at all.
   const w = [balance[0] ?? 0, (balance[1] ?? 0) * 1.4, (balance[2] ?? 0) * 2.6];
   const total = w[0] + w[1] + w[2] || 1;
   return [0, 1, 2].map((c) =>
@@ -10236,7 +10253,7 @@ function bandColor(balance) {
 }
 
 // Crest factor: peak well above rms means a transient (bright), peak near rms means something
-// sustained (deep). Same visual axis as the band colours, from what a live meter can actually see.
+// sustained (deep). Same visual axis as the band colors, from what a live meter can actually see.
 function crestColor(point) {
   const peak = point?.v ?? 0;
   const rms = point?.rms ?? 0;
@@ -10470,7 +10487,7 @@ function updateMixerBassBtn(strip) {
   strip.bassBtn.textContent = on ? `▽ ${strip.bassmono}` : '▽ mono';
   strip.bassBtn.classList.toggle('on-bass', on);
   strip.bassBtn.title = on
-    ? `bass mono: everything below ${strip.bassmono} Hz is centred, the width above it is kept. `
+    ? `bass mono: everything below ${strip.bassmono} Hz is centered, the width above it is kept. `
       + 'Click to switch off, drag left/right for the cutoff. Writes .bassmono(hz)'
     : 'bass mono — collapse the low end to mono, keeping the width above the cutoff. '
       + 'Click to switch on, drag left/right for the cutoff. Writes .bassmono(hz)';
@@ -10648,7 +10665,13 @@ function mixerStripLabels() {
   for (const b of blocks) if (known.has(b.label)) inStrip.add(b.label);
   const codeOrder = blocks.map((b) => b.label);
   const pos = (l) => { const i = codeOrder.indexOf(l); return i < 0 ? codeOrder.length : i; };
-  return [...inStrip].sort((a, b) => pos(a) - pos(b));
+  // A track's variations sit with it, right after its base, however the buffer orders them: the
+  // family is one thing in the mix, and the base's mute and solo take the whole of it (see
+  // labels.mjs). Sorted by where the BASE is written, then base before variations, then by text.
+  const base = (l) => (arrangeMod ? arrangeMod.baseOf(l) : l);
+  const isVar = (l) => arrangeMod && arrangeMod.variantOf(l) != null;
+  const basePos = (l) => { const p = pos(base(l)); return p < codeOrder.length ? p : pos(l); };
+  return [...inStrip].sort((a, b) => basePos(a) - basePos(b) || (isVar(a) - isVar(b)) || pos(a) - pos(b));
 }
 
 // Recompute the strip list, rebuild the row only when it actually changed, and re-read the
@@ -10680,11 +10703,14 @@ function buildMixerStrip(label) {
   const dpr = window.devicePixelRatio || 1;
   const color = mixerColorFor(label);
   const el = document.createElement('div');
-  el.className = 'mixer-strip';
+  // A variation's strip is drawn as part of its base's group: pulled in against the strip before
+  // it and named by its `#name`, since the base beside it already says the track.
+  const variant = arrangeMod ? arrangeMod.variantOf(label) : null;
+  el.className = `mixer-strip${variant != null ? ' mixer-strip-variant' : ''}`;
 
-  // The name row IS the plots' legend: the swatch is the colour that track draws in, right next
+  // The name row IS the plots' legend: the swatch is the color that track draws in, right next
   // to the controls that move it. (A separate legend row said the same thing twice.) The swatch
-  // carries the colour rather than the text, so the label stays readable on light themes where
+  // carries the color rather than the text, so the label stays readable on light themes where
   // the lighter palette entries wash out.
   const name = document.createElement('div');
   name.className = 'mixer-strip-name';
@@ -10694,7 +10720,7 @@ function buildMixerStrip(label) {
   swatch.style.background = color;
   const nameText = document.createElement('span');
   nameText.className = 'mixer-strip-name-text';
-  nameText.textContent = label;
+  nameText.textContent = variant != null ? `#${variant}` : label;
   name.append(swatch, nameText);
 
   const msRow = document.createElement('div');
@@ -11035,8 +11061,21 @@ function applyMixerRename(strip, to) {
   } finally {
     mixerSuppressSync = false;
   }
-  // The strip keeps its colour: it's the same track in the plots, and moving the entry rather
-  // than adding one keeps the palette handing out the same colours to everybody else.
+  // The painter, if it is up, has its own copy of the clips those edits just renamed in the
+  // buffer: bring it into step, with the variations a base takes along (see renameEdits).
+  if (arState && arrangeMod) {
+    const map = new Map([[from, to]]);
+    if (!from.includes('#') && !to.includes('#')) {
+      for (const l of arState.rows.flatMap((r) => r.variants)) {
+        if (arrangeMod.baseOf(l) === from && l !== from) map.set(l, `${to}#${arrangeMod.variantOf(l)}`);
+      }
+    }
+    arApplyRename(map);
+    arRefreshRows();
+    drawArrange();
+  }
+  // The strip keeps its color: it's the same track in the plots, and moving the entry rather
+  // than adding one keeps the palette handing out the same colors to everybody else.
   if (mixerColorByLabel.has(from) && !mixerColorByLabel.has(to)) {
     mixerColorByLabel.set(to, mixerColorByLabel.get(from));
     mixerColorByLabel.delete(from);
@@ -11155,7 +11194,7 @@ function syncMixerFromCode() {
 }
 
 // Highlight the strip whose control is being held, and fade the others - the strips ARE the
-// legend (each carries its colour swatch and name), so this is the same information the plots
+// legend (each carries its color swatch and name), so this is the same information the plots
 // are showing without a second row of chips to read. Only touches the DOM when the focus
 // actually changed; this runs every animation frame.
 function syncMixerStripFocus() {
@@ -11277,7 +11316,7 @@ function drawStripMeter(strip, colors) {
 }
 
 // One knob: a track around the dial, the travelled arc from the middle (each control's neutral)
-// filled in the track's colour, and a pointer. Both knobs are the same shape because both are
+// filled in the track's color, and a pointer. Both knobs are the same shape because both are
 // "how far either side of neutral" questions.
 function drawMixerKnob(strip, knob, colors) {
   const ctx = knob.canvas.getContext('2d');
@@ -11579,6 +11618,15 @@ mixerViewBtn.addEventListener('click', () => {
 });
 document.getElementById('mixerClose').addEventListener('click', closeMixer);
 document.getElementById('mixerOpenBtn').addEventListener('click', openMixer);
+// The header's view switch: the code, the arrangement (ctrl+A flips between the two) and DJ mode
+// (cmd+shift+X), lit where you are so a set's state reads across the room. Leaving DJ mode for
+// the code is the ordinary exit (the one that offers to keep or restore); see arReflectView.
+document.getElementById('viewCodeBtn').addEventListener('click', () => {
+  if (mixModeOn) exitDjMode('restore');
+  else if (arState) closeArrangeEditor();
+});
+document.getElementById('viewArrangeBtn').addEventListener('click', () => { if (!arState && !mixModeOn) openArrangePainter(); });
+document.getElementById('viewDjBtn').addEventListener('click', () => { if (!mixModeOn) toggleMixMode(); });
 mixerBackdrop.addEventListener('mousedown', (e) => {
   if (e.target === mixerBackdrop) closeMixer();
 });
@@ -11754,16 +11802,21 @@ async function evaluate(start, { byHand = false } = {}) {
   // belongs to the next eval, not to this one.
   const filed = commitOnEval;
   commitOnEval = [];
+  // Starting from stopped with the painter's marker down plays from THERE: the marker is where you
+  // were looking, and a song that always starts at bar 0 is a song whose outro you never hear
+  // without sitting through it. Sent with the eval so it lands on the same song clock the eval
+  // builds, rather than racing it as a request of its own.
+  const arrangeFrom = start && transport.paused && arState?.insert != null ? arState.insert : undefined;
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.
-  const pending = api('POST', '/api/evaluate', { code, start });
+  const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom });
   checkpointUrl(); // a state you played is a state worth finding again in browser history
   saveWip();       // ...and worth having on disk right now, not a debounce from now
   if (newPacks.length) openPackById(newPacks[0]); // it has no files - here is where to pick them
   try {
     const result = await pending;
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
-    setPatchScale(result.scale); // a setscale() in the buffer re-colours (and re-folds) the roll
+    setPatchScale(result.scale); // a setscale() in the buffer re-colors (and re-folds) the roll
     arSetClock(result.arrange ?? null); // the arrangement's song clock, for the painter's playhead
     renderTracks(result);
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
@@ -14163,7 +14216,7 @@ const SLICE_PEAK_BUCKET = 64; // frames per pyramid bucket - drawing reduces fro
 const SLICE_SENS_TITLE = 'how much has to happen for a hit to count — left keeps only the strongest, '
   + 'right finds everything, the middle is what .slice() chops on by itself. Moving this re-slices';
 // The slider's travel is a POSITION, 0..1, and the sensitivity it means is geometric: three
-// halvings to the left of centre and three doublings to the right, so 1 - what a sample with no
+// halvings to the left of center and three doublings to the right, so 1 - what a sample with no
 // set of its own chops on - sits in the middle instead of a fifth of the way along, and each
 // sixth of the travel is one halving. A linear 0.25..4 was the same range squashed to one side,
 // which put the whole quiet end of it in the first fifth of the slider.
@@ -15560,7 +15613,7 @@ function initSlicePanel() {
     const hit = sliceTabAt(x, y);
     if (hit >= 0) {
       // On a tab: drag it. The marker keeps its identity through the sort, so a marker dragged
-      // past its neighbour goes on being the one under the hand rather than swapping places with it.
+      // past its neighbor goes on being the one under the hand rather than swapping places with it.
       sliceState.drag = {
         key: sliceState.positions[hit],
         before: JSON.stringify(sliceState.positions),
@@ -15615,7 +15668,7 @@ function initSlicePanel() {
     sliceState.positions = sliceTidy(moved);
     let now = sliceState.positions.indexOf(sliceState.drag.key);
     if (now < 0) {
-      // Dragged onto a neighbour: the two markers are one now (a slice of no length plays nothing).
+      // Dragged onto a neighbor: the two markers are one now (a slice of no length plays nothing).
       // The hand carries on with whichever survived, so letting go doesn't leave the drag nowhere.
       now = Math.max(0, sliceMarkerNear(sliceState.drag.key, SLICE_HIT_PX * 4));
       sliceState.drag.key = sliceState.positions[now];
@@ -15700,7 +15753,7 @@ function initSlicePanel() {
         moved[sliceState.sel] = Math.min(1, Math.max(0, moved[sliceState.sel] + dir * step));
         const key = moved[sliceState.sel];
         sliceState.positions = sliceTidy(moved);
-        // -1 means it was nudged onto its neighbour and the two became one; the selection follows
+        // -1 means it was nudged onto its neighbor and the two became one; the selection follows
         // the survivor rather than pointing past the end of the list.
         sliceState.sel = Math.max(0, sliceState.positions.indexOf(key));
         sliceHandEdit();
@@ -16364,7 +16417,7 @@ fileNewBtn.addEventListener('click', newPatternFile);
 // has them. The dialog settles the two things the file can't say: which grid to snap the rhythm to
 // (auto-detected per lane - see midifile.mjs's pickGrid) and what KEY the music is in. The key is
 // guessed from the notes and only ever offered - taking it writes the buffer's `setscale(...)`, so
-// the rolls open coloured and foldable in that key and convert to degrees later; out-of-key notes
+// the rolls open colored and foldable in that key and convert to degrees later; out-of-key notes
 // are counted first, since that count is how good the guess looks.
 //
 // Nothing is evaluated by the import: the new lanes have no instrument on them yet, so they start
@@ -16565,7 +16618,7 @@ function midiImportOffKey(keyName) {
   return { off, total };
 }
 
-// Grey the key row out when the key is being left alone, and say what taking it would mean. The
+// Gray the key row out when the key is being left alone, and say what taking it would mean. The
 // notes themselves are unaffected either way - a roll holds pitches - so what's reported is how
 // well the key fits them, and whether it moves a patch that was already in another one.
 function reflectMidiImportKey() {
@@ -17073,7 +17126,7 @@ async function runHotkey(hk, e) {
 // through it.
 function anyModalOpen() {
   // askEl only exists once something has asked; it is built shown, so "not hidden" means open.
-  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, askEl]
+  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, blockEditBackdrop, askEl]
     .some((el) => el && !el.classList.contains('hidden'));
 }
 
@@ -17404,7 +17457,7 @@ function askDialog(message, choices) {
   });
 }
 
-// The same dialog with one control in it: a labelled <select>, for a question whose answer is a
+// The same dialog with one control in it: a labeled <select>, for a question whose answer is a
 // value rather than a button. Resolves the SELECT's value (options are [label, value] pairs), or
 // null for cancel / esc / the backdrop. Enter answers it from the keyboard, which is what makes
 // having a sensible default worth anything.
@@ -17435,7 +17488,7 @@ function askSelect(message, { label, options, value, confirm = 'ok' }) {
 }
 
 // ...and the same dialog with a text field in it, for a question whose answer is a word - a
-// rename. `problem(value)` is what greys the confirm button out, with the reason on the button's
+// rename. `problem(value)` is what grays the confirm button out, with the reason on the button's
 // own title, so a name the server would refuse is refused here first.
 function askText(message, { label, value = '', confirm = 'ok', problem = null } = {}) {
   return askShell((panel, done) => {
@@ -17501,6 +17554,7 @@ async function openMixMode() {
   mixModeOn = true;
   syncPreviewRouting(); // auditions move to the headphone cue, or stop being allowed at all
   document.body.classList.add('mix-on');
+  arReflectView();
   deckBPaneEl.classList.remove('hidden');
   mixStripEl.classList.remove('hidden');
   applyMixStack(); // the stacked layout, if it's this browser's preference
@@ -17616,6 +17670,7 @@ function closeMixMode() {
   syncPreviewRouting(); // back to the default output - off the desk there is nothing to protect
   mixPushStop();
   document.body.classList.remove('mix-on');
+  arReflectView();
   deckBPaneEl.classList.add('hidden');
   mixStripEl.classList.add('hidden');
   applyMixStack(); // canvases back into their panes, stack region away
@@ -17843,10 +17898,10 @@ function deckHeadRender(state) {
 // --- the song decks' waveform panes (songs phase 3; one per deck since deck A learned files) ---
 //
 // When a deck holds a disk FILE the editor slot shows a DJ waveform instead of CodeMirror: a
-// zoomed strip whose playhead sits fixed at centre with the track scrolling under it (drag to
+// zoomed strip whose playhead sits fixed at center with the track scrolling under it (drag to
 // scrub, wheel to zoom), over a full-track overview (click or drag to jump). Both draw from ONE
 // server analysis (GET /api/song/waveform - the recorder's envelope pass generalized: per-bucket
-// peak + rms coloured by low/mid/high energy balance, run on the analysis worker). The playhead
+// peak + rms colored by low/mid/high energy balance, run on the analysis worker). The playhead
 // is mirrored locally - posSec + (now - startSec) * rate, engine time being Date.now()/1000 on
 // the same machine - so the animation costs no polling; the desk's SSE frames keep the mirror
 // honest. Scrubbing a faded-out deck is still audible on the headphone cue (the cue tap sits
@@ -17891,8 +17946,8 @@ function songNormOf(env) {
   return peak < 0.0005 ? 1 : Math.min(6, 1 / peak);
 }
 
-// One column per visible bucket, mirrored around the centre line: translucent peak envelope
-// with the solid rms body inside it, coloured by band balance - drawRecordScope's read, reused.
+// One column per visible bucket, mirrored around the center line: translucent peak envelope
+// with the solid rms body inside it, colored by band balance - drawRecordScope's read, reused.
 function songDrawColumns(ctx, env, i0, i1, xAt, colW, mid, maxAmp, norm) {
   for (let i = i0; i <= i1; i++) {
     const [r, g, b] = bandColor(env.bands[i]);
@@ -18152,7 +18207,7 @@ function makeSongPane(deck) {
     // waveforms be read against each other at all (and, paused, what a sync will produce).
     const span = zoomSec * P.rateNow();
     const pxPerSec = w / span; // per SONG second
-    const t0 = pos - span / 2; // the playhead is pinned at centre; time scrolls under it
+    const t0 = pos - span / 2; // the playhead is pinned at center; time scrolls under it
     const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
 
     ctx.strokeStyle = dim;
@@ -18223,7 +18278,7 @@ function makeSongPane(deck) {
     }
 
     // The cue point: a marked line the playhead scrolls past, so where the CUE button will land
-    // is visible before it is pressed. Warn-coloured rather than accent - it must not read as
+    // is visible before it is pressed. Warn-colored rather than accent - it must not read as
     // another playhead - with a flag at the top the way a hardware waveform display marks it.
     const cue = P.mirror?.cueSec ?? 0;
     if (dur && cue >= t0 && cue <= t0 + span) {
@@ -18401,7 +18456,7 @@ function makeSongPane(deck) {
     syncEl.classList.toggle('on', !!m?.sync);
     // The tempo ratio the sync is riding - the song's tempo over the clock's: 1× beat-matched,
     // ½× half-time, 2× double-time. Dim when chosen automatically (nearest to native speed),
-    // lit when pinned; greyed on the master, whose tempo IS the clock.
+    // lit when pinned; grayed on the master, whose tempo IS the clock.
     const mult = m?.syncMult ?? 'auto';
     const eff = m?.master ? 1 : (m?.syncMultEffective ?? 1);
     const show = (v) => (v === 0.5 ? '½×' : `${v}×`);
@@ -18534,7 +18589,7 @@ const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
 
 // --- the livecoded decks' strip: what a deck playing CODE shows in the waveform stack ---------
 //
-// A song deck's waveform is analysed from a file. A pattern deck has no file, so this draws the
+// A song deck's waveform is analyzed from a file. A pattern deck has no file, so this draws the
 // two things a running pattern does have: the deck's LEVEL, and the BAR LINES.
 //
 // The level is the ~20/sec pre-fader meter the channel meters already stream (server.js's
@@ -18591,7 +18646,7 @@ for (const deck of ['a', 'b']) {
 
 /**
  * The strip's window, in cycles, and where any cycle position falls across `w` pixels of it.
- * Pure geometry, and the one invariant that matters is that xOf(cycNow) is the exact centre: the
+ * Pure geometry, and the one invariant that matters is that xOf(cycNow) is the exact center: the
  * playhead is pinned there on the song strips too, and that shared pin is what lets a livecoded
  * deck and a song deck stacked one above the other be read against each other at all.
  */
@@ -18630,7 +18685,7 @@ function djLiveWaveDraw(deck) {
   const mid = h / 2;
   const maxAmp = mid - 6;
 
-  // One scale with the song decks, and the playhead pinned at centre exactly as theirs is: the
+  // One scale with the song decks, and the playhead pinned at center exactly as theirs is: the
   // stack exists so the strips can be read against each other, which needs both to be true.
   const cps = transport.cps || 0.5;
   const cycNow = currentCyclePos();
@@ -18666,7 +18721,7 @@ function djLiveWaveDraw(deck) {
     }
   }
 
-  // The level trace, mirrored around the centre like a song's waveform: translucent peak with the
+  // The level trace, mirrored around the center like a song's waveform: translucent peak with the
   // solid rms body inside it, one column per meter frame. Columns are placed by the timestamp
   // each frame arrived under, not by their position in the ring, so a stalled feed leaves a gap
   // rather than quietly sliding the whole history off the beat. Normalized to the loudest thing
@@ -18825,7 +18880,7 @@ function settleSeamDrag({ start, fold0, mins, rail, k, want, total }) {
 //
 // Waveforms on top (only while stacked), both decks in the middle, the mixer at the bottom - with
 // a drag handle on each of the two seams. Both handles stay handles however little is left: a
-// region dragged past its minimum folds to a labelled RAIL saying what is down there, which a
+// region dragged past its minimum folds to a labeled RAIL saying what is down there, which a
 // click (on the rail, or on the seam beside it) opens again. Pushing a handle further than that
 // goes on folding whatever is next in its path, so either seam can end up owning the whole
 // height. The regions still left open share it, the last one open taking the remainder.
@@ -18834,7 +18889,7 @@ function settleSeamDrag({ start, fold0, mins, rail, k, want, total }) {
 // not song state. The canvases re-measure every frame (songSizeCanvas, mixMeterPaint), so the
 // only thing a drag has to tell anyone about is CodeMirror.
 const DJ_REGION_KEY = 'poptartDjRegions';
-const DJ_RAIL_PX = 18; // a folded region: the labelled rail, and .dj-rail's height in the css
+const DJ_RAIL_PX = 18; // a folded region: the labeled rail, and .dj-rail's height in the css
 const DJ_SEAM_PX = 7; // .dj-resize - a constant now that a folded region has a rail of its own
 // Below these a drag folds the region instead of shrinking it further. Deliberately small: every
 // region degrades gracefully (the two waveforms shrink together, the strip and the decks clip),
@@ -18971,7 +19026,7 @@ function djInitResizeHandle(id, above) {
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
       el.removeEventListener('pointercancel', onUp);
-      // A press that never became a drag is a click: the way back for a folded neighbour, the
+      // A press that never became a drag is a click: the way back for a folded neighbor, the
       // one above first (the same rule as organize's seams).
       if (!moved) {
         const folded = [names[k], names[k + 1]].find((n) => djRegions[`${n}Min`]);
@@ -19875,7 +19930,7 @@ function closeOrganize() {
 }
 
 // --- the three columns' widths: two draggable seams, a column dragged below its minimum
-// collapses to a labelled rail (click it, or its seam, to bring it back), double-click a seam
+// collapses to a labeled rail (click it, or its seam, to bring it back), double-click a seam
 // to reset. Stored widths are px; the LAST open column takes whatever is left, so the panel
 // is always exactly filled. Remembered across sessions. ---
 const ORG_COLS_KEY = 'poptart.orgCols';
@@ -19949,7 +20004,7 @@ function orgInitCols() {
         seam.removeEventListener('pointermove', onMove);
         seam.removeEventListener('pointerup', onUp);
         seam.removeEventListener('pointercancel', onUp);
-        // A press that never became a drag is a click: the way back for a folded neighbour.
+        // A press that never became a drag is a click: the way back for a folded neighbor.
         if (!moved) {
           if (orgCols.min[k]) orgCols.min[k] = false;
           else if (orgCols.min[k + 1]) orgCols.min[k + 1] = false;
@@ -22004,7 +22059,7 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
 // ---------------------------------------------------------------------------------------------
 // The arrangement painter - ctrl+A.
 //
-// A playlist, one row per TRACK: the buffer's labelled blocks down the side in the order they are
+// A playlist, one row per TRACK: the buffer's labeled blocks down the side in the order they are
 // written, bars along the top. Painting on a row makes a CLIP of that track, and a track plays
 // only inside its clips - its bare loop has become a part (the server gates it, see the
 // arrangement pass in /api/evaluate and pattern-core's arrange.mjs). The whole thing loops over its
@@ -22030,12 +22085,14 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
 const arPanel = document.getElementById('arrangePanel');
 const arCanvas = document.getElementById('arrangeCanvas');
 const arPickWrap = document.getElementById('arrangePickWrap');
-const arRollPickWrap = document.getElementById('arrangeRollPickWrap');
-const arRollPicker = document.getElementById('arrangeRollPicker');
-const arRollSearch = document.getElementById('arrangeRollSearch');
-const arRollList = document.getElementById('arrangeRollList');
 const arPicker = document.getElementById('arrangePicker');
 const arAutoSearch = document.getElementById('arrangeAutoSearch');
+const arBrushWrap = document.getElementById('arrangeBrushWrap');
+const arBrushName = document.getElementById('arrangeBrushName');
+const arBrushBtn = document.getElementById('arrangeBrushBtn');
+const arBrushPicker = document.getElementById('arrangeBrushPicker');
+const arBrushSearch = document.getElementById('arrangeBrushSearch');
+const arBrushList = document.getElementById('arrangeBrushList');
 const arPickList = document.getElementById('arrangePickList');
 const arSnapSelect = document.getElementById('arrangeSnap');
 const arLenInput = document.getElementById('arrangeLen');
@@ -22152,7 +22209,7 @@ function arMigrateOneLegacy() {
     const close = matchParen(code, open);
     if (close < 0) continue;
     // The whole statement, back to a `$:` label if it has one, so the migration leaves a definition
-    // line rather than a labelled block whose body is a definition.
+    // line rather than a labeled block whose body is a definition.
     const lineStart = code.lastIndexOf('\n', at - 1) + 1;
     const head = code.slice(lineStart, at);
     const from = /^\s*(?:[A-Za-z_$][\w$]*\s*:\s*)?$/.test(head) ? lineStart : at;
@@ -22172,7 +22229,7 @@ function arReadDef(code = cm.getValue()) {
   return { def, ...parseArrangeCall(code.slice(def.open + 1, def.close)) };
 }
 
-/** The tracks the painter draws rows for: the buffer's labelled blocks, in document order. */
+/** The tracks the painter draws rows for: the buffer's labeled blocks, in document order. */
 function arTrackLabels() {
   return arLabels();
 }
@@ -22182,7 +22239,7 @@ function arTrackLabels() {
  * did before there was an arrangement. Anything else would make typing a track and evaluating it a
  * silence you have to go and undo.
  */
-const arFillClip = (label, len) => ({ label, start: 0, len: Math.max(1, len), roll: null });
+const arFillClip = (label, len) => ({ label, start: 0, len: Math.max(1, len) });
 
 /**
  * Give every track in the buffer a row, filling the ones that have just appeared. Runs on every
@@ -22245,8 +22302,16 @@ function openArrangePainter() {
     const clips = labels.map((l) => arFillClip(l, AR_NEW_LEN));
     const text = serializeArrangeCall({ clips, snap: arrangeMod.ARRANGE_DEFAULT_SNAP, len: AR_NEW_LEN, tracks: labels, autos: [], loops: [] });
     const code = cm.getValue();
-    const gap = code.trim() ? '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length)) : '';
-    cm.replaceRange(`${gap}${text}`, cm.posFromIndex(code.length));
+    // Into the foot, flush under the definitions if the buffer has any (the same rule defsEdit
+    // follows, so the chips stack without a hole between them); else at the end, a blank line
+    // below the code.
+    const below = lastDefRunEnd(code);
+    if (below !== null) {
+      cm.replaceRange(`\n${text}`, cm.posFromIndex(below));
+    } else {
+      const gap = code.trim() ? '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length)) : '';
+      cm.replaceRange(`${gap}${text}`, cm.posFromIndex(code.length));
+    }
     refoldAll();
     logLine(`arrangement made: ${labels.length} track${labels.length === 1 ? '' : 's'}, ${AR_NEW_LEN} bars, every one playing throughout - carve it up`);
     def = arFindDef();
@@ -22329,6 +22394,8 @@ function arCallOpts(state) {
   // Which tracks are IN the arrangement - what tells a new one (fill it) from one you emptied
   // (leave it silent). See reconcileArrangement.
   if (state.tracks?.length) opts.tracks = state.tracks.slice();
+  // Hand-chosen clip colors, by label. Only what someone picked is written; the rest is derived.
+  if (state.colors && Object.keys(state.colors).length) opts.colors = { ...state.colors };
   // The pinned automation lanes ride with the song rather than with this browser: reopening a patch
   // anywhere puts the same curves back under the clips they were drawn against.
   const autos = (state.autos ?? []).map((a) => (typeof a === 'string' ? a : a.id)).filter(Boolean);
@@ -22385,8 +22452,8 @@ const arRegionData = (r) => ({ name: r.name, start: r.start, end: r.end }); // w
 // the same way it undoes a clip - the panel owns the keystroke, and a gesture it can't undo would
 // read as the shortcut being broken. Only the FOCUSED lane's: the others are on screen to be read
 // against it, and undoing into a lane you are not holding would be a change you can't see happen.
-const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, tracks: arState.tracks.slice(), loops: arState.loops.map(arRegionData), autoId: arState.autoId, autoPts: arState.autoPts.map((p) => ({ ...p })) });
-const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.tracks.join(',')}|${JSON.stringify(s.loops.map(arRegionData))}|${s.autoId}|${JSON.stringify(s.autoPts)}`;
+const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, tracks: arState.tracks.slice(), colors: { ...arState.colors }, loops: arState.loops.map(arRegionData), autoId: arState.autoId, autoPts: arState.autoPts.map((p) => ({ ...p })) });
+const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.tracks.join(',')}|${JSON.stringify(s.colors)}|${JSON.stringify(s.loops.map(arRegionData))}|${s.autoId}|${JSON.stringify(s.autoPts)}`;
 
 function arPushHistory() {
   const snap = arSnapshot();
@@ -22408,6 +22475,7 @@ function arHistoryStep(delta) {
   arState.len = snap.len;
   arState.snap = snap.snap;
   arState.tracks = snap.tracks.slice();
+  arState.colors = { ...snap.colors };
   arState.loops = snap.loops.map(arRegionData);
   arState.selRegion = null;
   arState.sel.clear();
@@ -22442,8 +22510,10 @@ function openArrangeEditor(call) {
     len: opts.len, // explicit loop length in bars, or null for "the last clip's end"
     loops: opts.loops.map((r) => ({ ...r })), // loop regions [{ name, start, end }] - see ArrangeClock
     tracks: opts.tracks.slice(), // the tracks that are IN it (membership, not order - see reconcileArrangement)
-    rows: [], // one per track: { label, own } - filled by arRefreshRows below
+    colors: { ...opts.colors }, // chosen clip colors by label; everything else takes a derived hue (see arHsl)
+    rows: [], // one per track: { label, own, variants } - filled by arRefreshRows below
     track: null, // the selected track's label: the row the gutter lights up (see arSelectTrack)
+    brush: null, // the label the pencil paints - the base, or one of its variations (see arSetBrush)
     pxPerCycle: AR_DEFAULT_PX_PER_CYCLE,
     scroll: 0, // leftmost visible bar
     scrollLane: 0, // topmost visible row (fractional while scrolling)
@@ -22487,7 +22557,8 @@ function openArrangeEditor(call) {
   arPushHistory();
   arSyncControls();
   arPanel.classList.remove('hidden');
-  bringPanelToFront(arPanel);
+  document.body.classList.add('arrange-on'); // the page takes the editor pane's place (see style.css)
+  arReflectView();
   arSizeCanvas();
   drawArrange();
   if (!arRaf) arRaf = requestAnimationFrame(arPlayheadLoop);
@@ -22495,13 +22566,34 @@ function openArrangeEditor(call) {
   if (!arClockSnap) api('GET', '/api/arrange').then((res) => arSetClock(res.arrange ?? null)).catch(() => {});
 }
 
+/**
+ * Leaving the arrangement lands you in the code - on the block of the clip you had selected, if
+ * you had one. A clip IS its block, so closing with one in hand is the "take me to it" gesture
+ * (the same place the block window's "in code" goes); closing with nothing selected leaves the
+ * cursor where it was.
+ */
 function closeArrangeEditor() {
+  const picked = arState ? [...arState.sel][0]?.label ?? null : null;
   arCloseMenu();
+  closeBlockEdit();
   arLaneNameInput.classList.add('hidden');
   if (arRaf) { cancelAnimationFrame(arRaf); arRaf = null; }
   if (arState?.marker) arState.marker.clear();
   arState = null;
   arPanel.classList.add('hidden');
+  document.body.classList.remove('arrange-on');
+  arReflectView();
+  cm.refresh(); // the editor was display:none while the page was up, and CodeMirror needs telling
+  if (picked) arGotoBlock(picked);
+}
+
+/** The header's view switch lights the segment you are on: the code, the arrangement, or DJ mode. */
+function arReflectView() {
+  const dj = mixModeOn;
+  const arrange = !!arState && !dj;
+  document.getElementById('viewDjBtn').classList.toggle('active', dj);
+  document.getElementById('viewArrangeBtn').classList.toggle('active', arrange);
+  document.getElementById('viewCodeBtn').classList.toggle('active', !dj && !arrange);
 }
 
 function arPlayheadLoop() {
@@ -22510,72 +22602,312 @@ function arPlayheadLoop() {
   arRaf = requestAnimationFrame(arPlayheadLoop);
 }
 
-// --- the rows: one per track ---
+// --- the rows: one per track, its variations sharing it ---
 
 /**
- * The painter's rows: every track in the buffer, in the order it is written, and then any track the
- * clips still name that the buffer no longer has. An orphan keeps its row (drawn faded) rather than
- * vanishing with its clips still in the data - a renamed or commented-out block should be visible
- * as the hole it left, and repaintable when it comes back.
+ * The painter's rows: every track in the buffer, in the order it is written, each with the
+ * VARIATIONS that share its row (`kick#fill:` sits on the `kick` row - see labels.mjs), and then
+ * any track the clips still name that the buffer no longer has. An orphan keeps its row (drawn
+ * faded) rather than vanishing with its clips still in the data - a renamed or commented-out block
+ * should be visible as the hole it left, and repaintable when it comes back. A variation whose base
+ * has gone is an orphan of a different kind: still a block, still playing in its clips, so it gets
+ * a row of its own until the base comes back.
+ *
+ * A row is `{ label, own, variants }` - the base label, whether the buffer still has it, and the
+ * full labels of everything that paints onto it, base first.
  */
 function arRefreshRows() {
   if (!arState) return;
-  const own = arTrackLabels();
-  const rows = own.map((label) => ({ label, own: true }));
-  for (const c of arState.clips) {
-    if (!rows.some((r) => r.label === c.label)) rows.push({ label: c.label, own: false });
+  const blocks = arBlocks();
+  const bases = new Set(blocks.filter((b) => b.variant == null).map((b) => b.label));
+  const rows = [];
+  const rowFor = (base, own) => {
+    let r = rows.find((x) => x.label === base);
+    if (!r) rows.push((r = { label: base, own, variants: [] }));
+    return r;
+  };
+  for (const b of blocks) {
+    // a variation with no base of its own is its own row, under its full name
+    const base = b.variant != null && !bases.has(b.base) ? b.label : b.base;
+    const r = rowFor(base, true);
+    if (!r.variants.includes(b.label)) r.variants.push(b.label);
   }
+  for (const c of arState.clips) {
+    const base = arrangeMod.baseOf(c.label);
+    const r = rows.find((x) => x.label === base) ?? rows.find((x) => x.label === c.label) ?? rowFor(base, false);
+    if (!r.variants.includes(c.label)) r.variants.push(c.label);
+  }
+  // Base first, whatever order the buffer met them in - the base is the row's own color and the
+  // variations step off it in this order (see arHsl), so the order has to be stable under a
+  // variation being typed above its base.
+  for (const r of rows) r.variants.sort((a, b) => (a === r.label ? -1 : b === r.label ? 1 : 0));
   const grew = rows.length !== arState.rows.length;
   arState.rows = rows;
-  // Each track's OWN roll, read once here rather than per clip per frame: arTrackRoll splits the
-  // whole buffer, and the clips ask for it on every draw to title themselves.
-  arState.rollOf = new Map(rows.map((r) => [r.label, arTrackRollUncached(r.label)]));
   if (!rows.some((r) => r.label === arState.track)) arState.track = rows[0]?.label ?? null;
+  // The brush has to name something a row still carries; failing that, the selected row's base.
+  if (!rows.some((r) => r.variants.includes(arState.brush))) arState.brush = arState.track;
+  arSyncBrushHead();
   if (grew) arSizeCanvas(); // the grid is as tall as the song has tracks (see arVisibleRows)
 }
 
 const arRowCount = () => arState.rows.length;
 /** The track a row plays, or null past the last one. */
 const arRowLabel = (row) => (row >= 0 && row < arState.rows.length ? arState.rows[row].label : null);
-const arRowOfLabel = (label) => arState.rows.findIndex((r) => r.label === label);
+/** The row a label - a base's or any of its variations' - is drawn on. */
+function arRowOfLabel(label) {
+  const direct = arState.rows.findIndex((r) => r.label === label);
+  if (direct >= 0) return direct;
+  const base = arrangeMod.baseOf(label);
+  return arState.rows.findIndex((r) => r.label === base || r.variants.includes(label));
+}
 
-/** Clicking a track's name: the row it lights up is the one the keys and a paste aim at. */
-function arSelectTrack(label) {
+/**
+ * Clicking a track's name selects its row - the one the keys and a paste aim at - and dips the
+ * brush in its base. Clicking a CLIP dips it in that clip's own variation instead (see the canvas
+ * handlers), which is how a part is picked up from one place and painted in a few more.
+ */
+function arSelectTrack(label, { brush = label } = {}) {
   if (!arState || label == null) return;
-  arState.track = label;
+  arState.track = arRowLabel(arRowOfLabel(label)) ?? label;
+  arSetBrush(brush);
   drawArrange();
 }
 
-/** The labels a clip may name: every labelled block in the buffer, in document order. */
+/** What the pencil would paint on `row`: the brush if it lives there, else nothing. */
+function arBrushFor(row) {
+  const r = arState?.rows[row];
+  return r && r.variants.includes(arState.brush) ? arState.brush : null;
+}
+
+/** The label the pencil paints. Only a label some row carries; anything else is ignored. */
+function arSetBrush(label) {
+  if (!arState || label == null) return;
+  if (!arState.rows.some((r) => r.variants.includes(label))) return;
+  arState.brush = label;
+  arSyncBrushHead();
+}
+
+/** The brush head shows what the pencil paints, in that clip's own color. */
+function arSyncBrushHead() {
+  arBrushHead.syncHead();
+  const label = arState?.brush;
+  arBrushName.style.color = label ? arColor(label) : '';
+}
+
+// The brush picker - the same widget the piano roll's roll head is (see makeNamePicker), over the
+// buffer's tracks instead of a definition registry: every base in document order, each followed by
+// its variations, and then any label the clips still name that the buffer has lost. Picking a row
+// dips the brush; typing `base#name` for a variation that doesn't exist yet makes it, as a copy of
+// its base, and dips the brush in that. Nothing here renames, stars or deletes - a track is code,
+// and those are edits to make in the code.
+const arBrushReg = {
+  kind: 'track',
+  label: 'track',
+  libraryNote: '',
+  allIds: () => {
+    if (!arState) return [];
+    const rows = [];
+    for (const r of arState.rows) {
+      for (const label of r.variants) rows.push({ id: label, scope: '', note: r.own ? '' : 'gone', own: false });
+    }
+    return rows;
+  },
+  pinState: () => 'none',
+  pin: () => {},
+  unpin: () => {},
+  duplicate: () => null,
+  remove: () => {},
+  rename: () => {},
+  create: () => {},
+};
+
+const arBrushHead = makeNamePicker({
+  els: {
+    wrap: arBrushWrap,
+    title: document.createElement('span'),
+    name: arBrushName,
+    btn: arBrushBtn,
+    picker: arBrushPicker,
+    search: arBrushSearch,
+    list: arBrushList,
+  },
+  reg: arBrushReg,
+  alwaysShow: true,
+  current: () => arState?.brush ?? null,
+  open: (id) => { arSelectTrack(id, { brush: id }); },
+  create: (id) => {
+    const at = id.indexOf('#');
+    const base = at > 0 ? id.slice(0, at) : null;
+    const name = at > 0 ? id.slice(at + 1) : '';
+    if (!base || !name || !arState.rows.some((r) => r.own && r.label === base)) {
+      logLine(`no track called "${id}" - a new track is typed into the code; to make a variation of one, type base#name (kick#fill)`, 'warn');
+      return;
+    }
+    const made = arCreateVariation(base, name);
+    if (made) arSelectTrack(made, { brush: made });
+  },
+  refocus: () => arCanvas.focus({ preventScroll: true }),
+});
+
 /**
- * The tracks a clip may name: every block that was WRITTEN as one - a named block, or a `$:` you
- * didn't feel like naming (see the kinds in labels.mjs). A bare column-0 statement is setup and
- * gets no row, whatever it evaluates to.
+ * A new variation of `base` called `name` - the block `base#name:` - written into the buffer as a
+ * copy of `from`'s block (the base itself by default, or one of its variations), so it starts out
+ * sounding exactly like what it came from and the edit that makes it differ is the person's.
+ * Placed after the last block of the family, so a track and its variations read top to bottom.
+ * Returns the new label, or null with a line saying why not.
+ */
+function arCreateVariation(base, name, from = base) {
+  if (!labelsMod) return null;
+  const code = cm.getValue();
+  const blocks = labelsMod.splitLabeledBlocks(code);
+  const src = blocks.find((b) => b.label === from);
+  if (!src) { logLine(`no block called "${from}" to copy`, 'warn'); return null; }
+  if (!/^[\w$]+$/.test(name)) { logLine(`a variation name has to be one plain word - not "${name}"`, 'warn'); return null; }
+  const label = `${base}#${name}`;
+  if (blocks.some((b) => b.label === label)) return label; // already there: use it
+  const family = blocks.filter((b) => b.base === base);
+  const after = family[family.length - 1] ?? src;
+  // The source's text, its label swapped for the new one. Mute and solo markers come off with it:
+  // a fresh variation should sound, whatever state the block it was copied from is in.
+  const text = code.slice(src.start, src.end).replace(/^\s*[A-Za-z_$][\w$]*(?:#[\w$]+)?(\s*:)/, `${label}$1`).replace(/\s+$/, '');
+  const at = code.slice(0, after.end).replace(/\s+$/, '').length; // the end of the last line of the family
+  cm.replaceRange(`\n${text}`, cm.posFromIndex(at));
+  refoldAll();
+  logLine(`new variation ${label} - a copy of ${from}`);
+  arRefreshRows();
+  arScheduleEval(); // it is a track now, and the engine should have it before it is painted
+  return label;
+}
+
+/** The next free numbered name for a variation of `base`: `kick#1`, then `kick#2`, and so on. */
+function arNextVariantName(base) {
+  const taken = new Set(arBlocks().filter((b) => b.base === base).map((b) => b.variant));
+  for (let i = 1; ; i++) if (!taken.has(String(i))) return String(i);
+}
+
+/**
+ * Give `clips` a variation of their own, so editing what they play stops changing every other clip
+ * that named the same block. One new variation per label among them: the pieces a split left
+ * sharing `kick#fill` all move to `kick#2` together, because they were one part before and are
+ * still one part now - the clip you go on to edit is the one to make unique again. Explicit on
+ * purpose (a menu item, never a side effect of splitting): a copy of a block is a thing to have
+ * chosen, since it is another track's worth of engine underneath.
+ */
+function arMakeUnique(clips) {
+  const byLabel = new Map();
+  for (const c of clips) {
+    if (!byLabel.has(c.label)) byLabel.set(c.label, []);
+    byLabel.get(c.label).push(c);
+  }
+  let brush = null;
+  for (const [label, group] of byLabel) {
+    const base = arrangeMod.baseOf(label);
+    const made = arCreateVariation(base, arNextVariantName(base), label);
+    if (!made) continue;
+    for (const c of group) c.label = made;
+    brush = made;
+  }
+  if (!brush) return;
+  writeArrangeCall();
+  arSetBrush(brush);
+  drawArrange();
+}
+
+/**
+ * The arrangeable blocks in the buffer, in document order: every block that was WRITTEN as a
+ * track - a named block, a variation of one, or a `$:` you didn't feel like naming (see the kinds
+ * in labels.mjs). A bare column-0 statement is setup and gets no row, whatever it evaluates to.
  *
  * A `$:` block's label is POSITIONAL (`$1`, `$2`, numbered as the parser meets them), so inserting
  * another anonymous block above one renumbers everything below it and its clips then describe a
  * different block. Named tracks have no such problem, which is the honest argument for naming
  * anything you mean to arrange; arranging one anonymously is allowed rather than encouraged.
  */
-function arLabels() {
+function arBlocks() {
   if (!labelsMod) return [];
   const seen = new Set();
   const out = [];
   for (const b of labelsMod.splitLabeledBlocks(cm.getValue())) {
     if (!b.label || b.kind === 'bare' || seen.has(b.label)) continue;
     seen.add(b.label);
-    out.push(b.label);
+    out.push(b);
   }
   return out;
 }
 
-/** A label's colour: a hue hashed from its name, so `bass` is the same colour in every song. */
+/** The labels a clip may name - every arrangeable block's, in document order. */
+function arLabels() {
+  return arBlocks().map((b) => b.label);
+}
+
+/** What a clip is titled: the track's name on a base, `#name` on a variation (the code's spelling). */
+function arClipTitle(label) {
+  const v = arrangeMod ? arrangeMod.variantOf(label) : null;
+  return v == null ? label : `#${v}`;
+}
+
+// --- colors ---
+
+/** A label's hue: hashed from its name, so `bass` is the same color in every song. */
 function arHue(label) {
   let h = 0;
   for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
   return h % 360;
 }
-const arColor = (label, alpha = 1) => `hsla(${arHue(label)}, 62%, 58%, ${alpha})`;
+
+// How far round the wheel each variation sits from its base. Far enough to tell apart at a glance
+// on a clip a few pixels wide, near enough that `kick#fill` still reads as a kind of kick.
+const AR_VARIANT_HUE_STEP = 28;
+
+/**
+ * A clip's color: what the person chose for that label if they chose one (see the `colors` option
+ * in arrange.mjs), else the base's hue stepped round the wheel once per variation, in the order
+ * the variations sit on the row - so the base is the track's color and each variation is a
+ * neighbor of it. Returned as [h, s, l] so a caller can dim or lighten it.
+ */
+function arHsl(label) {
+  const chosen = arState?.colors?.[label];
+  if (chosen) return hexToHsl(chosen);
+  const base = arrangeMod ? arrangeMod.baseOf(label) : label;
+  const row = arState?.rows.find((r) => r.label === base);
+  const at = row ? row.variants.indexOf(label) : -1;
+  const step = at > 0 ? at : 0;
+  return [(arHue(base) + step * AR_VARIANT_HUE_STEP) % 360, 62, 58];
+}
+const arColor = (label, alpha = 1) => {
+  const [h, s, l] = arHsl(label);
+  return `hsla(${h}, ${s}%, ${l}%, ${alpha})`;
+};
+
+/** "#rrggbb" -> [h, s, l] in degrees and percent. */
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, Math.round(l * 100)];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return [Math.round(h * 60), Math.round(s * 100), Math.round(l * 100)];
+}
+
+/** [h, s, l] -> "#rrggbb", for writing a chosen color into the arrangement. */
+function hslToHex(h, s, l) {
+  const sat = s / 100;
+  const lig = l / 100;
+  const k = (n) => (n + h / 30) % 12;
+  const a = sat * Math.min(lig, 1 - lig);
+  const f = (n) => lig - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const to = (v) => Math.round(v * 255).toString(16).padStart(2, '0');
+  return `#${to(f(0))}${to(f(8))}${to(f(4))}`;
+}
 
 // --- controls ---
 
@@ -22640,7 +22972,11 @@ const arYOf = (row) => AR_LANES_TOP + (row - arState.scrollLane) * AR_ROW;
  * tracks than fit is still all there; the panel staying on screen is the thing that can't give.
  */
 function arVisibleRows() {
-  const room = Math.max(AR_PANEL_MIN_H, Math.round((window.innerHeight || 900) * AR_PANEL_SHARE))
+  // As a page the panel has the editor pane's height, whatever the canvas draws - so measure it,
+  // and fall back to a share of the window before the first layout has happened.
+  const head = arPanel.querySelector('.pianoroll-panel-head')?.offsetHeight ?? 0;
+  const page = arPanel.clientHeight ? arPanel.clientHeight - head - 24 : 0; // 24: the body's padding
+  const room = Math.max(AR_PANEL_MIN_H, page || Math.round((window.innerHeight || 900) * AR_PANEL_SHARE))
     - AR_LANES_TOP - arAutoVisible() * AR_AUTO_H - AR_PAD_BOTTOM;
   const fit = Math.max(AR_SQUEEZE_ROWS, Math.floor(room / AR_ROW));
   return Math.min(fit, Math.max(AR_MIN_ROWS, arRowCount()));
@@ -22752,12 +23088,12 @@ function arPoint(e) {
 
 /** The clip under (x, y), the topmost drawn (last in the list) winning, and whether its right edge is. */
 function arClipAt(x, y) {
-  const label = arRowLabel(arRowOf(y));
-  if (label == null) return null;
+  const row = arRowOf(y);
+  if (arRowLabel(row) == null) return null;
   const bars = arBarsOf(x);
   for (let i = arState.clips.length - 1; i >= 0; i--) {
     const c = arState.clips[i];
-    if (c.label !== label) continue;
+    if (arRowOfLabel(c.label) !== row) continue; // the row's own clips, whichever variation each is
     const x1 = arXOf(c.start);
     const x2 = arXOf(c.start + c.len);
     if (x < x1 || x > x2) continue;
@@ -22932,19 +23268,32 @@ function drawArrange() {
       ctx.fillRect(hoverClip.edge === 'left' ? dx + 1 : dx2 - 4, y + 5, 3, AR_ROW - 10);
       ctx.globalAlpha = 1;
     }
-    // A clip that rebinds a roll says WHICH - the row already says the track, so its own name is
-    // the only thing left worth the space, and a fill reads as a fill at a glance.
+    // The title names WHICH of the row's variations this is. The row already says the track, so a
+    // base clip carries the track's name and a variation its `#name` - which is the spelling in
+    // the code, and reads as "a kind of kick" at a glance.
     if (w > 18) {
       ctx.save();
       ctx.beginPath(); ctx.rect(dx + 2, boxY, w - 4, AR_CLIP_TITLE_H); ctx.clip();
       ctx.fillStyle = text;
       ctx.globalAlpha = past ? 0.5 : 0.95;
-      // The name in the title is the ROLL this clip plays - the row already says the track, so the
-      // only thing left worth the space is which drawing is heard here. Double-click it to swap.
-      ctx.fillText(c.roll ?? arTrackRoll(c.label) ?? c.label, dx + 6, boxY + AR_CLIP_TITLE_H / 2);
+      ctx.fillText(arClipTitle(c.label), dx + 6, boxY + AR_CLIP_TITLE_H / 2);
       ctx.globalAlpha = 1;
       ctx.restore();
     }
+  }
+
+  // The pencil paints ONE row - the brush's (see arSetBrush) - so with it in hand every other row
+  // steps back, and the one that would take the paint is the one that reads as live. Click a
+  // track's name, or a clip, to move the brush.
+  if (arTool === 'draw' && arState.brush != null) {
+    const brushRow = arRowOfLabel(arState.brush);
+    ctx.fillStyle = col('--bg');
+    ctx.globalAlpha = 0.4;
+    for (let lane = firstLane; lane <= lastLane; lane++) {
+      if (lane === brushRow || arRowLabel(lane) == null) continue;
+      ctx.fillRect(AR_GUTTER, arYOf(lane), W - AR_GUTTER, AR_ROW);
+    }
+    ctx.globalAlpha = 1;
   }
 
   // The time selection, over the tracks it covers. It has always been drawn on the ruler, which was
@@ -23104,7 +23453,7 @@ function drawArrange() {
       ctx.globalAlpha = 1;
     }
     if (row) {
-      // A track's colour, as a bar down the side of its name: the clips carry it too, so a part
+      // A track's color, as a bar down the side of its name: the clips carry it too, so a part
       // dragged onto another row is visibly on another track.
       ctx.fillStyle = arColor(row.label, row.own ? 0.9 : 0.35);
       ctx.fillRect(0, top + 4, 3, AR_ROW - 8);
@@ -23114,6 +23463,15 @@ function drawArrange() {
       // An orphan - clips whose block is gone - is faded: the row is there to be seen and cleared.
       ctx.globalAlpha = row.own ? 0.95 : 0.45;
       ctx.fillText(row.label, 10, y);
+      // A row with variations says how many, and the brush's own is lit: with `kick` selected and
+      // the brush in `kick#fill`, the gutter shows which of them the pencil is carrying.
+      if (row.variants.length > 1) {
+        const w = ctx.measureText(row.label).width;
+        const brushHere = row.variants.includes(arState.brush) && arState.brush !== row.label ? arClipTitle(arState.brush) : `+${row.variants.length - 1}`;
+        ctx.fillStyle = brushHere.startsWith('#') ? arColor(arState.brush, 0.95) : col('--text-dim');
+        ctx.globalAlpha = 0.85;
+        ctx.fillText(brushHere, 10 + w + 6, y);
+      }
       ctx.globalAlpha = 1;
       ctx.restore();
     }
@@ -23439,10 +23797,10 @@ function arOpenMenu(clientX, clientY, hit, row) {
     items.push(['duplicate after', () => arDuplicate(targets)]);
     if (arSplitPoints().length) items.push(['split here', () => arSplitClips(), 'cmd-E — at the marker, or at both edges of a marked span']);
     if (targets.length > 1 || arState.regionSpan) items.push(['join', () => arJoinClips(), 'cmd-J — one clip from here to the end of the last']);
-    items.push(...arRollMenuItems(targets, clientX, clientY));
+    items.push(...arVariationMenuItems(targets));
   } else if (row != null && row >= 0 && arRowLabel(row) != null) {
     const label = arRowLabel(row);
-    const mine = arState.clips.filter((c) => c.label === label);
+    const mine = arState.clips.filter((c) => arRowOfLabel(c.label) === row); // the row's clips, every variation
     items.push([`select ${label}`, () => arSelectTrack(label)]);
     if (mine.length) items.push([`clear ${label}`, () => arDeleteClips(mine), 'the track stops sounding: a row with no clips is silent']);
     else items.push([`fill ${label}`, () => arFillTrack(label), 'a clip over the whole song - the track plays throughout again']);
@@ -23471,97 +23829,61 @@ function arCloseMenu() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Per-clip roll binding - which roll a track plays, painted.
-//
-// A track's roll is normally the one its `pianoroll("kick")` names. A clip may say a DIFFERENT one
-// over its own bars (`kick:fill,12,4` - see arrange.mjs), which is how a fill, a variation or an
-// alternate chorus is arranged rather than patterned: split the clip where the change happens,
-// fork the roll, and draw on the fork. The two halves are separate drawings from then on, and
-// painting the fork's name at the other phrase ends repeats it exactly.
-//
-// Everything here works on the ROLL REGISTRY the roll panel already owns (rollDefs), so a forked
-// roll is an ordinary `_roll(...)` definition: it opens in the piano roll, renames, duplicates,
-// stars into the library and is deleted the same way anything drawn is.
+// Variations, from the clip's side: a clip names a block, several clips may name the same one, and
+// the gestures here are about that sharing - making a clip its own, and telling the two apart.
 // ---------------------------------------------------------------------------------------------
 
-/** The roll a track's own block names - off the map arRefreshRows built (see arTrackRollUncached). */
-function arTrackRoll(label) {
-  return arState?.rollOf?.get(label) ?? null;
+/** How many clips name `label` besides these. */
+function arSharedWith(label, except) {
+  const mine = new Set(except);
+  return arState.clips.filter((c) => c.label === label && !mine.has(c)).length;
 }
 
-/** The roll the track's own block names, when it names exactly one. Reads the buffer; cache it. */
-function arTrackRollUncached(label) {
-  if (!labelsMod) return null;
-  for (const b of labelsMod.splitLabeledBlocks(cm.getValue())) {
-    if (b.label !== label) continue;
-    const m = /\bpianoroll\s*\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(b.code);
-    if (!m) return null;
-    const ids = m[2].trim();
-    return /^[\w$]+$/.test(ids) ? ids : null; // "<a b>" names several - there is no one roll to fork
-  }
-  return null;
-}
-
-/**
- * Bind a set of clips to a roll (null puts them back on the track's own). Naming the track's OWN
- * roll unbinds rather than writing it out: a clip that says what the track already says is a
- * binding that would go stale the moment the track's roll changed.
- */
-function arBindRoll(clips, roll) {
-  for (const c of clips) c.roll = roll && roll !== arTrackRoll(c.label) ? String(roll) : null;
-  writeArrangeCall();
-  drawArrange();
-}
-
-// Which clips the roll list is choosing for. Set when it opens; the picker's own hooks read it.
-let arRollTargets = [];
-
-// A clip's roll list - the same widget again (see makeNamePicker), this time over rollDefs and
-// anchored to the clip whose title was double-clicked. Picking a row binds these clips to that
-// roll; typing a name that has none makes the roll, binds it, and opens it to draw.
-const arRollHead = makeNamePicker({
-  els: {
-    wrap: arRollPickWrap,
-    title: document.createElement('span'),
-    name: document.createElement('input'),
-    btn: document.createElement('button'),
-    picker: arRollPicker,
-    search: arRollSearch,
-    list: arRollList,
-  },
-  reg: rollDefs,
-  alwaysShow: true,
-  current: () => arRollTargets[0]?.roll ?? arTrackRoll(arRollTargets[0]?.label) ?? null,
-  open: (id) => arBindRoll(arRollTargets, id),
-  create: (id) => { const targets = arRollTargets; rollDefs.create(id); arBindRoll(targets, id); },
-  refocus: () => arCanvas.focus({ preventScroll: true }),
-});
-
-/** The roll list, over the clips it is choosing for, hung off the clip you double-clicked. */
-function arOpenRollPicker(clips, atX, atY) {
-  if (!clips.length) return;
-  arRollTargets = clips;
-  const r = arCanvas.getBoundingClientRect();
-  const body = arCanvas.parentElement.getBoundingClientRect();
-  arRollPickWrap.style.left = `${r.left - body.left + Math.max(AR_GUTTER, atX)}px`;
-  arRollPickWrap.style.top = `${r.top - body.top + atY}px`;
-  arRollHead.syncHead();
-  arRollHead.openPicker();
-}
-
-/** The clip menu's roll line: the list, and the way back to the track's own. */
-function arRollMenuItems(targets, clientX, clientY) {
-  const label = targets[0]?.label;
-  if (!label || targets.some((c) => c.label !== label)) return []; // one track's clips at a time
-  const r = arCanvas.getBoundingClientRect();
+/** The clip menu's variation lines: make unique, edit the code, and the color. */
+function arVariationMenuItems(targets) {
   const items = ['-'];
-  items.push([`roll: ${targets[0].roll ?? arTrackRoll(label) ?? 'the track\'s own'}…`,
-    () => arOpenRollPicker(targets, clientX - r.left, clientY - r.top),
-    'which drawing these bars play - double-clicking the clip\'s title is the same list']);
-  if (targets.some((c) => c.roll)) {
-    items.push([`back to ${arTrackRoll(label) ?? 'the track\'s own roll'}`, () => arBindRoll(targets, null)]);
+  const labels = [...new Set(targets.map((c) => c.label))];
+  const shared = labels.reduce((n, l) => n + arSharedWith(l, targets), 0);
+  const one = labels.length === 1 ? labels[0] : null;
+  items.push([
+    `make unique${shared ? ` (shared with ${shared} other clip${shared === 1 ? '' : 's'})` : ''}`,
+    () => arMakeUnique(targets),
+    'a variation of its own - a copy of the block - so editing what these bars play changes nothing else',
+  ]);
+  if (one) {
+    items.push([`edit ${one}…`, () => arEditBlock(one), 'just this block, in a window - double-clicking the clip is the same']);
+    items.push([`color…`, () => arPickColor(one), 'a color of your own for every clip of this variation']);
+    if (arState.colors[one]) items.push(['default color', () => arSetColor(one, null)]);
   }
   return items;
+}
+
+// The color chooser is the platform's own, as the theme editor's is: one input, kept out of sight
+// and clicked open from the menu, since a swatch grid of ours would be a second opinion about a
+// thing the platform already asks well.
+let arColorInput = null;
+function arPickColor(label) {
+  if (!arColorInput) {
+    arColorInput = document.createElement('input');
+    arColorInput.type = 'color';
+    arColorInput.className = 'arrange-color-input';
+    arCanvas.parentElement.appendChild(arColorInput);
+  }
+  const [h, s, l] = arHsl(label);
+  arColorInput.value = hslToHex(h, s, l);
+  arColorInput.oninput = () => arSetColor(label, arColorInput.value, { record: false });
+  arColorInput.onchange = () => arSetColor(label, arColorInput.value);
+  arColorInput.click();
+}
+
+/** Write (or with null, forget) a chosen color for `label`. */
+function arSetColor(label, hex, { record = true } = {}) {
+  if (!arState) return;
+  if (hex) arState.colors[label] = hex.toLowerCase();
+  else delete arState.colors[label];
+  arSyncBrushHead();
+  writeArrangeCall(record, { evaluate: false }); // nothing about a color is heard
+  drawArrange();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -23586,13 +23908,16 @@ function arOpTargets(points) {
   const hits = arState.clips.filter((c) => c.start < b + 1e-9 && c.start + c.len > a - 1e-9);
   // With only a marker (no span) it is the one clip you are pointing at, on the row you are on -
   // splitting every track at once because a marker happens to be down would be a surprise.
-  return points.length > 1 ? hits : hits.filter((c) => c.label === arState.track);
+  const row = arRowOfLabel(arState.track);
+  return points.length > 1 ? hits : hits.filter((c) => arRowOfLabel(c.label) === row);
 }
 
 /**
  * Cut `targets` at every point that falls strictly inside them. A clip cut in two is two clips of
- * the same roll, back to back - nothing about the sound changes until one of them is moved, bound
- * to another roll, or taken away, which is the point of splitting.
+ * the same variation, back to back - nothing about the sound changes until one of them is moved,
+ * made unique (see arMakeUnique), or taken away, which is the point of splitting. The halves go on
+ * naming one block on purpose: a copy of a block is another track's worth of engine, and a thing
+ * to have chosen rather than a side effect of a cut.
  */
 function arSplitClips() {
   const points = arSplitPoints();
@@ -23612,7 +23937,7 @@ function arSplitClips() {
     arState.clips.splice(arState.clips.indexOf(c), 1);
     arState.sel.delete(c);
     for (let i = 0; i < edges.length - 1; i++) {
-      const piece = { label: c.label, start: edges[i], len: edges[i + 1] - edges[i], roll: c.roll ?? null };
+      const piece = { label: c.label, start: edges[i], len: edges[i + 1] - edges[i] };
       arState.clips.push(piece);
       made.push(piece);
     }
@@ -23621,25 +23946,25 @@ function arSplitClips() {
     logLine('no clip crosses the marker - the split had nothing to cut', 'warn');
     return;
   }
-  // What you are left holding is what you MARKED, not everything the cut produced. The region a key
-  // acts on is the union of the marked span and the selected clips (see arTimeRegion), so selecting
-  // all three pieces of a clip split out of its middle would widen the band back to the whole clip
-  // the moment it was cut - the selection appearing to jump to the thing you had just divided.
-  // Inside a span: the pieces that fell in it. From a bare marker: both halves, which is the whole
-  // of what was cut anyway.
+  // What you are left holding is what you MARKED, and nothing else. The region a key acts on is the
+  // union of the marked span and the selected clips (see arTimeRegion), so handing back pieces
+  // nobody asked for widens the band to the whole clip that was just divided - the selection
+  // appearing to jump to the thing you cut. A span leaves you the pieces that fell inside it. A
+  // bare marker is a PLACE, not a choice of clips: clicking into the middle of a clip and cutting
+  // there leaves the marker sitting where you put it and selects nothing at all.
   const span = arState.regionSpan;
   arState.sel = new Set(span
     ? made.filter((c) => c.start >= span[0] - 1e-9 && c.start + c.len <= span[1] + 1e-9)
-    : made);
+    : []);
   writeArrangeCall();
   drawArrange();
 }
 
 /**
- * One clip in place of several, per track: the span from the first onset to the last end, gaps
- * included. The roll is the FIRST piece's - a join can only keep one, and the one you hear first
- * is the one the joined clip should sound like; anything else it swallowed is said out loud,
- * because that is a drawing quietly dropping out of the song.
+ * One clip in place of several, per ROW: the span from the first onset to the last end, gaps
+ * included. The variation is the FIRST piece's - a join can only keep one, and the one you hear
+ * first is the one the joined clip should sound like; anything else it swallowed is said out
+ * loud, because that is a part quietly dropping out of the song.
  */
 function arJoinClips() {
   const points = arSplitPoints();
@@ -23649,22 +23974,25 @@ function arJoinClips() {
       : 'nothing to join - drag out a span across the clips, or select them', 'warn');
     return;
   }
-  const byTrack = new Map();
-  for (const c of targets) byTrack.set(c.label, [...(byTrack.get(c.label) ?? []), c]);
+  const byRow = new Map();
+  for (const c of targets) {
+    const row = arRowOfLabel(c.label);
+    byRow.set(row, [...(byRow.get(row) ?? []), c]);
+  }
   const made = [];
   const lost = new Set();
-  for (const [label, group] of byTrack) {
+  for (const group of byRow.values()) {
     if (group.length < 2) continue;
     group.sort((a, b) => a.start - b.start);
     const start = group[0].start;
     const end = Math.max(...group.map((c) => c.start + c.len));
-    const roll = group[0].roll ?? null;
-    for (const c of group.slice(1)) if ((c.roll ?? null) !== roll) lost.add(c.roll ?? arTrackRoll(label) ?? label);
+    const label = group[0].label;
+    for (const c of group.slice(1)) if (c.label !== label) lost.add(c.label);
     for (const c of group) {
       arState.clips.splice(arState.clips.indexOf(c), 1);
       arState.sel.delete(c);
     }
-    const one = { label, start, len: end - start, roll };
+    const one = { label, start, len: end - start };
     arState.clips.push(one);
     made.push(one);
   }
@@ -23673,7 +24001,7 @@ function arJoinClips() {
     return;
   }
   arState.sel = new Set(made);
-  if (lost.size) logLine(`joined: these bars now play ${made[0].roll ?? 'the track\'s own roll'} throughout - ${[...lost].join(', ')} ${lost.size === 1 ? 'is' : 'are'} no longer heard here`, 'warn');
+  if (lost.size) logLine(`joined: these bars now play ${made[0].label} throughout - ${[...lost].join(', ')} ${lost.size === 1 ? 'is' : 'are'} no longer heard here`, 'warn');
   writeArrangeCall();
   drawArrange();
 }
@@ -23756,7 +24084,7 @@ function arClipsIn(a, b) {
     const start = Math.max(a, c.start);
     const end = Math.min(b, c.start + c.len);
     if (end - start <= 1e-9) continue;
-    out.push({ label: c.label, roll: c.roll ?? null, start: start - a, len: end - start });
+    out.push({ label: c.label, start: start - a, len: end - start });
   }
   return out;
 }
@@ -23920,6 +24248,238 @@ function arRevealTrack(label) {
   }
   cm.scrollIntoView({ from: cm.posFromIndex(block.start), to: cm.posFromIndex(block.end) }, 80);
   arSelectTrack(label);
+}
+
+/**
+ * Leave the arrangement for the code, landing on `label`'s block: the cursor on its first line,
+ * the block scrolled into view. What leaving the arrangement with a clip selected does (see
+ * closeArrangeEditor) - the clip is the block, so that is where you meant to go.
+ */
+function arGotoBlock(label) {
+  if (!labelsMod) return;
+  const block = labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => b.label === label);
+  if (!block) return;
+  const from = cm.posFromIndex(block.start);
+  cm.setCursor({ line: from.line, ch: cm.getLine(from.line).length });
+  cm.scrollIntoView({ from, to: cm.posFromIndex(block.end) }, 80);
+  cm.focus();
+}
+
+// ---------------------------------------------------------------------------------------------
+// One block, on its own, to edit: double-click a clip and the block it names comes up in a small
+// window - label line and all - so a variation gets its difference without leaving the song, and
+// gets its new name the same way, since the label is the first thing in the box.
+//
+// The window is a VIEW of the buffer, not a copy of it. What you type is written back to the
+// block whenever you leave the box (and when the window closes, and before a handle opens a
+// panel); what a panel writes into the block - the piano roll drawing notes, a preset being
+// captured - shows up in the box the moment it lands. So the roll can be open in front of the
+// window with both of them alive, which is how a variation is usually worked on. The block's
+// place in the buffer is a CodeMirror mark, so it follows every edit above it.
+//
+// A changed label renames the block's clips with it (and, for a base, its variations and theirs)
+// - at a write-back, never per keystroke, so a name typed letter by letter renames once.
+// ---------------------------------------------------------------------------------------------
+
+const blockEditBackdrop = document.getElementById('blockEditBackdrop');
+const blockEditTitle = document.getElementById('blockEditTitle');
+const blockEditNote = document.getElementById('blockEditNote');
+let blockEditCM = null;
+let blockEdit = null; // { label, marker } - which block, and the mark over its text in the buffer
+let blockEditSyncing = false; // a write of ours is landing; the change handler must not echo it back
+
+function ensureBlockEditCM() {
+  if (!blockEditCM) {
+    blockEditCM = CodeMirror.fromTextArea(document.getElementById('blockEditEditor'), {
+      mode: { name: 'javascript' },
+      theme: 'poptart',
+      keyMap: 'sublime',
+      matchBrackets: true,
+      autoCloseBrackets: true,
+      viewportMargin: Infinity,
+      extraKeys: {
+        // Play, exactly as in the editor - the block written back first, the window staying up.
+        // Esc and the ✕ are how you leave; there is nothing to confirm, since the box is live.
+        'Cmd-Enter': () => playBlockEdit(),
+        'Ctrl-Enter': () => playBlockEdit(),
+        'Ctrl-Space': (ed) => showPoptartHint(ed),
+        Esc: () => closeBlockEdit(),
+      },
+    });
+    // The editor's own manners - completion as you type, the ctrl-hover docs - since this is the
+    // same code, only cut out of the buffer for a moment.
+    attachEditorWiring(blockEditCM);
+    blockEditCM.on('blur', () => commitBlockEdit());
+    // The double-click handles (the roll, a plugin's window, a preset, an lfo, a pack). Every one
+    // of those panels reads and writes the MAIN buffer, so the box is written back first and the
+    // handle is opened at the same character in the buffer - which is where the block is. The
+    // window stays up behind the panel, and follows what the panel writes (see the change hook).
+    blockEditCM.on('mousedown', (ed, e) => {
+      if (e.detail !== 2 || e.button !== 0 || !blockEdit) return;
+      const inner = ed.indexFromPos(ed.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+      commitBlockEdit();
+      const range = blockEditRange();
+      if (!range) return;
+      if (openWidgetAt(cm.getValue(), range[0] + inner)) e.preventDefault(); // the double-click WAS the gesture
+    });
+    // A panel's write into the block reaches the box. Only a change that touched the block: an
+    // unrelated write elsewhere in the buffer (the painter filing a clip) must not clobber what
+    // is being typed in here ahead of its write-back.
+    cm.on('change', (_ed, change) => {
+      if (!blockEdit || blockEditSyncing || blockEditBackdrop.classList.contains('hidden')) return;
+      const range = blockEditRange();
+      if (!range) { closeBlockEdit(); return; } // the block was deleted out from under the window
+      const at = cm.indexFromPos(change.from);
+      if (at < range[0] || at > range[1]) return;
+      const text = cm.getRange(cm.posFromIndex(range[0]), cm.posFromIndex(range[1])).replace(/\s+$/, '');
+      if (text === blockEditCM.getValue().replace(/\s+$/, '')) return;
+      const cur = blockEditCM.getCursor();
+      blockEditCM.setValue(text);
+      blockEditCM.setCursor(cur);
+    });
+  }
+  return blockEditCM;
+}
+
+/** Where the block is in the buffer right now, as [from, to) indices - or null if it has gone. */
+function blockEditRange() {
+  const r = blockEdit?.marker.find();
+  if (!r) return null;
+  const from = cm.indexFromPos(r.from);
+  const to = cm.indexFromPos(r.to);
+  return to > from ? [from, to] : null;
+}
+
+function arEditBlock(label) {
+  if (!labelsMod) return;
+  const code = cm.getValue();
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label);
+  if (!block) {
+    logLine(`no block called ${JSON.stringify(label)} in this buffer - its clips are an orphan row`, 'warn');
+    return;
+  }
+  const ed = ensureBlockEditCM();
+  if (blockEdit) blockEdit.marker.clear();
+  // The mark covers the block's text and not the blank lines after it, so the gap under the block
+  // is never part of what the box shows or writes.
+  const text = code.slice(block.start, block.end).replace(/\s+$/, '');
+  blockEdit = { label, marker: cm.markText(cm.posFromIndex(block.start), cm.posFromIndex(block.start + text.length), {}) };
+  blockEditTitle.textContent = label;
+  blockEditNote.textContent = '';
+  blockEditBackdrop.classList.remove('hidden');
+  ed.setValue(text);
+  ed.refresh();
+  ed.focus();
+  ed.setCursor({ line: 0, ch: ed.getLine(0).length });
+}
+
+/**
+ * Write the box back over the block. A no-op when they already agree, so the blur that follows a
+ * handle's double-click, or the close after a write-back, costs nothing. Returns the block's label
+ * as it now reads, having renamed if the label line changed.
+ */
+function commitBlockEdit() {
+  if (!blockEdit || !blockEditCM) return null;
+  const range = blockEditRange();
+  if (!range) return blockEdit.label;
+  const [from, to] = range;
+  const text = blockEditCM.getValue().replace(/\s+$/, '');
+  if (text !== cm.getRange(cm.posFromIndex(from), cm.posFromIndex(to))) {
+    blockEditSyncing = true;
+    try {
+      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+    } finally {
+      blockEditSyncing = false;
+    }
+    // A mark collapses when everything inside it is replaced at once; put it back over the new text.
+    blockEdit.marker.clear();
+    blockEdit.marker = cm.markText(cm.posFromIndex(from), cm.posFromIndex(from + text.length), {});
+    refoldAll();
+    // A write-back is an edit to the song, and it plays like one - the same debounced eval the
+    // painter's own writes get. It is also what loads a variation's plugins, so that `.param("`
+    // completion in here offers ITS parameters rather than a guess (see paramHints).
+    arScheduleEval();
+  }
+  const after = labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => b.start === from);
+  const now = after?.label ?? blockEdit.label;
+  if (now !== blockEdit.label) {
+    arRenameLabel(blockEdit.label, now);
+    blockEdit.label = now;
+    blockEditTitle.textContent = now;
+  }
+  return now;
+}
+
+/** cmd+enter in the window: write the block back and play the buffer, the way the editor's does. */
+function playBlockEdit() {
+  commitBlockEdit();
+  clearTimeout(arEvalTimer); // the write-back's debounced eval - this IS that eval, now
+  arEvalTimer = null;
+  evaluate(true, { byHand: true });
+}
+
+function closeBlockEdit({ goto = false } = {}) {
+  if (blockEditBackdrop.classList.contains('hidden')) return;
+  const now = commitBlockEdit();
+  blockEditBackdrop.classList.add('hidden');
+  blockEdit?.marker.clear();
+  blockEdit = null;
+  if (arState) {
+    arRefreshRows();
+    if (now) arSetBrush(now);
+    drawArrange();
+  }
+  if (goto && now) {
+    closeArrangeEditor();
+    arGotoBlock(now);
+  } else if (arState) {
+    arCanvas.focus({ preventScroll: true });
+  }
+}
+
+/**
+ * `from` is now called `to`: every clip that named it follows, and so does its color. For a BASE,
+ * the family goes with it - `kick#fill` becomes `drums#fill` in the code and in the clips - since
+ * a variation with no base is an orphan, and renaming a track is not meant to orphan its parts.
+ */
+function arRenameLabel(from, to) {
+  if (!labelsMod || !arrangeMod || from === to) return;
+  const fromBase = arrangeMod.variantOf(from) == null;
+  const toBase = arrangeMod.variantOf(to) == null;
+  const map = new Map([[from, to]]);
+  if (fromBase && toBase) {
+    // the family's blocks, renamed in the code from the bottom up so the offsets above hold
+    const blocks = labelsMod.splitLabeledBlocks(cm.getValue()).filter((b) => b.base === from && b.variant != null);
+    for (const b of [...blocks].reverse()) {
+      const renamed = `${to}#${b.variant}`;
+      map.set(b.label, renamed);
+      const code = cm.getValue();
+      const m = /^\s*([A-Za-z_$][\w$]*(?:#[\w$]+)?)(\s*:)/.exec(code.slice(b.start, b.end));
+      if (!m) continue;
+      const at = b.start + m[0].length - m[2].length - m[1].length;
+      cm.replaceRange(renamed, cm.posFromIndex(at), cm.posFromIndex(at + m[1].length));
+    }
+  }
+  arApplyRename(map);
+  logLine(`renamed ${from} to ${to}${map.size > 1 ? ` (and its ${map.size - 1} variation${map.size === 2 ? '' : 's'})` : ''}`);
+}
+
+/**
+ * The painter's side of a rename, whoever made it - the block window above, or the mixer typing
+ * over a strip's name (which rewrites the clips in the buffer itself; see mixctl's renameEdits).
+ * Every clip, the membership, the colors, the brush and the selected row follow `map`, and the
+ * call is written so the painter's marker and the buffer agree again.
+ */
+function arApplyRename(map) {
+  if (!arState) return;
+  for (const c of arState.clips) if (map.has(c.label)) c.label = map.get(c.label);
+  arState.tracks = arState.tracks.map((t) => map.get(t) ?? t);
+  for (const [a, b] of map) {
+    if (arState.colors[a] != null) { arState.colors[b] = arState.colors[a]; delete arState.colors[a]; }
+  }
+  if (map.has(arState.brush)) arState.brush = map.get(arState.brush);
+  if (map.has(arState.track)) arState.track = map.get(arState.track);
+  writeArrangeCall(true, { evaluate: false }); // the eval is the caller's, once
 }
 
 function arNameRegion(region, fresh = false) {
@@ -24099,7 +24659,7 @@ function arPinAuto(id) {
   arAutoPinsChanged();
 }
 
-/** Take a lane's strip away. The others stay where they are, and the hand moves to a neighbour. */
+/** Take a lane's strip away. The others stay where they are, and the hand moves to a neighbor. */
 function arUnpinAuto(id) {
   if (!arState) return;
   const at = arState.autos.findIndex((a) => a.id === String(id));
@@ -24265,7 +24825,7 @@ function arAutoAddPoint(bar, value) {
 // of curve. The arrow tool drags a span out of the strip (the pencil keeps drawing points), and
 // from there the whole set works on it: delete, copy, cut, paste, duplicate after.
 //
-// Two things are deliberately NOT the clips' behaviour:
+// Two things are deliberately NOT the clips' behavior:
 //   - a paste REPLACES the span it lands on rather than overlaying it. Two curves stacked on the
 //     same bars is not a thicker curve, it is a zigzag between them - a lane has one value at a
 //     time, so laying one down has to take the old one out of the way.
@@ -24777,7 +25337,7 @@ function initArrangeCanvas() {
       }
       arSelectTrack(hit.clip.label); // the track you are working on is the one you just grabbed
       const targets = [...arState.sel];
-      const orig = new Map(targets.map((c) => [c, { start: c.start, row: arRowOfLabel(c.label), len: c.len }]));
+      const orig = new Map(targets.map((c) => [c, { start: c.start, row: arRowOfLabel(c.label), len: c.len, label: c.label }]));
       arState.drag = hit.edge
         ? { kind: 'resize', targets, orig, x0: x, side: hit.edge, moved: false }
         // alt: option-drag duplicates, as in the roll - the copies are made on the first movement
@@ -24820,10 +25380,14 @@ function initArrangeCanvas() {
       drawArrange();
       return;
     }
-    // paint: the clip lands one cell wide, on the row's own track, and grows with the drag
+    // paint: the clip lands one cell wide and grows with the drag. It carries the BRUSH - which
+    // is only ever a label on this row (see arBrushFor): the pencil paints one row at a time, and
+    // the other rows are dimmed to say so.
+    const label = arBrushFor(row);
+    if (!label) { drawArrange(); return; }
     const start = Math.floor(arBarsOf(x) / arCell()) * arCell();
-    const clip = { label: arRowLabel(row), start: Math.max(0, start), len: arCell(), roll: null };
-    arSelectTrack(clip.label);
+    const clip = { label, start: Math.max(0, start), len: arCell() };
+    arSelectTrack(clip.label, { brush: label });
     arState.clips.push(clip);
     arState.sel = new Set([clip]);
     arState.drag = { kind: 'resize', targets: [clip], orig: new Map([[clip, { ...clip }]]), x0: x, side: 'right', moved: false, painted: true };
@@ -24865,7 +25429,7 @@ function initArrangeCanvas() {
       d.moved = Math.abs(x - d.x0) >= 3;
     } else if (d.kind === 'autoPoint') {
       // Bars snap to the painter's own grid (a curve turns where a clip starts), the value doesn't -
-      // there is no grid worth having down the value axis. Neighbours cage it, so the list stays in
+      // there is no grid worth having down the value axis. Neighbors cage it, so the list stays in
       // ascending bar order however far the drag travels; the value is held inside the strip's
       // range, which is why that range doesn't move mid-drag (see arRefreshAutoRange).
       const pts = arState.autoPts;
@@ -24933,7 +25497,9 @@ function initArrangeCanvas() {
       for (const c of d.targets) {
         const o = d.orig.get(c);
         c.start = o.start + shift;
-        c.label = arRowLabel(o.row + rowShift) ?? c.label;
+        // A clip dragged onto another row becomes that track's (its base - a variation of kick is not one
+        // of bass); one that stays on its row keeps its variation.
+        c.label = rowShift !== 0 ? arRowLabel(o.row + rowShift) ?? o.label : o.label;
       }
       d.moved = d.moved || shift !== 0 || rowShift !== 0;
     } else if (d.kind === 'resize') {
@@ -25102,22 +25668,22 @@ function initArrangeCanvas() {
       arRevealTrack(arRowLabel(row));
     }
     else if (clipHit) {
-      // The two halves again: the TITLE names the roll, so double-clicking it offers the others -
-      // a searchable list, because a song has more rolls than a menu can hold. The BODY is the
-      // music, so double-clicking that opens the drawing itself in the piano roll.
+      // A clip is a block: double-clicking it puts just that block up to edit (see arEditBlock),
+      // which is where a variation gets its difference - and where it gets renamed, since the
+      // label is the first thing in it.
       const clip = clipHit.clip;
       arState.sel = new Set([clip]);
-      arSelectTrack(clip.label);
-      const roll = clip.roll ?? arTrackRoll(clip.label);
-      if (clipHit.part === 'title') arOpenRollPicker([clip], x, arYOf(arRowOfLabel(clip.label)) + AR_ROW - 6);
-      else if (roll) openRollById(roll, null);
-      else logLine(`${clip.label} plays no named roll - double-click the clip's title to give this one`, 'warn');
+      arSelectTrack(clip.label, { brush: clip.label });
+      arEditBlock(clip.label);
       drawArrange();
     }
     else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_LANES_TOP && y < arGridBottom() && arRowLabel(row) != null) {
-      // double-click empty in the arrow tool paints one cell, as the roll does
+      // double-click empty in the arrow tool paints one cell, as the roll does - with the brush,
+      // or with the row's own base if the brush is elsewhere (a double-click is a deliberate
+      // "here", so it is not refused the way a stray pencil stroke on a dimmed row is)
       const start = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
-      const clip = { label: arRowLabel(row), start, len: arCell(), roll: null };
+      const clip = { label: arBrushFor(row) ?? arRowLabel(row), start, len: arCell() };
+      arSelectTrack(clip.label, { brush: clip.label });
       arState.clips.push(clip);
       arState.sel = new Set([clip]);
       writeArrangeCall();
@@ -25382,18 +25948,28 @@ function initArrangeEditor() {
   arReflectTool();
   arToolBtn.addEventListener('click', arToggleTool);
 
-  // The lane list takes the arrows and Enter while it has the keyboard, exactly as the roll's does.
-  arRollSearch.addEventListener('input', () => arRollHead.renderList(true));
-  arRollSearch.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); arRollHead.move(1); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); arRollHead.move(-1); }
-    else if (e.key === 'Enter') { e.preventDefault(); arRollHead.choose(); }
-    else if (e.key === 'Escape') { e.preventDefault(); arRollHead.closePicker(); }
+  // The brush list takes the arrows and Enter while it has the keyboard, exactly as the roll's does.
+  arBrushBtn.addEventListener('click', () => {
+    if (arBrushPicker.classList.contains('hidden')) arBrushHead.openPicker();
+    else arBrushHead.closePicker();
+  });
+  arBrushName.addEventListener('mousedown', (e) => { e.preventDefault(); arBrushHead.openPicker(); }); // read-only: the box IS the ▾
+  arBrushSearch.addEventListener('input', () => arBrushHead.renderList(true));
+  arBrushSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); arBrushHead.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); arBrushHead.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); arBrushHead.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); arBrushHead.closePicker(); }
     e.stopPropagation();
   });
   document.addEventListener('mousedown', (e) => {
-    if (!arRollPicker.classList.contains('hidden') && !arRollPickWrap.contains(e.target)) arRollHead.closePicker(false);
+    if (!arBrushPicker.classList.contains('hidden') && !arBrushWrap.contains(e.target)) arBrushHead.closePicker(false);
   });
+
+  // The block window (see arEditBlock): every way out writes the block back.
+  blockEditBackdrop.addEventListener('click', (e) => { if (e.target === blockEditBackdrop) closeBlockEdit(); });
+  document.getElementById('blockEditClose').addEventListener('click', () => closeBlockEdit());
+  document.getElementById('blockEditGoto').addEventListener('click', () => closeBlockEdit({ goto: true }));
   arAutoSearch.addEventListener('input', () => arAutoHead.renderList(true));
   arAutoSearch.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); arAutoHead.move(1); }
@@ -25411,7 +25987,11 @@ function initArrangeEditor() {
     arAutoHead.closePicker(false);
   });
   arCloseBtn.addEventListener('click', closeArrangeEditor);
-  window.addEventListener('resize', () => { if (arState) { arSizeCanvas(); drawArrange(); } });
+  // Every width change lands here, not only the window's: the page takes the editor pane's
+  // column, so the sidebar folding (ctrl+P) or a seam being dragged changes its width with the
+  // window standing still - and a bitmap sized for the old width was being stretched to the new
+  // one by the canvas's CSS width, text and all. Same observer the piano roll keeps on its canvas.
+  new ResizeObserver(() => { if (arState) { arSizeCanvas(); drawArrange(); } }).observe(arCanvas);
   // The call the panel is editing can be deleted, or typed over, from the buffer side: the panel
   // then has nothing to write into, so it goes. Its own writes are the exception.
   cm.on('change', () => {

@@ -1,6 +1,6 @@
 // Output-to-bus sends (Sig#bus / #dry / #bsend) and how the Scheduler forwards them to the engine.
 // The audio summing itself lives in SuperCollider (sc/poptart.scd) and is covered by a manual
-// checklist; here we pin the pure builder behaviour and the engine calls the scheduler emits.
+// checklist; here we pin the pure builder behavior and the engine calls the scheduler emits.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

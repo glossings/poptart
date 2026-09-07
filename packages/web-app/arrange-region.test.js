@@ -37,7 +37,7 @@ function painter({ clips = [], sel = [], regionSpan = null, selRegion = null } =
   return { fns, arState };
 }
 
-const clip = (label, start, len, roll = null) => ({ label, start, len, roll });
+const clip = (label, start, len) => ({ label, start, len });
 const shape = (cs) => cs.map((c) => [c.label, c.start, c.len]);
 
 // ---------------------------------------------------------------------------------------------
@@ -101,11 +101,10 @@ test('a clip merely touching an edge is not in the span', () => {
   assert.deepEqual(fns.arClipsIn(8, 16), [], 'ending exactly at 8 and starting exactly at 16');
 });
 
-test('a copied section keeps each clip on its own track, roll binding and all', () => {
-  const { fns } = painter({ clips: [clip('kick', 8, 4), clip('hat', 8, 4, 'fill')] });
+test('a copied section keeps each clip on its own variation', () => {
+  const { fns } = painter({ clips: [clip('kick', 8, 4), clip('hat#fill', 8, 4)] });
   const copied = fns.arClipsIn(8, 12);
-  assert.deepEqual(copied.map((c) => c.label), ['kick', 'hat'], 'the label IS the row now');
-  assert.deepEqual(copied.map((c) => c.roll), [null, 'fill'], 'a bound clip pastes still bound');
+  assert.deepEqual(copied.map((c) => c.label), ['kick', 'hat#fill'], 'the label is the block, variation and all');
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -178,19 +177,21 @@ test('the ops that consume a span let go of the loop region that marked it', () 
 //
 // The two edits a painted arrangement is mostly made of, and the two whose arithmetic is easy to
 // get subtly wrong: a split has to leave the same music sounding (two clips back to back, same
-// roll), and a join has to swallow the gaps between what it joins without moving anything.
+// variation), and a join has to swallow the gaps between what it joins without moving anything.
 // ---------------------------------------------------------------------------------------------
 
 /** The split/join ops over a fake painter. Writes and redraws are counted, not performed. */
 function ops({ clips = [], sel = [], insert = null, regionSpan = null, track = null } = {}) {
-  const arState = { clips, sel: new Set(sel), insert, regionSpan, track: track ?? clips[0]?.label ?? null };
+  const baseOf = (l) => String(l).split('#')[0];
+  const arState = { clips, sel: new Set(sel), insert, regionSpan, track: track ?? baseOf(clips[0]?.label ?? '') ?? null };
   const logged = [];
   const env = {
     arState,
     logLine: (line) => logged.push(line),
     writeArrangeCall: () => {},
     drawArrange: () => {},
-    arTrackRoll: () => null,
+    // rows are bases; a variation's clips sit on its base's row
+    arRowOfLabel: (l) => baseOf(l),
   };
   const LIFT = ['arSplitPoints', 'arOpTargets', 'arSplitClips', 'arJoinClips'].map(grab).join('\n\n');
   const keys = Object.keys(env);
@@ -201,88 +202,97 @@ function ops({ clips = [], sel = [], insert = null, regionSpan = null, track = n
 
 const clips = (st) => [...st.clips]
   .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) || a.start - b.start)
-  .map((c) => [c.label, c.start, c.len, c.roll ?? null]);
+  .map((c) => [c.label, c.start, c.len]);
 
-test('a split at the marker makes two clips of one, same roll, same music', () => {
-  const a = { label: 'kick', start: 0, len: 8, roll: null };
+test('a split at the marker makes two clips of one, same block, same music', () => {
+  const a = { label: 'kick', start: 0, len: 8 };
   const { fns, arState } = ops({ clips: [a], sel: [a], insert: 3 });
   fns.arSplitClips();
-  assert.deepEqual(clips(arState), [['kick', 0, 3, null], ['kick', 3, 5, null]]);
-  assert.equal(arState.sel.size, 2, 'the pieces are what you are holding afterwards');
+  assert.deepEqual(clips(arState), [['kick', 0, 3], ['kick', 3, 5]]);
+  assert.equal(arState.sel.size, 0, 'and a cut at a marker hands back nothing to hold');
 });
 
-test('a bound clip splits into two clips of the same roll', () => {
-  const a = { label: 'kick', start: 4, len: 8, roll: 'fill' };
-  const { fns, arState } = ops({ clips: [a], sel: [a], insert: 8 });
+test('a variation splits into two clips of the same variation - making one unique is a separate choice', () => {
+  const a = { label: 'kick#fill', start: 4, len: 8 };
+  const { fns, arState } = ops({ clips: [a], sel: [a], insert: 8, track: 'kick' });
   fns.arSplitClips();
-  assert.deepEqual(clips(arState), [['kick', 4, 4, 'fill'], ['kick', 8, 4, 'fill']]);
+  assert.deepEqual(clips(arState), [['kick#fill', 4, 4], ['kick#fill', 8, 4]]);
+  assert.ok(!/arMakeUnique\(pieces/.test(grab('arSplitClips')), 'a split never forks a block on its own');
+});
+
+test('a marker split takes the clip on the selected ROW, whichever variation it is', () => {
+  const k = { label: 'kick#fill', start: 0, len: 8 };
+  const b = { label: 'bass', start: 0, len: 8 };
+  const { fns, arState } = ops({ clips: [k, b], insert: 4, track: 'kick' });
+  fns.arSplitClips();
+  assert.deepEqual(clips(arState), [['bass', 0, 8], ['kick#fill', 0, 4], ['kick#fill', 4, 4]]);
 });
 
 test('a marked span splits at BOTH its edges, on every track it crosses', () => {
-  const k = { label: 'kick', start: 0, len: 16, roll: null };
-  const b = { label: 'bass', start: 0, len: 16, roll: null };
+  const k = { label: 'kick', start: 0, len: 16 };
+  const b = { label: 'bass', start: 0, len: 16 };
   const { fns, arState } = ops({ clips: [k, b], regionSpan: [4, 8] });
   fns.arSplitClips();
   assert.deepEqual(clips(arState), [
-    ['bass', 0, 4, null], ['bass', 4, 4, null], ['bass', 8, 8, null],
-    ['kick', 0, 4, null], ['kick', 4, 4, null], ['kick', 8, 8, null],
+    ['bass', 0, 4], ['bass', 4, 4], ['bass', 8, 8],
+    ['kick', 0, 4], ['kick', 4, 4], ['kick', 8, 8],
   ]);
 });
 
 test('with only a marker down, the split is the track you are on - not every track at once', () => {
-  const k = { label: 'kick', start: 0, len: 8, roll: null };
-  const b = { label: 'bass', start: 0, len: 8, roll: null };
+  const k = { label: 'kick', start: 0, len: 8 };
+  const b = { label: 'bass', start: 0, len: 8 };
   const { fns, arState } = ops({ clips: [k, b], insert: 4, track: 'kick' });
   fns.arSplitClips();
-  assert.deepEqual(clips(arState), [['bass', 0, 8, null], ['kick', 0, 4, null], ['kick', 4, 4, null]]);
+  assert.deepEqual(clips(arState), [['bass', 0, 8], ['kick', 0, 4], ['kick', 4, 4]]);
 });
 
 test('a marker that no clip crosses cuts nothing, and says so rather than erroring', () => {
-  const a = { label: 'kick', start: 0, len: 4, roll: null };
+  const a = { label: 'kick', start: 0, len: 4 };
   const { fns, arState, logged } = ops({ clips: [a], sel: [a], insert: 4 }); // exactly its end
   fns.arSplitClips();
-  assert.deepEqual(clips(arState), [['kick', 0, 4, null]], 'an edge is not inside');
+  assert.deepEqual(clips(arState), [['kick', 0, 4]], 'an edge is not inside');
   assert.match(logged.join('\n'), /no clip crosses the marker/);
 });
 
 test('join makes one clip from the first onset to the last end, gaps swallowed', () => {
-  const a = { label: 'kick', start: 0, len: 4, roll: null };
-  const b = { label: 'kick', start: 12, len: 4, roll: null };
+  const a = { label: 'kick', start: 0, len: 4 };
+  const b = { label: 'kick', start: 12, len: 4 };
   const { fns, arState } = ops({ clips: [a, b], sel: [a, b] });
   fns.arJoinClips();
-  assert.deepEqual(clips(arState), [['kick', 0, 16, null]]);
+  assert.deepEqual(clips(arState), [['kick', 0, 16]]);
 });
 
 test('join is per track: two rows joined at once stay two clips', () => {
-  const k1 = { label: 'kick', start: 0, len: 4, roll: null };
-  const k2 = { label: 'kick', start: 8, len: 4, roll: null };
-  const b1 = { label: 'bass', start: 0, len: 2, roll: null };
-  const b2 = { label: 'bass', start: 6, len: 2, roll: null };
+  const k1 = { label: 'kick', start: 0, len: 4 };
+  const k2 = { label: 'kick', start: 8, len: 4 };
+  const b1 = { label: 'bass', start: 0, len: 2 };
+  const b2 = { label: 'bass', start: 6, len: 2 };
   const { fns, arState } = ops({ clips: [k1, k2, b1, b2], sel: [k1, k2, b1, b2] });
   fns.arJoinClips();
-  assert.deepEqual(clips(arState), [['bass', 0, 8, null], ['kick', 0, 12, null]]);
+  assert.deepEqual(clips(arState), [['bass', 0, 8], ['kick', 0, 12]]);
 });
 
-test('join keeps the FIRST roll and says which drawings it swallowed', () => {
-  const a = { label: 'kick', start: 0, len: 4, roll: 'main' };
-  const b = { label: 'kick', start: 4, len: 4, roll: 'fill' };
+test('join keeps the FIRST variation and says which it swallowed', () => {
+  const a = { label: 'kick', start: 0, len: 4 };
+  const b = { label: 'kick#fill', start: 4, len: 4 };
   const { fns, arState, logged } = ops({ clips: [a, b], sel: [a, b] });
   fns.arJoinClips();
-  assert.deepEqual(clips(arState), [['kick', 0, 8, 'main']]);
-  assert.match(logged.join('\n'), /fill is no longer heard here/);
+  assert.deepEqual(clips(arState), [['kick', 0, 8]], 'one row, one clip, the first one\'s block');
+  assert.match(logged.join('\n'), /kick#fill is no longer heard here/);
 });
 
 test('a span joins what it overlaps without being told which clips', () => {
-  const a = { label: 'kick', start: 0, len: 2, roll: null };
-  const b = { label: 'kick', start: 4, len: 2, roll: null };
-  const c = { label: 'kick', start: 20, len: 2, roll: null };
+  const a = { label: 'kick', start: 0, len: 2 };
+  const b = { label: 'kick', start: 4, len: 2 };
+  const c = { label: 'kick', start: 20, len: 2 };
   const { fns, arState } = ops({ clips: [a, b, c], regionSpan: [0, 8] });
   fns.arJoinClips();
-  assert.deepEqual(clips(arState), [['kick', 0, 6, null], ['kick', 20, 2, null]], 'the one outside is left alone');
+  assert.deepEqual(clips(arState), [['kick', 0, 6], ['kick', 20, 2]], 'the one outside is left alone');
 });
 
 test('one clip is already joined, and says so rather than doing nothing', () => {
-  const a = { label: 'kick', start: 0, len: 4, roll: null };
+  const a = { label: 'kick', start: 0, len: 4 };
   const { fns, logged } = ops({ clips: [a], sel: [a] });
   fns.arJoinClips();
   assert.match(logged.join('\n'), /already joined/);
@@ -299,12 +309,27 @@ test('the title picks the clip up, the body marks the time under it', () => {
   assert.match(SRC, /if \(mod && e\.key\.toLowerCase\(\) === 'j'\) \{ arJoinClips\(\); e\.preventDefault\(\); return; \}/);
 });
 
-test('a clip names its roll, and double-clicking that name offers the others', () => {
-  // Nothing forks from the arrangement any more: a variation is drawn in the piano roll, which is
-  // where you are going anyway, and the clip only says which drawing it plays.
-  assert.ok(!/arForkRoll/.test(SRC), 'the fork gesture is gone');
-  assert.match(SRC, /const arRollHead = makeNamePicker\(\{/, 'a searchable list, like every other named thing');
-  assert.match(SRC, /if \(clipHit\.part === 'title'\) arOpenRollPicker\(\[clip\], x,/);
+test('a clip is a block: double-clicking it opens that block to edit, and the title says which', () => {
+  // A clip names a block - the base, or one of its `#` variations - and nothing else. There is no
+  // roll to rebind any more; what a clip plays is code, and the code is a double-click away.
+  assert.ok(!/arRollHead|arBindRoll|arTrackRoll|\.roll\b/.test(SRC), 'the roll binding is gone from the painter');
+  assert.match(SRC, /arSelectTrack\(clip\.label, \{ brush: clip\.label \}\);\n\s+arEditBlock\(clip\.label\);/);
+  assert.match(SRC, /ctx\.fillText\(arClipTitle\(c\.label\)/);
+  assert.match(grab('arClipTitle'), /v == null \? label : `#\$\{v\}`/, 'a variation is titled by its #name, the code\'s spelling');
+});
+
+test('the pencil paints the brush, on the brush\'s row only', () => {
+  // Painting is aimed: the brush names one label (a base or a variation), the pencil puts that
+  // label down on its own row and nowhere else, and clicking a clip or a track name moves it.
+  assert.match(SRC, /const label = arBrushFor\(row\);\n\s+if \(!label\) \{ drawArrange\(\); return; \}/);
+  assert.match(grab('arBrushFor'), /r\.variants\.includes\(arState\.brush\) \? arState\.brush : null/);
+  assert.match(SRC, /arState\.track = arRowLabel\(arRowOfLabel\(label\)\) \?\? label;\n\s+arSetBrush\(brush\);/, 'selecting a track dips the brush');
+  assert.match(SRC, /if \(arTool === 'draw' && arState\.brush != null\) \{/, 'and the other rows dim while it is in hand');
+});
+
+test('leaving the arrangement with a clip selected lands on its block', () => {
+  assert.match(grab('closeArrangeEditor'), /const picked = arState \? \[\.\.\.arState\.sel\]\[0\]\?\.label \?\? null : null;/);
+  assert.match(grab('closeArrangeEditor'), /if \(picked\) arGotoBlock\(picked\);/);
 });
 
 test('the editing verbs take cmd, never ctrl - the ctrl chords are the app\'s own', () => {
@@ -336,17 +361,96 @@ test('a split inside a span leaves you holding the middle, not the whole clip', 
   // The marked region is the union of the span and the selected clips (arTimeRegion), so selecting
   // every piece would widen the band back over the clip that was just divided - which reads as the
   // selection jumping to the thing you cut rather than staying where you were working.
-  const a = { label: 'kick', start: 0, len: 12, roll: null };
+  const a = { label: 'kick', start: 0, len: 12 };
   const { fns, arState } = ops({ clips: [a], regionSpan: [4, 8] });
   fns.arSplitClips();
-  assert.deepEqual(clips(arState), [['kick', 0, 4, null], ['kick', 4, 4, null], ['kick', 8, 4, null]]);
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 4], ['kick', 8, 4]]);
   assert.deepEqual([...arState.sel].map((c) => [c.start, c.len]), [[4, 4]], 'the middle third alone');
   assert.deepEqual(arState.regionSpan, [4, 8], 'and the span it was marked with stands');
 });
 
-test('a split at a bare marker leaves both halves held', () => {
-  const a = { label: 'kick', start: 0, len: 8, roll: null };
+test('a split at a bare marker selects nothing - the marker is a place, not a choice of clips', () => {
+  // Clicking into the middle of a clip to put the marker there and cutting should leave the cursor
+  // exactly where it was put. Handing back the two halves reads as the selection jumping onto the
+  // clip you just divided - and, via arTimeRegion, silently widens what the next key acts on.
+  const a = { label: 'kick', start: 0, len: 8 };
   const { fns, arState } = ops({ clips: [a], sel: [a], insert: 4 });
   fns.arSplitClips();
-  assert.equal(arState.sel.size, 2, 'the whole of what was cut');
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 4]], 'it still cuts');
+  assert.equal(arState.sel.size, 0, 'and holds nothing afterwards');
+  assert.equal(arState.insert, 4, 'the marker stays where it was put');
+});
+
+test('the whole _arrange call folds to a named chip, like a definitions run', () => {
+  // `_arrange(⋯)` left the one part of the call that says nothing on screen. Nobody types any of
+  // it, so the chip stands in for the lot and names what it is instead.
+  const fold = grab('foldConfigBlobs');
+  assert.match(fold, /foldSpan\(m\.index, close \+ 1, '⋯ arrangement'/);
+  assert.ok(!/foldSpan\(open \+ 1, close, '⋯',/.test(fold), 'no argument-only fold left behind');
+  assert.match(fold, /const key = `arrange:\$\{arrangeN\+\+\}`;/, 'keyed like a run\'s, by which one it is');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Variations: a clip may name `base#name`, a block of its own on the base's row.
+// ---------------------------------------------------------------------------------------------
+
+/** arMakeUnique over a fake painter: which blocks get made, and which clips move onto them. */
+function uniquing(clipList) {
+  const arState = { clips: clipList, brush: null };
+  const made = [];
+  const env = {
+    arState,
+    arrangeMod: { baseOf: (l) => String(l).split('#')[0] },
+    arCreateVariation: (base, name, from) => { made.push([base, name, from]); return `${base}#${name}`; },
+    arNextVariantName: (base) => String(made.filter((m) => m[0] === base).length + 1),
+    arSetBrush: (l) => { arState.brush = l; },
+    writeArrangeCall: () => {},
+    drawArrange: () => {},
+  };
+  const keys = Object.keys(env);
+  // eslint-disable-next-line no-new-func
+  const fn = new Function(...keys, `${grab('arMakeUnique')}\nreturn arMakeUnique;`)(...keys.map((k) => env[k]));
+  return { fn, arState, made };
+}
+
+test('make unique gives the clips a variation of their own, copied from what they played', () => {
+  const a = { label: 'kick', start: 0, len: 4 };
+  const { fn, arState, made } = uniquing([a, { label: 'kick', start: 8, len: 4 }]);
+  fn([a]);
+  assert.deepEqual(made, [['kick', '1', 'kick']], 'a numbered variation, copied from the clip\'s own block');
+  assert.deepEqual(arState.clips.map((c) => c.label), ['kick#1', 'kick'], 'only the clip asked for moves');
+  assert.equal(arState.brush, 'kick#1', 'and the brush is dipped in the new one');
+});
+
+test('make unique on a variation copies the VARIATION, and numbers from the base', () => {
+  const a = { label: 'kick#fill', start: 0, len: 4 };
+  const { made } = (() => { const u = uniquing([a]); u.fn([a]); return u; })();
+  assert.deepEqual(made, [['kick', '1', 'kick#fill']]);
+});
+
+test('several clips of one block made unique together stay one part', () => {
+  const a = { label: 'kick', start: 0, len: 4 };
+  const b = { label: 'kick', start: 4, len: 4 };
+  const { fn, arState, made } = uniquing([a, b]);
+  fn([a, b]);
+  assert.equal(made.length, 1, 'one new block, not two');
+  assert.deepEqual(arState.clips.map((c) => c.label), ['kick#1', 'kick#1']);
+});
+
+test('a variation is titled by its #name and colored a step off its base', () => {
+  const src = grab('arHsl');
+  assert.match(src, /\(arHue\(base\) \+ step \* AR_VARIANT_HUE_STEP\) % 360/);
+  assert.match(src, /const chosen = arState\?\.colors\?\.\[label\];\n\s+if \(chosen\) return hexToHsl\(chosen\);/, 'a chosen color wins');
+  assert.match(SRC, /if \(state\.colors && Object\.keys\(state\.colors\)\.length\) opts\.colors = \{ \.\.\.state\.colors \};/,
+    'and only chosen colors are written into the call');
+});
+
+test('renaming a base in the block window carries its variations and their clips along', () => {
+  const src = grab('arRenameLabel');
+  assert.match(src, /const renamed = `\$\{to\}#\$\{b\.variant\}`;/);
+  const apply = grab('arApplyRename');
+  assert.match(apply, /for \(const c of arState\.clips\) if \(map\.has\(c\.label\)\) c\.label = map\.get\(c\.label\);/);
+  assert.match(apply, /arState\.tracks = arState\.tracks\.map\(\(t\) => map\.get\(t\) \?\? t\);/);
+  // ...and the mixer's rename, which rewrites the clips in the buffer itself, brings the painter along
+  assert.match(SRC, /const res = mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]{0,900}arApplyRename\(map\);/);
 });

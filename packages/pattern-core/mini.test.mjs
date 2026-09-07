@@ -1,5 +1,5 @@
 // The mini-notation expression/random/euclid extensions. These pin down the parser-level
-// behaviour that the scheduler and the editor highlighter both depend on: euclid's new "xe(a,b)"
+// behavior that the scheduler and the editor highlighter both depend on: euclid's new "xe(a,b)"
 // spelling, the "(...)" arithmetic expressions, and the r/i/p/round/floor/ceil functions - all of
 // which must be DETERMINISTIC per (cycle, source-offset) so the two views can never disagree and a
 // bar replays identically. Pure parser tests, no scheduler/engine boot (see the package's testing
@@ -39,7 +39,7 @@ test('euclid: works on a named sample too (bd.e -> bd)', () => {
   assert.ok(steps.every((s) => s.value === 'bd'));
 });
 
-test('euclid: rotation still honoured, "1.e(3,8,2)"', () => {
+test('euclid: rotation still honored, "1.e(3,8,2)"', () => {
   const a = getStepsForCycle(parseMini('1.e(3,8)'), 0).filter((s) => s.value != null).map((s) => s.start);
   const b = getStepsForCycle(parseMini('1.e(3,8,2)'), 0).filter((s) => s.value != null).map((s) => s.start);
   assert.notDeepEqual(a, b);

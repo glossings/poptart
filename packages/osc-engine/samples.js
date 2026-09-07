@@ -308,7 +308,7 @@ function readWav(filePath) {
 const HOP = 256; // ~5ms at 48k - the slice-position resolution
 const MIN_GAP_SEC = 0.05; // two transients closer than this are one hit
 
-// How far above its neighbourhood a flux peak has to poke to count as an onset, at the default
+// How far above its neighborhood a flux peak has to poke to count as an onset, at the default
 // sensitivity. `sensitivity` scales BOTH thresholds down as it rises, so one control walks the
 // detector from "only the obvious hits" to "every tick in the loop": 1 is what .slice() has always
 // used, and the slice editor's slider moves it (see the /api/sampleSlices endpoint).

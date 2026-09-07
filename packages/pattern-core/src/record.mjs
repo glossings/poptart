@@ -217,7 +217,7 @@ const CAPTURE_EDGE_TOL = 1 / 32; // cycles
  *
  * Velocity is kept as played; an event's `index` (a key struck on an index roll) goes to the note's
  * sample index. The new notes are pushed LAST, so the overlap rule (clipOverlaps) resolves in their
- * favour - the note you just played cuts the one it landed on, which is what recording over a
+ * favor - the note you just played cuts the one it landed on, which is what recording over a
  * part means.
  */
 export function recordingToRoll(events, roll, { window, quantize = 0, countIn = true } = {}) {

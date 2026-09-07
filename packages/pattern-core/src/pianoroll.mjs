@@ -7,7 +7,7 @@
 // Format: space-separated note events `[!]midi[:index[:slice]],start,len[,vel[,prob[,nudge]]]`, e.g.
 // "60,0,4 64,0,4,0.7 67,8,8" or "24:0,0,1 24:3,4,1".
 //   !     - optional MUTE marker: the note is deactivated (the `0` key). It stays in the roll -
-//           drawn greyed out, still movable, still holding its lane against the overlap rule - but
+//           drawn grayed out, still movable, still holding its lane against the overlap rule - but
 //           it never sounds and it isn't converted to mini-notation. Unmuting it is one keypress,
 //           which is the point of keeping it in the string rather than deleting it.
 //   midi  - MIDI note number, 0..127 (this package's c3 = 60 convention)
@@ -177,7 +177,7 @@ export function normalizePianoRollSteps(steps) {
 
 /**
  * Which axis the editor draws this roll on: 'index', 'slice', or 'note' (the default, and what
- * every roll written before the other two existed says). Anything unrecognised comes back as
+ * every roll written before the other two existed says). Anything unrecognized comes back as
  * 'note' - the caller warns about it, since a roll that opens on the keyboard is a better answer to
  * a typo than one that refuses to open at all.
  */
@@ -660,7 +660,7 @@ export function retimePianoRoll(roll, factor) {
  * Repeat the loop window once more after itself: the window doubles in length and everything in it
  * is copied one window-length to the right, so a one-bar arpeggio becomes the same arpeggio over
  * two bars. Returns the copies to add (fresh objects - the caller pushes them last, so the overlap
- * rule resolves in their favour) and the new `len`.
+ * rule resolves in their favor) and the new `len`.
  */
 export function duplicatePianoRollLoop({ notes = [], len, start = 0 }) {
   const from = Math.round(start);

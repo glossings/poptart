@@ -15,7 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
-import { inSpans, arrangementRollAt } from './arrange.mjs';
+import { inSpans } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
@@ -36,7 +36,7 @@ import { Frac } from './frac.mjs';
 // music is a far worse outcome than doing something slightly different from what was asked - the
 // audience hears the silence, and the player has to fix it under the lights. So a userland mistake
 // that HAS a sane reading (an option that no longer exists, a rate on something with no rate, a
-// value out of range) says so on the console and carries on with the rest of the call honoured.
+// value out of range) says so on the console and carries on with the rest of the call honored.
 // Throwing is for what can't be played at all: a chain built on a pattern that doesn't exist, a
 // callback that returned something that isn't a signal.
 //
@@ -426,7 +426,7 @@ export class Sig {
     // Result time P reads source time P*f, for the continuous sample and the step grid alike.
     // The tiny negative-direction nudge keeps an onset-time sample (how the scheduler reads
     // .vel()/sampler configs) inside its own source step: reversed, an onset maps exactly onto
-    // its source step's exclusive END boundary, which would otherwise read the neighbour.
+    // its source step's exclusive END boundary, which would otherwise read the neighbor.
     const srcTime = (x) => x * f - (f < 0 ? 1e-6 : 0);
     // srcTime is a pure map of position, so a per-onset reader (Sig#eventAt) rides through it like
     // everything else - warping a control must not flatten `.begin(irand(16).div(16).fast(2))` into
@@ -752,7 +752,7 @@ export class Sig {
    * Like clip, this is a key on the event bundle rather than anything structural (see timeShift):
    * the note keeps its place in the pattern - conditions, inner patterns and the roll all still see
    * it where it was written - and only the timestamp it is played at moves. Beyond half a step
-   * either way it is clamped, since past that the event has swapped places with its neighbour and
+   * either way it is clamped, since past that the event has swapped places with its neighbor and
    * what you meant was a different rhythm.
    */
   nudge(value) {
@@ -1242,7 +1242,7 @@ export class Sig {
     // reads a fresh coin per eighth because the eighths are there to read it on, and
     // s("bd").when("1 0 1 0", ...) is still ONE hit, deciding once, rather than four.
     //
-    // Spans run onset to onset (with a filler from 0 to the first), and neighbours that agree -
+    // Spans run onset to onset (with a filler from 0 to the first), and neighbors that agree -
     // same truthiness, same condition atom - merge rather than split, so a callback that lengthens
     // events (.slow(2)) isn't chopped back up at boundaries where nothing changed. The atom read at
     // each onset rides along on the span, so the "<0 1>" currently choosing lights up in the editor
@@ -1473,7 +1473,7 @@ export class Sig {
     }
     // Remap an absolute cycle position into the loop band [t0, t0+len). t0/len are sampled at the
     // outer position c so patterned args shift the band over time. Frac keeps whole-cycle bands
-    // landing exactly on integer cycles (no float drift into the neighbour).
+    // landing exactly on integer cycles (no float drift into the neighbor).
     //
     // Two ways an argument can fail to name a band, kept deliberately apart. A REST ("~") is an
     // absence - there is no band here, so nothing sounds - and returns null, the rest every reader
@@ -3218,7 +3218,7 @@ function remapGrid(N, srcStepsFor, timeSig, lenSig) {
 // crossMerge's own rule for a resting control and the grid half of remap()'s resting-band null - a
 // `~` in "<29 ~ 29 34>" silences that bar. An ill-defined value ("0" length) is not a rest: it is an
 // atom like any other, so the event survives here and remap plays it straight. A constant arg (no
-// stepsForCycle) is returned untouched, so plain .rib(0, 2) keeps its exact old behaviour.
+// stepsForCycle) is returned untouched, so plain .rib(0, 2) keeps its exact old behavior.
 function ribMergeArg(baseStepsForCycle, argSig) {
   return argSig.stepsForCycle ? crossMerge(baseStepsForCycle, argSig) : baseStepsForCycle;
 }
@@ -4073,7 +4073,7 @@ export function irand(n) {
   const seed = nextAutoSeed();
   const nSig = typeof n === 'string' || n instanceof Sig ? toSignal(n) : null;
   // A usable bound: a positive integer count of outcomes. Non-numeric (or resting) reads as a rest
-  // rather than a NaN draw; 0/negative clamps to 1, the historical behaviour for numbers.
+  // rather than a NaN draw; 0/negative clamps to 1, the historical behavior for numbers.
   const bound = (v) => {
     if (v == null) return null;
     const c = Math.round(Number(v));
@@ -4178,7 +4178,7 @@ export function note(value) {
  * fraction of the time, like a `?` degrade), and overlapping notes play as chords. Holds absolute
  * MIDI notes, so it chains with .synth()/.scale()/.add()/etc. just like note().
  *
- * A note written with a leading `!` - `"!60,0,4"` - is MUTED: the roll still shows it (greyed out,
+ * A note written with a leading `!` - `"!60,0,4"` - is MUTED: the roll still shows it (grayed out,
  * and pressing `0` over it switches it back on) but it doesn't sound.
  *
  * Every event carries a SAMPLE INDEX as well as a pitch - `"24:3,0,1"` is the pack's fourth file,
@@ -4210,100 +4210,7 @@ export function note(value) {
  * on the definitions, not on this call.
  */
 export function pianoroll(str = '', opts = {}) {
-  // Which TRACK this roll belongs to, so the arrangement can rebind it clip by clip (below). The
-  // host sets the label around each block's evaluation; a definition block (`_roll(...)`) is
-  // anonymous, so its rolls are never anyone's to rebind - which is what keeps a rebound roll from
-  // being rebound again on the way in.
-  const label = currentBlockLabel && !currentBlockLabel.startsWith('$') ? currentBlockLabel : null;
-  if (label) rollOwnersSeen.add(label);
-  return withArrangeRoll(buildPianoroll(str, opts), label, currentBlockOwner);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Per-clip roll binding: which roll a track plays is a property of the ARRANGEMENT, so a fill is
-// painted at the phrase ends rather than patterned into the track (see arrange.mjs).
-//
-// Two pieces of host state, both lazy on purpose. The label is set around each block's evaluation
-// and captured by the pianoroll() above; the bindings are filed AFTER every block is built (the
-// arrangement pass can't run before the blocks exist), and read per cycle - so a roll swap needs
-// no rebuild, and editing a clip re-files a map rather than re-evaluating the track.
-// ---------------------------------------------------------------------------------------------
-
-let currentBlockLabel = null;
-let currentBlockOwner = 'a';
-let rollOwnersSeen = new Set();
-// Per DECK, like the definition registry's owners: two songs are up at once in a mix, and one
-// deck's evaluation must not take the other's arrangement out from under the tracks playing it.
-const arrangeRolls = { a: null, b: null }; // deck -> { bindings: Map, posOf }
-
-/**
- * The label of the block being evaluated, and which deck's buffer it is from. `null` between
- * blocks, and at the top of an eval.
- *
- * Deliberately does NOT clear the filed bindings: an evaluation that throws half way leaves the
- * tracks that are still playing on their old signals, and those read the bindings live. The
- * arrangement pass files them (or files null) once every block is built, which is the only moment
- * the two can be made to agree.
- */
-export function setBlockLabel(label, owner = 'a') {
-  currentBlockLabel = label == null ? null : String(label);
-  currentBlockOwner = owner === 'b' ? 'b' : 'a';
-}
-
-/** The tracks whose blocks built a piano roll this evaluation - who a clip can rebind at all. */
-export function rollOwners() {
-  return new Set(rollOwnersSeen);
-}
-
-/** Forget the tracks seen so far. The host calls this at the top of an evaluation. */
-export function clearRollOwners() {
-  rollOwnersSeen = new Set();
-}
-
-/**
- * File one deck's per-clip roll rebindings (see arrangementRollBindings), with the song clock they
- * are read against. Null clears them - a buffer with no arrangement rebinds nothing.
- */
-export function setArrangeRolls(bindings, posOf = null, owner = 'a') {
-  arrangeRolls[owner === 'b' ? 'b' : 'a'] = bindings && bindings.size ? { bindings, posOf } : null;
-}
-
-/**
- * The roll `label`'s track plays at `cycle`, or null for its own. A clip's binding covers the whole
- * cycle it starts in as far as this is concerned - it is read once per cycle, at the cycle's own
- * position - because a roll is a LOOP: swapping one mid-bar would play the second half of a
- * different loop, which is not what painting a fill over bar 12 means.
- */
-function arrangeRollFor(owner, label, cycle) {
-  const filed = arrangeRolls[owner];
-  if (!filed || !label) return null;
-  const list = filed.bindings.get(label);
-  if (!list) return null;
-  return arrangementRollAt(list, filed.posOf ? filed.posOf(cycle) : cycle);
-}
-
-/**
- * The roll a track plays, with the arrangement allowed a word per cycle. Wrapped around every
- * pianoroll() a track builds, and a no-op for every one of them until a clip actually rebinds -
- * the lookup is one Map miss per cycle, and the wrapper hands back the roll's own steps.
- *
- * The substitute plays on ABSOLUTE cycle time, exactly like the track it stands in for: a 2-bar
- * fill painted at bar 13 is heard from its second bar, the same as if the track had been playing
- * it all along. That is the rule the gate already follows, and the one that makes a clip a WINDOW
- * onto a running pattern rather than a trigger.
- */
-function withArrangeRoll(sig, label, owner) {
-  if (!label || !sig?.stepsForCycle) return sig;
-  const base = sig.stepsForCycle;
-  const stepsForCycle = (cycle) => {
-    const id = arrangeRollFor(owner, label, cycle);
-    if (id == null) return base(cycle);
-    const bound = lookupRoll(String(id));
-    // A binding naming a roll that no longer exists plays the track's own rather than silence: the
-    // clip is still a clip, and a deleted definition should not take the part with it.
-    return bound?.stepsForCycle ? bound.stepsForCycle(cycle) : base(cycle);
-  };
-  return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...sig._meta() });
+  return buildPianoroll(str, opts);
 }
 
 function buildPianoroll(str, opts) {
@@ -5476,7 +5383,7 @@ export function audio(name) {
  *   bass: note("c2*8").synth("Serum 2").fx("Pro-C 2").audio(input(1))   // ducked by a live mic
  *
  * Channels are numbered from 1, matching the numbers on the interface. One channel is mono and
- * lands centred (duplicated to both sides); two make a stereo pair, in the order given - they need
+ * lands centered (duplicated to both sides); two make a stereo pair, in the order given - they need
  * not be adjacent. Omit them for channels 1 and 2.
  *
  * The optional leading device name picks which device's channels those are, matched
@@ -5501,7 +5408,7 @@ export function input(...args) {
     throw new Error(`[signal] input() takes at most two channels (a stereo pair) - got ${chans.length}`);
   }
   if (chans.some((c) => !Number.isFinite(c) || c < 1)) {
-    throw new Error('[signal] input() channels are numbers from 1, as labelled on the interface, e.g. input(1) or input(3, 4)');
+    throw new Error('[signal] input() channels are numbers from 1, as labeled on the interface, e.g. input(1) or input(3, 4)');
   }
   // Resolution to absolute channels is deliberately NOT done here: the device layout is a runtime
   // fact that changes when the aggregate is rebuilt, so the scheduler resolves it per eval.

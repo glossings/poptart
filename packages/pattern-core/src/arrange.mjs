@@ -2,31 +2,32 @@
 // and the span math both the editor (which draws it) and the host (which gates tracks by it)
 // read. Like pianoroll.mjs this is served verbatim to the browser and imports nothing.
 //
-// An arrangement is a set of CLIPS, playlist-style: each clip says "this labelled block sounds
+// An arrangement is a set of CLIPS, playlist-style: each clip says "this labeled block sounds
 // here". Format: space-separated `label,start,len`, e.g. "drums,0,8 bass,4,4 drums,12,4".
-//   label - the block's label (`drums:` in the buffer), optionally `label:roll` to say WHICH roll
-//           the block plays over this clip (see below). No commas or whitespace, which a label
-//           can't hold anyway.
+//   label - the block's label (`drums:` in the buffer, or a variation's `drums#fill:` - see
+//           below). No commas or whitespace, which a label can't hold anyway.
 //   start - onset, in CYCLES (decimals allowed: 4.5 is halfway through bar 4)
 //   len   - length in cycles, > 0
 //
-// ONE ROW PER TRACK. A clip names its track and nothing else: the painter draws the buffer's
-// labelled blocks as rows, in the order they appear in it, and a clip is drawn on its own track's
-// row. (Older arrangements carried a `lane` column - `drums,0,0,8` - back when rows were free-form
-// and a label could sit on any number of them. Those still parse; the lane is simply dropped.)
+// ONE ROW PER TRACK, and a track's VARIATIONS share its row. A block labeled `drums#fill:` is a
+// second drums - its own block, its own engine track, a chain that can differ in any way at all -
+// and what makes it a variation rather than a track of its own is only that its clips are drawn
+// on the `drums` row (see labels.mjs). So a row is a track as a person thinks of it, and the clips
+// along it say which of its variations plays where: the bare `drums` for most of the song, the
+// fill for a bar at the end of each phrase. Clips on one row never overlap - at any bar a row
+// plays exactly one thing. (Older arrangements carried a `lane` column - `drums,0,0,8` - back when
+// rows were free-form and a label could sit on any number of them. Those still parse; the lane is
+// simply dropped. Older still, a clip could name a roll - `drums:fill` - which parses as `drums`.)
 //
 // What a clip MEANS at playback time: a block plays ONLY inside its clips - the bare
-// `label: pattern` stops being a loop and becomes a part - and a track with no clips at all is
+// `label: pattern` stops being a loop and becomes a part - and a block with no clips at all is
 // silent. That is only safe because every track is FILLED when it joins the arrangement (the
 // painter paints it edge to edge, see arReconcileTracks in the web app), so a row is empty only
-// because it was emptied. The arrangement loops over its length (`len` option, or the end of the
-// last clip rounded up to a whole cycle), and the pattern inside a clip runs on absolute cycle
-// time, so a `<a b>` alternation keeps its place whether or not its block was sounding the bar
-// before.
-//
-// A clip may also REBIND the roll its track plays: `drums:fill,12,4` plays the roll called `fill`
-// over bars 12-16 and the track's own roll everywhere else, so a variation is painted rather than
-// patterned (see the roll-binding helpers below, and pianoroll() in signal.mjs, which reads them).
+// because it was emptied. A variation is the exception: it joins with nothing painted, since a
+// filled variation would sit on top of its base, and a variation IS the thing you paint in by
+// hand. The arrangement loops over its length (`len` option, or the end of the last clip rounded
+// up to a whole cycle), and the pattern inside a clip runs on absolute cycle time, so a `<a b>`
+// alternation keeps its place whether or not its block was sounding the bar before.
 //
 // The options are editor metadata plus the loop length:
 //   len    - loop length in cycles (default: the last clip's end, rounded up)
@@ -35,6 +36,9 @@
 //            follow the buffer): it is what tells a track that has never been arranged - fill it -
 //            from one whose clips you deleted on purpose - leave it silent. See
 //            reconcileArrangement.
+//   colors - { label: "#rrggbb" } for the clips a person has colored by hand. A variation with no
+//            entry takes a hue step off its base's color (see the painter), so one is only written
+//            once someone has chosen.
 //   autos  - the automation lanes PINNED into the painter's strip, by name, top to bottom
 //   loops - loop regions, [[name, start, end], …] in cycles: while a region is ARMED, playback
 //           entering it loops it until the player releases it (ctrl+L), then runs on to the next
@@ -53,21 +57,28 @@ const num = (s) => {
   return Number.isFinite(v) ? v : null;
 };
 
-/** "drums" / "drums:fill" -> { label, roll }. The roll is null unless the clip rebinds one. */
-function splitLabel(text) {
-  const at = String(text).indexOf(':');
-  if (at < 0) return { label: text, roll: null };
-  const label = text.slice(0, at);
-  const roll = text.slice(at + 1);
-  return { label, roll: roll || null };
+/** The row a label belongs on: `drums#fill` -> `drums`, `drums` -> `drums`. Mirrors labels.mjs. */
+export function baseOf(label) {
+  const s = String(label ?? '');
+  const at = s.indexOf('#');
+  return at < 0 ? s : s.slice(0, at);
+}
+
+/** The variation name, `drums#fill` -> `fill`; null on a base. */
+export function variantOf(label) {
+  const s = String(label ?? '');
+  const at = s.indexOf('#');
+  return at < 0 ? null : s.slice(at + 1);
 }
 
 /**
- * "drums,0,8 bass:fill,4,4" -> [{ label, start, len, roll }]. Malformed tokens are skipped rather
- * than thrown on: a half-typed clip should cost a missing clip, not the whole arrangement.
+ * "drums,0,8 drums#fill,12,4" -> [{ label, start, len }]. Malformed tokens are skipped rather than
+ * thrown on: a half-typed clip should cost a missing clip, not the whole arrangement.
  *
  * A four-field token is an older arrangement's `label,lane,start,len` - the lane is read off and
- * dropped, since a clip's row is now its track's (see the header).
+ * dropped, since a clip's row is now its track's (see the header). A `label:roll` is older still,
+ * from when a clip could name a roll: the roll is dropped and the clip kept, so the song still has
+ * its shape and the part is a variation away from what it was.
  */
 export function parseArrangement(str) {
   const out = [];
@@ -76,11 +87,11 @@ export function parseArrangement(str) {
     const parts = tok.split(',');
     if (parts.length === 4) parts.splice(1, 1); // legacy lane column
     if (parts.length !== 3) continue;
-    const { label, roll } = splitLabel(parts[0]);
+    const label = parts[0].split(':')[0]; // legacy roll binding
     const start = num(parts[1]);
     const len = num(parts[2]);
     if (!label || start == null || len == null || len <= 0) continue;
-    out.push({ label, start, len, roll });
+    out.push({ label, start, len });
   }
   return out;
 }
@@ -95,7 +106,7 @@ export function serializeArrangement(clips) {
   return [...clips]
     .filter((c) => c && c.label && c.len > 0)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) || a.start - b.start)
-    .map((c) => `${c.label}${c.roll ? `:${c.roll}` : ''},${fmt(c.start)},${fmt(c.len)}`)
+    .map((c) => `${c.label},${fmt(c.start)},${fmt(c.len)}`)
     .join(' ');
 }
 
@@ -134,6 +145,15 @@ export function normalizeArrangeOpts(opts = {}) {
       if (label && !tracks.includes(label)) tracks.push(label);
     }
   }
+  // Hand-chosen clip colors, by label. Only what reads as a color is kept: a stray value here
+  // would otherwise be painted as CSS's idea of it, which is black.
+  const colors = {};
+  if (o.colors && typeof o.colors === 'object') {
+    for (const [label, c] of Object.entries(o.colors)) {
+      const hex = String(c ?? '').trim();
+      if (label.trim() && /^#[0-9a-fA-F]{6}$/.test(hex)) colors[label.trim()] = hex.toLowerCase();
+    }
+  }
   const loops = [];
   if (Array.isArray(o.loops)) {
     for (const item of o.loops) {
@@ -145,7 +165,7 @@ export function normalizeArrangeOpts(opts = {}) {
     }
     loops.sort((x, y) => x.start - y.start || x.end - y.end);
   }
-  return { snap, len, tracks, autos, loops };
+  return { snap, len, tracks, colors, autos, loops };
 }
 
 /**
@@ -155,8 +175,12 @@ export function normalizeArrangeOpts(opts = {}) {
  * whole reason `tracks` is written down. Without it, "this track is silent" and "this track is new"
  * look identical, and a row you emptied would fill itself again on the next evaluation.
  *
- * `labels` are the buffer's tracks, in document order. A label that has left the buffer is dropped
- * from the membership unless clips still name it - an orphan keeps its row until its clips go.
+ * `labels` are the buffer's tracks, in document order - variations included, since a variation is a
+ * block the membership has to know about too. A label that has left the buffer is dropped from
+ * the membership unless clips still name it - an orphan keeps its row until its clips go.
+ *
+ * A VARIATION joins with nothing painted (see the header): filling it would lay it over its base,
+ * and a variation is exactly the thing you paint in where you want it.
  *
  * Pure: hands back what to write, and writes nothing. The editor applies it (see arReconcileTracks
  * in the web app), which is also what makes it testable without a browser.
@@ -170,7 +194,9 @@ export function reconcileArrangement(clips, opts = {}, labels = []) {
   // whatever the membership says - which is what makes an old `arrange(…)`, written before any of
   // this was recorded, come through as the song it already was.
   const len = arrangementLength(clips, opts);
-  const added = joining.filter((l) => !named.has(l)).map((label) => ({ label, start: 0, len, roll: null }));
+  const added = joining
+    .filter((l) => !named.has(l) && variantOf(l) == null)
+    .map((label) => ({ label, start: 0, len }));
   const tracks = [...kept, ...joining];
   const changed = added.length > 0 || tracks.length !== o.tracks.length || tracks.some((t, i) => t !== o.tracks[i]);
   return { clips: added.length ? [...clips, ...added] : clips, tracks, added, changed };
@@ -229,36 +255,6 @@ export function arrangementLabels(clips) {
   const out = [];
   for (const c of clips) if (c.label && !out.includes(c.label)) out.push(c.label);
   return out;
-}
-
-/**
- * The per-clip roll REBINDINGS: label -> sorted [{ start, end, roll }] for the clips that name a
- * roll of their own. A track with none of these is absent from the map entirely, which is what
- * lets the pianoroll builder skip the lookup for the tracks that never rebind.
- *
- * Overlapping clips are left as they are rather than merged the way spans are: two clips saying
- * different rolls over one bar disagree, and the first of them (earliest onset) answers - see
- * arrangementRollAt. Merging could only pick one anyway, and doing it here would hide which.
- */
-export function arrangementRollBindings(clips) {
-  const byLabel = new Map();
-  for (const c of clips) {
-    if (!c.roll || !(c.len > 0)) continue;
-    const list = byLabel.get(c.label) ?? [];
-    list.push({ start: c.start, end: c.start + c.len, roll: c.roll });
-    byLabel.set(c.label, list);
-  }
-  for (const list of byLabel.values()) list.sort((a, b) => a.start - b.start || a.end - b.end);
-  return byLabel;
-}
-
-/** Which roll `bindings` puts at song position `pos` (already reduced), or null for the track's own. */
-export function arrangementRollAt(bindings, pos) {
-  for (const b of bindings) {
-    if (b.start > pos + EPS) break; // sorted, so nothing later can hold it
-    if (pos >= b.start - EPS && pos < b.end - EPS) return b.roll;
-  }
-  return null;
 }
 
 /**
@@ -378,5 +374,22 @@ export class ArrangeClock {
     const next = { cycle, pos, released: new Set([...released, looping]) };
     this.anchors.splice(i + 1, this.anchors.length, next);
     return looping;
+  }
+
+  /**
+   * From `cycle` on, the song is at `pos` - what starting playback from the painter's marker
+   * means. One more anchor, with every region armed again (a seek is a fresh run at the song
+   * from there, not a continuation of a loop you had let go of); whatever had been walked beyond
+   * it is dropped and walked again. Returns the position it landed on, folded into the song.
+   */
+  seek(cycle, pos) {
+    const at = ((Number(pos) % this.len) + this.len) % this.len;
+    const i = this._anchorIndexAt(cycle);
+    const next = { cycle, pos: at, released: new Set() };
+    // A seek at the very cycle an anchor already sits on replaces it rather than stacking a
+    // second anchor at the same cycle, which _anchorIndexAt would never look past.
+    const from = this.anchors[i] && Math.abs(this.anchors[i].cycle - cycle) < EPS ? i : i + 1;
+    this.anchors.splice(from, this.anchors.length, next);
+    return at;
   }
 }

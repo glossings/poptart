@@ -42,7 +42,7 @@ test('a label whose expression starts on the next line still owns it', () => {
   assert.deepEqual(blocks.map((b) => b.label), ['pluck', 'lead']);
   assert.match(blocks[0].code, /pianoroll\("b"\)/);
   assert.match(blocks[0].code, /\.gain\(1\)/);
-  assert.equal(blocks[0].start, 0, 'the label line belongs to the block, so it greys out with it');
+  assert.equal(blocks[0].start, 0, 'the label line belongs to the block, so it grays out with it');
 });
 
 test('mute and solo markers work on a label that stands on its own line', () => {
@@ -263,4 +263,44 @@ test('a $: block whose expression is on the next line is still anon', () => {
   const blocks = splitLabeledBlocks('$:\n  s("bd*4")');
   assert.equal(blocks.length, 1);
   assert.equal(blocks[0].kind, 'anon');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Variations: `base#name:` is a block of its own that shares the base's row in the arrangement.
+// ---------------------------------------------------------------------------------------------
+
+test('a #variation is its own block, and knows which row it belongs to', () => {
+  const src = [
+    'kick: s("mbd*4")',
+    'kick#1: s("mbd*4").i(3)',
+    'kick#outro: s("mbd*4").fx("FilterFreak 1")',
+    'hats: s("hh*8")',
+  ].join('\n');
+  assert.deepEqual(splitLabeledBlocks(src).map((b) => [b.label, b.base, b.variant]), [
+    ['kick', 'kick', null],
+    ['kick#1', 'kick', '1'],
+    ['kick#outro', 'kick', 'outro'],
+    ['hats', 'hats', null],
+  ]);
+});
+
+test('muting or soloing the base takes every variation with it', () => {
+  const muted = splitLabeledBlocks(['kick#outro: s("bd")', '_kick: s("bd")'].join('\n'));
+  assert.deepEqual(muted.map((b) => [b.label, b.muted, b.ownMuted]), [
+    ['kick#outro', true, false], // written above the base, and still muted by it
+    ['kick', true, true],
+  ]);
+  const soloed = splitLabeledBlocks(['Skick: s("bd")', 'kick#outro: s("bd")', 'hats: s("hh")'].join('\n'));
+  assert.deepEqual(soloed.map((b) => [b.label, b.soloed]), [['kick', true], ['kick#outro', true], ['hats', false]]);
+});
+
+test('a marker on a variation reaches only that variation', () => {
+  const blocks = splitLabeledBlocks(['kick: s("bd")', '_kick#outro: s("bd")', 'kick#1_: s("bd")'].join('\n'));
+  assert.deepEqual(blocks.map((b) => [b.label, b.muted]), [['kick', false], ['kick#outro', true], ['kick#1', true]]);
+});
+
+test('a bare statement and a $: track have no variant, and are their own base', () => {
+  const [bare, anon] = splitLabeledBlocks(['setbpm(140)', '$: s("hh")'].join('\n'));
+  assert.deepEqual([bare.base, bare.variant], ['$1', null]);
+  assert.deepEqual([anon.base, anon.variant], ['$2', null]);
 });

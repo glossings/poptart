@@ -382,7 +382,7 @@ function songBaseRate(deck) {
 // songSync.syncOctave), and the bpm its GRID counts in at that ratio: a 70 bpm song running
 // half-time under a 140 clock is aligned as a 140 - its eighths are the clock's beats, its
 // half-bars the clock's cycles. The deck whose song set the clock is the clock: its ratio is
-// 1 whatever the button says (the button is greyed for it), or a press there would re-pitch
+// 1 whatever the button says (the button is grayed for it), or a press there would re-pitch
 // the master against itself.
 let songMasterDeck = null; // the deck whose song last took the grid (see /api/song/play)
 function songOctave(deck) {
@@ -1150,7 +1150,7 @@ function deviceToOpen(devices) {
 // The output-channel picture for the settings tab and for loadEngine: how many channels the device
 // that would be opened can actually be heard on, which of those .o(n) is allowed to use, and the
 // counts the tab may offer. One function so the tab can never show a choice the engine would not
-// honour.
+// honor.
 function outputChannelState(devices = audioOutputDevices()) {
   const args = {
     devices,
@@ -3355,7 +3355,6 @@ const routes = {
     // build below gets to the end (see the catch): an evaluation that throws applies nothing, so
     // the tracks still playing must still find the definitions they resolve by name each cycle.
     patternCore.setDefOwner(deck);
-    patternCore.clearRollOwners(); // which tracks draw a roll is answered by THIS evaluation
     const definitionsBefore = patternCore.clearRolls('buffer', deck);
     // Enter the eval with NO key in force: the buffer's own setscale (hoisted below, so it
     // runs before any pattern is built) is the only thing that sets one. Starting from the
@@ -3404,9 +3403,6 @@ const routes = {
 
       evaluated = blocks.map((b) => {
         try {
-          // Which track is being built, for the pieces of a pattern that belong to the track rather
-          // than to the call - the arrangement's per-clip roll rebinding (see signal.mjs).
-          patternCore.setBlockLabel(b.label, deck);
           const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
           // Only an explicitly *named* block promises sound. Anything anonymous (bare code
           // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
@@ -3428,8 +3424,6 @@ const routes = {
           return { ...b, sig: value };
         } catch (err) {
           throw new Error(`${b.label}: ${err.message ?? err}`);
-        } finally {
-          patternCore.setBlockLabel(null, deck);
         }
       });
 
@@ -3505,6 +3499,14 @@ const routes = {
       for (const label of spans.keys()) {
         if (!labels.has(label)) eventLogQueue.push(`[arrange] no block called ${JSON.stringify(label)} - its clips play nothing`);
       }
+      // A variation whose base has gone - `kick` renamed by hand and `kick#fill` left behind - is
+      // still a block and still plays inside its clips; it just has no row to share, so the painter
+      // gives it one of its own. Worth a line, since the tangle it hints at is one keystroke old.
+      for (const b of built) {
+        if (b.variant != null && !labels.has(b.base)) {
+          eventLogQueue.push(`[arrange] ${JSON.stringify(b.label)} is a variation of ${JSON.stringify(b.base)}, which no block is called - it gets a row of its own until there is one`);
+        }
+      }
       const regions = arrangements.flatMap((a) => a.opts.loops);
       const clockKey = JSON.stringify([loopLen, regions]);
       if (arrangeClocks[deck]?.key !== clockKey) {
@@ -3512,6 +3514,13 @@ const routes = {
         arrangeClocks[deck].key = clockKey;
       }
       const clock = arrangeClocks[deck];
+      // `arrangeFrom`: play from this bar of the song (the painter's marker) rather than wherever
+      // the clock sits - anchored at the cycle the transport is about to start from, which after a
+      // stop is 0. Done here, on the clock this eval plays by, so it can't race the eval.
+      if (body.arrangeFrom != null && Number.isFinite(Number(body.arrangeFrom)) && transport) {
+        const at = clock.seek(transport.cycleAt(engine ? engine.getTime() : transport.getTime()), Number(body.arrangeFrom));
+        eventLogQueue.push(`[arrange] playing from bar ${Math.round(at * 100) / 100}`);
+      }
       const posAt = (c) => clock.posAt(c);
       for (const b of built) {
         const painted = spans.get(b.label);
@@ -3522,22 +3531,8 @@ const routes = {
         if (!painted && b.kind === 'bare') continue;
         b.sig = b.sig._arrangeGate(painted ?? [], posAt);
       }
-      // ...and the clips that name a roll of their own rebind their track's, cycle by cycle (see
-      // withArrangeRoll in signal.mjs). Filed rather than built in, so painting a fill re-files a
-      // map instead of rebuilding the track - and read lazily, so a roll drawn after the clip that
-      // names it is found anyway. A binding on a track with no roll to swap can only be a mistake
-      // worth naming: it plays exactly as if the clip had never been bound.
-      const bindings = patternCore.arrangementRollBindings(clips);
-      const owners = patternCore.rollOwners();
-      for (const label of bindings.keys()) {
-        if (labels.has(label) && !owners.has(label)) {
-          eventLogQueue.push(`[arrange] ${JSON.stringify(label)} has clips bound to a roll, but its block plays no pianoroll() - the bindings do nothing`);
-        }
-      }
-      patternCore.setArrangeRolls(bindings, posAt, deck);
     } else {
       arrangeClocks[deck] = null;
-      patternCore.setArrangeRolls(null, null, deck);
     }
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
@@ -3651,7 +3646,7 @@ const routes = {
       body: {
         cps: transport.cps,
         transport: transport.snapshot(),
-        scale: deckScale, // what setscale() left in force for this deck - the piano roll colours by it
+        scale: deckScale, // what setscale() left in force for this deck - the piano roll colors by it
         arrange: arrangeClocks[deck]?.snapshot() ?? null, // the song clock the painter's playhead runs
         deck,
         deckBpm: deckNativeBpm(deck),

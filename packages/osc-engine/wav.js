@@ -203,7 +203,7 @@ function trimRecording(srcPath, destPath, { startSec, lengthSec, wrapTail = fals
   };
 }
 
-// Crossover frequencies for the three-band colour split. Not a mixing decision - just enough
+// Crossover frequencies for the three-band color split. Not a mixing decision - just enough
 // separation for a kick, a snare body, and a hi-hat to land in visibly different bands.
 const BAND_LOW_HZ = 200;
 const BAND_HIGH_HZ = 2000;
@@ -215,7 +215,7 @@ const DEFAULT_BUCKETS = 1520;
 
 /**
  * Everything the editor draws a waveform from, in ONE pass over the samples: per-bucket peak, per
- * bucket RMS, and the low/mid/high energy balance that colours it.
+ * bucket RMS, and the low/mid/high energy balance that colors it.
  *
  * Peak AND rms, because peak alone is what makes a waveform look like a blob: over a bucket of a
  * few milliseconds a busy track hits near full scale almost every time, so the outline saturates
@@ -224,7 +224,7 @@ const DEFAULT_BUCKETS = 1520;
  *
  * The band split is two nested one-pole lowpasses: below the first is "low", between them "mid",
  * what's left is "high", each normalized so the three sum to 1. Deliberately crude (6dB/octave, on
- * a mono mixdown) because it drives a colour, not a crossover.
+ * a mono mixdown) because it drives a color, not a crossover.
  *
  * @returns {{ peaks: number[], rms: number[], bands: Array<[number, number, number]> }}
  */
@@ -283,7 +283,7 @@ const SONG_OVERVIEW_BUCKETS = 1200;
 /**
  * Fold an envelope down to fewer buckets: peak keeps the max, rms averages energy, and the
  * band balance is the energy-weighted mean of the folded buckets' shares (a loud bucket's
- * colour should win over a near-silent neighbour's).
+ * color should win over a near-silent neighbor's).
  */
 function reduceEnvelope(env, buckets) {
   const n = env.peaks.length;
@@ -357,7 +357,7 @@ function bands(audio, buckets = DEFAULT_BUCKETS) {
 
 function normalizeBands(acc) {
   const total = acc[0] + acc[1] + acc[2];
-  // Silence has no balance to report - call it all mid so it draws in a neutral colour rather
+  // Silence has no balance to report - call it all mid so it draws in a neutral color rather
   // than whatever a divide-by-zero would produce.
   if (total <= 1e-12) return [0, 1, 0];
   return acc.map((v) => Math.round((v / total) * 100) / 100);

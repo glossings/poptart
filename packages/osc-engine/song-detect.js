@@ -120,7 +120,7 @@ function detectBpm(samples, sampleRate, precomputedFlux = null) {
 
   // Score every candidate beat lag: its own periodicity, plus the two-beat lag (bars support
   // the beat over its double) and the half-beat (subdivisions support it over its half), under
-  // a gentle log-normal prior centred on song tempos - what breaks the tie between a tempo and
+  // a gentle log-normal prior centered on song tempos - what breaks the tie between a tempo and
   // its octaves when the envelope alone can't.
   let best = -Infinity;
   let bestLag = 0;
@@ -250,7 +250,7 @@ function fitBeatGrid(samples, sampleRate, bpmHint = null) {
         }
       }
       if (peak < 0) continue;
-      // Sub-hop refinement of the peak position (parabola through its neighbours).
+      // Sub-hop refinement of the peak position (parabola through its neighbors).
       const denom = flux[peak - 1] - 2 * flux[peak] + flux[peak + 1];
       const t = peak + (denom ? Math.max(-0.5, Math.min(0.5, (0.5 * (flux[peak - 1] - flux[peak + 1])) / denom)) : 0);
       n++;
@@ -414,7 +414,7 @@ function fitBeatGrid(samples, sampleRate, bpmHint = null) {
   const n16 = excess(nov16);
   const k4 = excess(kick4);
   const snarePair = [onset4[0] + onset4[2], onset4[1] + onset4[3]];
-  const backbeat = (snarePair[1] - snarePair[0]) / (snarePair[0] + snarePair[1] + 1e-9); // + favours {0,2}
+  const backbeat = (snarePair[1] - snarePair[0]) / (snarePair[0] + snarePair[1] + 1e-9); // + favors {0,2}
   if (process.env.POPTART_GRID_DEBUG) {
     const f = (a) => a.map((v) => +v.toFixed(2));
     console.error(JSON.stringify({ events, n4: f(n4), n16: f(n16), k4: f(k4), backbeat: +backbeat.toFixed(2), phase: +phase.toFixed(1), period: +period.toFixed(2) })); // eslint-disable-line no-console

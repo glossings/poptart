@@ -80,7 +80,7 @@ function harness({ program = 'PROGRAM-A', applied, mode = 'immediate' } = {}) {
     AUTOPIN_DEBOUNCE_MS: 400,
     transport: { paused: true },
     flushPluginCaptures: () => {},
-    // Timers are the debounce, not the behaviour under test: the pass is driven by hand here.
+    // Timers are the debounce, not the behavior under test: the pass is driven by hand here.
     setTimeout: () => null,
     clearTimeout: () => {},
     console: { log: (line) => logs.push(line) },
