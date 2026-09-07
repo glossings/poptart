@@ -363,5 +363,5 @@ test('an op with no target yet warns rather than erroring', () => {
 test('marking a span in one place lets go of the other, and escape lets go of both', () => {
   assert.match(SRC, /arState\.autoSel = null; \/\/ a span marked up here is instead of one in the automation strip/);
   assert.match(SRC, /arState\.autoSel = null; \/\/ \.\.\.including one marked in the automation strip below/);
-  assert.match(SRC, /if \(arState\.regionSpan \|\| arState\.sel\.size \|\| arState\.selRegion \|\| arState\.autoSel\) \{/);
+  assert.match(SRC, /if \(arState\.regionSpan \|\| arState\.sel\.size \|\| arState\.selRegion \|\| arState\.autoSel \|\| arState\.insert != null\) \{/);
 });

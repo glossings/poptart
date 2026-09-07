@@ -2760,6 +2760,12 @@ li.CodeMirror-hint-active {
   bottom: calc(100% + 4px);
 }
 
+/* A clip's own list hangs the usual way round - the rows it opens from are the top of the panel. */
+.arrange-pick-anchor.below .def-picker {
+  top: calc(100% + 4px);
+  bottom: auto;
+}
+
 #arrangeCanvas {
   display: block;
   width: 100%;

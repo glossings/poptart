@@ -122,11 +122,21 @@ function scan(state, text, mask = null, base = 0) {
 }
 
 /**
- * @returns {Array<{ label: string, muted: boolean, soloed: boolean, code: string,
- *   start: number, end: number }>}
+ * @returns {Array<{ label: string, kind: 'labeled'|'anon'|'bare', muted: boolean, soloed: boolean,
+ *   code: string, start: number, end: number }>}
  *   `start`/`end` are character offsets of the block in the original source (the label line
  *   included), for editor tooling. `code` is the block's executable source with the label
  *   stripped (replaced by spaces, so inner character offsets still line up with the original).
+ *
+ * `kind` says how the block was WRITTEN, which the label alone can't: every block that isn't
+ * named gets a `$n` label, but a `$: …` you typed and a bare column-0 statement mean different
+ * things by it.
+ *   labeled  `kick: …` - a named track.
+ *   anon     `$: …` - a track you didn't feel like naming. It promises sound, so the arrangement
+ *            gives it a row and the host says so when it turns out not to make any.
+ *   bare     a statement at column 0 with no label at all - `setbpm(140)`, `const kb = …`, a
+ *            `Signal.prototype` extension. Setup, almost always; it is allowed to evaluate to a
+ *            pattern (and then it plays), but nothing treats it as a part of the song.
  */
 export function splitLabeledBlocks(source) {
   const lines = source.split('\n');
@@ -153,6 +163,7 @@ export function splitLabeledBlocks(source) {
       const meta = parseLabel(m[1], () => `$${++anonCount}`);
       current = {
         ...meta,
+        kind: meta.anon ? 'anon' : 'labeled',
         // Blank out the label instead of slicing it off, so positions inside `code` equal
         // positions inside `source` minus `start` - the highlighter depends on that.
         code: ' '.repeat(m[0].length) + line.slice(m[0].length),
@@ -172,7 +183,7 @@ export function splitLabeledBlocks(source) {
       // anonymous block. A pattern here plays; anything else (a `Signal.prototype` extension, a
       // shared `const`) is a setup block that binds/acts for the blocks below - see server.js.
       push();
-      current = { label: `$${++anonCount}`, muted: false, soloed: false, code: line, start: offset, end: offset };
+      current = { label: `$${++anonCount}`, kind: 'bare', muted: false, soloed: false, code: line, start: offset, end: offset };
       state = scan(newScan(), line);
       awaitingBody = false;
     } else if (current) {
@@ -258,6 +269,7 @@ function parseLabel(raw, nextAnonName) {
   let name = raw;
   let muted = false;
   let soloed = false;
+  let anon = false;
 
   // Order matters: strip mute underscores first so `_bassS:` works; keep stripping so
   // `S_bass:` does too. Never strip a marker if it would leave an empty name.
@@ -275,6 +287,9 @@ function parseLabel(raw, nextAnonName) {
     }
   }
 
-  if (name === '$' || name === '') name = nextAnonName();
-  return { label: name, muted, soloed };
+  if (name === '$' || name === '') {
+    name = nextAnonName();
+    anon = true; // written `$:` - a track, just not a named one (see the kinds above)
+  }
+  return { label: name, muted, soloed, anon };
 }

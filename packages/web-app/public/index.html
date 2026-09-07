@@ -571,6 +571,14 @@
       <div class="arrange-body">
         <!-- The lane picker, anchored to the lane it is about: zero-sized, moved to the gutter cell
              whose ▾ was pressed, with the popover hanging off it (see arOpenLanePicker). -->
+        <!-- ...and the same again for a CLIP's roll, opened by double-clicking its title. Hangs
+             downwards (`below`): the rows are the top of the panel. -->
+        <div id="arrangeRollPickWrap" class="arrange-pick-anchor below">
+          <div id="arrangeRollPicker" class="def-picker hidden">
+            <input id="arrangeRollSearch" type="text" spellcheck="false" placeholder="roll name" />
+            <div id="arrangeRollList" class="def-pick-list"></div>
+          </div>
+        </div>
         <div id="arrangePickWrap" class="arrange-pick-anchor">
           <div id="arrangePicker" class="def-picker hidden">
             <input id="arrangeAutoSearch" type="text" spellcheck="false" placeholder="lane name" />

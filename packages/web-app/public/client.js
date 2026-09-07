@@ -438,7 +438,7 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     // The arrangement (ctrl+A, never cmd+A - select-all is select-all). CodeMirror's Mac keymap
     // binds Ctrl-A to goLineStart, so it has to be taken here rather than left to the document
     // handler below, which never sees it.
-    'Ctrl-A': () => openArrangePainter(),
+    'Ctrl-A': () => (arState ? closeArrangeEditor() : openArrangePainter()),
   },
 });
 // Show the editor pane: CodeMirror is up and the buffer this URL opens with is in it. Called from
@@ -494,13 +494,13 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     arrangeUnlock(); // release the loop region the arrangement is in (see the arrange section)
   } else if (e.key.toLowerCase() === 'a' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
-    && !arKeyInField() && arState == null) {
-    // ctrl+A opens the arrangement from anywhere the editor isn't (the editor's own keymap takes it
-    // there - see the CodeMirror extraKeys). Ctrl, never cmd: cmd+A is select-all wherever you are,
-    // and inside the painter ctrl+A/cmd+A both mean "every clip", which is why an open painter
-    // leaves this alone.
+    && !arKeyInField()) {
+    // ctrl+A is the arrangement, both ways: it opens the painter and it puts it away again. Ctrl
+    // rather than cmd because cmd+A is select-all wherever you are - in the editor, and inside the
+    // painter, where it means every clip.
     e.preventDefault();
-    openArrangePainter();
+    if (arState) closeArrangeEditor();
+    else openArrangePainter();
   } else if (e.key.toLowerCase() === 's') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
     if (e.shiftKey) savePatternFileAs();
@@ -2919,6 +2919,7 @@ function openLfoEditor(call) {
   lfoSyncHead();
   if (!lfoRaf) lfoRaf = requestAnimationFrame(lfoPlayheadLoop); // sweep the playhead while it runs
   lfoPanel.classList.remove('hidden');
+  bringPanelToFront(lfoPanel);
   drawLfoShape();
 }
 
@@ -3646,6 +3647,7 @@ function showPresetPanel(next) {
   };
   setPresetStatus('');
   presetPanel.classList.remove('hidden');
+  bringPanelToFront(presetPanel);
   presetSearch.value = '';
   presetSyncHead();
   presetHead.renderList(true);
@@ -4498,6 +4500,16 @@ function sourceCallAmong(refs, sourceMark) {
  *   library     () => ids that exist without being defined here (prebake, built-in presets)
  *   panel       the editor panel's hooks - see the roll instance below for the full shape
  */
+// Every floating panel is z-index 30 in the stylesheet, so two of them open at once stack in DOM
+// order - which put the arrangement over the piano roll however you got there, since it is written
+// further down index.html. Opening one brings it to the front instead: the panel you just asked for
+// is the one you want to see, whichever order they happen to be declared in.
+let panelFrontZ = 30;
+function bringPanelToFront(el) {
+  if (!el) return;
+  el.style.zIndex = String(++panelFrontZ);
+}
+
 function makeDefRegistry(opts) {
   // `label` is the kind as a person says it. It is usually the `kind` word itself, but that one is
   // also the wire name a pinned definition is filed under (`_slices`, not `_sliceSet`), so the two
@@ -4874,15 +4886,12 @@ function makeDefRegistry(opts) {
   // new one is (see create), only without starting from nothing.
   // `open: false` files the copy without putting it on screen and hands back its NAME, for a
   // caller that has somewhere else to point at it - the arrangement forking a roll for one clip.
-  function duplicate(id = panel.current(), scopeOrOpts = panelScope()) {
-    const opts = scopeOrOpts && typeof scopeOrOpts === 'object' ? scopeOrOpts : { scope: scopeOrOpts };
-    const sc = opts.scope ?? panelScope();
-    if (id == null) return null;
+  function duplicate(id = panel.current(), sc = panelScope()) {
+    if (id == null) return;
     const code = cm.getValue();
     const def = findDef(code, id, sc);
     if (!def) {
-      say(`can't duplicate ${label} "${id}": ${inLibrary(id, sc) ? 'it comes from the shared library - only what this buffer defines can be copied here' : 'its definition is not in this buffer'}`, true);
-      return null;
+      return say(`can't duplicate ${label} "${id}": ${inLibrary(id, sc) ? 'it comes from the shared library - only what this buffer defines can be copied here' : 'its definition is not in this buffer'}`, true);
     }
     const rows = allIds(def.scope ?? null);
     // Counted from the stem, not the name: duplicating `snare2` gives `snare3`, not `snare22` -
@@ -4896,12 +4905,9 @@ function makeDefRegistry(opts) {
     const indent = /^[ \t]*/.exec(code.slice(lineStart, def.start))[0];
     applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`]]);
     refoldAll();
-    if (opts.open !== false) {
-      say(`${label} "${to}" is a copy of "${id}"`);
-      panel.open(to, panel.carry());
-    }
+    say(`${label} "${to}" is a copy of "${id}"`);
+    panel.open(to, panel.carry());
     panel.scheduleEval();
-    return to;
   }
 
   // ★ - the library. A definition lives and dies with the buffer it was drawn in; pinning one copies
@@ -5436,6 +5442,7 @@ function openPianorollEditor(call, carry = null) {
   prRecGhosts(); // a recording already under way shows in the roll it just opened on
   if (call.id && !wasOpen) prRefreshRollList(); // the prebake half of the picker, asked for once
   prPanel.classList.remove('hidden');
+  bringPanelToFront(prPanel);
   prSizeCanvas(); // the width the layout gives it now, so the first frame is already right
   drawPianoroll();
   if (!prRaf) prRaf = requestAnimationFrame(prPlayheadLoop); // sweep a playhead while it plays
@@ -5618,6 +5625,10 @@ function makeNamePicker({
   // FIRST one - which is what a panel whose subject is optional needs (the arrangement's
   // automation lanes: a song may have none, and the picker is where it gets one).
   alwaysShow = false,
+  // What a typed name that matches nothing does. The default files an empty definition and opens
+  // it; a picker that is CHOOSING for something (a clip's roll) has to bind it as well, which is
+  // the same gesture from where the person is sitting.
+  create = null,
   // Optional second gesture per row: `use` writes that name into the call the panel is looking
   // through, rather than opening it for editing. `canUse` is asked per render, since there is only
   // something to write into when the panel was opened from a call (see makeDefRegistry's fork).
@@ -5848,7 +5859,7 @@ function makeNamePicker({
     onPick();
     // Created into the scope the list was drawn for - a preset made here belongs to the plugin the
     // slot holds, which is the one it is about to be shaped on.
-    if (row.act === 'create') reg.create(row.id, scope());
+    if (row.act === 'create') (create ?? ((id, sc) => reg.create(id, sc)))(row.id, scope());
     else open(row.id, row.scope);
     refocus();
   }
@@ -8495,7 +8506,7 @@ function initPianorollCanvas() {
     // (A pointer press is safe - the document's capture-phase dismiss restores first.)
     if (!prMenu.classList.contains('hidden')) return;
     const sel = [...prState.sel];
-    const mod = e.metaKey || e.ctrlKey;
+    const mod = editMod(e);
     if (mod && (e.key === 'z' || e.key === 'Z')) {
       // Undo/redo for the roll, scoped to the canvas having focus - cmd-Z with the cursor in the
       // code is CodeMirror's, as it always was. Ctrl-Y is the Windows redo spelling.
@@ -9785,6 +9796,7 @@ function showRecordPanel(label, opts, anchor = null) {
   recordWrapTail.checked = recordState.wrapTail;
   showLiveMeter();
   recordPanel.classList.remove('hidden');
+  bringPanelToFront(recordPanel);
   setRecordTap(label, true);
   startRecordPoll();
   drawRecordScope();
@@ -13972,7 +13984,7 @@ function packSyncFromCode() {
 
 // The keys a list answers to, once it has focus (clicking a row gives it focus).
 function packListKeys(list, e) {
-  const meta = e.metaKey || e.ctrlKey;
+  const meta = editMod(e);
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     packSelectStep(list, e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
@@ -15669,7 +15681,7 @@ function initSlicePanel() {
     // gesture nobody expects to be missing. Each write is its own step (no merging origin), so a
     // drag, a clear and an auto-slice come back one at a time; the panel redraws from the code the
     // undo restored (see sliceSyncFromCode), which is also what re-files the set for the engine.
-    if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    if (editMod(e) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       e.stopPropagation();
       if (e.shiftKey) cm.redo();
@@ -17008,6 +17020,17 @@ function comboToSpec(combo) {
     else { spec.code = keyTokenToCode(tok); spec.key = tok; }
   }
   return spec;
+}
+
+/**
+ * The WORKHORSE modifier - cmd on macOS, ctrl everywhere else. Every editing verb a panel offers
+ * (select all, copy, cut, paste, duplicate, undo) asks this rather than taking cmd OR ctrl, so the
+ * ctrl+letter chords stay the app's own: ctrl+A opens the arrangement, cmd+A selects everything in
+ * it, and neither has to guess which was meant. Pointer modifiers (a fine drag, ctrl+wheel zoom)
+ * are deliberately NOT this - those are conventions of their own and take either key.
+ */
+function editMod(e) {
+  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
 }
 
 function specMatches(spec, e) {
@@ -20579,7 +20602,7 @@ function orgSongAddNames(names) {
 
 function orgSongKeys(e) {
   if (orgPane3 !== 'songs') return;
-  const meta = e.metaKey || e.ctrlKey;
+  const meta = editMod(e);
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     orgSongStep(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
@@ -20884,7 +20907,7 @@ async function orgDiskAddSelected() {
 
 function orgDiskKeys(e) {
   if (orgPane3 !== 'disk') return;
-  const meta = e.metaKey || e.ctrlKey;
+  const meta = editMod(e);
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     orgDiskStep(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
@@ -22007,6 +22030,10 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
 const arPanel = document.getElementById('arrangePanel');
 const arCanvas = document.getElementById('arrangeCanvas');
 const arPickWrap = document.getElementById('arrangePickWrap');
+const arRollPickWrap = document.getElementById('arrangeRollPickWrap');
+const arRollPicker = document.getElementById('arrangeRollPicker');
+const arRollSearch = document.getElementById('arrangeRollSearch');
+const arRollList = document.getElementById('arrangeRollList');
 const arPicker = document.getElementById('arrangePicker');
 const arAutoSearch = document.getElementById('arrangeAutoSearch');
 const arPickList = document.getElementById('arrangePickList');
@@ -22032,6 +22059,12 @@ const AR_DEFAULT_PX_PER_CYCLE = 44; // one bar is comfortably wide by default: t
 const AR_MIN_PX_PER_CYCLE = 6;
 const AR_MAX_PX_PER_CYCLE = 400;
 const AR_EDGE_PX = 8; // how close to a clip's (or region's) edge counts as grabbing it to resize
+// A clip is a TITLE and a BODY, the way a playlist's are. The title is the clip as an object -
+// click to select it, drag to move it; the body is the TIME under it - click to put the insert
+// marker there, drag to mark a stretch of song. That split is what makes "split here" and "join
+// these" ordinary gestures: both need a place and a selection, and a clip that was only ever an
+// object had nowhere to put either.
+const AR_CLIP_TITLE_H = 13;
 const AR_SNAPS = [1, 2, 4, 8, 16]; // cells per bar the snap menu offers
 // How wide a snap cell has to be on screen for `auto` to divide down to it. The grid you snap to
 // is then always a grid you can see and hit: zoom in and the division gets finer, zoom out and it
@@ -22416,6 +22449,7 @@ function openArrangeEditor(call) {
     scrollLane: 0, // topmost visible row (fractional while scrolling)
     focus: null, // the bar the last gesture touched - what a button zoom moves toward (arZoomFocusX)
     sel: new Set(), // selected clip objects (transient, never serialized)
+    insert: null, // the insert marker, in bars: where a split happens and where a paste lands
     regionSpan: null, // the last marquee's snap-quantized [a, b) bars - half of the time selection (see arTimeRegion)
     selRegion: null, // the selected loop region (its name and × become live in the ruler)
     // The automation strips: the lanes PINNED under the clips, top to bottom, each
@@ -22453,6 +22487,7 @@ function openArrangeEditor(call) {
   arPushHistory();
   arSyncControls();
   arPanel.classList.remove('hidden');
+  bringPanelToFront(arPanel);
   arSizeCanvas();
   drawArrange();
   if (!arRaf) arRaf = requestAnimationFrame(arPlayheadLoop);
@@ -22492,6 +22527,9 @@ function arRefreshRows() {
   }
   const grew = rows.length !== arState.rows.length;
   arState.rows = rows;
+  // Each track's OWN roll, read once here rather than per clip per frame: arTrackRoll splits the
+  // whole buffer, and the clips ask for it on every draw to title themselves.
+  arState.rollOf = new Map(rows.map((r) => [r.label, arTrackRollUncached(r.label)]));
   if (!rows.some((r) => r.label === arState.track)) arState.track = rows[0]?.label ?? null;
   if (grew) arSizeCanvas(); // the grid is as tall as the song has tracks (see arVisibleRows)
 }
@@ -22509,12 +22547,22 @@ function arSelectTrack(label) {
 }
 
 /** The labels a clip may name: every labelled block in the buffer, in document order. */
+/**
+ * The tracks a clip may name: every block that was WRITTEN as one - a named block, or a `$:` you
+ * didn't feel like naming (see the kinds in labels.mjs). A bare column-0 statement is setup and
+ * gets no row, whatever it evaluates to.
+ *
+ * A `$:` block's label is POSITIONAL (`$1`, `$2`, numbered as the parser meets them), so inserting
+ * another anonymous block above one renumbers everything below it and its clips then describe a
+ * different block. Named tracks have no such problem, which is the honest argument for naming
+ * anything you mean to arrange; arranging one anonymously is allowed rather than encouraged.
+ */
 function arLabels() {
   if (!labelsMod) return [];
   const seen = new Set();
   const out = [];
   for (const b of labelsMod.splitLabeledBlocks(cm.getValue())) {
-    if (!b.label || b.label.startsWith('$') || seen.has(b.label)) continue;
+    if (!b.label || b.kind === 'bare' || seen.has(b.label)) continue;
     seen.add(b.label);
     out.push(b.label);
   }
@@ -22717,7 +22765,8 @@ function arClipAt(x, y) {
     // Either edge is a handle when the clip is wide enough to leave a body between them.
     const wide = x2 - x1 > AR_EDGE_PX * 3;
     const edge = wide && x2 - x <= AR_EDGE_PX ? 'right' : wide && x - x1 <= AR_EDGE_PX ? 'left' : null;
-    return { clip: c, edge };
+    const top = arYOf(arRowOfLabel(c.label)) + 3;
+    return { clip: c, edge, part: y < top + AR_CLIP_TITLE_H ? 'title' : 'body' };
   }
   return null;
 }
@@ -22849,11 +22898,32 @@ function drawArrange() {
     const w = Math.max(2, dx2 - dx - 1);
     const selected = arState.sel.has(c);
     const past = c.start >= loopLen - 1e-9;
-    ctx.fillStyle = arColor(c.label, past ? 0.18 : 0.42);
-    prRoundRect(ctx, dx + 0.5, y + 3, w, AR_ROW - 6, 4); ctx.fill();
+    const boxY = y + 3;
+    const boxH = AR_ROW - 6;
+    const bodyY = boxY + AR_CLIP_TITLE_H;
+    ctx.fillStyle = arColor(c.label, past ? 0.1 : 0.22);
+    prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.fill();
+    // the title, solid: it is the clip as a thing you can pick up, and it has to read as a handle
+    ctx.save();
+    ctx.beginPath(); prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.clip();
+    ctx.fillStyle = arColor(c.label, past ? 0.3 : 0.62);
+    ctx.fillRect(dx + 0.5, boxY, w, AR_CLIP_TITLE_H);
+    // ...and the bars run on THROUGH the body, so the place you are about to split at is visible
+    // inside a clip and not only in the empty song around it.
+    ctx.strokeStyle = col('--border');
+    for (let k = Math.ceil(arState.scroll / cell); k <= lastCell; k++) {
+      const bx = Math.round(arXOf(k * cell)) + 0.5;
+      if (bx <= dx || bx >= dx2) continue;
+      const onB = Math.abs(k * cell - Math.round(k * cell)) < 1e-9;
+      if (!onB && cellPx < 5) continue;
+      ctx.globalAlpha = onB ? 0.45 : 0.2;
+      ctx.beginPath(); ctx.moveTo(bx, bodyY); ctx.lineTo(bx, boxY + boxH); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
     ctx.strokeStyle = selected ? col('--accent') : arColor(c.label, 0.95);
     ctx.lineWidth = selected ? 1.5 : 1;
-    prRoundRect(ctx, dx + 0.5, y + 3, w, AR_ROW - 6, 4); ctx.stroke();
+    prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.stroke();
     ctx.lineWidth = 1;
     // the edge under the pointer shows as a handle, so a resize is offered before it is tried
     if (hoverClip?.clip === c && hoverClip.edge) {
@@ -22866,12 +22936,36 @@ function drawArrange() {
     // the only thing left worth the space, and a fill reads as a fill at a glance.
     if (w > 18) {
       ctx.save();
-      ctx.beginPath(); ctx.rect(dx + 2, y, w - 4, AR_ROW); ctx.clip();
+      ctx.beginPath(); ctx.rect(dx + 2, boxY, w - 4, AR_CLIP_TITLE_H); ctx.clip();
       ctx.fillStyle = text;
       ctx.globalAlpha = past ? 0.5 : 0.95;
-      ctx.fillText(c.roll ? `↳ ${c.roll}` : c.label, dx + 6, y + AR_ROW / 2);
+      // The name in the title is the ROLL this clip plays - the row already says the track, so the
+      // only thing left worth the space is which drawing is heard here. Double-click it to swap.
+      ctx.fillText(c.roll ?? arTrackRoll(c.label) ?? c.label, dx + 6, boxY + AR_CLIP_TITLE_H / 2);
       ctx.globalAlpha = 1;
       ctx.restore();
+    }
+  }
+
+  // The time selection, over the tracks it covers. It has always been drawn on the ruler, which was
+  // enough while a span was something you dragged out up there - now that a drag across a clip's
+  // body marks one, it has to be visible where the drag happened, over the music it is about.
+  const timeRegion = arTimeRegion();
+  if (timeRegion) {
+    const sx0 = Math.min(W, Math.max(AR_GUTTER, arXOf(timeRegion[0])));
+    const sx1 = Math.min(W, Math.max(AR_GUTTER, arXOf(timeRegion[1])));
+    if (sx1 > sx0) {
+      ctx.fillStyle = col('--accent');
+      ctx.globalAlpha = 0.13; // over the clips, not instead of them: the parts stay readable through it
+      ctx.fillRect(sx0, gridTop, sx1 - sx0, gridBottom - gridTop);
+      ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = col('--accent');
+      for (const ex of [timeRegion[0], timeRegion[1]]) {
+        const x = Math.round(arXOf(ex)) + 0.5;
+        if (x < AR_GUTTER || x > W) continue;
+        ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, gridBottom); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
     }
   }
 
@@ -22899,8 +22993,7 @@ function drawArrange() {
     if (x < AR_GUTTER) continue;
     ctx.fillText(String(bar + 1), x + 3, AR_RULER_TOP + AR_RULER / 2);
   }
-  // the time selection, as a highlighted band on the ruler (see arTimeRegion)
-  const timeRegion = arTimeRegion();
+  // ...and the same span on the ruler, which is where its extent is read off the bar numbers
   if (timeRegion) {
     const rx0 = Math.min(W, Math.max(AR_GUTTER, arXOf(timeRegion[0])));
     const rx1 = Math.min(W, Math.max(AR_GUTTER, arXOf(timeRegion[1])));
@@ -23052,6 +23145,35 @@ function drawArrange() {
     }
   }
   ctx.restore();
+
+  // The insert marker: where cmd+E splits and where a paste lands. A PLACE, not a moving thing, so
+  // it is deliberately quieter than the playhead: an arrow in the ruler pointing down at the bar it
+  // is on, and a soft glow of a line under it rather than a hard rule. A second solid line down the
+  // song would compete with the playhead for the eye and lose the difference between them.
+  if (arState.insert != null) {
+    const ix = arXOf(arState.insert);
+    if (ix >= AR_GUTTER && ix <= W) {
+      const mx = Math.round(ix) + 0.5;
+      ctx.save();
+      ctx.strokeStyle = col('--text');
+      ctx.shadowColor = col('--text');
+      ctx.shadowBlur = 5;
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath(); ctx.moveTo(mx, AR_LANES_TOP); ctx.lineTo(mx, autoBottom); ctx.stroke();
+      ctx.restore();
+      // the arrow, in the ruler, pointing at the place - which is what stays findable when the line
+      // is lost among the clips it crosses
+      ctx.fillStyle = col('--text');
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      ctx.moveTo(ix - 4.5, AR_LANES_TOP - 7);
+      ctx.lineTo(ix + 4.5, AR_LANES_TOP - 7);
+      ctx.lineTo(ix, AR_LANES_TOP - 1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
 
   // playhead
   arPlayheadOn = false;
@@ -23315,7 +23437,9 @@ function arOpenMenu(clientX, clientY, hit, row) {
     const targets = arState.sel.has(hit.clip) ? [...arState.sel] : [hit.clip];
     items.push([`delete${targets.length > 1 ? ` ${targets.length} clips` : ''}`, () => arDeleteClips(targets)]);
     items.push(['duplicate after', () => arDuplicate(targets)]);
-    items.push(...arRollMenuItems(targets));
+    if (arSplitPoints().length) items.push(['split here', () => arSplitClips(), 'cmd-E — at the marker, or at both edges of a marked span']);
+    if (targets.length > 1 || arState.regionSpan) items.push(['join', () => arJoinClips(), 'cmd-J — one clip from here to the end of the last']);
+    items.push(...arRollMenuItems(targets, clientX, clientY));
   } else if (row != null && row >= 0 && arRowLabel(row) != null) {
     const label = arRowLabel(row);
     const mine = arState.clips.filter((c) => c.label === label);
@@ -23360,8 +23484,13 @@ function arCloseMenu() {
 // stars into the library and is deleted the same way anything drawn is.
 // ---------------------------------------------------------------------------------------------
 
-/** The roll the track's own block names, when it names exactly one - what a fork forks. */
+/** The roll a track's own block names - off the map arRefreshRows built (see arTrackRollUncached). */
 function arTrackRoll(label) {
+  return arState?.rollOf?.get(label) ?? null;
+}
+
+/** The roll the track's own block names, when it names exactly one. Reads the buffer; cache it. */
+function arTrackRollUncached(label) {
   if (!labelsMod) return null;
   for (const b of labelsMod.splitLabeledBlocks(cm.getValue())) {
     if (b.label !== label) continue;
@@ -23373,50 +23502,180 @@ function arTrackRoll(label) {
   return null;
 }
 
-/** Bind (or, with null, unbind) a set of clips and write it. */
+/**
+ * Bind a set of clips to a roll (null puts them back on the track's own). Naming the track's OWN
+ * roll unbinds rather than writing it out: a clip that says what the track already says is a
+ * binding that would go stale the moment the track's roll changed.
+ */
 function arBindRoll(clips, roll) {
-  for (const c of clips) c.roll = roll;
+  for (const c of clips) c.roll = roll && roll !== arTrackRoll(c.label) ? String(roll) : null;
+  writeArrangeCall();
+  drawArrange();
+}
+
+// Which clips the roll list is choosing for. Set when it opens; the picker's own hooks read it.
+let arRollTargets = [];
+
+// A clip's roll list - the same widget again (see makeNamePicker), this time over rollDefs and
+// anchored to the clip whose title was double-clicked. Picking a row binds these clips to that
+// roll; typing a name that has none makes the roll, binds it, and opens it to draw.
+const arRollHead = makeNamePicker({
+  els: {
+    wrap: arRollPickWrap,
+    title: document.createElement('span'),
+    name: document.createElement('input'),
+    btn: document.createElement('button'),
+    picker: arRollPicker,
+    search: arRollSearch,
+    list: arRollList,
+  },
+  reg: rollDefs,
+  alwaysShow: true,
+  current: () => arRollTargets[0]?.roll ?? arTrackRoll(arRollTargets[0]?.label) ?? null,
+  open: (id) => arBindRoll(arRollTargets, id),
+  create: (id) => { const targets = arRollTargets; rollDefs.create(id); arBindRoll(targets, id); },
+  refocus: () => arCanvas.focus({ preventScroll: true }),
+});
+
+/** The roll list, over the clips it is choosing for, hung off the clip you double-clicked. */
+function arOpenRollPicker(clips, atX, atY) {
+  if (!clips.length) return;
+  arRollTargets = clips;
+  const r = arCanvas.getBoundingClientRect();
+  const body = arCanvas.parentElement.getBoundingClientRect();
+  arRollPickWrap.style.left = `${r.left - body.left + Math.max(AR_GUTTER, atX)}px`;
+  arRollPickWrap.style.top = `${r.top - body.top + atY}px`;
+  arRollHead.syncHead();
+  arRollHead.openPicker();
+}
+
+/** The clip menu's roll line: the list, and the way back to the track's own. */
+function arRollMenuItems(targets, clientX, clientY) {
+  const label = targets[0]?.label;
+  if (!label || targets.some((c) => c.label !== label)) return []; // one track's clips at a time
+  const r = arCanvas.getBoundingClientRect();
+  const items = ['-'];
+  items.push([`roll: ${targets[0].roll ?? arTrackRoll(label) ?? 'the track\'s own'}…`,
+    () => arOpenRollPicker(targets, clientX - r.left, clientY - r.top),
+    'which drawing these bars play - double-clicking the clip\'s title is the same list']);
+  if (targets.some((c) => c.roll)) {
+    items.push([`back to ${arTrackRoll(label) ?? 'the track\'s own roll'}`, () => arBindRoll(targets, null)]);
+  }
+  return items;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Split and join - the two edits a painted arrangement is mostly made of.
+//
+// Both read the same two things the body of a clip sets: the INSERT MARKER (a place) and the marked
+// SPAN (a stretch). cmd+E cuts where you are pointing; cmd+J makes one clip of what you have.
+// Neither cares about clip boundaries going in - a span may start inside one clip and end past the
+// end of another - which is what lets you mark four bars across a busy row and say "one clip".
+// ---------------------------------------------------------------------------------------------
+
+/** Where a split falls: the marked span's two edges, else the insert marker. */
+function arSplitPoints() {
+  if (arState.regionSpan) return [...arState.regionSpan];
+  return arState.insert == null ? [] : [arState.insert];
+}
+
+/** Which clips an op is about: the selected ones, else what lies under the point/span. */
+function arOpTargets(points) {
+  if (arState.sel.size) return [...arState.sel];
+  const [a, b] = points.length > 1 ? points : [points[0], points[0]];
+  const hits = arState.clips.filter((c) => c.start < b + 1e-9 && c.start + c.len > a - 1e-9);
+  // With only a marker (no span) it is the one clip you are pointing at, on the row you are on -
+  // splitting every track at once because a marker happens to be down would be a surprise.
+  return points.length > 1 ? hits : hits.filter((c) => c.label === arState.track);
+}
+
+/**
+ * Cut `targets` at every point that falls strictly inside them. A clip cut in two is two clips of
+ * the same roll, back to back - nothing about the sound changes until one of them is moved, bound
+ * to another roll, or taken away, which is the point of splitting.
+ */
+function arSplitClips() {
+  const points = arSplitPoints();
+  if (!points.length) {
+    logLine('nothing to split at - click inside a clip to put the marker there, or drag out a span', 'warn');
+    return;
+  }
+  const targets = new Set(arOpTargets(points));
+  const made = [];
+  let cuts = 0;
+  for (const c of [...arState.clips]) {
+    if (!targets.has(c)) continue;
+    const inside = points.filter((p) => p > c.start + 1e-9 && p < c.start + c.len - 1e-9).sort((p, q) => p - q);
+    if (!inside.length) continue;
+    cuts += inside.length;
+    const edges = [c.start, ...inside, c.start + c.len];
+    arState.clips.splice(arState.clips.indexOf(c), 1);
+    arState.sel.delete(c);
+    for (let i = 0; i < edges.length - 1; i++) {
+      const piece = { label: c.label, start: edges[i], len: edges[i + 1] - edges[i], roll: c.roll ?? null };
+      arState.clips.push(piece);
+      made.push(piece);
+    }
+  }
+  if (!cuts) {
+    logLine('no clip crosses the marker - the split had nothing to cut', 'warn');
+    return;
+  }
+  // What you are left holding is what you MARKED, not everything the cut produced. The region a key
+  // acts on is the union of the marked span and the selected clips (see arTimeRegion), so selecting
+  // all three pieces of a clip split out of its middle would widen the band back to the whole clip
+  // the moment it was cut - the selection appearing to jump to the thing you had just divided.
+  // Inside a span: the pieces that fell in it. From a bare marker: both halves, which is the whole
+  // of what was cut anyway.
+  const span = arState.regionSpan;
+  arState.sel = new Set(span
+    ? made.filter((c) => c.start >= span[0] - 1e-9 && c.start + c.len <= span[1] + 1e-9)
+    : made);
   writeArrangeCall();
   drawArrange();
 }
 
 /**
- * Fork the roll `clips` play into a copy of its own and bind them to it. The copy is named off the
- * original (`kick` -> `kick2`), which is what the roll panel's own duplicate does, so a series of
- * variations reads as one.
+ * One clip in place of several, per track: the span from the first onset to the last end, gaps
+ * included. The roll is the FIRST piece's - a join can only keep one, and the one you hear first
+ * is the one the joined clip should sound like; anything else it swallowed is said out loud,
+ * because that is a drawing quietly dropping out of the song.
  */
-function arForkRoll(clips) {
-  const label = clips[0]?.label;
-  const from = clips[0]?.roll ?? arTrackRoll(label);
-  if (!from) {
-    logLine(`${label} doesn't play one named roll - a clip can only fork a track whose pattern is pianoroll("name")`, 'warn');
+function arJoinClips() {
+  const points = arSplitPoints();
+  const targets = arOpTargets(points.length ? points : []);
+  if (targets.length < 2) {
+    logLine(targets.length ? 'a clip on its own is already joined - mark a span, or select the clips to join'
+      : 'nothing to join - drag out a span across the clips, or select them', 'warn');
     return;
   }
-  const to = rollDefs.duplicate(from, { open: false });
-  if (!to) return;
-  arBindRoll(clips, to);
-  logLine(`${clips.length === 1 ? 'this clip' : `${clips.length} clips`} of ${label} now play "${to}" - a copy of "${from}". Double-click the clip to draw it.`);
-}
-
-/** The clip menu's roll section: fork, bind to an existing roll, unbind. */
-function arRollMenuItems(targets) {
-  const label = targets[0]?.label;
-  if (!label || targets.some((c) => c.label !== label)) return []; // one track's clips at a time
-  const own = arTrackRoll(label);
-  const items = ['-'];
-  items.push([targets[0].roll ? 'fork again' : 'fork the roll here', () => arForkRoll(targets),
-    'a copy of the roll, bound to these clips only - the variation is drawn on the copy']);
-  const rows = rollDefs.allIds().filter((r) => r.id !== own);
-  if (rows.length) {
-    for (const r of rows.slice(0, 12)) {
-      if (targets.length === 1 && targets[0].roll === r.id) continue;
-      items.push([`  play ${r.id}`, () => arBindRoll(targets, r.id), `these bars play the roll "${r.id}"`]);
+  const byTrack = new Map();
+  for (const c of targets) byTrack.set(c.label, [...(byTrack.get(c.label) ?? []), c]);
+  const made = [];
+  const lost = new Set();
+  for (const [label, group] of byTrack) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => a.start - b.start);
+    const start = group[0].start;
+    const end = Math.max(...group.map((c) => c.start + c.len));
+    const roll = group[0].roll ?? null;
+    for (const c of group.slice(1)) if ((c.roll ?? null) !== roll) lost.add(c.roll ?? arTrackRoll(label) ?? label);
+    for (const c of group) {
+      arState.clips.splice(arState.clips.indexOf(c), 1);
+      arState.sel.delete(c);
     }
+    const one = { label, start, len: end - start, roll };
+    arState.clips.push(one);
+    made.push(one);
   }
-  if (targets.some((c) => c.roll)) {
-    items.push([`  back to ${own ?? 'the track\'s own roll'}`, () => arBindRoll(targets, null)]);
+  if (!made.length) {
+    logLine('nothing to join - the clips are all on different tracks', 'warn');
+    return;
   }
-  return items;
+  arState.sel = new Set(made);
+  if (lost.size) logLine(`joined: these bars now play ${made[0].roll ?? 'the track\'s own roll'} throughout - ${[...lost].join(', ')} ${lost.size === 1 ? 'is' : 'are'} no longer heard here`, 'warn');
+  writeArrangeCall();
+  drawArrange();
 }
 
 /** A clip over the whole song, the way a track joins the arrangement (see arReconcileTracks). */
@@ -24507,7 +24766,9 @@ function initArrangeCanvas() {
     // under the hand now - the clicked clip's extent, or the marquee about to be drawn.
     arState.regionSpan = null;
     arState.autoSel = null; // ...including one marked in the automation strip below
-    if (hit) {
+    if (hit && (hit.edge || hit.part === 'title')) {
+      // The TITLE is the clip itself: it selects, it drags, and option-drag copies. (The edges are
+      // the same handles they have always been, wherever on the clip they are grabbed.)
       if (e.shiftKey) {
         if (arState.sel.has(hit.clip)) arState.sel.delete(hit.clip);
         else arState.sel.add(hit.clip);
@@ -24525,10 +24786,37 @@ function initArrangeCanvas() {
       return;
     }
 
+    if (hit) {
+      // ...and the BODY is the time under it: the press puts the insert marker there (where a split
+      // happens and where a paste lands) and a drag from it marks a stretch of song. The clip's own
+      // edges mean nothing to that stretch - a selection may start inside one clip and end in the
+      // middle of another, or in the empty song past it, which is what makes "select this bit and
+      // join it" work without lining anything up first.
+      arSelectTrack(hit.clip.label);
+      // A fresh span every time: the marked region is the union of the drag and any SELECTED CLIPS
+      // (see arTimeRegion), so a drag that left the last selection standing would read as extending
+      // it. Letting go here is also what makes a plain click in a clip body dismiss a selection.
+      arState.sel.clear();
+      arState.regionSpan = null;
+      arState.selRegion = null;
+      arState.insert = Math.max(0, arSnapTo(arBarsOf(x)));
+      arState.drag = { kind: 'timeSel', a: arState.insert, x0: x };
+      drawArrange();
+      return;
+    }
+
     if (arTool === 'select' || e.shiftKey) {
-      // the arrow tool (or shift): rubber-band a selection
-      arState.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y };
-      if (!e.shiftKey) arState.sel.clear();
+      // The arrow tool over empty song: the same time drag as inside a clip. Shift keeps the
+      // rubber-band, which is how several clips are picked up at once.
+      if (e.shiftKey) {
+        arState.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y };
+      } else {
+        arState.sel.clear();
+        arState.regionSpan = null;
+        arState.selRegion = null;
+        arState.insert = Math.max(0, arSnapTo(arBarsOf(x)));
+        arState.drag = { kind: 'timeSel', a: arState.insert, x0: x };
+      }
       drawArrange();
       return;
     }
@@ -24700,9 +24988,10 @@ function initArrangeCanvas() {
     arState.drag = null;
     try { arCanvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
     if (d.kind === 'timeSel') {
-      // A press that never travelled is a click, and a click in the strip clears the selection
-      // rather than marking a cell-wide sliver of it.
-      if (!d.moved) arState.regionSpan = null;
+      // A press that never travelled is a click, and a click marks nothing: it leaves the insert
+      // marker where it landed and lets go of whatever was held, rather than marking a cell-wide
+      // sliver of song.
+      if (!d.moved) { arState.regionSpan = null; arState.sel.clear(); }
       drawArrange();
       arRefreshCursor();
       return;
@@ -24813,14 +25102,16 @@ function initArrangeCanvas() {
       arRevealTrack(arRowLabel(row));
     }
     else if (clipHit) {
-      // Double-click a clip: fork the roll under it, and open the fork to draw. This is the whole
-      // per-clip binding gesture in one - split a clip where the variation starts, double-click the
-      // piece, draw the fill. A clip already bound opens its own roll instead of forking again
-      // (fork twice from the menu if that is what you want).
+      // The two halves again: the TITLE names the roll, so double-clicking it offers the others -
+      // a searchable list, because a song has more rolls than a menu can hold. The BODY is the
+      // music, so double-clicking that opens the drawing itself in the piano roll.
       const clip = clipHit.clip;
       arState.sel = new Set([clip]);
-      if (!clip.roll) arForkRoll([clip]);
-      if (clip.roll) openRollById(clip.roll, null);
+      arSelectTrack(clip.label);
+      const roll = clip.roll ?? arTrackRoll(clip.label);
+      if (clipHit.part === 'title') arOpenRollPicker([clip], x, arYOf(arRowOfLabel(clip.label)) + AR_ROW - 6);
+      else if (roll) openRollById(roll, null);
+      else logLine(`${clip.label} plays no named roll - double-click the clip's title to give this one`, 'warn');
       drawArrange();
     }
     else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_LANES_TOP && y < arGridBottom() && arRowLabel(row) != null) {
@@ -24880,16 +25171,17 @@ function initArrangeCanvas() {
 
   arCanvas.addEventListener('keydown', (e) => {
     if (!arState) return;
-    const mod = e.metaKey || e.ctrlKey;
+    const mod = editMod(e);
     if (e.key === 'Escape') {
       e.preventDefault();
       // like the roll: first let go of what is held, then the panel itself. A picked loop region
       // counts as held now that it marks a span for the time ops - otherwise the band it lights
       // would be undismissable.
-      if (arState.regionSpan || arState.sel.size || arState.selRegion || arState.autoSel) {
+      if (arState.regionSpan || arState.sel.size || arState.selRegion || arState.autoSel || arState.insert != null) {
         arState.regionSpan = null;
         arState.selRegion = null;
         arState.autoSel = null;
+        arState.insert = null;
         arState.sel.clear();
         drawArrange();
       } else closeArrangeEditor();
@@ -24985,7 +25277,15 @@ function initArrangeCanvas() {
       e.preventDefault();
       return;
     }
+    // cmd+E cuts at the marker, cmd+J makes one clip of what is marked - the two edits an
+    // arrangement is mostly made of, on the keys a playlist has always used for them.
+    if (mod && e.key.toLowerCase() === 'e') { arSplitClips(); e.preventDefault(); return; }
+    if (mod && e.key.toLowerCase() === 'j') { arJoinClips(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'z') { arHistoryStep(e.shiftKey ? 1 : -1); e.preventDefault(); return; }
+    // ctrl+A shuts the painter (the key that opened it), cmd+A takes every clip in it. Guarded by
+    // editMod so this only claims ctrl where ctrl isn't the editing modifier: off macOS ctrl+A IS
+    // select-all, and that has to win inside a panel - escape closes it there.
+    if (e.ctrlKey && !e.metaKey && !editMod(e) && e.key.toLowerCase() === 'a') { closeArrangeEditor(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { arDuplicate([...arState.sel]); e.preventDefault(); return; }
     if (!mod && e.key.toLowerCase() === 'b') { arToggleTool(); e.preventDefault(); return; }
@@ -25083,6 +25383,17 @@ function initArrangeEditor() {
   arToolBtn.addEventListener('click', arToggleTool);
 
   // The lane list takes the arrows and Enter while it has the keyboard, exactly as the roll's does.
+  arRollSearch.addEventListener('input', () => arRollHead.renderList(true));
+  arRollSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); arRollHead.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); arRollHead.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); arRollHead.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); arRollHead.closePicker(); }
+    e.stopPropagation();
+  });
+  document.addEventListener('mousedown', (e) => {
+    if (!arRollPicker.classList.contains('hidden') && !arRollPickWrap.contains(e.target)) arRollHead.closePicker(false);
+  });
   arAutoSearch.addEventListener('input', () => arAutoHead.renderList(true));
   arAutoSearch.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); arAutoHead.move(1); }

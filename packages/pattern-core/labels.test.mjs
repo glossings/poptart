@@ -225,3 +225,42 @@ test('codeMask: an apostrophe inside a comment does not open a string', () => {
   const src = ["// don't touch", 'lead: n("0").synth("Serum 2")'].join('\n');
   assert.equal(codeHits(src, 'synth(').length, 1);
 });
+
+// ---------------------------------------------------------------------------------------------
+// How a block was WRITTEN
+//
+// Every block that isn't named gets a `$n` label, so the label alone cannot tell a `$: …` track
+// from a bare `setbpm(140)`. `kind` keeps that difference, and things downstream lean on it: the
+// arrangement gives a row to a track you wrote as one and not to setup, and the host says so when
+// a `$:` block turns out to make no sound.
+// ---------------------------------------------------------------------------------------------
+
+test('kind tells a named track, a $: track and a bare statement apart', () => {
+  const src = [
+    'setbpm(140)',
+    'const kb = midikeys("Twister")',
+    'kick: s("bd*4")',
+    '$: s("hh*8")',
+  ].join('\n');
+  assert.deepEqual(splitLabeledBlocks(src).map((b) => [b.label, b.kind]), [
+    ['$1', 'bare'],
+    ['$2', 'bare'],
+    ['kick', 'labeled'],
+    ['$3', 'anon'],
+  ]);
+});
+
+test('kind survives the mute and solo markers, on either spelling', () => {
+  const src = ['_kick: s("bd")', 'S$: s("hh")', '$_: s("oh")'].join('\n');
+  assert.deepEqual(splitLabeledBlocks(src).map((b) => [b.kind, b.muted, b.soloed]), [
+    ['labeled', true, false],
+    ['anon', false, true],
+    ['anon', true, false],
+  ]);
+});
+
+test('a $: block whose expression is on the next line is still anon', () => {
+  const blocks = splitLabeledBlocks('$:\n  s("bd*4")');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].kind, 'anon');
+});

@@ -253,9 +253,12 @@
             <li><code>Sdrums:</code> <strong>solos</strong> it — if anything is soloed, only soloed tracks play. Mute still wins.</li>
           </ul>
           <p>
-            Anything that <em>isn't</em> a labelled track — a bare line, or a <code>$:</code> block —
-            runs as <strong>setup</strong>: shared <code>const</code>s, language extensions, one-off
-            calls like <code>setbpm(128)</code>. A named block must evaluate to a pattern.
+            <code>$:</code> is a track you didn't feel like naming — it plays like any other and gets
+            its own row in the arrangement. A <strong>bare line</strong> at column 0 is
+            <strong>setup</strong>: shared <code>const</code>s, language extensions, one-off calls
+            like <code>setbpm(128)</code>. A named block must evaluate to a pattern; a
+            <code>$:</code> one that makes no sound is only worth a line in the console, since setup
+            belongs on a bare line anyway.
           </p>
           <div class="callout">
             <span class="tag">panels</span>
@@ -502,32 +505,44 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <h4>Arranging: painting parts into a song</h4>
           <p>
             Every labelled block loops forever. To turn loops into a song, press
-            <strong>ctrl+A</strong>: a playlist opens with one row per track — your labelled blocks,
-            in the order you wrote them — and bars along the top. The first time, every track is
+            <strong>ctrl+A</strong>: a playlist opens with one row per track — your labelled blocks
+            and your <code>$:</code> ones, in the order you wrote them — and bars along the top.
+            Setup at column 0 (<code>setbpm(140)</code>, a shared <code>const</code>) is not a track
+            and gets no row. The first time, every track is
             filled edge to edge, so nothing sounds different until you carve: click-drag on a row to
             paint a clip, and that track plays <em>only</em> inside its clips. A row you empty is
             silent. A track you type later joins the arrangement filled, the same way, so arranging
             never quietly takes a part away from you.
           </p>
           <p>
-            Clips move like notes: drag the body (onto another track's row too, which is how a part
-            moves between tracks), drag the right edge to resize, option-drag to duplicate,
-            right-click for delete / duplicate / fill / clear, ⌘Z to undo. Click a track's name to
-            select its row, double-click the name to jump to its code. The arrangement loops at the
-            last clip's end, or drag in the ruler (or type <strong>len</strong>) to set the length;
-            <strong>snap</strong> sets how finely clips land, <strong>+</strong>/<strong>−</strong>
-            and ctrl+wheel zoom. Inside a clip the pattern runs on absolute bar time, so a
-            <code>&lt;a b&gt;</code> keeps alternating through the bars it is painted out of.
+            <strong>A clip is a title and a body.</strong> The title along its top is the clip as a
+            thing: click to select it, drag to move it (onto another track's row too, which is how a
+            part moves between tracks), option-drag to duplicate. The body below is the
+            <em>time</em>: the bars run on through it, clicking puts the <strong>insert marker</strong>
+            there, and dragging marks a stretch of song — one that starts inside a clip and ends
+            wherever you let go, past its end or halfway through the next.
           </p>
           <p>
-            <strong>A clip can play a different roll.</strong> Double-click a clip and the roll its
-            track plays is forked — copied under a name of its own — and bound to that clip alone;
-            the piano roll opens on the copy, so drawing there changes those bars and nothing else.
-            That is how a fill, a variation or an alternate chorus is <em>painted</em>: split the
-            clip where the change happens, double-click the piece, draw. Paint the same fork at the
-            other phrase ends (right-click a clip → <strong>play <em>name</em></strong>) and it
-            repeats exactly; right-click → <strong>back to…</strong> unbinds. The fork is an ordinary
-            drawn roll, so it renames, duplicates and stars into your library like any other.
+            From those two, the edits an arrangement is mostly made of: <strong>⌘E</strong> splits at
+            the marker (or at both edges of a marked span, on every track it crosses), and
+            <strong>⌘J</strong> makes one clip of what you have selected or marked. Drag an edge to
+            resize, ⌘D duplicates after, ⌘C / X / V move a stretch of song, ⌘Z undoes. Click a
+            track's name to select its row, double-click it to jump to its code. The arrangement
+            loops at the last clip's end, or drag in the ruler (or type <strong>len</strong>) to set
+            the length; <strong>snap</strong> sets how finely clips land,
+            <strong>+</strong>/<strong>−</strong> and ctrl+wheel zoom. Inside a clip the pattern runs
+            on absolute bar time, so a <code>&lt;a b&gt;</code> keeps alternating through the bars it
+            is painted out of.
+          </p>
+          <p>
+            <strong>A clip can play a different roll.</strong> Its title carries the name of the roll
+            it plays; double-click that name for a searchable list of every roll there is, and pick
+            one to bind these bars to it — type a name nothing has and you get a new roll, bound and
+            open to draw. That is how a fill, a variation or an alternate chorus is
+            <em>painted</em>: split the clip where the change happens (⌘E), give the piece its own
+            roll, draw it. Bind the same roll at the other phrase ends and it repeats exactly;
+            right-click → <strong>back to…</strong> puts a clip back on its track's own roll.
+            Double-click a clip's <em>body</em> to open whatever roll it plays in the piano roll.
           </p>
           <p>
             <strong>Loop regions</strong> make a song you can hold. Drag across the ruler to mark a
@@ -1096,7 +1111,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
             <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code> · <code>ctrl+b</code> · <code>ctrl+g</code></td><td>eval · stop · bounce · mixer</td></tr>
-            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code></td><td>the arrangement · release the loop region it is in</td></tr>
+            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code></td><td>the arrangement (again to close it) · release the loop region it is in</td></tr>
             <tr><td>right-click · <code>ctrl+J</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>

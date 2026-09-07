@@ -3414,8 +3414,16 @@ const routes = {
           // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
           // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
           const isPattern = value instanceof patternCore.Sig;
-          if (!isPattern && value !== TEMPO_BLOCK && value !== SCALE_BLOCK && !value?.poptartArrangeBlock && !b.label.startsWith('$')) {
+          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value?.poptartArrangeBlock;
+          if (!isPattern && !setupValue && !b.label.startsWith('$')) {
             throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
+          }
+          // `$:` is the one anonymous spelling that PROMISES sound - it is a track you didn't feel
+          // like naming, and the arrangement gives it a row on that basis. One that turns out to
+          // make none is worth saying out loud rather than erroring: setup belongs at column 0 with
+          // no label at all, and the buffer plays perfectly well either way.
+          if (!isPattern && !setupValue && b.kind === 'anon') {
+            eventLogQueue.push(`[blocks] a $: block makes no sound (${b.code.trim().split('\n')[0].slice(0, 40)}) - $: is for a track you didn't name; setup needs no label at all`);
           }
           return { ...b, sig: value };
         } catch (err) {
@@ -3506,8 +3514,13 @@ const routes = {
       const clock = arrangeClocks[deck];
       const posAt = (c) => clock.posAt(c);
       for (const b of built) {
-        if (b.label.startsWith('$')) continue;
-        b.sig = b.sig._arrangeGate(spans.get(b.label) ?? [], posAt);
+        const painted = spans.get(b.label);
+        // A BARE column-0 pattern (see labels.mjs's kinds) is setup that happens to make a sound,
+        // and the painter gives it no row - so it can never have been emptied on purpose, and
+        // silencing it for clips it had no way to get would be a part disappearing for nothing.
+        // Written tracks - named or `$:` - take the rule as it stands: no clips means silence.
+        if (!painted && b.kind === 'bare') continue;
+        b.sig = b.sig._arrangeGate(painted ?? [], posAt);
       }
       // ...and the clips that name a roll of their own rebind their track's, cycle by cycle (see
       // withArrangeRoll in signal.mjs). Filed rather than built in, so painting a fill re-files a

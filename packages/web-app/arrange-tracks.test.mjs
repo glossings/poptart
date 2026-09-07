@@ -79,7 +79,7 @@ const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arMigrateLegacy', 'arMig
   .join('\n\n');
 
 /** The lifted functions over a fake editor and (optionally) a fake open panel. */
-function panel({ code = '', arState = null } = {}) {
+function panel({ code = '', arState = null, liveAnon = [] } = {}) {
   const cm = fakeCm(code);
   const logged = [];
   const env = {
@@ -91,6 +91,12 @@ function panel({ code = '', arState = null } = {}) {
     logLine: (line) => logged.push(line),
     refoldAll: () => {},
     arSizeCanvas: () => {},
+    // The row refresh caches each track's own roll off the buffer; the rows themselves are what
+    // this file is about, so the lookup is stubbed rather than lifted.
+    arTrackRollUncached: () => null,
+    // Which anonymous blocks the last evaluation said were tracks - the painter takes the answer
+    // from the host rather than guessing at the source (see arLabels).
+    arLiveAnon: liveAnon,
     writeArrangeCall: () => {},
     drawArrange: () => {},
   };
@@ -107,32 +113,36 @@ const state = (clips = []) => ({ clips, rows: [], track: null });
 // ---------------------------------------------------------------------------------------------
 
 const SONG = [
+  'setbpm(140)', // bare, at column 0: setup, and never a row
   'kick: pianoroll("kick")',
   'bass: pianoroll("bass")',
   'hats: s("hh*8")',
-  '$: setbpm(140)',
+  '$: s("perc*4")', // a track you didn't feel like naming - a row like any other
 ].join('\n');
 
 test('a row per labelled block, in the order the buffer writes them', () => {
   const st = state();
   const { fns } = panel({ code: SONG, arState: st });
   fns.arRefreshRows();
-  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'bass', 'hats']);
+  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'bass', 'hats', '$2']);
   assert.ok(st.rows.every((r) => r.own));
   assert.equal(st.track, 'kick', 'and the first is selected, so a key press has a target');
 });
 
-test('an anonymous block is not a track and gets no row', () => {
+test('a $: track gets a row; a bare setup statement never does', () => {
+  // Both are anonymous by label - every block that isn't named gets a `$n` - but they were WRITTEN
+  // differently, and labels.mjs keeps that: `$:` promises sound, a column-0 statement is setup.
   const st = state();
   panel({ code: SONG, arState: st }).fns.arRefreshRows();
-  assert.ok(!st.rows.some((r) => r.label.startsWith('$')));
+  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'bass', 'hats', '$2'],
+    'the $: track is arrangeable, in its place in the buffer; setbpm() is not there at all');
 });
 
 test('clips whose block is gone keep an orphan row, after the real ones', () => {
   const st = state(arrangeMod.parseArrangement('kick,0,8 ghost,0,4'));
   const { fns } = panel({ code: SONG, arState: st });
   fns.arRefreshRows();
-  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'bass', 'hats', 'ghost']);
+  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'bass', 'hats', '$2', 'ghost']);
   assert.equal(st.rows.at(-1).own, false, 'drawn faded, and clearable - not invisible');
 });
 
@@ -159,8 +169,10 @@ test('a track typed since the last evaluation is filled into the definition, pan
   const p = panel({ code: `${SONG}\n\n_arrange("kick,0,8", { len: 8, tracks: ["kick", "bass"] })\n` });
   assert.equal(p.fns.arReconcileTracks(), true);
   const read = p.fns.arReadDef();
-  assert.deepEqual(read.opts.tracks, ['kick', 'bass', 'hats'], 'hats has joined');
+  assert.deepEqual(read.opts.tracks, ['kick', 'bass', 'hats', '$2'], 'hats and the $: track have joined');
   assert.deepEqual(read.clips.filter((c) => c.label === 'hats'), [{ label: 'hats', start: 0, len: 8, roll: null }]);
+  assert.deepEqual(read.clips.filter((c) => c.label === '$2'), [{ label: '$2', start: 0, len: 8, roll: null }],
+    'a $: track is filled like any other - it is a track you did not name, not setup');
   assert.deepEqual(read.clips.filter((c) => c.label === 'bass'), [], 'bass was already in it, and silent on purpose');
   assert.equal(p.fns.arReconcileTracks(), false, 'and again is a no-op');
 });
