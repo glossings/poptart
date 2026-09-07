@@ -10383,6 +10383,11 @@ let mixerEvalTimer = null;
 let mixerSuppressSync = false; // our own replaceRange must not bounce back through the code sync
 let mixerSyncTimer = null;
 let mixerViewMode = localStorage.getItem('poptart-mixer-view') === 'overall' ? 'overall' : 'tracks';
+// The view the plots actually draw. The engine analyzes tracks individually only up to a track
+// count (its analysis is DSP on the audio thread - see OscEngine#mixMeters); past it there are
+// no per-track frames to draw, so the plots show the master whatever the toggle says, and the
+// note explains. The toggle keeps its setting for when the song shrinks back under the cap.
+const mixerEffectiveView = () => (mixerState?.perTrack === false ? 'overall' : mixerViewMode);
 // Labels the last eval built as tracks, muted ones included (renderTracks records it). What
 // qualifies a silenced block for a strip - see the section comment.
 let mixerKnownTracks = [];
@@ -10515,6 +10520,8 @@ async function openMixer() {
     raf: 0,
     lastArmAt: 0, // last re-POST of monitor-on, so a dead engine isn't spammed at poll rate
     monitorError: null,
+    perTrack: true, // per-track band frames are coming (see mixerEffectiveView)
+    perTrackMax: 0,
   };
   updateMixerViewBtn();
   updateMixerFreezeBtn();
@@ -10552,7 +10559,12 @@ function closeMixer() {
 }
 
 function updateMixerViewBtn() {
-  mixerViewBtn.textContent = mixerViewMode === 'tracks' ? 'by track' : 'overall';
+  const pinned = mixerEffectiveView() !== mixerViewMode;
+  mixerViewBtn.textContent = mixerEffectiveView() === 'tracks' ? 'by track' : 'overall';
+  mixerViewBtn.disabled = pinned;
+  mixerViewBtn.title = pinned
+    ? `per-track analysis is off past ${mixerState.perTrackMax} playing tracks - the plots show the master`
+    : 'color-coded per track, or the summed master alone';
 }
 
 // The plots take their bitmap size from their laid-out size, at device resolution; drawing code
@@ -10587,6 +10599,15 @@ async function mixerPoll() {
     mixerState.monitorError = null;
   }
   if (s.bandFreqs?.length) mixerState.bandFreqs = s.bandFreqs;
+  const perTrack = s.perTrack !== false;
+  if (perTrack !== mixerState.perTrack) {
+    mixerState.perTrack = perTrack;
+    mixerState.perTrackMax = s.perTrackMax ?? 0;
+    // The plots' sources just changed under the toggle - same reason the toggle itself clears
+    // the freeze hold.
+    mixerState.freezeMax.clear();
+    updateMixerViewBtn();
+  }
 
   const tracks = s.tracks ?? [];
   // A renamed-away label is forgotten the moment the engine stops reporting it - i.e. as soon as
@@ -10614,6 +10635,7 @@ async function mixerPoll() {
   mixerNoteEl.textContent =
     !mixerState.order.length ? 'nothing playing — evaluate a pattern and its tracks appear here'
     : mixerState.monitorError ? `meters offline: ${mixerState.monitorError}`
+    : !mixerState.perTrack ? `${tracks.length} tracks playing — per-track analysis stays off past ${mixerState.perTrackMax} (it runs on the audio thread), so the plots show the master`
     : '';
 }
 
@@ -11345,7 +11367,7 @@ function mixerBandAngle(b) {
 function mixerPlotSources(colors) {
   const alive = (disp) => disp && disp.some((b) => bandAmp(b) > 1e-5);
   let out;
-  if (mixerViewMode === 'overall') {
+  if (mixerEffectiveView() === 'overall') {
     const keep = mixerState.masterDisp
       && (alive(mixerState.masterDisp) || (mixerState.freeze && mixerState.freezeMax.has('*')));
     out = keep ? [{ key: '*', disp: mixerState.masterDisp, color: colors.accent }] : [];

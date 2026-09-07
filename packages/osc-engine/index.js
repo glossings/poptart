@@ -254,6 +254,13 @@ const MIX_BAND_FREQS = Array.from({ length: MIX_BAND_COUNT }, (_, i) =>
 // mid vs side IS the phase-correlation axis, and without them a magnitude-only display can
 // never leave the in-phase ±45° wedge (see the client's imager).
 const MIX_SPEC_VALUES_PER_BAND = 4;
+// The most playing tracks that each get their own band analyzer. Every analyzer is ~1.6% of a
+// core of DSP (measured by NRT render at 48k/256, 2026-09-07 - the sc side has the numbers) on
+// the single thread the song's own plugins run on, so the analysis has a budget: this many
+// tracks plus the master is ~15%. Past it the tracks get a meter-only tap (strips still meter,
+// ~0.2% each) and only the master is analyzed. Unbudgeted, a ten-track song's worth of the
+// original analyzer overran the audio thread - full-scale digital noise, not a display glitch.
+const MIX_SPEC_TRACK_MAX = 8;
 
 // The osc package with `metadata: true` requires args as { type, value } objects - raw JS
 // values would throw. Integers map to 'i', other numbers 'f', strings 's'.
@@ -741,13 +748,23 @@ class OscEngine {
     this._send('/poptart/tapTrack', [trackId, on ? 1 : 0]);
   }
 
-  // Global mixer monitoring: while on, the engine taps EVERY live track (and the master bus) with
+  // Global mixer monitoring: while on, the engine taps the given tracks (and the master bus) with
   // an analysis synth and streams per-track peak/RMS through onMixLevel plus per-band L/R
   // amplitudes through onMixSpec - what the editor's mixer modal draws. The band centers ride
-  // along so the analyzer is built against MIX_BAND_FREQS (see there). Idempotent; tracks created
-  // while on join by themselves.
-  mixMeters(on) {
-    this._send('/poptart/mixMeters', [on ? 1 : 0, JSON.stringify(MIX_BAND_FREQS)]);
+  // along so the analyzer is built against MIX_BAND_FREQS (see there). `trackIds` is the set to
+  // tap - the caller's playing tracks, re-sent whenever that set changes; a track named before it
+  // exists is tapped when it appears. Returns whether the tracks get band analysis of their own:
+  // past MIX_SPEC_TRACK_MAX of them they are metered only and the analyzer runs on the master
+  // alone (see there). Idempotent.
+  mixMeters(on, trackIds = []) {
+    const perTrack = trackIds.length <= MIX_SPEC_TRACK_MAX;
+    this._send('/poptart/mixMeters', [on ? 1 : 0, JSON.stringify(MIX_BAND_FREQS), JSON.stringify(trackIds), perTrack ? 1 : 0]);
+    return perTrack;
+  }
+
+  /** The most tracks mixMeters analyzes per track before falling back to the master alone. */
+  mixSpecTrackMax() {
+    return MIX_SPEC_TRACK_MAX;
   }
 
   // DJ deck meters: while on, one reader synth per deck streams the deck's summed PRE-FADER
@@ -1590,6 +1607,8 @@ class OscEngine {
 
 module.exports = {
   OscEngine,
+  MIX_BAND_FREQS,
+  MIX_SPEC_TRACK_MAX,
   resolveSclangPath,
   knownSclangLocations,
   onPath,

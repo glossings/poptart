@@ -1369,6 +1369,7 @@ async function restartEngine() {
     mixMonitorOn = false;
     clearTimeout(mixOffTimer);
     mixOffTimer = null;
+    mixArmedIds = '';
     mixLevels.clear();
     mixSpecs.clear();
     transport?.stop(); // playback is over - freeze the clock at cycle 0 until the next eval
@@ -2404,6 +2405,10 @@ function releaseRecTap(label) {
 
 let mixMonitorOn = false;
 let mixOffTimer = null; // re-armed by every status poll; firing means the mixer went away
+// What the engine was last told to tap (the playing tracks' engine ids, joined) and whether it
+// analyzes them individually - see mixArm.
+let mixArmedIds = '';
+let mixPerTrack = true;
 const mixLevels = new Map(); // key -> queued { peakL, rmsL, peakR, rmsR, at } ('*' = master bus)
 const mixSpecs = new Map(); // key -> latest band frame [[l, r], ...] in mixBandFreqs() order
 
@@ -2438,17 +2443,38 @@ function handleMixSpec(key, values) {
   mixSpecs.set(key, bands);
 }
 
+// The tracks the engine should tap: the ones with a scheduler, i.e. playing. Not every engine
+// track - an idle one kept warm for its label's return would burn an analyzer on silence, and
+// the analyzer's budget (engine.mixSpecTrackMax) counts what it taps. In label order, so the
+// staggered arming lights the strips up left to right.
+function mixTapIds() {
+  return [...schedulers.keys()].map((label) => trackIds.get(label)).filter(Boolean);
+}
+
+// Tell the engine what to tap. Called on the way on and from every status poll: the playing set
+// changes under an open mixer with every eval, and the engine only ever knows what it was last
+// told. A no-change poll sends nothing.
+function mixArm() {
+  const ids = mixTapIds();
+  const key = ids.join(' ');
+  if (mixMonitorOn && key === mixArmedIds) return;
+  mixPerTrack = engine.mixMeters(true, ids);
+  mixArmedIds = key;
+}
+
 function setMixMonitor(on) {
   if (on && !engine) throw new Error(engineError ?? 'engine not loaded');
   clearTimeout(mixOffTimer);
   mixOffTimer = null;
   try {
-    if (engine) engine.mixMeters(on);
+    if (on) mixArm();
+    else if (engine) engine.mixMeters(false);
   } catch (err) {
     if (on) throw err; // turning OFF a dead engine is fine - the taps died with it
   }
   mixMonitorOn = !!on && !!engine;
   if (!mixMonitorOn) {
+    mixArmedIds = '';
     mixLevels.clear();
     mixSpecs.clear();
   }
@@ -2464,6 +2490,9 @@ function mixStatus() {
   if (mixMonitorOn) {
     clearTimeout(mixOffTimer);
     mixOffTimer = setTimeout(() => setMixMonitor(false), MIX_AUTO_OFF_MS);
+    // Follow the playing set (an eval since the last poll). A send that fails is an engine on
+    // its way down; the restart path flags monitoring off and the client re-arms from there.
+    if (engine) try { mixArm(); } catch { /* engine going down */ }
   }
   const cutoff = Date.now() - 1000;
   const levels = {};
@@ -2478,6 +2507,10 @@ function mixStatus() {
     levels,
     spec: Object.fromEntries(mixSpecs),
     bandFreqs: engine ? engine.mixBandFreqs() : [],
+    // Whether the tracks are analyzed individually or the plots have only the master - the
+    // engine's analysis budget, see OscEngine#mixMeters. The max is what the client's note cites.
+    perTrack: mixPerTrack,
+    perTrackMax: engine ? engine.mixSpecTrackMax() : 0,
     transport: transport?.snapshot(),
   };
 }

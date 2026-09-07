@@ -167,16 +167,23 @@ var namedBuses, busGroup, acquireBus, releaseBus;
 // sits at the TAIL of the node tree, so both read a bus the track synth has already written this
 // block. recTaps holds one entry per tapped track: (bus:, meter:, disk:, buf:, path:).
 var recGroup, recTaps, startTap, stopTap;
-// Global mixer monitoring ('/poptart/mixMeters'): while the editor's mixer is open, every track's
-// post-fader output is copied to a private bus (the mixOut/mixSend args, parked exactly like the
-// recorder's) and an analysis synth on it streams peak/RMS levels plus a log-spaced band analyzer
-// (per-band L/R amplitude - one feed serving both the spectrum and the stereo-field display) back
-// to Node. A second analysis synth on hardware bus 0 reads the summed master, forwarded under the
-// reserved key "*" (never a track label - labels are identifiers). The analyzer's band centers
-// come FROM Node with the on message, so the frequencies the client draws are by construction the
-// ones being measured; the SynthDef is built lazily from them. mixOn makes createTrack tap tracks
-// born while the mixer is open.
+// Global mixer monitoring ('/poptart/mixMeters'): while the editor's mixer is open, each PLAYING
+// track's post-fader output is copied to a private bus (the mixOut/mixSend args, parked exactly
+// like the recorder's) and an analysis synth on it streams peak/RMS levels plus a log-spaced band
+// analyzer (per-band L/R amplitude - one feed serving both the spectrum and the stereo-field
+// display) back to Node. A second analysis synth on hardware bus 0 reads the summed master,
+// forwarded under the reserved key "*" (never a track label - labels are identifiers). The
+// analyzer's band centers come FROM Node with the on message, so the frequencies the client draws
+// are by construction the ones being measured; the SynthDef is built lazily from them.
+//
+// Node also says WHICH tracks to tap (mixWanted - the ones with a scheduler; an idle track kept
+// warm for its label's return would burn a full analyzer on silence) and whether they get the
+// band analyzer at all (mixPerTrack). The analyzer is real DSP on the one thread the song runs
+// on, so past a track count Node keeps (MIX_SPEC_TRACK_MAX in ../index.js) the tracks get a
+// meter-only tap and the band analysis runs on the master alone. mixReconcile brings the taps to
+// that description - on each message, and from createTrack for a wanted track born later.
 var mixTaps, mixOn = false, mixBandFreqs, mixMaster, buildMixDef, mixForwards;
+var mixWanted, mixPerTrack = true, mixReconcile, mixReconciling = false, mixDirty = false;
 var startMixTap, stopMixTap, stopMixMaster;
 // DJ deck meters ('/poptart/deckMeters'): two stereo meter buses (A at .index, B at .index + 2)
 // that every track synth sums its PRE-FADER signal into (the mdeck birth arg says which, -1 for
@@ -1373,7 +1380,8 @@ server.waitForBoot {
     // Recorder taps read what the track synths wrote this block, so their group goes at the tail.
     recTaps = IdentityDictionary.new; // trackId (Symbol) -> (bus:, meter:, disk:, buf:, path:)
     // Mixer analysis synths share the tail group for the same read-after-write reason.
-    mixTaps = IdentityDictionary.new; // trackId (Symbol) -> (bus:, synth:, funcs:)
+    mixTaps = IdentityDictionary.new; // trackId (Symbol) -> (bus:, synth:, funcs:, full:)
+    mixWanted = IdentitySet.new; // trackIds Node wants tapped - see the mix var declarations
     recGroup = Group.new(server, \addToTail);
     server.sync;
     "poptart: server booted, ready".postln;
@@ -1441,8 +1449,9 @@ OSCdef(\poptartCreateTrack, { |msg|
                 held: 0                           // active-note count, drives env gates
             );
             // A track born while the mixer is open joins its meters right away (an eval that adds
-            // a block mid-session), instead of staying dark until the mixer is reopened.
-            if (mixOn) { startMixTap.(key) };
+            // a block mid-session), instead of staying dark until the mixer is reopened - if Node
+            // has asked for it; the ask may have arrived while this track was still pending.
+            if (mixOn) { mixReconcile.() };
         };
     };
 }, '/poptart/createTrack');
@@ -3071,13 +3080,30 @@ OSCdef(\poptartTapTrack, { |msg|
 // Why four values and not two: l and r give level and left/right balance, but a magnitude-only
 // pair carries no phase, and phase is exactly what a goniometer's outer half shows. BPF is
 // linear, so the mid/side sum and difference are taken on the ALREADY FILTERED pair - two
-// filters per band, four envelope followers - and the client gets a real correlation axis for
-// nothing but a little arithmetic. 96 bands is ~192 biquads plus 384 followers per monitored
-// track: a couple of percent of a core, and only while the mixer is open.
+// filters per band, four followers - and the client gets a real correlation axis for nothing
+// but a little arithmetic.
+//
+// What it costs, measured (NRT render, 48k/256, 2026-09-07): about 1.6% of a core per instance,
+// and it all lands on the one thread the song's plugins run on. The followers are the expensive
+// part, not the filters: the same bank with Amplitude.kr followers was 4.8%, which on a ten-track
+// song came to more than half a core and overran the audio thread - heard as full-scale digital
+// noise. A per-frame peak is the same picture (the client runs its own attack/release on every
+// band anyway; the engine was smoothing twice) at a third of the price.
+//
+// The meter-only def is the fallback past MIX_SPEC_TRACK_MAX tracks: ~0.2% each, strips keep
+// metering, the band analysis runs on the master alone.
 buildMixDef = { |freqs|
     mixBandFreqs = freqs;
-    SynthDef(\poptart_mix_analysis, { |bus|
-        var sig = In.ar(bus, 2);
+    SynthDef(\poptart_mix_analysis, {
+        // The frame clock is the FIRST UGen on purpose, and the bus a body control rather than
+        // an argument. sclang's graph sort is a stack seeded with the antecedent-free UGens in
+        // reverse creation order: created anywhere later, the Impulse sinks under In and the
+        // 192 filters get scheduled before it, every follower has to wait for it, and all 384
+        // filtered signals are live at once - past scsynth's default 64 wire buffers, so the
+        // def silently fails to load ("exceeded number of interconnect buffers"). Created first
+        // it is popped first, and the sort interleaves filter and follower as before (6 live).
+        var frame = Impulse.kr(20);
+        var sig = In.ar(\bus.kr, 2);
         // rq 0.1 (Q = 10) against ~1/11-octave spacing: each filter is a little wider than the
         // gap to its neighbour, so the bank has no holes but still resolves a note rather than
         // smearing a whole third into one hump - the "missing detail" a wide bank loses. At
@@ -3085,40 +3111,48 @@ buildMixDef = { |freqs|
         var amps = freqs.collect { |f|
             var band = BPF.ar(sig, f, 0.1);
             var l = band[0], r = band[1];
-            // 0.02s attack / 0.25s release: transients register, the fall is readable.
-            [l, r, (l + r) * 0.5, (l - r) * 0.5].collect { |x| Amplitude.kr(x, 0.02, 0.25) };
+            // Peak over the frame: reset by the same trigger the reply reads on, and Peak
+            // outputs before it resets, so each frame carries the whole 50ms window's maximum.
+            [l, r, (l + r) * 0.5, (l - r) * 0.5].collect { |x| Peak.kr(x, frame) };
         };
         SendPeakRMS.kr(sig, 20, 3, '/poptart/mixLevel');
-        SendReply.kr(Impulse.kr(20), '/poptart/mixSpec', amps.flat);
+        SendReply.kr(frame, '/poptart/mixSpec', amps.flat);
+    }).add;
+    SynthDef(\poptart_mix_meter, { |bus|
+        SendPeakRMS.kr(In.ar(bus, 2), 20, 3, '/poptart/mixLevel');
     }).add;
 };
 
 // Both replies answer to sclang and carry only a node id - forward them to Node tagged with the
 // key they meter ("*" for the master; a track label can't collide with it, labels are
 // identifiers). Layouts as the rec meter documents: [nodeID, replyID, values...], values from
-// m[3] with m[0] the address.
-mixForwards = { |key, synth|
-    [
+// m[3] with m[0] the address. A meter-only synth has no band frames to forward.
+mixForwards = { |key, synth, full = true|
+    var funcs = [
         OSCFunc({ |m|
             nodeAddr.sendMsg('/poptart/mixLevel', key, m[3], m[4], m[5], m[6]);
-        }, '/poptart/mixLevel', server.addr, argTemplate: [synth.nodeID]),
-        OSCFunc({ |m|
-            nodeAddr.performList(\sendMsg, ['/poptart/mixSpec', key] ++ m.copyRange(3, m.size - 1));
-        }, '/poptart/mixSpec', server.addr, argTemplate: [synth.nodeID])
+        }, '/poptart/mixLevel', server.addr, argTemplate: [synth.nodeID])
     ];
+    if (full) {
+        funcs = funcs.add(OSCFunc({ |m|
+            nodeAddr.performList(\sendMsg, ['/poptart/mixSpec', key] ++ m.copyRange(3, m.size - 1));
+        }, '/poptart/mixSpec', server.addr, argTemplate: [synth.nodeID]));
+    };
+    funcs
 };
 
 // Tap one track for the mixer: private bus, the track's mix send pointed at it, an analysis
-// synth reading it. Idempotent, and independent of the recorder's tap (separate send args), so
-// an open record panel and the mixer never fight over one bus.
-startMixTap = { |key|
+// synth reading it (the full analyzer, or the meter-only def when `full` is false). Idempotent,
+// and independent of the recorder's tap (separate send args), so an open record panel and the
+// mixer never fight over one bus.
+startMixTap = { |key, full = true|
     var track = tracks[key];
     if (mixTaps[key].isNil and: { track.isKindOf(Event) }) {
         var bus = Bus.audio(server, 2);
-        var synth = Synth(\poptart_mix_analysis, [\bus, bus.index],
+        var synth = Synth(if (full) { \poptart_mix_analysis } { \poptart_mix_meter }, [\bus, bus.index],
             target: recGroup, addAction: \addToTail);
         track[\synth].set(\mixOut, bus.index, \mixSend, 1);
-        mixTaps[key] = (bus: bus, synth: synth, funcs: mixForwards.(key, synth));
+        mixTaps[key] = (bus: bus, synth: synth, funcs: mixForwards.(key, synth, full), full: full);
     };
 };
 
@@ -3141,37 +3175,71 @@ stopMixMaster = {
     };
 };
 
-// Mixer on/off. On: (re)build the analyzer if the band list changed - tearing down any running
-// analysis synths first, they were built against the old def - then tap every live track and the
-// master. Off: tear it all down and re-park the sends. Idempotent both ways; tracks created
-// while on are tapped by createTrack's own hook.
+// Bring the taps to what Node last asked for: every wanted track that exists gets a tap of the
+// current kind (a tap of the other kind is replaced), everything else is taken down, and the
+// master analyzer runs while on. Synths are started a beat apart rather than in one message:
+// each analyzer is close to a thousand UGens, and scsynth builds a graph on the audio thread, so
+// ten of them landing in one block was itself a dropout before the first frame was measured.
+// One reconcile runs at a time; a request arriving mid-run (a track born during the stagger)
+// marks it dirty and the loop goes round again against the newest description.
+mixReconcile = {
+    if (mixReconciling) { mixDirty = true } {
+        fork {
+            mixReconciling = true;
+            mixDirty = true;
+            while { mixDirty } {
+                mixDirty = false;
+                mixTaps.keys.do { |key|
+                    if (mixWanted.includes(key).not or: { mixTaps[key][\full] != mixPerTrack }) {
+                        stopMixTap.(key);
+                    };
+                };
+                if (mixOn.not) { stopMixMaster.() };
+                mixWanted.do { |key|
+                    if (mixOn and: { mixTaps[key].isNil } and: { tracks[key].isKindOf(Event) }) {
+                        startMixTap.(key, mixPerTrack);
+                        0.02.wait;
+                    };
+                };
+                if (mixOn and: { mixMaster.isNil }) {
+                    var synth = Synth(\poptart_mix_analysis, [\bus, 0],
+                        target: recGroup, addAction: \addToTail);
+                    mixMaster = (synth: synth, funcs: mixForwards.("*", synth));
+                };
+            };
+            mixReconciling = false;
+        };
+    };
+};
+
+// Mixer on/off. On: [1, bandCentersJSON, trackIdsJSON, perTrack] - (re)build the analyzer if the
+// band list changed, tearing down any running analysis synths first (they were built against the
+// old def), then reconcile to the track list. Node re-sends whenever the playing set changes.
+// Off: tear it all down and re-park the sends. Idempotent both ways.
 OSCdef(\poptartMixMeters, { |msg|
     var on = msg[1].asInteger;
     fork {
         if (on == 1) {
             var freqs = msg[2] !? { |j| j.asString.parseJSON };
+            var wanted = msg[3] !? { |j| j.asString.parseJSON };
             // parseJSON hands numbers back as strings (and nil on garbage) - normalize to floats,
             // and never build an analyzer with no bands.
             freqs = (freqs ? []).collect(_.asFloat);
             if (freqs.isEmpty) { freqs = [200.0, 2000.0, 8000.0] };
             if (mixBandFreqs != freqs) {
-                tracks.keysDo { |key| stopMixTap.(key) };
+                mixTaps.keys.do { |key| stopMixTap.(key) };
                 stopMixMaster.();
                 buildMixDef.(freqs);
                 server.sync;
             };
             mixOn = true;
-            tracks.keysDo { |key| startMixTap.(key) };
-            if (mixMaster.isNil) {
-                var synth = Synth(\poptart_mix_analysis, [\bus, 0],
-                    target: recGroup, addAction: \addToTail);
-                mixMaster = (synth: synth, funcs: mixForwards.("*", synth));
-            };
+            mixWanted = IdentitySet.newFrom((wanted ? []).collect(_.asSymbol));
+            mixPerTrack = (msg[4] ? 1).asInteger == 1;
         } {
             mixOn = false;
-            tracks.keysDo { |key| stopMixTap.(key) };
-            stopMixMaster.();
+            mixWanted = IdentitySet.new;
         };
+        mixReconcile.();
     };
 }, '/poptart/mixMeters');
 

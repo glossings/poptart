@@ -3062,6 +3062,12 @@ li.CodeMirror-hint-active {
   letter-spacing: normal;
   min-width: 64px;
 }
+/* Pinned to "overall" while the engine analyzes only the master (too many tracks - the note
+   says so). Greyed in place, as the pianoroll head does with its keyless buttons. */
+.mixer-view-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
 
 .mixer-plots {
   display: flex;
