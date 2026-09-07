@@ -59,6 +59,14 @@ test('a variation joins the arrangement with nothing painted', () => {
   assert.deepEqual(out.added, [], 'but no clip is made for it');
 });
 
+test('a group joins the arrangement with nothing painted, and keeps its row', () => {
+  // A group has no notes of its own - its variations are what goes on its row - so a clip of it
+  // would play nothing. It is still a track, and a row.
+  const out = reconcileArrangement(parseArrangement('kick#main,0,16'), { len: 16, tracks: [] }, ['kick', 'kick#main', 'hat'], ['kick']);
+  assert.deepEqual(out.tracks, ['kick', 'kick#main', 'hat']);
+  assert.deepEqual(out.added, [{ label: 'hat', start: 0, len: 16 }], 'the plain track fills; the group does not');
+});
+
 test('hand-chosen clip colors are kept, and anything that is not a color is not', () => {
   const o = normalizeArrangeOpts({ colors: { 'kick#fill': '#FF8800', kick: 'red', ' ': '#000000' } });
   assert.deepEqual(o.colors, { 'kick#fill': '#ff8800' });

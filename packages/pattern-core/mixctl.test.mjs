@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits } from './src/mixctl.mjs';
+import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits, groupEdits, isGroupBlock } from './src/mixctl.mjs';
 import { splitLabeledBlocks } from './src/labels.mjs';
 
 // Apply an edit the way CodeMirror would, so assertions read as the resulting buffer.
@@ -233,6 +233,47 @@ test('renameEdits: renaming a variation moves that block alone, clips included',
   assert.equal(alone, 'drums#a: s("mbd*4")\nkick#fill: s("mbd*8")\n_arrange("drums#a,0,8 kick#fill,6,2")');
 });
 
+const NESTED = [
+  'kick: s("mbd*4")',
+  '  #fill: s("mbd*8")',
+  '  #outro: s("mbd*4").fx("FilterFreak 1")',
+  'hats: s("hh*8")',
+  '_arrange("kick,0,8 kick#fill,6,2 hats,0,8 kick#outro,8,4")',
+].join('\n');
+
+test('renameEdits: a nested family follows its base with no edit to the variations themselves', () => {
+  const res = renameEdits(NESTED, 'kick', 'drums');
+  assert.equal(res.family, 2);
+  assert.equal(appliedAll(NESTED, res), [
+    'drums: s("mbd*4")',
+    '  #fill: s("mbd*8")', // untouched: its name was never in it
+    '  #outro: s("mbd*4").fx("FilterFreak 1")',
+    'hats: s("hh*8")',
+    '_arrange("drums,0,8 drums#fill,6,2 hats,0,8 drums#outro,8,4")',
+  ].join('\n'));
+});
+
+test('renameEdits: a nested variation renames within its family, and #name is short for base#name', () => {
+  const out = appliedAll(NESTED, renameEdits(NESTED, 'kick#fill', '#roll'));
+  assert.match(out, /^  #roll: s\("mbd\*8"\)$/m);
+  assert.match(out, /kick#roll,6,2/);
+  assert.equal(appliedAll(NESTED, renameEdits(NESTED, 'kick#fill', 'kick#roll')), out, 'the long spelling is the same edit');
+});
+
+test('renameEdits: a nested variation cannot be moved to another base by renaming', () => {
+  assert.match(renameEdits(NESTED, 'kick#fill', 'hats#fill').error, /written under kick/);
+  assert.match(renameEdits(NESTED, 'kick#fill', 'fill').error, /written under kick/);
+});
+
+test('flagEdit: a nested variation takes its markers around the #', () => {
+  const muted = applied(NESTED, flagEdit(NESTED, 'kick#fill', { muted: true }));
+  assert.match(muted, /^  _#fill: /m);
+  const [, fill] = splitLabeledBlocks(muted);
+  assert.equal(fill.label, 'kick#fill');
+  assert.equal(fill.muted, true);
+  assert.match(applied(muted, flagEdit(muted, 'kick#fill', {})), /^  #fill: /m, 'and back');
+});
+
 test('renameEdits: the new name is what the splitter reads back', () => {
   const code = '_Sbass: s("bd*4").audio("bass")';
   const out = appliedAll(code, renameEdits(code, 'bass', 'sub2'));
@@ -241,4 +282,43 @@ test('renameEdits: the new name is what the splitter reads back', () => {
   assert.equal(block.muted, true);
   assert.equal(block.soloed, true);
   assert.match(out, /\.audio\("sub2"\)/);
+});
+
+test('isGroupBlock: the head call is what makes a group', () => {
+  const [g, m, t] = splitLabeledBlocks('kick: group().postgain(0.8)\n  #main: s("bd*4")\nhat: audio("bus:kick")');
+  assert.equal(isGroupBlock(g), true);
+  assert.equal(isGroupBlock(m), false);
+  assert.equal(isGroupBlock(t), false, 'reading a bus by hand is not a group');
+  assert.equal(isGroupBlock(splitLabeledBlocks('_kick:group ( )')[0]), true, 'markers and spacing aside');
+});
+
+test('groupEdits: the track becomes a group and what it played becomes #main, clips and all', () => {
+  const code = 'kick: s("mbd*4")\n  .postgain(0.8)\nhat: s("hh*8")\n_arrange("kick,0,8 kick,12,4 hat,0,16", { len: 16, tracks: "kick hat" })';
+  const res = groupEdits(code, 'kick');
+  assert.equal(res.member, 'kick#main');
+  const out = appliedAll(code, res);
+  assert.equal(out, 'kick: group()\n  #main: s("mbd*4")\n  .postgain(0.8)\nhat: s("hh*8")\n_arrange("kick#main,0,8 kick#main,12,4 hat,0,16", { len: 16, tracks: "kick hat" })');
+  const [g, m] = splitLabeledBlocks(out);
+  assert.equal(isGroupBlock(g), true);
+  assert.equal(m.label, 'kick#main');
+  assert.equal(m.nested, true);
+  assert.match(m.code, /\.postgain\(0\.8\)/, 'the whole chain went down with it');
+});
+
+test('groupEdits: markers stay on the group, a body on the next line is left there', () => {
+  const code = '_Skick:\n  s("mbd*4")';
+  const out = appliedAll(code, groupEdits(code, 'kick'));
+  assert.equal(out, '_Skick: group()\n  #main: \n  s("mbd*4")');
+  const [g, m] = splitLabeledBlocks(out);
+  assert.equal(g.muted && g.soloed, true);
+  assert.equal(m.label, 'kick#main');
+  assert.match(m.code, /s\("mbd\*4"\)/);
+});
+
+test('groupEdits: refuses a group, a variation, a missing block, and a taken member name', () => {
+  assert.equal(groupEdits('kick: group()\n  #main: s("bd")', 'kick'), null);
+  assert.equal(groupEdits('kick: s("bd")\n  #fill: s("bd*2")', 'kick#fill'), null);
+  assert.equal(groupEdits('kick: s("bd")', 'hat'), null);
+  assert.equal(groupEdits('kick: s("bd")\n  #main: s("bd*2")', 'kick'), null);
+  assert.equal(groupEdits('kick: s("bd")\n  #main: s("bd*2")', 'kick', 'orig').member, 'kick#orig');
 });

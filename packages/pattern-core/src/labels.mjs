@@ -29,6 +29,17 @@
 // a plain JS labeled statement to everything that doesn't know about variations.
 const LABEL_RE = /^([A-Za-z_$][\w$]*(?:#[\w$]+)?)\s*:(?!:)/;
 
+// The NESTED spelling of a variation: an INDENTED `#name:` is a variation of the block above it -
+//
+//   kick: s("mbd*4")
+//     #1: s("mbd*4").i(3)
+//     #outro: s("mbd*4").fx("FilterFreak 1")
+//
+// - the same block `kick#outro:` at column 0 would be, but written under its base, where the
+// grouping can be seen and the base's name is never repeated (so renaming the base renames
+// nothing else). Mute and solo markers wrap the token as they wrap a label: `_#1:`, `#1_:`.
+const NESTED_RE = /^[ \t]+([_S]*#[\w$]+[_S]*)\s*:(?!:)/;
+
 // Does the state a block is in continue into `line`, rather than `line` starting a new
 // expression? Two ways to continue: (1) the block ends mid-expression - unbalanced (){}[], an
 // unclosed backtick template, or an open block comment (tracked by `scan`, which is string/
@@ -125,7 +136,7 @@ function scan(state, text, mask = null, base = 0) {
 }
 
 /**
- * @returns {Array<{ label: string, base: string, variant: string|null, kind: 'labeled'|'anon'|'bare',
+ * @returns {Array<{ label: string, base: string, variant: string|null, kind: 'labeled'|'anon'|'bare', nested: boolean,
  *   muted: boolean, soloed: boolean, ownMuted: boolean, ownSoloed: boolean,
  *   code: string, start: number, end: number }>}
  *   `start`/`end` are character offsets of the block in the original source (the label line
@@ -139,6 +150,12 @@ function scan(state, text, mask = null, base = 0) {
  * arrangement: at any bar a row plays one of its variations, and a variation with no clips plays
  * nothing. `base` is the row (`kick`), `variant` the name after the `#` (`outro`, or null on the
  * base itself); `label` stays the whole thing, which is what the engine knows the track as.
+ *
+ * A variation is usually written NESTED - an indented `#name:` under its base (see NESTED_RE),
+ * which is the same block with the base's name left off: `nested` says which spelling a block
+ * was written in, for the editor, which folds a nested family under its base and writes the
+ * label back in the form it found. A nested variation belongs to the nearest labeled block
+ * above it (its base, or a sibling's), so a family reads top to bottom.
  *
  * Muting or soloing the base takes the whole group with it - `_kick:` silences every `kick#…` -
  * since the base is the track as a person thinks of it and the variations are its parts. A
@@ -172,22 +189,32 @@ export function splitLabeledBlocks(source) {
     }
   };
 
+  // The base a nested `#name:` belongs to: that of the nearest labeled block above it, whatever
+  // that block is - a base, or a variation written either way, whose base it then shares. Setup
+  // lines between them (a bare `setbpm(140)`) don't come into it.
+  let lastBase = null;
+
   for (const line of lines) {
     // Only look for a label where the previous lines have left us in code - inside an open
     // `/*…*/` or `` `…` ``, `$: …` is prose, not a new block.
-    const m = current && endsUnparsed(state) ? null : LABEL_RE.exec(line);
-    if (m) {
+    const inCode = !(current && endsUnparsed(state));
+    const m = inCode ? LABEL_RE.exec(line) : null;
+    const nested = !m && inCode && lastBase != null ? NESTED_RE.exec(line) : null;
+    if (m || nested) {
       push();
-      const meta = parseLabel(m[1], () => `$${++anonCount}`);
+      const meta = m ? parseLabel(m[1], () => `$${++anonCount}`) : parseNested(nested[1], lastBase);
+      const raw = (m ?? nested)[0];
       current = {
         ...meta,
         kind: meta.anon ? 'anon' : 'labeled',
+        nested: !m, // written as an indented `#name:` under its base (see NESTED_RE)
         // Blank out the label instead of slicing it off, so positions inside `code` equal
         // positions inside `source` minus `start` - the highlighter depends on that.
-        code: ' '.repeat(m[0].length) + line.slice(m[0].length),
+        code: ' '.repeat(raw.length) + line.slice(raw.length),
         start: offset,
         end: offset,
       };
+      lastBase = meta.base;
       state = scan(newScan(), current.code);
       awaitingBody = !hasCode(current.code);
     } else if (current && (continuesBlock(state, line) || (awaitingBody && hasCode(line)))) {
@@ -202,7 +229,7 @@ export function splitLabeledBlocks(source) {
       // shared `const`) is a setup block that binds/acts for the blocks below - see server.js.
       push();
       const label = `$${++anonCount}`;
-      current = { label, base: label, variant: null, kind: 'bare', muted: false, soloed: false, ownMuted: false, ownSoloed: false, code: line, start: offset, end: offset };
+      current = { label, base: label, variant: null, kind: 'bare', nested: false, muted: false, soloed: false, ownMuted: false, ownSoloed: false, code: line, start: offset, end: offset };
       state = scan(newScan(), line);
       awaitingBody = false;
     } else if (current) {
@@ -299,14 +326,15 @@ function hasCode(text) {
   return false;
 }
 
-function parseLabel(raw, nextAnonName) {
+/**
+ * The mute/solo markers off a label token: `_bassS` -> { name: 'bass', muted, soloed }. Order
+ * matters: strip mute underscores first so `_bassS:` works; keep stripping so `S_bass:` does too.
+ * Never strip a marker if it would leave an empty name.
+ */
+function stripMarkers(raw) {
   let name = raw;
   let muted = false;
   let soloed = false;
-  let anon = false;
-
-  // Order matters: strip mute underscores first so `_bassS:` works; keep stripping so
-  // `S_bass:` does too. Never strip a marker if it would leave an empty name.
   let changed = true;
   while (changed && name.length > 1) {
     changed = false;
@@ -320,6 +348,21 @@ function parseLabel(raw, nextAnonName) {
       changed = true;
     }
   }
+  return { name, muted, soloed };
+}
+
+/** An indented `#name:` token under `base` (see NESTED_RE): the block `base#name`. */
+function parseNested(raw, base) {
+  const { name, muted, soloed } = stripMarkers(raw);
+  const variant = name.slice(1); // past the `#`
+  return { label: `${base}#${variant}`, base, variant, muted, soloed, ownMuted: muted, ownSoloed: soloed, anon: false };
+}
+
+function parseLabel(raw, nextAnonName) {
+  const stripped = stripMarkers(raw);
+  let { name } = stripped;
+  const { muted, soloed } = stripped;
+  let anon = false;
 
   if (name === '$' || name === '') {
     name = nextAnonName();

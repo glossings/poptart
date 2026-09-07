@@ -5375,6 +5375,26 @@ export function audio(name) {
 }
 
 /**
+ * A track's variations mixed down as ONE track - the head a track gets the moment it has a
+ * variation (see the arrangement's variations, and groups.mjs):
+ *
+ *   kick: group().postgain(0.8).fx("Pro-C 2")   // the group: what the mixer and the desk show
+ *     #main: s("mbd*4")                         // the pattern that used to be `kick`
+ *     #fill: s("mbd*4").i(3)
+ *
+ * Every variation of the block sends its output into the group's bus and stops playing directly
+ * (an explicit .dry() on a variation is respected), and the group reads that bus as its chain
+ * input - so a .postgain(), .fx() or .bus() written on the group is shared by every variation, and
+ * one fader, one mute and one gate take the whole family. The bus is named after the block itself
+ * (the label it carries at eval time, so a rename moves nothing): `group()` is `audio("bus:kick")`
+ * on a block called `kick`, with the name kept in step for you. No notes of its own; a group with
+ * no variations reads silence.
+ */
+export function group() {
+  return new Sig(() => null, { inputSource: { io: 'audio', name: 'bus:', group: true } });
+}
+
+/**
  * A hardware audio INPUT as a track source - the live-input counterpart to midi():
  *
  *   gtr:  input(3).fx("Amp Room").fx("ValhallaRoom")            // channel 3 through an amp sim

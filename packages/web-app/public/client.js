@@ -439,6 +439,9 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     // binds Ctrl-A to goLineStart, so it has to be taken here rather than left to the document
     // handler below, which never sees it.
     'Ctrl-A': () => (arState ? closeArrangeEditor() : openArrangePainter()),
+    // DJ mode (ctrl+D): the switch's third segment, next to ctrl+A. The Mac keymap's Ctrl-D is
+    // delete-forward, which nobody reaches for by that name.
+    'Ctrl-D': () => toggleMixMode(),
   },
 });
 // Show the editor pane: CodeMirror is up and the buffer this URL opens with is in it. Called from
@@ -505,7 +508,8 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
     if (e.shiftKey) savePatternFileAs();
     else savePatternFile();
-  } else if (e.key.toLowerCase() === 'x' && e.shiftKey) {
+  } else if (e.key.toLowerCase() === 'd' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
+    && !arKeyInField()) {
     e.preventDefault();
     toggleMixMode(); // the performance mixer's split (see the mix section at the foot of this file)
   }
@@ -925,6 +929,7 @@ function foldConfigBlobs() {
   // entirely (see openDefRunSpans).
   openDefRunSpans = [];
   for (const reg of DEF_REGISTRIES) foldDefRuns(code, reg);
+  foldFamilies(code);
   // Captured plugin state written out in full - a patch pasted in from outside, or a definition
   // typed by hand. What the editor writes is a handle into the store (see blobs.js), which is
   // short and stays on screen; this is for the ones that aren't.
@@ -998,6 +1003,32 @@ function foldConfigBlobs() {
 
 // How many ids a chip's tooltip spells out before it starts counting instead.
 const ROLL_CHIP_IDS = 6;
+
+/**
+ * A track's NESTED variations fold under it - `kick:` on its own line, then a chip reading
+ * `⋯ 2 variations` where `#1:` and `#outro:` would begin - so a song reads as its tracks, and a
+ * family opens when you want to see inside it (click the chip; the painter opens it for you when
+ * a clip's double-click lands there, see arGotoBlock). Only the nested spelling folds: a
+ * `kick#1:` at column 0 is its own line in the buffer, and stays one. Keyed by the base's name, so
+ * an opened family stays open while it is being typed in.
+ */
+function foldFamilies(code) {
+  if (!labelsMod) return;
+  const blocks = labelsMod.splitLabeledBlocks(code);
+  for (const base of blocks) {
+    if (base.variant != null || base.kind === 'bare') continue;
+    // the nested variations that follow it, contiguous but for setup lines
+    const kids = blocks.filter((b) => b.nested && b.base === base.label && b.start > base.start);
+    if (!kids.length) continue;
+    const last = kids[kids.length - 1];
+    const from = code.slice(0, base.end).replace(/\s+$/, '').length; // the end of the base's own text
+    const to = code.slice(0, last.end).replace(/\s+$/, '').length; // ...and of the family's
+    if (to <= from) continue;
+    const names = kids.map((k) => `#${k.variant}`);
+    foldSpan(from, to, `⋯ ${kids.length} variation${kids.length === 1 ? '' : 's'}`,
+      `${base.label}'s variations: ${names.join(', ')} — click to expand`, `family:${base.label}`);
+  }
+}
 
 // A run of consecutive definitions is a library rather than music: it plays nothing (the server
 // drops every definition sig) and what it holds is editor-written data that no one - least of all
@@ -10668,10 +10699,14 @@ function mixerStripLabels() {
   // A track's variations sit with it, right after its base, however the buffer orders them: the
   // family is one thing in the mix, and the base's mute and solo take the whole of it (see
   // labels.mjs). Sorted by where the BASE is written, then base before variations, then by text.
+  // The variations of a GROUP get no strip at all: they mix into the group's bus and the group's
+  // strip is their level, meter, mute and solo (see pattern-core's groups.mjs).
   const base = (l) => (arrangeMod ? arrangeMod.baseOf(l) : l);
   const isVar = (l) => arrangeMod && arrangeMod.variantOf(l) != null;
+  const groups = new Set(blocks.filter((b) => b.variant == null && mixctlMod && mixctlMod.isGroupBlock(b)).map((b) => b.label));
   const basePos = (l) => { const p = pos(base(l)); return p < codeOrder.length ? p : pos(l); };
-  return [...inStrip].sort((a, b) => basePos(a) - basePos(b) || (isVar(a) - isVar(b)) || pos(a) - pos(b));
+  return [...inStrip].filter((l) => !(isVar(l) && groups.has(base(l))))
+    .sort((a, b) => basePos(a) - basePos(b) || (isVar(a) - isVar(b)) || pos(a) - pos(b));
 }
 
 // Recompute the strip list, rebuild the row only when it actually changed, and re-read the
@@ -11619,7 +11654,7 @@ mixerViewBtn.addEventListener('click', () => {
 document.getElementById('mixerClose').addEventListener('click', closeMixer);
 document.getElementById('mixerOpenBtn').addEventListener('click', openMixer);
 // The header's view switch: the code, the arrangement (ctrl+A flips between the two) and DJ mode
-// (cmd+shift+X), lit where you are so a set's state reads across the room. Leaving DJ mode for
+// (ctrl+D), lit where you are so a set's state reads across the room. Leaving DJ mode for
 // the code is the ordinary exit (the one that offers to keep or restore); see arReflectView.
 document.getElementById('viewCodeBtn').addEventListener('click', () => {
   if (mixModeOn) exitDjMode('restore');
@@ -17349,7 +17384,7 @@ coreReady
   .catch(() => {});
 
 // ---------------------------------------------------------------------------------------------
-// Mix mode - the performance mixer (Cmd/Ctrl+Shift+X). The screen splits into two decks: the
+// Mix mode - the performance mixer (ctrl+D). The screen splits into two decks: the
 // main editor keeps playing as deck A while the second pane holds the INCOMING song, evaluated
 // as deck "b" (same clock, so it joins in phase; namespaced labels, so its kick and yours are
 // separate tracks; born wearing the crossfader's gain, so it arrives silent). Between them the
@@ -17552,6 +17587,7 @@ async function openMixMode() {
   }
   preMix = { code: cm.getValue(), savedName: currentSavedName, wipSession: wipSessionId };
   if (mixerState) closeMixer(); // the modal's meter load is the audio glitch openMixer refuses
+  if (arState) closeArrangeEditor(); // the decks take the page; the arrangement is the code's (see arReflectView)
   mixModeOn = true;
   syncPreviewRouting(); // auditions move to the headphone cue, or stop being allowed at all
   document.body.classList.add('mix-on');
@@ -22254,9 +22290,10 @@ const arFillClip = (label, len) => ({ label, start: 0, len: Math.max(1, len) });
 function arReconcileTracks() {
   if (!arrangeMod || !labelsMod) return false;
   const labels = arTrackLabels();
+  const groups = arGroupLabels();
   if (arState) {
     // The panel owns the data while it is open; writing the buffer under it would fight its marker.
-    const next = arrangeMod.reconcileArrangement(arState.clips, { len: arState.len, tracks: arState.tracks }, labels);
+    const next = arrangeMod.reconcileArrangement(arState.clips, { len: arState.len, tracks: arState.tracks }, labels, groups);
     if (!next.changed) return false;
     arState.clips = next.clips;
     arState.tracks = next.tracks;
@@ -22267,7 +22304,7 @@ function arReconcileTracks() {
   }
   const read = arReadDef();
   if (!read) return false;
-  const next = arrangeMod.reconcileArrangement(read.clips, read.opts, labels);
+  const next = arrangeMod.reconcileArrangement(read.clips, read.opts, labels, groups);
   if (!next.changed) return false;
   arWriteDefText(read.def, serializeArrangeCall({ ...read.opts, clips: next.clips, tracks: next.tracks }));
   return true;
@@ -22292,6 +22329,9 @@ function arWriteDefText(def, text) {
 function openArrangePainter() {
   if (!arrangeMod || !labelsMod) return;
   if (arState) { closeArrangeEditor(); return; } // ctrl+A again puts it away
+  // In DJ mode there are two decks and no one buffer to arrange (the switch's segment is dimmed
+  // there too); the page would land in deck B's place and push the decks along.
+  if (mixModeOn) { logLine('the arrangement is the code\'s - leave DJ mode first (ctrl+D)', 'warn'); return; }
   arMigrateLegacy();
   let def = arFindDef();
   if (!def) {
@@ -22300,7 +22340,8 @@ function openArrangePainter() {
       logLine('nothing to arrange yet - label a block (kick: s("bd*4")) and press ctrl+A again', 'warn');
       return;
     }
-    const clips = labels.map((l) => arFillClip(l, AR_NEW_LEN));
+    const groups = arGroupLabels();
+    const clips = labels.filter((l) => !groups.includes(l)).map((l) => arFillClip(l, AR_NEW_LEN));
     const text = serializeArrangeCall({ clips, snap: arrangeMod.ARRANGE_DEFAULT_SNAP, len: AR_NEW_LEN, tracks: labels, autos: [], loops: [] });
     const code = cm.getValue();
     // Into the foot, flush under the definitions if the buffer has any (the same rule defsEdit
@@ -22630,6 +22671,8 @@ function arRefreshRows() {
     // a variation with no base of its own is its own row, under its full name
     const base = b.variant != null && !bases.has(b.base) ? b.label : b.base;
     const r = rowFor(base, true);
+    // A group has nothing of its own to paint - its variations are what goes on its row.
+    if (b.variant == null && arIsGroup(b)) continue;
     if (!r.variants.includes(b.label)) r.variants.push(b.label);
   }
   for (const c of arState.clips) {
@@ -22644,8 +22687,11 @@ function arRefreshRows() {
   const grew = rows.length !== arState.rows.length;
   arState.rows = rows;
   if (!rows.some((r) => r.label === arState.track)) arState.track = rows[0]?.label ?? null;
-  // The brush has to name something a row still carries; failing that, the selected row's base.
-  if (!rows.some((r) => r.variants.includes(arState.brush))) arState.brush = arState.track;
+  // The brush has to name something a row still carries; failing that, the first thing the
+  // selected row does carry - its base, or a group's first variation.
+  if (!rows.some((r) => r.variants.includes(arState.brush))) {
+    arState.brush = rows.find((r) => r.label === arState.track)?.variants[0] ?? arState.track;
+  }
   arSyncBrushHead();
   if (grew) arSizeCanvas(); // the grid is as tall as the song has tracks (see arVisibleRows)
 }
@@ -22679,10 +22725,17 @@ function arBrushFor(row) {
   return r && r.variants.includes(arState.brush) ? arState.brush : null;
 }
 
-/** The label the pencil paints. Only a label some row carries; anything else is ignored. */
+/**
+ * The label the pencil paints. Only a label some row carries; a GROUP's own name (its row has
+ * nothing of its own to paint) dips in the first of its variations; anything else is ignored.
+ */
 function arSetBrush(label) {
   if (!arState || label == null) return;
-  if (!arState.rows.some((r) => r.variants.includes(label))) return;
+  if (!arState.rows.some((r) => r.variants.includes(label))) {
+    const row = arState.rows.find((r) => r.label === label);
+    if (!row?.variants.length) return;
+    label = row.variants[0];
+  }
   arState.brush = label;
   arSyncBrushHead();
 }
@@ -22757,26 +22810,82 @@ const arBrushHead = makeNamePicker({
  * Returns the new label, or null with a line saying why not.
  */
 function arCreateVariation(base, name, from = base) {
-  if (!labelsMod) return null;
-  const code = cm.getValue();
-  const blocks = labelsMod.splitLabeledBlocks(code);
-  const src = blocks.find((b) => b.label === from);
-  if (!src) { logLine(`no block called "${from}" to copy`, 'warn'); return null; }
+  if (!labelsMod || !mixctlMod) return null;
   if (!/^[\w$]+$/.test(name)) { logLine(`a variation name has to be one plain word - not "${name}"`, 'warn'); return null; }
   const label = `${base}#${name}`;
+  let code = cm.getValue();
+  let blocks = labelsMod.splitLabeledBlocks(code);
   if (blocks.some((b) => b.label === label)) return label; // already there: use it
+  // The first variation is the moment a track becomes a GROUP: what it played goes under it as
+  // its first variation, so the copy about to be made is a copy of that (see arMakeGroup).
+  const baseBlock = blocks.find((b) => b.label === base);
+  if (baseBlock && !arIsGroup(baseBlock)) {
+    const member = arMakeGroup(base);
+    if (!member) return null;
+    if (from === base) from = member;
+    code = cm.getValue();
+    blocks = labelsMod.splitLabeledBlocks(code);
+  } else if (baseBlock && from === base) {
+    // A group has nothing of its own to copy: its first variation is the part it plays by default.
+    const first = blocks.find((b) => b.base === base && b.variant != null);
+    if (!first) { logLine(`${base} is a group with no variations - nothing to copy`, 'warn'); return null; }
+    from = first.label;
+  }
+  const src = blocks.find((b) => b.label === from);
+  if (!src) { logLine(`no block called "${from}" to copy`, 'warn'); return null; }
   const family = blocks.filter((b) => b.base === base);
   const after = family[family.length - 1] ?? src;
-  // The source's text, its label swapped for the new one. Mute and solo markers come off with it:
-  // a fresh variation should sound, whatever state the block it was copied from is in.
-  const text = code.slice(src.start, src.end).replace(/^\s*[A-Za-z_$][\w$]*(?:#[\w$]+)?(\s*:)/, `${label}$1`).replace(/\s+$/, '');
+  // The source's text, its label swapped for the NESTED spelling - an indented `#name:` under the
+  // family, so the variation reads as part of its track and never repeats the track's name (see
+  // labels.mjs). Mute and solo markers come off with the label: a fresh variation should sound,
+  // whatever state the block it was copied from is in.
+  const text = code.slice(src.start, src.end)
+    .replace(/^[ \t]*[_S]*(?:[A-Za-z_$][\w$]*(?:#[\w$]+)?|#[\w$]+)[_S]*(\s*:)/, `  #${name}$1`)
+    .replace(/\s+$/, '');
   const at = code.slice(0, after.end).replace(/\s+$/, '').length; // the end of the last line of the family
   cm.replaceRange(`\n${text}`, cm.posFromIndex(at));
+  expandedFolds.add(`family:${base}`); // just made, so it wants to be seen, not folded away
   refoldAll();
   logLine(`new variation ${label} - a copy of ${from}`);
   arRefreshRows();
   arScheduleEval(); // it is a track now, and the engine should have it before it is painted
   return label;
+}
+
+/**
+ * The track `base` becomes a GROUP: `base: group()` over its variations, with what it played moved
+ * under it as `#main` (the first free of main, main2, …) and every clip that named it naming that
+ * (see mixctl's groupEdits, which is the edit; and pattern-core's groups.mjs, which is what a
+ * group IS - the mixdown its variations send into, one strip and one gate for the family). The
+ * song sounds exactly as it did; the group starts bare, and what a track shares with its
+ * variations - a .postgain(), an .fx() - is moved up onto it by hand, since which calls those are
+ * is a choice. Returns the member's label, or null when the block isn't one that can become a
+ * group (a variation, a group already, gone).
+ */
+function arMakeGroup(base) {
+  if (!labelsMod || !mixctlMod) return null;
+  const code = cm.getValue();
+  const taken = new Set(labelsMod.splitLabeledBlocks(code).map((b) => b.label));
+  let name = 'main';
+  for (let i = 2; taken.has(`${base}#${name}`); i++) name = `main${i}`;
+  const res = mixctlMod.groupEdits(code, base, name);
+  if (!res) return null;
+  arSuppressClose = true; // the edits touch the arrangement's own call; that is not it being deleted
+  try {
+    for (const edit of [...res.edits].reverse()) cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+  } finally {
+    arSuppressClose = false;
+  }
+  if (arState) {
+    // The panel owns the clips while it is open: its copy follows the code's. A color chosen for the
+    // track stays the row's and goes with the variation too - the same part, in the same color.
+    for (const c of arState.clips) if (c.label === base) c.label = res.member;
+    if (arState.colors[base] != null) arState.colors[res.member] = arState.colors[base];
+    if (arState.brush === base) arState.brush = res.member;
+    writeArrangeCall(true, { evaluate: false }); // the eval is the caller's, once
+  }
+  logLine(`${base} is a group now: what it played is #${name}, and its variations mix into it - a .postgain() or .fx() on ${base} takes all of them`);
+  return res.member;
 }
 
 /** The next free numbered name for a variation of `base`: `kick#1`, then `kick#2`, and so on. */
@@ -22838,6 +22947,14 @@ function arBlocks() {
 /** The labels a clip may name - every arrangeable block's, in document order. */
 function arLabels() {
   return arBlocks().map((b) => b.label);
+}
+
+/** Whether a block is a GROUP - headed by group(), the mixdown of its variations (see arMakeGroup). */
+const arIsGroup = (block) => !!mixctlMod && mixctlMod.isGroupBlock(block);
+
+/** The buffer's groups: rows with nothing of their own to paint, joining the arrangement unfilled. */
+function arGroupLabels() {
+  return arBlocks().filter((b) => b.variant == null && arIsGroup(b)).map((b) => b.label);
 }
 
 /** What a clip is titled: the track's name on a base, `#name` on a variation (the code's spelling). */
@@ -24290,6 +24407,12 @@ function arGotoBlock(label) {
   if (!labelsMod) return;
   const block = labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => b.label === label);
   if (!block) return;
+  // A nested variation lives inside its family's fold (see foldFamilies): open it, or the cursor
+  // would land on a chip.
+  if (block.nested && !expandedFolds.has(`family:${block.base}`)) {
+    expandedFolds.add(`family:${block.base}`);
+    refoldAll();
+  }
   const from = cm.posFromIndex(block.start);
   cm.setCursor({ line: from.line, ch: cm.getLine(from.line).length });
   cm.scrollIntoView({ from, to: cm.posFromIndex(block.end) }, 80);
@@ -24380,59 +24503,58 @@ function arRenameBlock(from, to) {
 // candidate, or nothing is touched - and what is done is said, and is one cmd+Z away.
 // ---------------------------------------------------------------------------------------------
 
-let arBlocksAtLastEval = null; // [{ label, variant, base, body }] - what the last evaluation saw
+let arBlocksAtLastEval = null; // [{ label, variant, base, nested, body }] - what the last evaluation saw
 
 function arFollowHandRenames() {
   if (!labelsMod || !mixctlMod || !arrangeMod) return;
   const snapshot = () => labelsMod.splitLabeledBlocks(cm.getValue())
     .filter((b) => b.kind === 'labeled')
-    .map((b) => ({ label: b.label, base: b.base, variant: b.variant, body: b.code.trim() }));
+    .map((b) => ({ label: b.label, base: b.base, variant: b.variant, nested: b.nested, body: b.code.trim() }));
   const before = arBlocksAtLastEval;
   let now = snapshot();
   arBlocksAtLastEval = now;
   if (!before) return;
-  const nowLabels = new Set(now.map((b) => b.label));
   const beforeLabels = new Set(before.map((b) => b.label));
+  const apply = (edits) => {
+    arSuppressClose = true; // the clips are being rewritten in place; the painter's call is still there
+    try {
+      for (const edit of [...edits].reverse()) cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
+    } finally {
+      arSuppressClose = false;
+    }
+  };
   for (const old of before) {
+    const nowLabels = new Set(now.map((b) => b.label));
     if (old.variant != null || nowLabels.has(old.label)) continue;
-    const family = before.filter((b) => b.base === old.label && b.variant != null && nowLabels.has(b.label));
+    const family = before.filter((b) => b.base === old.label && b.variant != null);
     if (!family.length) continue;
     const cands = now.filter((b) => b.variant == null && !beforeLabels.has(b.label) && b.body === old.body);
     if (cands.length !== 1) continue;
     const to = cands[0].label;
-    const map = new Map();
-    // The base's own clips first: its label line is already the new name, so only the clips
-    // that name it are still saying the old one.
-    const own = mixctlMod.arrangeClipEdits(cm.getValue(), new Map([[old.label, to]]));
-    if (own.length) {
-      arSuppressClose = true;
-      try {
-        for (const edit of [...own].reverse()) cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
-      } finally {
-        arSuppressClose = false;
-      }
-      map.set(old.label, to);
-    }
+    // Which of the family are still here to follow: a NESTED variation already reads as
+    // `to#name` (its label is the base's, and the base just changed), so only its clips are
+    // stale; one written out at column 0 still says the old name and gets renamed like the
+    // mixer would rename it.
+    const map = new Map([[old.label, to]]);
+    const absolute = [];
     for (const v of family) {
       const renamed = `${to}#${v.variant}`;
-      const res = mixctlMod.renameEdits(cm.getValue(), v.label, renamed);
-      if (res.error) { logLine(`${v.label}: ${res.error}`, true); continue; }
-      arSuppressClose = true;
-      try {
-        for (const edit of [...res.edits].reverse()) cm.replaceRange(edit.text, cm.posFromIndex(edit.from), cm.posFromIndex(edit.to));
-      } finally {
-        arSuppressClose = false;
+      if (v.nested ? nowLabels.has(renamed) : nowLabels.has(v.label)) {
+        map.set(v.label, renamed);
+        if (!v.nested) absolute.push(v);
       }
-      map.set(v.label, renamed);
     }
-    if (!map.size) continue;
+    apply(mixctlMod.arrangeClipEdits(cm.getValue(), map));
+    for (const v of absolute) {
+      const res = mixctlMod.renameEdits(cm.getValue(), v.label, map.get(v.label));
+      if (res.error) { logLine(`${v.label}: ${res.error}`, true); map.delete(v.label); continue; }
+      apply(res.edits);
+    }
     if (arState) { arApplyRename(map); arRefreshRows(); drawArrange(); }
-    const moved = family.filter((v) => map.has(v.label)).length;
+    const moved = map.size - 1;
     logLine(`${old.label} is ${to} now - its ${moved} variation${moved === 1 ? '' : 's'} and their clips followed (cmd+Z undoes)`);
     now = snapshot();
     arBlocksAtLastEval = now;
-    nowLabels.clear();
-    for (const b of now) nowLabels.add(b.label);
   }
 }
 

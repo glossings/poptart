@@ -50,6 +50,10 @@ let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.j
 let engineError = null;
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
+// The keys that are variations of a GROUP (see pattern-core's groups.mjs): their audio goes into
+// the group's bus and the group's track is the one the desk shows and gates - so these never get
+// a row, a fader or a swap gate of their own. Refilled per deck by each evaluation.
+const groupMembers = new Set();
 
 // Engine tracks are keyed by opaque ids ("#1", "#2", ...), not labels, so a track can be
 // re-labeled (deck promotion, in the performance-mixing work - see TODO.md) without any engine
@@ -250,7 +254,7 @@ function mixGateAll(deck) {
 }
 
 function* mixKeys() {
-  yield* schedulers.keys();
+  for (const key of schedulers.keys()) if (!groupMembers.has(key)) yield key;
   yield* songKeysLive();
 }
 
@@ -1562,7 +1566,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'pianoroll', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'pianoroll', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
@@ -3480,6 +3484,13 @@ const routes = {
     // and plays as normal.
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
 
+    // Groups: a block headed by group() reads the bus named after it and every variation of it
+    // sends there (see pattern-core's groups.mjs - the routing is the structure, nothing in the
+    // code says it). The bus is named by the engine KEY, so deck b's `kick` has a bus of its own.
+    const routed = patternCore.routeGroups(built, (label) => keyOfBlock(label));
+    for (const key of [...groupMembers]) if (deckOfKey(key) === deck) groupMembers.delete(key);
+    for (const label of routed.members) groupMembers.add(keyOfBlock(label));
+
     // The arrangement pass: with an arrangement in the buffer every TRACK is one of its rows, so
     // each plays only inside its clips - the bare loop it was is gated to the part it has become
     // (see pattern-core's arrange.mjs) - and a track with no clips at all is silent, which is what
@@ -3536,8 +3547,10 @@ const routes = {
     }
 
     // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
+    // A soloed variation of a group is heard THROUGH its group, so the group plays with it.
     const anySolo = built.some((b) => b.soloed && !b.muted);
-    const active = built.filter((b) => !b.muted && (!anySolo || b.soloed));
+    const soloedGroups = new Set(built.filter((b) => b.soloed && !b.muted && routed.members.has(b.label)).map((b) => b.base));
+    const active = built.filter((b) => !b.muted && (!anySolo || b.soloed || soloedGroups.has(b.label)));
 
     // Stop tracks whose label disappeared (or that are now muted / un-soloed) - within THIS
     // deck only: the other deck's tracks are not in this buffer, and this eval must not touch
@@ -3574,7 +3587,7 @@ const routes = {
       // The first song of the session (other deck empty) plays normally, and only genuinely NEW
       // stems are gated - a re-eval of a playing deck must not mute what is already sounding.
       // Recorded (not just applied) so its gate shows OFF.
-      if (mixState.swap && !schedulers.has(key)
+      if (mixState.swap && !schedulers.has(key) && !groupMembers.has(key)
         && [...schedulers.keys()].some((k) => deckOfKey(k) !== deck)
         && !mixState.perTrack.get(key)?.has('fader')) {
         let per = mixState.perTrack.get(key);

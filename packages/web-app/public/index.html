@@ -47,12 +47,12 @@
         <h1>poptart</h1>
         <span id="engineStatus" class="status">checking engine…</span>
         <!-- The views: the code, the arrangement as a page of its own (ctrl+A flips between the
-             two), and DJ mode (cmd+shift+X). One segmented control, the rec pair's shape - the lit
+             two), and DJ mode (ctrl+D). One segmented control, the rec pair's shape - the lit
              segment is where you are. -->
         <div class="view-switch" role="group" aria-label="view">
           <button id="viewCodeBtn" class="active" title="the code (ctrl+A flips)">code</button>
           <button id="viewArrangeBtn" title="the arrangement — a row per track, painted clips say when each plays (ctrl+A flips)">arrange</button>
-          <button id="viewDjBtn" title="DJ mode — two decks and a crossfader (cmd+shift+X)">dj</button>
+          <button id="viewDjBtn" title="DJ mode — two decks and a crossfader (ctrl+D)">dj</button>
         </div>
         <div class="spacer"></div>
         <div id="phraseViz" title="position in the 4-cycle phrase - one circle per cycle"></div>
@@ -150,7 +150,7 @@
           </div>
         </div>
 
-        <!-- Deck B - the incoming song of a mix (mix mode, Cmd/Ctrl+Shift+X). Evaluated as
+        <!-- Deck B - the incoming song of a mix (mix mode, ctrl+D). Evaluated as
              deck "b" server-side: same clock (it joins in phase), namespaced labels (its kick
              and yours are separate tracks), silent on arrival (the crossfader owns its gain). -->
         <div id="deckBPane" class="hidden">

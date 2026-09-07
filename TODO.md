@@ -8,22 +8,6 @@ no completion notes.
 [ ] LUFS metering in the ctrl+g console — short-term and integrated, alongside the existing
     stereo/spectral views.
 
-[ ] Relative variation labels — a variation nested under its base instead of repeating its name:
-
-        kick: s("mbd*4")
-          #1: s("mbd*4").i(3)
-          #outro: s("mbd*4").fx("FilterFreak 1")
-
-    An indented `#name:` is a variation of the block above it. The grouping is then visible
-    rather than inferred from a shared prefix, the family folds under `kick` by its indentation,
-    and renaming the base touches nothing (the children never carried its name - today a hand
-    rename is caught at the next evaluation by body identity, see arFollowHandRenames, which is
-    a heuristic where this would be structure). Same model underneath: engine track `kick#1`,
-    the same clips; `kick#1:` at column 0 stays as the absolute spelling. Parser change in
-    labels.mjs (an indented `#` line opens a block whose base is the last base) plus the
-    editor's fold; the painter, the mixer and mixctl's rename read `base`/`variant` and need
-    nothing. Wait until the flat form has settled.
-
 [ ] Patternable pitch bend — `.bend(sig)` sending MIDI pitch bend to a track's synth. The SC
     message path already exists (the live-MIDI pass-through calls ctl.midi.bend); the new piece
     is a poller bridging a modulator signal/bus to bend messages at ~50-100 Hz, plus the engine

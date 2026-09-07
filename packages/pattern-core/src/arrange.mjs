@@ -180,12 +180,14 @@ export function normalizeArrangeOpts(opts = {}) {
  * the membership unless clips still name it - an orphan keeps its row until its clips go.
  *
  * A VARIATION joins with nothing painted (see the header): filling it would lay it over its base,
- * and a variation is exactly the thing you paint in where you want it.
+ * and a variation is exactly the thing you paint in where you want it. So does a GROUP (`unfilled`
+ * - the labels headed by group(), see groups.mjs): it has no notes to paint, its variations are
+ * what goes on its row, and a clip of its own would be a clip playing nothing.
  *
  * Pure: hands back what to write, and writes nothing. The editor applies it (see arReconcileTracks
  * in the web app), which is also what makes it testable without a browser.
  */
-export function reconcileArrangement(clips, opts = {}, labels = []) {
+export function reconcileArrangement(clips, opts = {}, labels = [], unfilled = []) {
   const o = normalizeArrangeOpts(opts);
   const named = new Set(clips.map((c) => c.label));
   const kept = o.tracks.filter((l) => labels.includes(l) || named.has(l));
@@ -195,7 +197,7 @@ export function reconcileArrangement(clips, opts = {}, labels = []) {
   // this was recorded, come through as the song it already was.
   const len = arrangementLength(clips, opts);
   const added = joining
-    .filter((l) => !named.has(l) && variantOf(l) == null)
+    .filter((l) => !named.has(l) && variantOf(l) == null && !unfilled.includes(l))
     .map((label) => ({ label, start: 0, len }));
   const tracks = [...kept, ...joining];
   const changed = added.length > 0 || tracks.length !== o.tracks.length || tracks.some((t, i) => t !== o.tracks[i]);

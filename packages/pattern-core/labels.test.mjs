@@ -299,6 +299,53 @@ test('a marker on a variation reaches only that variation', () => {
   assert.deepEqual(blocks.map((b) => [b.label, b.muted]), [['kick', false], ['kick#outro', true], ['kick#1', true]]);
 });
 
+test('an indented #name: is a variation of the block above it - the same block, nested', () => {
+  const src = [
+    'kick: s("mbd*4")',
+    '  #1: s("mbd*4").i(3)',
+    '  #outro: s("mbd*4")',
+    '    .fx("FilterFreak 1")', // a chain continuing under the nested label, as under any
+    'hats: s("hh*8")',
+    '  #open: s("oh*4")',
+  ].join('\n');
+  const blocks = splitLabeledBlocks(src);
+  assert.deepEqual(blocks.map((b) => [b.label, b.base, b.variant, b.nested]), [
+    ['kick', 'kick', null, false],
+    ['kick#1', 'kick', '1', true],
+    ['kick#outro', 'kick', 'outro', true],
+    ['hats', 'hats', null, false],
+    ['hats#open', 'hats', 'open', true],
+  ]);
+  assert.equal(blocks[2].code.split('\n').length, 2, 'the continuation line stays with its block');
+  // positions inside `code` still equal positions inside the source minus `start`
+  assert.equal(blocks[1].code.indexOf('s("mbd*4").i(3)'), src.split('\n')[1].indexOf('s("mbd*4").i(3)'));
+});
+
+test('a nested variation under a variation shares its base; setup lines between them do not break the family', () => {
+  const src = ['kick: s("mbd*4")', 'kick#a: s("bd")', '  #b: s("sd")', 'setbpm(140)', '  #c: s("cp")'].join('\n');
+  assert.deepEqual(splitLabeledBlocks(src).map((b) => b.label), ['kick', 'kick#a', 'kick#b', '$1', 'kick#c']);
+});
+
+test('a nested token takes mute and solo markers around its #', () => {
+  const src = ['kick: s("mbd*4")', '  _#1: s("bd")', '  #2S: s("sd")'].join('\n');
+  assert.deepEqual(splitLabeledBlocks(src).map((b) => [b.label, b.ownMuted, b.ownSoloed]), [
+    ['kick', false, false], ['kick#1', true, false], ['kick#2', false, true],
+  ]);
+});
+
+test('an indented #name: with no labeled block above it is not a variation of anything', () => {
+  // Nothing to attach to: it reads as code, and a bare statement is what code at the top is.
+  const blocks = splitLabeledBlocks('  #1: s("bd")\nkick: s("mbd*4")');
+  assert.deepEqual(blocks.map((b) => [b.label, b.kind]), [['$1', 'bare'], ['kick', 'labeled']]);
+});
+
+test('a #name: inside a template or a comment is text, and an indented one in a chain is code', () => {
+  const tpl = splitLabeledBlocks('kick: s(`\n  #1: not a block\n`)');
+  assert.equal(tpl.length, 1);
+  const cmt = splitLabeledBlocks('kick: s("bd") /*\n  #1: nor this\n*/');
+  assert.equal(cmt.length, 1);
+});
+
 test('a bare statement and a $: track have no variant, and are their own base', () => {
   const [bare, anon] = splitLabeledBlocks(['setbpm(140)', '$: s("hh")'].join('\n'));
   assert.deepEqual([bare.base, bare.variant], ['$1', null]);

@@ -156,11 +156,20 @@ var silentBus, trashBus, scArgsFor, scKey, wireAudio, unwireAudio;
 var sidechainByTarget, sidechainBySource, sourceFeeds, acquireSourceFeed, releaseSourceFeed;
 // Named audio buses (Sig#bus / '/poptart/setBusOut'): a track can divert its output to a bus,
 // where any number of tracks sum, and another track reads the sum via the audio("name") head
-// source. busGroup sits at the head of the node tree so bus-writer tracks execute before the
-// readers that In.ar the bus (scsynth zeroes buses each block, so a reader ordered before its
-// writers would only see silence). acquire/releaseBus refcount the buses so they live exactly as
-// long as some writer or reader references them.
-var namedBuses, busGroup, acquireBus, releaseBus;
+// source. acquire/releaseBus refcount the buses so they live exactly as long as some writer or
+// reader references them.
+var namedBuses, acquireBus, releaseBus;
+// Node order between tracks that read each other. scsynth zeroes its buses every block, so a
+// reader ordered before its writers sees silence (not last block's signal - silence), and a
+// track's place in the tree has to follow from EVERYTHING routed into it: the tracks whose output
+// it reads (audio("kick"), a sidechain), the writers of every bus it reads (audio("bus:mix"), a
+// group's variations), and their sources in turn. trackLevels works that out as a depth - 0 for
+// a track that reads no other, one past the deepest thing it reads otherwise - and reorderTracks
+// keeps one Group per depth, in order, every track's group inside the one for its depth. Re-run
+// after any change to the routes, so the order is always the whole picture and never the last
+// pairwise nudge to win (a track that both reads a bus and sends to one used to be placed by
+// whichever of the two handlers ran last).
+var levelGroups, trackLevels, reorderTracks;
 // Per-track recording ('/poptart/tapTrack' + '/poptart/recordTrack'). A tapped track copies its
 // post-fader output to a private bus; a meter synth on that bus streams peaks back to Node so the
 // editor's record panel can show the signal, and a DiskOut synth writes the bounce itself. recGroup
@@ -578,7 +587,7 @@ wireAudio = { |targetKey, slot, rawName, gain, inA = 0, inB = 1|
                     Synth(\poptart_soundin, [\out, destBus.index, \inA, readA, \inB, readB, \gain, gain],
                         target: server.defaultGroup, addAction: \addToHead);
                 };
-                sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nil, feeder: feeder, busName: nil, owns: ownsBus);
+                sidechainByTarget[key] = (bus: destBus, target: target, targetKey: targetKey, slot: slot, source: nil, feeder: feeder, busName: nil, owns: ownsBus);
                 ("poptart: audio input: ch " ++ (wanted.collect { |c| c + 1 }.join("+"))
                     ++ if (name.isEmpty) { "" } { " of '" ++ name ++ "'" }
                     ++ " -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
@@ -586,44 +595,47 @@ wireAudio = { |targetKey, slot, rawName, gain, inA = 0, inB = 1|
             { true } {
                 // Resolve a bare / "track:" / "bus:" name. Both a source track and a bus writer may
                 // be created in the same eval as this reader, so wait briefly for either to appear;
-                // "bus:" forces a bus, otherwise track-first with a bus of that name as fallback. A
-                // track reading its OWN name (drums: audio("drums")) means the bus, not itself -
-                // self-routing would feed the track's output back into its own input - so a self
-                // match doesn't count as a track here, and we wait for the bus instead.
+                // otherwise track-first with a bus of that name as fallback. A track reading its OWN
+                // name (drums: audio("drums")) means the bus, not itself - self-routing would feed
+                // the track's output back into its own input - so a self match doesn't count as a
+                // track here, and we wait for the bus instead. "bus:" forces a bus and waits for
+                // nothing: there is nothing to tell apart, and a bus nobody writes yet is simply
+                // silence until someone does (a group() evaluated ahead of its variations).
                 var tries = 0, max = (5 / 0.05).asInteger, source, useBus;
                 while {
-                    ((isBusPrefix.not and: { nameKey != targetKey } and: { tracks[nameKey].isKindOf(Event) })
-                        or: { namedBuses[nameKey].notNil }).not
+                    isBusPrefix.not
+                    and: { ((nameKey != targetKey and: { tracks[nameKey].isKindOf(Event) })
+                        or: { namedBuses[nameKey].notNil }).not }
                     and: { tries < max }
                 } { 0.05.wait; tries = tries + 1 };
                 source = if (isBusPrefix or: { nameKey == targetKey }) { nil } { tracks[nameKey] };
-                useBus = source.isKindOf(Event).not and: { namedBuses[nameKey].notNil };
+                useBus = isBusPrefix or: { source.isKindOf(Event).not and: { namedBuses[nameKey].notNil } };
                 case
                 { source.isKindOf(Event) } {
                     // A track source offers its output on a shared feed bus (acquireSourceFeed)
                     // and this route reads a copy of it into the sink - so the same source can
                     // feed a chain input and a sidechain, or two tracks' duckers, at once. The
                     // reader sits at the head of the sink's group and the sink's group is ordered
-                    // after the source's, so the copy lands the same block, as before.
+                    // after the source's (reorderTracks), so the copy lands the same block.
                     var feedBus = acquireSourceFeed.(nameKey, source);
                     var feeder = Synth(\poptart_busread, [\out, destBus.index, \in, feedBus.index, \gain, gain],
                         target: target[\group], addAction: \addToHead);
-                    if (nameKey != targetKey) { target[\group].moveAfter(source[\group]) };
-                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nameKey, feeder: feeder, busName: nil, owns: ownsBus);
+                    sidechainByTarget[key] = (bus: destBus, target: target, targetKey: targetKey, slot: slot, source: nameKey, feeder: feeder, busName: nil, owns: ownsBus);
                     sidechainBySource[nameKey] = (sidechainBySource[nameKey] ?? { [] }).add((targetKey: targetKey, slot: slot));
+                    reorderTracks.();
                     ("poptart: audio route: " ++ name ++ " -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
                 }
                 { useBus } {
                     // A named bus (Sig#bus): a reader feeder copies the bus into the sink's input,
-                    // at the head of the sink's group so it lands before the track synth reads it.
-                    // The bus's writer tracks live in busGroup at the tree head; move this sink to
-                    // the tail of the default group so it runs after them (and thus sees their sum
-                    // this block, not a block late). The reader holds a bus ref while it's routed.
+                    // at the head of the sink's group so it lands before the track synth reads it,
+                    // and the sink's group is ordered after the bus's writers (reorderTracks) so it
+                    // sees their sum this block, not silence. The reader holds a bus ref while it's
+                    // routed.
                     var busObj = acquireBus.(name);
                     var feeder = Synth(\poptart_busread, [\out, destBus.index, \in, busObj.index, \gain, gain],
                         target: target[\group], addAction: \addToHead);
-                    target[\group].moveToTail(server.defaultGroup);
-                    sidechainByTarget[key] = (bus: destBus, target: target, slot: slot, source: nil, feeder: feeder, busName: name, owns: ownsBus);
+                    sidechainByTarget[key] = (bus: destBus, target: target, targetKey: targetKey, slot: slot, source: nil, feeder: feeder, busName: name, owns: ownsBus);
+                    reorderTracks.();
                     ("poptart: audio route: bus '" ++ name ++ "' -> " ++ targetKey ++ " (slot " ++ slot ++ ")").postln;
                 }
                 { true } { ("poptart: audio route: '" ++ name ++ "' is neither a track nor a bus").warn };
@@ -653,7 +665,52 @@ unwireAudio = { |targetKey, slot|
         entry[\feeder] !? { |f| f.free };
         if (entry[\owns]) { entry[\bus].free };
         sidechainByTarget[key] = nil;
+        reorderTracks.(); // the sink may sit shallower now
     };
+};
+
+// How deep each track sits (key -> depth): 0 for one that reads no other track, else one past the
+// deepest thing routed into it - a source track, or the writers of a bus it reads. A feedback loop
+// (a: audio("b"), b: audio("a")) has no order that works; the edge that closes it is dropped and
+// that read is a block late, which is the most any order could give it. A track still being built
+// (\pending) has no group to place and no routes yet; it is skipped and placed by its own routes.
+trackLevels = {
+    var writers = IdentityDictionary.new; // bus name -> the keys sending to it
+    var upstream = IdentityDictionary.new; // key -> the keys it must run after
+    var levels = IdentityDictionary.new;
+    var levelOf;
+    tracks.keysValuesDo { |k, t|
+        if (t.isKindOf(Event)) {
+            t[\busSends] !? { |names| names.do { |n| var b = n.asSymbol; writers[b] = (writers[b] ?? { [] }).add(k) } };
+        };
+    };
+    sidechainByTarget.do { |e|
+        var deps = case
+            { e[\source].notNil } { [e[\source]] }
+            { e[\busName].notNil } { writers[e[\busName].asSymbol] ?? { [] } }
+            { [] };
+        upstream[e[\targetKey]] = (upstream[e[\targetKey]] ?? { [] }).addAll(deps);
+    };
+    levelOf = { |k, stack|
+        levels[k] ?? {
+            var deps = (upstream[k] ?? { [] }).reject { |d| stack.includes(d) or: { tracks[d].isKindOf(Event).not } };
+            var lvl = if (deps.isEmpty) { 0 } { deps.collect { |d| levelOf.(d, stack ++ [k]) }.maxItem + 1 };
+            levels[k] = lvl;
+            lvl;
+        };
+    };
+    tracks.keysValuesDo { |k, t| if (t.isKindOf(Event)) { levelOf.(k, []) } };
+    levels;
+};
+
+// Put every track's group in the Group for its depth - one per depth, made as needed, each before
+// recGroup (whose taps must still read what the tracks wrote this block). Within a depth the order
+// is free: nothing at one depth reads anything else at it.
+reorderTracks = {
+    var levels = trackLevels.();
+    var deepest = levels.values.maxItem ?? 0;
+    while { levelGroups.size <= deepest } { levelGroups = levelGroups.add(Group.before(recGroup)) };
+    levels.keysValuesDo { |k, lvl| tracks[k][\group].moveToHead(levelGroups[lvl]) };
 };
 
 // Both helpers must be called from within a Routine (all handlers that use them fork first).
@@ -1329,8 +1386,8 @@ server.waitForBoot {
         Out.ar(out, SoundIn.ar(inA).dup * gain);
     }).add;
     // Feeder for a named audio bus read as a chain source (audio("busName")): copies the summed
-    // bus into the sink's input bus. Runs at the sink group's head, after the bus's writer tracks
-    // (which live in busGroup at the tree head), so the sum is already present this block.
+    // bus into the sink's input bus. Runs at the sink group's head, and the sink's group is ordered
+    // after the bus's writer tracks (see reorderTracks), so the sum is already present this block.
     SynthDef(\poptart_busread, { |out, in, gain = 1|
         Out.ar(out, In.ar(in, 2) * gain);
     }).add;
@@ -1367,14 +1424,14 @@ server.waitForBoot {
     sidechainByTarget = IdentityDictionary.new; // scKey -> (bus:, target:, slot:, source:, feeder:)
     sidechainBySource = IdentityDictionary.new; // sourceKey (Symbol) -> [(targetKey:, slot:)] it feeds
     sourceFeeds = IdentityDictionary.new; // sourceKey (Symbol) -> (bus: Bus, refs: Int)
-    // Named-bus registry + the head group its writer tracks live in (see the var declaration).
     namedBuses = IdentityDictionary.new; // busName (Symbol) -> (bus: Bus, refs: Int)
-    busGroup = Group.new(server, \addToHead);
     // Recorder taps read what the track synths wrote this block, so their group goes at the tail.
     recTaps = IdentityDictionary.new; // trackId (Symbol) -> (bus:, meter:, disk:, buf:, path:)
     // Mixer analysis synths share the tail group for the same read-after-write reason.
     mixTaps = IdentityDictionary.new; // trackId (Symbol) -> (bus:, synth:, funcs:)
     recGroup = Group.new(server, \addToTail);
+    // Depth 0 - every track starts here; deeper groups are made before recGroup as routes need them.
+    levelGroups = [Group.new(server, \addToHead)];
     server.sync;
     "poptart: server booted, ready".postln;
     // scsynth's pid rides along with the ready: node spawned US, not scsynth, so this is its only
@@ -1420,7 +1477,7 @@ OSCdef(\poptartCreateTrack, { |msg|
     if (tracks[key].isNil) {
         tracks[key] = \pending;
         fork {
-            var group = Group.new(server);
+            var group = Group.new(levelGroups[0]); // depth 0 until a route says otherwise (see reorderTracks)
             var inBus = Bus.audio(server, 2); // sample synths write here, the track synth mixes it in
             var def = buildTrackDef.(key);
             def.add; // sends to server + global SynthDescLib
@@ -1478,6 +1535,7 @@ destroyTrack = { |key|
             track[\group].free;
             track[\inBus].free;
             tracks[key] = nil;
+            reorderTracks.(); // whatever read this track sits shallower now
             ("poptart: destroyed track " ++ key).postln;
         };
     };
@@ -2503,8 +2561,8 @@ OSCdef(\poptartClearAudioInput, { |msg|
 // Output-to-bus sends (Sig#bus). msg = [trackId, name1, amount1, name2, amount2, ...]: replace the
 // track's whole set of bus sends. Each name acquires a ref on its bus; the previous set is released
 // afterwards (acquire-before-release, so a bus kept across the change never briefly hits zero refs
-// and gets freed). The writer track is moved into busGroup at the tree head so it executes before
-// any reader that In.ar's the bus. Sends past maxBusSends are dropped (with a warning).
+// and gets freed). The tree is reordered so the writer executes before any reader of the bus (see
+// reorderTracks). Sends past maxBusSends are dropped (with a warning).
 OSCdef(\poptartSetBusSends, { |msg|
     var key = msg[1].asSymbol;
     var pairs = msg.drop(2);
@@ -2529,8 +2587,7 @@ OSCdef(\poptartSetBusSends, { |msg|
             });
             track[\busSends] !? { |prev| prev.do { |bn| releaseBus.(bn) } };
             track[\busSends] = newNames;
-            track[\group].moveToHead(busGroup);
-            busGroup.moveToHead(server.defaultGroup);
+            reorderTracks.();
         };
     };
 }, '/poptart/setBusSends');
@@ -2543,7 +2600,7 @@ OSCdef(\poptartClearBusSends, { |msg|
             track[\synth].set(("busOut" ++ (i + 1)).asSymbol, trashBus.index, ("busSend" ++ (i + 1)).asSymbol, 0);
         });
         track[\busSends] !? { |prev| prev.do { |bn| releaseBus.(bn) }; track[\busSends] = nil };
-        track[\group].moveToHead(server.defaultGroup); // back into the normal (reader) node order
+        reorderTracks.(); // whatever read those buses may sit shallower now
     };
 }, '/poptart/clearBusSends');
 

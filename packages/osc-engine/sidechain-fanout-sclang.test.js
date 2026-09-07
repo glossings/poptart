@@ -54,6 +54,7 @@ var namedBuses = IdentityDictionary.new;
 var silentBus = Bus.audio(srv, 2), trashBus = Bus.audio(srv, 2);
 var acquireSourceFeed, releaseSourceFeed, wireAudio, unwireAudio, scKey;
 var awaitTrack, acquireBus, releaseBus;
+var recGroup = Group.basicNew(srv), levelGroups = [Group.basicNew(srv)], trackLevels, reorderTracks;
 // Real (never-created) nodes for the track's synth and group: .set/.moveAfter just put an OSC
 // message on the wire to a server that isn't there, which is exactly the no-op this test wants.
 // The messages themselves aren't sniffed - scsynth commands go out as numeric ids, so there is
@@ -73,6 +74,8 @@ ${extract('acquireSourceFeed')}
 ${extract('releaseSourceFeed')}
 ${extract('wireAudio')}
 ${extract('unwireAudio')}
+${extract('trackLevels')}
+${extract('reorderTracks')}
 
 ("COMPILES<" ++ [acquireSourceFeed, releaseSourceFeed, wireAudio, unwireAudio].every { |f| f.isKindOf(Function) } ++ ">").postln;
 

@@ -74,9 +74,10 @@ function fakeCm(text) {
 
 const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arMigrateLegacy', 'arMigrateOneLegacy', 'arReadDef', 'parseArrangeCall',
   'arCallOpts', 'serializeArrangeCall', 'arRefreshRows', 'arBlocks', 'arLabels', 'arTrackLabels', 'arRowOfLabel',
-  'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arFollowHandRenames']
+  'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arCreateVariation', 'arNextVariantName', 'arFollowHandRenames',
+  'arMakeGroup', 'arGroupLabels', 'arSetBrush']
   .map(grab)
-  .concat([grabConst('arRowLabel'), grabConst('arFillClip')])
+  .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup')])
   .join('\n\n');
 
 /** The lifted functions over a fake editor and (optionally) a fake open panel. */
@@ -99,11 +100,10 @@ function panel({ code = '', arState = null } = {}) {
     writeArrangeCall: () => {},
     drawArrange: () => {},
     arScheduleEval: () => {},
-    // a variation of an existing base is the brush's copy; here it just records that it was asked
-    arCreateVariation: (base, name) => { logged.push(`variation ${base}#${name}`); return `${base}#${name}`; },
+    expandedFolds: new Set(), // a family just made is opened, not folded away (see arCreateVariation)
   };
   // eslint-disable-next-line no-new-func
-  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames };`);
+  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arCreateVariation, arNextVariantName, arFollowHandRenames, arMakeGroup, arGroupLabels, arSetBrush };`);
   return { fns: build(...Object.values(env)), cm, logged, arState };
 }
 
@@ -139,6 +139,25 @@ test('variations share their base\'s row, base first, however the buffer orders 
     ['hats', ['hats']],
   ]);
   assert.equal(st.brush, 'kick', 'the brush starts on the selected row\'s base');
+});
+
+test('a group\'s row carries its variations and nothing of its own; the brush lands on the first', () => {
+  const st = state();
+  const { fns } = panel({ code: 'kick: group().postgain(0.8)\n  #main: s("mbd*4")\n  #fill: s("mbd*8")\nhats: s("hh*8")', arState: st });
+  fns.arRefreshRows();
+  assert.deepEqual(st.rows.map((r) => [r.label, r.variants]), [
+    ['kick', ['kick#main', 'kick#fill']],
+    ['hats', ['hats']],
+  ]);
+  assert.equal(st.brush, 'kick#main', 'the group has nothing to paint; its first variation is what the pencil takes');
+  fns.arSetBrush('hats');
+  assert.equal(st.brush, 'hats');
+  fns.arSetBrush('kick');
+  assert.equal(st.brush, 'kick#main', 'the group\'s own name dips in its first variation');
+  fns.arSetBrush('kick#fill');
+  assert.equal(st.brush, 'kick#fill');
+  fns.arSetBrush('nobody');
+  assert.equal(st.brush, 'kick#fill', 'a label no row carries is ignored');
 });
 
 test('a variation whose base is gone is a row of its own, under its full name', () => {
@@ -253,6 +272,19 @@ test('a variation\'s clip, and a chosen color, round-trip through the call', () 
   assert.deepEqual(read.opts.colors, { 'kick#fill': '#ff8800' });
 });
 
+test('a group joins the arrangement unfilled, panel open and shut', () => {
+  const st = { ...state(arrangeMod.parseArrangement('hats,0,8')), tracks: ['hats'], len: 8 };
+  const open = panel({ code: 'kick: group()\n  #main: s("mbd*4")\nhats: s("hh*8")\n\n_arrange("hats,0,8", { tracks: "hats" })', arState: st });
+  assert.equal(open.fns.arReconcileTracks(), true);
+  assert.deepEqual(st.tracks, ['hats', 'kick', 'kick#main']);
+  assert.deepEqual(st.clips.map((c) => c.label), ['hats'], 'neither the group nor its variation is filled');
+  const shut = panel({ code: 'kick: group()\n  #main: s("mbd*4")\nhats: s("hh*8")\n\n_arrange("hats,0,8", { len: 8, tracks: "hats" })' });
+  assert.equal(shut.fns.arReconcileTracks(), true);
+  const read = shut.fns.arReadDef();
+  assert.deepEqual(read.clips.map((c) => c.label), ['hats'], 'no clip was written for the group');
+  assert.deepEqual([...read.opts.tracks].sort(), ['hats', 'kick', 'kick#main']);
+});
+
 test('a variation typed since the last evaluation joins the arrangement UNFILLED', () => {
   // Filling it would lay it over its base for the whole song; a variation is the thing you paint.
   const p = panel({ code: `${FAMILY}\n\n_arrange("kick,0,8 hats,0,8", { len: 8, tracks: ["kick", "hats"] })\n` });
@@ -299,11 +331,58 @@ test('a missing base becomes a silent stub after the last track, above the foot'
   assert.match(p.logged.join('\n'), /new track pad/);
 });
 
-test('a missing variation of a track that exists is a copy of its base', () => {
+test('a missing variation of a track that exists makes the track a group, and is a copy of what it played', () => {
   const p = panel({ code: 'keys2: n("0 2").synth("Diva")\n' });
   assert.equal(p.fns.arCreateBlock('keys2#1'), true);
-  assert.match(p.logged.join('\n'), /^variation keys2#1$/m);
-  assert.ok(!/note\("~"\)/.test(p.cm.text), 'not a stub - the base is what it starts from');
+  assert.equal(p.cm.text, 'keys2: group()\n  #main: n("0 2").synth("Diva")\n  #1: n("0 2").synth("Diva")\n',
+    'the track is the mixdown; what it played is #main; the new one is a copy of that, nested under it');
+  assert.match(p.logged.join('\n'), /keys2 is a group now: what it played is #main/);
+});
+
+test('a new variation is written nested under the last of its family, markers off, fold opened', () => {
+  const p = panel({ code: '_kick: group()\n  #main: s("mbd*4")\n  .gain(0.8)\n  #fill: s("mbd*8")\n\nhats: s("hh*8")\n' });
+  assert.equal(p.fns.arNextVariantName('kick'), '1');
+  assert.equal(p.fns.arCreateVariation('kick', '1'), 'kick#1');
+  assert.equal(p.cm.text, '_kick: group()\n  #main: s("mbd*4")\n  .gain(0.8)\n  #fill: s("mbd*8")\n  #1: s("mbd*4")\n  .gain(0.8)\n\nhats: s("hh*8")\n',
+    'a copy of #main - the base has nothing to copy');
+  const [, main, fill, one] = labelsMod.splitLabeledBlocks(p.cm.text);
+  assert.deepEqual([main.label, fill.label, one.label, one.nested, one.muted], ['kick#main', 'kick#fill', 'kick#1', true, true],
+    'the family reads back - muted by the base, its own marker gone');
+  assert.equal(p.fns.arCreateVariation('kick', 'fill'), 'kick#fill', 'one that exists is simply used');
+});
+
+test('a family written without group() becomes one when the painter adds to it', () => {
+  // Variations of a plain track play directly (see groups.mjs); the painter's rule is that a track
+  // with variations is a group, and its first edit to such a family makes it so - sound unchanged.
+  const p = panel({ code: 'kick: s("mbd*4")\n  #fill: s("mbd*8")\n' });
+  assert.equal(p.fns.arCreateVariation('kick', 'outro', 'kick#fill'), 'kick#outro');
+  assert.equal(p.cm.text, 'kick: group()\n  #main: s("mbd*4")\n  #fill: s("mbd*8")\n  #outro: s("mbd*8")\n');
+});
+
+test('making a group, panel shut: the clips that named the track name #main, the membership keeps the track', () => {
+  const p = panel({ code: 'kick: s("mbd*4").postgain(0.8)\nhats: s("hh*8")\n\n_arrange("kick,0,8 kick,12,4 hats,0,16", { len: 16, tracks: "kick hats" })\n' });
+  assert.equal(p.fns.arMakeGroup('kick'), 'kick#main');
+  assert.equal(p.cm.text, 'kick: group()\n  #main: s("mbd*4").postgain(0.8)\nhats: s("hh*8")\n\n_arrange("kick#main,0,8 kick#main,12,4 hats,0,16", { len: 16, tracks: "kick hats" })\n');
+  assert.deepEqual(p.fns.arGroupLabels(), ['kick']);
+  assert.equal(p.fns.arMakeGroup('kick'), null, 'a group already');
+  assert.equal(p.fns.arMakeGroup('kick#main'), null, 'a variation is not a track to group');
+});
+
+test('making a group, panel open: the panel\'s clips, color and brush follow', () => {
+  const st = { ...state(arrangeMod.parseArrangement('kick,0,8 hats,0,8')), tracks: ['kick', 'hats'], colors: { kick: '#ff8800' }, brush: 'kick', track: 'kick' };
+  const p = panel({ code: 'kick: s("mbd*4")\nhats: s("hh*8")\n\n_arrange("kick,0,8 hats,0,8", { tracks: "kick hats" })\n', arState: st });
+  assert.equal(p.fns.arMakeGroup('kick'), 'kick#main');
+  assert.deepEqual(st.clips.map((c) => c.label), ['kick#main', 'hats']);
+  assert.equal(st.colors['kick#main'], '#ff8800', 'the same part, in the same color');
+  assert.equal(st.colors.kick, '#ff8800', 'and the row keeps it');
+  assert.equal(st.brush, 'kick#main');
+  assert.deepEqual(st.tracks, ['kick', 'hats'], 'the track is still the row');
+});
+
+test('the #main name steps aside for one the family already uses', () => {
+  const p = panel({ code: 'kick: s("mbd*4")\n  #main: s("mbd*8")\n' });
+  assert.equal(p.fns.arMakeGroup('kick'), 'kick#main2');
+  assert.match(p.cm.text, /^kick: group\(\)\n  #main2: s\("mbd\*4"\)\n  #main: /);
 });
 
 test('a missing variation of a missing base is a stub under the full name', () => {
@@ -334,6 +413,24 @@ test('renaming a base by hand carries its variations and their clips, on the nex
     'setbpm(140)',
     'mainKick: s("mbd*4")',
     'mainKick#outro: s("mbd*4").fx("FilterFreak 1")',
+    'hats: s("hh*8")',
+    '',
+    '_arrange("mainKick,0,8 mainKick#fill,6,2 hats,0,8 mainKick#outro,8,4")',
+    '',
+  ].join('\n'));
+  assert.match(p.logged.join('\n'), /kick is mainKick now - its 2 variations and their clips followed/);
+});
+
+test('a hand-renamed base with NESTED variations: their code needs nothing, their clips follow', () => {
+  const nested = 'kick: s("mbd*4")\n  #fill: s("mbd*8")\n  #outro: s("mbd*4").fx("FilterFreak 1")\nhats: s("hh*8")' + FAMILY_ARR;
+  const p = panel({ code: nested });
+  p.fns.arFollowHandRenames();
+  p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'mainKick: s("mbd*4")');
+  p.fns.arFollowHandRenames();
+  assert.equal(p.cm.text, [
+    'mainKick: s("mbd*4")',
+    '  #fill: s("mbd*8")', // untouched - the name was never in it
+    '  #outro: s("mbd*4").fx("FilterFreak 1")',
     'hats: s("hh*8")',
     '',
     '_arrange("mainKick,0,8 mainKick#fill,6,2 hats,0,8 mainKick#outro,8,4")',

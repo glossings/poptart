@@ -299,7 +299,7 @@ test('one clip is already joined, and says so rather than doing nothing', () => 
 });
 
 test('the title picks the clip up, the body marks the time under it', () => {
-  // Ableton's split, and the reason it works: a clip is an object at the top and a stretch of song
+  // The title/body split, and the reason it works: a clip is an object at the top and a stretch of song
   // below. Without the second half there is nowhere to put a marker, and nothing to split at.
   assert.match(SRC, /part: y < top \+ AR_CLIP_TITLE_H \? 'title' : 'body'/);
   assert.match(SRC, /if \(hit && \(hit\.edge \|\| hit\.part === 'title'\)\) \{/, 'the title drags the clip');
@@ -457,6 +457,16 @@ test('renaming from a clip or the mixer goes through one path, and the painter f
   assert.match(SRC, /items\.push\(\['rename…', \(\) => arRenameClip\(targets\[0\]\)/);
   assert.match(SRC, /if \(mod && e\.key\.toLowerCase\(\) === 'r'\) \{/);
   assert.match(grab('arCommitLaneName'), /if \(edit\.kind === 'clip'\) \{\n\s+if \(save && name && name !== edit\.from\) arRenameBlock\(edit\.from, name\);/);
+});
+
+test('a nested family folds under its base, and a jump to a variation opens the fold first', () => {
+  const fold = grab('foldFamilies');
+  assert.match(fold, /blocks\.filter\(\(b\) => b\.nested && b\.base === base\.label && b\.start > base\.start\)/);
+  assert.match(fold, /`⋯ \$\{kids\.length\} variation\$\{kids\.length === 1 \? '' : 's'\}`/);
+  assert.match(fold, /`family:\$\{base\.label\}`/, 'keyed by the base, so an opened family stays open while typed in');
+  assert.match(SRC, /for \(const reg of DEF_REGISTRIES\) foldDefRuns\(code, reg\);\n\s+foldFamilies\(code\);/);
+  assert.match(grab('arGotoBlock'), /if \(block\.nested && !expandedFolds\.has\(`family:\$\{block\.base\}`\)\) \{\n\s+expandedFolds\.add/);
+  assert.match(grab('arCreateVariation'), /expandedFolds\.add\(`family:\$\{base\}`\);/, 'a family just made is shown, not folded away');
 });
 
 test('double-clicking a clip flips to the code on its block - there is no second editor', () => {

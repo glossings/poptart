@@ -111,6 +111,12 @@ const API_DOCS = {
     desc: 'As a source: run a hardware input, another track, or a .bus() sum through this chain. As a method after an .fx(): feed that plugin\'s sidechain.',
     eg: 'audio("drums").fx("Saturn 2")',
   },
+  group: {
+    kind: 'builder',
+    sig: 'group()',
+    desc: 'The mixdown of this track\'s variations - the head a track gets with its first variation. Every variation sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. The bus is named after the block, so a rename moves nothing.',
+    eg: 'kick: group().postgain(0.8)\n  #main: s("mbd*4")\n  #fill: s("mbd*8")',
+  },
   input: {
     kind: 'builder',
     sig: 'input(device?, ch, ch2?)',

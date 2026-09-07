@@ -251,7 +251,7 @@
           <ul>
             <li><code>_bass:</code> (or <code>bass_:</code>) <strong>mutes</strong> a track without deleting it.</li>
             <li><code>Sdrums:</code> <strong>solos</strong> it — if anything is soloed, only soloed tracks play. Mute still wins.</li>
-            <li><code>drums#fill:</code> is a <strong>variation</strong> of <code>drums</code> — its own block and engine track, sharing the drums row in the arrangement (see <a href="#s4">arranging</a>). Muting or soloing the base takes its variations with it.</li>
+            <li>An indented <code>#fill:</code> under <code>drums</code> is a <strong>variation</strong> of it (<code>drums#fill</code> to the engine, and as a label at column 0) — its own block and engine track, sharing the drums row in the arrangement (see <a href="#s4">arranging</a>). A track with variations is a <strong>group</strong>: its own line is <code>group()</code>, the mixdown they all send into. Muting or soloing the base takes its variations with it.</li>
           </ul>
           <p>
             <code>$:</code> is a track you didn't feel like naming — it plays like any other and gets
@@ -520,28 +520,52 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             block of whichever clip you had selected.
           </p>
           <p>
-            <strong>Variations.</strong> A track's clips can play more than one version of it.
-            Label a block <code>kick#fill:</code> and it is a <em>variation</em> of <code>kick</code>:
-            its own block, its own instrument and chain — a different sample, another preset, an
-            effect the base hasn't got — and its clips go on the <code>kick</code> row. At any bar a
-            row plays exactly one of its variations; a variation with nothing painted plays nothing.
-            Within a loop, <code>&lt;a b&gt;</code>, <code>.when()</code> and
-            <code>.preset("&lt;a b&gt;")</code> are still the way to vary a pattern; a variation is
-            for a <em>section</em> — a fill, an outro, a chorus that adds a layer — and costs an
-            instance of whatever the block loads. <code>_kick:</code> mutes the family;
-            <code>_kick#fill:</code> mutes that one. In the mixer the family sits together.
+            <strong>Variations.</strong> A track's clips can play more than one version of it. An
+            indented <code>#name:</code> under a track is a <em>variation</em> of it: its own block,
+            its own instrument and chain — a different sample, another preset, an effect the base
+            hasn't got — and its clips go on the track's row. At any bar a row plays exactly one of
+            its variations; a variation with nothing painted plays nothing. Within a loop,
+            <code>&lt;a b&gt;</code>, <code>.when()</code> and <code>.preset("&lt;a b&gt;")</code>
+            are still the way to vary a pattern; a variation is for a <em>section</em> — a fill, an
+            outro, a chorus that adds a layer — and costs an instance of whatever the block loads.
           </p>
-          <pre><code>kick: s(<span class="s">"mbd*4"</span>)
-kick#1: s(<span class="s">"mbd*4"</span>).i(3)
-kick#outro: s(<span class="s">"mbd*4"</span>).fx(<span class="s">"FilterFreak 1"</span>).preset(<span class="s">"Highpass"</span>)</code></pre>
+          <pre><code>kick: group().postgain(<span class="n">0.8</span>)
+  #main: s(<span class="s">"mbd*4"</span>)
+  #1: s(<span class="s">"mbd*4"</span>).i(3)
+  #outro: s(<span class="s">"mbd*4"</span>).fx(<span class="s">"FilterFreak 1"</span>).preset(<span class="s">"Highpass"</span>)</code></pre>
+          <p>
+            <strong>A track with variations is a group.</strong> The moment a track gets its first
+            variation, what it played moves under it as <code>#main</code> and the track's own line
+            becomes <code>group()</code>: the mixdown. Every variation sends into it and plays
+            nothing directly, so a <code>.postgain()</code>, an <code>.fx()</code> or a
+            <code>.bus()</code> written on the group takes all of them, and the mixer and the DJ
+            desk show the group alone — one fader, one meter, one gate for the family. The song
+            sounds exactly as it did: the group starts bare, and what the track shares with its
+            variations is moved up onto it by hand (its <code>.postgain()</code>, likely; an
+            <code>.fx()</code> may or may not be). The group's bus is named after the block itself,
+            so renaming the track moves nothing; a variation's own <code>.dry()</code> is respected
+            if it wants to play directly as well. You can write it by hand — any block headed by
+            <code>group()</code> is one — and a group with no variations reads silence.
+          </p>
+          <p>
+            The family folds under its track as a <em>⋯ 3 variations</em> chip; click it to open
+            (double-clicking a clip opens it for you). The variations never carry the track's name,
+            so renaming <code>kick</code> renames nothing else. The engine knows each by its full
+            name — <code>kick#1</code>, <code>kick#outro</code> — and that spelling also works as a
+            label at column 0, <code>kick#outro:</code>, for a variation you'd rather keep apart.
+            <code>_kick:</code> mutes the family; <code>_#1:</code> mutes that one, and
+            <code>S#1:</code> solos it through its group.
+          </p>
           <p>
             <strong>The brush.</strong> The pencil paints what the <strong>paint</strong> box in the
             header names — a track, or one of its variations — and only onto that track's row; the
-            other rows dim while it is in hand. Click a track's name to dip the brush in its base,
-            click a clip to dip it in whatever that clip plays (which is how a part is picked up
+            other rows dim while it is in hand. Click a track's name to dip the brush in its base
+            (a group's first variation — the group itself has nothing to paint), click a clip to
+            dip it in whatever that clip plays (which is how a part is picked up
             from one place and painted in a few more), or press <strong>▾</strong> to search every
             track and variation there is. Type <code>kick#fill</code> for a variation that doesn't
-            exist yet and it is made — a copy of <code>kick</code> — and the brush is dipped in it.
+            exist yet and it is made — a copy of <code>kick</code>, which becomes a group if it
+            wasn't one — and the brush is dipped in it.
           </p>
           <p>
             <strong>A clip is a title and a body.</strong> The title along its top is the clip as a
@@ -568,8 +592,9 @@ kick#outro: s(<span class="s">"mbd*4"</span>).fx(<span class="s">"FilterFreak 1"
             flips you to the code with the cursor on that block — where a variation gets its
             difference, with the editor's own completion and handles. ctrl+A comes straight back.
             Right-click → <strong>rename…</strong> (or <strong>⌘R</strong> with a clip selected)
-            renames the block from the clip: a base takes its variations and their clips along,
-            and typing <code>kick#roll</code> turns one into a variation of something. The two
+            renames the block from the clip: a base takes its variations and their clips along, and
+            a variation renames within its family (<code>#roll</code> is enough). Renaming a track by
+            hand in the code is caught at the next evaluation and its clips follow too. The two
             halves of a split clip still play one block; <strong>make unique</strong> on the same
             menu gives a clip a numbered variation of its own, copied from what it played, so
             editing it changes nothing else. <strong>color…</strong> picks a color for every clip
@@ -1102,7 +1127,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
-            <tr><td><code>kick#fill: …</code> · <strong>ctrl+A</strong></td><td>a variation of kick, on its row in the arrangement · the arrangement page: a row per track, painted clips say which variation plays when</td></tr>
+            <tr><td><code>kick#fill: …</code> · <code>group()</code> · <strong>ctrl+A</strong></td><td>a variation of kick, on its row in the arrangement · the mixdown of a track's variations (what a track becomes with its first one) · the arrangement page: a row per track, painted clips say which variation plays when</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
             <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>
@@ -1142,7 +1167,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
             <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code> · <code>ctrl+b</code> · <code>ctrl+g</code></td><td>eval · stop · bounce · mixer</td></tr>
-            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code> · <code>cmd+shift+X</code></td><td>code | arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode - the switch's third segment</td></tr>
+            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code> · <code>ctrl+D</code></td><td>code | arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode - the switch's third segment</td></tr>
             <tr><td>right-click · <code>ctrl+J</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>
