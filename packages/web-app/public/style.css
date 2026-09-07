@@ -432,18 +432,17 @@ main {
   overflow: hidden;
 }
 
+/* The pane stacks its HEAD over the editor (mirroring deck B's pane), so the editor sizes by flex
+   under it rather than by the old single-child fill. Always, not only in DJ mode: the head carries
+   the pane's code | arrange switch now, and that is there whether or not there are two decks. */
 #editorPane {
   position: relative; /* the save flash overlays it */
   flex: 1;
   display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
-/* In DJ mode the pane stacks its deck head over the editor (mirroring deck B's pane), and the
-   editor sizes by flex under it instead of the default single-child fill. */
-body.mix-on #editorPane {
-  flex-direction: column;
-}
-body.mix-on #editorPane .CodeMirror {
+#editorPane .CodeMirror {
   height: auto;
   min-height: 0;
   flex: 1;
@@ -1219,6 +1218,34 @@ footer#console {
 .cm-s-poptart .CodeMirror-linenumber {
   color: var(--linenumber);
   padding: 0 12px 0 20px;
+}
+
+/* The GROUP carets: their own gutter between the line numbers and the code, where an editor's fold
+   controls have always been (see foldFamilies in client.js). A fixed width, so the code's left edge
+   holds still whether or not the song has a group in it - a gutter that sized to its content would
+   shift the whole buffer sideways the moment you made one. */
+.cm-s-poptart .poptart-group-fold {
+  width: 14px;
+}
+
+.cm-group-caret {
+  display: block;
+  width: 14px;
+  font-size: 9px;
+  text-align: center;
+  color: var(--linenumber);
+  cursor: pointer;
+  user-select: none;
+}
+
+.cm-group-caret:hover {
+  color: var(--accent);
+}
+
+/* Folded, the caret is the only thing on screen saying the members are still down there, so it
+   stays as legible as the code rather than fading back with the line numbers. */
+.cm-group-caret-folded {
+  color: var(--text-dim);
 }
 
 .cm-s-poptart .CodeMirror-cursor {
@@ -2480,6 +2507,13 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
+/* The one exception to the 46px above: the ARRANGEMENT's length is bars, and it lands wherever the
+   snap grid does, so it is routinely a fraction - `12.75`, `128.25` - where the roll's grid and
+   length are always whole numbers. 46px clipped those. Same box otherwise; only the width moves. */
+#arrangeLen {
+  width: 68px;
+}
+
 /* Every dropdown that sits in a panel's HEADER row - the arrangement's snap, the LFO's shape
    presets - is this one shape, so two panels open side by side don't show two different chevron
    insets. Anything new in a header joins this list rather than inventing its own metrics. */
@@ -2747,12 +2781,23 @@ li.CodeMirror-hint-active {
   max-width: none;
   max-height: none;
   min-width: 0;
+  min-height: 0; /* a flex item in the pane's COLUMN: without this the canvas floors its height */
   border: 0;
   border-radius: 0;
   box-shadow: none;
 }
 
-body.arrange-on #editorPane {
+/* The page fills ONE DECK's pane and no more: the panel is MOVED into that pane when it opens (see
+   openArrangeEditor), under the pane's own head, and what steps aside is the pane's body - the
+   editor, or the waveform when the deck holds a file.
+   Moving it rather than placing it with `order` is what keeps the pane's HEAD on screen: that head
+   carries the deck's code | arrange switch, and hiding the whole pane would take away the control
+   you press to get back. Outside DJ mode this reads exactly as it always has - one pane, the
+   arrangement in it; in a mix the other deck's code stays up beside it, which is the point. */
+body.arrange-on.arrange-deck-a #editorPane > .CodeMirror,
+body.arrange-on.arrange-deck-a #editorPane > .song-pane,
+body.arrange-on.arrange-deck-b #deckBPane > .CodeMirror,
+body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
   display: none;
 }
 
@@ -2919,11 +2964,12 @@ body.arrange-on #editorPane {
   border-right-color: var(--accent);
 }
 
-/* The arrangement is the code's arrangement; in DJ mode there are two decks and no one buffer to
-   arrange, so that segment stands down until you are back. */
-body.mix-on #viewArrangeBtn {
-  opacity: 0.4;
-  pointer-events: none;
+/* The same control on a PANE's head (code | arrange), where the row is 4px of padding rather than
+   the header's - so it comes down to the height of the small buttons it sits beside. */
+.view-switch.pane-view > button {
+  height: 22px;
+  padding: 0 9px;
+  font-size: 12px;
 }
 
 /* label swaps between "● rec" and countdowns - fixed width keeps the header from jittering. The
@@ -3192,7 +3238,7 @@ body.mix-on #viewArrangeBtn {
   background: var(--bg-raised);
 }
 
-/* A variation's strip sits IN its base's group: pulled up against the strip before it with the
+/* A grouped track's strip sits IN its group: pulled up against the strip before it with the
    seam between them left open, so `kick` and its `#fill` read as one desk section, the way the
    base's mute and solo already treat them. */
 .mixer-strip:has(+ .mixer-strip-variant) {
@@ -4006,11 +4052,14 @@ body.mix-on.mix-stacked .song-overview {
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
-#deckAHead {
-  display: none; /* the main editor grows its deck head only in DJ mode */
+/* Deck A's head is always there now - it carries the pane's code | arrange switch, which is the
+   only view control outside DJ mode. What grows in DJ mode is the DECK chrome beside it: the title,
+   the song picker, play, update and keep. */
+#deckAHead .deck-only {
+  display: none;
 }
-body.mix-on #deckAHead {
-  display: flex;
+body.mix-on #deckAHead .deck-only {
+  display: inline-flex;
 }
 #deckBHead .deck-b-title,
 #deckAHead .deck-b-title {

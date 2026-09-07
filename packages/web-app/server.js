@@ -3515,7 +3515,7 @@ const routes = {
       // gives it one of its own. Worth a line, since the tangle it hints at is one keystroke old.
       for (const b of built) {
         if (b.variant != null && !labels.has(b.base)) {
-          eventLogQueue.push(`[arrange] ${JSON.stringify(b.label)} is a variation of ${JSON.stringify(b.base)}, which no block is called - it gets a row of its own until there is one`);
+          eventLogQueue.push(`[arrange] ${JSON.stringify(b.label)} names the group ${JSON.stringify(b.base)}, which no block is called - it gets a row of its own until there is one`);
         }
       }
       const regions = arrangements.flatMap((a) => a.opts.loops);
@@ -3709,8 +3709,13 @@ const routes = {
     },
   }),
 
-  // The arrangement's song clock, for a painter opened after the eval that built it.
-  'GET /api/arrange': async () => ({ status: 200, body: { arrange: arrangeClocks.a?.snapshot() ?? null } }),
+  // The arrangement's song clock, for a painter opened after the eval that built it. Query `deck`
+  // says whose: in DJ mode the painter is opened against one of the two, and each has run its own
+  // clock since arrangeClocks became a pair.
+  'GET /api/arrange': async (query) => ({
+    status: 200,
+    body: { arrange: arrangeClocks[query?.deck === 'b' ? 'b' : 'a']?.snapshot() ?? null },
+  }),
 
   // ctrl+L: release the loop region the playhead is in, so playback runs on to the next armed one.
   // Body: { deck? }. Returns the region released (null if none was looping) and the clock after.

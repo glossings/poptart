@@ -114,7 +114,7 @@ const API_DOCS = {
   group: {
     kind: 'builder',
     sig: 'group()',
-    desc: 'The mixdown of this track\'s variations - the head a track gets with its first variation. Every variation sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. The bus is named after the block, so a rename moves nothing.',
+    desc: 'The mixdown of the tracks nested under this one - the head a track gets when the first `#name:` block is written under it. Each of those tracks sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. The bus is named after the block, so a rename moves nothing.',
     eg: 'kick: group().postgain(0.8)\n  #main: s("mbd*4")\n  #fill: s("mbd*8")',
   },
   input: {

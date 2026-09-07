@@ -75,7 +75,8 @@ function harness({ points = [], range = null, pxPerCycle = 40, scroll = 0, def =
     arBarsOf: (x) => scroll + (x - GUTTER) / pxPerCycle,
     arAutoDefOf: () => def,
     prPrebakeAutos: prebake,
-    cm: { getValue: () => env.code ?? '' },
+    // The painter reads the deck it is on, not "the editor" - see openArrangePainter's arCM.
+    arCM: { getValue: () => env.code ?? '' },
     shapeMod: null,
     code: '',
   };

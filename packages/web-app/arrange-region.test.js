@@ -27,14 +27,22 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const LIFTED = ['arTimeRegion', 'arClipsIn', 'arClearTime'].map(grab).join('\n\n');
+const LIFTED = ['arTimeRegion', 'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClearTime']
+  .map(grab).join('\n\n');
+
+// A row is a base label here, exactly as it is in the painter: `kick#fill` paints onto `kick`'s
+// row, so the row helpers the lifted code calls are that one rule and nothing else.
+const baseOf = (l) => String(l).split('#')[0];
+const rowEnv = { arRowOfLabel: (l) => baseOf(l), arRowLabel: (r) => r };
 
 /** The lifted region functions over a fake painter. */
-function painter({ clips = [], sel = [], regionSpan = null, selRegion = null } = {}) {
-  const arState = { clips, sel: new Set(sel), regionSpan, selRegion };
+function painter({ clips = [], sel = [], regionSpan = null, regionRows = null, selRegion = null } = {}) {
+  const arState = { clips, sel: new Set(sel), regionSpan, regionRows, selRegion };
+  const env = { arState, ...rowEnv };
+  const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
-  const fns = new Function('arState', `${LIFTED}\nreturn { arTimeRegion, arClipsIn, arClearTime };`)(arState);
-  return { fns, arState };
+  const build = new Function(...keys, `${LIFTED}\nreturn { arTimeRegion, arRegionRows, arClipsIn, arClearTime };`);
+  return { fns: build(...keys.map((k) => env[k])), arState };
 }
 
 const clip = (label, start, len) => ({ label, start, len });
@@ -180,23 +188,25 @@ test('the ops that consume a span let go of the loop region that marked it', () 
 // variation), and a join has to swallow the gaps between what it joins without moving anything.
 // ---------------------------------------------------------------------------------------------
 
-/** The split/join ops over a fake painter. Writes and redraws are counted, not performed. */
-function ops({ clips = [], sel = [], insert = null, regionSpan = null, track = null } = {}) {
-  const baseOf = (l) => String(l).split('#')[0];
-  const arState = { clips, sel: new Set(sel), insert, regionSpan, track: track ?? baseOf(clips[0]?.label ?? '') ?? null };
+/** The split/join/duplicate ops over a fake painter. Writes and redraws are counted, not performed. */
+function ops({ clips = [], sel = [], insert = null, regionSpan = null, regionRows = null, track = null } = {}) {
+  const arState = {
+    clips, sel: new Set(sel), insert, regionSpan, regionRows, selRegion: null, focus: 0,
+    track: track ?? baseOf(clips[0]?.label ?? '') ?? null,
+  };
   const logged = [];
   const env = {
     arState,
     logLine: (line) => logged.push(line),
     writeArrangeCall: () => {},
     drawArrange: () => {},
-    // rows are bases; a variation's clips sit on its base's row
-    arRowOfLabel: (l) => baseOf(l),
+    ...rowEnv, // rows are bases; a variation's clips sit on its base's row
   };
-  const LIFT = ['arSplitPoints', 'arOpTargets', 'arSplitClips', 'arJoinClips'].map(grab).join('\n\n');
+  const LIFT = ['arSplitPoints', 'arOpTargets', 'arSplitClips', 'arJoinClips',
+    'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClipOverlaps', 'arDuplicate'].map(grab).join('\n\n');
   const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
-  const build = new Function(...keys, `${LIFT}\nreturn { arSplitClips, arJoinClips, arSplitPoints, arOpTargets };`);
+  const build = new Function(...keys, `${LIFT}\nreturn { arSplitClips, arJoinClips, arSplitPoints, arOpTargets, arClipOverlaps, arDuplicate };`);
   return { fns: build(...keys.map((k) => env[k])), arState, logged };
 }
 
@@ -348,8 +358,10 @@ test('a marked span is shaded over the tracks, not only on the ruler', () => {
   // The ruler band was enough while a span was something you dragged out up there. A drag across a
   // clip's body marks one now, so it has to be visible where the drag happened - over the music.
   const draw = grab('drawArrange');
-  assert.match(draw, /ctx\.fillRect\(sx0, gridTop, sx1 - sx0, gridBottom - gridTop\)/,
-    'the span is filled across the rows');
+  assert.match(draw, /for \(const \[top, bot\] of bands\) ctx\.fillRect\(sx0, top, sx1 - sx0, bot - top\);/,
+    'the span is filled over the rows it covers');
+  // ...and the full height is still what a region covering every row draws (see arRegionRows)
+  assert.match(draw, /if \(!timeRows\) bands\.push\(\[gridTop, gridBottom\]\);/);
   assert.match(draw, /ctx\.fillRect\(rx0, AR_RULER_TOP, rx1 - rx0, AR_RULER\)/, '...and still banded on the ruler');
   // The insert marker stays quieter than the playhead: an arrow in the ruler and a glow, not a
   // second hard rule down the song competing with the thing that is actually moving.
@@ -451,7 +463,8 @@ test('renaming from a clip or the mixer goes through one path, and the painter f
   const apply = grab('arApplyRename');
   assert.match(apply, /for \(const c of arState\.clips\) if \(map\.has\(c\.label\)\) c\.label = map\.get\(c\.label\);/);
   assert.match(apply, /arState\.tracks = arState\.tracks\.map\(\(t\) => map\.get\(t\) \?\? t\);/);
-  assert.match(grab('arRenameBlock'), /const res = mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]{0,900}arApplyRename\(map\);/);
+  // arCM, not cm: the painter rewrites the deck it is on (see openArrangePainter)
+  assert.match(grab('arRenameBlock'), /const res = mixctlMod\.renameEdits\(arCM\.getValue\(\), from, to\);[\s\S]{0,900}arApplyRename\(map\);/);
   assert.match(grab('applyMixerRename'), /mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]*arApplyRename\(map\);/);
   // the gesture: the clip menu and cmd+R put the name box over the clip's title
   assert.match(SRC, /items\.push\(\['rename…', \(\) => arRenameClip\(targets\[0\]\)/);
@@ -459,17 +472,235 @@ test('renaming from a clip or the mixer goes through one path, and the painter f
   assert.match(grab('arCommitLaneName'), /if \(edit\.kind === 'clip'\) \{\n\s+if \(save && name && name !== edit\.from\) arRenameBlock\(edit\.from, name\);/);
 });
 
-test('a nested family folds under its base, and a jump to a variation opens the fold first', () => {
+test('a group gets a caret in the gutter and does NOT fold itself', () => {
+  // It used to fold on every evaluation, which hid the member you were in the middle of writing.
+  // Open is the default now; what is remembered is which groups you folded.
   const fold = grab('foldFamilies');
   assert.match(fold, /blocks\.filter\(\(b\) => b\.nested && b\.base === base\.label && b\.start > base\.start\)/);
-  assert.match(fold, /`⋯ \$\{kids\.length\} variation\$\{kids\.length === 1 \? '' : 's'\}`/);
-  assert.match(fold, /`family:\$\{base\.label\}`/, 'keyed by the base, so an opened family stays open while typed in');
+  assert.match(fold, /cm\.setGutterMarker\(cm\.posFromIndex\(from\)\.line, GROUP_GUTTER, groupCaret\(/);
+  assert.match(fold, /const folded = collapsedGroups\.has\(base\.label\);\n\s+.*\n\s+if \(!folded\) continue;/,
+    'nothing folds unless the caret was pressed');
+  assert.ok(!/variation\$\{kids\.length === 1/.test(fold), 'the auto-folding chip text is gone');
+  // ...and a group that leaves the buffer forgets it was folded, so a new one of that name opens
+  assert.match(fold, /for \(const label of \[\.\.\.collapsedGroups\]\) if \(!live\.has\(label\)\) collapsedGroups\.delete\(label\);/);
   assert.match(SRC, /for \(const reg of DEF_REGISTRIES\) foldDefRuns\(code, reg\);\n\s+foldFamilies\(code\);/);
-  assert.match(grab('arGotoBlock'), /if \(block\.nested && !expandedFolds\.has\(`family:\$\{block\.base\}`\)\) \{\n\s+expandedFolds\.add/);
-  assert.match(grab('arCreateVariation'), /expandedFolds\.add\(`family:\$\{base\}`\);/, 'a family just made is shown, not folded away');
+  // the gutter has to be declared at construction, and cleared at the top of every pass
+  assert.match(SRC, /gutters: \['CodeMirror-linenumbers', GROUP_GUTTER\],/);
+  assert.match(fold, /cm\.clearGutter\(GROUP_GUTTER\);/);
+  // a jump onto a member of a FOLDED group opens it first, or the cursor lands on the chip
+  assert.match(grab('arGotoBlock'), /if \(block\.nested && collapsedGroups\.has\(block\.base\)\) \{\n\s+collapsedGroups\.delete/);
+  assert.match(grab('arCreateVariation'), /collapsedGroups\.delete\(base\);/, 'a member just made is shown');
+  // and a fresh buffer starts with nothing folded
+  assert.match(grab('forgetExpandedFolds'), /collapsedGroups\.clear\(\);/);
+});
+
+test('the caret says which way it will go, and toggles the group', () => {
+  const caret = grab('groupCaret');
+  assert.match(caret, /el\.textContent = folded \? '▸' : '▾';/);
+  assert.match(caret, /if \(collapsedGroups\.has\(label\)\) collapsedGroups\.delete\(label\);\n\s+else collapsedGroups\.add\(label\);/);
+  assert.match(caret, /refoldAll\(\);/, 'the marks are re-derived rather than patched');
+  const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+  assert.match(css, /\.cm-s-poptart \.poptart-group-fold \{\n\s+width: 14px;\n\}/, 'a fixed gutter width, so the code does not shift');
 });
 
 test('double-clicking a clip flips to the code on its block - there is no second editor', () => {
   assert.ok(!/blockEdit/.test(SRC), 'the block window is gone');
   assert.match(grab('arEditBlock'), /closeArrangeEditor\(\);[\s\S]{0,200}arGotoBlock\(label\);/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The region is a RECTANGLE - rows as well as bars
+//
+// A selection used to be a vertical slice: clicking one clip lit every track over its bars, and
+// copy / cut / split / join all acted on the lot. It is a rectangle now (arRegionRows) - the rows
+// you pointed at and no others - with the two RIPPLE ops (cmd+shift+D, cmd+shift+backspace) still
+// taking the full height, because bars cannot move on one track and stand still on the next.
+// ---------------------------------------------------------------------------------------------
+
+test('a selected clip marks its own row, not a slice through the song', () => {
+  const a = clip('kick', 4, 4);
+  const { fns } = painter({ clips: [a, clip('bass', 4, 4)], sel: [a] });
+  assert.deepEqual([...fns.arRegionRows()], ['kick']);
+});
+
+test('a variation marks its BASE\'s row - they share one', () => {
+  const fill = clip('kick#fill', 8, 2);
+  assert.deepEqual([...painter({ clips: [fill], sel: [fill] }).fns.arRegionRows()], ['kick']);
+});
+
+test('several selected clips mark every row they are on', () => {
+  const a = clip('kick', 0, 4);
+  const b = clip('bass', 8, 4);
+  const { fns } = painter({ clips: [a, b], sel: [a, b] });
+  assert.deepEqual([...fns.arRegionRows()].sort(), ['bass', 'kick']);
+});
+
+test('a dragged span carries the rows it was dragged across', () => {
+  const { fns } = painter({ regionSpan: [0, 8], regionRows: new Set(['kick']) });
+  assert.deepEqual([...fns.arRegionRows()], ['kick']);
+});
+
+test('letting the span go lets its rows go with it', () => {
+  // regionRows is only read while a span is marked, so every place that drops the span drops the
+  // rows too without having to remember to - there is one field to clear, not two.
+  const { fns } = painter({ regionSpan: null, regionRows: new Set(['kick']) });
+  assert.equal(fns.arRegionRows(), null);
+});
+
+test('nothing marked is every row - which is what the ripple ops want', () => {
+  assert.equal(painter().fns.arRegionRows(), null);
+});
+
+test('a picked loop region is every row: it is a named span of the whole song', () => {
+  const a = clip('kick', 0, 4);
+  const { fns } = painter({ clips: [a], sel: [a], selRegion: { name: 'chorus', start: 8, end: 16 } });
+  assert.equal(fns.arRegionRows(), null, 'even with a clip held, the loop widens it to the song');
+});
+
+test('copying a span takes only the marked rows', () => {
+  const { fns } = painter({
+    clips: [clip('kick', 0, 8), clip('bass', 0, 8)],
+    regionSpan: [2, 6],
+    regionRows: new Set(['kick']),
+  });
+  assert.deepEqual(shape(fns.arClipsIn(2, 6, fns.arRegionRows())), [['kick', 0, 4]]);
+  // ...and with no rows marked it is still the whole slice
+  assert.deepEqual(shape(fns.arClipsIn(2, 6, null)), [['kick', 0, 4], ['bass', 0, 4]]);
+});
+
+test('clearing a span leaves the rows it does not cover alone', () => {
+  const { fns, arState } = painter({ clips: [clip('kick', 0, 8), clip('bass', 0, 8)] });
+  fns.arClearTime(2, 6, new Set(['kick']));
+  assert.deepEqual(shape(arState.clips), [['kick', 0, 2], ['kick', 6, 2], ['bass', 0, 8]]);
+});
+
+test('a span marked on one row splits and joins that row only', () => {
+  const spl = ops({
+    clips: [{ label: 'kick', start: 0, len: 12 }, { label: 'bass', start: 0, len: 12 }],
+    regionSpan: [4, 8],
+    regionRows: new Set(['kick']),
+  });
+  spl.fns.arSplitClips();
+  assert.deepEqual(clips(spl.arState), [['bass', 0, 12], ['kick', 0, 4], ['kick', 4, 4], ['kick', 8, 4]]);
+
+  const jn = ops({
+    clips: [{ label: 'kick', start: 0, len: 2 }, { label: 'kick', start: 6, len: 2 },
+      { label: 'bass', start: 0, len: 2 }, { label: 'bass', start: 6, len: 2 }],
+    regionSpan: [0, 8],
+    regionRows: new Set(['kick']),
+  });
+  jn.fns.arJoinClips();
+  assert.deepEqual(clips(jn.arState), [['bass', 0, 2], ['bass', 6, 2], ['kick', 0, 8]]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Duplicating overwrites what it lands on
+//
+// Two clips of one track sounding across the same bars is not a difference you can hear, so a
+// copy that stacked was only ever a mess waiting to be noticed. The roll has always clipped its
+// overlaps (prClipOverlaps); this is the same rule on the song's own timeline.
+// ---------------------------------------------------------------------------------------------
+
+test('a clip laid down cuts back whatever was under it on that row', () => {
+  const under = { label: 'kick', start: 0, len: 16 };
+  const over = { label: 'kick', start: 4, len: 4 };
+  const { fns, arState } = ops({ clips: [under, over] });
+  fns.arClipOverlaps([over]);
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 4], ['kick', 8, 8]],
+    'the long clip becomes the part before it and the part after');
+});
+
+test('it clips per ROW, so a fill dropped on its base replaces the base there', () => {
+  const loop = { label: 'kick', start: 0, len: 8 };
+  const fill = { label: 'kick#fill', start: 6, len: 2 };
+  const { fns, arState } = ops({ clips: [loop, fill] });
+  fns.arClipOverlaps([fill]);
+  assert.deepEqual(clips(arState), [['kick', 0, 6], ['kick#fill', 6, 2]]);
+});
+
+test('...and never touches another row', () => {
+  const over = { label: 'kick', start: 4, len: 4 };
+  const { fns, arState } = ops({ clips: [{ label: 'bass', start: 0, len: 16 }, over] });
+  fns.arClipOverlaps([over]);
+  assert.deepEqual(clips(arState), [['bass', 0, 16], ['kick', 4, 4]]);
+});
+
+test('a clip only partly under the new one keeps the end that survives', () => {
+  const over = { label: 'kick', start: 4, len: 8 };
+  const { fns, arState } = ops({ clips: [{ label: 'kick', start: 0, len: 6 }, over] });
+  fns.arClipOverlaps([over]);
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 8]]);
+});
+
+test('cmd+D on selected clips repeats them after themselves, overwriting', () => {
+  const a = { label: 'kick', start: 0, len: 4 };
+  const { fns, arState } = ops({ clips: [a, { label: 'kick', start: 4, len: 12 }], sel: [a] });
+  fns.arDuplicate();
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 4], ['kick', 8, 8]]);
+  assert.deepEqual([...arState.sel].map((c) => [c.start, c.len]), [[4, 4]], 'the copy is what you hold');
+});
+
+test('cmd+D on a span lifts a section out of the middle of a long clip', () => {
+  // The note's own example: mark bars 4..8 of a clip running 0..16 and the copy lands at 8..12,
+  // cutting what was there into the part before it and the part after.
+  const { fns, arState } = ops({
+    clips: [{ label: 'kick', start: 0, len: 16 }],
+    regionSpan: [4, 8],
+    regionRows: new Set(['kick']),
+  });
+  fns.arDuplicate();
+  assert.deepEqual(clips(arState), [['kick', 0, 8], ['kick', 8, 4], ['kick', 12, 4]]);
+  assert.deepEqual(arState.regionSpan, [8, 12], 'the span walks with the copy, so pressing again repeats');
+});
+
+test('a span duplicate stays on its own rows', () => {
+  const { fns, arState } = ops({
+    clips: [{ label: 'kick', start: 0, len: 16 }, { label: 'bass', start: 0, len: 16 }],
+    regionSpan: [4, 8],
+    regionRows: new Set(['kick']),
+  });
+  fns.arDuplicate();
+  assert.deepEqual(clips(arState).filter((c) => c[0] === 'bass'), [['bass', 0, 16]]);
+});
+
+test('cmd+D with an empty span says so rather than doing nothing', () => {
+  const { fns, logged } = ops({ clips: [{ label: 'kick', start: 0, len: 4 }], regionSpan: [8, 12] });
+  fns.arDuplicate();
+  assert.match(logged.join('\n'), /nothing in the marked span/);
+});
+
+test('the menu\'s explicit targets keep the clip shape even with a span marked', () => {
+  // "duplicate after" on a right-clicked clip is about that clip, whatever else is marked.
+  const a = { label: 'kick', start: 0, len: 4 };
+  const { fns, arState } = ops({ clips: [a], regionSpan: [8, 12], regionRows: new Set(['kick']) });
+  fns.arDuplicate([a]);
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 4]]);
+});
+
+test('the wiring: cmd+D reads the span, paste clips its overlaps, empty song drops the selection', () => {
+  assert.match(SRC, /e\.key\.toLowerCase\(\) === 'd'\) \{ arDuplicate\(\); e\.preventDefault\(\)/,
+    'cmd+D hands nothing in, so it can read the marked span itself');
+  assert.match(grab('arPasteTime'), /arState\.clips\.push\(\.\.\.made\);\n\s+arClipOverlaps\(made\);/);
+  // clicking empty song is the way OUT of a selection - escape was the only one before
+  assert.match(SRC, /if \(y >= arGridBottom\(\)\) \{ arDropSelection\(\); drawArrange\(\); return; \}/);
+  assert.match(SRC, /if \(row < 0 \|\| arRowLabel\(row\) == null\) \{ arDropSelection\(\); drawArrange\(\); return; \}/);
+  assert.match(grab('arDropSelection'), /arState\.regionRows = null;/);
+  // ...and the ripple ops stay the whole song's, whatever rows were marked when they were pressed
+  assert.match(grab('arTimeDuplicate'), /arState\.regionRows = null;/);
+  assert.ok(!/arRegionRows\(\)/.test(grab('arRemoveTime')), 'delete-time never narrows to rows');
+});
+
+test('a time drag carries the row it started on', () => {
+  assert.match(SRC, /arState\.drag = \{ kind: 'timeSel', a: arState\.insert, x0: x, row0: row \}/);
+  assert.match(SRC, /arState\.regionRows = arRowsBetween\(d\.row0, arRowOf\(y\)\);/);
+  assert.match(SRC, /arState\.regionRows = arRowsBetween\(arRowOf\(Math\.min\(d\.y0, d\.y1\)\), arRowOf\(Math\.max\(d\.y0, d\.y1\)\)\);/);
+});
+
+test('the arrangement\'s length box fits a fractional one', () => {
+  // A length dragged out in the ruler lands on the snap grid, so 12.75 is ordinary here where the
+  // roll's grid and length are always whole - 46px clipped it and step="1" flagged it invalid.
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+  assert.match(html, /id="arrangeLen" type="number" step="any"/);
+  const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+  assert.match(css, /#arrangeLen \{\n\s+width: 68px;\n\}/);
 });
