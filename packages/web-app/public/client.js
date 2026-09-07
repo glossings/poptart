@@ -21994,6 +21994,7 @@ const AR_AUTO_H = 88; // px, when a lane is open
 const AR_AUTO_PAD = 9; // px of headroom inside it, so a breakpoint at either extreme is still grabbable
 const AR_AUTO_HIT = 7; // px: how close to a breakpoint counts as grabbing it
 const AR_AUTO_LIVE_MS = 40; // how often a drag re-files the definition with the engine
+const AR_AUTO_NUDGE = 0.01; // one arrow press on a selected span, as a fraction of the strip's range
 
 let arState = null;
 let arRaf = null;
@@ -22196,6 +22197,7 @@ function openArrangeEditor(call) {
     autoOwn: false,
     autoOpen: false,
     autoRange: [0, 1],
+    autoSel: null, // the strip's own [a, b] span in bars - what its edit ops act on (arAutoPointsIn)
     drag: null,
     hover: null,
     history: [],
@@ -22769,6 +22771,26 @@ function drawArrangeAuto(ctx, col, W, text) {
   }
   ctx.globalAlpha = 1;
 
+  // the marked span, under the curve so the shape being operated on stays readable through it
+  const sel = arState.autoSel;
+  if (sel) {
+    const sx0 = Math.max(AR_GUTTER, arXOf(sel[0]));
+    const sx1 = Math.min(W, arXOf(sel[1]));
+    if (sx1 > sx0) {
+      ctx.fillStyle = col('--accent');
+      ctx.globalAlpha = 0.14;
+      ctx.fillRect(sx0, top + 1, sx1 - sx0, AR_AUTO_H - 2);
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = col('--accent');
+      for (const bx of [sel[0], sel[1]]) {
+        const x = Math.round(arXOf(bx)) + 0.5;
+        if (x < AR_GUTTER || x > W) continue;
+        ctx.beginPath(); ctx.moveTo(x, top + 1); ctx.lineTo(x, bottom - 1); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
   if (pts.length && shapeMod) {
     // The curve, sampled per pixel. A lane holds its end levels either side of its breakpoints
     // (see sampleAutoPoints), so the line runs the full width - the flat stretches are the lane
@@ -22790,9 +22812,11 @@ function drawArrangeAuto(ctx, col, W, text) {
       const x = arXOf(pts[i].x);
       if (x < AR_GUTTER - 6 || x > W + 6) continue;
       const y = arAutoYOf(pts[i].y);
+      // a point inside the span is filled rather than hollow, so what an op will take is countable
+      const inSel = sel && pts[i].x >= sel[0] - 1e-9 && pts[i].x <= sel[1] + 1e-9;
       ctx.beginPath();
       ctx.arc(x, y, i === held ? 5.5 : 4, 0, 2 * Math.PI);
-      ctx.fillStyle = col('--bg-panel');
+      ctx.fillStyle = col(inSel ? '--accent' : '--bg-panel');
       ctx.fill();
       ctx.strokeStyle = col('--accent');
       ctx.lineWidth = 1.5;
@@ -22834,10 +22858,16 @@ function arCursorFor(x, y) {
   // the automation strip: a breakpoint is grabbed, the curve is bent, empty space is drawn into
   if (arInAuto(y)) {
     if (x < AR_GUTTER) return 'pointer';
-    if (!arState.autoOwn) return 'default';
+    // a library lane can be spanned and copied, but not drawn into
+    if (!arState.autoOwn) return 'crosshair';
     if (arAutoPointAt(x, y) != null) return 'grab';
+    // inside a marked span, a vertical drag lifts the whole group
+    const bar = arBarsOf(x);
+    if (arTool === 'select' && arState.autoSel && bar >= arState.autoSel[0] && bar <= arState.autoSel[1]) return 'ns-resize';
     const onCurve = shapeMod && Math.abs(arAutoYOf(shapeMod.sampleAutoPoints(arState.autoPts, arBarsOf(x))) - y) <= AR_AUTO_HIT;
-    return onCurve && arAutoSegmentAt(x) != null ? 'ns-resize' : CUR_PENCIL;
+    if (onCurve && arAutoSegmentAt(x) != null) return 'ns-resize';
+    // empty strip: the pencil places a point, the arrow drags out a span to edit
+    return arTool === 'draw' ? CUR_PENCIL : 'crosshair';
   }
   // the ruler: the loop-end marker sets the length; everywhere else is the zoom/pan magnifier
   if (arInRuler(y)) return x < AR_GUTTER ? 'default' : arNearLoopEnd(x) ? 'col-resize' : CUR_ZOOM;
@@ -22964,8 +22994,11 @@ function arTimeRegion() {
   return b > a ? [a, b] : null;
 }
 
+// Nothing was refused here and nothing is broken - the gesture just has no target yet - so these
+// go out as warnings rather than errors: no red pulse on the collapsed console for a keystroke
+// that was simply early.
 function arTimeHint() {
-  logLine('the time ops need a region - select clips, pick a loop, or drag a span out in the loops strip with the arrow tool', true);
+  logLine('the time ops need a region - select clips, pick a loop, or drag a span out in the loops strip with the arrow tool', 'warn');
 }
 
 // The painter's clipboard: a span of song, its clips cut to the span's edges and their starts
@@ -22973,6 +23006,11 @@ function arTimeHint() {
 // from somewhere else. Module-level like the roll's, so it survives the panel closing and moving
 // a section between two songs is one copy and one paste.
 let arClipboard = null; // { width, clips: [{ label, lane, start, len }] }
+
+// Which of the painter's two clipboards was filled last - what an unqualified cmd+V means. The
+// panel has a clipboard for clips and one for curves (see arAutoClipboard), and a paste that
+// ignored which one you had just filled would be a coin toss.
+let arClipSource = null; // 'clips' | 'auto'
 
 const arFmtBars = (n) => `${Math.round(n * 100) / 100} bar${Math.abs(n - 1) < 1e-9 ? '' : 's'}`;
 
@@ -22999,6 +23037,7 @@ function arCopyTime({ cut = false } = {}) {
   const [a, b] = region;
   const clips = arClipsIn(a, b);
   arClipboard = { width: b - a, clips };
+  arClipSource = 'clips';
   logLine(`${cut ? 'cut' : 'copied'} ${clips.length} clip${clips.length === 1 ? '' : 's'} over ${arFmtBars(b - a)} - cmd-V pastes them`);
   if (!cut) return;
   arClearTime(a, b);
@@ -23034,7 +23073,7 @@ function arClearTime(a, b) {
 function arPasteTime() {
   if (!arState) return;
   if (!arClipboard?.clips.length) {
-    logLine('nothing on the painter\'s clipboard yet - select a span and cmd-C first', true);
+    logLine('nothing on the painter\'s clipboard yet - select a span and cmd-C first', 'warn');
     return;
   }
   const region = arTimeRegion();
@@ -23192,9 +23231,10 @@ function arCommitLaneName(save) {
 // What the strip adds is only the VIEW: the same bar axis as the clips, so the filter opening over
 // bars 16-20 is drawn against the section it opens over. Everything else is the same gesture set as
 // the LFO's shape editor (drag a point, vertical-drag a segment to bend it, double-click to add or
-// delete), and the same live-push as the roll and slice panels - the definition is re-filed with
-// the engine through the drag, so the curve is heard while it is being drawn, and written to the
-// buffer once when the hand comes off.
+// delete), over the painter's own tool split: the pencil draws points, the arrow drags out a span
+// to edit (see arAutoPointsIn). Live-pushed like the roll and slice panels - the definition is
+// re-filed with the engine through the drag, so the curve is heard while it is being drawn, and
+// written to the buffer once when the hand comes off.
 // ---------------------------------------------------------------------------------------------
 
 const arAutoDefOf = (id) => autoDefs.findDef(cm.getValue(), String(id));
@@ -23230,6 +23270,7 @@ function arSelectAuto(id) {
   arState.autoOwn = !!(name && arAutoDefOf(name));
   arState.autoPts = name ? (arAutoPointsOf(name) ?? [{ x: 0, y: 0, c: 0 }]) : [];
   arState.autoOpen = !!name;
+  arState.autoSel = null; // a span belongs to the curve it was drawn over, not to the strip
   if (name) localStorage.setItem('poptartArrangeAuto', name);
   arRefreshAutoRange();
   arSizeCanvas();
@@ -23319,14 +23360,18 @@ function arAutoPointAt(x, y) {
   return best ? best.index : null;
 }
 
-/** Which segment x falls in - what a vertical drag bends (see the LFO shape editor). */
-function arAutoSegmentAt(x) {
-  const bars = arBarsOf(x);
+/** Which segment a bar falls in. */
+function arAutoSegAtBar(bars) {
   const pts = arState.autoPts;
   for (let i = 0; i < pts.length - 1; i++) {
     if (bars >= pts[i].x && bars <= pts[i + 1].x && pts[i + 1].x > pts[i].x) return i;
   }
   return null;
+}
+
+/** Which segment x falls in - what a vertical drag bends (see the LFO shape editor). */
+function arAutoSegmentAt(x) {
+  return arAutoSegAtBar(arBarsOf(x));
 }
 
 /** Adds a breakpoint at (bar, value), keeping the list in ascending bar order. Returns its index. */
@@ -23337,9 +23382,236 @@ function arAutoAddPoint(bar, value) {
   return index;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The automation strip's own selection and edit ops - the same verbs the clips have, on a stretch
+// of curve. The arrow tool drags a span out of the strip (the pencil keeps drawing points), and
+// from there the whole set works on it: delete, copy, cut, paste, duplicate after.
+//
+// Two things are deliberately NOT the clips' behaviour:
+//   - a paste REPLACES the span it lands on rather than overlaying it. Two curves stacked on the
+//     same bars is not a thicker curve, it is a zigzag between them - a lane has one value at a
+//     time, so laying one down has to take the old one out of the way.
+//   - duplicate-after does not open time. The lane is drawn against the song's bars, which belong
+//     to the clips above it; rippling the curve alone would slide it out of step with the music it
+//     was drawn against. So it repeats the shape into the next span instead, and the selection
+//     walks with it - press it four times and an 8-bar sweep covers the chorus.
+// ---------------------------------------------------------------------------------------------
+
+// Module-level like the painter's own clipboard, so a curve can be carried between lanes - and
+// between songs. Points are held relative to the span's start, with its width, so pasting is a
+// translation.
+let arAutoClipboard = null; // { width, points: [{ x, y, c }] }
+
+/** Whether the open lane is this buffer's to edit; says why not, when it isn't. */
+function arAutoEditable() {
+  if (!arState?.autoId || !shapeMod) return false;
+  if (!arState.autoOwn) {
+    logLine(`automation lane "${arState.autoId}" comes from your library - ★ it into this buffer to edit it`, true);
+    return false;
+  }
+  return true;
+}
+
+function arAutoSpanHint() {
+  logLine('the lane\'s edit ops need a span - drag one out across the strip with the arrow tool', 'warn');
+}
+
+/**
+ * The curve over [a, b], its points measured from `a`. An edge that cuts through a segment gets a
+ * point of its own, sampled where it cuts - the trimming a copied clip gets: copying bars 8..16 out
+ * of the middle of a sweep has to give you that stretch of the sweep, starting at the value it had
+ * reached by bar 8, and not the whole of it. The span is closed at both ends, unlike a clip's: a
+ * curve is continuous, so where it ends up is as much a part of it as where it starts.
+ */
+function arAutoPointsIn(a, b) {
+  const pts = arState.autoPts;
+  if (!pts.length || !shapeMod) return [];
+  const first = pts[0].x;
+  const last = pts[pts.length - 1].x;
+  const at = (bar) => pts.some((p) => Math.abs(p.x - bar) < 1e-9);
+  const out = [];
+  // The bend of the segment an edge lands in is carried over as it stands. A half-segment does not
+  // have the same curve as the whole of it, but it has the same shape, which is what was drawn.
+  if (a > first + 1e-9 && a < last && !at(a)) out.push({ x: 0, y: shapeMod.sampleAutoPoints(pts, a), c: pts[arAutoSegAtBar(a) ?? 0]?.c ?? 0 });
+  for (const p of pts) if (p.x >= a - 1e-9 && p.x <= b + 1e-9) out.push({ x: p.x - a, y: p.y, c: p.c ?? 0 });
+  if (b > first && b < last - 1e-9 && !at(b)) out.push({ x: b - a, y: shapeMod.sampleAutoPoints(pts, b), c: 0 });
+  // A span off either end of the breakpoints is not empty - it is the lane holding its end level,
+  // which is a shape like any other. It copies as the flat stretch it is, so pasting one flattens
+  // what it lands on rather than quietly doing nothing.
+  if (!out.length) {
+    const held = shapeMod.sampleAutoPoints(pts, a);
+    out.push({ x: 0, y: held, c: 0 }, { x: b - a, y: held, c: 0 });
+  }
+  out.sort((p, q) => p.x - q.x);
+  return out;
+}
+
+/**
+ * Take the points in [a, b] out. The curve then runs straight from the point before the span to the
+ * one after it - a lane always has a value everywhere (see sampleAutoPoints), so "nothing here" is
+ * not one of the things it can say. Emptying the lane completely would leave it unparseable, so the
+ * last breakpoint out is replaced by a flat one holding the value the span opened on.
+ */
+function arAutoClearSpan(a, b) {
+  const held = shapeMod && arState.autoPts.length ? shapeMod.sampleAutoPoints(arState.autoPts, a) : 0;
+  arState.autoPts = arState.autoPts.filter((p) => p.x < a - 1e-9 || p.x > b + 1e-9);
+  if (!arState.autoPts.length) arState.autoPts.push({ x: Math.max(0, a), y: held, c: 0 });
+}
+
+/**
+ * Split the lane into what is before the span, inside it, and after it.
+ *
+ * The only subtlety is a bar carrying two breakpoints, which is how this format writes a vertical
+ * step (see parseAutoPoints): the first is the value arriving from the left and the last is the
+ * value leaving to the right, so an edge that already steps keeps its outside half outside. That
+ * is what makes a group move idempotent - the anchors it leaves behind are not picked up and moved
+ * again by the next one.
+ */
+function arAutoSplitSpan(a, b) {
+  const head = [];
+  const mid = [];
+  const tail = [];
+  for (const p of arState.autoPts) {
+    if (p.x < a - 1e-9) head.push(p);
+    else if (p.x > b + 1e-9) tail.push(p);
+    else mid.push(p);
+  }
+  if (mid.length > 1 && Math.abs(mid[0].x - a) < 1e-9 && Math.abs(mid[1].x - a) < 1e-9) head.push(mid.shift());
+  if (mid.length > 1 && Math.abs(mid.at(-1).x - b) < 1e-9 && Math.abs(mid.at(-2).x - b) < 1e-9) tail.unshift(mid.pop());
+  return { head, mid, tail };
+}
+
+/**
+ * Put breakpoints on the span's edges, so raising or lowering what is inside it changes that
+ * stretch and leaves the rest of the lane where it was. Each edge with curve beyond it gets a PAIR
+ * on the same bar: an anchor holding the value the curve had out there, and its twin inside the
+ * span, which moves. That pair is the vertical step you see appear at the edges of a raised
+ * selection - it is not an artefact, it is the only way a lane can say "this stretch, not the
+ * stretch next to it" while still having a value everywhere.
+ *
+ * Returns the breakpoints inside the span - the ones an edit then moves.
+ */
+function arAutoMaterializeSpan(a, b) {
+  const pts = arState.autoPts;
+  if (!pts.length || !shapeMod) return [];
+  const segC = (bar) => pts[arAutoSegAtBar(bar) ?? -1]?.c ?? 0;
+  const { head, mid, tail } = arAutoSplitSpan(a, b);
+  if (head.length && head.at(-1).x < a - 1e-9) {
+    const y = shapeMod.sampleAutoPoints(pts, a);
+    if (!mid.length || Math.abs(mid[0].x - a) > 1e-9) mid.unshift({ x: a, y, c: segC(a) });
+    head.push({ x: a, y, c: 0 }); // ...and the anchor, which does not
+  }
+  if (tail.length && tail[0].x > b + 1e-9) {
+    const y = shapeMod.sampleAutoPoints(pts, b);
+    if (!mid.length || Math.abs(mid.at(-1).x - b) > 1e-9) mid.push({ x: b, y, c: 0 });
+    tail.unshift({ x: b, y, c: segC(b) }); // carries the bend that ran into the rest of the lane
+  }
+  arState.autoPts = [...head, ...mid, ...tail];
+  return mid;
+}
+
+/**
+ * As much of `delta` as keeps every one of `values` inside the strip's range. Clamping the move
+ * rather than each point holds the group's SHAPE: clamping them one by one would flatten whichever
+ * reached the ceiling first, quietly rewriting the curve you were only trying to lift.
+ */
+function arAutoFit(values, delta) {
+  if (!values.length) return 0;
+  const [lo, hi] = arState.autoRange;
+  return Math.min(hi - Math.max(...values), Math.max(lo - Math.min(...values), delta));
+}
+
+/** Raise (or lower) every breakpoint in the span together. */
+function arAutoNudge(delta) {
+  if (!arState?.autoSel) return arAutoSpanHint();
+  if (!arAutoEditable()) return;
+  const mid = arAutoMaterializeSpan(arState.autoSel[0], arState.autoSel[1]);
+  const step = arAutoFit(mid.map((p) => p.y), delta);
+  if (!step) return; // already against the end of the range - nothing to write
+  for (const p of mid) p.y += step;
+  arAutoLanded();
+}
+
+/** One arrow press, scaled to the range so a lane in semitones does not need a hundred of them. */
+function arAutoNudgeStep(big) {
+  const [lo, hi] = arState.autoRange;
+  return AR_AUTO_NUDGE * Math.max(1, hi - lo) * (big ? 10 : 1);
+}
+
+/** Points into the lane at `at`, keeping it in ascending bar order. */
+function arAutoInsert(at, points) {
+  for (const p of points) arState.autoPts.push({ x: Math.max(0, at + p.x), y: p.y, c: p.c ?? 0 });
+  arState.autoPts.sort((p, q) => p.x - q.x);
+}
+
+/** Everything an edit does once the points are changed: hold the range, write, redraw. */
+function arAutoLanded() {
+  arWriteAuto();
+  arRefreshAutoRange();
+  drawArrange();
+}
+
+function arAutoCopySel({ cut = false } = {}) {
+  if (!arState?.autoSel) return arAutoSpanHint();
+  const [a, b] = arState.autoSel;
+  const points = arAutoPointsIn(a, b);
+  arAutoClipboard = { width: b - a, points };
+  arClipSource = 'auto';
+  logLine(`${cut ? 'cut' : 'copied'} ${points.length} breakpoint${points.length === 1 ? '' : 's'} over ${arFmtBars(b - a)} - cmd-V pastes them`);
+  if (!cut || !arAutoEditable()) return;
+  arAutoClearSpan(a, b);
+  arAutoLanded();
+}
+
+function arAutoDeleteSel() {
+  if (!arState?.autoSel) return arAutoSpanHint();
+  if (!arAutoEditable()) return;
+  arAutoClearSpan(arState.autoSel[0], arState.autoSel[1]);
+  arAutoLanded();
+}
+
+function arAutoPaste() {
+  if (!arState) return;
+  if (!arAutoClipboard?.points.length) {
+    logLine('nothing on the lane\'s clipboard yet - drag a span out and cmd-C first', 'warn');
+    return;
+  }
+  if (!arAutoEditable()) return;
+  const at = Math.max(0, arSnapTo(arState.autoSel ? arState.autoSel[0] : arState.focus ?? 0));
+  arAutoClearSpan(at, at + arAutoClipboard.width);
+  arAutoInsert(at, arAutoClipboard.points);
+  arState.autoSel = [at, at + arAutoClipboard.width]; // what landed is the span now, so it repeats
+  arState.focus = at;
+  arAutoLanded();
+}
+
+function arAutoDuplicateSel() {
+  if (!arState?.autoSel) return arAutoSpanHint();
+  if (!arAutoEditable()) return;
+  const [a, b] = arState.autoSel;
+  const w = b - a;
+  const points = arAutoPointsIn(a, b);
+  arAutoClearSpan(b, b + w);
+  arAutoInsert(b, points);
+  arState.autoSel = [b, b + w]; // the copy is the span now: pressing again walks one more along
+  arAutoLanded();
+}
+
 function arOpenAutoMenu(clientX, clientY) {
   const rows = autoDefs.allIds();
   const items = [];
+  // the ops on whatever the strip has marked, spelled out so the keys are discoverable
+  if (arState.autoSel) {
+    const bars = arFmtBars(arState.autoSel[1] - arState.autoSel[0]);
+    items.push([`copy ${bars}`, () => arAutoCopySel(), 'cmd-C']);
+    items.push([`cut ${bars}`, () => arAutoCopySel({ cut: true }), 'cmd-X']);
+    items.push(['duplicate after', () => arAutoDuplicateSel(), 'cmd-D — repeats it into the next span']);
+    items.push(['clear span', () => arAutoDeleteSel(), 'backspace']);
+    items.push(['raise', () => arAutoNudge(arAutoNudgeStep(false)), '↑ — shift for a coarse step, or drag the band']);
+    items.push(['lower', () => arAutoNudge(-arAutoNudgeStep(false)), '↓']);
+  }
+  if (arAutoClipboard?.points.length) items.push(['paste here', () => arAutoPaste(), 'cmd-V — replaces what it lands on']);
+  if (items.length) items.push('-');
   for (const row of rows) {
     const mark = row.id === arState.autoId ? '● ' : '  ';
     items.push([`${mark}${row.id}`, () => arSelectAuto(row.id), row.own ? `show ${row.id}` : `${row.id} — from your library`]);
@@ -23489,6 +23761,7 @@ function initArrangeCanvas() {
     }
     if (arInLoops(y)) {
       if (x < AR_GUTTER) return;
+      arState.autoSel = null; // a span marked up here is instead of one in the automation strip
       const rh = arRegionHit(x);
       if (rh) {
         const { region, part } = rh;
@@ -23520,21 +23793,51 @@ function initArrangeCanvas() {
     if (arInAuto(y)) {
       // the gutter cell is the lane picker; the strip itself is the curve
       if (x < AR_GUTTER) { arOpenAutoMenu(e.clientX, e.clientY); return; }
-      if (!arState.autoOwn) return; // a library lane is shown, not edited (see arWriteAuto)
-      const idx = arAutoPointAt(x, y);
+      const editable = arState.autoOwn; // a library lane is shown, not edited (see arWriteAuto)
+      const idx = editable ? arAutoPointAt(x, y) : null;
       if (idx != null) {
+        arState.autoSel = null;
         arState.drag = { kind: 'autoPoint', index: idx, moved: false };
+        drawArrange();
+        return;
+      }
+      // Inside a marked span, a vertical drag lifts everything in it at once - the group move the
+      // arrow keys do a step at a time. It takes precedence over the bend below because the span
+      // is an explicit selection: while one is up, the strip is about that stretch.
+      const bar = arBarsOf(x);
+      if (editable && arTool === 'select' && arState.autoSel
+          && bar >= arState.autoSel[0] && bar <= arState.autoSel[1]) {
+        // The edges are put in on the first real movement, not here: a press that never travels is
+        // a click, and a click must not leave a pair of breakpoints behind that nothing wrote.
+        arState.drag = { kind: 'autoGroup', y0: y, span: [...arState.autoSel], mid: null, orig: null, moved: false };
+        drawArrange();
         return;
       }
       // A press on the curve with no point under it bends that segment (the LFO editor's gesture);
       // anywhere else drops a new breakpoint and drags it, so one press is one edit either way.
-      const seg = arAutoSegmentAt(x);
+      const seg = editable ? arAutoSegmentAt(x) : null;
       const onCurve = shapeMod && Math.abs(arAutoYOf(shapeMod.sampleAutoPoints(arState.autoPts, arBarsOf(x))) - y) <= AR_AUTO_HIT;
       if (seg != null && onCurve) {
+        arState.autoSel = null;
         arState.drag = { kind: 'autoCurve', index: seg, moved: false };
+        drawArrange();
+        return;
+      }
+      // Empty strip: the pencil places a breakpoint, the arrow drags out the span its edit ops act
+      // on - the same division of labour the lanes have, where the pencil paints a clip and the
+      // arrow rubber-bands a selection. A library lane has no first branch, so it can still be
+      // spanned and copied; only the writes are closed to it.
+      if (arTool === 'select' || e.shiftKey || !editable) {
+        arState.sel.clear(); // one region is marked at a time, so it is clear what a key will hit
+        arState.regionSpan = null;
+        arState.selRegion = null;
+        arState.autoSel = null;
+        arState.drag = { kind: 'autoSel', a: Math.max(0, arBarsOf(x)), x0: x };
+        drawArrange();
         return;
       }
       const index = arAutoAddPoint(Math.max(0, arSnapTo(arBarsOf(x))), arAutoValAt(y));
+      arState.autoSel = null;
       arState.drag = { kind: 'autoPoint', index, moved: true }; // a new point is already an edit
       arAutoLivePush();
       drawArrange();
@@ -23546,6 +23849,7 @@ function initArrangeCanvas() {
     // ...and any press in the lanes supersedes the drawn time span: the region follows what is
     // under the hand now - the clicked clip's extent, or the marquee about to be drawn.
     arState.regionSpan = null;
+    arState.autoSel = null; // ...including one marked in the automation strip below
     if (hit) {
       if (e.shiftKey) {
         if (arState.sel.has(hit.clip)) arState.sel.delete(hit.clip);
@@ -23604,6 +23908,14 @@ function initArrangeCanvas() {
       const b = Math.ceil(hi / cell) * cell;
       arState.regionSpan = b > a ? [a, b] : null;
       d.moved = Math.abs(x - d.x0) >= 3;
+    } else if (d.kind === 'autoSel') {
+      // the same quantize-out as the loops strip: the span you meant is the cells you dragged
+      // across, and a curve op wants to land on the grid the curve was drawn against
+      const cell = arCell();
+      const a = Math.floor(Math.max(0, Math.min(d.a, arBarsOf(x))) / cell) * cell;
+      const b = Math.ceil(Math.max(0, Math.max(d.a, arBarsOf(x))) / cell) * cell;
+      arState.autoSel = b > a ? [a, b] : null;
+      d.moved = Math.abs(x - d.x0) >= 3;
     } else if (d.kind === 'autoPoint') {
       // Bars snap to the painter's own grid (a curve turns where a clip starts), the value doesn't -
       // there is no grid worth having down the value axis. Neighbours cage it, so the list stays in
@@ -23617,6 +23929,21 @@ function initArrangeCanvas() {
       p.y = Math.min(hi, Math.max(lo, arAutoValAt(y)));
       d.moved = true;
       arAutoLivePush();
+    } else if (d.kind === 'autoGroup') {
+      if (!d.mid && Math.abs(y - d.y0) >= 2) {
+        d.mid = arAutoMaterializeSpan(d.span[0], d.span[1]);
+        d.orig = d.mid.map((p) => p.y);
+        d.moved = true;
+      }
+      if (d.mid) {
+        // Unclamped pixels in, one clamped move out (see arAutoFit): the group keeps its shape and
+        // stays inside the range, so a drag off the top of the strip stops rather than flattening.
+        const [lo, hi] = arState.autoRange;
+        const raw = ((d.y0 - y) / (AR_AUTO_H - 2 * AR_AUTO_PAD)) * (hi - lo);
+        const dv = arAutoFit(d.orig, raw);
+        for (let i = 0; i < d.mid.length; i++) d.mid[i].y = d.orig[i] + dv;
+        arAutoLivePush();
+      }
     } else if (d.kind === 'autoCurve') {
       // vertical drag bends the segment, exactly as it does in the LFO's shape editor
       const seg = arState.autoPts[d.index];
@@ -23715,7 +24042,14 @@ function initArrangeCanvas() {
       arRefreshCursor();
       return;
     }
-    if (d.kind === 'autoPoint' || d.kind === 'autoCurve') {
+    if (d.kind === 'autoSel') {
+      // a press that never travelled is a click, and a click in the strip lets the span go
+      if (!d.moved) arState.autoSel = null;
+      drawArrange();
+      arRefreshCursor();
+      return;
+    }
+    if (d.kind === 'autoPoint' || d.kind === 'autoCurve' || d.kind === 'autoGroup') {
       if (d.moved) {
         arWriteAuto();
         arRefreshAutoRange(); // the drawn range follows the data again now the hand is off
@@ -23774,7 +24108,14 @@ function initArrangeCanvas() {
       // reads as: click to place, click again to change your mind.
       if (x < AR_GUTTER || !arState.autoOwn) return;
       const idx = arAutoPointAt(x, y);
-      if (idx == null || arState.autoPts.length <= 1) return;
+      if (idx == null) {
+        // ...and double-click empty in the arrow tool places one, as it paints a clip in the lanes
+        if (arTool !== 'select') return;
+        arAutoAddPoint(Math.max(0, arSnapTo(arBarsOf(x))), arAutoValAt(y));
+        arAutoLanded();
+        return;
+      }
+      if (arState.autoPts.length <= 1) return;
       arState.autoPts.splice(idx, 1);
       arWriteAuto();
       arRefreshAutoRange();
@@ -23839,12 +24180,58 @@ function initArrangeCanvas() {
       // like the roll: first let go of what is held, then the panel itself. A picked loop region
       // counts as held now that it marks a span for the time ops - otherwise the band it lights
       // would be undismissable.
-      if (arState.regionSpan || arState.sel.size || arState.selRegion) {
+      if (arState.regionSpan || arState.sel.size || arState.selRegion || arState.autoSel) {
         arState.regionSpan = null;
         arState.selRegion = null;
+        arState.autoSel = null;
         arState.sel.clear();
         drawArrange();
       } else closeArrangeEditor();
+      return;
+    }
+    // A span marked in the automation strip takes the edit keys: it is the thing most recently
+    // marked (marking one clears the clip selection, and vice versa), so there is never a question
+    // of which of the two a key is aimed at. Its ops are the lane's own - see arAutoPointsIn.
+    // cmd+shift+backspace lands here too, and clears the span rather than closing it up: the lane
+    // rides the song's bars, so taking time out from under it belongs to the arrangement, not to
+    // one curve. Escape the span first to reach the arrangement's own ops.
+    if (arState.autoSel) {
+      if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
+        arAutoCopySel({ cut: e.key.toLowerCase() === 'x' });
+        e.preventDefault();
+        return;
+      }
+      // Shifted or not, cmd+D duplicates the span. Up in the lanes the two are different ops - one
+      // repeats the selected CLIPS, the other repeats that stretch of TIME - but a curve has no
+      // objects to move independently of the time they sit on, so in here they are one gesture.
+      if (mod && e.key.toLowerCase() === 'd') { arAutoDuplicateSel(); e.preventDefault(); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { arAutoDeleteSel(); e.preventDefault(); return; }
+      // ...and the arrows work the span itself: up/down lift what is inside it as a group (shift
+      // for a coarse step), left/right walk the band along the bars a cell at a time.
+      if (!mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        const step = arAutoNudgeStep(e.shiftKey);
+        arAutoNudge(e.key === 'ArrowUp' ? step : -step);
+        e.preventDefault();
+        return;
+      }
+      if (!mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        const w = arState.autoSel[1] - arState.autoSel[0];
+        const a = Math.max(0, arState.autoSel[0] + (e.key === 'ArrowLeft' ? -1 : 1) * arCell());
+        arState.autoSel = [a, a + w];
+        drawArrange();
+        e.preventDefault();
+        return;
+      }
+    }
+    // A paste follows what was last COPIED rather than what is marked now: copying a curve, clicking
+    // where it should go (which lets the span go, as any click does) and pasting is the whole point
+    // of having a clipboard, and it would be a strange reward for it to put clips there instead.
+    // With nothing copied yet either way, it follows what IS marked, so the hint it gives is about
+    // the thing being aimed at.
+    if (mod && e.key.toLowerCase() === 'v'
+        && arAutoShown() && (arClipSource ? arClipSource === 'auto' : !!arState.autoSel)) {
+      arAutoPaste();
+      e.preventDefault();
       return;
     }
     // the time-selection ops (see arTimeRegion and friends) - before the plain delete below, which

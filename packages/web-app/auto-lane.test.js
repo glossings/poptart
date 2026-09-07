@@ -39,7 +39,7 @@ const AR_AUTO_H = constant('AR_AUTO_H');
 const AR_AUTO_PAD = constant('AR_AUTO_PAD');
 const AR_AUTO_HIT = constant('AR_AUTO_HIT');
 
-const LIFTED = ['arAutoYOf', 'arAutoValAt', 'arRefreshAutoRange', 'arAutoPointAt', 'arAutoSegmentAt', 'arAutoAddPoint', 'arAutoPointsOf', 'splitFirstArg']
+const LIFTED = ['arAutoYOf', 'arAutoValAt', 'arRefreshAutoRange', 'arAutoPointAt', 'arAutoSegAtBar', 'arAutoSegmentAt', 'arAutoAddPoint', 'arAutoPointsOf', 'splitFirstArg']
   .map(grab)
   .join('\n\n');
 

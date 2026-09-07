@@ -168,5 +168,5 @@ test('the ops that consume a span let go of the loop region that marked it', () 
   const del = grab('arTimeDelete');
   assert.match(del, /arState\.selRegion = null;/);
   // ...and escape can dismiss it, or the band it lights would be stuck on screen
-  assert.match(SRC, /if \(arState\.regionSpan \|\| arState\.sel\.size \|\| arState\.selRegion\) \{/);
+  assert.match(SRC, /if \(arState\.regionSpan \|\| arState\.sel\.size \|\| arState\.selRegion \|\| arState\.autoSel\) \{/);
 });
