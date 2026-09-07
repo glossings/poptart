@@ -19,8 +19,11 @@ const fs = require('node:fs');
 
 /**
  * Parse a WAV file, keeping its channels interleaved.
- * @returns {{ sampleRate: number, channels: number, frames: number, data: Float32Array } | null}
+ * @returns {{ sampleRate: number, channels: number, frames: number, totalFrames: number, data: Float32Array } | null}
  *   `data` is interleaved samples in -1..1; null for anything this reader can't decode.
+ *   `frames` is what was decoded; `totalFrames` is what the header says the file holds. They
+ *   differ only when the buffer was cut short of the data chunk - the sample map reads just
+ *   the head of a long file and still wants to know how long the whole thing is.
  */
 function readWavRaw(filePath) {
   let buf;
@@ -45,7 +48,7 @@ function decodeWavRaw(buf) {
     const size = buf.readUInt32LE(off + 4);
     const body = off + 8;
     if (id === 'fmt ') fmt = { off: body, size };
-    if (id === 'data') data = { off: body, size: Math.min(size, buf.length - body) };
+    if (id === 'data') data = { off: body, size: Math.min(size, buf.length - body), declared: size };
     off = body + size + (size % 2); // chunks are word-aligned
   }
   if (!fmt || !data || fmt.size < 16) return null;
@@ -66,7 +69,10 @@ function decodeWavRaw(buf) {
 
   const out = new Float32Array(frames * channels);
   for (let i = 0; i < out.length; i++) out[i] = readSample(data.off + i * bytesPer);
-  return { sampleRate, channels, frames, data: out };
+  // A streamed file can declare 0 or 0xffffffff (unknown length); trust what was read then.
+  const declared = Math.floor(data.declared / (bytesPer * channels));
+  const totalFrames = declared >= frames && data.declared !== 0xffffffff ? declared : frames;
+  return { sampleRate, channels, frames, totalFrames, data: out };
 }
 
 function sampleReader(format, bits, buf) {
