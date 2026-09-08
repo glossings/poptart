@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import * as arrangeMod from '../pattern-core/src/arrange.mjs';
 import * as labelsMod from '../pattern-core/src/labels.mjs';
 import * as mixctlMod from '../pattern-core/src/mixctl.mjs';
+import * as groupsMod from '../pattern-core/src/groups.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(HERE, 'public', 'client.js'), 'utf8');
@@ -73,15 +74,15 @@ function fakeCm(text) {
 }
 
 const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arMigrateLegacy', 'arMigrateOneLegacy', 'arReadDef', 'parseArrangeCall',
-  'arCallOpts', 'serializeArrangeCall', 'arRefreshRows', 'arBlocks', 'arLabels', 'arTrackLabels', 'arRowOfLabel',
-  'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arCreateVariation', 'arNextVariantName', 'arFollowHandRenames',
-  'arMakeGroup', 'arGroupLabels', 'arSetBrush']
+  'arCallOpts', 'serializeArrangeCall', 'arRefreshRows', 'arGroupTree', 'arGroupParents', 'arBlocks', 'arLabels',
+  'arTrackLabels', 'arRowOfLabel', 'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arFollowHandRenames',
+  'arCreateGroup', 'arUngroup', 'arGroupLabels', 'arPaintLabel']
   .map(grab)
   .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup')])
   .join('\n\n');
 
 /** The lifted functions over a fake editor and (optionally) a fake open panel. */
-function panel({ code = '', arState = null } = {}) {
+function panel({ code = '', arState = null, collapsed = [] } = {}) {
   const cm = fakeCm(code);
   const logged = [];
   const env = {
@@ -99,20 +100,23 @@ function panel({ code = '', arState = null } = {}) {
     logLine: (line) => logged.push(line),
     arRefold: () => {}, // refoldAll, but only for the main buffer - deck B has no folds
     arSizeCanvas: () => {},
-    arSyncBrushHead: () => {}, // the head is DOM; the brush it shows is on arState, which is what is tested
+    groupsMod,
+    cm, // arCreateGroup/arUngroup refold only when they are editing the main buffer
+    refoldEditor: () => {},
+    lastDefRunEnd: () => null, // where a new _groups(...) files in; the foot of the buffer here
     writeArrangeCall: () => {},
     drawArrange: () => {},
     arScheduleEval: () => {},
     expandedFolds: new Set(),
-    collapsedGroups: new Set(), // a member just made opens its group, if the group was folded shut
+    collapsedGroups: new Set(collapsed), // which groups are folded - shared with the code editor's folds
   };
   // eslint-disable-next-line no-new-func
-  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arCreateVariation, arNextVariantName, arFollowHandRenames, arMakeGroup, arGroupLabels, arSetBrush };`);
+  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames, arCreateGroup, arUngroup, arGroupLabels, arPaintLabel };`);
   return { fns: build(...Object.values(env)), cm, logged, arState };
 }
 
 /** Just enough panel state for the row functions - the fields they actually touch. */
-const state = (clips = []) => ({ clips, rows: [], track: null, brush: null });
+const state = (clips = []) => ({ clips, rows: [], tree: null, parents: null, track: null });
 
 // ---------------------------------------------------------------------------------------------
 // Rows are tracks
@@ -126,67 +130,61 @@ const SONG = [
   '$: s("perc*4")', // a track you didn't feel like naming - a row like any other
 ].join('\n');
 
-// ...and the same song with two variations of the kick, one of them written ABOVE its base
+// ...and the same song as a GROUP: the kick's parts are ordinary tracks, held together by the tree
 const FAMILY = [
-  'kick#fill: s("mbd*8")',
+  'kick: group()',
+  'kickFill: s("mbd*8")',
   'setbpm(140)',
-  'kick: s("mbd*4")',
-  'kick#outro: s("mbd*4").fx("FilterFreak 1")',
+  'kickMain: s("mbd*4")',
   'hats: s("hh*8")',
+  '_groups({ "kick": ["kickMain", "kickFill"] })',
 ].join('\n');
 
-test('variations share their base\'s row, base first, however the buffer orders them', () => {
+test("a group's members are rows of their own, nested under it in the tree's order", () => {
   const st = state();
   panel({ code: FAMILY, arState: st }).fns.arRefreshRows();
-  assert.deepEqual(st.rows.map((r) => [r.label, r.variants]), [
-    ['kick', ['kick', 'kick#fill', 'kick#outro']],
-    ['hats', ['hats']],
+  assert.deepEqual(st.rows.map((r) => [r.label, r.depth, r.group]), [
+    ['kick', 0, true],
+    ['kickMain', 1, false], // the tree's order, not the buffer's - the group's list is the one you chose
+    ['kickFill', 1, false],
+    ['hats', 0, false],
   ]);
-  assert.equal(st.brush, 'kick', 'the brush starts on the selected row\'s base');
+  assert.equal(st.track, 'kick', 'and the first is selected, so a key press has a target');
 });
 
-test('a group\'s row carries its variations and nothing of its own; the brush lands on the first', () => {
+test('a group takes no paint; its members do', () => {
   const st = state();
-  const { fns } = panel({ code: 'kick: group().postgain(0.8)\n  #main: s("mbd*4")\n  #fill: s("mbd*8")\nhats: s("hh*8")', arState: st });
-  fns.arRefreshRows();
-  assert.deepEqual(st.rows.map((r) => [r.label, r.variants]), [
-    ['kick', ['kick#main', 'kick#fill']],
-    ['hats', ['hats']],
-  ]);
-  assert.equal(st.brush, 'kick#main', 'the group has nothing to paint; its first variation is what the pencil takes');
-  fns.arSetBrush('hats');
-  assert.equal(st.brush, 'hats');
-  fns.arSetBrush('kick');
-  assert.equal(st.brush, 'kick#main', 'the group\'s own name dips in its first variation');
-  fns.arSetBrush('kick#fill');
-  assert.equal(st.brush, 'kick#fill');
-  fns.arSetBrush('nobody');
-  assert.equal(st.brush, 'kick#fill', 'a label no row carries is ignored');
-});
-
-test('a variation whose base is gone is a row of its own, under its full name', () => {
-  const st = state();
-  panel({ code: 'kick#fill: s("mbd*8")\nhats: s("hh*8")', arState: st }).fns.arRefreshRows();
-  assert.deepEqual(st.rows.map((r) => [r.label, r.own]), [['kick#fill', true], ['hats', true]]);
-});
-
-test('a variation\'s clip finds the base\'s row; a brush the rows no longer carry falls back', () => {
-  const st = state(arrangeMod.parseArrangement('kick#outro,12,4'));
-  st.brush = 'kick#gone';
   const { fns } = panel({ code: FAMILY, arState: st });
   fns.arRefreshRows();
-  assert.equal(fns.arRowOfLabel('kick#outro'), 0);
-  assert.equal(fns.arRowOfLabel('kick'), 0);
+  assert.equal(fns.arPaintLabel(0), null, 'a group makes no sound of its own');
+  assert.equal(fns.arPaintLabel(1), 'kickMain');
+  assert.equal(fns.arPaintLabel(3), 'hats');
+});
+
+test('a member of a FOLDED group has no row, and its clips draw on the group', () => {
+  const st = state(arrangeMod.parseArrangement('kickFill,12,4'));
+  const { fns } = panel({ code: FAMILY, arState: st, collapsed: ['kick'] });
+  fns.arRefreshRows();
+  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'hats'], 'the kit is one row');
+  assert.equal(fns.arRowOfLabel('kickFill'), 0, 'and its parts still show, on it');
   assert.equal(fns.arRowOfLabel('hats'), 1);
-  assert.equal(st.brush, 'kick', 'kick#gone is nobody\'s; the brush is back on the track');
 });
 
-test('a clip naming a variation the buffer has lost keeps it on the base\'s row', () => {
-  const st = state(arrangeMod.parseArrangement('kick#old,0,4'));
+test('a member whose group is not in the buffer keeps a row at the top level', () => {
+  const st = state();
+  panel({ code: 'kickFill: s("mbd*8")\nhats: s("hh*8")\n_groups({ "kick": ["kickFill"] })', arState: st })
+    .fns.arRefreshRows();
+  assert.deepEqual(st.rows.map((r) => [r.label, r.depth]), [['kickFill', 0], ['hats', 0]],
+    'losing a group must never lose what was in it');
+});
+
+test('a clip finds its own row; a clip naming a lost block gets an orphan one', () => {
+  const st = state(arrangeMod.parseArrangement('kickMain,12,4 gone,0,4'));
   const { fns } = panel({ code: FAMILY, arState: st });
   fns.arRefreshRows();
-  assert.equal(fns.arRowOfLabel('kick#old'), 0, 'on kick, faded - not an orphan row of its own');
-  assert.ok(st.rows[0].variants.includes('kick#old'));
+  assert.equal(fns.arRowOfLabel('kickMain'), 1);
+  assert.equal(st.rows.at(-1).label, 'gone');
+  assert.equal(st.rows.at(-1).own, false);
 });
 
 test('a row per labeled block, in the order the buffer writes them', () => {
@@ -267,35 +265,29 @@ test('the painter writes _arrange(...), options only when they say something', (
   assert.equal(fns.serializeArrangeCall({ ...base, clips: [] }), '_arrange()');
 });
 
-test('a variation\'s clip, and a chosen color, round-trip through the call', () => {
+test('a chosen color round-trips through the call', () => {
   const { fns } = panel();
-  const text = fns.serializeArrangeCall({ clips: arrangeMod.parseArrangement('kick,0,8 kick#fill,12,4'), snap: 'auto', len: null, autos: [], loops: [], colors: { 'kick#fill': '#ff8800' } });
-  assert.equal(text, '_arrange("kick,0,8 kick#fill,12,4", { colors: {"kick#fill":"#ff8800"} })');
+  const text = fns.serializeArrangeCall({ clips: arrangeMod.parseArrangement('kick,0,8 kickFill,12,4'), snap: 'auto', len: null, autos: [], loops: [], colors: { kickFill: '#ff8800' } });
+  assert.equal(text, '_arrange("kick,0,8 kickFill,12,4", { colors: {"kickFill":"#ff8800"} })');
   const read = panel({ code: text }).fns.arReadDef();
-  assert.deepEqual(read.clips.map((c) => c.label), ['kick', 'kick#fill']);
-  assert.deepEqual(read.opts.colors, { 'kick#fill': '#ff8800' });
+  assert.deepEqual(read.clips.map((c) => c.label), ['kick', 'kickFill']);
+  assert.deepEqual(read.opts.colors, { kickFill: '#ff8800' });
 });
 
-test('a group joins the arrangement unfilled, panel open and shut', () => {
+const GROUPED = 'kick: group()\nkickMain: s("mbd*4")\nhats: s("hh*8")\n_groups({ "kick": ["kickMain"] })';
+
+test('a group joins the arrangement unfilled; its members fill like any track', () => {
   const st = { ...state(arrangeMod.parseArrangement('hats,0,8')), tracks: ['hats'], len: 8 };
-  const open = panel({ code: 'kick: group()\n  #main: s("mbd*4")\nhats: s("hh*8")\n\n_arrange("hats,0,8", { tracks: "hats" })', arState: st });
+  const open = panel({ code: `${GROUPED}\n_arrange("hats,0,8", { tracks: "hats" })`, arState: st });
   assert.equal(open.fns.arReconcileTracks(), true);
-  assert.deepEqual(st.tracks, ['hats', 'kick', 'kick#main']);
-  assert.deepEqual(st.clips.map((c) => c.label), ['hats'], 'neither the group nor its variation is filled');
-  const shut = panel({ code: 'kick: group()\n  #main: s("mbd*4")\nhats: s("hh*8")\n\n_arrange("hats,0,8", { len: 8, tracks: "hats" })' });
+  assert.deepEqual(st.tracks, ['hats', 'kick', 'kickMain']);
+  assert.deepEqual(st.clips.map((c) => c.label), ['hats', 'kickMain'],
+    'the member is a track and fills; the group has nothing to paint');
+  const shut = panel({ code: `${GROUPED}\n_arrange("hats,0,8", { len: 8, tracks: "hats" })` });
   assert.equal(shut.fns.arReconcileTracks(), true);
   const read = shut.fns.arReadDef();
-  assert.deepEqual(read.clips.map((c) => c.label), ['hats'], 'no clip was written for the group');
-  assert.deepEqual([...read.opts.tracks].sort(), ['hats', 'kick', 'kick#main']);
-});
-
-test('a variation typed since the last evaluation joins the arrangement UNFILLED', () => {
-  // Filling it would lay it over its base for the whole song; a variation is the thing you paint.
-  const p = panel({ code: `${FAMILY}\n\n_arrange("kick,0,8 hats,0,8", { len: 8, tracks: ["kick", "hats"] })\n` });
-  assert.equal(p.fns.arReconcileTracks(), true);
-  const read = p.fns.arReadDef();
-  assert.deepEqual([...read.opts.tracks].sort(), ['hats', 'kick', 'kick#fill', 'kick#outro'], 'in the membership (which is not an order)');
-  assert.deepEqual(read.clips.map((c) => c.label).sort(), ['hats', 'kick'], 'and not a clip painted for either');
+  assert.deepEqual(read.clips.map((c) => c.label).sort(), ['hats', 'kickMain']);
+  assert.deepEqual([...read.opts.tracks].sort(), ['hats', 'kick', 'kickMain']);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -335,64 +327,48 @@ test('a missing base becomes a silent stub after the last track, above the foot'
   assert.match(p.logged.join('\n'), /new track pad/);
 });
 
-test('a missing variation of a track that exists makes the track a group, and is a copy of what it played', () => {
-  const p = panel({ code: 'keys2: n("0 2").synth("Diva")\n' });
-  assert.equal(p.fns.arCreateBlock('keys2#1'), true);
-  assert.equal(p.cm.text, 'keys2: group()\n  #main: n("0 2").synth("Diva")\n  #1: n("0 2").synth("Diva")\n',
-    'the track is the mixdown; what it played is #main; the new one is a copy of that, nested under it');
-  assert.match(p.logged.join('\n'), /keys2 is a group now: what it played is #main/);
+test('cmd+G: a group() line above the selection, and the tree that holds it', () => {
+  const p = panel({ code: 'kick: s("mbd*4")\nsnare: s("sd*2")\nhats: s("hh*8")\n' });
+  assert.equal(p.fns.arCreateGroup(['kick', 'snare'], 'drums'), 'drums');
+  assert.equal(p.cm.text,
+    'drums: group()\nkick: s("mbd*4")\nsnare: s("sd*2")\nhats: s("hh*8")\n_groups({ "drums": ["kick", "snare"] })\n');
+  assert.deepEqual(p.fns.arGroupLabels(), ['drums']);
+  assert.match(p.logged.join('\n'), /drums is a group of kick, snare/);
 });
 
-test('a new variation is written nested under the last of its family, markers off, fold opened', () => {
-  const p = panel({ code: '_kick: group()\n  #main: s("mbd*4")\n  .gain(0.8)\n  #fill: s("mbd*8")\n\nhats: s("hh*8")\n' });
-  assert.equal(p.fns.arNextVariantName('kick'), '1');
-  assert.equal(p.fns.arCreateVariation('kick', '1'), 'kick#1');
-  assert.equal(p.cm.text, '_kick: group()\n  #main: s("mbd*4")\n  .gain(0.8)\n  #fill: s("mbd*8")\n  #1: s("mbd*4")\n  .gain(0.8)\n\nhats: s("hh*8")\n',
-    'a copy of #main - the base has nothing to copy');
-  const [, main, fill, one] = labelsMod.splitLabeledBlocks(p.cm.text);
-  assert.deepEqual([main.label, fill.label, one.label, one.nested, one.muted], ['kick#main', 'kick#fill', 'kick#1', true, true],
-    'the family reads back - muted by the base, its own marker gone');
-  assert.equal(p.fns.arCreateVariation('kick', 'fill'), 'kick#fill', 'one that exists is simply used');
+test('cmd+G: a group of groups - the tree nests, the code stays flat', () => {
+  const p = panel({ code: 'kick: group()\nkickMain: s("bd")\nsnare: s("sd")\n_groups({ "kick": ["kickMain"] })\n' });
+  assert.equal(p.fns.arCreateGroup(['kick', 'kickMain', 'snare'], 'drums'), 'drums');
+  const tree = mixctlMod.readGroupTree(p.cm.text);
+  assert.deepEqual(tree.drums, ['kick', 'kickMain', 'snare']);
+  assert.equal(tree.kick, undefined, 'a track joins one group at a time - the old entry emptied');
 });
 
-test('a family written without group() becomes one when the painter adds to it', () => {
-  // Variations of a plain track play directly (see groups.mjs); the painter's rule is that a track
-  // with variations is a group, and its first edit to such a family makes it so - sound unchanged.
-  const p = panel({ code: 'kick: s("mbd*4")\n  #fill: s("mbd*8")\n' });
-  assert.equal(p.fns.arCreateVariation('kick', 'outro', 'kick#fill'), 'kick#outro');
-  assert.equal(p.cm.text, 'kick: group()\n  #main: s("mbd*4")\n  #fill: s("mbd*8")\n  #outro: s("mbd*8")\n');
+test('cmd+G: refuses a name that is taken, and says so rather than writing', () => {
+  const p = panel({ code: 'kick: s("bd")\nhats: s("hh")\n' });
+  assert.equal(p.fns.arCreateGroup(['kick'], 'hats'), null);
+  assert.equal(p.cm.text, 'kick: s("bd")\nhats: s("hh")\n', 'the buffer is untouched');
+  assert.match(p.logged.join('\n'), /already another pattern's name/);
 });
 
-test('making a group, panel shut: the clips that named the track name #main, the membership keeps the track', () => {
-  const p = panel({ code: 'kick: s("mbd*4").postgain(0.8)\nhats: s("hh*8")\n\n_arrange("kick,0,8 kick,12,4 hats,0,16", { len: 16, tracks: "kick hats" })\n' });
-  assert.equal(p.fns.arMakeGroup('kick'), 'kick#main');
-  assert.equal(p.cm.text, 'kick: group()\n  #main: s("mbd*4").postgain(0.8)\nhats: s("hh*8")\n\n_arrange("kick#main,0,8 kick#main,12,4 hats,0,16", { len: 16, tracks: "kick hats" })\n');
-  assert.deepEqual(p.fns.arGroupLabels(), ['kick']);
-  assert.equal(p.fns.arMakeGroup('kick'), null, 'a group already');
-  assert.equal(p.fns.arMakeGroup('kick#main'), null, 'a variation is not a track to group');
+test('ungroup a MEMBER: it leaves the tree, its code and its clips stay put', () => {
+  const p = panel({ code: 'drums: group()\nkick: s("bd")\nsnare: s("sd")\n_groups({ "drums": ["kick", "snare"] })\n' });
+  assert.equal(p.fns.arUngroup('kick'), true);
+  assert.deepEqual(mixctlMod.readGroupTree(p.cm.text), { drums: ['snare'] });
+  assert.match(p.cm.text, /^drums: group\(\)\nkick: s\("bd"\)/, 'the track is exactly where it was');
 });
 
-test('making a group, panel open: the panel\'s clips, color and brush follow', () => {
-  const st = { ...state(arrangeMod.parseArrangement('kick,0,8 hats,0,8')), tracks: ['kick', 'hats'], colors: { kick: '#ff8800' }, brush: 'kick', track: 'kick' };
-  const p = panel({ code: 'kick: s("mbd*4")\nhats: s("hh*8")\n\n_arrange("kick,0,8 hats,0,8", { tracks: "kick hats" })\n', arState: st });
-  assert.equal(p.fns.arMakeGroup('kick'), 'kick#main');
-  assert.deepEqual(st.clips.map((c) => c.label), ['kick#main', 'hats']);
-  assert.equal(st.colors['kick#main'], '#ff8800', 'the same part, in the same color');
-  assert.equal(st.colors.kick, '#ff8800', 'and the row keeps it');
-  assert.equal(st.brush, 'kick#main');
-  assert.deepEqual(st.tracks, ['kick', 'hats'], 'the track is still the row');
+test('ungroup a GROUP: its own line goes, and what was in it plays on its own', () => {
+  const p = panel({ code: 'drums: group()\nkick: s("bd")\n_groups({ "drums": ["kick"] })\n' });
+  assert.equal(p.fns.arUngroup('drums'), true);
+  assert.equal(p.cm.text, 'kick: s("bd")\n', 'the mixdown of nothing would be a silent track on the desk');
+  assert.match(p.logged.join('\n'), /not a group any more/);
 });
 
-test('the #main name steps aside for one the family already uses', () => {
-  const p = panel({ code: 'kick: s("mbd*4")\n  #main: s("mbd*8")\n' });
-  assert.equal(p.fns.arMakeGroup('kick'), 'kick#main2');
-  assert.match(p.cm.text, /^kick: group\(\)\n  #main2: s\("mbd\*4"\)\n  #main: /);
-});
-
-test('a missing variation of a missing base is a stub under the full name', () => {
-  const p = panel({ code: 'hats: s("hh*8")\n' });
-  assert.equal(p.fns.arCreateBlock('keys2#1'), true);
-  assert.match(p.cm.text, /\n\nkeys2#1: note\("~"\)\n$/);
+test('ungroup the last member: the empty tree takes the whole call with it', () => {
+  const p = panel({ code: 'drums: group()\nkick: s("bd")\n_groups({ "drums": ["kick"] })\n' });
+  p.fns.arUngroup('kick');
+  assert.equal(p.cm.text, 'drums: group()\nkick: s("bd")\n', 'no `_groups({})` left behind');
 });
 
 test('an empty buffer gets the stub as its first line', () => {
@@ -405,67 +381,67 @@ test('an empty buffer gets the stub as its first line', () => {
 // A base renamed by hand takes its family with it - at the evaluation, once the typing has settled
 // ---------------------------------------------------------------------------------------------
 
-const FAMILY_ARR = '\n\n_arrange("kick,0,8 kick#fill,6,2 hats,0,8 kick#outro,8,4")\n';
 
-test('renaming a group by hand carries its tracks and their clips, on the next evaluation', () => {
-  const p = panel({ code: FAMILY + FAMILY_ARR });
+test('a track renamed by hand carries its clips and its place in the tree', () => {
+  const code = [
+    'drums: group()',
+    'kick: s("mbd*4")',
+    'hats: s("hh*8")',
+    '',
+    '_arrange("kick,0,8 hats,0,8")',
+    '_groups({ "drums": ["kick", "hats"] })',
+    '',
+  ].join('\n');
+  const p = panel({ code });
   p.fns.arFollowHandRenames(); // the evaluation that saw `kick`
-  p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'mainKick: s("mbd*4")'); // the hand edit
+  p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'stomp: s("mbd*4")'); // the hand edit
   p.fns.arFollowHandRenames(); // the next one
   assert.equal(p.cm.text, [
-    'mainKick#fill: s("mbd*8")',
-    'setbpm(140)',
-    'mainKick: s("mbd*4")',
-    'mainKick#outro: s("mbd*4").fx("FilterFreak 1")',
+    'drums: group()',
+    'stomp: s("mbd*4")',
     'hats: s("hh*8")',
     '',
-    '_arrange("mainKick,0,8 mainKick#fill,6,2 hats,0,8 mainKick#outro,8,4")',
+    '_arrange("stomp,0,8 hats,0,8")',
+    '_groups({ "drums": ["stomp", "hats"] })',
     '',
   ].join('\n'));
-  assert.match(p.logged.join('\n'), /kick is mainKick now - the 2 tracks in it and their clips followed/);
+  assert.match(p.logged.join('\n'), /kick is stomp now - its clips and its group followed/);
 });
 
-test('a hand-renamed group with NESTED tracks: their code needs nothing, their clips follow', () => {
-  const nested = 'kick: s("mbd*4")\n  #fill: s("mbd*8")\n  #outro: s("mbd*4").fx("FilterFreak 1")\nhats: s("hh*8")' + FAMILY_ARR;
-  const p = panel({ code: nested });
+test('renaming a GROUP by hand keeps everything under it', () => {
+  const code = 'drums: group()\nkick: s("bd")\n_groups({ "drums": ["kick"] })\n';
+  const p = panel({ code });
   p.fns.arFollowHandRenames();
-  p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'mainKick: s("mbd*4")');
+  p.cm.text = p.cm.text.replace('drums: group()', 'kit: group()');
   p.fns.arFollowHandRenames();
-  assert.equal(p.cm.text, [
-    'mainKick: s("mbd*4")',
-    '  #fill: s("mbd*8")', // untouched - the name was never in it
-    '  #outro: s("mbd*4").fx("FilterFreak 1")',
-    'hats: s("hh*8")',
-    '',
-    '_arrange("mainKick,0,8 mainKick#fill,6,2 hats,0,8 mainKick#outro,8,4")',
-    '',
-  ].join('\n'));
-  assert.match(p.logged.join('\n'), /kick is mainKick now - the 2 tracks in it and their clips followed/);
+  assert.match(p.cm.text, /_groups\(\{ "kit": \["kick"\] \}\)/);
 });
 
 test('a rename that also changed the body is left alone - it might be a new track', () => {
-  const p = panel({ code: FAMILY });
+  const code = 'kick: s("mbd*4")\n_arrange("kick,0,8")\n';
+  const p = panel({ code });
   p.fns.arFollowHandRenames();
   p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'mainKick: s("mbd*2")');
   p.fns.arFollowHandRenames();
-  assert.match(p.cm.text, /^kick#fill: /m, 'the family is untouched');
+  assert.match(p.cm.text, /_arrange\("kick,0,8"\)/, 'the clips are untouched');
   assert.equal(p.logged.length, 0);
 });
 
-test('two new bases with the same body is ambiguous, so nothing moves', () => {
-  const p = panel({ code: FAMILY });
+test('two new tracks with the same body is ambiguous, so nothing moves', () => {
+  const code = 'kick: s("mbd*4")\n_arrange("kick,0,8")\n';
+  const p = panel({ code });
   p.fns.arFollowHandRenames();
   p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'a: s("mbd*4")\n\nb: s("mbd*4")');
   p.fns.arFollowHandRenames();
-  assert.match(p.cm.text, /^kick#fill: /m);
+  assert.match(p.cm.text, /_arrange\("kick,0,8"\)/);
 });
 
-test('the first evaluation has nothing to compare against, and a base without variations is nobody\'s business', () => {
+test('the first evaluation has nothing to compare against', () => {
   const p = panel({ code: 'hats: s("hh*8")\n\n_arrange("hats,0,8")\n' });
   p.fns.arFollowHandRenames();
   p.cm.text = p.cm.text.replace('hats:', 'hh:');
   p.fns.arFollowHandRenames();
-  assert.match(p.cm.text, /_arrange\("hats,0,8"\)/, 'no family, no follow - the orphan row says so instead');
+  assert.match(p.cm.text, /_arrange\("hh,0,8"\)/, 'the second pass has a before, and follows');
 });
 
 test('the word arrange inside a comment or a string is not a call', () => {

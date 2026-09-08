@@ -114,8 +114,8 @@ const API_DOCS = {
   group: {
     kind: 'builder',
     sig: 'group()',
-    desc: 'The mixdown of the tracks nested under this one - the head a track gets when the first `#name:` block is written under it. Each of those tracks sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. The bus is named after the block, so a rename moves nothing.',
-    eg: 'kick: group().postgain(0.8)\n  #main: s("mbd*4")\n  #fill: s("mbd*8")',
+    desc: 'The mixdown of the tracks the `_groups(...)` tree puts under this one (select them and press cmd+G - the editor writes the tree). Each member sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. Groups nest, and `main: group()` is the root everything reaches - the place a mastering chain goes. The bus is named after the block, so a rename moves nothing.',
+    eg: 'kick: group().postgain(0.8)\nkickMain: s("mbd*4")\nkickFill: s("mbd*8")\n\n_groups({ kick: ["kickMain", "kickFill"] })',
   },
   input: {
     kind: 'builder',

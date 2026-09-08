@@ -24,21 +24,10 @@
 // Kept dependency-free on purpose: the browser imports this file directly (served as ESM by
 // web-app/server.js) to know block boundaries and muted regions for playback highlighting.
 
-// A label is a name, optionally followed by `#` and a VARIATION name: `kick#outro:` is a variation
-// of the `kick` track (see splitLabeledBlocks). The `#` sits inside the label so the block is still
-// a plain JS labeled statement to everything that doesn't know about variations.
-const LABEL_RE = /^([A-Za-z_$][\w$]*(?:#[\w$]+)?)\s*:(?!:)/;
-
-// The NESTED spelling of a variation: an INDENTED `#name:` is a variation of the block above it -
-//
-//   kick: s("mbd*4")
-//     #1: s("mbd*4").i(3)
-//     #outro: s("mbd*4").fx("FilterFreak 1")
-//
-// - the same block `kick#outro:` at column 0 would be, but written under its base, where the
-// grouping can be seen and the base's name is never repeated (so renaming the base renames
-// nothing else). Mute and solo markers wrap the token as they wrap a label: `_#1:`, `#1_:`.
-const NESTED_RE = /^[ \t]+([_S]*#[\w$]+[_S]*)\s*:(?!:)/;
+// A label is a name and nothing else. Blocks are a FLAT namespace: what a track belongs to is in
+// the `_groups(...)` tree (see groups.mjs), never in its name, so nothing here has to know about
+// grouping and a track can be regrouped without being renamed.
+const LABEL_RE = /^([A-Za-z_$][\w$]*)\s*:(?!:)/;
 
 // Does the state a block is in continue into `line`, rather than `line` starting a new
 // expression? Two ways to continue: (1) the block ends mid-expression - unbalanced (){}[], an
@@ -136,32 +125,23 @@ function scan(state, text, mask = null, base = 0) {
 }
 
 /**
- * @returns {Array<{ label: string, base: string, variant: string|null, kind: 'labeled'|'anon'|'bare', nested: boolean,
- *   muted: boolean, soloed: boolean, ownMuted: boolean, ownSoloed: boolean,
- *   code: string, start: number, end: number }>}
+ * @returns {Array<{ label: string, kind: 'labeled'|'anon'|'bare',
+ *   muted: boolean, soloed: boolean, code: string, start: number, end: number }>}
  *   `start`/`end` are character offsets of the block in the original source (the label line
  *   included), for editor tooling. `code` is the block's executable source with the label
  *   stripped (replaced by spaces, so inner character offsets still line up with the original).
  *
- * A VARIATION is a block labeled `base#name:` - `kick#outro:` is a second kick, the one the
- * arrangement plays over the outro. Each variation is its own block and its own engine track (its
- * chain can differ in any way at all - another preset, an extra effect, a different sample), and
- * what makes it a variation rather than a track is only that it shares the base's ROW in the
- * arrangement: at any bar a row plays one of its variations, and a variation with no clips plays
- * nothing. `base` is the row (`kick`), `variant` the name after the `#` (`outro`, or null on the
- * base itself); `label` stays the whole thing, which is what the engine knows the track as.
+ * Every block is a track, and tracks are FLAT here: one name, one engine track, one row in the
+ * arrangement. Which tracks are mixed together is the `_groups(...)` tree's business (groups.mjs),
+ * and it is deliberately not this function's - a track's name says nothing about where it sits, so
+ * regrouping never renames and renaming never regroups. (An earlier design spelled a group's
+ * members `kick#fill:`, nested under the block above them, and it made every one of those two
+ * things the other's problem.)
  *
- * A variation is usually written NESTED - an indented `#name:` under its base (see NESTED_RE),
- * which is the same block with the base's name left off: `nested` says which spelling a block
- * was written in, for the editor, which folds a nested family under its base and writes the
- * label back in the form it found. A nested variation belongs to the nearest labeled block
- * above it (its base, or a sibling's), so a family reads top to bottom.
- *
- * Muting or soloing the base takes the whole group with it - `_kick:` silences every `kick#…` -
- * since the base is the track as a person thinks of it and the variations are its parts. A
- * marker on a variation reaches only that variation. `muted`/`soloed` are the effective flags
- * (what plays); `ownMuted`/`ownSoloed` are what THIS block's label says, for the editor, whose
- * mute gesture rewrites the label it was aimed at and nothing else.
+ * `muted`/`soloed` are what THIS block's label says. A marker on a GROUP reaches everything under
+ * it, but that is a fact about the tree, so the host applies it (see groups.mjs's ancestorsOf and
+ * descendantsOf) - a splitter that resolved it would have to read the `_groups` call, and this file
+ * stays a lexer.
  *
  * `kind` says how the block was WRITTEN, which the label alone can't: every block that isn't
  * named gets a `$n` label, but a `$: …` you typed and a bare column-0 statement mean different
@@ -189,32 +169,24 @@ export function splitLabeledBlocks(source) {
     }
   };
 
-  // The base a nested `#name:` belongs to: that of the nearest labeled block above it, whatever
-  // that block is - a base, or a variation written either way, whose base it then shares. Setup
-  // lines between them (a bare `setbpm(140)`) don't come into it.
-  let lastBase = null;
-
   for (const line of lines) {
     // Only look for a label where the previous lines have left us in code - inside an open
     // `/*…*/` or `` `…` ``, `$: …` is prose, not a new block.
     const inCode = !(current && endsUnparsed(state));
     const m = inCode ? LABEL_RE.exec(line) : null;
-    const nested = !m && inCode && lastBase != null ? NESTED_RE.exec(line) : null;
-    if (m || nested) {
+    if (m) {
       push();
-      const meta = m ? parseLabel(m[1], () => `$${++anonCount}`) : parseNested(nested[1], lastBase);
-      const raw = (m ?? nested)[0];
+      const meta = parseLabel(m[1], () => `$${++anonCount}`);
+      const raw = m[0];
       current = {
         ...meta,
         kind: meta.anon ? 'anon' : 'labeled',
-        nested: !m, // written as an indented `#name:` under its base (see NESTED_RE)
         // Blank out the label instead of slicing it off, so positions inside `code` equal
         // positions inside `source` minus `start` - the highlighter depends on that.
         code: ' '.repeat(raw.length) + line.slice(raw.length),
         start: offset,
         end: offset,
       };
-      lastBase = meta.base;
       state = scan(newScan(), current.code);
       awaitingBody = !hasCode(current.code);
     } else if (current && (continuesBlock(state, line) || (awaitingBody && hasCode(line)))) {
@@ -229,7 +201,7 @@ export function splitLabeledBlocks(source) {
       // shared `const`) is a setup block that binds/acts for the blocks below - see server.js.
       push();
       const label = `$${++anonCount}`;
-      current = { label, base: label, variant: null, kind: 'bare', nested: false, muted: false, soloed: false, ownMuted: false, ownSoloed: false, code: line, start: offset, end: offset };
+      current = { label, kind: 'bare', muted: false, soloed: false, code: line, start: offset, end: offset };
       state = scan(newScan(), line);
       awaitingBody = false;
     } else if (current) {
@@ -242,22 +214,7 @@ export function splitLabeledBlocks(source) {
   }
   push();
 
-  const kept = blocks.filter((b) => hasCode(b.code));
-  // A marker on a base reaches its variations (see the doc above). Read off the bases first, so
-  // the answer doesn't depend on whether `kick#outro:` was written above or below `_kick:`.
-  const groupMuted = new Set();
-  const groupSoloed = new Set();
-  for (const b of kept) {
-    if (b.variant != null) continue;
-    if (b.ownMuted) groupMuted.add(b.base);
-    if (b.ownSoloed) groupSoloed.add(b.base);
-  }
-  for (const b of kept) {
-    if (b.variant == null) continue;
-    b.muted = b.ownMuted || groupMuted.has(b.base);
-    b.soloed = b.ownSoloed || groupSoloed.has(b.base);
-  }
-  return kept;
+  return blocks.filter((b) => hasCode(b.code));
 }
 
 /**
@@ -351,13 +308,6 @@ function stripMarkers(raw) {
   return { name, muted, soloed };
 }
 
-/** An indented `#name:` token under `base` (see NESTED_RE): the block `base#name`. */
-function parseNested(raw, base) {
-  const { name, muted, soloed } = stripMarkers(raw);
-  const variant = name.slice(1); // past the `#`
-  return { label: `${base}#${variant}`, base, variant, muted, soloed, ownMuted: muted, ownSoloed: soloed, anon: false };
-}
-
 function parseLabel(raw, nextAnonName) {
   const stripped = stripMarkers(raw);
   let { name } = stripped;
@@ -368,10 +318,5 @@ function parseLabel(raw, nextAnonName) {
     name = nextAnonName();
     anon = true; // written `$:` - a track, just not a named one (see the kinds above)
   }
-  // `kick#outro` -> base `kick`, variant `outro`. The markers were stripped off the OUTSIDE of the
-  // whole label, so `_kick#outro:` mutes that variation and `kick#outro_:` does the same.
-  const hash = name.indexOf('#');
-  const base = hash < 0 ? name : name.slice(0, hash);
-  const variant = hash < 0 ? null : name.slice(hash + 1);
-  return { label: name, base, variant, muted, soloed, ownMuted: muted, ownSoloed: soloed, anon };
+  return { label: name, muted, soloed, anon };
 }

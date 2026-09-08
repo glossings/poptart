@@ -16,8 +16,6 @@ import {
   arrangementSpans,
   arrangementLabels,
   reconcileArrangement,
-  baseOf,
-  variantOf,
   inSpans,
   ArrangeClock,
 } from './src/index.mjs';
@@ -35,35 +33,17 @@ test('parse/serialize round-trip, malformed tokens dropped', () => {
   assert.equal(parseArrangement('a,0,0').length, 0, 'a zero-length clip is nothing');
 });
 
-test('a clip may name a VARIATION of its track, which sits on the same row', () => {
-  const clips = parseArrangement('drums,0,8 drums#fill,12,4');
-  assert.deepEqual(clips[1], { label: 'drums#fill', start: 12, len: 4 });
-  assert.equal(serializeArrangement(clips), 'drums,0,8 drums#fill,12,4', 'and round-trips');
-  assert.equal(baseOf('drums#fill'), 'drums');
-  assert.equal(variantOf('drums#fill'), 'fill');
-  assert.equal(baseOf('drums'), 'drums');
-  assert.equal(variantOf('drums'), null);
-});
-
 test('an older arrangement\'s roll binding parses as the plain clip', () => {
   // `drums:fill` once meant "drums, playing the roll called fill". The clip stays where it was
-  // painted; the roll it named is a variation away (`drums#fill: pianoroll("fill")…`).
+  // painted; the roll it named is a track of its own away (`drumsFill: pianoroll("fill")…`).
   assert.deepEqual(parseArrangement('drums:fill,12,4'), [{ label: 'drums', start: 12, len: 4 }]);
 });
 
-test('a variation joins the arrangement with nothing painted', () => {
-  // Filling it would lay it over its base for the whole song; a variation is the thing you paint in.
-  const out = reconcileArrangement(parseArrangement('kick,0,16'), { len: 16, tracks: ['kick'] }, ['kick', 'kick#fill']);
-  assert.ok(out.changed, 'it does join the membership');
-  assert.deepEqual(out.tracks, ['kick', 'kick#fill']);
-  assert.deepEqual(out.added, [], 'but no clip is made for it');
-});
-
 test('a group joins the arrangement with nothing painted, and keeps its row', () => {
-  // A group has no notes of its own - its variations are what goes on its row - so a clip of it
-  // would play nothing. It is still a track, and a row.
-  const out = reconcileArrangement(parseArrangement('kick#main,0,16'), { len: 16, tracks: [] }, ['kick', 'kick#main', 'hat'], ['kick']);
-  assert.deepEqual(out.tracks, ['kick', 'kick#main', 'hat']);
+  // A group has no notes of its own - what sounds on it is its members - so a clip of it would
+  // play nothing. It is still a track, and a row: the one its members fold away under.
+  const out = reconcileArrangement(parseArrangement('kickMain,0,16'), { len: 16, tracks: [] }, ['kick', 'kickMain', 'hat'], ['kick']);
+  assert.deepEqual(out.tracks, ['kick', 'kickMain', 'hat']);
   assert.deepEqual(out.added, [{ label: 'hat', start: 0, len: 16 }], 'the plain track fills; the group does not');
 });
 

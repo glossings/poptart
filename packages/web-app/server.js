@@ -50,9 +50,10 @@ let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.j
 let engineError = null;
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
-// The keys that are variations of a GROUP (see pattern-core's groups.mjs): their audio goes into
-// the group's bus and the group's track is the one the desk shows and gates - so these never get
-// a row, a fader or a swap gate of their own. Refilled per deck by each evaluation.
+// The keys inside a real GROUP (see pattern-core's groups.mjs - the `_groups(...)` tree): their
+// audio goes into the group's bus and the group's track is the one the desk shows and gates - so
+// these never get a fader or a swap gate of their own. Reaching only the implicit `main` root
+// doesn't count (or a mastered buffer would have one strip). Refilled per deck by each evaluation.
 const groupMembers = new Set();
 
 // Engine tracks are keyed by opaque ids ("#1", "#2", ...), not labels, so a track can be
@@ -1582,7 +1583,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sy
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_arrange'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_arrange', '_groups'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -3414,7 +3415,8 @@ const routes = {
           // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
           // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
           const isPattern = value instanceof patternCore.Sig;
-          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value?.poptartArrangeBlock;
+          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK
+            || value?.poptartArrangeBlock || value?.poptartGroupsBlock;
           if (!isPattern && !setupValue && !b.label.startsWith('$')) {
             throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
           }
@@ -3484,12 +3486,21 @@ const routes = {
     // and plays as normal.
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
 
-    // Groups: a block headed by group() reads the bus named after it and every variation of it
-    // sends there (see pattern-core's groups.mjs - the routing is the structure, nothing in the
-    // code says it). The bus is named by the engine KEY, so deck b's `kick` has a bus of its own.
-    const routed = patternCore.routeGroups(built, (label) => keyOfBlock(label));
+    // Groups: a block headed by group() reads the bus named after it, and every track the
+    // `_groups(...)` tree puts under it sends there (see pattern-core's groups.mjs). The tree is a
+    // definition like the arrangement's - the last one in the buffer wins - and the routing is read
+    // off it, so nothing in a member's own code says where it goes. The bus is named by the engine
+    // KEY, so deck b's `kick` has a bus of its own.
+    const groupBlock = [...evaluated].reverse().find((b) => b.sig?.poptartGroupsBlock);
+    const groupTree = groupBlock?.sig.tree ?? new Map();
+    const routed = patternCore.routeGroups(built, (label) => keyOfBlock(label), groupTree);
+    // What the desk shows: a track inside a real group is not its own channel - its group's fader,
+    // mute and gate take it. Reaching the implicit `main` root doesn't hide anything, or a buffer
+    // with a mastering chain would have no strips at all.
     for (const key of [...groupMembers]) if (deckOfKey(key) === deck) groupMembers.delete(key);
-    for (const label of routed.members) groupMembers.add(keyOfBlock(label));
+    for (const [label, parent] of routed.routedParents) {
+      if (parent !== patternCore.GROUP_ROOT) groupMembers.add(keyOfBlock(label));
+    }
 
     // The arrangement pass: with an arrangement in the buffer every TRACK is one of its rows, so
     // each plays only inside its clips - the bare loop it was is gated to the part it has become
@@ -3509,14 +3520,6 @@ const routes = {
       const labels = new Set(built.map((b) => b.label));
       for (const label of spans.keys()) {
         if (!labels.has(label)) eventLogQueue.push(`[arrange] no block called ${JSON.stringify(label)} - its clips play nothing`);
-      }
-      // A variation whose base has gone - `kick` renamed by hand and `kick#fill` left behind - is
-      // still a block and still plays inside its clips; it just has no row to share, so the painter
-      // gives it one of its own. Worth a line, since the tangle it hints at is one keystroke old.
-      for (const b of built) {
-        if (b.variant != null && !labels.has(b.base)) {
-          eventLogQueue.push(`[arrange] ${JSON.stringify(b.label)} names the group ${JSON.stringify(b.base)}, which no block is called - it gets a row of its own until there is one`);
-        }
       }
       const regions = arrangements.flatMap((a) => a.opts.loops);
       const clockKey = JSON.stringify([loopLen, regions]);
@@ -3546,11 +3549,25 @@ const routes = {
       arrangeClocks[deck] = null;
     }
 
-    // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
-    // A soloed variation of a group is heard THROUGH its group, so the group plays with it.
-    const anySolo = built.some((b) => b.soloed && !b.muted);
-    const soloedGroups = new Set(built.filter((b) => b.soloed && !b.muted && routed.members.has(b.label)).map((b) => b.base));
-    const active = built.filter((b) => !b.muted && (!anySolo || b.soloed || soloedGroups.has(b.label)));
+    // Mute and solo travel DOWN the group tree: a marker sits on one label, but a group is the
+    // tracks under it, so `_drums:` silences the whole kit and `Sdrums:` solos it. Mute wins over
+    // solo, as it always has, and it wins wherever it is written - a muted member stays silent
+    // inside a soloed group.
+    const muted = new Set();
+    const soloed = new Set();
+    for (const b of built) {
+      if (!b.muted && !b.soloed) continue;
+      const reach = [b.label, ...patternCore.descendantsOf(b.label, groupTree)];
+      for (const label of reach) (b.muted ? muted : soloed).add(label);
+    }
+    // ...and solo travels UP it as well: a soloed track is only audible through the groups it mixes
+    // into, so each of them has to play too. Its SIBLINGS don't - that is what soloing means.
+    for (const label of [...soloed]) {
+      for (const up of patternCore.ancestorsOf(label, routed.routedParents)) soloed.add(up);
+    }
+    const isMuted = (b) => muted.has(b.label);
+    const anySolo = built.some((b) => soloed.has(b.label) && !isMuted(b));
+    const active = built.filter((b) => !isMuted(b) && (!anySolo || soloed.has(b.label)));
 
     // Stop tracks whose label disappeared (or that are now muted / un-soloed) - within THIS
     // deck only: the other deck's tracks are not in this buffer, and this eval must not touch
@@ -3668,8 +3685,10 @@ const routes = {
         tracks: built.map((b) => ({
           label: b.label,
           key: keyOfBlock(b.label), // what this track is called server-side (deck b keys are "b:<label>")
-          muted: b.muted,
-          soloed: b.soloed,
+          // The EFFECTIVE flags - a member of a muted group reads as muted, which is what the
+          // mixer's buttons and the editor's dimmed code both want to show.
+          muted: muted.has(b.label),
+          soloed: soloed.has(b.label),
           active: active.includes(b),
           start: b.start,
           end: b.end,

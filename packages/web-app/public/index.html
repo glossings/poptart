@@ -211,17 +211,6 @@
       <div class="pianoroll-panel-head">
         <div class="pianoroll-head-main">
           <span id="arrangeTitle">arrange</span>
-          <!-- The BRUSH: which track the pencil paints - a plain one, or one inside a group. The same
-               name-and-▾ head the piano roll wears for its roll (see makeNamePicker); click a
-               track's name or a clip to dip the brush in it instead. -->
-          <div id="arrangeBrushWrap" class="pianoroll-ctl def-pick-wrap">paint
-            <input id="arrangeBrushName" class="def-name" type="text" spellcheck="false" readonly title="what the pencil paints — click a track name or a clip to change it" />
-            <button id="arrangeBrushBtn" class="small" title="pick a track to paint (type group#name to add a new one to a group)">▾</button>
-            <div id="arrangeBrushPicker" class="def-picker hidden">
-              <input id="arrangeBrushSearch" type="text" spellcheck="false" placeholder="track, or group#name" />
-              <div id="arrangeBrushList" class="def-pick-list"></div>
-            </div>
-          </div>
           <label class="pianoroll-ctl">snap <select id="arrangeSnap" title="paint grid — how finely clips snap"></select></label>
           <!-- step="any": a length dragged out in the ruler lands on the snap grid, so 12.75 is an
                ordinary value here and the browser must not flag it or round it away. -->

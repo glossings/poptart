@@ -15,9 +15,9 @@ export { recordingToMini, UNQUANTIZED_GRID, recordingToRoll, captureWindow, reco
 export { parseMidiFile, midiFileToLanes, midiLanesToPianoroll, pickGrid, detectKey, GRID_CANDIDATES, BEATS_PER_CYCLE } from './midifile.mjs';
 export { parseMini, getStepsForCycle, stepLocs } from './mini.mjs';
 export { splitLabeledBlocks, isBareCallBlock } from './labels.mjs';
-export { isGroupSig, routeGroups } from './groups.mjs';
+export { isGroupSig, routeGroups, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf, groupOrder, serializeGroupTree, pruneGroupTree, _groups, GROUP_ROOT } from './groups.mjs';
 export { injectLocations, isPatternPosition } from './locations.mjs';
 export { parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS, parseAutoPoints, serializeAutoPoints, sampleAutoPoints } from './shape.mjs';
 export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, noteSlice, noteNudge, noteNudgeChannel, looksLikeNoteString, sliceNotesFor, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_NUDGE, pianoRollSwingCells, commitPianoRollSwing, pianoRollNoteGrid } from './pianoroll.mjs';
 export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds, lookupSlices, sliceSetIds, lookupAuto, autoIds } from './rolls.mjs';
-export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementLength, arrangementSpans, arrangementLabels, reconcileArrangement, baseOf, variantOf, inSpans, ArrangeClock, _arrange, ARRANGE_DEFAULT_SNAP } from './arrange.mjs';
+export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementLength, arrangementSpans, arrangementLabels, reconcileArrangement, inSpans, ArrangeClock, _arrange, ARRANGE_DEFAULT_SNAP } from './arrange.mjs';

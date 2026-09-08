@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits, groupEdits, isGroupBlock } from './src/mixctl.mjs';
+import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits, groupEdits, isGroupBlock, readGroupTree, groupTreeEdit, arrangeClipEdits } from './src/mixctl.mjs';
 import { splitLabeledBlocks } from './src/labels.mjs';
 
 // Apply an edit the way CodeMirror would, so assertions read as the resulting buffer.
@@ -204,76 +204,6 @@ test('renameEdits: refuses a name that is taken, malformed, or reads as a marker
   assert.match(renameEdits(code, 'gone', 'x').error, /no block named/);
 });
 
-test('renameEdits: renaming a base carries its variations, in the code and in the clips', () => {
-  const code = [
-    'kick#fill: s("mbd*8")', // written above its base, and group-muted by it below
-    '_kick: s("mbd*4")',
-    'kick#outro: s("mbd*4").fx("FilterFreak 1")',
-    'hats: s("hh*8").audio("kick")',
-    '_arrange("kick,0,8 kick#fill,6,2 hats,0,8 kick#outro,8,4")',
-  ].join('\n');
-  const res = renameEdits(code, 'kick', 'drums');
-  assert.equal(res.family, 2);
-  const out = appliedAll(code, res);
-  assert.equal(out, [
-    'drums#fill: s("mbd*8")', // its OWN marker is none - the mute it inherits is not written onto it
-    '_drums: s("mbd*4")',
-    'drums#outro: s("mbd*4").fx("FilterFreak 1")',
-    'hats: s("hh*8").audio("drums")',
-    '_arrange("drums,0,8 drums#fill,6,2 hats,0,8 drums#outro,8,4")',
-  ].join('\n'));
-});
-
-test('renameEdits: renaming a variation moves that block alone, clips included', () => {
-  const code = 'kick: s("mbd*4")\nkick#fill: s("mbd*8")\n_arrange("kick,0,8 kick#fill,6,2")';
-  const out = appliedAll(code, renameEdits(code, 'kick#fill', 'kick#roll'));
-  assert.equal(out, 'kick: s("mbd*4")\nkick#roll: s("mbd*8")\n_arrange("kick,0,8 kick#roll,6,2")');
-  // ...and a base renamed INTO a variation takes nobody with it
-  const alone = appliedAll(code, renameEdits(code, 'kick', 'drums#a'));
-  assert.equal(alone, 'drums#a: s("mbd*4")\nkick#fill: s("mbd*8")\n_arrange("drums#a,0,8 kick#fill,6,2")');
-});
-
-const NESTED = [
-  'kick: s("mbd*4")',
-  '  #fill: s("mbd*8")',
-  '  #outro: s("mbd*4").fx("FilterFreak 1")',
-  'hats: s("hh*8")',
-  '_arrange("kick,0,8 kick#fill,6,2 hats,0,8 kick#outro,8,4")',
-].join('\n');
-
-test('renameEdits: a nested family follows its base with no edit to the variations themselves', () => {
-  const res = renameEdits(NESTED, 'kick', 'drums');
-  assert.equal(res.family, 2);
-  assert.equal(appliedAll(NESTED, res), [
-    'drums: s("mbd*4")',
-    '  #fill: s("mbd*8")', // untouched: its name was never in it
-    '  #outro: s("mbd*4").fx("FilterFreak 1")',
-    'hats: s("hh*8")',
-    '_arrange("drums,0,8 drums#fill,6,2 hats,0,8 drums#outro,8,4")',
-  ].join('\n'));
-});
-
-test('renameEdits: a nested variation renames within its family, and #name is short for base#name', () => {
-  const out = appliedAll(NESTED, renameEdits(NESTED, 'kick#fill', '#roll'));
-  assert.match(out, /^  #roll: s\("mbd\*8"\)$/m);
-  assert.match(out, /kick#roll,6,2/);
-  assert.equal(appliedAll(NESTED, renameEdits(NESTED, 'kick#fill', 'kick#roll')), out, 'the long spelling is the same edit');
-});
-
-test('renameEdits: a nested variation cannot be moved to another base by renaming', () => {
-  assert.match(renameEdits(NESTED, 'kick#fill', 'hats#fill').error, /written under kick/);
-  assert.match(renameEdits(NESTED, 'kick#fill', 'fill').error, /written under kick/);
-});
-
-test('flagEdit: a nested variation takes its markers around the #', () => {
-  const muted = applied(NESTED, flagEdit(NESTED, 'kick#fill', { muted: true }));
-  assert.match(muted, /^  _#fill: /m);
-  const [, fill] = splitLabeledBlocks(muted);
-  assert.equal(fill.label, 'kick#fill');
-  assert.equal(fill.muted, true);
-  assert.match(applied(muted, flagEdit(muted, 'kick#fill', {})), /^  #fill: /m, 'and back');
-});
-
 test('renameEdits: the new name is what the splitter reads back', () => {
   const code = '_Sbass: s("bd*4").audio("bass")';
   const out = appliedAll(code, renameEdits(code, 'bass', 'sub2'));
@@ -285,40 +215,94 @@ test('renameEdits: the new name is what the splitter reads back', () => {
 });
 
 test('isGroupBlock: the head call is what makes a group', () => {
-  const [g, m, t] = splitLabeledBlocks('kick: group().postgain(0.8)\n  #main: s("bd*4")\nhat: audio("bus:kick")');
+  const [g, m, t] = splitLabeledBlocks('kick: group().postgain(0.8)\nkickMain: s("bd*4")\nhat: audio("bus:kick")');
   assert.equal(isGroupBlock(g), true);
   assert.equal(isGroupBlock(m), false);
   assert.equal(isGroupBlock(t), false, 'reading a bus by hand is not a group');
   assert.equal(isGroupBlock(splitLabeledBlocks('_kick:group ( )')[0]), true, 'markers and spacing aside');
 });
 
-test('groupEdits: the track becomes a group and what it played becomes #main, clips and all', () => {
-  const code = 'kick: s("mbd*4")\n  .postgain(0.8)\nhat: s("hh*8")\n_arrange("kick,0,8 kick,12,4 hat,0,16", { len: 16, tracks: "kick hat" })';
-  const res = groupEdits(code, 'kick');
-  assert.equal(res.member, 'kick#main');
+// --- the `_groups(...)` call: the tree as data in the buffer ---
+
+test('readGroupTree: the call is strict JSON, and anything unreadable is no tree', () => {
+  assert.deepEqual(readGroupTree('kick: s("bd")\n_groups({ "drums": ["kick"] })'), { drums: ['kick'] });
+  assert.deepEqual(readGroupTree('kick: s("bd")'), {}, 'no call at all');
+  assert.deepEqual(readGroupTree('_groups({ drums: [half typed'), {}, 'never a throw');
+  assert.deepEqual(readGroupTree('// _groups({ "drums": ["kick"] })'), {}, 'a commented-out call is parked');
+});
+
+test('groupTreeEdit: writes into the existing call, or files a new one where the definitions are', () => {
+  const has = 'kick: s("bd")\n_groups({ "a": ["kick"] })\n';
+  assert.equal(applied(has, groupTreeEdit(has, '{ "b": ["kick"] }')), 'kick: s("bd")\n_groups({ "b": ["kick"] })\n');
+  const none = 'kick: s("bd")\n';
+  assert.equal(applied(none, groupTreeEdit(none, '{ "b": ["kick"] }')), 'kick: s("bd")\n_groups({ "b": ["kick"] })\n');
+  // An empty tree takes the call away rather than leaving `_groups({})` behind.
+  assert.equal(applied(has, groupTreeEdit(has, '{}')), 'kick: s("bd")\n');
+  assert.equal(groupTreeEdit(none, '{}'), null, 'nothing to write and nothing to remove');
+});
+
+test('groupEdits: a group() line above the tracks, and the tree that holds them', () => {
+  const code = 'kick: s("mbd*4")\n  .postgain(0.8)\nsnare: s("sd*2")\nhat: s("hh*8")';
+  const res = groupEdits(code, ['kick', 'snare'], 'drums');
+  assert.equal(res.name, 'drums');
+  assert.deepEqual(res.members, ['kick', 'snare']);
+  assert.deepEqual([...res.tree], [['drums', ['kick', 'snare']]]);
   const out = appliedAll(code, res);
-  assert.equal(out, 'kick: group()\n  #main: s("mbd*4")\n  .postgain(0.8)\nhat: s("hh*8")\n_arrange("kick#main,0,8 kick#main,12,4 hat,0,16", { len: 16, tracks: "kick hat" })');
-  const [g, m] = splitLabeledBlocks(out);
-  assert.equal(isGroupBlock(g), true);
-  assert.equal(m.label, 'kick#main');
-  assert.equal(m.nested, true);
-  assert.match(m.code, /\.postgain\(0\.8\)/, 'the whole chain went down with it');
+  assert.equal(out, 'drums: group()\nkick: s("mbd*4")\n  .postgain(0.8)\nsnare: s("sd*2")\nhat: s("hh*8")');
+  const [g, k] = splitLabeledBlocks(out);
+  assert.equal(isGroupBlock(g), true, 'the group starts bare - what its members share goes on by hand');
+  assert.match(k.code, /\.postgain\(0\.8\)/, 'a member keeps its whole chain');
 });
 
-test('groupEdits: markers stay on the group, a body on the next line is left there', () => {
-  const code = '_Skick:\n  s("mbd*4")';
-  const out = appliedAll(code, groupEdits(code, 'kick'));
-  assert.equal(out, '_Skick: group()\n  #main: \n  s("mbd*4")');
-  const [g, m] = splitLabeledBlocks(out);
-  assert.equal(g.muted && g.soloed, true);
-  assert.equal(m.label, 'kick#main');
-  assert.match(m.code, /s\("mbd\*4"\)/);
+test('groupEdits: a member leaves the group it was in - one track, one group', () => {
+  const code = 'kick: s("bd")\nsnare: s("sd")';
+  const res = groupEdits(code, ['kick'], 'perc', { drums: ['kick', 'snare'] });
+  assert.deepEqual([...res.tree], [['drums', ['snare']], ['perc', ['kick']]]);
 });
 
-test('groupEdits: refuses a group, a variation, a missing block, and a taken member name', () => {
-  assert.equal(groupEdits('kick: group()\n  #main: s("bd")', 'kick'), null);
-  assert.equal(groupEdits('kick: s("bd")\n  #fill: s("bd*2")', 'kick#fill'), null);
-  assert.equal(groupEdits('kick: s("bd")', 'hat'), null);
-  assert.equal(groupEdits('kick: s("bd")\n  #main: s("bd*2")', 'kick'), null);
-  assert.equal(groupEdits('kick: s("bd")\n  #main: s("bd*2")', 'kick', 'orig').member, 'kick#orig');
+test('groupEdits: setup between the tracks is allowed inside a group; another track is not', () => {
+  const withSetup = 'kick: s("bd")\nconst x = 2\nsnare: s("sd")';
+  assert.equal(groupEdits(withSetup, ['kick', 'snare'], 'drums').name, 'drums');
+  const withTrack = 'kick: s("bd")\nbass: s("bass")\nsnare: s("sd")';
+  assert.match(groupEdits(withTrack, ['kick', 'snare'], 'drums').error, /"bass" sits between/);
+});
+
+test('groupEdits: refuses a name that is taken, malformed, or reads as a marker', () => {
+  const code = 'kick: s("bd")\nhat: s("hh")';
+  assert.match(groupEdits(code, ['kick'], 'hat').error, /already another pattern's name/);
+  assert.match(groupEdits(code, ['kick'], 'no spaces').error, /can't be a group name/);
+  assert.match(groupEdits(code, ['kick'], 'Snare').error, /can't be a group name|marker/);
+  assert.match(groupEdits(code, ['gone'], 'drums').error, /nothing to group/);
+});
+
+test('renameEdits: a renamed track keeps its clips AND its place in the tree', () => {
+  const code = [
+    'drums: group()',
+    'kick: s("mbd*4")',
+    'hats: s("hh*8").audio("kick")',
+    '_arrange("kick,0,8 hats,0,8")',
+    '_groups({ "drums": ["kick", "hats"] })',
+  ].join('\n');
+  const res = renameEdits(code, 'kick', 'stomp');
+  assert.equal(res.groups, 1);
+  assert.equal(appliedAll(code, res), [
+    'drums: group()',
+    'stomp: s("mbd*4")',
+    'hats: s("hh*8").audio("stomp")',
+    '_arrange("stomp,0,8 hats,0,8")',
+    '_groups({ "drums": ["stomp", "hats"] })',
+  ].join('\n'));
+});
+
+test('renameEdits: renaming a GROUP keeps everything under it', () => {
+  const code = 'drums: group()\nkick: s("bd")\n_groups({ "drums": ["kick"] })';
+  assert.equal(appliedAll(code, renameEdits(code, 'drums', 'kit')),
+    'kit: group()\nkick: s("bd")\n_groups({ "kit": ["kick"] })');
+});
+
+test('arrangeClipEdits: a hand rename follows the clips and the tree together', () => {
+  const code = 'kick: s("bd")\n_arrange("kick,0,8")\n_groups({ "drums": ["kick"] })';
+  const out = [...arrangeClipEdits(code, { kick: 'stomp' })].reverse()
+    .reduce((acc, e) => acc.slice(0, e.from) + e.text + acc.slice(e.to), code);
+  assert.equal(out, 'kick: s("bd")\n_arrange("stomp,0,8")\n_groups({ "drums": ["stomp"] })');
 });

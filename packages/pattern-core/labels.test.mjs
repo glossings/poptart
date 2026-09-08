@@ -266,88 +266,47 @@ test('a $: block whose expression is on the next line is still anon', () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Variations: `base#name:` is a block of its own that shares the base's row in the arrangement.
+// A FLAT namespace. Blocks used to be able to name a group in their label - `kick#fill:`, or an
+// indented `#fill:` under the block above - and grouping is data now (see groups.mjs), so a `#` in
+// a label is nothing to the splitter. These pin that it stays nothing: a track's name says only
+// what the track is called, and a marker reaches only the block it is written on.
 // ---------------------------------------------------------------------------------------------
 
-test('a #variation is its own block, and knows which row it belongs to', () => {
-  const src = [
-    'kick: s("mbd*4")',
-    'kick#1: s("mbd*4").i(3)',
-    'kick#outro: s("mbd*4").fx("FilterFreak 1")',
-    'hats: s("hh*8")',
-  ].join('\n');
-  assert.deepEqual(splitLabeledBlocks(src).map((b) => [b.label, b.base, b.variant]), [
-    ['kick', 'kick', null],
-    ['kick#1', 'kick', '1'],
-    ['kick#outro', 'kick', 'outro'],
-    ['hats', 'hats', null],
+test('a label is a plain name - a # does not start one, and does not divide one', () => {
+  const blocks = splitLabeledBlocks(['kick: s("mbd*4")', 'kickFill: s("mbd*4").i(3)', 'hats: s("hh*8")'].join('\n'));
+  assert.deepEqual(blocks.map((b) => b.label), ['kick', 'kickFill', 'hats']);
+  assert.equal(blocks[0].base, undefined, 'no base/variant fields at all any more');
+  assert.equal(blocks[0].variant, undefined);
+});
+
+test('an indented #name: is not a variation of the block above it any more', () => {
+  // It used to be one. Now it is a statement like any other the splitter doesn't recognize - and
+  // since `#1: …` is not valid JS either, writing one is an error the evaluation names, which is
+  // the right outcome for a spelling that has gone.
+  const blocks = splitLabeledBlocks(['kick: s("mbd*4")', '  #1: s("bd")'].join('\n'));
+  assert.deepEqual(blocks.map((b) => [b.label, b.kind]), [['kick', 'labeled'], ['$1', 'bare']]);
+});
+
+test('a marker reaches only the block it is written on', () => {
+  // Muting a GROUP still silences what is under it, but that is the tree's doing (groups.mjs),
+  // not the splitter's - which is why these are exactly what each label says.
+  const blocks = splitLabeledBlocks(['_kick: s("bd")', 'kickFill: s("bd")', 'Shats: s("hh")'].join('\n'));
+  assert.deepEqual(blocks.map((b) => [b.label, b.muted, b.soloed]), [
+    ['kick', true, false], ['kickFill', false, false], ['hats', false, true],
   ]);
 });
 
-test('muting or soloing the base takes every variation with it', () => {
-  const muted = splitLabeledBlocks(['kick#outro: s("bd")', '_kick: s("bd")'].join('\n'));
-  assert.deepEqual(muted.map((b) => [b.label, b.muted, b.ownMuted]), [
-    ['kick#outro', true, false], // written above the base, and still muted by it
-    ['kick', true, true],
-  ]);
-  const soloed = splitLabeledBlocks(['Skick: s("bd")', 'kick#outro: s("bd")', 'hats: s("hh")'].join('\n'));
-  assert.deepEqual(soloed.map((b) => [b.label, b.soloed]), [['kick', true], ['kick#outro', true], ['hats', false]]);
+test('a name holding a # is not a label at all', () => {
+  // `kick#1:` is not an identifier followed by a colon, so it is a bare statement like any other
+  // line of code the splitter does not recognize - never a track called `kick` with something
+  // appended, which is the reading that has gone.
+  const blocks = splitLabeledBlocks('kick#1: s("bd")');
+  assert.deepEqual(blocks.map((b) => [b.label, b.kind]), [['$1', 'bare']]);
 });
 
-test('a marker on a variation reaches only that variation', () => {
-  const blocks = splitLabeledBlocks(['kick: s("bd")', '_kick#outro: s("bd")', 'kick#1_: s("bd")'].join('\n'));
-  assert.deepEqual(blocks.map((b) => [b.label, b.muted]), [['kick', false], ['kick#outro', true], ['kick#1', true]]);
-});
-
-test('an indented #name: is a variation of the block above it - the same block, nested', () => {
-  const src = [
-    'kick: s("mbd*4")',
-    '  #1: s("mbd*4").i(3)',
-    '  #outro: s("mbd*4")',
-    '    .fx("FilterFreak 1")', // a chain continuing under the nested label, as under any
-    'hats: s("hh*8")',
-    '  #open: s("oh*4")',
-  ].join('\n');
-  const blocks = splitLabeledBlocks(src);
-  assert.deepEqual(blocks.map((b) => [b.label, b.base, b.variant, b.nested]), [
-    ['kick', 'kick', null, false],
-    ['kick#1', 'kick', '1', true],
-    ['kick#outro', 'kick', 'outro', true],
-    ['hats', 'hats', null, false],
-    ['hats#open', 'hats', 'open', true],
-  ]);
-  assert.equal(blocks[2].code.split('\n').length, 2, 'the continuation line stays with its block');
-  // positions inside `code` still equal positions inside the source minus `start`
-  assert.equal(blocks[1].code.indexOf('s("mbd*4").i(3)'), src.split('\n')[1].indexOf('s("mbd*4").i(3)'));
-});
-
-test('a nested variation under a variation shares its base; setup lines between them do not break the family', () => {
-  const src = ['kick: s("mbd*4")', 'kick#a: s("bd")', '  #b: s("sd")', 'setbpm(140)', '  #c: s("cp")'].join('\n');
-  assert.deepEqual(splitLabeledBlocks(src).map((b) => b.label), ['kick', 'kick#a', 'kick#b', '$1', 'kick#c']);
-});
-
-test('a nested token takes mute and solo markers around its #', () => {
-  const src = ['kick: s("mbd*4")', '  _#1: s("bd")', '  #2S: s("sd")'].join('\n');
-  assert.deepEqual(splitLabeledBlocks(src).map((b) => [b.label, b.ownMuted, b.ownSoloed]), [
-    ['kick', false, false], ['kick#1', true, false], ['kick#2', false, true],
-  ]);
-});
-
-test('an indented #name: with no labeled block above it is not a variation of anything', () => {
-  // Nothing to attach to: it reads as code, and a bare statement is what code at the top is.
-  const blocks = splitLabeledBlocks('  #1: s("bd")\nkick: s("mbd*4")');
-  assert.deepEqual(blocks.map((b) => [b.label, b.kind]), [['$1', 'bare'], ['kick', 'labeled']]);
-});
-
-test('a #name: inside a template or a comment is text, and an indented one in a chain is code', () => {
+test('a #name: inside a template or a comment is text', () => {
   const tpl = splitLabeledBlocks('kick: s(`\n  #1: not a block\n`)');
   assert.equal(tpl.length, 1);
   const cmt = splitLabeledBlocks('kick: s("bd") /*\n  #1: nor this\n*/');
   assert.equal(cmt.length, 1);
-});
-
-test('a bare statement and a $: track have no variant, and are their own base', () => {
-  const [bare, anon] = splitLabeledBlocks(['setbpm(140)', '$: s("hh")'].join('\n'));
-  assert.deepEqual([bare.base, bare.variant], ['$1', null]);
-  assert.deepEqual([anon.base, anon.variant], ['$2', null]);
 });

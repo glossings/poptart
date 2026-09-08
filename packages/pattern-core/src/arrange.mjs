@@ -4,18 +4,22 @@
 //
 // An arrangement is a set of CLIPS, playlist-style: each clip says "this labeled block sounds
 // here". Format: space-separated `label,start,len`, e.g. "drums,0,8 bass,4,4 drums,12,4".
-//   label - the block's label (`drums:` in the buffer, or a variation's `drums#fill:` - see
-//           below). No commas or whitespace, which a label can't hold anyway.
+//   label - the block's label (`drums:` in the buffer). No commas or whitespace, which a label
+//           can't hold anyway.
 //   start - onset, in CYCLES (decimals allowed: 4.5 is halfway through bar 4)
 //   len   - length in cycles, > 0
 //
-// ONE ROW PER TRACK, and a track's VARIATIONS share its row. A block labeled `drums#fill:` is a
-// second drums - its own block, its own engine track, a chain that can differ in any way at all -
-// and what makes it a variation rather than a track of its own is only that its clips are drawn
-// on the `drums` row (see labels.mjs). So a row is a track as a person thinks of it, and the clips
-// along it say which of its variations plays where: the bare `drums` for most of the song, the
-// fill for a bar at the end of each phrase. Clips on one row never overlap - at any bar a row
-// plays exactly one thing. (Older arrangements carried a `lane` column - `drums,0,0,8` - back when
+// ONE ROW PER TRACK, exactly. A row is a block and a block is a row, so painting is only ever
+// "draw where this track sounds" - there is no second question about WHAT it plays there. A part
+// that comes and goes (the fill that replaces the kick at the end of a phrase) is its own track,
+// drawn on its own row, and the two are held together by being in the same GROUP (see groups.mjs):
+// the tree says they mix as one, the rows say when each sounds. Rows of one group sit under it and
+// fold away with it, which is what keeps a song of forty tracks readable.
+//
+// (An earlier design gave a track's VARIATIONS its row and asked each clip which variation it
+// meant - `drums,0,8` vs `drums#fill,12,4` on one line. Every gesture then needed a "which one"
+// answer the painter had nowhere good to put, so rows and blocks are 1:1 now and grouping carries
+// the relationship instead. Older arrangements carried a `lane` column - `drums,0,0,8` - back when
 // rows were free-form and a label could sit on any number of them. Those still parse; the lane is
 // simply dropped. Older still, a clip could name a roll - `drums:fill` - which parses as `drums`.)
 //
@@ -23,9 +27,9 @@
 // `label: pattern` stops being a loop and becomes a part - and a block with no clips at all is
 // silent. That is only safe because every track is FILLED when it joins the arrangement (the
 // painter paints it edge to edge, see arReconcileTracks in the web app), so a row is empty only
-// because it was emptied. A variation is the exception: it joins with nothing painted, since a
-// filled variation would sit on top of its base, and a variation IS the thing you paint in by
-// hand. The arrangement loops over its length (`len` option, or the end of the last clip rounded
+// because it was emptied. A GROUP is the exception: it joins with nothing painted, since it has no
+// notes of its own and what sounds on it is whatever its members are doing. The arrangement loops
+// over its length (`len` option, or the end of the last clip rounded
 // up to a whole cycle), and the pattern inside a clip runs on absolute cycle time, so a `<a b>`
 // alternation keeps its place whether or not its block was sounding the bar before.
 //
@@ -36,9 +40,9 @@
 //            follow the buffer): it is what tells a track that has never been arranged - fill it -
 //            from one whose clips you deleted on purpose - leave it silent. See
 //            reconcileArrangement.
-//   colors - { label: "#rrggbb" } for the clips a person has colored by hand. A variation with no
-//            entry takes a hue step off its base's color (see the painter), so one is only written
-//            once someone has chosen.
+//   colors - { label: "#rrggbb" } for the clips a person has colored by hand. A track with no
+//            entry takes a hue step off its group's color (see the painter), so the members of one
+//            group read as a family and an entry is only written once someone has chosen.
 //   autos  - the automation lanes PINNED into the painter's strip, by name, top to bottom
 //   loops - loop regions, [[name, start, end], …] in cycles: while a region is ARMED, playback
 //           entering it loops it until the player releases it (ctrl+L), then runs on to the next
@@ -56,20 +60,6 @@ const num = (s) => {
   const v = Number(s);
   return Number.isFinite(v) ? v : null;
 };
-
-/** The row a label belongs on: `drums#fill` -> `drums`, `drums` -> `drums`. Mirrors labels.mjs. */
-export function baseOf(label) {
-  const s = String(label ?? '');
-  const at = s.indexOf('#');
-  return at < 0 ? s : s.slice(0, at);
-}
-
-/** The variation name, `drums#fill` -> `fill`; null on a base. */
-export function variantOf(label) {
-  const s = String(label ?? '');
-  const at = s.indexOf('#');
-  return at < 0 ? null : s.slice(at + 1);
-}
 
 /**
  * "drums,0,8 drums#fill,12,4" -> [{ label, start, len }]. Malformed tokens are skipped rather than
@@ -175,14 +165,12 @@ export function normalizeArrangeOpts(opts = {}) {
  * whole reason `tracks` is written down. Without it, "this track is silent" and "this track is new"
  * look identical, and a row you emptied would fill itself again on the next evaluation.
  *
- * `labels` are the buffer's tracks, in document order - variations included, since a variation is a
- * block the membership has to know about too. A label that has left the buffer is dropped from
- * the membership unless clips still name it - an orphan keeps its row until its clips go.
+ * `labels` are the buffer's tracks, in document order. A label that has left the buffer is dropped
+ * from the membership unless clips still name it - an orphan keeps its row until its clips go.
  *
- * A VARIATION joins with nothing painted (see the header): filling it would lay it over its base,
- * and a variation is exactly the thing you paint in where you want it. So does a GROUP (`unfilled`
- * - the labels headed by group(), see groups.mjs): it has no notes to paint, its variations are
- * what goes on its row, and a clip of its own would be a clip playing nothing.
+ * A GROUP joins with nothing painted (`unfilled` - the labels headed by group(), see groups.mjs):
+ * it has no notes of its own, what sounds on it is its members, and a clip of its own would be a
+ * clip playing nothing.
  *
  * Pure: hands back what to write, and writes nothing. The editor applies it (see arReconcileTracks
  * in the web app), which is also what makes it testable without a browser.
@@ -197,7 +185,7 @@ export function reconcileArrangement(clips, opts = {}, labels = [], unfilled = [
   // this was recorded, come through as the song it already was.
   const len = arrangementLength(clips, opts);
   const added = joining
-    .filter((l) => !named.has(l) && variantOf(l) == null && !unfilled.includes(l))
+    .filter((l) => !named.has(l) && !unfilled.includes(l))
     .map((label) => ({ label, start: 0, len }));
   const tracks = [...kept, ...joining];
   const changed = added.length > 0 || tracks.length !== o.tracks.length || tracks.some((t, i) => t !== o.tracks[i]);

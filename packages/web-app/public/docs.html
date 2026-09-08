@@ -251,7 +251,7 @@
           <ul>
             <li><code>_bass:</code> (or <code>bass_:</code>) <strong>mutes</strong> a track without deleting it.</li>
             <li><code>Sdrums:</code> <strong>solos</strong> it — if anything is soloed, only soloed tracks play. Mute still wins.</li>
-            <li>An indented <code>#fill:</code> under <code>drums</code> makes <code>drums</code> a <strong>group</strong> and the indented block a track in it (<code>drums#fill</code> to the engine, and as a label at column 0) — its own block and engine track, sharing the drums row in the arrangement (see <a href="#s4">arranging</a>). A group's own line is <code>group()</code>, the mixdown its tracks all send into. Muting or soloing the group takes them all with it.</li>
+            <li>Select a few tracks and press <strong>⌘G</strong> to put them in a <strong>group</strong> — a <code>name: group()</code> line above them, the mixdown they all send into, recorded in a <code>_groups(…)</code> call the editor writes (see <a href="#s4">arranging</a>). Groups nest, fold away in the gutter, and muting or soloing one takes everything under it along.</li>
           </ul>
           <p>
             <code>$:</code> is a track you didn't feel like naming — it plays like any other and gets
@@ -520,55 +520,54 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             block of whichever clip you had selected.
           </p>
           <p>
-            <strong>Groups.</strong> One row of the arrangement can hold several tracks. An indented
-            <code>#name:</code> under a track makes that track a <em>group</em> and the indented
-            block a track <em>in</em> it: its own block, its own instrument and chain — a different
-            sample, another preset, an effect the others haven't got — and its clips go on the
-            group's row. At any bar a row plays exactly one of the tracks in its group; one with
-            nothing painted plays nothing. Within a loop, <code>&lt;a b&gt;</code>,
-            <code>.when()</code> and <code>.preset("&lt;a b&gt;")</code> are still the way to vary a
-            pattern; a second track in a group is for a <em>section</em> — a fill, an outro, a
-            chorus that adds a layer — and costs an instance of whatever the block loads.
+            <strong>Groups.</strong> Select a few tracks and press <strong>⌘G</strong> (or
+            right-click → <strong>group these tracks…</strong>), give the group a name, and they
+            mix as one: a <code>name: group()</code> line appears above them and the editor records
+            who is in it in a <code>_groups(…)</code> call at the foot of the buffer — never in the
+            tracks' own names or indentation, so regrouping a track never renames it. Groups
+            <em>nest</em>: group your kick tracks as <code>kick</code>, then <code>kick</code>,
+            <code>snare</code> and <code>hats</code> as <code>drums</code>. Within a loop,
+            <code>&lt;a b&gt;</code>, <code>.when()</code> and <code>.preset("&lt;a b&gt;")</code>
+            are still the way to vary a pattern; a second track in a group is for a
+            <em>section</em> — a fill, an outro, a chorus that adds a layer — and costs an instance
+            of whatever the block loads.
           </p>
           <pre><code>kick: group().postgain(<span class="n">0.8</span>)
-  #main: s(<span class="s">"mbd*4"</span>)
-  #1: s(<span class="s">"mbd*4"</span>).i(3)
-  #outro: s(<span class="s">"mbd*4"</span>).fx(<span class="s">"FilterFreak 1"</span>).preset(<span class="s">"Highpass"</span>)</code></pre>
+kickMain: s(<span class="s">"mbd*4"</span>)
+kickFill: s(<span class="s">"mbd*4"</span>).i(3)
+
+_groups({ <span class="s">"kick"</span>: [<span class="s">"kickMain"</span>, <span class="s">"kickFill"</span>] })</code></pre>
           <p>
-            <strong>The group is the mixdown.</strong> The moment a track gets its first indented
-            block, what it played moves under it as <code>#main</code> and the track's own line
-            becomes <code>group()</code>. Every track in it sends into that and plays nothing
-            directly, so a <code>.postgain()</code>, an <code>.fx()</code> or a <code>.bus()</code>
-            written on the group takes all of them, and the mixer and the DJ desk show the group
-            alone — one fader, one meter, one gate for the lot. The song sounds exactly as it did:
-            the group starts bare, and what its tracks share is moved up onto it by hand (its
-            <code>.postgain()</code>, likely; an <code>.fx()</code> may or may not be). The group's
-            bus is named after the block itself, so renaming it moves nothing; a grouped track's own
-            <code>.dry()</code> is respected if it wants to play directly as well. You can write one
-            by hand — any block headed by <code>group()</code> is a group — and an empty group reads
-            silence.
+            <strong>The group is the mixdown.</strong> Every track in a group sends into the
+            group's bus and plays nothing directly, so a <code>.postgain()</code>, an
+            <code>.fx()</code> or a <code>.bus()</code> written on the group takes all of them, and
+            the mixer and the DJ desk show the group alone — one fader, one meter, one gate for the
+            lot (unfold a strip to reach what is inside). A subgroup sends into <em>its</em> group
+            in turn, and <code>main: group()</code> is the root everything reaches in the end — the
+            place a mastering chain goes; without a <code>main:</code> block, tracks play straight
+            out as they always have. The group starts bare: what its tracks share is moved up onto
+            it by hand (its <code>.postgain()</code>, likely; an <code>.fx()</code> may or may not
+            be). The group's bus is named after the block itself, so renaming it moves nothing; a
+            grouped track's own <code>.dry()</code> is respected if it wants to play directly as
+            well. An empty group reads silence.
           </p>
           <p>
             A group carries a <strong>caret</strong> in the gutter beside its own line: press it to
-            fold its tracks away, press it again to bring them back. It never folds itself — a song
-            that hides two thirds of itself every time you evaluate is hiding the block you were
-            writing. The tracks in a group never carry its name, so renaming <code>kick</code>
-            renames nothing else. The engine knows each by its full name — <code>kick#1</code>,
-            <code>kick#outro</code> — and that spelling also works as a label at column 0,
-            <code>kick#outro:</code>, for one you'd rather keep apart. <code>_kick:</code> mutes the
-            whole group; <code>_#1:</code> mutes that one, and <code>S#1:</code> solos it through
-            its group.
+            fold its tracks away — subgroups and all — press it again to bring them back. It never
+            folds itself: a song that hides two thirds of itself every time you evaluate is hiding
+            the block you were writing. The same fold lives on the group's row in the arrangement,
+            and while it is shut the members' clips draw on the group's row, so a folded kit is one
+            line that still shows its shape. <code>_kick:</code> mutes the whole group;
+            <code>Skick:</code> solos it; a marker on one member reaches that member alone, heard
+            through its group. Right-click a group (in the code or on its row) to
+            <strong>ungroup</strong> it, or a member to take it out.
           </p>
           <p>
-            <strong>The brush.</strong> The pencil paints what the <strong>paint</strong> box in the
-            header names — a track, plain or grouped — and only onto that track's row; the other
-            rows dim while it is in hand. Click a row's name to dip the brush in it (for a group,
-            the first track in it — the group itself has nothing to paint), click a clip to dip it
-            in whatever that clip plays (which is how a part is picked up from one place and painted
-            in a few more), or press <strong>▾</strong> to search every track there is. Type
-            <code>kick#fill</code> for a track that doesn't exist yet and it is made — a copy of
-            <code>kick</code>, which becomes a group if it wasn't one — and the brush is dipped in
-            it.
+            <strong>Painting.</strong> A row is a track, so the pencil paints wherever you put it —
+            no picking first. A group's row takes no paint (it makes no sound of its own) and dims
+            with the pencil in hand, as does a row whose block has gone. To add another track to a
+            group, duplicate one of its blocks in the code and ⌘G it in, or paint the new track and
+            group it after.
           </p>
           <p>
             <strong>A clip is a title and a body.</strong> The title along its top is the clip as a
@@ -592,16 +591,14 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           </p>
           <p>
             <strong>Editing what a clip plays.</strong> A clip is a block, and double-clicking it
-            flips you to the code with the cursor on that block — where a track in a group gets its
-            difference, with the editor's own completion and handles. ctrl+A comes straight back.
-            Right-click → <strong>rename…</strong> (or <strong>⌘R</strong> with a clip selected)
-            renames the block from the clip: a group takes the tracks in it and their clips along,
-            and a grouped track renames within its group (<code>#roll</code> is enough). Renaming a
-            track by hand in the code is caught at the next evaluation and its clips follow too. The
-            two halves of a split clip still play one block; <strong>make unique</strong> on the same
-            menu gives a clip a numbered track of its own, copied from what it played, so editing it
-            changes nothing else. <strong>color…</strong> picks a color for every clip of that track
-            (one you haven't colored takes a hue a step off its group's).
+            flips you to the code with the cursor on that block — where the part gets its sound,
+            with the editor's own completion and handles. ctrl+A comes straight back. Right-click →
+            <strong>rename…</strong> (or <strong>⌘R</strong> with a clip selected) renames the
+            block from the clip, its clips and its place in the group tree along with it. Renaming
+            a track by hand in the code is caught at the next evaluation and follows the same way.
+            The two halves of a split clip still play one block. <strong>color…</strong> picks a
+            color for every clip of that track (one you haven't colored takes a hue a step off its
+            group's).
           </p>
           <p>
             <strong>Loop regions</strong> make a song you can hold. Drag across the ruler to mark a
@@ -1130,7 +1127,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
-            <tr><td><code>kick#fill: …</code> · <code>group()</code> · <strong>ctrl+A</strong></td><td>a track in the kick group, on its row in the arrangement · the mixdown of a group's tracks (what a track becomes when the first one is nested under it) · the arrangement page: a row per track, painted clips say which of a group's tracks plays when</td></tr>
+            <tr><td><strong>⌘G</strong> · <code>group()</code> · <strong>ctrl+A</strong></td><td>group the selected tracks (the editor writes <code>_groups(…)</code>; groups nest, and <code>main: group()</code> is where mastering goes) · the mixdown a group's tracks send into · the arrangement page: a row per track, clips say when each plays, group rows fold their members away</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
             <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>

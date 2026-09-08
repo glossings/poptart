@@ -57,11 +57,17 @@ the most unit-testable part.
   the key it's in, and writing each lane out as the arguments of a roll — which the editor files
   under the lane's name and plays with `pianoroll("name")` — so an import lands in the editable form
   and the roll's own →♪ converts it to mini-notation when that's wanted.
-- `arrange.mjs` — the arrangement painter's clip format (`label,lane,start,len`, in cycles) and
-  span math. `$: arrange()` opens a playlist in the editor; a block painted into it plays only
-  inside its clips (the host gates its Sig with `_arrangeGate`, on absolute cycle time, looping
-  over the arrangement's length), and a block never painted keeps looping as before. Lanes are
-  display only - any label on any lane - so a section is a set of blocks, not a token.
+- `arrange.mjs` — the arrangement's clip format (`label,start,len`, in cycles) and span math. The
+  `_arrange(...)` definition is always in force (ctrl+A paints it): one row per track, a block
+  plays only inside its clips (the host gates its Sig with `_arrangeGate`, on absolute cycle
+  time, looping over the arrangement's length), and an emptied row is silent.
+- `groups.mjs` — the track tree. A block headed by `group()` is a mixdown: it reads the bus named
+  after itself, and the tracks the `_groups(...)` definition puts under it send there and stop
+  playing directly (`routeGroups`). Groups nest — a subgroup sends into its parent — and a
+  `main:` group, when written, is the implicit root every ungrouped track reaches, which is where
+  a mastering chain goes. Membership is data the editor writes (cmd+G), never indentation or
+  name spelling, so regrouping never renames; scsynth node order needs nothing extra because the
+  engine already sorts tracks by how deep their bus reads go.
 - `index.mjs` — the public surface that stitches these together.
 
 ### `packages/osc-engine` — the engine adapter

@@ -320,21 +320,22 @@ test('the title picks the clip up, the body marks the time under it', () => {
 });
 
 test('a clip is a block: double-clicking it opens that block to edit, and the title says which', () => {
-  // A clip names a block - the base, or one of its `#` variations - and nothing else. There is no
-  // roll to rebind any more; what a clip plays is code, and the code is a double-click away.
+  // A clip names a block and nothing else. There is no roll to rebind and no variation to choose;
+  // what a clip plays is one track's code, and the code is a double-click away.
   assert.ok(!/arRollHead|arBindRoll|arTrackRoll|\.roll\b/.test(SRC), 'the roll binding is gone from the painter');
-  assert.match(SRC, /arSelectTrack\(clip\.label, \{ brush: clip\.label \}\);\n\s+arEditBlock\(clip\.label\);/);
+  assert.ok(!/arBrushFor|arSetBrush|arCreateVariation/.test(SRC), 'and so is the brush that chose between variations');
+  assert.match(SRC, /arSelectTrack\(clip\.label\);\n\s+arEditBlock\(clip\.label\);/);
   assert.match(SRC, /ctx\.fillText\(arClipTitle\(c\.label\)/);
-  assert.match(grab('arClipTitle'), /v == null \? label : `#\$\{v\}`/, 'a variation is titled by its #name, the code\'s spelling');
+  assert.match(grab('arClipTitle'), /return label;/, 'a clip is titled by its track');
 });
 
-test('the pencil paints the brush, on the brush\'s row only', () => {
-  // Painting is aimed: the brush names one label (a base or a variation), the pencil puts that
-  // label down on its own row and nowhere else, and clicking a clip or a track name moves it.
-  assert.match(SRC, /const label = arBrushFor\(row\);\n\s+if \(!label\) \{ drawArrange\(\); return; \}/);
-  assert.match(grab('arBrushFor'), /r\.variants\.includes\(arState\.brush\) \? arState\.brush : null/);
-  assert.match(SRC, /arState\.track = arRowLabel\(arRowOfLabel\(label\)\) \?\? label;\n\s+arSetBrush\(brush\);/, 'selecting a track dips the brush');
-  assert.match(SRC, /if \(arTool === 'draw' && arState\.brush != null\) \{/, 'and the other rows dim while it is in hand');
+test('the pencil paints the row it is put on, and a group takes no paint', () => {
+  // Rows and tracks are 1:1, so painting needs no aim: the row IS the answer. What can't take
+  // paint is a group (it makes no sound of its own) and an orphan (its block is gone).
+  assert.match(SRC, /const label = arPaintLabel\(row\);\n\s+if \(!label\) \{ drawArrange\(\); return; \}/);
+  assert.match(grab('arPaintLabel'), /r && r\.own && !r\.group \? r\.label : null/);
+  assert.match(SRC, /if \(arRowLabel\(lane\) == null \|\| arPaintLabel\(lane\) != null\) continue;/,
+    'and those rows dim while the pencil is in hand');
 });
 
 test('leaving the arrangement with a clip selected lands on its block', () => {
@@ -407,65 +408,25 @@ test('the whole _arrange call folds to a named chip, like a definitions run', ()
 // ---------------------------------------------------------------------------------------------
 
 /** arMakeUnique over a fake painter: which blocks get made, and which clips move onto them. */
-function uniquing(clipList) {
-  const arState = { clips: clipList, brush: null };
-  const made = [];
-  const env = {
-    arState,
-    arrangeMod: { baseOf: (l) => String(l).split('#')[0] },
-    arCreateVariation: (base, name, from) => { made.push([base, name, from]); return `${base}#${name}`; },
-    arNextVariantName: (base) => String(made.filter((m) => m[0] === base).length + 1),
-    arSetBrush: (l) => { arState.brush = l; },
-    writeArrangeCall: () => {},
-    drawArrange: () => {},
-  };
-  const keys = Object.keys(env);
-  // eslint-disable-next-line no-new-func
-  const fn = new Function(...keys, `${grab('arMakeUnique')}\nreturn arMakeUnique;`)(...keys.map((k) => env[k]));
-  return { fn, arState, made };
-}
-
-test('make unique gives the clips a variation of their own, copied from what they played', () => {
-  const a = { label: 'kick', start: 0, len: 4 };
-  const { fn, arState, made } = uniquing([a, { label: 'kick', start: 8, len: 4 }]);
-  fn([a]);
-  assert.deepEqual(made, [['kick', '1', 'kick']], 'a numbered variation, copied from the clip\'s own block');
-  assert.deepEqual(arState.clips.map((c) => c.label), ['kick#1', 'kick'], 'only the clip asked for moves');
-  assert.equal(arState.brush, 'kick#1', 'and the brush is dipped in the new one');
-});
-
-test('make unique on a variation copies the VARIATION, and numbers from the base', () => {
-  const a = { label: 'kick#fill', start: 0, len: 4 };
-  const { made } = (() => { const u = uniquing([a]); u.fn([a]); return u; })();
-  assert.deepEqual(made, [['kick', '1', 'kick#fill']]);
-});
-
-test('several clips of one block made unique together stay one part', () => {
-  const a = { label: 'kick', start: 0, len: 4 };
-  const b = { label: 'kick', start: 4, len: 4 };
-  const { fn, arState, made } = uniquing([a, b]);
-  fn([a, b]);
-  assert.equal(made.length, 1, 'one new block, not two');
-  assert.deepEqual(arState.clips.map((c) => c.label), ['kick#1', 'kick#1']);
-});
-
-test('a variation is titled by its #name and colored a step off its base', () => {
+test('a member is colored a step off its group, so a kit reads as a family', () => {
   const src = grab('arHsl');
-  assert.match(src, /\(arHue\(base\) \+ step \* AR_VARIANT_HUE_STEP\) % 360/);
+  assert.match(src, /\(hue \+ \(at \+ 1\) \* AR_MEMBER_HUE_STEP\) % 360/);
+  assert.match(src, /const parent = arGroupParents\(\)\.get\(label\) \?\? null;/,
+    'off the tree, not the row - a folded member has no row and still needs its color');
   assert.match(src, /const chosen = arState\?\.colors\?\.\[label\];\n\s+if \(chosen\) return hexToHsl\(chosen\);/, 'a chosen color wins');
   assert.match(SRC, /if \(state\.colors && Object\.keys\(state\.colors\)\.length\) opts\.colors = \{ \.\.\.state\.colors \};/,
     'and only chosen colors are written into the call');
 });
 
 test('renaming from a clip or the mixer goes through one path, and the painter follows', () => {
-  // mixctl's renameEdits rewrites the code AND the clips in the buffer (a base taking its
-  // variations along); the painter's own copy of the clips has to follow either way in.
+  // mixctl's renameEdits rewrites the code, the clips AND the group tree in the buffer; the
+  // painter's own copy of the clips has to follow either way in.
   const apply = grab('arApplyRename');
   assert.match(apply, /for \(const c of arState\.clips\) if \(map\.has\(c\.label\)\) c\.label = map\.get\(c\.label\);/);
   assert.match(apply, /arState\.tracks = arState\.tracks\.map\(\(t\) => map\.get\(t\) \?\? t\);/);
   // arCM, not cm: the painter rewrites the deck it is on (see openArrangePainter)
-  assert.match(grab('arRenameBlock'), /const res = mixctlMod\.renameEdits\(arCM\.getValue\(\), from, to\);[\s\S]{0,900}arApplyRename\(map\);/);
-  assert.match(grab('applyMixerRename'), /mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]*arApplyRename\(map\);/);
+  assert.match(grab('arRenameBlock'), /const res = mixctlMod\.renameEdits\(arCM\.getValue\(\), from, to\);[\s\S]{0,900}arApplyRename\(new Map\(\[\[from, to\]\]\)\);/);
+  assert.match(grab('applyMixerRename'), /mixctlMod\.renameEdits\(cm\.getValue\(\), from, to\);[\s\S]*arApplyRename\(new Map\(\[\[from, to\]\]\)\);/);
   // the gesture: the clip menu and cmd+R put the name box over the clip's title
   assert.match(SRC, /items\.push\(\['rename…', \(\) => arRenameClip\(targets\[0\]\)/);
   assert.match(SRC, /if \(mod && e\.key\.toLowerCase\(\) === 'r'\) \{/);
@@ -475,23 +436,36 @@ test('renaming from a clip or the mixer goes through one path, and the painter f
 test('a group gets a caret in the gutter and does NOT fold itself', () => {
   // It used to fold on every evaluation, which hid the member you were in the middle of writing.
   // Open is the default now; what is remembered is which groups you folded.
-  const fold = grab('foldFamilies');
-  assert.match(fold, /blocks\.filter\(\(b\) => b\.nested && b\.base === base\.label && b\.start > base\.start\)/);
+  const fold = grab('foldGroups');
+  assert.match(fold, /const tree = groupsMod\.normalizeGroupTree\(mixctlMod\.readGroupTree\(code\)\);/);
   assert.match(fold, /cm\.setGutterMarker\(cm\.posFromIndex\(from\)\.line, GROUP_GUTTER, groupCaret\(/);
-  assert.match(fold, /const folded = collapsedGroups\.has\(base\.label\);\n\s+.*\n\s+if \(!folded\) continue;/,
+  assert.match(fold, /const folded = collapsedGroups\.has\(group\.label\);\n\s+.*\n\s+if \(!folded\) continue;/,
     'nothing folds unless the caret was pressed');
-  assert.ok(!/variation\$\{kids\.length === 1/.test(fold), 'the auto-folding chip text is gone');
+  // the run below a group stops at the first block that is not under it
+  assert.match(fold, /if \(!under\.has\(b\.label\)\) break;/);
+  // a group inside a folded group is already hidden - marking it would lay a chip inside a chip
+  assert.match(fold, /if \(hiddenByAncestor\(group\.label\)\) continue;/);
   // ...and a group that leaves the buffer forgets it was folded, so a new one of that name opens
   assert.match(fold, /for \(const label of \[\.\.\.collapsedGroups\]\) if \(!live\.has\(label\)\) collapsedGroups\.delete\(label\);/);
-  assert.match(SRC, /for \(const reg of DEF_REGISTRIES\) foldDefRuns\(code, reg\);\n\s+foldFamilies\(code\);/);
+  assert.match(SRC, /for \(const reg of DEF_REGISTRIES\) foldDefRuns\(code, reg\);\n\s+foldGroups\(code\);/);
   // the gutter has to be declared at construction, and cleared at the top of every pass
   assert.match(SRC, /gutters: \['CodeMirror-linenumbers', GROUP_GUTTER\],/);
   assert.match(fold, /cm\.clearGutter\(GROUP_GUTTER\);/);
-  // a jump onto a member of a FOLDED group opens it first, or the cursor lands on the chip
-  assert.match(grab('arGotoBlock'), /if \(block\.nested && collapsedGroups\.has\(block\.base\)\) \{\n\s+collapsedGroups\.delete/);
-  assert.match(grab('arCreateVariation'), /collapsedGroups\.delete\(base\);/, 'a member just made is shown');
+  // a jump onto a member of a FOLDED group opens every group above it, or the cursor lands on a chip
+  assert.match(grab('arGotoBlock'), /groupsMod\.ancestorsOf\(label, parents\)\.filter\(\(a\) => collapsedGroups\.has\(a\)\)/);
+  assert.match(grab('arCreateGroup'), /collapsedGroups\.delete\(res\.name\);/, 'a group just made is shown');
   // and a fresh buffer starts with nothing folded
   assert.match(grab('forgetExpandedFolds'), /collapsedGroups\.clear\(\);/);
+});
+
+test('cmd+G groups the selection, and the gesture asks for a name in place', () => {
+  assert.match(SRC, /'Cmd-G': \(ed\) => groupSelection\(ed\),/);
+  assert.match(SRC, /'Shift-Ctrl-G': \(ed\) => groupSelection\(ed\),/, 'plain ctrl\+G is the mixer');
+  const sel = grab('groupSelection');
+  assert.match(sel, /\.filter\(\(b\) => b\.kind !== 'bare' && b\.start < to && b\.end > from\)/,
+    'the tracks the selection covers are the members');
+  assert.match(sel, /askGroupName\(ed, covered\[0\], name, \(chosen\) => arCreateGroup\(covered, chosen, ed\)\)/);
+  assert.match(SRC, /items\.push\(\['group these tracks…', \(\) => groupSelection\(ed\)/, 'and it is on the editor menu too');
 });
 
 test('the caret says which way it will go, and toggles the group', () => {
@@ -610,12 +584,14 @@ test('a clip laid down cuts back whatever was under it on that row', () => {
     'the long clip becomes the part before it and the part after');
 });
 
-test('it clips per ROW, so a fill dropped on its base replaces the base there', () => {
+test('it clips per LABEL: a track never overlaps itself, and other tracks layer', () => {
   const loop = { label: 'kick', start: 0, len: 8 };
-  const fill = { label: 'kick#fill', start: 6, len: 2 };
-  const { fns, arState } = ops({ clips: [loop, fill] });
-  fns.arClipOverlaps([fill]);
-  assert.deepEqual(clips(arState), [['kick', 0, 6], ['kick#fill', 6, 2]]);
+  const late = { label: 'kick', start: 6, len: 2 };
+  const fill = { label: 'kickFill', start: 4, len: 2 };
+  const { fns, arState } = ops({ clips: [loop, fill, late] });
+  fns.arClipOverlaps([late]);
+  assert.deepEqual(clips(arState), [['kick', 0, 6], ['kick', 6, 2], ['kickFill', 4, 2]],
+    'its own earlier clip is trimmed; the sibling under it layers on');
 });
 
 test('...and never touches another row', () => {
