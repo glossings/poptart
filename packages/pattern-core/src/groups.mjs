@@ -1,29 +1,28 @@
-// Groups: the track tree. A block whose head is `group()` is a mixdown - it makes no sound of its
-// own, it reads a bus, and the tracks that BELONG to it send into that bus and stop playing
-// directly. A group can belong to another group, so the tree nests as deep as a song needs:
+// Groups: the track tree. A block whose head is `group({ ... })` is a mixdown - it makes no sound
+// of its own, it reads a bus, and the tracks written INSIDE its braces send into that bus and stop
+// playing directly. A group block can sit inside another group's braces, so the tree nests as deep
+// as a song needs:
 //
-//   drums: group().fx("Pro-C 2")     // a supergroup: kick, snare and hats mixed and compressed
-//   kick:  group()                   // a group of kick tracks
-//   kickMain: s("mbd*4")             // ...its members, ordinary tracks in every other respect
-//   kickFill: s("mbd*4").i(3)
+//   drums: group({                     // a supergroup: the kit, mixed and compressed
+//     kick: group({                    // a group of kick tracks
+//       kickMain: s("mbd*4")           // ...its members, ordinary tracks in every other respect
+//       kickFill: s("mbd*4").i(3)
+//     })
+//     snare: s("msn").off(1/2)
+//   }).fx("Pro-C 2")
 //
-//   _groups({ drums: ["kick", "snare", "hats"], kick: ["kickMain", "kickFill"] })
-//
-// MEMBERSHIP IS DATA, not indentation. `_groups(...)` is a definition the editor writes, the way
-// `_arrange(...)` and `_roll(...)` are - grouping is a gesture (cmd+G over a selection), and the
-// call is where the gesture is recorded. Indentation was the obvious alternative and is worse for
-// exactly one reason: it makes whitespace load-bearing in a language where a chain is routinely
-// re-indented by hand, so a stray space would silently re-parent a track. Nothing here can be
-// broken by reformatting the code.
+// MEMBERSHIP IS WHERE THE CODE IS. The braces are the one source of truth - no side table to fall
+// out of step with the buffer, and `kick: foo` next to `snare: bar` with no group() anywhere is
+// exactly what it says: ungrouped tracks, routed as they always were. The braces are parsed as
+// STRUCTURE by labels.mjs (each body becomes ordinary blocks with `parent` set, and the group's own
+// code evaluates as `group({})` plus its chain), so nothing about the nesting is whitespace-
+// sensitive and nothing below this comment reads source text: this file is tree math over the
+// splitter's `parent` fields.
 //
 // What a member does NOT inherit is anything about its sound. A group shares a BUS, so the .fx(),
 // .postgain() and .pan() written on the group are shared by everything under it, and nothing else
 // is: two tracks in one group are two ordinary tracks that happen to mix together. Config a person
 // wants shared between them is shared the way any JS is - a `const` above them both.
-//
-// The whole tree is READ off `_groups` once per evaluation, and the routing is a consequence of it:
-// there is no `.bus("kick")` written onto each member to fall out of step when a member is copied,
-// renamed or moved.
 //
 // Kept dependency-free on purpose, like arrange.mjs and pianoroll.mjs: the browser imports this
 // file directly (served as ESM by web-app/server.js) to draw the arrangement's rows, the mixer's
@@ -31,23 +30,38 @@
 
 /**
  * The root of the tree: the group everything reaches in the end. `main` is a name, not a mechanism -
- * write `main: group().fx("Pro-L 2")` and every track that belongs to no other group sends into it,
- * which is what makes it the place a mastering chain goes. Write no `main:` block and there is no
- * root: tracks play straight out, exactly as they did before groups existed. So the master costs
- * nothing until it is asked for, and asking for it is one line.
+ * write a top-level `main: group().fx("Pro-L 2")` (no braces - its members are implicit) and every
+ * track that belongs to no other group sends into it, which is what makes it the place a mastering
+ * chain goes. Write no `main:` block and there is no root: tracks play straight out, exactly as
+ * they did before groups existed. So the master costs nothing until it is asked for, and asking
+ * for it is one line.
  */
 export const GROUP_ROOT = 'main';
 
 const isName = (s) => typeof s === 'string' && s.length > 0;
 
 /**
- * The tree as the builder and the editor both read it: a Map of parent -> ordered child names,
- * with everything unusable dropped. Flat rather than nested objects - a child that is itself a key
- * is a subgroup - because every edit here is local: regrouping one track rewrites one entry, and a
- * tree deep enough to need it is still one line per group.
+ * The tree read straight off the splitter's blocks: each block's `parent` field (set by
+ * labels.mjs for everything inside a group's braces) becomes an edge, in document order.
+ * Normalized on the way out - the structure itself can't cycle, but a duplicated label or a
+ * `main:` written inside somebody's braces still needs the rules below applied.
+ */
+export function treeOfBlocks(blocks) {
+  const tree = new Map();
+  for (const b of blocks ?? []) {
+    if (!b || b.parent == null || !isName(b.label)) continue;
+    if (!tree.has(b.parent)) tree.set(b.parent, []);
+    tree.get(b.parent).push(b.label);
+  }
+  return normalizeGroupTree(tree);
+}
+
+/**
+ * A parent -> ordered child names Map with everything unusable dropped. Flat rather than nested
+ * objects - a child that is itself a key is a subgroup - so every question below is one Map walk.
  *
- * What is dropped, and why each is dropped rather than thrown on (a half-typed tree should cost a
- * grouping, never the buffer):
+ * What is dropped, and why each is dropped rather than thrown on (a half-typed buffer should cost
+ * a grouping, never the whole eval):
  *   - a child named twice: the FIRST parent keeps it. A track is in one group; the alternative is
  *     an audio path that sums itself, which is a bug wearing a feature's clothes.
  *   - a group that contains itself, directly or through its subgroups: the edge that closes the
@@ -174,8 +188,9 @@ export function isGroupSig(sig) {
 /**
  * Apply the tree's routing to the blocks of one evaluation. Each block is `{ label, sig }`
  * (labels.mjs's fields plus the evaluated Sig); `busOf(label)` names the bus a group reads - the
- * engine's key for the block, so two decks' `kick` groups don't share a bus. The blocks' `sig`s are
- * replaced in place; returns which labels are groups and which are members of one.
+ * engine's key for the block, so two decks' `kick` groups don't share a bus. The tree defaults to
+ * the blocks' own structure (treeOfBlocks); pass one only to route by something else. The blocks'
+ * `sig`s are replaced in place; returns which labels are groups and which are members of one.
  *
  * Two rules, and every part of the hierarchy falls out of them:
  *   - a group block reads the bus named after itself;
@@ -189,8 +204,8 @@ export function isGroupSig(sig) {
  * writes the buses each track reads (see reorderTracks in sc/poptart.scd), so a subgroup lands
  * between its members and its parent on its own.
  */
-export function routeGroups(blocks, busOf = (label) => label, tree = new Map()) {
-  const t = normalizeGroupTree(tree);
+export function routeGroups(blocks, busOf = (label) => label, tree = null) {
+  const t = tree == null ? treeOfBlocks(blocks) : normalizeGroupTree(tree);
   const parents = parentsOf(t);
   const groups = new Set();
   const members = new Set();
@@ -227,40 +242,3 @@ export function routeGroups(blocks, busOf = (label) => label, tree = new Map()) 
   return { groups, members, tree: t, parents, routedParents };
 }
 
-/**
- * The `_groups(...)` definition: editor-owned data, like `_arrange(...)`. Returns a plain marker
- * object rather than a Sig - the line is a definition, not a voice, and the host reads the tree off
- * it before anything is routed.
- */
-export function _groups(tree) {
-  return { poptartGroupsBlock: true, tree: normalizeGroupTree(tree) };
-}
-
-/**
- * The tree as the source text carries it: a plain object literal, keys in the order given, values
- * arrays of names. An object rather than the packed string `_arrange` uses because a tree is read
- * far more often than it is typed, and `{ drums: ["kick", "snare"] }` needs no legend.
- */
-export function serializeGroupTree(tree) {
-  const t = normalizeGroupTree(tree);
-  if (!t.size) return '{}';
-  const entries = [...t].map(([parent, kids]) => `${JSON.stringify(parent)}: [${kids.map((k) => JSON.stringify(k)).join(', ')}]`);
-  return `{ ${entries.join(', ')} }`;
-}
-
-/**
- * Drop what the buffer no longer has, for the editor's write-back: a group with no block, and any
- * member with no block. Membership survives a track being COMMENTED OUT the same way the
- * arrangement's does - the label is gone from the buffer either way, so this is only ever called
- * with the labels of a successful evaluation, from the gesture that rewrites the call.
- */
-export function pruneGroupTree(tree, labels) {
-  const known = new Set(labels);
-  const out = new Map();
-  for (const [parent, kids] of normalizeGroupTree(tree)) {
-    if (!known.has(parent)) continue;
-    const kept = kids.filter((k) => known.has(k));
-    if (kept.length) out.set(parent, kept);
-  }
-  return out;
-}

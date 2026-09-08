@@ -113,9 +113,15 @@ const API_DOCS = {
   },
   group: {
     kind: 'builder',
-    sig: 'group()',
-    desc: 'The mixdown of the tracks the `_groups(...)` tree puts under this one (select them and press cmd+G - the editor writes the tree). Each member sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. Groups nest, and `main: group()` is the root everything reaches - the place a mastering chain goes. The bus is named after the block, so a rename moves nothing.',
-    eg: 'kick: group().postgain(0.8)\nkickMain: s("mbd*4")\nkickFill: s("mbd*8")\n\n_groups({ kick: ["kickMain", "kickFill"] })',
+    sig: 'group({ ...tracks })',
+    desc: 'The mixdown of the tracks written inside its braces (select them and press cmd+G - the editor wraps them for you). Each member sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. Groups nest - a group block can sit inside another\'s braces - and a bodyless `main: group()` is the root every ungrouped track reaches: the place a mastering chain goes. The bus is named after the block, so a rename moves nothing.',
+    eg: 'kick: group({\n  kickMain: s("mbd*4")\n  kickFill: s("mbd*8")\n}).postgain(0.8)',
+  },
+  copy: {
+    kind: 'both',
+    sig: 'copy(track)',
+    desc: 'Another track\'s entire pattern, evaluated fresh - as if you had duplicated its block by hand: notes, controls, instrument and fx all come along, and the copy is then a track of its own. Stronger than audio() (the sound) or midi() (the notes): this copies the PATTERN. As a method, what comes before it becomes the copy\'s notes - pianoroll("kickB").copy("kick") is kick\'s chain playing a different roll.',
+    eg: 'kick2: copy("kick").fast(2)',
   },
   input: {
     kind: 'builder',

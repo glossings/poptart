@@ -2304,6 +2304,27 @@ export class Sig {
   }
 
   /**
+   * The named track's pattern with THIS signal's notes swapped in - the method form of copy():
+   *
+   *   kick2: pianoroll("kickB").copy("kick")   // kick's chain and feel, playing the kickB roll
+   *
+   * Everything the copied block chained - instrument, fx, params, channel strip - carries over,
+   * and this signal becomes its note source: exactly the swap .note()/.n() perform, so the copy's
+   * own note channels (drawn velocities, clips) re-merge onto the new grid (see _noteLike). Use
+   * the bare builder - copy("kick") - when the copy should play the original's notes too.
+   */
+  copy(name) {
+    // `copy` here is the builder, not this method (a class method's name is not a binding in its
+    // own body), same trick as .pianoroll() above.
+    const sig = copy(name);
+    if (this.ctl) {
+      warnUser('[copy] a control head has no notes to swap into a copy - write the control after it instead: copy("kick").vel(...)');
+      return sig;
+    }
+    return sig._noteLike(this);
+  }
+
+  /**
    * `this` and `sig` sounding at once, keeping THIS signal's track metadata - the instrument, the
    * chain, the channel strip, the note channels, and (the reason this exists) a live midikeys()
    * route. A stack is a concatenation of step grids and nothing more, which is exactly what mini's
@@ -5375,30 +5396,74 @@ export function audio(name) {
 }
 
 /**
- * Several tracks mixed down as ONE track - the head of a group (see groups.mjs):
+ * Several tracks mixed down as ONE track - a group holds its members inside its braces:
  *
- *   kick: group().postgain(0.8).fx("Pro-C 2")   // the group: what the mixer and the desk show
- *   kickMain: s("mbd*4")                        // its members, ordinary tracks in every other way
- *   kickFill: s("mbd*4").i(3)
- *
- *   _groups({ kick: ["kickMain", "kickFill"] })
+ *   kick: group({
+ *     kickMain: s("mbd*4")             // its members, ordinary tracks in every other way
+ *     kickFill: s("mbd*4").i(3)
+ *   }).postgain(0.8).fx("Pro-C 2")     // the group: what the mixer and the desk show
  *
  * Every member sends its output into the group's bus and stops playing directly (an explicit
  * .dry() on a member is respected), and the group reads that bus as its chain input - so a
  * .postgain(), .fx() or .bus() written on the group is shared by everything under it, and one
- * fader, one mute and one gate take the whole family. A group can be a member of another group,
- * and `main` is the root everything reaches in the end - which is where a mastering chain goes.
+ * fader, one mute and one gate take the whole family. A group block can sit inside another
+ * group's braces, and a top-level bodyless `main: group()` is the root everything else reaches
+ * in the end - which is where a mastering chain goes.
  *
- * The bus is named after the block itself (the label it carries at eval time, so a rename moves
- * nothing): `group()` is `audio("bus:kick")` on a block called `kick`, with the name kept in step
- * for you. No notes of its own; a group with no members reads silence.
+ * The braces never reach this function: they are STRUCTURE, read by the splitter (labels.mjs),
+ * which files what is inside them as ordinary blocks with this block as their parent and blanks
+ * the body out of this block's own code - so what runs here is `group({})` and the chain. The bus
+ * is named after the block itself (the label it carries at eval time, so a rename moves nothing):
+ * `group({...})` is `audio("bus:kick")` on a block called `kick`, with the name kept in step for
+ * you. No notes of its own; a group with no members reads silence.
  *
- * WHICH tracks are its members is not written here - it is the `_groups(...)` tree at the foot of
- * the buffer, which the editor writes when you group a selection (cmd+G). So a track is regrouped
- * without being renamed or moved, and this call stays the same line whatever is under it.
+ * cmd+G over a selection writes this wrapper around the selected tracks for you.
  */
-export function group() {
+export function group(_body) {
+  // `_body` is the blanked `{}` the splitter leaves behind - nothing to read; see above.
   return new Sig(() => null, { inputSource: { io: 'audio', name: 'bus:', group: true } });
+}
+
+// How copy() reaches the rest of the buffer: the host installs a resolver for the duration of an
+// evaluation (name -> that block's freshly evaluated Sig, cycle-guarded; see /api/evaluate in
+// web-app's server.js). A hook rather than an import because pattern-core can't see the buffer -
+// only the evaluator knows what the other blocks say.
+let copyResolver = null;
+export function setCopyResolver(fn) {
+  copyResolver = typeof fn === 'function' ? fn : null;
+}
+
+function resolveCopy(name) {
+  if (typeof name !== 'string' || !name.trim()) {
+    throw new Error('[copy] copy() takes a track name - copy("kick")');
+  }
+  if (!copyResolver) {
+    throw new Error('[copy] copy() reads another track from the buffer, so it only works inside an evaluation');
+  }
+  return copyResolver(name.trim());
+}
+
+/**
+ * Another track's entire pattern, as if its block had been duplicated by hand:
+ *
+ *   kick:  s("mbd*4").ply("<1 2>").fx("Saturn 2")
+ *   kick2: copy("kick").fast(2)                     // everything kick is, twice as fast
+ *
+ * The named block's CODE is evaluated again, fresh - notes, controls, instrument, fx chain, all of
+ * it - so the copy is a full track of its own: retuning, re-effecting or muting it never touches
+ * the original, and an edit to the original is picked up on the next evaluation. That is stronger
+ * than audio("kick") (which taps the sound) or midi("kick") (which taps the notes): this copies
+ * the PATTERN.
+ *
+ * To keep a track's dressing but play different notes into it, put the notes first and use the
+ * method form - `kick2: pianoroll("kickB").copy("kick")` is kick's chain, channels and feel with
+ * the new roll swapped in as its notes (the same swap .note()/.n() do; see Sig#copy).
+ *
+ * A group can't be copied (it is a mixdown of other tracks, not a pattern - copy a member), and
+ * copies that form a loop are refused by name.
+ */
+export function copy(name) {
+  return resolveCopy(name);
 }
 
 /**

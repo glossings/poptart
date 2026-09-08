@@ -329,13 +329,33 @@ test('a clip is a block: double-clicking it opens that block to edit, and the ti
   assert.match(grab('arClipTitle'), /return label;/, 'a clip is titled by its track');
 });
 
-test('the pencil paints the row it is put on, and a group takes no paint', () => {
-  // Rows and tracks are 1:1, so painting needs no aim: the row IS the answer. What can't take
-  // paint is a group (it makes no sound of its own) and an orphan (its block is gone).
+test('the pencil paints the row it is put on - groups included; only an orphan takes none', () => {
+  // Rows and tracks are 1:1, so painting needs no aim: the row IS the answer. A group's row paints
+  // too - its clips gate the whole submix, and unpainted it passes its members through (drawn as a
+  // ghost union). The one row that can't take paint is an orphan's, whose block is gone.
   assert.match(SRC, /const label = arPaintLabel\(row\);\n\s+if \(!label\) \{ drawArrange\(\); return; \}/);
-  assert.match(grab('arPaintLabel'), /r && r\.own && !r\.group \? r\.label : null/);
+  assert.match(grab('arPaintLabel'), /r && r\.own \? r\.label : null/);
   assert.match(SRC, /if \(arRowLabel\(lane\) == null \|\| arPaintLabel\(lane\) != null\) continue;/,
     'and those rows dim while the pencil is in hand');
+  assert.match(grab('drawArrange'), /drawn as a GHOST/, "an unpainted group's row shows the union of its members");
+  // Dragging is the one gesture that does NOT retarget onto a group: a drop there would silently
+  // turn a part into a submix gate, so the clip keeps its own label instead.
+  assert.match(grab('arDropLabel'), /r && r\.own && !r\.group \? r\.label : null/);
+  assert.match(SRC, /c\.label = rowShift !== 0 \? arDropLabel\(o\.row \+ rowShift\) \?\? o\.label : o\.label;/);
+  // ...and the first clip painted onto a group's row says what it means, once.
+  assert.match(grab('arNoteGroupClip'), /gate the whole/);
+  assert.equal((SRC.match(/arNoteGroupClip\(label\);/g) ?? []).length, 2, 'both paint paths say it');
+});
+
+test("a FOLDED group's row draws its members squished into thin sub-lanes", () => {
+  // The zoomed-out picture a folded group track shows in any DAW: one thin colored band per
+  // member, in tree order, instead of full-height clips stacked opaque on one rectangle. The
+  // group's OWN clips (the submix gate) still draw full-height with a title.
+  const draw = grab('drawArrange');
+  assert.match(draw, /const squishLanes = new Map\(\);/);
+  assert.match(draw, /collapsedGroups\.has\(r\.label\)/);
+  assert.match(draw, /if \(squish\?\.has\(c\.label\)\) \{[\s\S]{0,400}continue;/,
+    'a squished member clip skips the border/title drawing entirely');
 });
 
 test('leaving the arrangement with a clip selected lands on its block', () => {
@@ -437,12 +457,12 @@ test('a group gets a caret in the gutter and does NOT fold itself', () => {
   // It used to fold on every evaluation, which hid the member you were in the middle of writing.
   // Open is the default now; what is remembered is which groups you folded.
   const fold = grab('foldGroups');
-  assert.match(fold, /const tree = groupsMod\.normalizeGroupTree\(mixctlMod\.readGroupTree\(code\)\);/);
-  assert.match(fold, /cm\.setGutterMarker\(cm\.posFromIndex\(from\)\.line, GROUP_GUTTER, groupCaret\(/);
-  assert.match(fold, /const folded = collapsedGroups\.has\(group\.label\);\n\s+.*\n\s+if \(!folded\) continue;/,
-    'nothing folds unless the caret was pressed');
-  // the run below a group stops at the first block that is not under it
-  assert.match(fold, /if \(!under\.has\(b\.label\)\) break;/);
+  assert.match(fold, /const groups = blocks\.filter\(\(b\) => b\.group && b\.bodyStart != null\);/,
+    'what folds is the braces body the splitter measured - no side tree to read');
+  assert.match(fold, /cm\.setGutterMarker\(cm\.posFromIndex\(group\.start\)\.line, GROUP_GUTTER, groupCaret\(/);
+  assert.match(fold, /if \(!folded\) continue;/, 'nothing folds unless the caret was pressed');
+  // the fold is the body span, so the group's own line and its chain stay on screen
+  assert.match(fold, /foldSpan\(group\.bodyStart, group\.bodyEnd,/);
   // a group inside a folded group is already hidden - marking it would lay a chip inside a chip
   assert.match(fold, /if \(hiddenByAncestor\(group\.label\)\) continue;/);
   // ...and a group that leaves the buffer forgets it was folded, so a new one of that name opens

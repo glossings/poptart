@@ -1,8 +1,9 @@
-// Groups (groups.mjs): the track tree. A block headed by group() is a mixdown, the `_groups(...)`
-// tree says who is under it, and the routing is read off the two - the group reads the bus named
-// after itself, its members send there and stop playing directly. Nothing is written into a
+// Groups (groups.mjs): the track tree. A block headed by group({...}) is a mixdown, the blocks
+// written inside its braces are under it (the splitter's `parent` fields - see labels.test.mjs
+// for the splitting itself), and the routing is read off that structure - the group reads the bus
+// named after itself, its members send there and stop playing directly. Nothing is written into a
 // member's code for it, so these pin the rule itself: who reads what, who sends where, what an
-// explicit .dry() and an existing send do, how nesting and the implicit `main` root behave, and
+// explicit .dry() and an existing send do, how nesting and the opt-in `main` root behave, and
 // that a track whose group has gone is freed rather than silenced.
 
 import test from 'node:test';
@@ -10,8 +11,8 @@ import assert from 'node:assert/strict';
 
 import { s, group, audio } from './src/signal.mjs';
 import {
-  isGroupSig, routeGroups, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf,
-  groupOrder, serializeGroupTree, pruneGroupTree, _groups, GROUP_ROOT,
+  isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf,
+  groupOrder, GROUP_ROOT,
 } from './src/groups.mjs';
 
 const blocksOf = (sigs) => Object.entries(sigs).map(([label, sig]) => ({ label, sig }));
@@ -80,23 +81,27 @@ test('groupOrder: a member whose group is not in the buffer stays, at the top le
   assert.deepEqual(groupOrder(['kick', 'bass'], t).map((r) => [r.label, r.depth]), [['kick', 0], ['bass', 0]]);
 });
 
-test('serializeGroupTree: strict JSON, so the buffer reads back with JSON.parse', () => {
-  const text = serializeGroupTree({ drums: ['kick', 'snare'] });
-  assert.equal(text, '{ "drums": ["kick", "snare"] }');
-  assert.deepEqual(JSON.parse(text), { drums: ['kick', 'snare'] });
-  assert.equal(serializeGroupTree({}), '{}');
+test("treeOfBlocks: the splitter's parent fields become the tree, in document order", () => {
+  const t = treeOfBlocks([
+    { label: 'drums', parent: null },
+    { label: 'kick', parent: 'drums' },
+    { label: 'kickMain', parent: 'kick' },
+    { label: 'snare', parent: 'drums' },
+    { label: 'bass', parent: null },
+  ]);
+  assert.deepEqual([...t.keys()], ['drums', 'kick']);
+  assert.deepEqual(t.get('drums'), ['kick', 'snare']);
+  assert.deepEqual(t.get('kick'), ['kickMain']);
 });
 
-test('pruneGroupTree: a group or a member the buffer has lost is dropped', () => {
-  const t = pruneGroupTree({ drums: ['kick', 'gone'], ghost: ['x'] }, ['drums', 'kick']);
-  assert.deepEqual([...t.keys()], ['drums']);
-  assert.deepEqual(t.get('drums'), ['kick']);
-});
-
-test('_groups(): a definition marker carrying the normalized tree', () => {
-  const def = _groups({ drums: ['kick'] });
-  assert.equal(def.poptartGroupsBlock, true);
-  assert.deepEqual(def.tree.get('drums'), ['kick']);
+test('treeOfBlocks: normalized on the way out - a duplicated label keeps its first parent', () => {
+  const t = treeOfBlocks([
+    { label: 'kick', parent: 'drums' },
+    { label: 'kick', parent: 'perc' },
+    { label: GROUP_ROOT, parent: 'drums' },
+  ]);
+  assert.deepEqual(t.get('drums'), ['kick'], 'main never becomes a child, and one track has one group');
+  assert.equal(t.has('perc'), false);
 });
 
 // --- the routing ---
@@ -174,4 +179,16 @@ test('routeGroups: no `main:` block, no root routing - tracks play straight out'
   assert.equal(members.size, 0);
   assert.deepEqual(blocks[0].sig.busSends, []);
   assert.equal(blocks[0].sig.channel.dry, undefined, 'a mastering chain costs nothing until it is asked for');
+});
+
+test("routeGroups: with no tree given, the blocks' own parent fields route", () => {
+  const blocks = [
+    { label: 'kick', sig: group(), parent: null },
+    { label: 'kickMain', sig: s('bd*4'), parent: 'kick' },
+    { label: 'hat', sig: s('hh*8'), parent: null },
+  ];
+  const { members } = routeGroups(blocks);
+  assert.deepEqual([...members], ['kickMain']);
+  assert.deepEqual(blocks[1].sig.busSends, [{ name: 'kick', amount: 1 }]);
+  assert.deepEqual(blocks[2].sig.busSends, []);
 });

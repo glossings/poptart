@@ -172,24 +172,14 @@ test('entering or leaving DJ mode puts the page away - the layout under it chang
 // The view controls
 // ---------------------------------------------------------------------------------------------
 
-test('the header carries DJ mode alone, as a toggle', () => {
-  const at = HTML.indexOf('<div class="view-switch" role="group" aria-label="view">');
-  assert.ok(at > 0, 'the header switch is gone entirely');
-  const block = HTML.slice(at, HTML.indexOf('</div>', at));
-  assert.match(block, /id="viewDjBtn"/);
-  assert.ok(!/viewCodeBtn|viewArrangeBtn/.test(block), 'code and arrange left the header');
+test('the header carries DJ mode alone, as a plain lit button', () => {
+  assert.match(HTML, /<button id="viewDjBtn"/);
+  assert.ok(!/view-switch/.test(HTML), 'the segmented switch is gone entirely - dj is an ordinary button');
+  assert.ok(!/viewCodeBtn|viewArrangeBtn/.test(HTML), 'and code | arrange has no chrome at all (ctrl+A flips it)');
   assert.match(SRC, /getElementById\('viewDjBtn'\)\.addEventListener\('click', \(\) => toggleMixMode\(\)\)/);
+  assert.match(CSS, /#viewDjBtn\.active \{/);
   // toggleMixMode already went both ways; the button is now simply that toggle
   assert.match(grab('toggleMixMode'), /if \(mixModeOn\) exitDjMode\('restore'\);\n\s+else openMixMode\(\);/);
-});
-
-test('each pane\'s head carries its own code | arrange switch', () => {
-  assert.match(HTML, /<div class="view-switch pane-view" role="group" aria-label="deck A view">[\s\S]{0,400}id="viewCodeBtn"[\s\S]{0,400}id="viewArrangeBtn"/);
-  assert.match(HTML, /<div class="view-switch pane-view" role="group" aria-label="deck B view">[\s\S]{0,400}id="viewCodeBtnB"[\s\S]{0,400}id="viewArrangeBtnB"/);
-  // both pairs wired off one list, so the two decks can never drift apart
-  assert.match(SRC, /\[\['a', 'viewCodeBtn', 'viewArrangeBtn'\], \['b', 'viewCodeBtnB', 'viewArrangeBtnB'\]\]/);
-  assert.match(SRC, /if \(!arState \|\| arDeck !== deck\) openArrangePainter\(deck\);/);
-  assert.match(SRC, /if \(arState && arDeck === deck\) closeArrangeEditor\(\);/);
 });
 
 test('deck A\'s head is always on screen; only its DECK chrome waits for DJ mode', () => {
@@ -201,11 +191,20 @@ test('deck A\'s head is always on screen; only its DECK chrome waits for DJ mode
   assert.ok(!/body\.mix-on #editorPane \{\n\s*flex-direction: column;/.test(CSS));
 });
 
-test('the switch lights per deck, and the dimmed-arrange rule is gone with the header segment', () => {
+test('a label inside a group body wears the label color, not the property dim', () => {
+  // The JS mode tokenizes `kicks:` inside braces as an object property, which the theme paints
+  // dimmer - reading as half-muted. markMemberLabels marks the splitter-confirmed track labels
+  // so only real properties (a synth's `state:`) keep the property color.
+  assert.match(grab('markMemberLabels'), /if \(b\.parent == null \|\| b\.kind === 'bare'\) continue;/);
+  assert.match(grab('updateMutedDim'), /markMemberLabels\(code, blocks\);/);
+  assert.match(CSS, /span\.cm-member-label \{\n\s*color: var\(--syn-variable\) !important;/);
+});
+
+test('only the dj toggle lights - there is no per-deck switch to reflect any more', () => {
   const reflect = grab('arReflectView');
-  assert.match(reflect, /const on = !!arState && arDeck === deck;/);
   assert.match(reflect, /getElementById\('viewDjBtn'\)\.classList\.toggle\('active', mixModeOn\)/);
-  assert.ok(!/body\.mix-on #viewArrangeBtn/.test(CSS), 'nothing left to dim - the segment moved');
+  assert.ok(!/viewArrangeBtn/.test(reflect), 'nothing else to light');
+  assert.ok(!/body\.mix-on #viewArrangeBtn/.test(CSS), 'nothing left to dim either');
 });
 
 test('ctrl+A means THIS pane\'s arrangement, in either editor', () => {

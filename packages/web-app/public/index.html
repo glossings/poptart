@@ -48,12 +48,9 @@
         <span id="engineStatus" class="status">checking engine…</span>
         <!-- DJ mode is a MODE, so the header carries it as one lit on/off button (ctrl+D). It used
              to be the third segment of a code | arrange | dj switch, which read as a third place to
-             be - but in DJ mode there are two panes and each has its own code and its own
-             arrangement, so one switch could never say where you were. Code vs arrange belongs to a
-             PANE, and lives on the pane's own head (see #deckAHead / #deckBHead below). -->
-        <div class="view-switch" role="group" aria-label="view">
-          <button id="viewDjBtn" title="DJ mode — two decks and a crossfader (ctrl+D)">dj</button>
-        </div>
+             be; the switch itself is gone too - ctrl+A flips a pane between code and arrangement,
+             and a chrome control saying the same thing was one control too many. -->
+        <button id="viewDjBtn" title="DJ mode — two decks and a crossfader (ctrl+D)">dj mode</button>
         <div class="spacer"></div>
         <div id="phraseViz" title="position in the 4-cycle phrase - one circle per cycle"></div>
         <div class="rec-wrap">
@@ -101,15 +98,10 @@
         <div id="djStackResize" class="dj-resize" role="separator" aria-orientation="horizontal"
              title="drag to divide the height between the waveforms and the decks - push past either and it folds to a rail (double-click resets)"></div>
         <div id="editorPane">
-          <!-- The pane's own head. The code | arrange switch is always here - outside DJ mode this
-               is the only pane there is, so it reads exactly as the header switch used to. The rest
-               of the row is deck chrome and appears only in DJ mode (body.mix-on), where the main
-               editor IS deck A: load a song, play it, or leave DJ mode keeping this pane. -->
+          <!-- The pane's own head: deck chrome, shown only in DJ mode (body.mix-on), where the
+               main editor IS deck A: load a song, play it, or leave DJ mode keeping this pane.
+               ctrl+A flips the pane between code and arrangement - there is no switch for it. -->
           <div id="deckAHead" class="deck-head">
-            <div class="view-switch pane-view" role="group" aria-label="deck A view">
-              <button id="viewCodeBtn" class="active" title="the code (ctrl+A flips)">code</button>
-              <button id="viewArrangeBtn" title="the arrangement — a row per track, painted clips say when each plays (ctrl+A flips)">arrange</button>
-            </div>
             <span class="deck-b-title deck-only">deck A</span>
             <!-- The picker is the organize window (→A / →B on its rows); the select behind it
                  is the set's queue bookkeeping (nextInSet / stepDeckBQueue), never shown. -->
@@ -161,12 +153,6 @@
              and yours are separate tracks), silent on arrival (the crossfader owns its gain). -->
         <div id="deckBPane" class="hidden">
           <div id="deckBHead">
-            <!-- Deck B's own code | arrange switch: the incoming song has an arrangement of its
-                 own, and this is where you flip to it (the painter moves into this pane). -->
-            <div class="view-switch pane-view" role="group" aria-label="deck B view">
-              <button id="viewCodeBtnB" class="active" title="deck B's code">code</button>
-              <button id="viewArrangeBtnB" title="deck B's arrangement — a row per track, painted clips say when each plays">arrange</button>
-            </div>
             <span class="deck-b-title">deck B</span>
             <select id="deckBFile" hidden></select>
             <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>

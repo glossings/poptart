@@ -50,7 +50,7 @@ let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.j
 let engineError = null;
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
-// The keys inside a real GROUP (see pattern-core's groups.mjs - the `_groups(...)` tree): their
+// The keys inside a real GROUP (written inside a `group({ ... })` body - see groups.mjs): their
 // audio goes into the group's bus and the group's track is the one the desk shows and gates - so
 // these never get a fader or a swap gate of their own. Reaching only the implicit `main` root
 // doesn't count (or a mastered buffer would have one strip). Refilled per deck by each evaluation.
@@ -1567,7 +1567,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'pianoroll', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pianoroll', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
@@ -1583,7 +1583,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sy
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_arrange', '_groups'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_arrange'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -1629,7 +1629,16 @@ const HOST_BUILDERS = { setbpm, setscale };
 // ctrl+A. Bound, undocumented, and identical in effect, purely so a patch written before the change
 // still plays; the painter rewrites the call the first time it opens one (see arMigrateLegacy in
 // client.js), and nothing writes this spelling any more.
-const LEGACY_BUILDERS = { arrange: (str = '', opts = {}) => patternCore._arrange(str, opts) };
+const LEGACY_BUILDERS = {
+  arrange: (str = '', opts = {}) => patternCore._arrange(str, opts),
+  // `_groups({...})` held the group tree as data for a few days before membership moved into the
+  // braces of `group({ ... })` itself. The call is inert now; bound so a buffer from that window
+  // still evaluates, and the log says what to write instead.
+  _groups: () => {
+    eventLogQueue.push('[groups] _groups(...) does nothing any more - a group holds its members inside its braces: name: group({ ... }). Delete the call and cmd+G the tracks instead.');
+    return { poptartGroupsBlock: true };
+  },
+};
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
 // with the loop regions' wraps and releases recorded in it. Built by the arrangement pass of
@@ -3388,6 +3397,28 @@ const routes = {
     };
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
 
+    // copy("kick") is another block's pattern, evaluated FRESH - a full duplicate of the track,
+    // never a shared Sig (fx slots and track bindings ride the chain, and a copy must own its
+    // own). Resolved through pattern-core's hook because only this evaluator can see the buffer;
+    // the stack refuses copies that chase each other in a loop. Installed for this eval only.
+    const copyStack = [];
+    patternCore.setCopyResolver((label) => {
+      const target = blocks.find((b) => b.label === label);
+      if (!target) throw new Error(`copy(${JSON.stringify(label)}): no block by that name in this buffer`);
+      if (target.group) throw new Error(`copy(${JSON.stringify(label)}): ${label} is a group - a mixdown of other tracks, not a pattern - so copy one of its members instead`);
+      if (copyStack.includes(label)) throw new Error(`copy(${JSON.stringify(label)}): these copies form a loop (${[...copyStack, label].join(' -> ')})`);
+      copyStack.push(label);
+      try {
+        const value = evalBlock(target.code, target.start);
+        if (!(value instanceof patternCore.Sig) || value.isDef) {
+          throw new Error(`copy(${JSON.stringify(label)}): that block isn't a pattern`);
+        }
+        return value;
+      } finally {
+        copyStack.pop();
+      }
+    });
+
     // setscale is HOISTED: every block that is nothing but a `setscale(...)` call runs here, in
     // document order, before any pattern is built - so the LAST one in the buffer is the key the
     // whole buffer plays in, and a `.sc()` pattern written ABOVE it follows it too. A hoisted call
@@ -3454,12 +3485,14 @@ const routes = {
       // every roll/shape/preset defined BELOW it out of the registry, and the tracks that are
       // still playing (which resolve them by name, lazily) fall silent on a buffer nobody meant
       // to change.
+      patternCore.setCopyResolver(null);
       patternCore.restoreRolls(definitionsBefore, 'buffer', deck);
       patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
       decks[deck].scale = patternCore.globalScale();
       patternCore.setGlobalScale(decks.a.scale ?? null); // the global holds the main deck's key at rest
       throw err;
     }
+    patternCore.setCopyResolver(null); // copies are resolved at build time; nothing later may reach back
     patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
     // What setscale() left in force is this deck's key; the global goes back to holding the main
     // deck's, which is what every non-eval reader (/api/status, live-note quantization) means.
@@ -3486,13 +3519,12 @@ const routes = {
     // and plays as normal.
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
 
-    // Groups: a block headed by group() reads the bus named after it, and every track the
-    // `_groups(...)` tree puts under it sends there (see pattern-core's groups.mjs). The tree is a
-    // definition like the arrangement's - the last one in the buffer wins - and the routing is read
-    // off it, so nothing in a member's own code says where it goes. The bus is named by the engine
-    // KEY, so deck b's `kick` has a bus of its own.
-    const groupBlock = [...evaluated].reverse().find((b) => b.sig?.poptartGroupsBlock);
-    const groupTree = groupBlock?.sig.tree ?? new Map();
+    // Groups: a block headed by group({...}) reads the bus named after it, and every track written
+    // inside its braces sends there (see pattern-core's groups.mjs). The tree IS the structure the
+    // splitter read - each block's `parent` field - so nothing in a member's own code says where it
+    // goes and nothing can fall out of step with the buffer. The bus is named by the engine KEY,
+    // so deck b's `kick` has a bus of its own.
+    const groupTree = patternCore.treeOfBlocks(built);
     const routed = patternCore.routeGroups(built, (label) => keyOfBlock(label), groupTree);
     // What the desk shows: a track inside a real group is not its own channel - its group's fader,
     // mute and gate take it. Reaching the implicit `main` root doesn't hide anything, or a buffer
@@ -3541,8 +3573,11 @@ const routes = {
         // A BARE column-0 pattern (see labels.mjs's kinds) is setup that happens to make a sound,
         // and the painter gives it no row - so it can never have been emptied on purpose, and
         // silencing it for clips it had no way to get would be a part disappearing for nothing.
+        // A GROUP with nothing painted passes through un-gated too: its sound is its members, who
+        // gate themselves on their own rows, so the group's effective arrangement is the union of
+        // theirs until somebody paints its row - and then the clips gate the whole submix.
         // Written tracks - named or `$:` - take the rule as it stands: no clips means silence.
-        if (!painted && b.kind === 'bare') continue;
+        if (!painted && (b.kind === 'bare' || routed.groups.has(b.label))) continue;
         b.sig = b.sig._arrangeGate(painted ?? [], posAt);
       }
     } else {

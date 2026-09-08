@@ -51,6 +51,10 @@ the most unit-testable part.
   the language decoupled from SuperCollider.
 - `labels.mjs` — the block model: named blocks (`bass: …`) must evaluate to patterns; anonymous
   code and `$:` blocks run as setup (shared `const`s, `Signal.prototype` extensions, statements).
+  A block headed by `group({ ... })` holds other blocks inside its braces: the splitter files the
+  body's contents as ordinary blocks with `parent`/`depth` set and blanks the body out of the
+  group's own code (offsets preserved), so evaluation and highlighting never see the nesting -
+  only blocks and a parent map.
 - `macros.mjs`, `midi.mjs`, `shape.mjs`, `record.mjs` — macro controls, MIDI CC input, LFO/envelope
   shape encoding, and recording helpers.
 - `midifile.mjs` — reading a dropped `.mid` into lanes, guessing the grid its rhythm sits on and
@@ -61,13 +65,14 @@ the most unit-testable part.
   `_arrange(...)` definition is always in force (ctrl+A paints it): one row per track, a block
   plays only inside its clips (the host gates its Sig with `_arrangeGate`, on absolute cycle
   time, looping over the arrangement's length), and an emptied row is silent.
-- `groups.mjs` — the track tree. A block headed by `group()` is a mixdown: it reads the bus named
-  after itself, and the tracks the `_groups(...)` definition puts under it send there and stop
-  playing directly (`routeGroups`). Groups nest — a subgroup sends into its parent — and a
-  `main:` group, when written, is the implicit root every ungrouped track reaches, which is where
-  a mastering chain goes. Membership is data the editor writes (cmd+G), never indentation or
-  name spelling, so regrouping never renames; scsynth node order needs nothing extra because the
-  engine already sorts tracks by how deep their bus reads go.
+- `groups.mjs` — the track tree, as math over the splitter's `parent` fields (`treeOfBlocks`). A
+  block headed by `group({ ... })` is a mixdown: it reads the bus named after itself, and the
+  tracks written inside its braces send there and stop playing directly (`routeGroups`). Groups
+  nest — a subgroup sends into its parent — and a bodyless `main: group()`, when written, is the
+  root every ungrouped track reaches, which is where a mastering chain goes. Membership is where
+  the code sits (cmd+G wraps a selection; the braces are the one source of truth), so regrouping
+  never renames and there is no side table to drift; scsynth node order needs nothing extra
+  because the engine already sorts tracks by how deep their bus reads go.
 - `index.mjs` — the public surface that stitches these together.
 
 ### `packages/osc-engine` — the engine adapter

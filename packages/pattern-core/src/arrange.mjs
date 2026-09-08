@@ -169,8 +169,9 @@ export function normalizeArrangeOpts(opts = {}) {
  * from the membership unless clips still name it - an orphan keeps its row until its clips go.
  *
  * A GROUP joins with nothing painted (`unfilled` - the labels headed by group(), see groups.mjs):
- * it has no notes of its own, what sounds on it is its members, and a clip of its own would be a
- * clip playing nothing.
+ * unpainted it passes through un-gated, so its effective arrangement is the union of its members'
+ * clips - and filling its row would gate the whole submix for no reason anyone asked. Painting it
+ * by hand later is the override: then the clips gate the submix (see the host's arrangement pass).
  *
  * Pure: hands back what to write, and writes nothing. The editor applies it (see arReconcileTracks
  * in the web app), which is also what makes it testable without a browser.

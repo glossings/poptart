@@ -310,3 +310,81 @@ test('a #name: inside a template or a comment is text', () => {
   const cmt = splitLabeledBlocks('kick: s("bd") /*\n  #1: nor this\n*/');
   assert.equal(cmt.length, 1);
 });
+
+// --- group({ ... }) bodies: the braces are structure, split into blocks of their own ---
+
+test('group({ ... }): the body becomes child blocks, the group keeps its span and its chain', () => {
+  const src = 'drums: group({\n  kick: s("mbd*4")\n  snare: s("sd*2")\n}).fx("Pro-C 2")\nbass: s("bass")';
+  const blocks = splitLabeledBlocks(src);
+  assert.deepEqual(blocks.map((b) => [b.label, b.parent, b.depth]), [
+    ['drums', null, 0], ['kick', 'drums', 1], ['snare', 'drums', 1], ['bass', null, 0],
+  ]);
+  const drums = blocks[0];
+  assert.equal(drums.group, true);
+  assert.equal(src.slice(drums.bodyStart, drums.bodyEnd).includes('kick:'), true);
+  assert.match(drums.code, /group\(\{\s*\}\)\.fx\("Pro-C 2"\)/, 'the body is blanked, the chain stays');
+  assert.equal(drums.code.length, src.slice(drums.start, drums.end).length - 1, 'offsets still line up (span minus the label-line newline accounting)');
+});
+
+test('group body blocks keep document-absolute offsets, so the highlighter needs no mapping', () => {
+  const src = 'drums: group({\n  kick: s("mbd*4")\n})';
+  const [, kick] = splitLabeledBlocks(src);
+  assert.equal(src.slice(kick.start, kick.end).trim(), 'kick: s("mbd*4")');
+  // positions inside `code` equal positions in the source minus `start` - the splitter's contract
+  const at = kick.code.indexOf('s("mbd*4")');
+  assert.equal(src.slice(kick.start + at, kick.start + at + 10), 's("mbd*4")');
+});
+
+test('groups nest: a group block inside another group body', () => {
+  const src = [
+    'drums: group({',
+    '  kicks: group({',
+    '    kick: s("bd")',
+    '    kick2: s("bd").fast(2)',
+    '  })',
+    '  snare: s("sd")',
+    '})',
+  ].join('\n');
+  const blocks = splitLabeledBlocks(src);
+  assert.deepEqual(blocks.map((b) => [b.label, b.parent, b.depth]), [
+    ['drums', null, 0], ['kicks', 'drums', 1], ['kick', 'kicks', 2], ['kick2', 'kicks', 2], ['snare', 'drums', 1],
+  ]);
+});
+
+test('a bodyless group() is marked but has no body span', () => {
+  const [main] = splitLabeledBlocks('main: group().fx("Pro-L 2")');
+  assert.equal(main.group, true);
+  assert.equal(main.bodyStart, undefined);
+});
+
+test('mute/solo markers and $: work on nested labels, and $n numbering stays unique', () => {
+  const src = 'drums: group({\n  _kick: s("bd")\n  $: s("hh*8")\n  setbpm(140)\n})\n$: s("x")';
+  const blocks = splitLabeledBlocks(src);
+  assert.deepEqual(blocks.map((b) => [b.label, b.kind, b.muted, b.parent]), [
+    ['drums', 'labeled', false, null],
+    ['kick', 'labeled', true, 'drums'],
+    ['$1', 'anon', false, 'drums'],
+    ['$2', 'bare', false, 'drums'],
+    ['$3', 'anon', false, null],
+  ]);
+});
+
+test('an indented name: inside an open options object is NOT a nested block', () => {
+  const src = 'drums: group({\n  kick: s("bd").synth("X", {\n    state: "abc"\n  })\n})';
+  const blocks = splitLabeledBlocks(src);
+  assert.deepEqual(blocks.map((b) => b.label), ['drums', 'kick'], 'state: stays inside the kick chain');
+});
+
+test('a group({ that never closes stays one (broken) block instead of swallowing the buffer', () => {
+  const src = 'drums: group({\n  kick: s("bd")';
+  const blocks = splitLabeledBlocks(src);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].label, 'drums');
+  assert.equal(blocks[0].bodyStart, undefined);
+});
+
+test('group( deeper than the head position is just an argument, not structure', () => {
+  const blocks = splitLabeledBlocks('x: wrap(group({\n  kick: s("bd")\n}))');
+  assert.equal(blocks.length, 1, 'only a block HEADED by group( explodes');
+  assert.equal(blocks[0].group, undefined);
+});

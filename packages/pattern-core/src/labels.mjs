@@ -6,7 +6,8 @@
 //   Sbass: ...  /  bassS: ...   leading or trailing capital S solos it (if anything is
 //                               soloed, only soloed patterns play; mute still wins)
 //
-// A label must start at column 0 (identifier followed by ':') *and* be in code: a `name:` inside
+// A label must start at column 0 (identifier followed by ':' - inside a `group({ ... })` body it
+// may be indented, see NESTED_LABEL_RE) *and* be in code: a `name:` inside
 // an open `/*…*/` comment or a multi-line `` `…` `` template is only text there, so it doesn't
 // start a block - see `endsUnparsed`. Continuation lines - `.param(…)` chains, the body of a
 // `function () { … }`, a multi-line `` `<…>` `` template - stay with the block they continue, so
@@ -24,10 +25,16 @@
 // Kept dependency-free on purpose: the browser imports this file directly (served as ESM by
 // web-app/server.js) to know block boundaries and muted regions for playback highlighting.
 
-// A label is a name and nothing else. Blocks are a FLAT namespace: what a track belongs to is in
-// the `_groups(...)` tree (see groups.mjs), never in its name, so nothing here has to know about
-// grouping and a track can be regrouped without being renamed.
+// A label is a name and nothing else. Labels are a FLAT namespace: what a track belongs to is
+// WHERE it is written - inside a `group({ ... })` block's braces (see the group splitting below and
+// groups.mjs) - never in its name, so a track can be regrouped without being renamed and the
+// arrangement, the mixer and a rename all address one bare name.
 const LABEL_RE = /^([A-Za-z_$][\w$]*)\s*:(?!:)/;
+
+// Inside a group's braces the same label shape is conventionally indented, so the anchor allows
+// leading blanks there. Only there: at the top level a column-0 anchor is what keeps an indented
+// `speed: 2,` inside somebody's options object from reading as a track.
+const NESTED_LABEL_RE = /^[ \t]*([A-Za-z_$][\w$]*)\s*:(?!:)/;
 
 // Does the state a block is in continue into `line`, rather than `line` starting a new
 // expression? Two ways to continue: (1) the block ends mid-expression - unbalanced (){}[], an
@@ -126,22 +133,32 @@ function scan(state, text, mask = null, base = 0) {
 
 /**
  * @returns {Array<{ label: string, kind: 'labeled'|'anon'|'bare',
- *   muted: boolean, soloed: boolean, code: string, start: number, end: number }>}
+ *   muted: boolean, soloed: boolean, code: string, start: number, end: number,
+ *   parent: string|null, depth: number, group?: boolean, bodyStart?: number, bodyEnd?: number }>}
  *   `start`/`end` are character offsets of the block in the original source (the label line
  *   included), for editor tooling. `code` is the block's executable source with the label
  *   stripped (replaced by spaces, so inner character offsets still line up with the original).
  *
- * Every block is a track, and tracks are FLAT here: one name, one engine track, one row in the
- * arrangement. Which tracks are mixed together is the `_groups(...)` tree's business (groups.mjs),
- * and it is deliberately not this function's - a track's name says nothing about where it sits, so
- * regrouping never renames and renaming never regroups. (An earlier design spelled a group's
- * members `kick#fill:`, nested under the block above them, and it made every one of those two
- * things the other's problem.)
+ * Every block is a track with one name, one engine track, one row in the arrangement - and a block
+ * whose expression is headed by `group({ ... })` holds other tracks INSIDE its braces:
+ *
+ *   drums: group({
+ *     kick: s("mbd*4")
+ *     snare: s("msn").off(1/2)
+ *   }).fx("Pro-C 2")
+ *
+ * The braces are structure, not code that runs: the body is split into ordinary blocks of its own
+ * (each with `parent` set to the group's label and `depth` one deeper), recursively, and the
+ * group's OWN `code` keeps its span with the body blanked to spaces - so it evaluates as
+ * `group({})` plus its chain, offsets still lined up, and the engine never sees the nesting as
+ * anything but blocks and a parent map (see groups.mjs's treeOfBlocks and routeGroups). A group
+ * block also carries `group: true` (bodyless `group()` heads too) and, when it has braces,
+ * `bodyStart`/`bodyEnd` - the character span between them, which is what the editor folds. The
+ * `group(` must head the block's expression; wrapped any deeper it is just an argument.
  *
  * `muted`/`soloed` are what THIS block's label says. A marker on a GROUP reaches everything under
- * it, but that is a fact about the tree, so the host applies it (see groups.mjs's ancestorsOf and
- * descendantsOf) - a splitter that resolved it would have to read the `_groups` call, and this file
- * stays a lexer.
+ * it, but that is the tree's business, so the host applies it (see groups.mjs's ancestorsOf and
+ * descendantsOf) - this file stays a lexer.
  *
  * `kind` says how the block was WRITTEN, which the label alone can't: every block that isn't
  * named gets a `$n` label, but a `$: …` you typed and a bare column-0 statement mean different
@@ -154,29 +171,48 @@ function scan(state, text, mask = null, base = 0) {
  *            pattern (and then it plays), but nothing treats it as a part of the song.
  */
 export function splitLabeledBlocks(source) {
+  return splitBlocks(String(source), { nested: false, counter: { n: 0 }, base: 0, parent: null, depth: 0 });
+}
+
+// How deep group({ group({ ... }) }) may nest before the splitter stops exploding bodies. A song
+// wants two or three levels; the guard is against a pathological buffer, not a real one.
+const MAX_GROUP_DEPTH = 12;
+
+// One splitting pass over `source` - the whole buffer, or (recursively) the body of a group's
+// braces. `counter` numbers anonymous blocks and is SHARED down the recursion, so `$n` names stay
+// unique across the buffer; `base` is where `source` starts in the document, so every block's
+// `start`/`end` is document-absolute at any depth.
+function splitBlocks(source, opts) {
+  const { nested, counter, base, parent, depth } = opts;
+  const labelRe = nested ? NESTED_LABEL_RE : LABEL_RE;
   const lines = source.split('\n');
   const blocks = [];
   let current = null;
   let state = null; // what `current`'s text so far has left open (see scan)
   let offset = 0;
-  let anonCount = 0;
   let awaitingBody = false; // `current` is a label whose expression hasn't appeared yet
 
   const push = () => {
     if (current) {
-      current.end = offset;
+      current.end = base + Math.min(offset, source.length);
       blocks.push(current);
+      explodeGroup(current, blocks, opts);
     }
   };
 
   for (const line of lines) {
     // Only look for a label where the previous lines have left us in code - inside an open
-    // `/*…*/` or `` `…` ``, `$: …` is prose, not a new block.
-    const inCode = !(current && endsUnparsed(state));
-    const m = inCode ? LABEL_RE.exec(line) : null;
+    // `/*…*/` or `` `…` ``, `$: …` is prose, not a new block. NESTED bodies add one more guard:
+    // their label anchor allows indentation, so indentation no longer keeps a continuation line's
+    // `state: "…"` (inside an open options object) from looking like a label - there, a label only
+    // splits when the block so far is CLOSED. At the top level an open bracket deliberately does
+    // not suppress a column-0 label (a stray `(` is a typo, and swallowing the rest of the buffer
+    // for it would hide the whole patch); inside one group's braces the blast radius is the body.
+    const inCode = !(current && endsUnparsed(state)) && !(nested && current && endsOpen(state));
+    const m = inCode ? labelRe.exec(line) : null;
     if (m) {
       push();
-      const meta = parseLabel(m[1], () => `$${++anonCount}`);
+      const meta = parseLabel(m[1], () => `$${++counter.n}`);
       const raw = m[0];
       current = {
         ...meta,
@@ -184,8 +220,10 @@ export function splitLabeledBlocks(source) {
         // Blank out the label instead of slicing it off, so positions inside `code` equal
         // positions inside `source` minus `start` - the highlighter depends on that.
         code: ' '.repeat(raw.length) + line.slice(raw.length),
-        start: offset,
-        end: offset,
+        start: base + offset,
+        end: base + offset,
+        parent,
+        depth,
       };
       state = scan(newScan(), current.code);
       awaitingBody = !hasCode(current.code);
@@ -196,12 +234,12 @@ export function splitLabeledBlocks(source) {
       scan(state, '\n' + line);
       if (hasCode(line)) awaitingBody = false;
     } else if (hasCode(line)) {
-      // A column-0 statement that isn't a label (or the first code before any label): its own
-      // anonymous block. A pattern here plays; anything else (a `Signal.prototype` extension, a
-      // shared `const`) is a setup block that binds/acts for the blocks below - see server.js.
+      // A statement that isn't a label (or the first code before any label): its own anonymous
+      // block. A pattern here plays; anything else (a `Signal.prototype` extension, a shared
+      // `const`) is a setup block that binds/acts for the blocks below - see server.js.
       push();
-      const label = `$${++anonCount}`;
-      current = { label, kind: 'bare', muted: false, soloed: false, code: line, start: offset, end: offset };
+      const label = `$${++counter.n}`;
+      current = { label, kind: 'bare', muted: false, soloed: false, code: line, start: base + offset, end: base + offset, parent, depth };
       state = scan(newScan(), line);
       awaitingBody = false;
     } else if (current) {
@@ -215,6 +253,60 @@ export function splitLabeledBlocks(source) {
   push();
 
   return blocks.filter((b) => hasCode(b.code));
+}
+
+// A block's expression headed by `group(`; capture up to the argument position so the body brace,
+// when there is one, is the character right after the match.
+const GROUP_HEAD_RE = /^\s*group\s*\(/;
+const GROUP_BODY_RE = /^(\s*group\s*\(\s*)\{/;
+
+// A just-completed `group({ ... })` block gives up its body: the blocks inside the braces are
+// split out as blocks of their own (appended right after it, so document order holds) and the
+// body's characters are blanked out of the group's own `code` - newlines kept, so every offset
+// still lines up and the code evaluates as `group({})` plus whatever is chained after the braces.
+function explodeGroup(block, blocks, opts) {
+  if (!GROUP_HEAD_RE.test(block.code)) return;
+  block.group = true; // a mixdown head, braces or not (a bodyless `main: group()` is still a group)
+  const bm = GROUP_BODY_RE.exec(block.code);
+  if (!bm || opts.depth >= MAX_GROUP_DEPTH) return;
+  const open = bm[1].length; // index of the `{` within `code`
+  const close = matchingBrace(block.code, open);
+  if (close < 0) return; // never closes: a half-typed group is one (broken) block, not a landslide
+  const body = block.code.slice(open + 1, close);
+  block.bodyStart = block.start + open + 1;
+  block.bodyEnd = block.start + close;
+  block.code = block.code.slice(0, open + 1) + body.replace(/[^\n]/g, ' ') + block.code.slice(close);
+  blocks.push(...splitBlocks(body, {
+    nested: true,
+    counter: opts.counter,
+    base: block.bodyStart,
+    parent: block.label,
+    depth: opts.depth + 1,
+  }));
+}
+
+// The index of the `}` closing the `{` at `openIdx` of `code`, honoring strings, templates and
+// comments - or -1 when it never closes (or a mismatched closer gets there first). A local,
+// character-precise cousin of `scan`, which is fed by line and can't answer mid-line questions.
+function matchingBrace(code, openIdx) {
+  let depth = 0;
+  let i = openIdx;
+  const n = code.length;
+  while (i < n) {
+    const c = code[i];
+    const d = code[i + 1];
+    if (c === '/' && d === '/') { while (i < n && code[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') { i += 2; while (i < n && !(code[i] === '*' && code[i + 1] === '/')) i++; i += 2; continue; }
+    if (c === '"' || c === "'") { i++; while (i < n && code[i] !== c && code[i] !== '\n') { if (code[i] === '\\') i++; i++; } i++; continue; }
+    if (c === '`') { i++; while (i < n && code[i] !== '`') { if (code[i] === '\\') i++; i++; } i++; continue; }
+    if (c === '{' || c === '(' || c === '[') depth++;
+    else if (c === '}' || c === ')' || c === ']') {
+      depth--;
+      if (depth === 0) return c === '}' ? i : -1;
+    }
+    i++;
+  }
+  return -1;
 }
 
 /**

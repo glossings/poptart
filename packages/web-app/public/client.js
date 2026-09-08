@@ -1014,17 +1014,6 @@ function foldConfigBlobs() {
     if (close < 0 || !code.slice(open + 1, close).trim()) continue;
     foldSpan(m.index, close + 1, '⋯ arrangement', DATA_ARG_TITLES.arrange, key);
   }
-  // _groups(...): the same treatment for the same reason - the tree is cmd+G's data, and the
-  // gutter carets already say what is grouped under what, in place, beside the tracks themselves.
-  const groupsRe = /\b_groups\s*\(/g;
-  let groupsN = 0;
-  while ((m = groupsRe.exec(code))) {
-    const key = `groups:${groupsN++}`;
-    const open = m.index + m[0].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0 || !code.slice(open + 1, close).trim()) continue;
-    foldSpan(m.index, close + 1, '⋯ groups', 'the group tree — click to expand, or select tracks and press cmd+G', key);
-  }
   // The same blob one call along, as a named preset's third argument. This is for the definitions
   // no run covers - one that chains, or shares its line with code - since inside a folded run the
   // run's own chip stands in for the lot. The id and the plugin stay visible: they are what the
@@ -1075,10 +1064,11 @@ function groupCaret(label, count, folded) {
 }
 
 /**
- * A GROUP's members - the tracks the `_groups(...)` tree puts under it, written as a run of blocks
- * below its own line - get a caret in the gutter beside the group, and fold under it when you press
- * it. Folding is HIERARCHICAL: a group's run holds its subgroups' runs, so folding `drums` puts the
- * whole kit away in one press, and a subgroup inside an open parent folds by itself.
+ * A GROUP's members - the blocks inside its `group({ ... })` braces - get a caret in the gutter
+ * beside the group's line, and the BODY folds to a chip when you press it, leaving the group's own
+ * line (and its chain after the braces) on screen. Folding is HIERARCHICAL for free: a body holds
+ * its subgroups' bodies, so folding `drums` puts the whole kit away in one press, and a subgroup
+ * inside an open parent folds by itself.
  *
  * They used to fold THEMSELVES, on every evaluation, down to a chip. A song then read as its
  * tracks, which was the idea, but it also meant the buffer hid two thirds of itself every time you
@@ -1087,49 +1077,34 @@ function groupCaret(label, count, folded) {
  * the control; what stays remembered is which groups you FOLDED (collapsedGroups), not which you
  * opened.
  *
- * The tree names members wherever they are, but a fold is a run of LINES, so what folds is the
- * contiguous run of members below the group - setup lines between them included, since a `const`
- * written among a group's tracks belongs to that section. The run stops at the first block that
- * isn't under this group, so a hand-edited tree naming a track from elsewhere costs that track its
- * place in the fold and never hides something unrelated.
+ * What folds is the character span between the braces (the splitter's bodyStart/bodyEnd), so the
+ * fold can never take anything that isn't the group's own body - setup lines inside it included,
+ * since a `const` written among a group's tracks belongs to that section.
  */
 function foldGroups(code) {
-  if (!labelsMod || !groupsMod || !mixctlMod) return;
+  if (!labelsMod || !groupsMod) return;
   cm.clearGutter(GROUP_GUTTER);
   const blocks = labelsMod.splitLabeledBlocks(code);
-  const tree = groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(code));
-  if (!tree.size) {
+  const groups = blocks.filter((b) => b.group && b.bodyStart != null);
+  if (!groups.length) {
     collapsedGroups.clear();
     return;
   }
-  const parents = groupsMod.parentsOf(tree);
+  const parents = groupsMod.parentsOf(groupsMod.treeOfBlocks(blocks));
   const live = new Set();
   // A group inside a FOLDED group is already hidden - marking it too would lay a second chip inside
   // the first one's range. Its own caret comes back when the parent opens.
   const hiddenByAncestor = (label) => groupsMod.ancestorsOf(label, parents).some((a) => collapsedGroups.has(a));
-  const trimmed = (idx) => code.slice(0, idx).replace(/\s+$/, '').length;
-  for (const group of blocks) {
-    if (group.kind === 'bare' || !tree.has(group.label)) continue;
-    const under = new Set(groupsMod.descendantsOf(group.label, tree));
-    // The run below the group: every block that is under it, stopping at the first that isn't.
-    const at = blocks.indexOf(group);
-    const kids = [];
-    for (let i = at + 1; i < blocks.length; i++) {
-      const b = blocks[i];
-      if (b.kind === 'bare') continue; // setup among the members stays with them
-      if (!under.has(b.label)) break;
-      kids.push(b);
-    }
-    if (!kids.length) continue;
+  for (const group of groups) {
+    const kids = blocks.filter((b) => b.parent === group.label && b.kind !== 'bare');
     live.add(group.label);
     if (hiddenByAncestor(group.label)) continue;
-    const from = trimmed(group.end); // the end of the group's own text
-    const to = trimmed(kids[kids.length - 1].end); // ...and of the run below it
-    if (to <= from) continue;
     const folded = collapsedGroups.has(group.label);
-    cm.setGutterMarker(cm.posFromIndex(from).line, GROUP_GUTTER, groupCaret(group.label, kids.length, folded));
+    cm.setGutterMarker(cm.posFromIndex(group.start).line, GROUP_GUTTER, groupCaret(group.label, kids.length, folded));
     if (!folded) continue;
-    foldSpan(from, to, `⋯ ${kids.length} more`,
+    // The body folds; the group's own line - `drums: group({` through `}).fx(…)` - stays on
+    // screen around the chip, so the mixdown's chain is always in reach.
+    foldSpan(group.bodyStart, group.bodyEnd, ` ⋯ ${kids.length} track${kids.length === 1 ? '' : 's'} `,
       `${group.label}: ${kids.map((k) => k.label).join(', ')} — click to open`, null,
       () => collapsedGroups.delete(group.label)); // the chip is the caret's other face
   }
@@ -1960,16 +1935,36 @@ window.addEventListener('pagehide', () => {
 let mutedDimTimer = null;
 let mutedDimMarks = [];
 
+// A label inside a group's braces is tokenized by the JS mode as an object PROPERTY (that is what
+// `kicks:` inside `{ }` is to JavaScript), which the theme paints dimmer than the top-level labels
+// it sits among - so the member reads as half-muted. These marks put the label color back; the
+// splitter says which colons are track labels, so a real property (`state:` in a synth's options)
+// keeps its property color.
+const NESTED_LABEL_TOKEN_RE = /^([ \t]*)([A-Za-z_$][\w$]*)\s*:/;
+
+function markMemberLabels(code, blocks) {
+  for (const b of blocks) {
+    if (b.parent == null || b.kind === 'bare') continue;
+    const m = NESTED_LABEL_TOKEN_RE.exec(code.slice(b.start, b.start + 80));
+    if (!m) continue;
+    const from = b.start + m[1].length;
+    mutedDimMarks.push(
+      cm.markText(cm.posFromIndex(from), cm.posFromIndex(from + m[2].length), { className: 'cm-member-label' }),
+    );
+  }
+}
+
 function updateMutedDim() {
   if (!labelsMod) return;
   for (const mk of mutedDimMarks) mk.clear();
   mutedDimMarks = [];
   const code = cm.getValue();
   const blocks = labelsMod.splitLabeledBlocks(code);
+  markMemberLabels(code, blocks);
   // Markers travel the group tree exactly as the host applies them (see /api/evaluate): mute and
   // solo reach everything UNDER the marked label, and a soloed track keeps the groups ABOVE it -
   // so what dims here is what will actually fall silent.
-  const tree = groupsMod && mixctlMod ? groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(code)) : new Map();
+  const tree = groupsMod ? groupsMod.treeOfBlocks(blocks) : new Map();
   const muted = new Set();
   const soloed = new Set();
   for (const b of blocks) {
@@ -2019,7 +2014,7 @@ function blockAtCursor(editor = cm) {
   if (!labelsMod) return null;
   const idx = editor.indexFromPos(editor.getCursor());
   const blocks = labelsMod.splitLabeledBlocks(editor.getValue());
-  return blocks.find((b) => idx >= b.start && idx <= b.end) ?? null;
+  return blocks.findLast((b) => idx >= b.start && idx <= b.end) ?? null;
 }
 
 // Give each parameter its address string - the plain name, or "Name#index" when the plugin
@@ -2793,7 +2788,7 @@ function findNamedCallAt(code, idx, re, name) {
  */
 function findChainHandleAt(code, idx) {
   if (!labelsMod) return null;
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  const block = labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = block.start;
@@ -3628,7 +3623,7 @@ function labeledBlocksFor(code) {
 // Read from the code rather than remembered, so moving the call between two .fx()es re-aims it.
 function presetTargetAt(code, idx) {
   if (!labelsMod) return null;
-  const block = labeledBlocksFor(code).find((b) => idx >= b.start && idx <= b.end);
+  const block = labeledBlocksFor(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
   const isCode = codeOnly(code);
   const re = /\b(synth|fx)\s*\(/g;
@@ -4332,7 +4327,7 @@ function prBlockLabelAt(idx) {
   // character - which is what a column-0 `pianoroll()` is - belongs to THAT block, not the one
   // above it. (blockAtCursor deliberately keeps the closed test: a cursor may sit at the end of
   // the buffer, which is one past the last block.)
-  return labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => idx >= b.start && idx < b.end)?.label ?? null;
+  return labelsMod.splitLabeledBlocks(cm.getValue()).findLast((b) => idx >= b.start && idx < b.end)?.label ?? null;
 }
 
 /**
@@ -4345,7 +4340,7 @@ function prBlockLabelAt(idx) {
 function prPlayingTrack() {
   if (!prState || !labelsMod) return null;
   const code = cm.getValue();
-  const labelAt = (idx) => labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx < b.end)?.label ?? null;
+  const labelAt = (idx) => labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx < b.end)?.label ?? null;
   const src = prState.source?.find();
   if (src) return labelAt(cm.indexFromPos(src.from));
   if (prState.rollId != null) {
@@ -5297,9 +5292,6 @@ function footSpans(code) {
   }
   const arrange = arFindDef(code);
   if (arrange && atTopLevel(code, isCode, arrange.start)) spans.push([arrange.start, arrange.close + 1]);
-  // ...and the `_groups(...)` call, editor-written data of the same kind (see mixctl.mjs).
-  const groups = mixctlMod ? mixctlMod.findGroupCall(code) : null;
-  if (groups && atTopLevel(code, isCode, groups.start)) spans.push([groups.start, groups.close + 1]);
   return spans.sort((a, b) => a[0] - b[0]);
 }
 
@@ -9937,7 +9929,7 @@ function serializeRecordCall({ cycles, name, wrapTail }) {
 // The label of the block a call lives in - the engine track the panel meters and bounces.
 function blockLabelAt(idx) {
   if (!labelsMod) return null;
-  return labelsMod.splitLabeledBlocks(cm.getValue()).find((b) => idx >= b.start && idx <= b.end)?.label ?? null;
+  return labelsMod.splitLabeledBlocks(cm.getValue()).findLast((b) => idx >= b.start && idx <= b.end)?.label ?? null;
 }
 
 function openRecordPanel(call) {
@@ -10828,9 +10820,9 @@ function mixerStripLabels() {
   // Reaching the implicit `main` root doesn't hide a track, or a buffer with a mastering chain
   // would have exactly one strip. Rows are in tree order, so a group stands immediately above the
   // members it is standing in for whenever they are unfolded.
-  const tree = groupsMod && mixctlMod ? groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(cm.getValue())) : new Map();
+  const tree = groupsMod ? groupsMod.treeOfBlocks(blocks) : new Map();
   const parents = groupsMod ? groupsMod.parentsOf(tree) : new Map();
-  const groups = new Set(blocks.filter((b) => mixctlMod && mixctlMod.isGroupBlock(b)).map((b) => b.label));
+  const groups = new Set(blocks.filter((b) => b.group).map((b) => b.label));
   // Hidden while any group above it is still folded. The root is not a fold - everything is under
   // it - so it never hides anything.
   const hidden = (l) => groupsMod && groupsMod.ancestorsOf(l, parents)
@@ -10876,9 +10868,9 @@ function buildMixerStrip(label) {
   const el = document.createElement('div');
   // A strip inside an unfolded group is drawn pulled in against the group's, which is the only
   // thing that says the two belong together once the desk is a flat row of channels.
-  const tree = groupsMod && mixctlMod ? groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(cm.getValue())) : new Map();
-  const inGroup = groupsMod && groupsMod.parentsOf(tree).get(label) != null;
-  const isGroup = tree.has(label);
+  const stripBlocks = labelsMod ? labelsMod.splitLabeledBlocks(cm.getValue()) : [];
+  const inGroup = stripBlocks.some((b) => b.label === label && b.parent != null);
+  const isGroup = stripBlocks.some((b) => b.label === label && b.group && b.bodyStart != null);
   el.className = `mixer-strip${inGroup ? ' mixer-strip-variant' : ''}`;
 
   // The name row IS the plots' legend: the swatch is the color that track draws in, right next
@@ -11805,23 +11797,12 @@ mixerViewBtn.addEventListener('click', () => {
 });
 document.getElementById('mixerClose').addEventListener('click', closeMixer);
 document.getElementById('mixerOpenBtn').addEventListener('click', openMixer);
-// The view controls, in the two places they belong (see arReflectView, which lights them).
-//
 // The HEADER carries DJ mode alone, as an on/off toggle (ctrl+D): it is a mode, lit so a set's
 // state reads across the room, and pressing it again is the ordinary exit (the one that offers to
-// keep or restore).
+// keep or restore). Code vs arrangement has no chrome at all - ctrl+A flips the pane you are in
+// (a code | arrange switch on each pane head was tried and taken out: it said what ctrl+A says,
+// in space the deck chrome wanted).
 document.getElementById('viewDjBtn').addEventListener('click', () => toggleMixMode());
-// ...and each PANE carries code | arrange for its own deck. That is the change DJ mode forced:
-// two decks means two buffers and two arrangements, so "which view" was never a question the
-// header could answer - only "which view of THIS pane" is (see openArrangePainter's deck).
-for (const [deck, code, arrange] of [['a', 'viewCodeBtn', 'viewArrangeBtn'], ['b', 'viewCodeBtnB', 'viewArrangeBtnB']]) {
-  document.getElementById(code).addEventListener('click', () => {
-    if (arState && arDeck === deck) closeArrangeEditor();
-  });
-  document.getElementById(arrange).addEventListener('click', () => {
-    if (!arState || arDeck !== deck) openArrangePainter(deck);
-  });
-}
 mixerBackdrop.addEventListener('mousedown', (e) => {
   if (e.target === mixerBackdrop) closeMixer();
 });
@@ -14595,7 +14576,7 @@ function findSliceCallAt(code, idx) {
 /** The `.slices("name")` on the same track as `idx`, if that chain names a set at all. */
 function sliceCallOnChain(code, idx) {
   if (!labelsMod) return null;
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  const block = labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
   const isCode = codeOnly(code);
   const re = /\bslices\s*\(/g;
@@ -14619,7 +14600,7 @@ function sliceCallOnChain(code, idx) {
  */
 function sliceSourceCallAt(code, idx) {
   if (!labelsMod) return null;
-  const block = labelsMod.splitLabeledBlocks(code).find((b) => idx >= b.start && idx <= b.end);
+  const block = labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
   const isCode = codeOnly(code);
   const re = /\b(sp|se|sr|s)\s*\(\s*(["'`])((?:\\.|(?!\2)[\s\S])*?)\2/g;
@@ -22153,13 +22134,10 @@ function openEditorMenu(ed, e) {
   if (selected) {
     items.push(['group these tracks…', () => groupSelection(ed), 'cmd-G — one fader, one mute, and they fold away together']);
   } else {
-    const at = editorTrackAt(ed);
-    if (at) {
-      const parents = groupsMod && mixctlMod ? groupsMod.parentsOf(mixctlMod.readGroupTree(ed.getValue())) : new Map();
-      const isGroup = groupsMod && mixctlMod
-        && groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(ed.getValue())).has(at);
-      if (isGroup) items.push([`ungroup ${at}`, () => arUngroup(at, ed), 'the tracks in it play on their own again']);
-      else if (parents.get(at) != null) items.push([`take ${at} out of ${parents.get(at)}`, () => arUngroup(at, ed)]);
+    const block = editorTrackAt(ed);
+    if (block) {
+      if (block.group) items.push([`ungroup ${block.label}`, () => arUngroup(block.label, ed), 'the tracks in it play on their own again']);
+      if (block.parent != null) items.push([`take ${block.label} out of ${block.parent}`, () => arTakeOut(block.label, ed)]);
     }
   }
   items.push('-');
@@ -22185,13 +22163,12 @@ function openEditorMenu(ed, e) {
   openCtxMenu(editorMenu, e.clientX, e.clientY, { items });
 }
 
-/** The track whose block the cursor is in, or null - what the menu's ungroup items are aimed at. */
+/** The block the cursor is in - the INNERMOST one, so a member wins over the group holding it. */
 function editorTrackAt(ed) {
   if (!labelsMod) return null;
   const at = ed.indexFromPos(ed.getCursor());
-  const block = labelsMod.splitLabeledBlocks(ed.getValue())
-    .find((b) => b.kind !== 'bare' && at >= b.start && at <= b.end);
-  return block?.label ?? null;
+  return labelsMod.splitLabeledBlocks(ed.getValue())
+    .findLast((b) => b.kind !== 'bare' && at >= b.start && at <= b.end) ?? null;
 }
 
 function writeClipboard(text) {
@@ -22938,18 +22915,9 @@ function closeArrangeEditor() {
   arCM = cm;
 }
 
-/**
- * Light what is on: the header's DJ toggle, and each pane's own code | arrange switch. Deck B's
- * switch is only meaningful while there is a deck B, but it is left alone rather than reset - the
- * pane it lives on is hidden outside DJ mode, so nobody can see it either way.
- */
+/** Light what is on: the header's DJ toggle. (Code vs arrange has no chrome - ctrl+A flips it.) */
 function arReflectView() {
   document.getElementById('viewDjBtn').classList.toggle('active', mixModeOn);
-  for (const [deck, code, arrange] of [['a', 'viewCodeBtn', 'viewArrangeBtn'], ['b', 'viewCodeBtnB', 'viewArrangeBtnB']]) {
-    const on = !!arState && arDeck === deck;
-    document.getElementById(arrange).classList.toggle('active', on);
-    document.getElementById(code).classList.toggle('active', !on);
-  }
 }
 
 function arPlayheadLoop() {
@@ -22969,7 +22937,8 @@ function arPlayheadLoop() {
  *
  * A row is `{ label, own, depth, parent, group }` - the track's label, whether the buffer still has
  * it, how deep in the tree it sits (what the gutter indents by), its group, and whether it IS one.
- * A group's row carries no clips of its own; it is the fold handle and the family's color.
+ * A group's row is the fold handle and the family's color; unpainted it shows the union of its
+ * members as a ghost, and painting it gates the whole submix.
  *
  * Rows under a FOLDED group are left out entirely (see collapsedGroups, shared with the code
  * editor's folds), which is what makes a forty-track song navigable: fold the drums and the drums
@@ -22978,9 +22947,7 @@ function arPlayheadLoop() {
 function arRefreshRows() {
   if (!arState) return;
   const blocks = arBlocks();
-  const tree = groupsMod && mixctlMod
-    ? groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(arCM.getValue()))
-    : new Map();
+  const tree = groupsMod ? groupsMod.treeOfBlocks(blocks) : new Map();
   const parents = groupsMod ? groupsMod.parentsOf(tree) : new Map();
   arState.tree = tree; // what arGroupTree/arGroupParents hand the draw loop
   arState.parents = parents;
@@ -23014,8 +22981,8 @@ function arRefreshRows() {
  */
 function arGroupTree() {
   if (arState?.tree) return arState.tree;
-  if (!groupsMod || !mixctlMod || !arCM) return new Map();
-  return groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(arCM.getValue()));
+  if (!groupsMod || !labelsMod || !arCM) return new Map();
+  return groupsMod.treeOfBlocks(labelsMod.splitLabeledBlocks(arCM.getValue()));
 }
 function arGroupParents() {
   if (arState?.parents) return arState.parents;
@@ -23055,19 +23022,55 @@ function arSelectTrack(label) {
 }
 
 /**
- * What the pencil paints on `row`: that row's track. Null on a GROUP's row - a group makes no sound
- * of its own, so a clip there would play nothing - and on an orphan's, whose block is gone.
+ * What the pencil paints on `row`: that row's track. A GROUP's row paints too - its clips gate the
+ * whole submix, and unpainted it passes through (the union of its members' clips; see the server's
+ * arrangement pass). Null only on an orphan's row, whose block is gone.
  */
 function arPaintLabel(row) {
+  const r = arState?.rows[row];
+  return r && r.own ? r.label : null;
+}
+
+/**
+ * What a DRAGGED clip may be relabeled to: an ordinary track's row only. A group's row is
+ * paintable but not a drop target - see the drag handler for why the two gestures differ.
+ */
+function arDropLabel(row) {
   const r = arState?.rows[row];
   return r && r.own && !r.group ? r.label : null;
 }
 
+// The first clip painted onto a group's row is worth one line: a group's clip means something
+// different from a track's, and the difference should be said where it happens, once.
+const groupClipNoted = new Set();
+function arNoteGroupClip(label) {
+  if (groupClipNoted.has(label) || !arState?.rows.some((r) => r.label === label && r.group)) return;
+  groupClipNoted.add(label);
+  logLine(`clips on ${label} gate the whole ${label} submix - clear ${label} (right-click its row) to pass its tracks through again`);
+}
+
 /**
- * Put the tracks of `labels` into a group called `name`: a `name: group()` line written above them
- * and an entry in the buffer's `_groups(...)` tree (see mixctl's groupEdits, which is the edit, and
- * pattern-core's groups.mjs, which is what a group IS - the bus its members mix into, one strip and
- * one gate for the family).
+ * Apply one of mixctl's edit lists (ascending offsets) back to front, in one undo step, without
+ * letting the arrangement mistake the churn for its call being deleted.
+ */
+function arApplyEdits(ed, edits) {
+  arSuppressClose = true;
+  try {
+    const run = () => {
+      for (const edit of [...edits].reverse()) ed.replaceRange(edit.text, ed.posFromIndex(edit.from), ed.posFromIndex(edit.to));
+    };
+    if (ed.operation) ed.operation(run);
+    else run();
+  } finally {
+    arSuppressClose = false;
+  }
+}
+
+/**
+ * Put the tracks of `labels` into a group called `name`: their lines move inside a new
+ * `name: group({ ... })` wrapper (see mixctl's groupWrapEdits, which is the edit, and pattern-
+ * core's groups.mjs, which is what a group IS - the bus its members mix into, one strip and one
+ * gate for the family). The braces are the membership; there is nothing else to write.
  *
  * The group starts BARE. What its members share - a .postgain(), an .fx() - goes onto it by hand,
  * because which calls those are is a choice: putting two tracks in a group says they mix together,
@@ -23076,19 +23079,10 @@ function arPaintLabel(row) {
  * Returns the group's name, or null with a line saying why not.
  */
 function arCreateGroup(labels, name, ed = arCM) {
-  if (!labelsMod || !mixctlMod || !groupsMod) return null;
-  const code = ed.getValue();
-  const res = mixctlMod.groupEdits(code, labels, name, mixctlMod.readGroupTree(code));
+  if (!labelsMod || !mixctlMod) return null;
+  const res = mixctlMod.groupWrapEdits(ed.getValue(), labels, name);
   if (res.error) { logLine(`group: ${res.error}`, true); return null; }
-  const tree = groupsMod.serializeGroupTree(res.tree);
-  const treeEdit = mixctlMod.groupTreeEdit(code, tree, lastDefRunEnd(code));
-  const edits = [...res.edits, ...(treeEdit ? [treeEdit] : [])].sort((a, b) => a.from - b.from);
-  arSuppressClose = true; // the edits may touch the arrangement's own call; that is not it being deleted
-  try {
-    for (const edit of [...edits].reverse()) ed.replaceRange(edit.text, ed.posFromIndex(edit.from), ed.posFromIndex(edit.to));
-  } finally {
-    arSuppressClose = false;
-  }
+  arApplyEdits(ed, res.edits);
   collapsedGroups.delete(res.name); // just made, so it wants to be seen
   refoldEditor(ed);
   logLine(`${res.name} is a group of ${res.members.join(', ')} - they mix into it, so a .postgain() or .fx() on ${res.name} takes all of them`);
@@ -23099,45 +23093,34 @@ function arCreateGroup(labels, name, ed = arCM) {
 }
 
 /**
- * Take `label` out of whatever group it is in - or, on a GROUP, dissolve it: its members move up to
- * where it was and its own line goes. The tracks keep playing either way; what changes is what they
- * mix through.
+ * Take `label` out of whatever group it is in - or, on a GROUP, dissolve it: its members move back
+ * out of the braces and its own line goes. The tracks keep playing either way; what changes is
+ * what they mix through.
  */
 function arUngroup(label, ed = arCM) {
-  if (!mixctlMod || !groupsMod) return false;
+  if (!labelsMod || !mixctlMod) return false;
   const code = ed.getValue();
-  const tree = groupsMod.normalizeGroupTree(mixctlMod.readGroupTree(code));
-  const next = new Map([...tree].map(([p, kids]) => [p, [...kids]]));
-  const dissolving = next.has(label);
-  if (dissolving) next.delete(label);
-  for (const [parent, kids] of [...next]) {
-    const kept = kids.filter((k) => k !== label);
-    if (kept.length) next.set(parent, kept);
-    else next.delete(parent);
-  }
-  const edits = [];
-  // Dissolving takes the group's own block with it - it is a mixdown of nothing now, and leaving it
-  // would leave a silent track on the desk.
-  if (dissolving && labelsMod) {
-    const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label);
-    if (block && mixctlMod.isGroupBlock(block)) {
-      const end = code[block.end] === '\n' ? block.end + 1 : block.end;
-      edits.push({ from: block.start, to: end, text: '' });
-    }
-  }
-  const treeEdit = mixctlMod.groupTreeEdit(code, groupsMod.serializeGroupTree(next), lastDefRunEnd(code));
-  if (treeEdit) edits.push(treeEdit);
-  if (!edits.length) return false;
-  edits.sort((a, b) => a.from - b.from);
-  arSuppressClose = true;
-  try {
-    for (const edit of [...edits].reverse()) ed.replaceRange(edit.text, ed.posFromIndex(edit.from), ed.posFromIndex(edit.to));
-  } finally {
-    arSuppressClose = false;
-  }
+  const block = labelsMod.splitLabeledBlocks(code).findLast((b) => b.label === label);
+  if (!block) return false;
+  if (!block.group) return arTakeOut(label, ed);
+  const res = mixctlMod.ungroupEdits(code, label);
+  if (res.error) { logLine(`ungroup: ${res.error}`, true); return false; }
+  arApplyEdits(ed, res.edits);
   collapsedGroups.delete(label);
   refoldEditor(ed);
-  logLine(dissolving ? `${label} is not a group any more - what was in it plays on its own` : `${label} is out of its group`);
+  logLine(`${label} is not a group any more - what was in it plays on its own`);
+  if (arState) { arRefreshRows(); drawArrange(); arScheduleEval(); } // see arCreateGroup on why only the painter re-evals
+  return true;
+}
+
+/** Move one member out of its group, one level up - the group itself stands. */
+function arTakeOut(label, ed = arCM) {
+  if (!mixctlMod) return false;
+  const res = mixctlMod.extractFromGroupEdits(ed.getValue(), label);
+  if (res.error) { logLine(`ungroup: ${res.error}`, true); return false; }
+  arApplyEdits(ed, res.edits);
+  refoldEditor(ed);
+  logLine(`${label} is out of ${res.parent}`);
   if (arState) { arRefreshRows(); drawArrange(); arScheduleEval(); } // see arCreateGroup on why only the painter re-evals
   return true;
 }
@@ -23198,14 +23181,18 @@ function groupSelection(ed) {
   const code = ed.getValue();
   const from = ed.indexFromPos(ed.getCursor('from'));
   const to = ed.indexFromPos(ed.getCursor('to'));
-  const covered = labelsMod.splitLabeledBlocks(code)
-    .filter((b) => b.kind !== 'bare' && b.start < to && b.end > from)
+  const blocks = labelsMod.splitLabeledBlocks(code);
+  const hit = blocks.filter((b) => b.kind !== 'bare' && b.start < to && b.end > from);
+  // Only the OUTERMOST blocks the selection touches: selecting across a whole group means that
+  // group joins as one member, not it and everything inside it twice over.
+  const covered = hit
+    .filter((b) => !hit.some((c) => c !== b && b.start >= c.start && b.end <= c.end))
     .map((b) => b.label);
   if (!covered.length) {
     logLine('nothing to group - the selection holds no tracks', true);
     return;
   }
-  const taken = new Set(labelsMod.splitLabeledBlocks(code).map((b) => b.label));
+  const taken = new Set(blocks.map((b) => b.label));
   let name = 'group';
   for (let i = 2; taken.has(name); i++) name = `group${i}`;
   askGroupName(ed, covered[0], name, (chosen) => arCreateGroup(covered, chosen, ed));
@@ -23241,7 +23228,7 @@ function arLabels() {
 /** Whether a block is a GROUP - headed by group(), the mixdown its members send into. */
 const arIsGroup = (block) => !!mixctlMod && mixctlMod.isGroupBlock(block);
 
-/** The buffer's groups: rows with nothing of their own to paint, joining the arrangement unfilled. */
+/** The buffer's groups: rows that join the arrangement unfilled (unpainted = pass-through). */
 function arGroupLabels() {
   return arBlocks().filter((b) => arIsGroup(b)).map((b) => b.label);
 }
@@ -23629,6 +23616,54 @@ function drawArrange() {
     ctx.beginPath(); ctx.moveTo(AR_GUTTER, y); ctx.lineTo(W, y); ctx.stroke();
   }
 
+  // A group with nothing painted passes its members through (see the server's arrangement pass),
+  // and its row says so: the union of everything under it, drawn as a GHOST - flat, faint, no
+  // handles - readable as "this is when the group sounds" rather than as clips to pick up.
+  // Painting the row replaces the ghost with real clips that gate the whole submix; a FOLDED
+  // group's row draws its members' actual clips instead (see arRowOfLabel), so no ghost there.
+  if (groupsMod) {
+    for (let lane = firstLane; lane <= lastLane; lane++) {
+      const r = arState.rows[lane];
+      if (!r || !r.group || collapsedGroups.has(r.label)) continue;
+      if (arState.clips.some((c) => c.label === r.label)) continue;
+      const under = new Set(groupsMod.descendantsOf(r.label, arGroupTree()));
+      const spans = arState.clips
+        .filter((c) => under.has(c.label))
+        .map((c) => [c.start, c.start + c.len])
+        .sort((a, b) => a[0] - b[0]);
+      if (!spans.length) continue;
+      const y = arYOf(lane);
+      ctx.fillStyle = arColor(r.label, 0.14);
+      let [s, e] = spans[0];
+      const ghost = () => {
+        const x1 = Math.max(AR_GUTTER, arXOf(s));
+        const x2 = Math.min(W, arXOf(e));
+        if (x2 > x1) { prRoundRect(ctx, x1 + 0.5, y + 5, Math.max(2, x2 - x1 - 1), AR_ROW - 10, 3); ctx.fill(); }
+      };
+      for (const [s2, e2] of spans.slice(1)) {
+        if (s2 <= e + 1e-9) { e = Math.max(e, e2); continue; }
+        ghost(); [s, e] = [s2, e2];
+      }
+      ghost();
+    }
+  }
+
+  // A FOLDED group's row draws its members squished: each member gets a thin sub-lane of the row,
+  // in tree order, so the folded row reads as a zoomed-out picture of what is inside - the way a
+  // folded group track shows its contents in any DAW - rather than a pile of opaque full-height
+  // clips fighting over the same rectangle. The group's OWN clips (the submix gate) still draw
+  // full-height: they are this row's clips, not a preview of somebody else's.
+  const squishLanes = new Map(); // row index -> Map(member label -> sub-lane index)
+  if (groupsMod) {
+    for (let lane = 0; lane < arState.rows.length; lane++) {
+      const r = arState.rows[lane];
+      if (!r?.group || !collapsedGroups.has(r.label)) continue;
+      const withClips = groupsMod.descendantsOf(r.label, arGroupTree())
+        .filter((l) => arState.clips.some((c) => c.label === l));
+      if (withClips.length) squishLanes.set(lane, new Map(withClips.map((l, i) => [l, i])));
+    }
+  }
+
   // clips
   const text = col('--text');
   const hoverClip = !arState.drag && arState.hover && arState.hover.y >= AR_LANES_TOP && arState.hover.x >= AR_GUTTER ? arClipAt(arState.hover.x, arState.hover.y) : null;
@@ -23643,6 +23678,16 @@ function drawArrange() {
     const w = Math.max(2, dx2 - dx - 1);
     const selected = arState.sel.has(c);
     const past = c.start >= loopLen - 1e-9;
+    // A member's clip on its folded group's row: the thin sub-lane bar (see squishLanes above).
+    // No border, title or bar lines - at this height it is a picture, not a handle.
+    const squish = squishLanes.get(row);
+    if (squish?.has(c.label)) {
+      const bandH = (AR_ROW - 8) / squish.size;
+      const sy = y + 4 + squish.get(c.label) * bandH;
+      ctx.fillStyle = arColor(c.label, selected ? 0.95 : past ? 0.3 : 0.7);
+      ctx.fillRect(dx, sy, Math.max(2, dx2 - dx - 1), Math.max(1.5, bandH - 1));
+      continue;
+    }
     const boxY = y + 3;
     const boxH = AR_ROW - 6;
     const bodyY = boxY + AR_CLIP_TITLE_H;
@@ -23691,9 +23736,9 @@ function drawArrange() {
     }
   }
 
-  // With the pencil in hand, the rows that CAN'T take paint step back: a group's row (it makes no
-  // sound of its own) and an orphan's (its block is gone). Every other row is live - a row is a
-  // track now, so the pencil paints wherever you put it.
+  // With the pencil in hand, the rows that CAN'T take paint step back: an orphan's, whose block is
+  // gone. Every other row is live - a group's included, since painting a group gates its whole
+  // submix - so the pencil paints wherever you put it.
   if (arTool === 'draw') {
     ctx.fillStyle = col('--bg');
     ctx.globalAlpha = 0.4;
@@ -24243,6 +24288,11 @@ function arOpenMenu(clientX, clientY, hit, row) {
     if (!r.group) {
       if (mine.length) items.push([`clear ${label}`, () => arDeleteClips(mine), 'the track stops sounding: a row with no clips is silent']);
       else items.push([`fill ${label}`, () => arFillTrack(label), 'a clip over the whole song - the track plays throughout again']);
+    } else {
+      // Only the group's OWN clips - `mine` holds folded members' clips too, and "clear" must
+      // never reach through a fold to somebody else's row.
+      const own = arState.clips.filter((c) => c.label === label);
+      if (own.length) items.push([`clear ${label}`, () => arDeleteClips(own), 'back to passing its members through as they play']);
     }
     // The tree, from the row it is drawn as: fold, dissolve, or take this track out of its group.
     if (r.group) {
@@ -24252,8 +24302,9 @@ function arOpenMenu(clientX, clientY, hit, row) {
         arRefreshRows(); arRefold(); drawArrange();
       }, 'the same fold the code has - they share it']);
       items.push([`ungroup ${label}`, () => arUngroup(label), 'the tracks in it play on their own again']);
-    } else if (arGroupParents().get(label) != null) {
-      items.push([`take ${label} out of ${arGroupParents().get(label)}`, () => arUngroup(label)]);
+    }
+    if (arGroupParents().get(label) != null) {
+      items.push([`take ${label} out of ${arGroupParents().get(label)}`, () => arTakeOut(label)]);
     }
   }
   // The time ops, on whatever span is marked - the same set the keys reach, spelled out so the
@@ -24843,7 +24894,9 @@ function arRevealTrack(label) {
 function arCreateBlock(label) {
   if (!labelsMod || !arrangeMod) return false;
   const blocks = labelsMod.splitLabeledBlocks(arCM.getValue());
-  const tracks = blocks.filter((b) => b.kind !== 'bare');
+  // Top-level tracks only: the last block in document order may sit inside a group's braces, and
+  // a new track written after ITS end would land inside the group nobody put it in.
+  const tracks = blocks.filter((b) => b.kind !== 'bare' && b.parent == null);
   const code = arCM.getValue();
   const text = `${label}: note("~")`;
   if (tracks.length) {
@@ -24869,12 +24922,13 @@ function arCreateBlock(label) {
  */
 function arGotoBlock(label) {
   if (!labelsMod) return;
-  const block = labelsMod.splitLabeledBlocks(arCM.getValue()).find((b) => b.label === label);
+  const blocks = labelsMod.splitLabeledBlocks(arCM.getValue());
+  const block = blocks.find((b) => b.label === label);
   if (!block) return;
   // A member of a group that has been FOLDED (see foldGroups) is behind a chip: open every group
   // above it, or the cursor would land on the chip instead of the code.
-  if (groupsMod && mixctlMod && collapsedGroups.size) {
-    const parents = groupsMod.parentsOf(mixctlMod.readGroupTree(arCM.getValue()));
+  if (groupsMod && collapsedGroups.size) {
+    const parents = groupsMod.parentsOf(groupsMod.treeOfBlocks(blocks));
     const shut = groupsMod.ancestorsOf(label, parents).filter((a) => collapsedGroups.has(a));
     if (shut.length) {
       for (const a of shut) collapsedGroups.delete(a);
@@ -24992,13 +25046,13 @@ function arFollowHandRenames() {
     if (cands.length !== 1) continue;
     const to = cands[0].label;
     const map = new Map([[old.label, to]]);
-    // The clips AND the group tree - both name the block, and a rename that followed only one of
-    // them would either silence the part or quietly take it out of its group.
+    // Only the clips name the block from outside it - membership is where the block sits, and the
+    // block hasn't moved.
     const edits = mixctlMod.arrangeClipEdits(arCM.getValue(), map);
     if (!edits.length) continue;
     apply(edits);
     if (arState) { arApplyRename(map); arRefreshRows(); drawArrange(); }
-    logLine(`${old.label} is ${to} now - its clips and its group followed (cmd+Z undoes)`);
+    logLine(`${old.label} is ${to} now - its clips followed (cmd+Z undoes)`);
     now = snapshot();
     arLastBlocks[arPassDeck] = now;
   }
@@ -25926,7 +25980,7 @@ function initArrangeCanvas() {
       return;
     }
     // paint: the clip lands one cell wide and grows with the drag, on the row it was drawn on -
-    // which is the track (see arPaintLabel). A group's row takes no paint and is dimmed to say so.
+    // which is the track (see arPaintLabel). Only an orphan's row takes no paint.
     const label = arPaintLabel(row);
     if (!label) { drawArrange(); return; }
     const start = Math.floor(arBarsOf(x) / arCell()) * arCell();
@@ -25934,6 +25988,7 @@ function initArrangeCanvas() {
     arSelectTrack(clip.label);
     arState.clips.push(clip);
     arState.sel = new Set([clip]);
+    arNoteGroupClip(label);
     arState.drag = { kind: 'resize', targets: [clip], orig: new Map([[clip, { ...clip }]]), x0: x, side: 'right', moved: false, painted: true };
     drawArrange();
   });
@@ -26044,10 +26099,12 @@ function initArrangeCanvas() {
       for (const c of d.targets) {
         const o = d.orig.get(c);
         c.start = o.start + shift;
-        // A clip dragged onto another row becomes that track's - but only a row that can take
-        // paint: dropped on a group's row (or an orphan's) it keeps its own label, since a clip
-        // of a group would play nothing.
-        c.label = rowShift !== 0 ? arPaintLabel(o.row + rowShift) ?? o.label : o.label;
+        // A clip dragged onto another row becomes that track's - but only an ordinary track's:
+        // dropped on a group's row (or an orphan's) it keeps its own label. A group's clips mean
+        // something different (they gate the whole submix), and a drag that quietly turned a part
+        // into a gate is how a song loses a part - painting the group's row directly is the
+        // deliberate way to gate it.
+        c.label = rowShift !== 0 ? arDropLabel(o.row + rowShift) ?? o.label : o.label;
       }
       d.moved = d.moved || shift !== 0 || rowShift !== 0;
     } else if (d.kind === 'resize') {
@@ -26227,8 +26284,8 @@ function initArrangeCanvas() {
       return; // the painter is gone; nothing left to draw
     }
     else if (arTool === 'select' && x >= AR_GUTTER && y >= AR_LANES_TOP && y < arGridBottom() && arRowLabel(row) != null) {
-      // double-click empty in the arrow tool paints one cell, as the roll does. A group's row has
-      // nothing to paint, so it is left alone.
+      // double-click empty in the arrow tool paints one cell, as the roll does. Only an orphan's
+      // row is left alone.
       const label = arPaintLabel(row);
       if (!label) return;
       const start = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
@@ -26236,6 +26293,7 @@ function initArrangeCanvas() {
       arSelectTrack(clip.label);
       arState.clips.push(clip);
       arState.sel = new Set([clip]);
+      arNoteGroupClip(label);
       writeArrangeCall();
       drawArrange();
     }

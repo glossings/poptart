@@ -1283,6 +1283,13 @@ footer#console {
   color: var(--syn-property);
 }
 
+/* A track label inside a group's braces: JavaScript calls it a property, but it is a label like
+   the top-level ones around it and wears their color (marked by client.js's markMemberLabels).
+   !important because the token's own .cm-property color sits on the same span. */
+.cm-s-poptart span.cm-member-label {
+  color: var(--syn-variable) !important;
+}
+
 .cm-s-poptart .cm-comment {
   color: var(--syn-comment);
   font-style: italic;
@@ -2920,16 +2927,10 @@ body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
   gap: 0; /* ● rec and its chevron are one segmented control - see #recBtn / #recOptsBtn */
 }
 
-/* The view switch (code | arrange | dj) is the rec pair's shape again: segments joined at the
-   seams, the lit one saying where you are. Lit the way the roll header's toggles are, minus the
-   bold: a heavier word is a wider word, and the whole row shuffled every time the view changed. */
-.view-switch {
-  display: flex;
-  align-items: center;
-  gap: 0;
-}
-
-.view-switch > button {
+/* The DJ toggle: an ordinary header button (it used to be the last segment of a code | arrange |
+   dj switch), lit while the mode is on the way the roll header's toggles are - background and
+   accent, no bold, so the word doesn't change width when it lights. */
+#viewDjBtn {
   height: 32px;
   box-sizing: border-box;
   display: inline-flex;
@@ -2937,39 +2938,12 @@ body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
   padding: 0 14px;
   font-size: 13px;
   line-height: 1;
-  border-radius: 0;
 }
 
-.view-switch > button + button {
-  border-left-width: 0; /* shares its neighbor's border */
-}
-
-.view-switch > button:first-child {
-  border-radius: 8px 0 0 8px;
-}
-
-.view-switch > button:last-child {
-  border-radius: 0 8px 8px 0;
-}
-
-.view-switch > button.active {
+#viewDjBtn.active {
   background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--accent);
-}
-
-/* A segment after the first has no left border of its own (it borrows its neighbor's right one),
-   so a lit middle segment's left edge is the neighbor's to paint. */
-.view-switch > button:has(+ button.active) {
-  border-right-color: var(--accent);
-}
-
-/* The same control on a PANE's head (code | arrange), where the row is 4px of padding rather than
-   the header's - so it comes down to the height of the small buttons it sits beside. */
-.view-switch.pane-view > button {
-  height: 22px;
-  padding: 0 9px;
-  font-size: 12px;
 }
 
 /* label swaps between "● rec" and countdowns - fixed width keeps the header from jittering. The

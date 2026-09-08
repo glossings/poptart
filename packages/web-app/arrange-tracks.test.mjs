@@ -76,7 +76,7 @@ function fakeCm(text) {
 const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arMigrateLegacy', 'arMigrateOneLegacy', 'arReadDef', 'parseArrangeCall',
   'arCallOpts', 'serializeArrangeCall', 'arRefreshRows', 'arGroupTree', 'arGroupParents', 'arBlocks', 'arLabels',
   'arTrackLabels', 'arRowOfLabel', 'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arFollowHandRenames',
-  'arCreateGroup', 'arUngroup', 'arGroupLabels', 'arPaintLabel']
+  'arApplyEdits', 'arCreateGroup', 'arUngroup', 'arTakeOut', 'arGroupLabels', 'arPaintLabel']
   .map(grab)
   .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup')])
   .join('\n\n');
@@ -111,7 +111,7 @@ function panel({ code = '', arState = null, collapsed = [] } = {}) {
     collapsedGroups: new Set(collapsed), // which groups are folded - shared with the code editor's folds
   };
   // eslint-disable-next-line no-new-func
-  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames, arCreateGroup, arUngroup, arGroupLabels, arPaintLabel };`);
+  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames, arCreateGroup, arUngroup, arTakeOut, arGroupLabels, arPaintLabel };`);
   return { fns: build(...Object.values(env)), cm, logged, arState };
 }
 
@@ -130,35 +130,44 @@ const SONG = [
   '$: s("perc*4")', // a track you didn't feel like naming - a row like any other
 ].join('\n');
 
-// ...and the same song as a GROUP: the kick's parts are ordinary tracks, held together by the tree
+// ...and the same song as a GROUP: the kick's parts are ordinary tracks, written inside its braces
 const FAMILY = [
-  'kick: group()',
-  'kickFill: s("mbd*8")',
-  'setbpm(140)',
-  'kickMain: s("mbd*4")',
+  'kick: group({',
+  '  kickMain: s("mbd*4")',
+  '  setbpm(140)', // setup among the members stays with them, and is still never a row
+  '  kickFill: s("mbd*8")',
+  '})',
   'hats: s("hh*8")',
-  '_groups({ "kick": ["kickMain", "kickFill"] })',
 ].join('\n');
 
-test("a group's members are rows of their own, nested under it in the tree's order", () => {
+test("a group's members are rows of their own, nested under it in the body's order", () => {
   const st = state();
   panel({ code: FAMILY, arState: st }).fns.arRefreshRows();
   assert.deepEqual(st.rows.map((r) => [r.label, r.depth, r.group]), [
     ['kick', 0, true],
-    ['kickMain', 1, false], // the tree's order, not the buffer's - the group's list is the one you chose
+    ['kickMain', 1, false],
     ['kickFill', 1, false],
     ['hats', 0, false],
   ]);
   assert.equal(st.track, 'kick', 'and the first is selected, so a key press has a target');
 });
 
-test('a group takes no paint; its members do', () => {
+test("a group's row paints too - its clips gate the submix; members paint their own", () => {
   const st = state();
   const { fns } = panel({ code: FAMILY, arState: st });
   fns.arRefreshRows();
-  assert.equal(fns.arPaintLabel(0), null, 'a group makes no sound of its own');
+  assert.equal(fns.arPaintLabel(0), 'kick', 'unpainted it passes through; painted it gates');
   assert.equal(fns.arPaintLabel(1), 'kickMain');
   assert.equal(fns.arPaintLabel(3), 'hats');
+});
+
+test('subgroups nest the rows a level deeper', () => {
+  const st = state();
+  const code = 'drums: group({\n  kicks: group({\n    kick: s("bd")\n  })\n  snare: s("sd")\n})\nbass: s("bass")';
+  panel({ code, arState: st }).fns.arRefreshRows();
+  assert.deepEqual(st.rows.map((r) => [r.label, r.depth]), [
+    ['drums', 0], ['kicks', 1], ['kick', 2], ['snare', 1], ['bass', 0],
+  ]);
 });
 
 test('a member of a FOLDED group has no row, and its clips draw on the group', () => {
@@ -168,14 +177,6 @@ test('a member of a FOLDED group has no row, and its clips draw on the group', (
   assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'hats'], 'the kit is one row');
   assert.equal(fns.arRowOfLabel('kickFill'), 0, 'and its parts still show, on it');
   assert.equal(fns.arRowOfLabel('hats'), 1);
-});
-
-test('a member whose group is not in the buffer keeps a row at the top level', () => {
-  const st = state();
-  panel({ code: 'kickFill: s("mbd*8")\nhats: s("hh*8")\n_groups({ "kick": ["kickFill"] })', arState: st })
-    .fns.arRefreshRows();
-  assert.deepEqual(st.rows.map((r) => [r.label, r.depth]), [['kickFill', 0], ['hats', 0]],
-    'losing a group must never lose what was in it');
 });
 
 test('a clip finds its own row; a clip naming a lost block gets an orphan one', () => {
@@ -274,7 +275,7 @@ test('a chosen color round-trips through the call', () => {
   assert.deepEqual(read.opts.colors, { kickFill: '#ff8800' });
 });
 
-const GROUPED = 'kick: group()\nkickMain: s("mbd*4")\nhats: s("hh*8")\n_groups({ "kick": ["kickMain"] })';
+const GROUPED = 'kick: group({\n  kickMain: s("mbd*4")\n})\nhats: s("hh*8")';
 
 test('a group joins the arrangement unfilled; its members fill like any track', () => {
   const st = { ...state(arrangeMod.parseArrangement('hats,0,8')), tracks: ['hats'], len: 8 };
@@ -327,21 +328,22 @@ test('a missing base becomes a silent stub after the last track, above the foot'
   assert.match(p.logged.join('\n'), /new track pad/);
 });
 
-test('cmd+G: a group() line above the selection, and the tree that holds it', () => {
+test('cmd+G: the selected tracks move inside a group({ ... }) wrapper', () => {
   const p = panel({ code: 'kick: s("mbd*4")\nsnare: s("sd*2")\nhats: s("hh*8")\n' });
   assert.equal(p.fns.arCreateGroup(['kick', 'snare'], 'drums'), 'drums');
   assert.equal(p.cm.text,
-    'drums: group()\nkick: s("mbd*4")\nsnare: s("sd*2")\nhats: s("hh*8")\n_groups({ "drums": ["kick", "snare"] })\n');
+    'drums: group({\n  kick: s("mbd*4")\n  snare: s("sd*2")\n})\nhats: s("hh*8")\n');
   assert.deepEqual(p.fns.arGroupLabels(), ['drums']);
   assert.match(p.logged.join('\n'), /drums is a group of kick, snare/);
 });
 
-test('cmd+G: a group of groups - the tree nests, the code stays flat', () => {
-  const p = panel({ code: 'kick: group()\nkickMain: s("bd")\nsnare: s("sd")\n_groups({ "kick": ["kickMain"] })\n' });
-  assert.equal(p.fns.arCreateGroup(['kick', 'kickMain', 'snare'], 'drums'), 'drums');
-  const tree = mixctlMod.readGroupTree(p.cm.text);
-  assert.deepEqual(tree.drums, ['kick', 'kickMain', 'snare']);
-  assert.equal(tree.kick, undefined, 'a track joins one group at a time - the old entry emptied');
+test('cmd+G: a group of groups - the wrap nests the braces', () => {
+  const p = panel({ code: 'kick: group({\n  kickMain: s("bd")\n})\nsnare: s("sd")\n' });
+  assert.equal(p.fns.arCreateGroup(['kick', 'snare'], 'drums'), 'drums');
+  const blocks = labelsMod.splitLabeledBlocks(p.cm.text);
+  assert.deepEqual(blocks.map((b) => [b.label, b.parent]), [
+    ['drums', null], ['kick', 'drums'], ['kickMain', 'kick'], ['snare', 'drums'],
+  ]);
 });
 
 test('cmd+G: refuses a name that is taken, and says so rather than writing', () => {
@@ -351,24 +353,26 @@ test('cmd+G: refuses a name that is taken, and says so rather than writing', () 
   assert.match(p.logged.join('\n'), /already another pattern's name/);
 });
 
-test('ungroup a MEMBER: it leaves the tree, its code and its clips stay put', () => {
-  const p = panel({ code: 'drums: group()\nkick: s("bd")\nsnare: s("sd")\n_groups({ "drums": ["kick", "snare"] })\n' });
+test('ungroup a MEMBER: its lines step out below the group; the group stands', () => {
+  const p = panel({ code: 'drums: group({\n  kick: s("bd")\n  snare: s("sd")\n})\n' });
   assert.equal(p.fns.arUngroup('kick'), true);
-  assert.deepEqual(mixctlMod.readGroupTree(p.cm.text), { drums: ['snare'] });
-  assert.match(p.cm.text, /^drums: group\(\)\nkick: s\("bd"\)/, 'the track is exactly where it was');
+  assert.equal(p.cm.text, 'drums: group({\n  snare: s("sd")\n})\nkick: s("bd")\n');
+  assert.match(p.logged.join('\n'), /kick is out of drums/);
 });
 
-test('ungroup a GROUP: its own line goes, and what was in it plays on its own', () => {
-  const p = panel({ code: 'drums: group()\nkick: s("bd")\n_groups({ "drums": ["kick"] })\n' });
+test('ungroup a GROUP: its wrapper goes, and what was in it plays on its own', () => {
+  const p = panel({ code: 'drums: group({\n  kick: s("bd")\n}).fx("Pro-C 2")\n' });
   assert.equal(p.fns.arUngroup('drums'), true);
-  assert.equal(p.cm.text, 'kick: s("bd")\n', 'the mixdown of nothing would be a silent track on the desk');
+  assert.equal(p.cm.text, 'kick: s("bd")\n', 'the wrapper and its chain go together');
   assert.match(p.logged.join('\n'), /not a group any more/);
 });
 
-test('ungroup the last member: the empty tree takes the whole call with it', () => {
-  const p = panel({ code: 'drums: group()\nkick: s("bd")\n_groups({ "drums": ["kick"] })\n' });
-  p.fns.arUngroup('kick');
-  assert.equal(p.cm.text, 'drums: group()\nkick: s("bd")\n', 'no `_groups({})` left behind');
+test('taking the last member out leaves an empty group({}) standing', () => {
+  const p = panel({ code: 'drums: group({\n  kick: s("bd")\n})\n' });
+  assert.equal(p.fns.arTakeOut('kick'), true);
+  const blocks = labelsMod.splitLabeledBlocks(p.cm.text);
+  assert.deepEqual(blocks.map((b) => [b.label, b.parent]), [['drums', null], ['kick', null]],
+    'still a bus, still there to put things back into - ungroup is the gesture that removes it');
 });
 
 test('an empty buffer gets the stub as its first line', () => {
@@ -382,14 +386,14 @@ test('an empty buffer gets the stub as its first line', () => {
 // ---------------------------------------------------------------------------------------------
 
 
-test('a track renamed by hand carries its clips and its place in the tree', () => {
+test('a track renamed by hand carries its clips - membership is where it sits, so nothing else moves', () => {
   const code = [
-    'drums: group()',
-    'kick: s("mbd*4")',
-    'hats: s("hh*8")',
+    'drums: group({',
+    '  kick: s("mbd*4")',
+    '  hats: s("hh*8")',
+    '})',
     '',
     '_arrange("kick,0,8 hats,0,8")',
-    '_groups({ "drums": ["kick", "hats"] })',
     '',
   ].join('\n');
   const p = panel({ code });
@@ -397,24 +401,17 @@ test('a track renamed by hand carries its clips and its place in the tree', () =
   p.cm.text = p.cm.text.replace('kick: s("mbd*4")', 'stomp: s("mbd*4")'); // the hand edit
   p.fns.arFollowHandRenames(); // the next one
   assert.equal(p.cm.text, [
-    'drums: group()',
-    'stomp: s("mbd*4")',
-    'hats: s("hh*8")',
+    'drums: group({',
+    '  stomp: s("mbd*4")',
+    '  hats: s("hh*8")',
+    '})',
     '',
     '_arrange("stomp,0,8 hats,0,8")',
-    '_groups({ "drums": ["stomp", "hats"] })',
     '',
   ].join('\n'));
-  assert.match(p.logged.join('\n'), /kick is stomp now - its clips and its group followed/);
-});
-
-test('renaming a GROUP by hand keeps everything under it', () => {
-  const code = 'drums: group()\nkick: s("bd")\n_groups({ "drums": ["kick"] })\n';
-  const p = panel({ code });
-  p.fns.arFollowHandRenames();
-  p.cm.text = p.cm.text.replace('drums: group()', 'kit: group()');
-  p.fns.arFollowHandRenames();
-  assert.match(p.cm.text, /_groups\(\{ "kit": \["kick"\] \}\)/);
+  assert.match(p.logged.join('\n'), /kick is stomp now - its clips followed/);
+  assert.equal(labelsMod.splitLabeledBlocks(p.cm.text).find((b) => b.label === 'stomp').parent, 'drums',
+    'still in its group - the braces never moved');
 });
 
 test('a rename that also changed the body is left alone - it might be a new track', () => {
