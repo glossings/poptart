@@ -2373,6 +2373,18 @@ export class Sig {
   }
 
   /**
+   * The named track's NOTES swapped in as THIS chain's pattern - the method form of pcopy(), and
+   * the mirror image of .copy(): `synth("X").fx("Y").pcopy("a")` keeps this chain and plays a's
+   * notes through it, exactly the swap .note()/.n() perform (this chain's own note channels
+   * re-merge onto the copied grid - see _noteLike). Use the bare builder - pcopy("a") - when
+   * there is no chain yet to keep.
+   */
+  pcopy(name) {
+    // `pcopy` here is the builder, same trick as .copy() above.
+    return this._noteLike(pcopy(name));
+  }
+
+  /**
    * `this` and `sig` sounding at once, keeping THIS signal's track metadata - the instrument, the
    * chain, the channel strip, the note channels, and (the reason this exists) a live midikeys()
    * route. A stack is a concatenation of step grids and nothing more, which is exactly what mini's
@@ -5561,6 +5573,73 @@ function resolveCopy(name) {
  */
 export function copy(name) {
   return resolveCopy(name);
+}
+
+/**
+ * Another track's NOTES, and nothing else - copy() with the dressing left behind:
+ *
+ *   a: pianoroll().synth("Serum 2").fx("ValhallaRoom")
+ *   b: pcopy("a").when(rand().gte(0.7), x => x.add(note(12))).synth("Sub Boombass")
+ *
+ * The named block is re-evaluated fresh (same resolver, loop guard and group rule as copy()),
+ * then reduced to its pattern: the step grid, per-note velocities/clips, the note channels and
+ * the pitch kind survive; instrument, fx, params, presets, sampler config, channel strip, buses
+ * and live routes are all dropped, so what you chain on is a clean note pattern - no second
+ * instrument to overlap a's, no fx stacking. Edits to a's notes are picked up on the next eval.
+ *
+ * A SAMPLER track copies as the notes it plays: each event's repitch (the drawn roll pitch, an
+ * .n()/.note() value) becomes the note, 60 (= as recorded) where it has none - so
+ * pcopy("kick") of a pianoroll("kick").s("bd") is the roll, playable on any synth.
+ *
+ * The complement of the method form of copy(): `pianoroll("x").copy("a")` is a's CHAIN with new
+ * notes; `pcopy("a").synth(...)` is a's NOTES with a new chain. As a method, .pcopy("a") swaps
+ * a's notes in as this chain's pattern, exactly as .note() would (see Sig#pcopy).
+ */
+export function pcopy(name) {
+  return bareNotes(resolveCopy(name), name);
+}
+
+// The pattern half of a resolved track: value stream + note channels + pitch kind, all track
+// metadata dropped (see pcopy above). A sampler track's steps carry pack names as values with
+// the pitch riding step.cfg.note (see crossMerge stamps), so they convert to note steps here -
+// the continuous fallback channel is read in cycle-time like any step-path operand (see _binop),
+// and an event with no pitch anywhere is "as recorded": 60, the sampler anchor.
+function bareNotes(sig, name) {
+  if (!sig.stepsForCycle && !sig.eventAt) {
+    warnUser(
+      sig.inputSource || sig.midiNotes
+        ? `[pcopy] "${name}" plays a live wire - there are no written notes to copy. Route the same source with midi()/midikeys(), or copy("${name}") the whole track.`
+        : `[pcopy] "${name}" has no note pattern to copy.`,
+    );
+    return new Sig(() => null);
+  }
+  if (!sig.sampler) {
+    return new Sig(sig.sample, {
+      stepsForCycle: sig.stepsForCycle,
+      eventAt: sig.eventAt,
+      noteChannels: sig.noteChannels,
+      pitchKind: sig.pitchKind,
+    });
+  }
+  const noteSig = sig.sampler.note;
+  const base = sig.stepsForCycle;
+  const stepsForCycle = (cycle) =>
+    base(cycle).map((st) => {
+      if (st.value == null) return st; // a rest copies as a rest
+      let pitch = st.cfg?.note;
+      if (pitch == null && noteSig) {
+        const at = cycle + (st.start + st.end) / 2; // read INSIDE the step, never on a boundary
+        const v = noteSig.sample(at, 1, at);
+        if (typeof v === 'number' && Number.isFinite(v)) pitch = v;
+      }
+      const { cfg, ...rest } = st;
+      return { ...rest, value: pitch ?? 60 };
+    });
+  return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), {
+    stepsForCycle,
+    noteChannels: sig.noteChannels,
+    pitchKind: 'note', // repitch values are absolute notes around the 60 anchor
+  });
 }
 
 /**

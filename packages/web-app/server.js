@@ -1568,7 +1568,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pianoroll', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',

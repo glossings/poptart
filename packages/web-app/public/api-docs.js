@@ -123,6 +123,12 @@ const API_DOCS = {
     desc: 'Another track\'s entire pattern, evaluated fresh - as if you had duplicated its block by hand: notes, controls, instrument and fx all come along, and the copy is then a track of its own. Stronger than audio() (the sound) or midi() (the notes): this copies the PATTERN. As a method, what comes before it becomes the copy\'s notes - pianoroll("kickB").copy("kick") is kick\'s chain playing a different roll.',
     eg: 'kick2: copy("kick").fast(2)',
   },
+  pcopy: {
+    kind: 'both',
+    sig: 'pcopy(track)',
+    desc: 'Another track\'s NOTES and nothing else - the pattern with the dressing left behind (no instrument, fx, sampler or channel strip come along), so you chain a fresh one with no overlaps. A sampler track copies as the notes it plays. As a method it swaps them in as this chain\'s pattern, like .note(). The mirror of .copy(): that keeps the chain, this keeps the notes.',
+    eg: 'b: pcopy("a").when(rand().gte(0.7), x => x.add(note(12))).synth("Sub Boombass")',
+  },
   input: {
     kind: 'builder',
     sig: 'input(device?, ch, ch2?)',
