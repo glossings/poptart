@@ -237,6 +237,16 @@ const SONG_LOAD_TIMEOUT_MS = 60000;
 // eval - but not at the cost of a filesystem look per sample event. See _ensurePack.
 const MISSING_SOURCE_RETRY_MS = 2000;
 
+// A routed note off a note-less (sampler) source ends this much before the sample event's own
+// window does, and never rings shorter than the floor - the sampler's rhythm is what a ducker or
+// a sub track hears, and abutting drum events on one pitch need daylight between one note's off
+// and the next note's on (the scheduler pulls a synth track's noteOffs early for the same reason).
+const NOTE_OFF_EARLY_SEC = 0.005;
+const MIN_ROUTE_NOTE_SEC = 0.001;
+// What a route fires when neither the call nor the source event names a pitch: a drum track
+// driving a ducker. Same value as pattern-core's DEFAULT_TRIG_NOTE, for the same reason.
+const DEFAULT_ROUTE_NOTE = 60;
+
 // The mixer's analysis bands: 96 log-spaced centers, 30Hz..17kHz - ~11 per octave (a bit under
 // 1/10 octave), which is the resolution at which a filter-bank analyzer starts reading like an
 // analyzer rather than a graphic-EQ display. Defined HERE and shipped to sclang with the
@@ -354,6 +364,13 @@ class OscEngine {
     // that fx (a .midi("track") injector). Device sources ("dev:...") don't use this - they go
     // straight to sclang (setMidiNotes / injectMidiDevice).
     this._midiRoutes = [];
+    // Sounding notes per route sink ("target:slot" -> Map(source note -> played note)) - how a
+    // note-off finds the pitch its on actually played under a time-varying map (see _heldFor).
+    this._routeHeld = new Map();
+    // Hardware-device routes whose pitch-op chain is dynamic: sclang forwards raw note edges to
+    // Node (defer mode) and Node answers with the mapped /poptart/noteOn - trackId -> { noteMap,
+    // held }. Static device routes never appear here; they play direct in sclang.
+    this._deferRoutes = new Map();
   }
 
   // Does the routing name refer to `sourceTrackId`? Track-first: a bare name (or "track:name")
@@ -364,34 +381,109 @@ class OscEngine {
     return n === sourceTrackId;
   }
 
-  // Fan a track's note edge out to every MIDI route whose source resolves to it. Synth sources
-  // carry pitch (an instrument route replays it; an injector too, for melodic effects); a fixed
-  // note is only used for note-less sources (see playSample). Called after the source's own note.
+  // The pitch one route fires for a source note at `sec`, or null for a note that shouldn't
+  // sound (a rest in a note-map operand). A dynamic route delegates to its noteMap - the pitch-op
+  // chain as a closure, sampled at the note's own time (see Scheduler#_buildNoteMap). A static
+  // route applies its folded transpose then scale (nearest pitch class, ties downward - the same
+  // rule sclang's device route uses, so every path sounds alike). Both are no-ops on an injector
+  // route, which carries neither.
+  _routePitch(route, note, sec) {
+    if (route.noteMap) return route.noteMap(note, sec);
+    let out = Math.round(note) + (route.transpose ?? 0);
+    const pcs = route.pcs;
+    if (pcs && pcs.length > 0) {
+      for (let d = 0; d < 12; d++) {
+        if (pcs.includes(wrap(out - d, 12))) { out -= d; break; }
+        if (pcs.includes(wrap(out + d, 12))) { out += d; break; }
+      }
+    }
+    return Math.min(127, Math.max(0, out));
+  }
+
+  // What a route's note-ONs mapped to, per source pitch, so the matching note-off releases the
+  // note that is actually sounding - a time-varying map would otherwise off a different pitch
+  // and leave the real one hanging. Keyed by sink (target:slot) so the table survives a route
+  // being replaced mid-note on re-eval.
+  _heldFor(route) {
+    const key = `${route.targetTrackId}:${route.slot}`;
+    let held = this._routeHeld.get(key);
+    if (!held) {
+      held = new Map();
+      this._routeHeld.set(key, held);
+    }
+    return held;
+  }
+
+  // Route teardown must release what it holds: the source's note-offs stop reaching a removed
+  // route, so anything still sounding through it would ring forever (same rule as every other
+  // piece of engine state a re-eval drops).
+  _flushHeld(targetTrackId, slot) {
+    const held = this._routeHeld.get(`${targetTrackId}:${slot}`);
+    if (!held) return;
+    for (const played of held.values()) {
+      if (slot === 0) this._send('/poptart/noteOff', [targetTrackId, played, 0]);
+      else this._send('/poptart/noteOffSlot', [targetTrackId, slot, played, 0]);
+    }
+    held.clear();
+  }
+
+  // Fan a track's note edge out to every MIDI route whose source resolves to it. The source's
+  // pitch is what the route plays (an instrument route replays it; an injector too, for melodic
+  // effects) - a sampler source's pitch travels the same way, see _fanoutMidiSample. Called
+  // after the source's own note.
   _fanoutMidi(sourceTrackId, note, velocity, targetTime, isOn) {
     if (this._midiRoutes.length === 0) return;
     const latency = this._latency(targetTime);
     for (const r of this._midiRoutes) {
       if (!this._nameIsTrack(r.name, sourceTrackId)) continue;
-      if (r.slot === 0) {
-        if (isOn) this._send('/poptart/noteOn', [r.targetTrackId, note, velocity, latency]);
-        else this._send('/poptart/noteOff', [r.targetTrackId, note, latency]);
-      } else if (isOn) {
-        this._send('/poptart/noteOnSlot', [r.targetTrackId, r.slot, note, velocity, latency]);
+      // The ON resolves the pitch at its own time and remembers it; the OFF releases what the ON
+      // played, never a fresh mapping - a dynamic map may answer differently by then.
+      const held = this._heldFor(r);
+      let played;
+      if (isOn) {
+        played = this._routePitch(r, note, targetTime);
+        if (played == null) continue; // a rest in the map silences this note on this route
+        held.set(note, played);
       } else {
-        this._send('/poptart/noteOffSlot', [r.targetTrackId, r.slot, note, latency]);
+        played = held.get(note);
+        if (played == null) continue; // its on was silenced (or predates the route) - nothing to release
+        held.delete(note);
+      }
+      if (r.slot === 0) {
+        if (isOn) this._send('/poptart/noteOn', [r.targetTrackId, played, velocity, latency]);
+        else this._send('/poptart/noteOff', [r.targetTrackId, played, latency]);
+      } else if (isOn) {
+        this._send('/poptart/noteOnSlot', [r.targetTrackId, r.slot, played, velocity, latency]);
+      } else {
+        this._send('/poptart/noteOffSlot', [r.targetTrackId, r.slot, played, latency]);
       }
     }
   }
 
-  // Fan-out for a note-less (sampler) source: fire the route's fixed note on the sample's rhythm,
-  // note-on at onset and note-off at offset (there's no separate off edge to hook like noteOff).
-  _fanoutMidiSample(sourceTrackId, velocity, onsetSec, offsetSec) {
+  // Fan-out for a sampler source: note-on at onset and note-off at offset (there's no separate
+  // off edge to hook like noteOff). `eventNote` is the sample event's own pitch - the repitch
+  // control, which a pianoroll or an .n() on a sampler track writes - so a melodic sampler line
+  // routes as the line it is; a drum pattern sets no pitch and falls back to 60. An injector's
+  // explicit .midi(name, { note }) outranks both: that note was asked for by name.
+  //
+  // The off edge is pulled a few ms early for the same reason the scheduler pulls a synth note's
+  // (see NOTE_OFF_EARLY_SEC there): back-to-back sample events - which is what a drum pattern
+  // mostly is - would otherwise put one route note's off and the next one's on at the exact same
+  // target time on the SAME pitch, and off-after-on silences the new note at birth. The sample
+  // itself keeps its untouched window; only the routed note gets the daylight.
+  _fanoutMidiSample(sourceTrackId, velocity, onsetSec, offsetSec, eventNote = null) {
     if (this._midiRoutes.length === 0) return;
+    const offSec = Math.max(onsetSec + MIN_ROUTE_NOTE_SEC, offsetSec - NOTE_OFF_EARLY_SEC);
+    // A repitch can be fractional (any signal drives it); _routePitch rounds and clips it to what
+    // MIDI can carry, after the route's pitch ops. On and off are emitted as a pair here, so one
+    // mapping (at the onset) serves both edges and no held table is needed.
+    const eventPitch = Number.isFinite(eventNote) ? eventNote : null;
     for (const r of this._midiRoutes) {
       if (!this._nameIsTrack(r.name, sourceTrackId)) continue;
-      const note = r.note ?? 60;
+      const note = this._routePitch(r, r.note ?? eventPitch ?? DEFAULT_ROUTE_NOTE, onsetSec);
+      if (note == null) continue; // a rest in the map silences this event on this route
       const onL = this._latency(onsetSec);
-      const offL = this._latency(offsetSec);
+      const offL = this._latency(offSec);
       if (r.slot === 0) {
         this._send('/poptart/noteOn', [r.targetTrackId, note, velocity, onL]);
         this._send('/poptart/noteOff', [r.targetTrackId, note, offL]);
@@ -403,13 +495,20 @@ class OscEngine {
   }
 
   // Add/replace a track->track MIDI route for (targetTrackId, slot); removes any prior route to
-  // the same sink first so a re-eval with a different source doesn't leave a stale one.
-  _addMidiRoute(name, targetTrackId, slot, note) {
-    this._removeMidiRoute(targetTrackId, slot);
-    this._midiRoutes.push({ name, targetTrackId, slot, note });
+  // the same sink first so a re-eval with a different source doesn't leave a stale one. `opts`
+  // carries the head source's pitch handling - { transpose, pcs } folded statics or a { noteMap }
+  // closure - which an injector never has. The held table is deliberately NOT cleared on replace:
+  // notes sounding through the old route still need their offs to resolve through the new one.
+  _addMidiRoute(name, targetTrackId, slot, note, opts = {}) {
+    this._midiRoutes = this._midiRoutes.filter((r) => !(r.targetTrackId === targetTrackId && r.slot === slot));
+    this._midiRoutes.push({
+      name, targetTrackId, slot, note,
+      transpose: opts.transpose ?? 0, pcs: opts.pcs ?? null, noteMap: opts.noteMap ?? null,
+    });
   }
   _removeMidiRoute(targetTrackId, slot) {
     this._midiRoutes = this._midiRoutes.filter((r) => !(r.targetTrackId === targetTrackId && r.slot === slot));
+    this._flushHeld(targetTrackId, slot);
   }
 
   version() {
@@ -1116,10 +1215,10 @@ class OscEngine {
    * the window's length in particular are computed here and nowhere else).
    */
   playSample(trackId, ref, cfg, onsetSec, offsetSec) {
-    // A sampler source has no pitch, so any MIDI route off this track fires its fixed note on the
-    // sample's rhythm. Done first, so a ducker/arp keyed off a drum pattern triggers even before
-    // the pack finishes loading (when the sample itself would still be silent).
-    this._fanoutMidiSample(trackId, cfg.vel ?? 1, onsetSec, offsetSec);
+    // Any MIDI route off this track plays the event's rhythm, pitch and velocity. Done first, so
+    // a ducker/arp keyed off a drum pattern triggers even before the pack finishes loading (when
+    // the sample itself would still be silent).
+    this._fanoutMidiSample(trackId, cfg.vel ?? 1, onsetSec, offsetSec, cfg.note ?? null);
     const entry = this._ensurePack(ref);
     if (entry.status !== 'ready' || entry.files.length === 0) return { skipped: `source "${ref}" ${entry.status}` };
 
@@ -1394,13 +1493,36 @@ class OscEngine {
   // Route a device's live performance stream (notes/velocity/bend/aftertouch/raw CC) to the
   // track's instrument, entirely engine-side - live playing never goes through the lookahead
   // scheduler. channel 0 = all channels. Device names match by case-insensitive substring.
-  // scalePcs (optional array of pitch classes 0-11, from .scale() on the midikeys chain)
-  // quantizes incoming notes to the scale before they reach the instrument.
-  setMidiNotes(trackId, device, channel = 0, scalePcs = null) {
-    this._send('/poptart/midiRoute', [trackId, device, channel, (scalePcs ?? []).join(',')]);
+  // scalePcs/transpose are the FOLDED form of the chain's pitch ops (see Scheduler#_routePitchArgs)
+  // and are applied in sclang - transpose first, then the scale quantize - so a static chain adds
+  // no latency at all. A dynamic chain arrives as `noteMap` (a per-note closure) instead: sclang
+  // can't run it, so the route goes to DEFER mode - sclang forwards each raw note edge to Node
+  // (the same /poptart/midiNoteIn feed MIDI record listens to) and plays nothing itself; Node maps
+  // the pitch and answers with /poptart/noteOn|noteOff (see _handleMessage). That's one localhost
+  // round trip per note edge - a millisecond or two on top of the MIDI driver's own latency.
+  setMidiNotes(trackId, device, channel = 0, scalePcs = null, transpose = 0, noteMap = null) {
+    if (noteMap) {
+      const prev = this._deferRoutes.get(trackId);
+      // Keep the held table across re-evals, same as _addMidiRoute: sounding notes still need
+      // their offs to resolve to the pitch their on actually played.
+      this._deferRoutes.set(trackId, { noteMap, held: prev?.held ?? new Map() });
+      this._send('/poptart/midiRoute', [trackId, device, channel, '', 0, 1]);
+    } else {
+      this._dropDeferRoute(trackId);
+      this._send('/poptart/midiRoute', [trackId, device, channel, (scalePcs ?? []).join(','), transpose, 0]);
+    }
   }
   clearMidiNotes(trackId) {
+    this._dropDeferRoute(trackId);
     this._send('/poptart/clearMidiRoute', [trackId]);
+  }
+
+  // Removing a defer route releases what it holds (see _flushHeld for why), then forgets it.
+  _dropDeferRoute(trackId) {
+    const route = this._deferRoutes.get(trackId);
+    if (!route) return;
+    for (const played of route.held.values()) this._send('/poptart/noteOff', [trackId, played, 0]);
+    this._deferRoutes.delete(trackId);
   }
 
   // ir: { device, cc, channel (null = all), min, max }. sclang registers a MIDIdef that writes
@@ -1433,10 +1555,16 @@ class OscEngine {
   // `hwChans` is [left, right] absolute 0-indexed hardware channels for an input() source (right
   // -1 = mono, centered engine-side), already resolved against the device layout in pattern-core;
   // null for a track/bus source or a legacy audio("dev:...") string, which default to channels 0+1.
-  setInputSource(trackId, io, name, channel = 0, scalePcs = null, hwChans = null) {
+  //
+  // A midi() source's pitch-op chain (.add()/.scale()/... - see Sig#_routeBinop) reaches both
+  // kinds of source: folded statics apply in sclang for a device and in the fan-out for a track
+  // route; a dynamic chain travels as the noteMap closure (a track route calls it in the fan-out,
+  // a device route defers its notes through Node - see setMidiNotes).
+  setInputSource(trackId, io, name, channel = 0, scalePcs = null, hwChans = null, transpose = 0, noteMap = null) {
     if (io === 'midi') {
-      if (this._isDevice(name)) this.setMidiNotes(trackId, this._deviceName(name), channel, scalePcs);
-      else this._addMidiRoute(name, trackId, 0, null); // slot 0 = instrument, null note = pass source pitch
+      if (this._isDevice(name)) this.setMidiNotes(trackId, this._deviceName(name), channel, scalePcs, transpose, noteMap);
+      // slot 0 = instrument, null note = pass the source's own pitch through
+      else this._addMidiRoute(name, trackId, 0, null, { transpose, pcs: scalePcs, noteMap });
     } else if (io === 'audio') {
       const [chA, chB] = hwChans ?? [0, 1];
       this._send('/poptart/setAudioInput', [trackId, name, chA, chB]);
@@ -1476,11 +1604,15 @@ class OscEngine {
 
   // Inject MIDI into the plugin at `slot` from a named source (Sig#midi injector, named form). A
   // track source fans out in Node (its notes replay to the plugin); a "dev:" source routes the
-  // hardware device's MIDI to the plugin in sclang. `note` is the fixed pitch for note-less
-  // (sampler) sources; melodic sources pass their own pitch through.
-  injectMidi(trackId, slot, name, note = 60) {
-    if (this._isDevice(name)) this._send('/poptart/injectMidiDevice', [trackId, slot, this._deviceName(name), note]);
-    else this._addMidiRoute(name, trackId, slot, note);
+  // hardware device's MIDI to the plugin in sclang. `note` pins the pitch the route fires; null
+  // (no `{ note }` in the call) means the source's own pitch, and DEFAULT_ROUTE_NOTE for a
+  // source that has none - a drum pattern, which is what a ducker is usually keyed off.
+  injectMidi(trackId, slot, name, note = null) {
+    if (this._isDevice(name)) {
+      this._send('/poptart/injectMidiDevice', [trackId, slot, this._deviceName(name), note ?? DEFAULT_ROUTE_NOTE]);
+      return;
+    }
+    this._addMidiRoute(name, trackId, slot, note);
   }
   clearMidiInject(trackId, slot) {
     this._removeMidiRoute(trackId, slot);
@@ -1560,9 +1692,32 @@ class OscEngine {
       return;
     }
     if (msg.address === '/poptart/midiNoteIn') {
-      // Live note feed from an active midikeys() route: [trackId, note, velocity 0..1, isOn].
+      // Live note feed from an active midikeys()/midi() device route: [trackId, note, velocity
+      // 0..1, isOn]. For a route in DEFER mode (a dynamic pitch-op chain - see setMidiNotes) the
+      // edge arrives RAW and unplayed: map it here, answer sclang with the note to sound, and
+      // hand the observers (MIDI record) the note as it sounds - the same post-transform feed a
+      // direct route gives them.
       const [track, note, vel, on] = (msg.args ?? []).map((a) => a?.value ?? a);
-      if (typeof this.onMidiNoteIn === 'function') this.onMidiNoteIn(String(track), Number(note), Number(vel), Number(on) !== 0);
+      const trackId = String(track);
+      const isOn = Number(on) !== 0;
+      const defer = this._deferRoutes.get(trackId);
+      if (defer) {
+        let played;
+        if (isOn) {
+          played = defer.noteMap(Number(note), this.getTime());
+          if (played == null) return; // a rest in the map: this key silently doesn't sound
+          defer.held.set(Number(note), played);
+          this._send('/poptart/noteOn', [trackId, played, Number(vel), 0]);
+        } else {
+          played = defer.held.get(Number(note));
+          if (played == null) return; // its on was silenced - nothing sounding to release
+          defer.held.delete(Number(note));
+          this._send('/poptart/noteOff', [trackId, played, 0]);
+        }
+        if (typeof this.onMidiNoteIn === 'function') this.onMidiNoteIn(trackId, played, Number(vel), isOn);
+        return;
+      }
+      if (typeof this.onMidiNoteIn === 'function') this.onMidiNoteIn(trackId, Number(note), Number(vel), isOn);
       return;
     }
     if (msg.address === '/poptart/paramAutomated') {

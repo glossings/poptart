@@ -2440,6 +2440,16 @@ OSCdef(\poptartClearParamCC, { |msg|
 OSCdef(\poptartMidiRoute, { |msg|
     var key = msg[1].asSymbol, device = msg[2].asString, channel = msg[3].asInteger;
     var scaleStr = if (msg.size > 4) { msg[4].asString } { "" };
+    // Folded pitch statics from the chain on the midi()/midikeys() source (see foldPitchOps in
+    // pattern-core): a semitone shift applied before the scale quantize, so the scale still
+    // decides what actually sounds.
+    var transpose = if (msg.size > 5) { msg[5].asInteger } { 0 };
+    // DEFER mode (a dynamic pitch-op chain): forward each raw note edge to Node and play nothing
+    // here - Node runs the chain and answers with /poptart/noteOn|noteOff (which land in the
+    // handlers above, gating envs and held-counts exactly as a scheduled note does). Bend, touch
+    // and CC still pass straight through to the instrument; polytouch follows the raw pitch,
+    // which a remapped note won't match - acceptable for how rare pressure-per-key is.
+    var defer = if (msg.size > 6) { msg[6].asInteger > 0 } { false };
     fork {
         var track = awaitTrack.(key);
         var src, uid, chanArg, kOn, kOff, kBend, kTouch, kPoly, kCc, scalePcs, quantize;
@@ -2449,12 +2459,13 @@ OSCdef(\poptartMidiRoute, { |msg|
         // synth just sees a retrigger, and the track's held-count still gates envs correctly.
         scalePcs = if (scaleStr.isEmpty) { nil } { scaleStr.split($,).collect(_.asInteger) };
         quantize = { |note|
-            var q = note;
+            var q = note + transpose;
             if (scalePcs.notNil) {
                 block { |break|
+                    var n = q;
                     (0..11).do { |d|
-                        if (scalePcs.includes((note - d) % 12)) { q = note - d; break.() };
-                        if (scalePcs.includes((note + d) % 12)) { q = note + d; break.() };
+                        if (scalePcs.includes((n - d) % 12)) { q = n - d; break.() };
+                        if (scalePcs.includes((n + d) % 12)) { q = n + d; break.() };
                     };
                 };
             };
@@ -2476,37 +2487,50 @@ OSCdef(\poptartMidiRoute, { |msg|
                 // where the new one is nil, so a channel -> all-channels edit needs a fresh create.
                 [kOn, kOff, kBend, kTouch, kPoly, kCc].do { |k| MIDIdef.all[k] !? { |d| d.free } };
                 MIDIdef.noteOn(kOn, { |veloc, note, chan|
-                    var ctl = track[\controllers][0];
-                    note = quantize.(note);
-                    // Every note edge also goes to Node (the note as it sounds, post-quantize) -
-                    // that's the feed web-app's MIDI record collects. Sent before the ctl check
-                    // so recording works even while the instrument is still opening.
-                    nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note,
-                        veloc / 127.0, if (veloc > 0) { 1 } { 0 });
-                    if (ctl.notNil) {
-                        if (veloc > 0) {
-                            track[\held] = track[\held] + 1;
-                            ctl.midi.noteOn(chan, note, veloc);
-                            track[\envs].do { |e| e[\synth].set(\gate, 1) };
-                            track[\lfos].do { |e|
-                                if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
+                    var ctl;
+                    if (defer) {
+                        // Raw edge to Node; Node's answer comes back as /poptart/noteOn and does
+                        // the playing (and the midiNoteIn record feed, with the mapped pitch).
+                        nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note,
+                            veloc / 127.0, if (veloc > 0) { 1 } { 0 });
+                    } {
+                        ctl = track[\controllers][0];
+                        note = quantize.(note);
+                        // Every note edge also goes to Node (the note as it sounds, post-quantize) -
+                        // that's the feed web-app's MIDI record collects. Sent before the ctl check
+                        // so recording works even while the instrument is still opening.
+                        nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note,
+                            veloc / 127.0, if (veloc > 0) { 1 } { 0 });
+                        if (ctl.notNil) {
+                            if (veloc > 0) {
+                                track[\held] = track[\held] + 1;
+                                ctl.midi.noteOn(chan, note, veloc);
+                                track[\envs].do { |e| e[\synth].set(\gate, 1) };
+                                track[\lfos].do { |e|
+                                    if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
+                                };
+                            } {
+                                // running-status note-on with velocity 0 = note-off
+                                track[\held] = max(0, track[\held] - 1);
+                                ctl.midi.noteOff(chan, note, 0);
+                                if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
                             };
-                        } {
-                            // running-status note-on with velocity 0 = note-off
-                            track[\held] = max(0, track[\held] - 1);
-                            ctl.midi.noteOff(chan, note, 0);
-                            if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
                         };
                     };
                 }, chan: chanArg, srcID: uid);
                 MIDIdef.noteOff(kOff, { |veloc, note, chan|
-                    var ctl = track[\controllers][0];
-                    note = quantize.(note);
-                    nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note, veloc / 127.0, 0);
-                    if (ctl.notNil) {
-                        track[\held] = max(0, track[\held] - 1);
-                        ctl.midi.noteOff(chan, note, veloc);
-                        if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
+                    var ctl;
+                    if (defer) {
+                        nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note, veloc / 127.0, 0);
+                    } {
+                        ctl = track[\controllers][0];
+                        note = quantize.(note);
+                        nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note, veloc / 127.0, 0);
+                        if (ctl.notNil) {
+                            track[\held] = max(0, track[\held] - 1);
+                            ctl.midi.noteOff(chan, note, veloc);
+                            if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
+                        };
                     };
                 }, chan: chanArg, srcID: uid);
                 MIDIdef.bend(kBend, { |val, chan|
@@ -2523,7 +2547,8 @@ OSCdef(\poptartMidiRoute, { |msg|
                 }, chan: chanArg, srcID: uid);
                 track[\midiRoute] = (keys: [kOn, kOff, kBend, kTouch, kPoly, kCc]);
                 ("poptart: track " ++ key ++ " playing live from " ++ src.device ++ " " ++ src.name
-                    ++ (if (channel > 0) { " (channel " ++ channel ++ ")" } { " (all channels)" })).postln;
+                    ++ (if (channel > 0) { " (channel " ++ channel ++ ")" } { " (all channels)" })
+                    ++ (if (defer) { " (pitch ops in Node)" } { "" })).postln;
             };
         };
     };

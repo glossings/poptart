@@ -125,7 +125,9 @@ test('scheduler sends resolved absolute channels as the head source', () => {
 
   const sent = callsTo('setInputSource');
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].args, ['gtr', 'audio', 'dev:Scarlett', 0, null, [1, -1]]);
+  // The trailing 0/null are the midi() pitch-op statics and note-map, which an audio source
+  // has no use for.
+  assert.deepEqual(sent[0].args, ['gtr', 'audio', 'dev:Scarlett', 0, null, [1, -1], 0, null]);
 });
 
 test('a legacy audio("dev:...") string still defaults to channels 1+2', () => {

@@ -325,9 +325,15 @@ export class Sig {
     } else {
       out = this.mapValue(mapFor(this.pitchKind));
     }
-    if (this.midiNotes) out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName } });
-    // A midi() source: quantize its live notes to the scale engine-side, like a midikeys() route.
-    if (this.inputSource?.io === 'midi') out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName } });
+    // On a live note source the scale is one link of the route's pitch-op chain, in chain order -
+    // `.scale("c minor").add(1)` quantizes then shifts, `.add(1).scale("c minor")` the reverse -
+    // exactly as the same chain would read on an ordinary pattern (see Scheduler#_buildNoteMap).
+    if (this.midiNotes) {
+      out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName, pitchOps: [...(this.midiNotes.pitchOps ?? []), { op: 'scale', name: scaleName }] } });
+    }
+    if (this.inputSource?.io === 'midi') {
+      out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName, pitchOps: [...(this.inputSource.pitchOps ?? []), { op: 'scale', name: scaleName }] } });
+    }
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     return out;
   }
@@ -908,9 +914,10 @@ export class Sig {
    *
    * `source` is another track's label or a MIDI device, resolved track-first (a connected device
    * is matched case-insensitively by substring); prefix "track:"/"dev:" to force one. A track
-   * source replays its notes into the plugin - a melodic track passes its pitch through, a drum
-   * track fires a fixed note (default MIDI 60 / c5; `{ note }` overrides) on each hit, which is
-   * what a ducker wants. Like .param() it targets whatever plugin is last in the chain, so put
+   * source replays its notes into the plugin - a track with pitch (a synth, or a sampler whose
+   * events carry a repitch note) passes it through, a drum track fires MIDI 60 / c5 on each hit,
+   * which is what a ducker wants. `{ note }` pins the pitch for either kind - for a plugin that
+   * listens on one key. Like .param() it targets whatever plugin is last in the chain, so put
    * .midi() right after the .fx(...) it should drive. As a *source* at the head of a track, the
    * bare midi("...") builder plays that input on the track's own instrument instead - see midi().
    */
@@ -922,7 +929,9 @@ export class Sig {
     if (typeof source !== 'string' || !source.trim()) {
       throw new Error('[signal] .midi() takes a source name - a track label or a MIDI device, e.g. .midi("kick")');
     }
-    const note = Math.round(opts.note ?? DEFAULT_TRIG_NOTE);
+    // null, not the default note: "unset" has to stay distinguishable engine-side, where it means
+    // "play the source's own pitch, falling back to DEFAULT_TRIG_NOTE for a source that has none".
+    const note = opts.note == null ? null : Math.round(opts.note);
     return this._clone({ midiInjects: [...this.midiInjects, { slot, name: source.trim(), note }] });
   }
 
@@ -982,10 +991,31 @@ export class Sig {
     // the notes alone. This is what lets a combinator reach into a pattern it was handed
     // (`.when(c, x => x.add(flip(1)))`), the same way `x.add(note(3))` reaches into pitch.
     if (other instanceof Sig && other.ctl) return this._ctlBinop(other.ctl, other, fn);
+    // A live note source (midi(), midikeys()): its notes are a wire from the source into this
+    // track's instrument, played engine-side, so they never pass through this pattern and
+    // arithmetic composed over them would silently do nothing. But every incoming note IS an
+    // onset, so the operation is ALSO appended to the route's pitch-op chain, where the right
+    // operand is sampled at each note's own arrival time (see Scheduler#_buildNoteMap) -
+    // `midi("keys").add(note(irand(8).seg(8)))` reads a fresh draw per note, exactly as it
+    // would per event on an ordinary pattern. A chain that carries its own events too
+    // (kb(1).pianoroll()) then falls through so the op reaches both kinds of note alike.
+    if (this.inputSource?.io === 'midi' || this.midiNotes) {
+      const routed = this._routeBinop(op, other, fn);
+      if (this.sampler) return routed._ctlBinop('note', other, fn);
+      if (this.stepsForCycle || this.eventAt) return routed._binopValues(op, other, fn, linear);
+      return routed;
+    }
     // On a sampler pattern the values are PACK NAMES, so plain arithmetic can only sensibly mean
     // the repitch note (24 = "c2" = as recorded): `s("rave").add(7)` is seven semitones up, the
     // same thing `s("rave").add(note(7))` says. Without this the pack name coerces to NaN.
     if (this.sampler) return this._ctlBinop('note', other, fn);
+    return this._binopValues(op, other, fn, linear);
+  }
+
+  // The value-stream half of _binop - the arithmetic as it lands on this pattern's own events
+  // and samples. Split out so a live-route chain can apply an op to its wire (the pitch-op
+  // entry) and to its own events with one spelling.
+  _binopValues(op, other, fn, linear) {
     if (typeof other === 'number' && linear) {
       // Bounds may be signals (see range()) - map those through fn instead of applying it directly.
       const mapBound = (b) => (typeof b === 'number' ? fn(b, other) : b.mapValue((v) => fn(Number(v), other)));
@@ -1179,6 +1209,24 @@ export class Sig {
       : withPitchKind(note(DEFAULT_SYNTH_NOTE)._clone(this._meta()), 'note');
     const out = attach(trigger);
     return ctlAuto ? out[ctl]() : out[ctl](values);
+  }
+
+  /**
+   * Value arithmetic on a live note source, carried on the route as one entry of its pitch-op
+   * chain (see _binop for why it can't compose over this pattern's values). Each entry keeps the
+   * operator's own fn and the right operand as a signal, to be sampled per incoming note at that
+   * note's time; a CONSTANT operand additionally records its value, which is what lets the
+   * scheduler fold an all-constant chain back into the engine's zero-overhead static route (a
+   * plain transpose+scale - for a hardware device that is the difference between playing direct
+   * in sclang and looping each note through Node).
+   */
+  _routeBinop(op, other, fn) {
+    const entry = { op, fn, sig: toSignal(other), const: constantSemitones(other) };
+    if (this.midiNotes) {
+      return this._clone({ midiNotes: { ...this.midiNotes, pitchOps: [...(this.midiNotes.pitchOps ?? []), entry] } });
+    }
+    const src = this.inputSource;
+    return this._clone({ inputSource: { ...src, pitchOps: [...(src.pitchOps ?? []), entry] } });
   }
 
   add(x) { return this._binop('add', x, (a, b) => a + b, true); }
@@ -2702,6 +2750,43 @@ function factorWindows(factorSig, cycle) {
 // before note()/n() has had a chance to convert it, and "add 12 to a note" is the same operation
 // either side of that builder. Anything else - a sound like "bd", a sample pack name - stays NaN, and
 // the operators leave those values alone (see _binop).
+// The fixed number of semitones an operand means, or null if it isn't fixed - what decides
+// whether a transpose can ride a live MIDI route (see Sig#_transposeInput). Fixed means: the same
+// single value across the whole cycle AND across cycles, so note(24), 24 and mini("24") qualify
+// while "<0 12>", "0 12" and any signal do not. Alternations are probed rather than reasoned
+// about, so a cycle-pattern longer than PROBE_CYCLES that reads constant over them would slip
+// through as its first value; nothing writes one, and the failure is a wrong transpose, not a
+// silent one.
+const PROBE_CYCLES = 8;
+function constantSemitones(x) {
+  if (typeof x === 'number') return Number.isFinite(x) ? x : null;
+  if (typeof x === 'string' && x.trim() !== '' && Number.isFinite(Number(x))) return Number(x);
+  if (!(x instanceof Sig)) return null;
+  if (x.eventAt) return null; // a per-onset reader (irand/choose) draws again every event
+  let first = null;
+  for (let cycle = 0; cycle < PROBE_CYCLES; cycle++) {
+    let v;
+    if (x.stepsForCycle) {
+      const steps = x.stepsForCycle(cycle);
+      if (steps.length !== 1) return null; // a grid of its own - it would change mid-note
+      const step = steps[0];
+      if (step.start !== 0 || step.end !== 1 || step.value == null) return null;
+      v = numericValue(step.value);
+    } else {
+      // No grid: constant only if it reads the same everywhere - which an LFO or a ramp doesn't.
+      for (const t of [0, 0.13, 0.5, 0.77]) {
+        const at = numericValue(x.sample(cycle + t, 1, cycle + t));
+        if (v === undefined) v = at;
+        else if (at !== v) return null;
+      }
+    }
+    if (!Number.isFinite(v)) return null;
+    if (first === null) first = v;
+    else if (v !== first) return null;
+  }
+  return first;
+}
+
 function numericValue(value) {
   if (typeof value === 'number') return value;
   const num = Number(value);
@@ -5367,8 +5452,20 @@ function assertInputName(builder, name) {
  * label, whose notes are re-triggered here; resolved track-first, prefix "track:"/"dev:" to force.
  * `channel` (1..16, omitted = all) narrows a hardware device to one MIDI channel. Like midikeys()
  * it schedules no notes of its own - the source's notes are routed to this track's instrument
- * engine-side, gating env()/lfo() shapes like any note. Chain .synth()/.fx()/.param()/.scale() as
- * usual. Called as a *method* after a plugin, `.midi(...)` injects into that plugin instead - see
+ * engine-side, gating env()/lfo() shapes like any note. Chain .synth()/.fx()/.param() as usual.
+ *
+ * Value transforms follow the notes: each incoming note is an onset, so .add()/.sub()/.mul()/
+ * .scale()/... ride the route as a pitch-op chain sampled at each note's own arrival time -
+ * `midi("kick").sub(note(24))` plays kick two octaves down, `midi("keys").add(note(irand(8)
+ * .seg(8)))` draws a fresh offset per note, and a REST in an operand silences the notes it
+ * covers. Two prints of the pattern semantics differ, deliberately: a held note reads its
+ * operands once, at its onset (a key is one gesture - it doesn't retrigger when an operand's
+ * step passes underneath it), and a `,`-stacked operand doesn't fan a note into a chord. An
+ * all-constant chain plays direct in sclang (zero added latency); a dynamic one on a hardware
+ * device loops each note edge through Node (~a millisecond). STRUCTURAL transforms (.fast(),
+ * .rev(), .euclid()) still mean nothing on a wire with no grid - to restructure the source,
+ * copy("kick") its pattern instead. Called as a *method* after a plugin, `.midi(...)` injects
+ * into that plugin instead - see
  * Sig#midi. (For a specific device, midikeys(); the computer keyboard plays through the piano
  * roll's ⌨ button - see client.js - and isn't a source in the language.)
  */

@@ -71,6 +71,43 @@ const LFO_ANCHOR_INTERVAL_SEC = 4;
 // birth. A few ms of daylight makes the ordering deterministic and is inaudible as a release.
 const NOTE_OFF_EARLY_SEC = 0.005;
 
+// --- live-route pitch ops (midi()/midikeys() + .add()/.scale()/... - see Sig#_routeBinop) ---
+//
+// A live source's notes are played engine-side, so the transforms chained onto it travel as a
+// pitch-op chain rather than composing over this pattern's (empty) value stream. Two carriers:
+// an all-constant chain folds to the engine's static route (a transpose plus at most one scale,
+// applied in sclang for a hardware device - zero added latency), and anything dynamic becomes a
+// note-map closure the engine calls per incoming note (see Scheduler#_buildNoteMap).
+function foldPitchOps(ops) {
+  let transpose = 0;
+  let scaleName = null;
+  for (const e of ops) {
+    if (e.op === 'scale') {
+      if (scaleName !== null) return null; // two scales can't fold into one static quantize
+      scaleName = e.name;
+      continue;
+    }
+    if (scaleName !== null) return null; // the static route quantizes LAST - a later op breaks that
+    if (e.const == null) return null; // a dynamic operand needs the per-note map
+    if (e.op === 'add') transpose += e.const;
+    else if (e.op === 'sub') transpose -= e.const;
+    else return null; // only a shift is a transpose
+  }
+  return { transpose, scaleName };
+}
+
+// Nearest scale degree, ties resolving downward - the one quantize rule, mirrored by the engine's
+// static route (_routePitch) and sclang's device route so every path agrees on what a note becomes.
+function quantizeToPcs(note, pcs) {
+  if (!pcs || pcs.length === 0) return note;
+  for (let d = 0; d < 12; d++) {
+    if (pcs.includes((((note - d) % 12) + 12) % 12)) return note - d;
+    if (pcs.includes((((note + d) % 12) + 12) % 12)) return note + d;
+  }
+  return note;
+}
+
+
 // The floor under an event pushed EARLY by .nudge()/.swing() (see pattern-core's timeShift). An
 // onset enters the lookahead window at least (lookahead - one tick) ahead of its grid position, so
 // that is the whole budget an early shift has to spend; the rest is margin for the trip to the
@@ -574,8 +611,8 @@ export class Scheduler {
     // live input never goes through the lookahead clock, so latency stays at the MIDI driver's.
     // Idempotent re-sends on re-eval; dropping the midikeys() source tears the route down.
     if (sig.midiNotes) {
-      const pcs = sig.midiNotes.scale ? scalePitchClasses(sig.midiNotes.scale) : null;
-      this.engine.setMidiNotes(this.trackId, sig.midiNotes.device, sig.midiNotes.channel ?? 0, pcs);
+      const route = this._routePitchArgs(sig.midiNotes.pitchOps);
+      this.engine.setMidiNotes(this.trackId, sig.midiNotes.device, sig.midiNotes.channel ?? 0, route.pcs, route.transpose, route.noteMap);
     } else if (this._midiRouted) {
       this.engine.clearMidiNotes(this.trackId);
     }
@@ -641,8 +678,8 @@ export class Scheduler {
     if (typeof this.engine.setInputSource === 'function') {
       const src = sig.inputSource;
       if (src) {
-        const pcs = src.scale ? scalePitchClasses(src.scale) : null;
-        this.engine.setInputSource(this.trackId, src.io, src.name, src.channel ?? 0, pcs, hwChannels(src.hw));
+        const route = this._routePitchArgs(src.pitchOps);
+        this.engine.setInputSource(this.trackId, src.io, src.name, src.channel ?? 0, route.pcs, hwChannels(src.hw), route.transpose, route.noteMap);
       } else if (this._prevInputSource) {
         this.engine.clearInputSource(this.trackId);
       }
@@ -875,6 +912,46 @@ export class Scheduler {
       // eslint-disable-next-line no-console
       console.error(`[scheduler] track "${this.label}" stopped - pattern threw during playback: ${err.message ?? err}`);
     }
+  }
+
+  // A live route's pitch-op chain as the engine wants it: folded to { pcs, transpose } when the
+  // whole chain is static, a { noteMap } closure otherwise (never both). See foldPitchOps.
+  _routePitchArgs(pitchOps) {
+    const ops = pitchOps ?? [];
+    if (ops.length === 0) return { pcs: null, transpose: 0, noteMap: null };
+    const folded = foldPitchOps(ops);
+    if (folded) {
+      return { pcs: folded.scaleName ? scalePitchClasses(folded.scaleName) : null, transpose: folded.transpose, noteMap: null };
+    }
+    return { pcs: null, transpose: 0, noteMap: this._buildNoteMap(ops) };
+  }
+
+  // The pitch-op chain as one closure, (incomingNote, engineTimeSec) -> note | null. The note's
+  // arrival is the onset: each operand is sampled at that instant, with both clocks on offer the
+  // way _sampleConfigAt reads a channel (steps and per-onset readers key off the cycle position,
+  // LFOs off real seconds) - so `.add(note(irand(8).seg(8)))` draws per note, deterministically by
+  // position, and `.add(sine(0.1).mul(12))` reads the LFO where the note lands. A REST in an
+  // operand returns null - it silences the note it covers, exactly as a rest on the right of a
+  // pattern operator silences the events it covers (one caveat: a live note reads its operands
+  // once, at its onset - it does not retrigger when an operand's step boundary passes underneath
+  // it, because a held key is one gesture, not a grid). A `,`-stack in an operand reads as one of
+  // its layers rather than fanning the note into a chord.
+  _buildNoteMap(pitchOps) {
+    const resolved = pitchOps.map((e) => (e.op === 'scale' ? { pcs: scalePitchClasses(e.name) ?? [] } : e));
+    return (noteIn, sec) => {
+      const cycle = this.transport.cycleAt(sec);
+      let v = noteIn;
+      for (const e of resolved) {
+        if (e.pcs) {
+          v = quantizeToPcs(Math.round(v), e.pcs);
+          continue;
+        }
+        const b = e.sig.sample(sec, this.transport.cps, cycle);
+        if (b == null) return null;
+        v = e.fn(v, Number(b));
+      }
+      return Number.isFinite(v) ? Math.min(127, Math.max(0, Math.round(v))) : null;
+    };
   }
 
   // `nowSec` is the tick's own clock reading, passed in so every event of one tick is measured

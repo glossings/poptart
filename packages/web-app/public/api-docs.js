@@ -102,7 +102,7 @@ const API_DOCS = {
   midi: {
     kind: 'both',
     sig: 'midi(source, channel)',
-    desc: 'As a source: play this track from a MIDI device or another track\'s notes. As a method after an .fx(): inject MIDI into that plugin.',
+    desc: 'As a source: play this track from a MIDI device or another track\'s notes. Pitch transforms follow the notes, sampled per arrival - .add(note(irand(8).seg(8))) draws per note, .scale() quantizes - but structural ones (.fast, .rev) need a pattern: copy() the source for those. As a method after an .fx(): inject MIDI into that plugin.',
     eg: 'note("c2*8").synth("Serum 2").fx("Kickstart").midi("kick")',
   },
   audio: {
