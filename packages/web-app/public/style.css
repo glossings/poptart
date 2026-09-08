@@ -4038,8 +4038,16 @@ body.mix-on.mix-stacked .song-overview {
 #deckAHead .deck-only {
   display: none;
 }
+/* Centered like deck B's buttons: inline-flex ignores the buttons' text-align, so without the
+   justify rule deck A's ▶ play sat left in its fixed width while deck B's sat centered. */
 body.mix-on #deckAHead .deck-only {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* ...except the song title, which reads left-aligned like a menu (see .deck-song). */
+body.mix-on #deckAHead .deck-song {
+  justify-content: flex-start;
 }
 #deckBHead .deck-b-title,
 #deckAHead .deck-b-title {

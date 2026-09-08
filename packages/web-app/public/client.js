@@ -22571,6 +22571,13 @@ function arWriteDefText(def, text) {
 function openArrangePainter(deck = mixModeOn ? djActiveDeck : 'a') {
   if (!arrangeMod || !labelsMod) return;
   const want = deck === 'b' && mixModeOn && deckBCM ? 'b' : 'a';
+  // A deck holding a SONG FILE has no blocks to arrange - its "arrangement" is the waveform pane
+  // sitting over this editor, and opening the painter under it would edit the wip buffer the song
+  // is covering, an arrangement of code nobody is hearing.
+  if (songPanes[want]?.song) {
+    logLine(`deck ${want.toUpperCase()} holds a song file - the arrangement painter is for pattern decks`, 'warn');
+    return;
+  }
   if (arState && arDeck === want) { closeArrangeEditor(); return; } // ctrl+A again puts it away
   if (arState) closeArrangeEditor(); // ...and on the other deck it moves, rather than opening twice
   arDeck = want;
@@ -26404,7 +26411,18 @@ function initArrangeCanvas() {
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'v') { arPasteTime(); e.preventDefault(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (arState.selRegion) arRemoveRegion(arState.selRegion);
-      else arDeleteClips([...arState.sel]);
+      else if (arState.regionSpan) {
+        // A marked section - a span of bars across the rows it was dragged over - empties the way
+        // cut does, minus the clipboard: the clips inside it go, the time stays as silence, and
+        // the span stays marked (it is still where you are working).
+        const [a, b] = arTimeRegion();
+        const rows = arRegionRows();
+        arClearTime(a, b, rows);
+        arSyncControls();
+        writeArrangeCall();
+        drawArrange();
+        logLine(`cleared ${arFmtBars(b - a)}${rows ? ` on ${rows.size} track${rows.size === 1 ? '' : 's'}` : ''}`);
+      } else arDeleteClips([...arState.sel]);
       e.preventDefault();
       return;
     }

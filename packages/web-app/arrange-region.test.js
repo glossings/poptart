@@ -390,6 +390,15 @@ test('a marked span is shaded over the tracks, not only on the ruler', () => {
   assert.match(draw, /ctx\.lineTo\(ix, AR_LANES_TOP - 1\);/, 'the arrow points down at the place');
 });
 
+test('backspace over a marked section clears its clips and leaves the time standing', () => {
+  // The marked span across rows is a selection like any other, so backspace empties it - cut
+  // minus the clipboard. The span stays marked (it is still where you are working), and closing
+  // the time up remains cmd+shift+backspace.
+  const keys = grab('initArrangeCanvas');
+  assert.match(keys, /else if \(arState\.regionSpan\) \{[\s\S]{0,700}arClearTime\(a, b, rows\);/);
+  assert.match(keys, /arClearTime\(a, b, rows\);[\s\S]{0,300}writeArrangeCall\(\);/);
+});
+
 test('a split inside a span leaves you holding the middle, not the whole clip', () => {
   // The marked region is the union of the span and the selected clips (arTimeRegion), so selecting
   // every piece would widen the band back over the clip that was just divided - which reads as the

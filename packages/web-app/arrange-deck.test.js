@@ -184,7 +184,10 @@ test('the header carries DJ mode alone, as a plain lit button', () => {
 
 test('deck A\'s head is always on screen; only its DECK chrome waits for DJ mode', () => {
   assert.match(CSS, /#deckAHead \.deck-only \{\n\s*display: none;\n\}/);
-  assert.match(CSS, /body\.mix-on #deckAHead \.deck-only \{\n\s*display: inline-flex;\n\}/);
+  // ...and revealed centered: inline-flex ignores the buttons' text-align, so without the justify
+  // rule deck A's play button sat left-aligned while deck B's sat centered.
+  assert.match(CSS, /body\.mix-on #deckAHead \.deck-only \{\n\s*display: inline-flex;\n\s*align-items: center;\n\s*justify-content: center;\n\}/);
+  assert.match(CSS, /body\.mix-on #deckAHead \.deck-song \{\n\s*justify-content: flex-start;\n\}/, 'the song title still reads like a menu');
   assert.ok(!/#deckAHead \{\n\s*display: none;/.test(CSS), 'the head itself is no longer hidden');
   // ...so the pane stacks head-over-editor whether or not there are two decks
   assert.match(CSS, /#editorPane \{[\s\S]{0,300}flex-direction: column;/);
@@ -205,6 +208,12 @@ test('only the dj toggle lights - there is no per-deck switch to reflect any mor
   assert.match(reflect, /getElementById\('viewDjBtn'\)\.classList\.toggle\('active', mixModeOn\)/);
   assert.ok(!/viewArrangeBtn/.test(reflect), 'nothing else to light');
   assert.ok(!/body\.mix-on #viewArrangeBtn/.test(CSS), 'nothing left to dim either');
+});
+
+test('the painter refuses a deck that holds a song FILE', () => {
+  // Its "arrangement" is the waveform pane over the editor; opening the painter would edit the
+  // wip buffer the song is covering - an arrangement of code nobody is hearing.
+  assert.match(grab('openArrangePainter'), /if \(songPanes\[want\]\?\.song\) \{[\s\S]{0,300}return;/);
 });
 
 test('ctrl+A means THIS pane\'s arrangement, in either editor', () => {
