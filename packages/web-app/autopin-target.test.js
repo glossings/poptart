@@ -46,11 +46,11 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const bodies = ['matchParen', 'codeOnly', 'firstStringLiteral', 'findChainCall', 'blockForTrack', 'applyBufferEdits']
+const bodies = ['matchParen', 'codeOnly', 'blockOwnCode', 'firstStringLiteral', 'findChainCall', 'findChainHandleAt', 'blockForTrack', 'applyBufferEdits']
   .map(grab)
   .join('\n\n');
 // eslint-disable-next-line no-new-func
-const load = new Function('labelsMod', 'cm', `${bodies}\nreturn { findChainCall, blockForTrack, applyBufferEdits };`);
+const load = new Function('labelsMod', 'cm', `${bodies}\nreturn { findChainCall, findChainHandleAt, blockForTrack, applyBufferEdits };`);
 
 // The editor stands in as a plain string, since every edit here is an offset splice.
 function fakeCm(text) {
@@ -84,7 +84,7 @@ test('a track restated further down is the block a capture is written into', () 
   assert.ok(block, 'the label is there twice - one of them has to answer');
   assert.match(code.slice(block.start, block.end), /pianoroll/);
   // ...which is what makes the slot findable at all: the overridden block has no synth() call.
-  assert.equal(findChainCall(code, block.start, block.end, 0).plugin, 'Serum 2');
+  assert.equal(findChainCall(code, block, 0).plugin, 'Serum 2');
 });
 
 test('a muted restatement does not take the track from a playing one', () => {
@@ -104,7 +104,7 @@ test('the definition goes below the call that names it, even at the end of the b
   const cm = fakeCm(code);
   const { blockForTrack, findChainCall, applyBufferEdits } = api(cm);
   const block = blockForTrack(code, 'bass');
-  const call = findChainCall(code, block.start, block.end, 1);
+  const call = findChainCall(code, block, 1);
   assert.equal(call.plugin, 'ValhallaRoom');
   assert.equal(call.closeParen + 1, code.length, 'this test is only about the offsets colliding');
 
@@ -117,7 +117,7 @@ test('a buffer that does end in a newline is written the same way', () => {
   const cm = fakeCm(code);
   const { blockForTrack, findChainCall, applyBufferEdits } = api(cm);
   const block = blockForTrack(code, 'bass');
-  const call = findChainCall(code, block.start, block.end, 1);
+  const call = findChainCall(code, block, 1);
   applyBufferEdits(captureEdits(code, call.closeParen, 'bass', '"ValhallaRoom", "@abc"'), '+autopin');
   assert.equal(cm.value, 'bass: audio("kick").fx("ValhallaRoom").preset("bass")\n\n_preset("bass", "ValhallaRoom", "@abc")');
 });
@@ -127,7 +127,7 @@ test('edits that do not collide are still applied last-first', () => {
   const cm = fakeCm(code);
   const { blockForTrack, findChainCall, applyBufferEdits } = api(cm);
   const block = blockForTrack(code, 'bass');
-  const call = findChainCall(code, block.start, block.end, 0);
+  const call = findChainCall(code, block, 0);
   // convertLegacyStates' three: strip the `{ state }`, file it under a name, name it on the call.
   applyBufferEdits([
     [call.afterFirstArg, call.closeParen, ''],
@@ -136,4 +136,36 @@ test('edits that do not collide are still applied last-first', () => {
   ], '+legacyState');
   assert.equal(cm.value,
     'bass: synth("Serum 2").preset("bass")\n\n_preset("x", "", "")\n_preset("bass", "Serum 2", "@abc")');
+});
+
+// A group's braces hold OTHER tracks, and their chains are theirs: `drums: group({ … }).fx("X")`
+// wears X in slot 1 however many synth()/fx() calls the tracks inside it have. Counting the nested
+// ones is what made double-clicking the group's own `fx` open the wrong plugin's window (or none),
+// and aimed a knob capture at a slot the group doesn't have.
+const GROUPED = [
+  'drums: group({',
+  '  kick: s("mbd*4").fx("Pro-C 2")',
+  '  hats: synth("Serum 2").fx("ValhallaRoom").fx("Pro-Q 3")',
+  '}).fx("FilterFreak1").fx("Pro-L 2")',
+].join('\n');
+
+test("a group's chain numbers around the tracks inside its braces", () => {
+  const { blockForTrack, findChainCall } = api();
+  const block = blockForTrack(GROUPED, 'drums');
+  assert.equal(findChainCall(GROUPED, block, 1).plugin, 'FilterFreak1');
+  assert.equal(findChainCall(GROUPED, block, 2).plugin, 'Pro-L 2');
+  assert.equal(findChainCall(GROUPED, block, 0), null, 'a group has no instrument slot');
+  // The tracks inside still answer for their own slots.
+  assert.equal(findChainCall(GROUPED, blockForTrack(GROUPED, 'hats'), 0).plugin, 'Serum 2');
+  assert.equal(findChainCall(GROUPED, blockForTrack(GROUPED, 'hats'), 2).plugin, 'Pro-Q 3');
+});
+
+test("double-clicking a group's own fx opens that group's slot", () => {
+  const { findChainHandleAt } = api();
+  const at = (needle) => findChainHandleAt(GROUPED, GROUPED.indexOf(needle) + 1);
+  assert.deepEqual(at('fx("FilterFreak1")'), { label: 'drums', slot: 1 });
+  assert.deepEqual(at('fx("Pro-L 2")'), { label: 'drums', slot: 2 });
+  assert.deepEqual(at('fx("Pro-C 2")'), { label: 'kick', slot: 1 });
+  assert.deepEqual(at('synth("Serum 2")'), { label: 'hats', slot: 0 });
+  assert.deepEqual(at('fx("Pro-Q 3")'), { label: 'hats', slot: 2 });
 });

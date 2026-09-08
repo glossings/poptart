@@ -38,7 +38,7 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const bodies = ['codeOnly', 'matchParen', 'sliceSourceCallAt', 'sliceFitChain', 'sliceFitCall', 'sliceFitCycles', 'prFitCycles']
+const bodies = ['codeOnly', 'blockOwnCode', 'matchParen', 'sliceSourceCallAt', 'sliceFitChain', 'sliceFitCall', 'sliceFitCycles', 'prFitCycles']
   .map(grab)
   .join('\n\n');
 

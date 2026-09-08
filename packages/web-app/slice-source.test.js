@@ -36,7 +36,7 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const bodies = ['codeOnly', 'matchParen', 'sliceSourceCallAt', 'sliceIndexList', 'sliceRefFrom', 'sliceChainSourceAt']
+const bodies = ['codeOnly', 'blockOwnCode', 'matchParen', 'sliceSourceCallAt', 'sliceIndexList', 'sliceRefFrom', 'sliceChainSourceAt']
   .map(grab)
   .join('\n\n');
 // eslint-disable-next-line no-new-func

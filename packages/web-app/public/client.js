@@ -1214,14 +1214,31 @@ function codeOnly(code) {
   return (idx) => !mask || mask[idx] === 1;
 }
 
+// `codeOnly` plus the one rule a group adds: whether an offset is code belonging to `block` ITSELF.
+// `drums: group({ kick: s("bd").fx("Pro-C 2") }).fx("FilterFreak1")` holds other tracks inside its
+// braces, and their synth/fx/slices/preset calls are theirs - the group's own chain is what sits
+// around them. splitLabeledBlocks blanks the body out of `block.code` for exactly this reason; the
+// scans that walk the document text between block.start and block.end (they want absolute offsets)
+// get the same rule from here, so the group's `.fx()` is slot 1 rather than however many the
+// tracks inside it happen to have.
+function blockOwnCode(code, block) {
+  const isCode = codeOnly(code);
+  const from = block?.bodyStart;
+  if (from == null) return isCode;
+  const to = block.bodyEnd;
+  return (idx) => isCode(idx) && (idx < from || idx >= to);
+}
+
 // Locates the synth(...) call (slot 0) or the slot-th .fx(...) call inside a track's block and
-// returns where its `{ state }` argument goes: [afterFirstArg, closeParen). Commented-out calls
-// are skipped entirely - they neither match nor count towards the .fx() numbering, so the slots
-// here are the slots the evaluated chain has.
-function findChainCall(code, from, to, slot) {
+// returns where its `{ state }` argument goes: [afterFirstArg, closeParen). Commented-out calls -
+// and, in a group, the calls belonging to the tracks inside its braces - are skipped entirely:
+// they neither match nor count towards the .fx() numbering, so the slots here are the slots the
+// evaluated chain has.
+function findChainCall(code, block, slot) {
+  const { start: from, end: to } = block;
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = from;
-  const isCode = codeOnly(code);
+  const isCode = blockOwnCode(code, block);
   let m;
   let fxSeen = 0;
   while ((m = re.exec(code)) && m.index < to) {
@@ -1255,13 +1272,14 @@ function firstStringLiteral(code, from, to) {
   return null;
 }
 
-// Finds an existing `.param("name", <value>)` call for `name` within [from, to) and returns the
-// character range of its value argument (after the separator comma, up to the close paren), so
+// Finds an existing `.param("name", <value>)` call for `name` on `block`'s own chain and returns
+// the character range of its value argument (after the separator comma, up to the close paren), so
 // conf can overwrite the value in place instead of appending a duplicate. null if not present.
-function findParamCall(code, from, to, name) {
+function findParamCall(code, block, name) {
+  const { start: from, end: to } = block;
   const re = /\.param\s*\(/g;
   re.lastIndex = from;
-  const isCode = codeOnly(code);
+  const isCode = blockOwnCode(code, block);
   let m;
   while ((m = re.exec(code)) && m.index < to) {
     if (!isCode(m.index)) continue; // a commented-out .param() keeps its value; write a live one
@@ -1397,7 +1415,7 @@ function writePluginState(trackLabel, slot, state, plugin, preset) {
 // be two descriptions of one sound, the pinned one silently ignored (see Scheduler#setPattern).
 function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   const block = blockForTrack(code, trackLabel);
-  const call = block && findChainCall(code, block.start, block.end, slot);
+  const call = block && findChainCall(code, block, slot);
   if (!call) {
     // The call was renamed or deleted between the gesture and the capture. Nothing to write to;
     // the next edit in that plugin captures again.
@@ -1453,8 +1471,8 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
 // { label, slot, plugin, state, afterFirstArg, closeParen }, or null. One at a time: every
 // conversion moves the offsets below it, so the caller converts and looks again.
 function findLegacyStateCall(code) {
-  const isCode = codeOnly(code);
   for (const block of labelsMod.splitLabeledBlocks(code)) {
+    const isCode = blockOwnCode(code, block); // a group's braces hold other blocks' calls, not its own
     const re = /\b(synth|fx)\s*\(/g;
     re.lastIndex = block.start;
     let m;
@@ -1795,12 +1813,12 @@ function upsertParam(trackLabel, slot, name, value) {
   const block = blockForTrack(code, trackLabel);
   if (!block) return;
   // Overwrite an existing .param() for this name, else insert one targeting the touched slot.
-  const existing = findParamCall(code, block.start, block.end, name);
+  const existing = findParamCall(code, block, name);
   if (existing) {
     cm.replaceRange(` ${value}`, cm.posFromIndex(existing.valueStart), cm.posFromIndex(existing.valueEnd));
     return;
   }
-  const call = findChainCall(code, block.start, block.end, slot);
+  const call = findChainCall(code, block, slot);
   if (!call) {
     logLine(`conf: couldn't find slot ${slot}'s call in "${trackLabel}" - re-evaluate and try again`, true);
     return;
@@ -2029,9 +2047,13 @@ function withParamAddrs(params) {
 function paramHints(cur, typed, textBefore, editor) {
   // A `.param(` call targets whatever is last in the chain at that point of the method chain:
   // slot 0 (the instrument) before any .fx(), then slot 1, 2, … after each. Count `.fx(`
-  // occurrences between the block start and the cursor to mirror that rule.
+  // occurrences between the block start and the cursor to mirror that rule - skipping a group's
+  // braces, since the chains inside them belong to the tracks nested there and the group's own
+  // slots number around them (the rule findChainCall follows too).
   const block = blockAtCursor(editor);
-  const sinceBlockStart = block ? textBefore.slice(block.start) : textBefore;
+  const sinceBlockStart = block
+    ? textBefore.slice(block.start, block.bodyStart) + (block.bodyEnd == null ? '' : textBefore.slice(block.bodyEnd))
+    : textBefore;
   const slot = (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
   // This track's slot; failing that, whatever is loaded at that slot anywhere.
   const entry =
@@ -2792,7 +2814,7 @@ function findChainHandleAt(code, idx) {
   if (!block) return null;
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = block.start;
-  const isCode = codeOnly(code);
+  const isCode = blockOwnCode(code, block);
   let m;
   let fxSeen = 0;
   while ((m = re.exec(code)) && m.index < block.end) {
@@ -3625,7 +3647,7 @@ function presetTargetAt(code, idx) {
   if (!labelsMod) return null;
   const block = labeledBlocksFor(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
-  const isCode = codeOnly(code);
+  const isCode = blockOwnCode(code, block);
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = block.start;
   let m;
@@ -14599,7 +14621,7 @@ function sliceCallOnChain(code, idx) {
   if (!labelsMod) return null;
   const block = labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
-  const isCode = codeOnly(code);
+  const isCode = blockOwnCode(code, block);
   const re = /\bslices\s*\(/g;
   re.lastIndex = block.start;
   let m;
@@ -14623,7 +14645,7 @@ function sliceSourceCallAt(code, idx) {
   if (!labelsMod) return null;
   const block = labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
-  const isCode = codeOnly(code);
+  const isCode = blockOwnCode(code, block);
   const re = /\b(sp|se|sr|s)\s*\(\s*(["'`])((?:\\.|(?!\2)[\s\S])*?)\2/g;
   re.lastIndex = block.start;
   let m;
