@@ -56,7 +56,7 @@ test('a chosen pattern option plays in full for its cycle', () => {
   assert.ok(sawPattern && sawConstant, 'both options came up');
 });
 
-test('choose() honours weights', () => {
+test('choose() honors weights', () => {
   const c = choose([1, 99], [2, 1]);
   let ones = 0;
   for (let cyc = 0; cyc < 200; cyc++) if (c.stepsForCycle(cyc)[0].value === 1) ones++;

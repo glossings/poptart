@@ -86,11 +86,11 @@ test('the seed survives every transform that rebuilds the IR', () => {
   }
 });
 
-test('rand() is unsmoothed - neighbouring reads are independent draws', () => {
+test('rand() is unsmoothed - neighboring reads are independent draws', () => {
   resetRandomSeeds();
   // The distinguishing property, and the whole point of the control: reading rand() twice a
   // 64th apart gives two unrelated numbers, so per-event sampling is a fresh coin every event.
-  // Smoothed noise would creep between neighbours instead (see perlin below).
+  // Smoothed noise would creep between neighbors instead (see perlin below).
   const jumpiness = (sig) => {
     const vals = Array.from({ length: 64 }, (_, k) => Number(sig.sample(k / 64, 1, k / 64)));
     const gaps = vals.slice(1).map((v, k) => Math.abs(v - vals[k]));

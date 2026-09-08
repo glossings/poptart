@@ -82,7 +82,7 @@ test('deviceToOpen: a configured aggregate that does not exist falls back and sa
 });
 
 test('deviceToOpen: an unreadable layout leaves the aggregate trusted', () => {
-  // No helper, no layout, nothing to check against - the old behaviour, rather than second-guessing
+  // No helper, no layout, nothing to check against - the old behavior, rather than second-guessing
   // an aggregate we cannot see inside.
   const { device } = deviceToOpen({
     devices, wanted: 'MacBook Pro Speakers', inputUids: [blackhole.uid], aggregateUid: AGG, layout: null,

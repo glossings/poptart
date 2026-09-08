@@ -38,7 +38,7 @@ const drag = (k, want, opts = {}) => settleSeamDrag({
   total: opts.total ?? TOTAL,
 });
 
-test('a seam trades between its two neighbours, leaving the far one alone', () => {
+test('a seam trades between its two neighbors, leaving the far one alone', () => {
   const { size, fold } = drag(0, 150);
   assert.deepEqual(size, [150, 150, 100]);
   assert.deepEqual(fold, [false, false, false]);
@@ -53,7 +53,7 @@ test('the sizes always add up to the total, however far the seam is pushed', () 
   }
 });
 
-test('pushing past a neighbour folds it and hands the squeeze to the next one out', () => {
+test('pushing past a neighbor folds it and hands the squeeze to the next one out', () => {
   const { size, fold } = drag(0, 340); // no room left for the decks at their minimum
   assert.deepEqual(fold, [false, true, false], 'the decks fold, the mixer takes the squeeze');
   assert.equal(size[1], RAIL);
@@ -86,11 +86,11 @@ test('pulling back unfolds in the order the push folded, at the sizes it started
   assert.deepEqual(pushed.fold, [false, true, true]);
   // Back the other way through the same gesture (fold0 is the drag's START state throughout).
   assert.deepEqual(drag(0, 340).fold, [false, true, false], 'the far one comes back first');
-  assert.deepEqual(drag(0, 150).fold, [false, false, false], 'then the neighbour');
+  assert.deepEqual(drag(0, 150).fold, [false, false, false], 'then the neighbor');
   assert.deepEqual(drag(0, 150).size, [150, 150, 100], 'and every region is where it began');
 });
 
-test('a region dragged under its own minimum folds, and its space goes to its neighbour', () => {
+test('a region dragged under its own minimum folds, and its space goes to its neighbor', () => {
   const { size, fold } = drag(0, 10);
   assert.deepEqual(fold, [true, false, false]);
   assert.equal(size[0], RAIL);

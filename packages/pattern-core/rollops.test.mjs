@@ -74,14 +74,14 @@ test('invertPitch: chromatic mirrors about the range midpoint, in key about the 
   assert.deepEqual(invertPitch(up, { scale: 'c major' }).map((n) => n.midi), [65, 64, 62, 60]);
 });
 
-test('spreadPitch: away from / toward the centre, in degrees or semitones, never crossing', () => {
+test('spreadPitch: away from / toward the center, in degrees or semitones, never crossing', () => {
   const triad = [N(60, 0), N(64, 0), N(67, 0)];
   assert.deepEqual(spreadPitch(triad, { scale: 'c major', steps: 1 }).map((n) => n.midi), [59, 64, 69], 'C E G -> B E A');
-  assert.deepEqual(spreadPitch(triad, { steps: 1 }).map((n) => n.midi), [59, 65, 68], 'chromatic: a semitone away from the 63.5 centre - E is above it');
+  assert.deepEqual(spreadPitch(triad, { steps: 1 }).map((n) => n.midi), [59, 65, 68], 'chromatic: a semitone away from the 63.5 center - E is above it');
   assert.deepEqual(spreadPitch(triad, { scale: 'c major', steps: -1 }).map((n) => n.midi), [62, 64, 65], 'contract: D E F');
   const pair = [N(60, 0), N(62, 0)];
   assert.deepEqual(spreadPitch(pair, { scale: 'c major', steps: -3 }).map((n) => n.midi), [60, 62], 'a pair contracting stops at its own two sides');
-  assert.deepEqual(spreadPitch(pair, { steps: -1 }).map((n) => n.midi), [61, 61], 'chromatic pair with an integer centre meets there');
+  assert.deepEqual(spreadPitch(pair, { steps: -1 }).map((n) => n.midi), [61, 61], 'chromatic pair with an integer center meets there');
 });
 
 test('conformToScale: everything in key', () => {
@@ -186,7 +186,7 @@ test('variation: the axes are what "varied" means - each one alone changes only 
   assert.deepEqual(filled.slice(0, 8).map((n) => [n.midi, n.start]), bar.map((n) => [n.midi, n.start + 16]), 'add alone: the originals are verbatim');
 });
 
-test('variation: pitch depth bounds the step, and an addition takes its neighbour\'s length', () => {
+test('variation: pitch depth bounds the step, and an addition takes its neighbor\'s length', () => {
   const bar = Array.from({ length: 8 }, (_, i) => N(60 + (i % 4) * 2, i * 2, 2));
   const opts = { len: 16, temperature: 1, seed: 3, scale: 'c major', drop: 0, time: 0, pitch: 0, vel: 0, add: 0 };
   const near = variation(bar, { ...opts, pitch: 1, depth: 1 }).notes.slice(8);

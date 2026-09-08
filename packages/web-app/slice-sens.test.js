@@ -5,7 +5,7 @@
 // The slider's travel is a POSITION and the sensitivity is geometric, because sensitivity is a
 // ratio: halving it doubles what a peak has to clear. A linear 0.25..4 put 1 - the value a sample
 // with no set of its own chops on - a fifth of the way along, with the whole quiet end of the range
-// crammed to its left (reported 2026-09-04). Centred and geometric, each sixth of the travel is
+// crammed to its left (reported 2026-09-04). Centered and geometric, each sixth of the travel is
 // one halving in either direction.
 //
 // The ends have to be the detector's own clamp: a slider that ran past it would have a dead zone,

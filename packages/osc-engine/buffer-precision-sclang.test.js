@@ -6,7 +6,7 @@
 // BufRd travels an audio wire, and a wire is float32. Above 2^23 frames - ~190s at 44.1k - the
 // gap between representable values is a whole frame, so a read that should advance 0.91875 frames
 // per output sample (a 44.1k file on poptart's 48k server) instead lurches 1,1,1,1,0,1,1... and
-// the interpolation has nothing left to interpolate. The result is a nearest-neighbour hold with
+// the interpolation has nothing left to interpolate. The result is a nearest-neighbor hold with
 // irregularly repeated frames: gritty aliasing, on exactly the material a DJ set is made of.
 //
 // The fix, everywhere, is the same idiom: the running phase lives in PlayBuf's internal double;

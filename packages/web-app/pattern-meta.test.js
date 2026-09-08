@@ -95,7 +95,7 @@ test('a bare @key with no value is not a tag', () => {
   assert.deepEqual(meta.tags, []);
 });
 
-test('deriveLabel takes the first labelled block, minus any mute/solo prefix', () => {
+test('deriveLabel takes the first labeled block, minus any mute/solo prefix', () => {
   assert.equal(deriveLabel('bass: note("c2")\nlead: n("0")'), 'bass');
   assert.equal(deriveLabel('_drums: s("bd")'), 'drums');
   assert.equal(deriveLabel('Slead: n("0")'), 'lead');

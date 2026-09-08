@@ -39,7 +39,7 @@ function clear() {
   for (const e of fs.readdirSync(DIR)) fs.rmSync(path.join(DIR, e), { recursive: true, force: true });
 }
 
-test('the root honours the environment override', () => {
+test('the root honors the environment override', () => {
   assert.equal(recordingsRoot(), DIR);
 });
 

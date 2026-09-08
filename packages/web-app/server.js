@@ -50,6 +50,11 @@ let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.j
 let engineError = null;
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
+// The keys inside a real GROUP (written inside a `group({ ... })` body - see groups.mjs): their
+// audio goes into the group's bus and the group's track is the one the desk shows and gates - so
+// these never get a fader or a swap gate of their own. Reaching only the implicit `main` root
+// doesn't count (or a mastered buffer would have one strip). Refilled per deck by each evaluation.
+const groupMembers = new Set();
 
 // Engine tracks are keyed by opaque ids ("#1", "#2", ...), not labels, so a track can be
 // re-labeled (deck promotion, in the performance-mixing work - see TODO.md) without any engine
@@ -250,7 +255,7 @@ function mixGateAll(deck) {
 }
 
 function* mixKeys() {
-  yield* schedulers.keys();
+  for (const key of schedulers.keys()) if (!groupMembers.has(key)) yield key;
   yield* songKeysLive();
 }
 
@@ -382,7 +387,7 @@ function songBaseRate(deck) {
 // songSync.syncOctave), and the bpm its GRID counts in at that ratio: a 70 bpm song running
 // half-time under a 140 clock is aligned as a 140 - its eighths are the clock's beats, its
 // half-bars the clock's cycles. The deck whose song set the clock is the clock: its ratio is
-// 1 whatever the button says (the button is greyed for it), or a press there would re-pitch
+// 1 whatever the button says (the button is grayed for it), or a press there would re-pitch
 // the master against itself.
 let songMasterDeck = null; // the deck whose song last took the grid (see /api/song/play)
 function songOctave(deck) {
@@ -1150,7 +1155,7 @@ function deviceToOpen(devices) {
 // The output-channel picture for the settings tab and for loadEngine: how many channels the device
 // that would be opened can actually be heard on, which of those .o(n) is allowed to use, and the
 // counts the tab may offer. One function so the tab can never show a choice the engine would not
-// honour.
+// honor.
 function outputChannelState(devices = audioOutputDevices()) {
   const args = {
     devices,
@@ -1563,7 +1568,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'pianoroll', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pianoroll', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
@@ -1625,7 +1630,16 @@ const HOST_BUILDERS = { setbpm, setscale };
 // ctrl+A. Bound, undocumented, and identical in effect, purely so a patch written before the change
 // still plays; the painter rewrites the call the first time it opens one (see arMigrateLegacy in
 // client.js), and nothing writes this spelling any more.
-const LEGACY_BUILDERS = { arrange: (str = '', opts = {}) => patternCore._arrange(str, opts) };
+const LEGACY_BUILDERS = {
+  arrange: (str = '', opts = {}) => patternCore._arrange(str, opts),
+  // `_groups({...})` held the group tree as data for a few days before membership moved into the
+  // braces of `group({ ... })` itself. The call is inert now; bound so a buffer from that window
+  // still evaluates, and the log says what to write instead.
+  _groups: () => {
+    eventLogQueue.push('[groups] _groups(...) does nothing any more - a group holds its members inside its braces: name: group({ ... }). Delete the call and cmd+G the tracks instead.');
+    return { poptartGroupsBlock: true };
+  },
+};
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
 // with the loop regions' wraps and releases recorded in it. Built by the arrangement pass of
@@ -3388,7 +3402,6 @@ const routes = {
     // build below gets to the end (see the catch): an evaluation that throws applies nothing, so
     // the tracks still playing must still find the definitions they resolve by name each cycle.
     patternCore.setDefOwner(deck);
-    patternCore.clearRollOwners(); // which tracks draw a roll is answered by THIS evaluation
     const definitionsBefore = patternCore.clearRolls('buffer', deck);
     // Enter the eval with NO key in force: the buffer's own setscale (hoisted below, so it
     // runs before any pattern is built) is the only thing that sets one. Starting from the
@@ -3417,6 +3430,28 @@ const routes = {
     };
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
 
+    // copy("kick") is another block's pattern, evaluated FRESH - a full duplicate of the track,
+    // never a shared Sig (fx slots and track bindings ride the chain, and a copy must own its
+    // own). Resolved through pattern-core's hook because only this evaluator can see the buffer;
+    // the stack refuses copies that chase each other in a loop. Installed for this eval only.
+    const copyStack = [];
+    patternCore.setCopyResolver((label) => {
+      const target = blocks.find((b) => b.label === label);
+      if (!target) throw new Error(`copy(${JSON.stringify(label)}): no block by that name in this buffer`);
+      if (target.group) throw new Error(`copy(${JSON.stringify(label)}): ${label} is a group - a mixdown of other tracks, not a pattern - so copy one of its members instead`);
+      if (copyStack.includes(label)) throw new Error(`copy(${JSON.stringify(label)}): these copies form a loop (${[...copyStack, label].join(' -> ')})`);
+      copyStack.push(label);
+      try {
+        const value = evalBlock(target.code, target.start);
+        if (!(value instanceof patternCore.Sig) || value.isDef) {
+          throw new Error(`copy(${JSON.stringify(label)}): that block isn't a pattern`);
+        }
+        return value;
+      } finally {
+        copyStack.pop();
+      }
+    });
+
     // setscale is HOISTED: every block that is nothing but a `setscale(...)` call runs here, in
     // document order, before any pattern is built - so the LAST one in the buffer is the key the
     // whole buffer plays in, and a `.sc()` pattern written ABOVE it follows it too. A hoisted call
@@ -3437,9 +3472,6 @@ const routes = {
 
       evaluated = blocks.map((b) => {
         try {
-          // Which track is being built, for the pieces of a pattern that belong to the track rather
-          // than to the call - the arrangement's per-clip roll rebinding (see signal.mjs).
-          patternCore.setBlockLabel(b.label, deck);
           const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
           // Only an explicitly *named* block promises sound. Anything anonymous (bare code
           // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
@@ -3447,7 +3479,8 @@ const routes = {
           // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
           // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
           const isPattern = value instanceof patternCore.Sig;
-          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value?.poptartArrangeBlock;
+          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK
+            || value?.poptartArrangeBlock || value?.poptartGroupsBlock;
           if (!isPattern && !setupValue && !b.label.startsWith('$')) {
             throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
           }
@@ -3461,8 +3494,6 @@ const routes = {
           return { ...b, sig: value };
         } catch (err) {
           throw new Error(`${b.label}: ${err.message ?? err}`);
-        } finally {
-          patternCore.setBlockLabel(null, deck);
         }
       });
 
@@ -3487,12 +3518,14 @@ const routes = {
       // every roll/shape/preset defined BELOW it out of the registry, and the tracks that are
       // still playing (which resolve them by name, lazily) fall silent on a buffer nobody meant
       // to change.
+      patternCore.setCopyResolver(null);
       patternCore.restoreRolls(definitionsBefore, 'buffer', deck);
       patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
       decks[deck].scale = patternCore.globalScale();
       patternCore.setGlobalScale(decks.a.scale ?? null); // the global holds the main deck's key at rest
       throw err;
     }
+    patternCore.setCopyResolver(null); // copies are resolved at build time; nothing later may reach back
     patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
     // What setscale() left in force is this deck's key; the global goes back to holding the main
     // deck's, which is what every non-eval reader (/api/status, live-note quantization) means.
@@ -3518,6 +3551,21 @@ const routes = {
     // signal.mjs's isDef). Anything derived from one (`roll(0, "…").synth(…)`) has lost the mark
     // and plays as normal.
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
+
+    // Groups: a block headed by group({...}) reads the bus named after it, and every track written
+    // inside its braces sends there (see pattern-core's groups.mjs). The tree IS the structure the
+    // splitter read - each block's `parent` field - so nothing in a member's own code says where it
+    // goes and nothing can fall out of step with the buffer. The bus is named by the engine KEY,
+    // so deck b's `kick` has a bus of its own.
+    const groupTree = patternCore.treeOfBlocks(built);
+    const routed = patternCore.routeGroups(built, (label) => keyOfBlock(label), groupTree);
+    // What the desk shows: a track inside a real group is not its own channel - its group's fader,
+    // mute and gate take it. Reaching the implicit `main` root doesn't hide anything, or a buffer
+    // with a mastering chain would have no strips at all.
+    for (const key of [...groupMembers]) if (deckOfKey(key) === deck) groupMembers.delete(key);
+    for (const [label, parent] of routed.routedParents) {
+      if (parent !== patternCore.GROUP_ROOT) groupMembers.add(keyOfBlock(label));
+    }
 
     // The arrangement pass: with an arrangement in the buffer every TRACK is one of its rows, so
     // each plays only inside its clips - the bare loop it was is gated to the part it has become
@@ -3545,37 +3593,49 @@ const routes = {
         arrangeClocks[deck].key = clockKey;
       }
       const clock = arrangeClocks[deck];
+      // `arrangeFrom`: play from this bar of the song (the painter's marker) rather than wherever
+      // the clock sits - anchored at the cycle the transport is about to start from, which after a
+      // stop is 0. Done here, on the clock this eval plays by, so it can't race the eval.
+      if (body.arrangeFrom != null && Number.isFinite(Number(body.arrangeFrom)) && transport) {
+        const at = clock.seek(transport.cycleAt(engine ? engine.getTime() : transport.getTime()), Number(body.arrangeFrom));
+        eventLogQueue.push(`[arrange] playing from bar ${Math.round(at * 100) / 100}`);
+      }
       const posAt = (c) => clock.posAt(c);
       for (const b of built) {
         const painted = spans.get(b.label);
         // A BARE column-0 pattern (see labels.mjs's kinds) is setup that happens to make a sound,
         // and the painter gives it no row - so it can never have been emptied on purpose, and
         // silencing it for clips it had no way to get would be a part disappearing for nothing.
+        // A GROUP with nothing painted passes through un-gated too: its sound is its members, who
+        // gate themselves on their own rows, so the group's effective arrangement is the union of
+        // theirs until somebody paints its row - and then the clips gate the whole submix.
         // Written tracks - named or `$:` - take the rule as it stands: no clips means silence.
-        if (!painted && b.kind === 'bare') continue;
+        if (!painted && (b.kind === 'bare' || routed.groups.has(b.label))) continue;
         b.sig = b.sig._arrangeGate(painted ?? [], posAt);
       }
-      // ...and the clips that name a roll of their own rebind their track's, cycle by cycle (see
-      // withArrangeRoll in signal.mjs). Filed rather than built in, so painting a fill re-files a
-      // map instead of rebuilding the track - and read lazily, so a roll drawn after the clip that
-      // names it is found anyway. A binding on a track with no roll to swap can only be a mistake
-      // worth naming: it plays exactly as if the clip had never been bound.
-      const bindings = patternCore.arrangementRollBindings(clips);
-      const owners = patternCore.rollOwners();
-      for (const label of bindings.keys()) {
-        if (labels.has(label) && !owners.has(label)) {
-          eventLogQueue.push(`[arrange] ${JSON.stringify(label)} has clips bound to a roll, but its block plays no pianoroll() - the bindings do nothing`);
-        }
-      }
-      patternCore.setArrangeRolls(bindings, posAt, deck);
     } else {
       arrangeClocks[deck] = null;
-      patternCore.setArrangeRolls(null, null, deck);
     }
 
-    // Solo wins over everything except mute: if anything is soloed, only soloed patterns play.
-    const anySolo = built.some((b) => b.soloed && !b.muted);
-    const active = built.filter((b) => !b.muted && (!anySolo || b.soloed));
+    // Mute and solo travel DOWN the group tree: a marker sits on one label, but a group is the
+    // tracks under it, so `_drums:` silences the whole kit and `Sdrums:` solos it. Mute wins over
+    // solo, as it always has, and it wins wherever it is written - a muted member stays silent
+    // inside a soloed group.
+    const muted = new Set();
+    const soloed = new Set();
+    for (const b of built) {
+      if (!b.muted && !b.soloed) continue;
+      const reach = [b.label, ...patternCore.descendantsOf(b.label, groupTree)];
+      for (const label of reach) (b.muted ? muted : soloed).add(label);
+    }
+    // ...and solo travels UP it as well: a soloed track is only audible through the groups it mixes
+    // into, so each of them has to play too. Its SIBLINGS don't - that is what soloing means.
+    for (const label of [...soloed]) {
+      for (const up of patternCore.ancestorsOf(label, routed.routedParents)) soloed.add(up);
+    }
+    const isMuted = (b) => muted.has(b.label);
+    const anySolo = built.some((b) => soloed.has(b.label) && !isMuted(b));
+    const active = built.filter((b) => !isMuted(b) && (!anySolo || soloed.has(b.label)));
 
     // Stop tracks whose label disappeared (or that are now muted / un-soloed) - within THIS
     // deck only: the other deck's tracks are not in this buffer, and this eval must not touch
@@ -3612,7 +3672,7 @@ const routes = {
       // The first song of the session (other deck empty) plays normally, and only genuinely NEW
       // stems are gated - a re-eval of a playing deck must not mute what is already sounding.
       // Recorded (not just applied) so its gate shows OFF.
-      if (mixState.swap && !schedulers.has(key)
+      if (mixState.swap && !schedulers.has(key) && !groupMembers.has(key)
         && [...schedulers.keys()].some((k) => deckOfKey(k) !== deck)
         && !mixState.perTrack.get(key)?.has('fader')) {
         let per = mixState.perTrack.get(key);
@@ -3684,7 +3744,7 @@ const routes = {
       body: {
         cps: transport.cps,
         transport: transport.snapshot(),
-        scale: deckScale, // what setscale() left in force for this deck - the piano roll colours by it
+        scale: deckScale, // what setscale() left in force for this deck - the piano roll colors by it
         arrange: arrangeClocks[deck]?.snapshot() ?? null, // the song clock the painter's playhead runs
         deck,
         deckBpm: deckNativeBpm(deck),
@@ -3693,8 +3753,10 @@ const routes = {
         tracks: built.map((b) => ({
           label: b.label,
           key: keyOfBlock(b.label), // what this track is called server-side (deck b keys are "b:<label>")
-          muted: b.muted,
-          soloed: b.soloed,
+          // The EFFECTIVE flags - a member of a muted group reads as muted, which is what the
+          // mixer's buttons and the editor's dimmed code both want to show.
+          muted: muted.has(b.label),
+          soloed: soloed.has(b.label),
           active: active.includes(b),
           start: b.start,
           end: b.end,
@@ -3734,8 +3796,13 @@ const routes = {
     },
   }),
 
-  // The arrangement's song clock, for a painter opened after the eval that built it.
-  'GET /api/arrange': async () => ({ status: 200, body: { arrange: arrangeClocks.a?.snapshot() ?? null } }),
+  // The arrangement's song clock, for a painter opened after the eval that built it. Query `deck`
+  // says whose: in DJ mode the painter is opened against one of the two, and each has run its own
+  // clock since arrangeClocks became a pair.
+  'GET /api/arrange': async (query) => ({
+    status: 200,
+    body: { arrange: arrangeClocks[query?.deck === 'b' ? 'b' : 'a']?.snapshot() ?? null },
+  }),
 
   // ctrl+L: release the loop region the playhead is in, so playback runs on to the next armed one.
   // Body: { deck? }. Returns the region released (null if none was looping) and the clock after.

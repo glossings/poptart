@@ -251,6 +251,7 @@
           <ul>
             <li><code>_bass:</code> (or <code>bass_:</code>) <strong>mutes</strong> a track without deleting it.</li>
             <li><code>Sdrums:</code> <strong>solos</strong> it — if anything is soloed, only soloed tracks play. Mute still wins.</li>
+            <li>Select a few tracks and press <strong>⌘G</strong> to put them in a <strong>group</strong> — the editor wraps them in <code>name: group({ … })</code>, the mixdown they all send into (see <a href="#s4">arranging</a>). The braces are the membership: no side table, nothing hidden. Groups nest, fold away in the gutter, and muting or soloing one takes everything under it along.</li>
           </ul>
           <p>
             <code>$:</code> is a track you didn't feel like naming — it plays like any other and gets
@@ -431,7 +432,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><td>move / resize / copy</td><td>drag · drag the right edge · <strong>option</strong>-drag</td></tr>
             <tr><td>nudge</td><td>arrow keys; <strong>shift</strong>+↑↓ an octave, <strong>shift</strong>+←→ lengthens/shortens</td></tr>
             <tr><td>velocity</td><td><strong>cmd</strong>-drag up/down</td></tr>
-            <tr><td>mute a note</td><td><strong>0</strong> — it greys out and stays (a <code>!</code> in the code); <strong>0</strong> again un-mutes</td></tr>
+            <tr><td>mute a note</td><td><strong>0</strong> — it grays out and stays (a <code>!</code> in the code); <strong>0</strong> again un-mutes</td></tr>
             <tr><td>clipboard</td><td><strong>cmd-C / X / V / D</strong> — into another roll too</td></tr>
             <tr><td>quantize</td><td><strong>ctrl+Q</strong> — pick a division; onsets snap, nudges clear, buried notes go</td></tr>
             <tr><td>undo</td><td><strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> while the grid has focus</td></tr>
@@ -504,45 +505,106 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           </p>
           <h4>Arranging: painting parts into a song</h4>
           <p>
-            Every labelled block loops forever. To turn loops into a song, press
-            <strong>ctrl+A</strong>: a playlist opens with one row per track — your labelled blocks
-            and your <code>$:</code> ones, in the order you wrote them — and bars along the top.
+            Every labeled block loops forever. To turn loops into a song, press
+            <strong>ctrl+A</strong>: the arrangement takes the editor's place — one row per track, your labeled
+            blocks and your <code>$:</code> ones in the order you wrote them, bars along the top.
             Setup at column 0 (<code>setbpm(140)</code>, a shared <code>const</code>) is not a track
-            and gets no row. The first time, every track is
-            filled edge to edge, so nothing sounds different until you carve: click-drag on a row to
-            paint a clip, and that track plays <em>only</em> inside its clips. A row you empty is
-            silent. A track you type later joins the arrangement filled, the same way, so arranging
-            never quietly takes a part away from you.
+            and gets no row. What you paint is kept in the buffer as a folded
+            <em>⋯ arrangement</em> chip — nobody types it, the same way nobody types the
+            <em>pianorolls</em> block. The first time, every track is filled edge to edge, so
+            nothing sounds different until you carve: click-drag on a row to paint a clip, and that
+            track plays <em>only</em> inside its clips. A row you empty is silent. A track you type
+            later joins the arrangement filled, the same way, so arranging never quietly takes a
+            part away from you. ctrl+A again takes you back — onto the
+            block of whichever clip you had selected.
+          </p>
+          <p>
+            <strong>Groups.</strong> Select a few tracks and press <strong>⌘G</strong> (or
+            right-click → <strong>group these tracks…</strong>), give the group a name, and they
+            mix as one: the editor wraps them in <code>name: group({ … })</code>. The braces
+            <em>are</em> the membership — where a track is written is what it belongs to, so
+            there is no side table to fall out of step, regrouping never renames, and code with no
+            <code>group()</code> anywhere is exactly what it says: ungrouped tracks, routed as
+            they always were. Groups <em>nest</em> — a group block sits inside another's braces:
+            wrap your kick tracks as <code>kick</code>, then <code>kick</code>, <code>snare</code>
+            and <code>hats</code> as <code>drums</code>. Within a loop, <code>&lt;a b&gt;</code>,
+            <code>.when()</code> and <code>.preset("&lt;a b&gt;")</code> are still the way to vary
+            a pattern; a second track in a group is for a <em>section</em> — a fill, an outro, a
+            chorus that adds a layer — and costs an instance of whatever the block loads. And
+            <code>copy("kick")</code> is a whole track duplicated programmatically —
+            <code>kick2: copy("kick").fast(2)</code> is everything kick is, twice as fast, and
+            <code>pianoroll("kickB").copy("kick")</code> is kick's chain playing a different roll.
+          </p>
+          <pre><code>kick: group({
+  kickMain: s(<span class="s">"mbd*4"</span>)
+  kickFill: s(<span class="s">"mbd*4"</span>).i(3)
+}).postgain(<span class="n">0.8</span>)</code></pre>
+          <p>
+            <strong>The group is the mixdown.</strong> Every track in a group sends into the
+            group's bus and plays nothing directly, so a <code>.postgain()</code>, an
+            <code>.fx()</code> or a <code>.bus()</code> written on the group takes all of them, and
+            the mixer and the DJ desk show the group alone — one fader, one meter, one gate for the
+            lot (unfold a strip to reach what is inside). A subgroup sends into <em>its</em> group
+            in turn, and a bodyless <code>main: group()</code> is the root every ungrouped track
+            reaches — the place a mastering chain goes; without a <code>main:</code> block, tracks
+            play straight out as they always have. The group starts bare: what its tracks share is
+            moved up onto it by hand (its <code>.postgain()</code>, likely; an <code>.fx()</code>
+            may or may not be). The group's bus is named after the block itself, so renaming it
+            moves nothing; a grouped track's own <code>.dry()</code> is respected if it wants to
+            play directly as well. An empty group reads silence.
+          </p>
+          <p>
+            A group carries a <strong>caret</strong> in the gutter beside its own line: press it to
+            fold the braces' body away — subgroups and all — press it again to bring it back; the
+            group's own line and its chain stay on screen around the chip. It never
+            folds itself: a song that hides two thirds of itself every time you evaluate is hiding
+            the block you were writing. The same fold lives on the group's row in the arrangement,
+            and while it is shut the members' clips draw on the group's row, so a folded kit is one
+            line that still shows its shape. <code>_kick:</code> mutes the whole group;
+            <code>Skick:</code> solos it; a marker on one member reaches that member alone, heard
+            through its group. Right-click a group (in the code or on its row) to
+            <strong>ungroup</strong> it, or a member to take it out.
+          </p>
+          <p>
+            <strong>Painting.</strong> A row is a track, so the pencil paints wherever you put it —
+            no picking first. A group's row paints too: unpainted, the group simply passes its
+            tracks through (their clips show on its row as a faint ghost); paint it and the clips
+            gate the whole submix — a one-row way to bring the entire kit in and out. Only a row
+            whose block has gone takes no paint, and dims with the pencil in hand. To add another
+            track to a group, duplicate one of its blocks inside the braces, or paint the new track
+            and ⌘G it in after.
           </p>
           <p>
             <strong>A clip is a title and a body.</strong> The title along its top is the clip as a
-            thing: click to select it, drag to move it (onto another track's row too, which is how a
-            part moves between tracks), option-drag to duplicate. The body below is the
-            <em>time</em>: the bars run on through it, clicking puts the <strong>insert marker</strong>
-            there, and dragging marks a stretch of song — one that starts inside a clip and ends
-            wherever you let go, past its end or halfway through the next.
+            thing: click to select it, drag to move it (onto another track's row too — it becomes
+            that track's), option-drag to duplicate. The body below is the <em>time</em>: the bars
+            run on through it, clicking puts the <strong>insert marker</strong> there, and dragging
+            marks a stretch of song — one that starts inside a clip and ends wherever you let go,
+            past its end or halfway through the next. With playback stopped, <strong>⌘⏎</strong>
+            starts from the marker rather than from bar 0.
           </p>
           <p>
             From those two, the edits an arrangement is mostly made of: <strong>⌘E</strong> splits at
             the marker (or at both edges of a marked span, on every track it crosses), and
             <strong>⌘J</strong> makes one clip of what you have selected or marked. Drag an edge to
-            resize, ⌘D duplicates after, ⌘C / X / V move a stretch of song, ⌘Z undoes. Click a
-            track's name to select its row, double-click it to jump to its code. The arrangement
-            loops at the last clip's end, or drag in the ruler (or type <strong>len</strong>) to set
-            the length; <strong>snap</strong> sets how finely clips land,
-            <strong>+</strong>/<strong>−</strong> and ctrl+wheel zoom. Inside a clip the pattern runs
-            on absolute bar time, so a <code>&lt;a b&gt;</code> keeps alternating through the bars it
-            is painted out of.
+            resize, ⌘D duplicates after, ⌘C / X / V move a stretch of song, ⌘Z undoes. The
+            arrangement loops at the last clip's end, or drag in the ruler (or type
+            <strong>len</strong>) to set the length; <strong>snap</strong> sets how finely clips
+            land, <strong>+</strong>/<strong>−</strong> and ctrl+wheel zoom. Inside a clip the pattern
+            runs on absolute bar time, so a <code>&lt;a b&gt;</code> keeps alternating through the
+            bars it is painted out of.
           </p>
           <p>
-            <strong>A clip can play a different roll.</strong> Its title carries the name of the roll
-            it plays; double-click that name for a searchable list of every roll there is, and pick
-            one to bind these bars to it — type a name nothing has and you get a new roll, bound and
-            open to draw. That is how a fill, a variation or an alternate chorus is
-            <em>painted</em>: split the clip where the change happens (⌘E), give the piece its own
-            roll, draw it. Bind the same roll at the other phrase ends and it repeats exactly;
-            right-click → <strong>back to…</strong> puts a clip back on its track's own roll.
-            Double-click a clip's <em>body</em> to open whatever roll it plays in the piano roll.
+            <strong>Editing what a clip plays.</strong> A clip is a block, and double-clicking it
+            flips you to the code with the cursor on that block — where the part gets its sound,
+            with the editor's own completion and handles. ctrl+A comes straight back. Right-click →
+            <strong>rename…</strong> (or <strong>⌘R</strong> with a clip selected) renames the
+            block from the clip, its clips along with it (its group needs nothing — membership is
+            where the block sits). Renaming
+            a track by hand in the code is caught at the next evaluation and follows the same way.
+            The two halves of a split clip still play one block. <strong>color…</strong> picks a
+            color for every clip of that track (one you haven't colored takes a hue a step off its
+            group's).
           </p>
           <p>
             <strong>Loop regions</strong> make a song you can hold. Drag across the ruler to mark a
@@ -1074,7 +1136,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
-            <tr><td><strong>ctrl+A</strong></td><td>the arrangement painter: a row per track, painted clips say when each one sounds</td></tr>
+            <tr><td><strong>⌘G</strong> · <code>group({…})</code> · <strong>ctrl+A</strong></td><td>wrap the selected tracks in a group (the braces are the membership; groups nest, and <code>main: group()</code> is where mastering goes) · the mixdown the tracks in its braces send into · the arrangement page: a row per track, clips say when each plays, group rows fold their members away</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
             <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>
@@ -1114,7 +1176,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
             <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code> · <code>ctrl+b</code> · <code>ctrl+g</code></td><td>eval · stop · bounce · mixer</td></tr>
-            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code></td><td>the arrangement (again to close it) · release the loop region it is in</td></tr>
+            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code> · <code>ctrl+D</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode (the lit header button)</td></tr>
             <tr><td>right-click · <code>ctrl+J</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>

@@ -8,6 +8,11 @@ no completion notes.
 [ ] LUFS metering in the ctrl+g console — short-term and integrated, alongside the existing
     stereo/spectral views.
 
+[ ] Mixer analysis vs unfolded groups — main's 8-track analyzer cap (commit 2aeeedc, not on this
+    branch yet) picks which tracks get per-track analyzers. When that lands here at merge time:
+    an unfolded group's strip should drop OUT of consideration and its members take the slots —
+    the group's channels are on screen, so its own picture says nothing the members' don't.
+
 [ ] Patternable pitch bend — `.bend(sig)` sending MIDI pitch bend to a track's synth. The SC
     message path already exists (the live-MIDI pass-through calls ctl.midi.bend); the new piece
     is a poller bridging a modulator signal/bus to bend messages at ~50-100 Hz, plus the engine

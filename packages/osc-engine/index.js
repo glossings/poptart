@@ -290,7 +290,7 @@ class OscEngine {
     this.nodePort = nodePort;
     this.scPort = scPort;
     // An explicit path wins (programmatic intent, e.g. tests); otherwise auto-detect, which
-    // honours POPTART_SCLANG and the standard install locations.
+    // honors POPTART_SCLANG and the standard install locations.
     this.sclangPath = sclangPath || resolveSclangPath();
     this.outDevice = outDevice;
     this.outChannels = outChannels;
@@ -1431,7 +1431,7 @@ class OscEngine {
   // midikeys note-route. io 'audio': feed the source's audio into the chain input (sclang).
   //
   // `hwChans` is [left, right] absolute 0-indexed hardware channels for an input() source (right
-  // -1 = mono, centred engine-side), already resolved against the device layout in pattern-core;
+  // -1 = mono, centered engine-side), already resolved against the device layout in pattern-core;
   // null for a track/bus source or a legacy audio("dev:...") string, which default to channels 0+1.
   setInputSource(trackId, io, name, channel = 0, scalePcs = null, hwChans = null) {
     if (io === 'midi') {

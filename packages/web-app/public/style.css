@@ -218,7 +218,7 @@ header h1 {
   letter-spacing: 0.03em;
 }
 
-/* Every control in the header is one height and one radius, with its contents centred - a button,
+/* Every control in the header is one height and one radius, with its contents centered - a button,
    a select and the docs link read as one row of the same thing, whatever each is made of. The
    icons are spans of their own so they can be sized as glyphs (a ▶ or ↻ at text size is a speck)
    without the label growing with them. */
@@ -243,7 +243,7 @@ header .ico {
   font-size: 15px;
   line-height: 1;
   display: inline-block;
-  transform: translateY(-0.5px); /* optical centre: glyphs sit a hair low against lowercase text */
+  transform: translateY(-0.5px); /* optical center: glyphs sit a hair low against lowercase text */
 }
 
 #recBtn .ico {
@@ -401,7 +401,7 @@ button.small.conf-active {
   color: #1a1a1a;
 }
 
-/* Wide enough for the longest thing it says ("restarting engine…"), and centred inside that, so
+/* Wide enough for the longest thing it says ("restarting engine…"), and centered inside that, so
    the engine going from checking to ready never resizes the pill - which used to shove every
    header control along with it. */
 .status {
@@ -432,18 +432,17 @@ main {
   overflow: hidden;
 }
 
+/* The pane stacks its HEAD over the editor (mirroring deck B's pane), so the editor sizes by flex
+   under it rather than by the old single-child fill. Always, not only in DJ mode: the head carries
+   the pane's code | arrange switch now, and that is there whether or not there are two decks. */
 #editorPane {
   position: relative; /* the save flash overlays it */
   flex: 1;
   display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
-/* In DJ mode the pane stacks its deck head over the editor (mirroring deck B's pane), and the
-   editor sizes by flex under it instead of the default single-child fill. */
-body.mix-on #editorPane {
-  flex-direction: column;
-}
-body.mix-on #editorPane .CodeMirror {
+#editorPane .CodeMirror {
   height: auto;
   min-height: 0;
   flex: 1;
@@ -797,10 +796,10 @@ aside h2 {
 }
 
 /* The same confirmation for the buffer itself - the one that's on screen whether the sidebar is
-   showing the files tab, showing something else, or collapsed altogether. Mostly a coloured frame:
-   this fires on every Cmd+S, so it has to register without washing out the code. The colour is a
+   showing the files tab, showing something else, or collapsed altogether. Mostly a colored frame:
+   this fires on every Cmd+S, so it has to register without washing out the code. The color is a
    variable because the same overlay says two things: green for a save, red for an error logged
-   while the console is collapsed (see logLine) - one pulse, two meanings, told apart by colour. */
+   while the console is collapsed (see logLine) - one pulse, two meanings, told apart by color. */
 .save-flash {
   --flash: var(--ok);
   position: absolute;
@@ -1170,7 +1169,7 @@ footer#console {
 /* -------------------------------------------------- CodeMirror: poptart theme */
 
 /* The plain textarea CodeMirror upgrades on load. Until client.js runs - a handful of vendor
-   scripts later - this is what the editor pane paints, so it wears the editor's own colours;
+   scripts later - this is what the editor pane paints, so it wears the editor's own colors;
    left unstyled it flashed as a white sheet of black text on every refresh. CodeMirror hides it
    once it's up, so this only ever shows for that first frame. */
 #editor {
@@ -1187,8 +1186,8 @@ footer#console {
   resize: none;
 }
 
-/* Even in the right colours, that first frame showed the pattern as flat unhighlighted text, then
-   repainted it in colour, then - on a share/history URL, whose buffer arrives over the network -
+/* Even in the right colors, that first frame showed the pattern as flat unhighlighted text, then
+   repainted it in color, then - on a share/history URL, whose buffer arrives over the network -
    replaced it outright with the file actually being opened. The pane keeps its space and its
    background until all of that has settled, and the code appears once, already highlighted and
    already the right file. */
@@ -1219,6 +1218,34 @@ footer#console {
 .cm-s-poptart .CodeMirror-linenumber {
   color: var(--linenumber);
   padding: 0 12px 0 20px;
+}
+
+/* The GROUP carets: their own gutter between the line numbers and the code, where an editor's fold
+   controls have always been (see foldFamilies in client.js). A fixed width, so the code's left edge
+   holds still whether or not the song has a group in it - a gutter that sized to its content would
+   shift the whole buffer sideways the moment you made one. */
+.cm-s-poptart .poptart-group-fold {
+  width: 14px;
+}
+
+.cm-group-caret {
+  display: block;
+  width: 14px;
+  font-size: 9px;
+  text-align: center;
+  color: var(--linenumber);
+  cursor: pointer;
+  user-select: none;
+}
+
+.cm-group-caret:hover {
+  color: var(--accent);
+}
+
+/* Folded, the caret is the only thing on screen saying the members are still down there, so it
+   stays as legible as the code rather than fading back with the line numbers. */
+.cm-group-caret-folded {
+  color: var(--text-dim);
 }
 
 .cm-s-poptart .CodeMirror-cursor {
@@ -1254,6 +1281,13 @@ footer#console {
 
 .cm-s-poptart .cm-property {
   color: var(--syn-property);
+}
+
+/* A track label inside a group's braces: JavaScript calls it a property, but it is a label like
+   the top-level ones around it and wears their color (marked by client.js's markMemberLabels).
+   !important because the token's own .cm-property color sits on the same span. */
+.cm-s-poptart span.cm-member-label {
+  color: var(--syn-variable) !important;
 }
 
 .cm-s-poptart .cm-comment {
@@ -1315,6 +1349,9 @@ footer#console {
   font-size: 12px;
   padding: 4px;
   max-height: 22em;
+  /* Over the dialogs (40) and the panels (30 and up): the addon's own 10 put the list behind any
+     dialog's backdrop. The doc box rides at the same height. */
+  z-index: 100;
 }
 
 .CodeMirror-hint {
@@ -1344,7 +1381,7 @@ li.CodeMirror-hint-active {
 
 .doc-box {
   position: fixed;
-  z-index: 40;
+  z-index: 100; /* beside the hint list, at its height */
   max-width: 26em;
   padding: 8px 10px;
   background: var(--bg-panel);
@@ -1649,7 +1686,7 @@ li.CodeMirror-hint-active {
 
 /* --------------------------------------------------------------- lfo editor */
 
-/* Centred and sized like the piano roll panel, deliberately: they are the same kind of thing -
+/* Centered and sized like the piano roll panel, deliberately: they are the same kind of thing -
    a drawing surface you open over the code - and one of them appearing somewhere else each time
    is the sort of small inconsistency that costs a beat to re-find mid-set. */
 /* The preset panel: the same centered chrome as the lfo/record panels, but with nothing to draw -
@@ -2272,7 +2309,7 @@ li.CodeMirror-hint-active {
   margin-left: auto;
 }
 
-/* One height for the tool row, contents centred, so a glyph-sized button (⌨) and a word-sized one
+/* One height for the tool row, contents centered, so a glyph-sized button (⌨) and a word-sized one
    (fold) stand level. */
 .pianoroll-head-tools button {
   height: 22px;
@@ -2477,6 +2514,13 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
+/* The one exception to the 46px above: the ARRANGEMENT's length is bars, and it lands wherever the
+   snap grid does, so it is routinely a fraction - `12.75`, `128.25` - where the roll's grid and
+   length are always whole numbers. 46px clipped those. Same box otherwise; only the width moves. */
+#arrangeLen {
+  width: 68px;
+}
+
 /* Every dropdown that sits in a panel's HEADER row - the arrangement's snap, the LFO's shape
    presets - is this one shape, so two panels open side by side don't show two different chevron
    insets. Anything new in a header joins this list rather than inventing its own metrics. */
@@ -2496,7 +2540,7 @@ li.CodeMirror-hint-active {
 }
 
 /* A header control that doesn't apply to the axis on screen - `scale` on the index rows, where
-   there is no key. Greyed in place rather than removed: a toolbar that reshuffles itself under the
+   there is no key. Grayed in place rather than removed: a toolbar that reshuffles itself under the
    pointer is worse than a button that plainly isn't for here. */
 .pianoroll-panel-head button:disabled {
   opacity: 0.35;
@@ -2731,10 +2775,42 @@ li.CodeMirror-hint-active {
 /* --------------------------------------------- arrangement painter */
 
 /* Wider than the roll: the horizontal axis is whole bars and a song is many of them. */
+/* The arrangement is a PAGE, not a panel: it sits inside main in the editor pane's place, and
+   while it is up (body.arrange-on) the editor pane steps aside. It still wears the piano roll's
+   panel chrome for its header, which is why the class is shared; everything that made that chrome
+   a centered floating box is undone here. The view switch in the header is how you flip. */
 .arrange-panel {
-  width: 940px;
-  /* A backstop under arSizeCanvas's own budget: whatever it computes, the panel stays on screen. */
-  max-height: calc(100vh - 24px);
+  position: static;
+  z-index: auto; /* a flex item stacks by z-index even when static; the chrome's 30 would float the page over the dialogs */
+  transform: none; /* the chrome centers a floating panel by translating it half its size; a page stays put */
+  flex: 1;
+  width: auto;
+  max-width: none;
+  max-height: none;
+  min-width: 0;
+  min-height: 0; /* a flex item in the pane's COLUMN: without this the canvas floors its height */
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* The page fills ONE DECK's pane and no more: the panel is MOVED into that pane when it opens (see
+   openArrangeEditor), under the pane's own head, and what steps aside is the pane's body - the
+   editor, or the waveform when the deck holds a file.
+   Moving it rather than placing it with `order` is what keeps the pane's HEAD on screen: that head
+   carries the deck's code | arrange switch, and hiding the whole pane would take away the control
+   you press to get back. Outside DJ mode this reads exactly as it always has - one pane, the
+   arrangement in it; in a mix the other deck's code stays up beside it, which is the point. */
+body.arrange-on.arrange-deck-a #editorPane > .CodeMirror,
+body.arrange-on.arrange-deck-a #editorPane > .song-pane,
+body.arrange-on.arrange-deck-b #deckBPane > .CodeMirror,
+body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
+  display: none;
+}
+
+.arrange-panel .arrange-body {
+  flex: 1;
+  min-height: 0;
 }
 
 .arrange-body {
@@ -2758,12 +2834,6 @@ li.CodeMirror-hint-active {
      the panel clips what runs past its edge. */
   top: auto;
   bottom: calc(100% + 4px);
-}
-
-/* A clip's own list hangs the usual way round - the rows it opens from are the top of the panel. */
-.arrange-pick-anchor.below .def-picker {
-  top: calc(100% + 4px);
-  bottom: auto;
 }
 
 #arrangeCanvas {
@@ -2855,6 +2925,25 @@ li.CodeMirror-hint-active {
   display: flex;
   align-items: center;
   gap: 0; /* ● rec and its chevron are one segmented control - see #recBtn / #recOptsBtn */
+}
+
+/* The DJ toggle: an ordinary header button (it used to be the last segment of a code | arrange |
+   dj switch), lit while the mode is on the way the roll header's toggles are - background and
+   accent, no bold, so the word doesn't change width when it lights. */
+#viewDjBtn {
+  height: 32px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 14px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+#viewDjBtn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* label swaps between "● rec" and countdowns - fixed width keeps the header from jittering. The
@@ -3129,6 +3218,25 @@ li.CodeMirror-hint-active {
   background: var(--bg-raised);
 }
 
+/* A grouped track's strip sits IN its group: pulled up against the strip before it with the
+   seam between them left open, so `kick` and its `#fill` read as one desk section, the way the
+   base's mute and solo already treat them. */
+.mixer-strip:has(+ .mixer-strip-variant) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.mixer-strip-variant {
+  margin-left: -6px; /* the strips' gap, closed */
+  border-left-style: dashed;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.mixer-strip-variant .mixer-strip-name-text {
+  color: var(--text-dim);
+}
+
 .mixer-strip-gone {
   opacity: 0.55;
 }
@@ -3194,8 +3302,8 @@ li.CodeMirror-hint-active {
   border-color: var(--accent);
 }
 
-/* The name row doubles as the plots' legend - swatch in the track's curve colour, then the
-   label. The swatch carries the colour so the text stays readable on light themes. */
+/* The name row doubles as the plots' legend - swatch in the track's curve color, then the
+   label. The swatch carries the color so the text stays readable on light themes. */
 .mixer-strip-name {
   display: flex;
   align-items: center;
@@ -3723,7 +3831,7 @@ li.CodeMirror-hint-active {
 }
 /* Stacked decks (the ⇅ button on the strip): the two detail waveforms leave their panes for
    #songStack, a full-width region above both, one directly over the other at one scale - with
-   the playhead pinned at centre in both, the two songs' beats line up (or don't) on a single
+   the playhead pinned at center in both, the two songs' beats line up (or don't) on a single
    vertical line, which is the whole reason to look at two waveforms at once. The panes keep
    their side-by-side rows underneath (title, overview, controls), squashed to what's left. */
 #songStack.hidden {
@@ -3823,7 +3931,7 @@ body.mix-on.mix-stacked #deckBPane {
 /* ---------------------------------------------------- DJ mode: resizable regions
    Three stacked regions in DJ mode - waveforms, decks, mixer - with a drag handle on each seam.
    Neither deck is ever sized on its own: the panes are grid COLUMNS of one row, so a row height
-   is always both decks at once. A region dragged past its minimum folds to a labelled rail
+   is always both decks at once. A region dragged past its minimum folds to a labeled rail
    (.dj-rail) that a click reopens; the handle stays a handle either way, and pushing it further
    folds whatever is next in its path. Which region is springy moves as they fold, which is why
    both sized rows here are properties written by djApplyRegionSizes. */
@@ -3873,7 +3981,7 @@ body.mix-on.mix-stacked #djStackResize {
   grid-row: 2;
   grid-column: 1 / -1;
 }
-/* the grip: a short centred rule, brightening on hover and while dragging */
+/* the grip: a short centered rule, brightening on hover and while dragging */
 .dj-resize::before {
   content: '';
   position: absolute;
@@ -3924,11 +4032,14 @@ body.mix-on.mix-stacked .song-overview {
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
-#deckAHead {
-  display: none; /* the main editor grows its deck head only in DJ mode */
+/* Deck A's head is always there now - it carries the pane's code | arrange switch, which is the
+   only view control outside DJ mode. What grows in DJ mode is the DECK chrome beside it: the title,
+   the song picker, play, update and keep. */
+#deckAHead .deck-only {
+  display: none;
 }
-body.mix-on #deckAHead {
-  display: flex;
+body.mix-on #deckAHead .deck-only {
+  display: inline-flex;
 }
 #deckBHead .deck-b-title,
 #deckAHead .deck-b-title {
@@ -3941,7 +4052,7 @@ body.mix-on #deckAHead {
 #deckBFile {
   display: none;
 }
-/* The deck heads' play/stop: the main button's colours (green at rest, red while playing) at
+/* The deck heads' play/stop: the main button's colors (green at rest, red while playing) at
    .small size, on a fixed width so the flip doesn't reflow the head around it. */
 #deckAPlay,
 #deckBPlay {
@@ -4679,7 +4790,7 @@ body.mix-on #deckAHead {
   justify-content: flex-end;
 }
 
-/* One labelled control between the question and the buttons (askSelect) - how the piano roll's
+/* One labeled control between the question and the buttons (askSelect) - how the piano roll's
    ctrl+Q asks which division to snap to. */
 .ask-field {
   display: flex;
@@ -5083,6 +5194,18 @@ body.mix-on #deckAHead {
   max-height: none;
 }
 
+/* The arrangement's color chooser: the platform's own input, kept out of sight and opened
+   from the clip menu (see arPickColor). Not display:none - a hidden input can't be clicked open. */
+.arrange-color-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  left: 0;
+  top: 0;
+}
+
 .snippet-browser {
   width: min(860px, 94vw);
   height: min(560px, 84vh);
@@ -5394,7 +5517,7 @@ body.mix-on #deckAHead {
 }
 
 /* ▶ and ■ are different widths, so the foot shifted every time the audition started or stopped.
-   The button is sized for the wider of them and the glyph is centred inside it. */
+   The button is sized for the wider of them and the glyph is centered inside it. */
 .slice-play {
   min-width: 2.4em;
   text-align: center;

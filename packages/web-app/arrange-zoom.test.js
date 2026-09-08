@@ -5,7 +5,7 @@
 // than toward a fixed edge or the middle of the view.
 //
 // The rule has two halves and the second is the one that would rot quietly: a focus that has been
-// scrolled out of view falls back to the centre, so zooming stays a zoom and never turns into a
+// scrolled out of view falls back to the center, so zooming stays a zoom and never turns into a
 // jump to somewhere you can't see. Both panels implement it separately (their coordinate systems
 // have nothing in common), so both are checked here against the same expectations.
 
@@ -56,13 +56,13 @@ test('the painter zooms toward the bar the last gesture touched', () => {
 test('having touched nothing yet, it zooms toward the middle of the view - never the left edge', () => {
   const x = arFocus({ focus: null });
   assert.equal(x, AR_MID);
-  assert.notEqual(x, AR_GUTTER, 'the old behaviour: everything crawled away to the right');
+  assert.notEqual(x, AR_GUTTER, 'the old behavior: everything crawled away to the right');
 });
 
 test('a focus scrolled out of view falls back to the middle rather than jumping to it', () => {
   assert.equal(arFocus({ focus: 5, scroll: 40 }), AR_MID, 'off the left');
   assert.equal(arFocus({ focus: 500 }), AR_MID, 'off the right');
-  // ...but one still on screen, however near an edge, is honoured
+  // ...but one still on screen, however near an edge, is honored
   assert.equal(arFocus({ focus: 0 }), AR_GUTTER, 'exactly at the left edge is still visible');
   assert.equal(arFocus({ focus: 20 }), AR_GUTTER + 800, 'and exactly at the right edge too');
 });

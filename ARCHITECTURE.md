@@ -51,17 +51,28 @@ the most unit-testable part.
   the language decoupled from SuperCollider.
 - `labels.mjs` — the block model: named blocks (`bass: …`) must evaluate to patterns; anonymous
   code and `$:` blocks run as setup (shared `const`s, `Signal.prototype` extensions, statements).
+  A block headed by `group({ ... })` holds other blocks inside its braces: the splitter files the
+  body's contents as ordinary blocks with `parent`/`depth` set and blanks the body out of the
+  group's own code (offsets preserved), so evaluation and highlighting never see the nesting -
+  only blocks and a parent map.
 - `macros.mjs`, `midi.mjs`, `shape.mjs`, `record.mjs` — macro controls, MIDI CC input, LFO/envelope
   shape encoding, and recording helpers.
 - `midifile.mjs` — reading a dropped `.mid` into lanes, guessing the grid its rhythm sits on and
   the key it's in, and writing each lane out as the arguments of a roll — which the editor files
   under the lane's name and plays with `pianoroll("name")` — so an import lands in the editable form
   and the roll's own →♪ converts it to mini-notation when that's wanted.
-- `arrange.mjs` — the arrangement painter's clip format (`label,lane,start,len`, in cycles) and
-  span math. `$: arrange()` opens a playlist in the editor; a block painted into it plays only
-  inside its clips (the host gates its Sig with `_arrangeGate`, on absolute cycle time, looping
-  over the arrangement's length), and a block never painted keeps looping as before. Lanes are
-  display only - any label on any lane - so a section is a set of blocks, not a token.
+- `arrange.mjs` — the arrangement's clip format (`label,start,len`, in cycles) and span math. The
+  `_arrange(...)` definition is always in force (ctrl+A paints it): one row per track, a block
+  plays only inside its clips (the host gates its Sig with `_arrangeGate`, on absolute cycle
+  time, looping over the arrangement's length), and an emptied row is silent.
+- `groups.mjs` — the track tree, as math over the splitter's `parent` fields (`treeOfBlocks`). A
+  block headed by `group({ ... })` is a mixdown: it reads the bus named after itself, and the
+  tracks written inside its braces send there and stop playing directly (`routeGroups`). Groups
+  nest — a subgroup sends into its parent — and a bodyless `main: group()`, when written, is the
+  root every ungrouped track reaches, which is where a mastering chain goes. Membership is where
+  the code sits (cmd+G wraps a selection; the braces are the one source of truth), so regrouping
+  never renames and there is no side table to drift; scsynth node order needs nothing extra
+  because the engine already sorts tracks by how deep their bus reads go.
 - `index.mjs` — the public surface that stitches these together.
 
 ### `packages/osc-engine` — the engine adapter

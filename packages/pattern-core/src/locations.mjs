@@ -11,7 +11,7 @@
 // place them. Block-relative offsets (not document-absolute) match splitLabeledBlocks' convention,
 // where positions inside a block's `code` equal positions in the source minus the block `start`.
 //
-// This is behaviour-preserving: the pattern builders (n/note/s/mini and the chain methods that
+// This is behavior-preserving: the pattern builders (n/note/s/mini and the chain methods that
 // take mini) already accept a Sig, and `mini("…")` of a genuine mini string is exactly what they
 // build internally - we've just tagged it with a location. A literal we MISS simply isn't
 // highlighted (graceful); the predicate is deliberately conservative so a non-mini string
@@ -58,7 +58,7 @@ export function injectLocations(code, base = 0) {
 // and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
-  'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'input', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'input', 'copy', 'lfo', 'midicc', 'midikeys', 'pianoroll',
   // The painter's clips, then its options - drawn data, never mini (see arrange.mjs). The bare
   // spelling stays listed for a buffer written before the arrangement became a definition.
   '_arrange', 'arrange',
@@ -88,7 +88,7 @@ const NAME_ARG_CALLS = new Set([
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', '_arrange', 'arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'input']);
+const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', '_arrange', 'arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'input', 'copy']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain

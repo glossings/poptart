@@ -15,8 +15,6 @@ import {
   arrangementLength,
   arrangementSpans,
   arrangementLabels,
-  arrangementRollBindings,
-  arrangementRollAt,
   reconcileArrangement,
   inSpans,
   ArrangeClock,
@@ -25,31 +23,40 @@ import {
 test('parse/serialize round-trip, malformed tokens dropped', () => {
   const clips = parseArrangement('bass,4,4 drums,0,8  nope,x,1 drums,12,4 hats,0.5,0.25');
   assert.deepEqual(clips, [
-    { label: 'bass', start: 4, len: 4, roll: null },
-    { label: 'drums', start: 0, len: 8, roll: null },
-    { label: 'drums', start: 12, len: 4, roll: null },
-    { label: 'hats', start: 0.5, len: 0.25, roll: null },
+    { label: 'bass', start: 4, len: 4 },
+    { label: 'drums', start: 0, len: 8 },
+    { label: 'drums', start: 12, len: 4 },
+    { label: 'hats', start: 0.5, len: 0.25 },
   ]);
   assert.equal(serializeArrangement(clips), 'bass,4,4 drums,0,8 drums,12,4 hats,0.5,0.25');
   assert.equal(parseArrangement('').length, 0);
   assert.equal(parseArrangement('a,0,0').length, 0, 'a zero-length clip is nothing');
 });
 
-test('a clip may name the roll its track plays over those bars', () => {
-  const clips = parseArrangement('drums,0,8 drums:fill,12,4');
-  assert.deepEqual(clips[1], { label: 'drums', start: 12, len: 4, roll: 'fill' });
-  assert.equal(serializeArrangement(clips), 'drums,0,8 drums:fill,12,4', 'and round-trips');
-  const bindings = arrangementRollBindings(clips);
-  assert.deepEqual(bindings.get('drums'), [{ start: 12, end: 16, roll: 'fill' }]);
-  assert.equal(arrangementRollAt(bindings.get('drums'), 13), 'fill');
-  assert.equal(arrangementRollAt(bindings.get('drums'), 4), null, 'the track\'s own roll elsewhere');
-  assert.equal(arrangementRollBindings(parseArrangement('drums,0,8')).size, 0, 'no bindings, no entry');
+test('an older arrangement\'s roll binding parses as the plain clip', () => {
+  // `drums:fill` once meant "drums, playing the roll called fill". The clip stays where it was
+  // painted; the roll it named is a track of its own away (`drumsFill: pianoroll("fill")…`).
+  assert.deepEqual(parseArrangement('drums:fill,12,4'), [{ label: 'drums', start: 12, len: 4 }]);
+});
+
+test('a group joins the arrangement with nothing painted, and keeps its row', () => {
+  // A group has no notes of its own - what sounds on it is its members - so a clip of it would
+  // play nothing. It is still a track, and a row: the one its members fold away under.
+  const out = reconcileArrangement(parseArrangement('kickMain,0,16'), { len: 16, tracks: [] }, ['kick', 'kickMain', 'hat'], ['kick']);
+  assert.deepEqual(out.tracks, ['kick', 'kickMain', 'hat']);
+  assert.deepEqual(out.added, [{ label: 'hat', start: 0, len: 16 }], 'the plain track fills; the group does not');
+});
+
+test('hand-chosen clip colors are kept, and anything that is not a color is not', () => {
+  const o = normalizeArrangeOpts({ colors: { 'kick#fill': '#FF8800', kick: 'red', ' ': '#000000' } });
+  assert.deepEqual(o.colors, { 'kick#fill': '#ff8800' });
+  assert.deepEqual(normalizeArrangeOpts({}).colors, {});
 });
 
 test('an older arrangement\'s lane column parses and is dropped', () => {
   assert.deepEqual(parseArrangement('drums,0,0,8 bass,1,4,4'), [
-    { label: 'drums', start: 0, len: 8, roll: null },
-    { label: 'bass', start: 4, len: 4, roll: null },
+    { label: 'drums', start: 0, len: 8 },
+    { label: 'bass', start: 4, len: 4 },
   ]);
   assert.ok(looksLikeArrangeString('drums,0,0,8 bass,1,4,4'));
 });
@@ -66,10 +73,10 @@ test('labels come back in the order the clips first name them', () => {
 });
 
 test('options: snap/len/tracks/autos with defaults', () => {
-  assert.deepEqual(normalizeArrangeOpts(), { snap: 'auto', len: null, tracks: [], autos: [], loops: [] });
+  assert.deepEqual(normalizeArrangeOpts(), { snap: 'auto', len: null, tracks: [], colors: {}, autos: [], loops: [] });
   assert.deepEqual(
     normalizeArrangeOpts({ snap: 4, len: 16, tracks: ['kick', 'kick'], autos: ['filter', 'filter', ''] }),
-    { snap: 4, len: 16, tracks: ['kick'], autos: ['filter'], loops: [] },
+    { snap: 4, len: 16, tracks: ['kick'], colors: {}, autos: ['filter'], loops: [] },
   );
   assert.equal(normalizeArrangeOpts({ len: 0 }).len, null);
 });
@@ -83,7 +90,7 @@ test('a track that has never been arranged joins it filled', () => {
   const out = reconcileArrangement(clips, { len: 16, tracks: ['kick'] }, ['kick', 'bass']);
   assert.ok(out.changed);
   assert.deepEqual(out.tracks, ['kick', 'bass']);
-  assert.deepEqual(out.added, [{ label: 'bass', start: 0, len: 16, roll: null }], 'the whole song, so it sounds as it did');
+  assert.deepEqual(out.added, [{ label: 'bass', start: 0, len: 16 }], 'the whole song, so it sounds as it did');
   assert.equal(out.clips.length, 2);
 });
 
@@ -197,6 +204,26 @@ test('ArrangeClock: walking ahead then releasing re-walks, and a snapshot replay
   assert.equal(clock.posAt(20), 0, 'wrapped at 8, A re-armed, looping again');
   const twin = new ArrangeClock(clock.snapshot());
   for (const c of [0, 1, 2.5, 3, 5, 9, 12]) assert.equal(twin.posAt(c), clock.posAt(c));
+});
+
+test('ArrangeClock.seek: from that cycle on the song is at that bar, regions armed afresh', () => {
+  const clock = new ArrangeClock({ len: 16, regions: [{ name: 'A', start: 0, end: 4 }] });
+  // stopped, so the transport restarts at cycle 0: a seek there is where the song starts
+  assert.equal(clock.seek(0, 12), 12);
+  assert.equal(clock.posAt(0), 12);
+  assert.equal(clock.posAt(3), 15);
+  assert.equal(clock.posAt(4), 0, 'the song wraps at 16');
+  assert.equal(clock.posAt(9), 1, 'and A, armed, is looping again');
+  // a seek mid-play, after a release: the release is forgotten - a seek is a fresh run
+  clock.release(9);
+  assert.equal(clock.posAt(9), 1);
+  assert.equal(clock.seek(10, 8), 8);
+  assert.equal(clock.posAt(10), 8);
+  assert.equal(clock.posAt(18), 0);
+  assert.equal(clock.posAt(23), 1, 'A loops again from the wrap');
+  assert.equal(clock.seek(30, 21), 5, 'a bar past the end folds into the song');
+  const twin = new ArrangeClock(clock.snapshot());
+  for (const c of [0, 3, 9, 10, 18, 23, 30, 33]) assert.equal(twin.posAt(c), clock.posAt(c));
 });
 
 test('_arrangeGate takes a position function', () => {

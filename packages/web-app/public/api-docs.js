@@ -111,10 +111,22 @@ const API_DOCS = {
     desc: 'As a source: run a hardware input, another track, or a .bus() sum through this chain. As a method after an .fx(): feed that plugin\'s sidechain.',
     eg: 'audio("drums").fx("Saturn 2")',
   },
+  group: {
+    kind: 'builder',
+    sig: 'group({ ...tracks })',
+    desc: 'The mixdown of the tracks written inside its braces (select them and press cmd+G - the editor wraps them for you). Each member sends into it and stops playing directly; a .postgain(), .fx() or .bus() on the group takes all of them, and the mixer and the DJ desk show the group alone. Groups nest - a group block can sit inside another\'s braces - and a bodyless `main: group()` is the root every ungrouped track reaches: the place a mastering chain goes. The bus is named after the block, so a rename moves nothing.',
+    eg: 'kick: group({\n  kickMain: s("mbd*4")\n  kickFill: s("mbd*8")\n}).postgain(0.8)',
+  },
+  copy: {
+    kind: 'both',
+    sig: 'copy(track)',
+    desc: 'Another track\'s entire pattern, evaluated fresh - as if you had duplicated its block by hand: notes, controls, instrument and fx all come along, and the copy is then a track of its own. Stronger than audio() (the sound) or midi() (the notes): this copies the PATTERN. As a method, what comes before it becomes the copy\'s notes - pianoroll("kickB").copy("kick") is kick\'s chain playing a different roll.',
+    eg: 'kick2: copy("kick").fast(2)',
+  },
   input: {
     kind: 'builder',
     sig: 'input(device?, ch, ch2?)',
-    desc: 'A hardware audio input as a track source. Channels are numbered from 1, as on the interface; one is mono and lands centred, two make a stereo pair. The optional device name picks which interface\'s channels those are (only meaningful with a poptart aggregate - see settings). Pass it to .audio() after an .fx() to sidechain off a live input.',
+    desc: 'A hardware audio input as a track source. Channels are numbered from 1, as on the interface; one is mono and lands centered, two make a stereo pair. The optional device name picks which interface\'s channels those are (only meaningful with a poptart aggregate - see settings). Pass it to .audio() after an .fx() to sidechain off a live input.',
     eg: 'input("Scarlett", 1).fx("Pro-Q 4")',
   },
   macro: {

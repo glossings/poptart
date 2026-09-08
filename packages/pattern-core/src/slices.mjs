@@ -37,7 +37,7 @@ export const SLICE_DECIMALS = 5;
 /**
  * A slice set as everything downstream wants it: ascending, each 0..1, no duplicates.
  *
- * Sorted rather than trusted - a marker dragged past its neighbour arrives out of order - and
+ * Sorted rather than trusted - a marker dragged past its neighbor arrives out of order - and
  * duplicates dropped, since two markers on the same frame describe an empty slice that would play
  * nothing at all. Deliberately does NOT force a leading 0: a set that starts at 0.1 means the
  * pickup before the first marker is never played, which is a thing you may want.

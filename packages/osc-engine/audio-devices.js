@@ -11,7 +11,7 @@
 // EVERYTHING here degrades: if the helper is missing or won't run (a non-macOS host, a stripped
 // checkout, a Gatekeeper block), listDevices() falls back to the system_profiler parsing poptart
 // used before, and the aggregate features report unavailable. A single device with absolute
-// channel numbers - the old behaviour - keeps working either way.
+// channel numbers - the old behavior - keeps working either way.
 
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');

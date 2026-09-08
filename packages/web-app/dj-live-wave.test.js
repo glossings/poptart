@@ -4,7 +4,7 @@
 //
 // The strip has no analysis behind it: it draws the channel meter's feed kept as history, under
 // bar lines taken straight off the clock. What has to be right is where those land on screen. The
-// playhead is pinned at the centre, the same place a song deck's is, and that shared pin is the
+// playhead is pinned at the center, the same place a song deck's is, and that shared pin is the
 // ONLY reason two strips stacked one above the other can be read against each other - so it is
 // pinned here. And the meter trace is slid backwards by the feed's lag, never forwards: the wrong
 // sign there draws a strip that looks entirely healthy while sitting twice the lag off its own
@@ -42,7 +42,7 @@ const { djLiveWindow, djLiveTraceCycle, DJ_LIVE_TRACE_LAG } = loadWaveGeometry()
 const CPS = 0.5;
 const W = 800;
 
-test('the playhead is the exact centre, whatever the tempo, span or width', () => {
+test('the playhead is the exact center, whatever the tempo, span or width', () => {
   for (const cps of [0.25, 0.5, 0.9, 2]) {
     for (const span of [0.25, 12, 60]) {
       for (const w of [1, 640, 1913]) {
@@ -53,7 +53,7 @@ test('the playhead is the exact centre, whatever the tempo, span or width', () =
   }
 });
 
-test('the window is the span centred on now, in cycles', () => {
+test('the window is the span centered on now, in cycles', () => {
   const { cyc0, cyc1 } = djLiveWindow(10, CPS, 12, W); // 12s at 0.5 cps = 6 cycles across
   assert.equal(cyc0, 7);
   assert.equal(cyc1, 13);
@@ -76,7 +76,7 @@ test('the edges of the window are the edges of the canvas', () => {
 
 test('a meter frame is slid BACK by the lag, never forward', () => {
   const now = 100000;
-  // A frame that landed this instant measured sound one lag ago - so it draws left of centre.
+  // A frame that landed this instant measured sound one lag ago - so it draws left of center.
   assert.ok(djLiveTraceCycle(now, now, 10, CPS) < 10);
   const behind = 10 - djLiveTraceCycle(now, now, 10, CPS);
   assert.ok(Math.abs(behind - (DJ_LIVE_TRACE_LAG / 1000) * CPS) < 1e-9);
