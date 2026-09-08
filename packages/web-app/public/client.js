@@ -10727,7 +10727,7 @@ function updateMixerViewBtn() {
   mixerViewBtn.textContent = mixerEffectiveView() === 'tracks' ? 'by track' : 'overall';
   mixerViewBtn.disabled = pinned;
   mixerViewBtn.title = pinned
-    ? `per-track analysis is off past ${mixerState.perTrackMax} playing tracks - the plots show the master`
+    ? `per-track analysis is off past ${mixerState.perTrackMax} strips - the plots show the master (folding a group frees its members' share)`
     : 'color-coded per track, or the summed master alone';
 }
 
@@ -10750,7 +10750,11 @@ function sizeMixerCanvases() {
 
 async function mixerPoll() {
   if (!mixerState) return;
-  const s = await api('GET', '/api/mixer/status');
+  // The poll carries which strips the desk is showing, and the server analyzes THOSE (see its
+  // mixTapIds): unfold a group and its members take the analyzers instead of the group; fold one
+  // and its hidden members stop spending the per-track budget. Empty on the very first poll
+  // (before the strips are built), which the server reads as "everything playing".
+  const s = await api('GET', `/api/mixer/status?strips=${encodeURIComponent(mixerState.order.join(','))}`);
   if (!mixerState) return;
   // The server flags off when the engine restarted under it (or our first arm failed) - re-arm,
   // gently. While the engine is down this fails and the note below says so.
@@ -10799,7 +10803,7 @@ async function mixerPoll() {
   mixerNoteEl.textContent =
     !mixerState.order.length ? 'nothing playing — evaluate a pattern and its tracks appear here'
     : mixerState.monitorError ? `meters offline: ${mixerState.monitorError}`
-    : !mixerState.perTrack ? `${tracks.length} tracks playing — per-track analysis stays off past ${mixerState.perTrackMax} (it runs on the audio thread), so the plots show the master`
+    : !mixerState.perTrack ? `${mixerState.order.length} strips showing — per-track analysis stays off past ${mixerState.perTrackMax} (it runs on the audio thread), so the plots show the master; folding a group frees its members' share`
     : '';
 }
 

@@ -2457,12 +2457,23 @@ function handleMixSpec(key, values) {
   mixSpecs.set(key, bands);
 }
 
-// The tracks the engine should tap: the ones with a scheduler, i.e. playing. Not every engine
-// track - an idle one kept warm for its label's return would burn an analyzer on silence, and
-// the analyzer's budget (engine.mixSpecTrackMax) counts what it taps. In label order, so the
+// The labels the mixer says it is SHOWING - its strips: the top of the group tree, plus the
+// members of whatever groups have been unfolded (see the client's mixerStripLabels). Sent with
+// every status poll; null until a poll says (the first poll, an older client), which reads as
+// "show everything".
+let mixShownLabels = null;
+
+// The tracks the engine should tap: the PLAYING ones whose strips are on the desk. Playing,
+// because an idle track kept warm for its label's return would burn an analyzer on silence - and
+// on the desk, because the analysis follows what is looked at: an unfolded group's strip stands
+// aside for its members' (its summed picture says nothing theirs don't), and a folded group's
+// hidden members don't spend the budget (engine.mixSpecTrackMax) either - which is what keeps a
+// twelve-track song folded into three groups under the per-track cap. In label order, so the
 // staggered arming lights the strips up left to right.
 function mixTapIds() {
-  return [...schedulers.keys()].map((label) => trackIds.get(label)).filter(Boolean);
+  const playing = [...schedulers.keys()];
+  const shown = mixShownLabels ? playing.filter((l) => mixShownLabels.has(l)) : playing;
+  return (shown.length ? shown : playing).map((label) => trackIds.get(label)).filter(Boolean);
 }
 
 // Tell the engine what to tap. Called on the way on and from every status poll: the playing set
@@ -2489,6 +2500,7 @@ function setMixMonitor(on) {
   mixMonitorOn = !!on && !!engine;
   if (!mixMonitorOn) {
     mixArmedIds = '';
+    mixShownLabels = null; // the next mixer to open says what it shows
     mixLevels.clear();
     mixSpecs.clear();
   }
@@ -5194,7 +5206,15 @@ const routes = {
 
   // What an open mixer polls ~10x/sec: playing track labels, drained meter readings, the latest
   // band frames, and the band centers they're measured at. Also the keep-alive - see mixStatus.
-  'GET /api/mixer/status': async () => ({ status: 200, body: mixStatus() }),
+  // `strips` is the comma-joined labels the desk is showing, and steers which tracks the engine
+  // analyzes (see mixTapIds); absent, every playing track is tapped as before.
+  'GET /api/mixer/status': async (query) => {
+    if (query.strips != null) {
+      const labels = String(query.strips).split(',').filter(Boolean);
+      mixShownLabels = labels.length ? new Set(labels) : null;
+    }
+    return { status: 200, body: mixStatus() };
+  },
 
   // Every bounce on disk, newest first - the sr() autocomplete's word list and the recordings
   // browser. Reads the filesystem directly, so it works with the engine down.

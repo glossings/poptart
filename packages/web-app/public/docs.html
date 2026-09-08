@@ -775,8 +775,10 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             <code>audio("…")</code> / <code>midi("…")</code> that reads that track. The mix lives in the
             pattern and travels with the patch. The plots switch between <strong>by track</strong> (each
             in its color) and <strong>overall</strong> (the master); the analysis runs on the audio
-            thread, so past eight playing tracks the strips keep their meters but the plots show the
-            master only.
+            thread, so past eight strips the plots show the master only. The analysis follows the
+            desk: a folded group is analyzed as one strip and its members cost nothing, and
+            unfolding it hands the analyzers to the members instead — so folding your groups is
+            also how a big song stays under the per-track cap.
           </p>
         </section>
 
