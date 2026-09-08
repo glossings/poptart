@@ -1624,22 +1624,6 @@ function setscale(name) {
 // makes the editor's reference cover it.
 const HOST_BUILDERS = { setbpm, setscale };
 
-// `arrange(...)` was the arrangement back when it was a call you wrote - a `$: arrange("…")` block
-// you could comment out, forget to evaluate, or have two of. It is `_arrange(...)` now (pattern-
-// core's arrange.mjs): an editor-owned definition like a roll's, always in force, painted with
-// ctrl+A. Bound, undocumented, and identical in effect, purely so a patch written before the change
-// still plays; the painter rewrites the call the first time it opens one (see arMigrateLegacy in
-// client.js), and nothing writes this spelling any more.
-const LEGACY_BUILDERS = {
-  arrange: (str = '', opts = {}) => patternCore._arrange(str, opts),
-  // `_groups({...})` held the group tree as data for a few days before membership moved into the
-  // braces of `group({ ... })` itself. The call is inert now; bound so a buffer from that window
-  // still evaluates, and the log says what to write instead.
-  _groups: () => {
-    eventLogQueue.push('[groups] _groups(...) does nothing any more - a group holds its members inside its braces: name: group({ ... }). Delete the call and cmd+G the tracks instead.');
-    return { poptartGroupsBlock: true };
-  },
-};
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
 // with the loop regions' wraps and releases recorded in it. Built by the arrangement pass of
@@ -1698,7 +1682,7 @@ const PREBAKE_BROWSER_SHIMS = {
   },
 };
 
-function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS, ...LEGACY_BUILDERS }) {
+function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS }) {
   // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
   // top-level bindings are in scope for every user block too (see runPrebake).
   const evalBlock = function evalBlock(code, locBase) {
@@ -3428,7 +3412,6 @@ const routes = {
     let sawSetbpm = false;
     const hostBuilders = {
       ...HOST_BUILDERS,
-      ...LEGACY_BUILDERS,
       setbpm: (value) => {
         const v = typeof value === 'string' ? patternCore.mini(value) : value;
         if (typeof v !== 'number' && typeof v?.sample !== 'function') {
@@ -3492,7 +3475,7 @@ const routes = {
           // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
           const isPattern = value instanceof patternCore.Sig;
           const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK
-            || value?.poptartArrangeBlock || value?.poptartGroupsBlock;
+            || value?.poptartArrangeBlock;
           if (!isPattern && !setupValue && !b.label.startsWith('$')) {
             throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
           }

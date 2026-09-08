@@ -199,7 +199,7 @@ function sourceRefEdits(code, mask, from, to) {
 // The arrangement's clip string names blocks too - `_arrange("kick,0,8 fill,12,4")` - and a clip
 // left naming the old label is an orphan row playing nothing. Each clip token whose label is
 // renamed (see `map`) is rewritten in place; the numbers after it are untouched.
-const ARRANGE_CALL_RE = /\b_?arrange\s*\(\s*(['"])((?:[^'"\\\n]|\\.)*)\1/g;
+const ARRANGE_CALL_RE = /\b_arrange\s*\(\s*(['"])((?:[^'"\\\n]|\\.)*)\1/g;
 
 /**
  * Whether a labeled block (from splitLabeledBlocks) is a group: its expression is headed by
@@ -382,8 +382,7 @@ function arrangeRefEdits(code, mask, map) {
     const tokenRe = /(^|\s)([^\s,]+),/g; // each clip's label: the token before its first comma
     let t;
     while ((t = tokenRe.exec(raw))) {
-      // an older `label:roll` token renames by its label alone
-      const label = t[2].split(':')[0];
+      const label = t[2];
       const to = map.get(label);
       if (to == null) continue;
       const at = open + t.index + t[1].length;

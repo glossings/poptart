@@ -130,7 +130,7 @@ test('the buffer passes run on the deck being EVALUATED, not the one being paint
   assert.match(on, /const ed = deck === 'b' \? deckBCM : cm;/);
   assert.match(on, /if \(arDeck !== deck\) arState = null;/, 'the panel\'s clips belong to one song');
   assert.match(on, /finally \{\n\s+arCM = prevCM;\n\s+arState = prevState;\n\s+arPassDeck = prevPass;\n\s+\}/);
-  assert.match(SRC, /arOnBuffer\('a', \(\) => \{\n\s+arMigrateLegacy\(\);\n\s+arFollowHandRenames\(\);/);
+  assert.match(SRC, /arOnBuffer\('a', \(\) => \{\n\s+arFollowHandRenames\(\);/);
   assert.match(SRC, /arOnBuffer\('a', arReconcileTracks\);/);
   assert.match(grab('evalDeckB'), /arSyncBuffer\('b'\);/, 'deck B gets the same passes');
 });

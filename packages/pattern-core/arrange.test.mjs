@@ -33,10 +33,14 @@ test('parse/serialize round-trip, malformed tokens dropped', () => {
   assert.equal(parseArrangement('a,0,0').length, 0, 'a zero-length clip is nothing');
 });
 
-test('an older arrangement\'s roll binding parses as the plain clip', () => {
-  // `drums:fill` once meant "drums, playing the roll called fill". The clip stays where it was
-  // painted; the roll it named is a track of its own away (`drumsFill: pianoroll("fill")…`).
-  assert.deepEqual(parseArrangement('drums:fill,12,4'), [{ label: 'drums', start: 12, len: 4 }]);
+test('the retired clip spellings are not special-cased - three plain fields or nothing', () => {
+  // A lane column (`drums,0,0,8`) and a roll binding (`drums:fill,12,4`) were both migrated out
+  // of every saved pattern when their eras ended; the parser carries no memory of them. A stray
+  // one is an ordinary malformed-or-orphan token, visible in the painter rather than quietly
+  // reinterpreted.
+  assert.deepEqual(parseArrangement('drums,0,0,8'), [], 'four fields is malformed now');
+  assert.deepEqual(parseArrangement('drums:fill,12,4'), [{ label: 'drums:fill', start: 12, len: 4 }],
+    'a : label matches no block, so it draws as an orphan row instead of silently rebinding');
 });
 
 test('a group joins the arrangement with nothing painted, and keeps its row', () => {
@@ -51,14 +55,6 @@ test('hand-chosen clip colors are kept, and anything that is not a color is not'
   const o = normalizeArrangeOpts({ colors: { 'kick#fill': '#FF8800', kick: 'red', ' ': '#000000' } });
   assert.deepEqual(o.colors, { 'kick#fill': '#ff8800' });
   assert.deepEqual(normalizeArrangeOpts({}).colors, {});
-});
-
-test('an older arrangement\'s lane column parses and is dropped', () => {
-  assert.deepEqual(parseArrangement('drums,0,0,8 bass,1,4,4'), [
-    { label: 'drums', start: 0, len: 8 },
-    { label: 'bass', start: 4, len: 4 },
-  ]);
-  assert.ok(looksLikeArrangeString('drums,0,0,8 bass,1,4,4'));
 });
 
 test('looksLikeArrangeString tells data from anything else', () => {

@@ -1,11 +1,9 @@
-// The arrangement painter's track model (public/client.js): one row per labeled block, the
-// migration off the old `$: arrange(…)` call, and the fill that makes "a row with no clips is
-// silent" a safe rule to have.
+// The arrangement painter's track model (public/client.js): one row per labeled block, and the
+// fill that makes "a row with no clips is silent" a safe rule to have.
 //
 // None of it can be seen going wrong in the UI until it already has: a track that joins the song
-// unfilled is a part that stops playing, and a migration that misses a call is a song that opens
-// empty. All three are ordinary list/string work, so they are lifted out of the shipped client.js
-// rather than copied - this fails if they drift.
+// unfilled is a part that stops playing. All of it is ordinary list/string work, so it is lifted
+// out of the shipped client.js rather than copied - this fails if it drifts.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -73,7 +71,7 @@ function fakeCm(text) {
   return cm;
 }
 
-const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arMigrateLegacy', 'arMigrateOneLegacy', 'arReadDef', 'parseArrangeCall',
+const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arReadDef', 'parseArrangeCall',
   'arCallOpts', 'serializeArrangeCall', 'arRefreshRows', 'arGroupTree', 'arGroupParents', 'arBlocks', 'arLabels',
   'arTrackLabels', 'arRowOfLabel', 'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arFollowHandRenames',
   'arApplyEdits', 'arCreateGroup', 'arUngroup', 'arTakeOut', 'arGroupLabels', 'arPaintLabel']
@@ -111,7 +109,7 @@ function panel({ code = '', arState = null, collapsed = [] } = {}) {
     collapsedGroups: new Set(collapsed), // which groups are folded - shared with the code editor's folds
   };
   // eslint-disable-next-line no-new-func
-  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arMigrateLegacy, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames, arCreateGroup, arUngroup, arTakeOut, arGroupLabels, arPaintLabel };`);
+  const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames, arCreateGroup, arUngroup, arTakeOut, arGroupLabels, arPaintLabel };`);
   return { fns: build(...Object.values(env)), cm, logged, arState };
 }
 
@@ -291,30 +289,13 @@ test('a group joins the arrangement unfilled; its members fill like any track', 
   assert.deepEqual([...read.opts.tracks].sort(), ['hats', 'kick', 'kickMain']);
 });
 
-// ---------------------------------------------------------------------------------------------
-// The migration off `$: arrange(…)`
-// ---------------------------------------------------------------------------------------------
-
-test('an old song\'s arrange() block becomes an _arrange(...) definition', () => {
-  const old = `${SONG}\n\n$: arrange("kick,0,0,8 bass,1,4,4", { len: 8 })\n`;
-  const p = panel({ code: old });
-  assert.equal(p.fns.arMigrateLegacy(), true);
-  assert.match(p.cm.text, /^_arrange\("kick,0,0,8 bass,1,4,4", \{ len: 8 \}\)$/m);
-  assert.ok(!/\$: arrange/.test(p.cm.text), 'the label goes with it - a definition is a bare statement');
-  // ...and what it now reads as is the same song, on the new clip format
-  const read = p.fns.arReadDef();
-  assert.deepEqual(read.clips, [
-    { label: 'kick', start: 0, len: 8 },
-    { label: 'bass', start: 4, len: 4 },
-  ]);
-  assert.equal(read.opts.len, 8);
-});
-
-test('a buffer already on _arrange is left alone', () => {
+test('_arrange is the one spelling - a bare arrange( is not the arrangement', () => {
+  // The `$: arrange(…)` era's migration shipped, ran on every saved pattern, and was then
+  // deleted; the definition finder knows only the definition.
   const p = panel({ code: `${SONG}\n\n_arrange("kick,0,8")\n` });
-  assert.equal(p.fns.arMigrateLegacy(), false);
-  assert.match(p.cm.text, /_arrange\("kick,0,8"\)/);
-  assert.ok(p.fns.arFindDef(), 'and it is found as the buffer\'s arrangement');
+  assert.ok(p.fns.arFindDef(), 'the definition is found');
+  const old = panel({ code: `${SONG}\n\n$: arrange("kick,0,0,8", { len: 8 })\n` });
+  assert.equal(old.fns.arFindDef(), null, 'the retired call is not');
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -442,7 +423,6 @@ test('the first evaluation has nothing to compare against', () => {
 });
 
 test('the word arrange inside a comment or a string is not a call', () => {
-  const p = panel({ code: `// arrange("nope,0,0,4")\nkick: s("bd").fx("Rearrange")\n` });
-  assert.equal(p.fns.arMigrateLegacy(), false);
+  const p = panel({ code: `// _arrange("nope,0,4")\nkick: s("bd").fx("Rearrange")\n` });
   assert.equal(p.fns.arFindDef(), null);
 });

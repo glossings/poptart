@@ -17,11 +17,10 @@
 // fold away with it, which is what keeps a song of forty tracks readable.
 //
 // (An earlier design gave a track's VARIATIONS its row and asked each clip which variation it
-// meant - `drums,0,8` vs `drums#fill,12,4` on one line. Every gesture then needed a "which one"
-// answer the painter had nowhere good to put, so rows and blocks are 1:1 now and grouping carries
-// the relationship instead. Older arrangements carried a `lane` column - `drums,0,0,8` - back when
-// rows were free-form and a label could sit on any number of them. Those still parse; the lane is
-// simply dropped. Older still, a clip could name a roll - `drums:fill` - which parses as `drums`.)
+// meant. Every gesture then needed a "which one" answer the painter had nowhere good to put, so
+// rows and blocks are 1:1 now and grouping carries the relationship instead. The retired
+// spellings from that era - a `lane` column, `label:roll` bindings, the `$: arrange(…)` call -
+// no longer parse; the saved patterns that used them were migrated in place.)
 //
 // What a clip MEANS at playback time: a block plays ONLY inside its clips - the bare
 // `label: pattern` stops being a loop and becomes a part - and a block with no clips at all is
@@ -62,22 +61,16 @@ const num = (s) => {
 };
 
 /**
- * "drums,0,8 drums#fill,12,4" -> [{ label, start, len }]. Malformed tokens are skipped rather than
+ * "drums,0,8 fill,12,4" -> [{ label, start, len }]. Malformed tokens are skipped rather than
  * thrown on: a half-typed clip should cost a missing clip, not the whole arrangement.
- *
- * A four-field token is an older arrangement's `label,lane,start,len` - the lane is read off and
- * dropped, since a clip's row is now its track's (see the header). A `label:roll` is older still,
- * from when a clip could name a roll: the roll is dropped and the clip kept, so the song still has
- * its shape and the part is a variation away from what it was.
  */
 export function parseArrangement(str) {
   const out = [];
   for (const tok of String(str ?? '').trim().split(/\s+/)) {
     if (!tok) continue;
     const parts = tok.split(',');
-    if (parts.length === 4) parts.splice(1, 1); // legacy lane column
     if (parts.length !== 3) continue;
-    const label = parts[0].split(':')[0]; // legacy roll binding
+    const label = parts[0];
     const start = num(parts[1]);
     const len = num(parts[2]);
     if (!label || start == null || len == null || len <= 0) continue;
@@ -104,8 +97,7 @@ export function serializeArrangement(clips) {
 export function looksLikeArrangeString(str) {
   const s = String(str ?? '').trim();
   if (!s) return true;
-  // Three fields, or an older arrangement's four with the lane still in.
-  return s.split(/\s+/).every((tok) => /^[^,\s]+(,\d+)?,-?[\d.]+,[\d.]+$/.test(tok));
+  return s.split(/\s+/).every((tok) => /^[^,\s]+,-?[\d.]+,[\d.]+$/.test(tok));
 }
 
 /** The options as the builder and the editor both read them, defaults filled in. */
@@ -182,8 +174,7 @@ export function reconcileArrangement(clips, opts = {}, labels = [], unfilled = [
   const kept = o.tracks.filter((l) => labels.includes(l) || named.has(l));
   const joining = labels.filter((l) => !kept.includes(l));
   // Only a track with nothing painted is filled. One that already has clips is in the arrangement
-  // whatever the membership says - which is what makes an old `arrange(…)`, written before any of
-  // this was recorded, come through as the song it already was.
+  // whatever the membership says.
   const len = arrangementLength(clips, opts);
   const added = joining
     .filter((l) => !named.has(l) && !unfilled.includes(l))

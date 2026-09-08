@@ -1002,7 +1002,7 @@ function foldConfigBlobs() {
   // the loops and the pinned lanes are all the painter's - and so is the call around them, which
   // nobody types either. Leaving `_arrange(⋯)` on screen showed the one part of it that says
   // nothing; a chip naming what it is says the same thing in less room.
-  const arrangeRe = /\b_?arrange\s*\(/g;
+  const arrangeRe = /\b_arrange\s*\(/g;
   let arrangeN = 0;
   while ((m = arrangeRe.exec(code))) {
     // Keyed by WHICH arrangement it is rather than by where, like a definitions run: the painter
@@ -11984,14 +11984,9 @@ async function evaluate(start, { byHand = false } = {}) {
   }
   migrateDefNames(); // a patch saved before the builders were privatised still says roll(...)
   convertLegacyStates(); // ...and one from before presets still pins `{ state }` onto its calls
-  // ...and one from before the arrangement was always on still says `$: arrange(…)`. Migrated HERE
-  // rather than only when the painter opens, because the two spellings mean different things now:
-  // every track of an arrangement is in it, so the tracks an old song left unpainted have to be
-  // filled (arReconcileTracks, below) or they would fall silent on the first evaluation.
   // ...on THIS pane's buffer, whichever deck the painter happens to be showing (see arOnBuffer).
   arOnBuffer('a', () => {
-    arMigrateLegacy();
-    arFollowHandRenames(); // a group renamed by hand takes its tracks and their clips along, as cmd+R would
+    arFollowHandRenames(); // a track renamed by hand takes its clips along, as cmd+R would
   });
   // A pack named for the first time (`sp("kit")`, or a bare `sp()` that materialize just named)
   // has no files yet, so it plays silence - and the one thing you want at that moment is the
@@ -19422,7 +19417,7 @@ async function evalDeckB(start) {
   }
   try {
     // Deck B has an arrangement of its own, so it gets the same buffer passes the main pane does:
-    // the legacy migration, hand-renames followed in, and every track of this song filled into its
+    // hand-renames followed in, and every track of this song filled into its
     // arrangement (see arSyncBuffer). Without it a track typed into deck B would fall silent.
     arSyncBuffer('b');
     // Same deal as the main pane's: with the painter open on THIS deck and the transport stopped,
@@ -22466,7 +22461,6 @@ function arOnBuffer(deck, run) {
 
 /** The whole set of them, for a deck evaluated in one go (deck B's). */
 const arSyncBuffer = (deck) => arOnBuffer(deck, () => {
-  arMigrateLegacy();
   arFollowHandRenames();
   arReconcileTracks();
 });
@@ -22499,48 +22493,6 @@ function arFindDef(code = arCM.getValue()) {
     return { start: m.index, open, close };
   }
   return null;
-}
-
-/**
- * A patch written before the arrangement became a definition: `$: arrange("…")`, a call you typed.
- * Rewritten in place to `_arrange("…")` the first time anything here touches it - the clip format
- * migrates itself (parseArrangement reads the old lane column and drops it), and the label the call
- * sat under goes with it, since a definition is a bare statement.
- *
- * Returns true if it rewrote. The server still binds the old spelling, so a patch that never opens
- * the painter goes on playing either way.
- */
-function arMigrateLegacy() {
-  let any = false;
-  // One rewrite at a time, rescanning after each: a call's replacement moves every offset after it,
-  // and a patch may well hold two of them (the old form let a song have several).
-  while (arMigrateOneLegacy()) any = true;
-  return any;
-}
-
-function arMigrateOneLegacy() {
-  const code = arCM.getValue();
-  const isCode = codeOnly(code);
-  const re = /(^|[^\w$.])arrange\s*\(/gm;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    const at = m.index + m[1].length;
-    if (!isCode(at)) continue;
-    const open = at + m[0].length - m[1].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0) continue;
-    // The whole statement, back to a `$:` label if it has one, so the migration leaves a definition
-    // line rather than a labeled block whose body is a definition.
-    const lineStart = code.lastIndexOf('\n', at - 1) + 1;
-    const head = code.slice(lineStart, at);
-    const from = /^\s*(?:[A-Za-z_$][\w$]*\s*:\s*)?$/.test(head) ? lineStart : at;
-    const text = `${code.slice(lineStart, at).match(/^\s*/)[0]}_arrange${code.slice(open, close + 1)}`;
-    arCM.replaceRange(text, arCM.posFromIndex(from), arCM.posFromIndex(close + 1));
-    arRefold();
-    logLine('arrange() is the always-on arrangement now - rewritten as _arrange(…), which ctrl+A paints');
-    return true;
-  }
-  return false;
 }
 
 /** The arrangement's clips and options as the buffer holds them, or null with no definition. */
@@ -22623,7 +22575,6 @@ function openArrangePainter(deck = mixModeOn ? djActiveDeck : 'a') {
   if (arState) closeArrangeEditor(); // ...and on the other deck it moves, rather than opening twice
   arDeck = want;
   arCM = want === 'b' ? deckBCM : cm;
-  arMigrateLegacy();
   let def = arFindDef();
   if (!def) {
     const labels = arTrackLabels();
