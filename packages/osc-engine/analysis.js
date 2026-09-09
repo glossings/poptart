@@ -115,6 +115,15 @@ function mapFeatures(paths) {
 }
 
 /**
+ * sample-map.js's deriveMap (projection, neighbors, layout, groups, labels) over every
+ * indexed sample's vector, off-thread. Same arguments and same return.
+ * @returns {Promise<object>}
+ */
+function mapDerive(vectors, paths, opts = {}) {
+  return run('mapderive', { vectors, paths, ...opts });
+}
+
+/**
  * Drop the worker. Anything still in flight rejects. Nothing in normal operation calls this - the
  * worker is a process-wide singleton that unrefs itself while idle, so it neither needs tearing
  * down at engine shutdown nor holds the process open; this exists so a test suite can end cleanly.
@@ -126,4 +135,4 @@ async function shutdownAnalysis() {
   await w.terminate();
 }
 
-module.exports = { analyzeSlices, trimRecording, songWaveform, songDetect, mapFeatures, shutdownAnalysis };
+module.exports = { analyzeSlices, trimRecording, songWaveform, songDetect, mapFeatures, mapDerive, shutdownAnalysis };

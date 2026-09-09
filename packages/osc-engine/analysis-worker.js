@@ -11,7 +11,7 @@ const { parentPort } = require('node:worker_threads');
 const { detectSlices } = require('./samples');
 const { trimRecording, songWaveform } = require('./wav');
 const { detectSongFacts } = require('./song-detect');
-const { readAudioHead, extractFeatures } = require('./sample-map');
+const { readAudioHead, extractFeatures, deriveMap } = require('./sample-map');
 
 const JOBS = {
   slices: ({ path, ...opts }) => detectSlices(path, opts),
@@ -25,6 +25,9 @@ const JOBS = {
     if (!head) return null;
     return { features: extractFeatures(head.samples, head.sampleRate, head.totalSeconds), seconds: head.totalSeconds };
   }),
+  // The map from the vectors: ~2s of CPU at library scale, which on the main thread would be
+  // 2s of silence (see analysis.js's header).
+  mapderive: ({ vectors, paths, ...opts }) => deriveMap(vectors, paths, opts),
 };
 
 parentPort.on('message', ({ id, kind, args }) => {

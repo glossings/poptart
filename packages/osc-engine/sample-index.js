@@ -53,10 +53,13 @@ class SampleIndex {
    *   injectable for tests (the default is the worker)
    * @param {(file: string) => Promise<string>} [opts.toWav] - path a WAV reader can open, for
    *   aiff/flac; injectable for tests
+   * @param {(vectors: Float32Array[], paths: string[]) => Promise<object>} [opts.derive] -
+   *   sample-map.js's deriveMap; the default runs it on the worker, tests run it inline
    */
-  constructor({ cacheFile = defaultCacheFile(), analyze = analysis.mapFeatures, toWav, walk = walkAudioFiles } = {}) {
+  constructor({ cacheFile = defaultCacheFile(), analyze = analysis.mapFeatures, toWav, walk = walkAudioFiles, derive = analysis.mapDerive } = {}) {
     this.cacheFile = cacheFile;
     this._analyze = analyze;
+    this._deriveFn = derive;
     this._toWav = toWav ?? (async (file) => (await resolveSongFile(file, { wav: true })).path);
     this._walk = walk;
     this.sources = [];
@@ -196,7 +199,7 @@ class SampleIndex {
       const changed = force || analyzed > 0 || removed > 0 || !this.map || !this._mapMatches();
       if (changed) {
         report('place', 0, 1);
-        this.map = this._derive();
+        this.map = await this._derive();
         this._dirty = true;
       }
       this.status.count = this.map?.paths.length ?? 0;
@@ -268,32 +271,17 @@ class SampleIndex {
   // The map
   // -------------------------------------------------------------------------------------------
 
-  _derive() {
+  // The map from the current entries: sample-map.js's deriveMap, on the worker by default (it
+  // is seconds of CPU), with this index's bookkeeping - paths, sources, lengths - alongside.
+  async _derive() {
     const entries = this._current();
-    const n = entries.length;
     const paths = entries.map((e) => e.path);
-    if (n < 3) {
-      return { paths, sources: entries.map((e) => e.source), seconds: entries.map((e) => e.seconds), points: [], xy: new Float32Array(n * 2), neighbors: [], clusters: new Int32Array(n), labels: paths.map(() => null), clusterLabels: [], prepared: null };
-    }
-    const prepared = sm.prepareVectors(entries.map((e) => e.features));
-    const neighbors = sm.knn(prepared.points, Math.min(NEIGHBORS, n - 1));
-    const graph = sm.knnGraph(neighbors);
-    const xy = sm.layout(graph, prepared.points);
-    const clusters = sm.cluster(graph, n);
-    const votes = paths.map((p) => sm.nameVotes(p));
-    const labels = sm.labelPoints(neighbors, votes);
-    const clusterLabels = sm.labelClusters(clusters, votes);
+    const derived = await this._deriveFn(entries.map((e) => e.features), paths, { k: NEIGHBORS });
     return {
       paths,
       sources: entries.map((e) => e.source),
       seconds: entries.map((e) => e.seconds),
-      points: prepared.points,
-      xy,
-      neighbors,
-      clusters,
-      labels,
-      clusterLabels,
-      prepared: { mean: prepared.mean, scale: prepared.scale, basis: prepared.basis },
+      ...derived,
     };
   }
 

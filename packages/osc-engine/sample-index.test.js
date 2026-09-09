@@ -51,7 +51,7 @@ const toWavCalls = [];
 // An "aiff" that is really a wav under another name, so the conversion hook can be exercised.
 const toWav = async (file) => { toWavCalls.push(file); return file.replace(/\.aif$/, '.decoded.wav'); };
 
-const fresh = (name = 'index.json') => new SampleIndex({ cacheFile: path.join(TMP, name), analyze, toWav });
+const fresh = (name = 'index.json') => new SampleIndex({ cacheFile: path.join(TMP, name), analyze, toWav, derive: async (v, p, o) => sm.deriveMap(v, p, o) });
 
 before(() => {
   for (let i = 0; i < 6; i++) write(path.join(KICKS, `kick0${i}.wav`), kick(45 + i * 6, i));

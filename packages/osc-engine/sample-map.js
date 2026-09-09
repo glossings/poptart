@@ -944,6 +944,44 @@ function labelClusters(clusters, votesPerFile, { minShare = 0.3 } = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The whole derivation, features in, map out
+// ---------------------------------------------------------------------------------------------
+
+const MAP_NEIGHBORS = 15;
+
+/**
+ * Everything the map is, from the feature vectors: projection, neighbors, layout, groups and
+ * labels. A couple of seconds at library scale, all of it CPU - which is why the index runs it
+ * on the analysis worker (analysis.js's mapDerive) rather than beside the note scheduler.
+ * @param {Float32Array[]} vectors - one per sample, FEATURE_LENGTH long
+ * @param {string[]} paths - the same samples' absolute paths, for the name votes
+ * @returns {{ points: Float32Array[], xy: Float32Array, neighbors: {index: Int32Array, dist: Float32Array}[],
+ *             clusters: Int32Array, labels: (string|null)[], clusterLabels: (string|null)[],
+ *             prepared: { mean: Float32Array, scale: Float32Array, basis: Float32Array[] } | null }}
+ */
+function deriveMap(vectors, paths, { k = MAP_NEIGHBORS } = {}) {
+  const n = vectors.length;
+  if (n < 3) {
+    return { points: [], xy: new Float32Array(n * 2), neighbors: [], clusters: new Int32Array(n), labels: paths.map(() => null), clusterLabels: [], prepared: null };
+  }
+  const prepared = prepareVectors(vectors);
+  const neighbors = knn(prepared.points, Math.min(k, n - 1));
+  const graph = knnGraph(neighbors);
+  const xy = layout(graph, prepared.points);
+  const clusters = cluster(graph, n);
+  const votes = paths.map((p) => nameVotes(p));
+  return {
+    points: prepared.points,
+    xy,
+    neighbors,
+    clusters,
+    labels: labelPoints(neighbors, votes),
+    clusterLabels: labelClusters(clusters, votes),
+    prepared: { mean: prepared.mean, scale: prepared.scale, basis: prepared.basis },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Kit-building queries, in the projected space
 // ---------------------------------------------------------------------------------------------
 
@@ -1024,6 +1062,7 @@ module.exports = {
   topVote,
   labelPoints,
   labelClusters,
+  deriveMap,
   farthestFrom,
   mulberry32,
 };
