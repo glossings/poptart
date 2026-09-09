@@ -109,3 +109,60 @@ test('the roll records its focus on press and through a drag, and its keys pass 
   // the wheel still pins to the pointer, which beats any remembered focus
   assert.match(SRC, /prZoomBy\(Math\.exp\(-e\.deltaY \* PR_ZOOM_WHEEL\), px\)/);
 });
+
+// ---------------------------------------------------------------------------------------------
+// The painter's REMEMBERED view: reopening the arrangement puts you back where you were working,
+// not at bar 1 of a song you were forty bars into. What is worth pinning is the restore, because
+// the view is remembered across SONGS: the numbers saved off a forty-track, two-hundred-bar patch
+// must never open a short one looking at empty space past its end, or at rows it doesn't have.
+// ---------------------------------------------------------------------------------------------
+
+/** arRestoreView into a painter holding a `loopLen`-bar song of `rows` tracks. */
+function arRestore(saved, { loopLen = 32, rows = 8, visibleRows = 8, visibleBars = 20 } = {}) {
+  const arState = { pxPerCycle: 44, scroll: 0, scrollLane: 0 };
+  // eslint-disable-next-line no-new-func
+  new Function('arState', 'arDeck', 'arReadViews', 'arLoopLen', 'arVisibleBars', 'arRowCount',
+    'arVisibleRows', 'AR_MIN_PX_PER_CYCLE', 'AR_MAX_PX_PER_CYCLE', `
+    let arViewSaved = null;
+    const arViewOf = (st) => \`\${st.pxPerCycle}|\${st.scroll}|\${st.scrollLane}\`;
+    const arClampRows = () => {
+      arState.scrollLane = Math.max(0, Math.min(arState.scrollLane, arRowCount() - arVisibleRows()));
+    };
+    ${grab('arRestoreView')}
+    arRestoreView();`)(
+    arState, 'a', () => ({ a: saved }), () => loopLen, () => visibleBars,
+    () => rows, () => visibleRows, 6, 400,
+  );
+  return arState;
+}
+
+test('the painter reopens where it was left, zoom and position both', () => {
+  assert.deepEqual(arRestore({ px: 120, scroll: 12, lane: 3 }, { rows: 20, visibleRows: 8 }),
+    { pxPerCycle: 120, scroll: 12, scrollLane: 3 });
+});
+
+test('never past the end of THIS song - the view is remembered across patches', () => {
+  // Half a screen short of the end: landing a little before where you left off is a view you can
+  // read, and landing past it is a blank canvas that looks like the song has gone.
+  assert.equal(arRestore({ px: 44, scroll: 400 }, { loopLen: 32, visibleBars: 20 }).scroll, 22);
+  assert.equal(arRestore({ px: 44, scroll: -5 }).scroll, 0, 'and never before the top');
+  assert.equal(arRestore({ px: 44, scroll: 500 }, { loopLen: 8, visibleBars: 20 }).scroll, 0,
+    'a song shorter than the view starts at bar 1');
+});
+
+test('rows that are no longer there are scrolled back to ones that are', () => {
+  assert.equal(arRestore({ lane: 30 }, { rows: 10, visibleRows: 8 }).scrollLane, 2);
+  assert.equal(arRestore({ lane: 30 }, { rows: 4, visibleRows: 8 }).scrollLane, 0,
+    'a song that fits does not scroll at all');
+});
+
+test('a zoom out of range is clamped, and junk leaves the default alone', () => {
+  assert.equal(arRestore({ px: 9000 }).pxPerCycle, 400);
+  assert.equal(arRestore({ px: 0.5 }).pxPerCycle, 6);
+  assert.deepEqual(arRestore({ px: 'wide', scroll: null, lane: undefined }),
+    { pxPerCycle: 44, scroll: 0, scrollLane: 0 });
+});
+
+test('nothing remembered for this deck opens the painter exactly as it always did', () => {
+  assert.deepEqual(arRestore(undefined), { pxPerCycle: 44, scroll: 0, scrollLane: 0 });
+});

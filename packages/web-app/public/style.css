@@ -4389,6 +4389,38 @@ body.mix-on #deckAHead .deck-song {
   font-family: var(--mono);
   font-size: 11px;
 }
+/* A stem inside an UNFOLDED group: stepped in from its group's row (client.js sets the padding,
+   on the side its deck reads from - deck B's rows pack to the right) and named a shade quieter,
+   which is what says the group's own row above it is the one that mixes them all. */
+.mix-track-member .mix-name {
+  color: var(--text-dim);
+}
+/* The fold caret on a group's row - the ctrl+G mixer's gesture, in the desk's own size. Held open
+   invisibly on every other row so the gates, names and faders stay in one column down the deck. */
+.mix-fold {
+  /* The gate's footprint next to it - it is the same kind of control, on the same row, and a
+     caret drawn smaller than everything around it is one you have to hunt for. */
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mix-fold:hover {
+  color: var(--text);
+}
+.mix-fold.empty {
+  visibility: hidden;
+  pointer-events: none;
+}
 .mix-gate {
   width: 14px;
   height: 14px;

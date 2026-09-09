@@ -78,8 +78,6 @@ test('injectLocations leaves every name-lookup argument a plain string', () => {
     ['x.fx("Pro-Q 3")', '.fx("Pro-Q 3")'],
     ['x.scale("F minor")', '.scale("F minor")'],
     ['setscale("F minor")', 'setscale("F minor")'],
-    ['x.bus("reverb")', '.bus("reverb")'],
-    ['x.bsend("delay")', '.bsend("delay")'],
     ['x.as("note:vel:clip")', '.as("note:vel:clip")'],
     ['midicc("dev:Keystep")', 'midicc("dev:Keystep")'],
     ['midikeys("dev:Keystep")', 'midikeys("dev:Keystep")'],
@@ -365,4 +363,8 @@ test('a pattern of NAMES is tagged for highlighting; the drawn data beside it is
   // .preset() has only the one form - its argument is always names - so it needs no entry in
   // NAME_ARG_CALLS at all, and the default (everything is a pattern) is already right.
   assert.equal(injectLocations('.preset("<init growl>")', 0), '.preset(mini("<init growl>", 9))');
+  // ...and neither does .bus()/.bsend(): both arguments are patterns now - a destination that
+  // re-routes as it turns over, and a send level like any other level.
+  assert.equal(injectLocations('.bus("<reverb delay>")', 0), '.bus(mini("<reverb delay>", 6))');
+  assert.equal(injectLocations('.bsend("reverb", "0 .5")', 0), '.bsend(mini("reverb", 8), mini("0 .5", 18))');
 });

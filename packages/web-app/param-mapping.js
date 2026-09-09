@@ -211,6 +211,7 @@ class MappedEngine {
   clearInputSource(...a) { return this.engine.clearInputSource(...a); }
   setBusSends(...a) { return this.engine.setBusSends(...a); }
   clearBusSends(...a) { return this.engine.clearBusSends(...a); }
+  setBusSendAmount(...a) { return this.engine.setBusSendAmount(...a); }
   injectAudio(trackId, slot, name, ...a) { return this.engine.injectAudio(trackId, slot, this._trackRef(name, trackId), ...a); }
   clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
   injectMidi(trackId, slot, name, ...a) { return this.engine.injectMidi(trackId, slot, this._trackRef(name, trackId), ...a); }

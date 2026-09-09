@@ -31,7 +31,7 @@ function loadMixDesk() {
     return src.slice(at, end);
   }).join('\n');
   // eslint-disable-next-line no-new-func
-  return new Function('mixState', 'deckOfKey', 'mixKeys', 'engine', 'engineTrack', `
+  return new Function('mixState', 'deckOfKey', 'mixKeys', 'mixDeskKeys', 'engine', 'engineTrack', `
     ${bodies};
     return { ${NAMES.join(', ')} };
   `);
@@ -61,6 +61,9 @@ function desk(keys, faders = {}) {
     mixState,
     (key) => (key.startsWith('b:') ? 'b' : 'a'),
     function* mixKeys() { yield* stems; },
+    // The desk's full population of one deck: with no groups here it is just that deck's stems
+    // (server.js folds the tracks inside groups in too - see mixAllKeys).
+    (deck) => stems.filter((k) => (k.startsWith('b:') ? 'b' : 'a') === deck),
     { setParam: (tid, slot, name, value) => live.set(tid, value) },
     (key) => key,
   );

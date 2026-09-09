@@ -406,6 +406,7 @@ export class Scheduler {
     this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
     this._busRouted = false; // track output currently diverted to a named bus (see Sig#bus)
+    this._sentBusSends = null; // bus sends as last resolved and pushed, for diffing (see _syncBusSends)
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
     this._livePresets = new Map(); // slot -> preset name currently sounding (auto-pin writes into it)
     this._presetWarned = new Set(); // "slot name" already complained about, so a bad name says it once
@@ -687,19 +688,15 @@ export class Scheduler {
     }
 
     // Output-to-bus sends (Sig#bus): feed this track's output to one or more named buses (summing
-    // with any other track on the same name), read back elsewhere via audio("name"). Replaced
-    // wholesale each eval and torn down when the pattern drops .bus() - the engine track outlives
-    // the Scheduler, so a stale send would keep feeding a bus the pattern no longer mentions. The
-    // dry level travels separately as the 'dry' channel control above.
-    if (typeof this.engine.setBusSends === 'function') {
-      const sends = sig.busSends ?? [];
-      if (sends.length > 0) {
-        this.engine.setBusSends(this.trackId, sends);
-      } else if (this._busRouted) {
-        this.engine.clearBusSends(this.trackId);
-      }
-      this._busRouted = sends.length > 0;
-    }
+    // with any other track on the same name), read back elsewhere via audio("name"). Both halves of
+    // a send take patterns, so the resolved set is re-read every tick as well - see _syncBusSends,
+    // which does the actual routing. Forgetting what was last sent makes this eval push its routing
+    // outright instead of diffing against a record the new pattern may have nothing to do with; the
+    // teardown when a pattern drops .bus() matters because the engine track outlives the Scheduler,
+    // so a stale send would keep feeding a bus the pattern no longer mentions. The dry level travels
+    // separately as the 'dry' channel control above.
+    this._sentBusSends = null;
+    this._syncBusSends(this.engine.getTime());
 
     // Audio injected into a plugin's aux/sidechain input (Sig#audio, injector form): wire each
     // { slot, name } and tear down any slot the new pattern dropped. `name` is a track or a
@@ -859,6 +856,7 @@ export class Scheduler {
       this.engine.clearBusSends(this.trackId);
       this._busRouted = false;
     }
+    this._sentBusSends = null;
     // Tier-2 modulators run as persistent engine-side synths, independent of the tick loop. Muting
     // or removing the track must clear them or a leftover LFO/env keeps modulating the param after
     // unmute - the fresh Scheduler an unmute creates never saw them and so can't clear them itself.
@@ -899,6 +897,7 @@ export class Scheduler {
 
       this._withNoteGate(() => {
         this._pollGenericParams(nowSec);
+        this._syncBusSends(nowSec); // patterned .bus() names / signal send levels
         for (const m of this._activeModulators.values()) {
           if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
         }
@@ -1340,6 +1339,70 @@ export class Scheduler {
       this.engine.anchorParamLFO(this.trackId, m.slot, m.name, ((total % 1) + 1) % 1, targetSec);
       m.anchoredAtSec = nowSec;
     }
+  }
+
+  // The bus sends in force right now (Sig#bus). A send's name may be a PATTERN of names
+  // (.bus("<reverb delay>"): where the output goes changes as the pattern turns over) and its
+  // amount a SIGNAL (.bus("reverb", sine())), so this runs every tick, not just per eval. Sampled at
+  // the time the values land, like every other polled control.
+  //
+  // The two halves go out by different routes because they cost very different things. A changed
+  // set of NAMES is a re-route: buses acquired and released, the node tree reordered so a writer
+  // runs before its readers. So names are diffed as a set and only pushed when they actually
+  // change. A changed AMOUNT is one .set on a control the SynthDef already lags, which is what a
+  // level polled at 30ms wants - sent per index, and only where it moved.
+  _syncBusSends(nowSec) {
+    if (typeof this.engine.setBusSends !== 'function') return;
+    const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
+    const applyCycle = this.transport.cycleAt(applySec);
+    const sends = [];
+    for (const send of this.pattern?.busSends ?? []) {
+      // A patterned name resting (a `~` step, or a value the pattern doesn't cover) means no send
+      // at all for as long as the rest lasts - the send drops out of the set, which frees the bus
+      // if nothing else feeds it, rather than sending to it at zero.
+      let name = send.name;
+      if (typeof name !== 'string') {
+        const v = name.sample(applySec, this.transport.cps, applyCycle);
+        if (v == null) continue;
+        name = String(v).trim();
+        if (!name) continue;
+      }
+      let amount = send.amount;
+      if (typeof amount !== 'number') {
+        const v = Number(amount.sample(applySec, this.transport.cps, applyCycle));
+        // A resting/non-numeric level holds the last one sent, same as a polled param (see
+        // _pollGenericParams) - the send is still routed, so silently dropping to 0 would be a
+        // louder mistake than staying where it was.
+        amount = Number.isNaN(v) ? this._sentAmountFor(sends.length, name) : v;
+      }
+      sends.push({ name, amount });
+    }
+
+    if (sends.length === 0) {
+      if (this._busRouted) this.engine.clearBusSends(this.trackId);
+      this._busRouted = false;
+      this._sentBusSends = [];
+      return;
+    }
+    const prev = this._sentBusSends;
+    const rerouted = !prev || prev.length !== sends.length || sends.some((s, i) => s.name !== prev[i].name);
+    if (rerouted) {
+      // setBusSends carries the levels with it, so nothing more is needed this tick.
+      this.engine.setBusSends(this.trackId, sends);
+    } else if (typeof this.engine.setBusSendAmount === 'function') {
+      for (let i = 0; i < sends.length; i++) {
+        if (sends[i].amount !== prev[i].amount) this.engine.setBusSendAmount(this.trackId, i, sends[i].amount, applySec);
+      }
+    }
+    this._busRouted = true;
+    this._sentBusSends = sends;
+  }
+
+  // The level index `i` is currently sending at, if it is still the same bus - what a resting
+  // signal level holds at. Falls back to unity for a send that has only just appeared.
+  _sentAmountFor(i, name) {
+    const prev = this._sentBusSends?.[i];
+    return prev && prev.name === name ? prev.amount : 1;
   }
 
   _pollGenericParams(nowSec) {

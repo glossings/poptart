@@ -1588,6 +1588,13 @@ class OscEngine {
   clearBusSends(trackId) {
     this._send('/poptart/clearBusSends', [trackId]);
   }
+  // Move one already-routed send's level (a signal-valued .bus() amount, polled by the scheduler).
+  // `index` is the send's position in the set setBusSends last established. Deliberately NOT a
+  // setParam: that maps a ramp synth's bus onto the control, which setBusSends' plain .set could
+  // then no longer move. The SynthDef lags busSendK instead, so a poll-rate .set is already smooth.
+  setBusSendAmount(trackId, index, amount, targetTime) {
+    this._send('/poptart/setBusSendAmount', [trackId, index, amount, this._latency(targetTime)]);
+  }
 
   // Inject audio into the plugin at `slot` as its aux/sidechain input (Sig#audio injector). A
   // track source: sclang allocates a cross-track bus, maps it into that slot's VSTPlugin aux bus,

@@ -58,7 +58,9 @@ export function injectLocations(code, base = 0) {
 // and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
-  'synth', 'fx', 'scale', 'setscale', 'bus', 'bsend', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  'synth', 'fx', 'scale', 'setscale', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'pianoroll',
+  // `.bus("<reverb delay>")` / `.bsend(...)` are deliberately NOT here: a send's destination is a
+  // pattern of names like `.preset()`'s, so its literal wants wrapping (and highlighting) too.
   // The painter's clips, then its options - drawn data, never mini (see arrange.mjs).
   '_arrange',
   // The editor's own definition calls: an id to look one up by, then the drawn data the matching

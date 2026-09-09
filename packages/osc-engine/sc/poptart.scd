@@ -300,6 +300,20 @@ buildTrackDef = { |key|
         var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
         var mid, side; // the channel strip's mid/side pair (see the width control below)
         var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv, djq; // the DJ stage (see below)
+        // The channel's DJ fader, read out here because it applies to the named-bus SENDS as well
+        // as to the direct output at the bottom - a post-fader send, the way a desk's are.
+        //
+        // Two things need that. A stem gated out of a mix has to go quiet including whatever it
+        // was feeding: a part "muted" at the desk while still pouring into a reverb is not muted.
+        // And a track written inside a group() has NO direct output - it plays dry(0) and its
+        // sound leaves through the group's bus - so this line is what gives the desk a working
+        // fader, gate and solo on a stem inside a group.
+        //
+        // The fader ONLY. Trim, the EQ, the filter and the crossfader's `deck` gain stay on the
+        // direct path below: `deck` has to be applied exactly once per audible path, and a
+        // group's own output already applies it - carrying it into the sends too would square the
+        // crossfade through every bus.
+        var faderAmt = fader.lag(0.08).clip(0, 1);
         maxSlots.do { |i|
             if (i == 0) {
                 // The instrument slot's output, plus whatever the track's sample synths wrote
@@ -367,11 +381,12 @@ buildTrackDef = { |key|
         // static; scSendGain scales the amount. Always-on Out keeps the UGen graph fixed.
         Out.ar(scSend, sig * scSendGain);
         // Named-bus sends (Sig#bus): up to maxBusSends independent aux sends, each a copy of the
-        // post-fader output to busOutK scaled by busSendK. Unused slots park busOutK at trashBus
-        // with busSendK = 0. Lagged so a routing change doesn't click. Any number of tracks sending
-        // to the same bus sum into it; read the sum on another track with the audio("name") source.
+        // post-fader output to busOutK scaled by busSendK, and by the DJ fader (see faderAmt).
+        // Unused slots park busOutK at trashBus with busSendK = 0. Lagged so a routing change
+        // doesn't click. Any number of tracks sending to the same bus sum into it; read the sum on
+        // another track with the audio("name") source.
         [busOut1, busOut2, busOut3, busOut4].do { |b, i|
-            Out.ar(b, sig * [busSend1, busSend2, busSend3, busSend4][i].lag(0.02));
+            Out.ar(b, sig * [busSend1, busSend2, busSend3, busSend4][i].lag(0.02) * faderAmt);
         };
         // Recorder tap (see the record section below): a copy of the post-fader output for the
         // meter and DiskOut synths, parked at trashBus with recSend 0 until a bounce taps it.
@@ -444,7 +459,7 @@ buildTrackDef = { |key|
         // default outside DJ decks - multiplies the write to zeros. The buses always exist; the
         // SendPeakRMS readers run only while the strip is open (see the deck meter section).
         Out.ar(deckMeterBus.index + (mdeck.max(0) * 2), live * (mdeck > -0.5));
-        live = live * fader.lag(0.08).clip(0, 1) * deck.lag(0.08).clip(0, 1);
+        live = live * faderAmt * deck.lag(0.08).clip(0, 1);
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
         // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by
         // `dry` (Sig#dry, channel control, default 1) so .dry(0)/.bsend() can mute the dry path
@@ -2625,6 +2640,19 @@ OSCdef(\poptartSetBusSends, { |msg|
         };
     };
 }, '/poptart/setBusSends');
+
+// One routed send's level moving (a signal-valued .bus() amount, polled by the scheduler).
+// msg = [trackId, index, amount, latency]. Just the level: the routing (which bus, and the node
+// order behind it) is setBusSends' business and is untouched here, so a swept send costs nothing
+// but a .set on a control the SynthDef already lags. An index past the set currently routed is
+// ignored - the send it named has gone.
+OSCdef(\poptartSetBusSendAmount, { |msg|
+    var key = msg[1].asSymbol, i = msg[2].asInteger, amt = msg[3].asFloat, latency = msg[4].asFloat;
+    var track = tracks[key];
+    if (track.isKindOf(Event) and: { i >= 0 } and: { i < maxBusSends } and: { i < (track[\busSends] ?? []).size }) {
+        bundleNow.(latency, { track[\synth].set(("busSend" ++ (i + 1)).asSymbol, amt) });
+    };
+}, '/poptart/setBusSendAmount');
 
 OSCdef(\poptartClearBusSends, { |msg|
     var key = msg[1].asSymbol;

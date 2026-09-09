@@ -681,15 +681,30 @@ export class Sig {
    * own output pair; control that independently with .dry() (or use .bsend() to send and mute the
    * dry in one call). `amount` defaults to 1. The bus is created on first use and freed when
    * nothing references it; reading a bus that no track feeds is silence.
+   *
+   * Both halves take patterns. The NAME may be a pattern of names - .bus("<reverb delay>") sends
+   * to the reverb one cycle and the delay the next, a re-route the scheduler makes as the pattern
+   * turns it over, and a rest drops the send for as long as it lasts. The AMOUNT is a signal like
+   * any other level: .bus("reverb", sine().range(0, 0.6)) sweeps the send, .bus("reverb", "0 .5")
+   * steps it.
    */
   bus(name, amount = 1) {
-    if (typeof name !== 'string' || !name.trim()) {
+    // A Sig name is a pattern of names - both what the editor's transpile hands us for any string
+    // here (it wraps every pattern-position literal in mini()) and the bare .bus("<a b>") spelling
+    // typed where the transpile doesn't reach. A plain string stays one literal name: a bus name is
+    // a lookup key, and the ones a group generates carry characters mini would read as syntax (see
+    // groups.mjs). Same split as .s() / .preset().
+    const nameSig = name instanceof Sig ? name : null;
+    if (!nameSig && (typeof name !== 'string' || !name.trim())) {
       throw new Error('[signal] .bus() takes a bus name, e.g. .bus("drums")');
     }
-    if (typeof amount !== 'number' || !Number.isFinite(amount)) {
-      throw new Error('[signal] .bus() amount must be a number (a send level), e.g. .bus("reverb", 0.3)');
+    // The send level is a level like .postgain()'s: a plain number is the static fast path (nothing
+    // to poll), anything else becomes a Sig the scheduler samples per tick.
+    const amountSig = typeof amount === 'number' ? null : toSignal(amount);
+    if (!amountSig && !Number.isFinite(amount)) {
+      throw new Error('[signal] .bus() amount must be a number or a signal (a send level), e.g. .bus("reverb", 0.3)');
     }
-    return this._clone({ busSends: [...this.busSends, { name: name.trim(), amount }] });
+    return this._clone({ busSends: [...this.busSends, { name: nameSig ?? name.trim(), amount: amountSig ?? amount }] });
   }
 
   /**
@@ -704,6 +719,7 @@ export class Sig {
   /**
    * Bus send with the dry killed: `.bsend("reverb")` is exactly `.bus("reverb").dry(0)` - route the
    * track entirely into the bus and stop it playing directly. `amount` scales the send (default 1).
+   * Patterns the same way .bus() does: a pattern of names re-routes, a signal amount rides the send.
    */
   bsend(name, amount = 1) {
     return this.bus(name, amount).dry(0);

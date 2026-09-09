@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { note, synth, s, lfo } from './src/signal.mjs';
+import { note, synth, s, lfo, mini, sine } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 // A stand-in engine: every method is a spy that records its call; getTime is 0 so the Transport a
@@ -38,8 +38,18 @@ test('.bus() trims the name and validates its arguments', () => {
   assert.deepEqual(synth('Serum 2').bus('  drums  ').busSends, [{ name: 'drums', amount: 1 }]);
   assert.throws(() => synth('Serum 2').bus(''), /bus name/);
   assert.throws(() => synth('Serum 2').bus(42), /bus name/);
-  assert.throws(() => synth('Serum 2').bus('drums', 'loud'), /amount must be a number/);
   assert.throws(() => synth('Serum 2').bus('drums', NaN), /amount must be a number/);
+});
+
+test('.bus() keeps a patterned name and a signal amount as signals', () => {
+  // A Sig name is what the editor's transpile hands us for any literal here; a plain string stays
+  // one literal name so a group's generated bus (`b:kick`) is never read as mini notation.
+  const sig = synth('Serum 2').bus(mini('<reverb delay>'), sine());
+  assert.equal(sig.busSends.length, 1);
+  assert.equal(typeof sig.busSends[0].name, 'object', 'the name pattern is kept whole');
+  assert.equal(typeof sig.busSends[0].amount, 'object', 'so is the level signal');
+  // A string amount is a pattern like every other level (see .postgain()).
+  assert.equal(typeof synth('Serum 2').bus('reverb', '0 .5').busSends[0].amount, 'object');
 });
 
 test('.dry() sets a dry-level channel control, independent of bus sends', () => {
@@ -87,6 +97,62 @@ test('scheduler does not clear sends when there were none to begin with', () => 
   const sch = new Scheduler(engine, { trackId: 'kick' });
   sch.setPattern(note('c2*4').synth('Serum 2'));
   assert.equal(callsTo('clearBusSends').length, 0);
+});
+
+test('scheduler re-routes when a patterned bus name turns over, and only then', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'kick', cps: 1 });
+  sch.transport.start(); // a frozen clock never leaves cycle 0, so the name could never turn over
+  sch.setPattern(note('c2*4').synth('Serum 2').bus(mini('<reverb delay>')));
+
+  // Cycle 0 of the name pattern - the send goes to "reverb".
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'reverb', amount: 1 }]]);
+  // Ticking inside the same cycle changes nothing: a re-route acquires and releases buses and
+  // reorders the node tree, so it must not happen once per poll.
+  sch._syncBusSends(0.1);
+  assert.equal(callsTo('setBusSends').length, 1, 'no re-route while the name holds');
+  // ...and the next cycle switches the destination.
+  sch._syncBusSends(1.05);
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'delay', amount: 1 }]]);
+});
+
+test('a resting name pattern drops the send entirely rather than sending at zero', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'kick', cps: 1 });
+  sch.transport.start();
+  sch.setPattern(note('c2*4').synth('Serum 2').bus(mini('<reverb ~>')));
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'reverb', amount: 1 }]]);
+
+  sch._syncBusSends(1.05); // the rest cycle
+  assert.equal(callsTo('clearBusSends').length, 1, 'the bus is released while the name rests');
+});
+
+test('a signal send level is polled as a level, not as a re-route', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'pad', cps: 1 });
+  sch.transport.start();
+  sch.setPattern(note('c2').synth('Serum 2').bus('reverb', sine()));
+
+  const routed = callsTo('setBusSends').length;
+  sch._syncBusSends(0.3);
+  sch._syncBusSends(0.6);
+  assert.equal(callsTo('setBusSends').length, routed, 'the routing never changed');
+  const moved = callsTo('setBusSendAmount');
+  assert.ok(moved.length >= 2, 'the level was pushed on its own');
+  assert.equal(moved[0].args[0], 'pad');
+  assert.equal(moved[0].args[1], 0, 'addressed by the send\'s index in the routed set');
+  assert.equal(typeof moved[0].args[2], 'number');
+  assert.ok(moved[0].args[3] > 0, 'applied at the lookahead horizon it was sampled for');
+});
+
+test('a static send level is never re-pushed after its routing lands', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'pad' });
+  sch.setPattern(note('c2').synth('Serum 2').bus('reverb', 0.3));
+  sch._syncBusSends(0.3);
+  sch._syncBusSends(0.6);
+  assert.equal(callsTo('setBusSends').length, 1);
+  assert.equal(callsTo('setBusSendAmount').length, 0, 'setBusSends already carried the level');
 });
 
 test('stop() releases a track\'s bus sends', () => {

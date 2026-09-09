@@ -3,11 +3,16 @@
 // read. Like pianoroll.mjs this is served verbatim to the browser and imports nothing.
 //
 // An arrangement is a set of CLIPS, playlist-style: each clip says "this labeled block sounds
-// here". Format: space-separated `label,start,len`, e.g. "drums,0,8 bass,4,4 drums,12,4".
+// here". Format: space-separated `label,start,len[,m]`, e.g. "drums,0,8 bass,4,4 drums,12,4".
 //   label - the block's label (`drums:` in the buffer). No commas or whitespace, which a label
 //           can't hold anyway.
 //   start - onset, in CYCLES (decimals allowed: 4.5 is halfway through bar 4)
 //   len   - length in cycles, > 0
+//   m     - present on a MUTED clip: it keeps its place in the song (and is drawn there, greyed)
+//           but sounds nothing, which is how a part is taken out for a listen without losing the
+//           painting. Written only when set, so an unmuted clip is spelled exactly as it always
+//           was. The literal `m` and nothing else: the retired lane column was a NUMBER in this
+//           position, so an old spelling still reads as malformed rather than as a muted clip.
 //
 // ONE ROW PER TRACK, exactly. A row is a block and a block is a row, so painting is only ever
 // "draw where this track sounds" - there is no second question about WHAT it plays there. A part
@@ -69,12 +74,15 @@ export function parseArrangement(str) {
   for (const tok of String(str ?? '').trim().split(/\s+/)) {
     if (!tok) continue;
     const parts = tok.split(',');
-    if (parts.length !== 3) continue;
+    if (parts.length !== 3 && parts.length !== 4) continue;
+    if (parts.length === 4 && parts[3] !== 'm') continue; // see the mute flag above
     const label = parts[0];
     const start = num(parts[1]);
     const len = num(parts[2]);
     if (!label || start == null || len == null || len <= 0) continue;
-    out.push({ label, start, len });
+    // `mute` only when it is true, so an ordinary clip is the same three-field object it has
+    // always been - the painter's snapshots and its serializer both round-trip through this.
+    out.push(parts.length === 4 ? { label, start, len, mute: true } : { label, start, len });
   }
   return out;
 }
@@ -89,7 +97,7 @@ export function serializeArrangement(clips) {
   return [...clips]
     .filter((c) => c && c.label && c.len > 0)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) || a.start - b.start)
-    .map((c) => `${c.label},${fmt(c.start)},${fmt(c.len)}`)
+    .map((c) => `${c.label},${fmt(c.start)},${fmt(c.len)}${c.mute ? ',m' : ''}`)
     .join(' ');
 }
 
@@ -97,7 +105,7 @@ export function serializeArrangement(clips) {
 export function looksLikeArrangeString(str) {
   const s = String(str ?? '').trim();
   if (!s) return true;
-  return s.split(/\s+/).every((tok) => /^[^,\s]+,-?[\d.]+,[\d.]+$/.test(tok));
+  return s.split(/\s+/).every((tok) => /^[^,\s]+,-?[\d.]+,[\d.]+(?:,m)?$/.test(tok));
 }
 
 /** The options as the builder and the editor both read them, defaults filled in. */
@@ -201,11 +209,16 @@ export function arrangementLength(clips, opts = {}) {
  * Where each label sounds: label -> sorted, merged [start, end) spans in cycles, lanes forgotten.
  * Two clips of one label that touch or overlap (on any lanes) are one span - the block is either
  * sounding at a moment or it isn't.
+ *
+ * A MUTED clip contributes nothing: it is a clip you can still see and move, and this is the one
+ * place that decides what a clip means to the ear, so muting is exactly "leave it out of here".
+ * A track whose every clip is muted therefore gets no spans at all, which the host reads as the
+ * silence an emptied row means - the part is out until you unmute it.
  */
 export function arrangementSpans(clips) {
   const byLabel = new Map();
   for (const c of clips) {
-    if (!(c.len > 0)) continue;
+    if (!(c.len > 0) || c.mute) continue;
     const list = byLabel.get(c.label) ?? [];
     list.push([c.start, c.start + c.len]);
     byLabel.set(c.label, list);

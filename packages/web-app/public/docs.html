@@ -544,7 +544,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             group's bus and plays nothing directly, so a <code>.postgain()</code>, an
             <code>.fx()</code> or a <code>.bus()</code> written on the group takes all of them, and
             the mixer and the DJ desk show the group alone — one fader, one meter, one gate for the
-            lot (unfold a strip to reach what is inside). A subgroup sends into <em>its</em> group
+            lot. Both carry a caret for looking inside: unfold a strip (or a stem on the desk) and
+            the tracks in the group appear stepped in under it, each with its own gate, solo and
+            fader. Soloing one holds its group open, so what you hear is that part alone. A subgroup sends into <em>its</em> group
             in turn, and a bodyless <code>main: group()</code> is the root every ungrouped track
             reaches — the place a mastering chain goes; without a <code>main:</code> block, tracks
             play straight out as they always have. The group starts bare: what its tracks share is
@@ -587,7 +589,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             From those two, the edits an arrangement is mostly made of: <strong>⌘E</strong> splits at
             the marker (or at both edges of a marked span, on every track it crosses), and
             <strong>⌘J</strong> makes one clip of what you have selected or marked. Drag an edge to
-            resize, ⌘D duplicates after, ⌘C / X / V move a stretch of song, ⌘Z undoes. The
+            resize, ⌘D duplicates after, ⌘C / X / V move a stretch of song, ⌘Z undoes.
+            <strong>0</strong> mutes what you have selected or marked — the clips stay where they
+            are, drawn washed out and dashed, and stop sounding until you press it again. The
             arrangement loops at the last clip's end, or drag in the ruler (or type
             <strong>len</strong>) to set the length; <strong>snap</strong> sets how finely clips
             land, <strong>+</strong>/<strong>−</strong> and ctrl+wheel zoom. Inside a clip the pattern
@@ -755,7 +759,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><td><code>.pan(v)</code></td><td>−1 left … 1 right.</td></tr>
             <tr><td><code>.width(v)</code></td><td>Stereo width: 0 mono, 1 untouched, up to 4. Applied before the pan.</td></tr>
             <tr><td><code>.bassmono(hz)</code></td><td>Mono below <code>hz</code>, stereo above. The standard club-rig insurance.</td></tr>
-            <tr><td><code>.bus(name, amt)</code></td><td>Aux send to a named bus; another track reads it with <code>audio("name")</code>. <code>.dry(0)</code> kills the dry; <code>.bsend()</code> is both at once.</td></tr>
+            <tr><td><code>.bus(name, amt)</code></td><td>Aux send to a named bus; another track reads it with <code>audio("name")</code>. <code>.dry(0)</code> kills the dry; <code>.bsend()</code> is both at once. Both arguments pattern: <code>.bus("&lt;reverb delay&gt;")</code> re-routes as it turns over, and the amount rides a signal.</td></tr>
             <tr><td><code>.o(n)</code></td><td>Which output pair: <code>.o(2)</code> = channels 3/4 (raise <em>output channels</em> in settings first).</td></tr>
           </table>
           <pre><code>pad: note(<span class="s">"c3 e3 g3"</span>).synth(<span class="s">"Diva"</span>)

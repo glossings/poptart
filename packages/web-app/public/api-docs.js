@@ -258,8 +258,8 @@ const API_DOCS = {
   bus: {
     kind: 'method',
     sig: 'bus(name, amount)',
-    desc: 'Aux send: mixes this track\'s output into a named bus that another track reads with audio("name"). Doesn\'t touch the dry signal.',
-    eg: '.bus("reverb", 0.3)',
+    desc: 'Aux send: mixes this track\'s output into a named bus that another track reads with audio("name"). Doesn\'t touch the dry signal. Both arguments take patterns - .bus("&lt;reverb delay&gt;") re-routes the send as the pattern turns over (a rest drops it), and the amount is a signal like any other level.',
+    eg: '.bus("reverb", sine().range(0, 0.6))',
   },
   dry: { kind: 'method', sig: 'dry(value)', desc: 'How much dry signal still reaches the track\'s own output, 1 by default. .dry(0) leaves only the bus sends.', eg: '.dry(0)' },
   wet: {
@@ -268,7 +268,7 @@ const API_DOCS = {
     desc: 'Dry/wet for the effect before it in the chain - 1 (default) is the plugin, 0 is a true bypass. Takes any signal, so .wet(auto("intro")) is how an effect comes and goes over a song without being spawned mid-set. Linear crossfade; blending a latency-inducing plugin (linear-phase EQ, lookahead limiter) combs against the dry path.',
     eg: '.fx("ValhallaRoom").wet(auto("breakdown"))',
   },
-  bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Bus send with the dry killed - exactly .bus(name, amount).dry(0).', eg: '.bsend("reverb")' },
+  bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Bus send with the dry killed - exactly .bus(name, amount).dry(0). Patterns its name and levels its amount just as .bus() does.', eg: '.bsend("reverb")' },
   vel: {
     kind: 'both',
     sig: 'vel(value)',

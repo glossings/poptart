@@ -18843,6 +18843,7 @@ function closeMixMode() {
   // against is changing, exactly as it does on the way in.
   if (arState) closeArrangeEditor();
   mixModeOn = false;
+  mixUnfolded.clear(); // a group is one stem again the next time the desk opens
   syncPreviewRouting(); // back to the default output - off the desk there is nothing to protect
   mixPushStop();
   document.body.classList.remove('mix-on');
@@ -20673,12 +20674,15 @@ async function mixRefresh() {
   } catch {
     return; // the strip just doesn't refresh; the next action retries
   }
-  for (const deck of ['a', 'b']) {
-    const host = document.getElementById(deck === 'a' ? 'mixTracksA' : 'mixTracksB');
-    host.innerHTML = '';
-    for (const t of state.tracks.filter((x) => x.deck === deck)) host.appendChild(mixTrackRow(t, !!state.solo?.[deck]?.includes(t.key)));
-    mixTracksHint(host);
-  }
+  // Held for mixRedrawTracks: folding a group changes nothing about the desk, so it must not cost
+  // a round trip to find out what to draw.
+  mixTracks = state.tracks;
+  mixSoloed.clear();
+  for (const deck of ['a', 'b']) for (const k of state.solo?.[deck] ?? []) mixSoloed.add(k);
+  // A group that has been folded shut since the last frame - or whose stems have gone - must not
+  // keep a fold nobody can see to undo.
+  for (const key of [...mixUnfolded]) if (!state.tracks.some((t) => t.parent === key)) mixUnfolded.delete(key);
+  mixRedrawTracks();
   document.getElementById('mixSwap').checked = !!state.swap;
   mixSyncValues(state);
 }
@@ -20865,10 +20869,78 @@ mixTempoSliderEl.addEventListener('input', () => {
 document.getElementById('mixTempoA').addEventListener('click', () => mixTempoDetent('a'));
 document.getElementById('mixTempoB').addEventListener('click', () => mixTempoDetent('b'));
 
-function mixTrackRow(t, soloed) {
+// The groups the DESK has been asked to look inside, by stem key. A group is one channel until you
+// say otherwise - that is what grouping bought - so this starts empty on every open and is written
+// nowhere: a way of looking, like the ctrl+G mixer's own mixerUnfolded.
+const mixUnfolded = new Set();
+let mixTracks = []; // the last frame's rows, so a fold can redraw without waiting on a request
+const mixSoloed = new Set(); // ...and which of them were soloed, for the same reason
+
+/**
+ * One deck's rows in TREE order: each group followed by what is inside it, and a member left out
+ * while any group above it is still folded. `depth` is how far in a stem sits, which is the indent
+ * that keeps saying the two belong together once the strip is a flat column of stems.
+ *
+ * A member whose group isn't in this deck's list at all (an eval caught halfway, an orphan) is
+ * drawn at the top level rather than dropped: a stem you can't see is a stem you can't gate.
+ */
+function mixDeckRows(tracks, deck) {
+  const mine = tracks.filter((x) => x.deck === deck);
+  const byKey = new Map(mine.map((t) => [t.key, t]));
+  const kids = new Map();
+  for (const t of mine) {
+    if (!t.parent || !byKey.has(t.parent)) continue;
+    if (!kids.has(t.parent)) kids.set(t.parent, []);
+    kids.get(t.parent).push(t);
+  }
+  const out = [];
+  const walk = (t, depth) => {
+    out.push({ t, depth, group: kids.has(t.key) });
+    if (kids.has(t.key) && mixUnfolded.has(t.key)) for (const kid of kids.get(t.key)) walk(kid, depth + 1);
+  };
+  for (const t of mine) if (!t.parent || !byKey.has(t.parent)) walk(t, 0);
+  return out;
+}
+
+/** Redraw the strip from the last frame - what a fold needs, since nothing about the desk moved. */
+function mixRedrawTracks() {
+  for (const deck of ['a', 'b']) {
+    const host = document.getElementById(deck === 'a' ? 'mixTracksA' : 'mixTracksB');
+    host.innerHTML = '';
+    const list = mixDeckRows(mixTracks, deck);
+    // The caret column only exists on a deck that HAS a group. It has to be held open on every row
+    // once one row wants it (or the gates and faders step out of line), and holding a column open
+    // on an ungrouped song would be a gate's width of nothing on every stem of every set.
+    const carets = list.some((r) => r.group);
+    for (const row of list) {
+      host.appendChild(mixTrackRow(row.t, mixSoloed.has(row.t.key), { ...row, carets }));
+    }
+    mixTracksHint(host);
+  }
+}
+
+function mixTrackRow(t, soloed, { depth = 0, group = false, carets = false } = {}) {
   const row = document.createElement('div');
-  row.className = 'mix-track';
+  row.className = 'mix-track' + (depth ? ' mix-track-member' : '');
+  // Stepped in from the group above it, on the side its deck reads from - deck B's rows pack to
+  // the right (see .mix-track in style.css), so its members step in from the right.
+  if (depth) row.style[t.deck === 'b' ? 'paddingRight' : 'paddingLeft'] = `${depth * 12}px`;
   const fader = t.controls.fader ?? 1;
+
+  // A group's row opens onto the stems inside it - the same caret the ctrl+G mixer's strips carry,
+  // and the same gesture. Held open (invisibly) on every other row of a deck that has groups, so
+  // the gates, names and faders stay in one column down the deck.
+  const fold = carets ? document.createElement('button') : null;
+  if (fold) fold.className = 'mix-fold' + (group ? '' : ' empty');
+  if (fold && group) {
+    const open = mixUnfolded.has(t.key);
+    fold.textContent = open ? '\u25BE' : '\u25B8';
+    fold.title = open ? 'fold this group\u2019s stems away' : 'show the stems inside this group';
+    fold.addEventListener('click', () => {
+      if (!mixUnfolded.delete(t.key)) mixUnfolded.add(t.key);
+      mixRedrawTracks();
+    });
+  }
 
   const gate = document.createElement('button');
   gate.className = 'mix-gate' + (fader > 0 ? ' on' : '') + (soloed ? ' solo' : '');
@@ -20890,7 +20962,7 @@ function mixTrackRow(t, soloed) {
   name.className = 'mix-name';
   name.textContent = t.deck === 'b' ? t.key.slice(t.key.indexOf(':') + 1) : t.key;
   name.title = t.key;
-  row.append(gate, name);
+  row.append(...[fold, gate, name].filter(Boolean));
 
   for (const [ctl, min, max, title] of MIX_TRACK_CONTROLS) {
     const input = document.createElement('input');
@@ -23738,6 +23810,82 @@ function arHistoryStep(delta) {
   drawArrange();
 }
 
+// --- the remembered view ---
+//
+// How far the painter is zoomed and where it is looking, kept across closes and reloads so
+// reopening the arrangement puts you back where you were working rather than at bar 1 of a song
+// you were forty bars into. Per DECK, since the two decks are two songs.
+//
+// In localStorage and not in the `_arrange()` call: scrolling is not an edit. The options that
+// DO ride with the song (snap, the pinned lanes, the colors) are choices about the arrangement
+// and travel with a patch opened anywhere; where a particular browser happens to be looking is
+// neither, and writing it into the buffer would mark a pattern file dirty for being read.
+const AR_VIEW_KEY = 'poptart-arrange-view';
+let arViewSaved = null; // the last view written, so the watcher writes only on a real change
+let arViewTimer = null;
+
+const arViewOf = (st) => `${st.pxPerCycle}|${st.scroll}|${st.scrollLane}`;
+
+function arReadViews() {
+  try {
+    const v = JSON.parse(localStorage.getItem(AR_VIEW_KEY));
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {}; // unreadable (or storage refused): open where the painter always did
+  }
+}
+
+/** Write this deck's view now - on close, and behind the watcher's debounce. */
+function arSaveView() {
+  clearTimeout(arViewTimer);
+  arViewTimer = null;
+  if (!arState) return;
+  try {
+    localStorage.setItem(AR_VIEW_KEY, JSON.stringify({
+      ...arReadViews(),
+      [arDeck]: { px: arState.pxPerCycle, scroll: arState.scroll, lane: arState.scrollLane },
+    }));
+    arViewSaved = arViewOf(arState); // what landed, so the watcher's next check is against it
+  } catch { /* private window, storage full - the painter just opens at the default next time */ }
+}
+
+/**
+ * Called every frame from the playhead loop: three number comparisons, and a write only once a
+ * gesture has settled. One watcher rather than a save call on each of the dozen things that move
+ * the view (both zooms, the wheel, the drag-pan, the arrows, Home, the edge-scroll while dragging
+ * a clip) - which is a list that would go quietly out of date the first time a new one was added.
+ */
+function arWatchView() {
+  if (!arState) return;
+  const now = arViewOf(arState);
+  if (now === arViewSaved || arViewTimer) return;
+  arViewSaved = now;
+  arViewTimer = setTimeout(arSaveView, 400);
+}
+
+/**
+ * Put the remembered view back, clamped to THIS song: a bar past the end of a shorter song, or a
+ * row count that shrank, would open the painter looking at nothing. Landing a little before where
+ * you left off is better than landing past it, so the scroll stops half a screen short of the end.
+ */
+function arRestoreView() {
+  const v = arReadViews()[arDeck];
+  arViewSaved = arViewOf(arState);
+  if (!v || typeof v !== 'object') return;
+  const px = Number(v.px);
+  if (Number.isFinite(px)) {
+    arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, px));
+  }
+  const scroll = Number(v.scroll);
+  if (Number.isFinite(scroll)) {
+    arState.scroll = Math.max(0, Math.min(scroll, Math.max(0, arLoopLen() - arVisibleBars() / 2)));
+  }
+  const lane = Number(v.lane);
+  if (Number.isFinite(lane)) arState.scrollLane = Math.max(0, lane);
+  arClampRows();
+  arViewSaved = arViewOf(arState);
+}
+
 // --- open / close ---
 
 function openArrangeEditor(call) {
@@ -23815,6 +23963,7 @@ function openArrangeEditor(call) {
   document.body.classList.toggle('arrange-deck-b', arDeck === 'b');
   arReflectView();
   arSizeCanvas();
+  arRestoreView(); // after the sizing: the clamps need to know how much is on screen
   drawArrange();
   if (!arRaf) arRaf = requestAnimationFrame(arPlayheadLoop);
   // The song clock the server is running for THIS deck: the painter opened after the eval that
@@ -23831,6 +23980,7 @@ function openArrangeEditor(call) {
  */
 function closeArrangeEditor() {
   const picked = arState ? [...arState.sel][0]?.label ?? null : null;
+  arSaveView(); // where you were looking, for the next time it opens - before arState goes
   arCloseMenu();
   arLaneNameInput.classList.add('hidden');
   if (arRaf) { cancelAnimationFrame(arRaf); arRaf = null; }
@@ -23852,6 +24002,7 @@ function arReflectView() {
 
 function arPlayheadLoop() {
   if (!arState) { arRaf = null; return; }
+  arWatchView();
   if (!transport.paused || arPlayheadOn) drawArrange();
   arRaf = requestAnimationFrame(arPlayheadLoop);
 }
@@ -24200,10 +24351,15 @@ function arHsl(label) {
   const at = (arGroupTree().get(parent) ?? []).indexOf(label);
   return [(hue + (at + 1) * AR_MEMBER_HUE_STEP) % 360, 62, 58];
 }
-const arColor = (label, alpha = 1) => {
+// `sat` scales the saturation without touching the hue: what a MUTED clip is drawn with (see the
+// clip loop in drawArrange). Washed out rather than a flat grey - on a folded group's row six
+// muted members would all be the same rectangle, and which part you took out is exactly the thing
+// you are looking at.
+const arColor = (label, alpha = 1, sat = 1) => {
   const [h, s, l] = arHsl(label);
-  return `hsla(${h}, ${s}%, ${l}%, ${alpha})`;
+  return `hsla(${h}, ${s * sat}%, ${l}%, ${alpha})`;
 };
+const AR_MUTED_SAT = 0.16;
 
 /** "#rrggbb" -> [h, s, l] in degrees and percent. */
 function hexToHsl(hex) {
@@ -24614,19 +24770,24 @@ function drawArrange() {
     if (squish?.has(c.label)) {
       const bandH = (AR_ROW - 8) / squish.size;
       const sy = y + 4 + squish.get(c.label) * bandH;
-      ctx.fillStyle = arColor(c.label, selected ? 0.95 : past ? 0.3 : 0.7);
+      ctx.fillStyle = arColor(c.label, selected ? 0.95 : past || c.mute ? 0.3 : 0.7, c.mute ? AR_MUTED_SAT : 1);
       ctx.fillRect(dx, sy, Math.max(2, dx2 - dx - 1), Math.max(1.5, bandH - 1));
       continue;
     }
     const boxY = y + 3;
     const boxH = AR_ROW - 6;
     const bodyY = boxY + AR_CLIP_TITLE_H;
-    ctx.fillStyle = arColor(c.label, past ? 0.1 : 0.22);
+    // A MUTED clip (the `0` key - see arToggleMute) is drawn washed out and outlined dashed: it
+    // is still a clip, in its place and ready to be picked up, it just isn't sounding. Faded the
+    // same way a clip PAST the loop end is, since both mean "drawn here, not heard here".
+    const sat = c.mute ? AR_MUTED_SAT : 1;
+    const dim = past || c.mute;
+    ctx.fillStyle = arColor(c.label, dim ? 0.1 : 0.22, sat);
     prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.fill();
     // the title, solid: it is the clip as a thing you can pick up, and it has to read as a handle
     ctx.save();
     ctx.beginPath(); prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.clip();
-    ctx.fillStyle = arColor(c.label, past ? 0.3 : 0.62);
+    ctx.fillStyle = arColor(c.label, dim ? 0.3 : 0.62, sat);
     ctx.fillRect(dx + 0.5, boxY, w, AR_CLIP_TITLE_H);
     // ...and the bars run on THROUGH the body, so the place you are about to split at is visible
     // inside a clip and not only in the empty song around it.
@@ -24641,9 +24802,11 @@ function drawArrange() {
     }
     ctx.globalAlpha = 1;
     ctx.restore();
-    ctx.strokeStyle = selected ? col('--accent') : arColor(c.label, 0.95);
+    ctx.strokeStyle = selected ? col('--accent') : arColor(c.label, 0.95, sat);
     ctx.lineWidth = selected ? 1.5 : 1;
+    if (c.mute) ctx.setLineDash([3, 2]);
     prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.stroke();
+    ctx.setLineDash([]);
     ctx.lineWidth = 1;
     // the edge under the pointer shows as a handle, so a resize is offered before it is tried
     if (hoverClip?.clip === c && hoverClip.edge) {
@@ -24659,7 +24822,7 @@ function drawArrange() {
       ctx.save();
       ctx.beginPath(); ctx.rect(dx + 2, boxY, w - 4, AR_CLIP_TITLE_H); ctx.clip();
       ctx.fillStyle = text;
-      ctx.globalAlpha = past ? 0.5 : 0.95;
+      ctx.globalAlpha = dim ? 0.5 : 0.95;
       ctx.fillText(arClipTitle(c.label), dx + 6, boxY + AR_CLIP_TITLE_H / 2);
       ctx.globalAlpha = 1;
       ctx.restore();
@@ -25194,6 +25357,52 @@ function arDeleteClips(clips) {
   drawArrange();
 }
 
+/**
+ * What the mute key acts on: the selected clips, else everything a marked span covers on the rows
+ * it was dragged over, else the one clip under the pointer. The first two are the step every clip
+ * op in here reads (see arOpTargets) - mark a section across four rows and one key takes the lot
+ * out of the song; the third is the roll's own `0`, which mutes what you are pointing at, so the
+ * key means the same thing in both panels.
+ */
+function arMuteTargets() {
+  if (arState.sel.size) return [...arState.sel];
+  const span = arTimeRegion();
+  if (span) {
+    const rows = arRegionRows();
+    return arState.clips.filter((c) => arRowInRegion(rows, c.label)
+      && c.start < span[1] - 1e-9 && c.start + c.len > span[0] + 1e-9);
+  }
+  const at = arState.hover && arState.hover.y >= AR_LANES_TOP && arState.hover.x >= AR_GUTTER
+    ? arClipAt(arState.hover.x, arState.hover.y) : null;
+  return at ? [at.clip] : [];
+}
+
+/**
+ * `0`: take clips out of what SOUNDS without taking them out of the arrangement. A muted clip
+ * keeps its bars, its color and its handles - it is drawn washed out and dashed - and simply
+ * contributes no span (see arrangementSpans), so "let me hear the song without this part" is an
+ * edit you can see, undo and put back, rather than a delete you would have to repaint.
+ *
+ * ONE toggle for the whole set, decided by whether any of them is still sounding: a mixed
+ * selection mutes, and pressing again brings all of it back. Flipping each clip on its own would
+ * make the second press hand back the inverse of what you started with, which is never the ask.
+ */
+function arToggleMute(targets) {
+  const clips = targets.filter((c) => arState.clips.includes(c));
+  if (!clips.length) {
+    logLine('nothing to mute - select clips, or drag out a span across the rows to take out', 'warn');
+    return;
+  }
+  const muting = clips.some((c) => !c.mute);
+  for (const c of clips) {
+    if (muting) c.mute = true;
+    else delete c.mute; // absent rather than false: an unmuted clip is spelled as it always was
+  }
+  writeArrangeCall();
+  drawArrange();
+  logLine(`${muting ? 'muted' : 'unmuted'} ${clips.length} clip${clips.length === 1 ? '' : 's'}`);
+}
+
 function arRemoveRegion(region) {
   arState.loops = arState.loops.filter((r) => r !== region);
   if (arState.selRegion === region) arState.selRegion = null;
@@ -25206,6 +25415,8 @@ function arOpenMenu(clientX, clientY, hit, row) {
   if (hit) {
     const targets = arState.sel.has(hit.clip) ? [...arState.sel] : [hit.clip];
     items.push([`delete${targets.length > 1 ? ` ${targets.length} clips` : ''}`, () => arDeleteClips(targets)]);
+    items.push([targets.some((c) => !c.mute) ? 'mute' : 'unmute', () => arToggleMute(targets),
+      '0 — it keeps its place and stops sounding']);
     items.push(['duplicate after', () => arDuplicate(targets), 'cmd-D — the copy overwrites what it lands on']);
     if (arSplitPoints().length) items.push(['split here', () => arSplitClips(), 'cmd-E — at the marker, or at both edges of a marked span']);
     if (targets.length > 1 || arState.regionSpan) items.push(['join', () => arJoinClips(), 'cmd-J — one clip from here to the end of the last']);
@@ -25363,7 +25574,7 @@ function arSplitClips() {
     arState.clips.splice(arState.clips.indexOf(c), 1);
     arState.sel.delete(c);
     for (let i = 0; i < edges.length - 1; i++) {
-      const piece = { label: c.label, start: edges[i], len: edges[i + 1] - edges[i] };
+      const piece = { ...c, start: edges[i], len: edges[i + 1] - edges[i] };
       arState.clips.push(piece);
       made.push(piece);
     }
@@ -25419,7 +25630,7 @@ function arJoinClips() {
       arState.clips.splice(arState.clips.indexOf(c), 1);
       arState.sel.delete(c);
     }
-    const one = { label, start, len: end - start };
+    const one = { ...group[0], label, start, len: end - start };
     arState.clips.push(one);
     made.push(one);
   }
@@ -25644,7 +25855,7 @@ function arClipsIn(a, b, rows = null) {
     const start = Math.max(a, c.start);
     const end = Math.min(b, c.start + c.len);
     if (end - start <= 1e-9) continue;
-    out.push({ label: c.label, start: start - a, len: end - start });
+    out.push({ ...c, start: start - a, len: end - start });
   }
   return out;
 }
@@ -27408,6 +27619,7 @@ function initArrangeCanvas() {
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { arDuplicate(); e.preventDefault(); return; }
     if (!mod && e.key.toLowerCase() === 'b') { arToggleTool(); e.preventDefault(); return; }
+    if (!mod && e.key === '0') { arToggleMute(arMuteTargets()); e.preventDefault(); return; }
     if (e.key === 'Tab') {
       // tab / shift+tab step the selection down the tracks, so the row you are working on can be
       // changed without leaving the canvas

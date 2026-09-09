@@ -54,7 +54,18 @@ const schedulers = new Map(); // pattern label -> Scheduler (one engine track pe
 // audio goes into the group's bus and the group's track is the one the desk shows and gates - so
 // these never get a fader or a swap gate of their own. Reaching only the implicit `main` root
 // doesn't count (or a mastered buffer would have one strip). Refilled per deck by each evaluation.
-const groupMembers = new Set();
+//
+// Each maps to the KEY OF THE GROUP it plays through, so the tree can be walked upward: the desk
+// unfolds a group into its members (they are gateable - a member's DJ fader rides its send into
+// the group's bus, see the track SynthDef), and a solo has to leave every group above the stem it
+// is auditioning open, or the stem has nowhere to come out.
+const groupMembers = new Map();
+// Every group `key` plays through, innermost first. Empty for a track that is nobody's member.
+function mixGroupChain(key) {
+  const out = [];
+  for (let at = groupMembers.get(key); at != null && !out.includes(at); at = groupMembers.get(at)) out.push(at);
+  return out;
+}
 
 // Engine tracks are keyed by opaque ids ("#1", "#2", ...), not labels, so a track can be
 // re-labeled (deck promotion, in the performance-mixing work - see TODO.md) without any engine
@@ -235,7 +246,34 @@ function mixSoloEnd(deck) {
   mixState.solo[deck].clear();
   mixState.soloPrev[deck] = null;
   if (!prev) return;
-  for (const k of mixKeys()) if (deckOfKey(k) === deck) mixSetFader(k, prev.get(k) ?? 1);
+  for (const k of mixDeskKeys(deck)) mixSetFader(k, prev.get(k) ?? 1);
+}
+
+/**
+ * The faders a deck wears while its solo runs, key -> value. A solo is "let me hear this one
+ * part", which over a TREE of tracks is three answers rather than one:
+ *   - the soloed stems play, at full;
+ *   - every group they play THROUGH stays open, or there is nothing to hear - a member's audio
+ *     leaves through its group's bus and never through its own output;
+ *   - what is INSIDE a soloed group keeps the balance it had, so soloing a group sounds like the
+ *     group did rather than like every part of it slammed to unity;
+ * ...and everything else on the deck is out.
+ *
+ * Derived from the solo set each time rather than patched incrementally, so taking a multi-solo
+ * apart one stem at a time closes the groups that are no longer needed on the way.
+ */
+function mixSoloFaders(deck) {
+  const solo = mixState.solo[deck];
+  const prev = mixState.soloPrev[deck];
+  const open = new Set();
+  for (const k of solo) for (const g of mixGroupChain(k)) open.add(g);
+  const out = new Map();
+  for (const key of mixDeskKeys(deck)) {
+    if (solo.has(key) || open.has(key)) out.set(key, 1);
+    else if (mixGroupChain(key).some((g) => solo.has(g))) out.set(key, prev?.get(key) ?? 1);
+    else out.set(key, 0);
+  }
+  return out;
 }
 
 // Every gate on one deck OUT in a single gesture (the deck head's `mute all`). Named for what it
@@ -258,6 +296,12 @@ function* mixKeys() {
   for (const key of schedulers.keys()) if (!groupMembers.has(key)) yield key;
   yield* songKeysLive();
 }
+
+// Every stem there is, the ones inside groups included - what the strip lists (folding the members
+// away under their group until you unfold it), what a solo reasons over, and what a desk reset has
+// to put back to neutral. mixKeys is the CHANNELS; these are the tracks.
+const mixAllKeys = () => [...mixKeys(), ...[...groupMembers.keys()].filter(isMixKey)];
+const mixDeskKeys = (deck) => mixAllKeys().filter((k) => deckOfKey(k) === deck);
 
 /** The playhead in song-seconds at engine time `at` (defaults to now). */
 function songPlayheadSec(deck, at = null) {
@@ -769,6 +813,23 @@ function applyMixTargets(targets) {
     }
   }
   mixNotify();
+}
+
+/**
+ * The strip's rows: the desk's channels (mixKeys) plus the tracks INSIDE groups, each carrying the
+ * key of the group it plays through. A group is one channel until you ask to see in - that is what
+ * grouping bought - so the strip folds the members away and unfolds them on request, the way the
+ * ctrl+G mixer's strips do. Sent whole, and folded browser-side: which groups you have open is a
+ * way of LOOKING, and the server has no business remembering it.
+ */
+function mixDeskTracks() {
+  const row = (key) => ({
+    key,
+    deck: deckOfKey(key),
+    parent: groupMembers.get(key) ?? null,
+    controls: Object.fromEntries(mixState.perTrack.get(key) ?? []),
+  });
+  return mixAllKeys().map(row);
 }
 
 // The desk's state as one plain object - what GET /api/mix returns (minus the track rows) and
@@ -3566,9 +3627,9 @@ const routes = {
     // What the desk shows: a track inside a real group is not its own channel - its group's fader,
     // mute and gate take it. Reaching the implicit `main` root doesn't hide anything, or a buffer
     // with a mastering chain would have no strips at all.
-    for (const key of [...groupMembers]) if (deckOfKey(key) === deck) groupMembers.delete(key);
+    for (const key of [...groupMembers.keys()]) if (deckOfKey(key) === deck) groupMembers.delete(key);
     for (const [label, parent] of routed.routedParents) {
-      if (parent !== patternCore.GROUP_ROOT) groupMembers.add(keyOfBlock(label));
+      if (parent !== patternCore.GROUP_ROOT) groupMembers.set(keyOfBlock(label), keyOfBlock(parent));
     }
 
     // The arrangement pass: with an arrangement in the buffer every TRACK is one of its rows, so
@@ -4476,11 +4537,7 @@ const routes = {
     status: 200,
     body: {
       ...mixDeskBody(),
-      tracks: query?.desk ? undefined : [...mixKeys()].map((key) => ({
-        key,
-        deck: deckOfKey(key),
-        controls: Object.fromEntries(mixState.perTrack.get(key) ?? []),
-      })),
+      tracks: query?.desk ? undefined : mixDeskTracks(),
     },
   }),
 
@@ -4603,17 +4660,19 @@ const routes = {
     const solo = mixState.solo[deck];
     if (solo.has(key)) {
       solo.delete(key);
+      // Re-derived rather than "just gate that one out": the group it was playing through may have
+      // been open only for it, and has to shut again with it (see mixSoloFaders).
       if (solo.size === 0) mixSoloEnd(deck);
-      else mixSetFader(key, 0);
+      else for (const [k, v] of mixSoloFaders(deck)) mixSetFader(k, v);
     } else {
       if (!mixState.soloPrev[deck]) { // first solo on this deck: remember what to come back to
         const prev = new Map();
-        for (const k of mixKeys()) if (deckOfKey(k) === deck) prev.set(k, mixState.perTrack.get(k)?.get('fader') ?? 1);
+        for (const k of mixDeskKeys(deck)) prev.set(k, mixState.perTrack.get(k)?.get('fader') ?? 1);
         mixState.soloPrev[deck] = prev;
       }
       if (!body.add) solo.clear();
       solo.add(key);
-      for (const k of mixKeys()) if (deckOfKey(k) === deck) mixSetFader(k, solo.has(k) ? 1 : 0);
+      for (const [k, v] of mixSoloFaders(deck)) mixSetFader(k, v);
     }
     mixNotify();
     return { status: 200, body: { key, deck, solo: [...solo] } };
@@ -4683,7 +4742,7 @@ const routes = {
       if (decks.a.bpm != null && typeof decks.a.bpm !== 'number') transport?.setBpm(decks.a.bpm);
       else if (deckNativeBpm('a') != null) transport?.rampBpm(deckNativeBpm('a'), 2);
     }
-    for (const key of mixKeys()) neutralizeMix(key);
+    for (const key of mixAllKeys()) neutralizeMix(key);
     decks.b = { scale: null, bpm: null };
     liveStateIds.b = new Set();
     patternCore.clearRolls('buffer', 'b');
@@ -4735,7 +4794,7 @@ const routes = {
     // The promoted song's declared tempo takes over on the client's promotion re-eval (override
     // gone, its setbpm drives again) - a no-op when the migration already landed on its native.
     mixState.tempoOverride = null;
-    for (const key of mixKeys()) neutralizeMix(key);
+    for (const key of mixAllKeys()) neutralizeMix(key);
     mixNotify();
     return { status: 200, body: { promoted: promoted.map((k) => k.slice(k.indexOf(':') + 1)) } };
   },

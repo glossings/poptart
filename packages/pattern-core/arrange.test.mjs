@@ -33,14 +33,34 @@ test('parse/serialize round-trip, malformed tokens dropped', () => {
   assert.equal(parseArrangement('a,0,0').length, 0, 'a zero-length clip is nothing');
 });
 
-test('the retired clip spellings are not special-cased - three plain fields or nothing', () => {
+test('the retired clip spellings are not special-cased - the mute flag or nothing', () => {
   // A lane column (`drums,0,0,8`) and a roll binding (`drums:fill,12,4`) were both migrated out
   // of every saved pattern when their eras ended; the parser carries no memory of them. A stray
   // one is an ordinary malformed-or-orphan token, visible in the painter rather than quietly
-  // reinterpreted.
-  assert.deepEqual(parseArrangement('drums,0,0,8'), [], 'four fields is malformed now');
+  // reinterpreted. The fourth field carries the mute flag now, which is why it is the LITERAL `m`
+  // and not a truthy value: the retired lane column was a number there, and a saved pattern from
+  // that era must never come back as a song with parts silently muted.
+  assert.deepEqual(parseArrangement('drums,0,0,8'), [], 'a lane column is still malformed');
+  assert.deepEqual(parseArrangement('drums,0,8,1'), [], '...whatever number is in it');
   assert.deepEqual(parseArrangement('drums:fill,12,4'), [{ label: 'drums:fill', start: 12, len: 4 }],
     'a : label matches no block, so it draws as an orphan row instead of silently rebinding');
+});
+
+test('a muted clip keeps its place and its bars, and sounds nothing', () => {
+  // Mute is the one thing about a clip that changes what is HEARD without changing where the clip
+  // is, so it round-trips through the string and drops out of the spans - and only there.
+  const clips = parseArrangement('a,0,2,m a,4,2 b,0,8,m');
+  assert.deepEqual(clips, [
+    { label: 'a', start: 0, len: 2, mute: true },
+    { label: 'a', start: 4, len: 2 },
+    { label: 'b', start: 0, len: 8, mute: true },
+  ]);
+  assert.equal(serializeArrangement(clips), 'a,0,2,m a,4,2 b,0,8,m');
+  assert.ok(looksLikeArrangeString('a,0,2,m a,4,2'), 'the editor still folds it as clip data');
+  assert.equal(arrangementLength(clips), 8, 'the song is as long as the muted clip still makes it');
+  const spans = arrangementSpans(clips);
+  assert.deepEqual(spans.get('a'), [[4, 6]], 'only the unmuted clip sounds');
+  assert.equal(spans.get('b'), undefined, 'every clip muted is a silent track, like an emptied row');
 });
 
 test('a group joins the arrangement with nothing painted, and keeps its row', () => {
