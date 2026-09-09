@@ -599,6 +599,243 @@ function songCue(deck, hold) {
   return { deck, cueSec: s.cueSec, playing: s.playing };
 }
 
+// --- the rest of a deck's transport, as gestures rather than endpoints ---
+//
+// Start, pause, seek and the facts row were written inline in their HTTP handlers, which was
+// fine while a browser click was the only way to reach them. A learned MIDI button is a second
+// caller for every one of them (see the mix-strip MIDI section), so each is a function here and
+// the endpoint is the thin wrapper - the same shape songCue and songNudge already had, and for
+// the same reason: two callers, one implementation, no chance of the pad and the button drifting
+// apart.
+
+/**
+ * Start (or resume) a deck's song. `pos` overrides the entry point (the pane's playhead, which
+ * is where the hand put it); `now` skips the quantize and starts at the next opportunity.
+ *
+ * Quantizing is the whole subtlety: with nothing else sounding, a synced song with a bpm TAKES
+ * the grid - the clock adopts its tempo and its bar phase, so everything that starts later lands
+ * on this record's downbeats. With something already playing, the start waits for the clock
+ * position that puts this song's cue on a bar line.
+ */
+function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
+  if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
+  const s = songDecks[deck];
+  if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  const r = Number(rate);
+  if (Number.isFinite(r) && r > 0.01 && r <= 4) s.manualRate = r;
+  const at = Number(pos);
+  const from = Number.isFinite(at)
+    ? Math.min(Math.max(0, at), s.duration)
+    : (s.posSec >= s.duration ? 0 : s.posSec);
+  const nowSec = engine.getTime();
+  let startSec = nowSec + SONG_START_LEAD_SEC;
+  const others = othersPlaying(deck);
+  // Grid-master: nothing else is on the clock, and this song knows where its bars are. When
+  // it doesn't (no bpm, or sync deliberately off) it runs free and the response says so -
+  // the next deck up will have nothing to lock onto, and that is worth a word.
+  const takeGrid = !others && s.sync && !!s.bpm;
+  // Before the rate is read: the master's native tempo IS the clock.
+  if (takeGrid) {
+    songMasterDeck = deck;
+    if (mixState.tempoOverride == null) transport.setBpm(s.bpm);
+  }
+  if (others && !startNow) {
+    const earliest = transport.cycleAt(nowSec + SONG_START_LEAD_SEC);
+    let startCycle;
+    if (s.sync && s.bpm) {
+      // The next clock position with the cue's bar phase.
+      const phase = songSync.gridPhase(from, songGridBpm(deck), s.anchorSec);
+      startCycle = Math.floor(earliest - phase) + phase;
+      if (startCycle < earliest) startCycle += 1;
+    } else {
+      const beat = 1 / songSync.BEATS_PER_CYCLE; // no grid: at least land on a beat
+      startCycle = Math.ceil(earliest / beat) * beat;
+    }
+    startSec = transport.secAt(startCycle);
+  }
+  s.nudge = 0;
+  s.servo = 0;
+  s.cueHeld = false; // a real start supersedes a preview - its release must not yank us home
+  s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
+  engine.songStart(engineTrack(SONG_KEYS[deck]), from, s.rate, startSec, s.keylock ? 1 : 0);
+  s.posSec = from;
+  s.startSec = startSec;
+  s.playing = true;
+  if (takeGrid) {
+    // The clock resumes with this song's bar position AS its cycle position, so from here the
+    // shared grid is this record's grid: the other deck's song quantizes onto its downbeats,
+    // and so does any eval. The entry point itself is left exactly where the hand put it -
+    // it's the grid that moves to the music, not the music to the grid.
+    // Cycle 1, not 0: the start is a lead ahead of `now`, and reading the clock in that
+    // window (an eval landing between the two) must not come back with a negative position.
+    transport.startAt(startSec, 1 + songSync.gridPhase(from, songGridBpm(deck), s.anchorSec));
+    syncVstTransport(); // plugins' host transport just jumped - don't wait out the 4s timer
+  }
+  songArmEndTimer(deck);
+  mixNotify();
+  return {
+    deck, pos: from, rate: s.rate, startSec, master: takeGrid,
+    bpm: transport.cps * 240, gridless: !others && !takeGrid,
+  };
+}
+
+/**
+ * The PLAY BUTTON, both halves: a playing deck pauses where it stands, a paused one resumes
+ * from there. What a learned play pad presses (the deck head's button does the same thing for a
+ * song deck, and evaluates the buffer for a deck holding code - which is the browser's, see
+ * mixMidiButton).
+ */
+function songTogglePlay(deck) {
+  const s = songDecks[deck];
+  if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  if (!s.playing) return songPlayDeck(deck);
+  s.cueHeld = false; // a pause under a held cue wins; the release finds nothing to undo
+  songPause(deck);
+  mixNotify();
+  return { deck, pos: s.posSec, playing: false };
+}
+
+/** Jump the playhead. Click-free while playing (the player seeks in place); paused, it just
+ * moves the resume point. Returns where it landed. */
+function songSeekTo(deck, posSec) {
+  const s = songDecks[deck];
+  if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  if (!Number.isFinite(posSec)) throw new Error('song/seek needs pos (seconds)');
+  const to = Math.min(Math.max(0, posSec), s.duration);
+  if (s.playing && engine) {
+    engine.songSeek(engineTrack(SONG_KEYS[deck]), to, 0);
+    s.posSec = to;
+    s.startSec = engine.getTime();
+    if (s.servo) {
+      s.servo = 0; // the drift the trim was closing jumped away with the playhead
+      songSendRate(deck);
+    }
+    songArmEndTimer(deck);
+  } else {
+    s.posSec = to;
+  }
+  mixNotify();
+  return to;
+}
+
+// The PLATTER as a continuous control (the `scrub` MIDI target): a jog wheel says how far it
+// just turned, not where in the track it is, so its messages are DELTAS and they arrive dozens
+// a second under a moving hand. Each one is accumulated and the deck is seeked once per flush -
+// a seek is an engine message plus a model rebase, a servo reset and a re-armed end timer, and
+// thirty of those a second is a deck fighting itself.
+const SONG_SCRUB_FLUSH_MS = 30;
+const songScrubPending = { a: 0, b: 0 };
+const songScrubTimer = { a: null, b: null };
+
+/** Move the playhead by `deltaSec`, coalesced. Silent about a deck with no song - a hand on the
+ *  platter of an empty deck should feel like nothing, not raise anything. */
+function songScrub(deck, deltaSec) {
+  if (!songDecks[deck] || !deltaSec) return;
+  songScrubPending[deck] += deltaSec;
+  if (songScrubTimer[deck]) return;
+  songScrubTimer[deck] = setTimeout(() => {
+    songScrubTimer[deck] = null;
+    const by = songScrubPending[deck];
+    songScrubPending[deck] = 0;
+    if (!by || !songDecks[deck]) return;
+    try { songSeekTo(deck, songPlayheadSec(deck) + by); } catch { /* engine between restarts */ }
+  }, SONG_SCRUB_FLUSH_MS);
+}
+
+/**
+ * The facts row (bpm, key, the beatgrid anchor, sync, the tempo ratio, keylock) as one patch.
+ * Only the keys PRESENT are touched, which is what lets the pane post a single edit and a MIDI
+ * button post a single toggle through the same door.
+ */
+function songSetMeta(deck, patch) {
+  const s = songDecks[deck];
+  if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  if ('bpm' in patch) {
+    delete s.bpmDetected; // whatever the hand says, it is no longer an estimate
+    if (patch.bpm == null || patch.bpm === '') {
+      s.bpm = null;
+      s.bpmByHand = false; // cleared - the detector is welcome to fill it in again
+      s.sync = false;
+      decks[deck].bpm = null; // native slot back to the 120 default
+    } else {
+      const bpm = Number(patch.bpm);
+      if (!Number.isFinite(bpm) || bpm < 20 || bpm > 400) throw new Error('song/meta: bpm must be 20..400 (or null to clear)');
+      s.bpm = bpm;
+      s.bpmByHand = true; // this number stands until it is cleared - see songDetectKick
+      decks[deck].bpm = bpm; // the native tempo the desk's migration slider/detents ride to
+      songDetectKick(deck); // re-fit the grid around the typed tempo (which is the fit's hint)
+    }
+  }
+  if ('key' in patch) {
+    s.musicalKey = String(patch.key ?? '').trim() || null;
+    delete s.keyDetected;
+  }
+  if ('anchorSec' in patch) {
+    const a = Number(patch.anchorSec);
+    if (!Number.isFinite(a)) throw new Error('song/meta: anchorSec must be a number (seconds)');
+    s.anchorSec = Math.min(Math.max(0, a), s.duration); // as given - the pane's magnet did any snapping
+    s.anchorByHand = true;
+    s.gridDetected = null;
+  }
+  if ('sync' in patch) {
+    if (patch.sync && s.bpm == null) throw new Error('sync needs a bpm - set one first (the tags had none)');
+    s.sync = !!patch.sync;
+  }
+  if ('syncMult' in patch) {
+    const m = patch.syncMult === 'auto' ? 'auto' : Number(patch.syncMult);
+    if (m !== 'auto' && m !== 0.5 && m !== 1 && m !== 2) throw new Error('song/meta: syncMult must be "auto", 0.5, 1 or 2');
+    s.syncMult = m;
+  }
+  if ('keylock' in patch && !!patch.keylock !== s.keylock) {
+    s.keylock = !!patch.keylock;
+    if (s.playing && engine) {
+      // Swap the running player for the other def at the current playhead, declicked (the
+      // old one release-fades under the new one, exactly like a restart).
+      const now = engine.getTime();
+      const pos = songPlayheadSec(deck, now);
+      const startSec = now + SONG_START_LEAD_SEC;
+      engine.songStart(engineTrack(SONG_KEYS[deck]), pos, s.rate + s.servo, startSec, s.keylock ? 1 : 0);
+      s.posSec = pos;
+      s.startSec = startSec;
+      songArmEndTimer(deck);
+    }
+  }
+  songApplyRate(deck); // bpm/sync edits change the effective rate; paused songs settle too
+  mixNotify();
+  return {
+    deck, bpm: s.bpm, musicalKey: s.musicalKey, anchorSec: s.anchorSec,
+    sync: s.sync, syncMult: s.syncMult, keylock: s.keylock, rate: s.rate,
+  };
+}
+
+/**
+ * Is the CLOCK somebody else's right now - so that the main deck's setbpm() may only RECORD its
+ * native tempo rather than drive the transport?
+ *
+ * Two things take it. The desk's tempo migration holds it from the first touch of the slider or
+ * a detent (mixState.tempoOverride), which is why re-evaling deck a mid-migration doesn't snap
+ * the clock back to its declared bpm. And a SONG deck that took the grid when it started holds
+ * it for as long as it plays: the room is dancing to that record's bars, and an eval that put
+ * the clock back on the code's declared tempo would re-rate the synced master under itself
+ * (a 128 record under a `setbpm(140)` buffer comes back 9% sharp).
+ *
+ * Both are ephemeral, both end the same way - the migration on eject/complete, the master when
+ * its song stops - and after either the buffer's own tempo drives again on the next eval.
+ */
+function clockHeldByDesk() {
+  return mixState.tempoOverride != null
+    || (songMasterDeck != null && !!songDecks[songMasterDeck]?.playing);
+}
+
+// The tempo-ratio button's cycle, ½x -> 1x -> 2x -> auto, shared by the pane's click and the
+// learned pad. The deck that set the clock has no ratio to choose (its tempo IS the clock), so
+// its button is grayed and its pad does nothing.
+const SONG_MULT_ORDER = ['auto', 0.5, 1, 2];
+function songMultNext(deck) {
+  const cur = songDecks[deck]?.syncMult ?? 'auto';
+  return SONG_MULT_ORDER[(SONG_MULT_ORDER.indexOf(cur) + 1) % SONG_MULT_ORDER.length];
+}
+
 // Forget one deck's song: player released and buffer freed engine-side, Node state dropped.
 // The TRACK stays warm (it's dropTrack's to take down) - a new load reuses it.
 function songUnload(deck) {
@@ -688,17 +925,72 @@ async function songDetectKick(deck) {
 
 // --- mix-strip MIDI (learn + drive) ---
 //
-// A hardware knob per desk control, the crossfader first: `settings.mixMidi` maps a target name
-// to the { device, channel, cc } that drives it, persisted in settings.json like everything
-// else. Learning is a long-poll: /api/mix/midilearn arms a target, the next CC message anywhere
-// binds it. A mapped (or learning) CC is CONSUMED - a knob given to the desk must not also
-// drive a midicc() in song code.
+// A hardware control per desk control: `settings.mixMidi` maps a target name to the
+// { device, channel, cc } that drives it, persisted in settings.json like everything else.
+// Learning is a long-poll: /api/mix/midilearn arms a target, the next CC message anywhere binds
+// it. A mapped (or learning) CC is CONSUMED - a knob given to the desk must not also drive a
+// midicc() in song code.
+//
+// Three kinds of target, because a controller has three kinds of control:
+//
+//   KNOBS   - the desk proper (crossfader, trim, the EQ bands, the filter pair, the channel
+//             faders). The CC's 0..1 lands in the control's own range (mixMidiValue) and is
+//             applied continuously.
+//   BUTTONS - a deck's transport and its facts row. HOLD buttons act on BOTH edges, because the
+//             gesture lasts as long as the finger does (a platter push bends the rate while
+//             held; cue previews while held and comes home on release). PRESS buttons act on
+//             the press edge only: play, the headphone audition, sync, the tempo ratio, keylock,
+//             the two jogs, and the two queue steps.
+//   PLATTER - one relative encoder per deck (`scrub`), which is how a jog wheel drives the
+//             playhead. See mixMidiScrubDelta for the convention and songScrub for the flush.
+//
+// Most targets are the SERVER's to act on, and that is the point of the mapping living here: a
+// learned control drives the engine with no browser in the loop, and the on-screen desk finds
+// out over the SSE mirror like any other watcher. Two things can't work that way, because the
+// state they need isn't here: stepping the set's queue is the library's (the playlists and the
+// pickers live in the browser), and `play` on a deck holding CODE means evaluating a buffer only
+// the editor has. Those press edges are forwarded to the client as an `action` frame on the same
+// channel, and it runs the gesture exactly as its own button does.
+const MIX_MIDI_KNOBS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader'];
+const MIX_MIDI_HOLD = ['nudgedn', 'nudgeup', 'cue'];
+const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'play', 'phones', 'sync', 'mult', 'keylock', 'next', 'prev'];
+const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, 'scrub'];
 const MIX_MIDI_TARGETS = new Set(['xf',
-  ...['a', 'b'].flatMap((d) => ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader',
-    // The song deck's platter buttons (songs phase 4) - button targets, not knobs: a nudge
-    // holds while the CC is high (press 127 / release 0), a jog fires on the press edge.
-    'nudgedn', 'nudgeup', 'jogdn', 'jogup'].map((c) => `${d}:${c}`))]);
+  ...['a', 'b'].flatMap((d) => MIX_MIDI_DECK_CTLS.map((c) => `${d}:${c}`))]);
 let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
+let mixMidiMonitor = false; // while the desk's `midi` mode is on: say what the hardware sends
+const mixMidiSaid = new Map(); // "kind num ch" -> when the monitor last printed it (throttle)
+const mixMidiDown = new Map(); // target -> was the pad down last message: what makes an EDGE
+const mixMidiLastErr = new Map(); // target -> the last complaint it made, so it makes it once
+
+// A mapping is { device, channel, kind, num } - `kind` being 'cc' or 'note', because a cc 7 and
+// a note 7 are different controls. Entries learned before the note feed existed have neither
+// field and are read as the cc they were.
+const midiKind = (m) => m?.kind ?? 'cc';
+const midiNum = (m) => m?.num ?? m?.cc;
+const midiSame = (m, device, channel, num, kind) => !!m
+  && m.device === device && m.channel === channel && midiNum(m) === num && midiKind(m) === kind;
+const midiSay = (channel, num, kind) => `${kind} ${num} (ch ${channel})`;
+
+// Which target names are BUTTONS - the set the learn rule below needs, and the same two lists
+// the dispatch reads.
+const MIX_MIDI_BUTTONS = new Set([...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS]);
+
+/**
+ * Is this message the one the armed target is waiting for? A learn used to bind the very next
+ * message of any sort, which is wrong on a real control surface: a platter emits a stream of
+ * ccs around its center whenever it is brushed, so arming a learn on a PAD and reaching for it
+ * bound the jog instead - five of one deck's buttons ended up on the same jog cc (2026-09-09).
+ *
+ * So the rule follows the target's own nature. A knob or the platter is a cc, never a note. A
+ * button is a note-on, or a cc PRESSED - and pressed means near the top, which is what a button
+ * sends and what a platter drifting around its 64 center never does.
+ */
+function mixMidiLearnable(target, kind, value) {
+  const name = target === 'xf' ? 'xf' : target.slice(2);
+  if (!MIX_MIDI_BUTTONS.has(name)) return kind === 'cc'; // knobs and the platter are continuous
+  return value >= (kind === 'note' ? 0.004 : 0.9); // a note-on of any velocity; a cc at the top
+}
 
 // A CC's 0..1 into the target's own range: two-sided controls center at 0, gains at unity.
 function mixMidiValue(target, v01) {
@@ -708,37 +1000,146 @@ function mixMidiValue(target, v01) {
   return v01 * 2; // trim and the EQ bands: 0..2, unity at center
 }
 
-function handleMixMidi(device, channel, cc, value) {
+// A jog wheel is a RELATIVE control: it says how far it just turned, never where in the track
+// it is. The convention taken here is the one DJ platters use - centered at 64, so 65 is one
+// tick forward and 63 one tick back, and a fast spin sends a bigger excursion the same way.
+// (The alternative convention, 1..63 forward and 65..127 back, would read a fast spin as a
+// backward one; a wheel that speaks it wants its output mode switched, which every controller
+// that has the mode also has the switch for.)
+//
+// The tick size is a record's: ~600 ticks to a revolution is the usual platter resolution and a
+// revolution at 33 1/3 rpm is 1.8 seconds, which puts a tick at 3ms. Tempo-independent on
+// purpose - a platter under the hand is moving the RECORD, not the grid.
+const SONG_SCRUB_TICK_SEC = 0.003;
+function mixMidiScrubDelta(v01) {
+  return (Math.round(v01 * 127) - 64) * SONG_SCRUB_TICK_SEC;
+}
+
+function handleMixMidi(device, channel, num, value, kind) {
+  // While the desk's `midi` mode is on, say what the hardware is sending - throttled per
+  // control, since a platter says it eighty times a second. This is the thing that turns "the
+  // pad won't learn" into "the pad sends a note and we were only listening for ccs".
+  if (mixMidiMonitor) {
+    const id = `${kind} ${num} ${channel}`;
+    const now = Date.now();
+    if (now - (mixMidiSaid.get(id) ?? 0) > 500) {
+      mixMidiSaid.set(id, now);
+      // The raw 0..127 as well as the fraction: a platter reads as 65/63 either side of a 64
+      // center, and "0.51" hides exactly the thing you opened the monitor to see.
+      eventLogQueue.push(`[midi] ${device}: ${midiSay(channel, num, kind)}`
+        + ` = ${Math.round(value * 127)}/127 (${value.toFixed(3)})`);
+    }
+  }
   if (mixMidiLearn) {
     const { target, finish, timer } = mixMidiLearn;
+    // Not what this target is waiting for: consumed (a control being learned must not also play
+    // a midicc() in the song) but the arm stands, so the hand can go on to the real control.
+    if (!mixMidiLearnable(target, kind, value)) return true;
+    const taken = Object.entries(settings.mixMidi ?? {})
+      .find(([other, m]) => other !== target && midiSame(m, device, channel, num, kind));
+    if (taken) {
+      // Two targets on one control is never what was meant, and it fails SILENTLY at play time
+      // (the first match in the map wins and the rest never fire). Say so and keep listening.
+      eventLogQueue.push(`[midi] ${midiSay(channel, num, kind)} already drives ${taken[0]} - `
+        + `alt+click that control to unbind it, or use another one for ${target}`);
+      return true;
+    }
     mixMidiLearn = null;
     clearTimeout(timer);
-    settings.mixMidi = { ...(settings.mixMidi ?? {}), [target]: { device, channel, cc } };
+    settings.mixMidi = { ...(settings.mixMidi ?? {}), [target]: { device, channel, kind, num } };
     saveSettings();
-    finish({ device, channel, cc });
+    finish({ device, channel, kind, num });
     return true;
   }
   for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
-    if (m && m.device === device && m.channel === channel && m.cc === cc) {
-      const name = target === 'xf' ? 'xf' : target.slice(2);
-      if (name.startsWith('nudge') || name.startsWith('jog')) {
-        const press = value >= 0.5;
-        try {
-          if (name.startsWith('nudge')) songNudge(target[0], { hold: press ? (name === 'nudgeup' ? 1 : -1) : 0 });
-          else if (press) songNudge(target[0], { jog: name === 'jogup' ? 1 : -1 });
-        } catch { /* no song on that deck - the button just does nothing */ }
-        return true;
-      }
-      const t = target === 'xf'
-        ? { name: 'xf', value: mixMidiValue(target, value) }
-        : { deck: target[0], name, value: mixMidiValue(target, value) };
-      try {
-        applyMixTargets([t]);
-      } catch { /* engine between restarts - the knob just does nothing */ }
-      return true;
-    }
+    if (!midiSame(m, device, channel, num, kind)) continue;
+    mixMidiDrive(target, value);
+    return true;
   }
   return false;
+}
+
+// One mapped control's message, whatever kind of control it is. Nothing in here is allowed to
+// throw: a pad aimed at a deck with no song, or pressed while the engine is between restarts,
+// has to do nothing rather than take the MIDI listener down with it.
+function mixMidiDrive(target, value) {
+  try {
+    mixMidiApply(target, value);
+    mixMidiLastErr.delete(target); // it works again: the next failure is news
+  } catch (err) {
+    // Worth a line rather than a silent nothing - a pad that does nothing all night because its
+    // deck is empty is a mapping you want told about. Once per reason, though: the same pad
+    // pressed through a whole track must not fill the console with one sentence.
+    const said = err?.message ?? String(err);
+    if (mixMidiLastErr.get(target) !== said) {
+      mixMidiLastErr.set(target, said);
+      eventLogQueue.push(`[midi] ${target}: ${said}`);
+    }
+  }
+}
+
+function mixMidiApply(target, value) {
+  const deck = target[0];
+  const name = target === 'xf' ? 'xf' : target.slice(2);
+  if (name === 'scrub') {
+    songScrub(deck, mixMidiScrubDelta(value));
+    return;
+  }
+  const hold = MIX_MIDI_HOLD.includes(name);
+  if (hold || MIX_MIDI_PRESS.includes(name)) {
+    const down = value >= 0.5;
+    if ((mixMidiDown.get(target) ?? false) === down) return; // no edge: a pad restating itself
+    mixMidiDown.set(target, down);
+    if (hold || down) mixMidiButton(deck, name, down);
+    return;
+  }
+  applyMixTargets([target === 'xf'
+    ? { name: 'xf', value: mixMidiValue(target, value) }
+    : { deck, name, value: mixMidiValue(target, value) }]);
+}
+
+// The press (and, for a hold button, the release) of one learned pad. Every case here is a
+// gesture some on-screen control also calls - none of this is a second implementation.
+function mixMidiButton(deck, name, down) {
+  const s = songDecks[deck];
+  switch (name) {
+    case 'nudgedn': songNudge(deck, { hold: down ? -1 : 0 }); return;
+    case 'nudgeup': songNudge(deck, { hold: down ? 1 : 0 }); return;
+    case 'jogdn': songNudge(deck, { jog: -1 }); return;
+    case 'jogup': songNudge(deck, { jog: 1 }); return;
+    case 'cue': songCue(deck, down); return;
+    case 'play':
+      // A deck holding a FILE has its transport right here. A deck holding CODE is played by
+      // evaluating a buffer that only the editor has, so that press goes to the browser.
+      if (s) songTogglePlay(deck);
+      else mixActionNotify(deck, 'play');
+      return;
+    case 'phones': {
+      // The headphone audition: a deck-wide `cue` broadcast, exactly what the on-screen
+      // headphone button posts (and named `phones` here so it can't be read as the cue POINT).
+      const on = (mixState.perDeck[deck].get('cue') ?? 0) > 0;
+      applyMixTargets([{ deck, name: 'cue', value: on ? 0 : 1 }]);
+      return;
+    }
+    case 'sync': songSetMeta(deck, { sync: !s?.sync }); return;
+    case 'keylock': songSetMeta(deck, { keylock: !s?.keylock }); return;
+    case 'mult':
+      // The deck that set the clock has no ratio to choose - its tempo IS the clock, and the
+      // on-screen button is disabled for it. The pad matches.
+      if (deck !== songMasterDeck) songSetMeta(deck, { syncMult: songMultNext(deck) });
+      return;
+    case 'next': case 'prev': mixActionNotify(deck, name); return;
+    default:
+  }
+}
+
+// The press edges the server can't act on itself (see the note at the top of this section),
+// pushed to the browser on the desk channel as a named frame. Not coalesced the way mixNotify
+// is: these are discrete presses, and dropping one loses a song change.
+function mixActionNotify(deck, action) {
+  if (!mixEventClients.size) return;
+  const frame = `event: action\ndata: ${JSON.stringify({ deck, action })}\n\n`;
+  for (const res of mixEventClients) res.write(frame);
 }
 
 // Everything the mix session holds for one (possibly just-created) track, applied engine-side.
@@ -862,6 +1263,13 @@ function mixDeskBody() {
       master: transport ? transport.cps * 240 : null,
       override: mixState.tempoOverride,
     },
+    // The CLOCK itself, not just its bpm. The browser mirrors cycle position from this snapshot
+    // (playback highlighting, the livecoded decks' bar/beat grid, the arrangement playhead), and
+    // the only other place it ever arrived was an /api/evaluate reply - so a tempo the DESK moved
+    // (the migration slider, a detent, a song deck taking the grid) left every client-side clock
+    // running at whatever cps the last eval's setbpm() had baked in until the next eval happened
+    // to correct it. The desk moves the clock far more often than an eval does.
+    transport: transport?.snapshot() ?? null,
     xf: mixState.xf,
     faders: { ...mixState.faders },
     cue: activeCue ? { name: activeCue.name } : null,
@@ -1509,9 +1917,11 @@ function wireEngine() {
   syncVstTransport(); // a fresh sclang needs the surviving transport's tempo, not 120
   // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
   // live-value store - what a Tier-1 midicc() signal samples.
-  engine.onMidiIn = (device, channel, cc, value) => {
-    if (handleMixMidi(device, channel, cc, value)) return; // a desk knob is the desk's alone
-    patternCore.feedMidiCC(device, channel, cc, value);
+  engine.onMidiIn = (device, channel, num, value, kind) => {
+    if (handleMixMidi(device, channel, num, value, kind)) return; // a desk control is the desk's alone
+    // Notes reach Node for the desk's learned buttons; a midicc() signal samples ccs, and a
+    // note number fed into that store would collide with the cc of the same number.
+    if (kind === 'cc') patternCore.feedMidiCC(device, channel, num, value);
   };
   // Learned desk knobs must work without any midicc() in the song to enable MIDI for them.
   if (Object.keys(settings.mixMidi ?? {}).length) engine.enableMidi();
@@ -3489,8 +3899,9 @@ const routes = {
         }
         sawSetbpm = true;
         decks[deck].bpm = v;
-        // While a tempo migration holds the clock, even the main deck's setbpm only RECORDS.
-        return deck === 'a' && mixState.tempoOverride == null ? setbpm(value) : TEMPO_BLOCK;
+        // While the desk holds the clock - a tempo migration, or a song deck playing as grid
+        // master - even the main deck's setbpm only RECORDS. See clockHeldByDesk.
+        return deck === 'a' && !clockHeldByDesk() ? setbpm(value) : TEMPO_BLOCK;
       },
     };
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
@@ -3602,7 +4013,7 @@ const routes = {
     // song had been loaded outside dj mode.
     if (!sawSetbpm) {
       decks[deck].bpm = null;
-      if (deck === 'a' && mixState.tempoOverride == null) setbpm(DEFAULT_CPS * 240);
+      if (deck === 'a' && !clockHeldByDesk()) setbpm(DEFAULT_CPS * 240);
     }
     noteProtoOwnership(deck);
 
@@ -4545,8 +4956,23 @@ const routes = {
   // next CC anywhere -> { learned: { device, channel, cc } }, or { learned: null } after 10s.
   // { target, clear: true } unbinds it. Targets: 'xf' or '<deck>:<control>' ("a:djf").
   'POST /api/mix/midilearn': async (body) => {
+    // { monitor } alone: the desk's `midi` mode turning on or off. While it is on, every message
+    // the hardware sends is named in the console - which is how you find out that a pad speaks
+    // notes, or that the control you just brushed is the one already bound to something else.
+    if (body.target == null && 'monitor' in body) {
+      mixMidiMonitor = !!body.monitor;
+      mixMidiSaid.clear();
+      if (mixMidiMonitor) {
+        if (!engine) throw new Error(engineError ?? 'engine not loaded');
+        engine.enableMidi();
+      }
+      return { status: 200, body: { monitor: mixMidiMonitor } };
+    }
     const target = String(body.target ?? '');
     if (!MIX_MIDI_TARGETS.has(target)) throw new Error(`"${target}" is not a learnable mix control`);
+    // Whatever this target's pad was last seen doing, it isn't doing it now - a rebind (or an
+    // unbind) that left a stale "down" behind would swallow the new pad's first press.
+    mixMidiDown.delete(target);
     if (body.clear) {
       if (settings.mixMidi?.[target]) {
         delete settings.mixMidi[target];
@@ -4890,67 +5316,11 @@ const routes = {
   // next downbeat; a beat-three cue for the next beat three): a bar at most, bar-aligned. An
   // earlier cut moved the entry point instead to shorten the wait, and a play that jumps
   // ahead of the cue you just set is exactly the wrong kind of surprise.
+  // Play/resume a deck's song (see songPlayDeck for the quantizing). Body:
+  // { deck, pos?, rate?, now? }.
   'POST /api/song/play': async (body) => {
-    if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
     const deck = body.deck === 'b' ? 'b' : 'a';
-    const s = songDecks[deck];
-    if (!s) throw new Error(`deck ${deck} has no song loaded`);
-    const rate = Number(body.rate);
-    if (Number.isFinite(rate) && rate > 0.01 && rate <= 4) s.manualRate = rate;
-    const pos = Number(body.pos);
-    let from = Number.isFinite(pos)
-      ? Math.min(Math.max(0, pos), s.duration)
-      : (s.posSec >= s.duration ? 0 : s.posSec);
-    const now = engine.getTime();
-    let startSec = now + SONG_START_LEAD_SEC;
-    const others = othersPlaying(deck);
-    // Grid-master: nothing else is on the clock, and this song knows where its bars are. When
-    // it doesn't (no bpm, or sync deliberately off) it runs free and the response says so -
-    // the next deck up will have nothing to lock onto, and that is worth a word.
-    const takeGrid = !others && s.sync && !!s.bpm;
-    // Before the rate is read: the master's native tempo IS the clock.
-    if (takeGrid) {
-      songMasterDeck = deck;
-      if (mixState.tempoOverride == null) transport.setBpm(s.bpm);
-    }
-    if (others && !body.now) {
-      const earliest = transport.cycleAt(now + SONG_START_LEAD_SEC);
-      let startCycle;
-      if (s.sync && s.bpm) {
-        // The next clock position with the cue's bar phase.
-        const phase = songSync.gridPhase(from, songGridBpm(deck), s.anchorSec);
-        startCycle = Math.floor(earliest - phase) + phase;
-        if (startCycle < earliest) startCycle += 1;
-      } else {
-        const beat = 1 / songSync.BEATS_PER_CYCLE; // no grid: at least land on a beat
-        startCycle = Math.ceil(earliest / beat) * beat;
-      }
-      startSec = transport.secAt(startCycle);
-    }
-    s.nudge = 0;
-    s.servo = 0;
-    s.cueHeld = false; // a real start supersedes a preview - its release must not yank us home
-    s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
-    engine.songStart(engineTrack(SONG_KEYS[deck]), from, s.rate, startSec, s.keylock ? 1 : 0);
-    s.posSec = from;
-    s.startSec = startSec;
-    s.playing = true;
-    if (takeGrid) {
-      // The clock resumes with this song's bar position AS its cycle position, so from here the
-      // shared grid is this record's grid: the other deck's song quantizes onto its downbeats,
-      // and so does any eval. The entry point itself is left exactly where the hand put it -
-      // it's the grid that moves to the music, not the music to the grid.
-      // Cycle 1, not 0: the start is a lead ahead of `now`, and reading the clock in that
-      // window (an eval landing between the two) must not come back with a negative position.
-      transport.startAt(startSec, 1 + songSync.gridPhase(from, songGridBpm(deck), s.anchorSec));
-      syncVstTransport(); // plugins' host transport just jumped - don't wait out the 4s timer
-    }
-    songArmEndTimer(deck);
-    mixNotify();
-    return {
-      status: 200,
-      body: { deck, pos: from, rate: s.rate, startSec, master: takeGrid, bpm: transport.cps * 240, gridless: !others && !takeGrid },
-    };
+    return { status: 200, body: songPlayDeck(deck, body) };
   },
 
   // The CUE gesture: press-and-hold previews from the cue point, release drops the playhead
@@ -4983,26 +5353,9 @@ const routes = {
   // seeks in place); while paused it just moves the resume point.
   'POST /api/song/seek': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
-    const s = songDecks[deck];
-    if (!s) throw new Error(`deck ${deck} has no song loaded`);
-    const pos = Number(body.pos);
-    if (!Number.isFinite(pos)) throw new Error('song/seek needs pos (seconds)');
-    const to = Math.min(Math.max(0, pos), s.duration);
-    if (s.playing && engine) {
-      engine.songSeek(engineTrack(SONG_KEYS[deck]), to, 0);
-      s.posSec = to;
-      s.startSec = engine.getTime();
-      if (s.servo) {
-        s.servo = 0; // the drift the trim was closing jumped away with the playhead
-        songSendRate(deck);
-      }
-      songArmEndTimer(deck);
-    } else {
-      s.posSec = to;
-    }
+    const to = songSeekTo(deck, Number(body.pos));
     // eslint-disable-next-line no-console
-    console.log(`[song] deck ${deck} seek -> ${to.toFixed(3)}s (${s.playing ? 'playing' : 'paused'})`);
-    mixNotify();
+    console.log(`[song] deck ${deck} seek -> ${to.toFixed(3)}s (${songDecks[deck].playing ? 'playing' : 'paused'})`);
     return { status: 200, body: { deck, pos: to } };
   },
 
@@ -5028,67 +5381,7 @@ const routes = {
   // rate moves time, not pitch; toggling mid-song is a declicked player swap at the playhead) }.
   'POST /api/song/meta': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
-    const s = songDecks[deck];
-    if (!s) throw new Error(`deck ${deck} has no song loaded`);
-    if ('bpm' in body) {
-      delete s.bpmDetected; // whatever the hand says, it is no longer an estimate
-      if (body.bpm == null || body.bpm === '') {
-        s.bpm = null;
-        s.bpmByHand = false; // cleared - the detector is welcome to fill it in again
-        s.sync = false;
-        decks[deck].bpm = null; // native slot back to the 120 default
-      } else {
-        const bpm = Number(body.bpm);
-        if (!Number.isFinite(bpm) || bpm < 20 || bpm > 400) throw new Error('song/meta: bpm must be 20..400 (or null to clear)');
-        s.bpm = bpm;
-        s.bpmByHand = true; // this number stands until it is cleared - see songDetectKick
-        decks[deck].bpm = bpm; // the native tempo the desk's migration slider/detents ride to
-        songDetectKick(deck); // re-fit the grid around the typed tempo (which is the fit's hint)
-      }
-    }
-    if ('key' in body) {
-      s.musicalKey = String(body.key ?? '').trim() || null;
-      delete s.keyDetected;
-    }
-    if ('anchorSec' in body) {
-      const a = Number(body.anchorSec);
-      if (!Number.isFinite(a)) throw new Error('song/meta: anchorSec must be a number (seconds)');
-      s.anchorSec = Math.min(Math.max(0, a), s.duration); // as given - the pane's magnet did any snapping
-      s.anchorByHand = true;
-      s.gridDetected = null;
-    }
-    if ('sync' in body) {
-      if (body.sync && s.bpm == null) throw new Error('sync needs a bpm - set one first (the tags had none)');
-      s.sync = !!body.sync;
-    }
-    if ('syncMult' in body) {
-      const m = body.syncMult === 'auto' ? 'auto' : Number(body.syncMult);
-      if (m !== 'auto' && m !== 0.5 && m !== 1 && m !== 2) throw new Error('song/meta: syncMult must be "auto", 0.5, 1 or 2');
-      s.syncMult = m;
-    }
-    if ('keylock' in body && !!body.keylock !== s.keylock) {
-      s.keylock = !!body.keylock;
-      if (s.playing && engine) {
-        // Swap the running player for the other def at the current playhead, declicked (the
-        // old one release-fades under the new one, exactly like a restart).
-        const now = engine.getTime();
-        const pos = songPlayheadSec(deck, now);
-        const startSec = now + SONG_START_LEAD_SEC;
-        engine.songStart(engineTrack(SONG_KEYS[deck]), pos, s.rate + s.servo, startSec, s.keylock ? 1 : 0);
-        s.posSec = pos;
-        s.startSec = startSec;
-        songArmEndTimer(deck);
-      }
-    }
-    songApplyRate(deck); // bpm/sync edits change the effective rate; paused songs settle too
-    mixNotify();
-    return {
-      status: 200,
-      body: {
-        deck, bpm: s.bpm, musicalKey: s.musicalKey, anchorSec: s.anchorSec,
-        sync: s.sync, keylock: s.keylock, rate: s.rate,
-      },
-    };
+    return { status: 200, body: songSetMeta(deck, body) };
   },
 
   // The platter (songs phase 4). Body: { deck, hold?: -1|0|1, jog?: -1|1 }. `hold` is the

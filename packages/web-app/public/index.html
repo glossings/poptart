@@ -107,6 +107,8 @@
                  is the set's queue bookkeeping (nextInSet / stepDeckBQueue), never shown. -->
             <select id="deckAFile" hidden></select>
             <button id="deckASong" class="small deck-song deck-only" title="the song on this deck - click to pick another (opens organize; loading clears this deck's current tracks)">pick a song…</button>
+            <button id="deckAPrev" class="small deck-only" title="load the previous song in the active playlist onto this deck">&#9198;</button>
+            <button id="deckANext" class="small deck-only" title="load the next song in the active playlist onto this deck">&#9197;</button>
             <button id="deckAPlay" class="small deck-only" title="Cmd/Ctrl+Enter">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <button id="deckAKeep" class="small deck-only" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
@@ -156,6 +158,7 @@
             <span class="deck-b-title">deck B</span>
             <select id="deckBFile" hidden></select>
             <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>
+            <button id="deckBPrev" class="small" title="queue the previous song in the active playlist">&#9198;</button>
             <button id="deckBNext" class="small" title="queue the next song in the active playlist (⇧⌘/Ctrl+Shift+.)">⏭</button>
             <button id="deckBPlay" class="small" title="Cmd/Ctrl+Enter in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
@@ -449,7 +452,7 @@
           </div>
           <div class="mix-actions">
             <button id="mixStack" class="small" title="stack the decks: deck B's waveform directly under deck A's, playheads on one vertical line, so the beats of the two can be read against each other (side by side again with another press)">&#8645;</button>
-            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click desk controls and turn hardware knobs, one after another; click again or press esc to finish. Alt+click a control to unbind it">midi</button>
+            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader and every channel strip, and on each deck cue, play, sync, 1×, key, the platter (click the waveform, then spin a jog wheel), the jog and drag buttons, the headphone button and the ⏮/⏭ queue steps">midi</button>
           </div>
         </div>
         <div class="mix-meter-col" id="mixMeterColB"></div>

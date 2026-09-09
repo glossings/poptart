@@ -1654,9 +1654,15 @@ class OscEngine {
 
   _handleMessage(msg) {
     if (msg.address === '/poptart/midiIn') {
-      // Live CC feed for Tier-1 signal sampling: [deviceName, channel (1-16), cc, value 0..1].
-      const [device, channel, cc, value] = (msg.args ?? []).map((a) => a?.value ?? a);
-      if (typeof this.onMidiIn === 'function') this.onMidiIn(String(device), Number(channel), Number(cc), Number(value));
+      // Live input feed: [deviceName, channel (1-16), number, value 0..1, kind]. `kind` is 'cc'
+      // or 'note' - a cc 7 and a note 7 are different controls, and the DJ desk's learned
+      // buttons are usually notes while its knobs and platters are ccs (see the forwarding
+      // MIDIdefs in poptart.scd). Absent on an older sclang: read as 'cc', which is all that
+      // was ever sent then.
+      const [device, channel, num, value, kind] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onMidiIn === 'function') {
+        this.onMidiIn(String(device), Number(channel), Number(num), Number(value), kind ? String(kind) : 'cc');
+      }
       return;
     }
     if (msg.address === '/poptart/songPos') {

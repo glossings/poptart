@@ -18880,7 +18880,7 @@ async function refreshSongFileStat(lib) {
 // The song picker: the ACTIVE playlist (the set, in order, with native bpms) leads, everything
 // else files under "all songs". With nothing picked and the pane empty, the set queues itself:
 // the song after the one that is playing (or after what deck B last held) is preselected and
-// loaded - the "next in the set" default. ⏭ / Cmd+Shift+. steps it (see stepDeckBQueue).
+// loaded - the "next in the set" default. ⏭ / Cmd+Shift+. steps it (see stepDeckQueue).
 async function refreshDeckFiles() {
   try {
     const [{ patterns }, lib] = await Promise.all([api('GET', '/api/patterns?q='), loadLibraryDoc()]);
@@ -18954,21 +18954,29 @@ function nextInSet(set) {
   return opts[(at + 1) % opts.length] ?? opts[0];
 }
 
-// ⏭ (and Cmd/Ctrl+Shift+.): step the set - select the next song in the active playlist and
-// load it into deck B, wrapping at the end.
-async function stepDeckBQueue() {
+// ⏭ / ⏮ (and Cmd/Ctrl+Shift+. for deck B's forward step): walk the active playlist and load
+// what the step lands on. Both directions wrap, and both decks step their own queue - the
+// hidden per-deck select IS the queue position, which is why the pickers keep their place
+// across a load from anywhere else (organize's →A / →B point it at the row they loaded).
+//
+// The MIDI targets `<deck>:next` and `<deck>:prev` are these two, forwarded from the server as
+// an `action` frame: the playlist lives in the browser, so the press has to come here to be
+// acted on (see the mix-strip MIDI section of server.js).
+async function stepDeckQueue(deck, dir = 1) {
   if (!mixModeOn) return;
-  const sel = document.getElementById('deckBFile');
+  const sel = document.getElementById(deck === 'a' ? 'deckAFile' : 'deckBFile');
   const opts = [...sel.querySelectorAll('option[data-set-index]')].filter((o) => !o.disabled);
   if (!opts.length) {
     logLine('no active playlist to step - open organize (≡) and mark a set active', true);
     return;
   }
+  // Nothing picked yet: a forward step starts at the top of the set, a backward one at its end.
   const cur = opts.findIndex((o) => o.selected);
-  const next = opts[(cur + 1) % opts.length];
-  next.selected = true;
-  await loadDeckBFile();
+  const at = cur < 0 ? (dir > 0 ? -1 : 0) : cur;
+  opts[(at + dir + opts.length) % opts.length].selected = true;
+  await (deck === 'a' ? loadDeckAFile : loadDeckBFile)();
 }
+function stepDeckBQueue() { return stepDeckQueue('b', 1); } // the ⏭ hotkey's name, hoisted for the callers above
 
 async function loadDeckBFile(value = document.getElementById('deckBFile').value) {
   if (!value || !deckBCM) return;
@@ -19555,7 +19563,7 @@ function makeSongPane(deck) {
   // The detail strip drags like the record: pull the waveform right and the playhead moves back.
   let drag = null;
   detailEl.addEventListener('pointerdown', (e) => {
-    if (!P.song) return;
+    if (!P.song || mixLearnArmed) return; // armed: this press is binding the platter, not scrubbing
     detailEl.setPointerCapture(e.pointerId);
     detailEl.classList.add('dragging');
     drag = { x: e.clientX, pos: P.playheadNow() };
@@ -19587,7 +19595,7 @@ function makeSongPane(deck) {
     if (r.width && dur) seek(((e.clientX - r.left) / r.width) * dur);
   }
   overviewEl.addEventListener('pointerdown', (e) => {
-    if (!P.song) return;
+    if (!P.song || mixLearnArmed) return; // armed: this press is binding the platter, not seeking
     overviewEl.setPointerCapture(e.pointerId);
     overviewDown = true;
     overviewSeek(e);
@@ -19671,13 +19679,13 @@ function makeSongPane(deck) {
       + (Math.abs(r.anchorSec - at) > 0.002 ? ' (snapped to the transient)' : ''));
   });
   syncEl.addEventListener('click', () => {
-    if (!P.song) return;
+    if (!P.song || mixLearnArmed) return;
     metaPost({ sync: !P.mirror?.sync }, (r) => (r.sync
       ? `sync on - ${D} rides the master clock (rate ${r.rate.toFixed(3)})`
       : `sync off - ${D} back to its own rate`));
   });
   multEl.addEventListener('click', () => {
-    if (!P.song) return;
+    if (!P.song || mixLearnArmed) return;
     if (P.mirror?.master) return;
     const order = ['auto', 0.5, 1, 2];
     const cur = P.mirror?.syncMult ?? 'auto';
@@ -19686,7 +19694,7 @@ function makeSongPane(deck) {
     metaPost({ syncMult: next }, (r) => `${D} tempo ratio ${name} - rate ${r.rate.toFixed(3)}`);
   });
   keylockEl.addEventListener('click', () => {
-    if (!P.song) return;
+    if (!P.song || mixLearnArmed) return;
     metaPost({ keylock: !P.mirror?.keylock }, (r) => `keylock ${r.keylock ? 'on - rate stretches time, not pitch' : 'off - back to repitch'}`);
   });
 
@@ -19721,7 +19729,7 @@ function makeSongPane(deck) {
       .catch((e) => logLine(`${D} cue: ${e.message ?? String(e)}`, true));
   };
   cueEl.addEventListener('pointerdown', (e) => {
-    if (!P.song) return;
+    if (!P.song || mixLearnArmed) return; // armed: this press is binding the pad, not cueing
     cueEl.setPointerCapture(e.pointerId); // the release counts wherever the finger ends up
     P.cueDown();
   });
@@ -19733,7 +19741,7 @@ function makeSongPane(deck) {
     const send = (hold) => api('POST', '/api/song/nudge', { deck, hold })
       .catch((e) => logLine(e.message ?? String(e), true));
     btn.addEventListener('pointerdown', (e) => {
-      if (!P.song) return;
+      if (!P.song || mixLearnArmed) return;
       btn.setPointerCapture(e.pointerId);
       holding = true;
       send(dir);
@@ -19750,14 +19758,28 @@ function makeSongPane(deck) {
   holdWire(nudgeUpEl, 1);
   for (const [name, jog] of [['songJogDn', -1], ['songJogUp', 1]]) {
     byId(name).addEventListener('click', () => {
-      if (!P.song) return;
+      if (!P.song || mixLearnArmed) return;
       api('POST', '/api/song/nudge', { deck, jog }).catch((e) => logLine(e.message ?? String(e), true));
     });
   }
+  // Every control on this pane is a learn surface, same gesture as the desk knobs: arm `midi`,
+  // press the control here, move the hardware one. The WAVEFORM is the platter's surface - the
+  // strip you drag to scrub is where a jog wheel binds, which is the same control by hand and
+  // by wheel (see the `scrub` target in server.js's mix-strip MIDI section).
   mixLearnAttach(nudgeDnEl, `${deck}:nudgedn`);
   mixLearnAttach(nudgeUpEl, `${deck}:nudgeup`);
   mixLearnAttach(byId('songJogDn'), `${deck}:jogdn`);
   mixLearnAttach(byId('songJogUp'), `${deck}:jogup`);
+  mixLearnAttach(cueEl, `${deck}:cue`);
+  // BOTH canvases bind the platter, because both are "the waveform" to the hand: the zoomed
+  // strip you drag, and the full-track overview you click. In the stacked layout the zoomed one
+  // has moved up into #songStack and the pane shows only the overview, so wiring the detail
+  // canvas alone left the visible waveform inert (reported 2026-09-09).
+  mixLearnAttach(detailEl, `${deck}:scrub`);
+  mixLearnAttach(overviewEl, `${deck}:scrub`);
+  mixLearnAttach(syncEl, `${deck}:sync`);
+  mixLearnAttach(multEl, `${deck}:mult`);
+  mixLearnAttach(keylockEl, `${deck}:keylock`);
 
   return P;
 }
@@ -20748,6 +20770,12 @@ function mixSyncValues(state) {
       : 'no cue pair this boot - pick a cue device in the settings tab (restarts the engine)';
     btn.classList.toggle('on', (state.perDeck[deck].cue ?? 0) > 0);
   }
+  // The CLOCK, mirrored from server truth on every desk frame. The desk moves the tempo far
+  // more often than an eval does - the migration slider, a detent, a song deck taking the grid -
+  // and until this frame carried the snapshot, everything drawn from currentCyclePos() (playback
+  // highlighting, the livecoded decks' bar grid, the arrangement playhead) kept running at
+  // whatever cps the last eval's setbpm() had baked in.
+  if (state.transport) transport = state.transport;
   mixTempoRender(state);
   songPaneSync(state); // after the tempo render: adoption reads mixNativeBpm for its beatgrid
   deckHeadRender(state);
@@ -20767,6 +20795,20 @@ function mixPushStart() {
       mixSyncValues(JSON.parse(e.data));
     } catch { /* a torn frame; the next one corrects */ }
   };
+  // Press edges the SERVER can't act on itself, forwarded here as named frames: stepping the
+  // set's queue (the playlists live in this side's library) and ▶ on a deck holding CODE (which
+  // means evaluating a buffer only the editor has). Both run the on-screen button's own path,
+  // so a pad and a click are the same gesture. See the mix-strip MIDI section of server.js.
+  mixEvents.addEventListener('action', (e) => {
+    if (!mixModeOn) return;
+    try {
+      const { deck, action } = JSON.parse(e.data);
+      if (deck !== 'a' && deck !== 'b') return;
+      if (action === 'play') deckPlayPress(deck);
+      else if (action === 'next') stepDeckQueue(deck, 1);
+      else if (action === 'prev') stepDeckQueue(deck, -1);
+    } catch { /* a torn frame; nothing to replay */ }
+  });
   // The channel meter feed rides the same stream as NAMED events, so the desk-state handler
   // above never sees them. Frames just land in mixMeterFeed; the rAF loop draws.
   mixEvents.addEventListener('level', (e) => {
@@ -20997,8 +21039,11 @@ function setMixLearn(on) {
   mixLearnArmed = on;
   mixLearnBtn.classList.toggle('on', on);
   logLine(on
-    ? 'MIDI learn armed - click a desk control then move a knob, as many as you like; esc or midi again to finish (alt+click unbinds)'
+    ? 'MIDI learn armed - click a control here then move the hardware one, as many as you like; esc or midi again to finish (alt+click unbinds). Every message your controller sends is named below while this is on'
     : 'MIDI learn off');
+  // The server names incoming messages in the console for as long as this is on, whether or not
+  // a target is armed: without it, a control that won't bind gives you nothing to go on.
+  api('POST', '/api/mix/midilearn', { monitor: on }).catch((e) => logLine(e.message ?? String(e), true));
 }
 mixLearnBtn.addEventListener('click', () => setMixLearn(!mixLearnArmed));
 document.addEventListener('keydown', (e) => {
@@ -21015,7 +21060,10 @@ async function mixLearnDo(target, clear) {
     }
     logLine(`learning ${target} - move a MIDI knob…`);
     const { learned } = await api('POST', '/api/mix/midilearn', { target });
-    if (learned) logLine(`${target} ← cc ${learned.cc} (ch ${learned.channel}, ${learned.device}) - next control?`);
+    if (learned) {
+      logLine(`${target} ← ${learned.kind ?? 'cc'} ${learned.num ?? learned.cc}`
+        + ` (ch ${learned.channel}, ${learned.device}) - next control?`);
+    }
     // A null reply is EITHER the 10s timeout or this poll being superseded by the next
     // control's click - only the timeout (still the latest, still armed) is worth a line.
     else if (my === mixLearnSeq && mixLearnArmed) logLine(`no CC seen for ${target} - still armed`, true);
@@ -21043,10 +21091,14 @@ for (const deck of ['a', 'b']) {
 for (const deck of ['a', 'b']) {
   const btn = document.getElementById(deck === 'a' ? 'mixCueA' : 'mixCueB');
   btn.addEventListener('click', () => {
+    if (mixLearnArmed) return; // the learn handler (registered after this one) takes the click
     const on = !btn.classList.contains('on');
     btn.classList.toggle('on', on);
     mixPost(`cue-${deck}`, { deck, name: 'cue', value: on ? 1 : 0 });
   });
+  // `phones`, not `cue`: the deck's headphone send and the deck's cue POINT are two different
+  // buttons on a controller, and the target names have to say which is which.
+  mixLearnAttach(btn, `${deck}:phones`);
 }
 
 // The `mute all` buttons: every gate on that deck out in one press (see mixGateAll in
@@ -21086,14 +21138,39 @@ for (const deck of ['a', 'b']) {
   }
 }
 document.getElementById('deckBSong').addEventListener('click', () => openOrganize('b'));
-document.getElementById('deckBPlay').addEventListener('click', () => (deckPlayingNow.b ? doStop('b') : evalDeckB(true)));
+document.getElementById('deckBPlay').addEventListener('click', () => deckPlayPress('b'));
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
 document.getElementById('deckAKeep').addEventListener('click', () => exitDjMode('a'));
 document.getElementById('deckBKeep').addEventListener('click', () => exitDjMode('b'));
 document.getElementById('deckASong').addEventListener('click', () => openOrganize('a'));
-document.getElementById('deckAPlay').addEventListener('click', () => (
-  deckPlayingNow.a ? doStop('a')
-    : mixModeOn && songPanes.a.song ? songPlay('a') : evaluate(true, { byHand: true })));
+document.getElementById('deckAPlay').addEventListener('click', () => deckPlayPress('a'));
+
+/**
+ * The deck head's ▶/■, as one gesture both the button and a learned play pad press. A deck
+ * holding a FILE plays/pauses (the server does that one itself - see songTogglePlay there - so
+ * a pad never waits on the browser); a deck holding CODE plays by evaluating its buffer, which
+ * only this side has, which is why the server forwards that press here as an `action` frame.
+ */
+function deckPlayPress(deck) {
+  if (mixLearnArmed) return; // the learn handler (registered after this one) takes the click
+  if (deckPlayingNow[deck]) return doStop(deck);
+  if (mixModeOn && songPanes[deck].song) return songPlay(deck);
+  return deck === 'b' ? evalDeckB(true) : evaluate(true, { byHand: true });
+}
+
+// The transport pads: play, and the queue steps either side of it.
+for (const deck of ['a', 'b']) {
+  const U = deck.toUpperCase();
+  mixLearnAttach(document.getElementById(`deck${U}Play`), `${deck}:play`);
+  for (const [id, dir] of [[`deck${U}Prev`, -1], [`deck${U}Next`, 1]]) {
+    const btn = document.getElementById(id);
+    btn.addEventListener('click', () => {
+      if (mixLearnArmed) return;
+      stepDeckQueue(deck, dir);
+    });
+    mixLearnAttach(btn, `${deck}:${dir > 0 ? 'next' : 'prev'}`);
+  }
+}
 document.getElementById('deckAUpdate').addEventListener('click', () => {
   if (mixModeOn && songPanes.a.song) {
     logLine('deck A holds a song - nothing to re-evaluate; ▶ plays/resumes, drag the waveform to scrub');
@@ -21101,7 +21178,6 @@ document.getElementById('deckAUpdate').addEventListener('click', () => {
   }
   evaluate(false, { byHand: true });
 });
-document.getElementById('deckBNext').addEventListener('click', stepDeckBQueue);
 document.getElementById('fileOrganizeBtn').addEventListener('click', () => openOrganize());
 
 // ---------------------------------------------------------------------------------------------
@@ -21322,7 +21398,8 @@ function buildOrganize() {
     <div id="orgPanel">
       <header>
         <span class="org-title">organize</span>
-        <input id="orgSearch" type="search" placeholder="filter songs… (name, tag:, bpm)" autocomplete="off" spellcheck="false">
+        <input id="orgSearch" type="search" placeholder="filter… (name, tag:, bpm)" autocomplete="off" spellcheck="false"
+               title="narrows the open playlist AND the list on the right at once; a file also matches on its folder path. tag:dub looks only at tags; esc clears">
         <span class="spacer"></span>
         <button id="orgClose" class="small" title="close (esc)">✕</button>
       </header>
@@ -21382,6 +21459,7 @@ function buildOrganize() {
   const orgSearchEl = orgEl.querySelector('#orgSearch');
   orgSearchEl.addEventListener('input', (e) => {
     orgQuery = e.target.value.trim().toLowerCase();
+    orgRenderItems(); // the open playlist narrows too, whichever tab the right-hand pane shows
     if (orgPane3 === 'disk') orgDiskQueueFind(); // the disk tab searches the whole TREE, like sp
     else orgRenderAll();
   });
@@ -21392,6 +21470,7 @@ function buildOrganize() {
       e.stopPropagation();
       orgSearchEl.value = '';
       orgQuery = '';
+      orgRenderItems();
       if (orgPane3 === 'disk') orgDiskFindClear();
       else orgRenderAll();
     } else if (e.key === 'ArrowDown' || e.key === 'Enter') {
@@ -21646,6 +21725,7 @@ function orgRenderItems() {
   const p = libDoc.playlists.find((x) => x.id === orgSelected);
   title.textContent = p ? p.name : 'contents';
   ul.innerHTML = '';
+  let shown = 0;
   if (!p) {
     ul.innerHTML = '<li class="org-empty">pick a playlist on the left</li>';
     return;
@@ -21657,6 +21737,12 @@ function orgRenderItems() {
   // left pointing at whatever slid into those slots.
   for (const i of [...orgItemSel]) if (i >= p.items.length) orgItemSel.delete(i);
   p.items.forEach((item, i) => {
+    // Filtered rows are LEFT OUT, never renumbered: `i` stays the row's true place in the set,
+    // so the position badge, the arrows, a drop and a removal all still mean what they say
+    // while a search narrows what you can see. A long set is otherwise unsearchable - which is
+    // exactly when you need to find one track in it (reported 2026-09-09).
+    if (!orgItemMatches(item)) return;
+    shown++;
     const isFile = libItemIsFile(item);
     const s = isFile ? null : orgSongs.find((x) => x.name === item);
     // Missing for a save = deleted out from under the set; for a file = moved or deleted on
@@ -21749,18 +21835,45 @@ function orgRenderItems() {
     });
     ul.appendChild(li);
   });
+  // Only while a search is on: how much of the set you are looking at, and a line that says the
+  // set is filtered rather than empty - the two are very different things to walk in on.
+  if (orgQuery) {
+    title.textContent = `${p.name} — ${shown} of ${p.items.length}`;
+    if (!shown && p.items.length) ul.innerHTML = '<li class="org-empty">nothing in this playlist matches that</li>';
+  }
 }
 
 // --- pane 3: every saved song ---
 
-function orgMatches(s) {
+// The search itself, over whatever facts a row happens to have: every word has to hit
+// something, and `tag:` looks only at tags. Shared by the saved-songs list and the playlist's
+// own contents (see orgItemMatches) so one box means one thing wherever you are looking.
+function orgQueryHits(hay, tags = [], bpm = null) {
   if (!orgQuery) return true;
-  const hay = `${s.name} ${s.title || ''}`.toLowerCase();
-  const tags = (s.tags ?? []).map((t) => t.toLowerCase());
+  const h = String(hay).toLowerCase();
+  const t = tags.map((x) => String(x).toLowerCase());
   return orgQuery.split(/\s+/).every((w) => {
-    if (w.startsWith('tag:')) return tags.some((t) => t.includes(w.slice(4)));
-    return hay.includes(w) || tags.some((t) => t.includes(w)) || String(s.bpm ?? '').includes(w);
+    if (w.startsWith('tag:')) return t.some((x) => x.includes(w.slice(4)));
+    return h.includes(w) || t.some((x) => x.includes(w)) || String(bpm ?? '').includes(w);
   });
+}
+
+function orgMatches(s) {
+  return orgQueryHits(`${s.name} ${s.title || ''}`, s.tags ?? [], s.bpm);
+}
+
+/**
+ * The same search against a PLAYLIST ROW, which is either a saved pattern's name or a file item.
+ * A saved one is matched by its full facts (tags included - the set inherits whatever the song
+ * says about itself); a file is matched by its title, its bpm, and its PATH, since the folder a
+ * track sits in is often the only thing you remember about it. A saved song that has since been
+ * deleted keeps its row and still matches by the name the row holds.
+ */
+function orgItemMatches(item) {
+  if (!orgQuery) return true;
+  if (libItemIsFile(item)) return orgQueryHits(`${libFileTitle(item)} ${item.path}`, [], item.bpm);
+  const s = orgSongs.find((x) => x.name === item);
+  return s ? orgMatches(s) : orgQueryHits(item);
 }
 
 function orgRenderAll() {

@@ -890,7 +890,26 @@ midiEnable = {
         MIDIIn.connectAll;
         midiConnected = IdentitySet.newFrom(MIDIClient.sources.collect { |s| s.uid });
         MIDIdef.cc(\poptart_cc_forward, { |val, num, chan, src|
-            nodeAddr.sendMsg("/poptart/midiIn", midiNameForUid.(src), chan + 1, num, val / 127.0);
+            nodeAddr.sendMsg("/poptart/midiIn", midiNameForUid.(src), chan + 1, num, val / 127.0, "cc");
+        });
+        // NOTES are forwarded too, and the trailing word is which kind of message this is - a
+        // cc 7 and a note 7 are different controls and must never bind to each other. Node uses
+        // the note feed for the DJ desk's learned BUTTONS only (a cc signal samples cc): control
+        // surfaces send their knobs and platters as cc and almost all of their buttons as notes,
+        // so without this half a controller simply can't be learned, and a learn armed on a pad
+        // instead binds whatever cc drifted past while the pad was silent (2026-09-09).
+        //
+        // Both edges go out, and a release is 0.0 whichever way it is spelled: hardware that
+        // sends a note-on of velocity 0 for its release lands on 0.0 too, whichever of these two
+        // handlers catches it. That is exactly what the desk's press/release edges read, so
+        // there is no special case anywhere downstream.
+        // Per-track midikeys() routes have their own srcID-filtered defs (see /poptart/midiRoute)
+        // and are untouched by these: MIDIdefs are keyed, and many can watch the same message.
+        MIDIdef.noteOn(\poptart_note_forward, { |veloc, num, chan, src|
+            nodeAddr.sendMsg("/poptart/midiIn", midiNameForUid.(src), chan + 1, num, veloc / 127.0, "note");
+        });
+        MIDIdef.noteOff(\poptart_noteoff_forward, { |veloc, num, chan, src|
+            nodeAddr.sendMsg("/poptart/midiIn", midiNameForUid.(src), chan + 1, num, 0.0, "note");
         });
         ("poptart: MIDI input enabled (" ++ MIDIClient.sources.size ++ " source(s))").postln;
     };
