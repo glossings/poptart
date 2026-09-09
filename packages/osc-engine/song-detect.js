@@ -618,4 +618,4 @@ function detectSongFacts(wavPath, { bpmHint = null } = {}) {
   };
 }
 
-module.exports = { detectSongFacts, detectBpm, detectKey, fitBeatGrid };
+module.exports = { detectSongFacts, detectBpm, detectKey, fitBeatGrid, fft };

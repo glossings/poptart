@@ -1075,6 +1075,15 @@ const settings = loadSettings();
 // - see samples.js). Chosen in the "settings" tab; null/absent means the default ~/.poptart/samples.
 require('@poptart/osc-engine/samples').setSamplesRoot(settings.samplesDir ?? null);
 
+// The sample map (similarity map of the folders in settings.mapSources - see sample-map-api.js).
+// Its routes join the table below; the index itself loads and refreshes once the server is up.
+const sampleMapApi = require('./sample-map-api').createSampleMapApi({
+  settings,
+  saveSettings,
+  // eslint-disable-next-line no-console
+  log: (line) => console.log(line),
+});
+
 // Audio devices with channel counts and UIDs, via the poptart-audio CoreAudio helper (with a
 // system_profiler fallback - see audio-devices.js). Channel counts are why this isn't sclang's
 // ServerOptions.outDevices: scsynth needs numOutputBusChannels at boot, and .o(n)'s
@@ -5463,6 +5472,9 @@ const routes = {
       body: { selected: uids, layout: audioInputLayout(), warning: skipped ?? audioDeviceWarning() },
     };
   },
+
+  // /api/sampleMap/* - the similarity map (sample-map-api.js).
+  ...sampleMapApi.routes,
 };
 
 // Full parameter lists keyed by plugin name - Serum 2's is 2,621 entries and round-trips
@@ -5733,6 +5745,9 @@ init().then(() => {
   server.listen(PORT, HOST, () => {
     // eslint-disable-next-line no-console
     console.log(`[poptart] listening on http://localhost:${PORT}`);
+    // Only now, with the engine up and the port open: the map's cache read is instant, but the
+    // library walk behind it is real disk work and should never delay the first eval.
+    sampleMapApi.start();
     if (!LOOPBACK_ONLY) {
       // eslint-disable-next-line no-console
       console.warn(

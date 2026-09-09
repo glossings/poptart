@@ -1528,6 +1528,12 @@ li.CodeMirror-hint-active {
   display: none;
 }
 
+/* The folder picker is opened FROM other dialogs (the pack panel's map asks for folders), so it
+   sits one step above the rest of them rather than wherever the markup happens to put it. */
+#dirPickerBackdrop {
+  z-index: 41;
+}
+
 .dir-picker {
   display: flex;
   flex-direction: column;
@@ -3653,6 +3659,23 @@ body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
   color: var(--err);
 }
 
+/* Dragging a row to reorder: a line where it would land. */
+.pack-entry.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.pack-entry.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.pack-entries.dragging {
+  cursor: grabbing;
+}
+
+.pack-entries.dragging .pack-entry:hover {
+  background: none;
+}
+
 /* A focused list is the one the arrow keys drive; the ring says which, quietly. */
 .pack-entries:focus-visible,
 .pack-browse-list:focus-visible {
@@ -3810,6 +3833,175 @@ body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
 }
 
 .pack-note.error {
+  color: var(--err);
+}
+
+/* --- the map view of the pick-from column --------------------------------------------------- */
+
+/* folders | map - which way the column is picking. */
+.pack-pick-mode {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+/* A toggle that is on: the pick mode, the 🎧 audition switch. */
+.pack-dialog .small.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.pack-map {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 10px 8px;
+}
+
+/* Sound families, each borrowed from a palette color every theme already defines against its
+   own background - so the map re-colors with the theme. The type a point IS (kick, clap, ride…)
+   rides on hover and on the legend; the hue only says which family. */
+:root {
+  --map-kick: var(--err);
+  --map-snare: var(--syn-number);
+  --map-hat: var(--syn-string);
+  --map-cymbal: var(--syn-property);
+  --map-perc: var(--syn-keyword);
+  --map-tonal: var(--accent);
+  --map-voice: var(--solo);
+  --map-loop: var(--text);
+  --map-other: var(--text-dim);
+}
+
+.pack-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  padding: 4px 0 6px;
+}
+
+/* One family: click isolates it (the rest fade), click again shows all. */
+.map-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.map-chip:hover {
+  color: var(--text);
+}
+
+.map-chip.on {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.map-chip .sw {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.map-chip .n {
+  opacity: 0.7;
+}
+
+.pack-map-canvas {
+  display: block;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  outline: none;
+  cursor: crosshair;
+}
+
+.pack-map-canvas:focus-visible {
+  border-color: var(--accent);
+}
+
+/* No sources yet, or none indexed: what to do about it, in the middle of where the map would be. */
+.pack-map-empty {
+  position: absolute;
+  inset: 40px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+  pointer-events: none;
+}
+
+.pack-map-empty .small {
+  pointer-events: auto;
+}
+
+/* A build in progress: phase and a bar along the map's foot. The bar is the transport's. */
+.pack-map-build {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+
+.pack-map-build .pack-play-bar {
+  flex: 1;
+}
+
+/* --- the map's folders, in the settings tab --- */
+.map-source-list {
+  max-height: 160px;
+}
+
+.map-source-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
+/* The path shows its tail (the folder's own name) when it doesn't fit, not its head. */
+.map-source-row .path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.map-source-note {
+  margin-top: 6px;
+  white-space: normal;
+}
+
+.map-source-note.error {
   color: var(--err);
 }
 

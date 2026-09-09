@@ -12911,7 +12911,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir(); refreshPreferVst3(); refreshWipRetention(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -13467,25 +13467,180 @@ async function browseTo(pathArg) {
   }
 }
 
-function openDirPicker() {
-  dirPickerBackdrop.classList.remove('hidden');
-  browseTo(samplesDirInput.value.trim() || null);
-}
-function closeDirPicker() { dirPickerBackdrop.classList.add('hidden'); }
+// Who gets the folder: the sample library by default, or whoever opened the picker with a
+// callback (the sample map's folder list does).
+let dirPickerOnUse = null;
 
-samplesDirBrowse.addEventListener('click', openDirPicker);
+function openDirPicker(startPath = samplesDirInput.value.trim() || null, onUse = null) {
+  dirPickerOnUse = onUse;
+  dirPickerBackdrop.classList.remove('hidden');
+  browseTo(startPath);
+}
+function closeDirPicker() { dirPickerBackdrop.classList.add('hidden'); dirPickerOnUse = null; }
+
+samplesDirBrowse.addEventListener('click', () => openDirPicker());
 dirPickerClose.addEventListener('click', closeDirPicker);
 dirPickerBackdrop.addEventListener('click', (e) => { if (e.target === dirPickerBackdrop) closeDirPicker(); });
 dirPickerPath.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); browseTo(dirPickerPath.value.trim()); }
 });
 dirPickerUse.addEventListener('click', () => {
-  samplesDirInput.value = dirPickerCurrent;
+  const chosen = dirPickerCurrent;
+  const onUse = dirPickerOnUse;
   closeDirPicker();
-  saveSamplesDir(dirPickerCurrent || null);
+  if (onUse) return onUse(chosen);
+  samplesDirInput.value = chosen;
+  saveSamplesDir(chosen || null);
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !dirPickerBackdrop.classList.contains('hidden')) closeDirPicker();
+  if (e.key === 'Escape' && !dirPickerBackdrop.classList.contains('hidden')) {
+    closeDirPicker();
+    e.stopImmediatePropagation(); // the dialog under it (the pack panel's map) keeps its own escape
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The sample map's folders (settings tab) and its build status. The map itself is the pack
+// panel's "map" view (see the pack panel below); this is where it is told what to look at.
+// Nothing is on the map unless a folder is listed here - the library is offered, not assumed.
+// ---------------------------------------------------------------------------------------------
+
+const mapSourceList = document.getElementById('mapSourceList');
+const mapSourceAdd = document.getElementById('mapSourceAdd');
+const mapSourceLibrary = document.getElementById('mapSourceLibrary');
+const mapRebuild = document.getElementById('mapRebuild');
+const mapSourceNote = document.getElementById('mapSourceNote');
+
+let mapSources = [];
+let mapSuggested = ''; // the sample library folder, offered as the obvious first source
+// The server's last word on the index: { building, phase, done, total, count, error, sources }.
+let mapStatus = null;
+let mapStatusTimer = null;
+const MAP_STATUS_POLL_MS = 500;
+const mapStatusListeners = new Set(); // called with the status after every poll
+
+function renderMapSources() {
+  mapSourceList.innerHTML = '';
+  if (!mapSources.length) {
+    const empty = document.createElement('div');
+    empty.className = 'dir-empty';
+    empty.textContent = 'no folders yet';
+    mapSourceList.appendChild(empty);
+  }
+  mapSources.forEach((dir, i) => {
+    const row = document.createElement('div');
+    row.className = 'map-source-row';
+    const p = document.createElement('span');
+    p.className = 'path';
+    p.textContent = dir;
+    p.title = dir;
+    row.appendChild(p);
+    const x = document.createElement('span');
+    x.className = 'pack-entry-btn pack-entry-del';
+    x.textContent = '✕';
+    x.title = 'take this folder off the map (its analysis is kept, so adding it back is instant)';
+    x.addEventListener('click', () => saveMapSources(mapSources.filter((_, j) => j !== i)));
+    row.appendChild(x);
+    mapSourceList.appendChild(row);
+  });
+  mapSourceLibrary.disabled = mapSources.includes(samplesDirInput.value.trim());
+  mapRebuild.disabled = !mapSources.length;
+}
+
+function mapStatusLine(st = mapStatus) {
+  if (!st) return '';
+  if (st.error) return `the last build failed: ${st.error}`;
+  if (st.building) {
+    if (st.phase === 'analyze' && st.total) return `analyzing ${st.done.toLocaleString()} / ${st.total.toLocaleString()} sounds…`;
+    return st.phase === 'place' ? 'placing…' : 'scanning folders…';
+  }
+  if (!st.sources?.length) return 'add a folder to build the map';
+  return `${(st.count ?? 0).toLocaleString()} sounds on the map`;
+}
+
+function mapRenderStatus() {
+  mapSourceNote.textContent = mapStatusLine();
+  mapSourceNote.classList.toggle('error', !!mapStatus?.error);
+}
+
+async function refreshMapSources() {
+  try {
+    await mapFetchSources();
+    renderMapSources();
+    await mapPollStatus();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function mapFetchSources() {
+  const { sources, suggested } = await api('GET', '/api/sampleMap/sources');
+  mapSources = sources;
+  mapSuggested = suggested ?? '';
+}
+
+async function saveMapSources(list) {
+  try {
+    mapStatus = await api('POST', '/api/sampleMap/sources', { sources: list });
+    mapSources = mapStatus.sources;
+    renderMapSources();
+    mapStatusChanged();
+    mapWatchBuild();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function mapPollStatus() {
+  mapStatus = await api('GET', '/api/sampleMap/status');
+  mapStatusChanged();
+  if (mapStatus.building) mapWatchBuild();
+  return mapStatus;
+}
+
+function mapStatusChanged() {
+  mapRenderStatus();
+  for (const fn of mapStatusListeners) fn(mapStatus);
+}
+
+// Polls while a build is on, then stops - a build is the only time the status moves.
+function mapWatchBuild() {
+  if (mapStatusTimer) return;
+  mapStatusTimer = setInterval(async () => {
+    try {
+      const st = await api('GET', '/api/sampleMap/status');
+      const finished = mapStatus?.building && !st.building;
+      mapStatus = st;
+      mapStatusChanged();
+      if (!st.building) {
+        clearInterval(mapStatusTimer);
+        mapStatusTimer = null;
+        if (finished) for (const fn of mapStatusListeners) fn(st, { finished: true });
+      }
+    } catch {
+      clearInterval(mapStatusTimer);
+      mapStatusTimer = null;
+    }
+  }, MAP_STATUS_POLL_MS);
+}
+
+mapSourceAdd.addEventListener('click', () => {
+  openDirPicker(mapSources[mapSources.length - 1] ?? (samplesDirInput.value.trim() || null), (dir) => {
+    if (dir && !mapSources.includes(dir)) saveMapSources([...mapSources, dir]);
+  });
+});
+mapSourceLibrary.addEventListener('click', () => {
+  const dir = samplesDirInput.value.trim();
+  if (dir && !mapSources.includes(dir)) saveMapSources([...mapSources, dir]);
+});
+mapRebuild.addEventListener('click', async () => {
+  try {
+    mapStatus = await api('POST', '/api/sampleMap/rebuild', { force: true });
+    mapStatusChanged();
+    mapWatchBuild();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -13645,6 +13800,7 @@ function openPackById(id, from = {}) {
     if (packFindActive()) packRunFind(packFind.query); // the disk may have moved on since last time
   }
   packRenderTransport();
+  packSetMode(packMode); // folders or the map, whichever the column was last on
   return true;
 }
 
@@ -13829,8 +13985,32 @@ function packAfterSelect(list, row) {
   if (list === 'entries') packRenderEntries();
   else packRenderBrowse();
   packScrollTo(list, row.key);
-  if (row.kind === 'file') packPlay(row.abs, row.name);
+  if (row.kind === 'file') packAudition(row.abs, row.name);
   else if (list === 'browse') packDescribeFolder(row.abs, row.name);
+}
+
+// Hearing a sound when it is picked is the default, and the 🎧 in the foot turns it off - for
+// walking a list while something plays, or just for quiet. ▶ always plays; this only decides
+// whether selecting does.
+const packAuditionBtn = document.getElementById('packAudition');
+const PACK_AUDITION_KEY = 'poptart.packAudition';
+let packAuditionOn = localStorage.getItem(PACK_AUDITION_KEY) !== '0';
+
+function packAudition(abs, name) {
+  if (packAuditionOn) return packPlay(abs, name);
+  // Loaded but not started, so ▶ has it ready and the foot names what is selected.
+  packPlayerStopSource();
+  Object.assign(packPlayer, { abs, name, buffer: null, offset: 0 });
+  packRenderTransport();
+  packMarkPlaying();
+  return packLoadBuffer(abs).then((buf) => { if (packPlayer.abs === abs) { packPlayer.buffer = buf; packRenderTransport(); } }).catch(() => {});
+}
+
+function packSetAudition(on) {
+  packAuditionOn = !!on;
+  localStorage.setItem(PACK_AUDITION_KEY, packAuditionOn ? '1' : '0');
+  packAuditionBtn.classList.toggle('on', packAuditionOn);
+  if (!packAuditionOn) packPlayerPause();
 }
 
 function packScrollTo(list, key) {
@@ -13940,6 +14120,7 @@ async function packDescribeFolder(abs, name) {
  */
 async function packAddSelected() {
   if (!packState?.own) return packRefuseLibrary();
+  if (packMode === 'map') return mapAddSelected();
   const rows = packRows('browse');
   const picked = rows.filter((r) => packSel.browse.has(r.key));
   if (!picked.length && packFindActive()) {
@@ -13984,6 +14165,14 @@ function packRenderEntries() {
   const nSel = packSel.entries.size;
   packRemoveSelBtn.disabled = !nSel || !packState.own;
   packRemoveSelBtn.textContent = nSel > 1 ? `remove ${nSel} →` : 'remove →';
+  // The map's slot actions: only once there is a map to ask.
+  const mapped = mapState.loaded && mapState.points.length > 0;
+  packSwapSelBtn.classList.toggle('hidden', !mapped);
+  packReshuffleBtn.classList.toggle('hidden', !mapped);
+  packSwapSelBtn.disabled = !nSel || !packState.own;
+  packSwapSelBtn.textContent = nSel > 1 ? `⇄ ${nSel}` : '⇄';
+  packReshuffleBtn.disabled = !n || !packState.own;
+  mapDraw(); // the in-pack rings follow the list
   if (!n) {
     const empty = document.createElement('div');
     empty.className = 'dir-empty';
@@ -14008,6 +14197,14 @@ function packRenderEntries() {
     name.title = row.kind === 'dir' ? `${entry} - a folder: every audio file in it, in name order` : entry;
     el.appendChild(name);
     if (packState.own) {
+      if (mapped && row.kind === 'file') {
+        const swap = document.createElement('span');
+        swap.className = 'pack-entry-btn';
+        swap.textContent = '⇄';
+        swap.title = 'swap for the next sound like it on the map';
+        swap.addEventListener('click', (e) => { e.stopPropagation(); packSwapIndexes([i]); });
+        el.appendChild(swap);
+      }
       const up = document.createElement('span');
       up.className = `pack-entry-btn${i === 0 ? ' off' : ''}`;
       up.textContent = '↑';
@@ -14026,8 +14223,71 @@ function packRenderEntries() {
       packEntriesEl.focus({ preventScroll: true });
       packSelectClick('entries', i, e);
     });
+    // Dragging a row reorders (a press that never moves is the selection above).
+    if (packState.own) el.addEventListener('pointerdown', (e) => { if (e.button === 0) packDragStart(i, e); });
     packEntriesEl.appendChild(el);
   }
+}
+
+// --- reordering by drag ---------------------------------------------------------------------------
+// Pointer-driven rather than the browser's drag-and-drop: the rows preventDefault their mousedown
+// to keep the list's focus, which also stops a native drag from ever starting. A press becomes a
+// drag after a few pixels; the row the pointer is over gets a line above or below it (whichever
+// half it is in), and letting go moves the dragged file there.
+
+let packDrag = null; // { from, y0, active, to } - `to` is the index the file would land at
+
+function packDragStart(i, e) {
+  packDrag = { from: i, y0: e.clientY, active: false, to: null, pointerId: e.pointerId };
+}
+
+function packDragTarget(clientY) {
+  const rows = [...packEntriesEl.children].filter((c) => c.dataset.key != null);
+  for (const row of rows) {
+    const r = row.getBoundingClientRect();
+    if (clientY < r.top + r.height / 2) return Number(row.dataset.key);
+  }
+  return rows.length; // past the last row: the end
+}
+
+function packDragMark(to) {
+  for (const row of packEntriesEl.children) {
+    const k = Number(row.dataset.key);
+    row.classList.toggle('drop-before', to != null && k === to);
+    row.classList.toggle('drop-after', to != null && to === packState.entries.length && k === to - 1);
+  }
+}
+
+function packDragMove(e) {
+  const d = packDrag;
+  if (!d) return;
+  if (!d.active) {
+    if (Math.abs(e.clientY - d.y0) < 4) return;
+    d.active = true;
+    packEntriesEl.setPointerCapture?.(d.pointerId);
+    packEntriesEl.classList.add('dragging');
+  }
+  d.to = packDragTarget(e.clientY);
+  packDragMark(d.to);
+}
+
+function packDragEnd(e) {
+  const d = packDrag;
+  packDrag = null;
+  if (!d?.active) return;
+  packEntriesEl.classList.remove('dragging');
+  packDragMark(null);
+  try { packEntriesEl.releasePointerCapture?.(d.pointerId); } catch { /* not captured */ }
+  if (d.to == null || e?.type === 'pointercancel') return;
+  // `to` is a gap index in the list as it stands; taking the row out first shifts the gaps after it.
+  const to = d.to > d.from ? d.to - 1 : d.to;
+  if (to === d.from) return;
+  const [entry] = packState.entries.splice(d.from, 1);
+  packState.entries.splice(to, 0, entry);
+  packSel.entries = new Set([to]);
+  packSel.entriesAnchor = to;
+  packWrite();
+  packRenderEntries();
 }
 
 async function packBrowseTo(target) {
@@ -14049,19 +14309,24 @@ async function packBrowseTo(target) {
 function packRenderBrowse() {
   const { path: dir, parent } = packBrowse;
   packBrowseList.innerHTML = '';
-  packBrowseHead.textContent = packFindNote();
+  // On the map, the head and ← add speak for the map (mapRenderHead); the list still fills in
+  // behind it, so switching back is instant.
+  const onMap = packMode === 'map';
+  if (!onMap) packBrowseHead.textContent = packFindNote();
   if (dir == null) return;
   const rows = packRows('browse');
   const finding = packFindActive();
   const nSel = packSel.browse.size;
   const nFiles = finding ? packFind.matched : rows.filter((r) => r.kind === 'file').length;
-  packAddSelBtn.disabled = !packState?.own || (!nSel && !nFiles);
-  packAddSelBtn.textContent = nSel
-    ? `← add ${nSel > 1 ? nSel : ''}`.trimEnd()
-    : finding ? `← add all ${nFiles} matches` : `← add all ${nFiles} here`;
-  packAddSelBtn.title = nSel
-    ? 'add the selection to the pack (←)'
-    : finding ? 'add every file that matches, wherever it is (←)' : 'add every audio file in this folder (←)';
+  if (!onMap) {
+    packAddSelBtn.disabled = !packState?.own || (!nSel && !nFiles);
+    packAddSelBtn.textContent = nSel
+      ? `← add ${nSel > 1 ? nSel : ''}`.trimEnd()
+      : finding ? `← add all ${nFiles} matches` : `← add all ${nFiles} here`;
+    packAddSelBtn.title = nSel
+      ? 'add the selection to the pack (←)'
+      : finding ? 'add every file that matches, wherever it is (←)' : 'add every audio file in this folder (←)';
+  }
   if (parent && !finding) {
     const up = document.createElement('div');
     up.className = 'dir-row dir-up';
@@ -14263,7 +14528,12 @@ function packSyncFromCode() {
 }
 
 // The keys a list answers to, once it has focus (clicking a row gives it focus).
+// Every key handler in the panel steps aside for the transport: ⌘↵ and ⌘. reach the document
+// (the backdrop keeps-transport), and must arrive untouched.
+const packTransportKey = (e) => (e.metaKey || e.ctrlKey) && (e.key === 'Enter' || e.key === '.');
+
 function packListKeys(list, e) {
+  if (packTransportKey(e)) return;
   const meta = editMod(e);
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
@@ -14283,6 +14553,10 @@ function packListKeys(list, e) {
   } else if (list === 'entries' && (e.key === 'ArrowRight' || e.key === 'Delete' || e.key === 'Backspace')) {
     e.preventDefault();
     packRemoveSelected();
+  } else if (list === 'entries' && (e.key === ']' || e.key === '[')) {
+    // A slot walks its neighbors on the map: ] the next sound like it, [ back the way it came.
+    e.preventDefault();
+    packSwapIndexes([...packSel.entries].map(Number), e.key === ']' ? 1 : -1);
   } else if (e.key === 'Escape') {
     return; // the panel's, handled on the document
   } else {
@@ -14295,6 +14569,7 @@ function initPackPanel() {
   cm.on('change', packSyncFromCode);
 
   packName.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
     if (e.key === 'Enter') { e.preventDefault(); packName.blur(); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); packHead.revertName(); packName.blur(); return; }
     e.stopPropagation();
@@ -14303,6 +14578,7 @@ function initPackPanel() {
 
   packSearch.addEventListener('input', () => packHead.renderList(true));
   packSearch.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); packHead.move(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); packHead.move(-1); }
     else if (e.key === 'Enter') { e.preventDefault(); packHead.choose(); }
@@ -14311,6 +14587,7 @@ function initPackPanel() {
   });
 
   packBrowsePath.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
     if (e.key === 'Enter') { e.preventDefault(); packBrowseTo(packBrowsePath.value.trim()); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePackPanel(); return; }
     e.stopPropagation();
@@ -14320,6 +14597,7 @@ function initPackPanel() {
   // backs out of the search before it backs out of the panel.
   packBrowseSearch.addEventListener('input', () => packQueueFind());
   packBrowseSearch.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -14338,7 +14616,12 @@ function initPackPanel() {
   });
   packBrowseList.addEventListener('keydown', (e) => packListKeys('browse', e));
   packEntriesEl.addEventListener('keydown', (e) => packListKeys('entries', e));
+  packEntriesEl.addEventListener('pointermove', packDragMove);
+  packEntriesEl.addEventListener('pointerup', packDragEnd);
+  packEntriesEl.addEventListener('pointercancel', packDragEnd);
   packAddSelBtn.addEventListener('click', () => packAddSelected());
+  packAuditionBtn.classList.toggle('on', packAuditionOn);
+  packAuditionBtn.addEventListener('click', () => packSetAudition(!packAuditionOn));
   packRemoveSelBtn.addEventListener('click', () => packRemoveSelected());
 
   // The transport: play/pause, and a bar that scrubs - held down it follows the pointer, and a
@@ -14369,7 +14652,648 @@ function initPackPanel() {
   packCloseBtn.addEventListener('click', () => closePackPanel());
   packBackdrop.addEventListener('click', (e) => { if (e.target === packBackdrop) closePackPanel(); });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && packState) closePackPanel();
+    // Not while the folder picker is up over the panel (the map's "add a folder…"): that
+    // escape is the picker's.
+    if (e.key === 'Escape' && packState && dirPickerBackdrop.classList.contains('hidden')) closePackPanel();
+  });
+
+  initPackMap();
+}
+
+// --- the map view -------------------------------------------------------------------------------
+// The pick-from column's other face: every sound in the folders chosen in settings, placed on a
+// plane by what it sounds like (osc-engine's sample-map.js), colored by family. It answers the
+// two questions a folder browser can't: what else sounds like this (the neighbors of a point,
+// walked with [ and ], or ⇄ on a row of the pack), and what sounds like nothing in the pack
+// yet (← unique: the farthest-from-the-kit pick, which is how a kit gets a kick, a snare, a
+// hat and a stab without twenty near-identical hats). Everything it does ends as a path in the
+// pack's definition; nothing at pattern time looks at the map.
+
+const packModeBrowseBtn = document.getElementById('packModeBrowse');
+const packModeMapBtn = document.getElementById('packModeMap');
+const packMapEl = document.getElementById('packMap');
+const packMapLegend = document.getElementById('packMapLegend');
+const packMapCanvas = document.getElementById('packMapCanvas');
+const packMapEmpty = document.getElementById('packMapEmpty');
+const packMapBuild = document.getElementById('packMapBuild');
+const packMapBuildText = document.getElementById('packMapBuildText');
+const packMapBuildHead = document.getElementById('packMapBuildHead');
+const packUniqueBtn = document.getElementById('packUnique');
+const packSwapSelBtn = document.getElementById('packSwapSel');
+const packReshuffleBtn = document.getElementById('packReshuffle');
+const sampleMapBtn = document.getElementById('sampleMapBtn');
+
+const PACK_MODE_KEY = 'poptart.packPickMode';
+const MAP_BTN_ZOOM = 1.4; // per-keypress zoom step for ⌘± (the wheel zooms proportionally)
+let packMode = localStorage.getItem(PACK_MODE_KEY) === 'map' ? 'map' : 'browse';
+
+// Type -> family. The family carries the hue; the type is what hover and the legend say.
+const MAP_FAMILIES = [
+  { id: 'kick', name: 'kicks', types: ['kick'] },
+  { id: 'snare', name: 'snares & claps', types: ['snare', 'clap', 'rim'] },
+  { id: 'hat', name: 'hats', types: ['hat', 'openhat'] },
+  { id: 'cymbal', name: 'cymbals', types: ['ride', 'crash'] },
+  { id: 'perc', name: 'toms & perc', types: ['tom', 'perc'] },
+  { id: 'tonal', name: 'tonal one-shots', types: ['stab', 'bass', 'synth'] },
+  { id: 'voice', name: 'voice & texture', types: ['vox', 'pad'] },
+  { id: 'loop', name: 'loops & breaks', types: ['loop'] },
+  { id: 'other', name: 'other', types: ['fx', null] },
+];
+const MAP_FAMILY_OF = {};
+for (const f of MAP_FAMILIES) for (const t of f.types) MAP_FAMILY_OF[t] = f.id;
+// What ← unique picks from when no family is isolated: the things a kit is made of.
+const MAP_KIT_FAMILIES = ['kick', 'snare', 'hat', 'cymbal', 'perc', 'tonal'];
+
+const mapState = {
+  loaded: false,
+  loading: false,
+  points: [], // { path, x, y, label, cluster, seconds, source, family }
+  byPath: new Map(), // abs -> index into points
+  counts: {}, // family -> n
+  view: { k: 1, tx: 0, ty: 0 }, // screen = data * k + t
+  kFit: 1,
+  hover: null, // point index
+  selected: null, // point index
+  isolate: null, // family id
+  neighbors: [], // of the selected point: [{ path, dist, label }]
+  nnCache: new Map(), // abs -> neighbors, so walking back and forth is instant
+  hop: new Map(), // abs -> how far down its neighbor list ⇄ has walked
+  drag: null,
+  gen: 0, // load generation, so a stale response can't overwrite a newer one
+};
+
+const mapFamilyOf = (label) => MAP_FAMILY_OF[label] ?? 'other';
+const mapColor = (family) => getComputedStyle(packMapCanvas).getPropertyValue(`--map-${family}`).trim();
+const mapCss = (name) => getComputedStyle(packMapCanvas).getPropertyValue(name).trim();
+
+function packSetMode(mode) {
+  packMode = mode === 'map' ? 'map' : 'browse';
+  localStorage.setItem(PACK_MODE_KEY, packMode);
+  const onMap = packMode === 'map';
+  packModeBrowseBtn.classList.toggle('on', !onMap);
+  packModeMapBtn.classList.toggle('on', onMap);
+  for (const el of [packBrowsePath, packBrowseSearch, packBrowseList]) el.classList.toggle('hidden', onMap);
+  packMapEl.classList.toggle('hidden', !onMap);
+  packUniqueBtn.classList.toggle('hidden', !onMap);
+  if (onMap) {
+    if (!mapState.loaded) mapLoad();
+    else { mapResize(); mapRenderHead(); mapRenderEmpty(); }
+    packMapCanvas.focus({ preventScroll: true });
+  } else {
+    packRenderBrowse();
+  }
+}
+
+async function mapLoad() {
+  const gen = ++mapState.gen;
+  mapState.loading = true;
+  mapRenderEmpty();
+  try {
+    const [snap] = await Promise.all([api('GET', '/api/sampleMap'), mapFetchSources()]);
+    if (gen !== mapState.gen) return;
+    mapStatus = snap.status;
+    mapRenderStatus();
+    const selectedPath = mapState.selected != null ? mapState.points[mapState.selected]?.path : null;
+    mapState.points = snap.points.map((p) => ({ ...p, family: mapFamilyOf(p.label) }));
+    mapState.byPath = new Map(mapState.points.map((p, i) => [p.path, i]));
+    mapState.counts = {};
+    for (const p of mapState.points) mapState.counts[p.family] = (mapState.counts[p.family] ?? 0) + 1;
+    mapState.nnCache.clear();
+    mapState.hover = null;
+    mapState.selected = selectedPath != null ? (mapState.byPath.get(selectedPath) ?? null) : null;
+    mapState.neighbors = [];
+    mapState.loaded = true;
+    mapState.loading = false;
+    mapRenderLegend();
+    mapResize();
+    mapFit();
+    if (mapState.selected != null) mapSelect(mapState.selected, { play: false });
+    if (snap.status.building) mapWatchBuild();
+  } catch (e) {
+    mapState.loading = false;
+    packSay(e.message ?? String(e), true);
+  }
+  mapRenderEmpty();
+  mapRenderHead();
+  packRenderEntries(); // the ⇄ buttons appear with the map
+}
+
+// A build that just finished: the map has changed underneath, reload it.
+mapStatusListeners.add((st, info) => {
+  if (packMode === 'map' && packState) {
+    mapRenderEmpty(); // "no folders" becomes "building…" with the bar, then the map
+    if (info?.finished) mapLoad();
+  }
+});
+
+function mapRenderEmpty() {
+  const st = mapStatus;
+  const nothing = !mapState.loading && !mapState.points.length;
+  packMapEmpty.classList.toggle('hidden', !nothing);
+  packMapEmpty.innerHTML = '';
+  if (nothing) {
+    const line = document.createElement('div');
+    if (st?.building) line.textContent = 'building the map…';
+    else if (!st?.sources?.length) line.textContent = 'no folders on the map yet';
+    else if (st?.error) line.textContent = `the last build failed: ${st.error}`;
+    else line.textContent = 'nothing on the map - the folders have no audio files the map can read';
+    packMapEmpty.appendChild(line);
+    if (!st?.building && !st?.sources?.length) {
+      // Choose right here: the library in one click, or any folder through the picker. The
+      // build starts on the spot and the map fills in when it is done (settings has the same
+      // list, for taking folders off again).
+      const row = document.createElement('div');
+      row.className = 'settings-actions';
+      if (mapSuggested) {
+        const lib = document.createElement('button');
+        lib.className = 'small';
+        lib.textContent = 'add the sample library';
+        lib.title = mapSuggested;
+        lib.addEventListener('click', () => saveMapSources([...mapSources, mapSuggested]));
+        row.appendChild(lib);
+      }
+      const pick = document.createElement('button');
+      pick.className = 'small';
+      pick.textContent = 'add a folder…';
+      pick.addEventListener('click', () => {
+        openDirPicker(mapSuggested || null, (dir) => { if (dir && !mapSources.includes(dir)) saveMapSources([...mapSources, dir]); });
+      });
+      row.appendChild(pick);
+      packMapEmpty.appendChild(row);
+    }
+  }
+  mapRenderBuild();
+}
+
+function mapRenderBuild() {
+  const st = mapStatus;
+  const on = !!st?.building && packMode === 'map';
+  packMapBuild.classList.toggle('hidden', !on);
+  if (!on) return;
+  packMapBuildText.textContent = mapStatusLine(st);
+  packMapBuildHead.style.width = st.phase === 'analyze' && st.total ? `${(100 * st.done) / st.total}%` : st.phase === 'place' ? '100%' : '0%';
+}
+
+function mapRenderLegend() {
+  packMapLegend.innerHTML = '';
+  for (const f of MAP_FAMILIES) {
+    const n = mapState.counts[f.id] ?? 0;
+    if (!n) continue;
+    const chip = document.createElement('span');
+    chip.className = `map-chip${mapState.isolate === f.id ? ' on' : ''}`;
+    chip.title = `${f.types.map((t) => t ?? 'unlabeled').join(', ')} · click to see only these`;
+    const sw = document.createElement('span');
+    sw.className = 'sw';
+    sw.style.background = `var(--map-${f.id})`;
+    chip.appendChild(sw);
+    chip.appendChild(document.createTextNode(f.name));
+    const count = document.createElement('span');
+    count.className = 'n';
+    count.textContent = ` ${n.toLocaleString()}`;
+    chip.appendChild(count);
+    chip.addEventListener('click', () => {
+      mapState.isolate = mapState.isolate === f.id ? null : f.id;
+      mapRenderLegend();
+      mapDraw();
+    });
+    packMapLegend.appendChild(chip);
+  }
+}
+
+// The column head and ← add, in map terms.
+function mapRenderHead() {
+  if (packMode !== 'map') return;
+  const n = mapState.points.length;
+  const sel = mapState.selected != null ? mapState.points[mapState.selected] : null;
+  packBrowseHead.textContent = n ? `${n.toLocaleString()} sounds` : '';
+  packAddSelBtn.disabled = !packState?.own || !sel;
+  packAddSelBtn.textContent = '← add';
+  packAddSelBtn.title = sel ? `add ${packBasename(sel.path)} to the pack (←)` : 'select a sound on the map first';
+  packUniqueBtn.disabled = !packState?.own || !n;
+}
+
+// --- geometry ---
+
+const mapVisible = (p) => !mapState.isolate || p.family === mapState.isolate;
+const mapSx = (p) => p.x * mapState.view.k + mapState.view.tx;
+const mapSy = (p) => p.y * mapState.view.k + mapState.view.ty;
+const mapW = () => packMapCanvas.clientWidth;
+const mapH = () => packMapCanvas.clientHeight;
+
+function mapResize() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(mapW() * dpr));
+  const h = Math.max(1, Math.round(mapH() * dpr));
+  if (packMapCanvas.width !== w) packMapCanvas.width = w;
+  if (packMapCanvas.height !== h) packMapCanvas.height = h;
+  mapDraw();
+}
+
+function mapFit() {
+  const pts = mapState.points;
+  if (!pts.length) return;
+  let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
+  for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
+  const pad = 18;
+  const k = Math.min((mapW() - 2 * pad) / (maxX - minX || 1), (mapH() - 2 * pad) / (maxY - minY || 1));
+  mapState.view = { k, tx: (mapW() - (minX + maxX) * k) / 2, ty: (mapH() - (minY + maxY) * k) / 2 };
+  mapState.kFit = k;
+  mapDraw();
+}
+
+function mapZoomAt(x, y, factor) {
+  const v = mapState.view;
+  const k = Math.max(mapState.kFit * 0.5, Math.min(mapState.kFit * 40, v.k * factor));
+  const f = k / v.k;
+  v.tx = x - (x - v.tx) * f;
+  v.ty = y - (y - v.ty) * f;
+  v.k = k;
+  mapDraw();
+}
+
+/** The visible point nearest the pixel, within a few px, or null. */
+function mapNearest(x, y, maxPx = 8) {
+  let best = null;
+  let bestD = maxPx * maxPx;
+  const pts = mapState.points;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (!mapVisible(p)) continue;
+    const dx = mapSx(p) - x;
+    const dy = mapSy(p) - y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// Bring a point into view if it isn't - a neighbor walk or a ⇄ shouldn't select something
+// off-screen.
+function mapReveal(i) {
+  const p = mapState.points[i];
+  if (!p) return;
+  const x = mapSx(p); const y = mapSy(p);
+  const m = 24;
+  if (x >= m && x <= mapW() - m && y >= m && y <= mapH() - m) return;
+  mapState.view.tx += mapW() / 2 - x;
+  mapState.view.ty += mapH() / 2 - y;
+}
+
+// --- drawing ---
+
+function mapDraw() {
+  if (packMode !== 'map' || packMapEl.classList.contains('hidden')) return;
+  const ctx = packMapCanvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = mapW(); const H = mapH();
+  ctx.clearRect(0, 0, W, H);
+  const pts = mapState.points;
+  if (!pts.length) return;
+  const r = Math.max(1.8, Math.min(4, 2.2 * Math.sqrt(mapState.view.k / mapState.kFit)));
+  const inPack = new Set((packState?.entries ?? []).map((e) => packAbsOf(e)));
+  const textDim = mapCss('--text-dim');
+  const accent = mapCss('--accent');
+  const text = mapCss('--text');
+
+  // Faded first, then the families on top, one path per family so state changes stay few.
+  const byFamily = {};
+  ctx.globalAlpha = 0.18;
+  ctx.fillStyle = textDim;
+  ctx.beginPath();
+  for (const p of pts) {
+    if (mapVisible(p)) { (byFamily[p.family] ??= []).push(p); continue; }
+    const x = mapSx(p); const y = mapSy(p);
+    if (x < -r || y < -r || x > W + r || y > H + r) continue;
+    ctx.moveTo(x + r, y);
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  ctx.globalAlpha = 0.85;
+  for (const [family, list] of Object.entries(byFamily)) {
+    ctx.fillStyle = mapColor(family);
+    ctx.beginPath();
+    for (const p of list) {
+      const x = mapSx(p); const y = mapSy(p);
+      if (x < -r || y < -r || x > W + r || y > H + r) continue;
+      ctx.moveTo(x + r, y);
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // In the pack already: a ring in the accent, like the ✓ in the folder view.
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1.5;
+  for (const abs of inPack) {
+    const i = mapState.byPath.get(abs);
+    if (i == null) continue;
+    const p = pts[i];
+    ctx.beginPath();
+    ctx.arc(mapSx(p), mapSy(p), r + 2.5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // The selection and its neighbors: lines out to them, rings on them.
+  const sel = mapState.selected != null ? pts[mapState.selected] : null;
+  if (sel) {
+    ctx.strokeStyle = textDim;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 1;
+    for (const n of mapState.neighbors) {
+      const j = mapState.byPath.get(n.path);
+      if (j == null) continue;
+      ctx.beginPath();
+      ctx.moveTo(mapSx(sel), mapSy(sel));
+      ctx.lineTo(mapSx(pts[j]), mapSy(pts[j]));
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    for (const n of mapState.neighbors) {
+      const j = mapState.byPath.get(n.path);
+      if (j == null) continue;
+      mapRing(ctx, pts[j], r + 2.5, mapColor(pts[j].family), 1.2);
+    }
+    mapRing(ctx, sel, r + 4, text, 2);
+  }
+  if (mapState.hover != null && mapState.hover !== mapState.selected) mapRing(ctx, pts[mapState.hover], r + 3, text, 1.2);
+
+  // The name of what the pointer is on (or of the selection), in the top-left corner - a fixed
+  // spot, so it never sits over the neighbors you are looking at.
+  const labelFor = mapState.hover ?? mapState.selected;
+  if (labelFor != null) {
+    const p = pts[labelFor];
+    const s = `${packBasename(p.path)}  ${p.label ?? `group ${p.cluster}`}`;
+    ctx.font = `11px ${mapCss('--mono')}`;
+    const w = Math.min(W - 12, ctx.measureText(s).width + 10);
+    ctx.fillStyle = mapCss('--bg-panel');
+    ctx.strokeStyle = mapCss('--border');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(6, 6, w, 18, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(6, 6, w, 18);
+    ctx.clip();
+    ctx.fillStyle = text;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(s, 11, 15);
+    ctx.restore();
+  }
+}
+
+function mapRing(ctx, p, rad, color, width) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.arc(mapSx(p), mapSy(p), rad, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// --- selecting, hearing, walking ---
+
+async function mapNeighborsOf(abs) {
+  if (mapState.nnCache.has(abs)) return mapState.nnCache.get(abs);
+  const { neighbors } = await api('GET', `/api/sampleMap/neighbors?path=${encodeURIComponent(abs)}&k=12`);
+  mapState.nnCache.set(abs, neighbors);
+  return neighbors;
+}
+
+async function mapSelect(i, { play = true } = {}) {
+  mapState.selected = i;
+  mapState.neighbors = [];
+  const p = mapState.points[i];
+  if (!p) { mapDraw(); mapRenderHead(); return; }
+  mapReveal(i);
+  mapDraw();
+  mapRenderHead();
+  if (play) packAudition(p.path);
+  try {
+    const nn = await mapNeighborsOf(p.path);
+    if (mapState.selected === i) { mapState.neighbors = nn; mapDraw(); }
+  } catch (e) {
+    packSay(e.message ?? String(e), true);
+  }
+}
+
+/**
+ * [ and ]: the selection walks its own neighbor list, nearest first. A selection that is IN the
+ * pack walks as that slot - the pack changes, exactly as ] on its row would - so exploring a
+ * pack sound's neighbors and swapping it are the same gesture wherever you press it. One that
+ * isn't in the pack just previews: the walked-to sound is named, ringed, and what ← adds.
+ */
+function mapWalk(delta) {
+  const sel = mapState.selected != null ? mapState.points[mapState.selected] : null;
+  if (!sel || !mapState.neighbors.length) return;
+  const slot = packState?.own ? packState.entries.findIndex((e) => packAbsOf(e) === sel.path) : -1;
+  if (slot >= 0) return packSwapIndexes([slot], delta);
+  const n = mapState.neighbors.length;
+  const at = mapState.hop.get(sel.path) ?? -1;
+  const next = (((at + delta) % n) + n) % n; // both ways wrap: [ from the first goes to the farthest
+  mapState.hop.set(sel.path, next);
+  const j = mapState.byPath.get(mapState.neighbors[next].path);
+  if (j == null) return;
+  // The walk stays anchored on the original - its neighbors, not the neighbor's neighbors - so
+  // the walked-to sound is shown as the hover: named, ringed, and what ← adds.
+  mapReveal(j);
+  mapState.hover = j;
+  mapDraw();
+  packAudition(mapState.points[j].path);
+}
+
+function mapAddSelected() {
+  if (!packState?.own) return packRefuseLibrary();
+  const target = mapState.hover ?? mapState.selected;
+  const p = target != null ? mapState.points[target] : null;
+  if (!p) return packSay('select a sound on the map first', true);
+  packAdd([p.path]);
+}
+
+// ← unique: the pick least like anything in the pack. Within the isolated family if one is,
+// otherwise among the families a kit is made of - so a kit of drums doesn't get handed a
+// four-bar break because it is, technically, the farthest thing.
+async function packUnique() {
+  if (!packState?.own) return packRefuseLibrary();
+  const families = mapState.isolate ? [mapState.isolate] : MAP_KIT_FAMILIES;
+  const types = MAP_FAMILIES.filter((f) => families.includes(f.id)).flatMap((f) => f.types);
+  try {
+    const { path } = await api('POST', '/api/sampleMap/unique', { kit: packState.entries.map(packAbsOf), types });
+    if (!path) return packSay('nothing left to pick from', true);
+    packAdd([path]);
+    const i = mapState.byPath.get(path);
+    if (i != null) mapSelect(i);
+  } catch (e) {
+    packSay(e.message ?? String(e), true);
+  }
+}
+
+// ⇄ (or ] on a row): a slot hops to the next sound like it - its neighbors, nearest first,
+// skipping what the pack already has - so pressing again keeps walking outward instead of
+// bouncing back; [ walks back the way it came. `delta` is the direction.
+async function packSwapIndexes(indexes, delta = 1) {
+  if (!packState?.own) return packRefuseLibrary();
+  const list = [...new Set(indexes)].sort((a, b) => a - b);
+  if (!list.length) return packSay('select a file in the pack first', true);
+  let swapped = 0;
+  let last = null;
+  for (const i of list) {
+    const abs = packAbsOf(packState.entries[i]);
+    let nn;
+    try {
+      nn = await mapNeighborsOf(abs);
+    } catch (e) {
+      return packSay(e.message ?? String(e), true);
+    }
+    if (!nn.length) { packSay(`${packBasename(abs)} isn't on the map - add its folder in settings`, true); continue; }
+    const have = new Set(packState.entries.map(packAbsOf));
+    const n = nn.length;
+    let at = (mapState.hop.get(abs) ?? -1) + delta;
+    let pick = null;
+    for (let step = 0; step < n; step++, at += delta) {
+      const cand = nn[((at % n) + n) % n];
+      if (!have.has(cand.path)) { pick = cand; break; }
+    }
+    if (!pick) continue;
+    // The new slot inherits the walk: the next press goes one further along the ORIGINAL's
+    // list, so a run of presses is a walk away from where it started (and ← retraces it).
+    mapState.hop.set(pick.path, ((at % n) + n) % n);
+    mapState.nnCache.set(pick.path, nn);
+    packState.entries[i] = packEntryFor(pick.path);
+    swapped++;
+    last = pick.path;
+  }
+  if (!swapped) return;
+  packWrite();
+  packRenderEntries();
+  packRenderBrowse();
+  packSay(`swapped ${swapped === 1 ? packBasename(last) + ' in' : `${swapped} files`}`);
+  if (last) {
+    packAudition(last);
+    const j = mapState.byPath.get(last);
+    if (j != null && packMode === 'map') mapSelect(j, { play: false });
+  }
+}
+
+// Delete on the map: the sound under the pointer (or selected) leaves the pack, if it is in it.
+function mapRemoveSelected() {
+  const target = mapState.hover ?? mapState.selected;
+  const p = target != null ? mapState.points[target] : null;
+  if (!p) return;
+  const i = packState?.entries.findIndex((e) => packAbsOf(e) === p.path) ?? -1;
+  if (i < 0) return packSay(`${packBasename(p.path)} isn't in the pack`, true);
+  packRemoveIndexes([i]);
+}
+
+async function packReshuffle() {
+  if (!packState?.own) return packRefuseLibrary();
+  if (!packState.entries.length) return packSay('the pack is empty', true);
+  try {
+    const { kit } = await api('POST', '/api/sampleMap/reshuffle', { kit: packState.entries.map(packAbsOf) });
+    let changed = 0;
+    kit.forEach((abs, i) => {
+      const entry = packEntryFor(abs);
+      if (entry !== packState.entries[i]) { packState.entries[i] = entry; changed++; }
+    });
+    if (!changed) return packSay('nothing on the map to shuffle to', true);
+    packWrite();
+    packRenderEntries();
+    packRenderBrowse();
+    packSay(`reshuffled ${changed} of ${kit.length}`);
+    mapDraw();
+  } catch (e) {
+    packSay(e.message ?? String(e), true);
+  }
+}
+
+// The sounds tab's "map" button: the pack panel, on its map, on a pack - the first one defined
+// here, or a new one called kit if there is none.
+function openSampleMap() {
+  if (!packState) {
+    const first = packDefs.defsInBuffer()[0]?.id ?? prPrebakePacks[0]?.id;
+    if (first != null) openPackById(first);
+    else packDefs.create('kit');
+    if (!packState) return;
+  }
+  packSetMode('map');
+}
+
+function initPackMap() {
+  packModeBrowseBtn.addEventListener('click', () => packSetMode('browse'));
+  packModeMapBtn.addEventListener('click', () => packSetMode('map'));
+  packUniqueBtn.addEventListener('click', () => packUnique());
+  packSwapSelBtn.addEventListener('click', () => packSwapIndexes([...packSel.entries].map(Number)));
+  packReshuffleBtn.addEventListener('click', () => packReshuffle());
+  sampleMapBtn.addEventListener('click', () => openSampleMap());
+
+  new ResizeObserver(() => { if (packMode === 'map' && packState) mapResize(); }).observe(packMapCanvas);
+
+  // Drag pans; a press that didn't move selects (and plays) what it landed on.
+  packMapCanvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    packMapCanvas.focus({ preventScroll: true });
+    mapState.drag = { x: e.clientX, y: e.clientY, tx: mapState.view.tx, ty: mapState.view.ty, moved: false };
+    packMapCanvas.setPointerCapture(e.pointerId);
+  });
+  packMapCanvas.addEventListener('pointermove', (e) => {
+    const d = mapState.drag;
+    if (d) {
+      const dx = e.clientX - d.x; const dy = e.clientY - d.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+      if (d.moved) { mapState.view.tx = d.tx + dx; mapState.view.ty = d.ty + dy; mapDraw(); }
+      return;
+    }
+    const h = mapNearest(e.offsetX, e.offsetY);
+    if (h !== mapState.hover) { mapState.hover = h; mapDraw(); }
+  });
+  packMapCanvas.addEventListener('pointerup', (e) => {
+    const d = mapState.drag;
+    mapState.drag = null;
+    if (d?.moved || e.detail > 1) return; // a double-click's second press: dblclick has it
+    const h = mapNearest(e.offsetX, e.offsetY);
+    if (h != null) mapSelect(h);
+  });
+  packMapCanvas.addEventListener('pointercancel', () => { mapState.drag = null; });
+  packMapCanvas.addEventListener('pointerleave', () => { if (mapState.hover != null) { mapState.hover = null; mapDraw(); } });
+  packMapCanvas.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    const h = mapNearest(e.offsetX, e.offsetY);
+    if (h != null) { mapState.selected = h; mapAddSelected(); }
+  });
+  // Plain wheel pans, ⌘/ctrl+wheel zooms at the pointer - the slice editor's convention.
+  packMapCanvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.metaKey || e.ctrlKey) { mapZoomAt(e.offsetX, e.offsetY, Math.exp(-e.deltaY * 0.004)); return; }
+    mapState.view.tx -= e.deltaX;
+    mapState.view.ty -= e.deltaY;
+    mapDraw();
+  }, { passive: false });
+  packMapCanvas.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey) return; // ⌘± / ⌘0 are handled on the document, below
+    if (e.key === ']' || e.key === '[') { e.preventDefault(); mapWalk(e.key === ']' ? 1 : -1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'Enter') { e.preventDefault(); mapAddSelected(); }
+    else if (e.key === 'ArrowRight' || e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); mapRemoveSelected(); }
+    else if (e.key === ' ') { e.preventDefault(); packPlayerToggle(); }
+    else if (e.key === 'Escape') return; // the panel's, handled on the document
+    else return;
+    e.stopPropagation();
+  });
+  // ⌘± zooms about the middle and ⌘0 refits, while the map is up - on the document, like the
+  // slice editor's, so a focused button in the panel can't swallow them.
+  document.addEventListener('keydown', (e) => {
+    if (!packState || packMode !== 'map' || !(e.metaKey || e.ctrlKey) || e.altKey) return;
+    if (!dirPickerBackdrop.classList.contains('hidden')) return;
+    if (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      e.stopPropagation();
+      mapZoomAt(mapW() / 2, mapH() / 2, e.key === '-' || e.key === '_' ? 1 / MAP_BTN_ZOOM : MAP_BTN_ZOOM);
+    } else if (e.key === '0') {
+      e.preventDefault();
+      e.stopPropagation();
+      mapFit();
+    }
   });
 }
 

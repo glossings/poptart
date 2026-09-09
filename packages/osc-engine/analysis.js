@@ -105,6 +105,25 @@ function songDetect(wavPath, opts = {}) {
 }
 
 /**
+ * sample-map.js's readAudioHead + extractFeatures over a batch of WAV paths, off-thread. One
+ * entry per path, in order: { features: Float32Array, seconds } or null where the file couldn't
+ * be decoded. The sample index feeds this a few dozen files at a time (see sample-index.js).
+ * @returns {Promise<Array<{ features: Float32Array, seconds: number } | null>>}
+ */
+function mapFeatures(paths) {
+  return run('mapfeatures', { paths });
+}
+
+/**
+ * sample-map.js's deriveMap (projection, neighbors, layout, groups, labels) over every
+ * indexed sample's vector, off-thread. Same arguments and same return.
+ * @returns {Promise<object>}
+ */
+function mapDerive(vectors, paths, opts = {}) {
+  return run('mapderive', { vectors, paths, ...opts });
+}
+
+/**
  * Drop the worker. Anything still in flight rejects. Nothing in normal operation calls this - the
  * worker is a process-wide singleton that unrefs itself while idle, so it neither needs tearing
  * down at engine shutdown nor holds the process open; this exists so a test suite can end cleanly.
@@ -116,4 +135,4 @@ async function shutdownAnalysis() {
   await w.terminate();
 }
 
-module.exports = { analyzeSlices, trimRecording, songWaveform, songDetect, shutdownAnalysis };
+module.exports = { analyzeSlices, trimRecording, songWaveform, songDetect, mapFeatures, mapDerive, shutdownAnalysis };

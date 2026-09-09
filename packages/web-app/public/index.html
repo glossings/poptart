@@ -262,7 +262,7 @@
             </section>
 
             <section id="samplesSection">
-              <h2>samples <span id="samplesCount" class="count"></span></h2>
+              <h2>samples <span id="samplesCount" class="count"></span> <button id="sampleMapBtn" class="small" title="the sample map: build a pack from sounds placed by what they sound like">map</button></h2>
               <input id="sampleSearch" type="search" placeholder="filter samples… (click to copy)" />
               <div id="sampleList" class="panel list">loading…</div>
             </section>
@@ -371,6 +371,22 @@
                 <button id="samplesDirReset" class="small" title="use the default ~/.poptart/samples">reset</button>
               </div>
               <div id="samplesDirNote" class="files-note"></div>
+            </section>
+            <!-- The sample map's sources: the folders whose sounds get analyzed and placed. A
+                 choice, not the library by default - the map is only as useful as what is on it,
+                 and a folder of impulse responses or full songs is not what a kit is built from. -->
+            <section id="sampleMapSection">
+              <h2>sample map</h2>
+              <div class="settings-row settings-row-block">
+                <span title="the folders whose sounds are analyzed and placed on the map (the pack panel's map view)">folders on the map</span>
+                <div id="mapSourceList" class="check-list map-source-list"></div>
+              </div>
+              <div class="settings-actions">
+                <button id="mapSourceAdd" class="small">add folder…</button>
+                <button id="mapSourceLibrary" class="small" title="add the sample library folder">add library</button>
+                <button id="mapRebuild" class="small" title="analyze every file again">rebuild</button>
+              </div>
+              <div id="mapSourceNote" class="settings-note map-source-note"></div>
             </section>
             <section>
               <h2>plugins</h2>
@@ -747,7 +763,7 @@
     <!-- The pack panel: a named sample pack (sp("kit")) is a list of files picked off the disk, so
          its editor is three lists - the packs there are, the files in this one (index order), and a
          folder browser to pick from. dir-picker-backdrop on purpose: the global hotkeys stand down. -->
-    <div id="packBackdrop" class="dir-picker-backdrop hidden">
+    <div id="packBackdrop" class="dir-picker-backdrop keeps-transport hidden">
       <div class="dir-picker pack-dialog" role="dialog" aria-label="sample pack">
         <div class="dir-picker-head">
           <span id="packTitle">sample pack</span>
@@ -764,20 +780,40 @@
             <div id="packPickList" class="def-pick-list pack-list"></div>
           </div>
           <div class="pack-col pack-col-entries">
-            <div class="pack-col-head">in the pack<span id="packEntriesHead" class="pack-col-sub"></span><span class="spacer"></span><button id="packRemoveSel" class="small" title="take the selection out of the pack (→ or delete)">remove →</button></div>
+            <div class="pack-col-head">in the pack<span id="packEntriesHead" class="pack-col-sub"></span><span class="spacer"></span><button id="packSwapSel" class="small" title="swap the selection for the next sound like it on the map (], or [ for the one before)">⇄</button><button id="packReshuffle" class="small" title="every file in the pack hops to a sound like it - same roles, different flavor">reshuffle</button><button id="packRemoveSel" class="small" title="take the selection out of the pack (→ or delete)">remove →</button></div>
             <div id="packEntries" class="pack-entries" tabindex="0"></div>
           </div>
+          <!-- The third column is the two ways of picking: the disk as folders, or the sample map -
+               every indexed sample placed by how it sounds (see sample-map.js). Same column, same
+               ← add, same selection-plays rule; the map just answers "what else sounds like this"
+               and "what sounds like nothing in the pack yet". -->
           <div class="pack-col pack-col-browse">
-            <div class="pack-col-head">pick from<span id="packBrowseHead" class="pack-col-sub"></span><span class="spacer"></span><button id="packAddSel" class="small" title="add the selection to the pack (←)">← add</button></div>
+            <div class="pack-col-head">pick from
+              <span id="packPickMode" class="pack-pick-mode" role="tablist">
+                <button id="packModeBrowse" class="small on" role="tab" title="the disk, as folders">folders</button>
+                <button id="packModeMap" class="small" role="tab" title="the sample map: every sound in your chosen folders, placed by what it sounds like">map</button>
+              </span>
+              <span id="packBrowseHead" class="pack-col-sub"></span><span class="spacer"></span>
+              <button id="packUnique" class="small hidden" title="add the sound least like anything in the pack yet - press it eight times for a kit">← unique</button>
+              <button id="packAddSel" class="small" title="add the selection to the pack (←)">← add</button>
+            </div>
             <input id="packBrowsePath" class="dir-picker-path pack-browse-path" type="text" spellcheck="false"
               title="current folder — edit or paste a path, then Enter to go there" />
             <input id="packBrowseSearch" class="pack-search pack-browse-search" type="text" spellcheck="false"
               placeholder="search this folder and everything under it" autocomplete="off"
               title="filter to the audio files whose path contains what you type (every word must match)" />
             <div id="packBrowseList" class="dir-picker-list pack-browse-list" tabindex="0"></div>
+            <div id="packMap" class="pack-map hidden">
+              <div id="packMapLegend" class="pack-map-legend"></div>
+              <canvas id="packMapCanvas" class="pack-map-canvas" tabindex="0"
+                title="click a sound to hear and select it · ← (or double-click) adds it · → (or delete) takes it out · [ ] walk the sounds like it · drag or wheel to pan, ⌘+wheel or ⌘± to zoom, ⌘0 to fit"></canvas>
+              <div id="packMapEmpty" class="pack-map-empty hidden"></div>
+              <div id="packMapBuild" class="pack-map-build hidden"><span id="packMapBuildText"></span><div class="pack-play-bar"><div id="packMapBuildHead" class="pack-play-head"></div></div></div>
+            </div>
           </div>
         </div>
         <div class="dir-picker-foot pack-foot">
+          <button id="packAudition" class="small on" title="hear a sound when it is selected · off: only ▶ plays">🎧</button>
           <button id="packPlayBtn" class="small" title="play / pause (space)" disabled>▶</button>
           <span id="packPlayName" class="pack-play-name"></span>
           <div id="packPlayBar" class="pack-play-bar" title="scrub"><div id="packPlayHead" class="pack-play-head"></div></div>
