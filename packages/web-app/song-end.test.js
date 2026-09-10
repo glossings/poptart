@@ -36,7 +36,7 @@ function loadSongEnd() {
   assert.ok(rel, 'SONG_RELEASE_SEC not found in server.js - this test needs updating');
   // eslint-disable-next-line no-new-func
   const make = new Function('songDecks', 'engine', 'engineTrack', 'SONG_KEYS', 'mixNotify',
-    'setTimeout', 'clearTimeout', `
+    'songHandGridOver', 'setTimeout', 'clearTimeout', `
       const SONG_RELEASE_SEC = ${rel[1]};
       ${bodies};
       return { ${NAMES.join(', ')} };
@@ -58,6 +58,7 @@ function deck(song) {
     (key) => `tid:${key}`,
     { a: '#song', b: 'b:#song' },
     () => {},
+    () => {}, // songHandGridOver - the grid moving off a stopped deck is song-master.test.js's
     (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     () => {},
   );

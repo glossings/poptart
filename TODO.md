@@ -62,20 +62,21 @@ no completion notes.
     exist on hardware, and targets are cheap now that buttons are a kind the dispatch knows about
     (see the mix-strip MIDI section of server.js).
 
-    Two ways to wrap, and the second is the one to build:
-    - Node-timed: arm a timer and send `engine.songSeek(tid, inSec, atTime)` a little early. The
-      sclang handler applies a seek inside a future-timestamped bundle, so the wrap itself is
-      sample-accurate even though the timer is not - exactly songArmEndTimer's shape, and cheap.
-      But the send lead puts an honest floor of about a beat on the loop length, which loses the
-      stutter loops that are half of why anyone wants this.
-    - In the player def (preferred): poptart_song_* / poptart_songwarp_* already carry a Phasor
-      for the position report and a PlayBuf that takes t_seek + seekFrame. Compare the Phasor
-      against a `loopEnd` control and trigger t_seek at `loopStart` in the graph: sample-accurate
-      at ANY length, with Node setting two controls and timing nothing. Keeps PlayBuf, so it does
-      not reopen the float32 phase problem the precision note in that def is about. ~half a day
-      in the .scd, and it deletes the whole timer question. Worth doing alongside the def's
-      self-gate at EOF (see the deferred oddments above): both are the same admission that the
-      player should know where it may not read past, and one pass gets them both.
+    Build the wrap INSIDE the player def. poptart_song_* / poptart_songwarp_* already carry a
+    Phasor for the position report and a PlayBuf that takes t_seek + seekFrame: add loopStart /
+    loopEnd / looping controls, fold the Phasor into the region, and fire t_seek at loopStart off
+    that fold. Sample-accurate at any length, with Node setting two numbers and timing nothing.
+    Keeps PlayBuf, so it does not reopen the float32 phase problem the precision note in that def
+    is about. Take it alongside the def's self-gate at EOF (see the deferred oddments above):
+    both are the same admission that the player should know where it may not read past, and one
+    pass gets them both.
+
+    The alternative - Node arming a timer and sending songSeek a little early - is not ruled out
+    by loop LENGTH, as an earlier pass here claimed. The sclang handler applies the seek inside a
+    future-timestamped bundle, so the wrap lands on the sample whatever the timer did, and a
+    short loop just means queueing several wraps ahead. It loses on upkeep instead: every queued
+    wrap is wrong the moment the rate moves, and the rate moves on every nudge, sync change and
+    servo trim. The def version holds no such state.
 
     What either way still needs Node-side: beat lengths off the existing beatgrid (s.bpm +
     s.anchorSec + songGridBpm, with songSync.snapToGrid); the linear playhead model folding the
@@ -83,35 +84,105 @@ no completion notes.
     firing inside a loop; a re-arm on rate changes (one call site, songApplyRate); and a ruling
     per gesture on whether cue / seek / nudge / a platter scrub breaks out. Keylock needs nothing
     - the warp def folds the shifter's pipeline delay into seekFrame, so a wrap lands in time
-    with key on. ~a day on top of the def change.
+    with key on. ~a day and a half all in.
 
-[ ] Deck looping - livecode decks. Same buttons on the deck as the song half above, different
-    mechanism, and one real design question underneath.
+    Ruling on the gestures: cue, seek, scrub, search and beat jump exit the loop and remember it
+    (RELOOP brings it back); nudge and the tempo controls do not.
 
-    The skeleton is already there. ArrangeClock (pattern-core/src/arrange.mjs) does armed regions
-    with every wrap and release recorded as an anchor, walked identically by the host that gates
-    the patterns and by the editor that draws the playhead, and a stop re-arms them. A performance
-    loop is an ephemeral unnamed region pushed into that deck's clock at [the current bar, +N
-    bars) and released when the loop is exited - never written into the code, like the rest of the
-    desk. The scheduler's lookahead is 150ms, so an armed loop bites at once.
+    The beat JUMP buttons should take their size from the loop-length selector, the way the newer
+    players do - so the selector is built once and drives both.
 
-    Two gaps:
-    - arrangeClocks[deck] is null when the buffer has no _arrange(...) (the else branch of the
-      arrangement pass in /api/evaluate), so a deck with no arrangement has nothing to loop
-      through. Wants a clock unconditionally - len = the arrangement's length, or something the
-      deck picks when there isn't one.
-    - What a loop MEANS, which is the decision. An arrangement region repeats WHICH CLIPS SOUND;
-      the patterns inside deliberately run on absolute cycle time, so a `<a b>` keeps advancing
-      and a 4-bar loop over a track with a 16-bar cycle does not repeat identically. That is
-      defensible as the poptart reading ("loop the arrangement") and it is the half-day version.
-      Making the CONTENT repeat the way a record does means remapping each track's query time,
-      which runs into Scheduler's forward-only _scheduledUntilCycle bookkeeping and the dedupe
-      around it - several days, and every interesting question is in there (what a running env
-      does at the wrap, whether a free LFO's phase rewinds, what count()/read() see).
+[ ] Deck looping - livecode decks. Same buttons on the deck as the song half above, and the same
+    mechanism one level along: a song deck loops by rewinding a read pointer into the file, and a
+    livecode deck loops by rewinding a read pointer into a CAPTURE of what the deck just played.
 
-    Suggested order: ship the arrangement-region version behind the same controls the song deck
-    gets, play with it, and only take the content loop if the `<>`s advancing turns out to feel
-    wrong. Aria's call.
+    Capture, not retrigger. Re-running the patterns over the loop's bars chops every release tail
+    and every fx tail at the wrap - the note still ringing is cut off and struck again - and it
+    cannot do a sub-beat loop at all, because the material inside one is not a note grid. Audio is
+    exact by construction: what repeats is what you heard.
+
+    So: a rolling capture per deck. The deck's bus (see the DJ FX units entry below - the same bus
+    serves both, so build it once) feeds a RecordBuf with loop 1 into a fixed ring, always
+    running, a few seconds long. Arming a loop FREEZES the ring and plays [playhead - N beats,
+    playhead) out of it; exiting resumes writing. Because the ring is already full when the button
+    is pressed, a loop of any length up to the ring arms RETROACTIVELY and bites instantly, which
+    is the half of this that makes stutters usable at all. The plumbing is nearly there: the track
+    def already has a recOut/recSend tap into a bus and there is a DiskOut synth reading one (the
+    bounce path in poptart.scd), and a ring is that with RecordBuf in place of DiskOut. Sixteen
+    seconds of stereo at 48k is about 6 MB a deck, so the ring can be generous.
+
+    The patterns keep running underneath, unheard, for as long as the loop sounds. That is what
+    makes the exit seamless - the deck is still exactly where the transport is, so dropping out is
+    just unmuting - and it is why this needs no Scheduler changes at all. It also means a loop
+    longer than the ring is simply not offered.
+
+    HALVE/DOUBLE, MOVE, EXIT and RELOOP are then all edits to the read window over one frozen
+    ring, so they cost nothing extra. Loop MOVE off the ring's edge is the one case to rule on:
+    clamp at the oldest sample the ring still holds.
+
+    Beat JUMP and play-from-bar-N on a livecode deck are a different job (a per-deck cycle offset
+    in the Scheduler) and should not be bundled into this one.
+
+[ ] Written arrangement regions should REPLAY, not just re-gate. A loop region drawn in the
+    arrangement (ArrangeClock in pattern-core/src/arrange.mjs; ctrl+L releases one) repeats which
+    clips SOUND but not what they play: the patterns underneath run on absolute cycle time, so a
+    `<a b>` keeps advancing and a 4-bar region over a track with a 16-bar cycle comes back
+    different every pass. A section has to sound the same each time round.
+
+    The fold already exists, and both readers already agree on it. ArrangeClock.posAt maps a
+    transport cycle to a SONG position, wrapping at every armed region, and the host that gates
+    the patterns and the editor that draws the playhead walk it from the same anchors. What is
+    missing is only that the patterns are still queried at the raw transport cycle. Query them at
+    posAt(cycle) instead:
+    - Scheduler keeps _scheduledUntilCycle in TRANSPORT cycles, so the forward-only bookkeeping
+      and the dedupe around it are untouched. Fold only where a cycle reaches the PATTERN:
+      stepsForCycle in _scheduleNoteEdges, and the cycle _buildNoteMap and _sampleConfigAt read.
+    - highlightGrid and the painter's playhead fold the same way, or the editor stops drawing what
+      it hears.
+    - The clock is per deck, and arrangeClocks[deck] is null when the buffer has no _arrange(...)
+      (the else branch of the arrangement pass in /api/evaluate). Wants a clock unconditionally,
+      folding as the identity - never wrapping - when there is no arrangement, or a deck without
+      one would start looping its patterns at whatever length got picked for it.
+
+    Consequences worth stating rather than discovering: the whole arrangement wrapping at its end
+    replays identically too, which is right for a song but IS a change to what existing buffers
+    do. Per-note envelopes are unaffected (they run from their own onsets), a free-running LFO
+    does not rewind (it is wall-clock by definition - see the modulators note), seeded rand/perlin
+    replay identically because they are seeded by position, and count() keeps counting. ~2 days.
+
+[ ] DJ FX units. Every track already carries seven fx slots with a per-slot dry/wet (Sig#wet, the
+    linear crossfade in the track def) and loadEffect/setParam are wired, so a performance
+    effects unit is a UI over machinery that exists: pick a plugin, an ON pad, a WET knob, and one
+    of the plugin's own parameters on a second knob. Every one of those gets a MIDI target as it
+    lands, the ON pad in both flavors the hardware has - momentary while held, and latched. The
+    unit is a mirrored pair like the rest of the desk.
+
+    WHERE IT LIVES is the design. A song deck is ONE track, so a unit on it could ride that
+    track's own chain. A livecode deck is many tracks with no submix, and loading the same reverb
+    on each of them is both expensive and wrong (the tails sum). So: a per-deck BUS track that
+    the deck's tracks route into, with the unit on the bus. The routing exists already - .bus()
+    sends and an `audio("name")` head reads the sum - what is new is the server creating that bus
+    per deck implicitly, pointing the deck's tracks at it, and hanging the unit off it. Master is
+    the same mechanism once more, on the `main` group root (which ARCHITECTURE.md already names
+    as where a mastering chain goes).
+
+    Three things fall out of the bus, in rough order of how much is left to do after it: the DJ
+    strip stage (trim, the EQ isolator, djf/djres, fader) can move from per-track to per-bus,
+    which is what it has always modeled; a livecode loop-roll gets somewhere to capture from (see
+    the looping entry above); and the deck meters have one place to read instead of eight.
+
+    Tempo-synced effects need nothing - the plugins' host transport is already synced and jumps
+    with the grid (syncVstTransport).
+
+    The one hold: a plugin cannot be added to a running chain (the SynthDef scaffold note in
+    poptart.scd), so the unit's slots are allocated up front. Three per deck is the number to
+    start with; choosing a plugin into an empty slot costs a load, and the pad is live only once
+    it is open.
+
+    Parameter picking is solved. /api/params lists a slot's real VST names, the editor's params
+    panel already renders that list, and real-world units come free through param-mapping.js
+    wherever a mappings/*.json exists - so the unit's second knob is that list plus one learned
+    cc.
 
 [ ] Preset morph: `preset("A").morph("B", sig)` interpolates the plugin's *parameter vector*
     (VSTPlugin getn/setn), not the opaque .fxp chunk - the chunk (wavetables etc.) is why a Serum

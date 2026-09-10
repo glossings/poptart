@@ -29,7 +29,8 @@ const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf
 // server.js spawns an engine on require, so the dispatch is read out of the source and given its
 // own dependencies - the same trick mix-gate-all.test.js and highlight-grid.test.js use.
 const NAMES = ['mixMidiValue', 'mixMidiScrubDelta', 'mixMidiApply', 'mixMidiButton', 'clockHeldByDesk'];
-const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_DECK_CTLS', 'SONG_SCRUB_TICK_SEC'];
+const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_DECK_CTLS',
+  'SONG_SCRUB_TICK_SEC', 'SONG_SEARCH_TICK_SEC'];
 const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMixTargets',
   'songScrub', 'songNudge', 'songCue', 'songTogglePlay', 'songSetMeta', 'songMultNext',
   'mixActionNotify'];
@@ -224,6 +225,22 @@ test('a platter message moves the playhead rather than setting it', () => {
   assert.ok(m.log[0][2] > 0);
 });
 
+// The jog's second mode. 1:1 is the wrong ratio for getting somewhere - crossing a five-minute
+// track at 3ms a tick is a hundred revolutions - so the same wheel under shift sends a different
+// cc, which is a second ordinary target rather than a modifier anything has to model.
+test('search is the same platter in a much coarser gear', () => {
+  const m = rig();
+  m.mixMidiApply('a:scrub', 66 / 127);
+  m.mixMidiApply('a:search', 66 / 127);
+  const [scrub, search] = m.log.map((l) => l[2]);
+  assert.equal(m.log.length, 2);
+  assert.ok(search > scrub * 10, `search must cross a track, not place a beat (${scrub} -> ${search})`);
+  // Same wheel: same center, same sign convention, same coalescing flush.
+  assert.equal(m.mixMidiScrubDelta(64 / 127, m.SONG_SEARCH_TICK_SEC), 0);
+  assert.ok(m.mixMidiScrubDelta(63 / 127, m.SONG_SEARCH_TICK_SEC) < 0);
+  assert.equal(m.log[1][1], 'a');
+});
+
 // --- who holds the clock ---
 
 test('the clock is the desk\'s while a migration holds it', () => {
@@ -249,7 +266,8 @@ test('every learn surface the editor offers is a target the server accepts', () 
     for (const m of grabConst(arr).matchAll(/'([a-z]+)'/g)) known.add(m[1]);
   }
   // The editor binds by writing `${deck}:name` (and the crossfader by name) into mixLearnAttach.
-  const attached = [...CLIENT.matchAll(/mixLearnAttach\(.*?\$\{deck\}:([a-z]+)`/g)].map((x) => x[1]);
+  const attached = [...CLIENT.matchAll(/mixLearnAttach\([^\n]*\)/g)]
+    .flatMap((c) => [...c[0].matchAll(/\$\{deck\}:([a-z]+)`/g)].map((x) => x[1]));
   const viaCtlList = /for \(const ctl of MIX_DECK_CONTROLS\) mixLearnAttach/.test(CLIENT);
   assert.ok(attached.length >= 11, `expected the decks to bind every per-deck control, saw ${attached.length}`);
   assert.ok(viaCtlList, 'the channel strip no longer binds through MIX_DECK_CONTROLS');

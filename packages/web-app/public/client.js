@@ -19775,8 +19775,11 @@ function makeSongPane(deck) {
   // strip you drag, and the full-track overview you click. In the stacked layout the zoomed one
   // has moved up into #songStack and the pane shows only the overview, so wiring the detail
   // canvas alone left the visible waveform inert (reported 2026-09-09).
-  mixLearnAttach(detailEl, `${deck}:scrub`);
-  mixLearnAttach(overviewEl, `${deck}:scrub`);
+  // ...and SHIFT+click binds the same wheel's coarse mode instead (`search`), which is the
+  // gesture the hardware itself uses: a controller sends a different cc while shift is held, so
+  // the two modes are two ordinary targets rather than a modifier the server has to model.
+  mixLearnAttach(detailEl, `${deck}:scrub`, `${deck}:search`);
+  mixLearnAttach(overviewEl, `${deck}:scrub`, `${deck}:search`);
   mixLearnAttach(syncEl, `${deck}:sync`);
   mixLearnAttach(multEl, `${deck}:mult`);
   mixLearnAttach(keylockEl, `${deck}:keylock`);
@@ -21039,7 +21042,7 @@ function setMixLearn(on) {
   mixLearnArmed = on;
   mixLearnBtn.classList.toggle('on', on);
   logLine(on
-    ? 'MIDI learn armed - click a control here then move the hardware one, as many as you like; esc or midi again to finish (alt+click unbinds). Every message your controller sends is named below while this is on'
+    ? 'MIDI learn armed - click a control here then move the hardware one, as many as you like; esc or midi again to finish (alt+click unbinds, shift+click on a waveform binds the jog\'s coarse search mode). Every message your controller sends is named below while this is on'
     : 'MIDI learn off');
   // The server names incoming messages in the console for as long as this is on, whether or not
   // a target is armed: without it, a control that won't bind gives you nothing to go on.
@@ -21072,13 +21075,15 @@ async function mixLearnDo(target, clear) {
   }
 }
 
-// While armed, a pointerdown on a learnable control is the binding gesture, not a drag.
-function mixLearnAttach(el, target) {
+// While armed, a pointerdown on a learnable control is the binding gesture, not a drag. A
+// control with a `shiftTarget` binds that one instead while shift is held - the waveforms use it
+// for the platter's coarse mode, which has no widget of its own and wants none.
+function mixLearnAttach(el, target, shiftTarget = null) {
   el.addEventListener('pointerdown', (e) => {
     if (!mixLearnArmed) return;
     e.preventDefault();
     e.stopImmediatePropagation(); // the knob's own drag handler must not also fire
-    mixLearnDo(target, e.altKey);
+    mixLearnDo(shiftTarget && e.shiftKey ? shiftTarget : target, e.altKey);
   }, true);
 }
 mixLearnAttach(document.getElementById('crossfader'), 'xf');

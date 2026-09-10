@@ -352,6 +352,7 @@ function songMarkPaused(deck, posSec = null) {
   s.playing = false;
   if (s.endTimer) clearTimeout(s.endTimer);
   s.endTimer = null;
+  songHandGridOver(deck); // a deck that has stopped playing is not the grid any more
 }
 
 // End of file, and NOT a pause. Pausing halts the Phasor (`run` 0, ~20ms of slew) and leaves the
@@ -422,7 +423,7 @@ function songBaseRate(deck) {
   // play leaves the clock where it was put.
   if (!s.playing && s.sync && s.bpm && !othersPlaying(deck) && mixState.tempoOverride == null) return 1;
   if (s.sync && s.bpm && transport) {
-    return songSync.syncRate(transport.cps * 240, s.bpm, deck === songMasterDeck ? 1 : s.syncMult) ?? s.manualRate;
+    return songSync.syncRate(transport.cps * 240, s.bpm, songOctave(deck)) ?? s.manualRate;
   }
   return s.manualRate;
 }
@@ -430,17 +431,54 @@ function songBaseRate(deck) {
 // The tempo ratio a deck's sync is riding (0.5 | 1 | 2 - song tempo over clock tempo; see
 // songSync.syncOctave), and the bpm its GRID counts in at that ratio: a 70 bpm song running
 // half-time under a 140 clock is aligned as a 140 - its eighths are the clock's beats, its
-// half-bars the clock's cycles. The deck whose song set the clock is the clock: its ratio is
-// 1 whatever the button says (the button is grayed for it), or a press there would re-pitch
-// the master against itself.
-let songMasterDeck = null; // the deck whose song last took the grid (see /api/song/play)
+// half-bars the clock's cycles.
+//
+// The deck holding the grid is the exception: its ratio is PINNED (songMasterOctave) rather than
+// read off its syncMult, and its button is grayed. Pinned because the clock can be migrated a
+// long way from where the master started it, and an 'auto' ratio would eventually half- or
+// double-time the very record everything else in the room is matched to. It is 1 for a deck that
+// took the grid at its own tempo; a deck that INHERITED the grid keeps the ratio it was already
+// playing at, which is what makes the handover silent (see songHandGridOver).
+let songMasterDeck = null; // the deck whose song holds the grid (see /api/song/play)
+let songMasterOctave = 1; // ...and the tempo ratio it rides while it holds it
 function songOctave(deck) {
   const s = songDecks[deck];
   if (!s || !s.bpm) return 1;
-  if (deck === songMasterDeck) return 1;
+  if (deck === songMasterDeck) return songMasterOctave;
   return songSync.syncOctave(transport ? transport.cps * 240 : s.bpm, s.bpm, s.syncMult);
 }
 const songGridBpm = (deck) => (songDecks[deck]?.bpm ?? 0) / songOctave(deck);
+
+/**
+ * Hand the grid on, or give it up. Called wherever the deck holding it stops being a deck that
+ * is playing: a pause, a per-deck stop, the end of the file, an unload, an eject, a song loaded
+ * over it.
+ *
+ * A master left set on a dead deck is not cosmetic. clockHeldByDesk stops holding the clock the
+ * moment that deck's song is gone, so the main deck's next setbpm drives the transport and
+ * re-rates the OTHER deck's synced song underneath it - the room's tempo lurching because a
+ * third track was loaded onto the deck nobody is listening to (2026-09-09). It also leaves the
+ * dead deck wearing the master's pinned ratio and a grayed ratio button.
+ *
+ * So the grid moves to whoever is still playing to it, as it does on hardware: the other deck
+ * takes over when its song is playing and knows where its bars are, and otherwise nobody holds
+ * it and the buffer's own setbpm drives the clock again on the next eval.
+ *
+ * The TEMPO does not move with it - the clock is where the room is dancing, and an heir is
+ * already locked to it. What has to survive is the heir's own RATE, and that is what pinning the
+ * ratio it is playing at right now buys: songApplyRate below is a no-op by construction, and is
+ * called anyway so that it stays one.
+ */
+function songHandGridOver(deck) {
+  if (songMasterDeck !== deck) return songMasterDeck;
+  const to = deck === 'a' ? 'b' : 'a';
+  const heir = songDecks[to];
+  const takes = !!(heir?.playing && heir.sync && heir.bpm);
+  songMasterOctave = takes ? songOctave(to) : 1; // read BEFORE the flag moves, or it reads as pinned
+  songMasterDeck = takes ? to : null;
+  if (takes) songApplyRate(to);
+  return songMasterDeck;
+}
 
 // What the engine's `rate` control is actually set to: the musical rate plus the drift servo's
 // trim. The trim never enters Node's playhead model - it exists precisely to make the engine's
@@ -637,6 +675,7 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
   // Before the rate is read: the master's native tempo IS the clock.
   if (takeGrid) {
     songMasterDeck = deck;
+    songMasterOctave = 1; // this song's own tempo is about to become the clock's
     if (mixState.tempoOverride == null) transport.setBpm(s.bpm);
   }
   if (others && !startNow) {
@@ -820,7 +859,8 @@ function songSetMeta(deck, patch) {
  * (a 128 record under a `setbpm(140)` buffer comes back 9% sharp).
  *
  * Both are ephemeral, both end the same way - the migration on eject/complete, the master when
- * its song stops - and after either the buffer's own tempo drives again on the next eval.
+ * its song stops (handing the grid to the other deck if that one is still playing to it - see
+ * songHandGridOver) - and after either the buffer's own tempo drives again on the next eval.
  */
 function clockHeldByDesk() {
   return mixState.tempoOverride != null
@@ -843,6 +883,7 @@ function songUnload(deck) {
   if (!s) return;
   if (s.endTimer) clearTimeout(s.endTimer);
   songDecks[deck] = null;
+  songHandGridOver(deck); // the grid goes with the song - to the other deck, or to nobody
   if (engine) {
     try { engine.songFree(engineTrack(SONG_KEYS[deck])); } catch { /* engine between restarts */ }
   }
@@ -941,8 +982,10 @@ async function songDetectKick(deck) {
 //             held; cue previews while held and comes home on release). PRESS buttons act on
 //             the press edge only: play, the headphone audition, sync, the tempo ratio, keylock,
 //             the two jogs, and the two queue steps.
-//   PLATTER - one relative encoder per deck (`scrub`), which is how a jog wheel drives the
-//             playhead. See mixMidiScrubDelta for the convention and songScrub for the flush.
+//   PLATTER - two relative encoders per deck, which is how a jog wheel drives the playhead:
+//             `scrub` is the wheel at 1:1 with the record and `search` is the same wheel in its
+//             coarse mode, for crossing a track rather than placing a beat. See
+//             mixMidiScrubDelta for the convention and songScrub for the flush.
 //
 // Most targets are the SERVER's to act on, and that is the point of the mapping living here: a
 // learned control drives the engine with no browser in the loop, and the on-screen desk finds
@@ -954,7 +997,7 @@ async function songDetectKick(deck) {
 const MIX_MIDI_KNOBS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader'];
 const MIX_MIDI_HOLD = ['nudgedn', 'nudgeup', 'cue'];
 const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'play', 'phones', 'sync', 'mult', 'keylock', 'next', 'prev'];
-const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, 'scrub'];
+const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, 'scrub', 'search'];
 const MIX_MIDI_TARGETS = new Set(['xf',
   ...['a', 'b'].flatMap((d) => MIX_MIDI_DECK_CTLS.map((c) => `${d}:${c}`))]);
 let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
@@ -1010,9 +1053,17 @@ function mixMidiValue(target, v01) {
 // The tick size is a record's: ~600 ticks to a revolution is the usual platter resolution and a
 // revolution at 33 1/3 rpm is 1.8 seconds, which puts a tick at 3ms. Tempo-independent on
 // purpose - a platter under the hand is moving the RECORD, not the grid.
+//
+// SEARCH is the same wheel in its coarse mode, and it exists because 1:1 is the wrong ratio for
+// getting somewhere: at 3ms a tick, crossing a five-minute track is a hundred revolutions. The
+// hardware answer is a second mode on the same platter, reached by holding shift - and because a
+// controller sends a DIFFERENT cc while shift is held, poptart needs no modifier concept for it.
+// `search` is simply a second continuous target, learned exactly like `scrub`. At 0.1s a tick a
+// revolution covers about a minute, so a five-minute track is five turns.
 const SONG_SCRUB_TICK_SEC = 0.003;
-function mixMidiScrubDelta(v01) {
-  return (Math.round(v01 * 127) - 64) * SONG_SCRUB_TICK_SEC;
+const SONG_SEARCH_TICK_SEC = 0.1;
+function mixMidiScrubDelta(v01, tickSec = SONG_SCRUB_TICK_SEC) {
+  return (Math.round(v01 * 127) - 64) * tickSec;
 }
 
 function handleMixMidi(device, channel, num, value, kind) {
@@ -1081,8 +1132,10 @@ function mixMidiDrive(target, value) {
 function mixMidiApply(target, value) {
   const deck = target[0];
   const name = target === 'xf' ? 'xf' : target.slice(2);
-  if (name === 'scrub') {
-    songScrub(deck, mixMidiScrubDelta(value));
+  if (name === 'scrub' || name === 'search') {
+    // Both are the platter; they differ only in how far a tick carries. songScrub coalesces
+    // either into one seek per flush, so a hand crossing modes mid-spin still moves once.
+    songScrub(deck, mixMidiScrubDelta(value, name === 'search' ? SONG_SEARCH_TICK_SEC : SONG_SCRUB_TICK_SEC));
     return;
   }
   const hold = MIX_MIDI_HOLD.includes(name);
@@ -1296,7 +1349,7 @@ function mixDeskBody() {
         sync: s.sync,
         syncMult: s.syncMult ?? 'auto',
         syncMultEffective: songOctave(d),
-        master: d === songMasterDeck, // this song set the clock - its ratio is 1 by definition
+        master: d === songMasterDeck, // this song holds the clock - its ratio is pinned, so the button is grayed
         keylock: s.keylock,
         nudge: s.nudge,
         // Confidence (0..1) when a fact is a phase 5 ESTIMATE rather than a tag/typed value -
