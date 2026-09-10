@@ -435,6 +435,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><td>mute a note</td><td><strong>0</strong> — it grays out and stays (a <code>!</code> in the code); <strong>0</strong> again un-mutes</td></tr>
             <tr><td>clipboard</td><td><strong>cmd-C / X / V / D</strong> — into another roll too</td></tr>
             <tr><td>quantize</td><td><strong>ctrl+Q</strong> — pick a division; onsets snap, nudges clear, buried notes go</td></tr>
+            <tr><td>clean up</td><td><strong>cmd-J</strong> — delete every note the loop window doesn't play, and every note buried under another</td></tr>
             <tr><td>undo</td><td><strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> while the grid has focus</td></tr>
             <tr><td>zoom · close</td><td><strong>cmd −/+</strong> · <strong>Esc</strong>, <strong>✕</strong>, or click outside</td></tr>
           </table>
@@ -449,7 +450,11 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <h4>The header</h4>
           <p>
             <strong>⧉</strong> repeats the loop after itself. <strong>÷2</strong> / <strong>×2</strong>
-            halve or double the rhythm — of the selection, or the whole roll. Changing
+            halve or double the rhythm — of the selection, or the whole roll.
+            <strong>clean up</strong> (<strong>cmd-J</strong>) throws away everything the roll is
+            carrying but not playing: notes that start outside the loop window, and notes buried
+            under another. Handy once a part is finished — while you're still editing, both of those
+            come back on their own if you drag the loop end out or move the note on top away. Changing
             <strong>grid</strong> re-meshes without moving the music (a quarter note on the 1/4 grid is
             four cells on the 1/16 grid). <strong>🎧</strong> auditions notes as you draw.
             <strong>⌨</strong> plays the roll's track from your typing keyboard (<a href="#s9">Study 9</a>).
@@ -579,7 +584,12 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <strong>A clip is a title and a body.</strong> The title along its top is the clip as a
             thing: click to select it, drag to move it (onto another track's row too — it becomes
-            that track's), option-drag to duplicate. The body below is the <em>time</em>: the bars
+            that track's), option-drag to duplicate. <strong>⌘-click</strong> adds one to the
+            selection (or takes it back out) and <strong>shift-click</strong> reaches through from
+            the last clip you clicked to this one — every clip in the rectangle of rows and bars
+            between the two, the same shape a marquee marks (shift- or ⌘-drag over empty song for
+            one of those, which starts from what you already hold). With either key down the whole
+            clip is the clip, body included. The body below is the <em>time</em>: the bars
             run on through it, clicking puts the <strong>insert marker</strong> there, and dragging
             marks a stretch of song — one that starts inside a clip and ends wherever you let go,
             past its end or halfway through the next. With playback stopped, <strong>⌘⏎</strong>

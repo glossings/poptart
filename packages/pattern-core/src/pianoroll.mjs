@@ -433,6 +433,30 @@ export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
 }
 
 /**
+ * Throw away everything the roll is carrying but not playing: notes whose ONSET falls outside the
+ * loop window (they are drawn dimmed and never sound - see prLoopEnd), and notes the overlap rule
+ * has buried. What is left is exactly what you hear.
+ *
+ * The two passes are in that order and the clip is redone between them, because dropping a note
+ * can give one back: a note reaching in from outside the window is what buries the note underneath
+ * it, and once it goes that note is audible again and must be KEPT. Only what is still hidden with
+ * the window's own notes alone is a real duplicate. Survivors keep their authored `full` length, so
+ * one merely clipped still springs back if the note in front of it is later moved away.
+ *
+ * A note is judged by its onset, not its tail: one that starts inside the window and rings past the
+ * end is sounding, and stays. Notes are mutated in place (clipOverlaps re-runs over the survivors);
+ * the survivors come back as a new array with a count of each kind of loss.
+ */
+export function cleanUpPianoRoll(notes, { start = 0, len = 0 } = {}) {
+  const end = start + len;
+  const inWindow = notes.filter((nt) => nt.start >= start && nt.start < end);
+  const outside = notes.length - inWindow.length;
+  clipOverlaps(inWindow);
+  const kept = inWindow.filter((nt) => !nt.hidden);
+  return { notes: kept, outside, buried: inWindow.length - kept.length };
+}
+
+/**
  * Convert a drawn roll to the equivalent mini-notation, in the same multi-line `<…>*grid` form the
  * MIDI recorder writes: `len` cells (one per grid column) between `<` and `>`, multiplied by `grid`,
  * so the whole thing loops every `len` grid-th notes. The cells are the loop WINDOW - `len` of them

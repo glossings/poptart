@@ -26,6 +26,7 @@ import {
   retimePianoRoll,
   duplicatePianoRollLoop,
   quantizePianoRoll,
+  cleanUpPianoRoll,
   pianoRollQuantizeDivs,
   pianoRollDefaultQuantizeDiv,
   PIANOROLL_DEFAULT_STEPS,
@@ -1258,4 +1259,64 @@ test('sliceNotesFor: the hits are a roll that says what it plays', () => {
     pianoroll(serializePianoRoll(notes), { grid: 4 }).stepsForCycle(0).map((st) => st.cfg),
     [{ index: 3, slice: 0 }, { index: 3, slice: 1 }],
   );
+});
+
+test('cleanUpPianoRoll: keeps what sounds, drops what the window never reaches', () => {
+  //                     before the window | in it | on the last cell | past the end
+  const notes = parsePianoRoll('60,-4,2 62,4,2 64,10,2 65,12,2');
+  const { notes: out, outside, buried } = cleanUpPianoRoll(notes, { start: 4, len: 8 });
+  assert.equal(outside, 2);
+  assert.equal(buried, 0);
+  assert.equal(serializePianoRoll(out), '62,4,2 64,10,2');
+});
+
+test('cleanUpPianoRoll: a note starting inside the window but ringing past it stays', () => {
+  const notes = parsePianoRoll('60,12,16'); // one cell before the end, sixteen cells long
+  const { notes: out, outside } = cleanUpPianoRoll(notes, { start: 0, len: 13 });
+  assert.equal(outside, 0);
+  assert.equal(serializePianoRoll(out), '60,12,16', 'judged by its onset, not its tail');
+});
+
+test('cleanUpPianoRoll: buried notes go, and the clip is redone before deciding which', () => {
+  // two onsets on one cell of one lane: the later note wins the lane (array order is priority)
+  // and the one under it is gone for good
+  const notes = parsePianoRoll('60,8,4 60,8,8');
+  const { notes: out, buried } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  assert.equal(buried, 1);
+  assert.equal(serializePianoRoll(out), '60,8,8');
+});
+
+test('cleanUpPianoRoll: a note buried only by one from outside the window comes back', () => {
+  // the long note reaches in from before the window and hides the one on cell 4; once it is
+  // dropped for being outside, that note sounds again and must be kept
+  const notes = parsePianoRoll('60,4,2 60,-2,12');
+  const { notes: out, outside, buried } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  assert.equal(outside, 1);
+  assert.equal(buried, 0);
+  assert.equal(serializePianoRoll(out), '60,4,2');
+  assert.equal(out[0].len, 2);
+});
+
+test('cleanUpPianoRoll: survivors keep the authored length a clip took from them', () => {
+  const notes = parsePianoRoll('60,0,8 60,4,4'); // the long note is cut to 4 by the one in front
+  const { notes: out } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  assert.equal(serializePianoRoll(out), '60,0,4 60,4,4');
+  out[1].start = 12; // ...and moving that one away springs it back, as it would in the editor
+  clipOverlaps(out);
+  assert.equal(serializePianoRoll(out), '60,0,8 60,12,4');
+});
+
+test('cleanUpPianoRoll: a muted note inside the window is kept', () => {
+  const notes = parsePianoRoll('!60,0,4 62,20,4');
+  const { notes: out, outside } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  assert.equal(outside, 1);
+  assert.equal(serializePianoRoll(out), '!60,0,4', 'mute is a state, not a deletion');
+});
+
+test('cleanUpPianoRoll: a clean roll loses nothing', () => {
+  const notes = parsePianoRoll('60,0,4 62,4,4 64,8,4');
+  const { notes: out, outside, buried } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  assert.equal(outside, 0);
+  assert.equal(buried, 0);
+  assert.equal(serializePianoRoll(out), '60,0,4 62,4,4 64,8,4');
 });

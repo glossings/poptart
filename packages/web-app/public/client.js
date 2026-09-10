@@ -4015,6 +4015,7 @@ const prCommitSwingBtn = document.getElementById('pianorollCommitSwing');
 const prHalveBtn = document.getElementById('pianorollHalve');
 const prDoubleBtn = document.getElementById('pianorollDouble');
 const prDupLoopBtn = document.getElementById('pianorollDupLoop');
+const prCleanUpBtn = document.getElementById('pianorollCleanUp');
 const prToolBtn = document.getElementById('pianorollTool');
 const prModeBtn = document.getElementById('pianorollMode');
 const prScaleFoldBtn = document.getElementById('pianorollScaleFold');
@@ -8155,6 +8156,34 @@ async function prQuantize() {
   if (prState.swing) logLine(`piano roll: the swing knob is still at ${prState.swing} - the notes are quantized, but the roll's groove is still applied to them as they play.`);
 }
 
+/**
+ * "clean up" (cmd+J): reduce the roll to exactly what it plays. Notes whose onset is outside the
+ * loop window are drawn dimmed and never sound; notes the overlap rule buries are not drawn at all.
+ * Both are useful WHILE editing - a phrase stretched past the loop end comes back when the end is
+ * dragged out, a buried note comes back when the one on top moves away - but once a part is
+ * finished they are luggage: invisible state in the code, re-hidden on every later edit, and lengths
+ * that spring back when you least want them to.
+ *
+ * Like quantize this is the rare roll edit that deletes, so it says what it took and lands as one
+ * history entry - cmd-Z with the grid focused puts everything back. Unlike quantize it doesn't ask
+ * first: it removes only what you cannot hear, so there is nothing to weigh up.
+ */
+function prCleanUp() {
+  if (!prState || !pianorollMod) return;
+  const { notes, outside, buried } = pianorollMod.cleanUpPianoRoll(prState.notes, prState);
+  if (!outside && !buried) { logLine('piano roll: nothing to clean up - every note is inside the loop and audible'); return; }
+  prState.notes = notes;
+  const kept = new Set(notes);
+  for (const n of [...prState.sel]) if (!kept.has(n)) prState.sel.delete(n); // deleted for good
+  writePianorollCall();
+  drawPianoroll();
+  const lost = [
+    outside ? `${outside} outside the loop` : null,
+    buried ? `${buried} buried` : null,
+  ].filter(Boolean);
+  logLine(`piano roll: cleaned up - deleted ${lost.join(' and ')} (cmd-Z with the grid focused puts them back)`);
+}
+
 // `0`: switch notes off without deleting them. They stay on the grid grayed out - still
 // selectable, still draggable, still holding their lane against the overlap rule - and simply don't
 // sound, which is a `!` on their token in the code. One key does both directions: a group with any
@@ -8704,6 +8733,9 @@ function initPianorollCanvas() {
       e.preventDefault();
       prState.sel = new Set(prLiveNotes(prState.notes));
       drawPianoroll();
+    } else if (mod && !e.shiftKey && (e.key === 'j' || e.key === 'J')) {
+      e.preventDefault();
+      prCleanUp();
     } else if (mod && e.shiftKey && (e.key === 'd' || e.key === 'D')) {
       e.preventDefault();
       prTimeDuplicate(); // the time-selection ops - see prTimeRegion and friends
@@ -8972,6 +9004,7 @@ function initPianorollEditor() {
     drawPianoroll();
     prRefocus();
   });
+  prCleanUpBtn.addEventListener('click', () => { prCleanUp(); prRefocus(); });
   prLenInput.addEventListener('change', () => {
     if (!prState) return;
     prState.len = Math.max(1, Math.round(Number(prLenInput.value) || prState.grid));
@@ -23445,6 +23478,10 @@ snippetBrowseBackdrop.addEventListener('keydown', (e) => {
 // ctrl+J - the same two entry points from the keyboard, for when the mouse is somewhere else: with
 // a selection it keeps one, with none it opens the browser.
 addHotkey(builtinHotkeys, 'ctrl+j', () => {
+  // Off macOS ctrl IS the edit modifier, so this chord and the roll's clean-up are one keystroke.
+  // The grid having focus decides between them - the same scope every other roll verb is bound in,
+  // and the reason the canvas handler never sees this key here (the chord runs in capture).
+  if (prState && document.activeElement === prCanvas) { prCleanUp(); return; }
   const ed = activeCM();
   if (ed.somethingSelected()) openSnippetSave(ed);
   else openSnippetBrowser(ed);
@@ -23465,10 +23502,12 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
 // That is what makes the empty row honest: a track with no clips is silent, and a row is only ever
 // empty because you emptied it.
 //
-// Clips edit like the roll's notes: click-drag to paint one, drag its body to move it (onto another
+// Clips edit like the roll's notes: click-drag to paint one, drag its title to move it (onto another
 // track's row too, which is what moving a part between tracks IS), option-drag to duplicate, drag
 // its right edge to resize, right-click or delete to remove it; cmd+shift+D and cmd+shift+backspace
-// are the roll's time-selection ops on the song's own timeline (see arTimeRegion). A clip may also
+// are the roll's time-selection ops on the song's own timeline (see arTimeRegion). Several at once
+// are picked the way they are everywhere: cmd+click adds one, shift+click reaches through from the
+// last one clicked, shift- or cmd-drag rubber-bands (see arPickClip). A clip may also
 // name its own ROLL - double-click one to fork the track's roll and rebind just that clip - so a
 // fill is painted rather than patterned (see the roll-binding section below).
 //
@@ -24032,6 +24071,7 @@ function openArrangeEditor(call) {
     scrollLane: 0, // topmost visible row (fractional while scrolling)
     focus: null, // the bar the last gesture touched - what a button zoom moves toward (arZoomFocusX)
     sel: new Set(), // selected clip objects (transient, never serialized)
+    selAnchor: null, // the clip a shift+click reaches FROM: the last one clicked plainly (arPickClip)
     insert: null, // the insert marker, in bars: where a split happens and where a paste lands
     regionSpan: null, // the last marquee's snap-quantized [a, b) bars - half of the time selection (see arTimeRegion)
     regionRows: null, // ...and WHICH ROWS it covers, by label; null is every row (see arRegionRows)
@@ -25926,6 +25966,7 @@ function arRowInRegion(rows, label) {
 function arDropSelection() {
   if (!arState) return;
   arState.sel.clear();
+  arState.selAnchor = null;
   arState.regionSpan = null;
   arState.regionRows = null;
   arState.selRegion = null;
@@ -25943,6 +25984,54 @@ function arRowsBetween(r0, r1) {
     if (label != null) out.add(label);
   }
   return out.size ? out : null;
+}
+
+/**
+ * Every clip in the RECTANGLE two clips span - the rows between them and the bars they cover
+ * between them. What shift+click reaches through, and deliberately the same shape a marquee marks
+ * (see the pointermove handler): a selection in here has always been an area of the song, not a
+ * run down a list, so reaching from one clip to another means the area between the two.
+ *
+ * Rows come from arRowOfLabel, so a clip hidden inside a collapsed group counts at its group's row
+ * - the row it is drawn on is the row it is reached at.
+ */
+function arClipsBetween(from, to) {
+  const r0 = Math.min(arRowOfLabel(from.label), arRowOfLabel(to.label));
+  const r1 = Math.max(arRowOfLabel(from.label), arRowOfLabel(to.label));
+  const a = Math.min(from.start, to.start);
+  const b = Math.max(from.start + from.len, to.start + to.len);
+  return arState.clips.filter((c) => {
+    const row = arRowOfLabel(c.label);
+    return row >= r0 && row <= r1 && c.start < b - 1e-9 && c.start + c.len > a + 1e-9;
+  });
+}
+
+/**
+ * A MODIFIED click on `clip` - the two gestures every editor shares. cmd (ctrl off macOS) adds the
+ * clip to what is held, or takes it back out if it was already in; shift reaches through from the
+ * anchor to here, and cmd+shift adds that reach to what is held rather than replacing it.
+ *
+ * Returns false when the click took the clip OUT of the selection: there is nothing under the hand
+ * to drag then, and starting a move would drag the clips the click just let go of.
+ */
+function arPickClip(clip, e) {
+  if (e.shiftKey) {
+    // The anchor is a clip object, and an evaluation rebuilds them - so one that is no longer in
+    // the arrangement reaches from nothing, and this click becomes the new anchor.
+    const from = arState.clips.includes(arState.selAnchor) ? arState.selAnchor : null;
+    if (!editMod(e)) arState.sel.clear();
+    for (const c of from ? arClipsBetween(from, clip) : [clip]) arState.sel.add(c);
+    if (!from) arState.selAnchor = clip;
+    return true;
+  }
+  if (arState.sel.has(clip)) {
+    arState.sel.delete(clip);
+    if (arState.selAnchor === clip) arState.selAnchor = null;
+    return false;
+  }
+  arState.sel.add(clip);
+  arState.selAnchor = clip; // cmd+click moves the anchor, so the next shift+click reaches from here
+  return true;
 }
 
 // Nothing was refused here and nothing is broken - the gesture just has no target yet - so these
@@ -27184,14 +27273,18 @@ function initArrangeCanvas() {
     // under the hand now - the clicked clip's extent, or the marquee about to be drawn.
     arState.regionSpan = null;
     arState.autoSel = null; // ...including one marked in the automation strip below
-    if (hit && (hit.edge || hit.part === 'title')) {
+    // A MODIFIED click is about the SELECTION, wherever on the clip it lands - body as well as
+    // title: with cmd or shift held a clip is a clip, not the time under it (a plain drag in the
+    // body is still how a stretch of song is marked). cmd adds one or takes it out again, shift
+    // reaches through from the last one clicked - see arPickClip.
+    const picked = hit && (editMod(e) || e.shiftKey) ? arPickClip(hit.clip, e) : null;
+    if (picked === false) { arSelectTrack(hit.clip.label); return; } // it let the clip go: nothing to drag
+    if (hit && (picked || hit.edge || hit.part === 'title')) {
       // The TITLE is the clip itself: it selects, it drags, and option-drag copies. (The edges are
       // the same handles they have always been, wherever on the clip they are grabbed.)
-      if (e.shiftKey) {
-        if (arState.sel.has(hit.clip)) arState.sel.delete(hit.clip);
-        else arState.sel.add(hit.clip);
-      } else if (!arState.sel.has(hit.clip)) {
-        arState.sel = new Set([hit.clip]);
+      if (!picked) {
+        if (!arState.sel.has(hit.clip)) arState.sel = new Set([hit.clip]);
+        arState.selAnchor = hit.clip; // ...and the clip a later shift+click reaches from
       }
       arSelectTrack(hit.clip.label); // the track you are working on is the one you just grabbed
       const targets = [...arState.sel];
@@ -27215,6 +27308,7 @@ function initArrangeCanvas() {
       // (see arTimeRegion), so a drag that left the last selection standing would read as extending
       // it. Letting go here is also what makes a plain click in a clip body dismiss a selection.
       arState.sel.clear();
+      arState.selAnchor = null;
       arState.regionSpan = null;
       arState.selRegion = null;
       arState.insert = Math.max(0, arSnapTo(arBarsOf(x)));
@@ -27223,13 +27317,15 @@ function initArrangeCanvas() {
       return;
     }
 
-    if (arTool === 'select' || e.shiftKey) {
-      // The arrow tool over empty song: the same time drag as inside a clip. Shift keeps the
-      // rubber-band, which is how several clips are picked up at once.
-      if (e.shiftKey) {
-        arState.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y };
+    if (arTool === 'select' || e.shiftKey || editMod(e)) {
+      // The arrow tool over empty song: the same time drag as inside a clip. Shift or cmd keeps the
+      // rubber-band, which is how several clips are picked up at once - and since both mean "as
+      // well as what I have", it starts from the selection rather than replacing it.
+      if (e.shiftKey || editMod(e)) {
+        arState.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y, base: new Set(arState.sel) };
       } else {
         arState.sel.clear();
+        arState.selAnchor = null;
         arState.regionSpan = null;
         arState.selRegion = null;
         arState.insert = Math.max(0, arSnapTo(arBarsOf(x)));
@@ -27247,6 +27343,7 @@ function initArrangeCanvas() {
     arSelectTrack(clip.label);
     arState.clips.push(clip);
     arState.sel = new Set([clip]);
+    arState.selAnchor = clip;
     arNoteGroupClip(label);
     arState.drag = { kind: 'resize', targets: [clip], orig: new Map([[clip, { ...clip }]]), x0: x, side: 'right', moved: false, painted: true };
     drawArrange();
@@ -27395,11 +27492,13 @@ function initArrangeCanvas() {
       d.y1 = y;
       const bx0 = arBarsOf(Math.min(d.x0, d.x1)), bx1 = arBarsOf(Math.max(d.x0, d.x1));
       const l0 = arRowOf(Math.min(d.y0, d.y1)), l1 = arRowOf(Math.max(d.y0, d.y1));
+      // Rebuilt from what was held when the drag STARTED (d.base), not from the live selection: a
+      // clip the rectangle sweeps over and then leaves has to come back out of the selection, and
+      // whether the modifier is still down halfway through a drag is not something to depend on.
+      arState.sel = new Set(d.base);
       for (const c of arState.clips) {
         const row = arRowOfLabel(c.label);
-        const inside = row >= l0 && row <= l1 && c.start < bx1 && c.start + c.len > bx0;
-        if (inside) arState.sel.add(c);
-        else if (!e.shiftKey) arState.sel.delete(c);
+        if (row >= l0 && row <= l1 && c.start < bx1 && c.start + c.len > bx0) arState.sel.add(c);
       }
     }
     // a drag near the right or bottom edge scrolls the timeline / the rows along
@@ -27678,12 +27777,18 @@ function initArrangeCanvas() {
     if (mod && e.shiftKey && e.key.toLowerCase() === 'd') { arTimeDuplicate(); e.preventDefault(); return; }
     // ...and the clipboard ops on that same span. cmd+X clears the area but leaves it in the song;
     // closing the span up is cmd+shift+backspace, above.
-    if (mod && !e.shiftKey && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
+    //
+    // Shift is not read here, so cmd+shift+C / X / V are the same ops. Everything else in this
+    // family is shifted (cmd+shift+D duplicates the span, cmd+shift+backspace closes it up), and
+    // the clipboard has only ever had the one meaning in this panel - the span - so a hand that
+    // stays on shift for the whole group has nothing else it could have meant. The automation
+    // strip's own copy and paste, above, have always ignored it for the same reason.
+    if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
       arCopyTime({ cut: e.key.toLowerCase() === 'x' });
       e.preventDefault();
       return;
     }
-    if (mod && !e.shiftKey && e.key.toLowerCase() === 'v') { arPasteTime(); e.preventDefault(); return; }
+    if (mod && e.key.toLowerCase() === 'v') { arPasteTime(); e.preventDefault(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (arState.selRegion) arRemoveRegion(arState.selRegion);
       else if (arState.regionSpan) {

@@ -165,6 +165,11 @@ test('the loops strip drags a span with the arrow and a loop with the pencil', (
 test('the clipboard ops are bound, and the ripple ops keep their own keys', () => {
   assert.match(SRC, /arCopyTime\(\{ cut: e\.key\.toLowerCase\(\) === 'x' \}\)/);
   assert.match(SRC, /e\.key\.toLowerCase\(\) === 'v'\) \{ arPasteTime\(\)/);
+  // ...and they do not read shift: the rest of the family is shifted (cmd+shift+D, cmd+shift+
+  // backspace), and the clipboard has only the one meaning here, so a hand that stays on shift for
+  // the whole group still copies, cuts and pastes the span.
+  assert.ok(!/mod && !e\.shiftKey && \(e\.key\.toLowerCase\(\) === 'c'/.test(SRC), 'cmd+shift+C copies too');
+  assert.ok(!/mod && !e\.shiftKey && e\.key\.toLowerCase\(\) === 'v'/.test(SRC), 'cmd+shift+V pastes too');
   assert.match(SRC, /\(e\.key === 'Delete' \|\| e\.key === 'Backspace'\)\) \{ arTimeDelete\(\)/);
   assert.match(SRC, /e\.key\.toLowerCase\(\) === 'd'\) \{ arTimeDuplicate\(\)/);
 });
@@ -312,7 +317,7 @@ test('the title picks the clip up, the body marks the time under it', () => {
   // The title/body split, and the reason it works: a clip is an object at the top and a stretch of song
   // below. Without the second half there is nowhere to put a marker, and nothing to split at.
   assert.match(SRC, /part: y < top \+ AR_CLIP_TITLE_H \? 'title' : 'body'/);
-  assert.match(SRC, /if \(hit && \(hit\.edge \|\| hit\.part === 'title'\)\) \{/, 'the title drags the clip');
+  assert.match(SRC, /if \(hit && \(picked \|\| hit\.edge \|\| hit\.part === 'title'\)\) \{/, 'the title drags the clip');
   assert.match(SRC, /arState\.insert = Math\.max\(0, arSnapTo\(arBarsOf\(x\)\)\);\n\s+arState\.drag = \{ kind: 'timeSel'/,
     'the body sets the marker and drags a span');
   assert.match(SRC, /if \(mod && e\.key\.toLowerCase\(\) === 'e'\) \{ arSplitClips\(\); e\.preventDefault\(\); return; \}/);
@@ -708,4 +713,110 @@ test('the arrangement\'s length box fits a fractional one', () => {
   assert.match(html, /id="arrangeLen" type="number" step="any"/);
   const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
   assert.match(css, /#arrangeLen \{\n\s+width: 68px;\n\}/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Picking clips: cmd+click and shift+click
+//
+// The two gestures every editor has, on the painter's own shape of selection. cmd adds one clip
+// (or takes it back out); shift reaches through from the last clip clicked to this one, and what
+// lies between two clips in here is an AREA - the rows between them and the bars they cover -
+// because that is what a selection in a timeline is, and what the marquee already marks.
+// ---------------------------------------------------------------------------------------------
+
+const ROWS = ['kick', 'bass', 'lead', 'pad'];
+
+function picker({ clips = [], sel = [], anchor = null } = {}) {
+  const arState = { clips, sel: new Set(sel), selAnchor: anchor };
+  const env = {
+    arState,
+    arRowOfLabel: (l) => ROWS.indexOf(baseOf(l)), // rows are numbered here: a reach spans a range of them
+    editMod: (e) => !!e.metaKey,
+  };
+  const LIFT = ['arClipsBetween', 'arPickClip'].map(grab).join('\n\n');
+  const keys = Object.keys(env);
+  // eslint-disable-next-line no-new-func
+  const build = new Function(...keys, `${LIFT}\nreturn { arClipsBetween, arPickClip };`);
+  return { fns: build(...keys.map((k) => env[k])), arState };
+}
+
+const CMD = { metaKey: true, shiftKey: false };
+const SHIFT = { metaKey: false, shiftKey: true };
+const CMD_SHIFT = { metaKey: true, shiftKey: true };
+/** What is held, order-independent - a Set's order is an implementation detail, not the selection. */
+const marks = (arState) => shape([...arState.sel]).map((c) => c.join('@')).sort();
+
+test('cmd+click adds a clip to what is held, and takes it back out again', () => {
+  const a = clip('kick', 0, 4);
+  const b = clip('bass', 8, 4);
+  const { fns, arState } = picker({ clips: [a, b] });
+  assert.equal(fns.arPickClip(a, CMD), true, 'it went in, so there is something to drag');
+  assert.equal(fns.arPickClip(b, CMD), true);
+  assert.deepEqual(marks(arState), ['bass@8@4', 'kick@0@4']);
+  assert.equal(arState.selAnchor, b, 'cmd+click moves the anchor to what it just picked');
+  assert.equal(fns.arPickClip(b, CMD), false, 'it came out, so the press is over - nothing to drag');
+  assert.deepEqual(marks(arState), ['kick@0@4']);
+  assert.equal(arState.selAnchor, null, 'and the anchor goes with it');
+});
+
+test('shift+click reaches through from the anchor: the rectangle of rows and bars between the two', () => {
+  const a = clip('kick', 0, 4);
+  const mid = clip('bass', 4, 4);
+  const to = clip('lead', 8, 4);
+  const lateRow = clip('pad', 4, 4); // in the bars, past the rows
+  const lateBar = clip('bass', 40, 4); // on the rows, past the bars
+  const { fns, arState } = picker({ clips: [a, mid, to, lateRow, lateBar], sel: [a], anchor: a });
+  fns.arPickClip(to, SHIFT);
+  assert.deepEqual(marks(arState), ['bass@4@4', 'kick@0@4', 'lead@8@4']);
+  assert.equal(arState.selAnchor, a, 'a reach never moves the anchor - that is what makes it a reach');
+  // ...so reaching somewhere nearer NARROWS it, rather than adding a second range
+  fns.arPickClip(mid, SHIFT);
+  assert.deepEqual(marks(arState), ['bass@4@4', 'kick@0@4']);
+});
+
+test('a clip only touching the rectangle\'s edge is not in it', () => {
+  const a = clip('kick', 0, 4);
+  const to = clip('bass', 8, 4);
+  const abut = clip('bass', 4, 4); // ends exactly where the reach's far clip starts... which is inside
+  const before = clip('bass', -4, 4); // ends exactly where the reach begins
+  const { fns, arState } = picker({ clips: [a, to, abut, before], sel: [a], anchor: a });
+  fns.arPickClip(to, SHIFT);
+  assert.deepEqual(marks(arState), ['bass@4@4', 'bass@8@4', 'kick@0@4'], 'the abutting one is inside 0..12');
+  assert.ok(!marks(arState).includes('bass@-4@4'), 'the one that merely touches bar 0 is not');
+});
+
+test('cmd+shift adds the reach to what is already held; shift alone replaces it', () => {
+  const a = clip('kick', 0, 4);
+  const b = clip('kick', 20, 4);
+  const to = clip('bass', 24, 4);
+  const { fns, arState } = picker({ clips: [a, b, to], sel: [a, b], anchor: b });
+  fns.arPickClip(to, CMD_SHIFT);
+  assert.deepEqual(marks(arState), ['bass@24@4', 'kick@0@4', 'kick@20@4'], 'the far clip stayed held');
+  fns.arPickClip(to, SHIFT);
+  assert.deepEqual(marks(arState), ['bass@24@4', 'kick@20@4'], 'plain shift is the reach and nothing else');
+});
+
+test('an anchor the arrangement no longer has reaches from nothing', () => {
+  // Every evaluation rebuilds the clips, so an anchor can outlive the object it points at. Reaching
+  // from one would select a rectangle drawn to a clip that is not on screen.
+  const gone = clip('kick', 0, 4);
+  const b = clip('bass', 8, 4);
+  const { fns, arState } = picker({ clips: [b], anchor: gone });
+  fns.arPickClip(b, SHIFT);
+  assert.deepEqual(marks(arState), ['bass@8@4'], 'it picks the clip clicked, and only that');
+  assert.equal(arState.selAnchor, b, '...and becomes the anchor to reach from next time');
+});
+
+test('the wiring: a modified click is about the clip, wherever on it it lands', () => {
+  // Body included - with cmd or shift down a clip is a clip, not the time under it. A plain press
+  // in the body still marks a span, which is the branch below this one.
+  assert.match(SRC, /const picked = hit && \(editMod\(e\) \|\| e\.shiftKey\) \? arPickClip\(hit\.clip, e\) : null;/);
+  assert.match(SRC, /if \(picked === false\) \{ arSelectTrack\(hit\.clip\.label\); return; \}/,
+    'a cmd+click that let the clip go starts no drag');
+  assert.match(SRC, /arState\.selAnchor = hit\.clip;/, 'a plain click is what a later reach comes from');
+  // The marquee is the same gesture with the pointer moving, so it too starts from what is held -
+  // and from a snapshot of it, not from the live selection it is rewriting.
+  assert.match(SRC, /kind: 'marquee', x0: x, y0: y, x1: x, y1: y, base: new Set\(arState\.sel\)/);
+  assert.match(SRC, /arState\.sel = new Set\(d\.base\);/);
+  assert.match(grab('arDropSelection'), /arState\.selAnchor = null;/, 'letting go lets the anchor go');
 });
