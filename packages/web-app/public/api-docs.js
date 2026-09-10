@@ -85,6 +85,12 @@ const API_DOCS = {
     desc: 'A note pattern you draw - double-click the pianoroll name to open the roll. Bare pianoroll() makes a new roll named after its track; rolls are named and patterned like anything else: pianoroll("<lead alt>") alternates two. As a method it MIXES the roll into what is already playing - kb(1).pianoroll() draws under a live keyboard - and the roll\'s ⌨, ● rec and capture record into it either way.',
     eg: 'lead: pianoroll().synth("Serum 2")',
   },
+  clips: {
+    kind: 'builder',
+    sig: 'clips()',
+    desc: 'A track whose notes come from the ARRANGEMENT: every clip painted on its row (ctrl+A) carries a roll of its own, played from where the clip starts, and the chain after clips() is the one sound all of them go through. Paint a clip and double-click it to draw into it; copy a clip to play the same notes twice (they stay linked - "make unique" in its menu splits them).',
+    eg: 'kick: clips().s("bd")',
+  },
 
   // ----------------------------------------------------------------- live input
   midikeys: {

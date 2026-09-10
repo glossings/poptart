@@ -74,7 +74,9 @@ function fakeCm(text) {
 const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arReadDef', 'parseArrangeCall',
   'arCallOpts', 'serializeArrangeCall', 'arRefreshRows', 'arGroupTree', 'arGroupParents', 'arBlocks', 'arLabels',
   'arTrackLabels', 'arRowOfLabel', 'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arFollowHandRenames',
-  'arApplyEdits', 'arCreateGroup', 'arUngroup', 'arTakeOut', 'arGroupLabels', 'arPaintLabel']
+  'arApplyEdits', 'arCreateGroup', 'arUngroup', 'arTakeOut', 'arGroupLabels', 'arPaintLabel',
+  // the clips() rows' half of the same reconcile pass: every clip on one carries a roll
+  'arClipsLabels', 'arAllClips', 'arFillClipRolls', 'arMintRolls']
   .map(grab)
   .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup')])
   .join('\n\n');
@@ -107,6 +109,16 @@ function panel({ code = '', arState = null, collapsed = [] } = {}) {
     arScheduleEval: () => {},
     expandedFolds: new Set(),
     collapsedGroups: new Set(collapsed), // which groups are folded - shared with the code editor's folds
+    // The roll registry, as much of it as the clips() fill pass touches (see arMintRolls).
+    rollDefs: {
+      allIds: () => [],
+      defsEdit: (code, ids) => [code.length, code.length, `\n${ids.map((id) => `_roll(${JSON.stringify(id)}, "")`).join('\n')}`],
+    },
+    freshDefId: (label, taken, base) => {
+      const name = /^[A-Za-z_][\w]*$/.test(label ?? '') ? label : base;
+      if (!taken.has(name)) return name;
+      for (let i = 2; ; i++) if (!taken.has(`${name}${i}`)) return `${name}${i}`;
+    },
   };
   // eslint-disable-next-line no-new-func
   const build = new Function(...Object.keys(env), `${LIFTED}\nreturn { arFindDef, arReadDef, serializeArrangeCall, arRefreshRows, arReconcileTracks, arFillClip, arRowLabel, arRowOfLabel, arCreateBlock, arFollowHandRenames, arCreateGroup, arUngroup, arTakeOut, arGroupLabels, arPaintLabel };`);

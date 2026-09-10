@@ -2046,6 +2046,7 @@ async function init() {
     eventLogQueue.push(line);
     if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
   });
+  installClipsResolver(); // how a clips() track reads its own row of the arrangement, from now on
   // First-run setup: SC detection, VSTPlugin auto-install, preflight warnings (see
   // PACKAGING.md Stage 1). Logs what it finds; never throws, never blocks the boot -
   // loadEngine()'s own diagnostics remain the backstop if something is still wrong.
@@ -2101,7 +2102,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
@@ -2163,6 +2164,48 @@ const HOST_BUILDERS = { setbpm, setscale };
 // /api/evaluate and KEPT across evals whose length and regions are unchanged, so editing a clip
 // mid-song doesn't forget which loop the playhead is in. Null while the deck has no arrangement.
 const arrangeClocks = { a: null, b: null };
+
+// Each deck's painted clips, kept for the same reason and read the same lazily: a clips() head
+// (see signal.mjs) asks for its own row's clips as each cycle is built, so the rolls painted along
+// a track's row are heard without the pattern being rebuilt. Null while the deck has no
+// arrangement at all, which is what tells a clips() track "nothing painted yet" from "an emptied
+// row" - the first is worth a line, the second is deliberate silence.
+const arrangeClips = { a: null, b: null };
+
+/** Every clip the buffer's `_arrange(...)` definitions carry, or null when it has none at all. */
+function arrangementClipsOf(evaluated) {
+  const found = evaluated.map((b) => b.sig).filter((v) => v?.poptartArrangeBlock);
+  return found.length ? found.flatMap((a) => a.clips) : null;
+}
+
+// Installed once: how a clips() head finds what is painted on its row. Set up here rather than in
+// the evaluation pass because resolution is LAZY - the head asks at cycle-build time, which is
+// mostly between evaluations, and a resolver torn down after each eval would leave every clips()
+// track silent the moment its evaluation finished.
+//
+// Asked several times per cycle per clips() track (the join walks ahead to see where a ringing
+// note is taken over), so each row's answer is kept until the arrangement itself changes - which
+// is one identity check, since an evaluation replaces the array wholesale. The clock is read
+// through rather than captured: it is swapped for a new one whenever the song's length or its
+// loop regions change, and a cached closure over the old one would place clips against a song
+// that no longer exists.
+function installClipsResolver() {
+  const posOf = { a: (cycle) => arrangeClocks.a?.posAt(cycle) ?? cycle, b: (cycle) => arrangeClocks.b?.posAt(cycle) ?? cycle };
+  const NONE = { clips: [], posAt: null, arranged: false };
+  const memo = { a: { src: null, rows: new Map() }, b: { src: null, rows: new Map() } };
+  patternCore.setClipsResolver((deck, label) => {
+    const d = deck === 'b' ? 'b' : 'a';
+    const painted = arrangeClips[d];
+    if (!painted) return NONE; // no arrangement in this deck's buffer at all
+    if (memo[d].src !== painted) memo[d] = { src: painted, rows: new Map() };
+    let row = memo[d].rows.get(label);
+    if (!row) {
+      row = { clips: patternCore.clipsOfLabel(painted, label), posAt: posOf[d], arranged: true };
+      memo[d].rows.set(label, row);
+    }
+    return row;
+  });
+}
 
 // One block of editor code (see labels.mjs) -> its value, evaluated with the builders in
 // scope. Evaluated via direct eval rather than wrapping the code in `return (...)` so a block
@@ -3959,6 +4002,23 @@ const routes = {
     };
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
 
+    // Which row a `clips()` written in this block plays (see pattern-core's clips()). Restores
+    // whatever was in force rather than clearing, because these nest: a copy() resolves inside the
+    // COPIER's build, and when it is done the copier's own row is the one still being built.
+    const evalAsBlock = (b, run) => {
+      const was = patternCore.clipsOwnerNow();
+      patternCore.setClipsOwner(deck, b.label);
+      try {
+        return run();
+      } finally {
+        patternCore.setClipsOwner(was.deck, was.label);
+      }
+    };
+
+    // What this deck's clips() tracks are playing by before this eval, put back if it throws - the
+    // twin of definitionsBefore, for the same reason: a buffer that doesn't parse changes nothing.
+    const clipsBefore = arrangeClips[deck];
+
     // copy("kick") is another block's pattern, evaluated FRESH - a full duplicate of the track,
     // never a shared Sig (fx slots and track bindings ride the chain, and a copy must own its
     // own). Resolved through pattern-core's hook because only this evaluator can see the buffer;
@@ -3971,7 +4031,9 @@ const routes = {
       if (copyStack.includes(label)) throw new Error(`copy(${JSON.stringify(label)}): these copies form a loop (${[...copyStack, label].join(' -> ')})`);
       copyStack.push(label);
       try {
-        const value = evalBlock(target.code, target.start);
+        // As the TARGET block: a copy of a clips() track plays the clips painted on that track's
+        // row, which is what "a full duplicate of the track" has to mean here.
+        const value = evalAsBlock(target, () => evalBlock(target.code, target.start));
         if (!(value instanceof patternCore.Sig) || value.isDef) {
           throw new Error(`copy(${JSON.stringify(label)}): that block isn't a pattern`);
         }
@@ -4001,7 +4063,7 @@ const routes = {
 
       evaluated = blocks.map((b) => {
         try {
-          const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
+          const value = hoisted.has(b) ? hoisted.get(b) : evalAsBlock(b, () => evalBlock(b.code, b.start));
           // Only an explicitly *named* block promises sound. Anything anonymous (bare code
           // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
           // style: declarations shared with the blocks below (const kb = midikeys("...")),
@@ -4033,6 +4095,13 @@ const routes = {
       // definitions the pass had not reached yet: every `pianoroll("lead")` in a normally-laid-out
       // buffer reported itself undefined on every evaluation, on a name that was defined two lines
       // later and played perfectly.
+      //
+      // A clips() head reads the arrangement as its cycles are built (see installClipsResolver),
+      // and the dry run builds one - so this deck's clips go in FIRST, or the first evaluation of
+      // a song would report every clips() track as having no arrangement on a buffer that has one.
+      // The arrangement pass below is where they take effect for playback; this only makes sure
+      // the dry run reads this buffer's rather than the last one's.
+      arrangeClips[deck] = arrangementClipsOf(evaluated);
       for (const b of evaluated) {
         if (!(b.sig instanceof patternCore.Sig)) continue;
         try {
@@ -4048,6 +4117,7 @@ const routes = {
       // still playing (which resolve them by name, lazily) fall silent on a buffer nobody meant
       // to change.
       patternCore.setCopyResolver(null);
+      arrangeClips[deck] = clipsBefore; // ...and the clips a clips() track is still playing by
       patternCore.restoreRolls(definitionsBefore, 'buffer', deck);
       patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
       decks[deck].scale = patternCore.globalScale();
@@ -4121,6 +4191,7 @@ const routes = {
         arrangeClocks[deck] = new patternCore.ArrangeClock({ len: loopLen, regions });
         arrangeClocks[deck].key = clockKey;
       }
+      arrangeClips[deck] = clips; // what a clips() track plays by, until the next evaluation
       const clock = arrangeClocks[deck];
       // `arrangeFrom`: play from this bar of the song (the painter's marker) rather than wherever
       // the clock sits - anchored at the cycle the transport is about to start from, which after a
@@ -4144,6 +4215,7 @@ const routes = {
       }
     } else {
       arrangeClocks[deck] = null;
+      arrangeClips[deck] = null; // no arrangement: a clips() track has nothing to play, and says so
     }
 
     // Mute and solo travel DOWN the group tree: a marker sits on one label, but a group is the

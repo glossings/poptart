@@ -4500,6 +4500,161 @@ function rollPattern(str, opts) {
   return joined;
 }
 
+// ---------------------------------------------------------------------------------------------
+// clips() - the track whose notes come from the ARRANGEMENT.
+//
+// Every other track plays ONE pattern and the arrangement says when: a clip of it is a stretch of
+// bars, and what sounds there is whatever the block's code says. A clips() track turns that round.
+// Each clip on its row carries a drawn roll of its own (the `r` field, see arrange.mjs), so the
+// row is a playlist of parts rather than a gate over one - the shape a drum track wants, where the
+// verse, the fill and the last four bars are the same kit playing different notes.
+//
+// Everything after the head is the ordinary chain, and every clip goes through it: the instrument,
+// the fx, the controls and the transforms are the track's, exactly once, and the clips supply only
+// notes. `kick: clips().s("bd")` is a kit; `lead: clips().synth("Serum 2").add(12)` transposes
+// every clip of the lead. That is the same division rolls have always had - rolls are data,
+// transforms are patterns - drawn out along the song instead of along one bar.
+//
+// TIME IS CLIP-LOCAL here, and only here. A painted block runs on absolute cycle time (see
+// _arrangeGate), so a `<a b>` keeps its place through the bars it is gated out of; a clip's roll
+// instead starts where the clip starts, because a part dropped at bar 33 has to play from its
+// beginning. The `o` field is the exception that proves it: splitting a clip gives the second
+// piece an offset into the same roll, so the cut changes where you can grab the part and nothing
+// you hear.
+//
+// Resolution is LAZY, like every other named definition: the arrangement is read when a cycle is
+// built, not when the call is evaluated. That is what lets a clips() head that has been copied
+// (copy("kick")) play its source's clips, and what lets a roll drawn into live from the panel be
+// heard mid-bar, exactly as a named roll is.
+// ---------------------------------------------------------------------------------------------
+
+// Which track's clips a clips() call written HERE plays - the host sets it around each block's
+// evaluation, and around a copy()'s, so the head captures the row it belongs to. (The label
+// alone is not enough: two decks are two songs, each with an arrangement of its own.)
+let clipsOwner = { deck: 'a', label: null };
+// (deck, label) -> { clips, posAt, arranged }: what that row has painted on it, the song clock's
+// cycle -> position map, and whether the buffer has an arrangement at all. Installed by the host,
+// which is the only thing that can see the painted arrangement.
+let clipsResolver = null;
+
+/** The block a `clips()` evaluated now belongs to. Host-called, not userland. */
+export function setClipsOwner(deck, label) {
+  clipsOwner = { deck: deck ?? 'a', label: label ?? null };
+}
+
+/** How a clips() head finds its row's clips at build time. Host-installed once. */
+export function setClipsResolver(fn) {
+  clipsResolver = typeof fn === 'function' ? fn : null;
+}
+
+/** What the resolver would answer for a call evaluated right now (the host's own read-back). */
+export function clipsOwnerNow() {
+  return { ...clipsOwner };
+}
+
+/**
+ * The same events `sig` has, moved `shift` cycles later - the one place in the language that
+ * remaps a pattern's time rather than reading it where it lies (see the join's note on that).
+ * Two source cycles can spill into one shifted one, so both are asked and each event is kept in
+ * the cycle its ONSET lands in, which is where the step model says it belongs.
+ */
+function shiftCycles(sig, shift) {
+  const base = sig.stepsForCycle;
+  if (!base || Math.abs(shift) < SLOT_EPS) return sig;
+  const stepsForCycle = (cycle) => {
+    const out = [];
+    const local = cycle - shift;
+    const lo = Math.floor(local + SLOT_EPS);
+    for (let c = lo; c <= lo + 1; c++) {
+      for (const s of base(c)) {
+        const start = c + s.start + shift - cycle;
+        if (start < -SLOT_EPS || start >= 1 - SLOT_EPS) continue;
+        out.push({ ...s, start: Math.max(0, start), end: start + (s.end - s.start) });
+      }
+    }
+    return out.sort((a, b) => a.start - b.start);
+  };
+  return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...sig._meta() });
+}
+
+// A shift is a float, and two clips that mean the same phase must resolve to the SAME child - the
+// join cuts a ringing note where a different child takes over, and float dust would cut it at
+// every bar line. Six places is finer than any grid anyone paints on.
+const clipShiftKey = (v) => String(Math.round(v * 1e6) / 1e6);
+
+/**
+ * `kick: clips().s("bd")` - a track that plays the rolls painted on its arrangement row, each
+ * from its own start. See the note above for what that means and why.
+ *
+ * Takes no arguments on purpose: which clips, which rolls and where is the arrangement's to say
+ * (ctrl+A), and naming a row here would only be a second place for it to be wrong. A row with
+ * nothing painted plays nothing, the same silence an emptied row means for every other track.
+ */
+export function clips() {
+  const owner = { ...clipsOwner }; // the row this call belongs to, fixed at evaluation
+  const warned = new Set();
+  // `${id}|${shift}` -> the roll shifted to that clip's phase, kept so the join sees one child
+  // per (roll, phase) and can tell a note ringing on from one a new clip has taken over. Re-made
+  // when the roll behind it is redefined, which is how a live edit in the panel is heard.
+  const children = new Map();
+  const painted = () => (clipsResolver ? clipsResolver(owner.deck, owner.label) : null)
+    ?? { clips: [], posAt: null, arranged: false };
+  const say = (key, msg) => {
+    if (warned.has(key)) return;
+    warned.add(key);
+    warnUser(msg);
+  };
+  const childFor = (id, shift) => {
+    const src = lookupRoll(id);
+    if (!src) {
+      say(`roll:${id}`, `[signal] clips(): no roll called ${JSON.stringify(id)} - that clip plays silence until a _roll(${JSON.stringify(id)}, ...) defines it. Double-click the clip in the arrangement to draw one.`);
+      return null;
+    }
+    const key = `${id}|${clipShiftKey(shift)}`;
+    const hit = children.get(key);
+    if (hit && hit.src === src) return hit.sig;
+    if (children.size > 512) children.clear(); // a long set walks the song many times over
+    const sig = shiftCycles(src, shift);
+    children.set(key, { src, sig });
+    return sig;
+  };
+  // The selector grid: this row's clips, cut to the cycle being built. Song position and transport
+  // cycle differ by a constant within one cycle (the clock wraps at region and song edges, which
+  // are cycle boundaries), so one offset maps the whole cycle both ways.
+  const slotsForCycle = (cycle) => {
+    if (owner.label == null) {
+      // No row to read: a clips() outside a track's own block (in prebake, say). Every other head
+      // is playable anywhere, so this is worth saying rather than being silent about.
+      say('rowless', '[signal] clips() is a TRACK: it plays the clips painted on its own row, so it has to be a labeled block\'s pattern (kick: clips().s("bd")).');
+      return [];
+    }
+    const { clips: list, posAt, arranged } = painted();
+    if (!arranged) {
+      say('none', '[signal] clips() plays what the arrangement paints on this track\'s row - press ctrl+A to paint one, then draw into the clips. Until then it is silent.');
+      return [];
+    }
+    if (!list.length) return [];
+    const delta = (posAt ? posAt(cycle) : cycle) - cycle;
+    const out = [];
+    for (const c of list) {
+      if (!c.roll) continue; // a clip with no roll drawn for it yet - the painter fills these in
+      const from = c.start - delta; // where this clip starts, in transport cycles
+      const a = Math.max(from, cycle);
+      const b = Math.min(from + c.len, cycle + 1);
+      if (b <= a + SLOT_EPS) continue;
+      out.push({ start: a - cycle, end: b - cycle, value: `${c.roll}|${clipShiftKey(from - (c.off ?? 0))}` });
+    }
+    return out.sort((x, y) => x.start - y.start);
+  };
+  const resolve = (value) => {
+    const at = value.lastIndexOf('|');
+    return childFor(value.slice(0, at), Number(value.slice(at + 1)));
+  };
+  const joined = selectorJoin(slotsForCycle, resolve);
+  joined.pitchKind = 'note'; // every clip is a roll, so this one is never in doubt
+  return joined;
+}
+
 /**
  * `roll(0, "60,0,4 64,0,4", { grid: 16 })` - a drawn piano roll kept under an id, so patterns can
  * name it rather than carry its notes: `pianoroll("<0 chorus>")` alternates two of them, and any

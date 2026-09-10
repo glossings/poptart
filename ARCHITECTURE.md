@@ -61,10 +61,22 @@ the most unit-testable part.
   the key it's in, and writing each lane out as the arguments of a roll — which the editor files
   under the lane's name and plays with `pianoroll("name")` — so an import lands in the editable form
   and the roll's own →♪ converts it to mini-notation when that's wanted.
-- `arrange.mjs` — the arrangement's clip format (`label,start,len`, in cycles) and span math. The
-  `_arrange(...)` definition is always in force (ctrl+A paints it): one row per track, a block
-  plays only inside its clips (the host gates its Sig with `_arrangeGate`, on absolute cycle
-  time, looping over the arrangement's length), and an emptied row is silent.
+- `arrange.mjs` — the arrangement's clip format (`label,start,len`, in cycles, plus tagged extras)
+  and span math. The `_arrange(...)` definition is always in force (ctrl+A paints it): one row per
+  track, a block plays only inside its clips (the host gates its Sig with `_arrangeGate`, on
+  absolute cycle time, looping over the arrangement's length), and an emptied row is silent.
+- **`clips()` turns that round for one track.** A block headed by `clips()` has no pattern of its
+  own: each clip painted on its row carries a drawn roll (the clip's `r` field) and plays it from
+  where the clip starts, so the row is a playlist of parts rather than a gate over one — the shape
+  a drum track wants, where the verse, the fill and the last four bars are the same kit playing
+  different notes. Everything after the head is the ordinary chain and every clip goes through it,
+  so rolls stay data and transforms stay patterns. It is the one place in the language where time
+  is remapped rather than read where it lies: a part dropped at bar 33 has to play from its
+  beginning, and a clip split in two carries an offset (`o`) into the same roll so the cut changes
+  nothing you hear. Two clips may name one roll — the same notes heard twice, drawn once — and the
+  painter's "make unique" is the only way back out of that link. Resolution is lazy like every
+  other named definition: the head asks the host what its row has painted as each cycle is built
+  (`setClipsResolver`), which is what lets a copy of the track play its source's clips.
 - `groups.mjs` — the track tree, as math over the splitter's `parent` fields (`treeOfBlocks`). A
   block headed by `group({ ... })` is a mixdown: it reads the bus named after itself, and the
   tracks written inside its braces send there and stop playing directly (`routeGroups`). Groups

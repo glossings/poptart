@@ -64,12 +64,30 @@ test('closing puts the binding back on the main buffer, after the jump into the 
   assert.match(close, /classList\.remove\('arrange-on', 'arrange-deck-a', 'arrange-deck-b'\)/);
 });
 
-test('every buffer read and write in the painter goes through arCM, never cm', () => {
-  // One stray `cm.` in here writes deck B's edit into the main buffer mid-mix.
+// The painter's code, minus its one bridge into the PIANO ROLL PANEL. That panel reads and writes
+// the main editor's document by construction (see prPlayingTrack and openPianorollEditor), so the
+// two functions that reach it are the deliberate exceptions to everything below - and they carry
+// their own guard instead: the one that WRITES refuses any deck but A outright.
+function painterSection() {
   const at = SRC.indexOf('// The arrangement painter - ctrl+A.');
   assert.ok(at > 0, 'the painter section header moved - this test needs updating');
-  const section = SRC.slice(at);
-  const strays = [...section.matchAll(/(^|[^\w.$])cm\.(\w+)/g)]
+  let section = SRC.slice(at);
+  for (const name of ['arTrackOfRoll', 'arOpenClipRoll']) {
+    const src = grab(name);
+    assert.ok(section.includes(src), `${name} is not in the painter section any more`);
+    section = section.replace(src, '');
+  }
+  return section;
+}
+
+test('the bridge from a clip into the piano roll is deck A\'s, and says so', () => {
+  assert.match(grab('arOpenClipRoll'), /if \(arDeck !== 'a'\) \{/, 'it refuses to draw into any other deck');
+  assert.match(grab('arTrackOfRoll'), /arReadDef\(cm\.getValue\(\)\)/, 'and it answers the panel about the main deck');
+});
+
+test('every buffer read and write in the painter goes through arCM, never cm', () => {
+  // One stray `cm.` in here writes deck B's edit into the main buffer mid-mix.
+  const strays = [...painterSection().matchAll(/(^|[^\w.$])cm\.(\w+)/g)]
     .map((m) => m[2])
     .filter((fn) => fn !== 'refresh' || false); // no exemptions: closing refreshes arCM too
   assert.deepEqual(strays, [], `the painter still touches cm directly: ${strays.join(', ')}`);
@@ -79,8 +97,7 @@ test('a write into deck B does not try to refold - that pane has no folds', () =
   assert.match(SRC, /const arRefold = \(\) => \{ if \(arCM === cm\) refoldAll\(\); \};/);
   // ...and every refold in the painter goes through it: the one call to refoldAll down there is
   // arRefold's own.
-  const at = SRC.indexOf('// The arrangement painter - ctrl+A.');
-  assert.equal((SRC.slice(at).match(/(^|[^\w.$])refoldAll\(\)/g) ?? []).length, 1);
+  assert.equal((painterSection().match(/(^|[^\w.$])refoldAll\(\)/g) ?? []).length, 1);
 });
 
 test('the buffer watcher is per editor, and only the bound one speaks', () => {

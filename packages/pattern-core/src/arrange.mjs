@@ -3,16 +3,26 @@
 // read. Like pianoroll.mjs this is served verbatim to the browser and imports nothing.
 //
 // An arrangement is a set of CLIPS, playlist-style: each clip says "this labeled block sounds
-// here". Format: space-separated `label,start,len[,m]`, e.g. "drums,0,8 bass,4,4 drums,12,4".
+// here". Format: space-separated `label,start,len[,extras]`, e.g. "drums,0,8 bass,4,4 drums,12,4".
 //   label - the block's label (`drums:` in the buffer). No commas or whitespace, which a label
 //           can't hold anyway.
 //   start - onset, in CYCLES (decimals allowed: 4.5 is halfway through bar 4)
 //   len   - length in cycles, > 0
-//   m     - present on a MUTED clip: it keeps its place in the song (and is drawn there, greyed)
-//           but sounds nothing, which is how a part is taken out for a listen without losing the
-//           painting. Written only when set, so an unmuted clip is spelled exactly as it always
-//           was. The literal `m` and nothing else: the retired lane column was a NUMBER in this
-//           position, so an old spelling still reads as malformed rather than as a muted clip.
+// Then any number of TAGGED extras, each one character of tag and the rest its value. Tagged
+// rather than positional so the set can grow without a saved song's clips changing meaning, and
+// so anything else in these fields is malformed - the retired lane column was a NUMBER here, and
+// a pattern from that era must never come back as a song with parts silently muted or rebound:
+//   m      - a MUTED clip: it keeps its place in the song (and is drawn there, greyed) but sounds
+//            nothing, which is how a part is taken out for a listen without losing the painting.
+//   r<id>  - the ROLL this clip plays, on a track headed by clips() (see signal.mjs). Only such a
+//            track reads it: every other track plays its own one pattern wherever it is painted,
+//            and a clip of it says only WHEN. Two clips naming one roll are linked - one set of
+//            notes, drawn once, heard in both places.
+//   o<num> - how far INTO that roll the clip starts, in cycles (omitted when 0, the usual case).
+//            What splitting a clip leaves behind: the second piece starts where the first left
+//            off, so cutting a clip in two changes where you can grab it and nothing you hear.
+// Every extra is written only when it is set, so a clip that has none is spelled exactly as it
+// always was.
 //
 // ONE ROW PER TRACK, exactly. A row is a block and a block is a row, so painting is only ever
 // "draw where this track sounds" - there is no second question about WHAT it plays there. A part
@@ -25,7 +35,9 @@
 // meant. Every gesture then needed a "which one" answer the painter had nowhere good to put, so
 // rows and blocks are 1:1 now and grouping carries the relationship instead. The retired
 // spellings from that era - a `lane` column, `label:roll` bindings, the `$: arrange(…)` call -
-// no longer parse; the saved patterns that used them were migrated in place.)
+// no longer parse; the saved patterns that used them were migrated in place. The `r` field above
+// is NOT that question coming back: a clips() track has no pattern of its own, so its clips are
+// the only thing that can say what plays there and nothing has to choose between them.)
 //
 // What a clip MEANS at playback time: a block plays ONLY inside its clips - the bare
 // `label: pattern` stops being a loop and becomes a part - and a block with no clips at all is
@@ -35,7 +47,9 @@
 // notes of its own and what sounds on it is whatever its members are doing. The arrangement loops
 // over its length (`len` option, or the end of the last clip rounded
 // up to a whole cycle), and the pattern inside a clip runs on absolute cycle time, so a `<a b>`
-// alternation keeps its place whether or not its block was sounding the bar before.
+// alternation keeps its place whether or not its block was sounding the bar before. (A clips()
+// track is the one exception, and deliberately: each of its clips plays its roll from the clip's
+// own start. See signal.mjs.)
 //
 // The options are editor metadata plus the loop length:
 //   len    - loop length in cycles (default: the last clip's end, rounded up)
@@ -68,21 +82,34 @@ const num = (s) => {
 /**
  * "drums,0,8 fill,12,4" -> [{ label, start, len }]. Malformed tokens are skipped rather than
  * thrown on: a half-typed clip should cost a missing clip, not the whole arrangement.
+ *
+ * The optional fields (see the format above) appear on the object only when the token sets them,
+ * so an ordinary clip is the same three-key object it has always been - which is what the
+ * painter's snapshots, its serializer and the tests all round-trip through.
  */
 export function parseArrangement(str) {
   const out = [];
   for (const tok of String(str ?? '').trim().split(/\s+/)) {
     if (!tok) continue;
     const parts = tok.split(',');
-    if (parts.length !== 3 && parts.length !== 4) continue;
-    if (parts.length === 4 && parts[3] !== 'm') continue; // see the mute flag above
+    if (parts.length < 3) continue;
     const label = parts[0];
     const start = num(parts[1]);
     const len = num(parts[2]);
     if (!label || start == null || len == null || len <= 0) continue;
-    // `mute` only when it is true, so an ordinary clip is the same three-field object it has
-    // always been - the painter's snapshots and its serializer both round-trip through this.
-    out.push(parts.length === 4 ? { label, start, len, mute: true } : { label, start, len });
+    const clip = { label, start, len };
+    let bad = false;
+    for (const ex of parts.slice(3)) {
+      // Each extra once: a token setting the same thing twice says two different things and is
+      // no more readable than a token setting something unknown.
+      if (ex === 'm' && !clip.mute) clip.mute = true;
+      else if (ex.length > 1 && ex[0] === 'r' && clip.roll == null) clip.roll = ex.slice(1);
+      else if (ex.length > 1 && ex[0] === 'o' && clip.off == null && num(ex.slice(1)) != null) clip.off = num(ex.slice(1));
+      else { bad = true; break; }
+    }
+    if (bad) continue;
+    if (clip.off === 0) delete clip.off; // the resting value is spelled by leaving it out
+    out.push(clip);
   }
   return out;
 }
@@ -92,12 +119,17 @@ const fmt = (v) => {
   return String(r);
 };
 
-/** The inverse of parseArrangement, clips ordered by track then time so a diff reads. */
+/**
+ * The inverse of parseArrangement, clips ordered by track then time so a diff reads. The extras
+ * are written in a fixed order (mute, roll, offset) whatever order they were read in, so one
+ * clip has exactly one spelling.
+ */
 export function serializeArrangement(clips) {
   return [...clips]
     .filter((c) => c && c.label && c.len > 0)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) || a.start - b.start)
-    .map((c) => `${c.label},${fmt(c.start)},${fmt(c.len)}${c.mute ? ',m' : ''}`)
+    .map((c) => `${c.label},${fmt(c.start)},${fmt(c.len)}${c.mute ? ',m' : ''}`
+      + `${c.roll ? `,r${c.roll}` : ''}${c.roll && c.off ? `,o${fmt(c.off)}` : ''}`)
     .join(' ');
 }
 
@@ -105,7 +137,7 @@ export function serializeArrangement(clips) {
 export function looksLikeArrangeString(str) {
   const s = String(str ?? '').trim();
   if (!s) return true;
-  return s.split(/\s+/).every((tok) => /^[^,\s]+,-?[\d.]+,[\d.]+(?:,m)?$/.test(tok));
+  return s.split(/\s+/).every((tok) => /^[^,\s]+,-?[\d.]+,[\d.]+(?:,(?:m|r[^,\s]+|o-?[\d.]+))*$/.test(tok));
 }
 
 /** The options as the builder and the editor both read them, defaults filled in. */
@@ -243,6 +275,15 @@ export function inSpans(spans, pos) {
     if (s > pos) break; // sorted, so nothing later can hold it
   }
   return false;
+}
+
+/**
+ * The clips one track SOUNDS, in time order - what a clips() head plays (see signal.mjs). Muted
+ * clips are left out here for the same reason arrangementSpans leaves them out: a muted clip is a
+ * clip you can still see and move, and nothing about it reaches the ear.
+ */
+export function clipsOfLabel(clips, label) {
+  return clips.filter((c) => c.label === label && !c.mute && c.len > 0).sort((a, b) => a.start - b.start);
 }
 
 /** Every label the arrangement mentions, in the order it first mentions them. */

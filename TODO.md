@@ -144,6 +144,10 @@ no completion notes.
       folding as the identity - never wrapping - when there is no arrangement, or a deck without
       one would start looping its patterns at whatever length got picked for it.
 
+    A clips() track already does this - its head places each clip against the SONG clock rather
+    than against transport time (see clips() in signal.mjs), so a region over one replays
+    identically today. This entry is the other tracks, whose patterns are still queried raw.
+
     Consequences worth stating rather than discovering: the whole arrangement wrapping at its end
     replays identically too, which is right for a song but IS a change to what existing buffers
     do. Per-note envelopes are unaffected (they run from their own onsets), a free-running LFO

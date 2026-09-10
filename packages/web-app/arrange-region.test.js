@@ -27,7 +27,7 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const LIFTED = ['arTimeRegion', 'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClearTime']
+const LIFTED = ['arTimeRegion', 'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClearTime', 'arClipPiece']
   .map(grab).join('\n\n');
 
 // A row is a base label here, exactly as it is in the painter: `kick#fill` paints onto `kick`'s
@@ -208,7 +208,7 @@ function ops({ clips = [], sel = [], insert = null, regionSpan = null, regionRow
     ...rowEnv, // rows are bases; a variation's clips sit on its base's row
   };
   const LIFT = ['arSplitPoints', 'arOpTargets', 'arSplitClips', 'arJoinClips',
-    'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClipOverlaps', 'arDuplicate'].map(grab).join('\n\n');
+    'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClipOverlaps', 'arDuplicate', 'arClipPiece'].map(grab).join('\n\n');
   const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
   const build = new Function(...keys, `${LIFT}\nreturn { arSplitClips, arJoinClips, arSplitPoints, arOpTargets, arClipOverlaps, arDuplicate };`);
@@ -233,6 +233,27 @@ test('a variation splits into two clips of the same variation - making one uniqu
   fns.arSplitClips();
   assert.deepEqual(clips(arState), [['kick#fill', 4, 4], ['kick#fill', 8, 4]]);
   assert.ok(!/arMakeUnique\(pieces/.test(grab('arSplitClips')), 'a split never forks a block on its own');
+});
+
+test('splitting a clips() clip leaves both halves on ONE roll, the second one entered part way', () => {
+  // The same rule as above, drawn out: a cut divides where you can grab the part, never what it
+  // plays. Both pieces name the roll the whole clip named, and the second says how far into it it
+  // starts, so bar 8 goes on sounding exactly as it did (see clips() in pattern-core).
+  const a = { label: 'kick', start: 4, len: 8, roll: 'kick2' };
+  const { fns, arState } = ops({ clips: [a], sel: [a], insert: 8, track: 'kick' });
+  fns.arSplitClips();
+  assert.deepEqual([...arState.clips].sort((x, y) => x.start - y.start), [
+    { label: 'kick', start: 4, len: 4, roll: 'kick2' },
+    { label: 'kick', start: 8, len: 4, roll: 'kick2', off: 4 },
+  ]);
+  // ...and splitting one that was ALREADY part way in adds to the offset it had.
+  const b = { label: 'kick', start: 0, len: 8, roll: 'kick2', off: 2 };
+  const two = ops({ clips: [b], sel: [b], insert: 4, track: 'kick' });
+  two.fns.arSplitClips();
+  assert.deepEqual([...two.arState.clips].sort((x, y) => x.start - y.start), [
+    { label: 'kick', start: 0, len: 4, roll: 'kick2', off: 2 },
+    { label: 'kick', start: 4, len: 4, roll: 'kick2', off: 6 },
+  ]);
 });
 
 test('a marker split takes the clip on the selected ROW, whichever variation it is', () => {
@@ -325,13 +346,26 @@ test('the title picks the clip up, the body marks the time under it', () => {
 });
 
 test('a clip is a block: double-clicking it opens that block to edit, and the title says which', () => {
-  // A clip names a block and nothing else. There is no roll to rebind and no variation to choose;
-  // what a clip plays is one track's code, and the code is a double-click away.
-  assert.ok(!/arRollHead|arBindRoll|arTrackRoll|\.roll\b/.test(SRC), 'the roll binding is gone from the painter');
-  assert.ok(!/arBrushFor|arSetBrush|arCreateVariation/.test(SRC), 'and so is the brush that chose between variations');
-  assert.match(SRC, /arSelectTrack\(clip\.label\);\n\s+arEditBlock\(clip\.label\);/);
-  assert.match(SRC, /ctx\.fillText\(arClipTitle\(c\.label\)/);
-  assert.match(grab('arClipTitle'), /return label;/, 'a clip is titled by its track');
+  // A clip names a block, and on an ordinary track that is the whole of what it says: there is no
+  // variation of that track to choose between and no brush to choose one with. What it plays is
+  // one track's code, and the code is a double-click away.
+  assert.ok(!/arBrushFor|arSetBrush|arCreateVariation/.test(SRC), 'the brush that chose between variations is gone');
+  assert.ok(!/#fill|variant|baseLabel/.test(grab('arSplitClips')), 'and a clip carries no variation of its own');
+  assert.match(SRC, /if \(arIsClipsRow\(clip\.label\) && arOpenClipRoll\(clip\)\) \{ drawArrange\(\); return; \}\n\s+arEditBlock\(clip\.label\);/);
+  assert.match(SRC, /ctx\.fillText\(arClipTitle\(c\.label, c\)/);
+});
+
+test('a clips() row is the one place a clip carries its own notes - and it says so in its title', () => {
+  // The opted-in shape: `kick: clips()` has no pattern of its own, so its clips supply the notes
+  // and the double-click opens THOSE rather than the code. Nothing about any other row changes,
+  // which is what keeps "a clip names a block" true everywhere it was true before.
+  assert.match(grab('arClipTitle'), /clip\?\.roll && arIsClipsRow\(label\) \? clip\.roll : label/);
+  assert.match(grab('arClipsLabels'), /\\bclips\\s\*\\\(/, 'a clips() row is one whose block calls it');
+  // Painting is how a part comes into being there, and every paint is a NEW part: dipping the
+  // brush in an existing clip would be a mode you could not see. Copying one is the linked case.
+  assert.equal((SRC.match(/if \(arIsClipsRow\(label\)\) clip\.roll = arMintRoll\(label\);/g) ?? []).length, 2,
+    'both paint gestures - the pencil and the arrow\'s double-click - mint one');
+  assert.match(grab('arUnlinkClips'), /arClipsOfRoll\(c\.roll\)\.length > 1/, 'only a shared roll can be made unique');
 });
 
 test('the pencil paints the row it is put on - groups included; only an orphan takes none', () => {

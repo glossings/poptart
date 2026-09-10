@@ -101,6 +101,8 @@ const rollDefs = makeDefRegistry({
   isData: (str) => (pianorollMod ? pianorollMod.looksLikeNoteString(str) : null),
   library: () => prPrebakeRolls,
   libraryNote: 'prebake',
+  otherRefs: (code, id) => arClipRefCount(code, id),
+  otherRenameEdits: (code, from, to) => arClipRenameEdits(code, from, to),
   panel: {
     current: () => prState?.rollId ?? null,
     open: (id, carry) => openRollById(id, carry),
@@ -4369,6 +4371,10 @@ function prPlayingTrack() {
   if (prState.rollId != null) {
     const call = rollDefs.refCalls(code, prState.rollId)[0];
     if (call) return labelAt(call.start);
+    // A roll drawn into an arrangement clip is named by no pattern at all - the clip names it (see
+    // clips()) - so the track that plays it is the one whose row that clip is on.
+    const owner = arTrackOfRoll(prState.rollId);
+    if (owner) return owner;
   }
   return prState.trackLabel;
 }
@@ -4695,7 +4701,14 @@ function makeDefRegistry(opts) {
   // `label` is the kind as a person says it. It is usually the `kind` word itself, but that one is
   // also the wire name a pinned definition is filed under (`_slices`, not `_sliceSet`), so the two
   // come apart wherever the call is named for the list it holds rather than for one of them.
-  const { kind, label = kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null } = opts;
+  const {
+    kind, label = kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null,
+    // References to one of these that are NOT calls in the code. Only rolls have any: an
+    // arrangement's clips name a roll (see clips()), so a rename has to carry them and a delete
+    // has to see them, exactly as it does for the patterns that say the name.
+    otherRefs = () => 0,
+    otherRenameEdits = () => [],
+  } = opts;
   const say = (line, isError) => logLine(line, isError);
 
   // A kind whose names are only unique WITHIN something else. A preset belongs to the plugin it was
@@ -4963,6 +4976,11 @@ function makeDefRegistry(opts) {
       return refuse(`${refs.length} pattern${refs.length === 1 ? '' : 's'} still play${refs.length === 1 ? 's' : ''} it `
         + '- take the name out of them first, or it will be re-created empty on the next evaluation');
     }
+    const clipped = otherRefs(code, id);
+    if (clipped) {
+      return refuse(`${clipped} clip${clipped === 1 ? '' : 's'} in the arrangement still play${clipped === 1 ? 's' : ''} it `
+        + '- delete the clips (ctrl+A) first, or the part goes silent where they are');
+    }
     const [from, to] = removalRange(code, def);
     const wasOpen = panel.current() === id;
     cm.replaceRange('', cm.posFromIndex(from), cm.posFromIndex(to));
@@ -5012,12 +5030,16 @@ function makeDefRegistry(opts) {
     const [litStart, litEnd] = defIdLiteralRange(code, def);
     const edits = [[litStart, litEnd, JSON.stringify(to)]];
     for (const call of refs) edits.push(...idOccurrenceEdits(call, from, to));
-    applyEdits(edits);
+    // References that are not calls at all: the arrangement's clips name a roll the way a pattern
+    // does (see clips()), and a rename that left them behind would swap a part for silence.
+    const elsewhere = otherRenameEdits(code, from, to);
+    applyEdits([...edits, ...elsewhere]);
     panel.setCurrent(from, to);
     refoldAll();
     panel.syncHead();
     panel.scheduleEval();
-    say(`renamed ${label} "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}`);
+    const also = elsewhere.length ? ` (${otherRefs(code, from)} clip(s) updated)` : '';
+    say(`renamed ${label} "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}${also}`);
   }
 
   // Two patterns playing one of these, renamed from inside one of them. Renaming both is the move
@@ -23705,7 +23727,10 @@ function arReconcileTracks() {
   if (arState) {
     // The panel owns the data while it is open; writing the buffer under it would fight its marker.
     const next = arrangeMod.reconcileArrangement(arState.clips, { len: arState.len, tracks: arState.tracks }, labels, groups);
-    if (!next.changed) return false;
+    // ...and a clip on a clips() row gets a roll to draw in, whether it was just painted or the
+    // row only became one now (`kick: clips()` typed over an ordinary track).
+    const rolled = arFillClipRolls(next.clips);
+    if (!next.changed && !rolled) return false;
     arState.clips = next.clips;
     arState.tracks = next.tracks;
     arRefreshRows();
@@ -23716,8 +23741,13 @@ function arReconcileTracks() {
   const read = arReadDef();
   if (!read) return false;
   const next = arrangeMod.reconcileArrangement(read.clips, read.opts, labels, groups);
-  if (!next.changed) return false;
-  arWriteDefText(read.def, serializeArrangeCall({ ...read.opts, clips: next.clips, tracks: next.tracks }));
+  const rolled = arFillClipRolls(next.clips);
+  if (!next.changed && !rolled) return false;
+  // Minting those rolls wrote definitions into the buffer, and they sit ABOVE the arrangement call
+  // (see defsEdit) - so where the call is has to be asked again before it is replaced.
+  const def = rolled ? arFindDef() : read.def;
+  if (!def) return false;
+  arWriteDefText(def, serializeArrangeCall({ ...read.opts, clips: next.clips, tracks: next.tracks }));
   return true;
 }
 
@@ -24190,6 +24220,8 @@ function arRefreshRows() {
   const parents = groupsMod ? groupsMod.parentsOf(tree) : new Map();
   arState.tree = tree; // what arGroupTree/arGroupParents hand the draw loop
   arState.parents = parents;
+  // ...and which of those rows are clips() rows, asked once per clip per frame for the titles.
+  arState.clipsRows = arClipsLabels();
   const groups = new Set(blocks.filter((b) => arIsGroup(b)).map((b) => b.label));
   const ordered = groupsMod
     ? groupsMod.groupOrder(blocks.map((b) => b.label), tree)
@@ -24472,9 +24504,237 @@ function arGroupLabels() {
   return arBlocks().filter((b) => arIsGroup(b)).map((b) => b.label);
 }
 
-/** What a clip is titled: its track's name. */
-function arClipTitle(label) {
-  return label;
+// ---------------------------------------------------------------------------------------------
+// Clip rolls - the painter's half of clips() (see pattern-core's signal.mjs).
+//
+// A track headed by clips() plays what is DRAWN IN each of its clips rather than one pattern gated
+// to them, so on such a row a clip owns a roll: the painter mints an empty `_roll(...)` for every
+// clip painted there, files its id in the clip's `r` field, and double-clicking the clip opens it
+// to draw into. Everything else about the row is unchanged - it is still one track, one chain, one
+// place in the tree.
+//
+// TWO clips may name ONE roll, and that is the interesting case: they are the same notes heard
+// twice, so drawing into either changes both. Every gesture that reproduces a clip - paste,
+// duplicate, option-drag, split - keeps the id, because a copy is nearly always what you meant
+// (the four-bar loop that comes back in the last chorus) and unlinking is one menu item away,
+// while re-linking two rolls that have been edited apart is not a thing anyone can do.
+//
+// A roll a clip stops naming is left in the buffer. Nothing plays it, it costs a line inside a
+// folded block, and the roll picker's own delete is where a definition goes - taking it out here
+// would make the painter's undo (which restores clips, not code) hand back a clip playing silence.
+// ---------------------------------------------------------------------------------------------
+
+/** The tracks headed by clips(): the rows whose clips each carry a drawn roll of their own. */
+function arClipsLabels() {
+  const out = new Set();
+  if (!labelsMod) return out;
+  // The mask and the blocks must be read off ONE string - a block's offsets index the buffer it
+  // was split from, and asking whether a match is code uses them.
+  const isCode = codeOnly(arCM.getValue());
+  for (const b of arBlocks()) {
+    const re = /\bclips\s*\(/g;
+    let m;
+    while ((m = re.exec(b.code)) !== null) {
+      if (!isCode(b.start + m.index)) continue;
+      out.add(b.label);
+      break;
+    }
+  }
+  return out;
+}
+
+/** Whether `label`'s row is a clips() row. Cached on the painter's state, like the group tree. */
+function arIsClipsRow(label) {
+  if (label == null) return false;
+  // Asked once per clip per frame by the titles, so it must not re-lex the buffer each time: the
+  // panel caches the set and arRefreshRows refreshes it (the first draw of a fresh panel gets it
+  // here, before that pass has run).
+  if (arState && !arState.clipsRows) arState.clipsRows = arClipsLabels();
+  return (arState?.clipsRows ?? arClipsLabels()).has(label);
+}
+
+/** The clips of the arrangement in hand - the panel's when it is open, else the buffer's. */
+function arAllClips() {
+  if (arState) return arState.clips;
+  return arReadDef()?.clips ?? [];
+}
+
+/** Every clip playing roll `id` - what tells a linked pair from a clip with a roll to itself. */
+const arClipsOfRoll = (id) => (id == null ? [] : arAllClips().filter((c) => c.roll === id));
+
+/**
+ * The track whose clips play roll `id`, or null. Read off the MAIN deck's buffer on purpose: this
+ * answers the piano roll panel, which is the main editor's (see prPlayingTrack), and a clip roll
+ * is named by no pattern - the clip is its only reference.
+ */
+function arTrackOfRoll(id) {
+  if (!arrangeMod || id == null) return null;
+  const read = arReadDef(cm.getValue());
+  return read?.clips.find((c) => c.roll === String(id))?.label ?? null;
+}
+
+/**
+ * How many clips of the MAIN deck's arrangement play roll `id` - the reference count the roll
+ * picker's delete asks for. A clip is a reference exactly as a `pianoroll("lead")` is, and it is
+ * one the code search can't see: it lives inside the arrangement's clip string.
+ */
+function arClipRefCount(code, id) {
+  if (!arrangeMod) return 0;
+  return (arReadDef(code)?.clips ?? []).filter((c) => c.roll === String(id)).length;
+}
+
+/**
+ * The edits that carry the arrangement's clips through a roll rename. Renaming from the piano
+ * roll's own head is the only way a roll's name changes, and a clip left naming the old one would
+ * be a part silently gone.
+ */
+function arClipRenameEdits(code, from, to) {
+  if (!arrangeMod) return [];
+  const read = arReadDef(code);
+  if (!read || !read.clips.some((c) => c.roll === from)) return [];
+  const clips = read.clips.map((c) => (c.roll === from ? { ...c, roll: to } : c));
+  // The painter keeps its own copy of the clips while it is open, and writes that copy back over
+  // the buffer at the next gesture - so it follows the rename here rather than undoing it.
+  if (arState && arDeck === 'a') for (const c of arState.clips) if (c.roll === from) c.roll = to;
+  return [[read.def.start, read.def.close + 1, serializeArrangeCall({ ...read.opts, clips })]];
+}
+
+/** The arguments a `_roll(...)` definition carries after its id, verbatim - what a fork copies. */
+function arRollBody(code, id) {
+  const def = rollDefs.findDef(code, String(id));
+  if (!def) return null;
+  return splitFirstArg(code.slice(def.open + 1, def.close))[1].trim() || '""';
+}
+
+/**
+ * File `count` fresh roll definitions named after `label`, and hand back their ids. One edit for
+ * the lot, so a pass that fills a whole row's clips is one undo step - and written through the
+ * same defsEdit every other definition uses, so they land in the folded block with the rest.
+ *
+ * `bodyFor(i)` supplies each one's data; the default is an empty roll, which is what a clip
+ * painted onto an empty stretch of song should be.
+ */
+function arMintRolls(label, count, bodyFor = null) {
+  if (!rollDefs || count <= 0) return [];
+  const code = arCM.getValue();
+  const taken = new Set(rollDefs.allIds(null, code).map((r) => r.id));
+  // ...and the ids this arrangement has already claimed: a clip whose definition has not been
+  // written yet (this very pass, or one in another deck's buffer) still owns its name.
+  for (const c of arAllClips()) if (c.roll) taken.add(c.roll);
+  const ids = [];
+  for (let i = 0; i < count; i++) {
+    const id = freshDefId(label, taken, 'roll');
+    taken.add(id);
+    ids.push(id);
+  }
+  const bodies = new Map(ids.map((id, i) => [id, bodyFor ? bodyFor(i) : '""']));
+  const [from, to, text] = rollDefs.defsEdit(code, ids, (id) => bodies.get(id));
+  arSuppressClose = true;
+  try {
+    arCM.replaceRange(text, arCM.posFromIndex(from), arCM.posFromIndex(to));
+  } finally {
+    arSuppressClose = false;
+  }
+  arRefold();
+  return ids;
+}
+
+/** One fresh empty roll for a clip just painted on `label`'s row. */
+const arMintRoll = (label) => arMintRolls(label, 1)[0] ?? null;
+
+/**
+ * Give every roll-less clip on a clips() row one - the pass that makes `kick: clips()` typed by
+ * hand into a row of drawable clips without anyone having to repaint it. Runs on every evaluation
+ * (see arReconcileTracks); returns how many it filled, so its caller knows to write the call.
+ *
+ * Mutates the clips in place, since both of that caller's paths hold the array it is about to
+ * serialize.
+ */
+function arFillClipRolls(clips) {
+  const rows = arClipsLabels();
+  if (!rows.size) return 0;
+  // Muted clips included: a clip on such a row HAS a roll, so unmuting one plays what is drawn in
+  // it rather than needing another pass to give it something to draw in.
+  const need = clips.filter((c) => rows.has(c.label) && !c.roll);
+  if (!need.length) return 0;
+  // Per track, so the ids read as that track's: three clips on `kick` are kick, kick2, kick3.
+  let filled = 0;
+  for (const label of new Set(need.map((c) => c.label))) {
+    const mine = need.filter((c) => c.label === label);
+    const ids = arMintRolls(label, mine.length);
+    mine.forEach((c, i) => { if (ids[i]) { c.roll = ids[i]; filled++; } });
+  }
+  return filled;
+}
+
+/**
+ * "make unique": give each of `targets` a roll of its own, copied from the one it shares. The
+ * gesture after a paste - the copy is where you want it and now wants different notes in it -
+ * and the only way back out of a link, which is why it says how many it actually split.
+ */
+function arUnlinkClips(targets) {
+  const shared = targets.filter((c) => c.roll && arClipsOfRoll(c.roll).length > 1);
+  if (!shared.length) {
+    logLine(targets.some((c) => c.roll)
+      ? 'these clips already have rolls of their own - nothing else is playing their notes'
+      : 'only a clips() track\'s clips carry rolls - this row plays one pattern wherever it is painted', 'warn');
+    return;
+  }
+  const code = arCM.getValue();
+  for (const c of shared) {
+    const body = arRollBody(code, c.roll);
+    const [id] = arMintRolls(c.label, 1, () => body ?? '""');
+    if (id) c.roll = id;
+  }
+  writeArrangeCall();
+  drawArrange();
+  logLine(shared.length === 1
+    ? '1 clip has notes of its own now - the clips it was linked to are unchanged'
+    : `${shared.length} clips have notes of their own now - the clips they were linked to are unchanged`);
+}
+
+/**
+ * Double-clicking a clip on a clips() row: open its roll to draw into. The piano roll panel reads
+ * and writes the MAIN editor's document, so this is deck A's gesture; on deck B the clip still
+ * plays, it just can't be drawn in from here.
+ */
+function arOpenClipRoll(clip) {
+  if (!clip?.roll) return false;
+  if (arDeck !== 'a') {
+    logLine(`the piano roll draws into the main deck's buffer - bring this song over to deck A to draw "${clip.roll}"`, 'warn');
+    return true;
+  }
+  if (!rollDefs.findDef(cm.getValue(), clip.roll)) {
+    // The clip names a roll nothing defines - a hand-edited call, or a definition deleted from the
+    // picker. Write it back under THAT name rather than refusing: the clip is the reference, so an
+    // empty roll under the name it says is exactly what "nothing drawn in here yet" means.
+    const [from, to, text] = rollDefs.defsEdit(cm.getValue(), [clip.roll]);
+    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+    refoldAll();
+  }
+  openRollById(clip.roll);
+  prCanvas.focus({ preventScroll: true });
+  return true;
+}
+
+/**
+ * A clip's piece of another clip: the same roll, entered `start - c.start` further in. What split
+ * and the overwrite trim both make, and the whole reason for the `o` field - a cut moves where you
+ * can grab the part and changes nothing you hear.
+ */
+function arClipPiece(c, start, len) {
+  const piece = { ...c, start, len };
+  if (c.roll) {
+    const off = (c.off ?? 0) + (start - c.start);
+    if (off) piece.off = off;
+    else delete piece.off;
+  }
+  return piece;
+}
+
+/** What a clip is titled: the roll it plays on a clips() row, else its track's name. */
+function arClipTitle(label, clip = null) {
+  return clip?.roll && arIsClipsRow(label) ? clip.roll : label;
 }
 
 // --- colors ---
@@ -24975,13 +25235,15 @@ function drawArrange() {
     }
     // The title names the clip's track. Usually the row's own name over again - rows and tracks
     // are 1:1 - but on a FOLDED group's row it is doing real work: the clips there are the
-    // members', and the title is what says which member each one is.
+    // members', and the title is what says which member each one is. On a clips() row it names
+    // the ROLL instead, which is what varies there - and two clips reading the same name is how
+    // a linked pair shows itself.
     if (w > 18) {
       ctx.save();
       ctx.beginPath(); ctx.rect(dx + 2, boxY, w - 4, AR_CLIP_TITLE_H); ctx.clip();
       ctx.fillStyle = text;
       ctx.globalAlpha = dim ? 0.5 : 0.95;
-      ctx.fillText(arClipTitle(c.label), dx + 6, boxY + AR_CLIP_TITLE_H / 2);
+      ctx.fillText(arClipTitle(c.label, c), dx + 6, boxY + AR_CLIP_TITLE_H / 2);
       ctx.globalAlpha = 1;
       ctx.restore();
     }
@@ -25578,6 +25840,20 @@ function arOpenMenu(clientX, clientY, hit, row) {
     items.push(['duplicate after', () => arDuplicate(targets), 'cmd-D — the copy overwrites what it lands on']);
     if (arSplitPoints().length) items.push(['split here', () => arSplitClips(), 'cmd-E — at the marker, or at both edges of a marked span']);
     if (targets.length > 1 || arState.regionSpan) items.push(['join', () => arJoinClips(), 'cmd-J — one clip from here to the end of the last']);
+    // On a clips() row a clip owns its notes, so the two things you do to notes live here: open
+    // them, and stop sharing them. Both are about the clip, which is why they sit above the block
+    // lines rather than among them.
+    if (arIsClipsRow(hit.clip.label)) {
+      const linked = targets.filter((c) => c.roll && arClipsOfRoll(c.roll).length > 1);
+      if (hit.clip.roll) {
+        items.push([`draw ${hit.clip.roll}`, () => arOpenClipRoll(hit.clip), 'double-click — the piano roll, on this clip\'s own notes']);
+      }
+      if (linked.length) {
+        const also = arClipsOfRoll(linked[0].roll).length - 1;
+        items.push([`make unique${linked.length > 1 ? ` (${linked.length})` : ''}`, () => arUnlinkClips(targets),
+          linked.length === 1 ? `its notes are played by ${also} other clip${also === 1 ? '' : 's'} - give this one a copy of its own` : 'each gets a copy of the notes it is sharing']);
+      }
+    }
     items.push(...arClipMenuItems(targets));
   } else if (row != null && row >= 0 && arRowLabel(row) != null) {
     const r = arState.rows[row];
@@ -25732,7 +26008,9 @@ function arSplitClips() {
     arState.clips.splice(arState.clips.indexOf(c), 1);
     arState.sel.delete(c);
     for (let i = 0; i < edges.length - 1; i++) {
-      const piece = { ...c, start: edges[i], len: edges[i + 1] - edges[i] };
+      // arClipPiece, not a bare spread: on a clips() row the second piece starts that far INTO the
+      // same roll, which is what keeps a cut from re-triggering the part half way through.
+      const piece = arClipPiece(c, edges[i], edges[i + 1] - edges[i]);
       arState.clips.push(piece);
       made.push(piece);
     }
@@ -25844,7 +26122,7 @@ function arClipOverlaps(winners) {
     const whole = pieces.length === 1 && Math.abs(pieces[0][0] - c.start) < 1e-9
       && Math.abs(pieces[0][1] - c.start - c.len) < 1e-9;
     if (whole) { kept.push(c); continue; }
-    for (const [s, e] of pieces) kept.push({ ...c, start: s, len: e - s });
+    for (const [s, e] of pieces) kept.push(arClipPiece(c, s, e - s));
     arState.sel.delete(c); // whatever survived it is a new clip; the one that was held has gone
   }
   arState.clips = kept;
@@ -26062,7 +26340,9 @@ function arClipsIn(a, b, rows = null) {
     const start = Math.max(a, c.start);
     const end = Math.min(b, c.start + c.len);
     if (end - start <= 1e-9) continue;
-    out.push({ ...c, start: start - a, len: end - start });
+    // A trimmed copy enters its roll where the trim starts (see arClipPiece), then sits at the
+    // clipboard's own origin - so pasting bars 8..16 of a part pastes bars 8..16 of its notes.
+    out.push({ ...arClipPiece(c, start, end - start), start: start - a });
   }
   return out;
 }
@@ -26102,7 +26382,7 @@ function arClearTime(a, b, rows = null) {
     const end = c.start + c.len;
     if (end <= a + 1e-9 || c.start >= b - 1e-9) { kept.push(c); continue; } // clear of the region
     if (c.start < a - 1e-9) kept.push({ ...c, len: a - c.start }); // the head that survives
-    if (end > b + 1e-9) kept.push({ ...c, start: b, len: end - b }); // ...and the tail
+    if (end > b + 1e-9) kept.push(arClipPiece(c, b, end - b)); // ...and the tail, still in step with its roll
   }
   arState.clips = kept;
   arState.sel.clear();
@@ -27288,7 +27568,7 @@ function initArrangeCanvas() {
       }
       arSelectTrack(hit.clip.label); // the track you are working on is the one you just grabbed
       const targets = [...arState.sel];
-      const orig = new Map(targets.map((c) => [c, { start: c.start, row: arRowOfLabel(c.label), len: c.len, label: c.label }]));
+      const orig = new Map(targets.map((c) => [c, { start: c.start, row: arRowOfLabel(c.label), len: c.len, label: c.label, off: c.off }]));
       arState.drag = hit.edge
         ? { kind: 'resize', targets, orig, x0: x, side: hit.edge, moved: false }
         // alt: option-drag duplicates, as in the roll - the copies are made on the first movement
@@ -27340,6 +27620,11 @@ function initArrangeCanvas() {
     if (!label) { drawArrange(); return; }
     const start = Math.floor(arBarsOf(x) / arCell()) * arCell();
     const clip = { label, start: Math.max(0, start), len: arCell() };
+    // On a clips() row a clip carries its own notes, so a fresh one gets a fresh roll: painting is
+    // how a part comes into being there, and it is drawable the moment it is drawn (double-click).
+    // Every clip painted is a NEW one - dipping the brush in an existing part would be a mode you
+    // could not see - and a copy of a part is what copy/paste and option-drag are for.
+    if (arIsClipsRow(label)) clip.roll = arMintRoll(label);
     arSelectTrack(clip.label);
     arState.clips.push(clip);
     arState.sel = new Set([clip]);
@@ -27470,6 +27755,13 @@ function initArrangeCanvas() {
         // the edge snaps to the grid, and a clip is never thinner than one cell
         if (d.side === 'left') {
           const start = Math.max(0, Math.min(arSnapTo(o.start + dBars), o.start + o.len - arCell()));
+          // Trimming the front of a clip on a clips() row moves where it ENTERS its roll, so every
+          // bar that stays in the clip goes on playing what it played - the same rule a split
+          // follows (see arClipPiece). Dragging the edge back out again undoes it exactly.
+          if (c.roll) {
+            const off = (o.off ?? 0) + (start - o.start);
+            if (off) c.off = off; else delete c.off;
+          }
           c.start = start;
           c.len = o.start + o.len - start;
         } else {
@@ -27635,9 +27927,14 @@ function initArrangeCanvas() {
       // A clip is a block: double-clicking it flips to the code on that block (see arEditBlock),
       // which is where the part gets its sound - and where it gets renamed, since the label is
       // the first thing in it. ctrl+A comes back.
+      //
+      // ...except on a clips() row, where the clip is not the block but the NOTES in it: there the
+      // double-click opens the roll to draw, which is what you came to the clip for. The block is
+      // still one gesture away - its name in the gutter, or `edit` in the clip's own menu.
       const clip = clipHit.clip;
       arState.sel = new Set([clip]);
       arSelectTrack(clip.label);
+      if (arIsClipsRow(clip.label) && arOpenClipRoll(clip)) { drawArrange(); return; }
       arEditBlock(clip.label);
       return; // the painter is gone; nothing left to draw
     }
@@ -27648,6 +27945,7 @@ function initArrangeCanvas() {
       if (!label) return;
       const start = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
       const clip = { label, start, len: arCell() };
+      if (arIsClipsRow(label)) clip.roll = arMintRoll(label); // a part of its own, as the pencil paints
       arSelectTrack(clip.label);
       arState.clips.push(clip);
       arState.sel = new Set([clip]);
