@@ -63,6 +63,23 @@ test('a muted clip keeps its place and its bars, and sounds nothing', () => {
   assert.equal(spans.get('b'), undefined, 'every clip muted is a silent track, like an emptied row');
 });
 
+test('a clip can carry a color of its own, and only six hex digits reads as one', () => {
+  // The `colors` option is the same choice made for a whole TRACK; this one is a clip saying it
+  // is different from the rest of its row, which is what right-clicking one and picking a color
+  // writes. Normalized to a lowercase #rrggbb on the way in, as the option's are.
+  const clips = parseArrangement('kick,0,4,cFF8800 kick,4,4 hat,0,4,m,c00ff00');
+  assert.deepEqual(clips, [
+    { label: 'kick', start: 0, len: 4, color: '#ff8800' },
+    { label: 'kick', start: 4, len: 4 },
+    { label: 'hat', start: 0, len: 4, mute: true, color: '#00ff00' },
+  ], 'and the clip beside it is untouched - a color is one clip\'s, not the row\'s');
+  assert.equal(serializeArrangement(clips), 'hat,0,4,m,c00ff00 kick,0,4,cff8800 kick,4,4');
+  assert.ok(looksLikeArrangeString('kick,0,4,cff8800'), 'the editor still folds it as clip data');
+  assert.deepEqual(parseArrangement('kick,0,4,cxyzxyz'), [], 'not hex, not a color');
+  assert.deepEqual(parseArrangement('kick,0,4,c1234567'), [], 'seven digits is not a color either');
+  assert.deepEqual(parseArrangement('kick,0,4,c'), [], 'and neither is nothing');
+});
+
 test('a group joins the arrangement with nothing painted, and keeps its row', () => {
   // A group has no notes of its own - what sounds on it is its members - so a clip of it would
   // play nothing. It is still a track, and a row: the one its members fold away under.

@@ -3028,12 +3028,18 @@ let mixShownLabels = null;
 // on the desk, because the analysis follows what is looked at: an unfolded group's strip stands
 // aside for its members' (its summed picture says nothing theirs don't), and a folded group's
 // hidden members don't spend the budget (engine.mixSpecTrackMax) either - which is what keeps a
-// twelve-track song folded into three groups under the per-track cap. In label order, so the
-// staggered arming lights the strips up left to right.
-function mixTapIds() {
+// twelve-track song folded into three groups under the per-track cap. Which of those two a label
+// is, is the CLIENT's to say: it is a way of looking, not a fact about the song, so the poll
+// carries the set (see mixerAnalyzedLabels) and this only intersects it with what is playing.
+// In label order, so the staggered arming lights the strips up left to right.
+function mixTapLabels() {
   const playing = [...schedulers.keys()];
   const shown = mixShownLabels ? playing.filter((l) => mixShownLabels.has(l)) : playing;
-  return (shown.length ? shown : playing).map((label) => trackIds.get(label)).filter(Boolean);
+  return shown.length ? shown : playing;
+}
+
+function mixTapIds() {
+  return mixTapLabels().map((label) => trackIds.get(label)).filter(Boolean);
 }
 
 // Tell the engine what to tap. Called on the way on and from every status poll: the playing set
@@ -3045,6 +3051,13 @@ function mixArm() {
   if (mixMonitorOn && key === mixArmedIds) return;
   mixPerTrack = engine.mixMeters(true, ids);
   mixArmedIds = key;
+  // Forget what the tracks we just STOPPED tapping last said. A band frame is the latest one
+  // rather than a queue (see handleMixSpec), so a key nothing feeds any more would go on being
+  // polled forever - the curve of a track that has stopped, or of a group that has just handed
+  // its analyzer to its members, frozen on the plot at whatever it was doing when it went.
+  const keep = new Set([...mixTapLabels(), '*']);
+  for (const key2 of [...mixSpecs.keys()]) if (!keep.has(key2)) mixSpecs.delete(key2);
+  for (const key2 of [...mixLevels.keys()]) if (!keep.has(key2)) mixLevels.delete(key2);
 }
 
 function setMixMonitor(on) {

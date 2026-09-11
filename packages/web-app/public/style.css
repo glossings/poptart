@@ -3259,6 +3259,16 @@ body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
   opacity: 0.4;
 }
 
+/* An unfolded group: its members are on the desk beside it and carry the meters and the curve
+   (see mixerAnalyzedLabels), so its own meter and swatch step back. The fader, mute and solo are
+   still the group's and stay at full strength - it is the READOUT that has moved, not the
+   controls. Same treatment the silent strip gives its swatch, for the same reason: the color is
+   the plot's legend, and this strip is not in the plot. */
+.mixer-strip-aside .mixer-meter,
+.mixer-strip-aside .mixer-strip-swatch {
+  opacity: 0.3;
+}
+
 /* While a fader or knob is held, the other tracks fade back in the plots - the strips say the
    same thing, so the two never disagree about what you are looking at. */
 .mixer-strip-unfocused {

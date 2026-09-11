@@ -19,12 +19,24 @@ import * as labelsMod from '../pattern-core/src/labels.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(HERE, 'public', 'client.js'), 'utf8');
 
-/** One function's source out of the shipped client.js (see arrange-tracks.test.mjs's twin). */
+/**
+ * One function's source out of the shipped client.js (see arrange-tracks.test.mjs's twin).
+ *
+ * The body starts at the first `{` past the PARAMETER LIST, not the first `{` at all: an options
+ * argument (`{ record = true } = {}`) opens one of its own, and counting from there would hand
+ * back the parameter list and call it the function.
+ */
 function grab(name) {
   const at = SRC.indexOf(`function ${name}(`);
   assert.ok(at > 0, `${name} not found in client.js - this test needs updating`);
   let depth = 0;
-  const start = SRC.indexOf('{', at);
+  let params = 0;
+  let after = SRC.indexOf('(', at);
+  for (let i = after; i < SRC.length; i++) {
+    if (SRC[i] === '(') params++;
+    else if (SRC[i] === ')' && --params === 0) { after = i; break; }
+  }
+  const start = SRC.indexOf('{', after);
   for (let i = start; i < SRC.length; i++) {
     const c = SRC[i];
     if (c === '/' && SRC[i + 1] === '/') { i = SRC.indexOf('\n', i); continue; }
@@ -46,8 +58,9 @@ function grab(name) {
   throw new Error(`${name} did not close - the grab helper needs updating`);
 }
 
+/** One `const NAME = ...;` line, its trailing comment included (harmless in the lifted source). */
 function grabConst(name) {
-  const m = new RegExp(`^const ${name} = [^\\n]*;$`, 'm').exec(SRC);
+  const m = new RegExp(`^const ${name} = [^\\n]*;.*$`, 'm').exec(SRC);
   assert.ok(m, `${name} not found in client.js`);
   return m[0];
 }
@@ -91,20 +104,24 @@ const rollDefsStub = {
 const LIFTED = ['matchParen', 'codeOnly', 'splitFirstArg', 'freshDefId', 'arFindDef', 'arReadDef',
   'parseArrangeCall', 'arCallOpts', 'serializeArrangeCall', 'arBlocks', 'arLabels',
   'arClipsLabels', 'arIsClipsRow', 'arAllClips', 'arTrackOfRoll', 'arClipRefCount', 'arClipRenameEdits',
-  'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece']
+  'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece',
+  'arHue', 'arHsl', 'hexToHsl', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor']
   .map(grab)
-  .concat([grabConst('preferredDefId'), grabConst('arClipsOfRoll'), grabConst('arMintRoll')])
+  .concat([grabConst('preferredDefId'), grabConst('arClipsOfRoll'), grabConst('arMintRoll'),
+    grabConst('AR_MEMBER_HUE_STEP'), grabConst('AR_ROLL_LIGHT_STEP'),
+    grabConst('AR_ROLL_LIGHT_SPAN'), grabConst('AR_ROLL_WRAP_HUE')])
   .join('\n\n');
 
 const RETURNS = ['arClipsLabels', 'arIsClipsRow', 'arTrackOfRoll', 'arClipRefCount', 'arClipRenameEdits',
-  'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece', 'arReadDef', 'arAllClips'];
+  'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece', 'arReadDef', 'arAllClips',
+  'arHsl', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor'];
 
 /** The lifted clip-roll functions over a fake editor and (optionally) an open painter. */
 function painter({ code = '', clips = null, deck = 'a' } = {}) {
   const cm = fakeCm(code);
   const logged = [];
   const wrote = { n: 0 };
-  const arState = clips ? { clips, sel: new Set(), rows: [] } : null;
+  const arState = clips ? { clips, sel: new Set(), rows: [], colors: {} } : null;
   const env = {
     arCM: cm,
     cm,
@@ -118,6 +135,9 @@ function painter({ code = '', clips = null, deck = 'a' } = {}) {
     logLine: (line) => logged.push(line),
     writeArrangeCall: () => { wrote.n++; },
     drawArrange: () => {},
+    // The track colors read off the group tree; these songs are flat, so each takes its own hue.
+    arGroupParents: () => new Map(),
+    arGroupTree: () => new Map(),
   };
   const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
@@ -276,4 +296,64 @@ test('a span copied out of the middle of a clip carries where in the roll it cam
   // with split is pinned in the shipped source, so a bare spread cannot creep back into either.
   assert.match(SRC, /out\.push\(\{ \.\.\.arClipPiece\(c, start, end - start\), start: start - a \}\);/);
   assert.match(SRC, /kept\.push\(arClipPiece\(c, b, end - b\)\);/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Colors - one per roll, and one per clip over the top of that
+// ---------------------------------------------------------------------------------------------
+
+test('every roll on a clips() row is its own shade of the track, and one roll is one shade', () => {
+  // Which is the whole point: two clips the same color ARE the same notes, and a clip you have
+  // just painted (a roll of its own) shows itself as a new part without anybody labelling it.
+  const code = 'kick: clips().s("bd")\n\nbass: n("0").synth("X")';
+  const clips = arrangeMod.parseArrangement('kick,0,4,rkick kick,4,4,rkick kick,8,4,rkick2 bass,0,4');
+  const { fns } = painter({ code, clips });
+  const hue = (c) => fns.arClipHsl(c)[0];
+
+  const shade = (c) => fns.arClipHsl(c);
+  assert.deepEqual(shade(clips[0]), shade(clips[1]), 'linked clips are exactly the same color');
+  assert.notDeepEqual(shade(clips[0]), shade(clips[2]), 'a different roll is a different shade');
+  assert.deepEqual(shade(clips[0]), fns.arHsl('kick'), 'the first part IS the track\'s color');
+  assert.equal(hue(clips[2]), hue(clips[0]), 'and the parts share the track\'s hue...');
+  assert.notEqual(shade(clips[2])[2], shade(clips[0])[2], '...differing in lightness instead');
+  assert.deepEqual(shade(clips[3]), fns.arHsl('bass'), 'an ordinary row\'s clip is its track\'s color');
+
+  // The walk steps out either side of the track's own lightness, then laps one hue step over -
+  // so a row of many parts never draws two of them alike.
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 7].map((i) => fns.arRollTint(i)),
+    [[0, 0], [0, 7], [0, -7], [0, 14], [0, -14], [0, 21], [0, -21], [9, 0]]);
+  const tints = new Set(Array.from({ length: 40 }, (_, i) => String(fns.arRollTint(i))));
+  assert.equal(tints.size, 40, 'forty parts, forty shades');
+  // Off the id alone: dragging a clip about, or deleting the one before it, must not repaint it.
+  // The BARE name is the first of the series, which is what freshDefId hands out first.
+  assert.equal(fns.arRollShade('kick', 'kick'), 0);
+  assert.equal(fns.arRollShade('kick2', 'kick'), 1);
+  assert.equal(fns.arRollShade('kick10', 'kick'), 9);
+  // A roll named by hand (or one whose track was renamed out from under it) hashes instead, and
+  // never onto 0 - that shade belongs to the track's own color.
+  assert.equal(fns.arRollShade('verse', 'kick'), fns.arRollShade('verse', 'kick'), 'stable');
+  assert.notEqual(fns.arRollShade('verse', 'kick'), 0);
+  assert.notEqual(fns.arRollShade('kick2', 'drums'), 1, 'not this track\'s series any more');
+});
+
+test('coloring a clip colors THAT clip - the track\'s own color is the row\'s menu', () => {
+  const code = 'kick: clips().s("bd")';
+  const clips = arrangeMod.parseArrangement('kick,0,4,rkick kick,4,4,rkick');
+  const { fns, arState, wrote } = painter({ code, clips });
+
+  fns.arSetClipColor([clips[0]], '#FF8800');
+  assert.equal(clips[0].color, '#ff8800');
+  assert.equal(clips[1].color, undefined, 'its linked twin keeps the row\'s color - a color is not the notes');
+  assert.deepEqual(arState.colors, {}, 'and the track\'s own color is untouched');
+  assert.deepEqual(fns.arClipHsl(clips[0]), [32, 100, 50], 'a chosen color wins over the roll\'s shade');
+
+  fns.arSetClipColor([clips[0]], null);
+  assert.equal(clips[0].color, undefined, 'and "default color" hands it back to the row');
+
+  // The track-wide choice still exists; it is just the ROW's gesture now, and the roll shades
+  // step off it rather than off the hashed hue.
+  fns.arSetColor('kick', '#3366CC');
+  assert.equal(arState.colors.kick, '#3366cc');
+  assert.equal(fns.arClipHsl(clips[1])[0], fns.arHsl('kick')[0], 'kick is the first roll: the track color itself');
+  assert.equal(wrote.n, 3);
 });

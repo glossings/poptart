@@ -10745,6 +10745,7 @@ async function openMixer() {
   mixerState = {
     strips: new Map(),
     order: [], // strip labels in code order - the palette walk and the draw order
+    aside: new Set(), // ...of those, the groups standing aside for their own members' analyzers
     serverTracks: [], // what the engine says is playing, as of the last poll
     // Labels a strip has been renamed away from, dropped from the poll's track list until the
     // engine stops reporting them. The rename lands in the code at once, but the old track keeps
@@ -10827,11 +10828,11 @@ function sizeMixerCanvases() {
 
 async function mixerPoll() {
   if (!mixerState) return;
-  // The poll carries which strips the desk is showing, and the server analyzes THOSE (see its
+  // The poll carries which strips the desk wants analyzed, and the server taps THOSE (see its
   // mixTapIds): unfold a group and its members take the analyzers instead of the group; fold one
   // and its hidden members stop spending the per-track budget. Empty on the very first poll
   // (before the strips are built), which the server reads as "everything playing".
-  const s = await api('GET', `/api/mixer/status?strips=${encodeURIComponent(mixerState.order.join(','))}`);
+  const s = await api('GET', `/api/mixer/status?strips=${encodeURIComponent(mixerAnalyzedLabels().join(','))}`);
   if (!mixerState) return;
   // The server flags off when the engine restarted under it (or our first arm failed) - re-arm,
   // gently. While the engine is down this fails and the note below says so.
@@ -10880,7 +10881,7 @@ async function mixerPoll() {
   mixerNoteEl.textContent =
     !mixerState.order.length ? 'nothing playing — evaluate a pattern and its tracks appear here'
     : mixerState.monitorError ? `meters offline: ${mixerState.monitorError}`
-    : !mixerState.perTrack ? `${mixerState.order.length} strips showing — per-track analysis stays off past ${mixerState.perTrackMax} (it runs on the audio thread), so the plots show the master; folding a group frees its members' share`
+    : !mixerState.perTrack ? `${mixerAnalyzedLabels().length} tracks to analyze — per-track analysis stays off past ${mixerState.perTrackMax} (it runs on the audio thread), so the plots show the master; folding a group frees its members' share`
     : '';
 }
 
@@ -10932,13 +10933,34 @@ function mixerStripLabels() {
     .some((a) => groups.has(a) && a !== groupsMod.GROUP_ROOT && !mixerUnfolded.has(a));
   const order = groupsMod ? groupsMod.groupOrder(codeOrder, tree).map((o) => o.label) : codeOrder;
   const treePos = (l) => { const i = order.indexOf(l); return i < 0 ? order.length + pos(l) : i; };
-  return [...inStrip].filter((l) => !hidden(l)).sort((a, b) => treePos(a) - treePos(b));
+  const shown = [...inStrip].filter((l) => !hidden(l)).sort((a, b) => treePos(a) - treePos(b));
+  // An UNFOLDED group stands aside from the analysis. Its strip stays - the fader, the mute and
+  // the solo are still the group's - but its summed picture says nothing its members' don't, and
+  // it would take one of the per-track analyzers to say it (see the server's mixTapIds and
+  // OscEngine#mixMeters). So unfolding a group of four spends four analyzers, not five.
+  //
+  // Only while its members are actually on the desk: an unfolded group with nothing showing has
+  // nobody standing in for it, and going dark there would be a strip that just stops working.
+  const aside = new Set(shown.filter((l) => groups.has(l) && mixerUnfolded.has(l)
+    && shown.some((m) => (parents.get(m) ?? null) === l)));
+  return { order: shown, aside };
 }
 
 // The groups the mixer has been asked to look inside, by label. A group is one channel on the desk
 // until you say otherwise - that is what grouping bought - so this starts empty on every open and
 // is not written into the code: it is a way of looking, not a property of the song.
 const mixerUnfolded = new Set();
+
+/**
+ * The strips that get an analyzer: everything on the desk except a group standing aside for its
+ * own members (see mixerStripLabels). What the poll asks the server to tap, and what the
+ * per-track budget is counted against.
+ */
+function mixerAnalyzedLabels() {
+  const aside = mixerState?.aside;
+  const order = mixerState?.order ?? [];
+  return aside?.size ? order.filter((l) => !aside.has(l)) : order;
+}
 
 // Recompute the strip list, rebuild the row only when it actually changed, and re-read the
 // code's values into the controls. Called from every poll and (debounced) from every buffer
@@ -10950,7 +10972,10 @@ function refreshMixerStrips() {
   if (gen === mixerState.codeGen && tracksKey === mixerState.tracksKey) return;
   mixerState.codeGen = gen;
   mixerState.tracksKey = tracksKey;
-  const labels = mixerStripLabels();
+  const { order: labels, aside } = mixerStripLabels();
+  mixerState.aside = aside;
+  // A strip that stops being analyzed must not leave its last curve frozen on the plot.
+  for (const l of aside) mixerState.freezeMax.delete(l);
   if (labels.join('\n') !== mixerState.order.join('\n')) {
     const kept = mixerState.strips;
     mixerState.strips = new Map();
@@ -11444,7 +11469,11 @@ function syncMixerFromCode() {
       strip.el.title = `"${strip.label}" is playing but isn't in the buffer any more - its controls are off`;
       continue;
     }
-    strip.el.title = '';
+    // Unfolded, a group hands its analyzer to its members (see mixerStripLabels) - so its meter
+    // and its curve are theirs now, and the strip says which rather than reading as a dead one.
+    const aside = mixerState.aside?.has(strip.label) ?? false;
+    strip.el.classList.toggle('mixer-strip-aside', aside);
+    strip.el.title = aside ? `${strip.label}'s channels are showing, so they carry the meters - fold it to meter the group itself` : '';
     if (!strip.dragGain && !strip.writeTimer.postgain) {
       strip.gain = gain.value;
       strip.fader.value = Math.round(mixerGainToFader(gain.value) * 1000);
@@ -24751,11 +24780,13 @@ function arHue(label) {
 const AR_MEMBER_HUE_STEP = 28;
 
 /**
- * A clip's color: what the person chose for that label if they chose one (see the `colors` option
+ * A TRACK's color: what the person chose for that label if they chose one (see the `colors` option
  * in arrange.mjs), else its GROUP's hue stepped round the wheel once per member, in the order the
  * group lists them - so a group is a color and everything in it is a neighbor of that color, which
  * is what makes a folded row's mixed clips still read as the kit. A track in no group takes its own
  * hashed hue. Returned as [h, s, l] so a caller can dim or lighten it.
+ *
+ * What one CLIP is drawn in is arClipHsl, which starts here and may step off it.
  */
 function arHsl(label) {
   const chosen = arState?.colors?.[label];
@@ -24769,12 +24800,73 @@ function arHsl(label) {
   const at = (arGroupTree().get(parent) ?? []).indexOf(label);
   return [(hue + (at + 1) * AR_MEMBER_HUE_STEP) % 360, 62, 58];
 }
+// How a ROLL's shade steps off its track's color. Rolls vary LIGHTNESS, not hue: hue is already
+// saying which track a clip belongs to and which member of which group that track is (see the step
+// above), so stepping it again would walk a kick's later parts into the hats' color. A row has to
+// go on reading as one color while its parts read as different parts.
+//
+// The walk alternates either side of the track's own lightness - 0, +1, -1, +2, -2, +3, -3 - so
+// consecutive parts are as far apart as the span allows rather than creeping in one direction.
+// Past the last of those it starts round again one small hue step over, so a row of many parts
+// still never draws two of them the same: same color means same notes, always.
+const AR_ROLL_LIGHT_STEP = 7; // percent of lightness per part
+const AR_ROLL_LIGHT_SPAN = 3; // ...and how many steps either side of the track's own
+const AR_ROLL_WRAP_HUE = 9; // degrees per lap of that walk
+
+/** A roll's shade index -> how far its color sits from its track's, as [hue, lightness] deltas. */
+function arRollTint(i) {
+  const span = AR_ROLL_LIGHT_SPAN * 2 + 1;
+  const lap = Math.floor(i / span);
+  const k = i % span;
+  const out = k === 0 ? 0 : (k % 2 ? Math.ceil(k / 2) : -(k / 2));
+  return [lap * AR_ROLL_WRAP_HUE, out * AR_ROLL_LIGHT_STEP];
+}
+
+/**
+ * Which shade of its track a roll takes. Off the ID rather than off any ordering, so a clip's
+ * color is the same wherever it is dragged to and whatever is deleted around it - and two clips
+ * playing ONE roll are always exactly the same color, which is the whole point: that is how a
+ * linked pair shows itself, and how a part you have just made unique shows that it is.
+ *
+ * The painter mints a track's rolls as `kick`, `kick2`, `kick3` (see arMintRolls and freshDefId -
+ * the bare name IS the first of the series), so a roll named for its own track is that series and
+ * the shades walk in the order the parts were made. Anything else - a roll named by hand, or one
+ * whose track has since been renamed - takes a hashed step, never 0: zero is the track's own
+ * color, which the first of the series has.
+ */
+function arRollShade(id, label) {
+  const s = String(id);
+  const stem = String(label ?? '');
+  if (stem && s === stem) return 0;
+  const n = stem && s.startsWith(stem) ? /^\d+$/.exec(s.slice(stem.length)) : null;
+  return n ? Number(n[0]) - 1 : 1 + (arHue(s) % 31);
+}
+
+/**
+ * The color ONE clip is drawn in: its own if someone picked one for it (the `c` field - see
+ * arrange.mjs), else its track's, stepped once per roll on a clips() row so the parts along the
+ * row are told apart at a glance.
+ */
+function arClipHsl(clip) {
+  if (clip?.color) return hexToHsl(clip.color);
+  const [h, s, l] = arHsl(clip.label);
+  if (!clip?.roll || !arIsClipsRow(clip.label)) return [h, s, l];
+  const [dh, dl] = arRollTint(arRollShade(clip.roll, clip.label));
+  // Held inside a legible band, because the track's own lightness may be a hand-picked color's.
+  return [(h + dh) % 360, s, Math.min(82, Math.max(34, l + dl))];
+}
+
 // `sat` scales the saturation without touching the hue: what a MUTED clip is drawn with (see the
 // clip loop in drawArrange). Washed out rather than a flat grey - on a folded group's row six
 // muted members would all be the same rectangle, and which part you took out is exactly the thing
 // you are looking at.
 const arColor = (label, alpha = 1, sat = 1) => {
   const [h, s, l] = arHsl(label);
+  return `hsla(${h}, ${s * sat}%, ${l}%, ${alpha})`;
+};
+/** The same, for a clip rather than a track - what every clip in the lanes is drawn with. */
+const arClipColor = (clip, alpha = 1, sat = 1) => {
+  const [h, s, l] = arClipHsl(clip);
   return `hsla(${h}, ${s * sat}%, ${l}%, ${alpha})`;
 };
 const AR_MUTED_SAT = 0.16;
@@ -25188,7 +25280,7 @@ function drawArrange() {
     if (squish?.has(c.label)) {
       const bandH = (AR_ROW - 8) / squish.size;
       const sy = y + 4 + squish.get(c.label) * bandH;
-      ctx.fillStyle = arColor(c.label, selected ? 0.95 : past || c.mute ? 0.3 : 0.7, c.mute ? AR_MUTED_SAT : 1);
+      ctx.fillStyle = arClipColor(c, selected ? 0.95 : past || c.mute ? 0.3 : 0.7, c.mute ? AR_MUTED_SAT : 1);
       ctx.fillRect(dx, sy, Math.max(2, dx2 - dx - 1), Math.max(1.5, bandH - 1));
       continue;
     }
@@ -25200,12 +25292,12 @@ function drawArrange() {
     // same way a clip PAST the loop end is, since both mean "drawn here, not heard here".
     const sat = c.mute ? AR_MUTED_SAT : 1;
     const dim = past || c.mute;
-    ctx.fillStyle = arColor(c.label, dim ? 0.1 : 0.22, sat);
+    ctx.fillStyle = arClipColor(c, dim ? 0.1 : 0.22, sat);
     prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.fill();
     // the title, solid: it is the clip as a thing you can pick up, and it has to read as a handle
     ctx.save();
     ctx.beginPath(); prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.clip();
-    ctx.fillStyle = arColor(c.label, dim ? 0.3 : 0.62, sat);
+    ctx.fillStyle = arClipColor(c, dim ? 0.3 : 0.62, sat);
     ctx.fillRect(dx + 0.5, boxY, w, AR_CLIP_TITLE_H);
     // ...and the bars run on THROUGH the body, so the place you are about to split at is visible
     // inside a clip and not only in the empty song around it.
@@ -25220,7 +25312,7 @@ function drawArrange() {
     }
     ctx.globalAlpha = 1;
     ctx.restore();
-    ctx.strokeStyle = selected ? col('--accent') : arColor(c.label, 0.95, sat);
+    ctx.strokeStyle = selected ? col('--accent') : arClipColor(c, 0.95, sat);
     ctx.lineWidth = selected ? 1.5 : 1;
     if (c.mute) ctx.setLineDash([3, 2]);
     prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.stroke();
@@ -25881,6 +25973,10 @@ function arOpenMenu(clientX, clientY, hit, row) {
     if (arGroupParents().get(label) != null) {
       items.push([`take ${label} out of ${arGroupParents().get(label)}`, () => arTakeOut(label)]);
     }
+    // The row is the track, so this is where the track's own color lives - a clip's menu colors
+    // that clip alone.
+    items.push([`color ${label}…`, () => arPickColor(label), 'every clip of this track that has not been colored on its own']);
+    if (arState.colors[label]) items.push(['default color', () => arSetColor(label, null)]);
   }
   // The time ops, on whatever span is marked - the same set the keys reach, spelled out so the
   // shortcuts are discoverable rather than folklore.
@@ -25920,36 +26016,66 @@ function arClipMenuItems(targets) {
   if (one) {
     items.push([`edit ${one}`, () => arEditBlock(one), 'the code, on this block - double-clicking the clip is the same (ctrl+A comes back)']);
     items.push(['rename…', () => arRenameClip(targets[0]), 'cmd-R — the block, its clips and its place in the tree']);
-    items.push([`color…`, () => arPickColor(one), 'a color of your own for every clip of this track']);
-    if (arState.colors[one]) items.push(['default color', () => arSetColor(one, null)]);
+  }
+  // Color is about the CLIPS you right-clicked and no others. A whole track at once is the row's
+  // own menu (right-click its name), which is the thing that IS the track - a clip is one part of
+  // it, and coloring a section to find it again should not repaint the rest of the song.
+  const n = targets.length;
+  items.push(['color…', () => arPickClipColor(targets),
+    n === 1 ? 'a color of your own for this clip' : `a color of your own for these ${n} clips`]);
+  if (targets.some((c) => c.color)) {
+    items.push(['default color', () => arSetClipColor(targets, null), 'back to the track\'s own color']);
   }
   return items.length > 1 ? items : [];
 }
 
 // The color chooser is the platform's own, as the theme editor's is: one input, kept out of sight
 // and clicked open from the menu, since a swatch grid of ours would be a second opinion about a
-// thing the platform already asks well.
+// thing the platform already asks well. `apply(hex)` is what each of the two scopes does with it.
 let arColorInput = null;
-function arPickColor(label) {
+function arOpenColorInput(from, apply) {
   if (!arColorInput) {
     arColorInput = document.createElement('input');
     arColorInput.type = 'color';
     arColorInput.className = 'arrange-color-input';
     arCanvas.parentElement.appendChild(arColorInput);
   }
-  const [h, s, l] = arHsl(label);
+  const [h, s, l] = from;
   arColorInput.value = hslToHex(h, s, l);
-  arColorInput.oninput = () => arSetColor(label, arColorInput.value, { record: false });
-  arColorInput.onchange = () => arSetColor(label, arColorInput.value);
+  // Live while it is dragged (no history step - the gesture is one edit), landed on change.
+  arColorInput.oninput = () => apply(arColorInput.value, false);
+  arColorInput.onchange = () => apply(arColorInput.value, true);
   arColorInput.click();
 }
 
-/** Write (or with null, forget) a chosen color for `label`. */
+/** The whole TRACK's color - the row menu's. */
+function arPickColor(label) {
+  arOpenColorInput(arHsl(label), (hex, record) => arSetColor(label, hex, { record }));
+}
+
+/** ...and one clip's, which wins over it. Opens on what those clips are drawn in now. */
+function arPickClipColor(targets) {
+  if (!targets.length) return;
+  arOpenColorInput(arClipHsl(targets[0]), (hex, record) => arSetClipColor(targets, hex, { record }));
+}
+
+/** Write (or with null, forget) a chosen color for the TRACK `label`. */
 function arSetColor(label, hex, { record = true } = {}) {
   if (!arState) return;
   if (hex) arState.colors[label] = hex.toLowerCase();
   else delete arState.colors[label];
   writeArrangeCall(record, { evaluate: false }); // nothing about a color is heard
+  drawArrange();
+}
+
+/** Write (or with null, forget) a chosen color on each of `clips` - see arrange.mjs's `c` field. */
+function arSetClipColor(clips, hex, { record = true } = {}) {
+  if (!arState) return;
+  for (const c of clips) {
+    if (hex) c.color = hex.toLowerCase();
+    else delete c.color;
+  }
+  writeArrangeCall(record, { evaluate: false });
   drawArrange();
 }
 

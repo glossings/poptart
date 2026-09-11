@@ -21,6 +21,10 @@
 //   o<num> - how far INTO that roll the clip starts, in cycles (omitted when 0, the usual case).
 //            What splitting a clip leaves behind: the second piece starts where the first left
 //            off, so cutting a clip in two changes where you can grab it and nothing you hear.
+//   c<hex>  - a color chosen for THIS clip, six hex digits without the `#`. The `colors` option
+//            below is the same choice made for a whole track; this one overrides it for one clip,
+//            which is what right-clicking a clip and picking a color writes. Editor metadata:
+//            nothing about playback reads it.
 // Every extra is written only when it is set, so a clip that has none is spelled exactly as it
 // always was.
 //
@@ -58,9 +62,10 @@
 //            follow the buffer): it is what tells a track that has never been arranged - fill it -
 //            from one whose clips you deleted on purpose - leave it silent. See
 //            reconcileArrangement.
-//   colors - { label: "#rrggbb" } for the clips a person has colored by hand. A track with no
+//   colors - { label: "#rrggbb" } for the TRACKS a person has colored by hand. A track with no
 //            entry takes a hue step off its group's color (see the painter), so the members of one
-//            group read as a family and an entry is only written once someone has chosen.
+//            group read as a family and an entry is only written once someone has chosen. One
+//            clip colored on its own writes the `c` field above instead, which wins over this.
 //   autos  - the automation lanes PINNED into the painter's strip, by name, top to bottom
 //   loops - loop regions, [[name, start, end], …] in cycles: while a region is ARMED, playback
 //           entering it loops it until the player releases it (ctrl+L), then runs on to the next
@@ -105,6 +110,7 @@ export function parseArrangement(str) {
       if (ex === 'm' && !clip.mute) clip.mute = true;
       else if (ex.length > 1 && ex[0] === 'r' && clip.roll == null) clip.roll = ex.slice(1);
       else if (ex.length > 1 && ex[0] === 'o' && clip.off == null && num(ex.slice(1)) != null) clip.off = num(ex.slice(1));
+      else if (ex.length === 7 && ex[0] === 'c' && clip.color == null && /^[0-9a-fA-F]{6}$/.test(ex.slice(1))) clip.color = `#${ex.slice(1).toLowerCase()}`;
       else { bad = true; break; }
     }
     if (bad) continue;
@@ -129,7 +135,8 @@ export function serializeArrangement(clips) {
     .filter((c) => c && c.label && c.len > 0)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) || a.start - b.start)
     .map((c) => `${c.label},${fmt(c.start)},${fmt(c.len)}${c.mute ? ',m' : ''}`
-      + `${c.roll ? `,r${c.roll}` : ''}${c.roll && c.off ? `,o${fmt(c.off)}` : ''}`)
+      + `${c.roll ? `,r${c.roll}` : ''}${c.roll && c.off ? `,o${fmt(c.off)}` : ''}`
+      + `${/^#[0-9a-f]{6}$/i.test(c.color ?? '') ? `,c${c.color.slice(1).toLowerCase()}` : ''}`)
     .join(' ');
 }
 
@@ -137,7 +144,7 @@ export function serializeArrangement(clips) {
 export function looksLikeArrangeString(str) {
   const s = String(str ?? '').trim();
   if (!s) return true;
-  return s.split(/\s+/).every((tok) => /^[^,\s]+,-?[\d.]+,[\d.]+(?:,(?:m|r[^,\s]+|o-?[\d.]+))*$/.test(tok));
+  return s.split(/\s+/).every((tok) => /^[^,\s]+,-?[\d.]+,[\d.]+(?:,(?:m|r[^,\s]+|o-?[\d.]+|c[0-9a-fA-F]{6}))*$/.test(tok));
 }
 
 /** The options as the builder and the editor both read them, defaults filled in. */
