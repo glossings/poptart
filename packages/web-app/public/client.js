@@ -4031,6 +4031,7 @@ const prKeysBtn = document.getElementById('pianorollKeys'); // ⌨ - the compute
 const prCaptureBtn = document.getElementById('pianorollCapture'); // what was just played, into the roll
 const prSide = document.querySelector('.pianoroll-side');
 const prSideToggle = document.getElementById('pianorollSideToggle');
+const prBendBtn = document.getElementById('pianorollBend'); // the bend overlay's switch (see prSetBend)
 const prCloseBtn = document.getElementById('pianorollClose');
 
 const PR_W = 660; // grid width with the control column open; the CSS owns it from there (see prW)
@@ -4115,6 +4116,30 @@ let prTool = localStorage.getItem('poptartPianorollTool') === 'select' ? 'select
 // The channels the value lane edits, in the order its gutter label cycles them. vel and prob are
 // 0..1; nudge is the drawn time offset (see pianoroll.mjs), bipolar around 0 and measured in cells.
 const PR_LANE_KEYS = ['vel', 'prob', 'nudge'];
+// The bend overlay (see the bend section below). Its vertical scale is one SEMITONE per grid row,
+// zero at the middle of the grid - so a two-semitone slide is two rows tall, read against the very
+// notes it bends, and the drawable range is the half-grid either way. PR_ROWS is 24, which makes
+// that an octave up and an octave down: further than any pitch-bend wheel reaches and further than
+// a sample survives, so the clamp is a boundary of the drawing, never of the music.
+const PR_BEND_RANGE = PR_ROWS / 2;
+const PR_BEND_HIT = 7; // px - how near a breakpoint (or the curve) a press has to be to grab it
+// What a full MIDI pitch bend is worth where the code doesn't say - the default .bend() itself
+// assumes, mirrored here because the browser has no copy of signal.mjs. Keep the two in step
+// (DEFAULT_BEND_RANGE there); it is only ever a line the overlay draws, never a value that plays.
+const DEFAULT_BEND_RANGE = 2;
+const PR_BEND_CURVE_STEP = 3; // px between samples when the curve is stroked
+const PR_BEND_STEP = 0.25; // semitones an arrow key lifts a marked span; shift makes it a whole one
+// How near an alignment the pitch scroll has to come before the wheel pulls it onto a note's row
+// (in rows). Generous enough to catch without aiming, small enough that scrolling THROUGH the roll
+// still feels like scrolling - see prBendMagnet.
+const PR_BEND_MAGNET = 0.4;
+const PR_CARET_TICK = 7; // px the caret's ticks reach in from the top and bottom of the grid
+// Where the magnetized wheel is really scrolling from. The pull has to be applied to a raw,
+// unsnapped position or a fine trackpad scroll would be swallowed by the magnet and never escape
+// it; this remembers the raw value and the snapped one it produced, so a pitch change from
+// anywhere else (a frame, an arrow key, another roll) is noticed and the raw restarted from it.
+let prBendScroll = null; // { raw, snapped }
+let prBendOn = localStorage.getItem('poptartPianorollBend') === '1'; // sticky, like the tool
 const PR_MAX_NUDGE = 0.5; // mirrors pianoroll.mjs's PIANOROLL_MAX_NUDGE - half a cell either way
 // What the lane and cmd-drag set. Deliberately NOT sticky, unlike the tool and the folds: a roll
 // opened fresh always shows `vel`, because that is what you reach for nearly every time, and a lane
@@ -4478,13 +4503,23 @@ function parsePianorollCall(inner) {
   const swing = swingM ? Math.min(0.5, Math.max(-0.5, Number(swingM[1]) || 0)) : 0;
   const sgM = /\bswinggrid\s*:\s*(\d+)/.exec(inner);
   const swinggrid = sgM ? Math.max(1, Math.round(Number(sgM[1]))) : null;
+  // bend: the roll's drawn pitch-bend curve, breakpoints in cells and semitones (see the bend
+  // overlay below). Absent on every roll that doesn't bend, which is the point - a flat curve is
+  // written as no curve at all, so the option only ever appears on a roll that uses it.
+  const bendM = /\bbend\s*:\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner);
+  let bend = [];
+  try {
+    if (bendM?.[2]?.trim() && shapeMod) bend = shapeMod.parseBendPoints(bendM[2]);
+  } catch {
+    bend = []; // half-typed curve: the panel opens with none rather than refusing to open
+  }
   let notes = [];
   try {
     notes = pianorollMod.parsePianoRoll(noteStr);
   } catch {
     // unparseable note string - start from an empty roll
   }
-  return { notes, grid, len, start, mode, swing, swinggrid };
+  return { notes, grid, len, start, mode, swing, swinggrid, bend };
 }
 
 // Hidden notes (buried under another - see prClipOverlaps) are left out: the code holds what
@@ -4494,7 +4529,7 @@ function parsePianorollCall(inner) {
  * the live push (prPushRoll) are both formed from this, so what a drag SOUNDS like can't drift from
  * what the code says once the drag is written down.
  */
-function prCallOpts({ grid, len, start, mode, swing, swinggrid }) {
+function prCallOpts({ grid, len, start, mode, swing, swinggrid, bend }) {
   const opts = { grid, len };
   if (start) opts.start = start; // a window that opens at 0 is the default - don't write it
   if (mode && mode !== 'note') opts.mode = mode; // notes are the default - don't write it
@@ -4502,6 +4537,12 @@ function prCallOpts({ grid, len, start, mode, swing, swinggrid }) {
   // are what the builder assumes, and a roll that says nothing about groove should look like one.
   if (swing) opts.swing = Math.round(swing * 100000) / 100000;
   if (swing && swinggrid && swinggrid !== grid) opts.swinggrid = swinggrid;
+  // A curve that bends nothing is not written - not as an empty string, not as a pair of zeroes.
+  // Flattening a bend out has to leave the roll exactly as it would have been had one never been
+  // drawn, because that is what the person just asked for; and on the playback side a channel that
+  // is absent costs the track nothing at all, while one that reads zero still costs it a polled
+  // control and an engine-side ramp (see bendChannelFor in signal.mjs).
+  if (bend?.length && shapeMod && !shapeMod.bendIsFlat(bend)) opts.bend = shapeMod.serializeBendPoints(bend);
   return opts;
 }
 
@@ -5592,7 +5633,7 @@ function openPianorollEditor(call, carry = null) {
   if (prState?.marker) prState.marker.clear();
   // A roll(...) definition is a pianoroll() call with an id in front of it - drop the id and the
   // rest parses identically.
-  const { notes, grid, len, start, mode, swing, swinggrid } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
+  const { notes, grid, len, start, mode, swing, swinggrid, bend } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
   prState = {
     marker: cm.markText(from, to, {}),
     callStart: call.start,
@@ -5610,12 +5651,27 @@ function openPianorollEditor(call, carry = null) {
     // and the commit button turns it into per-note nudges without changing a thing that sounds.
     swing,
     swinggrid,
+    // The roll's pitch bend, drawn over the grid in the bend overlay: breakpoints in absolute
+    // cells and semitones, empty on a roll that doesn't bend (see the bend section below).
+    bend,
+    bendHeld: null, // the breakpoint under the hand, for the readout - transient, never written
+    // The marked stretch of curve, [a, b] in cells - what the span edit ops act on (see
+    // prBendPointsIn). Dragged out with the arrow tool, exactly as the arrangement's automation
+    // span is, and transient like the note selection beside it.
+    bendSel: null,
     pitchTop: PR_DEFAULT_TOP, // replaced by prFramePitch below, which needs prState to exist
     fold: prFold, // only the rows something is drawn on (either axis)
     scaleFold: prScaleFold, // ...and only the key's rows, on the note axis (both sticky, like the tool)
     zoom: 1, // 1 = the whole rendered width fits; >1 zooms in horizontally with a scroll offset
     scrollCells: 0, // leftmost visible cell when zoomed in
     focusCell: null, // the cell the last gesture touched - what a keyboard zoom aims at (prZoomFocusPx)
+    // The CARET: the cell the last press put the insertion point on, snapped to the grid. A
+    // selection says what to act on; this says WHERE, for the things that need a place rather than
+    // a subject - paste, above all. Without it a paste has nowhere to go but where the material
+    // came from, which is the head of the roll as often as not. Distinct from focusCell beside it:
+    // that follows a drag for the zoom to aim at and is never drawn, this is set once per press and
+    // is on screen, because a position you cannot see is a position you cannot use.
+    caret: null,
     sel: new Set(), // currently selected note objects (transient; mutated in place, never reserialized)
     regionSpan: null, // the last marquee's quantized [a, b) cells - half of the time selection (see prTimeRegion)
     ghost: [], // keys still down in a take being recorded into this roll, drawn where they will land (see prRecGhosts); never serialized
@@ -6184,8 +6240,8 @@ const PR_HISTORY_MAX = 200; // snapshots kept; the oldest are dropped past this
 // The roll as one undoable state. Swing is in it because committing is an edit like any other: it
 // zeroes the knob and writes the same offsets into the notes, and an undo that put the nudges back
 // while leaving the knob at 0 would double the groove.
-const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start, mode: prState.mode, swing: prState.swing, swinggrid: prState.swinggrid });
-const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}|${s.mode}|${s.swing}|${s.swinggrid}`;
+const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start, mode: prState.mode, swing: prState.swing, swinggrid: prState.swinggrid, bend: prState.bend.map((p) => ({ ...p })) });
+const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}|${s.mode}|${s.swing}|${s.swinggrid}|${prBendKey(s.bend)}`;
 
 // Record the roll's current state, unless it's identical to the entry we're already sitting on -
 // which makes this safe to call from anywhere, including the code-sync path that fires on every
@@ -6213,6 +6269,10 @@ function prHistoryStep(delta) {
   prState.mode = snap.mode;
   prState.swing = snap.swing;
   prState.swinggrid = snap.swinggrid;
+  prState.bend = snap.bend.map((p) => ({ ...p }));
+  prState.bendHeld = null; // the restored points are new objects, like the notes below
+  prState.bendSel = null;
+  prState.caret = null;
   prState.sel.clear(); // the restored notes are new objects; the old selection means nothing
   prSyncGridLenInputs();
   prSyncMode();
@@ -6353,6 +6413,13 @@ function syncPianorollFromCode() {
   prState.start = parsed.start;
   prState.swing = parsed.swing;
   prState.swinggrid = parsed.swinggrid;
+  // A bend typed (or deleted) by hand in the call is the same edit the overlay makes - re-read it,
+  // and let go of a breakpoint index that no longer names anything.
+  if (prBendKey(parsed.bend) !== prBendKey(prState.bend)) {
+    prState.bend = parsed.bend;
+    prState.bendHeld = null;
+    prState.bendSel = null; // a span belongs to the curve it was drawn over
+  }
   if (parsed.mode !== prState.mode) {
     // Typed `mode: "index"` into the call by hand - the same change of view the button makes,
     // selection included (see prSetMode).
@@ -6386,6 +6453,7 @@ const prRenderCols = () => {
   let end = prLoopEnd();
   for (const nt of prState.notes) if (!nt.hidden && nt.start + nt.len > end) end = nt.start + nt.len;
   for (const g of prState.ghost) if (g.start + g.len > end) end = g.start + g.len;
+  for (const p of prState.bend) if (p.x > end) end = p.x;
   return (Math.floor(end / prState.grid) + 1) * prState.grid + 4;
 };
 
@@ -6397,6 +6465,8 @@ const prMinCell = () => {
   let min = Math.min(0, prState.start);
   for (const nt of prState.notes) if (!nt.hidden && nt.start < min) min = nt.start;
   for (const g of prState.ghost) if (g.start < min) min = g.start;
+  // ...and the bend curve, which may reach outside the loop like the notes do (see prBendExtent).
+  for (const p of prState.bend) if (p.x < min) min = p.x;
   return Math.floor(min / prState.grid) * prState.grid;
 };
 
@@ -6828,6 +6898,610 @@ function prSetLane(valueFor) {
  * channel on show, over the selection if there is one and the whole roll otherwise - the menu says
  * which. The only place those two live; a lane is what you'd reach for to do either.
  */
+// ---------------------------------------------------------------------------------------------
+// The bend overlay - a roll's pitch bend, drawn over its own grid.
+//
+// Pitch bend is one value for the whole track at any instant, not a number per note: on a MIDI
+// synth it IS a channel message, and on a sampler it is the speed the file is read at. So it is
+// drawn as a curve over time rather than as markers in the value lane below, which is per-note and
+// has nothing to say here. The `bend` button in the side column puts the grid behind a scrim and
+// hands the area to the curve; switching it off gives the notes back.
+//
+// The curve is drawn against the NOTES on purpose - the same cells across, one semitone per grid
+// row down, zero at the middle. That is what makes it readable as music: a slide that lands a
+// third above is three rows tall, over the very note it bends. The drawable reach is the half-grid
+// either way (an octave), which no bend wheel and few samples survive anyway.
+//
+// Gestures are the ones the LFO's shape editor and the arrangement's automation lane already have,
+// because this is the third instance of the same thing: drag a breakpoint, vertical-drag a segment
+// to curve it, double-click to add or remove one, and - with the arrow tool - drag out a stretch
+// to lift, copy, cut, duplicate or delete as one (see the span ops below). What is different is
+// where the curve LIVES - on
+// the roll (see pianoroll()'s `bend` option), so it travels with the notes through copies, clip
+// variations and the roll library, and a `.bend()` written on the chain replaces it the way setting
+// any control replaces what was there.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * How far a MIDI pitch bend reaches on this roll's track, in semitones - what the overlay draws its
+ * reach lines at. Null where the question doesn't arise: a sampler bends by repitching, so it has
+ * no such limit, and neither does a roll with no track around it yet.
+ *
+ * Read off the code rather than asked of the engine, because it is a fact about the WRITING - the
+ * second argument of `.bend(sig, range)`, which is how a person tells poptart what their plugin's
+ * own bend-range control is set to. Absent, it is the 2 semitones nearly every synth powers up on
+ * (DEFAULT_BEND_RANGE in signal.mjs - keep the two in step).
+ */
+function prBendPluginRange() {
+  const at = prChainAt();
+  if (at == null || !labelsMod) return null;
+  const code = cm.getValue();
+  const block = labelsMod.splitLabeledBlocks(code).findLast((b) => at >= b.start && at < b.end);
+  if (!block) return null;
+  const body = code.slice(block.start, block.end);
+  // A sampler track has no bend ceiling to draw. Asked of the head of the chain, which is the only
+  // thing that decides it: a `.synth(...)` plays a plugin, the sample sources play files.
+  if (/\b(?:s|se|sr|sp)\s*\(/.test(body) && !/\.synth\s*\(/.test(body)) return null;
+  const call = /\.bend\s*\(/.exec(body);
+  if (!call) return DEFAULT_BEND_RANGE;
+  const open = block.start + call.index + call[0].length - 1;
+  const close = matchParen(code, open);
+  if (close < 0) return DEFAULT_BEND_RANGE;
+  // The range is the LAST top-level argument, and only when it is a plain number: a patterned one
+  // has no single value to draw a line at, and the honest answer there is the default's line or
+  // none at all rather than a line that is right for one cycle in four.
+  const [, rest] = splitFirstArg(code.slice(open + 1, close));
+  const n = Number(rest.trim());
+  return rest.trim() && Number.isFinite(n) && n > 0 ? n : DEFAULT_BEND_RANGE;
+}
+
+/** The curve as one string, for the undo key - the serializer, minus the flat-is-nothing rule. */
+const prBendKey = (points) => (points ?? []).map((p) => `${p.x},${p.y},${p.c ?? 0}`).join(' ');
+
+const prBendCenterY = (m) => m.gridTop + m.gridH / 2;
+const prBendY = (semis, m) => prBendCenterY(m) - semis * m.rowH;
+const prBendSemisAt = (py, m) =>
+  Math.max(-PR_BEND_RANGE, Math.min(PR_BEND_RANGE, (prBendCenterY(m) - py) / m.rowH));
+
+/**
+ * The pitch scroll that would park the zero line exactly on row `pos`.
+ *
+ * A row's top is `PR_TOPBAR + (pitchTop - pos) * rowH` and the zero line is half the grid down, so
+ * putting the row's CENTRE on the line solves to `pos + PR_ROWS / 2 - 0.5`. Half a row, because a
+ * row is a band and the line is a line.
+ */
+const prBendAlignTop = (pos) => pos + PR_ROWS / 2 - 0.5;
+
+/** Every row a drawn note sits on, as lane positions - the alignments the wheel magnetizes to. */
+function prBendNoteRows(m) {
+  const rows = new Set();
+  for (const nt of prLiveNotes(prState.notes)) rows.add(prPosOf(prRowOf(nt), m));
+  return [...rows];
+}
+
+/**
+ * `pitchTop` pulled onto the nearest note's row where one is close enough, else left alone.
+ *
+ * The point of the pull is reading the curve as PITCH. The zero line is the bend's origin, so with
+ * it parked on the note being bent, "where the curve goes" and "where the note goes" are the same
+ * place on the grid - a slide drawn up to the row above lands a semitone above, and you can see
+ * which note that is. Off an alignment the curve is still correct, just not measured against
+ * anything in particular.
+ */
+function prBendMagnet(pitchTop, m) {
+  let best = null;
+  for (const pos of prBendNoteRows(m)) {
+    const top = prBendAlignTop(pos);
+    const d = Math.abs(top - pitchTop);
+    if (d <= PR_BEND_MAGNET && (!best || d < best.d)) best = { top, d };
+  }
+  return best ? best.top : pitchTop;
+}
+
+/** The note row the zero line is sitting on right now, or null - what lights the centre line up. */
+function prBendAlignedRow(m) {
+  for (const pos of prBendNoteRows(m)) {
+    if (Math.abs(prBendAlignTop(pos) - prState.pitchTop) < 1e-6) return pos;
+  }
+  return null;
+}
+
+/** Semitones at an absolute cell - 0 on a roll with no curve, which is what "no bend" sounds like. */
+const prBendValueAt = (cell) =>
+  (prState.bend.length && shapeMod ? shapeMod.sampleBendPoints(prState.bend, cell) : 0);
+
+/** The stretch playback reads the curve over: the loop window, which is what a bend loops with. */
+const prBendLoop = () => [prState.start, prState.start + prState.len];
+
+/**
+ * Everything the curve covers - the loop window, widened to hold any breakpoints drawn outside it.
+ *
+ * A bend may reach past the loop, exactly as the notes may: what is out there does not sound (see
+ * bendChannelFor, which reads the curve at `cell mod len`), it is drawn dimmed like the notes out
+ * there, and extending `len` brings it in. That is what makes "duplicate a phrase, then open the
+ * loop up to it" work, and it is why duplicate is not fenced at the loop's end.
+ */
+function prBendExtent() {
+  const [a, b] = prBendLoop();
+  let lo = a;
+  let hi = b;
+  for (const p of prState.bend) {
+    if (p.x < lo) lo = p.x;
+    if (p.x > hi) hi = p.x;
+  }
+  return [lo, hi];
+}
+
+/** The breakpoint under (px, py), nearest first, or null. */
+function prBendPointAt(px, py, m) {
+  let best = null;
+  prState.bend.forEach((p, i) => {
+    const d = Math.hypot(prCellToX(p.x, m) - px, prBendY(p.y, m) - py);
+    if (d <= PR_BEND_HIT && (!best || d < best.d)) best = { index: i, d };
+  });
+  return best ? best.index : null;
+}
+
+/** Which segment a cell falls in, level or not - what a span's edge carries its curvature over from. */
+function prBendSegAtCell(cell) {
+  const pts = prState.bend;
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (cell >= pts[i].x && cell <= pts[i + 1].x && pts[i + 1].x > pts[i].x) return i;
+  }
+  return null;
+}
+
+/** Which segment a press at px falls in - what a vertical drag curves. Null off the curve itself. */
+function prBendSegmentAt(px, py, m) {
+  const cell = prCellFloat(px, m);
+  if (Math.abs(prBendY(prBendValueAt(cell), m) - py) > PR_BEND_HIT) return null;
+  const i = prBendSegAtCell(cell);
+  // A LEVEL segment is not curvable, so the press falls through to placing a point. Curvature is
+  // the shape of a journey between two values, and a segment that goes nowhere has none to bend -
+  // on the flat line a new curve starts from, dragging it would look broken.
+  return i == null || prState.bend[i].y === prState.bend[i + 1].y ? null : i;
+}
+
+/**
+ * The flat line at zero, laid down across the loop the first time the curve is touched.
+ *
+ * A roll with no bend carries no breakpoints at all, which is what keeps the option off every roll
+ * that doesn't use one. But the first press has to leave a curve that BENDS AND COMES BACK - a lone
+ * point would hold its value over the whole loop, which is a detuned roll, not a bend. So the ends
+ * are pinned at zero first and the new point goes between them.
+ */
+function prBendSeed() {
+  if (prState.bend.length) return;
+  const [a, b] = prBendLoop();
+  prState.bend = [{ x: a, y: 0, c: 0 }, { x: b, y: 0, c: 0 }];
+}
+
+/** Adds a breakpoint, keeping the list in ascending cell order. Returns its index. */
+function prBendAddPoint(cell, semis) {
+  const at = prState.bend.findIndex((p) => p.x > cell);
+  const index = at === -1 ? prState.bend.length : at;
+  prState.bend.splice(index, 0, { x: cell, y: semis, c: 0 });
+  return index;
+}
+
+/**
+ * A cell inside the loop window, snapped the way the loop ruler's edges are: to the bar and its
+ * divisions by default, to a whole cell with `fine` (shift), and not at all with `free` (alt).
+ *
+ * The free option is here and not on the notes because a bend is the one thing on this grid that
+ * genuinely lives between the cells - a slide that leaves a fraction of a beat after the note it
+ * starts on is an ordinary thing to want, where a note that starts there is usually a mistake.
+ */
+function prBendCell(px, m, fine, free) {
+  const cell = free ? prCellFloat(px, m) : prSnapCell(prCellFloat(px, m), m, fine);
+  // Fenced by the RENDERED span rather than by the loop: a point may be put outside the loop, where
+  // it is drawn dimmed and does not sound until the loop is opened up to it - the same freedom the
+  // notes have. The fence that remains only stops a point being dropped somewhere off screen.
+  return Math.max(m.minCell, Math.min(m.cols, cell));
+}
+
+/**
+ * What every frame of a bend gesture calls: the player hears the curve now (the roll is re-filed
+ * under its name, exactly as a dragged note is - see prLiveSync), the code catches up when the hand
+ * comes off. A bend is the thing most worth hearing while it is drawn, since the whole question is
+ * whether it lands in tune.
+ */
+function prBendTouched() {
+  prLiveSync();
+  drawPianoroll();
+}
+
+/**
+ * End of a bend gesture. A curve that has been flattened back out is DELETED rather than written as
+ * a row of zeroes: undoing a bend has to leave the roll as it would have been had one never been
+ * drawn (see prCallOpts), and an all-zero curve still costs the track a polled control.
+ */
+function prBendCommit() {
+  if (shapeMod?.bendIsFlat(prState.bend)) { prState.bend = []; prState.bendSel = null; }
+  prState.bendHeld = null;
+  prWriteNow(); // records the undo entry on the way past (see writePianorollCall)
+  drawPianoroll();
+}
+
+// ---------------------------------------------------------------------------------------------
+// The bend curve's own selection and edit ops - the same verbs the notes have, on a stretch of
+// curve. The arrow tool drags a span out across the grid (the pencil keeps drawing points), and
+// from there the whole set works on it: lift it, delete it, copy, cut, paste, duplicate after.
+//
+// This is the arrangement's automation span, on the roll's axis - the same machinery, because it
+// is the same problem: a curve has a value everywhere, so "select these vertices" has to mean "this
+// stretch of time", and moving a stretch has to leave the curve either side of it where it was.
+// Two behaviors carried over from there for the same reasons:
+//   - a paste REPLACES the span it lands on rather than overlaying it. Two curves stacked on the
+//     same cells is not a thicker curve, it is a zigzag between them.
+//   - duplicate-after does not open time. The curve is drawn against the roll's cells, which belong
+//     to the notes above it; rippling the bend alone would slide it out of step with the music.
+//
+// One thing is different, and it is the roll's own rule: a curve that ends up flat is DELETED
+// rather than written as zeroes (see prBendCommit), so clearing a span can legitimately leave
+// nothing behind. That is what "this roll does not bend" looks like.
+// ---------------------------------------------------------------------------------------------
+
+// Module-level like the roll's own note clipboard, so a curve can be carried between rolls.
+// Points are held relative to the span's start, with its width, so pasting is a translation.
+let prBendClipboard = null; // { width, points: [{ x, y, c }] }
+
+const prBendEps = 1e-9;
+
+function prBendSpanHint() {
+  logLine('the bend\'s edit ops need a span - drag one out across the grid with the arrow tool', 'warn');
+}
+
+/**
+ * The curve over [a, b], its points measured from `a`. An edge cutting through a segment gets a
+ * point of its own, sampled where it cuts: copying the middle of a slide has to give you that
+ * stretch of the slide, starting at the value it had reached, not the whole of it. Closed at both
+ * ends, unlike a note selection - a curve is continuous, so where it ends up is as much a part of
+ * it as where it starts.
+ */
+function prBendPointsIn(a, b) {
+  if (!shapeMod) return [];
+  const pts = prState.bend;
+  // An empty curve has no points to take, but the span over it is still a stretch of flat zero -
+  // the ends below fall through to the held-value case, so copying from a roll that does not bend
+  // gives a flat span that FLATTENS what it is pasted onto, rather than nothing at all.
+  const first = pts.length ? pts[0].x : Infinity;
+  const last = pts.length ? pts[pts.length - 1].x : -Infinity;
+  const at = (cell) => pts.some((p) => Math.abs(p.x - cell) < prBendEps);
+  const out = [];
+  // The curvature of the segment an edge lands in is carried over as it stands. A half-segment
+  // does not have the same curve as the whole of it, but it has the same shape, which is what
+  // was drawn.
+  if (a > first + prBendEps && a < last && !at(a)) out.push({ x: 0, y: prBendValueAt(a), c: pts[prBendSegAtCell(a) ?? 0]?.c ?? 0 });
+  for (const p of pts) if (p.x >= a - prBendEps && p.x <= b + prBendEps) out.push({ x: p.x - a, y: p.y, c: p.c ?? 0 });
+  if (b > first && b < last - prBendEps && !at(b)) out.push({ x: b - a, y: prBendValueAt(b), c: 0 });
+  // A span off either end of the breakpoints is not empty - it is the curve holding its end level,
+  // which is a shape like any other. It copies as the flat stretch it is, so pasting one flattens
+  // what it lands on rather than quietly doing nothing.
+  if (!out.length) {
+    const held = prBendValueAt(a);
+    out.push({ x: 0, y: held, c: 0 }, { x: b - a, y: held, c: 0 });
+  }
+  out.sort((p, q) => p.x - q.x);
+  return out;
+}
+
+/**
+ * Take the points in [a, b] out, so the curve runs straight from the point before the span to the
+ * one after it. Unlike an automation lane this may empty the curve completely, and that is the
+ * right answer: no breakpoints is how the roll says it does not bend.
+ */
+function prBendClearSpan(a, b) {
+  prState.bend = prState.bend.filter((p) => p.x < a - prBendEps || p.x > b + prBendEps);
+}
+
+/**
+ * Split the curve into what is before the span, inside it, and after it.
+ *
+ * The only subtlety is a cell carrying two breakpoints, which is how this format writes a vertical
+ * step: the first is the value arriving from the left and the last the value leaving to the right,
+ * so an edge that already steps keeps its outside half outside. That is what makes a group move
+ * idempotent - the anchors it leaves behind are not picked up and moved again by the next one.
+ */
+function prBendSplitSpan(a, b) {
+  const head = [];
+  const mid = [];
+  const tail = [];
+  for (const p of prState.bend) {
+    if (p.x < a - prBendEps) head.push(p);
+    else if (p.x > b + prBendEps) tail.push(p);
+    else mid.push(p);
+  }
+  if (mid.length > 1 && Math.abs(mid[0].x - a) < prBendEps && Math.abs(mid[1].x - a) < prBendEps) head.push(mid.shift());
+  if (mid.length > 1 && Math.abs(mid.at(-1).x - b) < prBendEps && Math.abs(mid.at(-2).x - b) < prBendEps) tail.unshift(mid.pop());
+  return { head, mid, tail };
+}
+
+/**
+ * Put breakpoints on the span's edges, so lifting what is inside it moves that stretch and leaves
+ * the rest of the curve where it was. Each edge with curve beyond it gets a PAIR on the same cell:
+ * an anchor holding the value the curve had out there, and its twin inside the span, which moves.
+ * That pair is the vertical step you see appear at the edges of a lifted selection - not an
+ * artefact, but the only way a curve can say "this stretch, not the one next to it" while still
+ * having a value everywhere.
+ *
+ * Returns the breakpoints inside the span - the ones an edit then moves.
+ */
+function prBendMaterializeSpan(a, b) {
+  prBendSeed(); // a first edit on a roll that has never bent starts from the flat line
+  const pts = prState.bend;
+  if (!pts.length || !shapeMod) return [];
+  const segC = (cell) => pts[prBendSegAtCell(cell) ?? -1]?.c ?? 0;
+  const { head, mid, tail } = prBendSplitSpan(a, b);
+  if (head.length && head.at(-1).x < a - prBendEps) {
+    const y = prBendValueAt(a);
+    if (!mid.length || Math.abs(mid[0].x - a) > prBendEps) mid.unshift({ x: a, y, c: segC(a) });
+    head.push({ x: a, y, c: 0 }); // ...and the anchor, which does not
+  }
+  if (tail.length && tail[0].x > b + prBendEps) {
+    const y = prBendValueAt(b);
+    if (!mid.length || Math.abs(mid.at(-1).x - b) > prBendEps) mid.push({ x: b, y, c: 0 });
+    tail.unshift({ x: b, y, c: segC(b) }); // carries the curve that ran into the rest of the bend
+  }
+  prState.bend = [...head, ...mid, ...tail];
+  return mid;
+}
+
+/**
+ * As much of `delta` as keeps every one of `values` inside the drawable reach. Clamping the MOVE
+ * rather than each point holds the group's shape: clamping them one by one would flatten whichever
+ * hit the ceiling first, quietly rewriting the curve you were only trying to lift.
+ */
+function prBendFit(values, delta) {
+  if (!values.length) return 0;
+  return Math.min(PR_BEND_RANGE - Math.max(...values), Math.max(-PR_BEND_RANGE - Math.min(...values), delta));
+}
+
+/** Raise (or lower) every breakpoint in the span together. */
+function prBendNudge(delta) {
+  if (!prState.bendSel) return prBendSpanHint();
+  const mid = prBendMaterializeSpan(prState.bendSel[0], prState.bendSel[1]);
+  const step = prBendFit(mid.map((p) => p.y), delta);
+  if (!step) return; // already against the end of the reach - nothing to write
+  for (const p of mid) p.y += step;
+  prBendCommit();
+}
+
+/**
+ * Points into the curve at `at`, in ascending cell order. Deliberately unfenced: clamping here
+ * would fold a pasted shape up against the loop's end instead of letting it land past it, and a
+ * shape squashed into a wall is not the shape that was copied.
+ */
+function prBendInsert(at, points) {
+  for (const p of points) prState.bend.push({ x: at + p.x, y: p.y, c: p.c ?? 0 });
+  prState.bend.sort((p, q) => p.x - q.x);
+}
+
+function prBendCopySel({ cut = false } = {}) {
+  if (!prState.bendSel) return prBendSpanHint();
+  const [a, b] = prState.bendSel;
+  const points = prBendPointsIn(a, b);
+  prBendClipboard = { width: b - a, points };
+  logLine(`copied ${points.length} bend point${points.length === 1 ? '' : 's'} over ${Math.round((b - a) * 100) / 100} cells - cmd-V pastes them`);
+  if (!cut) return;
+  prBendClearSpan(a, b);
+  prBendCommit();
+}
+
+function prBendDeleteSel() {
+  if (!prState.bendSel) return prBendSpanHint();
+  prBendClearSpan(prState.bendSel[0], prState.bendSel[1]);
+  prBendCommit();
+}
+
+function prBendPaste() {
+  if (!prBendClipboard?.points.length) {
+    logLine('nothing on the bend clipboard yet - drag a span out and cmd-C first', 'warn');
+    return;
+  }
+  const w = prBendClipboard.width;
+  // Where it lands, in the order a person would expect to be obeyed: the marked span if there is
+  // one, else the CARET - the cell the last press declared (see prState.caret) - and only failing
+  // both, the loop's opening. Unfenced, so a paste may land past the loop's end and wait there for
+  // the loop to be opened up to it.
+  const at = prState.bendSel ? prState.bendSel[0] : prState.caret ?? prBendLoop()[0];
+  prBendSeed();
+  prBendClearSpan(at, at + w);
+  prBendInsert(at, prBendClipboard.points);
+  prState.bendSel = [at, at + w]; // what landed is the span now, so it repeats
+  prBendCommit();
+}
+
+function prBendDuplicateSel() {
+  if (!prState.bendSel) return prBendSpanHint();
+  const [a, b] = prState.bendSel;
+  const w = b - a;
+  const points = prBendPointsIn(a, b);
+  prBendClearSpan(b, b + w);
+  prBendInsert(b, points);
+  prState.bendSel = [b, b + w]; // the copy is the span now: pressing again walks one more along
+  prBendCommit();
+}
+
+/**
+ * The bend overlay's keyboard verbs. Returns true when the key was the curve's, so the roll's own
+ * handler leaves it alone.
+ *
+ * Deliberately NOT handled here, so they keep working while a bend is being drawn: cmd-Z (one
+ * history covers the whole roll), cmd-A, and the transport keys. Escape drops the span first and
+ * only closes the panel once there is nothing marked, which is the roll's own rule for a selection.
+ */
+function prBendKeydown(e, mod) {
+  const has = !!prState.bendSel;
+  if (mod && (e.key === 'a' || e.key === 'A')) {
+    e.preventDefault();
+    prState.bendSel = prBendExtent(); // the loop, plus anything drawn outside it
+    drawPianoroll();
+    return true;
+  }
+  if (mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) {
+    e.preventDefault();
+    prBendDuplicateSel();
+    return true;
+  }
+  if (mod && !e.shiftKey && (e.key === 'c' || e.key === 'C' || e.key === 'x' || e.key === 'X')) {
+    e.preventDefault();
+    prBendCopySel({ cut: e.key === 'x' || e.key === 'X' });
+    return true;
+  }
+  if (mod && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+    e.preventDefault();
+    prBendPaste();
+    return true;
+  }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    prBendDeleteSel();
+    return true;
+  }
+  if (e.key === 'Escape' && has) {
+    e.preventDefault();
+    prState.bendSel = null;
+    drawPianoroll();
+    return true;
+  }
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && has) {
+    e.preventDefault();
+    // A plain arrow is a fine step, shift a whole semitone - the same "small move / musical move"
+    // split the note axis has, read in the unit this axis actually counts in.
+    prBendNudge((e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 1 : PR_BEND_STEP));
+    return true;
+  }
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && has) {
+    e.preventDefault();
+    // Left/right walks the span along a cell at a time, so a shape can be auditioned against
+    // several places in the bar without re-dragging it.
+    const dir = e.key === 'ArrowRight' ? 1 : -1;
+    const w = prState.bendSel[1] - prState.bendSel[0];
+    const a = Math.max(prBendExtent()[0], prState.bendSel[0] + dir);
+    prState.bendSel = [a, a + w];
+    drawPianoroll();
+    return true;
+  }
+  return false;
+}
+
+/** Switch the overlay on or off. Sticky across rolls and sessions, like the tool and the folds. */
+function prSetBend(on) {
+  prBendOn = on;
+  localStorage.setItem('poptartPianorollBend', on ? '1' : '0');
+  prBendBtn.classList.toggle('active', on);
+  prBendBtn.title = on
+    ? 'drawing pitch bend — pencil draws points, arrow marks a stretch to lift/copy; press again to edit the notes'
+    : "draw this roll's pitch bend over the grid — semitones, one row each, flat at zero until you move it";
+  if (prState) { prState.bendHeld = null; prState.bendSel = null; drawPianoroll(); }
+}
+
+/**
+ * The overlay itself: a scrim over the grid, the zero line, the reach of the track's MIDI bend
+ * range, and the curve with its breakpoints.
+ *
+ * Drawn only over the LOOP WINDOW, which is where the curve exists - the dimmed cells either side
+ * of it are the ones that never play, and a curve stretching out into them would be claiming to do
+ * something there. The notes stay visible through the scrim because they are the reference: the
+ * point of drawing a bend here rather than in a lane of its own is seeing what it bends.
+ */
+function drawBendOverlay(ctx, col, m) {
+  const { W, gridTop, gridH } = m;
+  const accent = col('--accent');
+  const zeroY = prBendCenterY(m);
+  // The scrim. Light enough that the notes read through it, heavy enough that the curve is clearly
+  // the thing in front - the same move the arrangement makes with an unpainted row.
+  ctx.fillStyle = 'rgba(120,120,130,0.3)';
+  ctx.fillRect(PR_GUTTER, gridTop, W - PR_GUTTER, gridH);
+  // ...and the cells the loop does not play, washed again over the scrim so they still read as the
+  // dead ends they are. Same order as the grid above: the wash goes UNDER the content, so a curve
+  // drawn out there is as bright as a note drawn out there - visible, and visibly not playing.
+  prDimOutside(ctx, m, gridTop, gridH);
+  // Centre line: no bend. Solid, because it is the value the curve returns to and the one a flat
+  // roll sits on. It lights up when it is sitting exactly on a drawn note's row - the alignment the
+  // wheel magnetizes to (see prBendMagnet), and the one that lets the curve be read as pitch: with
+  // it parked on the note being bent, where the curve goes IS where the note goes.
+  const onNote = prBendAlignedRow(m) != null;
+  ctx.strokeStyle = onNote ? accent : col('--border-strong');
+  ctx.lineWidth = onNote ? 1.5 : 1;
+  ctx.beginPath(); ctx.moveTo(PR_GUTTER, zeroY + 0.5); ctx.lineTo(W, zeroY + 0.5); ctx.stroke();
+  ctx.lineWidth = 1;
+  // ...and the edges of what a MIDI synth on this track can actually reach. A sampler ignores them
+  // (it repitches, so it bends as far as it is asked), which is why they are a hint and not a wall:
+  // the curve may be drawn past them, and the console says so when it is played through a plugin.
+  const reach = prBendPluginRange();
+  if (reach && reach < PR_BEND_RANGE) {
+    ctx.strokeStyle = col('--text-dim');
+    ctx.setLineDash([2, 3]);
+    for (const dir of [1, -1]) {
+      const y = prBendY(dir * reach, m);
+      ctx.beginPath(); ctx.moveTo(PR_GUTTER, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  // The marked span, under the curve so the shape being operated on stays readable through it.
+  // Drawn whether or not there are points: marking a stretch of a roll that does not bend yet is
+  // how you paste one onto it.
+  if (prState.bendSel) {
+    const sx0 = Math.max(PR_GUTTER, prCellToX(prState.bendSel[0], m));
+    const sx1 = Math.min(W, prCellToX(prState.bendSel[1], m));
+    if (sx1 > sx0) {
+      ctx.fillStyle = accent;
+      ctx.globalAlpha = 0.14;
+      ctx.fillRect(sx0, gridTop, sx1 - sx0, gridH);
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = accent;
+      for (const c of prState.bendSel) {
+        const x = Math.round(prCellToX(c, m)) + 0.5;
+        if (x < PR_GUTTER || x > W) continue;
+        ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, gridTop + gridH); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+  if (!prState.bend.length || !shapeMod) return; // nothing drawn yet: the centre line IS the curve
+  const [a, b] = prBendExtent();
+  const x0 = Math.max(PR_GUTTER, prCellToX(a, m));
+  const x1 = Math.min(W, prCellToX(b, m));
+  if (x1 <= x0) return; // the loop is scrolled off the side
+  // Stroked by sampling rather than by line segments, so a curved segment reads as the curve it is.
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let x = x0; x <= x1; x += PR_BEND_CURVE_STEP) {
+    const y = prBendY(prBendValueAt(prCellFloat(x, m)), m);
+    if (x === x0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.lineTo(x1, prBendY(prBendValueAt(prCellFloat(x1, m)), m));
+  ctx.stroke();
+  // Breakpoints, the one being dragged filled in - the same held/unheld pair the shape editor uses.
+  prState.bend.forEach((p, i) => {
+    const x = prCellToX(p.x, m);
+    if (x < PR_GUTTER - 4 || x > W + 4) return;
+    const y = prBendY(p.y, m);
+    const held = prState.bendHeld === i;
+    ctx.beginPath();
+    ctx.arc(x, y, held ? 5 : 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = held ? accent : col('--bg');
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // The value in semitones, while the point is in the hand. Bends are small numbers where being
+    // out by a quarter tone is the difference between a slide and a mistake, so it is worth two
+    // decimals - and it is only ever on screen for one point at a time.
+    if (held) {
+      ctx.fillStyle = col('--text');
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle'; // set outright, like the value lane's readout - canvas text state carries over
+      ctx.fillText(`${p.y > 0 ? '+' : ''}${Math.round(p.y * 100) / 100}`,
+        Math.min(W - 32, x + 8), Math.max(gridTop + 10, Math.min(gridTop + gridH - 4, y - 8)));
+    }
+  });
+}
+
 function prOpenLaneMenu(clientX, clientY) {
   if (!prState) return;
   const key = prLaneKey();
@@ -8044,6 +8718,27 @@ function drawPianoroll() {
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
   }
 
+  // The bend overlay goes over the notes and the marquee but under the playhead and the gutters:
+  // it is the thing being edited, and the playhead has to stay readable across it.
+  if (prBendOn) drawBendOverlay(ctx, col, m);
+
+  // The caret - where a paste will land (see prState.caret). Drawn as a pair of ticks biting in
+  // from the top and bottom of the grid rather than as a full line: it has to be findable at a
+  // glance and impossible to mistake for the playhead, which is the one other vertical line here
+  // and the one that moves on its own. Over the bend overlay, not under it: the curve's paste
+  // reads the caret too, so it is needed most where the scrim would have dulled it.
+  if (prState.caret != null) {
+    const cx = Math.round(prCellToX(prState.caret, m)) + 0.5;
+    if (cx >= PR_GUTTER && cx <= W) {
+      ctx.strokeStyle = col('--text-dim');
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx, gridTop); ctx.lineTo(cx, gridTop + PR_CARET_TICK);
+      ctx.moveTo(cx, laneTop); ctx.lineTo(cx, laneTop - PR_CARET_TICK);
+      ctx.stroke();
+    }
+  }
+
   drawValueLane(ctx, col, m);
 
   // playhead: sweeps the loop (position = absolute cell mod len) while the transport runs
@@ -8092,6 +8787,16 @@ function prCursorFor(px, py, m, velMod) {
     return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
   }
   if (px < PR_GUTTER) return prNoteMode() ? 'pointer' : 'default'; // over the piano keyboard - a numbered gutter has nothing to play
+  // With the bend overlay up the grid is the curve's: a breakpoint (or the curve itself) drags,
+  // and everywhere else places a point.
+  if (prBendOn) {
+    if (prBendPointAt(px, py, m) != null) return 'move';
+    const cell = prCellFloat(px, m);
+    // Over a marked span the arrow lifts it; that reads before the curve, as the press does.
+    if (prTool === 'select' && prState.bendSel && cell >= prState.bendSel[0] && cell <= prState.bendSel[1]) return CUR_UPDOWN;
+    if (prBendSegmentAt(px, py, m) != null) return CUR_UPDOWN;
+    return prTool === 'select' ? 'crosshair' : CUR_PENCIL;
+  }
   const cell = prCellAt(px, m);
   const emptyCursor = prTool === 'draw' ? CUR_PENCIL : 'crosshair'; // pencil draws, arrow marquees
   if (cell == null) return emptyCursor;
@@ -8235,7 +8940,11 @@ function prDuplicate() {
   if (!prState.sel.size) return;
   const sel = [...prState.sel];
   const shift = Math.max(1, Math.max(...sel.map((n) => n.start + n.len)) - Math.min(...sel.map((n) => n.start)));
-  const copies = sel.map((n) => ({ ...n, start: prClampToLoop(n.start + shift) }));
+  // Unfenced at the loop's end. Clamping the copies into the window put every one of them on the
+  // last cell when the selection was near it - a stack, not a duplicate - and the roll already lets
+  // a note be drawn or arrow-stepped past the loop, where it waits, dimmed, for the window to be
+  // opened up to it. Duplicating a phrase and THEN lengthening the loop is how a part gets longer.
+  const copies = sel.map((n) => ({ ...n, start: n.start + shift }));
   prState.notes.push(...copies);
   prState.sel = new Set(copies);
   prClipOverlaps(); // the copies were pushed last, so they land on top of anything already there
@@ -8261,7 +8970,13 @@ function prCopy(notes) {
 
 function prPaste() {
   if (!prState || !prClipboard?.length) return;
-  const copies = prClipboard.map((n) => ({ ...n, start: prClampToLoop(n.start) }));
+  // Pasted AT THE CARET - the cell the last press declared (see prState.caret) - with the clipboard
+  // carried there as a block, so the timing between the notes is untouched and the earliest of them
+  // lands where you pointed. Without a caret they go back to the cells they were copied from, which
+  // is what this always did and is still the right answer when nobody has said otherwise.
+  const from = Math.min(...prClipboard.map((n) => n.start));
+  const shift = prState.caret == null ? 0 : prState.caret - from;
+  const copies = prClipboard.map((n) => ({ ...n, start: n.start + shift }));
   prState.notes.push(...copies); // last, so the pasted notes win the overlap rule where they land
   prState.sel = new Set(copies);
   prClipOverlaps();
@@ -8440,7 +9155,7 @@ function initPianorollCanvas() {
   const dragCursor = (d) =>
     (d.kind === 'loop'
       ? (d.edge === 'move' ? 'grabbing' : d.edge === 'start' ? CUR_BRACKET_L : CUR_BRACKET_R)
-      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET_R, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer' }[d.kind] ?? 'default');
+      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET_R, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer', bendPoint: 'grabbing', bendCurve: CUR_UPDOWN, bendGroup: CUR_UPDOWN, bendSpan: 'crosshair' }[d.kind] ?? 'default');
 
   // ctrl-drag (mac) = velocity, not a menu - except over the value lane, which has one of its own
   // (randomize / reset the channel it shows; see prOpenLaneMenu), and the note grid, whose
@@ -8472,6 +9187,9 @@ function initPianorollCanvas() {
     // What a keyboard zoom aims at from here (see prZoomFocusPx): the cell this gesture is on,
     // recorded once for every kind of gesture there is.
     if (px >= PR_GUTTER) prState.focusCell = prCellFloat(px, m);
+    // ...and the caret, snapped, wherever the press landed - the grid, the ruler or the value lane.
+    // Every press moves it, which is what makes "click there, then paste" work without a mode.
+    if (px >= PR_GUTTER) prState.caret = prSnapCell(prCellFloat(px, m), m, e.shiftKey);
     if (py < PR_TOPBAR) { // loop ruler - drag either end, or the window itself (written on pointerup)
       if (px >= PR_GUTTER) {
         const edge = prLoopEdgeAt(px, m);
@@ -8506,6 +9224,56 @@ function initPianorollCanvas() {
       drag = { kind: 'lane', lastPy: py };
       prState._laneDrag = nt; // the marker the readout follows
       drawPianoroll();
+      return;
+    }
+    // The bend overlay owns the grid while it is on (see prSetBend): the notes are behind a scrim
+    // and what a press means is a point on the curve. The ruler and the value lane above and below
+    // keep their own gestures, and so does the keyboard gutter - only the drawing area changes
+    // hands, which is what makes the button a mode you can see rather than one you have to recall.
+    if (prBendOn && px >= PR_GUTTER) {
+      const at = prBendPointAt(px, py, m);
+      if (at != null) { // an existing breakpoint: drag it
+        prState.bendSel = null;
+        drag = { kind: 'bendPoint', index: at };
+        prState.bendHeld = at;
+        drawPianoroll();
+        return;
+      }
+      // Inside a marked span, a vertical drag lifts everything in it at once - the group move the
+      // arrow keys do a step at a time. It takes precedence over curving a segment because the span
+      // is an explicit selection: while one is up, the grid is about that stretch.
+      const cell = prCellFloat(px, m);
+      if (prTool === 'select' && prState.bendSel && cell >= prState.bendSel[0] && cell <= prState.bendSel[1]) {
+        // The edge anchors go in on the first real movement, not here: a press that never travels
+        // is a click, and a click must not leave a pair of breakpoints behind that nothing asked for.
+        drag = { kind: 'bendGroup', y0: py, span: [...prState.bendSel], mid: null, orig: null };
+        drawPianoroll();
+        return;
+      }
+      const seg = prBendSegmentAt(px, py, m);
+      if (seg != null) { // on the curve between two points: a vertical drag curves that segment
+        prState.bendSel = null;
+        drag = { kind: 'bendCurve', index: seg };
+        drawPianoroll();
+        return;
+      }
+      // Empty grid: the pencil places a breakpoint, the arrow drags out the span its edit ops act
+      // on - the same division of labour the roll already has, where the pencil draws a note and
+      // the arrow rubber-bands a selection.
+      if (prTool === 'select' || e.shiftKey) {
+        prState.bendSel = null;
+        drag = { kind: 'bendSpan', a: prBendCell(px, m, false, false), x0: px };
+        drawPianoroll();
+        return;
+      }
+      // A new breakpoint, already in the hand - one press is one edit, as it is in the automation
+      // lane. On a roll that has never bent, this is also where the flat line the curve starts
+      // from gets laid down (see prBendSeed).
+      prBendSeed();
+      const index = prBendAddPoint(prBendCell(px, m, e.shiftKey, e.altKey), prBendSemisAt(py, m));
+      drag = { kind: 'bendPoint', index };
+      prState.bendHeld = index;
+      prBendTouched();
       return;
     }
     const pos = prPosAt(py, m);
@@ -8602,6 +9370,56 @@ function initPianorollCanvas() {
       }
       prClipOverlaps(); // notes it passes over give way, and come back behind it
       if (drag.orig[0]) prPreviewNotes([drag.orig[0].n]);
+    } else if (drag.kind === 'bendPoint') {
+      // Cells snap like a note's start (shift is fine), semitones don't: a bend is heard against
+      // the notes, not against a grid of its own, and the interesting values are between the
+      // semitones as often as on them. Neighbors cage the cell so the list stays in ascending
+      // order however far the drag travels, and the loop window caps it at either end - a
+      // breakpoint outside the loop is one playback would never read.
+      const pts = prState.bend;
+      const pt = pts[drag.index];
+      const cell = prBendCell(px, m, e.shiftKey, e.altKey);
+      // Caged by its NEIGHBOURS so the list stays in ascending order, and by nothing else: the ends
+      // are free to travel out past the loop, where the curve is drawn but not played.
+      pt.x = Math.min(pts[drag.index + 1]?.x ?? Infinity, Math.max(pts[drag.index - 1]?.x ?? -Infinity, cell));
+      pt.y = prBendSemisAt(py, m);
+      prState.bendHeld = drag.index;
+      prBendTouched();
+      return;
+    } else if (drag.kind === 'bendSpan') {
+      // Dragged out in whole cells either way, so the span covers the stretch that was swept rather
+      // than stopping halfway through the cell the pointer happens to be over.
+      const to = prBendCell(px, m, false, false);
+      const a = Math.min(drag.a, to);
+      const b = Math.max(drag.a, to);
+      prState.bendSel = b > a ? [a, b] : null;
+      drawPianoroll();
+      return;
+    } else if (drag.kind === 'bendGroup') {
+      // The anchors are materialized on the first real movement (see the press), and only once -
+      // after that the same breakpoints follow the hand for the rest of the drag.
+      if (!drag.mid && Math.abs(py - drag.y0) >= 2) {
+        drag.mid = prBendMaterializeSpan(drag.span[0], drag.span[1]);
+        drag.orig = drag.mid.map((p) => p.y);
+      }
+      if (drag.mid) {
+        // Unclamped pixels in, one clamped move out (see prBendFit): the group keeps its shape and
+        // stays inside the reach, so a drag off the top of the grid stops rather than flattening.
+        const raw = (drag.y0 - py) / m.rowH;
+        const dv = prBendFit(drag.orig, raw);
+        for (let i = 0; i < drag.mid.length; i++) drag.mid[i].y = drag.orig[i] + dv;
+        prBendTouched();
+      }
+      return;
+    } else if (drag.kind === 'bendCurve') {
+      // Vertical drag curves the segment, exactly as it does in the LFO's shape editor and the
+      // arrangement's automation lane. Sign follows the segment's direction so dragging "away from
+      // the straight line" always deepens the curve, whichever way the bend is going.
+      const seg = prState.bend[drag.index];
+      const rising = prState.bend[drag.index + 1].y >= seg.y;
+      seg.c = Math.max(-12, Math.min(12, (seg.c ?? 0) + (e.movementY ?? 0) * 0.08 * (rising ? 1 : -1)));
+      prBendTouched();
+      return;
     } else if (drag.kind === 'vel') {
       const d = (e.movementY ?? 0) * 0.01;
       const key = prLaneKey();
@@ -8664,6 +9482,12 @@ function initPianorollCanvas() {
       // still costs the buffer a re-eval, so it doesn't get one.
       // prWriteNow, not writePianorollCall: it flushes whatever the gesture last pushed and cancels
       // the coalesced write behind it, which would otherwise land after this one.
+      // A finished bend writes itself - and drops a curve that has been flattened back out, which
+      // the ordinary write path has no reason to know about (see prBendCommit).
+      // A span drag only marks a stretch - it changes no points, so there is nothing to write.
+      else if (drag.kind === 'bendSpan') { drawPianoroll(); }
+      else if (drag.kind === 'bendGroup') { if (drag.mid) prBendCommit(); }
+      else if (drag.kind === 'bendPoint' || drag.kind === 'bendCurve') { prBendCommit(); }
       else if (drag.kind === 'paint') { if (drag.painted) prWriteNow(); }
       else if (drag.kind !== 'audition') {
         prClipOverlaps(); // already clipped live on every frame; this settles the final position
@@ -8691,6 +9515,17 @@ function initPianorollCanvas() {
     const m = prMetrics();
     const { px, py } = prCanvasPos(e);
     if (py >= m.laneTop) return; // the value lane edits values, never the notes themselves
+    // While the bend overlay has the grid, a double-click takes a breakpoint OUT - the gesture the
+    // shape editor, the automation lane and the slice editor's markers all share. The press that
+    // opened this already put one in, so the pair reads as: click to place, click again to change
+    // your mind. The last two are kept: a curve needs an end at each side to be a curve at all.
+    if (prBendOn && px >= PR_GUTTER) {
+      const at = prBendPointAt(px, py, m);
+      if (at == null || prState.bend.length <= 2) return;
+      prState.bend.splice(at, 1);
+      prBendCommit();
+      return;
+    }
     const cell = prCellAt(px, m);
     if (cell == null) return;
     const hit = prNoteAt(cell, prMidiAt(py, m));
@@ -8729,7 +9564,18 @@ function initPianorollCanvas() {
     }
     if (e.deltaY && !e.shiftKey) {
       // pitch scrolls continuously (pitchTop is fractional), so it glides instead of stepping rows
-      prState.pitchTop -= e.deltaY * PR_PITCH_WHEEL; // prMetrics clamps it to the ends of the axis
+      if (prBendOn) {
+        // ...and in the bend overlay it is magnetized onto the drawn notes' rows, so the curve's
+        // zero line can be parked on the note it belongs to (see prBendMagnet). Accumulated on the
+        // RAW position rather than on what the magnet last produced: applying each delta to a
+        // snapped value would let a magnet wider than one scroll step swallow the scroll entirely.
+        const from = prBendScroll?.snapped === prState.pitchTop ? prBendScroll.raw : prState.pitchTop;
+        const raw = from - e.deltaY * PR_PITCH_WHEEL;
+        prState.pitchTop = prBendMagnet(raw, m);
+        prBendScroll = { raw, snapped: prState.pitchTop };
+      } else {
+        prState.pitchTop -= e.deltaY * PR_PITCH_WHEEL; // prMetrics clamps it to the ends of the axis
+      }
       changed = true;
     }
     if (changed) drawPianoroll();
@@ -8743,6 +9589,11 @@ function initPianorollCanvas() {
     if (!prMenu.classList.contains('hidden')) return;
     const sel = [...prState.sel];
     const mod = editMod(e);
+    // While the bend overlay has the grid, the edit verbs are the CURVE's - the same keys, aimed at
+    // the marked span instead of the selected notes. Undo is deliberately left out and falls
+    // through: one history walks the whole roll, curve and notes together, which is what a person
+    // pressing cmd-Z means either way.
+    if (prBendOn && prBendKeydown(e, mod)) return;
     if (mod && (e.key === 'z' || e.key === 'Z')) {
       // Undo/redo for the roll, scoped to the canvas having focus - cmd-Z with the cursor in the
       // code is CodeMirror's, as it always was. Ctrl-Y is the Windows redo spelling.
@@ -9111,6 +9962,14 @@ function initPianorollEditor() {
     prRefocus();
   });
 
+  // bend - hand the grid over to the roll's pitch-bend curve (see the bend overlay section).
+  // Sticky like the folds, and reflected on open so the button and the canvas can't disagree.
+  prSetBend(prBendOn && !prSideMin);
+  prBendBtn.addEventListener('click', () => {
+    prSetBend(!prBendOn);
+    prRefocus();
+  });
+
   const reflectPreview = () => prPreviewBtn.classList.toggle('active', prPreviewEnabled);
   reflectPreview();
   prPreviewBtn.addEventListener('click', () => {
@@ -9132,6 +9991,9 @@ function initPianorollEditor() {
   prSideToggle.addEventListener('click', () => {
     prSideMin = !prSideMin;
     localStorage.setItem('poptartPianorollSide', prSideMin ? '1' : '');
+    // Closing the column takes the bend button with it, and a mode you cannot see the way out of is
+    // a trap - so closing it also leaves the overlay. The way back in is the way in always was.
+    if (prSideMin && prBendOn) prSetBend(false);
     reflectSide();
     prRefocus();
   });

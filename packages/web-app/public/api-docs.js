@@ -258,6 +258,12 @@ const API_DOCS = {
   gain: { kind: 'method', sig: 'gain(value)', desc: 'Track input gain, before the fx chain - the level the plugins are fed, so turning it down drives the compressor and the reverb less hard. 1 = unity; chains multiply, so a level and a modulator compose.', eg: '.gain(0.5).gain(env())' },
   postgain: { kind: 'method', sig: 'postgain(value)', desc: 'Track output gain, after the whole fx chain and before the sends - the channel fader, and what the mixer writes. 1 = unity; chains multiply like .gain().', eg: '.postgain(0.7)' },
   pan: { kind: 'method', sig: 'pan(value)', desc: 'Stereo pan, -1 (left) .. 1 (right), 0 = center.', eg: '.pan(sine(0.2).range(-1, 1))' },
+  bend: {
+    kind: 'method',
+    sig: 'bend(semitones, range)',
+    desc: 'Pitch bend, in semitones, for the whole track - a sampler repitches, a plugin gets MIDI pitch bend. Continuous like pan rather than per-note, so everything sounding bends together. `range` is how many semitones a full bend is worth on that plugin (2 unless you have changed it); a sampler ignores it. Draw one on a roll instead with the piano roll\'s bend button.',
+    eg: '.bend(sine(0.5).range(-2, 2))',
+  },
   bassmono: { kind: 'method', sig: 'bassmono(hz)', desc: 'Collapse everything below `hz` to mono, keeping the width above it. 0 = off. Filters only the side signal, so the low end keeps its level and loses only its width - which is what vanishes on a club rig or a phone anyway.', eg: '.width(1.6).bassmono(120)' },
   width: { kind: 'method', sig: 'width(amount)', desc: 'Stereo width (mid/side): 0 mono, 1 untouched, up to 4 = 400%. Scales the difference between the channels, so a mono source has nothing to widen. Applied before pan, so you can narrow a wide sound and then place it. Past 1 costs mono compatibility - watch the mixer\'s stereo image.', eg: '.width(0.6).pan(-0.4)' },
   o: { kind: 'method', sig: 'o(pair)', desc: 'Which stereo output pair the track plays to - .o(1) is channels 1/2, .o(2) is 3/4. Wraps at the "output channels" setting, which is 2 unless you raise it - so by default every .o(n) is channels 1/2.', eg: '.o(2)' },

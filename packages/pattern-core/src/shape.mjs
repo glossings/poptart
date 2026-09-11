@@ -74,6 +74,15 @@ export function sampleShape(points, phase) {
 // runs as long as the song, and y is the literal value handed to whatever control reads it (a
 // normalized param wants 0..1, but auto() is an ordinary signal and can be scaled like one).
 export function parseAutoPoints(str) {
+  return parseBreakpoints(str, 'auto', 'bar', 'an automation');
+}
+
+/**
+ * The shared breakpoint reader behind parseAutoPoints and parseBendPoints - the same `x,y[,c]`
+ * text, differing only in what x MEANS and therefore in what a bad one should say. `tag` is the
+ * bracketed source in the message, `axis` the name of the x axis, `what` the thing being read.
+ */
+function parseBreakpoints(str, tag, axis, what) {
   const points = String(str)
     .trim()
     .split(/\s+/)
@@ -84,15 +93,15 @@ export function parseAutoPoints(str) {
       // zero, which on a wet lane is the effect vanishing while you are still typing the value.
       const parts = tok.split(',');
       if (parts.length < 2 || parts.length > 3 || parts.some((p) => !p.trim())) {
-        throw new Error(`[auto] bad breakpoint "${tok}" (want "bar,value" or "bar,value,c")`);
+        throw new Error(`[${tag}] bad breakpoint "${tok}" (want "${axis},value" or "${axis},value,c")`);
       }
       const [x, y, c = 0] = parts.map(Number);
-      if (![x, y, c].every(Number.isFinite)) throw new Error(`[auto] bad breakpoint "${tok}" (want "bar,value" or "bar,value,c")`);
+      if (![x, y, c].every(Number.isFinite)) throw new Error(`[${tag}] bad breakpoint "${tok}" (want "${axis},value" or "${axis},value,c")`);
       return { x, y, c };
     });
-  if (points.length < 1) throw new Error('[auto] an automation needs at least 1 breakpoint');
+  if (points.length < 1) throw new Error(`[${tag}] ${what} needs at least 1 breakpoint`);
   for (let i = 1; i < points.length; i++) {
-    if (points[i].x < points[i - 1].x) throw new Error('[auto] breakpoints must be in ascending bar order');
+    if (points[i].x < points[i - 1].x) throw new Error(`[${tag}] breakpoints must be in ascending ${axis} order`);
   }
   return points;
 }
@@ -121,6 +130,37 @@ export function sampleAutoPoints(points, bar) {
     }
   }
   return points[points.length - 1].y;
+}
+
+// Pitch-bend breakpoints - a roll's drawn bend curve (see the `bend` option on pianoroll()).
+// The same `x,y[,c]` text again, with x an absolute CELL of the roll it was drawn on and y a
+// number of SEMITONES, positive up. Cells rather than bars because a roll is written on cells:
+// the curve turns where the notes do, and it loops with them over the roll's own `len`.
+//
+// Neither axis is clamped here. Semitones are an absolute musical distance, which is what lets
+// one curve mean the same thing to a sampler (it repitches) and to a MIDI synth (it is encoded
+// against that plugin's bend range - see Sig#bend). Clipping belongs where the limit is, not in
+// the drawing.
+export function parseBendPoints(str) {
+  return parseBreakpoints(str, 'bend', 'cell', 'a bend curve');
+}
+
+export function serializeBendPoints(points) {
+  return serializeAutoPoints(points);
+}
+
+/**
+ * Semitones at an absolute cell. Holds the nearest end outside the breakpoints, exactly as an
+ * automation does - a bend drawn over the middle of a roll leaves the cells either side of it
+ * sitting at the value the curve starts and finishes on, rather than snapping to centre.
+ */
+export function sampleBendPoints(points, cell) {
+  return sampleAutoPoints(points, cell);
+}
+
+/** A curve that bends nothing: no points at all, or every point flat at zero with no curvature. */
+export function bendIsFlat(points) {
+  return !points || points.length === 0 || points.every((p) => Math.abs(p.y) < 1e-9);
 }
 
 export const SHAPE_PRESETS = {

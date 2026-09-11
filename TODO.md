@@ -8,13 +8,6 @@ no completion notes.
 [ ] LUFS metering in the ctrl+g console — short-term and integrated, alongside the existing
     stereo/spectral views.
 
-[ ] Patternable pitch bend — `.bend(sig)` sending MIDI pitch bend to a track's synth. The SC
-    message path already exists (the live-MIDI pass-through calls ctl.midi.bend); the new piece
-    is a poller bridging a modulator signal/bus to bend messages at ~50-100 Hz, plus the engine
-    method, MappedEngine forwarding, re-eval teardown, and per-plugin bend-range config (VSTs
-    default to ±2 semitones). ~a day. Until then patch portamento + in-patch pitch envelopes
-    cover glides, and .param on a pitch parameter covers performed bends.
-
 [ ] Keylock on Linux/Windows: the decks' keylock is the PoptartPitchShift UGen (Rubber Band Live
     Shifter, packages/osc-engine/native/rubberband/) and only the macOS universal .scx is built
     and committed; elsewhere extensions.js finds no prebuilt, logs it at boot, and the def falls

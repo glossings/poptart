@@ -85,6 +85,11 @@ const DEFAULT_CASES = [
   // The per-fx-slot dry/wet (Sig#wet): neutral is the plugin's own output, so clearing a
   // modulator off one leaves the effect sounding instead of silently bypassing it.
   ['wet1', '1'], ['wet7', '1'],
+  // Pitch bend (Sig#bend). Centre for the bend itself; for the RANGE, the 2 semitones a plugin is
+  // assumed to be set to - the one channel control whose neutral is neither 0 nor 1. A 0 here
+  // would be worse than merely wrong: the bend encoding divides by the range, so clearing a
+  // modulator off it would make every bend saturate instead of going quiet.
+  ['bend', '0'], ['bendrange', '2'],
 ];
 
 function runSclang() {
@@ -100,6 +105,9 @@ var cueOffset; // nil = the no-cue build; reassigned before the cue-armed build 
 // The deck meter buses (a 4-channel Bus in the shipped scd); the def only reads .index, so an
 // event stands in. 64 keeps the probe indices clear of the harness's own buses.
 var deckMeterBus = (index: 64);
+// Pitch bend (Sig#bend): the rate the track synth posts its bend value back at, and the node-id ->
+// track map destroyTrack unregisters from. Both are engine-wide in the shipped file.
+var bendPollHz = 100, bendTracks = IdentityDictionary.new;
 var statePending = IdentityDictionary.new, noteQueues = IdentityDictionary.new;
 var stateWaitMax = 0.3;
 var slotKey = { |k, slot| (k ++ "_" ++ slot).asSymbol };

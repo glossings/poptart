@@ -2554,8 +2554,10 @@ li.CodeMirror-hint-active {
 }
 
 /* An engaged toggle in the roll's header (preview on, folded to the scale) lights up, so its
-   state is readable without hovering for the tooltip. */
-.pianoroll-panel-head button.active {
+   state is readable without hovering for the tooltip - and likewise one in its side column, where
+   the bend overlay is switched on. */
+.pianoroll-panel-head button.active,
+.pianoroll-side button.active {
   background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--accent);

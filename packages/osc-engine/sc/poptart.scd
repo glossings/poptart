@@ -210,6 +210,13 @@ var modFreeDelay = 0.3, freeModulatorLater;
 // The ramp behind every polled control - see poptartSetParam.
 var rampTo, dropRamp, dropSlotRamps;
 var steppedChannelControls = #[\out, \cue, \mdeck]; // selectors, not levels: set outright, never ramped
+// Pitch bend (Sig#bend). The track synth republishes its bend control on a bus of the track's own
+// (see buildTrackDef): sample voices map it, and this rate is how often the synth posts the value
+// back to sclang to be sent on as a MIDI pitch-bend message. 100 Hz is a compromise with a reason
+// at each end - Node's own control poll is 30ms, which reproduces a fast wobble as a staircase,
+// while a rate much past this buys resolution the 14-bit message cannot carry anyway.
+// bendTracks maps the posting synth's node id back to its track, since that is all SendReply says.
+var bendPollHz = 100, bendTracks = IdentityDictionary.new;
 // Bundle time for a message aimed at a song-deck player - clamped so it can never land before
 // the player's (possibly future, cycle-quantized) spawn. See the song decks section.
 var songLat;
@@ -292,6 +299,7 @@ buildTrackDef = { |key|
     // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
     // route is set up - see scArgsFor and the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, postgain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
+        bend = 0, bendrange = 2, bendOut,
         trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0,
@@ -314,6 +322,31 @@ buildTrackDef = { |key|
         // group's own output already applies it - carrying it into the sends too would square the
         // crossfade through every bus.
         var faderAmt = fader.lag(0.08).clip(0, 1);
+        var bendV, bendOn;
+        // Pitch bend (Sig#bend), in semitones - a channel control like gain/pan, reaching this
+        // synth by whichever route the control is driven from (a ramp for a polled signal, a
+        // native LFO's bus, a plain set). Two things read it, and neither is this synth's own
+        // audio, so it is published straight back out on a bus of the track's own:
+        //
+        //   - the track's SAMPLE VOICES, which map \bend off that bus and fold it into their
+        //     playback rate (see the poptart_sample_ defs). They sit at the head of the group and
+        //     this synth at its tail, so they read the value a block late - 1.5ms, inaudible.
+        //   - the PLUGIN in slot 0, over MIDI, via the SendReply below.
+        //
+        // ReplaceOut rather than Out: a control bus is not cleared between blocks, so Out would
+        // accumulate the value forever. There is exactly one writer per track, which is what makes
+        // the overwrite the right verb.
+        bendV = bend.lag(0.01).clip(-48, 48);
+        ReplaceOut.kr(bendOut, bendV);
+        // A VST takes pitch bend as a MIDI message, so something has to turn the bus back into
+        // messages - sclang, at bendPollHz (see the bendOut OSCFunc). Sent only while the track is
+        // actually bending, plus a tail after it centres so the centring message is never the one
+        // that gets dropped: a track that never calls .bend() posts nothing at all. bendrange rides
+        // along because the 14-bit encoding depends on it and it is a control like any other.
+        bendOn = (bendV.abs > 1e-4);
+        SendReply.kr(
+            Impulse.kr(bendPollHz) * (bendOn + Trig1.kr(1 - bendOn, 0.1)).min(1),
+            '/poptart/bendOut', [bendV, bendrange]);
         maxSlots.do { |i|
             if (i == 0) {
                 // The instrument slot's output, plus whatever the track's sample synths wrote
@@ -472,13 +505,20 @@ buildTrackDef = { |key|
 // unity gain in and out, center pan, first output pair - and for the DJ stage, unity
 // trim/bands/fader/deck (djf's neutral is 0, the filter's center detent; djres's is 0, no resonance).
 channelDefault = { |name|
+    // bendrange is the one control whose neutral is neither 0 nor 1: it is how many semitones a
+    // full MIDI pitch bend is worth, so clearing a modulator off it has to leave the 2 nearly every
+    // synth powers up on (DEFAULT_BEND_RANGE in signal.mjs). Zero would be worse than wrong - the
+    // bend encoding divides by it, so every bend would saturate at once. `bend` itself falls
+    // through to 0 below, which is centre, exactly as pan's does.
     // wet1..wet7 (Sig#wet, the per-fx-slot dry/wet) belong with the unity controls: neutral for a
     // wet control is the plugin's own output, and a modulator cleared off one must leave the
     // effect sounding rather than silently bypassing it.
-    if ((name == "gain") or: { name == "postgain" } or: { name == "out" } or: { name == "dry" } or: { name == "width" }
-        or: { name == "trim" } or: { name == "fader" } or: { name == "deck" }
-        or: { name == "eqlo" } or: { name == "eqmid" } or: { name == "eqhi" }
-        or: { name.asString.beginsWith("wet") }) { 1 } { 0 };
+    if (name == "bendrange") { 2 } {
+        if ((name == "gain") or: { name == "postgain" } or: { name == "out" } or: { name == "dry" } or: { name == "width" }
+            or: { name == "trim" } or: { name == "fader" } or: { name == "deck" }
+            or: { name == "eqlo" } or: { name == "eqmid" } or: { name == "eqhi" }
+            or: { name.asString.beginsWith("wet") }) { 1 } { 0 };
+    };
 };
 
 // Parked sidechain args for a freshly created track synth: every fx-slot aux input reads the
@@ -1061,8 +1101,15 @@ server.waitForBoot {
     // sus is a 0..1 level. All default to 0/0/1/0, which floors down to the old tiny declick fade.
     [1, 2].do { |nc|
         var toStereo = { |sig| if (nc == 1) { sig ! 2 } { sig } };
-        SynthDef(("poptart_sample_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0|
+        SynthDef(("poptart_sample_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
             var frames = BufFrames.ir(buf);
+            // Pitch bend (Sig#bend), in semitones, read live off the track's bend bus - every voice
+            // on the track is mapped to it at spawn (see the playSample OSCdef). A repitching voice
+            // bends the way a record does: the read speeds up, so a bend also shortens what of the
+            // file gets played in the event's time. That is the honest behavior for this player and
+            // not a shortcoming of it - the warp voices below, which already hold pitch and time
+            // apart, bend pitch alone.
+            var bendRatio = bend.midiratio;
             var startF = begin * frames, endF = max(begin * frames, (end * frames) - 1);
             var from = Select.kr(rate < 0, [startF, endF]);
             // PlayBuf, not BufRd walked by a Line - and the reason is precision, not convenience.
@@ -1075,7 +1122,7 @@ server.waitForBoot {
             // a double INSIDE the UGen, so nothing is ever quantized to a bus. Its rate is frames
             // per output sample, so the span/dur the Line ran over becomes the step, sign and all -
             // the read is the same read, just measured accurately.
-            var step = ((endF - startF) / max(dur, 1e-6) / SampleRate.ir) * Select.kr(rate < 0, [1, -1]);
+            var step = ((endF - startF) / max(dur, 1e-6) / SampleRate.ir) * Select.kr(rate < 0, [1, -1]) * bendRatio;
             // PlayBuf stops at the BUFFER's edge, not at `end`, so past the region it reads on
             // instead of holding the last frame. Only the release tail is ever out there (the env
             // below closes the gate at `dur`), and a few ms of the next slice under a fade beats a
@@ -1112,12 +1159,14 @@ server.waitForBoot {
         //    once per pass - a 1.3ms brush with the old bug in exchange for losing it everywhere
         //    else. A loop shorter than a block degenerates to the patch path, which IS the old
         //    graph.
-        SynthDef(("poptart_sample_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0|
+        SynthDef(("poptart_sample_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0, bend = 0|
             var frames = BufFrames.ir(buf);
             var startF = loopLo * frames, endF = max((loopLo * frames) + 1, (loopHi * frames) - 1);
             var span = endF - startF;
             var from = (entry * frames).clip(startF, endF);
-            var step = rate * BufRateScale.ir(buf);
+            // Bend rides on the step, so the whole walk - the audio, the trajectory and the corners
+            // it turns at - speeds up together and the loop stays one loop (see the one-shot above).
+            var step = rate * BufRateScale.ir(buf) * bend.midiratio;
             // Phasor's resetPos is ONLY applied on a trigger - its initial value is `start`, so a
             // never-triggered phasor cannot be made to begin anywhere else. Every phasor here
             // therefore runs from zero and the entry point is added in and wrapped.
@@ -1155,11 +1204,14 @@ server.waitForBoot {
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
-        SynthDef(("poptart_sample_warp_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0|
+        SynthDef(("poptart_sample_warp_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
             var overlaps = 8;
             var from = Select.kr(rate < 0, [begin, end]);
             var to = Select.kr(rate < 0, [end, begin]);
-            var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs, 0.1, -1, overlaps, 0.1, 2)
+            // Here bend goes on the freqScale and NOT on the pointer, which is the whole point of a
+            // warp voice: the grains are resampled while the playhead keeps its own pace, so a
+            // stretched sample bends in pitch alone and still ends where the event ends.
+            var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2)
                 * (2 / overlaps);
             // atk/dec/rel are the play duration (dur) times their input, so .attack(2) ramps over
             // 2*dur and never reaches 1 before the note ends. A gate held open for exactly dur runs
@@ -1177,7 +1229,7 @@ server.waitForBoot {
         // read phase Warp1 keeps internally - so a frame of pointer round-off never reaches the ear. The step comes from the begin..end window and its
         // play time, which cancel down to "normalized units per second" - independent of where the
         // loop bounds are, so a file-wrapping loop still moves at the rate .speed()/.fit() asked for.
-        SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0|
+        SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0, bend = 0|
             var overlaps = 8;
             var span = max(0.001, end - begin);
             var step = (span / max(0.001, dur)) * rate.sign / ControlRate.ir;
@@ -1190,7 +1242,8 @@ server.waitForBoot {
             var bouncePh = (Phasor.kr(0, step.abs, 0, 2 * loopSpan, 0) + bounceFrom) % (2 * loopSpan);
             var bounced = lo + loopSpan - absdif(bouncePh, loopSpan);
             var ptr = Select.kr(pingpong, [lo + walk, bounced]);
-            var sig = Warp1.ar(nc, buf, ptr, rate.abs, 0.1, -1, overlaps, 0.1, 2) * (2 / overlaps);
+            // freqScale again, not the pointer: the loop keeps its length and bends in pitch.
+            var sig = Warp1.ar(nc, buf, ptr, rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2) * (2 / overlaps);
             // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
             // the loop's gate-off, then released. Floors preserve the original declick fade.
             var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.008, rel * dur);
@@ -1521,14 +1574,30 @@ OSCdef(\poptartCreateTrack, { |msg|
         fork {
             var group = Group.new(levelGroups[0]); // depth 0 until a route says otherwise (see reorderTracks)
             var inBus = Bus.audio(server, 2); // sample synths write here, the track synth mixes it in
+            // The track's pitch-bend value, republished by the track synth for its sample voices to
+            // map and for the MIDI sender to read (see buildTrackDef). One per track for the track's
+            // life, so a voice spawned at any moment has somewhere to read from; it sits at 0 -
+            // no bend - until something writes it.
+            var bendBus = Bus.control(server, 1);
+            var synth;
             var def = buildTrackDef.(key);
+            // Control buses keep whatever the last owner left in them - the server never clears
+            // one, on free or on allocation - so a recycled index could hand a new track somebody
+            // else's bend for the block before its track synth first writes. Zeroed explicitly,
+            // ahead of the sync, so the bus is at centre before anything can read it.
+            bendBus.set(0);
             def.add; // sends to server + global SynthDescLib
             server.sync;
+            synth = Synth(trackDefName.(key), [\inBus, inBus.index, \bendOut, bendBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
+            // SendReply names its sender by node id and nothing else, so the bend messages coming
+            // back from this synth need a way home (see the bendOut OSCFunc).
+            bendTracks[synth.nodeID] = key;
             tracks[key] = (
                 def: def,
                 group: group,
                 inBus: inBus,
-                synth: Synth(trackDefName.(key), [\inBus, inBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail),
+                bendBus: bendBus,
+                synth: synth,
                 controllers: Array.newClear(maxSlots),
                 loaded: Array.newClear(maxSlots), // slot -> pluginId once open() succeeds
                 wanted: Array.newClear(maxSlots), // slot -> pluginId an in-flight open() should commit
@@ -1575,8 +1644,10 @@ destroyTrack = { |key|
             // A song deck's player synth dies with the group below; its buffer (the whole file,
             // real RAM) must not outlive the track.
             songs[key] !? { |e| e[\posFunc] !? { |f| f.free }; e[\buf] !? { |b| b.free }; songs[key] = nil };
+            bendTracks.removeAt(track[\synth].nodeID);
             track[\group].free;
             track[\inBus].free;
+            track[\bendBus] !? { |b| b.free };
             tracks[key] = nil;
             reorderTracks.(); // whatever read this track sits shallower now
             ("poptart: destroyed track " ++ key).postln;
@@ -1946,6 +2017,29 @@ OSCdef(\poptartSetParam, { |msg|
         };
     };
 }, '/poptart/setParam');
+
+// Pitch bend on its way out to a plugin (Sig#bend). The track synth posts its bend control at
+// bendPollHz while the track is bending (see buildTrackDef's SendReply); here that value becomes
+// a MIDI pitch-bend message on the instrument in slot 0.
+//
+// MIDI pitch bend is a 14-bit number with no unit: 8192 is centre and the ends mean whatever the
+// plugin's own bend-range setting says they mean - two semitones on almost everything. `.bend()`
+// is written in SEMITONES instead, because a musical distance is the thing a person means and it
+// has to mean the same to a sampler (which repitches, and has no such setting). `bendrange` is the
+// bridge: how many semitones this plugin's full throw is worth, so the division below is the only
+// place the two spellings ever meet. Past the range there is nothing left to send - the message
+// saturates, the bend flattens off, and Node says so once per eval rather than per message.
+//
+// Sent unbundled, at "now". The value already carries its musical timing: Node scheduled it onto
+// the bus at the right moment through the ordinary control path, so this is a report of what the
+// bus reached, and delaying it further would only put the bend behind the notes it belongs to.
+OSCFunc({ |msg|
+    var key = bendTracks[msg[1].asInteger];
+    var semis = msg[3].asFloat, range = max(msg[4].asFloat, 1e-6);
+    var track = key !? { tracks[key] };
+    var ctl = if (track.isKindOf(Event)) { track[\controllers][0] };
+    ctl !? { ctl.midi.bend(0, (8192 + (semis / range * 8192)).round.clip(0, 16383)) };
+}, '/poptart/bendOut', server.addr);
 
 // Native modulators: map a control bus to the VST parameter once, drive the bus with a UGen
 // oscillator running in scsynth's audio callback - zero further OSC traffic, genuinely
@@ -2798,7 +2892,13 @@ OSCdef(\poptartPlaySample, { |msg|
         track[\held] = track[\held] + 1;
         args = [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
                 \rate, rate, \dur, dur, \gate, 1, \amp, amp,
-                \atk, atk, \dec, dec, \sus, sus, \rel, rel];
+                \atk, atk, \dec, dec, \sus, sus, \rel, rel,
+                // Pitch bend (Sig#bend) as a MAP rather than a value: the voice reads the track's
+                // bend bus for as long as it sounds, so a curve drawn across a bar bends a hit that
+                // started before it. Mapped in the creation message itself (Bus#asMap is the "c7"
+                // spelling the server reads as "follow this bus"), which is what keeps a voice from
+                // ever sounding one block unbent.
+                \bend, track[\bendBus].asMap];
         // Only the loop defs have these controls - appended just for them rather than sent to a
         // one-shot def that would ignore them (and log a "control not found" for each).
         if (loop == 1) {

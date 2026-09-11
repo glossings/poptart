@@ -13,7 +13,7 @@ import {
   parseNoteValue, noteToMidi, degreeToMidi, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
-import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints } from './shape.mjs';
+import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints, parseBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
@@ -616,6 +616,46 @@ export class Sig {
     const incoming = toSignal(value);
     const combined = this.channel.postgain ? multiplyGain(this.channel.postgain, incoming) : incoming;
     return this._clone({ channel: { ...this.channel, postgain: combined } });
+  }
+
+  /**
+   * Channel strip: pitch bend, in SEMITONES, positive up. One control, both kinds of track:
+   *
+   *   lead: pianoroll("lead").synth("Serum 2").bend(sine(0.25).range(-2, 2))   // MIDI pitch bend
+   *   vox:  s("acap").bend("<0 -1 0 2>")                                       // the sampler repitches
+   *
+   * A signal like any other channel control, so it takes an LFO, an envelope, a mini string, a
+   * drawn `auto()` lane or plain arithmetic over them - and it is CONTINUOUS, not per-note: the
+   * track bends, everything sounding on it bends with it. That is what MIDI pitch bend is (a
+   * channel message, not a note one), and it is why two notes cannot bend apart on a synth track.
+   * A drawn curve does the same job from the piano roll's bend overlay, where it rides on the roll
+   * (see pianoroll()'s `bend` option) and this replaces it, the way setting any control replaces
+   * what was there.
+   *
+   * How far a semitone IS depends on where it lands. A sampler bends the playback rate, so the
+   * range is whatever the file can stand; a plugin reads MIDI pitch bend, which is a 14-bit number
+   * against a range the plugin itself decides - nearly always +/-2 semitones. `range` is how you
+   * tell poptart what that plugin is set to, so `.bend(7, 12)` means seven semitones on a synth
+   * whose wheel is set to an octave. Ask for more than the range and the plugin can only give you
+   * the range: the curve is clipped at the edge and a line says so, because the alternative is a
+   * bend that silently flattens out where it was supposed to peak.
+   */
+  bend(value, range) {
+    const channel = { ...this.channel, bend: toSignal(value) };
+    if (range !== undefined) {
+      const r = toSignal(range);
+      if (r.constVal != null && !(r.constVal > 0)) {
+        throw new Error('[signal] .bend()\'s range is how many semitones a full MIDI bend is worth, so it has to be positive - e.g. .bend(sig, 12)');
+      }
+      channel.bendrange = r;
+    }
+    // Only a constant can be checked here; a signal's travel isn't known until it is sampled (the
+    // scheduler checks it there - see _warnBendRange) and a drawn curve is checked where it is
+    // drawn. Warned, never thrown: a bend past the range still plays, it just stops climbing.
+    const extent = channel.bend.constVal;
+    const limit = channel.bendrange?.constVal ?? DEFAULT_BEND_RANGE;
+    if (!this.sampler && extent != null && Math.abs(extent) > limit) warnUser(bendRangeWarning(extent, limit));
+    return this._clone({ channel });
   }
 
   /** Channel strip: stereo pan, -1 (left) .. 1 (right), 0 = center. Signals welcome: `.pan(sine(0.2).range(-1, 1))`. */
@@ -3547,6 +3587,21 @@ function condSwitchMap(before, after, condAt, truthy, skip = new Set()) {
   return out;
 }
 
+// How many semitones a full-scale MIDI pitch bend is worth, where nothing says otherwise. Two is
+// what nearly every synth powers up on, and it is a property of the PLUGIN rather than of the
+// music - .bend() is written in semitones and encoded against this on the way out (see Sig#bend).
+export const DEFAULT_BEND_RANGE = 2;
+
+/**
+ * The one line a bend past its range gets, wherever it is noticed - the chain, the poll or the
+ * piano roll's overlay. Says the number that was asked for and the number that will be heard, so
+ * the fix (raise the plugin's own bend range, and tell .bend() about it) reads off the message.
+ */
+export function bendRangeWarning(semitones, range) {
+  const at = Math.round(Math.abs(semitones) * 100) / 100;
+  return `[signal] .bend() reaches ${at} semitones but this track's MIDI bend range is ${range} - the plugin can only bend ${range}, so the curve flattens off at its edge. Set the range on the plugin's own pitch-bend control and pass it as .bend(sig, ${Math.ceil(at)}); a sampler track is unaffected (it repitches, so it bends as far as you ask).`;
+}
+
 // What each track-level channel-strip control reads as when nothing sets it - the neutral values
 // the scheduler snaps a dropped control back to, and the "off" side of a .when() that only sets
 // one on the truthy branch. out = stereo pair (Sig#o), 1-based; dry = direct-output level
@@ -3559,6 +3614,7 @@ function condSwitchMap(before, after, condAt, truthy, skip = new Set()) {
 export const MAX_FX_SLOTS = 7; // must match maxSlots - 1 in poptart.scd (slot 0 is the instrument)
 export const CHANNEL_DEFAULTS = {
   gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1,
+  bend: 0, bendrange: DEFAULT_BEND_RANGE,
   ...Object.fromEntries(Array.from({ length: MAX_FX_SLOTS }, (_, i) => [`wet${i + 1}`, 1])),
 };
 
@@ -4365,6 +4421,10 @@ function buildPianoroll(str, opts) {
     warnUser(`[signal] pianoroll(): unknown mode ${JSON.stringify(rawMode)} - modes are ${PIANOROLL_MODES.join(' and ')}; the editor will open this roll on the note axis.`);
   }
   const notes = parsePianoRoll(str);
+  // The roll's own pitch-bend curve, drawn in the panel's bend overlay (Sig#bend is the same
+  // channel written by hand). Breakpoints are in absolute roll CELLS and semitones, so the curve
+  // turns where the notes do and loops with them over `len` - see bendChannelFor.
+  const bendCurve = bendChannelFor(opts, grid, len, from);
   // Whether this roll has anything to say about the sample index at all. All-or-nothing per roll:
   // stamping the channel on SOME events would leave a later .i() setting only the others (the
   // stamp wins over the channel - see _sampleConfigAt), which is a roll that half-obeys.
@@ -4436,7 +4496,14 @@ function buildPianoroll(str, opts) {
     return out;
   };
   const sample = (t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos);
-  const roll = new Sig(sample, { stepsForCycle, pitchKind: 'note' });
+  const roll = new Sig(sample, {
+    stepsForCycle,
+    pitchKind: 'note',
+    // A drawn bend is a CHANNEL, not something on the events: it is continuous, and a channel is
+    // the only thing that can be read between onsets. That also makes a later `.bend()` on the
+    // chain replace it outright, like setting any other control (see Sig#bend).
+    ...(bendCurve ? { channel: { bend: bendCurve } } : {}),
+  });
   if (!swingAmount) return roll;
   const sig = toSignal(swingAmount);
   const swung = crossMerge(roll.stepsForCycle, sig, stampField('swing'));
@@ -4478,6 +4545,35 @@ const swingStamped = (stepsForCycle, amount, grid) => (cycle) =>
 // cycle between two, `~` is a bar of silence. Resolution is LAZY - the registry is read when a
 // cycle is built, not when the call is evaluated - so the definitions may sit anywhere in the
 // buffer, above or below the pattern that names them.
+/**
+ * A roll's drawn pitch-bend curve as a channel signal, or null where the roll bends nothing.
+ *
+ * The breakpoints are in absolute roll CELLS (the same axis the notes' starts are on) and in
+ * semitones. Playback walks absolute cells the way the notes do - cell `m` of the loop sounds at
+ * `m mod len`, and loop position 0 is roll cell `start` - so the curve threads across cycles in
+ * step with the notes however `len` and `grid` relate. A curve that is flat at zero is no curve:
+ * it costs the track a polled control and an engine-side ramp for a bend of nothing, so it reads
+ * as absent, which is also what the panel writes when you flatten one out.
+ */
+function bendChannelFor(opts, grid, len, from) {
+  const raw = typeof opts === 'number' ? null : opts?.bend;
+  if (raw == null || raw === '') return null;
+  let points;
+  try {
+    points = Array.isArray(raw) ? raw.map((pt) => ({ x: Number(pt.x), y: Number(pt.y), c: Number(pt.c) || 0 })) : parseBendPoints(raw);
+  } catch (err) {
+    // A half-typed curve is not a reason to stop the roll playing (the panel writes these, so a
+    // broken one is nearly always a hand-edit in progress) - the notes play straight instead.
+    warnUser(`[signal] pianoroll(): ${err.message.replace(/^\[bend\] /, '')} - this roll plays with no bend.`);
+    return null;
+  }
+  if (bendIsFlat(points)) return null;
+  return new Sig((t, cps, pos) => {
+    const cell = (pos ?? t * cps) * grid;
+    return sampleBendPoints(points, from + (((cell % len) + len) % len));
+  });
+}
+
 function rollPattern(str, opts) {
   if (typeof opts === 'number' || (opts && Object.keys(opts).length > 0)) {
     warnUser('[signal] pianoroll("<ids>") takes grid/len/start from each roll() definition - the options on this call are ignored.');
@@ -4497,6 +4593,31 @@ function rollPattern(str, opts) {
   };
   const joined = selectorJoin((cycle) => selector.stepsForCycle(cycle), resolve);
   joined.pitchKind = 'note'; // every option is a roll, so this one is never in doubt
+  // A drawn pitch bend travels differently from the roll's swing beside it. Swing rides ON each
+  // event, because a chord is several events at one onset and a channel sampled there could only
+  // answer for all of them at once. A bend has the opposite shape: it is CONTINUOUS, one value per
+  // instant for the whole track, and the events are exactly where it can't live. So the join grows
+  // a bend channel that asks whichever roll is playing at this instant for its own curve - which
+  // is a question a per-cycle pick can answer, unlike "which of these two notes is yours".
+  //
+  // It answers `null` - not 0 - until a bending roll has actually been picked. A null is a control
+  // the poll skips entirely (see _pollGenericParams), so a pattern of rolls that bend nothing costs
+  // nothing at all: no message, no ramp synth, no bus. Once one HAS bent, the answer becomes 0
+  // instead, because by then there is something to come back from and silence would leave the
+  // track parked at the last roll's bend.
+  let bent = false;
+  joined.channel = {
+    ...joined.channel,
+    bend: new Sig((t, cps, pos) => {
+      const cyclePos = pos ?? t * cps;
+      const cycle = Math.floor(cyclePos);
+      const slot = slotAt(selector.stepsForCycle(cycle), cyclePos - cycle);
+      const curve = slot ? resolve(slot.value)?.channel?.bend : null;
+      if (!curve) return bent ? 0 : null;
+      bent = true;
+      return curve.sample(t, cps, cyclePos) ?? 0;
+    }),
+  };
   return joined;
 }
 

@@ -22,7 +22,7 @@
 //    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
-import { sampleBound, CHANNEL_DEFAULTS, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, noteGateFromGrid } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
@@ -411,6 +411,7 @@ export class Scheduler {
     this._livePresets = new Map(); // slot -> preset name currently sounding (auto-pin writes into it)
     this._presetWarned = new Set(); // "slot name" already complained about, so a bad name says it once
     this._earlyShiftWarned = false; // an over-early nudge says so once, not once per event
+    this._bendWarned = false; // ...and a bend past the plugin's range, likewise once
     this._presetHold = new Map(); // slot -> preset the editor is holding it on (see holdPreset)
     this._stateHold = new Set(); // slots being edited by hand right now (see holdPluginState)
     this._channelHold = new Map(); // channel control -> value a mixer control is holding it at (see holdChannel)
@@ -658,6 +659,8 @@ export class Scheduler {
     this._presetWarned.clear();
     this._presetCatchUp = true; // a changed name takes effect now, not at its next onset
     this._earlyShiftWarned = false;
+    this._bendWarned = false;
+    this._checkBendModulator(sig);
 
     // A channel control the new pattern dropped (`.postgain(...)` deleted mid-session, or `.bsend()`
     // removed - which drops dry) snaps back to its default. Schedule the reset at the lookahead
@@ -665,9 +668,21 @@ export class Scheduler {
     // nowSec+lookahead, so a reset sent at "now" gets overwritten ~150ms later by that stale
     // in-flight value - for dry=0 that leaves the track silent forever. Matching the poll horizon
     // (and being sent afterwards) makes the reset land at/after the stale value and win.
+    //
+    // "Dropped" is not only a name that has gone. A control whose signal answers NOTHING at all has
+    // dropped too, and one channel is built that way on purpose: a pattern of named rolls always
+    // carries a bend channel, because which roll is playing - and so whether there is a curve to
+    // read - is not known until it is asked (see rollPattern). It answers null while no roll it has
+    // picked has bent, which the poll skips, so a roll that bends nothing costs nothing. The catch
+    // is here: deleting a curve and re-evaluating builds a channel that is PRESENT and null, and a
+    // name-only test would leave the engine parked on the bend the old curve last sent. Asking the
+    // signal, rather than only the name, is what closes that.
     const resetSec = this.engine.getTime() + DEFAULT_LOOKAHEAD_SEC;
+    const resetCycle = this.transport.cycleAt(resetSec);
+    const speaks = (name) => name in sig.channel
+      && this._withNoteGate(() => sig.channel[name].sample(resetSec, this.transport.cps, resetCycle)) != null;
     for (const name of this._prevChannelNames) {
-      if (!(name in sig.channel)) {
+      if (!speaks(name)) {
         this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, resetSec);
       }
     }
@@ -1405,6 +1420,40 @@ export class Scheduler {
     return prev && prev.name === name ? prev.amount : 1;
   }
 
+  // A whole modulator on bend - `.bend(lfo("saw").range(0, 9))`, which is the most natural way to
+  // write one - runs NATIVELY: the engine is handed the shape once and drives the control itself,
+  // so the poll below never sees a value and never gets to check it. Its reach is known without
+  // sampling anything, though, which makes this the better place to notice it anyway: the line
+  // arrives when the pattern is evaluated rather than when the sweep first goes too far.
+  _checkBendModulator(sig) {
+    if (sig.sampler) return;
+    const bend = sig.channel.bend;
+    const ir = bend?.lfoIR ?? bend?.envIR ?? bend?.ccIR;
+    if (!ir) return;
+    // Signal-valued bounds are skipped rather than guessed at: where a range wanders there is no
+    // one number to compare, and the poll re-resolves those anyway.
+    const ends = [ir.min, ir.max].filter((v) => typeof v === 'number').map(Math.abs);
+    if (!ends.length) return;
+    const reach = Math.max(...ends);
+    const range = sig.channel.bendrange?.constVal ?? DEFAULT_BEND_RANGE;
+    if (!(reach > range)) return;
+    this._bendWarned = true; // said once, here - the poll must not say it again
+    warnPattern(`[scheduler] track "${this.label}": ${bendRangeWarning(reach, range).replace(/^\[signal\] /, '')}`);
+  }
+
+  // A bend the plugin can't reach (Sig#bend): MIDI pitch bend is 14 bits against a range the
+  // PLUGIN sets, so a curve drawn past it is heard flattened off at the edge rather than as drawn.
+  // Only a signal needs checking here - a constant says so when it is written - and only on a
+  // synth track, since a sampler repitches and bends however far it is asked to. Once per eval:
+  // the poll runs 33 times a second, and a swept bend would otherwise fill the console.
+  _checkBendRange(value, applySec, applyCycle) {
+    if (this._bendWarned || this.pattern.sampler) return;
+    const range = this.pattern.channel.bendrange?.sample(applySec, this.transport.cps, applyCycle) ?? DEFAULT_BEND_RANGE;
+    if (!(Math.abs(value) > range)) return;
+    this._bendWarned = true;
+    warnPattern(`[scheduler] track "${this.label}": ${bendRangeWarning(value, range).replace(/^\[signal\] /, '')}`);
+  }
+
   _pollGenericParams(nowSec) {
     // Sample each signal at the time the value will actually be applied (the engine schedules
     // setParam in a timestamped bundle at applySec) - sampling at nowSec instead would put
@@ -1419,6 +1468,7 @@ export class Scheduler {
       const held = c.slot === CHANNEL_SLOT ? this._channelHold.get(c.name) : undefined;
       const value = held ?? c.sig.sample(applySec, this.transport.cps, applyCycle);
       if (typeof value === 'number') {
+        if (c.name === 'bend' && c.slot === CHANNEL_SLOT) this._checkBendRange(value, applySec, applyCycle);
         this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);
       }
     }

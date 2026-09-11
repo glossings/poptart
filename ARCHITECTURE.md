@@ -177,6 +177,17 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   retrigger/envelope mode) sample in JS off the track's own note grid — the scheduler emits those
   notes, so the gate is a pure function of (pattern, position) and both paths hear the same notes.
   The one source that isn't on the grid is live `midikeys()` input, which only the engine sees.
+- **Pitch bend is one control with two destinations.** `.bend(sig)` — and the curve drawn on a
+  roll, which is the same channel — is a number of *semitones* on the track's channel strip,
+  reaching the engine by the ordinary control path above. What is unusual is the other end. A
+  sampler bends by repitching, so its voices simply read the value; a plugin needs MIDI pitch
+  bend, which is a 14-bit *message* against a range the plugin itself decides (almost always ±2
+  semitones — tell poptart yours with `.bend(sig, range)`). Both are served by one per-track
+  control bus that the track synth republishes its bend control onto: sample voices map it at
+  spawn, and a `SendReply` posts it to sclang at 100 Hz — but only while the track is actually
+  bending, so a patch that never bends pays nothing. Semitones rather than a normalized wheel
+  position is the choice that makes one control work for both: a musical distance means the same
+  thing to a sampler and to a synth, where "half a bend" does not.
 - **Fixed 8-slot chain per track (1 instrument + 7 effects).** `VSTPlugin~` instances live inside a
   `SynthDef`'s UGen graph and can't be added to a running `Synth`, so chain length is baked in.
   Swapping which plugin occupies a slot is fine; growing past 8 is not handled yet.
