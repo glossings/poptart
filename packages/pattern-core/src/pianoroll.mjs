@@ -326,6 +326,11 @@ export const noteNudgeChannel = (nt) => noteNudge(nt) / Math.max(1, Math.round(n
  * existence. (A note without `full` - one just parsed out of the string, which already holds
  * clipped lengths - adopts its current `len` as its authored length.)
  *
+ * That reprieve lasts exactly as long as the gesture. This is the resolution a DRAG wants, while
+ * where the note on top is going is still an open question; the moment it is let go the answer is
+ * settled and the reserve is given up (see commitOverlaps). Callers pick the one that matches what
+ * the user is doing - the editor's rule is that only a pointer still held gets this one.
+ *
  * Notes are updated IN PLACE and the same array comes back, hidden ones included: a caller keeps
  * them so they can return, and filters `hidden` out when it draws, hit-tests or serializes.
  *
@@ -402,6 +407,8 @@ export function pianoRollDefaultQuantizeDiv(grid) {
  *   - a note that was merely CLIPPED keeps its clipped length as its authored one (`full` = `len`),
  *     so the tail that used to hide behind the note in front of it is gone rather than waiting to
  *     spring back. After this, nothing in the roll is hidden and no part of any note is either.
+ *     (That last part is what EVERY settled edit does now - see commitOverlaps. Quantize is only
+ *     unusual in reporting it, because snapping can bury a note that was perfectly audible before.)
  *
  * `only` (a Set/array of notes, or null for the whole roll) is what MOVES - the selection, when
  * there is one. The tidy-up is always the whole roll: whether a note is buried is a fact about its
@@ -410,6 +417,30 @@ export function pianoRollDefaultQuantizeDiv(grid) {
  * Notes are mutated in place; the SURVIVORS come back as a new array (the caller replaces its own,
  * since the deleted ones are gone for good), with a count of what was dropped and what was cut.
  */
+/**
+ * Settle the overlap rule: what the roll PLAYS becomes what the roll stores.
+ *
+ * clipOverlaps is provisional - it works out what is heard right now and keeps the drawn length on
+ * `full` so a note that moves away gives the one beneath it back. That is what a drag needs, and
+ * only a drag: while a note is under the hand its position is still a question, so the roll holds
+ * the answer in reserve. The moment the hand comes off, the question is settled, and a roll that
+ * went on remembering the tail of every note it had ever covered would be carrying invisible state
+ * nobody asked it to keep - state that springs back on an unrelated later edit.
+ *
+ * So: a clipped note gives up the tail hiding behind the one in front of it, a buried note is gone,
+ * and afterwards the roll says exactly what it sounds. Returns the notes that survive.
+ */
+export function commitOverlaps(notes) {
+  clipOverlaps(notes);
+  const kept = [];
+  for (const nt of notes) {
+    if (nt.hidden) continue;
+    nt.full = nt.len; // the clip IS the note now
+    kept.push(nt);
+  }
+  return kept;
+}
+
 export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
   const g = normalizePianoRollSteps(grid);
   const step = Math.max(1, Math.round(g / normalizePianoRollSteps(div ?? g)));
@@ -420,40 +451,30 @@ export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
     nt.nudge = 0;
   }
   clipOverlaps(notes);
-  let dropped = 0;
-  let snipped = 0;
-  const kept = [];
-  for (const nt of notes) {
-    if (nt.hidden) { dropped++; continue; }
-    if (nt.len < nt.full) snipped++;
-    nt.full = nt.len; // the clip IS the note now - there is no tail left behind the one in front
-    kept.push(nt);
-  }
-  return { notes: kept, dropped, snipped };
+  // Counted before the settle, which is what takes them (see commitOverlaps); quantize reports
+  // what its snapping cost, where every other edit settles silently.
+  const dropped = notes.filter((nt) => nt.hidden).length;
+  const snipped = notes.filter((nt) => !nt.hidden && nt.len < nt.full).length;
+  return { notes: commitOverlaps(notes), dropped, snipped };
 }
 
 /**
- * Throw away everything the roll is carrying but not playing: notes whose ONSET falls outside the
- * loop window (they are drawn dimmed and never sound - see prLoopEnd), and notes the overlap rule
- * has buried. What is left is exactly what you hear.
+ * Throw away what the roll is carrying but not playing: notes whose ONSET falls outside the loop
+ * window, which are drawn dimmed and never sound.
  *
- * The two passes are in that order and the clip is redone between them, because dropping a note
- * can give one back: a note reaching in from outside the window is what buries the note underneath
- * it, and once it goes that note is audible again and must be KEPT. Only what is still hidden with
- * the window's own notes alone is a real duplicate. Survivors keep their authored `full` length, so
- * one merely clipped still springs back if the note in front of it is later moved away.
- *
- * A note is judged by its onset, not its tail: one that starts inside the window and rings past the
- * end is sounding, and stays. Notes are mutated in place (clipOverlaps re-runs over the survivors);
- * the survivors come back as a new array with a count of each kind of loss.
+ * A note is judged by its onset, not its tail - one that starts inside the window and rings past
+ * the end is sounding, and stays. The survivors come back as a new array with a count of the loss;
+ * nothing is mutated.
  */
 export function cleanUpPianoRoll(notes, { start = 0, len = 0 } = {}) {
   const end = start + len;
-  const inWindow = notes.filter((nt) => nt.start >= start && nt.start < end);
-  const outside = notes.length - inWindow.length;
-  clipOverlaps(inWindow);
-  const kept = inWindow.filter((nt) => !nt.hidden);
-  return { notes: kept, outside, buried: inWindow.length - kept.length };
+  // Notes the overlap rule buried used to be swept up here too. They cannot accumulate any more:
+  // burying is settled the moment the hand comes off the note on top (see commitOverlaps), so by
+  // the time anyone presses this there is nothing hidden left to find. What is left is the other
+  // kind of silent note - the one drawn outside the window, which is still worth keeping while a
+  // part is being written and is still luggage once it is finished.
+  const kept = notes.filter((nt) => nt.start >= start && nt.start < end);
+  return { notes: kept, outside: notes.length - kept.length };
 }
 
 /**

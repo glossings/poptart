@@ -27,6 +27,7 @@ import {
   duplicatePianoRollLoop,
   quantizePianoRoll,
   cleanUpPianoRoll,
+  commitOverlaps,
   pianoRollQuantizeDivs,
   pianoRollDefaultQuantizeDiv,
   PIANOROLL_DEFAULT_STEPS,
@@ -143,6 +144,66 @@ test('clipOverlaps: everything comes back when the note on top moves away', () =
   clipOverlaps(roll2);
   assert.equal(buried.hidden, false);
   assert.equal(sounding(roll2), '72,3,6 60,4,2'); // (serialize sorts by onset)
+});
+
+// ---------------------------------------------------------------------------------------------
+// commitOverlaps - the same rule, settled
+//
+// clipOverlaps is what a DRAG sees: provisional, and reversible for as long as the note on top is
+// still in the hand. commitOverlaps is what happens when it is let go. The pair is the whole of the
+// design: recoverable while the gesture is open, final once it is closed, and nothing kept in
+// reserve afterwards that could spring back on some unrelated edit later.
+// ---------------------------------------------------------------------------------------------
+
+test('commitOverlaps: a clipped note gives up the tail it was hiding, for good', () => {
+  const long = nt(60, 0, 8);
+  const short = nt(60, 4, 1);
+  const roll = commitOverlaps([long, short]);
+  assert.equal(long.len, 4);
+  assert.equal(long.full, 4, 'the drawn length is the sounding one now - there is no tail in reserve');
+  // ...so moving the note that cut it away no longer brings anything back.
+  short.start = 12;
+  clipOverlaps(roll);
+  assert.equal(long.len, 4, 'still four cells - what was covered is gone');
+  assert.equal(sounding(roll), '60,0,4 60,12,1');
+});
+
+test('commitOverlaps: a buried note is deleted rather than kept out of sight', () => {
+  const under = nt(60, 0, 4);
+  const over = nt(60, 0, 1);
+  const roll = commitOverlaps([under, over]);
+  assert.deepEqual(roll, [over], 'only the note on top survives');
+  // And it does not come back when the note that buried it is moved off the lane.
+  over.midi = 72;
+  clipOverlaps(roll);
+  assert.equal(sounding(roll), '72,0,1');
+});
+
+test('commitOverlaps: settling twice changes nothing the first one did not', () => {
+  const roll = commitOverlaps([nt(60, 0, 8), nt(60, 4, 1), nt(60, 4, 2)]);
+  const once = sounding(roll);
+  assert.equal(sounding(commitOverlaps(roll)), once);
+  assert.deepEqual(roll.map((n) => n.full), roll.map((n) => n.len), 'every survivor is its own full length');
+});
+
+test('commitOverlaps: notes that never overlapped are untouched', () => {
+  const a = nt(60, 0, 4);
+  const b = nt(64, 0, 4); // a different lane - no contest at all
+  const roll = commitOverlaps([a, b]);
+  assert.equal(roll.length, 2);
+  assert.equal(a.len, 4);
+  assert.equal(a.full, 4);
+});
+
+test('commitOverlaps: a note reaching in from outside the loop still clips what it covers', () => {
+  // The window is not consulted here. Whether a note SOUNDS is the loop's business (clean up is
+  // where that is settled); whether two notes fight for a lane is not.
+  const fromOutside = nt(60, -2, 8);
+  const inside = nt(60, 4, 4);
+  const roll = commitOverlaps([fromOutside, inside]); // later in the array = higher priority
+  assert.equal(roll.length, 2);
+  assert.equal(fromOutside.len, 6, 'cut at the onset of the one in front of it');
+  assert.equal(fromOutside.full, 6, '...and it does not get those two cells back later');
 });
 
 test('clipOverlaps: two notes on one cell - the later one takes it, the other hides', () => {
@@ -1264,9 +1325,8 @@ test('sliceNotesFor: the hits are a roll that says what it plays', () => {
 test('cleanUpPianoRoll: keeps what sounds, drops what the window never reaches', () => {
   //                     before the window | in it | on the last cell | past the end
   const notes = parsePianoRoll('60,-4,2 62,4,2 64,10,2 65,12,2');
-  const { notes: out, outside, buried } = cleanUpPianoRoll(notes, { start: 4, len: 8 });
+  const { notes: out, outside } = cleanUpPianoRoll(notes, { start: 4, len: 8 });
   assert.equal(outside, 2);
-  assert.equal(buried, 0);
   assert.equal(serializePianoRoll(out), '62,4,2 64,10,2');
 });
 
@@ -1277,33 +1337,21 @@ test('cleanUpPianoRoll: a note starting inside the window but ringing past it st
   assert.equal(serializePianoRoll(out), '60,12,16', 'judged by its onset, not its tail');
 });
 
-test('cleanUpPianoRoll: buried notes go, and the clip is redone before deciding which', () => {
-  // two onsets on one cell of one lane: the later note wins the lane (array order is priority)
-  // and the one under it is gone for good
+test('cleanUpPianoRoll: buried notes are no longer its business', () => {
+  // Two onsets on one cell of one lane. Nothing here is hidden by the time anyone presses clean up,
+  // because burying is settled the moment the note on top is let go (see commitOverlaps) - so this
+  // takes neither of them, and clean up is purely about the loop window now.
   const notes = parsePianoRoll('60,8,4 60,8,8');
-  const { notes: out, buried } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
-  assert.equal(buried, 1);
-  assert.equal(serializePianoRoll(out), '60,8,8');
+  const { notes: out, outside } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  assert.equal(outside, 0);
+  assert.equal(out.length, 2);
 });
 
-test('cleanUpPianoRoll: a note buried only by one from outside the window comes back', () => {
-  // the long note reaches in from before the window and hides the one on cell 4; once it is
-  // dropped for being outside, that note sounds again and must be kept
+test('cleanUpPianoRoll: dropping a note from outside the window leaves the rest alone', () => {
   const notes = parsePianoRoll('60,4,2 60,-2,12');
-  const { notes: out, outside, buried } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  const { notes: out, outside } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
   assert.equal(outside, 1);
-  assert.equal(buried, 0);
   assert.equal(serializePianoRoll(out), '60,4,2');
-  assert.equal(out[0].len, 2);
-});
-
-test('cleanUpPianoRoll: survivors keep the authored length a clip took from them', () => {
-  const notes = parsePianoRoll('60,0,8 60,4,4'); // the long note is cut to 4 by the one in front
-  const { notes: out } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
-  assert.equal(serializePianoRoll(out), '60,0,4 60,4,4');
-  out[1].start = 12; // ...and moving that one away springs it back, as it would in the editor
-  clipOverlaps(out);
-  assert.equal(serializePianoRoll(out), '60,0,8 60,12,4');
 });
 
 test('cleanUpPianoRoll: a muted note inside the window is kept', () => {
@@ -1315,8 +1363,7 @@ test('cleanUpPianoRoll: a muted note inside the window is kept', () => {
 
 test('cleanUpPianoRoll: a clean roll loses nothing', () => {
   const notes = parsePianoRoll('60,0,4 62,4,4 64,8,4');
-  const { notes: out, outside, buried } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
+  const { notes: out, outside } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
   assert.equal(outside, 0);
-  assert.equal(buried, 0);
   assert.equal(serializePianoRoll(out), '60,0,4 62,4,4 64,8,4');
 });

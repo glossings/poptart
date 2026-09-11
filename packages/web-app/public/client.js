@@ -3964,14 +3964,13 @@ function initPresetPanel() {
 // probability. With the arrow tool a marker drags up and down, whole selection at once, keeping the
 // selection's differences; with the pencil you PAINT instead, and every note the drag sweeps over
 // snaps to the height you're holding it at (see prPaintLane). Right-click the lane for randomize /
-// reset of the channel - the selection, or the roll. A note dropped on one already sounding at that pitch keeps its own
-// length and the one underneath gives way - cut short, or hidden if it was landed on square - and
-// gets everything back the moment the note on top moves away (see prClipOverlaps). ctrl+Q
-// QUANTIZES - a dialog asks which division (the roll's grid one notch coarser, by default), onsets
-// snap onto it and every drawn nudge goes back to 0. It is also the one edit that settles the
-// overlap rule for keeps: buried notes are deleted outright and a clipped one gives up the tail
-// that was hiding behind the note in front of it, so afterwards the roll says exactly what it
-// plays (see prQuantize). cmd+shift+D and cmd+shift+backspace are the TIME-selection ops - they
+// reset of the channel - the selection, or the roll. A note dropped on one already sounding at that
+// pitch keeps its own length and the one underneath gives way - cut short, or hidden if it was
+// landed on square. While you are still HOLDING the note on top, dragging it away gives the other
+// one everything back; letting go settles it, and what was covered is gone for good (see
+// prSettleOverlaps). ctrl+Q QUANTIZES - a dialog asks which division (the roll's grid one notch
+// coarser, by default), onsets snap onto it and every drawn nudge goes back to 0 (see prQuantize).
+// cmd+shift+D and cmd+shift+backspace are the TIME-selection ops - they
 // duplicate or delete a span of the timeline itself, across every lane (see prTimeRegion, where
 // the region and its ruler band are defined). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
@@ -7638,7 +7637,7 @@ function prHarmonyCommit(spec) {
   prPreviewOff();
   prHarmonyLive(); // nothing made: the live roll goes back with the drawn one
   if (!out) return;
-  prClipOverlaps();
+  prSettleOverlaps();
   prScrollTo(out); // a dropped bass octave may land off-screen
   writePianorollCall();
   drawPianoroll();
@@ -8352,7 +8351,7 @@ async function prSliceToNotes(targets) {
   const gone = new Set(live);
   prState.notes = prState.notes.filter((nt) => !gone.has(nt)).concat(made);
   prState.sel = new Set(made);
-  prClipOverlaps();
+  prSettleOverlaps();
   if (!prSliceMode()) { prState.mode = 'slice'; prSyncMode(); prFramePitch(); }
   writePianorollCall();
   drawPianoroll();
@@ -8808,20 +8807,42 @@ function prCursorFor(px, py, m, velMod) {
   return 'move';
 }
 
-// The overlap rule (see clipOverlaps): no two notes ring at one pitch. The note on top keeps
-// its full drawn length; one it merely runs into is cut off at its onset, and one it lands square
-// on top of is hidden outright. Both are non-destructive - the drawn length rides on `full` and a
-// hidden note stays in prState.notes, just out of the roll and out of the code - so this can run
-// live on every drag frame, and moving the note on top away brings the other one straight back.
+// The overlap rule (see clipOverlaps): no two notes ring at one pitch. The note on top keeps its
+// full drawn length; one it merely runs into is cut off at its onset, and one it lands square on
+// top of is hidden outright.
 //
-// Hidden notes are the roll's only invisible state, so everything that reads notes for the user -
-// drawing, hit-testing, the marquee, the serializer - goes through prLiveNotes.
+// That resolution is provisional WHILE THE HAND IS DOWN and final the moment it comes off. Under
+// the hand the drawn length rides on `full` and a buried note stays in prState.notes, so dragging
+// the note on top back off gives the one underneath everything back - a drag is a question, and the
+// roll holds the answer in reserve until it is finished. On release the tail is given up and the
+// buried note is deleted (prSettleOverlaps): the roll then says exactly what it plays, with nothing
+// remembered that could spring back on an unrelated edit later.
+//
+// So there are two calls, and which one a piece of code wants is decided by one question: is the
+// user still holding this? The four in the pointer handlers say no yet; everything else settles.
+//
+// Hidden notes are the roll's only invisible state, and they now last no longer than a drag - but
+// everything that reads notes for the user (drawing, hit-testing, the marquee, the serializer) goes
+// through prLiveNotes all the same, because mid-drag is exactly when those run.
 const prLiveNotes = (notes) => notes.filter((nt) => !nt.hidden);
 
+/** The provisional resolution, for a drag in progress. Recoverable: nothing is thrown away. */
 function prClipOverlaps() {
   if (!prState || !pianorollMod) return;
   pianorollMod.clipOverlaps(prState.notes);
   for (const n of [...prState.sel]) if (n.hidden) prState.sel.delete(n); // can't act on what isn't there
+}
+
+/**
+ * ...and the final one, for an edit that is over: clipped notes give up their hidden tails and
+ * buried notes are deleted outright. Every edit that is not a live drag ends here, so a finished
+ * roll holds no note it does not play.
+ */
+function prSettleOverlaps() {
+  if (!prState || !pianorollMod) return;
+  const kept = new Set(pianorollMod.commitOverlaps(prState.notes));
+  prState.notes = prState.notes.filter((nt) => kept.has(nt));
+  for (const n of [...prState.sel]) if (!kept.has(n)) prState.sel.delete(n); // gone for good now
 }
 
 // Put `notes` on top: priority is array order, so the notes an edit just placed go last and are
@@ -8845,9 +8866,9 @@ const prDivLabel = (n) => PR_DIV_NAMES[n] ?? `${n}/cycle`;
  * clipped ones lose the tail that was hiding behind the note in front of them.
  *
  * The selection is what moves when there is one, like every other edit here; with nothing selected
- * it is the whole roll. Deleting is the one thing this does that no other roll edit does - the
- * overlap rule is otherwise always recoverable - which is why it asks first rather than being a
- * bare keystroke, and why it lands as one undo step like anything else.
+ * it is the whole roll. It asks before it runs because it MOVES notes that were where you put them,
+ * which no other roll edit does wholesale - not because of what the overlap rule then takes, which
+ * every settled edit takes now (see prSettleOverlaps). It lands as one undo step like anything else.
  */
 async function prQuantize() {
   if (!prState || !pianorollMod) return;
@@ -8884,31 +8905,27 @@ async function prQuantize() {
 }
 
 /**
- * "clean up" (cmd+J): reduce the roll to exactly what it plays. Notes whose onset is outside the
- * loop window are drawn dimmed and never sound; notes the overlap rule buries are not drawn at all.
- * Both are useful WHILE editing - a phrase stretched past the loop end comes back when the end is
- * dragged out, a buried note comes back when the one on top moves away - but once a part is
- * finished they are luggage: invisible state in the code, re-hidden on every later edit, and lengths
- * that spring back when you least want them to.
+ * "clean up" (cmd+J): delete every note the loop window doesn't play. A note whose onset is outside
+ * the window is drawn dimmed and never sounds - useful while a part is being written, since
+ * dragging the loop's end out brings it back, and luggage once the part is finished.
  *
- * Like quantize this is the rare roll edit that deletes, so it says what it took and lands as one
- * history entry - cmd-Z with the grid focused puts everything back. Unlike quantize it doesn't ask
- * first: it removes only what you cannot hear, so there is nothing to weigh up.
+ * That is the whole job now. Buried notes used to be swept up here as well; they cannot pile up any
+ * more, because burying is settled the moment the note on top is let go (see prSettleOverlaps).
+ *
+ * Like quantize this is a roll edit that deletes, so it says what it took and lands as one history
+ * entry - cmd-Z with the grid focused puts everything back. Unlike quantize it doesn't ask first:
+ * it removes only what you cannot hear, so there is nothing to weigh up.
  */
 function prCleanUp() {
   if (!prState || !pianorollMod) return;
-  const { notes, outside, buried } = pianorollMod.cleanUpPianoRoll(prState.notes, prState);
-  if (!outside && !buried) { logLine('piano roll: nothing to clean up - every note is inside the loop and audible'); return; }
+  const { notes, outside } = pianorollMod.cleanUpPianoRoll(prState.notes, prState);
+  if (!outside) { logLine('piano roll: nothing to clean up - every note is inside the loop'); return; }
   prState.notes = notes;
   const kept = new Set(notes);
   for (const n of [...prState.sel]) if (!kept.has(n)) prState.sel.delete(n); // deleted for good
   writePianorollCall();
   drawPianoroll();
-  const lost = [
-    outside ? `${outside} outside the loop` : null,
-    buried ? `${buried} buried` : null,
-  ].filter(Boolean);
-  logLine(`piano roll: cleaned up - deleted ${lost.join(' and ')} (cmd-Z with the grid focused puts them back)`);
+  logLine(`piano roll: cleaned up - deleted ${outside} note${outside === 1 ? '' : 's'} outside the loop (cmd-Z with the grid focused puts them back)`);
 }
 
 // `0`: switch notes off without deleting them. They stay on the grid grayed out - still
@@ -8947,7 +8964,7 @@ function prDuplicate() {
   const copies = sel.map((n) => ({ ...n, start: n.start + shift }));
   prState.notes.push(...copies);
   prState.sel = new Set(copies);
-  prClipOverlaps(); // the copies were pushed last, so they land on top of anything already there
+  prSettleOverlaps(); // the copies were pushed last, so they land on top of anything already there
   writePianorollCall();
   drawPianoroll();
 }
@@ -8979,7 +8996,7 @@ function prPaste() {
   const copies = prClipboard.map((n) => ({ ...n, start: n.start + shift }));
   prState.notes.push(...copies); // last, so the pasted notes win the overlap rule where they land
   prState.sel = new Set(copies);
-  prClipOverlaps();
+  prSettleOverlaps();
   prScrollTo(copies);
   writePianorollCall();
   drawPianoroll();
@@ -9062,7 +9079,7 @@ function prTimeDuplicate() {
   prState.notes.push(...copies);
   prState.sel = new Set(copies);
   prState.regionSpan = [b, b + w]; // the copy is the new region, so the gesture repeats down the timeline
-  prClipOverlaps();
+  prSettleOverlaps();
   writePianorollCall();
   drawPianoroll();
 }
@@ -9072,7 +9089,7 @@ function prTimeDelete() {
   if (!region) return prTimeHint();
   prRemoveTime(region[0], region[1]);
   prState.regionSpan = null;
-  prClipOverlaps();
+  prSettleOverlaps();
   writePianorollCall();
   drawPianoroll();
 }
@@ -9490,7 +9507,7 @@ function initPianorollCanvas() {
       else if (drag.kind === 'bendPoint' || drag.kind === 'bendCurve') { prBendCommit(); }
       else if (drag.kind === 'paint') { if (drag.painted) prWriteNow(); }
       else if (drag.kind !== 'audition') {
-        prClipOverlaps(); // already clipped live on every frame; this settles the final position
+        prSettleOverlaps(); // already clipped live on every frame; this settles the final position
         prWriteNow();
       }
       prState._dragCols = null; // unfreeze the column range
@@ -9532,14 +9549,14 @@ function initPianorollCanvas() {
     if (hit != null) { // double-click a note erases it
       prState.sel.delete(prState.notes[hit]);
       prState.notes.splice(hit, 1);
-      prClipOverlaps(); // whatever it was covering comes back
+      prSettleOverlaps(); // whatever it was covering comes back
       writePianorollCall();
       drawPianoroll();
     } else if (prTool === 'select' && prInLoop(cell)) { // double-click empty in the arrow tool draws a note
       const nt = prNewNote(prMidiAt(py, m), cell);
       prState.notes.push(nt);
       prState.sel = new Set([nt]);
-      prClipOverlaps();
+      prSettleOverlaps();
       writePianorollCall();
       drawPianoroll();
     }
@@ -9625,7 +9642,7 @@ function initPianorollCanvas() {
       if (e.key === 'x' || e.key === 'X') {
         prState.notes = prState.notes.filter((n) => !prState.sel.has(n));
         prState.sel.clear();
-        prClipOverlaps();
+        prSettleOverlaps();
         writePianorollCall();
         drawPianoroll();
       }
@@ -9640,7 +9657,7 @@ function initPianorollCanvas() {
       e.preventDefault();
       prState.notes = prState.notes.filter((n) => !prState.sel.has(n));
       prState.sel.clear();
-      prClipOverlaps(); // the notes they were covering come back, at their drawn length
+      prSettleOverlaps(); // the notes they were covering come back, at their drawn length
       writePianorollCall();
       drawPianoroll();
     } else if (e.key === 'Escape') {
@@ -9665,7 +9682,7 @@ function initPianorollCanvas() {
       }
       prScrollTo(sel);
       prPreviewNotes(sel);
-      prClipOverlaps();
+      prSettleOverlaps();
       writePianorollCall();
       drawPianoroll();
     } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -9683,7 +9700,7 @@ function initPianorollCanvas() {
         // (which grows to keep up) - so the timing between the notes is never touched.
         for (const n of sel) n.start += dir;
       }
-      prClipOverlaps();
+      prSettleOverlaps();
       writePianorollCall();
       drawPianoroll();
     }
@@ -9770,7 +9787,7 @@ function initPianorollEditor() {
     if (!prState) return;
     const grid = Math.max(1, Math.round(Number(prGridSelect.value) || 16));
     Object.assign(prState, pianorollMod.regridPianoRoll(prState, grid));
-    prClipOverlaps();
+    prSettleOverlaps();
     prSyncGridLenInputs();
     writePianorollCall();
     drawPianoroll();
@@ -9853,7 +9870,7 @@ function initPianorollEditor() {
     } else {
       Object.assign(prState, pianorollMod.retimePianoRoll(prState, factor));
     }
-    prClipOverlaps();
+    prSettleOverlaps();
     prSyncGridLenInputs();
     writePianorollCall();
     drawPianoroll();
@@ -9871,7 +9888,7 @@ function initPianorollEditor() {
     prState.notes.push(...copies); // last, so the copies win the overlap rule where they land
     prState.len = len;
     prState.sel = new Set(copies);
-    prClipOverlaps();
+    prSettleOverlaps();
     prSyncGridLenInputs();
     writePianorollCall();
     drawPianoroll();
@@ -9910,7 +9927,7 @@ function initPianorollEditor() {
     const moved = snapped.filter((midi, i) => midi !== live[i].midi).length;
     if (!moved) { logLine(`every note is already in ${patchScale}`); return; }
     live.forEach((nt, i) => { nt.midi = snapped[i]; });
-    prClipOverlaps(); // snapping can land two notes in one lane
+    prSettleOverlaps(); // snapping can land two notes in one lane
     writePianorollCall();
     drawPianoroll();
     logLine(`snapped ${moved} note${moved === 1 ? '' : 's'} to ${patchScale}`);
@@ -10599,7 +10616,13 @@ function applyRecording(results, take) {
       const take = prRecTake(label);
       const rest = events.filter((ev) => !take.keys.has(prRecKey(ev)));
       const out = rest.length ? prRecWrite(rest, { window, quantize }, take) : null;
-      prState.sel = new Set(take.notes.filter((nt) => !nt.hidden));
+      // The take is down for good now, so the overlap rule settles with it: whatever the recording
+      // played over gives up its tail here rather than holding it in reserve for an unrelated edit
+      // later to spring it back (see prSettleOverlaps). The selection is taken afterwards, since
+      // the settle is what decides which of the take's own notes survived.
+      prSettleOverlaps();
+      const live = new Set(prState.notes);
+      prState.sel = new Set(take.notes.filter((nt) => live.has(nt)));
       prState.take = null;
       writePianorollCall();
       drawPianoroll();
