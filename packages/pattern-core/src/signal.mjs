@@ -10,7 +10,7 @@
 
 import { parseMini, getStepsForCycle, warpSteps, stepLocs } from './mini.mjs';
 import {
-  parseNoteValue, noteToMidi, degreeToMidi, parseScaleName, quantizeToScale,
+  parseNoteValue, noteToMidi, degreeToMidi, midiToDegree, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints, parseBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
@@ -110,6 +110,8 @@ function swingGridReport(stepsForCycle, n, cycles = 4) {
 // Said by .sc() when no setscale() has run. Falling back to C major keeps the pattern audible (a
 // silent track mid-set is the worse failure) while naming the one line that's missing.
 const NO_GLOBAL_SCALE = `[signal] .sc() has no scale yet - put setscale("F minor") anywhere in the buffer. Playing in ${DEFAULT_SCALE} until then.`;
+// Said by .add(n(...)) / .sub(n(...)) on a note pattern that has no key to step in.
+const NO_SCALE_FOR_STEP = `[signal] .add(n(...)) steps in a scale, but this pattern has none - put .sc() before it or setscale("F minor") anywhere in the buffer. Stepping in ${DEFAULT_SCALE} until then.`;
 
 // A plugin name is a name, not a pattern. Which plugin is in a slot is fixed for as long as the
 // slot exists - a plugin takes hundreds of milliseconds to open and throws its voices away when it
@@ -226,6 +228,9 @@ export class Sig {
     // n()/note()/synth() builders and threaded through arithmetic/track metadata so
     // note("c4 e4").add(12).scale(...) still knows it's holding notes.
     this.pitchKind = opts.pitchKind ?? null;
+    // The scale the notes were last put through (.scale()/.sc()), or null. Metadata like pitchKind,
+    // so a later .add(n(2)) knows which key to step in once the values are absolute notes.
+    this.scaleName = opts.scaleName ?? null;
     // Debug flag from Sig#log(): the scheduler prints one line per event this pattern fires.
     // Metadata like everything above, so it survives the rest of the chain (.log() can go
     // anywhere in it) - see _meta().
@@ -263,6 +268,7 @@ export class Sig {
       presetPatterns: this.presetPatterns,
       midiNotes: this.midiNotes,
       pitchKind: this.pitchKind,
+      scaleName: this.scaleName,
       logging: this.logging,
     };
   }
@@ -310,7 +316,7 @@ export class Sig {
         throw new Error('[signal] .scale() on a sampler needs degrees or notes first - e.g. s("pluck").n("0 2 4").scale("F minor")');
       }
       const map = mapFor(this.sampler.note.pitchKind);
-      const mapped = this.sampler.note.mapValue(map);
+      const mapped = withPitchKind(this.sampler.note.mapValue(map), 'note'); // the channel now holds MIDI too
       // The repitch note also rides on each event (step.cfg.note, see crossMerge) - that merged
       // copy is what the scheduler reads, so it has to be mapped too or .scale() would quantize
       // the channel and leave the events playing their raw degrees.
@@ -335,6 +341,7 @@ export class Sig {
       out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName, pitchOps: [...(this.inputSource.pitchOps ?? []), { op: 'scale', name: scaleName }] } });
     }
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
+    out.scaleName = scaleName; // ...and remembers the key, for .add(n(...)) downstream
     return out;
   }
 
@@ -1040,7 +1047,9 @@ export class Sig {
    * symbolically (rewriting min/max), keeping it a native, sample-accurate modulator instead of
    * demoting it to polled JS sampling.
    */
-  _binop(op, other, fn, linear) {
+  // `inScale` says fn already works in scale degrees (see _arith) - it only matters to the
+  // live-route fold below.
+  _binop(op, other, fn, linear, inScale = false) {
     // A CONTROL operand - one of the top-level sampler builders, `speed("-1")`/`begin(0.5)`/… -
     // names a CHANNEL rather than a value stream, so the operation lands on that channel instead
     // of on this pattern's own values: `x.mul(speed("-1"))` lands on the speed channel and leaves
@@ -1056,7 +1065,7 @@ export class Sig {
     // would per event on an ordinary pattern. A chain that carries its own events too
     // (kb(1).pianoroll()) then falls through so the op reaches both kinds of note alike.
     if (this.inputSource?.io === 'midi' || this.midiNotes) {
-      const routed = this._routeBinop(op, other, fn);
+      const routed = this._routeBinop(op, other, fn, inScale);
       if (this.sampler) return routed._ctlBinop('note', other, fn);
       if (this.stepsForCycle || this.eventAt) return routed._binopValues(op, other, fn, linear);
       return routed;
@@ -1071,6 +1080,34 @@ export class Sig {
   // The value-stream half of _binop - the arithmetic as it lands on this pattern's own events
   // and samples. Split out so a live-route chain can apply an op to its wire (the pitch-op
   // entry) and to its own events with one spelling.
+  /** Whether this pattern's pitch values are absolute MIDI notes (see pitchKind / _binop). */
+  _holdsNotes() {
+    if (this.inputSource?.io === 'midi' || this.midiNotes) return true; // a live source plays MIDI notes
+    if (this.sampler) return this.sampler.note?.pitchKind === 'note';
+    return this.pitchKind === 'note';
+  }
+
+  /**
+   * Lifts a semitone arithmetic `fn` into the same operation in scale degrees: the left operand
+   * (an absolute note) becomes its degree in this pattern's key, `fn` applies, and the result
+   * (rounded - a degree is a whole step, so .div(n(2)) can't land between two) comes back as a
+   * note. A note that isn't IN the key keeps its distance from the degree it is nearest to, so a
+   * chromatic passing tone stays a passing tone after the step and .add(n(0)) changes nothing.
+   * The key is the last .scale()/.sc() in the chain, else the global setscale().
+   */
+  _degreeStep(fn) {
+    let scale = this.scaleName ?? globalScale();
+    if (!scale) {
+      warnUser(NO_SCALE_FOR_STEP);
+      scale = DEFAULT_SCALE;
+    }
+    return (a, b) => {
+      const degree = midiToDegree(a, scale);
+      const offKey = a - degreeToMidi(degree, scale);
+      return degreeToMidi(Math.round(fn(degree, b)), scale) + offKey;
+    };
+  }
+
   _binopValues(op, other, fn, linear) {
     if (typeof other === 'number' && linear) {
       // Bounds may be signals (see range()) - map those through fn instead of applying it directly.
@@ -1276,8 +1313,10 @@ export class Sig {
    * plain transpose+scale - for a hardware device that is the difference between playing direct
    * in sclang and looping each note through Node).
    */
-  _routeBinop(op, other, fn) {
-    const entry = { op, fn, sig: toSignal(other), const: constantSemitones(other) };
+  _routeBinop(op, other, fn, inScale = false) {
+    // A scale step is never a constant number of semitones (a third is 3 or 4 of them), so an
+    // in-scale op can't fold into the route's static transpose - it rides the per-note map.
+    const entry = { op, fn, sig: toSignal(other), const: inScale ? null : constantSemitones(other) };
     if (this.midiNotes) {
       return this._clone({ midiNotes: { ...this.midiNotes, pitchOps: [...(this.midiNotes.pitchOps ?? []), entry] } });
     }
@@ -1285,11 +1324,26 @@ export class Sig {
     return this._clone({ inputSource: { ...src, pitchOps: [...(src.pitchOps ?? []), entry] } });
   }
 
-  add(x) { return this._binop('add', x, (a, b) => a + b, true); }
-  sub(x) { return this._binop('sub', x, (a, b) => a - b, true); }
-  mul(x) { return this._binop('mul', x, (a, b) => a * b, true); }
-  div(x) { return this._binop('div', x, (a, b) => a / b, true); }
-  mod(x) { return this._binop('mod', x, (a, b) => ((a % b) + b) % b, false); }
+  add(x) { return this._arith('add', x, (a, b) => a + b, true); }
+  sub(x) { return this._arith('sub', x, (a, b) => a - b, true); }
+  mul(x) { return this._arith('mul', x, (a, b) => a * b, true); }
+  div(x) { return this._arith('div', x, (a, b) => a / b, true); }
+  mod(x) { return this._arith('mod', x, (a, b) => ((a % b) + b) % b, false); }
+
+  /**
+   * The pitch-returning arithmetic (add/sub/mul/div/mod) on top of _binop. A DEGREE operand -
+   * `n(2)`, `n("<0 2 -1>")` - names its unit: scale steps. On a pattern that already holds absolute
+   * notes (a pianoroll, anything past .scale()/.sc(), a live source) the whole operation then
+   * happens in scale degrees rather than semitones: .add(n(2)) walks each note up two scale tones
+   * the way .add(2) walks it up two semitones, .mod(n(7)) folds a line into one in-key octave. On a
+   * degree pattern the numbers ARE steps already, so nothing changes. The rewrite happens once,
+   * here, so every path under _binop (values, sampler repitch channel, live-route pitch ops) steps
+   * the same way; the comparisons return 1/0 rather than a pitch, so they stay on _binop as-is.
+   */
+  _arith(op, x, fn, linear) {
+    const inScale = x instanceof Sig && x.pitchKind === 'degree' && this._holdsNotes();
+    return this._binop(op, x, inScale ? this._degreeStep(fn) : fn, linear, inScale);
+  }
   round() { return this._unop('round', Math.round); }
   abs() { return this._unop('abs', Math.abs); }
   floor() { return this._unop('floor', Math.floor); }

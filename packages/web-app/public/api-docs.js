@@ -374,11 +374,11 @@ const API_DOCS = {
   },
 
   // ----------------------------------------------------------------- arithmetic
-  add: { kind: 'method', sig: 'add(x)', desc: 'Adds, keeping the left side\'s structure. On a control pattern it reaches into that channel. A `,`-stacked right side sounds every layer at once - .add(note("0,7")) keeps each note and adds its fifth alongside.', eg: '.add(note("0,7"))' },
-  sub: { kind: 'method', sig: 'sub(x)', desc: 'Subtracts, keeping the left side\'s structure. A `,`-stacked right side sounds every layer at once.', eg: '.sub(12)' },
-  mul: { kind: 'method', sig: 'mul(x)', desc: 'Multiplies, keeping the left side\'s structure. A `,`-stacked right side sounds every layer at once - .mul(speed("1.1,0.9")) is two hits, detuned apart.', eg: '.mul(speed(2))' },
-  div: { kind: 'method', sig: 'div(x)', desc: 'Divides, keeping the left side\'s structure.', eg: 'irand(8).div(8)' },
-  mod: { kind: 'method', sig: 'mod(x)', desc: 'Modulo (always positive), keeping the left side\'s structure.', eg: '.mod(12)' },
+  add: { kind: 'method', sig: 'add(x)', desc: 'Adds, keeping the left side\'s structure. On a control pattern it reaches into that channel. A `,`-stacked right side sounds every layer at once - .add(note("0,7")) keeps each note and adds its fifth alongside. On notes, .add(n(2)) steps two SCALE tones (the last .scale()/.sc(), else setscale) where .add(2) is two semitones.', eg: '.add(n("<0 2 -1>"))' },
+  sub: { kind: 'method', sig: 'sub(x)', desc: 'Subtracts, keeping the left side\'s structure. A `,`-stacked right side sounds every layer at once. On notes, .sub(n(1)) steps down one scale tone where .sub(1) is a semitone.', eg: '.sub(12)' },
+  mul: { kind: 'method', sig: 'mul(x)', desc: 'Multiplies, keeping the left side\'s structure. A `,`-stacked right side sounds every layer at once - .mul(speed("1.1,0.9")) is two hits, detuned apart. An n() operand works in scale degrees on notes.', eg: '.mul(speed(2))' },
+  div: { kind: 'method', sig: 'div(x)', desc: 'Divides, keeping the left side\'s structure. An n() operand works in scale degrees on notes.', eg: 'irand(8).div(8)' },
+  mod: { kind: 'method', sig: 'mod(x)', desc: 'Modulo (always positive), keeping the left side\'s structure. On notes, .mod(n(7)) folds a line into one in-key octave where .mod(12) folds raw MIDI numbers.', eg: '.mod(12)' },
   round: { kind: 'method', sig: 'round()', desc: 'Rounds each value to the nearest integer.', eg: 'rand().range(0, 7).round()' },
   abs: { kind: 'method', sig: 'abs()', desc: 'Absolute value of each value.', eg: '.abs()' },
   floor: { kind: 'method', sig: 'floor()', desc: 'Rounds each value down to the integer below.', eg: '.floor()' },

@@ -1010,7 +1010,17 @@ kick: s(<span class="s">"bd*4"</span>)</code></pre>
             its structure from the left side; the right can be a number, a string or another signal:
           </p>
           <pre><code>note(<span class="s">"c3 e3 g3"</span>).add(12)                      <span class="c">// up an octave</span>
-n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scale(<span class="s">"C major"</span>)     <span class="c">// transpose every other cycle</span></code></pre>
+n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scale(<span class="s">"C major"</span>)     <span class="c">// transpose every other cycle</span>
+pianoroll(<span class="s">"lead"</span>).sc().add(n(<span class="s">"&lt;0 2 -1&gt;"</span>))      <span class="c">// ...in scale tones: n() names the unit</span></code></pre>
+          <p>
+            A number (or a bare string) works in semitones; an <code>n()</code> operand moves the whole
+            operation into <strong>scale degrees</strong> — in the key the notes last went through, else
+            the <code>setscale</code> key — so already-absolute notes (a piano roll, anything past
+            <code>.sc()</code>) transpose inside the key without being rewritten as degrees. The same
+            rule covers all five: <code>.mod(n(7))</code> folds a line into one in-key octave.
+            Out-of-key notes keep their distance from the nearest degree, so a chromatic passing tone
+            stays one.
+          </p>
           <p>
             The set: <code>add sub mul div mod round abs floor ceil clamp</code>, and the comparisons
             <code>gte gt lte lt eq neq</code> (1/0 — handy as conditions).
