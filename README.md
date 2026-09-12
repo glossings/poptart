@@ -25,6 +25,8 @@ If you somehow ended up here without previously checking out [Tidal Cycles](http
 - **A sampler, a piano roll, a mixer, MIDI in and out** — all of it writing code rather than
   hiding state, so the patch *is* the sound and a single file plays exactly what you heard.
 - **Extensible from the editor.** Extend `Signal.prototype` live, the way you would in Strudel.
+- **Shares its clock.** MIDI clock out for hardware, Ableton Link for the other apps on the
+  network.
 
 Everything past that is in the built-in guide — the **docs ↗** button in the app.
 

@@ -1,7 +1,8 @@
-// Transport#onStateChange - the hook the host's clock outputs hang off (MIDI clock's
-// start/stop/locate - see web-app's server.js). What is asserted: each transition announces
-// itself exactly once with the right kind, and tempo changes never announce (they have their
-// own hook).
+// Transport#onStateChange and #shiftCycles - the hooks the host's clock sharing hangs off (MIDI
+// clock's start/stop/locate, the Link follower's phase trims - see web-app's server.js). What is
+// asserted: each transition announces itself exactly once with the right kind, tempo changes
+// never announce (they have their own hook), and a shift moves position without touching tempo
+// or running state.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -46,5 +47,32 @@ test('tempo changes never announce a state change', () => {
   tr.setCps(1);
   tr.rampBpm(100, 0);
   assert.deepEqual(kinds, ['start']);
+  tr.dispose();
+});
+
+test('shiftCycles moves a running clock by exactly delta, keeps tempo, says nothing', () => {
+  const { tr, kinds, advance, now } = clock();
+  tr.start();
+  advance(2); // 1 cycle at 0.5 cps
+  assert.equal(tr.cycleAt(now()), 1);
+  tr.shiftCycles(0.3);
+  assert.ok(Math.abs(tr.cycleAt(now()) - 1.3) < 1e-12);
+  assert.equal(tr.cps, 0.5);
+  advance(2);
+  assert.ok(Math.abs(tr.cycleAt(now()) - 2.3) < 1e-12); // still advancing at the same rate
+  tr.shiftCycles(-0.3);
+  assert.ok(Math.abs(tr.cycleAt(now()) - 2) < 1e-12);
+  assert.deepEqual(kinds, ['start']);
+  tr.dispose();
+});
+
+test('shiftCycles is a no-op on a paused clock and on junk', () => {
+  const { tr, now } = clock();
+  tr.shiftCycles(0.4);
+  assert.equal(tr.cycleAt(now()), 0);
+  tr.start();
+  tr.shiftCycles(NaN);
+  tr.shiftCycles(0);
+  assert.equal(tr.cycleAt(now()), 0);
   tr.dispose();
 });

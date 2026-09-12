@@ -921,6 +921,12 @@ aside h2 {
   cursor: pointer;
 }
 
+/* the live half of a check row's label (a peer count, a status word): present or absent without
+   moving the words before it */
+.settings-aside {
+  color: var(--text-dim);
+}
+
 /* a text-only check row under a field row: the field's box is taller than its text, so without
    this the next row's words sit right against its bottom edge */
 .settings-row:not(.settings-check) + .settings-check {

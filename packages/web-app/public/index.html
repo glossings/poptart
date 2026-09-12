@@ -396,6 +396,11 @@
               <label class="settings-row">midi clock out
                 <select id="midiClockSelect" title="send MIDI clock (24 ticks a beat, with start/stop and song position) to a MIDI destination, so a drum machine or sequencer follows poptart's clock - in mix mode that is the desk's clock, tempo migrations included"></select>
               </label>
+              <label class="settings-check"
+                title="join the Ableton Link session on this network: tempo is shared both ways, poptart's play button starts and stops the other apps (and theirs starts poptart, outside mix mode), and a start lands on the session's bar">
+                <input id="linkToggle" type="checkbox" />
+                ableton link <span id="linkPeers" class="settings-aside"></span>
+              </label>
             </section>
             <section>
               <h2>plugins</h2>

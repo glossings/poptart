@@ -15,3 +15,6 @@ packages/web-app/prebake.hotkeys.js
 
 # Rubber Band + SC headers fetched by native/rubberband/build.sh
 packages/osc-engine/native/rubberband/.deps/
+
+# Ableton Link SDK + asio fetched by native/link/build.sh
+packages/osc-engine/native/link/.deps/

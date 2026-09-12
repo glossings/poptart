@@ -13880,7 +13880,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshLink(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -14427,6 +14427,91 @@ midiClockSelect.addEventListener('change', async () => {
     refreshMidiClock().catch(() => {});
   }
 });
+
+// Ableton Link (settings → sync). The switch is here; what the session is doing arrives on its
+// own push channel (linkFollow below), open while Link is on.
+const linkToggle = document.getElementById('linkToggle');
+const linkPeersEl = document.getElementById('linkPeers');
+
+function linkRender({ enabled, peers, playing }) {
+  linkToggle.checked = enabled;
+  linkPeersEl.textContent = !enabled ? ''
+    : `· ${peers} peer${peers === 1 ? '' : 's'}${peers && playing ? ', playing' : ''}`;
+}
+
+async function refreshLink() {
+  try {
+    const state = await api('GET', '/api/link');
+    linkRender(state);
+    linkFollow(state.enabled);
+    linkToggle.disabled = !state.available;
+    if (!state.available) linkToggle.title = 'Link needs the poptart-link helper, which is not built for this system';
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+linkToggle.addEventListener('change', async () => {
+  const want = linkToggle.checked;
+  linkToggle.disabled = true;
+  try {
+    const state = await api('POST', '/api/link', { enabled: want });
+    linkRender(state);
+    linkFollow(state.enabled);
+    logLine(state.enabled ? `link: on (${state.peers} peer${state.peers === 1 ? '' : 's'})` : 'link: off');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    refreshLink().catch(() => {});
+  } finally {
+    linkToggle.disabled = false;
+  }
+});
+
+// The session's play button, relayed by the server (only the editor knows what code to start, so
+// the server can't act on it itself). Poptart follows it exactly as far as its own play button
+// goes: play evaluates the buffer, stop stops everything. NOT in mix mode - a DAW stopping must
+// never silence a set.
+//
+// Only a CHANGE of the session's play state acts, and the first frame merely establishes what
+// that state is: a peer leaving (a DAW quit, a laptop closed) must not read as a stop, which is
+// what watching the peer count instead would do. The server already swallows the echo of
+// poptart's own start, so what arrives here is somebody else pressing play.
+let linkPlaying = null;
+function linkFollowTransport(state) {
+  const wants = !!state.enabled && !!state.playing;
+  const was = linkPlaying;
+  linkPlaying = wants;
+  if (was === null || wants === was || mixModeOn) return;
+  if (wants && !playing) evaluate(true, { byHand: false });
+  else if (!wants && playing) doStop();
+}
+
+// The push channel is open only while Link is on. A browser allows about six connections to one
+// host at a time and an EventSource holds one for as long as it lives, so a channel left open for
+// a feature nobody is using is one fewer slot for the evaluations and polls that must not queue -
+// and the desk has a permanent channel of its own the moment mix mode opens.
+let linkEvents = null;
+function linkFollow(on) {
+  if (on === !!linkEvents) return;
+  if (!on) {
+    linkEvents.close();
+    linkEvents = null;
+    linkPlaying = null; // the next session we join starts from no opinion
+    return;
+  }
+  linkEvents = new EventSource('/api/link/events');
+  linkEvents.onmessage = (e) => {
+    let state;
+    try {
+      state = JSON.parse(e.data);
+    } catch {
+      return; // a torn frame; the next one corrects
+    }
+    linkRender(state);
+    linkFollowTransport(state);
+  };
+}
+refreshLink(); // whether Link is on is a server-side setting; the channel follows it
 
 // Folder picker - a server-side directory browser (the server and browser are the same machine,
 // and browsers can't hand back a real filesystem path). Navigate into subfolders, up via ".."
@@ -21843,8 +21928,10 @@ let mixTempoAnim = null; // local mirror of a server-side ramp, so the readout g
 const mixTempoNowEl = document.getElementById('mixTempoNow');
 const mixTempoSliderEl = document.getElementById('mixTempoSlider');
 
+let mixLinkPeers = null; // peers on the Link session while it is on (the desk's push says), else null
+
 function mixTempoShow(bpm) {
-  mixTempoNowEl.textContent = bpm == null ? '' : `${bpm.toFixed(1)} bpm`;
+  mixTempoNowEl.textContent = bpm == null ? '' : `${bpm.toFixed(1)} bpm${mixLinkPeers == null ? '' : ` · link ${mixLinkPeers}`}`;
   const { a, b } = mixNativeBpm;
   if (bpm != null && a != null && b != null && a !== b && document.activeElement !== mixTempoSliderEl) {
     mixTempoSliderEl.value = Math.min(1, Math.max(0, (bpm - a) / (b - a)));
@@ -21869,6 +21956,7 @@ function mixTempoAnimStart(from, to, seconds) {
 
 function mixTempoRender(state) {
   mixNativeBpm = state.deckBpm;
+  mixLinkPeers = state.link ? state.link.peers : null;
   for (const deck of ['a', 'b']) {
     const btn = document.getElementById(deck === 'a' ? 'mixTempoA' : 'mixTempoB');
     const bpm = state.deckBpm[deck];

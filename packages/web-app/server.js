@@ -691,6 +691,12 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
       startCycle = Math.ceil(earliest / beat) * beat;
     }
     startSec = transport.secAt(startCycle);
+  } else if (takeGrid && !startNow) {
+    // Nothing else on the clock, but maybe a Link session to land on: this record's bar line
+    // goes on the session's, so the room and the peers hear the same downbeat. The wait is at
+    // most a bar; the tempo just pushed above is where the session's bars will fall from here.
+    const at = linkBarStart(songSync.gridPhase(from, songGridBpm(deck), s.anchorSec), startSec, transport.cps * 240);
+    if (at != null) startSec = at;
   }
   s.nudge = 0;
   s.servo = 0;
@@ -1316,6 +1322,7 @@ function mixDeskBody() {
       master: transport ? transport.cps * 240 : null,
       override: mixState.tempoOverride,
     },
+    link: linkState.enabled ? { peers: linkState.peers } : null,
     // The CLOCK itself, not just its bpm. The browser mirrors cycle position from this snapshot
     // (playback highlighting, the livecoded decks' bar/beat grid, the arrangement playhead), and
     // the only other place it ever arrived was an /api/evaluate reply - so a tempo the DESK moved
@@ -1564,6 +1571,262 @@ function syncEngineClock(event = 'sync') {
 // MIDI clock out: sclang sends the ticks from its mirror of the transport, to the destination
 // chosen in the settings tab (persisted as settings.midiClockOut).
 let midiClockActive = null; // the destination the running engine actually ticks to
+
+// ---------------------------------------------------------------------------------------------
+// Ableton Link. The session peer is a helper process (see osc-engine's link.js); this is the
+// musical half - what poptart follows, and what it pushes.
+//
+// TEMPO goes both ways, and the rule on our side is INTENT. A peer's tempo lands through
+// setCps, so it is continuous and rate-locked songs follow it through onCpsChange like any other
+// tempo move. Poptart pushes back whenever the clock moves for a reason of its own - an edited
+// setbpm, a migration slider, a detent, a record taking the grid - and never when it moves
+// because the session said so (applyingLinkTempo). What it must NOT do is push on a re-eval that
+// merely restates the tempo the buffer always declared: that is not a gesture, and treating it
+// as one is what made a peer's tempo die on the next Cmd+Enter. See declareTempo.
+//
+// PHASE only comes in, and only where yielding is free: a start from stopped lands on the
+// session's bar, a Link switched on mid-performance jumps once unless the desk holds the clock
+// (a record's bars are the room's bars and are not moved for anyone), and otherwise the relation
+// poptart has is kept and drift-trimmed until the next song start puts its own bar line on the
+// session's. link-sync.js has that math.
+//
+// PLAY STATE goes both ways too. Out: the transport's start/stop reaches the session, which is
+// what makes a DAW follow poptart's play button. In: the session's play state is relayed to the
+// browser (the buffer lives there, so only the editor can start it) over the push channel below,
+// and the editor ignores it in mix mode - a DAW stopping must never silence a set.
+// ---------------------------------------------------------------------------------------------
+const linkPeer = require('@poptart/osc-engine/link');
+const linkSync = require('./link-sync');
+
+const LINK_PUSH_MS = 100; // a migration ramp is a stream of steps; the session needs ~10/s of it
+
+const linkState = {
+  enabled: false,
+  peers: 0,
+  playing: false, // the session's play state as last reported
+  report: null, // { bpm, beats, atSec } - the session's latest word
+  offset: 0, // the accepted phase relation, in cycles (0 = on the session's bar)
+  adoptPending: false, // a jump onto the session's bar is owed (Link just came on)
+};
+let linkHandle = null;
+let applyingLinkTempo = false; // true while a peer's tempo is being applied, so it isn't pushed back
+let linkPushTimer = null;
+let linkPushPending = null;
+// A report already in flight when we push carries the tempo from BEFORE the push, and applying it
+// would drag the clock back for one heartbeat. Ignore a disagreeing tempo for a moment after
+// pushing one (the pipe's round trip is sub-millisecond; this is generous). A migration ramp
+// renews the window with every step, which is right - the gesture in progress owns the tempo.
+const LINK_PUSH_QUIET_MS = 250;
+let linkQuietUntil = 0;
+// What poptart last told the session about its own play state. The session echoes it back a
+// moment later, and that echo must not read as the session asking for something.
+let linkPushedPlaying = null;
+
+// The clock moved for a reason of poptart's own: tell the session, at most ten times a second.
+function linkPushTempo(bpm) {
+  if (!linkHandle || !linkState.enabled || !(bpm > 0)) return;
+  if (linkPushTimer) {
+    linkPushPending = bpm;
+    return;
+  }
+  linkHandle.setTempo(bpm);
+  linkQuietUntil = Date.now() + LINK_PUSH_QUIET_MS;
+  linkPushTimer = setTimeout(() => {
+    linkPushTimer = null;
+    const next = linkPushPending;
+    linkPushPending = null;
+    if (next != null) linkPushTempo(next);
+  }, LINK_PUSH_MS);
+}
+
+function linkPushPlaying(playing) {
+  if (!linkHandle || !linkState.enabled) return;
+  linkPushedPlaying = playing;
+  linkHandle.setPlaying(playing);
+}
+
+function applyLinkReport({ bpm, beats, atSec, peers, playing }) {
+  const peersChanged = peers !== linkState.peers;
+  const playingChanged = playing !== linkState.playing;
+  linkState.peers = peers;
+  linkState.playing = playing;
+  linkState.report = { bpm, beats, atSec };
+  if (peersChanged) {
+    eventLogQueue.push(`[link] ${peers} peer${peers === 1 ? '' : 's'} on the session`);
+    mixNotify();
+  }
+  // The session coming back with the play state poptart just pushed is not the session asking
+  // for anything - swallow exactly that one echo, so a later change by a peer still arrives.
+  const selfEcho = playingChanged && playing === linkPushedPlaying;
+  // Echoed, or nothing to echo (the session was already in that state): either way the marker
+  // has done its job, and left standing it would swallow a peer's next real change.
+  if (playing === linkPushedPlaying) linkPushedPlaying = null;
+  if (peersChanged || (playingChanged && !selfEcho)) linkNotify();
+  // Alone, the helper's timeline is nobody's: a session of one has no tempo to follow and no bar
+  // to land on (jumping onto it would move the clock for nothing, and leave adoptPending spent
+  // before a peer ever arrived). The follow starts with the first peer.
+  if (!engine || !transport || !linkState.enabled || !peers) return;
+  const quiet = Date.now() < linkQuietUntil;
+  if (!quiet && !linkSync.sameTempo(bpm, transport.cps * 240)) {
+    applyingLinkTempo = true;
+    try {
+      transport.setCps(bpm / 240);
+    } finally {
+      applyingLinkTempo = false;
+    }
+  }
+  if (transport.paused) return; // nothing to align; the next start lands on the bar
+  const now = engine.getTime();
+  const measured = linkSync.phaseDelta(transport.cycleAt(now), linkSync.sessionBeatsAt(linkState.report, now));
+  const step = linkSync.followStep(measured, linkState.offset, {
+    mayAdopt: linkState.adoptPending && !clockHeldByDesk(),
+  });
+  linkState.offset = step.offset;
+  if (step.kind === 'adopt' || step.kind === 'accept') linkState.adoptPending = false;
+  if (step.shift) transport.shiftCycles(step.shift);
+  if (step.kind === 'adopt') {
+    syncEngineClock('rebase'); // the MIDI clock relocates, the plugins' transport jumps with us
+    mixNotify(); // every client-side clock mirror re-reads the transport
+  }
+}
+
+/** Where the session's bar sits at `atSec`, as a cycle fraction - null without peers to land on. */
+function linkPhaseAt(atSec) {
+  if (!linkState.enabled || !linkState.peers || !linkState.report) return null;
+  return linkSync.sessionPhase(linkSync.sessionBeatsAt(linkState.report, atSec));
+}
+
+/**
+ * Start the transport from stopped. With Link peers about, the clock resumes with the session's
+ * bar phase as its cycle position rather than 0, so poptart's next downbeat is the session's -
+ * which means a start halfway through a bar comes in halfway through the pattern, exactly as
+ * joining a Link session is meant to feel. Returns the cycle it started at (what an eval opens
+ * its schedulers' windows at), or null when the clock was already running.
+ */
+function transportStart() {
+  if (!transport || !transport.paused) return null;
+  const now = engine.getTime();
+  const phase = linkPhaseAt(now);
+  if (phase == null) {
+    transport.start();
+    return 0;
+  }
+  linkState.offset = 0;
+  linkState.adoptPending = false;
+  transport.startAt(now, phase);
+  return phase;
+}
+
+/**
+ * The first moment at or after `notBeforeSec` when the session's bar is at `phase` (cycle
+ * fraction), with the session running at `bpmAhead` from then on - null without peers. Taking it
+ * means landing on the session's bar, so the accepted relation resets to 0.
+ */
+function linkBarStart(phase, notBeforeSec, bpmAhead) {
+  if (!linkState.enabled || !linkState.peers || !linkState.report) return null;
+  const at = linkSync.nextTimeAtPhase(linkState.report, phase, notBeforeSec, bpmAhead, engine.getTime());
+  if (at == null) return null;
+  linkState.offset = 0;
+  linkState.adoptPending = false;
+  return at;
+}
+
+/** Is a Link session entitled to own the tempo right now? (Only a session with peers in it.) */
+function linkOwnsTempo() {
+  return linkState.enabled && linkState.peers > 0;
+}
+
+// The tempo deck a's last eval DECLARED: its setbpm number, or the 120 default for a buffer that
+// says nothing. Null once a signal tempo declares something with no single number to restate.
+let declaredBpm = null;
+
+/**
+ * Apply a deck-a eval's tempo declaration - except when it is a restatement of the one already
+ * in force and a Link session owns the tempo. Re-running a buffer is not a tempo gesture;
+ * editing its number is, and that pushes into the session like any other deliberate move.
+ */
+function declareTempo(value, resolved) {
+  const numeric = typeof resolved === 'number' ? resolved : null;
+  const moves = linkSync.declarationMoves(numeric, declaredBpm, linkOwnsTempo());
+  declaredBpm = numeric;
+  if (!moves) return TEMPO_BLOCK; // a restatement, and the session's tempo stands
+  return setbpm(value);
+}
+
+// --- the Link push channel (SSE, GET /api/link/events) ---
+//
+// Peers and the session's play state, pushed on change only (never the peer's twice-a-second
+// heartbeat), so an idle session is idle traffic-free. The browser holds this open while Link is
+// on, in mix mode or not: the session's play button has to reach the editor, which is the only
+// thing that knows what code to start.
+const linkEventClients = new Set();
+
+function linkBody() {
+  return {
+    enabled: linkState.enabled,
+    peers: linkState.peers,
+    playing: linkState.enabled && linkState.playing,
+    bpm: linkState.report?.bpm ?? null,
+  };
+}
+
+function linkNotify() {
+  if (!linkEventClients.size) return;
+  const frame = `data: ${JSON.stringify(linkBody())}\n\n`;
+  for (const res of linkEventClients) res.write(frame);
+}
+
+function serveLinkEvents(res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(`data: ${JSON.stringify(linkBody())}\n\n`); // the current state, immediately
+  linkEventClients.add(res);
+  res.on('close', () => linkEventClients.delete(res));
+}
+
+/** Join or leave the session, and reflect it in linkState. Safe to call with it already there. */
+function applyLinkSetting(enabled) {
+  linkState.enabled = !!enabled;
+  linkState.peers = 0;
+  linkState.report = null;
+  linkState.playing = false;
+  linkState.offset = 0;
+  linkState.adoptPending = linkState.enabled;
+  linkPushedPlaying = null;
+  linkQuietUntil = 0;
+  if (!linkState.enabled) {
+    linkHandle?.stop();
+    linkHandle = null;
+    linkNotify();
+    return;
+  }
+  if (linkHandle) return;
+  if (!linkPeer.helperAvailable()) {
+    linkState.enabled = false;
+    throw new Error(`Link needs the poptart-link helper, which is not built for this system (${process.platform})`);
+  }
+  linkHandle = linkPeer.joinLink({
+    onError: (err) => {
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] link: ${err.message}`);
+      eventLogQueue.push(`[link] the session peer stopped (${err.message}) - switch Link off and on to rejoin`);
+      linkHandle = null;
+      linkState.peers = 0;
+      linkNotify();
+    },
+  });
+  linkHandle.onState = applyLinkReport;
+  // The session inherits whatever the clock is already doing, so a Link switched on mid-set
+  // doesn't hand the room a 120 the moment a DAW joins.
+  if (transport) {
+    linkPushTempo(transport.cps * 240);
+    linkHandle.setPlaying(!transport.paused);
+  }
+  linkNotify();
+}
 
 // What the running engine should tick to, as persisted - re-applied after every engine
 // (re)start, since a fresh sclang has no destination.
@@ -1985,8 +2248,18 @@ function wireEngine() {
   // Born paused at cycle 0: the clock only advances while something is playing (first eval
   // starts it, /api/stop freezes it back at 0). Survives engine restarts, hence the guard.
   if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
-  transport.onStateChange = (kind) => syncEngineClock(kind); // start/stop/rebase reach the MIDI clock
+  transport.onStateChange = (kind) => {
+    syncEngineClock(kind); // start/stop/rebase reach the MIDI clock
+    // ...and the session, which is what makes a DAW follow poptart's play button. A phase move
+    // ('rebase') is not a transport change - nothing to say about it.
+    if (kind === 'start') linkPushPlaying(true);
+    else if (kind === 'stop') linkPushPlaying(false);
+  };
   transport.onCpsChange = () => {
+    // The clock moved for a reason of poptart's own (an eval, a migration, a record taking the
+    // grid): the session follows. A peer's own tempo arriving is excluded, or the two would push
+    // each other back and forth forever.
+    if (!applyingLinkTempo) linkPushTempo(transport.cps * 240);
     syncVstTransport();
     // Rate-locked songs ride the clock: every ramp step re-derives rate = master/native (with
     // a model rebase, so the mirrored playhead stays exact) - see songApplyRate.
@@ -2093,6 +2366,16 @@ async function init() {
   engine = await loadEngine();
   if (engine) wireEngine();
   runPrebake(); // once, after builders + transport exist and before the first eval
+  // The Link peer is its own process and has nothing to do with the audio engine, so it is
+  // started here rather than in wireEngine() - an engine restart leaves the session alone.
+  if (settings.link) {
+    try {
+      applyLinkSetting(true);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] link: ${err.message}`);
+    }
+  }
 }
 
 // Strudel-flavored ergonomics: let mini-notation strings be used directly as patterns in
@@ -3978,6 +4261,20 @@ const routes = {
     return { status: 200, body: { enabled: settings.preferVst3 } };
   },
 
+  // Ableton Link (settings tab): the switch, and what the session looks like from here.
+  'GET /api/link': async () => ({
+    status: 200,
+    body: { ...linkBody(), available: linkPeer.helperAvailable() },
+  }),
+
+  'POST /api/link': async (body) => {
+    applyLinkSetting(!!body.enabled); // throws (and stays off) where the helper isn't built
+    settings.link = linkState.enabled;
+    saveSettings();
+    mixNotify();
+    return { status: 200, body: linkBody() };
+  },
+
   // MIDI clock out (settings tab): its destination, persisted and re-applied on every engine
   // start (applyMidiClockSetting).
   'GET /api/midiClock': async () => ({
@@ -4072,7 +4369,7 @@ const routes = {
         decks[deck].bpm = v;
         // While the desk holds the clock - a tempo migration, or a song deck playing as grid
         // master - even the main deck's setbpm only RECORDS. See clockHeldByDesk.
-        return deck === 'a' && !clockHeldByDesk() ? setbpm(value) : TEMPO_BLOCK;
+        return deck === 'a' && !clockHeldByDesk() ? declareTempo(value, v) : TEMPO_BLOCK;
       },
     };
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
@@ -4211,7 +4508,7 @@ const routes = {
     // song had been loaded outside dj mode.
     if (!sawSetbpm) {
       decks[deck].bpm = null;
-      if (deck === 'a' && !clockHeldByDesk()) setbpm(DEFAULT_CPS * 240);
+      if (deck === 'a' && !clockHeldByDesk()) declareTempo(DEFAULT_CPS * 240, DEFAULT_CPS * 240);
     }
     noteProtoOwnership(deck);
 
@@ -4334,8 +4631,8 @@ const routes = {
     // still frozen there), so the downbeat - and a `.preset()`'s first application, which is
     // what used to leave synths on their init program for the whole first cycle - is inside the
     // window instead of a few microseconds behind it (see Scheduler#start).
-    const scheduleFrom = transport.cycleAt(engine.getTime());
-    if (active.length > 0 && body.start !== false) transport.start();
+    let scheduleFrom = transport.cycleAt(engine.getTime());
+    if (active.length > 0 && body.start !== false) scheduleFrom = transportStart() ?? scheduleFrom;
 
     for (const b of active) {
       const key = keyOfBlock(b.label);
@@ -6272,6 +6569,11 @@ const server = http.createServer(async (req, res) => {
   // The desk push channel (mix mode's knob mirror) - same deal.
   if (req.method === 'GET' && url.pathname === '/api/mix/events') {
     return serveMixEvents(res);
+  }
+
+  // The Link push channel: peers and the session's play state, held open while Link is on.
+  if (req.method === 'GET' && url.pathname === '/api/link/events') {
+    return serveLinkEvents(res);
   }
 
   const handler = routes[`${req.method} ${url.pathname}`];

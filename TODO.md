@@ -24,7 +24,9 @@ no completion notes.
       toolchain; keep the .scx name so the class file is shared.
     - both: keylock-sclang.test.js already branches on HAS-RB, so it verifies whichever path is
       installed; add a build-matrix job that commits (or releases) the artifacts rather than
-      asking users for a compiler - see the header comment in build.sh for why.
+      asking users for a compiler - see the header comment in build.sh for why. The same job
+      should build the poptart-link helper (see its own entry below), which needs the same
+      per-platform machines.
 
 [ ] Keylock control lag - uniform-latency graph option: with key on, a deck's controls (nudge,
     jog, cue jump, pause/resume) take effect ~60 ms after the gesture - the pitch shifter's
@@ -368,31 +370,22 @@ no completion notes.
     sclang's sysrt MIDI responders receive the ticks; a smoothing filter (a PLL over the last N
     tick intervals - USB MIDI clock is famously jittery) estimates tempo and beat phase, then
     forwards to Node as a (tempo, beat at a moment) report and rebases the transport with
-    Transport#setCps for tempo and a phase shift for beat - the same follower the Link item
-    below needs. poptart always follows here (the 150 ms lookahead is fine for that). Strudel
+    Transport#setCps for tempo and a phase shift for beat - the same follower Link already
+    has (server.js's applyLinkReport over link-sync.js; a MIDI clock report can feed it as a
+    second source). poptart always follows here (the 150 ms lookahead is fine for that). Strudel
     can't do either (browser, no clock sender in its midi package), so Strudel -> poptart stays
     a live note feed.
 
-[ ] Ableton Link - join a Link session so poptart shares tempo, beat phase AND start/stop with
-    a DAW on the LAN. A first pass on sclang's built-in LinkClock (2026-09-12) proved the tempo
-    and phase halves but hit a wall on start/stop: SC 3.14's Link glue receives the session's
-    play state (\linkStart/\linkStop notifications) but has no primitive to SET it, so a
-    poptart start can never start the DAW. Decided (2026-09-13): a small helper binary on the
-    Link SDK, built and committed like the keylock UGen (native/), is poptart's peer instead -
-    Node drives it over stdio, reads beats/tempo/peers directly, and sets isPlaying, so the
-    sclang half goes away. Shape to keep from the first pass (patch in the 09-12 session):
-    tempo goes both ways (setbpm/migration push, a peer's change lands through setCps and
-    onCpsChange re-rates synced songs); phase only comes in and only where yielding is free - a
-    start from stopped lands on the session's bar, a Link switched on mid-performance jumps once
-    unless clockHeldByDesk, otherwise the relation is kept and drift-trimmed (sub-tick, silent)
-    until the next song start puts its bar on the session's; the follow math (sessionPhase,
-    phaseDelta, followStep, nextTimeAtPhase) is pure and unit-tested. New rule for the rebuild:
-    poptart only pushes a tempo the user is intentionally changing - record the bpm each eval
-    and each desk gesture, and push on a CHANGE (an edited setbpm number, a migration, a detent,
-    a record taking the grid), never on a re-eval that merely restates the same declaration or
-    has none; a peer's tempo therefore survives Cmd+Enter. Start/stop: poptart's start/stop
-    sets the session's play state; the DAW's play starts the buffer from the session's bar and
-    its stop stops playback, outside mix mode only (a DAW stopping must not silence a set).
+[ ] Link on Linux/Windows: the session peer is the poptart-link helper
+    (packages/osc-engine/native/link/) and only the macOS universal binary is built and
+    committed; elsewhere helperAvailable() is false, the settings toggle is disabled and says so.
+    Unlike the keylock UGen this is an ordinary executable, not an scsynth plugin, so it is
+    plain C++ with no SC headers: a build.sh branch per platform (Link's own CMake handles
+    Linux/Windows, or keep the one-line clang++/g++/cl invocation and swap
+    -DLINK_PLATFORM_MACOSX for LINUX/WINDOWS and CoreFoundation for the platform's socket libs).
+    Must be built on the platform it runs on, same as the keylock builds above - do them in one
+    CI matrix job. link.test.js already skips when the helper is missing, so it verifies
+    whichever path is installed.
 
 [ ] Bonjour announcement of the OSC input port off macOS: bonjour.js announces "_osc._udp" via
     the system's `dns-sd -R` (so TouchOSC's Browse finds the machine) and is a logged no-op on

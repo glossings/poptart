@@ -43,15 +43,12 @@ Two knobs help:
 - `POPTART_VST_DIRS` narrows the scan to specific directories. A common setup is a folder of
   symlinks to just the plugins you play, at `~/.poptart/plugins` (used automatically when it
   exists) — this keeps scans fast and avoids problem plugins entirely.
-- `POPTART_VST_EXCLUDE` skips individual plugins by absolute path (VSTPlugin prunes them from the
-  traversal so they're never probed). Use it for copy-protection, metering, or analysis plugins
-  that fail to probe headlessly.
+- `POPTART_VST_EXCLUDE` skips individual plugins by absolute path, so they are never probed. Use
+  it for copy-protection, metering, or analysis plugins that fail to probe headlessly.
 
-Plugins are probed one at a time. VSTPlugin's default is to probe in parallel, which is faster but
-segfaults scsynth partway through a large scan on at least one machine (a null dereference inside
-`VSTPlugin.scx` on scsynth's audio thread — VSTPlugin's own result handling, reached regardless of
-which plugins are in the folder). Set `POPTART_VST_PARALLEL=1` if you want the fast path back; it
-only affects plugins that actually need probing, since cached entries re-verify without a probe.
+Plugins are probed one at a time. Probing them in parallel is faster but has crashed the audio
+server partway through a large scan, so it is off by default; set `POPTART_VST_PARALLEL=1` to
+turn it on. Either way only plugins that are new or changed since the last scan get probed.
 
 A probe that fails is not fatal — it is reported as `error!` in the scan log and that plugin is
 simply absent from the list. Plugins with copy protection or their own startup dialogs commonly
@@ -60,27 +57,38 @@ fail to probe headlessly while working fine in a DAW.
 Many plugins install both a VST2 and a VST3 build. By default poptart lists only the VST3 when
 both exist (the **prefer VST3 over VST2** toggle in the settings tab), and `.synth("Name")` /
 `.fx("Name")` resolve name collisions to the VST3. Both builds are still scanned, and the VST2
-stays loadable by its exact id (e.g. `.synth("Mangle")` vs `.synth("Mangle.vst3")` — VST2 dict
-ids carry no extension).
+stays loadable by its exact id: `.synth("Mangle")` is the VST2, `.synth("Mangle.vst3")` the VST3.
 
-### Sync: MIDI clock out
+### Sync: MIDI clock out and Ableton Link
 
-The settings tab's **sync** section shares poptart's clock with hardware. **midi clock out**
-sends MIDI clock (24 ticks a beat, with start/stop and song position) to one CoreMIDI
-destination, so a drum machine or hardware sequencer follows the transport - in mix mode that is
-the desk's clock, tempo migrations included, and a record taking the grid relocates the
-sequencer on its next sixteenth. Pick the destination by name; it is matched like `midicc()`'s
-device names (case-insensitive substring). The setting persists (`midiClockOut` in
-`~/.poptart/settings.json`) and comes back after an engine restart.
+Both live in the settings tab's **sync** section, and both settings persist across restarts.
+
+**midi clock out** sends MIDI clock, with start/stop and song position, to one MIDI destination,
+so a drum machine or hardware sequencer follows poptart's tempo and transport. Pick the
+destination by name — it is matched the same way as `midicc()` device names, so a
+case-insensitive fragment is enough. In mix mode the hardware follows the desk's clock, tempo
+migrations included.
+
+**ableton link** joins the Link session on your local network, so poptart shares a timeline with
+a DAW, a phone app or another livecoder:
+
+- Change the tempo on either side and the other follows. Re-evaluating your code does not reset
+  the tempo unless you actually edited its `setbpm`.
+- Press play or stop in poptart and the other apps do the same. Their play and stop reach
+  poptart too, except in mix mode, where nothing outside poptart can stop a set.
+- Poptart starts in step with the session's bars, so starting mid-bar starts you mid-pattern,
+  as in any Link app.
+
+Link is macOS-only for now; on other systems the toggle is disabled.
 
 ## Installing VSTPlugin by hand
 
 On first run poptart detects that the VSTPlugin server extension is missing, downloads the pinned
 build for your platform (checksum-verified), and unzips it into your SuperCollider `Extensions`
 directory. On macOS the pinned build comes from
-[poptart's vstplugin fork](https://github.com/glossings/vstplugin/releases): upstream v0.6.2 with a
-fix for a probe crash that wrongly puts some plugins (Auto-Tune Pro, sforzando, Arturia V
-Collection, …) on the scan cache's ignore list.
+[poptart's vstplugin fork](https://github.com/glossings/vstplugin/releases), which is upstream
+v0.6.2 plus a fix for a probe crash that made some plugins (Auto-Tune Pro, sforzando, Arturia V
+Collection, …) vanish from the scan.
 
 Should the auto-install fail: it's a compiled binary extension, *not* a Quark. Download the macOS
 zip from the fork releases page (other platforms: <https://git.iem.at/pd/vstplugin/-/releases>)
@@ -152,4 +160,5 @@ usual suspects:
     reporting as a poptart issue: forced 48 kHz on a rate-locked device is the usual one).
 
 **The engine was fine, then every track went silent.** If `scsynth` dies mid-session nothing
-restarts it yet — the UI keeps saying "engine ready" while notes go nowhere. Restart `npm run dev`.
+restarts it yet — the UI keeps saying "engine ready" while notes go nowhere. Re-pick the output
+device in the settings tab (any device change restarts the engine), or restart `npm run dev`.

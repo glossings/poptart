@@ -256,7 +256,7 @@ export class Transport {
     this.onCpsChange = null;
     // Fired on every change of the clock's running state or phase that is NOT a tempo change:
     // 'start' (paused -> running), 'stop', 'rebase' (a running clock's phase moved - a song deck
-    // taking the grid). The host mirrors these to the engine's clock
+    // taking the grid, a Link phase adoption). The host mirrors these to the engine's clock
     // outputs: MIDI clock's start/stop and its locate (see server.js's syncEngineClock).
     this.onStateChange = null;
   }
@@ -311,6 +311,20 @@ export class Transport {
     this._announce(wasPaused ? 'start' : 'rebase');
   }
 
+  /**
+   * Move a RUNNING clock's position by `delta` cycles, now, tempo untouched. This is a phase
+   * jump - anything scheduled against the old position plays early or late by that much - so it
+   * is for corrections the caller has decided are worth it: the host's Link follower trims
+   * sub-tick drift with it silently, and adopts a session's bar phase with it once (announcing
+   * that one itself, as a 'rebase', so the clock's mirrors relocate). A paused clock has no
+   * phase to move.
+   */
+  shiftCycles(delta) {
+    if (!Number.isFinite(delta) || delta === 0 || this._paused) return;
+    const now = this.getTime();
+    this._baseCycle = this.cycleAt(now) + delta;
+    this._baseSec = now;
+  }
 
   setCps(cps) {
     if (!(cps > 0) || !Number.isFinite(cps)) return; // ignore junk (a tempo signal mid-rest, 0, NaN)
