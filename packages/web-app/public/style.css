@@ -910,9 +910,21 @@ aside h2 {
 }
 
 /* a checkbox row: the box keeps its natural size (settings-row stretches its inputs) and the
-   whole label is clickable */
+   whole label is clickable. Laid out like a settings-row whether or not it also carries that
+   class - as an inline label the box sat on the text's baseline, a hair above the words. */
 .settings-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
   cursor: pointer;
+}
+
+/* a text-only check row under a field row: the field's box is taller than its text, so without
+   this the next row's words sit right against its bottom edge */
+.settings-row:not(.settings-check) + .settings-check {
+  margin-top: 6px;
 }
 
 .settings-check input {
