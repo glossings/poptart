@@ -744,7 +744,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             The <strong>session</strong> tab has eight macro knobs, bound as <code>macro1</code>…<code>macro8</code>;
             drop one anywhere a signal goes. <code>midicc("Twister")(12)</code> is a hardware knob as a
-            signal, bound natively — a real knob driving a real knob, no lag.
+            signal, bound natively — a real knob driving a real knob, no lag. <code>osc("/1/fader3")</code>
+            is the same for anything that sends OSC (a tablet controller, a Max patch) to poptart's
+            input port, 57160 by default.
           </p>
           <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, macro1.range(200, 4000))</code></pre>
           <div class="callout">
@@ -1184,7 +1186,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>lfo("shape", {rate, mode})</code></td><td>hand-drawn shape</td></tr>
             <tr><td><code>env({a, d, s, r})</code></td><td>per-note ADSR</td></tr>
             <tr><td><code>.range(lo, hi)</code></td><td>rescale a 0..1 signal</td></tr>
-            <tr><td><code>macro1…macro8</code> · <code>midicc("…")(cc, ch)</code></td><td>live knobs</td></tr>
+            <tr><td><code>macro1…macro8</code> · <code>midicc("…")(cc, ch)</code> · <code>osc("/addr")</code></td><td>live knobs</td></tr>
           </table>
           <table>
             <tr><th>Transforms</th><th></th></tr>

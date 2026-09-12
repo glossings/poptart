@@ -101,6 +101,22 @@ test('reapOrphanedEngine() kills only what is actually left behind', () => {
   assert.deepEqual(reaped, ['scsynth (pid 101)']);
 });
 
+test('reapOrphanedEngine() reaps the Bonjour announcer too, and only while it is still dns-sd', () => {
+  // A Node that died without stop() leaves its dns-sd registering "poptart" forever, and the next
+  // boot would come up as "poptart (2)". A recycled pid that now names something else is left alone.
+  const file = tmpPidfile();
+  orphans.recordEnginePids({ sclang: 100, scsynth: 101, 'dns-sd': 102 }, { file });
+  const { killed, kill } = recorder();
+  const reaped = orphans.reapOrphanedEngine({ file, comm: table({ 102: 'dns-sd' }), kill });
+  assert.deepEqual(killed, [102]);
+  assert.deepEqual(reaped, ['dns-sd (pid 102)']);
+
+  orphans.recordEnginePids({ 'dns-sd': 102 }, { file });
+  const again = recorder();
+  assert.deepEqual(orphans.reapOrphanedEngine({ file, comm: table({ 102: 'mdnsd' }), kill: again.kill }), []);
+  assert.deepEqual(again.killed, []);
+});
+
 test('reapOrphanedEngine() forgets the pids even when it killed nothing', () => {
   // Otherwise a pidfile naming pids that have since been recycled would be re-examined - and
   // re-risked - on every single engine start for the life of the machine.

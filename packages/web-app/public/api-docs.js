@@ -105,6 +105,12 @@ const API_DOCS = {
     desc: 'A MIDI controller as a signal source; the result takes (cc, channel) and gives a continuous 0..1 signal.',
     eg: 'midicc("Twister")(12).range(200, 5000)',
   },
+  osc: {
+    kind: 'builder',
+    sig: 'osc(address, index)',
+    desc: 'An incoming OSC message as a signal: the latest value sent to that exact address on poptart\'s OSC input port (57160 unless POPTART_OSC_IN_PORT says otherwise). index picks which argument to read (0 = first; an XY pad\'s second axis is 1). Bound natively like midicc - a tablet fader on a parameter has no scheduler latency. Rests until the address first arrives.',
+    eg: 'osc("/1/fader3").range(200, 5000)',
+  },
   midi: {
     kind: 'both',
     sig: 'midi(source, channel)',

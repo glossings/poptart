@@ -27,6 +27,9 @@
 
 (
 var nodePort = "POPTART_NODE_PORT".getenv.asInteger;
+// Where outside OSC senders reach osc() signals - its own port, apart from the command port Node
+// talks to (-u), opened lazily by oscEnable.
+var oscInPort = ("POPTART_OSC_IN_PORT".getenv ? "57160").asInteger;
 var sampleRate = ("POPTART_SAMPLE_RATE".getenv ? "48000").asInteger;
 var blockSize = ("POPTART_BLOCK_SIZE".getenv ? "256").asInteger;
 // Audio output device (empty/unset = system default) and its channel count, chosen in the
@@ -146,6 +149,7 @@ var slotKey, waitForLoad, flushNotes, clearPending;
 var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
+var oscInitialized = false, oscEnable;
 // Cross-track audio routing (the audio() head source and the .audio(...) sidechain injector).
 // silentBus is the read-only default for every fx slot's aux input (never written -> silence);
 // trashBus is the write-only default for a track's send when it feeds nothing (parked, never
@@ -993,6 +997,36 @@ midiWarnMissing = { |context, device|
     };
 };
 
+// --- live OSC input (osc() - see /poptart/setParamOSC) ---
+
+// Lazy and idempotent like midiEnable: the input port opens when a pattern first asks (a
+// setParamOSC, or Node's explicit /poptart/oscInit for Tier-1-only use). It is a SECOND port,
+// apart from the command port Node talks to (-u), so a controller's message can never be read
+// as an engine command, and the number is one to type into a controller's settings. Once open,
+// every message that arrives on it is forwarded to Node as /poptart/oscIn [address, args...] -
+// the live-value feed an osc() signal demoted to Tier-1 samples JS-side. Per-parameter native
+// bindings are OSCdefs filtered to this port (see setParamOSC); like the MIDI forwarders, many
+// can watch the same message. Non-numeric arguments (strings, blobs) are dropped on the way to
+// Node: the store keeps values, and nothing reads a string.
+oscEnable = {
+    if (oscInitialized.not) {
+        oscInitialized = true;
+        if (thisProcess.openUDPPort(oscInPort)) {
+            thisProcess.addOSCRecvFunc({ |msg, time, addr, recvPort|
+                if (recvPort == oscInPort) {
+                    nodeAddr.sendMsg("/poptart/oscIn", msg[0], *(msg[1..].select { |a| a.isNumber }));
+                };
+            });
+            ("poptart: OSC input open on port " ++ oscInPort).postln;
+            // Node announces the open port over Bonjour on this (see bonjour.js).
+            nodeAddr.sendMsg("/poptart/oscOpen", oscInPort);
+        } {
+            ("poptart: could not open OSC input port " ++ oscInPort
+                ++ " (in use? set POPTART_OSC_IN_PORT) - osc() signals will receive nothing").warn;
+        };
+    };
+};
+
 // --- boot ---
 
 // Our server must be the default: SynthDef.add sends defs to Server.default's desc lib.
@@ -1604,6 +1638,7 @@ OSCdef(\poptartCreateTrack, { |msg|
                 lfos: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, shape:, index:)
                 envs: IdentityDictionary.new,     // \slotN_param -> (synth:, bus:, index:)
                 ccs: IdentityDictionary.new,      // \slotN_param -> (bus:, index:, lo:, hi:, last:, binding:, defKey:)
+                oscs: IdentityDictionary.new,     // \slotN_param -> same shape as ccs, bound to an OSC address (see setParamOSC)
                 ramps: IdentityDictionary.new,    // \slotN_param -> (synth:, bus:, index:, slot:) - polled controls (see rampTo)
                 editWatch: Array.newClear(maxSlots), // slot -> [OSCFunc] watching for plugin edits
                 held: 0                           // active-note count, drives env gates
@@ -1640,6 +1675,7 @@ destroyTrack = { |key|
                 dict.do { |e| e[\synth] !? { |s| s.free }; e[\bus] !? { |b| b.free } };
             };
             track[\ccs].do { |e| MIDIdef.all[e[\defKey]] !? { |d| d.free }; e[\bus] !? { |b| b.free } };
+            track[\oscs].do { |e| OSCdef.all[e[\defKey]] !? { |d| d.free }; e[\bus] !? { |b| b.free } };
             track[\busSends] !? { |names| names.do { |bn| releaseBus.(bn) } };
             // A song deck's player synth dies with the group below; its buffer (the whole file,
             // real RAM) must not outlive the track.
@@ -2556,6 +2592,103 @@ OSCdef(\poptartClearParamCC, { |msg|
         track[\ccs].removeAt(ccKey);
     };
 }, '/poptart/clearParamCC');
+
+// osc() -> parameter: setParamCC with an OSC address in place of a device/cc/channel binding.
+// One OSCdef per bound parameter, filtered to the input port, writes the message's argument
+// `argIndex` (scaled into lo..hi) straight to a control bus mapped onto the parameter - no Node
+// round-trip, no polling. Everything else is setParamCC's contract: a re-send with the same
+// binding updates lo/hi in place (the fader's last position rescaled onto the new range), a
+// changed binding re-registers the def on the same bus, the parameter is re-mapped on every send
+// (the entry outlives a swapped plugin), and slot -1 is the track's own channel controls.
+OSCdef(\poptartSetParamOSC, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
+    var address = msg[4].asSymbol, argIndex = msg[5].asInteger;
+    var lo = msg[6].asFloat, hi = msg[7].asFloat;
+    fork {
+        var track = awaitTrack.(key);
+        var isChannel, ctl, index, oscKey, existing, binding, defKey, registerDef;
+        if (track.isNil) { ("poptart: setParamOSC: no track " ++ key).warn } {
+            oscEnable.();
+            isChannel = slot == -1;
+            if (isChannel.not and: { awaitLoaded.(track, slot).not }) {
+                ("poptart: setParamOSC: no plugin loaded in slot " ++ slot).warn;
+            } {
+                if (isChannel.not) {
+                    ctl = track[\controllers][slot];
+                    index = resolveParamIndex.(ctl.info, paramName);
+                };
+                if (isChannel.not and: { index.isNil }) {
+                    ("poptart: setParamOSC: plugin has no parameter named '" ++ paramName
+                        ++ "' (see getParams / the params panel for real names)").warn;
+                } {
+                    binding = address ++ "|" ++ argIndex;
+                    oscKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+                    defKey = ("poptart_osc_" ++ key ++ "_" ++ oscKey).asSymbol;
+                    existing = track[\oscs][oscKey];
+                    registerDef = { |e|
+                        OSCdef.all[defKey] !? { |d| d.free };
+                        OSCdef(defKey, { |m|
+                            var v = m[argIndex + 1];
+                            if (v.isNumber) {
+                                e[\last] = v.asFloat;
+                                e[\bus].set(e[\lo] + (e[\last] * (e[\hi] - e[\lo])));
+                            };
+                        }, address, recvPort: oscInPort);
+                        // The one line that says an address IS wired - the thing to look for
+                        // when a fader does nothing: no line here means the binding never happened.
+                        ("poptart: osc " ++ address ++ "[" ++ argIndex ++ "] -> " ++ key ++ " slot " ++ slot
+                            ++ " '" ++ paramName ++ "' (" ++ lo ++ ".." ++ hi ++ ")").postln;
+                    };
+                    if (existing.isNil and: { isChannel.not } and: { (lo < 0) or: { hi > 1 } }) {
+                        ("poptart: OSC range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
+                            ++ "' is outside the normalized 0..1 VST parameter range and will pin -"
+                            + "use .range(0.2, 0.9)-style values until per-plugin calibration exists").warn;
+                    };
+                    if (existing.notNil) {
+                        existing[\lo] = lo;
+                        existing[\hi] = hi;
+                        existing[\index] = index;
+                        if (isChannel) { track[\synth].map(paramName.asSymbol, existing[\bus]) } { ctl.map(index, existing[\bus]) };
+                        if ((existing[\binding] != binding) or: { OSCdef.all[defKey].isNil }) {
+                            existing[\binding] = binding;
+                            registerDef.(existing);
+                        };
+                        existing[\bus].set(lo + (existing[\last] * (hi - lo)));
+                    } {
+                        var bus = Bus.control(server, 1);
+                        var entry = (bus: bus, index: index, lo: lo, hi: hi, last: 0,
+                            binding: binding, defKey: defKey);
+                        bus.set(lo); // the fader's position is unknown until it moves - start at the floor
+                        registerDef.(entry);
+                        dropRamp.(key, track, oscKey);
+                        if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
+                        track[\oscs][oscKey] = entry;
+                    };
+                };
+            };
+        };
+    };
+}, '/poptart/setParamOSC');
+
+OSCdef(\poptartClearParamOSC, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
+    var track = tracks[key];
+    var oscKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+    var existing = if (track.isKindOf(Event)) { track[\oscs][oscKey] };
+    if (existing.notNil) {
+        OSCdef.all[existing[\defKey]] !? { |d| d.free };
+        if (slot == -1) {
+            track[\synth].map(paramName.asSymbol, -1);
+            track[\synth].set(paramName.asSymbol, channelDefault.(paramName));
+        } {
+            track[\controllers][slot].unmap(existing[\index]);
+        };
+        existing[\bus].free;
+        track[\oscs].removeAt(oscKey);
+    };
+}, '/poptart/clearParamOSC');
+
+OSCdef(\poptartOscInit, { oscEnable.() }, '/poptart/oscInit');
 
 // midikeys(): route a device's live performance stream to the track's instrument. Handlers
 // forward straight to the slot-0 controller's MIDI input - deliberately NOT through the

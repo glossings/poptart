@@ -81,6 +81,7 @@ test('injectLocations leaves every name-lookup argument a plain string', () => {
     ['x.as("note:vel:clip")', '.as("note:vel:clip")'],
     ['midicc("dev:Keystep")', 'midicc("dev:Keystep")'],
     ['midikeys("dev:Keystep")', 'midikeys("dev:Keystep")'],
+    ['osc("/1/fader3", 1)', 'osc("/1/fader3", 1)'],
     ['midi("track")', 'midi("track")'],
     ['audio("track")', 'audio("track")'],
     // lfo() and pianoroll() are judged by CONTENT, not by the callee: drawn data stays plain,

@@ -42,8 +42,9 @@ function pidfilePath(nodePort) {
 const defaultKill = (pid, signal) => process.kill(pid, signal);
 
 // The only command names we will ever kill. A remembered pid that now names anything else has
-// been recycled and is somebody else's process.
-const OURS = /^(sclang|scsynth|supernova)$/;
+// been recycled and is somebody else's process. dns-sd is the Bonjour announcer of the OSC
+// input port (see bonjour.js) - ours only while it is the pid we wrote down.
+const OURS = /^(sclang|scsynth|supernova|dns-sd)$/;
 
 /**
  * The command of a running pid as `ps` reports it - the full path it was launched with - or null
@@ -127,7 +128,7 @@ function killIfOurs(pid, { comm = commandName, kill = defaultKill } = {}) {
 function reapOrphanedEngine({ file, comm = commandName, kill = defaultKill } = {}) {
   const pids = readEnginePids({ file });
   const killed = [];
-  for (const name of ['scsynth', 'sclang']) {
+  for (const name of ['scsynth', 'sclang', 'dns-sd']) {
     const pid = pids[name];
     if (pid != null && killIfOurs(pid, { comm, kill })) killed.push(`${name} (pid ${pid})`);
   }

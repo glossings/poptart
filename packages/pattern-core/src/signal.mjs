@@ -19,6 +19,7 @@ import { inSpans } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
+import { latestOsc, registerOscAddress, normalizeOscAddress } from './osc.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { Frac } from './frac.mjs';
 
@@ -5718,18 +5719,22 @@ export function env(opts = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Live MIDI input. midicc() signals are symbolic like the LFO builders (`ccIR`): assigned to a
-// control they compile to a native engine-side binding (MIDI event -> control bus -> parameter,
-// see setParamCC in the engine), so a hardware knob drives its parameter with no polling and no
-// scheduler latency. Their JS-side sample() reads the host-fed live-value store (midi.mjs), so
-// a cc signal demoted into Tier-1 (used inside arithmetic, .hold(), a signal-valued bound...)
-// still works - at poll-rate latency instead of the native path's.
+// Live MIDI and OSC input. midicc() and osc() signals are symbolic like the LFO builders
+// (`ccIR`): assigned to a control they compile to a native engine-side binding (incoming event
+// -> control bus -> parameter, see setParamCC/setParamOSC in the engine), so a hardware knob or
+// a tablet fader drives its parameter with no polling and no scheduler latency. Their JS-side
+// sample() reads the host-fed live-value stores (midi.mjs, osc.mjs), so a signal demoted into
+// Tier-1 (used inside arithmetic, .hold(), a signal-valued bound...) still works - at poll-rate
+// latency instead of the native path's. One IR shape serves both: a MIDI binding is
+// { device, cc, channel, min, max }, an OSC one { osc: address, index, min, max }, and every
+// bounds rewrite (.range(), linear math) is source-agnostic - only the sampler and the
+// scheduler's engine call look at which it is.
 // ---------------------------------------------------------------------------------------------
 
 function withCcIR(ir) {
   return new Sig(
     (t, cps, pos) => {
-      const v = latestCC(ir.device, ir.cc, ir.channel);
+      const v = ir.osc ? latestOsc(ir.osc, ir.index) : latestCC(ir.device, ir.cc, ir.channel);
       if (v == null) return null; // nothing received yet - rest, so the param holds its value
       const lo = sampleBound(ir.min, t, cps, pos) ?? 0;
       const hi = sampleBound(ir.max, t, cps, pos) ?? 1;
@@ -5764,6 +5769,27 @@ export function midicc(device) {
     }
     return withCcIR({ device, cc, channel, min: 0, max: 1 });
   };
+}
+
+/**
+ * `osc("/1/fader3")` - an incoming OSC message as a signal source: the latest value sent to that
+ * address, from a tablet controller, a Max patch, or anything else that speaks OSC to poptart's
+ * input port. The address is exact (a leading slash is implied), and `index` picks which of the
+ * message's arguments to read - the first by default, so `osc("/xy", 1)` is an XY pad's second
+ * axis. Values are taken as sent and `.range(lo, hi)` maps a 0..1 fader onto lo..hi; for a
+ * sender working in other units, `.mul()`/`.add()` rewrite the bounds symbolically just as they
+ * do for midicc(), so the binding stays native. Rests until the address first arrives, so a
+ * parameter holds its value instead of jumping to a guess.
+ */
+export function osc(address, index = 0) {
+  if (typeof address !== 'string' || !address.trim()) {
+    throw new Error('[signal] osc(...) takes an OSC address, e.g. osc("/1/fader3") - the exact address the sender writes to');
+  }
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error('[signal] osc: the second argument is which of the message\'s values to read (0 = first)');
+  }
+  registerOscAddress(address);
+  return withCcIR({ osc: normalizeOscAddress(address), index, min: 0, max: 1 });
 }
 
 /**

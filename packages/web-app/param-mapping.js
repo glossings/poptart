@@ -169,6 +169,18 @@ class MappedEngine {
     this.engine.clearParamCC(trackId, slot, name);
   }
 
+  setParamOSC(trackId, slot, name, ir) {
+    const spec = this._spec(trackId, slot, name);
+    const mapped = spec
+      ? { ...ir, min: toNormalized(ir.min, spec), max: toNormalized(ir.max, spec) }
+      : ir;
+    this.engine.setParamOSC(trackId, slot, name, mapped);
+  }
+
+  clearParamOSC(trackId, slot, name) {
+    this.engine.clearParamOSC(trackId, slot, name);
+  }
+
   // --- pass-throughs ---
   start(...a) { return this.engine.start(...a); }
   stop(...a) { return this.engine.stop(...a); }
@@ -201,6 +213,7 @@ class MappedEngine {
   defineSamplePacks(...a) { return this.engine.defineSamplePacks(...a); }
   record(...a) { return this.engine.record(...a); }
   enableMidi(...a) { return this.engine.enableMidi(...a); }
+  enableOsc(...a) { return this.engine.enableOsc(...a); }
   setMidiNotes(...a) { return this.engine.setMidiNotes(...a); }
   clearMidiNotes(...a) { return this.engine.clearMidiNotes(...a); }
   // Signal routing (midi()/audio() source builders and .midi()/.audio() injectors). No

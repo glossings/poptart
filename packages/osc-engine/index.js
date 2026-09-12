@@ -23,6 +23,7 @@ const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceE
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension } = require('./extensions');
+const { advertiseOsc } = require('./bonjour');
 
 // Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
 // this process also runs the note scheduler against a 150ms lookahead - gzipSync of that is
@@ -220,6 +221,10 @@ function diagnoseSclangOutput(output, vstInstalled = vstPluginExtensionInstalled
 // one - see also POPTART_SCSYNTH_PORT in sc/poptart.scd for the third port involved.
 const DEFAULT_NODE_PORT = Number(process.env.POPTART_OSC_NODE_PORT || 57140); // Node listens here for replies from sclang
 const DEFAULT_SC_PORT = Number(process.env.POPTART_OSC_SC_PORT || 57150); // sclang listens here for commands from Node
+// Where OUTSIDE senders (a tablet controller, a Max patch) reach osc() signals. Its own port, apart
+// from the command port above, so a stray user message can never be read as an engine command
+// and the number is one to write in a controller's settings. Opened lazily (see enableOsc).
+const DEFAULT_OSC_IN_PORT = Number(process.env.POPTART_OSC_IN_PORT || 57160);
 
 const READY_TIMEOUT_MS = 60000; // sclang class-library compile + scsynth boot
 const REPLY_TIMEOUT_MS = 10000;
@@ -296,9 +301,10 @@ class OscEngine {
   // belong to the input devices combined in behind the playback device.
   // inChannels: that same device's input channel count (0 for output-only devices) - scsynth opens
   // one device for both in and out, so numInputBusChannels must not exceed what the device offers.
-  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0, cueOffset = null } = {}) {
+  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0, cueOffset = null, oscInPort = DEFAULT_OSC_IN_PORT } = {}) {
     this.nodePort = nodePort;
     this.scPort = scPort;
+    this.oscInPort = oscInPort;
     // An explicit path wins (programmatic intent, e.g. tests); otherwise auto-detect, which
     // honors POPTART_SCLANG and the standard install locations.
     this.sclangPath = sclangPath || resolveSclangPath();
@@ -340,6 +346,12 @@ class OscEngine {
     // points it at pattern-core's live-value store). Fired for every /poptart/midiIn message
     // once MIDI is enabled engine-side.
     this.onMidiIn = null;
+    // Live OSC feed callback, (address, [numeric args]) - every message that reaches the OSC input
+    // port once it is open (see enableOsc), for pattern-core's osc() store.
+    this.onOscIn = null;
+    // The Bonjour announcement of that port (see bonjour.js), started when sclang confirms the
+    // port is open and stopped with the engine.
+    this._oscAd = null;
     // Live note feed callback, (trackId, note, velocity 0..1, isOn) - fired for every
     // /poptart/midiNoteIn message, i.e. each note edge of an active midikeys() route (the note
     // as it sounds, post scale-quantization). What web-app's MIDI record collects.
@@ -619,6 +631,7 @@ class OscEngine {
             env: {
               ...process.env,
               POPTART_NODE_PORT: String(this.nodePort),
+              POPTART_OSC_IN_PORT: String(this.oscInPort),
               POPTART_SAMPLE_RATE: String(sampleRate),
               POPTART_BLOCK_SIZE: String(bufferSize),
               ...(this.outDevice ? { POPTART_OUT_DEVICE: String(this.outDevice) } : {}),
@@ -722,6 +735,12 @@ class OscEngine {
         // eslint-disable-next-line no-console
         console.warn(`[poptart] scsynth (pid ${pid}) outlived sclang - killed it so the next engine start can open the audio device`);
       }
+    }
+    // The Bonjour announcement withdraws when its dns-sd exits; the next sclang opens the port
+    // afresh and announces again.
+    if (this._oscAd) {
+      this._oscAd.stop();
+      this._oscAd = null;
     }
     clearEnginePids({ file: this._pidfile });
     if (this._port) {
@@ -1535,6 +1554,26 @@ class OscEngine {
     this._send('/poptart/clearParamCC', [trackId, slotIndex, paramName]);
   }
 
+  // --- OSC input (see the "live OSC input" section of sc/poptart.scd) ---
+
+  // Idempotent: sclang opens the OSC input port (oscInPort, POPTART_OSC_IN_PORT) and starts
+  // forwarding every message it receives there back as /poptart/oscIn (consumed via onOscIn
+  // above). The native path below opens it on its own; this exists for patterns whose only OSC
+  // use is Tier-1 (an osc() signal inside arithmetic), which is sampled Node-side.
+  enableOsc() {
+    this._send('/poptart/oscInit', []);
+  }
+
+  // ir: { osc: address, index, min, max }. sclang registers an OSCdef on the input port that
+  // writes the scaled argument to a control bus mapped onto the parameter - setParamCC's
+  // mechanism with an OSC address in place of a device/cc/channel binding.
+  setParamOSC(trackId, slotIndex, paramName, ir) {
+    this._send('/poptart/setParamOSC', [trackId, slotIndex, paramName, ir.osc, ir.index ?? 0, ir.min, ir.max]);
+  }
+  clearParamOSC(trackId, slotIndex, paramName) {
+    this._send('/poptart/clearParamOSC', [trackId, slotIndex, paramName]);
+  }
+
   // --- midi()/audio() source + injector routing ---
   //
   // A routing `name` is either another track (bare, or "track:label") or a hardware input
@@ -1663,6 +1702,26 @@ class OscEngine {
       if (typeof this.onMidiIn === 'function') {
         this.onMidiIn(String(device), Number(channel), Number(num), Number(value), kind ? String(kind) : 'cc');
       }
+      return;
+    }
+    if (msg.address === '/poptart/oscOpen') {
+      // sclang has the OSC input port open (see oscEnable in poptart.scd): announce it so a
+      // controller app's host browser finds this machine. Once per engine life - sclang sends
+      // this once too, but a re-send is harmless.
+      if (!this._oscAd) {
+        const port = Number(msg.args?.[0]?.value ?? msg.args?.[0]) || this.oscInPort;
+        this._oscAd = advertiseOsc(port);
+        if (this._oscAd.pid != null) {
+          recordEnginePids({ sclang: this._sclangProcess?.pid ?? null, scsynth: this._scsynthPid, 'dns-sd': this._oscAd.pid }, { file: this._pidfile });
+        }
+      }
+      return;
+    }
+    if (msg.address === '/poptart/oscIn') {
+      // Live OSC feed: [address, ...args] - one message as it reached the input port. Numeric
+      // arguments only reach the store (see feedOsc); the address is the first argument.
+      const [address, ...args] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onOscIn === 'function') this.onOscIn(String(address), args);
       return;
     }
     if (msg.address === '/poptart/songPos') {

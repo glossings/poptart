@@ -1,4 +1,4 @@
-export { Sig, Signal, n, note, mini, s, se, sr, sp, synth, sine, saw, tri, square, ramp, rand, perlin, lfo, env, midicc, midikeys, macro, choose, cat, seq, irand, resetRandomSeeds, midi, audio, input, group, copy, pcopy, setCopyResolver, clips, setClipsOwner, setClipsResolver, clipsOwnerNow, pianoroll, _roll, liveRoll, _shape, _preset, _pack, _slices, liveSlices, _auto, liveAuto, auto } from './signal.mjs';
+export { Sig, Signal, n, note, mini, s, se, sr, sp, synth, sine, saw, tri, square, ramp, rand, perlin, lfo, env, midicc, midikeys, osc, macro, choose, cat, seq, irand, resetRandomSeeds, midi, audio, input, group, copy, pcopy, setCopyResolver, clips, setClipsOwner, setClipsResolver, clipsOwnerNow, pianoroll, _roll, liveRoll, _shape, _preset, _pack, _slices, liveSlices, _auto, liveAuto, auto } from './signal.mjs';
 export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, normalizeSliceSet, normalizeSliceEntry, normalizeSliceFit, sliceSetIsEmpty, slicePositionsFor, sliceEntryFor, sliceSetKeys, parseSliceSet, serializeSliceSet, SLICE_DECIMALS } from './slices.mjs';
 // Controls as top-level builders (Strudel's control patterns) - the method form of each still lives
 // on Sig; these are what let a combinator aim at one channel, x.mul(speed("-1")) / x.mul(clip(2)).
@@ -6,6 +6,7 @@ export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slic
 export { channelAt, soundingEnd, timeShift, endEdgeStep, withSoundingSpan } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
+export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
 export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveInputChannels } from './audio-inputs.mjs';
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';
 export { Scheduler, Transport, setEventLogger } from './scheduler.mjs';

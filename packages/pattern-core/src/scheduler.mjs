@@ -1,7 +1,8 @@
 // Bridges a Sig (see signal.mjs) to an "engine" - any object implementing the interface used
 // below (createTrack/loadInstrument/loadEffect/noteOn/noteOff/noteOnSlot (optional)/noteOffSlot
 // (optional)/playSample/setParam/setParamLFO/clearParamLFO/anchorParamLFO (optional)/setParamEnv/
-// clearParamEnv/setParamCC/clearParamCC/setMidiNotes/clearMidiNotes/getTime, and - all optional -
+// clearParamEnv/setParamCC/clearParamCC/setParamOSC/clearParamOSC/setMidiNotes/clearMidiNotes/
+// getTime, and - all optional -
 // setInputSource/clearInputSource/injectAudio/clearAudioInject/injectMidi/clearMidiInject for the
 // midi()/audio() source + injector routing).
 // This class is engine-agnostic by design: anything implementing that interface works
@@ -16,9 +17,10 @@
 //    the same walk but emit playSample events (config signals sampled at each onset) instead of
 //    noteOn/noteOff pairs.
 //  - Parameter modulation: a control assigned one whole modulator (an `lfoIR`/`envIR`/`ccIR`
-//    signal) is programmed into the engine once and runs natively on its audio thread. Any
-//    other signal - a product of two modulators, a .when() over one, a mini string - is polled
-//    at a fixed rate, and the engine ramps between polls (see ARCHITECTURE.md's "Modulation").
+//    signal - the last one a midicc() or an osc()) is programmed into the engine once and runs
+//    natively on its audio thread. Any other signal - a product of two modulators, a .when()
+//    over one, a mini string - is polled at a fixed rate, and the engine ramps between polls
+//    (see ARCHITECTURE.md's "Modulation").
 //    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
@@ -129,7 +131,18 @@ const MIN_SOUNDING_SEC = 0.001;
 // chain index - the engine maps them onto the track's own output stage rather than a VST param.
 const CHANNEL_SLOT = -1;
 // Engine call that tears down each kind of Tier-2 modulator (persistent engine-side synth).
-const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC' };
+// midicc() and osc() share one IR (see withCcIR in signal.mjs) but are distinct KINDS here, so a
+// control that moves from one to the other clears the old engine binding instead of updating a
+// MIDI entry in place with an OSC address.
+const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC', osc: 'clearParamOSC' };
+
+/** Which native modulator a control signal is, or null for a polled one. */
+function modulatorKind(sig) {
+  if (sig.lfoIR) return 'lfo';
+  if (sig.envIR) return 'env';
+  if (sig.ccIR) return sig.ccIR.osc ? 'osc' : 'cc';
+  return null;
+}
 
 // Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
 const MAX_CHAIN_SLOTS = 8;
@@ -454,7 +467,7 @@ export class Scheduler {
     if (!(name in CHANNEL_DEFAULTS)) return `"${name}" is not a channel control`;
     const sig = this.pattern?.channel?.[name];
     if (sig && (sig.lfoIR || sig.envIR || sig.ccIR)) {
-      return `${name} is driven by a native modulator (env/lfo/midicc) - edit the code instead`;
+      return `${name} is driven by a native modulator (env/lfo/midicc/osc) - edit the code instead`;
     }
     this._channelHold.set(name, value);
     return null;
@@ -748,7 +761,7 @@ export class Scheduler {
     // polled signal, which a leftover bus mapping would fight with).
     const nextModulators = new Map();
     for (const c of this._controlEntries(sig)) {
-      const kind = c.sig.lfoIR ? 'lfo' : c.sig.envIR ? 'env' : c.sig.ccIR ? 'cc' : null;
+      const kind = modulatorKind(c.sig);
       if (kind) nextModulators.set(`${c.slot} ${c.name}`, { ...c, kind });
     }
     for (const [key, prev] of this._activeModulators) {
@@ -825,6 +838,8 @@ export class Scheduler {
       this.engine.setParamLFO(this.trackId, m.slot, m.name, resolved);
     } else if (m.kind === 'env') {
       this.engine.setParamEnv(this.trackId, m.slot, m.name, resolved);
+    } else if (m.kind === 'osc') {
+      this.engine.setParamOSC(this.trackId, m.slot, m.name, resolved);
     } else {
       this.engine.setParamCC(this.trackId, m.slot, m.name, resolved);
     }

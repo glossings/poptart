@@ -1978,6 +1978,18 @@ function wireEngine() {
   };
   // Learned desk knobs must work without any midicc() in the song to enable MIDI for them.
   if (Object.keys(settings.mixMidi ?? {}).length) engine.enableMidi();
+  // Live OSC messages (forwarded from sclang once the input port is open) feed pattern-core's
+  // live-value store - what a Tier-1 osc() signal samples.
+  const oscSeen = new Set();
+  engine.onOscIn = (address, args) => {
+    // Said once per address: the line that says a controller IS reaching poptart - the thing to
+    // look for when a fader does nothing (its sclang sibling is the "osc ... ->" binding line).
+    if (!oscSeen.has(address)) {
+      oscSeen.add(address);
+      console.log(`[poptart] osc: receiving ${address} (${args.length} value${args.length === 1 ? '' : 's'})`);
+    }
+    patternCore.feedOsc(address, args);
+  };
   // Live note edges from midikeys() routes - logged for the MIDI recorder and the roll's capture.
   engine.onMidiNoteIn = (trackId, note, vel, isOn) => handleMidiNoteIn(trackLabel(trackId), note, vel, isOn);
   // Plugin-GUI knob gestures - what conf capture writes into the code.
@@ -2102,7 +2114,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'tri', 'square', 'ramp', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
@@ -4333,6 +4345,9 @@ const routes = {
     // use (a cc signal inside arithmetic), whose JS-side sampling needs the /poptart/midiIn
     // feed. Idempotent, so re-sending every eval is fine.
     if (patternCore.midiInUse()) engine.enableMidi();
+    // Same for osc(): the native path (setParamOSC) opens the input port itself; a Tier-1-only
+    // osc signal needs the /poptart/oscIn feed. Idempotent too.
+    if (patternCore.oscInUse()) engine.enableOsc();
 
     // Re-arm conf capture engine-side: sclang keeps the flag on its track object, which an
     // engine restart discards - the eval that recreates the track re-sends it. Idempotent.

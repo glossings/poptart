@@ -362,3 +362,30 @@ no completion notes.
     deterministic ranking + seeded tiebreak, repeated invoke cycles alternatives; add a
     voice-leading pass (minimal total movement picks the suggested chord's inversion) which also
     improves the phase-2 voicing menu's ordering. Build last - most design-heavy.
+
+[ ] Ableton Link - join a Link session so poptart shares tempo and beat phase with a DAW, an iOS
+    app, or another SC/Tidal session on the LAN. Shape (assessed 2026-09-12, ~a day): sclang's
+    built-in LinkClock (no extension) joins the session and owns tempo estimation + phase
+    agreement; it forwards (tempo, beat, link-time -> server-time mapping) to Node a few times a
+    second as /poptart/link, and Node rebases the transport with exactly the hooks the DJ sync
+    model already uses - Transport#setCps (continuous, no retrigger) for tempo and startAt for
+    beat phase. Peer-to-peer, so setbpm in poptart should push back into the session too
+    (LinkClock.tempo_). Start/stop sync is optional in Link 3 - leave it off at first. Prefer
+    this over MIDI clock wherever the other side speaks Link: no jitter filter to write.
+
+[ ] MIDI clock in - follow an external MIDI clock (24 ppqn ticks + start/stop/continue/song
+    position) for hardware and apps without Link. Assessed 2026-09-12, 1-2 days, mostly tuning:
+    sclang's sysrt MIDI responders receive the ticks; a smoothing filter (a PLL over the last N
+    tick intervals - USB MIDI clock is famously jittery) estimates tempo and beat phase, then
+    forwards to Node like the Link item above and rebases the transport the same way. poptart
+    always follows here (the 150 ms lookahead is fine for that); MIDI clock OUT, where poptart is
+    the master, is the easy half (~half a day: a sclang routine emitting ticks from the transport
+    tempo) and worth doing first if a drum machine is the actual use case. Strudel can't do either
+    (browser, no clock sender in its midi package), so Strudel -> poptart stays a live note feed.
+
+[ ] Bonjour announcement of the OSC input port off macOS: bonjour.js announces "_osc._udp" via
+    the system's `dns-sd -R` (so TouchOSC's Browse finds the machine) and is a logged no-op on
+    Linux/Windows. Cross-platform means a pure-JS mDNS responder (e.g. the bonjour-service
+    package) in place of the child process - same handle shape ({ pid: null, stop() }), no
+    pidfile entry needed since nothing outlives Node. Do it alongside the keylock Linux/Windows
+    builds above, which need the same test machines.
