@@ -63,6 +63,16 @@ both exist (the **prefer VST3 over VST2** toggle in the settings tab), and `.syn
 stays loadable by its exact id (e.g. `.synth("Mangle")` vs `.synth("Mangle.vst3")` — VST2 dict
 ids carry no extension).
 
+### Sync: MIDI clock out
+
+The settings tab's **sync** section shares poptart's clock with hardware. **midi clock out**
+sends MIDI clock (24 ticks a beat, with start/stop and song position) to one CoreMIDI
+destination, so a drum machine or hardware sequencer follows the transport - in mix mode that is
+the desk's clock, tempo migrations included, and a record taking the grid relocates the
+sequencer on its next sixteenth. Pick the destination by name; it is matched like `midicc()`'s
+device names (case-insensitive substring). The setting persists (`midiClockOut` in
+`~/.poptart/settings.json`) and comes back after an engine restart.
+
 ## Installing VSTPlugin by hand
 
 On first run poptart detects that the VSTPlugin server extension is missing, downloads the pinned

@@ -766,9 +766,14 @@ class OscEngine {
   // assuming their own default 120. beatsPos is the song position in beats (4 per cycle,
   // matching setbpm's bpm = cps * 240 convention). Sent on every tempo change and as a
   // periodic re-sync (see web-app server.js), so the plugins' self-advanced transport can't
-  // drift against the pattern grid.
-  setTempo(bpm, beatsPos, targetTime) {
-    this._send('/poptart/setTempo', [bpm, beatsPos, this._latency(targetTime)]);
+  // drift against the pattern grid. The same message re-anchors sclang's mirror of the host
+  // clock, which MIDI clock out ticks from: `playing` says whether
+  // the transport runs (a paused one is frozen at 0 and must not pull the mirror back there),
+  // `event` what just happened to it - 'sync' (a tempo change or the periodic re-sync),
+  // 'start', 'stop', or 'rebase' (a running clock's phase moved) - which is what MIDI clock's
+  // start/stop/locate messages are about.
+  setTempo(bpm, beatsPos, targetTime, playing = true, event = 'sync') {
+    this._send('/poptart/setTempo', [bpm, beatsPos, this._latency(targetTime), playing ? 1 : 0, String(event)]);
   }
 
   // --- plugin discovery ---
@@ -1507,6 +1512,20 @@ class OscEngine {
   // matched against. Enables MIDI input as a side effect (see poptart.scd).
   getMidiDevices() {
     return this._request('/poptart/getMidiDevices', []);
+  }
+
+  // Connected CoreMIDI destinations, named like the sources ("<device> <port>"): what MIDI clock
+  // out can be pointed at. Enables MIDI as a side effect, like getMidiDevices.
+  getMidiDestinations() {
+    return this._request('/poptart/getMidiDestinations', []);
+  }
+
+  // Point MIDI clock out at a destination (case-insensitive substring of its name, like
+  // midicc()'s device names), or turn it off with '' / null. sclang ticks 24 per beat from its
+  // mirror of the host clock (see setTempo) and relocates sequencers on start/rebase. Resolves
+  // { active: name | null }; rejects when nothing matches, naming what is connected.
+  setMidiClockOut(name) {
+    return this._request('/poptart/midiClockOut', [name ? String(name) : '']);
   }
 
   // Route a device's live performance stream (notes/velocity/bend/aftertouch/raw CC) to the

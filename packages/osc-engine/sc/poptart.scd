@@ -150,6 +150,9 @@ var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
 var oscInitialized = false, oscEnable;
+// The host transport's mirror (see hostClockSync) and what hangs off it: MIDI clock out.
+var hostClock, hostClockSync, clockOut, clockOutName, clockOutLatency = 0.05, clockRunning = false, clockLocate = false;
+var clockTicker, clockTickerStart, clockTickerStop, clockNextTick, midiClockSet, midiDestName;
 // Cross-track audio routing (the audio() head source and the .audio(...) sidechain injector).
 // silentBus is the read-only default for every fx slot's aux input (never written -> silence);
 // trashBus is the write-only default for a track's send when it feeds nothing (parked, never
@@ -1878,9 +1881,131 @@ OSCdef(\poptartUnloadEffect, { |msg|
 // their own transport on the audio clock, so each position correction is only a few seconds'
 // worth of ppm-level clock skew (microseconds, inaudible), and position-anchored synced LFOs
 // stay locked to the pattern grid indefinitely.
+// --- the host clock's mirror: MIDI clock out ---
+//
+// Node's Transport is the one clock every scheduler reads; it reaches sclang as
+// '/poptart/setTempo' (bpm, beat position at a target moment, the lead to that moment, whether
+// it is running, and what just happened to it) - on every tempo change, every start/stop/phase
+// move, and every 4s regardless. hostClock is that clock's sclang mirror: a TempoClock
+// re-anchored by each message (a few microseconds between real changes, so a routine scheduled
+// on it never drifts against the pattern grid). The plugins' emulated DAW transport was the
+// first thing to hang off the message; MIDI clock out is the second.
+hostClock = TempoClock(currentTempo / 60).permanent_(true);
+
+// Re-anchor the mirror. `beats` is the transport's beat position at now + `latency` (the same
+// lead note events carry), while a TempoClock's beats are its position NOW: hence the pull-back
+// by tempo * latency. Only re-anchored while the transport runs - paused, Node's position is
+// frozen at 0, and pulling the mirror back there every 4s would make a ticking MIDI clock
+// stutter; the tempo still follows, so a stopped drum machine already shows the right bpm.
+// The event is what MIDI clock's realtime messages are about: 'start' and 'rebase' make the
+// tick train relocate at its next sixteenth (see clockTickerStart), 'stop' sends the stop. A
+// plain tempo change or the periodic re-sync is 'sync' and needs nothing beyond the anchor.
+hostClockSync = { |bpm, beats, latency, playing, event|
+    var tempo = bpm / 60;
+    if ((hostClock.tempo - tempo).abs > 1e-9) { hostClock.tempo_(tempo) };
+    if (playing) { hostClock.beats_(beats - (tempo * latency)) };
+    clockRunning = playing;
+    switch (event.asSymbol,
+        \start, { clockLocate = true; clockTickerStart.() },
+        \rebase, { clockLocate = true; clockTickerStart.() },
+        \stop, { clockOut !? { |out| out.stop } }
+    );
+};
+
+// The index (24 per beat) of the first tick whose sounding moment is after now + lead: the
+// earliest one a send timestamped `lead` beats ahead can still hit. The epsilon keeps a routine
+// waking exactly at its own send moment (beats + lead == k/24, bar float noise) off the tick it
+// just sent.
+clockNextTick = { |beats, lead|
+    (((beats + lead) * 24) + 1e-6).floor.asInteger + 1
+};
+
+clockTickerStop = {
+    clockTicker !? { |r| r.stop };
+    clockTicker = nil;
+};
+
+// One routine on the mirror clock sends the ticks. Each is timestamped clockOutLatency ahead
+// (MIDIOut's latency: CoreMIDI delivers it on its own clock, so the jitter is the driver's, not
+// sclang's), which is why the routine wakes that much before each tick's beat. A pending locate
+// lands on the next sixteenth (every 6th tick): stop, song position, continue, tick - back to
+// back, so a sequencer relocates with no gap, and the first tick after the continue is the
+// sixteenth itself, as the spec has it. From the very top (tick 0) a plain start says the same
+// thing to gear that ignores song position. Ticks flow whether or not the transport runs: a
+// stopped sequencer still wants the tempo, and a start then is a locate, not a restart.
+clockTickerStart = {
+    clockTickerStop.();
+    if (clockOut.notNil) {
+        clockTicker = Routine {
+            loop {
+                var lead = clockOutLatency * hostClock.tempo;
+                var k = clockNextTick.(hostClock.beats, lead);
+                ((k / 24) - lead - hostClock.beats).max(0).wait;
+                if (clockLocate and: { clockRunning } and: { k >= 0 } and: { (k % 6) == 0 }) {
+                    clockLocate = false;
+                    clockOut.stop;
+                    if (k == 0) { clockOut.start } { clockOut.songPtr((k div: 6) % 16384); clockOut.continue };
+                };
+                clockOut.midiClock;
+            };
+        }.play(hostClock);
+    };
+};
+
+midiDestName = { |d| d.device.asString ++ " " ++ d.name.asString };
+
+// Point MIDI clock out at a destination ("" = off): the same case-insensitive substring match as
+// midicc()'s sources, against CoreMIDI's "<device> <port>" names. Answers the matched name (nil
+// when nothing matched, or off). A running transport relocates the sequencer at the next
+// sixteenth, so a destination picked mid-performance comes in on the bar.
+midiClockSet = { |name|
+    var p = name.asString.toLower, dest;
+    var find = { MIDIClient.destinations.detect { |d| midiDestName.(d).toLower.contains(p) } };
+    clockTickerStop.();
+    clockOut = nil;
+    clockOutName = nil;
+    if (p.size > 0) {
+        midiEnable.();
+        dest = find.value;
+        if (dest.isNil) { MIDIClient.list; dest = find.value }; // plugged in since the client came up
+        dest !? {
+            clockOut = MIDIOut(0, dest.uid).latency_(clockOutLatency);
+            clockOutName = midiDestName.(dest);
+            clockLocate = true;
+            clockTickerStart.();
+            ("poptart: MIDI clock out to " ++ clockOutName).postln;
+        };
+    } {
+        "poptart: MIDI clock out off".postln;
+    };
+    clockOutName;
+};
+
+OSCdef(\poptartMidiClockOut, { |msg|
+    var requestId = msg[1], name = msg[2].asString;
+    var active = midiClockSet.(name);
+    if (name.size > 0 and: { active.isNil }) {
+        replyErr.("/poptart/midiClockOut", requestId, "no MIDI destination matching '" ++ name ++ "' - connected: "
+            ++ MIDIClient.destinations.collect({ |d| midiDestName.(d) }).join(", "));
+    } {
+        replyOk.("/poptart/midiClockOut", requestId, toJson.((active: active)));
+    };
+}, '/poptart/midiClockOut');
+
+OSCdef(\poptartGetMidiDestinations, { |msg|
+    var requestId = msg[1];
+    midiEnable.();
+    MIDIClient.list; // re-read, so gear plugged in since the first init is offered too
+    replyOk.("/poptart/getMidiDestinations", requestId,
+        toJson.(MIDIClient.destinations.collect { |d| midiDestName.(d) }));
+}, '/poptart/getMidiDestinations');
+
 OSCdef(\poptartSetTempo, { |msg|
     var bpm = msg[1].asFloat, beats = msg[2].asFloat, latency = msg[3].asFloat;
+    var playing = if (msg.size > 4) { msg[4].asInteger > 0 } { true };
+    var event = if (msg.size > 5) { msg[5].asSymbol } { \sync };
     currentTempo = bpm;
+    hostClockSync.(bpm, beats, latency, playing, event);
     bundleNow.(latency, {
         tracks.do { |track|
             if (track.isKindOf(Event)) {

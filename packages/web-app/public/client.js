@@ -13880,7 +13880,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -14389,6 +14389,42 @@ preferVst3Toggle.addEventListener('change', async () => {
     loadKnownPlugins().catch(() => {}); // refresh the browser + autocomplete pool
   } catch (e) {
     logLine(e.message ?? String(e), true);
+  }
+});
+
+// MIDI clock out (settings → sync): where the engine ticks to. Persisted; the server re-applies
+// it on every engine start.
+const midiClockSelect = document.getElementById('midiClockSelect');
+const midiClockTitle = midiClockSelect.title;
+
+async function refreshMidiClock() {
+  try {
+    const { destinations, selected, active } = await api('GET', '/api/midiClock');
+    midiClockSelect.innerHTML = '';
+    midiClockSelect.appendChild(new Option('off', ''));
+    for (const name of destinations) midiClockSelect.appendChild(new Option(name, name));
+    // A saved destination that is not plugged in right now stays selectable, and says so.
+    if (selected && !destinations.includes(selected)) midiClockSelect.appendChild(new Option(`${selected} (not connected)`, selected));
+    midiClockSelect.value = selected ?? '';
+    midiClockSelect.title = selected && !active
+      ? `"${selected}" is chosen but the running engine found no such destination - is it plugged in? (pick it again to retry)`
+      : midiClockTitle;
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+midiClockSelect.addEventListener('change', async () => {
+  const device = midiClockSelect.value || null;
+  midiClockSelect.disabled = true;
+  try {
+    const { active } = await api('POST', '/api/midiClock', { device });
+    logLine(active ? `midi clock out: ${active}` : 'midi clock out: off');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    midiClockSelect.disabled = false;
+    refreshMidiClock().catch(() => {});
   }
 });
 

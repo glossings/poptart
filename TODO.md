@@ -363,25 +363,36 @@ no completion notes.
     voice-leading pass (minimal total movement picks the suggested chord's inversion) which also
     improves the phase-2 voicing menu's ordering. Build last - most design-heavy.
 
-[ ] Ableton Link - join a Link session so poptart shares tempo and beat phase with a DAW, an iOS
-    app, or another SC/Tidal session on the LAN. Shape (assessed 2026-09-12, ~a day): sclang's
-    built-in LinkClock (no extension) joins the session and owns tempo estimation + phase
-    agreement; it forwards (tempo, beat, link-time -> server-time mapping) to Node a few times a
-    second as /poptart/link, and Node rebases the transport with exactly the hooks the DJ sync
-    model already uses - Transport#setCps (continuous, no retrigger) for tempo and startAt for
-    beat phase. Peer-to-peer, so setbpm in poptart should push back into the session too
-    (LinkClock.tempo_). Start/stop sync is optional in Link 3 - leave it off at first. Prefer
-    this over MIDI clock wherever the other side speaks Link: no jitter filter to write.
-
 [ ] MIDI clock in - follow an external MIDI clock (24 ppqn ticks + start/stop/continue/song
     position) for hardware and apps without Link. Assessed 2026-09-12, 1-2 days, mostly tuning:
     sclang's sysrt MIDI responders receive the ticks; a smoothing filter (a PLL over the last N
     tick intervals - USB MIDI clock is famously jittery) estimates tempo and beat phase, then
-    forwards to Node like the Link item above and rebases the transport the same way. poptart
-    always follows here (the 150 ms lookahead is fine for that); MIDI clock OUT, where poptart is
-    the master, is the easy half (~half a day: a sclang routine emitting ticks from the transport
-    tempo) and worth doing first if a drum machine is the actual use case. Strudel can't do either
-    (browser, no clock sender in its midi package), so Strudel -> poptart stays a live note feed.
+    forwards to Node as a (tempo, beat at a moment) report and rebases the transport with
+    Transport#setCps for tempo and a phase shift for beat - the same follower the Link item
+    below needs. poptart always follows here (the 150 ms lookahead is fine for that). Strudel
+    can't do either (browser, no clock sender in its midi package), so Strudel -> poptart stays
+    a live note feed.
+
+[ ] Ableton Link - join a Link session so poptart shares tempo, beat phase AND start/stop with
+    a DAW on the LAN. A first pass on sclang's built-in LinkClock (2026-09-12) proved the tempo
+    and phase halves but hit a wall on start/stop: SC 3.14's Link glue receives the session's
+    play state (\linkStart/\linkStop notifications) but has no primitive to SET it, so a
+    poptart start can never start the DAW. Decided (2026-09-13): a small helper binary on the
+    Link SDK, built and committed like the keylock UGen (native/), is poptart's peer instead -
+    Node drives it over stdio, reads beats/tempo/peers directly, and sets isPlaying, so the
+    sclang half goes away. Shape to keep from the first pass (patch in the 09-12 session):
+    tempo goes both ways (setbpm/migration push, a peer's change lands through setCps and
+    onCpsChange re-rates synced songs); phase only comes in and only where yielding is free - a
+    start from stopped lands on the session's bar, a Link switched on mid-performance jumps once
+    unless clockHeldByDesk, otherwise the relation is kept and drift-trimmed (sub-tick, silent)
+    until the next song start puts its bar on the session's; the follow math (sessionPhase,
+    phaseDelta, followStep, nextTimeAtPhase) is pure and unit-tested. New rule for the rebuild:
+    poptart only pushes a tempo the user is intentionally changing - record the bpm each eval
+    and each desk gesture, and push on a CHANGE (an edited setbpm number, a migration, a detent,
+    a record taking the grid), never on a re-eval that merely restates the same declaration or
+    has none; a peer's tempo therefore survives Cmd+Enter. Start/stop: poptart's start/stop
+    sets the session's play state; the DAW's play starts the buffer from the session's bar and
+    its stop stops playback, outside mix mode only (a DAW stopping must not silence a set).
 
 [ ] Bonjour announcement of the OSC input port off macOS: bonjour.js announces "_osc._udp" via
     the system's `dns-sd -R` (so TouchOSC's Browse finds the machine) and is a logged no-op on

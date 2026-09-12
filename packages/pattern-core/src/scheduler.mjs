@@ -254,6 +254,15 @@ export class Transport {
     // the tempo out to listeners beyond the schedulers - e.g. web-app forwards it to the
     // engine so VST-internal synced LFOs/delays follow setbpm (see server.js).
     this.onCpsChange = null;
+    // Fired on every change of the clock's running state or phase that is NOT a tempo change:
+    // 'start' (paused -> running), 'stop', 'rebase' (a running clock's phase moved - a song deck
+    // taking the grid). The host mirrors these to the engine's clock
+    // outputs: MIDI clock's start/stop and its locate (see server.js's syncEngineClock).
+    this.onStateChange = null;
+  }
+
+  _announce(kind) {
+    if (typeof this.onStateChange === 'function') this.onStateChange(kind);
   }
 
   cycleAt(sec) {
@@ -271,9 +280,11 @@ export class Transport {
 
   /** Freeze the clock and rewind to cycle 0. Tempo (cps) survives; only position resets. */
   stop() {
+    const wasRunning = !this._paused;
     this._paused = true;
     this._baseCycle = 0;
     this._baseSec = this.getTime();
+    if (wasRunning) this._announce('stop');
   }
 
   /** Un-freeze: the clock advances again from wherever it sits (cycle 0 after stop()). */
@@ -281,6 +292,7 @@ export class Transport {
     if (!this._paused) return;
     this._baseSec = this.getTime();
     this._paused = false;
+    this._announce('start');
   }
 
   /**
@@ -292,10 +304,13 @@ export class Transport {
    */
   startAt(sec, cycle = 0) {
     if (!Number.isFinite(sec) || !Number.isFinite(cycle)) return;
+    const wasPaused = this._paused;
     this._baseSec = sec;
     this._baseCycle = cycle;
     this._paused = false;
+    this._announce(wasPaused ? 'start' : 'rebase');
   }
+
 
   setCps(cps) {
     if (!(cps > 0) || !Number.isFinite(cps)) return; // ignore junk (a tempo signal mid-rest, 0, NaN)

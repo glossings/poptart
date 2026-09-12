@@ -1547,11 +1547,36 @@ const VST_TRANSPORT_SYNC_MS = 4000;
 const VST_TRANSPORT_LOOKAHEAD_SEC = 0.15; // applied engine-side at this target, like note events
 
 function syncVstTransport() {
-  if (!engine || !transport) return;
-  const targetSec = engine.getTime() + VST_TRANSPORT_LOOKAHEAD_SEC;
-  engine.setTempo(transport.cps * 240, transport.cycleAt(targetSec) * 4, targetSec);
+  syncEngineClock('sync');
 }
 setInterval(syncVstTransport, VST_TRANSPORT_SYNC_MS);
+
+// The same message is what re-anchors sclang's mirror of the transport, which MIDI clock out
+// ticks from (see below). `event` says what just happened to the clock beyond its tempo:
+// 'start', 'stop', 'rebase' (a running clock's phase moved) - the transport announces those
+// itself (onStateChange) - or 'sync'.
+function syncEngineClock(event = 'sync') {
+  if (!engine || !transport) return;
+  const targetSec = engine.getTime() + VST_TRANSPORT_LOOKAHEAD_SEC;
+  engine.setTempo(transport.cps * 240, transport.cycleAt(targetSec) * 4, targetSec, !transport.paused, event);
+}
+
+// MIDI clock out: sclang sends the ticks from its mirror of the transport, to the destination
+// chosen in the settings tab (persisted as settings.midiClockOut).
+let midiClockActive = null; // the destination the running engine actually ticks to
+
+// What the running engine should tick to, as persisted - re-applied after every engine
+// (re)start, since a fresh sclang has no destination.
+function applyMidiClockSetting() {
+  if (!engine || !settings.midiClockOut) return;
+  const eng = engine;
+  midiClockActive = null;
+  eng.setMidiClockOut(settings.midiClockOut).then(
+    (r) => { if (engine === eng) midiClockActive = r.active ?? null; },
+    // eslint-disable-next-line no-console
+    (err) => console.warn(`[poptart] MIDI clock out: ${err.message}`),
+  );
+}
 
 // Event-loop stall watchdog. The note scheduler shares this process, so any synchronous work
 // that holds the loop near the 150ms lookahead is an audible stutter on EVERY playing deck -
@@ -1960,6 +1985,7 @@ function wireEngine() {
   // Born paused at cycle 0: the clock only advances while something is playing (first eval
   // starts it, /api/stop freezes it back at 0). Survives engine restarts, hence the guard.
   if (!transport) transport = new patternCore.Transport(() => engine.getTime(), { cps: DEFAULT_CPS, paused: true });
+  transport.onStateChange = (kind) => syncEngineClock(kind); // start/stop/rebase reach the MIDI clock
   transport.onCpsChange = () => {
     syncVstTransport();
     // Rate-locked songs ride the clock: every ramp step re-derives rate = master/native (with
@@ -1968,6 +1994,7 @@ function wireEngine() {
     mixNotify(); // a tempo ramp's every step reaches the strip's readout live
   };
   syncVstTransport(); // a fresh sclang needs the surviving transport's tempo, not 120
+  applyMidiClockSetting();
   // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
   // live-value store - what a Tier-1 midicc() signal samples.
   engine.onMidiIn = (device, channel, num, value, kind) => {
@@ -3949,6 +3976,29 @@ const routes = {
     settings.preferVst3 = !!body.enabled;
     saveSettings();
     return { status: 200, body: { enabled: settings.preferVst3 } };
+  },
+
+  // MIDI clock out (settings tab): its destination, persisted and re-applied on every engine
+  // start (applyMidiClockSetting).
+  'GET /api/midiClock': async () => ({
+    status: 200,
+    body: {
+      destinations: engine ? await engine.getMidiDestinations() : [],
+      selected: settings.midiClockOut ?? null,
+      active: midiClockActive,
+    },
+  }),
+
+  // Body: { device } - a destination name (substring), or null/"" for off. Fails, and keeps the
+  // old setting, when nothing connected matches.
+  'POST /api/midiClock': async (body) => {
+    const device = body.device ? String(body.device).trim() : null;
+    let active = null;
+    if (engine) ({ active } = await engine.setMidiClockOut(device ?? ''));
+    settings.midiClockOut = device;
+    midiClockActive = active ?? null;
+    saveSettings();
+    return { status: 200, body: { selected: device, active: midiClockActive } };
   },
 
   // Body: { dir } - a folder path, or null/"" to reset to the default (~/.poptart/samples).
