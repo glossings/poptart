@@ -103,12 +103,25 @@ var noteQueues = IdentityDictionary.new;
 // preset swap takes tens of milliseconds, so this is slack, not a budget) - and, on release,
 // how late a held note may fire. A COLD restore - the state arriving while its plugin is still
 // opening, i.e. a new song coming up - is different on both counts: the hold lasts the whole
-// open+load (marked `cold` on the pending entry; coldWaitMax is only the stuck-load failsafe),
-// and the release DROPS the notes whose onset has passed instead of bursting them out late.
-// The track stays silent until its program is confirmed in, then joins on the next on-time
-// note - the alternative was every synth playing its init preset for the length of the load.
+// open+load (marked `cold` on the pending entry; openWaitMax + coldWaitMax is only the
+// stuck-open/stuck-load failsafe), and the release DROPS the notes whose onset has passed
+// instead of bursting them out late. The track stays silent until its program is confirmed in,
+// then joins on the next on-time note - the alternative was every synth playing its init preset
+// for the length of the load.
+//
+// Opens are serialized engine-wide (see openQueued), so how long a slot's plugin takes to open
+// depends on how many are queued ahead of it - a song's worth, on a load. A restore that waits
+// for its plugin on a fixed clock therefore fails for the slots at the back of the queue, and
+// fails SILENTLY as far as the scheduler knows: it marked the state applied when it sent it, so
+// nothing re-sends, the plugin comes up on its init program, and the first capture out of it
+// files that init program over the real preset in the code (the fill track of PIPEWIRE,
+// 2026-09-13). So awaitLoaded follows the open itself - waiting for as long as one is in flight
+// for the slot (see `wanted`) - and openWaitMax is only the guard against an open that never
+// reports back at all: openQueued gives each one 30s before moving on, so this covers a queue
+// with one wedged plugin in it, not a budget any real load is expected to approach.
 var stateWaitMax = 0.3;
 var coldWaitMax = 20;
+var openWaitMax = 60;
 // '<track>_<slot>' -> the time until which an edit reported by that slot's plugin is OUR doing
 // rather than the user's. Loading a program makes plugins fire the very callbacks auto-pin
 // watches - /vst_update above all, since a plugin that redraws when its program changes cannot
@@ -792,9 +805,20 @@ awaitTrack = { |key, timeoutSec = 5|
     };
     if (t.isKindOf(Event)) { t } { nil };
 };
-awaitLoaded = { |track, slot, timeoutSec = 10|
-    var tries = 0, max = (timeoutSec / 0.05).asInteger;
-    while { track[\loaded][slot].isNil and: { tries < max } } { 0.05.wait; tries = tries + 1 };
+// Waits for the plugin in a slot to be open, for as long as an open is actually in flight for it
+// (`wanted` is set by loadInstrument/loadEffect before the open is queued and cleared when the
+// open fails or the slot is unloaded). `graceSec` is for message ordering only: the load message
+// that marks the slot is handled before the one that waits on it, but both fork and wait for the
+// track first, so the mark can land a beat after the wait begins. Past the grace, an unmarked
+// slot is an empty one and this returns at once; a marked one is waited for up to openWaitMax
+// (see there - a stuck-open guard, not a budget). Returns whether the plugin is open.
+awaitLoaded = { |track, slot, graceSec = 1|
+    var tries = 0, grace = (graceSec / 0.05).asInteger, max = (openWaitMax / 0.05).asInteger;
+    while {
+        track[\loaded][slot].isNil
+        and: { tries < max }
+        and: { track[\wanted][slot].notNil or: { tries < grace } }
+    } { 0.05.wait; tries = tries + 1 };
     track[\loaded][slot].notNil;
 };
 
@@ -1773,24 +1797,31 @@ OSCdef(\poptartLoadInstrument, { |msg|
     fork {
         var track = awaitTrack.(key);
         if (track.isNil) { ("poptart: loadInstrument: no track " ++ key).warn } {
-            // Livecoding re-eval sends the same chain again - don't reload an already-open plugin.
-            if (track[\loaded][0] != pluginId) {
+            // Livecoding re-eval sends the same chain again - don't reload an already-open plugin,
+            // nor one whose open is still queued (see `wanted` in loadEffect).
+            if ((track[\loaded][0] != pluginId) and: { track[\wanted][0] != pluginId }) {
                 var ctl = track[\controllers][0] ?? {
                     VSTPluginController(track[\synth], id: \slot0, synthDef: track[\def])
                 };
                 track[\controllers][0] = ctl;
                 track[\loaded][0] = nil;
+                // Marks the open in flight - what a restore waiting on this slot follows (see
+                // awaitLoaded) - and, as for an effect, what the open checks before it commits.
+                track[\wanted][0] = pluginId;
                 openQueued.(ctl, resolvePlugin.(pluginId), { |self, ok|
                     if (ok) {
-                        track[\loaded][0] = pluginId;
-                        // Emulated DAW transport from the first sample on: a rolling transport
-                        // at the current tempo (position re-syncs via '/poptart/setTempo').
-                        self.setPlaying(true);
-                        self.setTempo(currentTempo);
-                        dropSlotRamps.(key, track, 0); // the open cleared their mappings (see dropRamp)
-                        watchPluginEdits.(track, key, 0, self);
-                        ("poptart: loaded instrument " ++ pluginId).postln;
+                        if (track[\wanted][0] == pluginId) {
+                            track[\loaded][0] = pluginId;
+                            // Emulated DAW transport from the first sample on: a rolling transport
+                            // at the current tempo (position re-syncs via '/poptart/setTempo').
+                            self.setPlaying(true);
+                            self.setTempo(currentTempo);
+                            dropSlotRamps.(key, track, 0); // the open cleared their mappings (see dropRamp)
+                            watchPluginEdits.(track, key, 0, self);
+                            ("poptart: loaded instrument " ++ pluginId).postln;
+                        };
                     } {
+                        track[\wanted][0] = nil;
                         ("poptart: FAILED to load instrument '" ++ pluginId
                             ++ "' (name must match a scanned plugin - see the plugin browser)").warn;
                     };
@@ -3468,9 +3499,10 @@ OSCdef(\poptartSetPluginState, { |msg|
         // is coming at this time" has to be true HERE, not when the load starts (see waitForLoad).
         statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency, cold: cold);
         // The notes waiting on this load are released the moment the program is in - or by this,
-        // whatever the plugin does or fails to do (for a cold load, a pure stuck-load failsafe;
-        // the apply below clears the pending itself on every path).
-        SystemClock.sched(latency + if (cold) { coldWaitMax } { stateWaitMax }, { clearPending.(seqKey, seq); nil });
+        // whatever the plugin does or fails to do (for a cold load, a pure stuck-open/stuck-load
+        // failsafe covering the whole open+load; the apply below clears the pending itself on
+        // every path).
+        SystemClock.sched(latency + if (cold) { openWaitMax + coldWaitMax } { stateWaitMax }, { clearPending.(seqKey, seq); nil });
         if (latency > 0) { SystemClock.sched(latency, { apply.value; nil }) } { apply.value };
     } {
         File.delete(path);
@@ -3494,7 +3526,7 @@ OSCdef(\poptartStatePending, { |msg|
     if (seq >= (stateSeqs[seqKey] ? 0)) {
         stateSeqs[seqKey] = seq;
         statePending[seqKey] = (seq: seq, at: Main.elapsedTime + latency, cold: cold);
-        SystemClock.sched(latency + if (cold) { coldWaitMax } { stateWaitMax }, { clearPending.(seqKey, seq); nil });
+        SystemClock.sched(latency + if (cold) { openWaitMax + coldWaitMax } { stateWaitMax }, { clearPending.(seqKey, seq); nil });
     };
 }, '/poptart/statePending');
 
