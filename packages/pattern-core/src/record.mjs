@@ -18,7 +18,7 @@
 // No `@` weight chains on purpose: the slot grid stays visible in the code.
 
 import { parseMini } from './mini.mjs';
-import { clipOverlaps, normalizePianoRollSteps, regridPianoRoll, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_GRID, PIANOROLL_MAX_NUDGE } from './pianoroll.mjs';
+import { clipOverlaps, normalizePianoRollSteps, regridPianoRoll, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_GRID, PIANOROLL_MAX_NUDGE, PIANOROLL_MIN_LEN } from './pianoroll.mjs';
 
 /** Slots per cycle used when recording with quantization off - fine enough to keep the feel. */
 export const UNQUANTIZED_GRID = 96;
@@ -246,7 +246,9 @@ export function recordingToRoll(events, roll, { window, quantize = 0, countIn = 
     const onset = q > 0 ? Math.round(ev.start * q) / q : ev.start;
     const cell = Math.round(onset * grid);
     const nudge = Math.min(PIANOROLL_MAX_NUDGE, Math.max(-PIANOROLL_MAX_NUDGE, ev.start * grid - cell));
-    const noteLen = Math.max(1, Math.round((ev.end - ev.start) * grid));
+    // As long as it was held, to the roll's own precision (see serializePianoRoll) - a length is any
+    // number of cells, so a staccato stab is not rounded up to a cell it never filled.
+    const noteLen = Math.max(PIANOROLL_MIN_LEN, Math.round((ev.end - ev.start) * grid * 1000) / 1000);
     const rel = cell - startCell;
     let drawn;
     if (rel < 0) {

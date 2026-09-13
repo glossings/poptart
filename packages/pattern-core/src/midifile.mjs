@@ -19,7 +19,7 @@
 // reports as `timeSig` so the caller can say so.
 
 import { UNQUANTIZED_GRID } from './record.mjs';
-import { serializePianoRoll, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE } from './pianoroll.mjs';
+import { serializePianoRoll, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MIN_LEN } from './pianoroll.mjs';
 
 // ---------------------------------------------------------------------------------------------
 // Reading the file
@@ -376,7 +376,8 @@ function laneToRollNotes(events, R, len) {
     const start = Math.round(ev.start * R);
     if (start < 0 || start >= len) continue; // outside the loop window - it would never sound
     const midi = Math.min(127, Math.max(0, Math.round(ev.note)));
-    const length = Math.max(1, Math.round((ev.end - ev.start) * R));
+    // Kept as played, to the roll's precision: a length is any number of cells (see pianoroll.mjs).
+    const length = Math.max(PIANOROLL_MIN_LEN, Math.round((ev.end - ev.start) * R * 1000) / 1000);
     const key = `${start}:${midi}`;
     const existing = byCell.get(key);
     if (existing) {

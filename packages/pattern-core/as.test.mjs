@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mini, n, note, s, clip, channelAt, soundingEnd } from './src/signal.mjs';
+import { mini, n, note, s, clip, channelAt, soundingEnd, timeShift, SAMPLER_CONTROL_NAMES } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, msg ?? `${a} !~ ${b}`);
@@ -202,4 +202,52 @@ test('.as("note:slice") leaves the channel alone where the field is empty', () =
 
 test('.as(): slice is a known field, and a misspelt one still names them all', () => {
   assert.throws(() => mini('0').as('slize'), /unknown field "slize".*slice/s);
+});
+
+// ---------------------------------------------------------------------------------------------
+// every control is a field
+// ---------------------------------------------------------------------------------------------
+// .as() names channels by the same words the methods and top-level builders use, so the whole
+// control family is admissible - not a hand-picked few. `"…".as("vel:flip")` used to throw.
+
+test('.as("vel:flip") stamps flip onto each event and keeps the velocity channel', () => {
+  const sig = mini('1:1 0.5:0 1').as('vel:flip').s('breaks');
+  const st = stepsAt(sig);
+  assert.deepEqual(st.map((s2) => s2.cfg?.flip), [1, 0, undefined]);
+  close(velAt(sig, st[0]), 1);
+  close(velAt(sig, st[1]), 0.5);
+});
+
+test('.as("note:speed:begin") rides through .s() and a later setter replaces its channel', () => {
+  const sig = mini('60:2:0.25 62:-1').as('note:speed:begin').s('breaks');
+  assert.deepEqual(stepsAt(sig).map((s2) => [s2.cfg.speed, s2.cfg.begin]), [[2, 0.25], [-1, undefined]]);
+  // Setting a control replaces it: .speed(1) takes the token speeds off the events (crossMerge's
+  // clear) and the other field stays put.
+  const reset = sig.speed(1);
+  assert.deepEqual(stepsAt(reset).map((s2) => [s2.cfg.speed, s2.cfg.begin]), [[undefined, 0.25], [undefined, undefined]]);
+  assert.equal(reset.sampler.speed.sample(0, 1), 1);
+});
+
+test('.as("splice") reads as .splice(): the chop, played fitted to its event', () => {
+  const sig = mini('0:3 1').as('i:splice').s('breaks');
+  assert.deepEqual(stepsAt(sig).map((s2) => [s2.cfg.index, s2.cfg.slice, s2.cfg.splice]), [[0, 3, 1], [1, undefined, undefined]]);
+});
+
+test('.as("note:swing") swings only the events whose token says so', () => {
+  const sig = mini('60 60:0.25 60 60:0.25 60 60:0.25 60 60:0.25').as('note:swing');
+  const st = stepsAt(sig).sort((a, b) => a.start - b.start);
+  const shift = (step) => timeShift(step, sig.noteChannels, step.start, 1, step.start);
+  close(shift(st[0]), 0); // an onbeat of the default 8-grid, and no swing field anyway
+  close(shift(st[1]), 0.25 / 8); // an offbeat, moved by its own amount of one slot
+  assert.ok(sig.noteChannels.swing, 'swing is carried as a note channel too');
+});
+
+test('every control name is a field, and every field is stamped where its method would put it', () => {
+  for (const name of SAMPLER_CONTROL_NAMES) {
+    assert.doesNotThrow(() => mini('1').as(name), `.as("${name}")`);
+  }
+});
+
+test('.as(): a misspelt field names the whole control family', () => {
+  assert.throws(() => mini('0').as('flipp'), /unknown field "flipp".*flip.*swinggrid/s);
 });

@@ -640,7 +640,7 @@ test('a span marked on one row splits and joins that row only', () => {
 //
 // Two clips of one track sounding across the same bars is not a difference you can hear, so a
 // copy that stacked was only ever a mess waiting to be noticed. The roll has always clipped its
-// overlaps (prClipOverlaps); this is the same rule on the song's own timeline.
+// overlaps (prResolveOverlaps); this is the same rule on the song's own timeline.
 // ---------------------------------------------------------------------------------------------
 
 test('a clip laid down cuts back whatever was under it on that row', () => {

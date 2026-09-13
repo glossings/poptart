@@ -1169,7 +1169,11 @@ server.waitForBoot {
             // 2*dur and never reaches 1 before the note ends. A gate held open for exactly dur runs
             // attack->decay->sustain across playback, then releases when the region ends; a cut
             // event (gate->0 early) releases sooner. Tiny floors keep the fade-in/out declicked.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.008, rel * dur);
+            // The release floor is 15ms rather than the attack's 3ms because Env.adsr's default
+            // curve (-4) front-loads a fall: two thirds of the drop lands in the first quarter of
+            // the segment, so an 8ms floor was ~2ms of real fade and thumped on bass-heavy material
+            // cut short by a pianoroll note. Every sampler def below uses the same floors.
+            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
@@ -1237,7 +1241,7 @@ server.waitForBoot {
             var sig = (play * (1 - hold)) + (patch * hold);
             // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
             // the loop's gate-off, then released. Floors preserve the original declick fade.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.008, rel * dur);
+            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
@@ -1254,7 +1258,7 @@ server.waitForBoot {
             // 2*dur and never reaches 1 before the note ends. A gate held open for exactly dur runs
             // attack->decay->sustain across playback, then releases when the region ends; a cut
             // event (gate->0 early) releases sooner. Tiny floors keep the fade-in/out declicked.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.008, rel * dur);
+            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
@@ -1283,7 +1287,7 @@ server.waitForBoot {
             var sig = Warp1.ar(nc, buf, ptr, rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2) * (2 / overlaps);
             // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
             // the loop's gate-off, then released. Floors preserve the original declick fade.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.008, rel * dur);
+            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;

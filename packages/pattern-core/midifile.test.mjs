@@ -366,7 +366,9 @@ test('midiLanesToPianoroll: one pitch retriggered inside a cell merges instead o
     ]),
   ]);
   const [entry] = midiLanesToPianoroll(midiFileToLanes(file), { grid: 4 }).entries;
-  assert.deepEqual(entry.notes, [{ midi: 60, index: 0, slice: null, start: 0, len: 2, vel: 0.79, prob: 1, nudge: 0, mute: false }]);
+  // the merged note is the longer hit's, to the length it was held (a length is any number of
+  // cells, and an import keeps it as played rather than rounding it up to the cell)
+  assert.deepEqual(entry.notes, [{ midi: 60, index: 0, slice: null, start: 0, len: 1.865, vel: 0.79, prob: 1, nudge: 0, mute: false }]);
   assert.equal(playedSteps(entry.body).length, 1); // one onset, not two of the same note at once
 });
 

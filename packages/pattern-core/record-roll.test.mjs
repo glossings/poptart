@@ -99,7 +99,7 @@ test('unquantized: the nearest cell, with the remainder as a nudge', () => {
   const [nt] = live(out.notes);
   assert.equal(nt.start, 2);
   assert.ok(Math.abs(nt.nudge - 0.3) < 1e-6);
-  assert.equal(nt.len, 1);
+  assert.equal(nt.len, 0.7, 'held for 0.7 of a cell, written as 0.7 of a cell - not rounded up to one');
 });
 
 test('a coarse quantize on a fine roll lands on the matching cells, keeping the offset as a nudge', () => {
@@ -140,7 +140,7 @@ test('a triplet roll quantized to sixteenths re-meshes to their common multiple'
 test('an index rides along with the pitch, and velocity is kept as played', () => {
   const roll = fresh(16, 1);
   const out = recordingToRoll([ev(24, 8.0, 8.1, 0.63, { index: 3 })], roll, { window: [8, 9], quantize: 16 });
-  assert.equal(serializePianoRoll(live(out.notes)), '24:3,0,2,0.63');
+  assert.equal(serializePianoRoll(live(out.notes)), '24:3,0,1.6,0.63', 'a tenth of a cycle is 1.6 cells, and stays 1.6');
 });
 
 test('lengths are never quantized', () => {

@@ -4582,7 +4582,12 @@ const routes = {
         // gate themselves on their own rows, so the group's effective arrangement is the union of
         // theirs until somebody paints its row - and then the clips gate the whole submix.
         // Written tracks - named or `$:` - take the rule as it stands: no clips means silence.
+        // A BUS - a track headed by audio(), see labels.mjs's isBusBlock - has no row at all: it
+        // plays whatever feeds it, and those tracks gate themselves on rows of their own, so it
+        // sounds exactly when they do and a gate of its own could only cut a tail off. Clips it
+        // still holds from before it was one are dropped by the painter, and ignored here.
         if (!painted && (b.kind === 'bare' || routed.groups.has(b.label))) continue;
+        if (patternCore.isBusBlock(b)) continue;
         b.sig = b.sig._arrangeGate(painted ?? [], posAt);
       }
     } else {

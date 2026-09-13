@@ -359,6 +359,29 @@ export function isBareCallBlock(code, name) {
   return false;
 }
 
+// A block's expression headed by `audio(` - the same shape GROUP_HEAD_RE reads, for the other
+// kind of track that has no notes of its own.
+const BUS_HEAD_RE = /^\s*audio\s*\(/;
+
+/**
+ * Whether a block (from splitLabeledBlocks) is a BUS: its expression is headed by `audio(` - a
+ * reverb return reading a `.bus()` sum, a parallel-processed copy of another track, a hardware
+ * input run through a chain. Nothing of its own sounds on it: it plays whatever feeds it, so it
+ * is not a row of the arrangement (see arrange.mjs) - the tracks feeding it gate themselves, and a
+ * gate of its own could only cut a tail off. Only the HEAD counts: `.audio(...)` further along a
+ * chain is a sidechain injector on an ordinary track. Comments are stripped first, as
+ * isBareCallBlock does, and the label is already blanked out of `code` by the splitter. A group
+ * reads a bus too, but is its own kind (see `group` above): it keeps a row for its members to sit
+ * under.
+ */
+export function isBusBlock(block) {
+  if (!block || block.group) return false;
+  const bare = String(block.code ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ');
+  return BUS_HEAD_RE.test(bare);
+}
+
 // Is any line of `text` more than whitespace and not a `//` comment? Walks the lines and stops at
 // the first one that is, rather than splitting the whole text into an array first: this is asked
 // of entire blocks, which a pinned plugin state makes megabytes long, and the answer is almost

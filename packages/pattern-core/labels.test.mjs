@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { splitLabeledBlocks, isBareCallBlock, codeMask } from './src/labels.mjs';
+import { splitLabeledBlocks, isBareCallBlock, isBusBlock, codeMask } from './src/labels.mjs';
 
 const labels = (src) => splitLabeledBlocks(src).map((b) => b.label);
 
@@ -387,4 +387,30 @@ test('group( deeper than the head position is just an argument, not structure', 
   const blocks = splitLabeledBlocks('x: wrap(group({\n  kick: s("bd")\n}))');
   assert.equal(blocks.length, 1, 'only a block HEADED by group( explodes');
   assert.equal(blocks[0].group, undefined);
+});
+
+// isBusBlock: which tracks the arrangement gives NO row - a block headed by audio() plays whatever
+// feeds it, and those tracks are rows already.
+test('isBusBlock: audio() at the head, and only at the head', () => {
+  const blocks = splitLabeledBlocks([
+    'verb: audio("bus:verb").fx("ValhallaRoom")',
+    'side: s("hh*8").fx("Pro-C 2").audio("kick")', // a sidechain injector on an ordinary track
+    '_Sdub: audio ( "kick" )', // markers and spacing aside
+    'late: // the return',
+    '  audio("bus:late")',
+    'kick: group({',
+    '  kickMain: s("bd*4")',
+    '})',
+    'live: input(1)', // a hardware input is a source of its own kind, not a bus
+    'audio("bus:x")', // bare, at column 0: never a row either way
+  ].join('\n'));
+  const by = Object.fromEntries(blocks.map((b) => [b.label, b]));
+  assert.equal(isBusBlock(by.verb), true);
+  assert.equal(isBusBlock(by.side), false, '.audio() as a method is a sidechain, not a bus');
+  assert.equal(isBusBlock(by.dub), true);
+  assert.equal(isBusBlock(by.late), true, 'a comment before the head is skipped');
+  assert.equal(isBusBlock(by.kick), false, 'a group reads a bus, but is a group');
+  assert.equal(isBusBlock(by.kickMain), false);
+  assert.equal(isBusBlock(by.live), false);
+  assert.equal(isBusBlock(null), false);
 });

@@ -120,7 +120,7 @@ const API_DOCS = {
   audio: {
     kind: 'both',
     sig: 'audio(source)',
-    desc: 'As a source: run a hardware input, another track, or a .bus() sum through this chain. As a method after an .fx(): feed that plugin\'s sidechain.',
+    desc: 'As a source: run a hardware input, another track, or a .bus() sum through this chain. As a method after an .fx(): feed that plugin\'s sidechain. As a source it has no row in the arrangement: it sounds whenever what feeds it does.',
     eg: 'audio("drums").fx("Saturn 2")',
   },
   group: {
@@ -234,7 +234,7 @@ const API_DOCS = {
   fx: {
     kind: 'method',
     sig: 'fx(plugin, { state })',
-    desc: 'Appends an effect to the track\'s chain, after the instrument and any earlier .fx(). Double-click the fx name to open its own editor window. Later .param() calls target it.',
+    desc: 'Appends an effect to the track\'s chain, after the instrument and any earlier .fx(). Ctrl+F drops one at the caret with the plugin list open. Double-click the fx name to open its own editor window. Later .param() calls target it.',
     eg: '.fx("ValhallaRoom").param("Mix", 0.3)',
   },
   param: {
@@ -353,7 +353,7 @@ const API_DOCS = {
   as: {
     kind: 'method',
     sig: 'as(spec)',
-    desc: 'Reads "a:b:c" tokens as named fields - note, n, i, vel, clip, nudge - so one string carries pitch, sample choice, dynamics and feel together. Empty fields keep their defaults, so "38::0.04" sets only the last one.',
+    desc: 'Reads "a:b:c" tokens as named fields - note, n, or any control (vel, clip, nudge, swing, i, slice, begin, speed, flip, …) - so one string carries pitch, sample choice, dynamics and feel together. Empty fields keep their defaults, so "38::0.04" sets only the last one.',
     eg: '"<36:1:4 ~>*8".as("note:vel:clip")',
   },
   degrade: { kind: 'method', sig: 'degrade(prob, seed)', desc: 'Randomly drops events (default 50%), deterministic per cycle. The mini-notation "?" postfix is the same operation.', eg: '.degrade(0.3)' },

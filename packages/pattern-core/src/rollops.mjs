@@ -18,12 +18,14 @@
 import { degreeToMidi, midiToDegree, quantizeToScale, scalePitchClasses } from './notes.mjs';
 
 const MAX_NUDGE = 0.5; // mirrors pianoroll.mjs's PIANOROLL_MAX_NUDGE
+const MIN_LEN = 0.01; // mirrors pianoroll.mjs's PIANOROLL_MIN_LEN - a length is any number of cells above it
 const clampNudge = (v) => Math.min(MAX_NUDGE, Math.max(-MAX_NUDGE, v));
 const clampMidi = (m) => Math.min(127, Math.max(0, Math.round(m)));
 const clampVel = (v) => Math.min(1, Math.max(0, v));
+const clampLen = (v) => (Number.isFinite(v) && v > 0 ? Math.max(MIN_LEN, v) : 1);
 const noteNudge = (nt) => (Number.isFinite(nt.nudge) ? clampNudge(nt.nudge) : 0);
 const noteVel = (nt) => (Number.isFinite(nt.vel) ? nt.vel : 1);
-const withLen = (nt, len) => ({ ...nt, len: Math.max(1, Math.round(len)), full: Math.max(1, Math.round(len)) });
+const withLen = (nt, len) => ({ ...nt, len: clampLen(len), full: clampLen(len) });
 const byTime = (a, b) => (a.start + noteNudge(a)) - (b.start + noteNudge(b)) || a.midi - b.midi;
 
 /**

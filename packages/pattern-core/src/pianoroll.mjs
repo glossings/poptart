@@ -25,8 +25,11 @@
 //           MIDI recorder writes what was played during the count-in at NEGATIVE cells, before the
 //           roll's own time starts (see record.mjs) - drawn to the left of cell 0, never played, there
 //           to be dragged into the loop if it turns out you want it
-//   len   - length in cells, integer >= 1 (may run past the last cell: the note rings on, like a
-//           mini-notation tie)
+//   len   - length in CELLS, any positive number (may run past the last cell: the note rings on,
+//           like a mini-notation tie). Whole cells are what the grid draws and snaps to, but the
+//           length itself is free: a note can be a third of a cell, or four and a bit, without the
+//           grid having to be redrawn finer to say so (the editor's cmd-drag on a note's right edge,
+//           and cmd+shift+arrows). Never below PIANOROLL_MIN_LEN.
 //   vel   - optional velocity, 0..1 (omitted when 1, the default)
 //   prob  - optional probability the note plays, 0..1 (omitted when 1). Drives a per-cycle random
 //           gate in the builder, and becomes a `?` degrade when converted to mini-notation. When
@@ -79,6 +82,9 @@ export const PIANOROLL_DEFAULT_SLICE = null;
 // next door, and the honest edit is to move it. (The nudge CHANNEL clamps at half the event's own
 // width for the same reason; on a one-cell note the two limits are the same number.)
 export const PIANOROLL_MAX_NUDGE = 0.5;
+// The shortest a note can be, in cells. Lengths are free (see the format notes) but not zero: a
+// note has to last SOME time to be a note, and the serializer writes three decimals of a cell.
+export const PIANOROLL_MIN_LEN = 0.01;
 
 // Slot boundaries land on fractions binary floating point can't hold exactly - the same nudge
 // signal.mjs's timeShift takes, and for the same reason: floor(2/16 * 8) must be 1, not 0.
@@ -246,7 +252,7 @@ export function parsePianoRoll(str) {
       index: Math.max(0, Math.round(index)),
       slice: slice === null ? null : Math.max(0, Math.round(slice)),
       start: Math.round(start), // may be negative - count-in material sits before cell 0
-      len: Math.max(1, Math.round(len)),
+      len: clampLen(len),
       vel: clamp01(vel),
       prob: clamp01(prob),
       nudge: clampNudge(nudge),
@@ -266,7 +272,7 @@ export function serializePianoRoll(notes) {
       const pitch = slice !== null ? `${Math.round(nt.midi)}:${index}:${slice}`
         : index === PIANOROLL_DEFAULT_INDEX ? `${Math.round(nt.midi)}`
           : `${Math.round(nt.midi)}:${index}`;
-      let s = `${nt.mute ? '!' : ''}${pitch},${Math.round(nt.start)},${Math.round(nt.len)}`;
+      let s = `${nt.mute ? '!' : ''}${pitch},${Math.round(nt.start)},${fmt(clampLen(nt.len))}`;
       // Positional fields, so each one holds open the slots before it: a nudge writes vel and prob
       // whatever they are, and a sub-unity prob writes vel even when it's 1.
       const nudge = noteNudge(nt);
@@ -296,7 +302,29 @@ export const noteNudge = (nt) => (Number.isFinite(nt.nudge) ? clampNudge(nt.nudg
  * Only the builder divides. pianoRollToMini writes cells straight out, because the pattern it emits
  * puts one step in each cell and carries length as a clip instead (see fieldStr there).
  */
-export const noteNudgeChannel = (nt) => noteNudge(nt) / Math.max(1, Math.round(nt.len));
+export const noteNudgeChannel = (nt) => noteNudge(nt) / clampLen(nt.len);
+
+/**
+ * Where a note actually sounds, in cells: its drawn cell plus its nudge. The one number the fine
+ * gestures (cmd+arrows, a free drag) move, and the inverse of placePianoRollNote.
+ */
+export const pianoRollNotePos = (nt) => nt.start + noteNudge(nt);
+
+/**
+ * Put a note at `pos` cells - any real number - by splitting it into the cell it is drawn on and the
+ * nudge that carries the rest. A nudge reaches half a cell either way (PIANOROLL_MAX_NUDGE), so past
+ * that the note CARRIES into the cell next door: nudging a note 0.3, 0.3, 0.3 of a cell to the right
+ * walks it from cell 4 to cell 5 with a nudge of -0.1, never wedging it at +0.5. That is what lets
+ * the keyboard nudge and a free drag put a note anywhere while the roll keeps writing every note on
+ * a cell, which is what the grid draws, hit-tests and quantizes. Mutated in place and handed back.
+ */
+export function placePianoRollNote(nt, pos) {
+  const p = Number.isFinite(pos) ? pos : nt.start;
+  const start = Math.round(p);
+  nt.start = start;
+  nt.nudge = clampNudge(p - start);
+  return nt;
+}
 
 /**
  * Overlap resolution, one lane at a time: two notes in the same lane are
@@ -326,10 +354,11 @@ export const noteNudgeChannel = (nt) => noteNudge(nt) / Math.max(1, Math.round(n
  * existence. (A note without `full` - one just parsed out of the string, which already holds
  * clipped lengths - adopts its current `len` as its authored length.)
  *
- * That reprieve lasts exactly as long as the gesture. This is the resolution a DRAG wants, while
- * where the note on top is going is still an open question; the moment it is let go the answer is
- * settled and the reserve is given up (see commitOverlaps). Callers pick the one that matches what
- * the user is doing - the editor's rule is that only a pointer still held gets this one.
+ * That reprieve lasts as long as the note on top is SELECTED. While it is, where it is going is
+ * still an open question - it can be dragged, let go of, nudged with the arrows, lengthened,
+ * shortened - and everything it covers waits underneath. The moment it leaves the selection the
+ * answer is settled and the reserve is given up (see commitOverlaps, which takes the selection as
+ * `held` and settles only what gave way to a note outside it).
  *
  * Notes are updated IN PLACE and the same array comes back, hidden ones included: a caller keeps
  * them so they can return, and filters `hidden` out when it draws, hit-tests or serializes.
@@ -340,6 +369,17 @@ export const noteNudgeChannel = (nt) => noteNudge(nt) / Math.max(1, Math.round(n
  * itself underneath while the note was off.
  */
 export function clipOverlaps(notes) {
+  resolveLanes(notes);
+  return notes;
+}
+
+/**
+ * The rule itself: resolves every lane in place (see clipOverlaps) and says who gave way to whom -
+ * a Map from each hidden or clipped note to the note in front of it. Nothing whole is in the map.
+ * That is what lets commitOverlaps settle selectively, and it is answered here rather than stamped
+ * on the notes because it is true only until the next edit moves something.
+ */
+function resolveLanes(notes) {
   for (const nt of notes) if (!Number.isFinite(nt.full)) nt.full = nt.len;
 
   const lanes = new Map();
@@ -349,19 +389,24 @@ export function clipOverlaps(notes) {
     lanes.get(key).push({ nt, i });
   });
 
+  const behind = new Map();
   for (const lane of lanes.values()) {
     lane.sort((a, b) => b.i - a.i); // highest priority (last in the array) resolves first
-    const claimed = []; // [start, end) of every note already given its room in this lane
+    const claimed = []; // [start, end, note] for every note already given its room in this lane
     for (const { nt } of lane) {
-      nt.hidden = claimed.some(([s, e]) => nt.start >= s && nt.start < e);
-      if (nt.hidden) continue; // buried - claims nothing, so it can't clip anyone either
+      const over = claimed.find(([s, e]) => nt.start >= s && nt.start < e);
+      nt.hidden = !!over;
+      if (over) { behind.set(nt, over[2]); continue; } // buried - claims nothing, so it can't clip anyone either
       let end = nt.start + nt.full;
-      for (const [s] of claimed) if (s > nt.start && s < end) end = s;
-      nt.len = Math.max(1, end - nt.start);
-      claimed.push([nt.start, nt.start + nt.len]);
+      let cut = false;
+      for (const [s, , front] of claimed) if (s > nt.start && s < end) { end = s; cut = true; behind.set(nt, front); }
+      // A note nobody cuts keeps its drawn length AS WRITTEN - not start + full - start, which for
+      // a free length (2 + 0.7 - 2) comes back a float hair off and would re-serialize differently.
+      nt.len = cut ? clampLen(end - nt.start) : nt.full;
+      claimed.push([nt.start, nt.start + nt.len, nt]);
     }
   }
-  return notes;
+  return behind;
 }
 
 /**
@@ -409,6 +454,10 @@ export function pianoRollDefaultQuantizeDiv(grid) {
  *     spring back. After this, nothing in the roll is hidden and no part of any note is either.
  *     (That last part is what EVERY settled edit does now - see commitOverlaps. Quantize is only
  *     unusual in reporting it, because snapping can bury a note that was perfectly audible before.)
+ *   - with `ends`, every LENGTH rounds to the division too, never below one slot of it, so a note
+ *     that was dragged or nudged to a free length lands with its end on the grid as well as its
+ *     start. Off by default: onsets are what a quantize is for, and a hand-drawn staccato is not a
+ *     mistake to be corrected on the way past.
  *
  * `only` (a Set/array of notes, or null for the whole roll) is what MOVES - the selection, when
  * there is one. The tidy-up is always the whole roll: whether a note is buried is a fact about its
@@ -421,19 +470,25 @@ export function pianoRollDefaultQuantizeDiv(grid) {
  * Settle the overlap rule: what the roll PLAYS becomes what the roll stores.
  *
  * clipOverlaps is provisional - it works out what is heard right now and keeps the drawn length on
- * `full` so a note that moves away gives the one beneath it back. That is what a drag needs, and
- * only a drag: while a note is under the hand its position is still a question, so the roll holds
- * the answer in reserve. The moment the hand comes off, the question is settled, and a roll that
- * went on remembering the tail of every note it had ever covered would be carrying invisible state
- * nobody asked it to keep - state that springs back on an unrelated later edit.
+ * `full` so a note that moves away gives the one beneath it back. That is what a SELECTED note
+ * needs: while it is selected its position is still a question - it may yet be dragged again,
+ * nudged, lengthened or shortened - so the roll holds the answer in reserve. The moment it leaves
+ * the selection the question is settled, and a roll that went on remembering the tail of every note
+ * it had ever covered would be carrying invisible state nobody asked it to keep - state that springs
+ * back on an unrelated later edit.
  *
- * So: a clipped note gives up the tail hiding behind the one in front of it, a buried note is gone,
- * and afterwards the roll says exactly what it sounds. Returns the notes that survive.
+ * `held` is that selection: a Set of the notes still in hand, or nothing. What gave way to one of
+ * THEM is left exactly as it is - buried, or clipped with its tail in reserve. Everything else
+ * settles: a clipped note gives up the tail hiding behind the one in front of it, a buried note is
+ * gone, and afterwards that part of the roll says exactly what it sounds. Returns the notes that
+ * survive, the ones still in reserve included.
  */
-export function commitOverlaps(notes) {
-  clipOverlaps(notes);
+export function commitOverlaps(notes, held = null) {
+  const behind = resolveLanes(notes);
   const kept = [];
   for (const nt of notes) {
+    const front = behind.get(nt);
+    if (front && held?.has(front)) { kept.push(nt); continue; } // still an open question
     if (nt.hidden) continue;
     nt.full = nt.len; // the clip IS the note now
     kept.push(nt);
@@ -441,7 +496,7 @@ export function commitOverlaps(notes) {
   return kept;
 }
 
-export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
+export function quantizePianoRoll(notes, { grid, div, only = null, ends = false } = {}) {
   const g = normalizePianoRollSteps(grid);
   const step = Math.max(1, Math.round(g / normalizePianoRollSteps(div ?? g)));
   const moving = only ? new Set(only) : null;
@@ -449,6 +504,12 @@ export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
     if (moving && !moving.has(nt)) continue;
     nt.start = Math.round(nt.start / step) * step;
     nt.nudge = 0;
+    // The DRAWN length is what rounds (`full` - the note as authored, before anything in front of
+    // it clipped it), and the settle below re-clips from there, same as any other edit.
+    if (ends) {
+      const full = Number.isFinite(nt.full) ? nt.full : nt.len;
+      nt.full = Math.max(step, Math.round(full / step) * step);
+    }
   }
   clipOverlaps(notes);
   // Counted before the settle, which is what takes them (see commitOverlaps); quantize reports
@@ -469,8 +530,8 @@ export function quantizePianoRoll(notes, { grid, div, only = null } = {}) {
 export function cleanUpPianoRoll(notes, { start = 0, len = 0 } = {}) {
   const end = start + len;
   // Notes the overlap rule buried used to be swept up here too. They cannot accumulate any more:
-  // burying is settled the moment the hand comes off the note on top (see commitOverlaps), so by
-  // the time anyone presses this there is nothing hidden left to find. What is left is the other
+  // burying is settled the moment the note on top is deselected (see commitOverlaps), so by the
+  // time anyone presses this there is nothing hidden left to find. What is left is the other
   // kind of silent note - the one drawn outside the window, which is still worth keeping while a
   // part is being written and is still luggage once it is finished.
   const kept = notes.filter((nt) => nt.start >= start && nt.start < end);
@@ -541,7 +602,7 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   const onsets = Array.from({ length: total }, () => []);
   for (const nt of notes) onsets[nt.start - from].push(nt);
   const anyVel = notes.some((nt) => nt.vel < 1);
-  const anyClip = notes.some((nt) => nt.len > 1);
+  const anyClip = notes.some((nt) => nt.len !== 1);
   const anyNote = notes.some((nt) => Math.round(nt.midi) !== PIANOROLL_DEFAULT_NOTE);
   const anyIndex = notes.some((nt) => noteIndex(nt) !== PIANOROLL_DEFAULT_INDEX);
   const anySlice = notes.some((nt) => noteSlice(nt) !== null);
@@ -578,7 +639,9 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
     // side, and the roll's cells go out as they are. (The builder makes a multi-cell note one wide
     // step instead, which is why it has to divide.)
     if (f === 'nudge') return fmtNudge(noteNudge(nt));
-    return String(Math.round(nt.len));
+    // The clip is the length in cells, whole or not - a third of a cell drawn is a third of a step
+    // played, since one step here IS one cell.
+    return fmt(clampLen(nt.len));
   };
   // The fields that vary stay in the cells; the ones that don't are lifted onto control calls. An
   // empty roll agrees on nothing (there is nothing to agree), so it keeps writing its pitch field.
@@ -645,16 +708,18 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
  * behind the ×2/÷2 buttons when the grid itself can't carry the change, and behind ×2/÷2 applied to
  * a SELECTION, which stretches about its own first onset so the phrase grows to the right from
  * where it already starts. Both the drawn length (`full`) and the clipped one (`len`) move, so a
- * later clipOverlaps resolves the rescaled roll exactly as the drawn one resolved. Coarsening
- * rounds, and can round two notes onto one cell - which is a real collision the caller's
- * clipOverlaps then settles, not a bug in the arithmetic.
+ * later clipOverlaps resolves the rescaled roll exactly as the drawn one resolved. Onsets are
+ * cells, so coarsening rounds them, and can round two notes onto one cell - which is a real
+ * collision the caller's clipOverlaps then settles, not a bug in the arithmetic. Lengths are free
+ * (see the format notes), so they scale exactly: a sixteenth drawn on a 1/16 grid is still a
+ * sixteenth on a 1/4 grid, a quarter of a cell long.
  */
 export function rescalePianoRoll(notes, ratio, anchor = 0) {
   for (const nt of notes) {
     const full = Number.isFinite(nt.full) ? nt.full : nt.len;
     nt.start = Math.round(anchor + (nt.start - anchor) * ratio);
-    nt.full = Math.max(1, Math.round(full * ratio));
-    nt.len = Math.max(1, Math.round(nt.len * ratio));
+    nt.full = clampLen(full * ratio);
+    nt.len = clampLen(nt.len * ratio);
     // A nudge is measured in cells, and the cells just changed size: a note at 4.1 cells belongs at
     // 4.1 * ratio, which is the new start plus the old offset scaled the same way. Coarsening can
     // push it past half a cell, where it is clamped - the note has been rounded onto a grid too
@@ -761,7 +826,7 @@ export function sliceNotesFor(sources, { marks, cycles, grid, start = 0, maxGrid
   const runs = [];
   for (const nt of sources) {
     const opens = (Math.round(nt.start) - from) / g;
-    const shuts = opens + Math.max(1, Math.round(nt.len)) / g;
+    const shuts = opens + clampLen(nt.len) / g;
     const hits = [];
     for (let pass = Math.floor(opens / span); pass * span < shuts && hits.length <= SLICE_HITS_MAX; pass++) {
       for (let k = 0; k < at.length; k++) {
@@ -873,4 +938,12 @@ function clamp01(v) {
 
 function clampNudge(v) {
   return Math.min(PIANOROLL_MAX_NUDGE, Math.max(-PIANOROLL_MAX_NUDGE, v));
+}
+
+// A length is any positive number of cells (see the format notes); anything unusable - zero, a
+// negative, a note drawn before lengths were checked - is one cell, the length a fresh note has.
+function clampLen(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.max(PIANOROLL_MIN_LEN, n);
 }

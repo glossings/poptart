@@ -429,13 +429,14 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><th>At the grid</th><th></th></tr>
             <tr><td>draw / erase</td><td>drag with the pencil · double-click a note</td></tr>
             <tr><td>select</td><td><strong>B</strong> for the arrow tool; click, shift-click, marquee, <strong>cmd-A</strong></td></tr>
-            <tr><td>move / resize / copy</td><td>drag · drag the right edge · <strong>option</strong>-drag</td></tr>
-            <tr><td>nudge</td><td>arrow keys; <strong>shift</strong>+↑↓ an octave, <strong>shift</strong>+←→ lengthens/shortens</td></tr>
+            <tr><td>move / resize / copy</td><td>drag · drag the right edge (<strong>cmd</strong> for a free length, off the grid) · <strong>option</strong>-drag</td></tr>
+            <tr><td>nudge</td><td>arrow keys; <strong>shift</strong>+↑↓ an octave, <strong>shift</strong>+←→ lengthens/shortens a cell; <strong>cmd</strong>+←→ nudges the onset a pixel's worth (zoom in for finer), <strong>cmd-shift</strong>+←→ the length</td></tr>
             <tr><td>velocity</td><td><strong>cmd</strong>-drag up/down</td></tr>
+            <tr><td>overlaps</td><td>a note dropped on another at its pitch cuts it off, or buries it — undone by moving the top note away, for as long as it stays selected; deselect to make the cut final</td></tr>
             <tr><td>mute a note</td><td><strong>0</strong> — it grays out and stays (a <code>!</code> in the code); <strong>0</strong> again un-mutes</td></tr>
             <tr><td>clipboard</td><td><strong>cmd-C / X / V / D</strong> — into another roll too</td></tr>
-            <tr><td>quantize</td><td><strong>ctrl+Q</strong> — pick a division; onsets snap, nudges clear, buried notes go</td></tr>
-            <tr><td>clean up</td><td><strong>cmd-J</strong> — delete every note the loop window doesn't play, and every note buried under another</td></tr>
+            <tr><td>quantize</td><td><strong>ctrl+Q</strong> — pick a division; onsets snap, nudges clear, buried notes go; tick <em>lengths too</em> to land the ends on it as well</td></tr>
+            <tr><td>clean up</td><td><strong>cmd-J</strong> — delete every note the loop window doesn't play</td></tr>
             <tr><td>undo</td><td><strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> while the grid has focus</td></tr>
             <tr><td>zoom · close</td><td><strong>cmd −/+</strong> · <strong>Esc</strong>, <strong>✕</strong>, or click outside</td></tr>
           </table>
@@ -451,10 +452,10 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <strong>⧉</strong> repeats the loop after itself. <strong>÷2</strong> / <strong>×2</strong>
             halve or double the rhythm — of the selection, or the whole roll.
-            <strong>clean up</strong> (<strong>cmd-J</strong>) throws away everything the roll is
-            carrying but not playing: notes that start outside the loop window, and notes buried
-            under another. Handy once a part is finished — while you're still editing, both of those
-            come back on their own if you drag the loop end out or move the note on top away. Changing
+            <strong>clean up</strong> (<strong>cmd-J</strong>) throws away the notes the roll is
+            carrying but not playing — the ones that start outside the loop window. Handy once a part
+            is finished; while you're still editing, they come back on their own if you drag the loop
+            end out. Changing
             <strong>grid</strong> re-meshes without moving the music (a quarter note on the 1/4 grid is
             four cells on the 1/16 grid). <strong>🎧</strong> auditions notes as you draw.
             <strong>⌨</strong> plays the roll's track from your typing keyboard (<a href="#s9">Study 9</a>).

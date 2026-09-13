@@ -76,9 +76,9 @@ const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arReadDef', 'parseArrang
   'arTrackLabels', 'arRowOfLabel', 'arReconcileTracks', 'arWriteDefText', 'arCreateBlock', 'arFollowHandRenames',
   'arApplyEdits', 'arCreateGroup', 'arUngroup', 'arTakeOut', 'arGroupLabels', 'arPaintLabel',
   // the clips() rows' half of the same reconcile pass: every clip on one carries a roll
-  'arClipsLabels', 'arAllClips', 'arFillClipRolls', 'arMintRolls']
+  'arClipsLabels', 'arAllClips', 'arFillClipRolls', 'arMintRolls', 'arDropBusClips']
   .map(grab)
-  .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup')])
+  .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup'), grabConst('arIsBus')])
   .join('\n\n');
 
 /** The lifted functions over a fake editor and (optionally) a fake open panel. */
@@ -437,4 +437,48 @@ test('the first evaluation has nothing to compare against', () => {
 test('the word arrange inside a comment or a string is not a call', () => {
   const p = panel({ code: `// _arrange("nope,0,4")\nkick: s("bd").fx("Rearrange")\n` });
   assert.equal(p.fns.arFindDef(), null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Buses are not rows
+// ---------------------------------------------------------------------------------------------
+
+const RETURNS = [
+  'kick: s("bd*4").bus("verb", 0.3)',
+  'verb: audio("bus:verb").fx("ValhallaRoom")', // a return: it sounds when the kick does
+  'side: s("hh*8").fx("Pro-C 2").audio("kick")', // .audio() as a METHOD is a sidechain - a track
+].join('\n');
+
+test('a bus - audio() at the head - gets no row and joins nothing', () => {
+  const st = { ...state(), tracks: [], len: 8 };
+  const { fns } = panel({ code: RETURNS, arState: st });
+  fns.arRefreshRows();
+  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'side']);
+  assert.equal(fns.arReconcileTracks(), true);
+  assert.deepEqual(st.clips.map((c) => c.label), ['kick', 'side'], 'the tracks fill; the bus is not in the song');
+  assert.deepEqual(st.tracks, ['kick', 'side']);
+  assert.deepEqual(fns.arGroupLabels(), []);
+});
+
+test('clips a bus held from before it was one are dropped, not orphaned', () => {
+  const st = { ...state(arrangeMod.parseArrangement('kick,0,8 verb,0,8')), tracks: ['kick', 'verb'], len: 8 };
+  const open = panel({ code: RETURNS, arState: st });
+  assert.equal(open.fns.arReconcileTracks(), true);
+  assert.deepEqual(st.clips.map((c) => c.label), ['kick', 'side']);
+  assert.deepEqual(st.tracks, ['kick', 'side']);
+  assert.deepEqual(st.rows.map((r) => r.label), ['kick', 'side'], 'and no orphan row stands in for it');
+  // Painter shut, the definition itself is rewritten without them - and stays put after that.
+  const shut = panel({ code: `${RETURNS}\n\n_arrange("kick,0,8 verb,0,8", { len: 8, tracks: ["kick", "verb"] })\n` });
+  assert.equal(shut.fns.arReconcileTracks(), true);
+  const read = shut.fns.arReadDef();
+  assert.deepEqual(read.clips.map((c) => c.label), ['kick', 'side']);
+  assert.deepEqual(read.opts.tracks, ['kick', 'side']);
+  assert.equal(shut.fns.arReconcileTracks(), false, 'a second pass is a no-op');
+});
+
+test('a bus made ordinary again joins as a new track: filled', () => {
+  const code = 'kick: s("bd*4")\nverb: s("hh*8")\n\n_arrange("kick,0,8", { len: 8, tracks: ["kick"] })\n';
+  const p = panel({ code });
+  assert.equal(p.fns.arReconcileTracks(), true);
+  assert.deepEqual(p.fns.arReadDef().clips.filter((c) => c.label === 'verb'), [{ label: 'verb', start: 0, len: 8 }]);
 });

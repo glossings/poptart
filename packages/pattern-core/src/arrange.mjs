@@ -35,6 +35,13 @@
 // the tree says they mix as one, the rows say when each sounds. Rows of one group sit under it and
 // fold away with it, which is what keeps a song of forty tracks readable.
 //
+// The one track with NO row is a BUS - a block headed by audio(): the reverb return reading a
+// .bus() sum, the parallel copy of the drums. Nothing of its own sounds on it; the tracks feeding
+// it are rows already and gate themselves, so it sounds when they do, and a row for it could only
+// cut a tail off. The painter leaves it out (labels.mjs's isBusBlock, arBlocks in the web app)
+// and the host never gates it. A group() is the other track with no notes of its own, but it
+// keeps a row: its members sit under it.
+//
 // (An earlier design gave a track's VARIATIONS its row and asked each clip which variation it
 // meant. Every gesture then needed a "which one" answer the painter had nowhere good to put, so
 // rows and blocks are 1:1 now and grouping carries the relationship instead. The retired

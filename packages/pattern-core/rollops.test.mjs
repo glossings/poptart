@@ -322,9 +322,11 @@ test('arpeggiate: every direction orders the run its own way', () => {
 
 test('arpeggiate: fractional rates land in nudges; doubled pitches and overruns are dropped', () => {
   const out = arpeggiate([N(60, 2, 2), N(64, 2, 2)], { rate: 0.5 });
+  // each hit rings until the next, and at half a cell a rate that IS half a cell (lengths are any
+  // number of cells - see pianoroll.mjs)
   assert.deepEqual(pick(out, 'midi', 'start', 'nudge', 'len'), [
-    { midi: 60, start: 2, nudge: 0, len: 1 }, { midi: 64, start: 2, nudge: 0.5, len: 1 },
-    { midi: 60, start: 3, nudge: 0, len: 1 }, { midi: 64, start: 3, nudge: 0.5, len: 1 },
+    { midi: 60, start: 2, nudge: 0, len: 0.5 }, { midi: 64, start: 2, nudge: 0.5, len: 0.5 },
+    { midi: 60, start: 3, nudge: 0, len: 0.5 }, { midi: 64, start: 3, nudge: 0.5, len: 0.5 },
   ]);
   // rate 0.25 over one cell: the third hit doubles 60 in cell 0, the fourth rounds past the end.
   const tight = arpeggiate([N(60, 0, 1), N(64, 0, 1)], { rate: 0.25 });

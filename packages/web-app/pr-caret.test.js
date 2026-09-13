@@ -45,13 +45,7 @@ function harness({ notes = [], caret = null, clipboard = null } = {}) {
     prState,
     prLoopEnd: () => prState.start + prState.len,
     prClampToLoop: (cell) => Math.min(prState.start + prState.len - 1, Math.max(prState.start, cell)),
-    // The real settle, not a stand-in: pasting onto a note is one of the ways the overlap rule now
-    // resolves for keeps, so these tests should feel it.
-    prSettleOverlaps: () => {
-      const kept = new Set(pianorollMod.commitOverlaps(prState.notes));
-      prState.notes = prState.notes.filter((nt) => kept.has(nt));
-      for (const n of [...prState.sel]) if (!kept.has(n)) prState.sel.delete(n);
-    },
+    pianorollMod, // for the real prResolveOverlaps, below - pasting onto a note is one of the ways the overlap rule runs
     prScrollTo: () => {},
     writePianorollCall: () => wrote.push(prState.notes.map((n) => `${n.midi}@${n.start}`).join(' ')),
     drawPianoroll: () => {},
@@ -59,7 +53,7 @@ function harness({ notes = [], caret = null, clipboard = null } = {}) {
   };
   // eslint-disable-next-line no-new-func
   const build = new Function(...Object.keys(env),
-    `let prClipboard = ${JSON.stringify(clipboard)};\n${grab('prCopy')}\n${grab('prPaste')}\n${grab('prDuplicate')}\nreturn { prCopy, prPaste, prDuplicate, clip: () => prClipboard };`);
+    `let prClipboard = ${JSON.stringify(clipboard)};\n${grab('prCopy')}\n${grab('prPaste')}\n${grab('prDuplicate')}\n${grab('prResolveOverlaps')}\nreturn { prCopy, prPaste, prDuplicate, prResolveOverlaps, clip: () => prClipboard };`);
   return { fns: build(...Object.values(env)), prState, wrote };
 }
 
@@ -140,9 +134,9 @@ test('duplicate keeps the spacing inside a multi-note selection', () => {
   assert.deepEqual(at(prState.notes), [0, 3, 4, 7], 'the pair repeated one phrase-width later');
 });
 
-test('pasting onto a note settles the overlap rule there and then', () => {
-  // The paste is not a held gesture, so there is nothing still to decide: what the pasted note
-  // covers is given up immediately rather than waiting in reserve.
+test('pasting onto a note clips it, with the tail in reserve while the paste stays selected', () => {
+  // The pasted notes are the selection, so what they cover waits - the paste can still be nudged
+  // off. Deselecting is what settles it.
   const { fns, prState } = harness({
     notes: [{ midi: 60, start: 0, len: 8, full: 8, vel: 1, prob: 1 }],
     caret: 4,
@@ -151,16 +145,23 @@ test('pasting onto a note settles the overlap rule there and then', () => {
   fns.prPaste();
   const long = prState.notes.find((n) => n.start === 0);
   assert.equal(long.len, 4, 'cut at the pasted note\'s onset');
-  assert.equal(long.full, 4, 'and the tail behind it is gone, not merely hidden');
+  assert.equal(long.full, 8, 'the tail waits behind it while the pasted note is selected');
+  prState.sel.clear(); // clicked off
+  fns.prResolveOverlaps();
+  assert.equal(long.full, 4, 'and now the tail is gone for good');
 });
 
-test('pasting square on top of a note deletes it outright', () => {
+test('pasting square on top of a note buries it until the paste is deselected', () => {
   const { fns, prState } = harness({
     notes: [{ midi: 60, start: 4, len: 4, full: 4, vel: 1, prob: 1 }],
     caret: 4,
     clipboard: [{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }],
   });
   fns.prPaste();
-  assert.equal(prState.notes.length, 1, 'the one underneath is gone, not hidden');
+  assert.equal(prState.notes.length, 2, 'the one underneath is hidden, not gone');
+  assert.equal(prState.notes.filter((n) => !n.hidden).length, 1);
+  prState.sel.clear();
+  fns.prResolveOverlaps();
+  assert.equal(prState.notes.length, 1, 'deselected: the one underneath is deleted');
   assert.equal(prState.notes[0].len, 1);
 });

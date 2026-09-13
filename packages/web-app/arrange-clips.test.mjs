@@ -107,7 +107,7 @@ const LIFTED = ['matchParen', 'codeOnly', 'splitFirstArg', 'freshDefId', 'arFind
   'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece',
   'arHue', 'arHsl', 'hexToHsl', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor']
   .map(grab)
-  .concat([grabConst('preferredDefId'), grabConst('arClipsOfRoll'), grabConst('arMintRoll'),
+  .concat([grabConst('preferredDefId'), grabConst('arClipsOfRoll'), grabConst('arMintRoll'), grabConst('arIsBus'),
     grabConst('AR_MEMBER_HUE_STEP'), grabConst('AR_ROLL_LIGHT_STEP'),
     grabConst('AR_ROLL_LIGHT_SPAN'), grabConst('AR_ROLL_WRAP_HUE')])
   .join('\n\n');

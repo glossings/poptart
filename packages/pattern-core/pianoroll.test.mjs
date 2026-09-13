@@ -36,6 +36,9 @@ import {
   PIANOROLL_DEFAULT_SLICE,
   noteSlice,
   sliceNotesFor,
+  placePianoRollNote,
+  pianoRollNotePos,
+  PIANOROLL_MIN_LEN,
 } from './src/pianoroll.mjs';
 import { pianoroll, note, n, i, slice, vel, mini, s, midikeys, channelAt, soundingEnd, timeShift, setPatternWarn } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
@@ -149,11 +152,69 @@ test('clipOverlaps: everything comes back when the note on top moves away', () =
 // ---------------------------------------------------------------------------------------------
 // commitOverlaps - the same rule, settled
 //
-// clipOverlaps is what a DRAG sees: provisional, and reversible for as long as the note on top is
-// still in the hand. commitOverlaps is what happens when it is let go. The pair is the whole of the
-// design: recoverable while the gesture is open, final once it is closed, and nothing kept in
-// reserve afterwards that could spring back on some unrelated edit later.
+// clipOverlaps is what an edit sees: provisional, and reversible for as long as the note on top is
+// still SELECTED. commitOverlaps is what happens when it is not - given the selection as `held`, it
+// settles only what gave way to a note outside it, so a selected note keeps everything it covers in
+// reserve through a whole run of drags and nudges, and deselecting it is what makes the cut final.
+// With no `held` everything settles. Either way nothing is left afterwards that could spring back
+// on some unrelated edit later.
 // ---------------------------------------------------------------------------------------------
+
+test('commitOverlaps: what a HELD note covers stays in reserve', () => {
+  const long = nt(60, 0, 8);
+  const buried = nt(60, 6, 1);
+  const short = nt(60, 4, 3); // on top: dropped into the long one, right over the buried one
+  const roll = commitOverlaps([long, buried, short], new Set([short]));
+  assert.equal(roll.length, 3, 'the buried note is kept, out of sight');
+  assert.equal(buried.hidden, true);
+  assert.equal(long.len, 4, 'the long note is cut where the held one starts...');
+  assert.equal(long.full, 8, '...but still knows how long it was drawn');
+  assert.equal(sounding(roll), '60,0,4 60,4,3');
+  // The held note moves off (an arrow nudge, say) - still selected, so both come back. The long
+  // note now runs into the buried one, which is NOT selected, so that cut is settled at once.
+  short.midi = 67;
+  commitOverlaps(roll, new Set([short]));
+  assert.equal(buried.hidden, false);
+  assert.equal(long.len, 6);
+  assert.equal(long.full, 6, 'clipped by an unselected note: nothing left in reserve');
+  assert.equal(sounding(roll), '60,0,6 67,4,3 60,6,1');
+});
+
+test('commitOverlaps: deselecting the note on top settles what it covers', () => {
+  const long = nt(60, 0, 8);
+  const buried = nt(60, 6, 1);
+  const short = nt(60, 4, 3);
+  let roll = commitOverlaps([long, buried, short], new Set([short]));
+  roll = commitOverlaps(roll, new Set()); // clicked off
+  assert.deepEqual(roll, [long, short], 'the buried note is deleted');
+  assert.equal(long.full, 4, 'the tail is gone for good');
+  short.midi = 67; // moving it later gives nothing back
+  commitOverlaps(roll);
+  assert.equal(long.len, 4);
+});
+
+test('commitOverlaps: the reserve is per note on top, not all or nothing', () => {
+  const a = nt(60, 0, 8);
+  const b = nt(64, 0, 8);
+  const onA = nt(60, 4, 1);
+  const onB = nt(64, 4, 1);
+  commitOverlaps([a, b, onA, onB], new Set([onA])); // only onA is still selected
+  assert.equal(a.full, 8, 'what the selected note covers waits');
+  assert.equal(b.full, 4, 'what the deselected one covers is settled');
+});
+
+test('commitOverlaps: a held note that is itself buried holds nothing', () => {
+  // Two selected notes dropped on one cell: the earlier one is buried by the later, and a note
+  // it used to clip is judged against the survivor only.
+  const long = nt(60, 0, 8);
+  const first = nt(60, 4, 2);
+  const second = nt(60, 4, 1);
+  const roll = commitOverlaps([long, first, second], new Set([first, second]));
+  assert.equal(first.hidden, true, 'kept in reserve - its occluder is held');
+  assert.equal(roll.length, 3);
+  assert.equal(long.len, 4);
+  assert.equal(long.full, 8, 'clipped by the survivor, which is held');
+});
 
 test('commitOverlaps: a clipped note gives up the tail it was hiding, for good', () => {
   const long = nt(60, 0, 8);
@@ -526,10 +587,11 @@ test('rescalePianoRoll: notes keep their span in time, rounding when it must', (
   assert.equal(serializePianoRoll(notes), '60,0,16 64,16,8');
   rescalePianoRoll(notes, 1 / 4); // and back
   assert.equal(serializePianoRoll(notes), '60,0,4 64,4,2');
-  // coarsening can't take a note below a single cell
+  // coarsening rounds the ONSET (a cell) but the length is free, so a sixteenth on a 1/4 grid is
+  // still a sixteenth - a quarter of a cell - not a whole quarter note
   const short = parsePianoRoll('60,3,1');
   rescalePianoRoll(short, 1 / 4);
-  assert.equal(serializePianoRoll(short), '60,1,1');
+  assert.equal(serializePianoRoll(short), '60,1,0.25');
 });
 
 // ×2 / ÷2 with a selection: only those notes move, and they spread from the first of them, so the
@@ -835,6 +897,20 @@ test('the roll draws nudge in CELLS and plays it as a share of the note', () => 
   const shift = (st) => timeShift(st, sig.noteChannels, st.start, 1, st.start);
   assert.equal(shift(steps[0]).toFixed(10), (0.1 / grid).toFixed(10));
   assert.equal(shift(steps[1]).toFixed(10), (0.1 / grid).toFixed(10), 'the same distance in time');
+});
+
+test('a note shorter than a cell can still be nudged half a cell', () => {
+  // The nudge channel reaches half an event's own width - which for a quarter-cell note would be an
+  // eighth of a cell, less than the roll lets you draw. The roll stamps the reach that makes its own
+  // half-cell sayable, and no further: the shift in time is exactly the cells drawn.
+  const grid = 16;
+  const sig = pianoroll('60,0,0.25,1,1,0.4 64,8,0.25,1,1,-0.5 67,12,2,1,1,0.4', { grid });
+  const steps = sig.stepsForCycle(0);
+  const shift = (st) => timeShift(st, sig.noteChannels, st.start, 1, st.start);
+  assert.equal(shift(steps[0]).toFixed(10), (0.4 / grid).toFixed(10), 'a quarter-cell note, 0.4 of a cell late');
+  assert.equal(shift(steps[1]).toFixed(10), (-0.5 / grid).toFixed(10), '...and half a cell early');
+  assert.equal(steps[2].nudgeReach, undefined, 'a note a cell or longer is inside the channel\'s own reach');
+  assert.equal(shift(steps[2]).toFixed(10), (0.4 / grid).toFixed(10));
 });
 
 test('an un-nudged roll stamps nothing, so a later .nudge()/.swing() reads normally', () => {
@@ -1366,4 +1442,77 @@ test('cleanUpPianoRoll: a clean roll loses nothing', () => {
   const { notes: out, outside } = cleanUpPianoRoll(notes, { start: 0, len: 16 });
   assert.equal(outside, 0);
   assert.equal(serializePianoRoll(out), '60,0,4 62,4,4 64,8,4');
+});
+
+// Lengths are FREE: any positive number of cells, written to three decimals, so the editor's fine
+// gestures (a cmd edge drag, cmd+shift+arrows) and a recorded staccato are said exactly rather than
+// rounded up to the cell. The grid stays what it was drawn on; only the notes get finer.
+test('parsePianoRoll / serializePianoRoll: a length is any positive number of cells', () => {
+  assert.equal(serializePianoRoll(parsePianoRoll('60,0,0.25 64,1,2.5')), '60,0,0.25 64,1,2.5');
+  assert.equal(parsePianoRoll('60,0,0.25')[0].len, 0.25);
+  // ...but never nothing: zero or negative is the one-cell default, and the floor is the shortest note
+  assert.equal(parsePianoRoll('60,0,0')[0].len, 1);
+  assert.equal(parsePianoRoll('60,0,-2')[0].len, 1);
+  assert.equal(parsePianoRoll('60,0,0.0001')[0].len, PIANOROLL_MIN_LEN);
+  // whole lengths still write as they always did
+  assert.equal(serializePianoRoll(parsePianoRoll('60,0,4')), '60,0,4');
+});
+
+test('pianoroll(): a fractional length is a fractional duration', () => {
+  const [st] = pianoroll('60,0,0.5', { grid: 16 }).stepsForCycle(0);
+  assert.equal(st.end - st.start, 0.5 / 16);
+});
+
+test('pianoRollToMini: a fractional length goes out as a fractional clip, and plays the same', () => {
+  const str = '60,0,0.5 64,2,1.25';
+  assert.equal(
+    pianoRollToMini(parsePianoRoll(str), { grid: 4, len: 4 }),
+    '`<\n  60:0.5 ~ 64:1.25 ~\n>*4`.as("note:clip")',
+  );
+  const pr = pianoroll(str, { grid: 4, len: 4 });
+  const rebuilt = rebuildMini(pianoRollToMini(parsePianoRoll(str), { grid: 4, len: 4 }));
+  for (const c of [0, 1]) assert.deepEqual(soundsLike(rebuilt, c), soundsLike(pr, c));
+});
+
+test('regridPianoRoll: a free length scales exactly, both ways', () => {
+  const roll = { notes: parsePianoRoll('60,0,0.5 64,2,1.25'), grid: 4, len: 4, start: 0 };
+  regridPianoRoll(roll, 16);
+  assert.equal(serializePianoRoll(roll.notes), '60,0,2 64,8,5');
+  regridPianoRoll({ ...roll, grid: 16 }, 4);
+  assert.equal(serializePianoRoll(roll.notes), '60,0,0.5 64,2,1.25');
+});
+
+test('placePianoRollNote: a position splits into a cell and a nudge, carrying across cells', () => {
+  const nt = parsePianoRoll('60,4,1')[0];
+  placePianoRollNote(nt, 4.3);
+  assert.equal(nt.start, 4);
+  assert.equal(nt.nudge.toFixed(6), (0.3).toFixed(6));
+  assert.equal(pianoRollNotePos(nt).toFixed(6), (4.3).toFixed(6));
+  // two more steps of 0.3 to the right: past half a cell the note is on the NEXT cell, nudged back
+  placePianoRollNote(nt, pianoRollNotePos(nt) + 0.3);
+  placePianoRollNote(nt, pianoRollNotePos(nt) + 0.3);
+  assert.equal(nt.start, 5);
+  assert.equal(nt.nudge.toFixed(6), (-0.1).toFixed(6));
+  // and back the other way, through the cell boundary
+  placePianoRollNote(nt, pianoRollNotePos(nt) - 0.6);
+  assert.equal(nt.start, 4);
+  assert.equal(nt.nudge.toFixed(6), (0.3).toFixed(6));
+  // never wedged at the clamp: the nudge stays within half a cell however far the note walks
+  for (let k = 0; k < 20; k++) placePianoRollNote(nt, pianoRollNotePos(nt) + 0.37);
+  assert.ok(Math.abs(nt.nudge) <= 0.5 + 1e-9);
+  assert.equal(pianoRollNotePos(nt).toFixed(6), (4.3 + 20 * 0.37).toFixed(6));
+  // the string round-trips it: cell and nudge, nothing else
+  assert.equal(serializePianoRoll([placePianoRollNote(parsePianoRoll('60,0,1')[0], 2.25)]), '60,2,1,1,1,0.25');
+});
+
+test('quantize: lengths are left alone unless asked, then land on the division too', () => {
+  const { notes: onsets } = quantizePianoRoll(parsePianoRoll('60,1,0.4 62,5,2.7 64,9,5'), { grid: 16, div: 4 });
+  assert.equal(serializePianoRoll(onsets), '60,0,0.4 62,4,2.7 64,8,5', 'onsets only, by default');
+  // a 1/4 division on a 16-grid is a 4-cell step: 0.4 -> one step (never shorter), 2.7 -> 4, 5 -> 4, 6 -> 8
+  const { notes: ends } = quantizePianoRoll(parsePianoRoll('60,1,0.4 62,5,2.7 64,9,5 65,13,6'), { grid: 16, div: 4, ends: true });
+  assert.equal(serializePianoRoll(ends), '60,0,4 62,4,4 64,8,4 65,12,8');
+  // the END rounds the DRAWN length, and the overlap rule still has the last word
+  const { notes: clipped, snipped } = quantizePianoRoll(parsePianoRoll('60,0,5 60,9,2'), { grid: 16, div: 4, ends: true });
+  assert.equal(snipped, 0, 'a 5 rounded to 4 no longer reaches the note at 8');
+  assert.equal(serializePianoRoll(clipped), '60,0,4 60,8,4');
 });
