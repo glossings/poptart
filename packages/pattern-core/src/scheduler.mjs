@@ -909,6 +909,11 @@ export class Scheduler {
     this._running = false;
     if (this._timer) clearInterval(this._timer);
     this._timer = null;
+    // Nothing here silences what the engine is still sounding for the track: every event already
+    // sent carries its own gate-off and plays on to it, and that is a feature - long notes and top
+    // loops running on after a stop, a show's last notes ringing out. It is the PLAY that hushes:
+    // the host releases a stopped track's voices when it starts it again (engine.hush, see the
+    // evaluate route), so the top of the bar never plays over the old copy's middle.
     // A live midikeys() route plays notes engine-side with no scheduler tick involved, so
     // stopping the track (mute, stop-all, label removal) must tear it down explicitly or the
     // keyboard keeps sounding. setPattern re-establishes it on the next eval.

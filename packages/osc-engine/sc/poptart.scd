@@ -159,6 +159,7 @@ var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued;
 var destroyTrack;
 var slotKey, waitForLoad, flushNotes, clearPending;
+var hushTrack;
 var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
@@ -1638,6 +1639,10 @@ OSCdef(\poptartCreateTrack, { |msg|
         tracks[key] = \pending;
         fork {
             var group = Group.new(levelGroups[0]); // depth 0 until a route says otherwise (see reorderTracks)
+            // Sample voices spawn into a group of their own at the head of the track's, so one
+            // gate-off releases every one of them at once (see hushTrack); the modulators, the
+            // ramps and the chain sit outside it, in the track group as before.
+            var voices = Group.new(group, \addToHead);
             var inBus = Bus.audio(server, 2); // sample synths write here, the track synth mixes it in
             // The track's pitch-bend value, republished by the track synth for its sample voices to
             // map and for the MIDI sender to read (see buildTrackDef). One per track for the track's
@@ -1660,6 +1665,7 @@ OSCdef(\poptartCreateTrack, { |msg|
             tracks[key] = (
                 def: def,
                 group: group,
+                voices: voices,
                 inBus: inBus,
                 bendBus: bendBus,
                 synth: synth,
@@ -2122,6 +2128,42 @@ OSCdef(\poptartNoteOff, { |msg|
         if (waitForLoad.(key, 0, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOff');
+
+// --- hush: release everything a track is sounding, now ---
+// Sent by the host when a stopped track is played again. The stop itself lets everything ring
+// out - the scheduler sends nothing more, but every event already sent carries its own gate-off
+// and plays on to it, and that is a feature: long notes and top loops running on after the stop,
+// a show's last notes. What must not happen is the restart playing the top of the bar over the
+// old copy's middle (a quick stop/start's doubled, out-of-time drums), so the play hushes first.
+// The sample voices sit in a group of their own (see createTrack), so one gate-off releases them
+// all at their own release floor; the plugins get MIDI all-notes-off; the env modulators' gate
+// closes as it does when the last note ends. Notes still waiting on a program load (see
+// waitForLoad) are dropped - they were due before the stop. `again` repeats the release that many
+// seconds on, for a caller hushing while events are still in flight (sent a lookahead early, they
+// are already the server's and spawn AFTER the first release) - on the same track object only,
+// since by then the key may belong to a track built afresh (a label removed and re-added).
+hushTrack = { |key, again|
+    var track = tracks[key];
+    var release = { |t|
+        bundleNow.(nil, {
+            t[\voices] !? { |g| g.set(\gate, 0) };
+            t[\controllers].do { |ctl| ctl !? { ctl.midi.allNotesOff(0) } };
+            t[\envs].do { |e| e[\synth].set(\gate, 0) };
+        });
+        t[\held] = 0;
+        maxSlots.do { |slot| noteQueues[slotKey.(key, slot)] = nil };
+    };
+    if (track.isKindOf(Event)) {
+        release.(track);
+        if (again > 0) {
+            SystemClock.sched(again, { if (tracks[key] === track) { release.(track) }; nil });
+        };
+    };
+};
+
+OSCdef(\poptartHush, { |msg|
+    hushTrack.(msg[1].asSymbol, (msg[2] ? 0).asFloat);
+}, '/poptart/hush');
 
 // MIDI to a specific plugin in the chain (Sig#trig / '/poptart/noteOnSlot'): a side channel to
 // one slot's plugin, so - unlike the instrument noteOn above - it does NOT touch the track's
@@ -3198,7 +3240,7 @@ OSCdef(\poptartPlaySample, { |msg|
             args = args ++ [\loopLo, loopLo, \loopHi, loopHi, \entry, entry, \pingpong, pingpong];
         };
         bundleNow.(latency, {
-            synth = Synth(defName, args, target: track[\group], addAction: \addToHead);
+            synth = Synth(defName, args, target: track[\voices] ? track[\group], addAction: \addToHead);
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
             track[\lfos].do { |e|
                 if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };

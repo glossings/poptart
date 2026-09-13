@@ -1550,6 +1550,18 @@ class OscEngine {
       this._send('/poptart/midiRoute', [trackId, device, channel, (scalePcs ?? []).join(','), transpose, 0]);
     }
   }
+  /**
+   * Release everything sounding on a track, now: its sample voices (at their own release floor),
+   * the plugins' held notes (MIDI all-notes-off) and the env modulators' gates. The host sends it
+   * when a stopped track is played again: a stop lets everything ring out (every event already
+   * sent plays on to its own gate-off - a fitted break to the end of its bar - and that is wanted),
+   * but the restart must not play the top of the bar over the old copy. `againSec` repeats the
+   * release that far ahead, for a caller hushing while events are still in flight (sent a
+   * lookahead early, they spawn after the first release).
+   */
+  hush(trackId, againSec = 0) {
+    this._send('/poptart/hush', [trackId, againSec]);
+  }
   clearMidiNotes(trackId) {
     this._dropDeferRoute(trackId);
     this._send('/poptart/clearMidiRoute', [trackId]);
