@@ -1696,24 +1696,34 @@ function linkPhaseAt(atSec) {
   return linkSync.sessionPhase(linkSync.sessionBeatsAt(linkState.report, atSec));
 }
 
+// How far ahead of "now" play-from-stop puts its start position. The schedulers start with the
+// clock and tick every 30ms with a 150ms lookahead (scheduler.mjs's DEFAULT_LOOKAHEAD_SEC), so a
+// start this far ahead has the downbeat inside their first window, timestamped for the engine;
+// started at "now", cycle 0 was behind the first tick already and fired late. It is also the VST
+// transport lookahead (VST_TRANSPORT_LOOKAHEAD_SEC), so the plugins' host clock announces the
+// start at exactly beat 0.
+const START_LEAD_SEC = 0.15;
+
 /**
- * Start the transport from stopped. With Link peers about, the clock resumes with the session's
- * bar phase as its cycle position rather than 0, so poptart's next downbeat is the session's -
- * which means a start halfway through a bar comes in halfway through the pattern, exactly as
- * joining a Link session is meant to feel. Returns the cycle it started at (what an eval opens
- * its schedulers' windows at), or null when the clock was already running.
+ * Start the transport from stopped, reaching its start position at `atSec` - a lead ahead of now
+ * by default, and the evaluate route calls this LAST, once every track is set up, so none of the
+ * setup eats into the schedulers' lookahead (see the route). With Link peers about, the clock
+ * resumes with the session's bar phase at that moment as its cycle position rather than 0, so
+ * poptart's next downbeat is the session's - which means a start halfway through a bar comes in
+ * halfway through the pattern, exactly as joining a Link session is meant to feel. Returns the
+ * cycle it starts at (what an eval opens its schedulers' windows at), or null when the clock was
+ * already running.
  */
-function transportStart() {
+function transportStart(atSec = engine.getTime() + START_LEAD_SEC) {
   if (!transport || !transport.paused) return null;
-  const now = engine.getTime();
-  const phase = linkPhaseAt(now);
+  const phase = linkPhaseAt(atSec);
   if (phase == null) {
-    transport.start();
+    transport.start(atSec);
     return 0;
   }
   linkState.offset = 0;
   linkState.adoptPending = false;
-  transport.startAt(now, phase);
+  transport.startAt(atSec, phase);
   return phase;
 }
 
@@ -4627,17 +4637,24 @@ const routes = {
       }
     }
 
-    // Playback (re)starts: un-freeze the clock. After a stop it sits at cycle 0, so every
-    // pattern comes in from the top of the grid; mid-performance evals are a no-op here.
-    // `start: false` (the editor's "Update" button) evaluates without touching the clock: a
-    // stopped clock stays frozen (patterns load silently), a running one keeps running.
     // Where this eval's schedulers open their window: the clock's position NOW, read before
-    // anything below advances it. On play-from-stop that is exactly cycle 0 (the transport is
-    // still frozen there), so the downbeat - and a `.preset()`'s first application, which is
-    // what used to leave synths on their init program for the whole first cycle - is inside the
-    // window instead of a few microseconds behind it (see Scheduler#start).
+    // anything below advances it. A mid-performance eval leaves the clock alone, and so does
+    // `start: false` (the editor's "Update" button): a stopped clock stays frozen (patterns load
+    // silently), a running one keeps running.
+    //
+    // Play-from-stop is the other case, and its clock start comes LAST - after every track is set
+    // up and the highlight grids are built - a lookahead ahead of that moment (see transportStart).
+    // Started up here instead, the clock ran through all of that synchronous work before any
+    // scheduler could tick, and everything due by then - the downbeat, and on a big buffer a beat
+    // or more behind it - reached the engine already late and played in one bunch: the first
+    // cycle's "everyone out of time", snapping straight on the second. A start's schedulers are
+    // started with the clock, at the cycle it starts from (0, or the Link session's bar phase),
+    // so their windows open exactly on the downbeat - which keeps a `.preset()`'s first
+    // application inside the first window too, rather than a whole cycle later (see
+    // Scheduler#start).
     let scheduleFrom = transport.cycleAt(engine.getTime());
-    if (active.length > 0 && body.start !== false) scheduleFrom = transportStart() ?? scheduleFrom;
+    const starting = active.length > 0 && body.start !== false && transport.paused;
+    const toStart = [];
 
     for (const b of active) {
       const key = keyOfBlock(b.label);
@@ -4689,7 +4706,8 @@ const routes = {
       // Already-live tracks get a re-assert; a NEW track had its values baked into its birth
       // args above, and this is a harmless no-op while it builds.
       applyMixTo(key);
-      sch.start(scheduleFrom);
+      if (starting) toStart.push(sch);
+      else sch.start(scheduleFrom);
     }
 
     // Any midicc()/midikeys() seen at eval time needs MIDI input running engine-side. The
@@ -4719,6 +4737,27 @@ const routes = {
       console.warn(`[poptart] evaluate (deck ${deck}) took ${Math.round(evalMs)}ms`);
     }
 
+    const tracks = built.map((b) => ({
+      label: b.label,
+      key: keyOfBlock(b.label), // what this track is called server-side (deck b keys are "b:<label>")
+      // The EFFECTIVE flags - a member of a muted group reads as muted, which is what the
+      // mixer's buttons and the editor's dimmed code both want to show.
+      muted: muted.has(b.label),
+      soloed: soloed.has(b.label),
+      active: active.includes(b),
+      start: b.start,
+      end: b.end,
+      instrument: b.sig.instrument,
+      fxChain: b.sig.fxChain,
+      paramNames: paramLabels(b.sig),
+      grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW) : null,
+    }));
+    // The clock starts now that everything above is in place (see scheduleFrom), and this
+    // eval's schedulers with it, their windows opening on its start position.
+    if (starting) {
+      scheduleFrom = transportStart() ?? scheduleFrom;
+      for (const sch of toStart) sch.start(scheduleFrom);
+    }
     mixNotify(); // the deck head's play/stop toggle follows the desk stream
     return {
       status: 200,
@@ -4731,21 +4770,7 @@ const routes = {
         deckBpm: deckNativeBpm(deck),
         gridFrom,
         gridCount: HL_WINDOW,
-        tracks: built.map((b) => ({
-          label: b.label,
-          key: keyOfBlock(b.label), // what this track is called server-side (deck b keys are "b:<label>")
-          // The EFFECTIVE flags - a member of a muted group reads as muted, which is what the
-          // mixer's buttons and the editor's dimmed code both want to show.
-          muted: muted.has(b.label),
-          soloed: soloed.has(b.label),
-          active: active.includes(b),
-          start: b.start,
-          end: b.end,
-          instrument: b.sig.instrument,
-          fxChain: b.sig.fxChain,
-          paramNames: paramLabels(b.sig),
-          grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW) : null,
-        })),
+        tracks,
       },
     };
   },

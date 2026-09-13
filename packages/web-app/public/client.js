@@ -10348,10 +10348,12 @@ function maybePrefetchGrid(cycle) {
 }
 
 // The transport mirror as a cycle position "now" - the same rebased formula the server uses.
-// A paused transport is frozen at baseCycle (0 after a stop / at page load).
+// A paused transport is frozen at baseCycle (0 after a stop / at page load), and a running one
+// started a little ahead (play-from-stop puts its start a lookahead out - see the server's
+// transportStart) sits at its start position until the clock gets there.
 function currentCyclePos() {
   if (transport.paused) return transport.baseCycle;
-  return transport.baseCycle + (Date.now() / 1000 - transport.baseSec) * transport.cps;
+  return transport.baseCycle + Math.max(0, Date.now() / 1000 - transport.baseSec) * transport.cps;
 }
 
 function highlightTick() {

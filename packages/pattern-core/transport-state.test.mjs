@@ -76,3 +76,19 @@ test('shiftCycles is a no-op on a paused clock and on junk', () => {
   assert.equal(tr.cycleAt(now()), 0);
   tr.dispose();
 });
+
+test('start(atSec) reaches the start position at that moment, not now', () => {
+  const { tr, kinds, now, advance } = clock();
+  tr.start(now() + 1);
+  assert.deepEqual(kinds, ['start']);
+  assert.equal(tr.paused, false);
+  assert.equal(tr.secAt(0), now() + 1);
+  assert.ok(tr.cycleAt(now()) < 0, 'not there yet: the start position is still ahead');
+  advance(1);
+  assert.equal(tr.cycleAt(now()), 0);
+  advance(2);
+  assert.equal(tr.cycleAt(now()), 1);
+  tr.start(NaN); // running already, and junk besides: ignored
+  assert.deepEqual(kinds, ['start']);
+  tr.dispose();
+});

@@ -287,10 +287,17 @@ export class Transport {
     if (wasRunning) this._announce('stop');
   }
 
-  /** Un-freeze: the clock advances again from wherever it sits (cycle 0 after stop()). */
-  start() {
-    if (!this._paused) return;
-    this._baseSec = this.getTime();
+  /**
+   * Un-freeze: the clock advances again from wherever it sits (cycle 0 after stop()), reaching
+   * that position at `atSec` (default: now). A start a little ahead of now is what lets whoever
+   * starts it finish setting up first - the host's play-from-stop starts the clock a lookahead
+   * ahead, once every track is set up. Until `atSec` the clock reads as negative time to its
+   * start position; the schedulers open their windows only once it has got there (see
+   * Scheduler#_tick), so nothing at the start position is ever handed to the engine already due.
+   */
+  start(atSec = this.getTime()) {
+    if (!this._paused || !Number.isFinite(atSec)) return;
+    this._baseSec = atSec;
     this._paused = false;
     this._announce('start');
   }
@@ -943,16 +950,24 @@ export class Scheduler {
       const nowSec = this.engine.getTime();
       const targetCycle = this.transport.cycleAt(nowSec + DEFAULT_LOOKAHEAD_SEC);
 
-      // Preset swaps go out FIRST, before the notes of the same window. A note is handed to the
-      // audio thread as a timestamped bundle the moment the engine handles its message - nothing
-      // can hold it back after that - so whether it should wait for a program load is decided
-      // then, from what the engine has already been told. Send the notes first and the swap is
-      // still news when the note at its onset has been committed to play straight through it,
-      // which is exactly the note that was being eaten (see poptart.scd's waitForLoad).
-      this._schedulePresetSwaps(this._scheduledUntilCycle, targetCycle);
-      this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle, nowSec);
-      this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
-      this._scheduledUntilCycle = targetCycle;
+      // The window only ever moves forward. A clock started a little ahead of now (play-from-stop
+      // starts it a lookahead ahead - see Transport#start) reads as negative time until it gets
+      // there, and a window that followed it would open in cycle -1, which a cyclic pattern is
+      // happy to answer for with the tail of a bar that never was. The same holds for a running
+      // clock shifted backwards (a Link trim): what the old position already sent is in the
+      // engine, and is not sent again.
+      if (targetCycle > this._scheduledUntilCycle) {
+        // Preset swaps go out FIRST, before the notes of the same window. A note is handed to the
+        // audio thread as a timestamped bundle the moment the engine handles its message - nothing
+        // can hold it back after that - so whether it should wait for a program load is decided
+        // then, from what the engine has already been told. Send the notes first and the swap is
+        // still news when the note at its onset has been committed to play straight through it,
+        // which is exactly the note that was being eaten (see poptart.scd's waitForLoad).
+        this._schedulePresetSwaps(this._scheduledUntilCycle, targetCycle);
+        this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle, nowSec);
+        this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
+        this._scheduledUntilCycle = targetCycle;
+      }
 
       this._withNoteGate(() => {
         this._pollGenericParams(nowSec);
