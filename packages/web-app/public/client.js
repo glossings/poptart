@@ -13075,7 +13075,7 @@ async function evaluate(start, { byHand = false } = {}) {
   // were looking, and a song that always starts at bar 0 is a song whose outro you never hear
   // without sitting through it. Sent with the eval so it lands on the same song clock the eval
   // builds, rather than racing it as a request of its own.
-  const arrangeFrom = start && transport.paused && arState?.insert != null ? arState.insert : undefined;
+  const arrangeFrom = start && transport.paused && arMarkerFor('a') != null ? arMarkerFor('a') : undefined;
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.
   const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom });
@@ -16585,8 +16585,8 @@ const sliceRenderList = () => { if (sliceState) sliceHead.renderList(); };
 // would be work for a result that cannot differ.
 function sliceCarry() {
   if (!sliceState) return {};
-  const { source, at, file, key, label, index, indices, srcName } = sliceState;
-  return { source, at, file, key, label, index, indices, srcName };
+  const { source, at, file, key, label, index, indices, srcName, ref } = sliceState;
+  return { source, at, file, key, label, index, indices, srcName, ref };
 }
 
 /**
@@ -16875,8 +16875,8 @@ function openSliceSetById(id, from = {}) {
   const at = from.at ?? (source?.find() ? cm.indexFromPos(source.find().from) : null);
   const keep = from.file
     ? { file: from.file, key: from.key ?? null, label: from.label ?? '', index: from.index ?? null,
-      indices: from.indices ?? [], srcName: from.srcName ?? '' }
-    : { file: null, key: null, label: '', index: null, indices: [], srcName: '' };
+      indices: from.indices ?? [], srcName: from.srcName ?? '', ref: from.ref ?? null }
+    : { file: null, key: null, label: '', index: null, indices: [], srcName: '', ref: null };
   sliceState = {
     id: key,
     set: def ? sliceSetOf(cm.getValue(), def) : lib.set ?? [],
@@ -16913,7 +16913,7 @@ function openSliceSetById(id, from = {}) {
 
 function closeSlicePanel() {
   if (!sliceState) return;
-  sliceStopAudition();
+  sliceStopAudition({ hush: true });
   sliceState.source?.clear();
   sliceState = null;
   sliceBackdrop.classList.add('hidden');
@@ -16942,6 +16942,7 @@ async function sliceLoadSample() {
       }
       state.indices = src.indices;
       state.srcName = src.name;
+      state.ref = src.ref; // the engine's own address for the source - what an audition through the track plays
       // Which of them to draw. A chain whose index is a pattern names several files and plays one
       // at a time, so: the one being PLAYED if the transport is running (the same question
       // activeIdIn answers for a `<tight loose>` of set names), else the first it names - and, once
@@ -17681,18 +17682,27 @@ function sliceAdoptDetected() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Audition - one slice at a time, straight out of the decoded buffer. The pack panel's routing
-// rules apply (DJ mode wants a headphone cue), which is what auditionBlocked answers.
+// Audition - one slice at a time. Through the TRACK the panel was opened from when the engine
+// can play it there (the chop then comes out through that track's chain - its fx, its gain and
+// postgain, its sends - which is what the pattern will sound like); straight out of the decoded
+// buffer otherwise. The pack panel's routing rules apply (DJ mode wants a headphone cue), which
+// is what auditionBlocked answers.
 // ---------------------------------------------------------------------------------------------
 
-const slicePlayer = { source: null, startedAt: 0, from: 0, to: 0, raf: null };
+const slicePlayer = { source: null, startedAt: 0, from: 0, to: 0, raf: null, gen: 0, clock: null };
 
-function sliceStopAudition() {
+function sliceStopAudition({ hush = false } = {}) {
+  slicePlayer.gen++; // an audition still on its way to the engine lands on nothing
   if (slicePlayer.source) {
     const src = slicePlayer.source;
     slicePlayer.source = null;
     src.onended = null;
     try { src.stop(); } catch { /* already ended */ }
+    // A voice the engine plays is the track's to stop. Only on an explicit stop (the ■, closing
+    // the panel) and only while the transport is paused: a hush takes every voice on the track
+    // with it, and a part that is playing must not be cut for a chop you were done hearing -
+    // clicking through the chops of a running break just lets each ring out under the next.
+    if (hush && src.track && transport.paused) api('POST', '/api/previewSlice', { trackId: src.track, stop: true }).catch(() => {});
   }
   cancelAnimationFrame(slicePlayer.raf);
   slicePlayBtn.textContent = '▶';
@@ -17702,8 +17712,19 @@ function sliceStopAudition() {
 function sliceAuditionPosition() {
   if (!slicePlayer.source || !sliceState?.buffer) return null;
   const dur = sliceState.buffer.duration;
-  const at = slicePlayer.from + (previewCtx.currentTime - slicePlayer.startedAt) / dur;
+  const at = slicePlayer.from + (slicePlayer.clock() - slicePlayer.startedAt) / dur;
   return at > slicePlayer.to ? null : at;
+}
+
+/**
+ * The track an audition plays THROUGH: the block whose sampler call the panel was opened from.
+ * Null sends it out of the browser instead - in DJ mode (the track's output is the deck's, and an
+ * audition belongs in the headphones), for a file the panel was handed with no source ref, or for
+ * a panel that was opened from nowhere in the code.
+ */
+function sliceAuditionTrack() {
+  if (mixModeOn || !sliceState?.ref) return null;
+  return sliceRegionAt(sliceAtNow())?.label ?? null;
 }
 
 /** Play slice `k` (or the whole file when there are no markers at all). */
@@ -17716,13 +17737,39 @@ function sliceAudition(k) {
   const from = marks.length ? marks[Math.min(k, marks.length - 1)] : 0;
   const to = marks.length ? (marks[Math.min(k, marks.length - 1) + 1] ?? 1) : 1;
   sliceStopAudition();
+  const track = sliceAuditionTrack();
+  if (!track) return sliceAuditionLocal(state, from, to);
+  const gen = slicePlayer.gen;
+  api('POST', '/api/previewSlice', { trackId: track, ref: state.ref, index: state.index ?? 0, begin: from, end: to })
+    .then((res) => {
+      if (gen !== slicePlayer.gen || sliceState !== state) return; // superseded while in flight
+      // Nothing to play through yet (the track not evaluated, its source still loading): the
+      // browser plays the file, as it always did.
+      if (!res.ok) return sliceAuditionLocal(state, from, to);
+      // The engine owns the voice; here there is only the head to run, on the wall clock, for
+      // as long as the chop lasts as recorded.
+      const ms = Math.max(10, (to - from) * state.buffer.duration * 1000);
+      const src = { track, onended: null, timer: null, stop() { clearTimeout(this.timer); } };
+      src.timer = setTimeout(() => src.onended?.(), ms + 30);
+      sliceStartHead(src, from, to, () => performance.now() / 1000);
+    })
+    .catch(() => { if (gen === slicePlayer.gen && sliceState === state) sliceAuditionLocal(state, from, to); });
+}
+
+/** The audition out of the decoded buffer, straight to the speakers - for a chop no track plays. */
+function sliceAuditionLocal(state, from, to) {
   if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
   const dur = state.buffer.duration;
   const src = previewCtx.createBufferSource();
   src.buffer = state.buffer;
   src.connect(previewCtx.destination);
   src.start(0, from * dur, Math.max(0.01, (to - from) * dur));
-  Object.assign(slicePlayer, { source: src, startedAt: previewCtx.currentTime, from, to });
+  sliceStartHead(src, from, to, () => previewCtx.currentTime);
+}
+
+/** Run the head over from..to while `src` sounds; `clock` is what its time is read off. */
+function sliceStartHead(src, from, to, clock) {
+  Object.assign(slicePlayer, { source: src, startedAt: clock(), clock, from, to });
   slicePlayBtn.textContent = '■';
   src.onended = () => {
     if (slicePlayer.source !== src) return;
@@ -18103,7 +18150,7 @@ function initSlicePanel() {
 
   // --- the foot ---
   slicePlayBtn.addEventListener('click', () => {
-    if (slicePlayer.source) sliceStopAudition();
+    if (slicePlayer.source) sliceStopAudition({ hush: true });
     else sliceAudition(sliceState?.sel ?? 0);
     sliceRender();
   });
@@ -21576,10 +21623,9 @@ async function evalDeckB(start) {
     // hand-renames followed in, and every track of this song filled into its
     // arrangement (see arSyncBuffer). Without it a track typed into deck B would fall silent.
     arSyncBuffer('b');
-    // Same deal as the main pane's: with the painter open on THIS deck and the transport stopped,
-    // its marker says which bar of deck B's song to start from (see evaluate).
-    const arrangeFrom = start && transport.paused && arDeck === 'b' && arState?.insert != null
-      ? arState.insert : undefined;
+    // Same deal as the main pane's: with the transport stopped, deck B's marker - kept while the
+    // painter is shut, like deck A's (see arKeptInsert) - says which bar of its song to start from.
+    const arrangeFrom = start && transport.paused && arMarkerFor('b') != null ? arMarkerFor('b') : undefined;
     const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start, arrangeFrom });
     if (result.transport) transport = result.transport;
     if (arDeck === 'b') arSetClock(result.arrange ?? null); // deck B's own song clock, for the playhead
@@ -24664,7 +24710,9 @@ addHotkey(builtinHotkeys, 'ctrl+j', () => {
 // its right edge to resize, right-click or delete to remove it; cmd+shift+D and cmd+shift+backspace
 // are the roll's time-selection ops on the song's own timeline (see arTimeRegion). Several at once
 // are picked the way they are everywhere: cmd+click adds one, shift+click reaches through from the
-// last one clicked, shift- or cmd-drag rubber-bands (see arPickClip). A clip may also
+// last one clicked, shift- or cmd-drag rubber-bands (see arPickClip). A stretch of song marked
+// with the arrow tool is a selection too: press any clip inside it and drag, and what moves (or
+// option-drag copies) is the clips it holds, cut at its edges (see arSpanClips). A clip may also
 // name its own ROLL - double-click one to fork the track's roll and rebind just that clip - so a
 // fill is painted rather than patterned (see the roll-binding section below).
 //
@@ -24799,6 +24847,19 @@ const arSyncBuffer = (deck) => arOnBuffer(deck, () => {
 
 let arState = null;
 let arRaf = null;
+
+// The insert marker OUTLIVES the painter, per deck. It is where playback starts from (see
+// arMarkerFor), and the loop it serves is "put the start at bar 17, go and change something in
+// the roll, play, change it again" - which is a loop spent mostly with the painter shut. Dropping
+// the marker on close made every audition a trip back into the arrangement to set it again.
+// In memory only: a start bar surviving a reload would be a song that plays from the middle for
+// no reason anyone can see. Clicked away (empty song, arDropSelection), it is gone for good.
+const arKeptInsert = { a: null, b: null };
+
+/** The bar a play from stopped starts `deck`'s song at: its marker, painter open or not. */
+function arMarkerFor(deck) {
+  return arState && arDeck === deck ? arState.insert : arKeptInsert[deck];
+}
 let arPlayheadOn = false;
 let arW = 0;
 let arH = 0;
@@ -25289,6 +25350,9 @@ function openArrangeEditor(call) {
   arReflectView();
   arSizeCanvas();
   arRestoreView(); // after the sizing: the clamps need to know how much is on screen
+  // ...and the marker, where it was left - unless the song has since got shorter than it.
+  const kept = arKeptInsert[arDeck];
+  arState.insert = kept != null && kept < arLoopLen() ? kept : null;
   drawArrange();
   if (!arRaf) arRaf = requestAnimationFrame(arPlayheadLoop);
   // The song clock the server is running for THIS deck: the painter opened after the eval that
@@ -25306,6 +25370,7 @@ function openArrangeEditor(call) {
 function closeArrangeEditor() {
   const picked = arState ? [...arState.sel][0]?.label ?? null : null;
   arSaveView(); // where you were looking, for the next time it opens - before arState goes
+  if (arState) arKeptInsert[arDeck] = arState.insert; // ...and where playback starts (see arKeptInsert)
   arCloseMenu();
   arLaneNameInput.classList.add('hidden');
   if (arRaf) { cancelAnimationFrame(arRaf); arRaf = null; }
@@ -26975,11 +27040,13 @@ function arCursorFor(x, y) {
     if (rh?.part === 'right') return CUR_BRACKET_R;
     if (rh?.part === 'close') return 'pointer';
     if (rh) return 'grab';
-    // empty strip: the pencil draws a loop, the arrow drags out a span to edit
-    return arTool === 'draw' ? CUR_PENCIL : 'crosshair';
+    // empty strip: a drag draws a loop, whichever tool is up (shift-drag marks a span to edit)
+    return CUR_PENCIL;
   }
   if (x < AR_GUTTER) return y < arGridBottom() && arRowLabel(arRowOf(y)) != null ? 'pointer' : 'default';
   const hit = arClipAt(x, y);
+  if (hit && !hit.edge && arState.regionSpan && !arState.sel.size && arBarsOf(x) >= arState.regionSpan[0]
+      && arBarsOf(x) < arState.regionSpan[1] && arRowInRegion(arRegionRows(), hit.clip.label)) return 'grab'; // the span picks up
   if (hit) return hit.edge === 'left' ? CUR_BRACKET_L : hit.edge === 'right' ? CUR_BRACKET_R : 'grab';
   return arTool === 'draw' && arRowLabel(arRowOf(y)) != null ? CUR_PENCIL : 'crosshair';
 }
@@ -27043,6 +27110,16 @@ function arToggleMute(targets) {
   writeArrangeCall();
   drawArrange();
   logLine(`${muting ? 'muted' : 'unmuted'} ${clips.length} clip${clips.length === 1 ? '' : 's'}`);
+}
+
+/** A loop region over `span` - the menu's way to one, beside dragging in the loops strip. */
+function arLoopSpan([a, b]) {
+  const region = { name: '', start: a, end: b };
+  arState.loops.push(region);
+  arState.loops.sort((p, q) => p.start - q.start || p.end - q.end);
+  arState.selRegion = region;
+  drawArrange();
+  arNameRegion(region, true); // the name lands the region (esc lets it go), as a drawn one does
 }
 
 function arRemoveRegion(region) {
@@ -27121,6 +27198,7 @@ function arOpenMenu(clientX, clientY, hit, row) {
     if (!hit && arState.regionSpan) items.push([`repeat ${bars}${where}`, () => arDuplicate(), 'cmd-D — the copy overwrites what follows']);
     items.push(['duplicate after', () => arTimeDuplicate(), 'cmd-shift-D — every track, opening time for the copy']);
     items.push(['delete time', () => arTimeDelete(), 'cmd-shift-backspace — every track, closing the span up']);
+    if (!arState.selRegion) items.push([`loop ${bars}`, () => arLoopSpan(span), 'a loop region over the span - name it, and playback holds there']);
   }
   if (arClipboard?.clips.length) {
     if (items.length && !span) items.push('-');
@@ -27496,8 +27574,8 @@ function arRowInRegion(rows, label) {
   return row != null && rows.has(row);
 }
 
-/** Let go of everything held in the rows - what escape does, and what a click on empty song means. */
-function arDropSelection() {
+/** Let go of everything held in the rows - what escape does (marker kept), and what a click on empty song means. */
+function arDropSelection(opts) {
   if (!arState) return;
   arState.sel.clear();
   arState.selAnchor = null;
@@ -27505,7 +27583,7 @@ function arDropSelection() {
   arState.regionRows = null;
   arState.selRegion = null;
   arState.autoSel = null;
-  arState.insert = null;
+  if (!opts?.keepInsert) arState.insert = null;
 }
 
 /** The row labels from row `r0` to row `r1` inclusive - what a drag down the rows marks. */
@@ -27572,7 +27650,7 @@ function arPickClip(clip, e) {
 // go out as warnings rather than errors: no red pulse on the collapsed console for a keystroke
 // that was simply early.
 function arTimeHint() {
-  logLine('the time ops need a region - select clips, pick a loop, or drag a span out in the loops strip with the arrow tool', 'warn');
+  logLine('the time ops need a region - select clips, pick a loop, drag across the rows with the arrow tool, or shift-drag the loops strip', 'warn');
 }
 
 // The painter's clipboard: a span of song, its clips cut to the span's edges and their starts
@@ -27642,6 +27720,34 @@ function arClearTime(a, b, rows = null) {
   }
   arState.clips = kept;
   arState.sel.clear();
+}
+
+/**
+ * What a marked span HOLDS, as clips: every clip inside [a, b) on `rows`, whole - and a clip that
+ * crosses either edge cut there first, so the part inside is a clip of its own. The cut is an
+ * edit (the halves go on sounding exactly as the whole did), made only when the span is picked up
+ * to be moved or copied: a highlighted stretch of song is then the same thing as a hand-made
+ * selection of the clips in it, and the drag takes the bars you marked rather than the clips they
+ * happened to fall in. Pieces replace their clip in place, so the draw order holds.
+ */
+function arSpanClips(a, b, rows = null) {
+  const held = [];
+  const next = [];
+  for (const c of arState.clips) {
+    const end = c.start + c.len;
+    if (!arRowInRegion(rows, c.label) || end <= a + 1e-9 || c.start >= b - 1e-9) { next.push(c); continue; }
+    if (c.start >= a - 1e-9 && end <= b + 1e-9) { next.push(c); held.push(c); continue; } // whole
+    const from = Math.max(a, c.start);
+    const to = Math.min(b, end);
+    if (c.start < a - 1e-9) next.push({ ...c, len: a - c.start }); // the head, outside the span
+    const inside = arClipPiece(c, from, to - from); // ...the part inside, in step with its roll
+    next.push(inside);
+    held.push(inside);
+    if (end > b + 1e-9) next.push(arClipPiece(c, b, end - b)); // ...and the tail, outside
+    arState.sel.delete(c); // the clip that was held is three now; the drag holds the middle
+  }
+  arState.clips = next;
+  return held;
 }
 
 /**
@@ -28681,15 +28787,18 @@ function initArrangeCanvas() {
         arState.drag = part === 'left' || part === 'right'
           ? { kind: 'regionEdge', region, orig, side: part, x0: x, moved: false }
           : { kind: 'regionMove', region, orig, x0: x, moved: false };
-      } else if (arTool === 'draw') {
-        // the pencil on an empty stretch of the strip: drag out a loop region
+      } else if (!e.shiftKey) {
+        // An empty stretch of the strip: drag out a loop region - with EITHER tool. Loops are all
+        // the strip holds, so a drag here can only mean one. The tool used to decide (pencil =
+        // loop, arrow = time selection), which left the arrow tool - the one a selection-heavy
+        // session sits in - with no way to make a loop at all.
         arState.selRegion = null;
         const a = Math.max(0, Math.floor(arBarsOf(x) / arCell()) * arCell());
         arState.drag = { kind: 'region', a, b: a + arCell() };
       } else {
-        // ...and the arrow on the same stretch drags out a TIME SELECTION: the span the copy /
-        // cut / paste / duplicate / delete ops act on. Same strip, same drag - the tool says
-        // whether you are marking a loop to play or an area to edit.
+        // ...and shift-drag on the same stretch drags out a TIME SELECTION over every row: the
+        // span the copy / cut / paste / duplicate / delete ops act on. (The arrow tool marks one
+        // over the rows it is dragged across down in the lanes; this is the whole-song version.)
         arState.selRegion = null;
         arState.sel.clear();
         arState.regionSpan = null;
@@ -28803,6 +28912,21 @@ function initArrangeCanvas() {
       return;
     }
     if (row < 0 || arRowLabel(row) == null) { arDropSelection(); drawArrange(); return; }
+
+    // A press on a clip INSIDE the marked span picks the span up: what you highlighted is what the
+    // drag carries - whole clips whole, and a clip the span cuts through cut there as the drag
+    // starts (see arSpanClips) - exactly as if the clips in it had been shift-clicked through one
+    // by one, option-drag copies included. The span is only a highlight until the hand moves: a
+    // press that never travels is the plain click it always was (see finish).
+    const span = arState.regionSpan;
+    if (hit && !hit.edge && span && !arState.sel.size && !e.shiftKey && !editMod(e)
+        && arBarsOf(x) >= span[0] && arBarsOf(x) < span[1] && arRowInRegion(arRegionRows(), hit.clip.label)) {
+      arSelectTrack(hit.clip.label);
+      arState.drag = { kind: 'move', targets: [], orig: new Map(), x0: x, row0: row, moved: false, alt: e.altKey,
+        span: [...span], spanRows: arRegionRows(), press: hit };
+      drawArrange();
+      return;
+    }
 
     arState.selRegion = null; // anything selected in the rows is instead of a region
     // ...and any press in the lanes supersedes the drawn time span: the region follows what is
@@ -28977,6 +29101,30 @@ function initArrangeCanvas() {
       // is nothing else it could mean, and it is the gesture that was missing: a part written on
       // the wrong track used to be a retype.
       const dRow = arRowOf(y) - d.row0;
+      // A span picked up (see the pointerdown): on the first real movement it becomes the clips it
+      // holds, cut at its edges, and the drag goes on as a move of those - option-copies included,
+      // below. Until then there is nothing in the hand, so there is nothing to shift.
+      if (d.span && !d.cut) {
+        if (dBars === 0 && dRow === 0) { drawArrange(); return; }
+        // Option-drag COPIES what the span holds, so the originals are not cut at all: the copies
+        // are the span's pieces, trimmed the way the clipboard trims them (arClipsIn), and they
+        // are what the drag carries. A plain drag cuts the song itself and carries the pieces.
+        let held;
+        if (d.alt) {
+          held = arClipsIn(d.span[0], d.span[1], d.spanRows).map((c) => ({ ...c, start: c.start + d.span[0] }));
+          arState.clips.push(...held);
+          d.copied = true;
+        } else held = arSpanClips(d.span[0], d.span[1], d.spanRows);
+        if (!held.length) { d.span = null; d.cut = true; drawArrange(); return; }
+        d.cut = true;
+        d.targets = held;
+        d.orig = new Map(held.map((c) => [c, { start: c.start, row: arRowOfLabel(c.label), len: c.len, label: c.label, off: c.off }]));
+        arState.sel = new Set(held);
+        arState.selAnchor = held[0] ?? null;
+        arState.regionSpan = null; // the held clips ARE the region now (see arTimeRegion)
+        arState.regionRows = null;
+        d.moved = true; // the cut is an edit even if the hand comes straight back
+      }
       // Option-drag duplicates - the roll's altCopy, clip-shaped: the originals stay where they
       // were and the drag carries fresh copies instead. Made on the first real movement, so an
       // option-click that never travels is just a click, not a clip stacked exactly on itself.
@@ -29116,6 +29264,25 @@ function initArrangeCanvas() {
       if (d.moved) {
         arState.loops.sort((p, q) => p.start - q.start || p.end - q.end);
         writeArrangeCall();
+      }
+      drawArrange();
+      arRefreshCursor();
+      return;
+    }
+    if (d.kind === 'move' && d.span && !d.cut) {
+      // The span was pressed but never carried: the click it was. On a title that is the clip
+      // itself, on a body the time under it - the two plain presses a clip has always taken (see
+      // the pointerdown) - and either way the highlight is let go, as any press in the lanes lets
+      // it go.
+      arState.regionSpan = null;
+      arState.regionRows = null;
+      arState.sel.clear();
+      if (d.press.part === 'title') {
+        arState.sel.add(d.press.clip);
+        arState.selAnchor = d.press.clip;
+      } else {
+        arState.selAnchor = null;
+        arState.insert = Math.max(0, arSnapTo(arBarsOf(d.x0)));
       }
       drawArrange();
       arRefreshCursor();
@@ -29262,9 +29429,11 @@ function initArrangeCanvas() {
       e.preventDefault();
       // like the roll: first let go of what is held, then the panel itself. A picked loop region
       // counts as held now that it marks a span for the time ops - otherwise the band it lights
-      // would be undismissable.
-      if (arState.regionSpan || arState.sel.size || arState.selRegion || arState.autoSel || arState.insert != null) {
-        arDropSelection();
+      // would be undismissable. The insert marker does NOT: it is where playback starts, and
+      // escape is how the painter gets put away between auditions (see arKeptInsert), so it rides
+      // through both presses. A click on empty song is what takes it off.
+      if (arState.regionSpan || arState.sel.size || arState.selRegion || arState.autoSel) {
+        arDropSelection({ keepInsert: true });
         drawArrange();
       } else closeArrangeEditor();
       return;

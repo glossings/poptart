@@ -3826,6 +3826,9 @@ function stateHandle(state) {
 // .log() left running with no browser attached can't grow without bound: the oldest lines go,
 // which is the right end to lose - the interesting one is what just played.
 const EVENT_LOG_MAX = 500;
+// How long a slice-editor audition may sound (see /api/previewSlice): an event this long never
+// gates a chop, so it plays out as recorded, and a whole long file still has an end.
+const PREVIEW_SLICE_MAX_SEC = 600;
 const eventLogQueue = [];
 let autoPinTimer = null;
 let autoPinRun = null; // the capture pass in flight, so a flush can wait for it instead of racing
@@ -4660,6 +4663,12 @@ const routes = {
       const key = keyOfBlock(b.label);
       // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
       const tid = claimEngineTrack(key);
+      // Sampler options on a chain that never names a source - note("c3").i(2) with no .s() -
+      // are held and never read (signal.mjs's samplerPending): the track plays its synth. Said
+      // once per evaluation, since nothing else would.
+      if (!b.sig.sampler && b.sig.samplerPending) {
+        eventLogQueue.push(`[${key}] ${Object.keys(b.sig.samplerPending).join('/')} set but nothing in the chain plays a sample - add .s("pack") (or .se()/.sr()/.sp())`);
+      }
       mappedEngine.setChain(tid, [b.sig.instrument, ...b.sig.fxChain]);
       // With swap mode on, an incoming stem starts GATED OUT (fader 0) whenever the OTHER deck
       // already has a song up - on either deck, symmetrically: the whole point of the mode is
@@ -5083,6 +5092,35 @@ const routes = {
       engine.noteOff(tid, note, now);
     }
     return { status: 200, body: { ok: true } };
+  },
+
+  // A one-off audition of a chop from the slice editor, THROUGH the track the panel was opened
+  // from: the engine plays it on that track, so it comes out through the track's own chain - its
+  // fx, its gain and postgain, its sends - which is what the pattern will sound like. Body:
+  // { trackId, ref, index, begin, end } to play; { trackId, stop: true } to hush the track (the
+  // client asks only while the transport is paused, since a hush takes every voice on the track).
+  // Not logged, like previewNote: a chop heard while chopping is not an event played. ok: false
+  // when there is nothing to play through yet - the track is not evaluated, or its source is
+  // still loading - and the client plays the file out of the browser instead.
+  'POST /api/previewSlice': async (body) => {
+    if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    const trackId = String(body.trackId ?? '');
+    if (!trackId || !schedulers.has(trackId)) return { status: 200, body: { ok: false, why: 'track not evaluated' } };
+    const tid = engineTrack(trackId);
+    if (body.stop) {
+      mappedEngine.hush(tid);
+      return { status: 200, body: { ok: true } };
+    }
+    const ref = String(body.ref ?? '');
+    const begin = Number(body.begin);
+    const end = Number(body.end);
+    if (!ref || !Number.isFinite(begin) || !Number.isFinite(end)) return { status: 200, body: { ok: false, why: 'bad request' } };
+    const now = engine.getTime();
+    // As recorded: no fit, no slice set, and an event long enough that nothing gates it - the
+    // chop plays out at the rate the panel's own player would play it, only through the track.
+    const cfg = { index: Math.round(Number(body.index) || 0), begin, end, vel: 1 };
+    const info = engine.playSample(tid, ref, cfg, now, now + PREVIEW_SLICE_MAX_SEC);
+    return { status: 200, body: { ok: !info?.skipped, why: info?.skipped ?? null, durSec: info?.durSec ?? null } };
   },
 
   // Introspection: real parameter names of the plugin in a track slot. Body: { trackId, slot }.

@@ -58,8 +58,23 @@ test('fit() with no argument sets the auto mode rather than doing arithmetic', (
   assert.equal(cfgAt(s('breaks').mul(fit(2)), 'fit', 0), 2);
 });
 
-test('a control aimed at a non-sampler pattern says so', () => {
-  assert.throws(() => note('c3').mul(speed(-1)), /only applies to a sampler pattern/);
+test('a control written before the source waits for it', () => {
+  // The chain reads the same however the controls are ordered around .s().
+  assert.equal(cfgAt(note('c3').i(2).s('bd'), 'index', 0), 2);
+  assert.equal(cfgAt(note('c3').mul(speed(-1)).s('bd'), 'speed', 0), -1);
+  assert.equal(cfgAt(note('c3').begin(0.25).s('bd').add(begin(0.5)), 'begin', 0), 0.75);
+  assert.equal(cfgAt(note('c3').add(begin(0.5)).s('bd'), 'begin', 0), 0.5);
+  // The pitch is still the repitch note, and nothing is left waiting once the source has it.
+  const ordered = note('c3').i(2).s('bd');
+  assert.equal(ordered.sampler.note.sample(0, 1, 0), note('c3').sample(0, 1, 0));
+  assert.equal(ordered.samplerPending, null);
+  // A patterned option ahead of the source subdivides the grid exactly as it does after it.
+  const early = note('c3').i('0 1').s('bd').stepsForCycle(0);
+  const late = note('c3').s('bd').i('0 1').stepsForCycle(0);
+  assert.deepEqual(early.map((x) => [x.start, x.cfg.index]), late.map((x) => [x.start, x.cfg.index]));
+  // Never resolved, the chain is not a sampler: the synth plays and the option waits.
+  assert.equal(note('c3').i(2).sampler, null);
+  assert.equal(cfgAt({ sampler: note('c3').i(2).samplerPending }, 'index', 0), 2);
 });
 
 // ---------------------------------------------------------------------------------------------

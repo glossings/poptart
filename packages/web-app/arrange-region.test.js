@@ -27,7 +27,7 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const LIFTED = ['arTimeRegion', 'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClearTime', 'arClipPiece']
+const LIFTED = ['arTimeRegion', 'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClearTime', 'arClipPiece', 'arSpanClips']
   .map(grab).join('\n\n');
 
 // A row is a base label here, exactly as it is in the painter: `kick#fill` paints onto `kick`'s
@@ -41,7 +41,7 @@ function painter({ clips = [], sel = [], regionSpan = null, regionRows = null, s
   const env = { arState, ...rowEnv };
   const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
-  const build = new Function(...keys, `${LIFTED}\nreturn { arTimeRegion, arRegionRows, arClipsIn, arClearTime };`);
+  const build = new Function(...keys, `${LIFTED}\nreturn { arTimeRegion, arRegionRows, arClipsIn, arClearTime, arSpanClips };`);
   return { fns: build(...keys.map((k) => env[k])), arState };
 }
 
@@ -182,7 +182,16 @@ test('the ops that consume a span let go of the loop region that marked it', () 
   const del = grab('arTimeDelete');
   assert.match(del, /arState\.selRegion = null;/);
   // ...and escape can dismiss it, or the band it lights would be stuck on screen
-  assert.match(SRC, /if \(arState\.regionSpan \|\| arState\.sel\.size \|\| arState\.selRegion \|\| arState\.autoSel \|\| arState\.insert != null\) \{/);
+  assert.match(SRC, /if \(arState\.regionSpan \|\| arState\.sel\.size \|\| arState\.selRegion \|\| arState\.autoSel\) \{\s*arDropSelection\(\{ keepInsert: true \}\);/);
+});
+
+test('the insert marker outlives the painter, per deck', () => {
+  // closing keeps it, opening puts it back, and both decks' plays read it painter open or shut
+  assert.match(grab('closeArrangeEditor'), /if \(arState\) arKeptInsert\[arDeck\] = arState\.insert;/);
+  assert.match(grab('openArrangeEditor'), /const kept = arKeptInsert\[arDeck\];/);
+  assert.match(grab('arMarkerFor'), /arState && arDeck === deck \? arState\.insert : arKeptInsert\[deck\]/);
+  assert.match(SRC, /const arrangeFrom = start && transport\.paused && arMarkerFor\('a'\) != null/);
+  assert.match(grab('arDropSelection'), /if \(!opts\?\.keepInsert\) arState\.insert = null;/);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -853,4 +862,46 @@ test('the wiring: a modified click is about the clip, wherever on it it lands', 
   assert.match(SRC, /kind: 'marquee', x0: x, y0: y, x1: x, y1: y, base: new Set\(arState\.sel\)/);
   assert.match(SRC, /arState\.sel = new Set\(d\.base\);/);
   assert.match(grab('arDropSelection'), /arState\.selAnchor = null;/, 'letting go lets the anchor go');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Picking a span up: what a drag from inside it carries
+// ---------------------------------------------------------------------------------------------
+
+test('a span picked up is the clips inside it, cut at its edges', () => {
+  const { fns, arState } = painter({
+    clips: [clip('long', 0, 32), clip('inside', 10, 2), clip('head', 6, 4), clip('tail', 14, 4), clip('before', 0, 4), clip('after', 20, 4)],
+  });
+  const held = fns.arSpanClips(8, 16);
+  assert.deepEqual(shape(held).sort(), shape([clip('long', 8, 8), clip('inside', 10, 2), clip('head', 8, 2), clip('tail', 14, 2)]).sort());
+  // the rest of each cut clip stays in the song, still sounding either side of the span
+  assert.deepEqual(shape(arState.clips).sort(), shape([
+    clip('long', 0, 8), clip('long', 8, 8), clip('long', 16, 16),
+    clip('inside', 10, 2),
+    clip('head', 6, 2), clip('head', 8, 2),
+    clip('tail', 14, 2), clip('tail', 16, 2),
+    clip('before', 0, 4), clip('after', 20, 4),
+  ]).sort());
+});
+
+test('a whole clip inside the span is held as itself, not a copy', () => {
+  const inside = clip('inside', 10, 2);
+  const { fns, arState } = painter({ clips: [inside] });
+  assert.equal(fns.arSpanClips(8, 16)[0], inside);
+  assert.equal(arState.clips[0], inside);
+});
+
+test('a span picked up on some rows leaves the other rows be', () => {
+  const { fns, arState } = painter({ clips: [clip('drums', 0, 16), clip('bass', 0, 16)] });
+  const held = fns.arSpanClips(4, 8, new Set(['drums']));
+  assert.deepEqual(shape(held), shape([clip('drums', 4, 4)]));
+  assert.deepEqual(shape(arState.clips.filter((c) => c.label === 'bass')), shape([clip('bass', 0, 16)]));
+});
+
+test('a cut piece on a clips() row enters its roll where the cut falls', () => {
+  const { fns, arState } = painter({ clips: [{ label: 'fill', roll: 'fill_1', start: 0, len: 8 }] });
+  const [held] = fns.arSpanClips(2, 6);
+  assert.equal(held.off, 2);
+  assert.equal(arState.clips.find((c) => c.start === 6).off, 6);
+  assert.equal(arState.clips.find((c) => c.start === 0).off, undefined);
 });

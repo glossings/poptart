@@ -245,7 +245,8 @@ test('.slices() with nothing in it is the moment before the editor names it, not
   assert.equal(setAt(s('breaks').slices()), null);
 });
 
-test('.slices() only applies to a sampler pattern', () => {
+test('.slices() written before the source waits for it', () => {
   fresh();
-  assert.throws(() => note('60 62').slices([0, 0.5]), /sampler pattern/);
+  assert.deepEqual(setAt(note('60 62').slices([0, 0.5]).s('breaks')), setAt(s('breaks').slices([0, 0.5])));
+  assert.equal(note('60 62').slices([0, 0.5]).sampler, null, 'no source yet: not a sampler');
 });

@@ -127,7 +127,7 @@ test('each deck\'s eval sets the playhead clock only when the painter is on it',
 
 test('deck B honors the painter\'s marker as a start bar, like the main pane', () => {
   assert.match(grab('evalDeckB'),
-    /const arrangeFrom = start && transport\.paused && arDeck === 'b' && arState\?\.insert != null/);
+    /const arrangeFrom = start && transport\.paused && arMarkerFor\('b'\) != null/);
   assert.match(grab('evalDeckB'), /deck: 'b', start, arrangeFrom \}/);
 });
 

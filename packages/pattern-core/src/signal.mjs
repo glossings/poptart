@@ -210,6 +210,10 @@ export class Sig {
     // onset) or absent for its default.
     // Patterned values also merge their step grid into the pattern's (see _samplerOpt).
     this.sampler = opts.sampler ?? null;
+    // ...and the same config written BEFORE the chain names a source - note("c3").i(2).s("bd"):
+    // held here until .s()/.se()/.sr()/.sp() folds it into `sampler` (see _samplerOpt). Null once
+    // a source has taken it; a chain that never names one plays its synth, and the server says so.
+    this.samplerPending = opts.samplerPending ?? null;
     // Which namespace this sampler's step values address: 'pack' (s - a folder, plus an index),
     // 'named' (sp - a _pack() definition, plus an index), 'file' (se - one exact path under the
     // samples root), or 'rec' (sr - a bounce, by name). Held
@@ -263,6 +267,7 @@ export class Sig {
       channel: this.channel,
       noteChannels: this.noteChannels,
       sampler: this.sampler,
+      samplerPending: this.samplerPending,
       samplerKind: this.samplerKind,
       recordOpts: this.recordOpts,
       slotStates: this.slotStates,
@@ -1246,13 +1251,12 @@ export class Sig {
       return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, [note.key]: combined }, stepsForCycle }));
     }
     const spec = SAMPLER_CONTROLS[ctl];
-    if (!this.sampler) {
-      throw new Error(`[signal] ${ctl}() only applies to a sampler pattern - start with s("pack")`);
-    }
     // fit() with no argument carries no number to combine with - it just sets the channel.
     if (other instanceof Sig && other.ctlAuto) return this._samplerOpt(ctl, spec.key, 'auto');
     const otherSig = bareSig(toSignal(other));
-    const current = this.sampler[spec.key];
+    // Ahead of the source the channel is pending (see _samplerOpt) and combines the same way:
+    // note("c3").mul(speed(-1)).s("bd") reads as the s("bd").mul(speed(-1)) it means.
+    const current = (this.sampler ?? this.samplerPending ?? {})[spec.key];
     const combined =
       current instanceof Sig
         ? bareSig(current)._binop(ctl, otherSig, fn, false)
@@ -1721,6 +1725,7 @@ export class Sig {
       eventAt: remapEventAt(this),
       ...this._meta(),
       sampler: remapObj(this.sampler),
+      samplerPending: remapObj(this.samplerPending),
       noteChannels: remapObj(this.noteChannels),
       channel: remapObj(this.channel),
       paramSignals: remapParams(this.paramSignals),
@@ -2228,6 +2233,7 @@ export class Sig {
       ...(readsPerOnset ? { eventAt: remapEventAt(this) } : {}),
       ...this._meta(),
       sampler: remapObj(this.sampler),
+      samplerPending: remapObj(this.samplerPending),
       noteChannels: remapObj(this.noteChannels),
       channel: remapObj(this.channel),
       paramSignals: remapParams(this.paramSignals),
@@ -2235,7 +2241,8 @@ export class Sig {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Sampler config - only meaningful on s("pack") patterns. Every setter accepts a number, a
+  // Sampler config - read by s("pack") patterns, in whatever order the chain sets it (an option
+  // written ahead of the source waits for it - see _samplerOpt). Every setter accepts a number, a
   // mini string, or any Sig; the value is sampled at each event's onset, so patterns and LFOs
   // all work: s("bd").i("0 3").speed(sine(0.2).range(0.5, 2)). A patterned value also gives
   // structure, subdividing the events it overlaps - s("breaks2").slice("0 1 2 3") retriggers
@@ -2243,9 +2250,6 @@ export class Sig {
   // -------------------------------------------------------------------------------------------
 
   _samplerOpt(method, key, sig) {
-    if (!this.sampler) {
-      throw new Error(`[signal] .${method}() only applies to a sampler pattern - start with s("pack")`);
-    }
     // Patterned values mix their structure into the event grid like .vel()/.note() do, so
     // s("breaks2").slice("0 1 2 3") plays four quarter-cycle events, not one, and a `,`-stacked
     // value plays its layers at once - `.speed("1.1,0.9")` is two hits, detuned apart. Each event
@@ -2253,6 +2257,10 @@ export class Sig {
     // (fit) and plain-number Sigs have no stepsForCycle, so crossMerge only clears the channel and
     // leaves the structure alone - the value is then sampled per onset instead.
     const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampCfg(key));
+    // Written before the source - note("c3").i(2).s("bd") - the option waits in samplerPending for
+    // the .s() that folds it in (see _asSampler): the order the controls are typed in is not a
+    // thing to trip over, and the result is exactly the chain with .s() first.
+    if (!this.sampler) return this._clone({ samplerPending: { ...(this.samplerPending ?? {}), [key]: sig }, stepsForCycle });
     return this._clone({ sampler: { ...this.sampler, [key]: sig }, stepsForCycle });
   }
 
@@ -2383,9 +2391,8 @@ export class Sig {
    * splitting them further. `.slice()` is what plays the chops.
    */
   slices(v) {
-    if (!this.sampler) {
-      throw new Error('[signal] .slices() only applies to a sampler pattern - start with s("pack")');
-    }
+    // Ahead of the source it waits like any other sampler option (see _samplerOpt).
+    if (!this.sampler) return this._clone({ samplerPending: { ...(this.samplerPending ?? {}), slices: slicesSignal(v) } });
     return this._clone({ sampler: { ...this.sampler, slices: slicesSignal(v) } });
   }
 
@@ -2689,7 +2696,8 @@ export class Sig {
     // value stream for the source name over the same grid. An existing sampler keeps its
     // note (re-.s()-ing just changes what plays).
     const noteSig = this.sampler?.note ?? this;
-    const sampler = { ...(this.sampler ?? {}), note: noteSig };
+    // ...and picks up any option written ahead of the source (see _samplerOpt's samplerPending).
+    const sampler = { ...(this.sampler ?? this.samplerPending ?? {}), note: noteSig };
     // Each step's own pitch also rides as its repitch note (step.cfg.note, where the scheduler
     // reads merged values first): a chord - two steps at ONE onset, what pianoroll() draws - can't
     // be told apart by sampling the note channel at that shared onset, the same reason .as() walks
@@ -2731,7 +2739,7 @@ export class Sig {
         }
       : (t, cps, pos) => (this.sample(t, cps, pos) == null ? null : name);
     const eventAt = nameSig ? mapEventAt(nameSig, (v) => String(v)) : mapEventAt(this, () => name);
-    return new Sig(sample, { stepsForCycle, eventAt, ...this._meta(), sampler, samplerKind: kind });
+    return new Sig(sample, { stepsForCycle, eventAt, ...this._meta(), sampler, samplerPending: null, samplerKind: kind });
   }
 
   /**
