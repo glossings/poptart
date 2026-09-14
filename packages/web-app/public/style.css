@@ -147,6 +147,14 @@
   box-sizing: border-box;
 }
 
+/* A sideways trackpad swipe pans the canvases, and must never become the browser's back/forward:
+   a canvas's wheel preventDefault only covers gestures that START over it, so the header, gutters
+   and panel edges would still hand the swipe to history navigation. */
+html,
+body {
+  overscroll-behavior-x: none;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;

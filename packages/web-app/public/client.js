@@ -23963,7 +23963,7 @@ function snippetRefsIn(code, from, to) {
       if (call.start < from || call.close >= to) continue;
       for (const id of idsNamedIn(call.str)) {
         const scope = call.scope ?? '';
-        const key = `${reg.kind} ${id} ${reg.kind === 'preset' ? scope : ''}`;
+        const key = `${reg.kind}\0${id}\0${reg.kind === 'preset' ? scope : ''}`;
         if (seen.has(key)) continue;
         seen.add(key);
         out.push({ reg, kind: reg.kind, id, scope });
