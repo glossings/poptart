@@ -4952,8 +4952,8 @@ const routes = {
   //
   // This is what lets a snippet CARRY a library definition rather than merely point at one, so it
   // can never be broken later by an unpin or a hand-edit of prebake. The editor can't do it for
-  // itself: it knows the library's names (see /api/rolls) but has no source for them - openRollById
-  // says as much when you try to open a prebake roll. Answered in order of how faithful the answer
+  // itself: it knows the library's names (see /api/rolls) but has no source for them - which is
+  // also why opening or duplicating a library roll asks here first. Answered in order of how faithful the answer
   // is: the ★ file, then the prebake sources, then rebuilt from the registry for the kinds where
   // that is lossless. A roll that exists only as a registered Sig has no source anywhere, and says
   // so rather than being quietly dropped.

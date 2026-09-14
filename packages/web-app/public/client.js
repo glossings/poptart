@@ -4206,7 +4206,7 @@ let prW = PR_W;
 // last thing you want when you're drawing into one mid-set - so it pins, and the pattern goes on
 // switching what you HEAR either way. Sticky, like the tool and fold settings.
 let prFollowLocked = localStorage.getItem('poptartPianorollLock') === '1';
-let prPrebakeRolls = []; // ids from ~/.poptart/prebake.js: listed in the picker, not editable here
+let prPrebakeRolls = []; // library ids (★ and prebake): listed in the picker, copied into the buffer to edit
 let prPrebakeShapes = []; // the same for shape(...) definitions
 let prPrebakePresets = []; // ...and for captured plugin presets, a sound library shared by every patch
 let prPrebakePacks = []; // ...and for sample packs: [{ id, files }] - the files, since the pack panel shows them
@@ -5178,12 +5178,16 @@ function makeDefRegistry(opts) {
   // new one is (see create), only without starting from nothing.
   // `open: false` files the copy without putting it on screen and hands back its NAME, for a
   // caller that has somewhere else to point at it - the arrangement forking a roll for one clip.
+  // A library one has no text in the buffer to copy, so its source is fetched first (see
+  // librarySource) and the copy is written in as a fresh definition - which is async, hence the
+  // promise; the buffer's own copy is still written synchronously.
   function duplicate(id = panel.current(), sc = panelScope()) {
     if (id == null) return;
     const code = cm.getValue();
     const def = findDef(code, id, sc);
+    if (!def && inLibrary(id, sc)) return duplicateFromLibrary(id, sc);
     if (!def) {
-      return say(`can't duplicate ${label} "${id}": ${inLibrary(id, sc) ? 'it comes from the shared library - only what this buffer defines can be copied here' : 'its definition is not in this buffer'}`, true);
+      return say(`can't duplicate ${label} "${id}": its definition is not in this buffer`, true);
     }
     const rows = allIds(def.scope ?? null);
     // Counted from the stem, not the name: duplicating `snare2` gives `snare3`, not `snare22` -
@@ -5200,6 +5204,64 @@ function makeDefRegistry(opts) {
     say(`${label} "${to}" is a copy of "${id}"`);
     panel.open(to, panel.carry());
     panel.scheduleEval();
+  }
+
+  async function duplicateFromLibrary(id, sc) {
+    const src = await librarySource(id, sc);
+    if (!src) return false;
+    const code = cm.getValue();
+    const rows = allIds(src.scope || null, code);
+    const stem = id.replace(/\d+$/, '') || id;
+    const to = freshDefId(stem, (name) => rows.some((r) => r.id === name), kind);
+    const [from, end, text] = defsEdit(code, [{ id: to, scope: src.scope }], () => src.body);
+    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(end));
+    refoldAll();
+    say(`${label} "${to}" is a copy of library ${label} "${id}"`);
+    panel.open(to, panel.carry());
+    panel.scheduleEval();
+    return true;
+  }
+
+  // The source of a library definition: { scope, body } with body everything after the id. The ★
+  // file's copy is already here; anything else (a hand-written prebake one, a built-in shape) is
+  // asked of the server, which reads the prebake sources - the same lookup a snippet uses to carry
+  // a library name. Null, with a line, when nothing can produce it.
+  async function librarySource(id, sc) {
+    let entry = pinnedEntry(id, sc);
+    if (!entry) {
+      try {
+        const { defs } = await api('POST', '/api/snippets/resolveDefs', { want: [{ kind, id: String(id), scope: sc ?? '' }] });
+        entry = defs?.[0]?.code ? defs[0] : null;
+        if (!entry) say(`can't copy ${label} "${id}" out of the library: ${defs?.[0]?.why ?? 'no source for it'}`, true);
+      } catch (err) {
+        say(`can't copy ${label} "${id}" out of the library: ${err.message ?? err}`, true);
+      }
+    }
+    if (!entry) return null;
+    const inner = entry.code.slice(entry.code.indexOf('(') + 1, entry.code.lastIndexOf(')'));
+    return { scope: entry.scope ?? '', body: splitFirstArg(inner)[1].trim() };
+  }
+
+  /**
+   * Brings library definition `id` into this buffer under its OWN name, so the panel has text to
+   * draw into. The copy shadows the library's (see pin), so nothing changes about what plays; once
+   * it has been drawn into, its ★ reads "differs" and a click files the edit back to the library.
+   * True when the buffer now defines it.
+   */
+  async function adopt(id, sc = null) {
+    if (findDef(cm.getValue(), id, sc)) return true;
+    if (!inLibrary(id, sc)) return false;
+    const src = await librarySource(id, sc);
+    if (!src) return false;
+    const code = cm.getValue();
+    if (findDef(code, id, sc)) return true; // a second open landed while this one was fetching
+    const [from, to, text] = defsEdit(code, [{ id: String(id), scope: src.scope }], () => src.body);
+    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+    refoldAll();
+    const starred = !!pinnedEntry(id, sc);
+    say(`${label} "${id}" copied into this buffer from your library${starred ? ' - click its ★ after editing to update the library' : ''}`);
+    panel.scheduleEval();
+    return true;
   }
 
   // ★ - the library. A definition lives and dies with the buffer it was drawn in; pinning one copies
@@ -5273,7 +5335,7 @@ function makeDefRegistry(opts) {
     }
   }
 
-  return { kind, label, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, materialize, create, remove, rename, duplicate, pinState, pin, unpin };
+  return { kind, label, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, inLibrary, materialize, create, remove, rename, duplicate, adopt, pinState, pin, unpin };
 }
 
 
@@ -5778,17 +5840,24 @@ function prCarry() {
     : null;
 }
 
-/** Puts roll `id`'s definition under the editor. False (and a line) if this buffer hasn't got one. */
-function openRollById(id, carry = null) {
+/**
+ * Puts roll `id`'s definition under the editor. False (and a line) if this buffer hasn't got one.
+ * A library roll (★ or prebake) is copied into the buffer first when `adopt` is on - the panel draws
+ * into buffer text, so that copy is what makes it editable (see makeDefRegistry's adopt). The copy
+ * arrives a fetch later, so this answers true and opens it then.
+ */
+function openRollById(id, carry = null, { adopt = true } = {}) {
   const def = rollDefs.defsInBuffer().find((d) => d.id === String(id));
+  if (!def && adopt && rollDefs.inLibrary(String(id), null)) {
+    rollDefs.adopt(String(id)).then((ok) => {
+      if (!ok) return prSyncRollHead();
+      openRollById(id, carry, { adopt: false });
+      prCanvas.focus({ preventScroll: true });
+    });
+    return true;
+  }
   if (!def) {
-    const known = prPrebakeRolls.includes(String(id));
-    logLine(
-      known
-        ? `roll "${id}" is defined in prebake.js - open it there to edit its notes`
-        : `no roll(${JSON.stringify(String(id))}, …) in this buffer to open`,
-      true
-    );
+    logLine(`no roll(${JSON.stringify(String(id))}, …) in this buffer to open`, true);
     return false;
   }
   openPianorollEditor(def, carry);
@@ -5837,6 +5906,9 @@ function prFollowPlayingRoll() {
   if (!range) return;
   const id = activeIdIn(cm.indexFromPos(range.from), cm.indexFromPos(range.to));
   if (id == null || id === prState.rollId) return;
+  // Following into a library roll the buffer has no copy of stays put: copying one in is a
+  // decision to edit it, and a bar ticking over isn't that (and this runs every frame).
+  if (!rollDefs.findDef(cm.getValue(), id)) return;
   openRollById(id, prCarry());
 }
 
@@ -5885,7 +5957,9 @@ function prUseInCall(id) {
     : null;
   refoldAll();
   logLine(`pianoroll("${was}") now plays "${id}"`);
-  if (id !== prState.rollId) openRollById(id, prCarry());
+  // Playing a library roll here isn't editing it, so the panel only follows one the buffer defines
+  // (opening a library one would copy it in - see openRollById).
+  if (id !== prState.rollId && rollDefs.findDef(cm.getValue(), id)) openRollById(id, prCarry());
   else prSyncRollHead();
   prScheduleEval();
 }
@@ -6057,18 +6131,19 @@ function makeNamePicker({
       }
       // A copy of this one under the next free spelling of its name, opened in its place - the same
       // data, to draw a variation on; the → beside it is then how the call comes to play the copy.
-      // Only this buffer's own: a library entry's data isn't in the buffer to copy (see duplicate).
-      if (row.act === 'open' && row.own) {
+      // A library row copies too - its source is fetched first, so the copy lands a beat later.
+      if (row.act === 'open') {
         const dup = document.createElement('span');
         dup.className = 'def-pick-dup';
         dup.textContent = '⧉';
         dup.title = `duplicate ${row.id}`;
-        dup.addEventListener('mousedown', (e) => {
+        dup.addEventListener('mousedown', async (e) => {
           e.preventDefault();
           e.stopPropagation(); // the row's own handler opens it instead
           idx = i;
           onPick();
-          reg.duplicate(row.id, row.scope);
+          await reg.duplicate(row.id, row.scope);
+          if (!isOpen()) return;
           // The list stays up, moved onto the copy (which the panel now shows, so it is `current`):
           // the → beside it is the likely next gesture, and Enter/arrows start from there. Focus
           // stays in the search box so the keyboard keeps driving the list rather than the canvas.
@@ -23889,8 +23964,8 @@ function snippetRefsIn(code, from, to) {
 /**
  * Those definitions as code to write into the snippet file. The buffer's own are read straight off
  * it; anything else is a library name, and the server is asked for its source - the browser knows
- * the library's NAMES but has no source for them (openRollById says as much when you try to open a
- * prebake roll). A name nothing can produce a definition for comes back carrying `why`, and shows
+ * the library's NAMES but has no source for them (makeDefRegistry's librarySource asks the same
+ * route). A name nothing can produce a definition for comes back carrying `why`, and shows
  * struck through in the dialog rather than being quietly dropped.
  */
 async function snippetCarriesFor(code, from, to) {
@@ -25928,7 +26003,9 @@ function arOpenClipRoll(clip) {
     logLine(`the piano roll draws into the main deck's buffer - bring this song over to deck A to draw "${clip.roll}"`, 'warn');
     return true;
   }
-  if (!rollDefs.findDef(cm.getValue(), clip.roll)) {
+  // A library roll opens as a copy of its notes (openRollById adopts it), never as an empty one
+  // shadowing them.
+  if (!rollDefs.findDef(cm.getValue(), clip.roll) && !rollDefs.inLibrary(clip.roll, null)) {
     // The clip names a roll nothing defines - a hand-edited call, or a definition deleted from the
     // picker. Write it back under THAT name rather than refusing: the clip is the reference, so an
     // empty roll under the name it says is exactly what "nothing drawn in here yet" means.
