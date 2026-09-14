@@ -369,6 +369,11 @@ class OscEngine {
     // which re-captures the state and writes it back into the synth/fx call. Fires per gesture,
     // so consumers must debounce - capturing a state is a disk write plus a gzip.
     this.onPluginEdited = null;
+    // Transport-key feed, ('eval' | 'stop') - Cmd/Ctrl+Return or Cmd/Ctrl+. typed while a plugin's
+    // own editor window has the keyboard. That window belongs to scsynth, so the browser never sees
+    // those keys; poptart's VSTPlugin build sends them here instead of beeping, once
+    // POPTART_HOTKEY_PORT names this port (set on the sclang spawn, inherited by scsynth).
+    this.onHotkey = null;
     // Track->track MIDI routes for the midi() source builder / .midi() injector when the source
     // is another track (not a device): each { name, targetTrackId, slot, note }. Resolved lazily
     // at note time (see _fanoutMidi) so it doesn't matter which track was evaluated first. slot 0
@@ -631,6 +636,7 @@ class OscEngine {
             env: {
               ...process.env,
               POPTART_NODE_PORT: String(this.nodePort),
+              POPTART_HOTKEY_PORT: String(this.nodePort), // read by VSTPlugin's editor windows (see onHotkey)
               POPTART_OSC_IN_PORT: String(this.oscInPort),
               POPTART_SAMPLE_RATE: String(sampleRate),
               POPTART_BLOCK_SIZE: String(bufferSize),
@@ -1833,6 +1839,12 @@ class OscEngine {
       // The user changed something in a plugin's own editor window: [trackId, slot].
       const [track, slot] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onPluginEdited === 'function') this.onPluginEdited(String(track), Number(slot));
+      return;
+    }
+    if (msg.address === '/poptart/hotkey') {
+      // A transport key typed into a plugin's editor window: ['eval' | 'stop'] (see onHotkey).
+      const action = String(msg.args?.[0]?.value ?? msg.args?.[0] ?? '');
+      if ((action === 'eval' || action === 'stop') && typeof this.onHotkey === 'function') this.onHotkey(action);
       return;
     }
     if (!msg.address.endsWith('.reply')) return;

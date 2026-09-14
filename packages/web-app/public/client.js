@@ -488,6 +488,16 @@ setTimeout(editorReady, 2000);
 // panel says so with `keeps-transport`, and those two keys alone reach past it; everything else
 // (⌘S in particular) still belongs to the dialog.
 const TRANSPORT_KEY = (e) => e.key === 'Enter' || (e.key === '.' && !e.shiftKey);
+// Whichever deck was clicked into last (see djSetActiveDeck): its song if it holds one, its code if
+// it doesn't. Outside DJ mode that is always the one editor there is.
+function transportPlay() {
+  if (mixModeOn) djPlayActive();
+  else evaluate(true, { byHand: true });
+}
+// The active deck alone; outside DJ mode (no deck) it is the whole set, as ever.
+function transportStop() {
+  doStop(mixModeOn ? djActiveDeck : null);
+}
 document.addEventListener('keydown', (e) => {
   if (e.defaultPrevented || !(e.metaKey || e.ctrlKey)) return;
   const dialogs = [...document.querySelectorAll('.dir-picker-backdrop:not(.hidden)')];
@@ -497,14 +507,10 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Enter') {
     e.preventDefault();
-    // Whichever deck was clicked into last (see djSetActiveDeck): its song if it holds one, its
-    // code if it doesn't. Outside DJ mode that is always the one editor there is.
-    if (mixModeOn) djPlayActive();
-    else evaluate(true, { byHand: true });
+    transportPlay();
   } else if (e.key === '.' && !e.shiftKey) {
     e.preventDefault();
-    // The active deck alone; outside DJ mode (no deck) it is the whole set, as ever.
-    doStop(mixModeOn ? djActiveDeck : null);
+    transportStop();
   } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
     e.preventDefault();
     stepDeckBQueue(); // mix mode: load the active set's next song into deck B
@@ -890,6 +896,12 @@ window.addEventListener('popstate', async () => {
     bootId = e.data;
   });
   es.addEventListener('reload', reloadWhenUp);
+  // ⌘↵ / ⌘. typed into a plugin's own window, which the page can't hear (see server.js's
+  // broadcastHotkey). No dialog guard: the keyboard was in the plugin, not in a dialog.
+  es.addEventListener('hotkey', (e) => {
+    if (e.data === 'eval') transportPlay();
+    else if (e.data === 'stop') transportStop();
+  });
 })();
 
 // ---------------------------------------------------------------------------------------------
@@ -25730,12 +25742,7 @@ function groupSelection(ed) {
   const from = ed.indexFromPos(ed.getCursor('from'));
   const to = ed.indexFromPos(ed.getCursor('to'));
   const blocks = labelsMod.splitLabeledBlocks(code);
-  const hit = blocks.filter((b) => b.kind !== 'bare' && b.start < to && b.end > from);
-  // Only the OUTERMOST blocks the selection touches: selecting across a whole group means that
-  // group joins as one member, not it and everything inside it twice over.
-  const covered = hit
-    .filter((b) => !hit.some((c) => c !== b && b.start >= c.start && b.end <= c.end))
-    .map((b) => b.label);
+  const covered = mixctlMod ? mixctlMod.selectionMembers(blocks, from, to) : [];
   if (!covered.length) {
     logLine('nothing to group - the selection holds no tracks', true);
     return;

@@ -230,6 +230,20 @@ function codeLineBreaks(code, mask, from, to) {
 }
 
 /**
+ * The labels a cmd+G selection [from, to) makes members: the OUTERMOST blocks it touches, so a
+ * selection across a whole group brings that group as one member, not it and everything inside
+ * it twice over. A group whose body holds the entire selection is where the selection sits, not
+ * part of it - selecting members inside `lows: group({ ... })` makes a subgroup, never wraps lows.
+ */
+export function selectionMembers(blocks, from, to) {
+  const hit = blocks.filter((b) => b.kind !== 'bare' && b.start < to && b.end > from
+    && !(b.group && b.bodyStart != null && b.bodyStart <= from && to <= b.bodyEnd));
+  return hit
+    .filter((b) => !hit.some((c) => c !== b && b.start >= c.start && b.end <= c.end))
+    .map((b) => b.label);
+}
+
+/**
  * The edits that wrap the blocks `labels` in a new `name: group({ ... })` - the cmd+G gesture.
  * Pure text: the selected blocks' lines move inside the braces (indented two spaces, template-
  * safe), and that is the whole of membership - there is no side table to update.

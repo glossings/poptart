@@ -38,9 +38,11 @@ const {
 // `shasum -a 256`. The macOS build is one universal (x86-64 + arm64) zip.
 //
 // The macOS asset comes from poptart's vstplugin fork instead of upstream: it is the official
-// v0.6.2 zip with only the `host` binary rebuilt to fix a probe crash (plugins that automate
-// parameters during their own init - Auto-Tune Pro, sforzando, Arturia V Collection, ... -
-// segfault the stock prober and get wrongly added to the scan cache's ignore list). Fix branch:
+// v0.6.2 zip with the SC binaries (VSTPlugin.scx, VSTPlugin_supernova.scx, host) rebuilt for two
+// fixes. A probe crash: plugins that automate parameters during their own init - Auto-Tune Pro,
+// sforzando, Arturia V Collection, ... - segfault the stock prober and get wrongly added to the
+// scan cache's ignore list. And transport keys: a plugin's editor window swallows ⌘↵ / ⌘. with a
+// system beep, where the fork forwards them to poptart (see OscEngine#onHotkey). Fix branch:
 // https://github.com/glossings/vstplugin/tree/fix/probe-performedit-null-info. Before bumping
 // past v0.6.2, check whether upstream picked up the fix (VST3Plugin::performEdit guarding a
 // null info_) - if so, drop the fork and repin all platforms to upstream.
@@ -49,9 +51,9 @@ const {
 const VSTPLUGIN_UPLOAD_BASE = 'https://git.iem.at/-/project/485/uploads';
 
 const MACOS_ASSET = {
-  file: 'vstplugin_v0.6.2-poptart.1_macOS.zip',
-  url: 'https://github.com/glossings/vstplugin/releases/download/v0.6.2-poptart.1/vstplugin_v0.6.2-poptart.1_macOS.zip',
-  sha256: 'bf1949a7dcd70e6e50e1d4c3e9f357d24027deb65b0768896f264d5c2bc73a52',
+  file: 'vstplugin_v0.6.2-poptart.2_macOS.zip',
+  url: 'https://github.com/glossings/vstplugin/releases/download/v0.6.2-poptart.2/vstplugin_v0.6.2-poptart.2_macOS.zip',
+  sha256: 'ed6a41d23b6da656d5ace26f288366423f5e08237968adf19b1e966caefa4c25',
 };
 
 const VSTPLUGIN_RELEASE = {
@@ -84,19 +86,29 @@ function assetUrl(asset) {
   return asset.url ?? `${VSTPLUGIN_UPLOAD_BASE}/${asset.upload}/${asset.file}`;
 }
 
-// sha256 of the `host` prober inside the *stock* v0.6.2 macOS zip. An installed extension whose
-// prober matches byte-for-byte is exactly upstream v0.6.2 - the build with the probe crash - so
-// setup upgrades it in place. Any other hash (already upgraded, custom build, future version)
-// is somebody's deliberate state and is left alone.
-const STOCK_MACOS_HOST_SHA256 = '9cae4e6537e46f24a2474c668e8675cee2de9b269d934cafc547929f9d62ffb7';
+// sha256 of the `host` prober in every macOS build poptart has shipped or replaced, with what is
+// wrong with it. `host` is rebuilt with every fork release (the editor window code is compiled
+// into it too), so its hash identifies the build: an installed extension matching one of these
+// byte-for-byte is exactly that release, and setup upgrades it in place. Any other hash (the
+// current release, a custom build, a future version) is somebody's deliberate state and is left
+// alone. Add the outgoing release's host here whenever MACOS_ASSET is bumped.
+const OUTDATED_MACOS_HOSTS = {
+  // upstream v0.6.2
+  '9cae4e6537e46f24a2474c668e8675cee2de9b269d934cafc547929f9d62ffb7':
+    'the stock v0.6.2 prober, which crashes on some plugins (Auto-Tune Pro, sforzando, ...) during scans',
+  // v0.6.2-poptart.1
+  '92f2e3d957f811190077fd3249361ed9620e0f11938b801f69387d3918174030':
+    'an older poptart build, whose plugin windows beep at ⌘↵ / ⌘. instead of playing and stopping',
+};
 
-// The installed extension dir whose plugins/host is the stock v0.6.2 macOS prober, or null.
-// `dirs`/`stockSha` are injectable for tests.
-function stockHostDir({ dirs = vstPluginExtensionDirs(), stockSha = STOCK_MACOS_HOST_SHA256 } = {}) {
-  if (process.platform !== 'darwin') return null; // only the macOS asset carries the patch
+// The first installed extension dir whose plugins/host is an outdated macOS build, as
+// { dir, why }, or null. `dirs`/`outdated` are injectable for tests.
+function outdatedHostDir({ dirs = vstPluginExtensionDirs(), outdated = OUTDATED_MACOS_HOSTS } = {}) {
+  if (process.platform !== 'darwin') return null; // only the macOS asset carries the fixes
   for (const dir of dirs) {
     try {
-      if (sha256File(path.join(dir, 'plugins', 'host')) === stockSha) return dir;
+      const why = outdated[sha256File(path.join(dir, 'plugins', 'host'))];
+      if (why) return { dir, why };
     } catch {
       // no prober here - not this dir
     }
@@ -261,27 +273,25 @@ async function runSetup({ log = console } = {}) {
     warn(`SuperCollider not found - ${SC_INSTALL_HINT} (or set POPTART_SCLANG to your sclang binary)`);
   }
 
-  const staleDir = vstPluginExtensionInstalled() ? stockHostDir() : null;
-  if (staleDir) {
-    // Stock v0.6.2's prober crashes on plugins that automate parameters during init (Auto-Tune
-    // Pro, sforzando, ...) and wrongly puts them on the scan cache's ignore list. Upgrade in
-    // place when the stock copy is in the dir we install to; a system-wide copy can't be fixed
-    // from here (installing beside it would duplicate the classes and break sclang's boot).
-    if (staleDir === vstPluginExtensionDirs()[0]) {
-      log.log('[poptart]   ~ VSTPlugin found, but with the stock v0.6.2 prober (probe-crash bug) - upgrading');
+  const stale = vstPluginExtensionInstalled() ? outdatedHostDir() : null;
+  if (stale) {
+    // An outdated build (see OUTDATED_MACOS_HOSTS). Upgrade in place when it is in the dir we
+    // install to; a system-wide copy can't be fixed from here (installing beside it would
+    // duplicate the classes and break sclang's boot).
+    if (stale.dir === vstPluginExtensionDirs()[0]) {
+      log.log(`[poptart]   ~ VSTPlugin found, but it is ${stale.why} - upgrading`);
       try {
         await installVstPlugin({ log });
         summary.vstPlugin = 'upgraded';
       } catch (err) {
         warn(
-          `could not upgrade the VSTPlugin prober (${err.message}). Some plugins will fail their ` +
-            'scan probe until it is upgraded - reinstall from https://github.com/glossings/vstplugin/releases',
+          `could not upgrade VSTPlugin (${err.message}) - it is ${stale.why}. Reinstall from ` +
+            'https://github.com/glossings/vstplugin/releases',
         );
       }
     } else {
       warn(
-        `VSTPlugin at ${staleDir} has the stock v0.6.2 prober, which crashes on some plugins ` +
-          '(Auto-Tune Pro, sforzando, ...) during scans. Replace that install with the macOS zip ' +
+        `VSTPlugin at ${stale.dir} is ${stale.why}. Replace that install with the macOS zip ` +
           'from https://github.com/glossings/vstplugin/releases',
       );
     }
@@ -330,8 +340,8 @@ module.exports = {
   installVstPlugin,
   pickAsset,
   assetUrl,
-  stockHostDir,
-  STOCK_MACOS_HOST_SHA256,
+  outdatedHostDir,
+  OUTDATED_MACOS_HOSTS,
   sha256File,
   extractZip,
   sclangStatus,

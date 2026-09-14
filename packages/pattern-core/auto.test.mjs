@@ -4,7 +4,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { _auto, liveAuto, auto, setPatternWarn } from './src/signal.mjs';
+import { _auto, liveAuto, auto, setPatternWarn, setClipsOwner, setClipsResolver } from './src/signal.mjs';
+import { ArrangeClock } from './src/arrange.mjs';
 import { parseAutoPoints, serializeAutoPoints, sampleAutoPoints } from './src/shape.mjs';
 import { clearRolls, setRollLayer, lookupAuto, autoIds } from './src/rolls.mjs';
 
@@ -152,4 +153,33 @@ test('auto() is an ordinary signal - arithmetic rides along', () => {
   fresh();
   _auto('semis', '0,0 4,1');
   assert.equal(auto('semis').mul(12).sample(0, 1, 4), 12);
+});
+
+test('with an arrangement, auto() reads the song clock - playing from the marker reads the lane from there', () => {
+  fresh();
+  _auto('rise', '0,0 16,1');
+  const clock = new ArrangeClock({ len: 32 });
+  setClipsOwner('a', 'lead');
+  setClipsResolver((deck) => (deck === 'a' ? { clips: [], posAt: (c) => clock.posAt(c), arranged: true } : null));
+  try {
+    const sig = auto('rise');
+    assert.equal(sig.sample(0, 1, 4), 0.25); // unseeked: song position is the cycle
+    clock.seek(0, 8); // play from bar 8, with the transport starting at cycle 0
+    assert.equal(sig.sample(0, 1, 0), 0.5); // not bar 0's value
+    assert.equal(sig.sample(0, 1, 4), 0.75);
+  } finally {
+    setClipsResolver(null);
+    setClipsOwner('a', null);
+  }
+});
+
+test('without an arrangement, auto() stays on the transport cycle', () => {
+  fresh();
+  _auto('rise', '0,0 16,1');
+  setClipsResolver(() => ({ clips: [], posAt: null, arranged: false }));
+  try {
+    assert.equal(auto('rise').sample(0, 1, 8), 0.5);
+  } finally {
+    setClipsResolver(null);
+  }
 });

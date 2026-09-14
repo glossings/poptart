@@ -2306,6 +2306,9 @@ function wireEngine() {
   engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackLabel(trackId), slot, name, index, value);
   // Any edit inside a plugin's own window - what auto-pin captures back into the code.
   engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackLabel(trackId), slot);
+  // ⌘↵ / ⌘. typed into a plugin's own window - the browser never sees those keys, so the page is
+  // told to run them (see broadcastHotkey).
+  engine.onHotkey = broadcastHotkey;
   // Peak level of a track tapped for recording - what the record panel's meter draws.
   engine.onRecLevel = (trackId, left, right) => handleRecLevel(trackLabel(trackId), left, right);
   // A song player's actual playhead, ~2/sec - the drift servo's measurement (songs phase 4).
@@ -6499,6 +6502,14 @@ function broadcastReload() {
   reloadTimer = setTimeout(() => {
     for (const res of reloadClients) res.write('event: reload\ndata: 1\n\n');
   }, 80);
+}
+
+// The same stream carries ⌘↵ / ⌘. typed into a plugin's own window (see OscEngine#onHotkey): it is
+// the one channel every page holds open for as long as it lives, and a browser has too few
+// connections to one host to spend another on two keys. Not settled like a reload - each press is
+// a press.
+function broadcastHotkey(action) {
+  for (const res of reloadClients) res.write(`event: hotkey\ndata: ${action}\n\n`);
 }
 
 try {

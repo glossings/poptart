@@ -13,8 +13,8 @@ const path = require('node:path');
 const {
   pickAsset,
   assetUrl,
-  stockHostDir,
-  STOCK_MACOS_HOST_SHA256,
+  outdatedHostDir,
+  OUTDATED_MACOS_HOSTS,
   sha256File,
   sclangStatus,
   findSclangSymlinkOnPath,
@@ -102,8 +102,9 @@ test('sclangStatus trusts a POPTART_SCLANG override', () => {
   }
 });
 
-test('stockHostDir finds the dir whose prober matches the stock hash, in order', () => {
-  // Real hashing over fixture files; the stock sha is injected so the test controls it.
+test('outdatedHostDir finds the dir whose prober matches an outdated hash, in order, with the reason', () => {
+  if (process.platform !== 'darwin') return; // only the macOS asset is ever upgraded
+  // Real hashing over fixture files; the outdated table is injected so the test controls it.
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-stockhost-'));
   try {
     const mk = (name, content) => {
@@ -113,20 +114,26 @@ test('stockHostDir finds the dir whose prober matches the stock hash, in order',
       return dir;
     };
     const stock = mk('user', 'stock bytes');
-    const patched = mk('system', 'patched bytes');
-    const stockSha = sha256File(path.join(stock, 'plugins', 'host'));
-    // stock prober found; non-matching and missing dirs skipped
-    assert.strictEqual(stockHostDir({ dirs: [patched, stock], stockSha }), stock);
-    assert.strictEqual(stockHostDir({ dirs: [patched, path.join(base, 'nope')], stockSha }), null);
+    const older = mk('older', 'older poptart bytes');
+    const current = mk('system', 'current bytes');
+    const outdated = {
+      [sha256File(path.join(stock, 'plugins', 'host'))]: 'stock',
+      [sha256File(path.join(older, 'plugins', 'host'))]: 'older poptart',
+    };
+    // an outdated prober found; non-matching and missing dirs skipped
+    assert.deepStrictEqual(outdatedHostDir({ dirs: [current, stock], outdated }), { dir: stock, why: 'stock' });
+    assert.deepStrictEqual(outdatedHostDir({ dirs: [current, older], outdated }), { dir: older, why: 'older poptart' });
+    assert.strictEqual(outdatedHostDir({ dirs: [current, path.join(base, 'nope')], outdated }), null);
     // earlier dir wins when both match (user dir is listed first in production)
-    const stock2 = mk('user2', 'stock bytes');
-    assert.strictEqual(stockHostDir({ dirs: [stock, stock2], stockSha }), stock);
+    assert.strictEqual(outdatedHostDir({ dirs: [older, stock], outdated }).dir, older);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
 
-test('the pinned stock-host hash is a full digest and differs from the patched asset hash', () => {
-  assert.match(STOCK_MACOS_HOST_SHA256, /^[0-9a-f]{64}$/);
-  assert.notStrictEqual(STOCK_MACOS_HOST_SHA256, pickAsset('darwin', 'arm64').sha256);
+test('the outdated-host hashes are full digests, and the pinned asset is not among them', () => {
+  const hashes = Object.keys(OUTDATED_MACOS_HOSTS);
+  assert.ok(hashes.length >= 2);
+  for (const sha of hashes) assert.match(sha, /^[0-9a-f]{64}$/);
+  assert.ok(!hashes.includes(pickAsset('darwin', 'arm64').sha256));
 });

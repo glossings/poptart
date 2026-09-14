@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits, groupWrapEdits, ungroupEdits, extractFromGroupEdits, isGroupBlock, arrangeClipEdits } from './src/mixctl.mjs';
+import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits, groupWrapEdits, ungroupEdits, extractFromGroupEdits, isGroupBlock, arrangeClipEdits, selectionMembers } from './src/mixctl.mjs';
 import { splitLabeledBlocks } from './src/labels.mjs';
 
 // Apply an edit the way CodeMirror would, so assertions read as the resulting buffer.
@@ -244,6 +244,26 @@ test('groupWrapEdits: wrapping inside a group makes a subgroup', () => {
   const blocks = splitLabeledBlocks(out);
   assert.deepEqual(blocks.map((b) => [b.label, b.parent]),
     [['drums', null], ['kicks', 'drums'], ['kick', 'kicks'], ['snare', 'drums']]);
+});
+
+test('selectionMembers: a selection inside a group picks the members, not the group around them', () => {
+  const code = 'setbpm(144)\nlows: group({\n  kick: pianoroll("kick").synth("Kick Ninja")\n    .fx("Pro-Q 3").width(0)\n'
+    + '  lowest: pianoroll("kick")\n    .fx("Pro-Q 3").preset("lowest")\n  mid: pianoroll("midkick")\n'
+    + '    .fx("Pro-Q 3").preset("mid")\n  high: pianoroll("high").synth("Hive")\n    .fx("Pro-Q 3").preset("high")\n'
+    + '}).postgain(0.61)';
+  const blocks = splitLabeledBlocks(code);
+  const lineStart = (s) => code.indexOf(s) - 2;
+  const bodyEnd = code.indexOf('})');
+  // Whole lines, from "lowest:" through the last high line - the drag ends at the start of "})".
+  assert.deepEqual(selectionMembers(blocks, lineStart('lowest:'), bodyEnd), ['lowest', 'mid', 'high']);
+  // Mid-line to mid-line inside the body, too.
+  assert.deepEqual(selectionMembers(blocks, code.indexOf('mid:') + 1, code.indexOf('"high")')), ['mid', 'high']);
+  // Reaching past the close brings the whole group as one member.
+  assert.deepEqual(selectionMembers(blocks, lineStart('lowest:'), code.length), ['lows']);
+  const out = appliedAll(code, groupWrapEdits(code, selectionMembers(blocks, lineStart('lowest:'), bodyEnd), 'upper'));
+  assert.deepEqual(splitLabeledBlocks(out).map((b) => [b.label, b.parent]), [
+    ['$1', null], ['lows', null], ['kick', 'lows'], ['upper', 'lows'], ['lowest', 'upper'], ['mid', 'upper'], ['high', 'upper'],
+  ]);
 });
 
 test('groupWrapEdits: setup between the tracks is wrapped along; another track is refused', () => {

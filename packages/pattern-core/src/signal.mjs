@@ -4974,9 +4974,15 @@ function defineAuto(id, str, quiet) {
  * heard between notes too. Resolution is LAZY like pianoroll's - the registry is read every
  * sample - so the definition may sit anywhere in the buffer, and a lane being redrawn is heard
  * without a re-eval.
+ *
+ * "Song position" is the arrangement's song clock when the buffer has one (see arrange.mjs's
+ * ArrangeClock), read through the same resolver clips() uses: playing from the painter's marker
+ * seeks that clock, and a lane reading raw transport cycles would start from bar 0 while every
+ * clip started from the marker. Without an arrangement the transport cycle is the song.
  */
 export function auto(id) {
   const key = String(id).trim();
+  const owner = { ...clipsOwner }; // which deck's song this lane is read against, fixed at evaluation
   let warned = false; // one line per unknown name, not one per poll tick
   return new Sig((t, cps, pos) => {
     const points = lookupAuto(key);
@@ -4987,7 +4993,9 @@ export function auto(id) {
       }
       return null;
     }
-    return sampleAutoPoints(points, pos ?? t * cps);
+    const cycle = pos ?? t * cps;
+    const posAt = clipsResolver?.(owner.deck, owner.label)?.posAt;
+    return sampleAutoPoints(points, posAt ? posAt(cycle) : cycle);
   });
 }
 
