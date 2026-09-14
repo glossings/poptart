@@ -24,7 +24,7 @@
 //    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
-import { sampleBound, CHANNEL_DEFAULTS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, noteGateFromGrid } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
@@ -151,7 +151,7 @@ function modulatorKind(sig) {
 }
 
 // Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
-const MAX_CHAIN_SLOTS = 8;
+const MAX_CHAIN_SLOTS = MAX_FX_SLOTS + 1;
 
 // ---------------------------------------------------------------------------------------------
 // Sig#log() - one console line per event a flagged pattern fires.
@@ -647,7 +647,8 @@ export class Scheduler {
     if (sig.instrument) {
       this.engine.loadInstrument(this.trackId, sig.instrument);
     }
-    sig.fxChain.forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
+    // Effects past the engine's last slot were already warned about in .fx() and have nowhere to go.
+    sig.fxChain.slice(0, MAX_FX_SLOTS).forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
 
     // An .fx(...) removed from the code must actually stop sounding (and release its plugin):
     // empty every slot past the new chain's end. All trailing slots are cleared, not a diff

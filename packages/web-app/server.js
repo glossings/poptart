@@ -5140,7 +5140,8 @@ const routes = {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     const slots = [];
     for (const [trackId, chain] of mappedEngine.chains) {
-      for (let slot = 0; slot < chain.length; slot++) {
+      // A slot past the engine's last one never loads (.fx() already warned), so don't wait on it.
+      for (let slot = 0; slot < Math.min(chain.length, patternCore.MAX_FX_SLOTS + 1); slot++) {
         const plugin = chain[slot];
         if (!plugin) continue;
         if (!paramsByPlugin.has(plugin)) {

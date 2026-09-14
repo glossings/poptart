@@ -76,7 +76,9 @@ var excludePaths = ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
 var parallelScan = ("POPTART_VST_PARALLEL".getenv ? "0") == "1";
 // Shared by the boot scan and the /poptart/scanPlugins rescan, so the two can't drift.
 var searchOptions = (timeout: 20, exclude: excludePaths, parallel: parallelScan);
-var maxSlots = 8; // slot 0 = instrument, 1..7 = effects
+// Slot 0 = instrument, 1..20 = effects. An empty slot is a pass-through costing ~0.002% of a core
+// (offline render: 15 tracks of 21 empty slots vs 8 slots, 09-14), and adds no latency.
+var maxSlots = 21;
 var maxBusSends = 4; // a track can send to this many named buses at once (Sig#bus); must match the
                      // busOut1..N / busSend1..N controls hardcoded in the track SynthDef below
 // scsynth's own port, overridable so a second poptart stack (tests, parallel session) doesn't
@@ -315,18 +317,18 @@ buildTrackDef = { |key|
     // back-panel jack nobody is monitoring. Both are silence with the meters moving; playChannels
     // is the count that is actually being listened to.
     var numPairs = max(1, min(playChannels, server.options.numOutputBusChannels) div: 2);
-    // scBus1..7 are per-fx-slot auxiliary (sidechain) input buses; scSend/scSendGain are this
-    // track's own sidechain send (see Sig#sidechain). Node fills the sc* args with parked buses
-    // by default (silentBus for the aux inputs, trashBus for the send) and repoints them when a
-    // route is set up - see scArgsFor and the setSidechain OSCdef.
+    // scBus1..N (one per fx slot, named controls so the count follows maxSlots) are the slots'
+    // auxiliary (sidechain) input buses; scSend/scSendGain are this track's own sidechain send (see
+    // Sig#sidechain). Node fills the sc* args with parked buses by default (silentBus for the aux
+    // inputs, trashBus for the send) and repoints them when a route is set up - see scArgsFor and
+    // the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, postgain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
         bend = 0, bendrange = 2, bendOut,
         trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
-        recOut, recSend = 0, mixOut, mixSend = 0,
-        scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7|
+        recOut, recSend = 0, mixOut, mixSend = 0|
         var sig = Silent.ar(2);
-        var scBuses = [scBus1, scBus2, scBus3, scBus4, scBus5, scBus6, scBus7];
+        var scBuses = (1..maxSlots - 1).collect { |i| ("scBus" ++ i).asSymbol.kr(0) };
         var mid, side; // the channel strip's mid/side pair (see the width control below)
         var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv, djq; // the DJ stage (see below)
         // The channel's DJ fader, read out here because it applies to the named-bus SENDS as well
@@ -393,7 +395,7 @@ buildTrackDef = { |key|
                 // `active`, the bypass flipped on only once a plugin actually loads (an empty
                 // VSTPlugin slot outputs silence, not pass-through, so an unloaded slot must read
                 // as fully dry whatever else says), and `wet`, the user's own mix control
-                // (Sig#wet, a channel control named wet1..wet7 - see CHANNEL_DEFAULTS).
+                // (Sig#wet, a channel control named wet1..wetN - see CHANNEL_DEFAULTS).
                 //
                 // Linear rather than equal-power: a wet knob's endpoints have to be EXACTLY the
                 // dry signal and EXACTLY the plugin's, which is what makes wet 0 a true bypass
@@ -549,10 +551,8 @@ scArgsFor = {
     [\scSend, trashBus.index, \scSendGain, 1,
      \recOut, trashBus.index, \recSend, 0,
      \mixOut, trashBus.index, \mixSend, 0,
-     \busOut1, trashBus.index, \busOut2, trashBus.index, \busOut3, trashBus.index, \busOut4, trashBus.index,
-     \scBus1, silentBus.index, \scBus2, silentBus.index, \scBus3, silentBus.index,
-     \scBus4, silentBus.index, \scBus5, silentBus.index, \scBus6, silentBus.index,
-     \scBus7, silentBus.index];
+     \busOut1, trashBus.index, \busOut2, trashBus.index, \busOut3, trashBus.index, \busOut4, trashBus.index]
+    ++ (1..maxSlots - 1).collect { |i| [("scBus" ++ i).asSymbol, silentBus.index] }.flatten;
 };
 // Dict key for a sidechain route, identifying the aux input by (target track, fx slot).
 scKey = { |targetKey, slot| (targetKey.asString ++ "#" ++ slot).asSymbol };

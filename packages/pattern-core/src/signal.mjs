@@ -553,6 +553,11 @@ export class Sig {
   fx(pluginId, config) {
     assertPluginName('fx', pluginId);
     const slot = this.fxChain.length + 1; // this fx's chain slot (0 = instrument)
+    if (slot === MAX_FX_SLOTS + 1) {
+      // Said once, at the first effect that misses: the engine's chain has a fixed length (see
+      // maxSlots in poptart.scd), so this one and every .fx() after it never load. The rest plays.
+      warnUser(`[signal] a track holds ${MAX_FX_SLOTS} effects - .fx("${pluginId}") is effect ${slot} and won't load, nor will any after it.`);
+    }
     return this._clone({
       fxChain: [...this.fxChain, pluginId],
       ...(config?.state ? { slotStates: { ...this.slotStates, [slot]: config.state } } : {}),
@@ -3683,7 +3688,7 @@ export function bendRangeWarning(semitones, range) {
 // rest - real controls on the track synth, addressed at pseudo-slot -1 - rather than plugin
 // parameters, which is what lets them ramp, take a modulator and reset on re-eval for free. 1 is
 // the plugin's own output, so a chain nobody has called .wet() on sounds exactly as it always did.
-export const MAX_FX_SLOTS = 7; // must match maxSlots - 1 in poptart.scd (slot 0 is the instrument)
+export const MAX_FX_SLOTS = 20; // must match maxSlots - 1 in poptart.scd (slot 0 is the instrument)
 export const CHANNEL_DEFAULTS = {
   gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1,
   bend: 0, bendrange: DEFAULT_BEND_RANGE,

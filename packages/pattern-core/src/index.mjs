@@ -3,7 +3,7 @@ export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, 
 // Controls as top-level builders (Strudel's control patterns) - the method form of each still lives
 // on Sig; these are what let a combinator aim at one channel, x.mul(speed("-1")) / x.mul(clip(2)).
 export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, vel, clip, nudge, swing, swinggrid, SAMPLER_CONTROL_NAMES } from './signal.mjs';
-export { channelAt, soundingEnd, timeShift, endEdgeStep, withSoundingSpan } from './signal.mjs';
+export { channelAt, soundingEnd, timeShift, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';

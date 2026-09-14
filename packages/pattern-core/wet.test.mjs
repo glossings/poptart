@@ -1,6 +1,6 @@
 // .wet() - the per-fx-slot dry/wet mix. An effect turned down to 0 is a bypass, so a wet lane is
 // how an effect comes and goes across a song without a plugin being spawned mid-set. The controls
-// are channel controls (wet1..wet7, pseudo-slot -1), which is what gets them ramps, modulators and
+// are channel controls (wet1..wet20, pseudo-slot -1), which is what gets them ramps, modulators and
 // re-eval teardown for free; the crossfade itself lives in the track SynthDef, pinned at the
 // bottom of this file by reading the source.
 
@@ -67,8 +67,8 @@ test('past the engine\'s last fx slot it warns and leaves the pattern alone', ()
   assert.equal(ok.value.channel[`wet${MAX_FX_SLOTS}`].sample(0, 1, 0), 0.5);
 
   const over = capture(() => sig.fx('Pro-C 2').wet(0.5));
-  assert.equal(over.lines.length, 1);
-  assert.match(over.lines[0], /only reaches the first 7 effects/);
+  assert.equal(over.lines.length, 2);
+  assert.match(over.lines[1], new RegExp(`only reaches the first ${MAX_FX_SLOTS} effects`));
   assert.equal(over.value.channel[`wet${MAX_FX_SLOTS + 1}`], undefined);
 });
 
@@ -101,6 +101,21 @@ test('wet is polled as a slot -1 channel control', () => {
   sch.setPattern(note('c2*4').synth('Serum 2').fx('ValhallaRoom').wet(0.3));
   sch._pollGenericParams(0);
   assert.deepEqual(channelSends(callsTo, 'wet1'), [0.3]);
+});
+
+test('an .fx() past the last slot warns once, and the scheduler never loads it', () => {
+  let sig = note('c2*4').synth('Serum 2');
+  for (let i = 0; i < MAX_FX_SLOTS; i++) sig = sig.fx('ValhallaRoom');
+  const over = capture(() => sig.fx('ShaperBox 3').fx('OTT'));
+  assert.equal(over.lines.length, 1);
+  assert.match(over.lines[0], /holds 20 effects - \.fx\("ShaperBox 3"\) is effect 21/);
+
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'pad' });
+  sch.setPattern(over.value);
+  const slots = callsTo('loadEffect').map((c) => c.args[2]);
+  assert.equal(slots.length, MAX_FX_SLOTS);
+  assert.equal(Math.max(...slots), MAX_FX_SLOTS);
 });
 
 test('dropping the .wet() call snaps that slot back to fully wet', () => {
