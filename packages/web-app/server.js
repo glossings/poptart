@@ -2437,10 +2437,10 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
@@ -5100,7 +5100,9 @@ const routes = {
   // A one-off audition of a chop from the slice editor, THROUGH the track the panel was opened
   // from: the engine plays it on that track, so it comes out through the track's own chain - its
   // fx, its gain and postgain, its sends - which is what the pattern will sound like. Body:
-  // { trackId, ref, index, begin, end } to play; { trackId, stop: true } to hush the track (the
+  // { trackId, ref, index, begin, end, attack?, decay?, sustain?, release?, speed?, stretch? } to
+  // play (the envelope panel sends the envelope it is drawing, in seconds, at the rate it draws it
+  // at); { trackId, stop: true } to hush the track (the
   // client asks only while the transport is paused, since a hush takes every voice on the track).
   // Not logged, like previewNote: a chop heard while chopping is not an event played. ok: false
   // when there is nothing to play through yet - the track is not evaluated, or its source is
@@ -5119,9 +5121,14 @@ const routes = {
     const end = Number(body.end);
     if (!ref || !Number.isFinite(begin) || !Number.isFinite(end)) return { status: 200, body: { ok: false, why: 'bad request' } };
     const now = engine.getTime();
-    // As recorded: no fit, no slice set, and an event long enough that nothing gates it - the
-    // chop plays out at the rate the panel's own player would play it, only through the track.
+    // As recorded unless the body says otherwise: no fit, no slice set, and an event long enough that
+    // nothing gates it - the chop plays out at the rate the panel's own player would play it, only
+    // through the track.
     const cfg = { index: Math.round(Number(body.index) || 0), begin, end, vel: 1 };
+    for (const key of ['attack', 'decay', 'sustain', 'release', 'speed', 'stretch']) {
+      const v = Number(body[key]);
+      if (body[key] != null && Number.isFinite(v)) cfg[key] = v;
+    }
     const info = engine.playSample(tid, ref, cfg, now, now + PREVIEW_SLICE_MAX_SEC);
     return { status: 200, body: { ok: !info?.skipped, why: info?.skipped ?? null, durSec: info?.durSec ?? null } };
   },

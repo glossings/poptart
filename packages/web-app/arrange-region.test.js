@@ -539,7 +539,9 @@ test('cmd+G groups the selection, and the gesture asks for a name in place', () 
   assert.match(SRC, /'Cmd-G': \(ed\) => groupSelection\(ed\),/);
   assert.match(SRC, /'Shift-Ctrl-G': \(ed\) => groupSelection\(ed\),/, 'plain ctrl\+G is the mixer');
   const sel = grab('groupSelection');
-  assert.match(sel, /\.filter\(\(b\) => b\.kind !== 'bare' && b\.start < to && b\.end > from\)/,
+  // The membership rule lives in pattern-core (mixctl's selectionMembers, tested there): the
+  // outermost blocks the selection touches, never a group whose body holds the whole selection.
+  assert.match(sel, /const covered = mixctlMod \? mixctlMod\.selectionMembers\(blocks, from, to\) : \[\];/,
     'the tracks the selection covers are the members');
   assert.match(sel, /askGroupName\(ed, covered\[0\], name, \(chosen\) => arCreateGroup\(covered, chosen, ed\)\)/);
   assert.match(SRC, /items\.push\(\['group these tracks…', \(\) => groupSelection\(ed\)/, 'and it is on the editor menu too');

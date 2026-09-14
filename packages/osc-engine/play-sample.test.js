@@ -487,3 +487,47 @@ test('splice keeps a negative speed negative - the chop plays backwards and stil
   assert.ok(Math.abs(args[ARG.speed] - -4.8) < 1e-9);
   assert.ok(Math.abs(args[ARG.dur] - 0.25) < 1e-9);
 });
+
+// Envelope args ride right after `cut` (see playSample's _send call).
+const ENV = { attack: 13, decay: 14, sustain: 15, release: 16 };
+
+test('envelope times are seconds, whatever the sample length or speed', () => {
+  // The same attack on a 4.8s file and a 0.3s one, at two speeds: the voice gets the same seconds.
+  for (const [duration, speed] of [[4.8, 1], [0.3, 1], [4.8, 2]]) {
+    const { engine, sent } = engineWithFile(duration);
+    engine.playSample('t1', 'breaks', { speed, attack: 0.005, decay: 0.2, sustain: 0.4, release: 0.1, secPerCycle: 2 }, 0, 1);
+    const args = sent.pop().args;
+    assert.strictEqual(args[ENV.attack], 0.005, `${duration}s at ${speed}x`);
+    assert.strictEqual(args[ENV.decay], 0.2);
+    assert.strictEqual(args[ENV.sustain], 0.4);
+    assert.strictEqual(args[ENV.release], 0.1);
+  }
+});
+
+test('envscale multiplies attack, decay and release but not sustain', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { attack: 0.1, decay: 0.2, sustain: 0.5, release: 0.3, envScale: 0.5, secPerCycle: 2 }, 0, 1);
+  const args = sent.pop().args;
+  assert.ok(Math.abs(args[ENV.attack] - 0.05) < 1e-12);
+  assert.ok(Math.abs(args[ENV.decay] - 0.1) < 1e-12);
+  assert.strictEqual(args[ENV.sustain], 0.5, 'sustain is a level');
+  assert.ok(Math.abs(args[ENV.release] - 0.15) < 1e-12);
+});
+
+test('unset envelope sends the declick defaults, and a negative scale sends 0', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { secPerCycle: 2 }, 0, 1);
+  assert.deepStrictEqual(sent.pop().args.slice(ENV.attack, ENV.release + 1), [0, 0, 1, 0]);
+  engine.playSample('t1', 'breaks', { attack: 0.1, release: 0.2, envScale: -1, secPerCycle: 2 }, 0, 1);
+  const args = sent.pop().args;
+  assert.strictEqual(args[ENV.attack], 0);
+  assert.strictEqual(args[ENV.release], 0);
+});
+
+test('playSample reports the envelope seconds it sent', () => {
+  const { engine } = engineWithFile(4.8);
+  const info = engine.playSample('t1', 'breaks', { attack: 0.1, release: 0.4, envScale: 2, secPerCycle: 2 }, 0, 1);
+  assert.ok(Math.abs(info.attack - 0.2) < 1e-12);
+  assert.ok(Math.abs(info.release - 0.8) < 1e-12);
+  assert.strictEqual(info.decay, 0);
+});

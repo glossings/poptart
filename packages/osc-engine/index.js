@@ -282,6 +282,21 @@ const MIX_SPEC_TRACK_MAX = 8;
 const wrap = (i, n) => ((i % n) + n) % n;
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
 
+/**
+ * A sampler event's envelope times, in the seconds the SC voice takes: attack, decay and release
+ * as the pattern wrote them, each times `envScale` (.envscale(), 1 when unset). Nothing here knows
+ * the note's length - `.envscale(dur())` is how a pattern asks for times that follow it. A negative
+ * or non-numeric result is 0, which the voice floors to its declick fade.
+ */
+function envelopeSeconds(cfg) {
+  const scale = Number.isFinite(cfg.envScale) ? cfg.envScale : 1;
+  const secs = (v) => {
+    const out = (Number.isFinite(v) ? v : 0) * scale;
+    return out > 0 ? out : 0;
+  };
+  return { attack: secs(cfg.attack), decay: secs(cfg.decay), release: secs(cfg.release) };
+}
+
 function toOscArgs(values) {
   return values.map((v) => {
     if (typeof v === 'string') return { type: 's', value: v };
@@ -1230,7 +1245,7 @@ class OscEngine {
    * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, flip,
    * stretch, fit ('auto' | measures), slice, slices (a hand-drawn set - start positions, or a map
    * of them keyed by file - which `slice` then indexes instead of the file's own transients),
-   * note, vel, attack, decay, sustain, release,
+   * note, vel, attack, decay, sustain, release (seconds, bar sustain), envScale (multiplies the three times),
    * loopWrap (0 file | 1 window), loopDir (0 forward | 1 pingpong), secPerCycle }.
    * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
@@ -1382,6 +1397,7 @@ class OscEngine {
     // ("long/2", "long@2", "long _"). Loops already gate there; the small margin avoids
     // cutting a voice that ends naturally anyway.
     const cut = !loop && durSec > eventSec + 0.005 ? 1 : 0;
+    const env = envelopeSeconds(cfg);
     this._send('/poptart/playSample', [
       trackId,
       ref,
@@ -1396,20 +1412,20 @@ class OscEngine {
       this._latency(offsetSec),
       amp,
       cut,
-      // ADSR amplitude envelope: attack/decay/release multiply the played duration (SC scales
-      // them by dur - .attack(2) ramps over 2*dur), sustain is a 0..1 level. Defaults of 0/0/1/0
-      // floor down to the sampler's original tiny declick envelope, so unset ADSR is unchanged.
-      cfg.attack ?? 0,
-      cfg.decay ?? 0,
+      // ADSR amplitude envelope: attack/decay/release in seconds, each times .envscale() (see
+      // envelopeSeconds), sustain a 0..1 level. Defaults of 0/0/1/0 floor down to the sampler's
+      // original tiny declick envelope, so unset ADSR is unchanged.
+      env.attack,
+      env.decay,
       cfg.sustain ?? 1,
-      cfg.release ?? 0,
+      env.release,
       loopLo,
       loopHi,
       loopEntry,
       pingpong,
     ]);
     return {
-      index: idx, begin, end, loop, speed, stretch, durSec, cut, amp, fileSec: file.duration,
+      index: idx, begin, end, loop, speed, stretch, durSec, cut, amp, fileSec: file.duration, ...env,
       loopWrap: windowed ? 'window' : 'file', loopDir: pingpong ? 'pingpong' : 'forward',
     };
   }
@@ -1877,6 +1893,7 @@ class OscEngine {
 
 module.exports = {
   OscEngine,
+  envelopeSeconds,
   MIX_BAND_FREQS,
   MIX_SPEC_TRACK_MAX,
   resolveSclangPath,

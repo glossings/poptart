@@ -188,6 +188,12 @@ const API_DOCS = {
     desc: 'An ADSR envelope, triggered by the track\'s notes. attack, decay and release are in seconds; sustain is a level from 0 to 1. curve shapes each segment: negative is exponential, 0 is linear, positive bows outward.',
     eg: 'gain(env({ attack: 0.01, release: 0.3 }))',
   },
+  dur: {
+    kind: 'builder',
+    sig: 'dur()',
+    desc: 'The length of the current note, in seconds. Read by a sampler control, it is the length of the note being played; anywhere else, the length of the most recent note to start.',
+    eg: 's("pad").attack(0.25).release(0.5).envscale(dur())',
+  },
   auto: {
     kind: 'builder',
     sig: 'auto(name)',
@@ -416,7 +422,7 @@ const API_DOCS = {
   end: { kind: 'both', sig: 'end(pos)', desc: 'Where in the sample playback stops, from 0 (the start) to 1 (the end).', eg: '.end(0.25)' },
   loop: { kind: 'both', sig: 'loop(on)', desc: 'Loops the sample for the length of each event instead of playing it once, starting from begin(). loop(0) also stops a negative speed from looping.', eg: '.loop()' },
   loopwrap: { kind: 'both', sig: 'loopwrap(mode)', desc: 'Which part of the sample loop() repeats: 0 loops the whole file (begin only sets where playback enters), 1 loops just the begin..end window. Values are rounded and wrap around, so any signal works.', eg: '.loop().loopwrap(1)' },
-  loopdir: { kind: 'both', sig: 'loopdir(mode)', desc: 'How loop() turns around: 0 jumps back to the start of the region, 1 plays back and forth. Values are rounded and wrap around, so any signal works.', eg: '.loop().loopdir(1)' },
+  loopdir: { kind: 'both', sig: 'loopdir(mode)', desc: 'What loop() does at the edge of its region: 0 restarts from the region\'s start, 1 reverses direction and alternates forward and backward passes. Values are rounded and wrap around, so any signal works.', eg: '.loop().loopdir(1)' },
   speed: { kind: 'both', sig: 'speed(rate)', desc: 'Playback speed: 2 is an octave up and half as long, 0 is silent, and negative plays backwards from end, looping unless loop(0) is set.', eg: '.speed("<1 -1>")' },
   flip: { kind: 'both', sig: 'flip(on)', desc: 'Reverses the sample so it ends on the beat: above 0.5, it plays backwards and is delayed so it reaches begin at the end of the step.', eg: '.flip("<0 1>*2")' },
   stretch: { kind: 'both', sig: 'stretch(factor)', desc: 'Time-stretches the sample without changing its pitch: 2 is twice as long. Works best on rhythmic material.', eg: '.stretch(2)' },
@@ -424,11 +430,12 @@ const API_DOCS = {
   slice: { kind: 'both', sig: 'slice(n)', desc: 'Plays the nth slice of the sample, cut at its detected transients, wrapping past the last. WAV files only.', eg: '.slice(irand(8))' },
   splice: { kind: 'both', sig: 'splice(n, mode?)', desc: 'Plays the nth transient slice, fitted to the length of its event: splice("<0 1 2>*8") plays each slice as an eighth note. Fits by changing speed unless mode is "stretch". With no n, fits the current begin..end window. speed and note apply on top, and fit is ignored.', eg: '.splice("<0 1 2>*8")' },
   splicemode: { kind: 'both', sig: 'splicemode(mode)', desc: 'How splice fits a slice to its event: 0 or "repitch" changes speed and pitch together, 1 or "stretch" keeps the pitch. Values are rounded and wrap around, so any signal works.', eg: '.splice("0 1 2 3").splicemode("stretch")' },
-  attack: { kind: 'both', sig: 'attack(mult)', desc: 'Sampler envelope attack time, as a multiple of the note\'s length.', eg: '.attack(0.1)' },
-  decay: { kind: 'both', sig: 'decay(mult)', desc: 'Sampler envelope decay time, as a multiple of the note\'s length.', eg: '.decay(0.3)' },
+  attack: { kind: 'both', sig: 'attack(seconds)', desc: 'Sampler envelope attack time, in seconds: the fade in from silence at the start of each note.', eg: '.attack(0.005)' },
+  decay: { kind: 'both', sig: 'decay(seconds)', desc: 'Sampler envelope decay time, in seconds: the fall from full level to the sustain level.', eg: '.decay(0.3)' },
   sustain: { kind: 'both', sig: 'sustain(level)', desc: 'Sampler envelope sustain level, from 0 to 1.', eg: '.sustain(0.5)' },
-  release: { kind: 'both', sig: 'release(mult)', desc: 'Sampler envelope release time, as a multiple of the note\'s length.', eg: '.release(0.5)' },
-  adsr: { kind: 'method', sig: 'adsr(a, d, s, r)', desc: 'Sets the sampler envelope in one call: attack, decay and release as multiples of the note\'s length, sustain as a level from 0 to 1.', eg: '.adsr(0.05, 0.2, 0.6, 0.4)' },
+  release: { kind: 'both', sig: 'release(seconds)', desc: 'Sampler envelope release time, in seconds: the fade out once the note ends.', eg: '.release(0.1)' },
+  envscale: { kind: 'both', sig: 'envscale(factor)', desc: 'Multiplies the sampler envelope\'s attack, decay and release times. Sustain is unchanged. Scaling by the note\'s length makes the envelope stretch with each note.', eg: '.attack(0.1).envscale(dur())' },
+  adsr: { kind: 'method', sig: 'adsr(a, d, s, r)', desc: 'Sets the sampler envelope in one call: attack, decay and release in seconds, sustain as a level from 0 to 1. Double-click the name to draw it over the sample.', eg: '.adsr(0.005, 0.2, 0.6, 0.1)' },
 
   // ----------------------------------------------------------------- debugging
   log: {

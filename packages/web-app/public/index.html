@@ -910,6 +910,47 @@
       </div>
     </div>
 
+    <!-- The envelope panel: a sampler chain's attack/decay/sustain/release drawn over the sample it
+         shapes, with where playback begins, ends and loops. The slice editor's dialog, canvas and
+         foot, since it is the same kind of window over the same kind of waveform. -->
+    <div id="envBackdrop" class="dir-picker-backdrop keeps-transport hidden">
+      <div class="dir-picker slice-dialog" role="dialog" aria-label="envelope editor">
+        <div class="dir-picker-head">
+          <span>envelope</span>
+          <span id="envFile" class="slice-file"></span>
+          <span class="spacer"></span>
+          <button id="envClose" class="small">✕</button>
+        </div>
+        <div class="slice-body">
+          <canvas id="envCanvas" class="slice-canvas" tabindex="0"
+            title="drag a point to set the envelope, a tab to set begin or end (⌘ for fine control) · double-click a point or tab to reset it · wheel scrolls, ⌘-wheel zooms, 0 shows the whole file · space plays the note"></canvas>
+        </div>
+        <div class="dir-picker-foot slice-foot">
+          <button id="envPlayBtn" class="small slice-play" title="play one note from begin to the end of its release, through the track's chain (space)">▶</button>
+          <span class="slice-fit">
+            <button id="envLoopBtn" class="small" title="repeat the sample for the length of each note instead of playing it once (.loop())">loop</button>
+          </span>
+          <!-- The loop's two modes, labeled the way the foot's sens slider is, and shown only while it
+               loops: with loop off they set nothing. -->
+          <label id="envWrapWrap" class="slice-sens hidden" title="the part of the sample that repeats (.loopwrap())">loop region
+            <select id="envWrapSel" class="slice-foot-sel">
+              <option value="0">whole sample</option>
+              <option value="1">begin to end</option>
+            </select>
+          </label>
+          <label id="envDirWrap" class="slice-sens hidden" title="what playback does on reaching the end of the loop region (.loopdir())">loop direction
+            <select id="envDirSel" class="slice-foot-sel">
+              <option value="0">forward</option>
+              <option value="1">pingpong</option>
+            </select>
+          </label>
+          <span class="spacer"></span>
+          <span id="envReadout" class="slice-count"></span>
+          <span id="envNote" class="pack-note"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- The mixer (ctrl+g). Its own backdrop class, NOT dir-picker-backdrop: that class makes the
          global hotkey handler stand down, and the transport keys (cmd+enter, cmd+.) must keep
          working while mixing. -->

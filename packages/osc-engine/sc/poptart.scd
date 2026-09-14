@@ -1159,8 +1159,8 @@ server.waitForBoot {
     // factor exactly back off. These keep windowRandRatio at 0.1, unlike the keylock player
     // below: their grains are pitch-shifted (freqScale is the rate), so they do not line up the
     // way a transparent keylock's do, and a little scatter is what keeps a stretch from combing. atk/dec/rel are the amplitude ADSR times
-    // scaled by dur (atk 2 = attack over 2*dur, so it never reaches full before the note ends);
-    // sus is a 0..1 level. All default to 0/0/1/0, which floors down to the old tiny declick fade.
+    // in seconds, already scaled by .envscale() on the Node side; sus is a 0..1 level. All default to
+    // 0/0/1/0, which floors down to the old tiny declick fade.
     [1, 2].do { |nc|
         var toStereo = { |sig| if (nc == 1) { sig ! 2 } { sig } };
         SynthDef(("poptart_sample_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
@@ -1190,15 +1190,15 @@ server.waitForBoot {
             // below closes the gate at `dur`), and a few ms of the next slice under a fade beats a
             // few ms of held DC.
             var sig = PlayBuf.ar(nc, buf, step, 1, from, loop: 0);
-            // atk/dec/rel are the play duration (dur) times their input, so .attack(2) ramps over
-            // 2*dur and never reaches 1 before the note ends. A gate held open for exactly dur runs
-            // attack->decay->sustain across playback, then releases when the region ends; a cut
-            // event (gate->0 early) releases sooner. Tiny floors keep the fade-in/out declicked.
+            // atk/dec/rel are seconds, so an attack longer than the note never reaches 1 before it
+            // ends. A gate held open for exactly dur runs attack->decay->sustain across playback,
+            // then releases when the region ends; a cut event (gate->0 early) releases sooner. Tiny
+            // floors keep the fade-in/out declicked.
             // The release floor is 15ms rather than the attack's 3ms because Env.adsr's default
             // curve (-4) front-loads a fall: two thirds of the drop lands in the first quarter of
             // the segment, so an 8ms floor was ~2ms of real fade and thumped on bass-heavy material
             // cut short by a pianoroll note. Every sampler def below uses the same floors.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
+            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
@@ -1264,9 +1264,9 @@ server.waitForBoot {
             var play = PlayBuf.ar(nc, buf, step.abs * dir, reAim, pos, loop: 1);
             var patch = BufRd.ar(nc, buf, pos, loop: 1, interpolation: 4);
             var sig = (play * (1 - hold)) + (patch * hold);
-            // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
-            // the loop's gate-off, then released. Floors preserve the original declick fade.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
+            // atk/dec/rel are seconds; sustain is held until the loop's gate-off, then released.
+            // Floors preserve the original declick fade.
+            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
@@ -1279,11 +1279,11 @@ server.waitForBoot {
             // stretched sample bends in pitch alone and still ends where the event ends.
             var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2)
                 * (2 / overlaps);
-            // atk/dec/rel are the play duration (dur) times their input, so .attack(2) ramps over
-            // 2*dur and never reaches 1 before the note ends. A gate held open for exactly dur runs
-            // attack->decay->sustain across playback, then releases when the region ends; a cut
-            // event (gate->0 early) releases sooner. Tiny floors keep the fade-in/out declicked.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
+            // atk/dec/rel are seconds, so an attack longer than the note never reaches 1 before it
+            // ends. A gate held open for exactly dur runs attack->decay->sustain across playback,
+            // then releases when the region ends; a cut event (gate->0 early) releases sooner. Tiny
+            // floors keep the fade-in/out declicked.
+            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
@@ -1310,9 +1310,9 @@ server.waitForBoot {
             var ptr = Select.kr(pingpong, [lo + walk, bounced]);
             // freqScale again, not the pointer: the loop keeps its length and bends in pitch.
             var sig = Warp1.ar(nc, buf, ptr, rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2) * (2 / overlaps);
-            // atk/dec/rel are fractions of dur (the natural region length); sustain is held until
-            // the loop's gate-off, then released. Floors preserve the original declick fade.
-            var atkS = max(0.003, atk * dur), decS = dec * dur, relS = max(0.015, rel * dur);
+            // atk/dec/rel are seconds; sustain is held until the loop's gate-off, then released.
+            // Floors preserve the original declick fade.
+            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
@@ -3206,7 +3206,7 @@ OSCdef(\poptartPlaySample, { |msg|
     var rate = msg[7].asFloat, stretch = msg[8].asFloat, dur = msg[9].asFloat;
     var latency = msg[10].asFloat, stopLatency = msg[11].asFloat;
     var amp = (msg[12] ? 1).asFloat, cut = (msg[13] ? 0).asInteger;
-    // ADSR envelope: atk/dec/rel are fractions of dur (SC scales them), sus is a 0..1 level.
+    // ADSR envelope: atk/dec/rel are seconds (Node applies .envscale()), sus is a 0..1 level.
     // Defaults of 0/0/1/0 floor down to the old declick env inside the synthdef.
     var atk = (msg[14] ? 0).asFloat, dec = (msg[15] ? 0).asFloat;
     var sus = (msg[16] ? 1).asFloat, rel = (msg[17] ? 0).asFloat;

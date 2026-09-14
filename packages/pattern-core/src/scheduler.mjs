@@ -24,7 +24,7 @@
 //    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
-import { sampleBound, CHANNEL_DEFAULTS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, noteGateFromGrid } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
@@ -215,8 +215,12 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
   if (cfg.vel !== undefined) bits.push(`vel=${num(cfg.vel)}`);
   if (cfg.note !== undefined) bits.push(`note=${num(cfg.note)}`);
   if (cfg.slice !== undefined) bits.push(`slice=${num(cfg.slice)}`);
+  // The envelope as the voice gets it: seconds, .envscale() already applied - the engine reports
+  // what it sent, and an engine that reports nothing gets the same product worked out here.
+  const scale = Number.isFinite(cfg.envScale) ? cfg.envScale : 1;
   for (const [key, dflt] of [['attack', 0], ['decay', 0], ['sustain', 1], ['release', 0]]) {
-    if (cfg[key] !== undefined && cfg[key] !== dflt) bits.push(`${key}=${num(cfg[key])}`);
+    const v = res[key] ?? (cfg[key] === undefined ? undefined : key === 'sustain' ? cfg[key] : Math.max(0, cfg[key] * scale));
+    if (v !== undefined && v !== dflt) bits.push(`${key}=${num(v)}${key === 'sustain' ? '' : 's'}`);
   }
   if (info?.skipped) {
     bits.push(`SILENT (${info.skipped})`);
@@ -1124,7 +1128,8 @@ export class Scheduler {
             ? [stepStartCycle, stepEndCycle]
             : [this.transport.cycleAt(onsetSec), this.transport.cycleAt(offsetSec)];
         if (this.pattern.sampler) {
-          const cfg = this._sampleConfigAt(step, gridSec, stepStartCycle);
+          // dur() reads the note being emitted: the span the engine will actually gate it for.
+          const cfg = withEventSpan({ onsetSec, endSec: offsetSec }, () => this._sampleConfigAt(step, gridSec, stepStartCycle));
           if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
           // What the engine resolves to files: a bare name is a pack (a folder), "sp:" a named
           // pack (a _pack() definition), "file:"/"rec:" one exact file (se/sr). Only the two packs
@@ -1390,7 +1395,7 @@ export class Scheduler {
     const merged = step.cfg;
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
     for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch',
-      'slice', 'splice', 'spliceMode', 'note', 'attack', 'decay', 'sustain', 'release']) {
+      'slice', 'splice', 'spliceMode', 'note', 'attack', 'decay', 'sustain', 'release', 'envScale']) {
       if (merged && merged[key] !== undefined) {
         cfg[key] = merged[key];
       } else if (src[key]) {

@@ -36,6 +36,7 @@ let mixctlMod = null; // mixctl.mjs - the mixer's gain/pan trim reads and code e
 let groupsMod = null; // groups.mjs - the track tree: who is in which group, and in what order
 let recordMod = null; // record.mjs - a live take into a roll (the ● rec and capture paths)
 let slicesMod = null; // slices.mjs - reading, tidying and writing a _slices() set's positions
+let samplerctlMod = null; // samplerctl.mjs - the envelope panel's sampler-control reads and code edits
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -51,9 +52,11 @@ const coreReady = Promise.all([
   import('/pattern-core/rollops.mjs'),
   import('/pattern-core/slices.mjs'),
   import('/pattern-core/groups.mjs'),
+  import('/pattern-core/samplerctl.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc]) => {
     groupsMod = gr;
+    samplerctlMod = sc;
     slicesMod = sl;
     miniMod = m;
     labelsMod = l;
@@ -73,6 +76,7 @@ const coreReady = Promise.all([
     initPresetPanel();
     initPackPanel();
     initSlicePanel();
+    initEnvelopePanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
     // Which spans are DATA (rather than roll ids) is a question only pianoroll.mjs can answer, so
@@ -2690,6 +2694,7 @@ function openDeckBWidgetAt(code, idx) {
     ['preset', findPresetCallAt(code, idx)],
     ['sample pack', findSpCallAt(code, idx)],
     ['slice', slicesMod && findSliceCallAt(code, idx)],
+    ['envelope', findEnvelopeHandleAt(code, idx) && { onName: true }],
     ['record', findRecordCallAt(code, idx)],
   ].find(([, call]) => call?.onName);
   if (panel) logLine(`deck B: the ${panel[0]} panel can only edit deck A's buffer so far - move the pattern there to open it`);
@@ -2802,6 +2807,9 @@ function openWidgetAt(code, idx) {
   // editor section).
   const sliceCall = slicesMod && findSliceCallAt(code, idx);
   if (sliceCall?.onName && openSliceEditorFromCall(sliceCall, code, idx)) return true;
+  // The envelope and playback controls of a sampler chain - or its s()/se()/sr() source - open the
+  // envelope drawn over the sample. Asked after the slice editor, whose `slice` is also a sampler word.
+  if (findEnvelopeHandleAt(code, idx) && openEnvelopeAt(code, idx)) return true;
   const rec = findRecordCallAt(code, idx);
   if (rec?.onName) {
     if (!recordState || rec.start !== recordState.callStart) openRecordPanel(rec);
@@ -17651,15 +17659,23 @@ function sliceRender() {
 }
 
 function sliceDrawWave(ctx, W, top, waveH, c) {
-  const pk = sliceState.peaks;
+  drawPeaks(ctx, sliceState.peaks, W, top, waveH, c.wave, slicePosOf);
+}
+
+/**
+ * A peak pyramid (slicePeakPyramid) drawn as one vertical line per pixel column. `posOf(x)` is the
+ * fraction of the file at canvas x - the one thing the slice and envelope panels map differently.
+ */
+function drawPeaks(ctx, pk, W, top, waveH, color, posOf) {
   const half = waveH / 2;
   const mid = top + half;
-  ctx.strokeStyle = c.wave;
+  ctx.strokeStyle = color;
   ctx.globalAlpha = 0.85;
   ctx.beginPath();
   for (let x = 0; x < W; x++) {
-    const f0 = Math.floor(slicePosOf(x) * pk.frames);
-    const f1 = Math.max(f0 + 1, Math.floor(slicePosOf(x + 1) * pk.frames));
+    const f0 = Math.floor(posOf(x) * pk.frames);
+    const f1 = Math.max(f0 + 1, Math.floor(posOf(x + 1) * pk.frames));
+    if (f1 <= 0 || f0 >= pk.frames) continue; // off either end of the file: nothing to draw there
     let lo = 0;
     let hi = 0;
     if (f1 - f0 <= SLICE_PEAK_BUCKET) {
@@ -18336,6 +18352,773 @@ function initSlicePanel() {
   // ...and the fit readout on a slow one: what auto resolves to depends on the tempo, which an
   // evaluation can change under it. Once a second is well inside "before you could have read it".
   setInterval(() => { if (sliceState) sliceSyncFit(); }, 1000);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Envelope panel - a sampler chain's amplitude envelope, drawn over the sample it shapes.
+//
+// The envelope's times are seconds (see Sig#attack), which is what makes drawing it over the
+// waveform mean anything: the attack you drag across is the stretch of audio it fades in, whatever
+// the note. Where playback begins and ends, and how it loops, live in the same window because they
+// are what the envelope is laid against - a one-shot holds its sustain until `end`, and the release
+// fades whatever audio follows.
+//
+// Everything is read off the code and written back to it as plain numeric controls (samplerctl.mjs):
+// a drag writes when you let go, a double-click resets a handle to its default, and ⌘Z is the
+// buffer's undo. A control the chain sets with a pattern is drawn hollow and does not move - the
+// panel would be writing a number nothing plays.
+//
+// The axis is FILE seconds, so the waveform draws as recorded. Envelope time is laid onto it through
+// the chain's literal speed, stretch and fit: a sample played at double speed crosses two seconds of
+// file in each second of envelope. A literal .envscale(k) is drawn in too; a patterned one (the
+// usual `.envscale(dur())`) depends on each note, so it is named in the readout instead.
+// ---------------------------------------------------------------------------------------------
+
+const envBackdrop = document.getElementById('envBackdrop');
+const envFileEl = document.getElementById('envFile');
+const envCanvas = document.getElementById('envCanvas');
+const envPlayBtn = document.getElementById('envPlayBtn');
+const envLoopBtn = document.getElementById('envLoopBtn');
+const envWrapWrap = document.getElementById('envWrapWrap');
+const envDirWrap = document.getElementById('envDirWrap');
+const envWrapSel = document.getElementById('envWrapSel');
+const envDirSel = document.getElementById('envDirSel');
+const envReadout = document.getElementById('envReadout');
+const envNote = document.getElementById('envNote');
+
+const ENV_HIT_PX = 8; // how near a press counts as being on a point
+const ENV_SPREAD_PX = 14; // the least two points are drawn apart, so both can be grabbed when their values coincide
+const ENV_POINT_R = 4.5;
+const ENV_PAD_Y = 12; // room above full level and below silence, so the points at either stay grabbable
+const ENV_EVAL_DEBOUNCE_MS = 250;
+const ENV_CURVE = -4; // Env.adsr's default curve - what the sampler voices shape every segment with
+const ENV_ATTACK_FLOOR = 0.003; // the voices' declick floors (poptart.scd): what a 0 actually plays
+const ENV_RELEASE_FLOOR = 0.015;
+const ENV_MIN_SPAN_SEC = 0.005; // the closest zoom: 5ms across the whole canvas
+const ENV_LOCAL_CURVE_HZ = 200; // gain-curve points per second for an audition out of the browser
+
+// { label, at, ref, name, index, file, buffer, peaks, ctl, draft, view, drag, hover } - the chain on
+// screen. `label` addresses its block (samplerctl reads by label); `at` is a bookmark on its source
+// call, which moves with the text. `ctl` is what the code says (readSamplerControls) and `draft`
+// the values a drag in progress has moved, laid over it. `view` is { start, span } in file seconds.
+let envState = null;
+let envEvalTimer = null;
+let envLoadGen = 0;
+const envPlayer = { source: null, startedAt: 0, clock: null, raf: null, gen: 0, total: 0 };
+
+function envScheduleEval() {
+  clearTimeout(envEvalTimer);
+  envEvalTimer = setTimeout(() => { envEvalTimer = null; evaluate(false); }, ENV_EVAL_DEBOUNCE_MS);
+}
+
+const envSay = (msg, isError = false) => {
+  envNote.textContent = msg ?? '';
+  envNote.classList.toggle('error', !!msg && isError);
+};
+
+const ENV_HANDLE_WORDS = new Set(['adsr', 'attack', 'decay', 'sustain', 'release', 'envscale', 'begin', 'end',
+  'loop', 'loopwrap', 'loopdir', 's', 'se', 'sr']);
+
+/**
+ * Whether `idx` is on a handle that opens the envelope panel: the name of an envelope or playback
+ * control on a sampler chain, or of the chain's own s()/se()/sr() source (sp() is the pack panel's).
+ * The words are everyday ones - `end(` and `loop(` turn up in plain JavaScript - so the chain has to
+ * have a sampler source for any of them to count.
+ */
+function findEnvelopeHandleAt(code, idx) {
+  if (!labelsMod) return null;
+  let ws = idx;
+  let we = idx;
+  while (ws > 0 && /[\w$]/.test(code[ws - 1])) ws--;
+  while (we < code.length && /[\w$]/.test(code[we])) we++;
+  const word = code.slice(ws, we);
+  if (!ENV_HANDLE_WORDS.has(word)) return null;
+  let k = we;
+  while (k < code.length && (code[k] === ' ' || code[k] === '\t')) k++;
+  if (code[k] !== '(') return null;
+  if (!codeOnly(code)(ws)) return null;
+  const src = envSourceAt(code, idx);
+  if (!src) return null;
+  const isSource = word === 's' || word === 'se' || word === 'sr';
+  if (isSource && src.start !== ws) return null; // an s( that isn't this chain's source is something else
+  return { src };
+}
+
+/** The sampler source of the track around `idx`, when that track is one the panel can draw. */
+function envSourceAt(code, idx) {
+  const src = sliceSourceCallAt(code, idx);
+  if (!src || src.block.group || src.block.kind === 'bare') return null;
+  return sliceChainSourceAt(code, idx) ? src : null;
+}
+
+function openEnvelopeAt(code, idx) {
+  if (!samplerctlMod) return false;
+  const src = envSourceAt(code, idx);
+  if (!src) return false;
+  const chain = sliceChainSourceAt(code, idx);
+  if (envState) closeEnvelopePanel();
+  envState = {
+    label: src.block.label,
+    at: cm.setBookmark(cm.posFromIndex(src.start)),
+    ref: chain.ref,
+    name: chain.name,
+    // The file being played right now where the index is a pattern, else the first one named - the
+    // slice editor's rule, for the same reason.
+    index: sliceSoundingIndexAt(idx) ?? chain.index,
+    file: null,
+    buffer: null,
+    peaks: null,
+    ctl: null,
+    draft: null,
+    view: { start: 0, span: 1 },
+    drag: null,
+    hover: null,
+  };
+  if (!envRead()) return false;
+  syncPreviewRouting(); // the panel auditions - settle where that comes out before it can
+  envFileEl.textContent = '';
+  envBackdrop.classList.remove('hidden');
+  envSay('');
+  envSyncFoot();
+  envRender();
+  envLoadSample();
+  envCanvas.focus({ preventScroll: true });
+  return true;
+}
+
+function closeEnvelopePanel() {
+  if (!envState) return;
+  envStopAudition({ hush: true });
+  envState.at?.clear();
+  envState = null;
+  envBackdrop.classList.add('hidden');
+}
+
+/** Re-reads the chain's controls from the code. False (and the panel closed) once the track is gone. */
+function envRead() {
+  const ctl = samplerctlMod.readSamplerControls(cm.getValue(), envState.label);
+  if (!ctl) {
+    logLine(`the envelope panel closed: track "${envState.label}" is no longer in the buffer`);
+    closeEnvelopePanel();
+    return false;
+  }
+  envState.ctl = ctl;
+  return true;
+}
+
+async function envLoadSample() {
+  const state = envState;
+  const gen = ++envLoadGen;
+  try {
+    const res = await api('GET', `/api/sampleFile?ref=${encodeURIComponent(state.ref)}&i=${state.index ?? 0}`);
+    if (gen !== envLoadGen || envState !== state) return;
+    if (!res.file) return envSay(`nothing to draw: "${state.ref}" has no files`, true);
+    state.file = res.file;
+    state.index = res.index;
+    const paged = !/^(file|rec):/.test(state.ref);
+    envFileEl.textContent = `${paged ? `${state.name}:${res.index}` : state.name} · ${res.file.split('/').pop()}`;
+    envFileEl.title = res.file;
+    state.buffer = await packLoadBuffer(res.file);
+    if (gen !== envLoadGen || envState !== state) return;
+    state.peaks = slicePeakPyramid(state.buffer);
+    state.view = { start: 0, span: envFullSpan() };
+    envRender();
+  } catch (e) {
+    if (gen === envLoadGen && envState === state) envSay(e.message ?? String(e), true);
+  }
+}
+
+// The code moved under the panel - an undo, a typed edit, the panel's own write - so the handles
+// follow it. Not mid-drag: the hand is the source of truth until it lets go.
+function envSyncFromCode() {
+  if (!envState || envState.drag) return;
+  setTimeout(() => {
+    if (!envState || envState.drag) return;
+    if (!envRead()) return;
+    envState.draft = null;
+    const at = envState.at.find();
+    const chain = at ? sliceChainSourceAt(cm.getValue(), cm.indexFromPos(at)) : null;
+    if (chain && chain.ref !== envState.ref) {
+      // A different source typed in: draw that one instead.
+      Object.assign(envState, { ref: chain.ref, name: chain.name, index: chain.index, file: null, buffer: null, peaks: null });
+      envLoadSample();
+    }
+    envSyncFoot();
+    envRender();
+  }, 0);
+}
+
+// --- what the code says, and what it means in seconds -----------------------------------------
+
+/** Every control the panel draws, as numbers: the drag in progress over what the code says. */
+function envValues() {
+  const out = {};
+  for (const [name, v] of Object.entries(envState.ctl)) {
+    if (v && typeof v === 'object') out[name] = v.value;
+  }
+  return { ...out, ...(envState.draft ?? {}) };
+}
+
+/** A literal .envscale() multiplies what is drawn; a patterned one can't be drawn, so it reads as 1. */
+function envScaleNow() {
+  const sc = envState.ctl.envscale;
+  return sc.patterned ? 1 : Math.max(0, sc.value);
+}
+
+/** File seconds crossed per second of envelope, from the chain's literal speed, stretch and fit. */
+function envRate() {
+  const { speed, stretch, fit } = envState.ctl;
+  const dur = envState.buffer?.duration;
+  let rate = Math.abs(speed.patterned ? 1 : speed.value) / Math.max(1e-6, stretch.patterned ? 1 : stretch.value);
+  if (typeof fit === 'number' || fit === 'auto') {
+    const cycles = sliceFitCycles(fit, dur);
+    const cps = transport.cps || 0;
+    if (cycles > 0 && cps > 0 && dur) rate *= (dur * cps) / cycles; // playSample's fit multiplier
+  }
+  return rate > 0 && Number.isFinite(rate) ? rate : 1;
+}
+
+/**
+ * The envelope as the voice will play it. Times are real seconds (scaled), `fa`/`fr` the attack and
+ * release after the voices' declick floors, and `tg` when the gate closes: a one-shot's window runs
+ * out at `end`, and that is where the release begins.
+ */
+function envShape() {
+  const v = envValues();
+  const dur = envState.buffer?.duration ?? 0;
+  const rate = envRate();
+  const k = envScaleNow();
+  const a = Math.max(0, v.attack * k);
+  const d = Math.max(0, v.decay * k);
+  const r = Math.max(0, v.release * k);
+  const beginSec = Math.min(1, Math.max(0, v.begin)) * dur;
+  const endSec = Math.min(1, Math.max(0, v.end)) * dur;
+  return {
+    a, d, r, s: Math.min(1, Math.max(0, v.sustain)),
+    fa: Math.max(ENV_ATTACK_FLOOR, a),
+    fr: Math.max(ENV_RELEASE_FLOOR, r),
+    beginSec, endSec, rate, k, dur,
+    tg: Math.abs(endSec - beginSec) / rate,
+  };
+}
+
+/** The envelope's level `t` seconds after the note starts - Env.adsr's segments and curve. */
+function envLevelAt(t, e) {
+  const seg = (y1, y2, pos) => shapeMod.curveInterp(y1, y2, Math.min(1, Math.max(0, pos)), ENV_CURVE);
+  const hold = (u) => (u < e.fa ? seg(0, 1, u / e.fa) : u < e.fa + e.d ? seg(1, e.s, (u - e.fa) / e.d) : e.s);
+  if (t < 0) return 0;
+  if (t < e.tg) return hold(t);
+  const dt = t - e.tg;
+  return dt >= e.fr ? 0 : seg(hold(e.tg), 0, dt / e.fr);
+}
+
+/** From the file's start to past the end of the release, with a little air after it. */
+function envFullSpan() {
+  const e = envShape();
+  return Math.max(ENV_MIN_SPAN_SEC, Math.max(e.dur, e.beginSec + (e.tg + e.fr) * e.rate) * 1.04);
+}
+
+// --- geometry --------------------------------------------------------------------------------
+
+const envW = () => Math.max(1, envCanvas.clientWidth);
+const envXOf = (sec) => ((sec - envState.view.start) / envState.view.span) * envW();
+const envSecOf = (x) => envState.view.start + (x / envW()) * envState.view.span;
+const envWaveTop = () => SLICE_TAB_H;
+const envWaveH = () => Math.max(1, envCanvas.clientHeight - SLICE_TAB_H);
+const envYOf = (level) => envWaveTop() + ENV_PAD_Y + (1 - level) * Math.max(1, envWaveH() - 2 * ENV_PAD_Y);
+const envLevelOf = (y) => Math.min(1, Math.max(0, 1 - (y - envWaveTop() - ENV_PAD_Y) / Math.max(1, envWaveH() - 2 * ENV_PAD_Y)));
+
+function envSetView(start, span) {
+  const full = envFullSpan();
+  const s = Math.min(Math.max(ENV_MIN_SPAN_SEC, span), full);
+  envState.view = { start: Math.min(Math.max(0, start), Math.max(0, full - s)), span: s };
+}
+
+function envTabWidth(label, ctx = envCanvas.getContext('2d')) {
+  ctx.font = '10px ui-monospace, monospace';
+  return Math.ceil(ctx.measureText(label).width) + 10;
+}
+
+/**
+ * Every handle on screen, with the controls it moves. The begin tab hangs right of its line and the
+ * end tab left of it, so both sit inside the window they bound. The decay point is two controls at
+ * once - its x is the decay, its y the sustain level - and the hold line after it moves the level alone.
+ *
+ * `x` is where a handle's value puts it; `px` is where it is drawn and grabbed. The two differ only
+ * when points would land on top of each other - an unset envelope has attack 0, decay 0 and sustain
+ * 1, which puts A and D on the same pixel - and then the later point is drawn a little to the
+ * right, so both can be seen and taken hold of. A drag measures from `x`, so the offset never leaks
+ * into a value.
+ */
+function envHandles() {
+  const e = envShape();
+  const at = (t) => envXOf(e.beginSec + t * e.rate);
+  const beginX = envXOf(e.beginSec);
+  const endX = envXOf(e.endSec);
+  const points = [
+    { key: 'attack', keys: ['attack'], label: 'A', x: at(e.a), y: envYOf(1) },
+    { key: 'decay', keys: ['decay', 'sustain'], label: 'D', x: at(e.a + e.d), y: envYOf(e.s) },
+    { key: 'release', keys: ['release'], label: 'R', x: at(e.tg + e.r), y: envYOf(0) },
+  ];
+  let minX = -Infinity;
+  for (const pt of points) {
+    pt.px = Math.max(pt.x, minX);
+    minX = pt.px + ENV_SPREAD_PX;
+  }
+  return [
+    { key: 'begin', keys: ['begin'], tab: true, x: beginX, px: beginX, x0: beginX, x1: beginX + envTabWidth('begin') },
+    { key: 'end', keys: ['end'], tab: true, x: endX, px: endX, x0: endX - envTabWidth('end'), x1: endX },
+    ...points,
+    { key: 'sustain', keys: ['sustain'], line: true, x0: at(e.a + e.d), x1: at(e.tg), y: envYOf(e.s) },
+  ];
+}
+
+function envHandleAt(x, y) {
+  const hs = envHandles();
+  if (y <= SLICE_TAB_H) {
+    // The later tab wins where they overlap, which is the end tab: begin can always be reached by
+    // dragging end away first, while the reverse would strand an end sitting on top of begin.
+    return hs.filter((h) => h.tab && x >= h.x0 - 3 && x <= h.x1 + 3).pop() ?? null;
+  }
+  let best = null;
+  let bestD = ENV_HIT_PX;
+  for (const h of hs) {
+    if (h.tab || h.line) continue;
+    const dist = Math.hypot(h.px - x, h.y - y);
+    if (dist <= bestD) { best = h; bestD = dist; }
+  }
+  if (best) return best;
+  const hold = hs.find((h) => h.line);
+  if (hold && x >= hold.x0 && x <= hold.x1 && Math.abs(y - hold.y) <= 5) return hold;
+  return null;
+}
+
+/** The handle's controls the code holds as patterns - the ones a drag must leave alone. */
+const envPatternedOf = (h) => h.keys.filter((k) => envState.ctl[k]?.patterned);
+
+// --- drawing ---------------------------------------------------------------------------------
+
+function envRender() {
+  if (!envState) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(envCanvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(envCanvas.clientHeight * dpr));
+  if (envCanvas.width !== w || envCanvas.height !== h) {
+    envCanvas.width = w;
+    envCanvas.height = h;
+  }
+  const ctx = envCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = envCanvas.clientWidth;
+  const H = envCanvas.clientHeight;
+  const c = sliceThemeColors();
+  ctx.clearRect(0, 0, W, H);
+  const top = envWaveTop();
+  const waveH = envWaveH();
+
+  if (!envState.peaks) {
+    ctx.fillStyle = c.wave;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(envState.file ? 'decoding…' : 'finding the sample…', W / 2, top + waveH / 2);
+    return;
+  }
+  const e = envShape();
+  const beginX = envXOf(e.beginSec);
+  const endX = envXOf(e.endSec);
+
+  // Outside begin..end is audio this note never reaches (bar what a release reads on past `end`),
+  // so it is washed back rather than hidden - where to drag begin and end to is still visible.
+  ctx.fillStyle = 'rgba(127,127,127,0.10)';
+  const lo = Math.min(beginX, endX);
+  const hi = Math.max(beginX, endX);
+  if (lo > 0) ctx.fillRect(0, top, Math.min(W, lo), waveH);
+  if (hi < W) ctx.fillRect(Math.max(0, hi), top, W - Math.max(0, hi), waveH);
+  drawPeaks(ctx, envState.peaks, W, top, waveH, c.wave, (x) => envSecOf(x) / e.dur);
+
+  // The envelope, traced a pixel at a time off the same curve the voice runs.
+  const endT = e.tg + e.fr;
+  const x0 = Math.max(0, Math.floor(beginX));
+  const x1 = Math.min(W, Math.ceil(envXOf(e.beginSec + endT * e.rate)) + 1);
+  if (x1 > x0) {
+    ctx.beginPath();
+    ctx.moveTo(x0, envYOf(0));
+    for (let x = x0; x <= x1; x++) ctx.lineTo(x, envYOf(envLevelAt((envSecOf(x) - e.beginSec) / e.rate, e)));
+    ctx.lineTo(x1, envYOf(0));
+    ctx.fillStyle = c.accent;
+    ctx.globalAlpha = 0.14;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // Where the gate closes - `end` for a one-shot. A loop holds its sustain until the note ends
+  // instead, which only the pattern knows, so there the line is dashed: the release starts wherever
+  // the note does.
+  const gateX = Math.round(envXOf(e.beginSec + e.tg * e.rate)) + 0.5;
+  if (gateX >= 0 && gateX <= W) {
+    ctx.strokeStyle = c.border;
+    ctx.lineWidth = 1;
+    ctx.setLineDash(envValues().loop > 0.5 ? [4, 4] : []);
+    ctx.beginPath();
+    ctx.moveTo(gateX, top);
+    ctx.lineTo(gateX, top + waveH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // The playhead of an audition in progress.
+  if (envPlayer.source) {
+    const t = envPlayer.clock() - envPlayer.startedAt;
+    const px = Math.round(envXOf(e.beginSec + t * e.rate)) + 0.5;
+    if (px >= 0 && px <= W) {
+      ctx.strokeStyle = c.warn;
+      ctx.beginPath();
+      ctx.moveTo(px, top);
+      ctx.lineTo(px, top + waveH);
+      ctx.stroke();
+    }
+  }
+
+  const active = envState.drag?.handle.key ?? envState.hover?.key ?? null;
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.textBaseline = 'middle';
+  for (const hd of envHandles()) {
+    const on = hd.key === active;
+    const fixed = envPatternedOf(hd).length === hd.keys.length; // nothing about it can move
+    if (hd.tab) {
+      ctx.strokeStyle = on ? c.accent : c.text;
+      ctx.globalAlpha = on ? 1 : 0.55;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(hd.x) + 0.5, top);
+      ctx.lineTo(Math.round(hd.x) + 0.5, top + waveH);
+      ctx.stroke();
+      ctx.globalAlpha = fixed ? 0.45 : 1;
+      ctx.fillStyle = on ? c.accent : c.border;
+      ctx.fillRect(hd.x0, 1, hd.x1 - hd.x0, SLICE_TAB_H - 3);
+      ctx.fillStyle = on ? c.bg : c.text;
+      ctx.textAlign = 'center';
+      ctx.fillText(hd.key, (hd.x0 + hd.x1) / 2, SLICE_TAB_H / 2);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    if (hd.line) continue;
+    ctx.beginPath();
+    ctx.arc(hd.px, hd.y, on ? ENV_POINT_R + 1.5 : ENV_POINT_R, 0, Math.PI * 2);
+    if (fixed) {
+      ctx.strokeStyle = c.text;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = on ? c.text : c.accent;
+      ctx.fill();
+    }
+    ctx.fillStyle = c.text;
+    ctx.globalAlpha = 0.7;
+    ctx.textAlign = 'left';
+    ctx.fillText(hd.label, hd.px + ENV_POINT_R + 4, hd.y + (hd.key === 'release' ? -8 : 8));
+    ctx.globalAlpha = 1;
+  }
+}
+
+/** A time as the readout says it: 5ms, 240ms, 1.25s. */
+function envTimeText(sec) {
+  if (sec < 1) return `${Number((sec * 1000).toPrecision(3))}ms`;
+  return `${Number(sec.toPrecision(3))}s`;
+}
+
+function envSyncFoot() {
+  if (!envState) return;
+  const { ctl } = envState;
+  const v = envValues();
+  const time = (name) => (ctl[name].patterned ? ctl[name].text : envTimeText(v[name]));
+  const level = ctl.sustain.patterned ? ctl.sustain.text : String(Number(v.sustain.toFixed(2)));
+  const scale = ctl.envscale.patterned ? ` · ×${ctl.envscale.text}` : ctl.envscale.value !== 1 ? ` · ×${ctl.envscale.value}` : '';
+  envReadout.textContent = `A ${time('attack')} · D ${time('decay')} · S ${level} · R ${time('release')}${scale}`;
+  const looping = v.loop > 0.5;
+  envLoopBtn.classList.toggle('on', looping);
+  envLoopBtn.disabled = ctl.loop.patterned;
+  envWrapWrap.classList.toggle('hidden', !looping);
+  envDirWrap.classList.toggle('hidden', !looping);
+  envWrapSel.value = v.loopwrap > 0.5 ? '1' : '0';
+  envWrapSel.disabled = ctl.loopwrap.patterned;
+  envDirSel.value = v.loopdir > 0.5 ? '1' : '0';
+  envDirSel.disabled = ctl.loopdir.patterned;
+}
+
+// --- writing ---------------------------------------------------------------------------------
+
+/**
+ * Writes `values` ({ control: number }) onto the chain and re-evaluates. The controls are re-read
+ * from the code before this returns: the change listener re-reads them too, but only on a later
+ * turn, and a render in between would draw the value the code held BEFORE the write - a handle let
+ * go of would jump back for a frame and then return.
+ */
+function envWrite(values) {
+  if (!envState || !samplerctlMod) return;
+  const res = samplerctlMod.samplerControlEdits(cm.getValue(), envState.label, values);
+  envState.draft = null;
+  if (!res) return envSay(`track "${envState.label}" has no code to write onto`, true);
+  if (res.skipped.length) envSay(`${res.skipped.join(' and ')} ${res.skipped.length === 1 ? 'is' : 'are'} a pattern on this chain - left as written`);
+  if (!res.edits.length) return;
+  applyEdits(res.edits.map((ed) => [ed.from, ed.to, ed.text]));
+  envRead();
+  envScheduleEval();
+}
+
+/** The control values a handle at canvas (x, y) means. `sec` is the file position, after gearing. */
+function envDragValues(handle, sec, y) {
+  const e = envShape();
+  const k = e.k > 0 ? e.k : 1;
+  const t = (sec - e.beginSec) / e.rate; // envelope seconds after the note starts
+  const out = {};
+  switch (handle.key) {
+    case 'begin': out.begin = Math.min(Math.max(0, sec / e.dur), Math.max(0, envValues().end - 1e-4)); break;
+    case 'end': out.end = Math.max(Math.min(1, sec / e.dur), Math.min(1, envValues().begin + 1e-4)); break;
+    case 'attack': out.attack = Math.max(0, t) / k; break;
+    case 'decay':
+      out.decay = Math.max(0, t - e.a) / k;
+      out.sustain = envLevelOf(y);
+      break;
+    case 'sustain': out.sustain = envLevelOf(y); break;
+    case 'release': out.release = Math.max(0, t - e.tg) / k; break;
+    default: break;
+  }
+  for (const name of envPatternedOf(handle)) delete out[name];
+  return out;
+}
+
+/** A handle's file position now - where a drag starts measuring from. */
+function envHandleSec(handle) {
+  return envSecOf(handle.x ?? handle.x0);
+}
+
+// --- audition --------------------------------------------------------------------------------
+
+function envStopAudition({ hush = false } = {}) {
+  envPlayer.gen++;
+  if (envPlayer.source) {
+    const src = envPlayer.source;
+    envPlayer.source = null;
+    src.onended = null;
+    try { src.stop(); } catch { /* already ended */ }
+    // The slice editor's rule: only stop the track's voices while the transport is paused, since
+    // a hush takes every voice on the track with it.
+    if (hush && src.track && transport.paused) api('POST', '/api/previewSlice', { trackId: src.track, stop: true }).catch(() => {});
+  }
+  cancelAnimationFrame(envPlayer.raf);
+  envPlayBtn.textContent = '▶';
+}
+
+/** Plays the note once, begin through the end of its release, with the envelope on screen. */
+function envAudition() {
+  const state = envState;
+  if (!state?.buffer) return;
+  const blocked = auditionBlocked();
+  if (blocked) { envStopAudition(); return envSay(blocked, true); }
+  envStopAudition();
+  const v = envValues();
+  const e = envShape();
+  const stretch = state.ctl.stretch.patterned ? 1 : state.ctl.stretch.value;
+  const track = mixModeOn ? null : state.label;
+  if (!track) return envAuditionLocal(state, e);
+  const gen = envPlayer.gen;
+  api('POST', '/api/previewSlice', {
+    trackId: track, ref: state.ref, index: state.index ?? 0, begin: v.begin, end: v.end,
+    attack: e.a, decay: e.d, sustain: e.s, release: e.r, speed: e.rate * stretch, stretch,
+  })
+    .then((res) => {
+      if (gen !== envPlayer.gen || envState !== state) return;
+      if (!res.ok) return envAuditionLocal(state, e);
+      const total = e.tg + e.fr;
+      const src = { track, onended: null, timer: null, stop() { clearTimeout(this.timer); } };
+      src.timer = setTimeout(() => src.onended?.(), total * 1000 + 30);
+      envStartHead(src, () => performance.now() / 1000, total);
+    })
+    .catch(() => { if (gen === envPlayer.gen && envState === state) envAuditionLocal(state, e); });
+}
+
+/** The audition out of the decoded buffer, for a track the engine can't play it through. */
+function envAuditionLocal(state, e) {
+  if (previewCtx.state === 'suspended') previewCtx.resume().catch(() => {});
+  const total = e.tg + e.fr;
+  const src = previewCtx.createBufferSource();
+  src.buffer = state.buffer;
+  src.playbackRate.value = e.rate; // repitches where the engine would stretch - near enough to hear the shape
+  const gain = previewCtx.createGain();
+  src.connect(gain).connect(previewCtx.destination);
+  const n = Math.max(2, Math.ceil(total * ENV_LOCAL_CURVE_HZ));
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) curve[i] = envLevelAt((total * i) / (n - 1), e);
+  const now = previewCtx.currentTime;
+  gain.gain.setValueCurveAtTime(curve, now, Math.max(0.01, total));
+  src.start(now, e.beginSec, Math.max(0.01, total * e.rate));
+  envStartHead(src, () => previewCtx.currentTime, total);
+}
+
+function envStartHead(src, clock, total) {
+  Object.assign(envPlayer, { source: src, startedAt: clock(), clock, total });
+  envPlayBtn.textContent = '■';
+  src.onended = () => {
+    if (envPlayer.source !== src) return;
+    envStopAudition();
+    envRender();
+  };
+  envAuditionTick();
+}
+
+function envAuditionTick() {
+  cancelAnimationFrame(envPlayer.raf);
+  envRender();
+  if (envPlayer.source) envPlayer.raf = requestAnimationFrame(envAuditionTick);
+}
+
+// --- wiring ----------------------------------------------------------------------------------
+
+function initEnvelopePanel() {
+  const local = (e) => {
+    const rect = envCanvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
+
+  envCanvas.addEventListener('pointerdown', (e) => {
+    if (!envState?.peaks || e.button !== 0) return;
+    envCanvas.focus({ preventScroll: true });
+    const { x, y } = local(e);
+    const handle = envHandleAt(x, y);
+    if (!handle) return;
+    const patterned = envPatternedOf(handle);
+    if (patterned.length === handle.keys.length) {
+      const name = patterned[0];
+      return envSay(`${name} is ${envState.ctl[name].text} on this chain - edit it in the code`);
+    }
+    envSay('');
+    const from = envSecOf(x);
+    // `base` is where the handle was and `from` where the hand was: a ⌘ (fine) drag moves the handle
+    // a fraction of what the hand does, re-anchored whenever the modifier changes so it never jumps.
+    envState.drag = { handle, base: envHandleSec(handle), from, fine: sliceFineDrag(e), moved: false };
+    envCanvas.setPointerCapture(e.pointerId);
+    envRender();
+  });
+
+  envCanvas.addEventListener('pointermove', (e) => {
+    if (!envState?.peaks) return;
+    const { x, y } = local(e);
+    const d = envState.drag;
+    if (!d || !envCanvas.hasPointerCapture?.(e.pointerId)) {
+      const hover = envHandleAt(x, y);
+      if (hover?.key !== envState.hover?.key) {
+        envState.hover = hover;
+        envCanvas.style.cursor = hover ? (hover.line ? 'ns-resize' : hover.tab ? 'ew-resize' : 'grab') : '';
+        envRender();
+      }
+      return;
+    }
+    const fine = sliceFineDrag(e);
+    const here = envSecOf(x);
+    if (fine !== d.fine) {
+      d.base += (here - d.from) * (d.fine ? SLICE_FINE : 1);
+      d.from = here;
+      d.fine = fine;
+    }
+    const sec = d.base + (here - d.from) * (fine ? SLICE_FINE : 1);
+    // The handle's own list, recomputed against the draft so far: its y has to come from the hand,
+    // but its x is what the geared position says.
+    const values = envDragValues(d.handle, sec, y);
+    envState.draft = { ...(envState.draft ?? {}), ...values };
+    d.moved = true;
+    envSyncFoot();
+    envRender();
+  });
+
+  const endDrag = (e) => {
+    const d = envState?.drag;
+    if (!d) return;
+    if (envCanvas.hasPointerCapture?.(e.pointerId)) envCanvas.releasePointerCapture(e.pointerId);
+    envState.drag = null;
+    const draft = envState.draft;
+    if (d.moved && draft) envWrite(draft); // one write, one undo step, one evaluation per drag
+    else envState.draft = null;
+    envSyncFoot();
+    envRender();
+  };
+  envCanvas.addEventListener('pointerup', endDrag);
+  envCanvas.addEventListener('pointercancel', endDrag);
+
+  // Double-click a handle to put its controls back to what an unset chain plays.
+  envCanvas.addEventListener('dblclick', (e) => {
+    if (!envState?.peaks) return;
+    const { x, y } = local(e);
+    const handle = envHandleAt(x, y);
+    if (!handle) return;
+    const values = {};
+    for (const name of handle.keys) values[name] = samplerctlMod.SAMPLER_CTL_DEFAULTS[name];
+    envWrite(values);
+  });
+
+  envCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // The slice editor's wheel: it moves along the sample, ⌘ (or ctrl) zooms into where it points.
+  envCanvas.addEventListener('wheel', (e) => {
+    if (!envState?.peaks) return;
+    e.preventDefault();
+    const { x } = local(e);
+    if (e.metaKey || e.ctrlKey) {
+      const at = envSecOf(x);
+      const span = envState.view.span * Math.exp(e.deltaY * 0.002);
+      envSetView(at - (x / envW()) * span, span);
+    } else {
+      const by = ((e.deltaX || e.deltaY) / envW()) * envState.view.span;
+      envSetView(envState.view.start + by, envState.view.span);
+    }
+    envRender();
+  }, { passive: false });
+
+  envBackdrop.addEventListener('keydown', (e) => {
+    if (!envState) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    // Everything this panel does is a buffer edit, so ⌘Z is the buffer's undo (see the slice editor).
+    if (editMod(e) && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.shiftKey) cm.redo();
+      else cm.undo();
+      return;
+    }
+    if (e.key === ' ' && !(e.target instanceof HTMLButtonElement)) {
+      e.preventDefault();
+      if (envPlayer.source) envStopAudition({ hush: true });
+      else envAudition();
+      return;
+    }
+    if (e.key === '0' && envState.peaks) { e.preventDefault(); envSetView(0, envFullSpan()); envRender(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeEnvelopePanel(); }
+  });
+
+  envPlayBtn.addEventListener('click', () => {
+    if (envPlayer.source) envStopAudition({ hush: true });
+    else envAudition();
+    envRender();
+  });
+  envLoopBtn.addEventListener('click', () => { if (envState) envWrite({ loop: envValues().loop > 0.5 ? 0 : 1 }); });
+  envWrapSel.addEventListener('change', () => {
+    if (envState) envWrite({ loopwrap: Number(envWrapSel.value) });
+    envCanvas.focus({ preventScroll: true }); // so the keys keep working, as the slice grid's select does
+  });
+  envDirSel.addEventListener('change', () => {
+    if (envState) envWrite({ loopdir: Number(envDirSel.value) });
+    envCanvas.focus({ preventScroll: true });
+  });
+
+  document.getElementById('envClose').addEventListener('click', () => closeEnvelopePanel());
+  envBackdrop.addEventListener('click', (e) => { if (e.target === envBackdrop) closeEnvelopePanel(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && envState) closeEnvelopePanel();
+  });
+  window.addEventListener('resize', () => { if (envState) envRender(); });
+  cm.on('change', envSyncFromCode);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -24609,6 +25392,14 @@ function openEditorMenu(ed, e) {
     ? ['save as snippet…', () => openSnippetSave(ed), 'keep this selection - and the rolls, shapes, presets and packs it names - for every project']
     : ['insert snippet…', () => openSnippetBrowser(ed), 'put a kept phrase in here, sidecar and all']];
   items.push(['add an effect…', () => insertFxCall(ed), 'ctrl-F — an .fx("") at the caret, with the plugin list open']);
+  // The envelope panel for the sampler track under the caret - the way in for a chain that has no
+  // envelope call yet to double-click.
+  if (ed === cm && !selected && samplerctlMod) {
+    const at = cm.indexFromPos(cm.getCursor());
+    if (envSourceAt(cm.getValue(), at)) {
+      items.push(['edit envelope…', () => openEnvelopeAt(cm.getValue(), at), 'draw the attack, decay, sustain and release over the sample, and where it begins, ends and loops']);
+    }
+  }
   // The tree, where it is edited: grouping is a gesture over a selection, and ungrouping is aimed
   // at whatever track the caret is in.
   if (selected) {

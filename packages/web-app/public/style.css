@@ -5836,14 +5836,20 @@ body.mix-on #deckAHead .deck-song {
   gap: 3px;
 }
 
-/* The division select at the .small buttons' size; mono digits, like the fit readout's. */
-.slice-grid-sel {
+/* The foot's dropdowns at the .small buttons' size: the slice grid's division, and the envelope
+   panel's loop region and direction. */
+.slice-grid-sel,
+.slice-foot-sel {
   padding: 2px 20px 2px 7px;
   font-size: 11px;
   border-radius: 4px;
-  font-family: var(--mono);
   background-position: right 6px center;
   background-size: 8px 5px;
+}
+
+/* Mono digits on the division, like the fit readout's; the loop selects hold words. */
+.slice-grid-sel {
+  font-family: var(--mono);
 }
 
 .slice-fit-val {

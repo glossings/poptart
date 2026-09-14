@@ -206,7 +206,7 @@ export class Sig {
     // onset. Which plugin is in the slot never varies; only what it is set to.
     this.presetPatterns = opts.presetPatterns ?? {};
     // Sampler config, present only for sampler patterns: { index, begin, end, loop, speed,
-    // stretch, fit, slice, attack, decay, sustain, release }, each a Sig (sampled per event
+    // stretch, fit, slice, attack, decay, sustain, release, envScale }, each a Sig (sampled per event
     // onset) or absent for its default.
     // Patterned values also merge their step grid into the pattern's (see _samplerOpt).
     this.sampler = opts.sampler ?? null;
@@ -2278,8 +2278,8 @@ export class Sig {
   /**
    * Loop the sample for the event's duration instead of playing it as a one-shot. Truthy/falsy and
    * patternable like any channel - and `.loop(0)` is also how a negative .speed() opts out of its
-   * default backwards loop. HOW it loops is .loopwrap() (which region) and .loopdir() (how it
-   * turns over), each its own channel:
+   * default backwards loop. HOW it loops is .loopwrap() (which region repeats) and .loopdir() (what
+   * happens at the region's edge), each its own channel:
    *
    *   s("breaks:35").fit().begin(0.9).loop()                     // ...0.9 -> 1 -> 0 -> 1 -> 0
    *   s("breaks:35").fit().slice(3).loop().loopwrap(1)           // just that slice
@@ -2293,7 +2293,7 @@ export class Sig {
     return this._samplerOpt('loop', 'loop', toSignal(v));
   }
   /**
-   * Which region a .loop() runs round, as a mode number (bare `.loopwrap()` means 1):
+   * Which region a .loop() repeats, as a mode number (bare `.loopwrap()` means 1):
    *
    *   0 "file" (default) - the loop is the whole FILE and .begin() is only where it enters, so
    *                        .begin(0.9).loop() runs out the end and carries on from 0 instead of
@@ -2306,10 +2306,10 @@ export class Sig {
    */
   loopwrap(v = 1) { return this._samplerOpt('loopwrap', 'loopWrap', toSignal(v)); }
   /**
-   * How a .loop() turns over at the edge of its region, as a mode number (bare `.loopdir()` is 1):
+   * What a .loop() does at the edge of its region, as a mode number (bare `.loopdir()` is 1):
    *
-   *   0 "forward" (default) - reaching the far edge jumps back to the near one.
-   *   1 "pingpong"          - reaching the far edge turns round, so it bounces back and forth.
+   *   0 "forward" (default) - playback restarts from the region's start.
+   *   1 "pingpong"          - playback reverses direction, alternating forward and backward passes.
    *
    * Rounds and wraps exactly like .loopwrap(), so any signal drives it: .loopdir(irand(2)).
    */
@@ -2401,20 +2401,25 @@ export class Sig {
     return this._clone({ sampler: { ...this.sampler, slices: slicesSignal(v) } });
   }
 
-  // ADSR amplitude envelope over the voice. attack/decay/release scale the played duration:
-  // .attack(0.5) fades in over half the note, .attack(2) ramps over 2x the note (never reaching
-  // full before it ends). Attack->decay->sustain run across playback; once the note's duration
-  // ends the envelope releases from wherever it is. sustain is a 0..1 level. All default to 0
-  // (sustain 1), which floors to the tiny declick the sampler used before, so unset ADSR is
-  // unchanged.
-  /** Attack time as a multiple of the played duration - the fade-in from silence toward full. */
+  // ADSR amplitude envelope over the voice. attack/decay/release are SECONDS, the way a sampler
+  // and env() both measure them: .attack(0.005) is 5ms of fade-in whatever the note, the file or
+  // the speed, which is what lets an envelope line up with the sound itself (shaving a harsh
+  // transient). Attack->decay->sustain run across playback; once the note ends the envelope
+  // releases from wherever it is. sustain is a 0..1 level. All default to 0 (sustain 1), which
+  // floors to the tiny declick the sampler used before, so unset ADSR is unchanged.
+  //
+  // .envscale() multiplies the three times at emit time (osc-engine's envelopeSeconds), so times
+  // that follow the note instead are `.envscale(dur())`.
+  /** Attack time in seconds - the fade-in from silence toward full. */
   attack(v) { return this._samplerOpt('attack', 'attack', toSignal(v)); }
-  /** Decay time as a multiple of the played duration - the fall from the attack peak to the sustain level. */
+  /** Decay time in seconds - the fall from the attack peak to the sustain level. */
   decay(v) { return this._samplerOpt('decay', 'decay', toSignal(v)); }
   /** Sustain level, 0..1 - the held level after decay (a level, not a duration). */
   sustain(v) { return this._samplerOpt('sustain', 'sustain', toSignal(v)); }
-  /** Release time as a multiple of the played duration - the fade-out once the note's duration ends. */
+  /** Release time in seconds - the fade-out once the note ends. */
   release(v) { return this._samplerOpt('release', 'release', toSignal(v)); }
+  /** Multiplies attack, decay and release (not sustain): `.envscale(dur())` scales them by the note's length. */
+  envscale(v) { return this._samplerOpt('envscale', 'envScale', toSignal(v)); }
   /** Set all four ADSR controls at once: .adsr(attack, decay, sustain, release). */
   adsr(a, d, s, r) {
     let out = this;
@@ -3866,7 +3871,7 @@ export function n(value) {
  * event per step: `s("bd hh bd hh")`. A `:n` suffix picks the pack's nth file, strudel-style:
  * `s("bd:4")` = `s("bd").i(4)` (an explicit .i() overrides the suffix). Configure with
  * .i()/.begin()/.end()/.loop()/.speed()/.flip()/.stretch()/.fit()/.slice()/.attack()/.decay()/
- * .sustain()/.release() (or .adsr()); route through effects with .fx()/.param() as usual.
+ * .sustain()/.release()/.envscale() (or .adsr()); route through effects with .fx()/.param() as usual.
  */
 export function s(value) {
   return samplerPattern('s', value, 'pack');
@@ -3958,6 +3963,7 @@ const SAMPLER_CONTROLS = {
   decay: { key: 'decay', unset: 0 },
   sustain: { key: 'sustain', unset: 1 },
   release: { key: 'release', unset: 0 },
+  envscale: { key: 'envScale', unset: 1 },
   note: { key: 'note', unset: DEFAULT_SYNTH_NOTE }, // reached by bare arithmetic, not a builder
 };
 
@@ -4046,11 +4052,11 @@ export const begin = controlBuilder('begin');
 export const end = controlBuilder('end');
 /** Loop the sample for the event instead of one-shot - the top-level form of `.loop()`. */
 export const loop = controlBuilder('loop');
-/** Which region a loop runs round: 0 = the whole file, 1 = the begin..end window. Top-level `.loopwrap()`. */
+/** Which region a loop repeats: 0 = the whole file, 1 = the begin..end window. Top-level `.loopwrap()`. */
 export const loopwrap = controlBuilder('loopwrap');
-/** How a loop turns over: 0 = jump back, 1 = pingpong. Top-level `.loopdir()`. */
+/** What a loop does at its region's edge: 0 = restart, 1 = pingpong. Top-level `.loopdir()`. */
 export const loopdir = controlBuilder('loopdir');
-/** Playback rate off begin(); negative wraps backwards round the region - the top-level form of `.speed()`. */
+/** Playback rate from begin(); negative plays backward and wraps within the region - the top-level form of `.speed()`. */
 export const speed = controlBuilder('speed');
 /** Reverse the window into the beat (over 0.5 = on) - the top-level form of `.flip()`. */
 export const flip = controlBuilder('flip');
@@ -4070,14 +4076,16 @@ export const splicemode = (v = 1) => {
   out.ctl = 'splicemode';
   return out;
 };
-/** Attack, as a multiple of the played duration - the top-level form of `.attack()`. */
+/** Attack, in seconds - the top-level form of `.attack()`. */
 export const attack = controlBuilder('attack');
-/** Decay, as a multiple of the played duration - the top-level form of `.decay()`. */
+/** Decay, in seconds - the top-level form of `.decay()`. */
 export const decay = controlBuilder('decay');
 /** Sustain level, 0..1 - the top-level form of `.sustain()`. */
 export const sustain = controlBuilder('sustain');
-/** Release, as a multiple of the played duration - the top-level form of `.release()`. */
+/** Release, in seconds - the top-level form of `.release()`. */
 export const release = controlBuilder('release');
+/** Envelope time multiplier - the top-level form of `.envscale()`. */
+export const envscale = controlBuilder('envscale');
 
 /** Per-note velocity as an operand - the top-level form of `.vel()`. */
 export const vel = controlBuilder('vel');
@@ -5680,6 +5688,38 @@ export function noteGateFromGrid(stepsForCycle, spanOf) {
       return out;
     },
   };
+}
+
+// The event being emitted right now, as { onsetSec, endSec }: the scheduler binds it while it
+// samples one event's config (withEventSpan), so dur() reads the length of exactly that note - a
+// chord whose notes ring for different lengths included. Null outside an emission.
+let eventSpan = null;
+
+/** Runs `fn` with `span` ({ onsetSec, endSec }) as the note dur() measures (see above). */
+export function withEventSpan(span, fn) {
+  const prev = eventSpan;
+  eventSpan = span;
+  try {
+    return fn();
+  } finally {
+    eventSpan = prev;
+  }
+}
+
+/**
+ * `dur()` - the current note's length in seconds, as a signal. Read while an event is emitted
+ * (a sampler control: `.envscale(dur())`) it is that event's sounding length, clip and swing
+ * included. Anywhere else a note gate is in scope (a polled .gain() or .param()) it is the length
+ * of the most recent note to start. With neither - nothing has played - it rests.
+ */
+export function dur() {
+  return new Sig((t, cps, pos) => {
+    if (eventSpan) return eventSpan.endSec - eventSpan.onsetSec;
+    if (!noteGate || !(cps > 0)) return null;
+    let latest = null;
+    for (const span of noteGate.intervalsUpTo(pos ?? t * cps)) if (!latest || span[0] >= latest[0]) latest = span;
+    return latest ? (latest[1] - latest[0]) / cps : null;
+  });
 }
 
 // The most recent note onset at or before `pos` (absolute cycles), or null with no gate in scope
