@@ -155,11 +155,16 @@ test('a static send level is never re-pushed after its routing lands', () => {
   assert.equal(callsTo('setBusSendAmount').length, 0, 'setBusSends already carried the level');
 });
 
-test('stop() releases a track\'s bus sends', () => {
+// A group member sounds only through its send, and clearing it swaps the send's output bus on
+// one sample - the ringing hit vanishes, a click. Stop rings out, so the send stays; the next
+// eval diffs it against the pattern and the play that brings the track back hushes it.
+test('stop() leaves a track\'s bus sends up, so a grouped hit rings out like an ungrouped one', () => {
   const { engine, callsTo } = mockEngine();
   const sch = new Scheduler(engine, { trackId: 'kick' });
   sch.setPattern(note('c2*4').synth('Serum 2').bus('drums'));
   sch.stop();
+  assert.equal(callsTo('clearBusSends').length, 0);
+  sch.setPattern(note('c2*4').synth('Serum 2')); // the eval after: .bus() gone, send cleared
   assert.equal(callsTo('clearBusSends').length, 1);
 });
 

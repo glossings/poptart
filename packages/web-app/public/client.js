@@ -424,7 +424,7 @@ function copyLines(cm, dir) {
 const GROUP_GUTTER = 'poptart-group-fold';
 
 const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
-  mode: { name: 'javascript' },
+  mode: 'poptart',
   theme: 'poptart',
   keyMap: 'sublime',
   lineNumbers: true,
@@ -436,6 +436,10 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   autoCloseBrackets: true,
   viewportMargin: Infinity,
   extraKeys: {
+    // One indent level in, the mirror of the sublime keymap's Shift-Tab (indentLess). Left to
+    // CodeMirror's default, Tab with nothing selected inserts a tab character - the only one in a
+    // buffer made of spaces, and four columns wide against every two-space level around it.
+    'Tab': 'indentMore',
     'Cmd-Enter': () => evaluate(true, { byHand: true }),
     'Ctrl-Enter': () => evaluate(true, { byHand: true }),
     'Cmd-.': () => doStop('a'), // in DJ mode: this pane's deck only; otherwise a full stop
@@ -19895,7 +19899,7 @@ async function openMixMode() {
   djSetActiveDeck('a'); // deck A is armed until the other pane is clicked
   if (!deckBCM) {
     deckBCM = CodeMirror.fromTextArea(document.getElementById('deckBEditor'), {
-      mode: { name: 'javascript' },
+      mode: 'poptart',
       theme: 'poptart',
       keyMap: 'sublime',
       lineNumbers: true,
@@ -19903,6 +19907,7 @@ async function openMixMode() {
       autoCloseBrackets: true,
       viewportMargin: Infinity,
       extraKeys: {
+        'Tab': 'indentMore', // as in the main editor
         'Cmd-Enter': () => evalDeckB(true),
         'Ctrl-Enter': () => evalDeckB(true),
         'Shift-Cmd-Enter': () => exitDjMode('b'),
@@ -23910,12 +23915,13 @@ function renderSnippetCarries(el, carries, { onToggle = null } = {}) {
 function ensureSnippetSaveCM() {
   if (!snippetSaveCM) {
     snippetSaveCM = CodeMirror.fromTextArea(document.getElementById('snippetSaveEditor'), {
-      mode: { name: 'javascript' },
+      mode: 'poptart',
       theme: 'poptart',
       keyMap: 'sublime',
       matchBrackets: true,
       viewportMargin: Infinity,
       extraKeys: {
+        'Tab': 'indentMore', // as in the main editor
         'Cmd-Enter': saveSnippet,
         'Ctrl-Enter': saveSnippet,
         'Cmd-S': saveSnippet,
@@ -24249,13 +24255,14 @@ function renameSnippetInline(entry, label) {
 function ensureSnippetBrowseCM() {
   if (!snippetBrowseCM) {
     snippetBrowseCM = CodeMirror.fromTextArea(document.getElementById('snippetBrowseEditor'), {
-      mode: { name: 'javascript' },
+      mode: 'poptart',
       theme: 'poptart',
       keyMap: 'sublime',
       matchBrackets: true,
       viewportMargin: Infinity,
       readOnly: true,
       extraKeys: {
+        'Tab': 'indentMore', // as in the main editor
         'Cmd-S': saveSnippetEdit,
         'Ctrl-S': saveSnippetEdit,
         'Cmd-Enter': saveSnippetEdit,

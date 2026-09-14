@@ -41,6 +41,12 @@ function hwChannels(hw) {
   return chans;
 }
 
+// One audio route as the engine will wire it - the resolved source name, hardware channels and
+// gain - so two evals asking for the same thing compare equal (see setPattern's routing).
+function audioRouteKey(name, hwChans, gain = 1) {
+  return JSON.stringify([name, hwChans, gain]);
+}
+
 const DEFAULT_LOOKAHEAD_SEC = 0.15;
 // How far back a window opening mid-pattern looks for the preset already in force (see
 // _schedulePresetSwaps): enough for a slow preset pattern, cheap enough to not matter.
@@ -451,7 +457,8 @@ export class Scheduler {
     // control the new pattern doesn't set - e.g. a track that had .bsend() (dry=0) coming back must
     // return to dry=1. Same reasoning as clearing all trailing fx slots rather than diffing.
     this._prevChannelNames = Object.keys(CHANNEL_DEFAULTS);
-    this._prevAudioInjectSlots = new Set(); // fx slots the previous pattern audio-injected, for teardown
+    this._sentAudioInjects = new Map(); // fx slot -> audioRouteKey last wired, for diffing and teardown
+    this._sentInputRoute = null; // audioRouteKey of the head audio input last wired (null: none, or MIDI)
     this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
     this._busRouted = false; // track output currently diverted to a named bus (see Sig#bus)
@@ -740,13 +747,29 @@ export class Scheduler {
     // Live head input from the midi()/audio() source builders (Sig#inputSource): play a named
     // MIDI source on this track's instrument, or feed a named audio source into the chain input.
     // The engine resolves the name to a track or a device. Dropped on re-eval when it's gone.
+    //
+    // An audio route the engine already has is NOT sent again. Re-wiring one engine-side means
+    // tearing the old bus reader down and building a new one, and the signal is cut hard between
+    // the two - a click in whatever the track was passing, and for a group row that is its whole
+    // sound (see groups.mjs: a group reads its bus as its head input). Every eval lands here, and
+    // a knob turned on any plugin is an eval (auto-pin writes the state into the code), so without
+    // this every tweak clicked the groups. Only audio is diffed: a MIDI route is a Node-side table
+    // entry that costs nothing to replace, and its noteMap closes over THIS pattern's signals, so
+    // it has to be. The record is per Scheduler, which is enough: a Scheduler is rebuilt whenever
+    // its label comes back or the engine restarts, and a fresh one sends its route once.
     if (typeof this.engine.setInputSource === 'function') {
       const src = sig.inputSource;
       if (src) {
         const route = this._routePitchArgs(src.pitchOps);
-        this.engine.setInputSource(this.trackId, src.io, src.name, src.channel ?? 0, route.pcs, hwChannels(src.hw), route.transpose, route.noteMap);
+        const hw = hwChannels(src.hw);
+        const key = src.io === 'audio' ? audioRouteKey(src.name, hw) : null;
+        if (key == null || key !== this._sentInputRoute) {
+          this.engine.setInputSource(this.trackId, src.io, src.name, src.channel ?? 0, route.pcs, hw, route.transpose, route.noteMap);
+        }
+        this._sentInputRoute = key;
       } else if (this._prevInputSource) {
         this.engine.clearInputSource(this.trackId);
+        this._sentInputRoute = null;
       }
       this._prevInputSource = sig.inputSource ?? null;
     }
@@ -765,16 +788,23 @@ export class Scheduler {
     // Audio injected into a plugin's aux/sidechain input (Sig#audio, injector form): wire each
     // { slot, name } and tear down any slot the new pattern dropped. `name` is a track or a
     // hardware audio input; the engine routes the audio and orders any source track ahead of this.
+    // Diffed per slot for the same reason as the head input above: a re-wire cuts the sidechain
+    // signal, and a ducker keyed off it lets go for a moment. A slot whose plugin changes keeps
+    // its route - the engine re-opens the plugin inside the same track synth, and the aux bus is
+    // that synth's.
     if (typeof this.engine.injectAudio === 'function') {
-      const nextSlots = new Set();
+      const next = new Map();
       for (const inj of sig.audioInjects ?? []) {
-        nextSlots.add(inj.slot);
-        this.engine.injectAudio(this.trackId, inj.slot, inj.name, inj.gain ?? 1, hwChannels(inj.hw));
+        const hw = hwChannels(inj.hw);
+        const gain = inj.gain ?? 1;
+        const key = audioRouteKey(inj.name, hw, gain);
+        next.set(inj.slot, key);
+        if (this._sentAudioInjects.get(inj.slot) !== key) this.engine.injectAudio(this.trackId, inj.slot, inj.name, gain, hw);
       }
-      for (const slot of this._prevAudioInjectSlots) {
-        if (!nextSlots.has(slot)) this.engine.clearAudioInject(this.trackId, slot);
+      for (const slot of this._sentAudioInjects.keys()) {
+        if (!next.has(slot)) this.engine.clearAudioInject(this.trackId, slot);
       }
-      this._prevAudioInjectSlots = nextSlots;
+      this._sentAudioInjects = next;
     }
 
     // MIDI injected into a plugin from a named source (Sig#midi injector): another track's notes
@@ -921,12 +951,14 @@ export class Scheduler {
       this.engine.clearMidiNotes(this.trackId);
       this._midiRouted = false;
     }
-    // Bus sends also outlive the tick loop - drop them so a stopped/muted track stops feeding its
-    // buses (and releases them). setPattern re-establishes them on the next eval.
-    if (this._busRouted && typeof this.engine.clearBusSends === 'function') {
-      this.engine.clearBusSends(this.trackId);
-      this._busRouted = false;
-    }
+    // Bus sends stay up. A group member plays nothing directly - its whole sound goes through its
+    // send into the group's bus - and clearing that send here swapped the send's output bus on
+    // one sample: the hit that was ringing out simply vanished from the group, a click on every
+    // stop of a grouped track while an ungrouped one rang on. The sends outlive the tick loop
+    // like the voices do, and get the same treatment: the play that brings the track back hushes
+    // it, and the next eval diffs the sends against the pattern (setPattern forgets what was
+    // sent, so it pushes or clears outright). A track that is gone for good is destroyed
+    // engine-side (see the host's dropTrack), sends and all.
     this._sentBusSends = null;
     // Tier-2 modulators run as persistent engine-side synths, independent of the tick loop. Muting
     // or removing the track must clear them or a leftover LFO/env keeps modulating the param after

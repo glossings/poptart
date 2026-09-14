@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { note, synth, input, setPatternWarn } from './src/signal.mjs';
+import { note, synth, input, audio, midi, setPatternWarn } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 import { setAudioInputLayout, audioInputChannelCount, resolveInputChannels } from './src/audio-inputs.mjs';
 import { injectLocations } from './src/locations.mjs';
@@ -203,4 +203,62 @@ test('teardown: dropping input() on re-eval clears the route', () => {
   sch.setPattern(input(1).fx('ValhallaRoom'));
   sch.setPattern(note('c2*4').synth('Serum 2')); // input() gone this eval
   assert.equal(callsTo('clearInputSource').length, 1);
+});
+
+// Re-wiring an audio route engine-side tears the old bus reader down and builds a new one, which
+// cuts the signal between the two - a click on every eval, and a plugin knob turned is an eval
+// (auto-pin). So a route the engine already has is not sent again; only a changed one is.
+test('an unchanged head audio input is not re-sent on re-eval', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'low' });
+  sch.setPattern(audio('bus:low').fx('Pro-Q 3'));
+  sch.setPattern(audio('bus:low').fx('Pro-Q 3').postgain(0.9)); // the knob tweak: same route
+  assert.equal(callsTo('setInputSource').length, 1);
+  sch.setPattern(audio('bus:other').fx('Pro-Q 3')); // a different source: wired again
+  assert.equal(callsTo('setInputSource').length, 2);
+  assert.equal(callsTo('clearInputSource').length, 0);
+});
+
+test('a head input that comes back after being dropped is wired again', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'low' });
+  sch.setPattern(audio('bus:low').fx('Pro-Q 3'));
+  sch.setPattern(note('c2*4').synth('Serum 2'));
+  sch.setPattern(audio('bus:low').fx('Pro-Q 3'));
+  assert.equal(callsTo('clearInputSource').length, 1);
+  assert.equal(callsTo('setInputSource').length, 2);
+});
+
+// A MIDI route is a Node-side table entry, and its note map closes over the pattern it was built
+// from - so it is replaced every eval, on purpose.
+test('a head MIDI source is re-sent every eval', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(midi('keys').synth('Serum 2'));
+  sch.setPattern(midi('keys').synth('Serum 2'));
+  assert.equal(callsTo('setInputSource').length, 2);
+});
+
+test('an unchanged sidechain inject is not re-sent; a changed gain, or a dropped one, is', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'bass' });
+  const ducked = note('c2*8').synth('Serum 2').fx('Pro-C 2').audio('kick');
+  sch.setPattern(ducked);
+  sch.setPattern(ducked.postgain(0.8)); // an eval that touched nothing about the route
+  assert.equal(callsTo('injectAudio').length, 1);
+  sch.setPattern(note('c2*8').synth('Serum 2').fx('Pro-C 2').audio('kick', { gain: 0.5 }));
+  assert.equal(callsTo('injectAudio').length, 2, 'a new gain is a new route');
+  sch.setPattern(note('c2*8').synth('Serum 2').fx('Pro-C 2'));
+  assert.deepEqual(callsTo('clearAudioInject').map((c) => c.args), [['bass', 1]]);
+  sch.setPattern(ducked);
+  assert.equal(callsTo('injectAudio').length, 3, 'wired again once it is back');
+});
+
+test('a sidechain inject survives its plugin changing', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'bass' });
+  sch.setPattern(note('c2*8').synth('Serum 2').fx('Pro-C 2').audio('kick'));
+  sch.setPattern(note('c2*8').synth('Serum 2').fx('Kickstart 2').audio('kick'));
+  assert.equal(callsTo('injectAudio').length, 1, 'same slot, same source: the aux bus is the track synth\'s');
+  assert.equal(callsTo('clearAudioInject').length, 0);
 });

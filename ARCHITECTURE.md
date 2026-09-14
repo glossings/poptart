@@ -142,6 +142,10 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - `public/snippet-code.js` — what a snippet's names have to become in the buffer it lands in
   (reuse the identical one, rename the clashing one, rewrite the body to match). Loaded in the
   browser and required by its test, like `pattern-meta.js`.
+- `public/poptart-mode.js` — the editor's CodeMirror mode: JavaScript's tokens, with indentation
+  read off the brackets instead of the parse. A group body (`kick: …` over `rumble: …`, no
+  commas) is not JavaScript until the transpile, and the JavaScript mode's indenter derails on
+  it. Loaded in the browser and required by its test through CodeMirror's node shim.
 
 ## How a pattern becomes sound (data flow)
 
