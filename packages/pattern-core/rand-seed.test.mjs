@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { rand, perlin, s, sine, saw, tri, square, ramp, resetRandomSeeds, setPatternWarn } from './src/signal.mjs';
+import { rand, perlin, s, sine, saw, tri, square, isaw, resetRandomSeeds, setPatternWarn } from './src/signal.mjs';
 
 const SPAN = Array.from({ length: 64 }, (_, k) => k * 0.25);
 const readAt = (sig) => SPAN.map((t) => sig.sample(t, 1, t));
@@ -111,10 +111,10 @@ test('the deterministic shapes take no seed, so they cannot shift the random cou
   resetRandomSeeds();
   const bare = [rand().lfoIR.seed, rand().lfoIR.seed];
   resetRandomSeeds();
-  const interleaved = [rand().lfoIR.seed, sine(2), saw(1), tri(1), square(1), ramp(1), rand().lfoIR.seed];
+  const interleaved = [rand().lfoIR.seed, sine(2), saw(1), tri(1), square(1), isaw(1), rand().lfoIR.seed];
   assert.equal(interleaved[0], bare[0]);
   assert.equal(interleaved[6], bare[1], 'the LFOs in between consumed no seeds');
-  for (const shape of [sine(1), saw(1), tri(1), square(1), ramp(1)]) {
+  for (const shape of [sine(1), saw(1), tri(1), square(1), isaw(1)]) {
     assert.equal(shape.lfoIR.seed, undefined, 'a deterministic shape carries no seed at all');
   }
 });

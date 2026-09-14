@@ -1100,8 +1100,8 @@ server.waitForBoot {
     // rand() has no rate to ask for pattern-side. The smoothed one is perlin, fractal
     // (fBm) value noise layered over a few octaves for organic drift. Like rand, the native and JS
     // samplings differ (both random, only the rate/range contract is shared - see signal.mjs).
-    // ramp is a rising saw, same shape as \saw here.
-    [\sine, \tri, \saw, \ramp, \square, \rand, \perlin].do { |shape|
+    // saw rises 0->1 each period; isaw falls 1->0.
+    [\sine, \tri, \saw, \isaw, \square, \rand, \perlin].do { |shape|
         SynthDef(("poptart_lfo_" ++ shape).asSymbol, { |out, freq = 1, phase = 0, lo = 0, hi = 1, t_trig = 0|
             // Phase comes from one resettable Sweep, not each oscillator UGen's own internal
             // accumulator, so the scheduler can re-pin it to the shared transport clock with
@@ -1114,7 +1114,7 @@ server.waitForBoot {
                 \sine, { (ph * 2pi).sin * 0.5 + 0.5 },
                 \tri, { 1 - ((ph * 2) - 1).abs },
                 \saw, { ph },
-                \ramp, { ph },
+                \isaw, { 1 - ph },
                 \square, { ph < 0.5 },
                 \rand, { LFDNoise0.kr(freq) * 0.5 + 0.5 }, // stepped, not interpolated; no phase - never anchored
                 \perlin, { // fBm: octaves of smoothed noise, each 2x rate and 1/2 amplitude

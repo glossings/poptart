@@ -165,8 +165,8 @@ export function bendIsFlat(points) {
 
 export const SHAPE_PRESETS = {
   triangle: '0,0 0.5,1 1,0',
-  ramp: '0,0 1,1',
-  saw: '0,1 1,0',
+  saw: '0,0 1,1',
+  isaw: '0,1 1,0',
   square: '0,1 0.5,1 0.5,0 1,0',
   sine: '0,0.5,-1.6 0.25,1,1.6 0.5,0.5,-1.6 0.75,0,1.6 1,0.5',
   pluck: '0,1,-4 1,0',

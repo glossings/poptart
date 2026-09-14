@@ -5286,8 +5286,10 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
   let unipolar;
   switch (ir.shape) {
     case 'saw':
-    case 'ramp':
       unipolar = phase;
+      break;
+    case 'isaw':
+      unipolar = 1 - phase;
       break;
     case 'tri':
       unipolar = phase < 0.5 ? phase * 2 : 2 - phase * 2;
@@ -5385,10 +5387,10 @@ function shapeSignal(shape) {
 
 /** `sine({ rate: 0.3 }).range(200, 5000)` - also callable as `sine(0.3)` (rate shorthand). */
 export const sine = shapeSignal('sine');
-export const saw = shapeSignal('saw');
+export const saw = shapeSignal('saw'); // rising 0->1 each period
+export const isaw = shapeSignal('isaw'); // falling 1->0 each period
 export const tri = shapeSignal('tri');
 export const square = shapeSignal('square');
-export const ramp = shapeSignal('ramp'); // rising 0->1 each period (alias shape of saw)
 // What a `.param("Cutoff", rand())` runs on the server: LFDNoise0 needs SOME pace, and rand()
 // itself no longer carries one (see below), so every native rand steps at this fixed rate. Only
 // the Tier-2 path reads it; pattern-side sampling never does.

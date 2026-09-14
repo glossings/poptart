@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { note, saw, sine, lfo, lfoPhaseCount } from './src/signal.mjs';
+import { note, saw, isaw, sine, lfo, lfoPhaseCount } from './src/signal.mjs';
 import { Scheduler, Transport } from './src/scheduler.mjs';
 
 function mockEngine(now = 0) {
@@ -43,6 +43,14 @@ test('a synced modulator reads the cycle position, not the second it is sampled 
   const b = sine(0.25).sample(1e9 + 12345.678, cps, 2.5);
   assert.equal(a, b);
   assert.equal(saw(0.25).sample(1e9, cps, 2.5), 0.625); // 2.5 cycles into a 4-cycle pass
+});
+
+test('saw rises and isaw falls over each pass', () => {
+  assert.deepEqual([0, 0.25, 0.5].map((c) => saw(1).sample(c, 1, c)), [0, 0.25, 0.5]);
+  assert.deepEqual([0, 0.25, 0.5].map((c) => isaw(1).sample(c, 1, c)), [1, 0.75, 0.5]);
+  // The lfo() presets of the same names agree with the signals.
+  assert.deepEqual([0, 0.25, 0.5].map((c) => lfo('saw').sample(c, 1, c)), [0, 0.25, 0.5]);
+  assert.deepEqual([0, 0.25, 0.5].map((c) => lfo('isaw').sample(c, 1, c)), [1, 0.75, 0.5]);
 });
 
 test('a Hz rate counts seconds and ignores the grid', () => {

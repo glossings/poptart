@@ -1431,7 +1431,7 @@ class OscEngine {
   setParam(trackId, slotIndex, paramName, value, targetTime) {
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
   }
-  // ir: { shape: 'sine'|'saw'|'tri'|'square'|'ramp'|'rand', rateHz, phaseCycles, min, max } for
+  // ir: { shape: 'sine'|'saw'|'isaw'|'tri'|'square'|'rand', rateHz, phaseCycles, min, max } for
   // the basic shapes, or { shape: 'custom', points, mode, ... } for lfo() drawn shapes - see
   // signal.mjs / shape.mjs.
   // sclang maps a control bus to the VST parameter once and drives it with an internal UGen

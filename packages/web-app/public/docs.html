@@ -725,7 +725,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           </p>
           <h4>LFOs</h4>
           <p>
-            <code>sine</code>, <code>saw</code>, <code>tri</code>, <code>square</code>, <code>ramp</code>,
+            <code>sine</code>, <code>saw</code>, <code>isaw</code>, <code>tri</code>, <code>square</code>,
             <code>rand</code>, <code>perlin</code>. Each is a 0..1 shape; <code>.range(lo, hi)</code>
             rescales it. The rate is in <strong>cycles</strong>: <code>sine(0.25)</code> is one pass
             per four cycles, and it starts that pass on the cycle grid (0, 4, 8…) — a slow sweep is
@@ -1188,7 +1188,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
           </table>
           <table>
             <tr><th>Modulators</th><th></th></tr>
-            <tr><td><code>sine/saw/tri/square/ramp/rand/perlin(rate)</code></td><td>LFOs, 0..1</td></tr>
+            <tr><td><code>sine/saw/isaw/tri/square/rand/perlin(rate)</code></td><td>LFOs, 0..1</td></tr>
             <tr><td><code>lfo("shape", {rate, mode})</code></td><td>hand-drawn shape</td></tr>
             <tr><td><code>env({a, d, s, r})</code></td><td>per-note ADSR</td></tr>
             <tr><td><code>.range(lo, hi)</code></td><td>rescale a 0..1 signal</td></tr>
