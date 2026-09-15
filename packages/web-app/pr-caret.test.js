@@ -37,8 +37,8 @@ function grab(name) {
 }
 
 /** prPaste and prCopy over a fake panel; everything they call that isn't the point is stubbed. */
-function harness({ notes = [], caret = null, clipboard = null } = {}) {
-  const prState = { notes: notes.map((n) => ({ ...n })), caret, sel: new Set(), start: 0, len: 16, grid: 16 };
+function harness({ notes = [], caret = null, clipboard = null, regionSpan = null } = {}) {
+  const prState = { notes: notes.map((n) => ({ ...n })), caret, sel: new Set(), start: 0, len: 16, grid: 16, regionSpan };
   const wrote = [];
   const pianorollMod = require('../pattern-core/src/pianoroll.mjs');
   const env = {
@@ -53,8 +53,13 @@ function harness({ notes = [], caret = null, clipboard = null } = {}) {
   };
   // eslint-disable-next-line no-new-func
   const build = new Function(...Object.keys(env),
-    `let prClipboard = ${JSON.stringify(clipboard)};\n${grab('prCopy')}\n${grab('prPaste')}\n${grab('prDuplicate')}\n${grab('prResolveOverlaps')}\nreturn { prCopy, prPaste, prDuplicate, prResolveOverlaps, clip: () => prClipboard };`);
+    `let prClipboard = ${JSON.stringify(clipboard)};\n${grab('prCopy')}\n${grab('prPaste')}\n${grab('prDuplicate')}\n${grab('prResolveOverlaps')}\n${grab('prTimeRegion')}\nreturn { prCopy, prPaste, prDuplicate, prResolveOverlaps, clip: () => prClipboard };`);
   return { fns: build(...Object.values(env)), prState, wrote };
+}
+
+/** A clipboard as prCopy leaves it: the notes and the region they were taken from - their own extent unless one is given. */
+function clipOf(notes, at = Math.min(...notes.map((n) => n.start)), w = Math.max(...notes.map((n) => n.start + n.len)) - at) {
+  return { notes, at, w };
 }
 
 const at = (notes) => notes.map((n) => n.start).sort((a, b) => a - b);
@@ -63,7 +68,7 @@ test('a paste lands at the caret, carrying the clipboard there as a block', () =
   // The timing BETWEEN the notes is what a copied phrase is; only where it starts moves.
   const { fns, prState } = harness({
     caret: 8,
-    clipboard: [{ midi: 60, start: 4, len: 1, vel: 1, prob: 1 }, { midi: 64, start: 6, len: 1, vel: 1, prob: 1 }],
+    clipboard: clipOf([{ midi: 60, start: 4, len: 1, vel: 1, prob: 1 }, { midi: 64, start: 6, len: 1, vel: 1, prob: 1 }]),
   });
   fns.prPaste();
   assert.deepEqual(at(prState.notes), [8, 10], 'the earliest note landed on the caret; the gap survived');
@@ -73,7 +78,7 @@ test('with no caret a paste goes back to the cells it was copied from', () => {
   // Which is what this always did, and is still the right answer when nobody has said otherwise.
   const { fns, prState } = harness({
     caret: null,
-    clipboard: [{ midi: 60, start: 4, len: 1, vel: 1, prob: 1 }, { midi: 64, start: 6, len: 1, vel: 1, prob: 1 }],
+    clipboard: clipOf([{ midi: 60, start: 4, len: 1, vel: 1, prob: 1 }, { midi: 64, start: 6, len: 1, vel: 1, prob: 1 }]),
   });
   fns.prPaste();
   assert.deepEqual(at(prState.notes), [4, 6]);
@@ -82,19 +87,19 @@ test('with no caret a paste goes back to the cells it was copied from', () => {
 test('a caret past the loop pastes out there rather than folding onto the last cell', () => {
   // Out there the notes are drawn but do not sound, exactly as any note drawn past the loop is -
   // and opening the loop up to them brings them in.
-  const { fns, prState } = harness({ caret: 40, clipboard: [{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }] });
+  const { fns, prState } = harness({ caret: 40, clipboard: clipOf([{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }]) });
   fns.prPaste();
   assert.deepEqual(at(prState.notes), [40]);
 });
 
 test('a caret before the roll pastes at negative cells, which the window may still open onto', () => {
-  const { fns, prState } = harness({ caret: -4, clipboard: [{ midi: 60, start: 2, len: 1, vel: 1, prob: 1 }] });
+  const { fns, prState } = harness({ caret: -4, clipboard: clipOf([{ midi: 60, start: 2, len: 1, vel: 1, prob: 1 }]) });
   fns.prPaste();
   assert.deepEqual(at(prState.notes), [-4]);
 });
 
 test('pasting the same clipboard twice at two carets leaves two copies', () => {
-  const { fns, prState } = harness({ caret: 0, clipboard: [{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }] });
+  const { fns, prState } = harness({ caret: 0, clipboard: clipOf([{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }]) });
   fns.prPaste();
   prState.caret = 12;
   fns.prPaste();
@@ -111,7 +116,52 @@ test('an empty clipboard pastes nothing at all', () => {
 test('copy strips the hidden flag, so a buried note comes back visible', () => {
   const { fns } = harness({});
   fns.prCopy([{ midi: 60, start: 0, len: 1, vel: 1, prob: 1, hidden: true }]);
-  assert.equal(fns.clip()[0].hidden, false);
+  assert.equal(fns.clip().notes[0].hidden, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The region the notes were taken from. A bar marqueed with one note on its second beat is a bar,
+// not a beat: the copy, the paste and the duplicate all carry the marked span's width, so the
+// note lands on the second beat of the bar it is put in - not hard against the caret, and not
+// one note-length after itself.
+// ---------------------------------------------------------------------------------------------
+
+test('copy remembers the marked region, not just the notes\' own extent', () => {
+  const { fns, prState } = harness({ notes: [{ midi: 60, start: 4, len: 1, vel: 1, prob: 1 }], regionSpan: [0, 16] });
+  prState.sel = new Set(prState.notes);
+  fns.prCopy([...prState.sel]);
+  assert.deepEqual([fns.clip().at, fns.clip().w], [0, 16]);
+});
+
+test('with nothing marked, the copied region is the notes\' own extent', () => {
+  const { fns, prState } = harness({ notes: [{ midi: 60, start: 4, len: 2, vel: 1, prob: 1 }, { midi: 64, start: 7, len: 1, vel: 1, prob: 1 }] });
+  prState.sel = new Set(prState.notes);
+  fns.prCopy([...prState.sel]);
+  assert.deepEqual([fns.clip().at, fns.clip().w], [4, 4]);
+});
+
+test('a paste puts the REGION\'s start on the caret, so a note keeps its place in the bar', () => {
+  const { fns, prState } = harness({ caret: 16, clipboard: clipOf([{ midi: 60, start: 4, len: 1, vel: 1, prob: 1 }], 0, 16) });
+  fns.prPaste();
+  assert.deepEqual(at(prState.notes), [20], 'second beat of the next bar, not the next bar\'s first cell');
+  assert.deepEqual(prState.regionSpan, [16, 32], 'and the pasted bar is the marked region now');
+});
+
+test('duplicate with a marked region repeats it one region later, and the mark walks with it', () => {
+  const { fns, prState } = harness({ notes: [{ midi: 60, start: 4, len: 1, vel: 1, prob: 1 }], regionSpan: [0, 16] });
+  prState.sel = new Set(prState.notes);
+  fns.prDuplicate();
+  assert.deepEqual(at(prState.notes), [4, 20], 'the copy is a bar later, not a note-length later');
+  assert.deepEqual(prState.regionSpan, [16, 32]);
+  fns.prDuplicate();
+  assert.deepEqual(at(prState.notes), [4, 20, 36], 'pressing again lays the next bar down');
+});
+
+test('duplicate with a marked region and nothing selected changes nothing', () => {
+  const { fns, prState, wrote } = harness({ regionSpan: [0, 16] });
+  fns.prDuplicate();
+  assert.equal(prState.notes.length, 0);
+  assert.equal(wrote.length, 0);
 });
 
 test('duplicate carries on past the loop instead of stacking on its last cell', () => {
@@ -140,7 +190,7 @@ test('pasting onto a note clips it, with the tail in reserve while the paste sta
   const { fns, prState } = harness({
     notes: [{ midi: 60, start: 0, len: 8, full: 8, vel: 1, prob: 1 }],
     caret: 4,
-    clipboard: [{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }],
+    clipboard: clipOf([{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }]),
   });
   fns.prPaste();
   const long = prState.notes.find((n) => n.start === 0);
@@ -155,7 +205,7 @@ test('pasting square on top of a note buries it until the paste is deselected', 
   const { fns, prState } = harness({
     notes: [{ midi: 60, start: 4, len: 4, full: 4, vel: 1, prob: 1 }],
     caret: 4,
-    clipboard: [{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }],
+    clipboard: clipOf([{ midi: 60, start: 0, len: 1, vel: 1, prob: 1 }]),
   });
   fns.prPaste();
   assert.equal(prState.notes.length, 2, 'the one underneath is hidden, not gone');

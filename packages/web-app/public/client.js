@@ -4016,7 +4016,9 @@ function initPresetPanel() {
 // duplicate or delete a span of the timeline itself, across every lane (see prTimeRegion, where
 // the region and its ruler band are defined). Wheel scrolls
 // pitch, shift-wheel scrolls time, ctrl-wheel (or cmd ±)
-// zooms in on fine grids. Every note carries a pitch AND a sample index, and the `note`/`index`
+// zooms in on fine grids; the bar numbers above the loop bar are a magnifier - drag them sideways
+// to pan the timeline, down to zoom in, up to zoom out (the arrangement ruler's gesture; see the
+// 'nav' drag). Every note carries a pitch AND a sample index, and the `note`/`index`
 // button says which of them the rows are showing - a piano keyboard, or a plain 0, 1, 2, … count of
 // a pack's files driving .i(). Switching moves nothing and changes no sound (see prSetMode). `fold`
 // hides the rows nothing is drawn on, on either axis; `scale` hides everything outside the key, and
@@ -4076,7 +4078,14 @@ const prBendBtn = document.getElementById('pianorollBend'); // the bend overlay'
 const prCloseBtn = document.getElementById('pianorollClose');
 
 const PR_W = 660; // grid width with the control column open; the CSS owns it from there (see prW)
-const PR_TOPBAR = 16; // loop-ruler strip along the top (drag it to set the loop length)
+// The ruler along the top is two strips. The bar numbers are the MAGNIFIER - drag them sideways to
+// pan, up and down to zoom, the arrangement ruler's gesture (see CUR_ZOOM and axisGate) - and the
+// loop bar under them is where the playing window is drawn and dragged. Splitting them is what
+// gives the mouse a way along a zoomed-in roll: a ruler that is all loop bar has nowhere to take
+// hold of the view by.
+const PR_NAV = 16; // magnifier strip: bar numbers, and the time-selection band
+const PR_LOOPBAR = 12; // loop bar under it (drag its ends to set the window, its body to slide it)
+const PR_TOPBAR = PR_NAV + PR_LOOPBAR; // both strips; the note rows start here
 const PR_GRIDH = 384; // piano-grid height below the ruler
 const PR_LANEH = 64; // value lane below the grid (per-note velocity / probability markers)
 const PR_CH = PR_TOPBAR + PR_GRIDH + PR_LANEH; // full canvas height
@@ -4148,6 +4157,28 @@ const CUR_ZOOM = svgCursor(
   '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><circle cx="8" cy="8" r="5.5" fill="#fff" fill-opacity="0.85" stroke="#111" stroke-width="1.4"/><path d="M12.2 12.2l4.8 4.8" fill="none" stroke="#111" stroke-width="2.6" stroke-linecap="round"/><path d="M12.4 12.4l4.4 4.4" fill="none" stroke="#fff" stroke-width="1" stroke-linecap="round"/></svg>',
   8, 8, 'zoom-in',
 );
+// The magnifier's gesture, shared by the arrangement ruler and the roll's: sideways pans, up and
+// down zooms. A hand meaning one of those seldom moves exactly along it, so the drag is GATED by
+// its direction: within NAV_AXIS_ARC degrees of an axis only that axis counts, and only a drag
+// clearly between the two - the diagonal band left over, narrower than either arc - pans and zooms
+// together. The direction is read off the last few movements, decayed (NAV_AXIS_DECAY), so a pan
+// that turns into a zoom gets there within a few pixels (measured from the press instead, it would
+// take a vertical run as long as the pan before it), while the pixel of jitter in one movement
+// can't flip the mode.
+const NAV_AXIS_ARC = 35; // degrees either side of an axis that read as that axis alone (leaving 20 between them for both)
+const NAV_AXIS_DECAY = 0.6; // how much of the recent direction each movement keeps
+const NAV_ZOOM_PER_PX = 0.015; // vertical travel to zoom: a factor of exp(px * this), down to zoom in
+const axisGateState = () => ({ rx: 0, ry: 0 }); // the recent direction, one per drag
+/** One movement (dx, dy) of a magnifier drag, reduced to the component(s) the direction gate lets through. */
+function axisGate(g, dx, dy) {
+  g.rx = g.rx * NAV_AXIS_DECAY + dx;
+  g.ry = g.ry * NAV_AXIS_DECAY + dy;
+  const t = Math.tan((NAV_AXIS_ARC * Math.PI) / 180);
+  const ax = Math.abs(g.rx), ay = Math.abs(g.ry);
+  if (ay <= ax * t) return { dx, dy: 0 };
+  if (ax <= ay * t) return { dx: 0, dy };
+  return { dx, dy };
+}
 
 let prState = null; // see openPianorollEditor for the full shape (notes, steps, pitchTop, zoom, scroll, sel, tool, cmdMode, trackLabel)
 let prSuppressCursor = false;
@@ -6585,7 +6616,7 @@ function syncPianorollFromCode() {
 // --- canvas geometry (logical coordinates; the backing store is scaled by devicePixelRatio) ---
 // The grid renders `cols` cells - at least the loop (len) plus a little headroom, and at least one
 // cycle (grid) for context. Horizontal zoom widens each cell past the "fit" width and scrolls; the
-// pitch axis never zooms. A loop ruler occupies the top PR_TOPBAR px; note rows sit below it.
+// pitch axis never zooms. The ruler (bar numbers over the loop bar, see PR_NAV) occupies the top PR_TOPBAR px; note rows sit below it.
 
 // Rendered columns: the loop window's end - or the end of the last note, whichever is further -
 // rounded up to its next whole bar, plus a little headroom to drag into. Notes are not fenced in by
@@ -6847,9 +6878,10 @@ function drawIndexRows(ctx, col, m) {
   ctx.beginPath(); ctx.moveTo(PR_GUTTER + 0.5, 0); ctx.lineTo(PR_GUTTER + 0.5, H); ctx.stroke();
 }
 
-// The loop ruler across the top: bar ticks, the loop window [start, start+len) highlighted, and a
-// grab handle at each of its ends - drag either one to move that boundary anywhere on the timeline,
-// or the highlighted body to slide the whole window over the notes.
+// The ruler across the top, two strips deep (see PR_NAV / PR_LOOPBAR): bar ticks and numbers on
+// the magnifier strip, and under it the loop window [start, start+len) highlighted on the loop
+// bar with a grab handle at each of its ends - drag either one to move that boundary anywhere on
+// the timeline, or the highlighted body to slide the whole window over the notes.
 function drawLoopBar(ctx, col, m) {
   const accent = col('--accent');
   ctx.fillStyle = col('--bg-panel');
@@ -6858,9 +6890,9 @@ function drawLoopBar(ctx, col, m) {
   const loopEndX = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prLoopEnd(), m)));
   const loopStartX = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(prState.start, m)));
   ctx.fillStyle = col('--accent-soft');
-  ctx.fillRect(loopStartX, 0, Math.max(0, loopEndX - loopStartX), PR_TOPBAR);
+  ctx.fillRect(loopStartX, PR_NAV, Math.max(0, loopEndX - loopStartX), PR_LOOPBAR);
 
-  // bar ticks + numbers (a bar = `grid` cells = one cycle)
+  // bar ticks + numbers (a bar = `grid` cells = one cycle); the ticks run down through both strips
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   ctx.font = '8px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -6871,10 +6903,11 @@ function drawLoopBar(ctx, col, m) {
     ctx.strokeStyle = col('--border-strong');
     ctx.lineWidth = 0.6;
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, PR_TOPBAR); ctx.stroke();
-    ctx.fillText(String(c / prState.grid + 1), x + 3, PR_TOPBAR / 2);
+    ctx.fillText(String(c / prState.grid + 1), x + 3, PR_NAV / 2);
   }
 
-  // the time selection, as a highlighted band on the ruler (see prTimeRegion)
+  // the time selection, as a highlighted band across the magnifier strip (see prTimeRegion) -
+  // read off the bar numbers, as in the arrangement, and clear of the loop window below it
   const region = prTimeRegion();
   if (region) {
     const rx0 = Math.min(m.W, Math.max(PR_GUTTER, prCellToX(region[0], m)));
@@ -6882,25 +6915,28 @@ function drawLoopBar(ctx, col, m) {
     if (rx1 > rx0) {
       ctx.fillStyle = accent;
       ctx.globalAlpha = 0.35;
-      ctx.fillRect(rx0, 0, rx1 - rx0, PR_TOPBAR);
+      ctx.fillRect(rx0, 0, rx1 - rx0, PR_NAV);
       ctx.globalAlpha = 1;
     }
   }
 
-  // a grab handle at each end, pointing into the window
+  // a grab handle at each end of the loop window, pointing into it
+  const midY = PR_NAV + PR_LOOPBAR / 2;
   ctx.fillStyle = accent;
   if (prCellToX(prState.start, m) >= PR_GUTTER) {
     ctx.beginPath();
-    ctx.moveTo(loopStartX, 0); ctx.lineTo(loopStartX, PR_TOPBAR); ctx.lineTo(loopStartX + 6, PR_TOPBAR / 2);
+    ctx.moveTo(loopStartX, PR_NAV); ctx.lineTo(loopStartX, PR_TOPBAR); ctx.lineTo(loopStartX + 6, midY);
     ctx.closePath(); ctx.fill();
   }
   if (prCellToX(prLoopEnd(), m) <= m.W) {
     ctx.beginPath();
-    ctx.moveTo(loopEndX, 0); ctx.lineTo(loopEndX, PR_TOPBAR); ctx.lineTo(loopEndX - 6, PR_TOPBAR / 2);
+    ctx.moveTo(loopEndX, PR_NAV); ctx.lineTo(loopEndX, PR_TOPBAR); ctx.lineTo(loopEndX - 6, midY);
     ctx.closePath(); ctx.fill();
   }
+  // the seam between the two strips, and the ruler's foot
   ctx.strokeStyle = col('--border');
   ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PR_GUTTER, PR_NAV + 0.5); ctx.lineTo(m.W, PR_NAV + 0.5); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(PR_GUTTER, PR_TOPBAR + 0.5); ctx.lineTo(m.W, PR_TOPBAR + 0.5); ctx.stroke();
 }
 
@@ -8921,7 +8957,8 @@ function prScrollTo(notes) {
 
 // Which cursor the pointer should show at (px,py), given whether a velocity/prob modifier is held.
 function prCursorFor(px, py, m, velMod) {
-  if (py < PR_TOPBAR) { // loop ruler: the ends resize the window, its body slides it
+  if (py < PR_NAV) return px < PR_GUTTER ? 'default' : CUR_ZOOM; // the bar numbers: the magnifier (see the 'nav' drag)
+  if (py < PR_TOPBAR) { // loop bar: the ends resize the window, its body slides it
     if (px < PR_GUTTER) return 'default';
     const edge = prLoopEdgeAt(px, m);
     return edge === 'move' ? 'grab' : edge === 'start' ? CUR_BRACKET_L : CUR_BRACKET_R;
@@ -9102,11 +9139,19 @@ function prToggleMute() {
   drawPianoroll();
 }
 
-// Duplicate the selection one block-length to the right (cmd-D), selecting the copies.
+// Duplicate the selection after itself (cmd-D), selecting the copies. They land one REGION later
+// (see prTimeRegion): the marked time span when the arrow tool drew one - so a bar marqueed with a
+// note on its second beat repeats as a note on the second beat of the NEXT bar, however little of
+// the bar the note fills - and the selection's own extent when nothing is marked. The mark walks
+// with the copy, so pressing again keeps laying the block down the timeline.
 function prDuplicate() {
-  if (!prState.sel.size) return;
+  if (!prState.sel.size) {
+    if (prState.regionSpan) logLine('nothing in the marked span to duplicate - cmd-shift-D repeats the time itself', 'warn');
+    return;
+  }
   const sel = [...prState.sel];
-  const shift = Math.max(1, Math.max(...sel.map((n) => n.start + n.len)) - Math.min(...sel.map((n) => n.start)));
+  const region = prTimeRegion();
+  const shift = Math.max(1, region ? region[1] - region[0] : 1);
   // Unfenced at the loop's end. Clamping the copies into the window put every one of them on the
   // last cell when the selection was near it - a stack, not a duplicate - and the roll already lets
   // a note be drawn or arrow-stepped past the loop, where it waits, dimmed, for the window to be
@@ -9114,6 +9159,7 @@ function prDuplicate() {
   const copies = sel.map((n) => ({ ...n, start: n.start + shift }));
   prState.notes.push(...copies);
   prState.sel = new Set(copies);
+  if (prState.regionSpan) prState.regionSpan = prState.regionSpan.map((c) => c + shift);
   prResolveOverlaps(); // the copies were pushed last, so they land on top of anything already there
   writePianorollCall();
   drawPianoroll();
@@ -9129,23 +9175,33 @@ function prDuplicate() {
 // what carrying it into another roll means - clamped into the loop, and selected, so a paste is one
 // arrow-key or drag away from anywhere else. Within the same roll that puts the copies on top of
 // the originals (the overlap rule keeps the top ones); cmd-D is the in-roll duplicate.
-let prClipboard = null; // [{ ...note }], each a detached copy - the roll it came from may be gone
+//
+// The clipboard carries the REGION the notes were taken from as well as the notes (see
+// prTimeRegion): a bar marqueed with a note on its second beat pastes as a bar with a note on its
+// second beat, because the caret is where the region's start goes, not where the first note goes -
+// and the pasted region is marked afterwards, so cmd-D carries on repeating it at that width.
+let prClipboard = null; // { notes: [{ ...note }], at, w } - detached copies (the roll they came from may be gone) and the region [at, at + w) they were taken from
 function prCopy(notes) {
-  prClipboard = notes.map((n) => ({ ...n, hidden: false }));
+  const region = prTimeRegion();
+  const at = region ? region[0] : Math.min(...notes.map((n) => n.start));
+  const w = region ? region[1] - region[0] : Math.max(...notes.map((n) => n.start + n.len)) - at;
+  prClipboard = { notes: notes.map((n) => ({ ...n, hidden: false })), at, w };
   logLine(`copied ${notes.length} note${notes.length === 1 ? '' : 's'} - cmd-V pastes them into any roll`);
 }
 
 function prPaste() {
-  if (!prState || !prClipboard?.length) return;
+  if (!prState || !prClipboard?.notes.length) return;
   // Pasted AT THE CARET - the cell the last press declared (see prState.caret) - with the clipboard
-  // carried there as a block, so the timing between the notes is untouched and the earliest of them
-  // lands where you pointed. Without a caret they go back to the cells they were copied from, which
-  // is what this always did and is still the right answer when nobody has said otherwise.
-  const from = Math.min(...prClipboard.map((n) => n.start));
-  const shift = prState.caret == null ? 0 : prState.caret - from;
-  const copies = prClipboard.map((n) => ({ ...n, start: n.start + shift }));
+  // carried there as a block: the region's start lands where you pointed, and the timing between
+  // the notes, and their place within the region, are untouched. Without a caret they go back to
+  // the cells they were copied from, which is what this always did and is still the right answer
+  // when nobody has said otherwise.
+  const { notes, at, w } = prClipboard;
+  const to = prState.caret ?? at;
+  const copies = notes.map((n) => ({ ...n, start: n.start + (to - at) }));
   prState.notes.push(...copies); // last, so the pasted notes win the overlap rule where they land
   prState.sel = new Set(copies);
+  prState.regionSpan = [to, to + w]; // the paste is the marked region now, so cmd-D repeats it at its width
   prResolveOverlaps();
   prScrollTo(copies);
   writePianorollCall();
@@ -9300,7 +9356,7 @@ function initPianorollCanvas() {
   // the panel simply being shown. (While it's hidden the callback sees zero and waits.)
   new ResizeObserver(prSizeCanvas).observe(prCanvas);
 
-  let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'lane'|'marquee'|'loop'|'audition', ... }
+  let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'lane'|'marquee'|'loop'|'nav'|'audition', ... }
   const snapshotPos = () => [...prState.sel].map((n) => ({ n, start: n.start, row: prRowOf(n) }));
   const snapshotLen = () => [...prState.sel].map((n) => ({ n, len: n.len }));
   // Raise the dragged notes over whatever they land on - but only once the drag has actually moved
@@ -9322,7 +9378,7 @@ function initPianorollCanvas() {
   const dragCursor = (d) =>
     (d.kind === 'loop'
       ? (d.edge === 'move' ? 'grabbing' : d.edge === 'start' ? CUR_BRACKET_L : CUR_BRACKET_R)
-      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET_R, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', audition: 'pointer', bendPoint: 'grabbing', bendCurve: CUR_UPDOWN, bendGroup: CUR_UPDOWN, bendSpan: 'crosshair' }[d.kind] ?? 'default');
+      : { vel: CUR_UPDOWN, lane: CUR_UPDOWN, paint: CUR_PENCIL, resize: CUR_BRACKET_R, move: 'grabbing', create: CUR_PENCIL, marquee: 'crosshair', nav: CUR_ZOOM, audition: 'pointer', bendPoint: 'grabbing', bendCurve: CUR_UPDOWN, bendGroup: CUR_UPDOWN, bendSpan: 'crosshair' }[d.kind] ?? 'default');
 
   // ctrl-drag (mac) = velocity, not a menu - except over the value lane, which has one of its own
   // (randomize / reset the channel it shows; see prOpenLaneMenu), and the note grid, whose
@@ -9354,10 +9410,17 @@ function initPianorollCanvas() {
     // What a keyboard zoom aims at from here (see prZoomFocusPx): the cell this gesture is on,
     // recorded once for every kind of gesture there is.
     if (px >= PR_GUTTER) prState.focusCell = prCellFloat(px, m);
-    // ...and the caret, snapped, wherever the press landed - the grid, the ruler or the value lane.
-    // Every press moves it, which is what makes "click there, then paste" work without a mode.
+    // The magnifier strip: a grip on the VIEW rather than a place in the music, so it moves the
+    // focus (a keyboard zoom afterwards aims where the hand was) but leaves the caret alone. The
+    // cell grabbed stays under the pointer as the drag pans and zooms (see the pointermove).
+    if (py < PR_NAV) {
+      if (px >= PR_GUTTER) drag = { kind: 'nav', cell: prCellFloat(px, m), x0: px, lx: px, ly: py, gx: 0, gy: 0, zoom0: prState.zoom, gate: axisGateState() };
+      return;
+    }
+    // ...and the caret, snapped, wherever the press landed - the grid, the loop bar or the value
+    // lane. Every press moves it, which is what makes "click there, then paste" work without a mode.
     if (px >= PR_GUTTER) prState.caret = prSnapCell(prCellFloat(px, m), m, e.shiftKey);
-    if (py < PR_TOPBAR) { // loop ruler - drag either end, or the window itself (written on pointerup)
+    if (py < PR_TOPBAR) { // loop bar - drag either end, or the window itself (written on pointerup)
       if (px >= PR_GUTTER) {
         const edge = prLoopEdgeAt(px, m);
         drag = { kind: 'loop', edge, grabCell: prCellFloat(px, m), start0: prState.start };
@@ -9516,7 +9579,17 @@ function initPianorollCanvas() {
     prPointer = { px, py };
     if (!drag) { setCursor(prCursorFor(px, py, m, e.metaKey || e.ctrlKey)); return; }
     if (px >= PR_GUTTER) prState.focusCell = prCellFloat(px, m); // a drag carries the focus with it
-    if (drag.kind === 'loop') {
+    if (drag.kind === 'nav') {
+      // The magnifier: sideways pans, keeping the grabbed cell under the pointer; down zooms in
+      // and up zooms out, pinned to that same cell. Each movement passes through the direction
+      // gate first (axisGate), so a drag that is nearly along one axis is that axis alone, and
+      // the gated travel (gx, gy) is what the view is read from - never the raw pointer.
+      const g = axisGate(drag.gate, px - drag.lx, py - drag.ly);
+      drag.lx = px; drag.ly = py;
+      drag.gx += g.dx; drag.gy += g.dy;
+      prState.zoom = Math.min(PR_MAX_ZOOM, Math.max(1, drag.zoom0 * Math.exp(drag.gy * NAV_ZOOM_PER_PX)));
+      prState.scrollCells = drag.cell - (drag.x0 + drag.gx - PR_GUTTER) / prMetrics().cellW; // clamped on the next prMetrics
+    } else if (drag.kind === 'loop') {
       // The window's ends - and its start when the whole thing is being slid - snap to the bar and
       // its halves unless shift is held (see prSnapCell).
       const at = prSnapCell(drag.edge === 'move' ? drag.start0 + prCellFloat(px, m) - drag.grabCell : prCellFloat(px, m), m, e.shiftKey);
@@ -9665,7 +9738,7 @@ function initPianorollCanvas() {
       else if (drag.kind === 'bendGroup') { if (drag.mid) prBendCommit(); }
       else if (drag.kind === 'bendPoint' || drag.kind === 'bendCurve') { prBendCommit(); }
       else if (drag.kind === 'paint') { if (drag.painted) prWriteNow(); }
-      else if (drag.kind !== 'audition') {
+      else if (drag.kind !== 'audition' && drag.kind !== 'nav') { // (a nav drag moved the view, not the music)
         prResolveOverlaps(); // already resolved live on every frame; the notes stay selected, so nothing settles yet
         prWriteNow();
       }
@@ -29653,7 +29726,7 @@ function initArrangeCanvas() {
       }
       // the rest of the ruler is a magnifier: drag down to zoom in, up to zoom out, and the bar
       // you grabbed stays under the pointer, so a sideways drag pans as well
-      arState.drag = { kind: 'zoom', bar: arBarsOf(x), y0: y, px0: arState.pxPerCycle };
+      arState.drag = { kind: 'zoom', bar: arBarsOf(x), x0: x, lx: x, ly: y, gx: 0, gy: 0, px0: arState.pxPerCycle, gate: axisGateState() };
       return;
     }
     if (arInLoops(y)) {
@@ -29969,8 +30042,13 @@ function initArrangeCanvas() {
       d.moved = true;
       arAutoLivePush();
     } else if (d.kind === 'zoom') {
-      arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, d.px0 * Math.exp((y - d.y0) * 0.015)));
-      arState.scroll = Math.max(0, d.bar - (x - AR_GUTTER) / arState.pxPerCycle);
+      // Through the direction gate first (axisGate): a drag nearly along one axis pans or zooms,
+      // never both by accident, and the view is read from the gated travel rather than the pointer.
+      const g = axisGate(d.gate, x - d.lx, y - d.ly);
+      d.lx = x; d.ly = y;
+      d.gx += g.dx; d.gy += g.dy;
+      arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, d.px0 * Math.exp(d.gy * NAV_ZOOM_PER_PX)));
+      arState.scroll = Math.max(0, d.bar - (d.x0 + d.gx - AR_GUTTER) / arState.pxPerCycle);
     } else if (d.kind === 'len') {
       arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
       d.moved = true;
