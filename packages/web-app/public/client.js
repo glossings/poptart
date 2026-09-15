@@ -8885,10 +8885,11 @@ function drawPianoroll() {
 
   drawValueLane(ctx, col, m);
 
-  // playhead: sweeps the loop (position = absolute cell mod len) while the transport runs
+  // playhead: sweeps the loop (position = absolute cell mod len) while the transport runs. Read in
+  // song time when there is an arrangement, which is where the scheduler reads the roll.
   prPlayheadOn = false;
   if (!transport.paused) {
-    const abs = currentCyclePos() * prState.grid;
+    const abs = (arClockState()?.pos ?? currentCyclePos()) * prState.grid;
     const x = prCellToX(prState.start + (((abs % prState.len) + prState.len) % prState.len), m);
     if (x >= PR_GUTTER && x <= W) {
       ctx.strokeStyle = col('--accent');
@@ -29565,6 +29566,13 @@ function arrangeUnlock() {
       arSetClock(res.arrange ?? null);
       logLine(res.released ? `[arrange] loop ${res.released} released` : '[arrange] no loop to release');
       if (arState) drawArrange();
+      // The grid window in hand was walked through the clock as it was - looping - so from here on
+      // it lights the loop's bars while playback runs on. Re-fetch from the current cycle; a
+      // top-up overwrites the cycles it covers.
+      if (res.released && patternRegions.length) {
+        gridTo = Math.max(gridFrom, Math.floor(currentCyclePos()));
+        maybePrefetchGrid(gridTo);
+      }
     })
     .catch((e) => logLine(`[arrange] ${e.message}`, true));
 }

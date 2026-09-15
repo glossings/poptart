@@ -13,7 +13,7 @@ const path = require('node:path');
 
 // server.js spawns an engine on require, so highlightGrid is read out of the source and given its
 // own dependencies - the same trick preset-holds.test.js uses for patternSigs.
-function loadHighlightGrid(patternSigs) {
+function loadHighlightGrid(patternSigs, songSteps = null) {
   const src = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
   const at = src.indexOf('function highlightGrid(');
   assert.ok(at > 0, 'highlightGrid not found in server.js - this test needs updating');
@@ -30,6 +30,8 @@ function loadHighlightGrid(patternSigs) {
     soundingEnd: (s) => s.end,
     endEdgeStep: (s) => s,
     timeShift: (s) => s.shift ?? 0,
+    // No song clock unless a test brings the real one: every step is where the pattern has it.
+    songSteps: songSteps ?? ((stepsForCycle, from) => stepsForCycle(from).map((step) => ({ step, cycle: from, delta: 0 }))),
   };
   // eslint-disable-next-line no-new-func
   return new Function('patternCore', 'patternSigs', `${src.slice(at, end)}; return highlightGrid;`)(patternCore, patternSigs);
@@ -100,6 +102,21 @@ test('every cycle of the window carries its own gates', () => {
   const grid = gridOf(sig);
   assert.deepEqual(grid.map((g) => g.cycle), [0, 1]);
   for (const g of grid) assert.deepEqual(g.gates, [0]);
+});
+
+test('with a song clock, each transport cycle lights the bar the song is on', async () => {
+  // Started from the painter's marker at bar 2: transport cycle 0 plays - and so lights - bar 2.
+  const { ArrangeClock, songSteps } = await import('../pattern-core/src/arrange.mjs');
+  const clock = new ArrangeClock({ len: 4 });
+  clock.seek(0, 2);
+  const sig = {
+    stepsForCycle: (cycle) => [{ start: 0.5, end: 1, value: 'bd', locs: [[10 + cycle, 11 + cycle]] }],
+    noteChannels: {},
+  };
+  const highlightGrid = loadHighlightGrid((s) => [s], songSteps);
+  const grid = highlightGrid(sig, 0, 1000, 0, 2, clock);
+  assert.deepEqual(grid.map((g) => [g.cycle, g.steps[0].locs[0][0], g.steps[0].start, g.steps[0].end]), [[0, 12, 0.5, 1], [1, 13, 0.5, 1]]);
+  assert.deepEqual(grid[0].gates, [0.5]);
 });
 
 // --- what a sliced sampler step chops (the slice editor's playback follow) -----------------------

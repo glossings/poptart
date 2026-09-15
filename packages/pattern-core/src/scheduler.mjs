@@ -26,6 +26,7 @@
 
 import { sampleBound, CHANNEL_DEFAULTS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
+import { songSteps } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -449,6 +450,7 @@ export class Scheduler {
     this.trackId = trackId;
     this.label = label ?? trackId; // what user-facing lines call this track (trackId may be an opaque engine id)
     this.pattern = null;
+    this._songClock = null; // the deck's ArrangeClock, or null: the song is the transport (see setSongClock)
     this._scheduledUntilCycle = 0;
     this._timer = null;
     this._running = false;
@@ -636,14 +638,41 @@ export class Scheduler {
     return pluginId == null ? undefined : this._appliedStates.get(`${slot}:${pluginId}`);
   }
 
+  /**
+   * The song clock this track's pattern is read against (pattern-core's ArrangeClock), or null for
+   * none. With one, every place a transport cycle reaches the pattern - the steps it plays, the
+   * channels read at their onsets, the polled controls, the preset and shape swaps - asks at the
+   * SONG position instead, so a track started from the painter's marker plays the bars the song is
+   * on, and a loop region replays what it played the first time round. When things happen stays
+   * in transport time: the schedule window, the timestamps, and a free-running LFO's phase.
+   *
+   * Set by the host before setPattern, on every evaluation - the clock is swapped for a new one
+   * whenever the song's length or loop regions change, and the note gate built there reads it.
+   */
+  setSongClock(clock) {
+    this._songClock = clock ?? null;
+  }
+
+  // Where the song is at transport cycle `cycle`.
+  _songAt(cycle) {
+    return this._songClock ? this._songClock.posAt(cycle) : cycle;
+  }
+
+  // The steps a pattern plays in the transport span [from, to), each with the song cycle it came
+  // from and the song-minus-transport offset in force there (see arrange.mjs's songSteps).
+  _songSteps(stepsForCycle, from, to) {
+    return songSteps(stepsForCycle, from, to, this._songClock);
+  }
+
   setPattern(sig) {
     this.pattern = sig;
     // The note gate every JS-sampled modulator on this track reads (see withNoteGate): the same
     // sounding spans _scheduleNoteEdges emits, so a polled env() and a native one hear the same
-    // notes. Rebuilt per eval, since the grid it caches is this pattern's.
+    // notes. Rebuilt per eval, since the grid it caches is this pattern's. Kept in TRANSPORT cycles,
+    // the time the notes actually sounded in - see _withNoteGate for how a song-time read finds them.
     const since = this._noteGate?.since ?? -Infinity; // a re-eval mid-play keeps where playback began
     this._noteGate = sig.stepsForCycle
-      ? noteGateFromGrid(sig.stepsForCycle, (step, cycle) => this._soundingSpan(step, cycle))
+      ? noteGateFromGrid((cycle) => this._songSteps(sig.stepsForCycle, cycle, cycle + 1), (e) => this._soundingSpan(e))
       : null;
     if (this._noteGate) this._noteGate.since = since;
     this.engine.createTrack(this.trackId);
@@ -740,8 +769,9 @@ export class Scheduler {
     // signal, rather than only the name, is what closes that.
     const resetSec = this.engine.getTime() + DEFAULT_LOOKAHEAD_SEC;
     const resetCycle = this.transport.cycleAt(resetSec);
+    const resetSong = this._songAt(resetCycle);
     const speaks = (name) => name in sig.channel
-      && this._withNoteGate(() => sig.channel[name].sample(resetSec, this.transport.cps, resetCycle)) != null;
+      && this._withNoteGate(() => sig.channel[name].sample(resetSec, this.transport.cps, resetSong), resetCycle) != null;
     for (const name of this._prevChannelNames) {
       if (!speaks(name)) {
         this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, resetSec);
@@ -845,29 +875,45 @@ export class Scheduler {
     // on. The one exception is signal-valued .range() bounds, which _tick re-resolves and
     // re-sends (an in-place engine-side update - phase/gate state is preserved).
     const nowSec = this.engine.getTime();
+    const nowCycle = this.transport.cycleAt(nowSec);
     this._withNoteGate(() => {
       for (const m of this._activeModulators.values()) this._sendModulator(m, nowSec, true);
-    });
+    }, nowCycle);
   }
 
-  /** Runs `fn` with this track's note grid bound as the gate its modulators sample against. */
-  _withNoteGate(fn) {
-    return withNoteGate(this._noteGate, fn);
+  /**
+   * Runs `fn` with this track's note grid bound as the gate its modulators sample against, for
+   * reads made around transport cycle `atCycle`.
+   *
+   * The gate holds when notes SOUNDED, in transport cycles, but a modulator is sampled at the song
+   * position (see setSongClock). So the gate it sees is the real one moved by the song-minus-
+   * transport offset in force at `atCycle`: an envelope measures from its note's real onset, which
+   * is the time that passed - a note played just before a loop region wrapped is still ringing
+   * just after it, however far back the song jumped.
+   */
+  _withNoteGate(fn, atCycle) {
+    const gate = this._noteGate;
+    const delta = gate && this._songClock && atCycle != null ? this._songAt(atCycle) - atCycle : 0;
+    if (!delta) return withNoteGate(gate, fn);
+    return withNoteGate({
+      intervalsUpTo: (pos) => gate.intervalsUpTo(pos - delta).map(([a, b]) => [a + delta, b + delta]),
+    }, fn);
   }
 
-  // One event's sounding span in absolute cycles, or null where nothing sounds (a rest, a tie's
-  // continuation, a note at zero velocity - what _scheduleNoteEdges skips). Read at the grid
-  // position like the emitter does; the nudge/swing shift is a matter of milliseconds against a
-  // modulator whose times are set in tens of them.
-  _soundingSpan(step, cycle) {
+  // One event's sounding span in absolute transport cycles, or null where nothing sounds (a rest, a
+  // tie's continuation, a note at zero velocity - what _scheduleNoteEdges skips). Takes a songSteps
+  // entry and reads it at its grid position like the emitter does; the nudge/swing shift is a
+  // matter of milliseconds against a modulator whose times are set in tens of them.
+  _soundingSpan({ step, cycle, delta }) {
     if (step.value == null || step.cont) return null;
-    const onset = cycle + step.start;
+    const songOnset = cycle + step.start;
+    const onset = songOnset - delta;
     const onsetSec = this.transport.secAt(onset);
     if (!this.pattern.sampler) {
-      const vel = this._velAt(step, onsetSec, onset) ?? 1.0;
+      const vel = this._velAt(step, onsetSec, songOnset) ?? 1.0;
       if (vel <= 0) return null;
     }
-    return [onset, cycle + this._soundingEnd(step, onsetSec, onset)];
+    return [onset, cycle - delta + this._soundingEnd(step, onsetSec, songOnset)];
   }
 
   /**
@@ -885,7 +931,7 @@ export class Scheduler {
     const rateHz = m.sig.lfoIR ? lfoRateHz(ir, cps) : null;
     const synced = m.sig.lfoIR != null && ir.rateHz == null;
     m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number' || synced;
-    const pos = this.transport.cycleAt(nowSec);
+    const pos = this._songAt(this.transport.cycleAt(nowSec));
     // A resting signal bound (a mini-string bound mid-`~`) holds the last sent value; on the
     // very first send there's nothing to hold, so fall back to the unipolar default.
     const lo = sampleBound(ir.min, nowSec, cps, pos) ?? (initial ? 0 : null);
@@ -1017,7 +1063,7 @@ export class Scheduler {
         for (const m of this._activeModulators.values()) {
           if (m.dynamic) this._sendModulator(m, nowSec); // signal-valued .range() bounds
         }
-      });
+      }, targetCycle);
       this._anchorLFOs(nowSec);
     } catch (err) {
       // Patterns evaluate lazily, so a bad value can first throw here, inside the timer -
@@ -1054,7 +1100,7 @@ export class Scheduler {
   _buildNoteMap(pitchOps) {
     const resolved = pitchOps.map((e) => (e.op === 'scale' ? { pcs: scalePitchClasses(e.name) ?? [] } : e));
     return (noteIn, sec) => {
-      const cycle = this.transport.cycleAt(sec);
+      const cycle = this._songAt(this.transport.cycleAt(sec));
       let v = noteIn;
       for (const e of resolved) {
         if (e.pcs) {
@@ -1075,96 +1121,97 @@ export class Scheduler {
   _scheduleNoteEdges(fromCycle, toCycle, nowSec = this.engine.getTime()) {
     if (!this.pattern.stepsForCycle) return; // top-level pattern has no note structure (e.g. a bare LFO)
 
-    for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
-      for (const step of this.pattern.stepsForCycle(cycle)) {
-        if (step.value == null) continue; // rest
-        if (step.cont) continue; // tie/hold: the sounding event's onset was in an earlier step
+    // Only onsets newly entering the lookahead window - each tick advances `fromCycle` to the
+    // previous tick's `toCycle`, so this never double-fires. The window is tested against the GRID
+    // position, never the nudged one: an event belongs to the tick its written position falls in,
+    // and moving that test would either double-fire an event or drop one whenever a shift carried
+    // it across a window edge. Each step comes with its SONG position (see setSongClock): that is
+    // where the pattern has it and where every channel is read, while the transport position, one
+    // offset away, is when it plays.
+    for (const { step, cycle, delta } of this._songSteps(this.pattern.stepsForCycle, fromCycle, toCycle)) {
+      if (step.value == null) continue; // rest
+      if (step.cont) continue; // tie/hold: the sounding event's onset was in an earlier step
 
-        const stepStartCycle = cycle + step.start;
-        // Only trigger onsets newly entering the lookahead window - each tick advances
-        // `fromCycle` to the previous tick's `toCycle`, so this never double-fires. The window is
-        // tested against the GRID position, never the nudged one: an event belongs to the tick its
-        // written position falls in, and moving that test would either double-fire an event or drop
-        // one whenever a shift carried it across a window edge.
-        if (stepStartCycle < fromCycle || stepStartCycle >= toCycle) continue;
+      const songStart = cycle + step.start;
+      const stepStartCycle = songStart - delta;
 
-        const gridSec = this.transport.secAt(stepStartCycle);
-        // How long it rings: the step's own width times its clip channel. This is where clip is
-        // applied - it's a key on the event like any other (see soundingEnd), so the noteOff simply
-        // lands later, possibly cycles later, with nothing about the pattern's structure changed.
-        const stepEndCycle = cycle + this._soundingEnd(step, gridSec, stepStartCycle);
+      const gridSec = this.transport.secAt(stepStartCycle);
+      // How long it rings: the step's own width times its clip channel. This is where clip is
+      // applied - it's a key on the event like any other (see soundingEnd), so the noteOff simply
+      // lands later, possibly cycles later, with nothing about the pattern's structure changed.
+      const songEnd = cycle + this._soundingEnd(step, gridSec, songStart);
+      const stepEndCycle = songEnd - delta;
 
-        // Where it actually plays: its grid position plus whatever .nudge()/.swing() move it by
-        // (see timeShift), the other control read at the point of emission. Every channel above and
-        // below is sampled at the GRID position, shift included - the event's musical position is
-        // where it was written, and swing moves the sound, not the note.
-        const shiftSec = this._timeShiftSec(step, stepStartCycle, gridSec, nowSec);
-        const onsetSec = gridSec + shiftSec;
-        // The END is warped too, and at ITS OWN grid position rather than the onset's - swing bends
-        // the time axis, so both edges of the note follow the bend they each sit on. Translating the
-        // whole event by the onset's shift instead would have a swung note ring straight through the
-        // straight note that follows it: a default (clip 1) note ends exactly where the next one
-        // begins, and moving only one of those two apart by a third of a slot puts one event's
-        // noteOff a long way inside the next event's note - which on a repeated pitch (a swung
-        // bassline on one note) silences every second note partway through. Warping both edges keeps
-        // the gap between consecutive events exactly as it was written, and leaves the noteOff and
-        // the next noteOn coincident, which is the case NOTE_OFF_EARLY_SEC already handles.
-        const endGridSec = this.transport.secAt(stepEndCycle);
-        const endStep = endEdgeStep(step, stepEndCycle - Math.floor(stepEndCycle));
-        const endSec = endGridSec + this._shiftSecAt(endStep, stepEndCycle, endGridSec);
-        // A note can't end before it starts - reachable only by mixing a late onset nudge with an
-        // early one at the end position, but the engine would take a backwards span literally.
-        const offsetSec = Math.max(onsetSec + MIN_SOUNDING_SEC, endSec);
+      // Where it actually plays: its grid position plus whatever .nudge()/.swing() move it by
+      // (see timeShift), the other control read at the point of emission. Every channel above and
+      // below is sampled at the GRID position, shift included - the event's musical position is
+      // where it was written, and swing moves the sound, not the note.
+      const shiftSec = this._timeShiftSec(step, songStart, delta, gridSec, nowSec);
+      const onsetSec = gridSec + shiftSec;
+      // The END is warped too, and at ITS OWN grid position rather than the onset's - swing bends
+      // the time axis, so both edges of the note follow the bend they each sit on. Translating the
+      // whole event by the onset's shift instead would have a swung note ring straight through the
+      // straight note that follows it: a default (clip 1) note ends exactly where the next one
+      // begins, and moving only one of those two apart by a third of a slot puts one event's
+      // noteOff a long way inside the next event's note - which on a repeated pitch (a swung
+      // bassline on one note) silences every second note partway through. Warping both edges keeps
+      // the gap between consecutive events exactly as it was written, and leaves the noteOff and
+      // the next noteOn coincident, which is the case NOTE_OFF_EARLY_SEC already handles.
+      const endGridSec = this.transport.secAt(stepEndCycle);
+      const endStep = endEdgeStep(step, songEnd - Math.floor(songEnd));
+      const endSec = endGridSec + this._shiftSecAt(endStep, songEnd, delta, endGridSec);
+      // A note can't end before it starts - reachable only by mixing a late onset nudge with an
+      // early one at the end position, but the engine would take a backwards span literally.
+      const offsetSec = Math.max(onsetSec + MIN_SOUNDING_SEC, endSec);
 
-        // Velocity is one note channel now, read uniformly for both track kinds (see _velAt): the
-        // merged step.vel wins, else the channel is sampled at the onset, else it's unset.
-        const velocity = this._velAt(step, gridSec, stepStartCycle);
-        // .log() prints where the event is HEARD - a swung note reads at the position it plays, not
-        // the one it was written at. Unshifted events skip the round trip so their positions stay
-        // the exact fractions the grid produced.
-        const logAt = !this.pattern.logging
-          ? null
-          : shiftSec === 0
-            ? [stepStartCycle, stepEndCycle]
-            : [this.transport.cycleAt(onsetSec), this.transport.cycleAt(offsetSec)];
-        if (this.pattern.sampler) {
-          // dur() reads the note being emitted: the span the engine will actually gate it for.
-          const cfg = withEventSpan({ onsetSec, endSec: offsetSec }, () => this._sampleConfigAt(step, gridSec, stepStartCycle));
-          if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
-          // What the engine resolves to files: a bare name is a pack (a folder), "sp:" a named
-          // pack (a _pack() definition), "file:"/"rec:" one exact file (se/sr). Only the two packs
-          // take the index suffix - the other two address a single file, so a ":" in one of those
-          // values belongs to the name.
-          const kind = this.pattern.samplerKind ?? 'pack';
-          let pack = String(step.value);
-          if (kind === 'pack' || kind === 'named') {
-            // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
-            const m = /^(.+):(-?\d+)$/.exec(pack);
-            if (m) {
-              pack = m[1];
-              if (cfg.index === undefined) cfg.index = Number(m[2]);
-            }
-            if (kind === 'named') pack = `sp:${pack}`;
-          } else {
-            pack = `${kind === 'rec' ? 'rec' : 'file'}:${pack}`;
+      // Velocity is one note channel now, read uniformly for both track kinds (see _velAt): the
+      // merged step.vel wins, else the channel is sampled at the onset, else it's unset.
+      const velocity = this._velAt(step, gridSec, songStart);
+      // .log() prints where the event is HEARD - a swung note reads at the position it plays, not
+      // the one it was written at. Unshifted events skip the round trip so their positions stay
+      // the exact fractions the grid produced.
+      const logAt = !this.pattern.logging
+        ? null
+        : shiftSec === 0
+          ? [stepStartCycle, stepEndCycle]
+          : [this.transport.cycleAt(onsetSec), this.transport.cycleAt(offsetSec)];
+      if (this.pattern.sampler) {
+        // dur() reads the note being emitted: the span the engine will actually gate it for.
+        const cfg = withEventSpan({ onsetSec, endSec: offsetSec }, () => this._sampleConfigAt(step, gridSec, songStart));
+        if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
+        // What the engine resolves to files: a bare name is a pack (a folder), "sp:" a named
+        // pack (a _pack() definition), "file:"/"rec:" one exact file (se/sr). Only the two packs
+        // take the index suffix - the other two address a single file, so a ":" in one of those
+        // values belongs to the name.
+        const kind = this.pattern.samplerKind ?? 'pack';
+        let pack = String(step.value);
+        if (kind === 'pack' || kind === 'named') {
+          // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
+          const m = /^(.+):(-?\d+)$/.exec(pack);
+          if (m) {
+            pack = m[1];
+            if (cfg.index === undefined) cfg.index = Number(m[2]);
           }
-          // The engine reports back what it resolved the config down to (fit -> rate, slice ->
-          // window, and the window's length in seconds) - that's what .log() prints, since none
-          // of it can be known here: it depends on the sample file's own length.
-          const info = this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
-          if (logAt) {
-            this._logEvent(logAt[0], logAt[1], formatSampleEvent(pack, cfg, info, stepEndCycle - stepStartCycle));
-          }
+          if (kind === 'named') pack = `sp:${pack}`;
         } else {
-          const midiNote = Math.round(step.value);
-          const vel = velocity ?? 1.0; // unset velocity on a synth note is full
-          if (logAt) {
-            this._logEvent(logAt[0], logAt[1], formatNoteEvent(midiNote, vel));
-          }
-          if (vel <= 0) continue;
-          this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec);
-          this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC));
+          pack = `${kind === 'rec' ? 'rec' : 'file'}:${pack}`;
         }
+        // The engine reports back what it resolved the config down to (fit -> rate, slice ->
+        // window, and the window's length in seconds) - that's what .log() prints, since none
+        // of it can be known here: it depends on the sample file's own length.
+        const info = this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
+        if (logAt) {
+          this._logEvent(logAt[0], logAt[1], formatSampleEvent(pack, cfg, info, stepEndCycle - stepStartCycle));
+        }
+      } else {
+        const midiNote = Math.round(step.value);
+        const vel = velocity ?? 1.0; // unset velocity on a synth note is full
+        if (logAt) {
+          this._logEvent(logAt[0], logAt[1], formatNoteEvent(midiNote, vel));
+        }
+        if (vel <= 0) continue;
+        this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec);
+        this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC));
       }
     }
   }
@@ -1190,27 +1237,24 @@ export class Scheduler {
     for (const m of this._activeModulators.values()) {
       const ir = m.sig.lfoIR;
       if (!ir?.shapePattern?.stepsForCycle) continue;
-      for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
-        for (const step of ir.shapePattern.stepsForCycle(cycle)) {
-          const at = cycle + step.start;
-          if (at < fromCycle || at >= toCycle) continue;
-          if (step.value == null || step.cont) continue; // a rest holds the shape that is playing
-          const index = ir.shapeNames.indexOf(String(step.value).trim());
-          // The first step of an eval asserts the shape rather than assuming it: an unchanged
-          // spec keeps the running synth, which may be holding any shape, and a scheduler that
-          // assumed the first would skip the message that puts it right. The engine no-ops when
-          // it already agrees.
-          if (index < 0 || index === m.shapeIndex) continue;
-          m.shapeIndex = index;
-          const atSec = this.transport.secAt(at);
-          this.engine.setParamShape(this.trackId, m.slot, m.name, index, atSec);
-          // Phase restarts at the swap, so that is where the anchor's phase formula counts from -
-          // in both units, since a synced rate counts the swap's cycle and a Hz one its second.
-          // In the note-gated modes the engine defers the swap to the next gate and keeps its own
-          // time anyway - those are never anchored (see _anchorLFOs).
-          m.phaseOriginSec = atSec;
-          m.phaseOriginCycle = at;
-        }
+      for (const { step, cycle, delta } of this._songSteps(ir.shapePattern.stepsForCycle, fromCycle, toCycle)) {
+        if (step.value == null || step.cont) continue; // a rest holds the shape that is playing
+        const at = cycle + step.start - delta; // transport: the phase below counts in it
+        const index = ir.shapeNames.indexOf(String(step.value).trim());
+        // The first step of an eval asserts the shape rather than assuming it: an unchanged
+        // spec keeps the running synth, which may be holding any shape, and a scheduler that
+        // assumed the first would skip the message that puts it right. The engine no-ops when
+        // it already agrees.
+        if (index < 0 || index === m.shapeIndex) continue;
+        m.shapeIndex = index;
+        const atSec = this.transport.secAt(at);
+        this.engine.setParamShape(this.trackId, m.slot, m.name, index, atSec);
+        // Phase restarts at the swap, so that is where the anchor's phase formula counts from -
+        // in both units, since a synced rate counts the swap's cycle and a Hz one its second.
+        // In the note-gated modes the engine defers the swap to the next gate and keeps its own
+        // time anyway - those are never anchored (see _anchorLFOs).
+        m.phaseOriginSec = atSec;
+        m.phaseOriginCycle = at;
       }
     }
   }
@@ -1248,10 +1292,14 @@ export class Scheduler {
       // is really sounding - which is the one a knob turned now belongs to.
       if (this._presetHold.has(slot) || this._stateHold.has(slot)) continue;
       if (catchUp) {
-        const inForce = this._presetInForceBefore(sig, fromCycle);
+        // Looked for in SONG time, which is where the pattern has its names (see setSongClock); the
+        // queue wants seconds, so the name's distance back from the window's song edge is carried
+        // back from its transport edge.
+        const songFrom = this._songAt(fromCycle);
+        const inForce = this._presetInForceBefore(sig, songFrom);
         if (inForce) {
           const queue = this._presetQueue(slot);
-          queue.push({ atSec: this.transport.secAt(inForce.at), name: inForce.name });
+          queue.push({ atSec: this.transport.secAt(fromCycle - (songFrom - inForce.at)), name: inForce.name });
           this._livePresets.set(slot, queue);
           const why = this._applyPreset(slot, inForce.name, null);
           if (why && !this._presetWarned.has(`${slot} ${inForce.name}`)) {
@@ -1260,36 +1308,32 @@ export class Scheduler {
           }
         }
       }
-      for (let cycle = Math.floor(fromCycle); cycle < toCycle; cycle++) {
-        for (const step of sig.stepsForCycle(cycle)) {
-          const at = cycle + step.start;
-          if (at < fromCycle || at >= toCycle) continue;
-          if (step.value == null || step.cont) continue;
-          const name = String(step.value).trim();
-          if (!name) continue;
-          const atSec = this.transport.secAt(at);
-          // Recorded whether or not a state is pushed: this name IS the one sounding from here,
-          // so it is where a capture off that plugin belongs even if nothing has been captured
-          // into it yet. That empty case is the whole authoring loop - see Sig#preset.
-          const queue = this._presetQueue(slot);
-          queue.push({ atSec, name });
-          this._livePresets.set(slot, queue);
-          // Applied a hair before the onset it belongs to, so the program is in by the time the
-          // notes at that onset play (see PRESET_SWAP_LEAD_SEC). The QUEUE still carries the true
-          // onset: which preset a knob you turn belongs to is a question about the music, not
-          // about how long a plugin takes to swallow a program.
-          const why = this._applyPreset(slot, name, atSec - PRESET_SWAP_LEAD_SEC);
-          if (why && !this._presetWarned.has(`${slot} ${name}`)) {
-            this._presetWarned.add(`${slot} ${name}`);
-            warnPattern(`[scheduler] track "${this.label}" slot ${slot}: ${why}`);
-          }
+      for (const { step, cycle, delta } of this._songSteps(sig.stepsForCycle, fromCycle, toCycle)) {
+        if (step.value == null || step.cont) continue;
+        const name = String(step.value).trim();
+        if (!name) continue;
+        const atSec = this.transport.secAt(cycle + step.start - delta);
+        // Recorded whether or not a state is pushed: this name IS the one sounding from here,
+        // so it is where a capture off that plugin belongs even if nothing has been captured
+        // into it yet. That empty case is the whole authoring loop - see Sig#preset.
+        const queue = this._presetQueue(slot);
+        queue.push({ atSec, name });
+        this._livePresets.set(slot, queue);
+        // Applied a hair before the onset it belongs to, so the program is in by the time the
+        // notes at that onset play (see PRESET_SWAP_LEAD_SEC). The QUEUE still carries the true
+        // onset: which preset a knob you turn belongs to is a question about the music, not
+        // about how long a plugin takes to swallow a program.
+        const why = this._applyPreset(slot, name, atSec - PRESET_SWAP_LEAD_SEC);
+        if (why && !this._presetWarned.has(`${slot} ${name}`)) {
+          this._presetWarned.add(`${slot} ${name}`);
+          warnPattern(`[scheduler] track "${this.label}" slot ${slot}: ${why}`);
         }
       }
     }
   }
 
-  // The latest named step strictly before `fromCycle` (the one whose program should be in when a
-  // window opens there), or null. Null too when a named step sits exactly ON the opening edge:
+  // The latest named step strictly before song position `fromCycle` (the one whose program should
+  // be in when a window opens there), or null. Null too when a named step sits exactly ON the opening edge:
   // the window itself applies that one, and the previous program would only be loaded to be
   // replaced in the same breath. Looks back a bounded number of cycles, never below cycle 0.
   _presetInForceBefore(sig, fromCycle) {
@@ -1352,14 +1396,16 @@ export class Scheduler {
   // makes an end landing on the next event's onset pick up the same shift that event will play with,
   // and what a per-step stamp can't answer for: a stamp belongs to the event it is on, so a channel
   // with a grid of its own is the only thing that can say what happens where this note stops.
-  _shiftSecAt(step, atCycle, atSec) {
-    const shift = timeShift(step, this.pattern.noteChannels, atSec, this.transport.cps, atCycle);
+  // `songCycle` is where the channels are read and `delta` the song-minus-transport offset that puts
+  // the shifted position back on the transport (see setSongClock).
+  _shiftSecAt(step, songCycle, delta, atSec) {
+    const shift = timeShift(step, this.pattern.noteChannels, atSec, this.transport.cps, songCycle);
     if (!shift) return 0;
-    return this.transport.secAt(atCycle + shift) - atSec;
+    return this.transport.secAt(songCycle - delta + shift) - atSec;
   }
 
-  _timeShiftSec(step, onsetCycle, onsetSec, nowSec) {
-    let shiftSec = this._shiftSecAt(step, onsetCycle, onsetSec);
+  _timeShiftSec(step, songCycle, delta, onsetSec, nowSec) {
+    let shiftSec = this._shiftSecAt(step, songCycle, delta, onsetSec);
     if (!shiftSec) return 0;
     // The budget is a fixed number of seconds rather than "however much lead this event happened to
     // be found with": the same note must move by the same amount on every pass, or an event sitting
@@ -1471,7 +1517,7 @@ export class Scheduler {
   _syncBusSends(nowSec) {
     if (typeof this.engine.setBusSends !== 'function') return;
     const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
-    const applyCycle = this.transport.cycleAt(applySec);
+    const applyCycle = this._songAt(this.transport.cycleAt(applySec));
     const sends = [];
     for (const send of this.pattern?.busSends ?? []) {
       // A patterned name resting (a `~` step, or a value the pattern doesn't cover) means no send
@@ -1561,7 +1607,7 @@ export class Scheduler {
     // setParam in a timestamped bundle at applySec) - sampling at nowSec instead would put
     // every polled control a constant lookahead (150ms) behind the note grid.
     const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
-    const applyCycle = this.transport.cycleAt(applySec);
+    const applyCycle = this._songAt(this.transport.cycleAt(applySec)); // read in song time (see setSongClock)
     for (const c of this._controlEntries(this.pattern)) {
       if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // runs natively, programmed once in setPattern()
       // A mixer control being dragged holds this one at the value under your finger (see

@@ -1864,14 +1864,15 @@ export class Sig {
    * The arrangement painter's gate (see arrange.mjs): keeps only the events whose onset falls
    * inside one of `spans` ([start, end) in cycles, sorted and merged), the position taken modulo
    * `len` so the arrangement loops. Everything else becomes a rest, so the step grid keeps its
-   * shape and the highlighter simply has nothing to light. The pattern still runs on ABSOLUTE
-   * cycle time - a `<a b>` keeps alternating through the bars it is gated out of - which is what
-   * makes painting a part in and out leave its own rhythm alone. Host-applied, not userland.
+   * shape and the highlighter simply has nothing to light. The pattern still runs on the song's
+   * whole timeline - a `<a b>` keeps alternating through the bars it is gated out of - which is
+   * what makes painting a part in and out leave its own rhythm alone. Host-applied, not userland.
+   *
+   * The host's readers already ask in song positions (see arrange.mjs's songSteps), so the host
+   * passes the song length; a position function is taken too, for a caller asking in raw cycles.
    */
   _arrangeGate(spans, len) {
     if (!this.stepsForCycle) return this; // nothing event-shaped to gate - a bare control signal
-    // `len` is the loop length, or the song clock's own cycle -> position function when the
-    // arrangement has loop regions (see arrange.mjs's ArrangeClock).
     const loop = Math.max(1e-9, Number(len) || 1);
     const posOf = typeof len === 'function' ? len : (c) => ((c % loop) + loop) % loop;
     const base = this.stepsForCycle;
@@ -4729,7 +4730,7 @@ function rollPattern(str, opts) {
 // every clip of the lead. That is the same division rolls have always had - rolls are data,
 // transforms are patterns - drawn out along the song instead of along one bar.
 //
-// TIME IS CLIP-LOCAL here, and only here. A painted block runs on absolute cycle time (see
+// TIME IS CLIP-LOCAL here, and only here. A painted block runs on the song's timeline (see
 // _arrangeGate), so a `<a b>` keeps its place through the bars it is gated out of; a clip's roll
 // instead starts where the clip starts, because a part dropped at bar 33 has to play from its
 // beginning. The `o` field is the exception that proves it: splitting a clip gives the second
@@ -4740,15 +4741,19 @@ function rollPattern(str, opts) {
 // built, not when the call is evaluated. That is what lets a clips() head that has been copied
 // (copy("kick")) play its source's clips, and what lets a roll drawn into live from the panel be
 // heard mid-bar, exactly as a named roll is.
+//
+// The cycle a clips() head is asked for is already a SONG position: the scheduler and the
+// highlighter read every track through the deck's song clock (see arrange.mjs's songSteps), so a
+// loop region or a start from the painter's marker places the clips without the head knowing.
 // ---------------------------------------------------------------------------------------------
 
 // Which track's clips a clips() call written HERE plays - the host sets it around each block's
 // evaluation, and around a copy()'s, so the head captures the row it belongs to. (The label
 // alone is not enough: two decks are two songs, each with an arrangement of its own.)
 let clipsOwner = { deck: 'a', label: null };
-// (deck, label) -> { clips, posAt, arranged }: what that row has painted on it, the song clock's
-// cycle -> position map, and whether the buffer has an arrangement at all. Installed by the host,
-// which is the only thing that can see the painted arrangement.
+// (deck, label) -> { clips, arranged }: what that row has painted on it, and whether the buffer has
+// an arrangement at all. Installed by the host, which is the only thing that can see the painted
+// arrangement.
 let clipsResolver = null;
 
 /** The block a `clips()` evaluated now belongs to. Host-called, not userland. */
@@ -4812,7 +4817,7 @@ export function clips() {
   // when the roll behind it is redefined, which is how a live edit in the panel is heard.
   const children = new Map();
   const painted = () => (clipsResolver ? clipsResolver(owner.deck, owner.label) : null)
-    ?? { clips: [], posAt: null, arranged: false };
+    ?? { clips: [], arranged: false };
   const say = (key, msg) => {
     if (warned.has(key)) return;
     warned.add(key);
@@ -4832,9 +4837,7 @@ export function clips() {
     children.set(key, { src, sig });
     return sig;
   };
-  // The selector grid: this row's clips, cut to the cycle being built. Song position and transport
-  // cycle differ by a constant within one cycle (the clock wraps at region and song edges, which
-  // are cycle boundaries), so one offset maps the whole cycle both ways.
+  // The selector grid: this row's clips, cut to the song cycle being built.
   const slotsForCycle = (cycle) => {
     if (owner.label == null) {
       // No row to read: a clips() outside a track's own block (in prebake, say). Every other head
@@ -4842,17 +4845,16 @@ export function clips() {
       say('rowless', '[signal] clips() is a TRACK: it plays the clips painted on its own row, so it has to be a labeled block\'s pattern (kick: clips().s("bd")).');
       return [];
     }
-    const { clips: list, posAt, arranged } = painted();
+    const { clips: list, arranged } = painted();
     if (!arranged) {
       say('none', '[signal] clips() plays what the arrangement paints on this track\'s row - press ctrl+A to paint one, then draw into the clips. Until then it is silent.');
       return [];
     }
     if (!list.length) return [];
-    const delta = (posAt ? posAt(cycle) : cycle) - cycle;
     const out = [];
     for (const c of list) {
       if (!c.roll) continue; // a clip with no roll drawn for it yet - the painter fills these in
-      const from = c.start - delta; // where this clip starts, in transport cycles
+      const from = c.start;
       const a = Math.max(from, cycle);
       const b = Math.min(from + c.len, cycle + 1);
       if (b <= a + SLOT_EPS) continue;
@@ -4988,14 +4990,13 @@ function defineAuto(id, str, quiet) {
  * sample - so the definition may sit anywhere in the buffer, and a lane being redrawn is heard
  * without a re-eval.
  *
- * "Song position" is the arrangement's song clock when the buffer has one (see arrange.mjs's
- * ArrangeClock), read through the same resolver clips() uses: playing from the painter's marker
- * seeks that clock, and a lane reading raw transport cycles would start from bar 0 while every
- * clip started from the marker. Without an arrangement the transport cycle is the song.
+ * "Song position" is the position it is sampled at: the scheduler reads every control through the
+ * deck's song clock when the buffer has an arrangement (see Scheduler#setSongClock), so playing
+ * from the painter's marker reads the lane from the marker. Without an arrangement the transport
+ * cycle is the song.
  */
 export function auto(id) {
   const key = String(id).trim();
-  const owner = { ...clipsOwner }; // which deck's song this lane is read against, fixed at evaluation
   let warned = false; // one line per unknown name, not one per poll tick
   return new Sig((t, cps, pos) => {
     const points = lookupAuto(key);
@@ -5006,9 +5007,7 @@ export function auto(id) {
       }
       return null;
     }
-    const cycle = pos ?? t * cps;
-    const posAt = clipsResolver?.(owner.deck, owner.label)?.posAt;
-    return sampleAutoPoints(points, posAt ? posAt(cycle) : cycle);
+    return sampleAutoPoints(points, pos ?? t * cps);
   });
 }
 

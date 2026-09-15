@@ -118,37 +118,6 @@ no completion notes.
     Beat JUMP and play-from-bar-N on a livecode deck are a different job (a per-deck cycle offset
     in the Scheduler) and should not be bundled into this one.
 
-[ ] Written arrangement regions should REPLAY, not just re-gate. A loop region drawn in the
-    arrangement (ArrangeClock in pattern-core/src/arrange.mjs; ctrl+L releases one) repeats which
-    clips SOUND but not what they play: the patterns underneath run on absolute cycle time, so a
-    `<a b>` keeps advancing and a 4-bar region over a track with a 16-bar cycle comes back
-    different every pass. A section has to sound the same each time round.
-
-    The fold already exists, and both readers already agree on it. ArrangeClock.posAt maps a
-    transport cycle to a SONG position, wrapping at every armed region, and the host that gates
-    the patterns and the editor that draws the playhead walk it from the same anchors. What is
-    missing is only that the patterns are still queried at the raw transport cycle. Query them at
-    posAt(cycle) instead:
-    - Scheduler keeps _scheduledUntilCycle in TRANSPORT cycles, so the forward-only bookkeeping
-      and the dedupe around it are untouched. Fold only where a cycle reaches the PATTERN:
-      stepsForCycle in _scheduleNoteEdges, and the cycle _buildNoteMap and _sampleConfigAt read.
-    - highlightGrid and the painter's playhead fold the same way, or the editor stops drawing what
-      it hears.
-    - The clock is per deck, and arrangeClocks[deck] is null when the buffer has no _arrange(...)
-      (the else branch of the arrangement pass in /api/evaluate). Wants a clock unconditionally,
-      folding as the identity - never wrapping - when there is no arrangement, or a deck without
-      one would start looping its patterns at whatever length got picked for it.
-
-    A clips() track already does this - its head places each clip against the SONG clock rather
-    than against transport time (see clips() in signal.mjs), so a region over one replays
-    identically today. This entry is the other tracks, whose patterns are still queried raw.
-
-    Consequences worth stating rather than discovering: the whole arrangement wrapping at its end
-    replays identically too, which is right for a song but IS a change to what existing buffers
-    do. Per-note envelopes are unaffected (they run from their own onsets), a free-running LFO
-    does not rewind (it is wall-clock by definition - see the modulators note), seeded rand/perlin
-    replay identically because they are seeded by position, and count() keeps counting. ~2 days.
-
 [ ] DJ FX units. Every track already carries seven fx slots with a per-slot dry/wet (Sig#wet, the
     linear crossfade in the track def) and loadEffect/setParam are wired, so a performance
     effects unit is a UI over machinery that exists: pick a plugin, an ON pad, a WET knob, and one

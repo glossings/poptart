@@ -18,6 +18,7 @@ import {
   reconcileArrangement,
   inSpans,
   ArrangeClock,
+  songSteps,
 } from './src/index.mjs';
 
 test('parse/serialize round-trip, malformed tokens dropped', () => {
@@ -257,6 +258,28 @@ test('ArrangeClock.seek: from that cycle on the song is at that bar, regions arm
   assert.equal(clock.seek(30, 21), 5, 'a bar past the end folds into the song');
   const twin = new ArrangeClock(clock.snapshot());
   for (const c of [0, 3, 9, 10, 18, 23, 30, 33]) assert.equal(twin.posAt(c), clock.posAt(c));
+});
+
+test('segments cut a transport span where the song clock jumps', () => {
+  const clock = new ArrangeClock({ len: 8, regions: [{ name: 'A', start: 1, end: 2.5 }] });
+  assert.deepEqual(clock.segments(0, 2), [{ from: 0, to: 2, delta: 0 }]);
+  assert.deepEqual(clock.segments(2, 4), [{ from: 2, to: 2.5, delta: 0 }, { from: 2.5, to: 4, delta: -1.5 }]);
+  clock.seek(4, 6);
+  assert.deepEqual(clock.segments(3.5, 5), [{ from: 3.5, to: 4, delta: -1.5 }, { from: 4, to: 5, delta: 2 }]);
+});
+
+test('songSteps reads each step at its song position', () => {
+  const clock = new ArrangeClock({ len: 4 });
+  clock.seek(0, 1.5);
+  const got = songSteps(n('<[0 1] [2 3]>').stepsForCycle, 0, 1, clock)
+    .map(({ step, cycle, delta }) => [cycle + step.start - delta, step.value]);
+  assert.deepEqual(got, [[0, 3], [0.5, 0]], 'bar 1\'s second half, then bar 2\'s downbeat');
+});
+
+test('songSteps without a clock is the pattern as it lies', () => {
+  const steps = n('0 1').stepsForCycle;
+  assert.deepEqual(songSteps(steps, 3, 4).map((e) => [e.cycle, e.step.value, e.delta]), [[3, 0, 0], [3, 1, 0]]);
+  assert.deepEqual(songSteps(steps, 3.5, 4.25).map((e) => e.cycle + e.step.start), [3.5, 4], 'a window mid-cycle keeps only its own onsets');
 });
 
 test('_arrangeGate takes a position function', () => {

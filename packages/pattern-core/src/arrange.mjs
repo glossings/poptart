@@ -442,4 +442,53 @@ export class ArrangeClock {
     this.anchors.splice(from, this.anchors.length, next);
     return at;
   }
+
+  /**
+   * The transport span [from, to) cut wherever the song clock jumps, each piece with the constant
+   * `delta` that turns its transport cycles into song positions (song = transport + delta). Walks
+   * the clock to `to` first, so every wrap inside the span is on record before it is cut at.
+   */
+  segments(from, to) {
+    this.posAt(to);
+    const out = [];
+    let a = from;
+    for (let i = this._anchorIndexAt(from); ; i++) {
+      const anchor = this.anchors[i];
+      const next = this.anchors[i + 1];
+      const b = next && next.cycle < to ? Math.max(a, next.cycle) : to;
+      if (b > a) out.push({ from: a, to: b, delta: anchor.pos - anchor.cycle });
+      if (b >= to) return out;
+      a = b;
+    }
+  }
+}
+
+/**
+ * Every step a pattern plays in the transport span [from, to), each read where the SONG is at that
+ * moment - what makes a track started from the painter's marker, or brought round again by a loop
+ * region, play the bars the song is on rather than the bars the transport has counted.
+ *
+ * Returns `{ step, cycle, delta }`: `step` exactly as the pattern gave it for song cycle `cycle`,
+ * so its onset is at song position `cycle + step.start` - where every channel, swing grid and
+ * sampler control is read - and at transport cycle `cycle + step.start - delta`, which is when it
+ * plays. Both readers of a track's grid (the scheduler that plays it and the host's highlighter)
+ * walk it through here, so the two cannot disagree about which bar is sounding.
+ *
+ * With no clock (a deck without an arrangement) the song is the transport: delta 0, never a wrap.
+ * The song positions a clock jumps between are painter-snapped and so may sit inside a cycle; the
+ * span is read piece by piece, a step belonging to the piece its song onset lands in.
+ */
+export function songSteps(stepsForCycle, from, to, clock = null) {
+  const out = [];
+  for (const { from: a, to: b, delta } of clock ? clock.segments(from, to) : [{ from, to, delta: 0 }]) {
+    const lo = a + delta - EPS;
+    const hi = b + delta - EPS;
+    for (let cycle = Math.floor(lo + 2 * EPS); cycle < hi; cycle++) {
+      for (const step of stepsForCycle(cycle)) {
+        const at = cycle + step.start;
+        if (at >= lo && at < hi) out.push({ step, cycle, delta });
+      }
+    }
+  }
+  return out;
 }

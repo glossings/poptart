@@ -15,12 +15,13 @@ import {
   setClipsOwner,
   setClipsResolver,
   ArrangeClock,
+  songSteps,
 } from './src/index.mjs';
 
 // The host's job, in four lines: a clips() head asks (deck, label) what is painted on its row.
-const paint = (str, { posAt = null, arranged = true } = {}) => {
+const paint = (str, { arranged = true } = {}) => {
   const all = parseArrangement(str);
-  setClipsResolver((deck, label) => ({ clips: clipsOfLabel(all, label), posAt, arranged }));
+  setClipsResolver((deck, label) => ({ clips: clipsOfLabel(all, label), arranged }));
   return all;
 };
 
@@ -150,16 +151,19 @@ test('with no arrangement at all a clips() track is silent, and says so', () => 
   assert.match(said.join(' '), /ctrl\+A/);
 });
 
-test('the song clock is what the clips are placed against, so a loop region replays them', () => {
+test('read through the song clock, a loop region replays the clips', () => {
   _roll('a', '60,0,1', { grid: 4 });
   _roll('b', '70,0,1', { grid: 4 });
-  paint('lead,0,1,ra lead,1,1,rb');
   const clock = new ArrangeClock({ len: 4, regions: [{ name: 'intro', start: 0, end: 2 }] });
-  paint('lead,0,1,ra lead,1,1,rb', { posAt: (c) => clock.posAt(c) });
+  paint('lead,0,1,ra lead,1,1,rb');
   const sig = headFor('lead');
+  // How the scheduler and the highlighter read every track (see songSteps).
+  const through = (c) => songSteps(sig.stepsForCycle, c, c + 1, clock)
+    .filter(({ step }) => step.value != null)
+    .map(({ step, cycle, delta }) => [Math.round((cycle + step.start - delta - c) * 1e6) / 1e6, step.value]);
 
   // The region wraps every two bars, so the two clips alternate forever rather than falling silent.
-  assert.deepEqual([0, 1, 2, 3, 4, 5].map((c) => at(sig, c)), [
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map(through), [
     [[0, 60]], [[0, 70]], [[0, 60]], [[0, 70]], [[0, 60]], [[0, 70]],
   ]);
 });

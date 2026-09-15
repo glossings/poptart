@@ -2520,13 +2520,10 @@ function arrangementClipsOf(evaluated) {
 //
 // Asked several times per cycle per clips() track (the join walks ahead to see where a ringing
 // note is taken over), so each row's answer is kept until the arrangement itself changes - which
-// is one identity check, since an evaluation replaces the array wholesale. The clock is read
-// through rather than captured: it is swapped for a new one whenever the song's length or its
-// loop regions change, and a cached closure over the old one would place clips against a song
-// that no longer exists.
+// is one identity check, since an evaluation replaces the array wholesale. No clock here: a head
+// is asked in song positions already (see the Scheduler's setSongClock and highlightGrid).
 function installClipsResolver() {
-  const posOf = { a: (cycle) => arrangeClocks.a?.posAt(cycle) ?? cycle, b: (cycle) => arrangeClocks.b?.posAt(cycle) ?? cycle };
-  const NONE = { clips: [], posAt: null, arranged: false };
+  const NONE = { clips: [], arranged: false };
   const memo = { a: { src: null, rows: new Map() }, b: { src: null, rows: new Map() } };
   patternCore.setClipsResolver((deck, label) => {
     const d = deck === 'b' ? 'b' : 'a';
@@ -2535,7 +2532,7 @@ function installClipsResolver() {
     if (memo[d].src !== painted) memo[d] = { src: painted, rows: new Map() };
     let row = memo[d].rows.get(label);
     if (!row) {
-      row = { clips: patternCore.clipsOfLabel(painted, label), posAt: posOf[d], arranged: true };
+      row = { clips: patternCore.clipsOfLabel(painted, label), arranged: true };
       memo[d].rows.set(label, row);
     }
     return row;
@@ -2883,7 +2880,11 @@ const hlTracks = new Map(); // label -> { sig, start, end } for the last eval's 
 // own [start,end] document range - so a location that rode in from a prebake-defined pattern or a
 // dynamic string (which the client can't place in this block) is dropped - then rebased to
 // block-relative. Steps that end up with no in-range span are omitted (they light nothing).
-function highlightGrid(sig, start, end, from, count) {
+//
+// `from` and each grid entry's `cycle` are TRANSPORT cycles - the clock the editor mirrors - but the
+// steps in one are read where the deck's song `clock` is then (see pattern-core's songSteps), the
+// way the scheduler plays them: a track started from the painter's marker lights the bars it plays.
+function highlightGrid(sig, start, end, from, count, clock = null) {
   const sigs = patternSigs(sig).filter((s) => s.stepsForCycle);
   const grid = [];
   const base = Math.max(0, from);
@@ -2922,13 +2923,15 @@ function highlightGrid(sig, start, end, from, count) {
     for (const sub of sigs) {
       let steps;
       try {
-        steps = sub.stepsForCycle(c);
+        steps = patternCore.songSteps(sub.stepsForCycle, c, c + 1, clock);
       } catch {
         continue;
       }
-      for (const s of steps) {
+      for (const { step: s, cycle, delta } of steps) {
         if (s.value == null) continue;
-        const at = c + s.start;
+        const at = cycle + s.start; // the song position, where every channel is read
+        const offset = cycle - delta - c; // song cycle -> this transport cycle (0 with no clock)
+        const rel = offset + s.start;
         // Where the onset is HEARD - nudge/swing move the sound (see below), and everything that
         // fires off a note fires off the shifted one.
         const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at);
@@ -2939,7 +2942,7 @@ function highlightGrid(sig, start, end, from, count) {
         // track's OWN sig carries them: its control patterns are already cross-merged into it, and
         // a param's step grid is not a trigger of anything. Kept whether or not the step lights an
         // atom - a note whose source is out of this block still gates the modulator.
-        if (sub === sig && !s.cont) gates.push(s.start + startShift);
+        if (sub === sig && !s.cont) gates.push(rel + startShift);
         const locs = patternCore
           .stepLocs(s)
           .filter((l) => l[0] >= start && l[1] <= end)
@@ -2953,13 +2956,13 @@ function highlightGrid(sig, start, end, from, count) {
           const soundsTo = patternCore.soundingEnd(s, sub.noteChannels, at, 1, at);
           // Both edges are warped at their own positions, exactly as the scheduler warps them (see
           // endEdgeStep), so a swung flash starts and stops with the sound it belongs to.
-          const endAt = c + soundsTo;
+          const endAt = cycle + soundsTo;
           const endStep = patternCore.endEdgeStep(s, endAt - Math.floor(endAt));
           const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt);
           const chop = sampler && sub === sig ? chopAt(s, at) : null;
           out.push({
-            start: s.start + startShift,
-            end: soundsTo + endShift,
+            start: rel + startShift,
+            end: offset + soundsTo + endShift,
             ...(s.cont ? { cont: true } : {}),
             ...(chop ? { chop } : {}),
             locs,
@@ -4588,7 +4591,6 @@ const routes = {
         const at = clock.seek(transport.cycleAt(engine ? engine.getTime() : transport.getTime()), Number(body.arrangeFrom));
         eventLogQueue.push(`[arrange] playing from bar ${Math.round(at * 100) / 100}`);
       }
-      const posAt = (c) => clock.posAt(c);
       for (const b of built) {
         const painted = spans.get(b.label);
         // A BARE column-0 pattern (see labels.mjs's kinds) is setup that happens to make a sound,
@@ -4604,7 +4606,9 @@ const routes = {
         // still holds from before it was one are dropped by the painter, and ignored here.
         if (!painted && (b.kind === 'bare' || routed.groups.has(b.label))) continue;
         if (patternCore.isBusBlock(b)) continue;
-        b.sig = b.sig._arrangeGate(painted ?? [], posAt);
+        // Gated in SONG positions: the schedulers and the highlighter read every track through this
+        // deck's clock (see arrangeClocks), so the gate is asked where the song is, not the transport.
+        b.sig = b.sig._arrangeGate(painted ?? [], loopLen);
       }
     } else {
       arrangeClocks[deck] = null;
@@ -4709,6 +4713,7 @@ const routes = {
       // the hand-editing section). Re-asserted here because a Scheduler is rebuilt whenever its
       // label comes back, and unlike a preset hold this sends nothing - it only holds things off.
       for (const slot of stateHeldSlotsFor(key)) sch.holdPluginState(slot, true);
+      sch.setSongClock(arrangeClocks[deck]); // before setPattern, whose note gate reads it
       sch.setPattern(b.sig);
       for (const [holdKey, held] of presetHolds) {
         const at = holdKey.lastIndexOf('|');
@@ -4769,7 +4774,7 @@ const routes = {
       instrument: b.sig.instrument,
       fxChain: b.sig.fxChain,
       paramNames: paramLabels(b.sig),
-      grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW) : null,
+      grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW, arrangeClocks[deck]) : null,
     }));
     // The clock starts now that everything above is in place (see scheduleFrom), and this
     // eval's schedulers with it, their windows opening on its start position.
@@ -4982,7 +4987,7 @@ const routes = {
     const count = Math.min(HL_WINDOW * 4, Math.max(1, Math.floor(Number(q.count)) || HL_WINDOW));
     const tracks = [...hlTracks.entries()].map(([label, t]) => ({
       label,
-      grid: highlightGrid(t.sig, t.start, t.end, from, count),
+      grid: highlightGrid(t.sig, t.start, t.end, from, count, arrangeClocks[deckOfKey(label)]),
     }));
     return { status: 200, body: { gridFrom: from, gridCount: count, tracks } };
   },
