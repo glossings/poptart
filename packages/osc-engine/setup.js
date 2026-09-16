@@ -51,9 +51,9 @@ const {
 const VSTPLUGIN_UPLOAD_BASE = 'https://git.iem.at/-/project/485/uploads';
 
 const MACOS_ASSET = {
-  file: 'vstplugin_v0.6.2-poptart.2_macOS.zip',
-  url: 'https://github.com/glossings/vstplugin/releases/download/v0.6.2-poptart.2/vstplugin_v0.6.2-poptart.2_macOS.zip',
-  sha256: 'ed6a41d23b6da656d5ace26f288366423f5e08237968adf19b1e966caefa4c25',
+  file: 'vstplugin_v0.6.2-poptart.3_macOS.zip',
+  url: 'https://github.com/glossings/vstplugin/releases/download/v0.6.2-poptart.3/vstplugin_v0.6.2-poptart.3_macOS.zip',
+  sha256: 'f77c89d7a89f819d79627041ce7669d35b54bb9891e4e1b41636658ff2d875fb',
 };
 
 const VSTPLUGIN_RELEASE = {
@@ -99,6 +99,9 @@ const OUTDATED_MACOS_HOSTS = {
   // v0.6.2-poptart.1
   '92f2e3d957f811190077fd3249361ed9620e0f11938b801f69387d3918174030':
     'an older poptart build, whose plugin windows beep at ⌘↵ / ⌘. instead of playing and stopping',
+  // v0.6.2-poptart.2
+  '27030af745d7d28b492f7db6d7f58854c2880a3d02cb2c9c06b9594dbf2cae12':
+    'an older poptart build that cannot restore a preset bigger than 64KB into a bridged (Intel-only) plugin',
 };
 
 // The first installed extension dir whose plugins/host is an outdated macOS build, as
