@@ -3808,6 +3808,27 @@ function commitCapture(at) {
   syncStateHold(key);
 }
 
+/**
+ * Thaws every frozen slot of one track that the chain about to be set puts a DIFFERENT plugin in.
+ * Reordering the .fx(...) calls (or retyping one) between a knob turn and the eval - deferred mode
+ * leaves a whole performance for that - reopens both plugins fresh, so there is nothing left in
+ * the slot to protect: the edited plugin was captured on the way into the eval (the route flushes
+ * before it builds) and is written wherever its call is now, and the plugin arriving here needs
+ * its program pushed like any other. Left frozen, it sounded init until the old capture's commit,
+ * or the timeout, thawed it - and the window that was open on the slot belonged to the plugin that
+ * just closed. Called before setPattern, while the engine's chain is still the old one.
+ */
+function thawReplacedSlots(label, chain) {
+  for (const slot of stateHeldSlotsFor(label)) {
+    const now = pluginInSlot(label, slot);
+    if (now == null || (chain[slot] ?? null) === now) continue;
+    const key = `${label}|${slot}`;
+    handTaken.delete(key);
+    uncaptured.delete(key);
+    syncStateHold(key);
+  }
+}
+
 /** Drops captures that never made it into the code. Windows are not in here: one is closed, never
  * expired - see the section header. */
 function expireStateHolds() {
@@ -4733,6 +4754,8 @@ const routes = {
       // and a slot whose plugin is being edited must not have a stored program pushed into it (see
       // the hand-editing section). Re-asserted here because a Scheduler is rebuilt whenever its
       // label comes back, and unlike a preset hold this sends nothing - it only holds things off.
+      // A slot this eval puts a different plugin in is let go first (see thawReplacedSlots).
+      thawReplacedSlots(key, [b.sig.instrument ?? null, ...b.sig.fxChain]);
       for (const slot of stateHeldSlotsFor(key)) sch.holdPluginState(slot, true);
       sch.setSongClock(arrangeClocks[deck]); // before setPattern, whose note gate reads it
       sch.setPattern(b.sig);

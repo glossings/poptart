@@ -131,7 +131,7 @@ const API_DOCS = {
   group: {
     kind: 'builder',
     sig: 'group({ ...tracks })',
-    desc: 'Mixes the tracks inside its braces into one channel. Members no longer play on their own, and .postgain(), .fx() or .bus() on the group apply to all of them. Groups can be nested. Select tracks and press cmd+G to wrap them. A main: group() with no braces receives every track that is not in another group.',
+    desc: 'Mixes the tracks inside its braces into one channel. Members no longer play on their own, and .postgain(), .fx() or .bus() on the group apply to all of them. Groups can be nested. Select tracks and press cmd+G to wrap them. A main: group() with no braces receives every track that is not in another group. Any other group written as name: group() with nothing inside gets its braces added on the next run, with the cursor placed between them.',
     eg: 'kick: group({\n  kickMain: s("mbd*4")\n  kickFill: s("mbd*8")\n}).postgain(0.8)',
   },
   copy: {

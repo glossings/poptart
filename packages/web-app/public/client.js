@@ -1422,9 +1422,28 @@ function applyBufferEdits(edits, origin) {
   });
 }
 
+// Where a captured plugin's call is NOW. A capture is keyed by the slot its plugin sat in at the
+// gesture, and a chain reordered in the code between the gesture and the write - deferred mode
+// leaves a whole performance for that - has moved it: the plugin was reopened fresh in its new
+// slot, so the capture is the only copy of the edit and has to be written where the plugin is.
+// Unambiguous only when the plugin appears once in the chain; the same plugin twice keeps the
+// slot it was given, and the plugin check in createPresetForSlot says so if that turns out wrong.
+function slotOfPluginNow(code, trackLabel, slot, plugin) {
+  if (!plugin) return slot;
+  const block = blockForTrack(code, trackLabel);
+  if (!block) return slot;
+  if (findChainCall(code, block, slot)?.plugin === plugin) return slot;
+  const found = [];
+  for (let s = 0, call; (call = findChainCall(code, block, s)) || s === 0; s++) {
+    if (call?.plugin === plugin) found.push(s);
+  }
+  return found.length === 1 ? found[0] : slot;
+}
+
 function writePluginState(trackLabel, slot, state, plugin, preset) {
   if (!labelsMod) return null;
   const code = cm.getValue();
+  slot = slotOfPluginNow(code, trackLabel, slot, plugin);
   // Which preset this belongs in, most reliable first: the one the server says was loaded when the
   // knob moved (a hold, or whatever the pattern had reached), then whatever the buffer's own
   // .preset(...) for this slot names. The second is what covers a capture landing before the eval
@@ -13208,6 +13227,33 @@ function updateTransportButtons() {
 // from cycle 0; `start: false` (Update) leaves the clock alone - a running performance is
 // re-patched seamlessly, a stopped one just reloads the patterns without making sound. Either
 // way the params panel, autocomplete, and highlighting regions refresh.
+/**
+ * A group written with nothing in its parens - `drums: group()` - opens on the way to the engine:
+ *
+ *   drums: group({
+ *     ‸                                // the cursor, when the run was your own cmd+enter
+ *   })
+ *
+ * The braces are the membership (see arCreateGroup), so a group typed without them is one with
+ * nothing in it yet, and the next thing to do is write its tracks - between braces the editor may
+ * as well have opened. The root is the exception: `main: group()` has no braces on purpose (its
+ * members are implicit - see pattern-core's groups.mjs) and is left as written. mixctl's
+ * openGroupEdits is the edit; this applies it to the main editor's buffer and, on a run by hand,
+ * puts the cursor where the first member goes. A panel's own debounced eval opens the braces too,
+ * so what the engine plays is the buffer either way, but leaves the cursor alone: a rewrite under
+ * a hand that is elsewhere shouldn't move it.
+ */
+function openBareGroups(placeCursor) {
+  if (!mixctlMod) return;
+  const { edits } = mixctlMod.openGroupEdits(cm.getValue());
+  if (!edits.length) return;
+  applyEdits(edits.map((e) => [e.from, e.to, e.text]));
+  for (const e of edits) collapsedGroups.delete(e.label); // just opened, so it wants to be seen
+  // applyEdits works back to front, so the first edit's offsets still hold in the new buffer.
+  if (placeCursor) cm.setCursor(cm.posFromIndex(edits[0].from + edits[0].caret));
+  logLine(`${edits.map((e) => e.label).join(', ')}: group({ }) - the tracks written between the braces mix into it`);
+}
+
 async function evaluate(start, { byHand = false } = {}) {
   // Running the buffer yourself is the "tidy it up and play it" gesture, so it puts back every
   // chip you had opened. The panels' own debounced evals don't pass byHand and so leave them be:
@@ -13230,6 +13276,7 @@ async function evaluate(start, { byHand = false } = {}) {
   // is away, so the prompt never sits between the keystroke and the sound.
   const packsBefore = new Set(packDefs.defsInBuffer().map((d) => d.id));
   for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset()/sp() gets its definition first
+  openBareGroups(byHand); // `drums: group()` grows its braces - and, by hand, the cursor goes inside them
   // a track typed since the last eval joins the arrangement, playing throughout (after materialize,
   // so a definition written into the buffer has not moved the call out from under it)
   arOnBuffer('a', arReconcileTracks);

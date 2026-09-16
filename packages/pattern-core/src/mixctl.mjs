@@ -13,6 +13,7 @@
 // the patterned one, which is what grabbing the pan knob means.
 
 import { splitLabeledBlocks, codeMask } from './labels.mjs';
+import { GROUP_ROOT } from './groups.mjs';
 
 // A bare numeric argument: the only kind of call the mixer may rewrite in place.
 const NUM_ARG_RE = /^\s*(-?(?:\d+\.?\d*|\.\d+))\s*$/;
@@ -370,6 +371,46 @@ export function extractFromGroupEdits(code, label, ctx = null) {
     ],
     parent: parent.label,
   };
+}
+
+/**
+ * The edits that open a group written with nothing in its parens - `drums: group()` - into a
+ * body to write tracks in:
+ *
+ *   drums: group({
+ *     ‸
+ *   })
+ *
+ * Bodyless is the ROOT's spelling (`main: group()`, whose members are implicit - see groups.mjs),
+ * so the root is left alone; on any other name it is a group nobody has put anything in yet, and
+ * the braces are where that goes. The parens keep whatever is chained after them, and inside a
+ * group's body the new braces take the head's indent, as cmd+G's wrapper does. An argument
+ * written by hand (`group({})`, `group(x)`) is left as it is. Ascending; apply back to front.
+ *
+ * @returns {{ edits: Array<{from,to,text,label,caret}> }} `caret` is the offset within `text` of
+ *   the end of the indented blank line - where a cursor goes to write the first member.
+ */
+export function openGroupEdits(code, ctx = null) {
+  const { blocks, mask } = ctx ?? analyze(code);
+  const edits = [];
+  for (const b of blocks) {
+    if (!b.group || b.bodyStart != null || b.label === GROUP_ROOT) continue;
+    // The head: the first `group(` the mask calls code in the block (the splitter marked it, so
+    // there is one - the label is blanked in its `code`, never in the buffer searched here).
+    const re = /group\s*\(/g;
+    re.lastIndex = b.start;
+    let hit = null;
+    for (let m = re.exec(code); m && m.index < b.end; m = re.exec(code)) {
+      if (mask[m.index]) { hit = m; break; }
+    }
+    if (!hit) continue;
+    const open = hit.index + hit[0].length - 1;
+    const close = matchParen(code, mask, open);
+    if (close < 0 || /\S/.test(code.slice(open + 1, close))) continue;
+    const indent = /^[ \t]*/.exec(code.slice(b.start, b.start + 64))[0];
+    edits.push({ from: open + 1, to: close, text: `{\n${indent}  \n${indent}}`, label: b.label, caret: indent.length + 4 });
+  }
+  return { edits };
 }
 
 /**

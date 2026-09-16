@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits, groupWrapEdits, ungroupEdits, extractFromGroupEdits, isGroupBlock, arrangeClipEdits, selectionMembers } from './src/mixctl.mjs';
+import { readTrim, trimEdit, formatTrim, flagEdit, analyze, renameEdits, groupWrapEdits, ungroupEdits, extractFromGroupEdits, openGroupEdits, isGroupBlock, arrangeClipEdits, selectionMembers } from './src/mixctl.mjs';
 import { splitLabeledBlocks } from './src/labels.mjs';
 
 // Apply an edit the way CodeMirror would, so assertions read as the resulting buffer.
@@ -349,4 +349,30 @@ test('arrangeClipEdits: a hand rename follows the clips', () => {
   const out = [...arrangeClipEdits(code, { kick: 'stomp' })].reverse()
     .reduce((acc, e) => acc.slice(0, e.from) + e.text + acc.slice(e.to), code);
   assert.equal(out, 'drums: group({\n  kick: s("bd")\n})\n_arrange("stomp,0,8")');
+});
+
+test('openGroupEdits: a bodyless group opens its braces; the root keeps its spelling', () => {
+  const code = 'drums: group()\nkick: s("bd")\nmain: group().fx("Pro-L 2")';
+  const res = openGroupEdits(code);
+  assert.deepEqual(res.edits.map((e) => e.label), ['drums']);
+  const out = appliedAll(code, res);
+  assert.equal(out, 'drums: group({\n  \n})\nkick: s("bd")\nmain: group().fx("Pro-L 2")');
+  // the caret lands at the end of the indented blank line, ready for the first member
+  const at = res.edits[0].from + res.edits[0].caret;
+  assert.equal(out.slice(at - 3, at + 1), '\n  \n');
+  const drums = splitLabeledBlocks(out).find((b) => b.label === 'drums');
+  assert.ok(drums.group && drums.bodyStart != null);
+});
+
+test('openGroupEdits: inside a group the braces take the indent, and the chain after the parens stays', () => {
+  const code = 'drums: group({\n  kicks: group( ).postgain(0.8)\n})';
+  const res = openGroupEdits(code);
+  assert.equal(appliedAll(code, res), 'drums: group({\n  kicks: group({\n    \n  }).postgain(0.8)\n})');
+  assert.equal(res.edits[0].text.slice(0, res.edits[0].caret), '{\n    ');
+});
+
+test('openGroupEdits: a group with an argument, or a track, is left alone', () => {
+  for (const code of ['a: group({})', 'a: group({\n  b: s("bd")\n})', 'a: group(x)', 'a: s("bd") // group()', 'a: s("group()")']) {
+    assert.deepEqual(openGroupEdits(code).edits, [], code);
+  }
 });

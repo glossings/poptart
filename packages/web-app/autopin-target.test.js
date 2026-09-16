@@ -46,11 +46,11 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const bodies = ['matchParen', 'codeOnly', 'blockOwnCode', 'firstStringLiteral', 'findChainCall', 'findChainHandleAt', 'blockForTrack', 'applyBufferEdits']
+const bodies = ['matchParen', 'codeOnly', 'blockOwnCode', 'firstStringLiteral', 'findChainCall', 'findChainHandleAt', 'blockForTrack', 'applyBufferEdits', 'slotOfPluginNow']
   .map(grab)
   .join('\n\n');
 // eslint-disable-next-line no-new-func
-const load = new Function('labelsMod', 'cm', `${bodies}\nreturn { findChainCall, findChainHandleAt, blockForTrack, applyBufferEdits };`);
+const load = new Function('labelsMod', 'cm', `${bodies}\nreturn { findChainCall, findChainHandleAt, blockForTrack, applyBufferEdits, slotOfPluginNow };`);
 
 // The editor stands in as a plain string, since every edit here is an offset splice.
 function fakeCm(text) {
@@ -168,4 +168,21 @@ test("double-clicking a group's own fx opens that group's slot", () => {
   assert.deepEqual(at('fx("Pro-C 2")'), { label: 'kick', slot: 1 });
   assert.deepEqual(at('synth("Serum 2")'), { label: 'hats', slot: 0 });
   assert.deepEqual(at('fx("Pro-Q 3")'), { label: 'hats', slot: 2 });
+});
+
+test('a capture follows its plugin when the chain was reordered before it was written', () => {
+  // Deferred mode holds a capture until the next eval, and the eval that reorders the .fx() calls
+  // is exactly that: the capture arrives keyed by the slot the plugin USED to sit in. The reorder
+  // reopened the plugin fresh, so this capture is the only copy of the edit - it goes where the
+  // plugin's call is now, not into the call that took over its slot number.
+  const { slotOfPluginNow } = load(labelsMod, fakeCm(''));
+  const code = 'bass: pianoroll("60").synth("Serum").fx("ValhallaRoom").fx("Pro-Q")\n';
+  assert.equal(slotOfPluginNow(code, 'bass', 1, 'Pro-Q'), 2, 'was slot 1 at the gesture, is slot 2 now');
+  assert.equal(slotOfPluginNow(code, 'bass', 2, 'Pro-Q'), 2, 'still where it was: untouched');
+  assert.equal(slotOfPluginNow(code, 'bass', 1, 'ValhallaRoom'), 1);
+  assert.equal(slotOfPluginNow(code, 'bass', 2, null), 2, 'a capture with no plugin has nothing to follow');
+  // The same plugin twice is ambiguous, so the slot stands and the plugin check reports it.
+  const twice = 'bass: pianoroll("60").synth("Serum").fx("Pro-Q").fx("Pro-Q").fx("ValhallaRoom")\n';
+  assert.equal(slotOfPluginNow(twice, 'bass', 3, 'Pro-Q'), 3);
+  assert.equal(slotOfPluginNow(code, 'bass', 1, 'Gone'), 1, 'a plugin no longer in the chain keeps its slot for the check to refuse');
 });

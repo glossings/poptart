@@ -115,15 +115,18 @@ function loadHoldFns() {
   // about is the freeze, and a capture must not be able to change it.
   const asked = [];
   const captureOpenEditors = (keys) => { asked.push(...keys); return keys.length; };
+  // What the engine holds in each slot right now, by label - the chain an eval is about to replace.
+  const chains = new Map();
+  const pluginInSlot = (label, slot) => chains.get(label)?.[slot] ?? null;
   const names = ['stateHeld', 'syncStateHold', 'stateHeldSlotsFor', 'noteHandEdit', 'takeSlotByHand',
     'releaseSlotsHeldByHand', 'commitCapture', 'currentHolds', 'expireStateHolds', 'setPresetHold',
-    'expirePresetHolds'];
+    'expirePresetHolds', 'thawReplacedSlots'];
   // eslint-disable-next-line no-new-func
   const make = new Function('presetHolds', 'schedulers', 'handTaken', 'uncaptured', 'autoPinDirty',
-    'captureOpenEditors', 'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS',
+    'captureOpenEditors', 'pluginInSlot', 'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS',
     `let editSeq = 0;\n${names.map(take).join('\n')}\nreturn { ${names.join(', ')} };`);
-  const fns = make(presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, captureOpenEditors, ttl, uncapTtl);
-  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, asked, ttl, uncapTtl, ...fns };
+  const fns = make(presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, captureOpenEditors, pluginInSlot, ttl, uncapTtl);
+  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, chains, asked, ttl, uncapTtl, ...fns };
 }
 
 // Records every hold/release the Scheduler is actually asked to perform. holdPreset() LOADS a
@@ -410,6 +413,35 @@ test('opening the panel on the preset a frozen slot is already sounding loads no
   noteHandEdit('lead|0');
   setPresetHold('lead', 0, 'b', { force: true });
   assert.deepEqual(sch.calls.at(-1), [0, 'b'], 'switching presets still loads over a frozen slot');
+});
+
+test('an eval that puts a different plugin in a frozen slot lets the slot go', () => {
+  // The .fx() calls were reordered in the code between the knob turn and the eval. The eval
+  // captured the edited plugin on its way in and reopens both plugins fresh, so the slot has
+  // nothing left to protect - and the plugin arriving in it needs its program pushed. Its window
+  // (if one was open) belonged to the plugin that just closed.
+  const { takeSlotByHand, noteHandEdit, thawReplacedSlots, stateHeldSlotsFor, schedulers, chains, handTaken, uncaptured } = loadHoldFns();
+  const sch = fakeScheduler();
+  schedulers.set('lead', sch);
+  chains.set('lead', ['Serum', 'ValhallaRoom', 'Pro-Q']);
+
+  takeSlotByHand('lead', 2);
+  noteHandEdit('lead|2');
+  noteHandEdit('lead|1'); // a knob in the reverb too - it stays where it is
+  thawReplacedSlots('lead', ['Serum', 'ValhallaRoom', 'Pro-Q']); // an eval that changed nothing
+  assert.deepEqual([...stateHeldSlotsFor('lead')].sort(), [1, 2], 'an unchanged chain thaws nothing');
+
+  thawReplacedSlots('lead', ['Serum', 'Pro-Q', 'ValhallaRoom']); // the two effects swapped
+  assert.deepEqual([...stateHeldSlotsFor('lead')], [], 'both slots hold a different plugin now');
+  assert.equal(handTaken.size, 0);
+  assert.equal(uncaptured.size, 0);
+  assert.deepEqual(sch.frozen.slice(-2), [[2, false], [1, false]]);
+
+  chains.set('lead', ['Serum', 'Pro-Q', 'ValhallaRoom']); // what that eval loaded
+  noteHandEdit('lead|1');
+  noteHandEdit('lead|2');
+  thawReplacedSlots('lead', ['Serum', 'Pro-Q']); // the reverb's call deleted
+  assert.deepEqual([...stateHeldSlotsFor('lead')], [1], 'a slot that keeps its plugin keeps its freeze; an emptied one is let go');
 });
 
 test('a capture deferred until the next eval keeps its slot frozen however long that takes', () => {
