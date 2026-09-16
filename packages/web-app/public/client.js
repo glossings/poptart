@@ -1338,11 +1338,12 @@ function findParamCall(code, block, name) {
 // the preset on one copy, and swap between them by commenting: both states are right there in the
 // text. It folds to a chip on screen (foldConfigBlobs), so what you read stays short.
 //
-// The state lands about half a second after you let go of the knob. Asking a plugin for its program
-// suspends it briefly, which you can hear, so there is a second mode (POPTART_AUTOPIN=deferred)
-// that holds captures during a performance and takes them at the next eval/stop/save instead -
-// quieter, but your sound design sits outside the buffer until then. settlePluginState below is
-// what the actions that write the buffer out use to make sure nothing is still being held.
+// With the clock stopped, the state lands about half a second after you let go of the knob. Asking
+// a plugin for its program suspends it briefly - audible, and every note sent to it meanwhile is
+// refused - so while the clock runs captures are held and taken at the next eval/stop/save instead;
+// your sound design sits outside the buffer until then. One capture per gesture whatever the clock
+// is doing is the opt-in POPTART_AUTOPIN=immediate. settlePluginState below is what the actions
+// that write the buffer out use to make sure nothing is still being held.
 // ---------------------------------------------------------------------------------------------
 
 // A slot driven by a .preset(...) pattern: the state goes into the DEFINITION of whichever preset

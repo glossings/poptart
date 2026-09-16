@@ -240,11 +240,13 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   *suspended* while it serializes — a couple of megabytes for a Serum patch, and audible. (The
   `async: false` alternative moves the same work onto the audio thread, which is worse.)
   Compression at both ends runs on the threadpool, so the scheduler's loop never sees our half.
-  The default is to spend that suspension immediately, one per gesture: the buffer then always
-  describes what you hear, and no sound design exists anywhere but the code. `POPTART_AUTOPIN=
-  deferred` trades that for an uninterrupted performance — captures made while the clock runs are
-  held until the next eval/stop/save/export/link — at the cost of a window where the plugin and the
-  buffer disagree and a closed tab loses the difference. "Capture when the editor window closes"
+  The default holds a capture made while the clock runs until the next eval/stop/save/export/link,
+  and spends it at once only when the clock is frozen: an uninterrupted performance, at the cost of
+  a window where the plugin and the buffer disagree and a closed tab loses the difference.
+  `POPTART_AUTOPIN=immediate` spends the suspension per gesture instead, so the buffer always
+  describes what you hear — but a suspended plugin also refuses the notes and control values the
+  scheduler sends it meanwhile, which is why it is no longer the default. "Capture when the editor
+  window closes"
   would be the signal worth waiting for and isn't available: VSTPlugin's events are `/vst_param`,
   `/vst_auto`, `/vst_program*`, `/vst_latency`, `/vst_midi`, `/vst_sysex`, `/vst_update` and
   `/vst_crash` — nothing reports an editor being closed.

@@ -389,6 +389,29 @@ test('picking a preset in the panel loads it even while the slot is frozen', () 
   assert.deepEqual(sch.calls, [[0, 'b']], 'a deliberate pick is a request to hear that preset');
 });
 
+test('opening the panel on the preset a frozen slot is already sounding loads nothing over the knobs', () => {
+  // Deferred mode: the knobs were captured on the way in (the route flushes first), but that
+  // program is still on its way to the buffer, so the store's copy of the preset is the OLD one.
+  // Loading it "so you hear what you are editing" put the old sound in for as long as the panel
+  // stayed open. A pick of a DIFFERENT preset still loads - that is a request to hear it.
+  const { noteHandEdit, setPresetHold, commitCapture, schedulers, presetHolds } = loadHoldFns();
+  const sch = fakeScheduler();
+  schedulers.set('lead', sch);
+
+  const seq = noteHandEdit('lead|0');
+  setPresetHold('lead', 0, 'sounding0', { force: true }); // the panel opening on what is loaded
+  assert.deepEqual(sch.calls, [], 'the plugin already holds the newest version of this preset');
+  assert.equal(presetHolds.get('lead|0').loaded, false, 'and the hold knows it has loaded nothing');
+
+  commitCapture({ trackId: 'lead', slot: 0, seq }); // the code has it, the store has it
+  setPresetHold('lead', 0, 'sounding0'); // the next poll's renewal
+  assert.deepEqual(sch.calls, [[0, 'sounding0']], 'loads once the store is current - a no-op push by then');
+
+  noteHandEdit('lead|0');
+  setPresetHold('lead', 0, 'b', { force: true });
+  assert.deepEqual(sch.calls.at(-1), [0, 'b'], 'switching presets still loads over a frozen slot');
+});
+
 test('a capture deferred until the next eval keeps its slot frozen however long that takes', () => {
   // POPTART_AUTOPIN=deferred holds captures for the whole of a performance on purpose. Thawing on
   // the timeout there would hand the pattern a plugin whose sound is still only in the plugin.

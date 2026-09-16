@@ -39,10 +39,11 @@ function loadAutopin(deps) {
     grab('function markSlotDirty('),
     grab('function captureOpenEditors('),
     grab('async function captureDirtyPlugins('),
+    grab('function expireStateHolds('),
   ].join('\n\n');
   const names = Object.keys(deps);
   // eslint-disable-next-line no-new-func
-  return new Function(...names, `${body}\nreturn { markSlotDirty, captureOpenEditors, captureDirtyPlugins, stateHandle };`)(
+  return new Function(...names, `${body}\nreturn { markSlotDirty, captureOpenEditors, captureDirtyPlugins, stateHandle, expireStateHolds };`)(
     ...names.map((n) => deps[n]),
   );
 }
@@ -50,7 +51,7 @@ function loadAutopin(deps) {
 const handleOf = (state) => `@${crypto.createHash('sha256').update(String(state), 'utf8').digest('hex').slice(0, 12)}`;
 
 // One track, one plugin in slot 0, and enough of the server's bookkeeping to run a capture pass.
-function harness({ program = 'PROGRAM-A', applied, mode = 'immediate' } = {}) {
+function harness({ program = 'PROGRAM-A', applied, mode = 'deferred' } = {}) {
   const state = { program };
   const scheduler = {
     applied: new Map(applied ? [['0:Omnisphere', applied]] : []),
@@ -78,6 +79,7 @@ function harness({ program = 'PROGRAM-A', applied, mode = 'immediate' } = {}) {
     AUTOPIN_MODE: mode,
     AUTOPIN_SLOW_MS: 50,
     AUTOPIN_DEBOUNCE_MS: 400,
+    UNCAPTURED_TTL_MS: 20000,
     transport: { paused: true },
     flushPluginCaptures: () => {},
     // Timers are the debounce, not the behavior under test: the pass is driven by hand here.
@@ -179,4 +181,31 @@ test('a slot that changed hands since the ask is dropped quietly', async () => {
   await h.captureDirtyPlugins();
   assert.equal(h.deps.autoPinReady.size, 0);
   assert.deepEqual(h.logs, [], 'nobody asked for this capture, so its dead end is not news');
+});
+
+test('a capture in flight is not a hold that expired: the slot stays frozen while the plugin serializes', async () => {
+  // Deferred mode holds a reported edit dirty for as long as the clock runs, so by the time the
+  // eval flushes it the gesture can be minutes old - far past the freeze's timeout, which only
+  // spared the slot while it was still on the dirty list. The capture takes it off that list and
+  // then waits on the plugin, and the editor's poll (which expires stale holds) keeps coming
+  // meanwhile. Thawing there let the pattern push the buffer's OLD program at the plugin right as
+  // the new one was being read out of it, and the capture then filed under a sequence number no
+  // commit could match. The pianoroll's edit-time evals were how it showed up.
+  const h = harness({ mode: 'deferred' });
+  h.deps.transport = { paused: false };
+  h.deps.syncStateHold = (key) => h.thawed.push(key);
+  h.thawed = [];
+  h.deps.uncaptured.set('pad|0', { seq: 7, at: Date.now() - 20000 - 1 }); // the knob, a set ago
+  h.deps.autoPinDirty.set('pad|0', { trackId: 'pad', slot: 0, plugin: 'Omnisphere', preset: 'lead', speculative: false });
+  // The plugin hands its program over slowly, and a poll lands in the middle of it.
+  h.deps.engine.getPluginState = async () => {
+    h.expireStateHolds();
+    return 'PROGRAM-B';
+  };
+
+  await h.captureDirtyPlugins();
+
+  assert.deepEqual(h.thawed, [], 'nothing thawed the slot under the capture');
+  assert.ok(h.deps.uncaptured.has('pad|0'), 'still frozen until the code has the program');
+  assert.equal(h.deps.autoPinReady.get('pad|0')?.seq, 7, 'filed under the gesture it captures, so the commit can release it');
 });

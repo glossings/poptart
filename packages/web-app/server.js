@@ -3527,9 +3527,7 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
 // the threadpool - see osc-engine), so there is no faster capture to write - only a better moment
 // to spend one:
 //
-// `immediate` (the default) spends one as soon as each gesture settles, whatever the clock is
-// doing: one brief suspension per tweak, and a buffer that always matches what you hear.
-// `deferred` (POPTART_AUTOPIN=deferred) spends it only where it costs least:
+// `deferred` (the default) spends it only where it costs least:
 //
 //   - clock frozen -> capture as soon as the gesture settles. Nothing is playing to interrupt.
 //   - clock running -> hold the slot dirty, and capture at the next moment the code has to be
@@ -3538,11 +3536,18 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
 //     all of them are far rarer than knob moves. It also keeps a megabyte-scale rewrite of the
 //     buffer out of the middle of a performance.
 //
+// `immediate` (POPTART_AUTOPIN=immediate) spends one as soon as each gesture settles, whatever the
+// clock is doing: one brief suspension per tweak, and a buffer that always matches what you hear.
+//
 // Deferring buys an uninterrupted jam, and pays for it in the gap between the plugin and the
 // buffer: sound design that exists only inside the plugin is lost if the tab or the server goes
 // away, and anything reading the buffer meanwhile (an autosave, a snapshot) is describing a sound
 // that has moved on. flushPluginCaptures closes the gap wherever the code is about to be written
-// out, but not everything is one of those moments - which is why it isn't the default.
+// out, but not everything is one of those moments. Immediate was the original default for that
+// reason, and lost the job to what a suspension costs beyond the dropout: VSTPlugin refuses every
+// command that reaches a suspended plugin ("temporarily suspended!"), so each per-tweak capture
+// also dropped the notes and control values the scheduler sent that plugin meanwhile. A dropped
+// note is audible to the room; a stale autosave is not.
 //
 // The signal actually worth waiting for would be the plugin's own window closing, and VSTPlugin
 // doesn't offer it: its events are /vst_param, /vst_auto, /vst_program*, /vst_latency, /vst_midi,
@@ -3565,7 +3570,7 @@ const AUTOPIN_DEBOUNCE_MS = 400;
 const AUTOPIN_SLOW_MS = 50;
 
 // See the section header for what these two cost each other.
-const AUTOPIN_MODE = process.env.POPTART_AUTOPIN === 'deferred' ? 'deferred' : 'immediate';
+const AUTOPIN_MODE = process.env.POPTART_AUTOPIN === 'immediate' ? 'immediate' : 'deferred';
 
 // "trackId|slot" -> { trackId, slot, plugin, preset } - edited, not yet captured. `plugin` is what
 // sat in that slot when the gesture happened; a capture that finds something else there has been
@@ -3610,10 +3615,19 @@ function setPresetHold(trackId, slot, preset, { force = false } = {}) {
   // the plugin is sounding what your knobs made, which is the sound the panel is editing anyway.
   // Recorded as such, so the poll that comes after the freeze lifts loads it rather than reading
   // as a heartbeat and doing nothing for the rest of the session.
-  const loaded = renewal || force || !stateHeld(key);
+  //
+  // The panel picking a preset loads it even over a frozen slot - except the preset that slot is
+  // already on. That is the panel OPENING on the sound you have been editing, and until the
+  // capture of those knobs has been filed and evaluated the store's copy of that preset is the old
+  // one (deferred mode can make that window a whole poll, a write and an eval long): loading it
+  // put the old sound in the plugin for as long as the panel stayed open, and the new one back the
+  // moment it closed. The plugin is holding the newest version of that preset; the knobs are it.
+  const onIt = force && stateHeld(key) && schedulers.get(trackId)?.livePreset(slot) === preset;
+  const load = force && !onIt;
+  const loaded = renewal || load || !stateHeld(key);
   presetHolds.set(key, { preset, at: Date.now(), loaded });
   if (renewal || !loaded) return null;
-  return schedulers.get(trackId)?.holdPreset(slot, preset, { force }) ?? null;
+  return schedulers.get(trackId)?.holdPreset(slot, preset, { force: load }) ?? null;
 }
 
 /** Drops leases the editor has stopped renewing, handing those slots back to their patterns. */
@@ -3947,6 +3961,13 @@ async function captureDirtyPlugins() {
       continue;
     }
     try {
+      // The freeze's timeout counts from the GESTURE until here, and in deferred mode that can be a
+      // whole performance ago. The slot just left the dirty list (above), and the serialization
+      // below takes real time - long enough for the editor's poll to come round and see a hold
+      // that is neither waiting to be captured nor young. Restarted now, so the capture itself is
+      // never what thaws the slot; restarted again once the program is in hand, below.
+      const holding = uncaptured.get(key);
+      if (holding) holding.at = Date.now();
       const t0 = performance.now();
       const state = await engine.getPluginState(engineTrack(trackId), slot);
       const ms = performance.now() - t0;
@@ -3978,8 +3999,8 @@ async function captureDirtyPlugins() {
         // it, exactly as if the plugin had said so itself.
         noteHandEdit(key);
       }
-      // The time the editor has to file this starts HERE, not at the gesture: in deferred mode the
-      // capture itself may have been held back for a whole performance.
+      // The time the editor has to file this starts HERE, not at the gesture (nor at the start of
+      // the capture): a program that took seconds to hand over leaves the editor the whole window.
       const held = uncaptured.get(key);
       if (held) held.at = Date.now();
       autoPinReady.set(key, { trackId, slot, plugin, preset, state: handle, seq: held?.seq ?? 0 });
