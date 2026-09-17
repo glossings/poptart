@@ -15067,6 +15067,7 @@ const packPlayHead = document.getElementById('packPlayHead');
 const packPlayTime = document.getElementById('packPlayTime');
 const packNote = document.getElementById('packNote');
 const packCloseBtn = document.getElementById('packClose');
+const packMenu = document.getElementById('packMenu');
 
 // { id, entries, own } - the pack on screen. `own`: defined in this buffer (editable); otherwise
 // it is the library's, shown as it is, and the ★ is how it becomes this buffer's to edit.
@@ -15558,7 +15559,7 @@ function packRenderEntries() {
   if (!n) {
     const empty = document.createElement('div');
     empty.className = 'dir-empty';
-    empty.textContent = packState.own ? 'empty - pick files on the right' : 'empty';
+    empty.textContent = packState.own ? 'empty - pick files on the right, or drop them here' : 'empty';
     packEntriesEl.appendChild(empty);
     return;
   }
@@ -15603,6 +15604,7 @@ function packRenderEntries() {
     el.addEventListener('mousedown', (e) => {
       e.preventDefault(); // keeps the list focused for the keys, rather than selecting text
       packEntriesEl.focus({ preventScroll: true });
+      if (e.button === 2 && packSel.entries.has(i)) return; // the right button over a selection is about the selection
       packSelectClick('entries', i, e);
     });
     // Dragging a row reorders (a press that never moves is the selection above).
@@ -15670,6 +15672,192 @@ function packDragEnd(e) {
   packSel.entriesAnchor = to;
   packWrite();
   packRenderEntries();
+}
+
+// --- dropping files from the desktop --------------------------------------------------------------
+// A file dragged in from Finder (or a sample service's app, or a download) lands in the pack the
+// way a pick from the folder browser does: as a path to where it already lives. The browser hands
+// the page only the file's name, size and bytes, so the server finds it on the disk by those (see
+// sample-locate.js) - nothing is copied or moved. A file the server can't place is named in the
+// note rather than added as a guess. The document-level file-drop handlers (the MIDI importer's,
+// further down) keep a stray drop from navigating the page away; while this panel is open its
+// "drop a .mid" overlay stands down, so the list underneath is what the files land on.
+
+// A drag from a sample service's app (rather than from Finder) tends to carry no File at all but
+// a file:// URL or a plain path to the sound in its library - which is the location itself, so
+// that is taken as it is and only checked on the server.
+
+// The list takes EVERY drag while the panel is open, whatever it declares: a drag whose types the
+// page doesn't know (an app's own pasteboard flavors, or a file promise the browser can't read)
+// would otherwise never fire a drop at all, and a drop that fires with nothing in it can at least
+// say what it carried - a drag that is refused says nothing. Nothing else drags onto this list.
+const packDropWanted = (e) => !!packState && !!e.dataTransfer;
+const packDropTypes = (dt) => Array.from(dt?.types ?? []);
+const packDropKnown = (types) => types.includes('Files') || types.includes('text/uri-list') || types.includes('text/plain');
+let packDropDepth = 0; // dragenter/dragleave fire per child crossed, so the highlight counts them
+
+/** Absolute paths a drop names as text: file:// URLs (one per line) or bare paths. */
+function packDropPaths(dt) {
+  const out = [];
+  const take = (line) => {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) return;
+    let p = t;
+    if (/^file:/i.test(t)) {
+      try { p = decodeURIComponent(new URL(t).pathname); } catch { return; }
+    }
+    if (p.startsWith('/') && !out.includes(p)) out.push(p);
+  };
+  for (const type of ['text/uri-list', 'text/plain']) {
+    let text = '';
+    try { text = dt.getData(type); } catch { /* not there */ }
+    for (const line of String(text ?? '').split(/\r?\n/)) take(line);
+  }
+  return out;
+}
+
+packEntriesEl.addEventListener('dragenter', (e) => {
+  if (!packDropWanted(e)) return;
+  e.preventDefault();
+  if (packDropDepth++ === 0) {
+    // Once per drag: what it declares. The contents can't be read until the drop, but a drag from
+    // an app the page can't read is the one that never gets that far, and its types are the clue.
+    const types = packDropTypes(e.dataTransfer);
+    if (!packDropKnown(types)) logLine(`pack drag: carries ${types.length ? types.join(', ') : 'no types the page can see'}`, 'warn');
+  }
+  packEntriesEl.classList.toggle('drop-target', !!packState.own);
+});
+packEntriesEl.addEventListener('dragover', (e) => {
+  if (!packDropWanted(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = packState.own ? 'link' : 'none';
+});
+packEntriesEl.addEventListener('dragleave', (e) => {
+  if (!packDropWanted(e)) return;
+  if (--packDropDepth <= 0) {
+    packDropDepth = 0;
+    packEntriesEl.classList.remove('drop-target');
+  }
+});
+packEntriesEl.addEventListener('drop', (e) => {
+  if (!packDropWanted(e)) return;
+  e.preventDefault();
+  e.stopPropagation(); // the MIDI importer's document handler must not read a URL drop as its own
+  packDropDepth = 0;
+  packEntriesEl.classList.remove('drop-target');
+  const dt = e.dataTransfer;
+  const files = Array.from(dt.files ?? []);
+  const paths = files.length ? [] : packDropPaths(dt);
+  if (!files.length && !paths.length) {
+    // Nothing this panel can read. What the drag DID carry goes to the console, since that is the
+    // one clue to what the app it came from would need supported.
+    const types = packDropTypes(dt);
+    packSay('that drag carried no file - see the console', true);
+    logLine(`pack drop: no file or path in it - it carried ${types.length ? types.map((t) => `${t}: ${JSON.stringify(String(dt.getData(t) ?? '').slice(0, 200))}`).join(' · ') : 'no data at all'}`, 'warn');
+    return;
+  }
+  packDropFiles({ files, paths });
+});
+
+// ⌘V on the list: the clipboard's files. Its own route in because a sample service's app drags
+// a FILE PROMISE, which Chromium's window never registers for, so that drag never reaches the
+// page at all - while "copy" in the same app puts a file URL on the system clipboard, which the
+// server reads natively (pasteboard.js). The browser's own clipboard data is tried first, since a
+// file copied in Finder may well arrive that way; the server is asked when it holds nothing.
+packEntriesEl.addEventListener('paste', async (e) => {
+  if (!packState) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (!packState.own) return packRefuseLibrary();
+  const cd = e.clipboardData;
+  const files = Array.from(cd?.files ?? []);
+  const paths = files.length ? [] : packDropPaths(cd);
+  if (files.length || paths.length) return packDropFiles({ files, paths });
+  packPasteFromClipboard();
+});
+
+/** The system clipboard's audio files, read by the server, added where they live. */
+async function packPasteFromClipboard() {
+  if (!packState?.own) return packRefuseLibrary();
+  const state = packState;
+  packSay('reading the clipboard…');
+  let r;
+  try {
+    r = await api('GET', '/api/pasteboardFiles');
+  } catch (err) {
+    return packSay(err.message ?? String(err), true);
+  }
+  if (packState !== state) return;
+  if (r.files.length) packAdd(r.files);
+  if (r.skipped.length) return packSay(`${r.files.length ? `added ${r.files.length} · ` : ''}${r.skipped.length === 1 ? `${r.skipped[0]} isn't` : `${r.skipped.length} of them aren't`} a wav, aif, aiff or flac that exists`, true);
+  if (r.files.length) return;
+  if (!r.types.length) return packSay('the clipboard is empty', true);
+  packSay('nothing on the clipboard is a file - see the console', true);
+  logLine(`pack paste: nothing on the clipboard is a file - it carries ${r.types.join(', ')}`, 'warn');
+}
+
+// Right-click over the list: the same paste, for a hand that is on the mouse, and the selection's
+// actions beside it. Shift+right-click is the way through to the browser's own menu, as it is
+// over the code. Its element lives inside the pack backdrop so it paints above the dialog.
+packEntriesEl.addEventListener('contextmenu', (e) => {
+  if (!packState || e.shiftKey) return;
+  e.preventDefault();
+  if (!packState.own) return; // a library pack takes nothing - no menu is better than a dead one
+  const items = [['paste files from the clipboard', () => packPasteFromClipboard(), 'the files copied in Finder or a sample app, added where they live (⌘V)']];
+  const nSel = packSel.entries.size;
+  if (packState.entries.length) {
+    items.push('-');
+    if (nSel) items.push([nSel > 1 ? `remove ${nSel} files` : 'remove', () => packRemoveSelected(), 'take the selection out of the pack (→ or delete)']);
+    items.push(['select all', () => packSelectAll('entries'), '⌘A']);
+  }
+  openCtxMenu(packMenu, e.clientX, e.clientY, { items, after: () => packEntriesEl.focus({ preventScroll: true }) });
+});
+// The menu goes away on any press outside it (its items act on click, so a press ON it must not
+// hide them first) and on Escape - taken here, in capture, before the panel's own Escape closes it.
+document.addEventListener('pointerdown', (e) => { if (!packMenu.contains(e.target)) packMenu.classList.add('hidden'); }, true);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !packMenu.classList.contains('hidden')) { packMenu.classList.add('hidden'); e.stopPropagation(); }
+}, true);
+
+/** The hex sha256 of a dropped file's bytes - what tells it from a namesake on the disk. */
+async function packHashFile(file) {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * The drop, one item at a time in drop order: a File is found on the disk by name and bytes, a
+ * path is checked to be an audio file that exists. Whatever was found is added as the paths found.
+ */
+async function packDropFiles({ files = [], paths = [] }) {
+  if (!packState?.own) return packRefuseLibrary();
+  const items = [
+    ...files.filter((f) => isAudioPath(f.name)).map((file) => ({ name: file.name, file })),
+    ...paths.filter((p) => isAudioPath(p)).map((path) => ({ name: packBasename(path), path })),
+  ];
+  if (!items.length) return packSay('drop wav, aif, aiff or flac files', true);
+  if (files.length && !globalThis.crypto?.subtle) return packSay("can't hash the file here - open poptart at localhost", true);
+  const state = packState;
+  const found = [];
+  const missing = [];
+  for (const [n, item] of items.entries()) {
+    packSay(`finding ${item.name} on disk${items.length > 1 ? ` (${n + 1} of ${items.length})` : ''}…`);
+    try {
+      const body = item.file
+        ? { name: item.file.name, size: item.file.size, sha256: await packHashFile(item.file), hint: packBrowse.path }
+        : { path: item.path };
+      const { file: abs } = await api('POST', '/api/locateSample', body);
+      if (abs) found.push(abs);
+      else missing.push(item.name);
+    } catch (err) {
+      missing.push(`${item.name} (${err.message ?? err})`);
+    }
+  }
+  if (packState !== state) return; // the panel moved on to another pack while the disk was asked
+  if (found.length) packAdd(found);
+  if (!missing.length) return;
+  const who = missing.length === 1 ? missing[0] : `${missing.length} of them`;
+  packSay(`${found.length ? `added ${found.length} · ` : ''}couldn't find where ${who} lives on disk - pick it from the folder browser`, true);
 }
 
 async function packBrowseTo(target) {
@@ -19838,7 +20026,9 @@ function endFileDrag() {
 document.addEventListener('dragenter', (e) => {
   if (!dragHasFiles(e)) return;
   fileDragDepth++;
-  fileDropOverlay.classList.remove('hidden');
+  // The pack panel takes audio files dropped on its list (see packDropFiles) - a .mid prompt over
+  // it would promise the wrong thing.
+  if (packBackdrop.classList.contains('hidden')) fileDropOverlay.classList.remove('hidden');
 });
 document.addEventListener('dragleave', (e) => {
   if (dragHasFiles(e) && --fileDragDepth <= 0) endFileDrag();

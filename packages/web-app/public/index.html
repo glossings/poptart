@@ -782,7 +782,9 @@
 
     <!-- The pack panel: a named sample pack (sp("kit")) is a list of files picked off the disk, so
          its editor is three lists - the packs there are, the files in this one (index order), and a
-         folder browser to pick from. dir-picker-backdrop on purpose: the global hotkeys stand down. -->
+         folder browser to pick from. Files dragged in from the desktop drop onto the middle list
+         and are found on the disk by name and bytes (see sample-locate.js), so a pack entry is
+         always the file where it lives. dir-picker-backdrop on purpose: the global hotkeys stand down. -->
     <div id="packBackdrop" class="dir-picker-backdrop keeps-transport hidden">
       <div class="dir-picker pack-dialog" role="dialog" aria-label="sample pack">
         <div class="dir-picker-head">
@@ -801,7 +803,7 @@
           </div>
           <div class="pack-col pack-col-entries">
             <div class="pack-col-head">in the pack<span id="packEntriesHead" class="pack-col-sub"></span><span class="spacer"></span><button id="packSwapSel" class="small" title="swap the selection for the next sound like it on the map (], or [ for the one before)">⇄</button><button id="packReshuffle" class="small" title="every file in the pack hops to a sound like it - same roles, different flavor">reshuffle</button><button id="packRemoveSel" class="small" title="take the selection out of the pack (→ or delete)">remove →</button></div>
-            <div id="packEntries" class="pack-entries" tabindex="0"></div>
+            <div id="packEntries" class="pack-entries" tabindex="0" title="the pack's files, in index order · drop audio files here from the desktop to add them, or paste files copied in Finder or a sample app (⌘V, or right-click)"></div>
           </div>
           <!-- The third column is the two ways of picking: the disk as folders, or the sample map -
                every indexed sample placed by how it sounds (see sample-map.js). Same column, same
@@ -841,6 +843,8 @@
           <span id="packNote" class="pack-note"></span>
         </div>
       </div>
+      <!-- Right-click over the pack's files: inside the backdrop, so it paints above the dialog. -->
+      <div id="packMenu" class="ctx-menu hidden" role="menu"></div>
     </div>
 
     <!-- The slice editor: double-click `slice` (or `slices`) on a sampler chain. Draws the sample

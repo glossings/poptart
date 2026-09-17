@@ -15,6 +15,8 @@ const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./sn
 const blobs = require('./blobs');
 const pinnedDefs = require('./pinned-defs');
 const snippets = require('./snippets');
+const { locateDroppedFile, verifyDroppedPath } = require('./sample-locate');
+const { readPasteboardFiles } = require('./pasteboard');
 const recordings = require('@poptart/osc-engine/recordings');
 const analysis = require('@poptart/osc-engine/analysis');
 
@@ -4247,6 +4249,48 @@ const routes = {
         truncated: !!walked.truncated,
       },
     };
+  },
+
+  // A file dropped into the pack panel from the desktop: where it lives on the disk. The browser
+  // hands the page a dropped file's name, size and bytes and never its path, and a pack entry is
+  // a path - so the file is found again by those three (Spotlight for the name, the bytes' hash
+  // to tell it from a namesake; see sample-locate.js). Nothing is copied or moved. Body: { name,
+  // size, sha256, hint? (the folder the panel is browsing, walked first if Spotlight has nothing) }.
+  // `file` is the absolute path, or null when nothing on the disk is that file. A drag that names
+  // the file by path already (a file:// URL from a sample service's app) sends { path } instead,
+  // and gets it back checked - an audio file that exists - or null.
+  'POST /api/locateSample': async (body) => {
+    const { isAudioName, samplesRoot, walkAudioFiles } = require('@poptart/osc-engine/samples');
+    if (body.path != null) return { status: 200, body: { file: await verifyDroppedPath(body.path, { isAudioName }) } };
+    const file = await locateDroppedFile({
+      name: body.name,
+      size: body.size,
+      sha256: body.sha256,
+      hints: body.hint ? [String(body.hint)] : [],
+      samplesRoot: samplesRoot(),
+      isAudioName,
+      walk: walkAudioFiles,
+    });
+    return { status: 200, body: { file } };
+  },
+
+  // The audio files on the system clipboard, for ⌘V on the pack list: what "copy" in Finder or a
+  // sample service's app put there, as the paths where they live (see pasteboard.js for why a
+  // paste, and not a drag, is the way in from such an app). `files` is the audio that exists;
+  // `skipped` names what was on the clipboard but isn't a sample; `types` is what the clipboard
+  // carried, for the console when there was nothing usable.
+  'GET /api/pasteboardFiles': async () => {
+    const { isAudioName } = require('@poptart/osc-engine/samples');
+    const { types, files: raw } = await readPasteboardFiles();
+    const files = [];
+    const skipped = [];
+    for (const p of raw) {
+      if (!isAudioName(p)) { skipped.push(path.basename(p)); continue; }
+      const file = await verifyDroppedPath(p, { isAudioName });
+      if (file) files.push(file);
+      else skipped.push(path.basename(p));
+    }
+    return { status: 200, body: { files, skipped, types } };
   },
 
   // Which FILE a sampler chain is playing - what the slice editor draws the waveform of. Query:
