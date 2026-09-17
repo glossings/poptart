@@ -240,6 +240,16 @@ export class Sig {
     // Metadata like everything above, so it survives the rest of the chain (.log() can go
     // anywhere in it) - see _meta().
     this.logging = opts.logging ?? false;
+    // What this signal means as a LAYER of a binop (see _layers). null (the common case) says its
+    // values take the verb of the binop they are handed to; a list of { op, fn, raw } says they are to be combined
+    // with what those events already have in force, one operation at a time. `add(note(2))` is
+    // [{ op: 'add', fn, raw: null }] - raw null meaning this signal's own values are the operand -
+    // and a channel built by .add(vel(-0.3)) on a pattern with no velocity of its own records the
+    // operand it was handed as `raw`, so what it composed against the resting default can be
+    // recomposed against a real value later (see withPending). Metadata like pitchKind: it travels
+    // through .fast()/.mapValue()/arithmetic, which transform the operand's values, not what is
+    // to be done with them.
+    this.pending = opts.pending ?? null;
   }
 
   _clone(overrides) {
@@ -276,6 +286,7 @@ export class Sig {
       pitchKind: this.pitchKind,
       scaleName: this.scaleName,
       logging: this.logging,
+      pending: this.pending,
     };
   }
 
@@ -816,7 +827,9 @@ export class Sig {
    * multiplication happens where the event is emitted (see soundingEnd).
    */
   clip(value) {
-    if (!this.stepsForCycle) {
+    // A control in head position - vel(0.3).clip(…) - has no grid yet and needs none: the channel
+    // waits for the sound (or the layer) that brings the events. See _fromHeadCtl.
+    if (!this.stepsForCycle && !this.ctl) {
       throw new Error('[signal] .clip() needs a step pattern, e.g. n("0 3 5").clip(2)');
     }
     const sig = toSignal(value);
@@ -836,7 +849,9 @@ export class Sig {
    * what you meant was a different rhythm.
    */
   nudge(value) {
-    if (!this.stepsForCycle) {
+    // A control in head position - vel(0.3).nudge(…) - has no grid yet and needs none: the channel
+    // waits for the sound (or the layer) that brings the events. See _fromHeadCtl.
+    if (!this.stepsForCycle && !this.ctl) {
       throw new Error('[signal] .nudge() needs a step pattern, e.g. s("hh*8").nudge(0.05)');
     }
     const sig = toSignal(value);
@@ -869,7 +884,9 @@ export class Sig {
    * rather than replacing it.
    */
   swing(amount, grid) {
-    if (!this.stepsForCycle) {
+    // A control in head position - vel(0.3).swing(…) - has no grid yet and needs none: the channel
+    // waits for the sound (or the layer) that brings the events. See _fromHeadCtl.
+    if (!this.stepsForCycle && !this.ctl) {
       throw new Error('[signal] .swing() needs a step pattern, e.g. s("hh*8").swing(1/3)');
     }
     const sig = toSignal(amount === undefined ? DEFAULT_SWING : amount);
@@ -915,7 +932,9 @@ export class Sig {
    * pass it as .swing(amount, grid).
    */
   swinggrid(value) {
-    if (!this.stepsForCycle) {
+    // A control in head position - vel(0.3).swinggrid(…) - has no grid yet and needs none: the channel
+    // waits for the sound (or the layer) that brings the events. See _fromHeadCtl.
+    if (!this.stepsForCycle && !this.ctl) {
       throw new Error('[signal] .swinggrid() needs a step pattern, e.g. s("hh*16").swing(0.2, 16)');
     }
     const sig = toSignal(value);
@@ -1066,7 +1085,7 @@ export class Sig {
     // of on this pattern's own values: `x.mul(speed("-1"))` lands on the speed channel and leaves
     // the notes alone. This is what lets a combinator reach into a pattern it was handed
     // (`.when(c, x => x.add(flip(1)))`), the same way `x.add(note(3))` reaches into pitch.
-    if (other instanceof Sig && other.ctl) return this._ctlBinop(other.ctl, other, fn);
+    if (other instanceof Sig && other.ctl) return this._ctlBinop(other.ctl, other, fn, op);
     // A live note source (midi(), midikeys()): its notes are a wire from the source into this
     // track's instrument, played engine-side, so they never pass through this pattern and
     // arithmetic composed over them would silently do nothing. But every incoming note IS an
@@ -1077,14 +1096,14 @@ export class Sig {
     // (kb(1).pianoroll()) then falls through so the op reaches both kinds of note alike.
     if (this.inputSource?.io === 'midi' || this.midiNotes) {
       const routed = this._routeBinop(op, other, fn, inScale);
-      if (this.sampler) return routed._ctlBinop('note', other, fn);
+      if (this.sampler) return routed._ctlBinop('note', other, fn, op);
       if (this.stepsForCycle || this.eventAt) return routed._binopValues(op, other, fn, linear);
       return routed;
     }
     // On a sampler pattern the values are PACK NAMES, so plain arithmetic can only sensibly mean
     // the repitch note (24 = "c2" = as recorded): `s("rave").add(7)` is seven semitones up, the
     // same thing `s("rave").add(note(7))` says. Without this the pack name coerces to NaN.
-    if (this.sampler) return this._ctlBinop('note', other, fn);
+    if (this.sampler) return this._ctlBinop('note', other, fn, op);
     return this._binopValues(op, other, fn, linear);
   }
 
@@ -1171,6 +1190,7 @@ export class Sig {
                     cont: mixedCont(s, b, start),
                     value: fn(numericValue(s.value), numericValue(b.value)),
                     locs: [...stepLocs(s), ...stepLocs(b)],
+                    ...chainWith(s, op, fn, numericValue(b.value)),
                   });
                 }
                 continue;
@@ -1185,7 +1205,7 @@ export class Sig {
               // Union the highlight spans of both operands, so `n("0 1").add("7 0")` lights the
               // live atom in each literal - the value that sounds genuinely propagated from both.
               const locs = layers.length === 1 ? [...stepLocs(s), ...stepLocs(layers[0])] : stepLocs(s);
-              out.push({ ...s, start, end, cont: mixedCont(s, layers[0], start), value: fn(numericValue(s.value), numericValue(b)), locs });
+              out.push({ ...s, start, end, cont: mixedCont(s, layers[0], start), value: fn(numericValue(s.value), numericValue(b)), locs, ...chainWith(s, op, fn, numericValue(b)) });
             }
           }
           return out;
@@ -1237,22 +1257,30 @@ export class Sig {
    * force there: the event's own value, else the channel, else the resting default. Going through
    * the setter instead would clear the drawn values off first (crossMerge's replace-the-channel
    * rule) and play the whole roll at the operand's own value.
+   *
+   * With no channel to compose against, the operation is applied to the resting default AND
+   * remembered on the result (Sig#pending, via withPending): as a layer of a binop the same
+   * operation is then redone against the value the target event has in force, which is what makes
+   * `.set(note(12).add(vel(-0.3)))` mean "0.3 quieter than the note it lands on". Played on its own
+   * the channel reads exactly as before.
    */
-  _ctlBinop(ctl, other, fn) {
+  _ctlBinop(ctl, other, fn, op = 'op') {
     const note = NOTE_CONTROLS[ctl];
     if (note) {
       const otherSig = bareSig(toSignal(other));
       const current = this.noteChannels[note.key];
       // The channel half of the composition: what an event with no value of its own reads, and what
       // survives onto a later pitch swap (see applyNoteChannels).
-      const combined =
+      const combined = withPending(
         current instanceof Sig
           ? bareSig(current)._binop(ctl, otherSig, fn, false)
-          : otherSig.mapValue((v) => fn(note.unset, Number(v)));
+          : composedChannel(otherSig, note.unset, op, fn),
+        current, op, fn, otherSig,
+      );
       // With no events at all (a bare control signal) there is nowhere for a per-event value to be,
       // and the setter is both correct and the thing that reports .clip()/.swing()'s own errors.
       if (!this.stepsForCycle) return this[ctl](combined);
-      const stepsForCycle = composeOnSteps(this.stepsForCycle, otherSig, note.key, note.unset, current, fn);
+      const stepsForCycle = composeOnSteps(this.stepsForCycle, otherSig, note.key, note.unset, current, fn, op);
       return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, [note.key]: combined }, stepsForCycle }));
     }
     const spec = SAMPLER_CONTROLS[ctl];
@@ -1262,13 +1290,74 @@ export class Sig {
     // Ahead of the source the channel is pending (see _samplerOpt) and combines the same way:
     // note("c3").mul(speed(-1)).s("bd") reads as the s("bd").mul(speed(-1)) it means.
     const current = (this.sampler ?? this.samplerPending ?? {})[spec.key];
-    const combined =
+    const combined = withPending(
       current instanceof Sig
         ? bareSig(current)._binop(ctl, otherSig, fn, false)
-        : otherSig.mapValue((v) => fn(spec.unset, Number(v)));
+        : composedChannel(otherSig, spec.unset, op, fn),
+      current, op, fn, otherSig,
+    );
     // The repitch channel keeps its note/degree kind, so a later .scale() still reads it right.
     if (spec.key === 'note') combined.pitchKind = current?.pitchKind ?? otherSig.pitchKind ?? 'note';
     return this._samplerOpt(ctl, spec.key, combined);
+  }
+
+  /**
+   * The LAYER form of the binops: `.add(a, b)`, `.set(a, b)`, ... edit every event once per
+   * argument and play all the edits at once. A layer is a chain of pieces, each naming a channel:
+   * its own values are the pitch (`note(12)`), a setter adds a channel (`.vel(0.7)`, `.clip(2)`,
+   * `.speed(2)`), a sound swaps the sample (`s("hh")`). The binop is the VERB every piece takes -
+   * under .add() a bare `.vel(0.7)` is 0.7 louder, under .set() it is exactly 0.7 - unless the
+   * piece names its own: a binop chained inside the layer (`note(12).set(vel(0.7))`,
+   * `note(2).mul(vel(1.3))`) or a top-level wrapper on the layer's own values (`set(note(30))`,
+   * `add(note(12))` - see operatorBuilder). A channel no piece mentions keeps the event's value.
+   *
+   *   pianoroll().add(note(0).set(vel(0.3).clip(0.5)), note(12).mul(vel(0.7)))
+   *   pianoroll().set(note(30).clip(2), add(note(12)).vel(0.7))
+   *
+   * The first plays each drawn note pinned to velocity 0.3 and half its length, plus its octave at
+   * 70% of the drawn velocity; the second plays a c1 twice as long, plus the octave at 0.7. With
+   * several arguments each event fans out the way a `,`-stacked operand does; a single layer that
+   * carries configuration takes this path too, so `.add(note(12).set(vel(0.7)))` is one voicing.
+   *
+   * Pieces read the way operands do everywhere: a patterned piece cuts the event where it changes
+   * (`add(note("0 7"))` transposes the halves differently), a rest in a piece silences that span, a
+   * `,`-stack inside a piece sounds every layer, and the event's own chord cross-products with the
+   * layers. "In force" for a verb is the event's own value, else the pattern's channel, else the
+   * channel's resting default - the rule `.mul(vel(0.7))` already follows. A verb on a layer of
+   * degrees (`add(n(2))`) steps in the scale, as .add(n(2)) does. Values a layer's own events
+   * carry (a roll's drawn velocities, an .as("note:vel") field) are pieces too, in the binop's verb.
+   *
+   * On a sampler the pitch pieces land on the repitch note and a sound piece swaps the sample; a
+   * sound piece on a synth pattern has nowhere to land and is skipped with a warning.
+   */
+  _layers(op, fn, layers) {
+    if (!layers.length) throw new Error(`[signal] .${op}() takes one or more arguments, e.g. .${op}(note(12).vel(0.7))`);
+    // A control in head position is a trigger plus a channel, never a pitch (see _noteLike).
+    if (this.ctl) return this._fromHeadCtl((trigger) => trigger._layers(op, fn, layers));
+    // A live source's notes play engine-side and never pass through this pattern (see _binop) -
+    // and a layer says things (set the pitch, cut the event) the route's pitch-op chain can't.
+    if (this.inputSource?.io === 'midi' || this.midiNotes) {
+      warnUser(`[signal] .${op}() with a layer cannot edit the notes of a live source (midi/midikeys) - they play engine-side. Use one plain value there, .add(12) or .note(...)`);
+      return this;
+    }
+    if (!this.stepsForCycle) throw new Error(`[signal] .${op}() with a layer needs a step pattern to edit, e.g. note("c3 e3").${op}(note(12).vel(0.7))`);
+    const plans = layers.map((l) => layerPlan(this, toSignal(l), op, fn));
+    const stepsForCycle = (cycle) => {
+      const out = [];
+      for (const s of this.stepsForCycle(cycle)) {
+        if (s.value == null) {
+          out.push(s);
+          continue;
+        }
+        for (const plan of plans) applyLayer(this, plan, s, cycle, out);
+      }
+      return out;
+    };
+    // The kind of pitch the events hold now: what the layers SET them to, if they agree, else what
+    // came in (an arithmetic verb keeps the incoming kind, as .add() does).
+    const setKinds = new Set(plans.flatMap((p) => p.pieces.filter((x) => x.kind === 'pitch' && x.pending.at(-1).op === 'set').map((x) => x.sig.pitchKind ?? this.pitchKind)));
+    const pitchKind = setKinds.size === 1 ? [...setKinds][0] : this.pitchKind;
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta(), pitchKind });
   }
 
   /**
@@ -1334,11 +1423,19 @@ export class Sig {
     return this._clone({ inputSource: { ...src, pitchOps: [...(src.pitchOps ?? []), entry] } });
   }
 
-  add(x) { return this._arith('add', x, (a, b) => a + b, true); }
-  sub(x) { return this._arith('sub', x, (a, b) => a - b, true); }
-  mul(x) { return this._arith('mul', x, (a, b) => a * b, true); }
-  div(x) { return this._arith('div', x, (a, b) => a / b, true); }
-  mod(x) { return this._arith('mod', x, (a, b) => ((a % b) + b) % b, false); }
+  add(...xs) { return this._arith('add', xs, ARITHMETIC.add, true); }
+  sub(...xs) { return this._arith('sub', xs, ARITHMETIC.sub, true); }
+  mul(...xs) { return this._arith('mul', xs, ARITHMETIC.mul, true); }
+  div(...xs) { return this._arith('div', xs, ARITHMETIC.div, true); }
+  mod(...xs) { return this._arith('mod', xs, ARITHMETIC.mod, false); }
+  /**
+   * The binop that REPLACES: `.set(x)` puts x's values where this pattern's were, keeping this
+   * pattern's rhythm (cut where x changes, as every operand cuts), and `.set(vel(0.5))` puts 0.5 on
+   * the velocity channel. Its reason to exist is the layer form shared by all the binops - see
+   * _layers - where it is the verb that pins a channel: `.add(note(12).set(vel(0.7)))` is the
+   * octave AT 0.7, where `.add(note(12).vel(0.7))` is the octave 0.7 louder.
+   */
+  set(...xs) { return this._arith('set', xs, ARITHMETIC.set, false); }
 
   /**
    * The pitch-returning arithmetic (add/sub/mul/div/mod) on top of _binop. A DEGREE operand -
@@ -1350,7 +1447,13 @@ export class Sig {
    * here, so every path under _binop (values, sampler repitch channel, live-route pitch ops) steps
    * the same way; the comparisons return 1/0 rather than a pitch, so they stay on _binop as-is.
    */
-  _arith(op, x, fn, linear) {
+  _arith(op, xs, fn, linear) {
+    // Several operands, or one that carries configuration or a verb of its own, are LAYERS (see
+    // _layers). A bare value or a bare control is the one-operand arithmetic below. .set() has no
+    // one-operand arithmetic to speak of - replacing values IS the one-layer edit - so everything
+    // but a bare control (which .set() aims at its channel, like every binop) goes the layer way.
+    const x = xs[0];
+    if (xs.length !== 1 || isLayer(x) || (op === 'set' && !isBareControl(x))) return this._layers(op, fn, xs);
     const inScale = x instanceof Sig && x.pitchKind === 'degree' && this._holdsNotes();
     return this._binop(op, x, inScale ? this._degreeStep(fn) : fn, linear, inScale);
   }
@@ -3227,16 +3330,46 @@ function biteCoverSteps(cycle, eventsFor, srcStepsFor) {
 // Each stamp also carries the `clear` that takes its channel's value back OFF an event, which is
 // what makes setting a control twice mean the second one - see crossMerge.
 function stampField(name) {
-  const stamp = (step, value) => {
+  const stamp = (step, value, from) => {
     const v = Number(value);
-    if (!Number.isNaN(v)) step[name] = v;
+    if (Number.isNaN(v)) return;
+    step[name] = v;
+    // A control step that carries its operation chain (see composedChannel) puts it on the event
+    // too, under step.pend - what lets the value be recomposed as a layer (see applyStamps).
+    if (from?.chain) step.pend = { ...step.pend, [name]: from.chain };
   };
   stamp.clear = (step) => {
-    if (!(name in step)) return step;
-    const { [name]: _old, ...rest } = step;
-    return rest;
+    if (!(name in step) && !step.pend?.[name]) return step;
+    const { [name]: _old, pend, ...rest } = step;
+    return withKeyDropped(rest, 'pend', pend, name);
   };
   return stamp;
+}
+
+// `rest` with `bag[key]` gone - the bag put back under `field` only if anything is left in it.
+function withKeyDropped(rest, field, bag, key) {
+  if (!bag || bag[key] === undefined) return bag ? { ...rest, [field]: bag } : rest;
+  const { [key]: _old, ...kept } = bag;
+  return Object.keys(kept).length ? { ...rest, [field]: kept } : rest;
+}
+
+// The chain a step of an arithmetic result carries: only a channel step composed against its
+// resting default has one (see composedChannel), and a further operation on it extends it.
+function chainWith(s, op, fn, v) {
+  return s.chain ? { chain: [...s.chain, { op, fn, v }] } : {};
+}
+
+// A control operand applied to a channel's resting default - what _ctlBinop hands the channel when
+// nothing was set there yet. Every reader sees the applied value; each step also carries the
+// operation and the operand it was applied to (`chain`), so a layer can redo it against the value
+// an event actually has in force (see Sig#pending, applyStamps).
+function composedChannel(otherSig, unset, op, fn) {
+  const out = otherSig.mapValue((v) => fn(unset, Number(v)));
+  const inner = otherSig.stepsForCycle;
+  if (!inner) return out;
+  out.stepsForCycle = (cycle) =>
+    inner(cycle).map((s) => (s.value == null ? s : { ...s, value: fn(unset, Number(s.value)), chain: [{ op, fn, v: Number(s.value) }] }));
+  return out;
 }
 
 // A note-channel control used as an OPERAND (`.mul(vel(0.5))`) composes with whatever value is in
@@ -3255,7 +3388,7 @@ function stampField(name) {
 // is worth at that onset. An event with NO value of its own and a continuous channel behind it is
 // left alone either way: the composed channel already carries it, and reading it there keeps it a
 // real-time read instead of freezing an LFO at grid-build time.
-function composeOnSteps(baseStepsForCycle, otherSig, name, unset, channel, fn) {
+function composeOnSteps(baseStepsForCycle, otherSig, name, unset, channel, fn, op) {
   const hasChannel = channel instanceof Sig;
   const own = (step) => (typeof step[name] === 'number' && !Number.isNaN(step[name]) ? step[name] : null);
   // No `clear` on the stamp: the value already on the event is this operation's LEFT operand, not
@@ -3269,7 +3402,12 @@ function composeOnSteps(baseStepsForCycle, otherSig, name, unset, channel, fn) {
       // standing here is a continuous one - leave that to `combined`, which composed the same way
       // and gets read in real time. With no channel either, the resting default is the left side.
       if (cur === null && hasChannel) return;
+      // Composed against the resting default (or extending a chain that was), the operation is
+      // remembered on the event as well as done - see stampField / applyStamps. Composed against a
+      // value the event really had, it is simply done.
+      const chain = step.pend?.[name];
       step[name] = fn(cur ?? unset, v);
+      if (cur === null || chain) step.pend = { ...step.pend, [name]: [...(chain ?? []), { op, fn, v }] };
     };
     return crossMerge(baseStepsForCycle, otherSig, stamp);
   }
@@ -3281,21 +3419,317 @@ function composeOnSteps(baseStepsForCycle, otherSig, name, unset, channel, fn) {
       const cur = s.value == null ? null : own(s);
       if (cur === null) return s;
       const v = Number(otherSig.sample(cycle + s.start, 1, cycle + s.start));
-      return Number.isNaN(v) ? s : { ...s, [name]: fn(cur, v) };
+      if (Number.isNaN(v)) return s;
+      const chain = s.pend?.[name];
+      return { ...s, [name]: fn(cur, v), ...(chain ? { pend: { ...s.pend, [name]: [...chain, { op, fn, v }] } } : {}) };
     });
 }
 
+// Sig#pending's bookkeeping for _ctlBinop: `combined` already holds the operation applied to the
+// channel's resting default, which is what every reader of the channel wants; the pending list
+// says how to redo it against a value that is actually in force. A channel that IS set composed on
+// the spot, and stays a set channel. A channel that was itself pending chains: .add(vel(-0.3))
+// .mul(vel(2)) is "0.3 below, then doubled", each step reading its own operand.
+function withPending(combined, current, op, fn, raw) {
+  if (current instanceof Sig && !current.pending) return combined;
+  combined.pending = [...(current?.pending ?? []), { op, fn, raw }];
+  return combined;
+}
+
+// -----------------------------------------------------------------------------------------------
+// Layers - the several-operand form of the binops (see Sig#_layers)
+// -----------------------------------------------------------------------------------------------
+
+// Whether an operand is a LAYER rather than a plain value stream: it carries configuration of its
+// own (note channels, sampler channels, a sound) or a verb (Sig#pending). A bare control -
+// `vel(0.5)`, `speed("-1")` - is neither: it aims at one channel and goes through _ctlBinop.
+function hasConfig(x) {
+  return Object.values(x.noteChannels).some(Boolean) || !!(x.sampler || x.samplerPending || x.samplerKind);
+}
+function isLayer(x) {
+  return x instanceof Sig && (!!x.pending || hasConfig(x));
+}
+function isBareControl(x) {
+  return x instanceof Sig && !!x.ctl && !hasConfig(x);
+}
+
+// The resting default of a sampler channel, by the key the config carries it under. Looked up
+// rather than tabled: SAMPLER_CONTROLS is declared further down the module.
+function samplerUnsetByKey(key) {
+  return Object.values(SAMPLER_CONTROLS).find((spec) => spec.key === key)?.unset ?? 0;
+}
+
+// What one layer says: its pieces, each { kind, sig, pending, ...where it lands }, and the channels
+// to read off its own events. kind is 'pitch' (the layer's own values, landing on the event value
+// or a sampler's repitch note), 'pack' (a sound layer's source names - always a set), 'note' (a
+// note channel, by name) or 'sampler' (a sampler channel, by key). pending is the piece's verb:
+// its own Sig#pending where it named one, else the binop's.
+//
+// A channel with a GRID is not a piece: its values are already on the layer's own events - the
+// stamp a setter merged, a roll's drawn velocities, an .as() field - paired with the pitch they
+// belong to, and where the channel was composed against nothing (`.mul(vel(1.3))` on a layer with
+// no velocity) the event carries the operation itself (step.pend, see composedChannel). Reading
+// the channel signal instead would cross its layers against the pitch layers a second time. So
+// only a channel with no grid (a plain number, an LFO) is a piece, sampled per event; the rest
+// are stampNames/stampKeys, read off the covering event by applyStamps in the binop's verb.
+function layerPlan(target, layer, op, fn) {
+  const verb = [{ op, fn, raw: null }];
+  const pieces = [];
+  const piece = (kind, sig, extra = {}) => pieces.push({ kind, sig, pending: sig.pending ?? (kind === 'pack' ? null : verb), ...extra });
+  if (layer.ctlAuto) {
+    warnUser(`[signal] .${op}(): bare ${layer.ctl}() carries no value - give it one, or call .${layer.ctl}() on the result instead`);
+  } else if (layer.ctl) {
+    if (NOTE_CONTROLS[layer.ctl]) piece('note', layer, { name: layer.ctl, unset: NOTE_CONTROLS[layer.ctl].unset });
+    else if (!target.sampler) warnUser(`[signal] .${op}(): ${layer.ctl}() is a sampler control and this pattern has no sampler - skipping it`);
+    else piece('sampler', layer, { key: SAMPLER_CONTROLS[layer.ctl].key, unset: SAMPLER_CONTROLS[layer.ctl].unset });
+  } else if (layer.samplerKind) {
+    if (!target.sampler) warnUser(`[signal] .${op}(): a sound layer (s/sp/se/sr) can only land on a sampler pattern - skipping its sound; put .s() before .${op}()`);
+    else piece('pack', layer);
+  } else {
+    piece('pitch', layer);
+  }
+  const stampNames = [];
+  for (const name of Object.keys(NOTE_CONTROLS)) {
+    if (layer.ctl === name) continue; // the head control's own values are the piece above
+    const ch = layer.noteChannels[name];
+    if (ch instanceof Sig && !ch.stepsForCycle) piece('note', ch, { name, unset: NOTE_CONTROLS[name].unset });
+    else stampNames.push(name);
+  }
+  const cfg = layer.sampler ?? layer.samplerPending ?? {};
+  const stampKeys = [];
+  if (Object.keys(cfg).length && !target.sampler && !layer.samplerKind) {
+    warnUser(`[signal] .${op}(): the layer carries sampler controls and this pattern has no sampler - skipping them`);
+  }
+  for (const [ctl, spec] of Object.entries(SAMPLER_CONTROLS)) {
+    if (layer.ctl === ctl) continue;
+    const src = cfg[spec.key];
+    if (src === 'auto') {
+      warnUser(`[signal] .${op}(): bare fit() carries no value - call .fit() on the result instead`);
+      continue;
+    }
+    if (src instanceof Sig && !src.stepsForCycle) {
+      if (target.sampler) piece('sampler', src, { key: spec.key, unset: spec.unset });
+    } else {
+      stampKeys.push(spec.key);
+    }
+  }
+  return { op, fn, pieces, stampNames, stampKeys };
+}
+
+// Every reading of `sig` at cycle-phase `at`: one per covering step for a gridded pattern (several
+// for a `,`-stack, a single null over a rest), one bare read for anything else. `step` is the
+// covering step itself, for the merged event's continuation test and for the values it carries.
+function readingsAt(sig, cycle, at) {
+  const steps = mixableSteps(sig, cycle);
+  if (steps) {
+    const covering = coveringSteps(steps, at);
+    return covering.length ? covering.map((b) => ({ value: b.value, locs: stepLocs(b), step: b })) : [{ value: null, locs: [] }];
+  }
+  const ev = readEvent(sig, cycle + at);
+  return [{ value: ev.value, locs: ev.locs }];
+}
+
+// The operation an entry of a pending list performs on the target: in scale degrees when the
+// operand holds degrees and the target holds notes (the rewrite _arith makes), else as written.
+function pendingFn(target, p, entry) {
+  const pitch = p.kind === 'pitch' || (p.kind === 'sampler' && p.key === 'note');
+  const operand = entry.raw ?? p.sig;
+  return pitch && operand.pitchKind === 'degree' && target._holdsNotes() ? target._degreeStep(entry.fn) : entry.fn;
+}
+
+// What a piece makes of one event at cycle-phase `at`, given the value in force there: a list of
+// { value, locs, edges, from } - several when a stack fans out - with null for "silent here". A
+// piece with no verb (a sound) yields its own reading; one with a verb folds each operation over
+// the value in force, reading the recorded operand (or, with none recorded, the piece's own
+// values). `from` is the piece's own covering step, whose stamped values applyStamps reads.
+function pieceOutcomes(target, p, inForce, cycle, at) {
+  const own = readingsAt(p.sig, cycle, at);
+  const asOutcome = (r) => (r.value == null ? null : { value: r.value, locs: r.locs, edges: r.step ? [r.step] : [], from: r.step ?? null, chain: null });
+  if (!p.pending) return own.map(asOutcome);
+  // A channel whose every operation recorded its operand has nothing to read off its own values -
+  // they are those operands already applied to the resting default (see withPending).
+  const seeds = p.pending.some((e) => !e.raw) ? own : [{ value: 0, locs: [], step: null }];
+  const outs = [];
+  for (const r of seeds) {
+    if (r.value == null) {
+      outs.push(null);
+      continue;
+    }
+    let accs = [{ value: inForce, locs: r.locs, edges: r.step ? [r.step] : [], from: r.step ?? null, chain: [] }];
+    for (const e of p.pending) {
+      const fn = pendingFn(target, p, e);
+      const readings = e.raw ? readingsAt(e.raw, cycle, at) : [r];
+      const next = [];
+      for (const acc of accs) {
+        if (acc == null) {
+          next.push(null);
+          continue;
+        }
+        for (const q of readings) {
+          if (q.value == null) {
+            next.push(null);
+            continue;
+          }
+          const v = numericValue(q.value);
+          next.push({
+            value: fn(acc.value, v),
+            locs: e.raw ? [...acc.locs, ...q.locs] : acc.locs,
+            edges: e.raw && q.step ? [...acc.edges, q.step] : acc.edges,
+            from: acc.from,
+            chain: [...acc.chain, { op: e.op, fn, v }],
+          });
+        }
+      }
+      accs = next;
+    }
+    outs.push(...accs);
+  }
+  return outs;
+}
+
+// The value a piece's channel has in force on `step` at cycle-phase `at`: the event's own value,
+// else the target pattern's channel, else the channel's resting default.
+function inForceOf(target, p, step, cycle, at) {
+  const t = cycle + at;
+  switch (p.kind) {
+    case 'pitch':
+      return target.sampler ? samplerInForce(target, step, 'note', DEFAULT_SYNTH_NOTE, t) : numericValue(step.value);
+    case 'note':
+      return channelAt(p.name, step, target.noteChannels, t, 1, t) ?? p.unset;
+    case 'sampler':
+      return samplerInForce(target, step, p.key, p.unset, t);
+    default:
+      return null; // 'pack': never combined
+  }
+}
+
+function samplerInForce(target, step, key, unset, t) {
+  const merged = step.cfg?.[key];
+  if (typeof merged === 'number' && !Number.isNaN(merged)) return merged;
+  const ch = target.sampler?.[key] ?? target.samplerPending?.[key];
+  if (ch instanceof Sig) {
+    const v = Number(ch.sample(t, 1, t));
+    if (!Number.isNaN(v)) return v;
+  }
+  return unset;
+}
+
+// `step` with a piece's outcome written where the piece lands, and on a channel the chain of
+// operations that produced it (step.pend / step.cfgPend) - so a verb said inside a layer,
+// `note(0).set(vel(0.3))`, still holds when the result is itself a layer of `.add(...)`: the outer
+// add distributes over bare values, and a recorded chain is not bare. A value that isn't a number
+// (a pack name aimed at a pitch, a rest that slipped through) leaves the event as it was.
+function applyPiece(target, p, step, v, chain = null) {
+  switch (p.kind) {
+    case 'pitch': {
+      const num = numericValue(v);
+      if (Number.isNaN(num)) return step;
+      return target.sampler ? { ...step, cfg: { ...step.cfg, note: num } } : { ...step, value: num };
+    }
+    case 'pack':
+      return { ...step, value: String(v) };
+    case 'note': {
+      const num = Number(v);
+      if (Number.isNaN(num)) return step;
+      return { ...step, [p.name]: num, ...(chain ? { pend: { ...step.pend, [p.name]: chain } } : {}) };
+    }
+    case 'sampler': {
+      const num = Number(v);
+      if (Number.isNaN(num)) return step;
+      return { ...step, cfg: { ...step.cfg, [p.key]: num }, ...(chain ? { cfgPend: { ...step.cfgPend, [p.key]: chain } } : {}) };
+    }
+    default:
+      return step;
+  }
+}
+
+// The values a layer's own covering step carries on its gridded channels - a setter's merged value,
+// a roll's drawn velocities and clips, an .as() field, a converted sampler's repitch note - applied
+// to the event. A value the layer composed against nothing (step.pend / step.cfgPend, see
+// composedChannel) is redone as the operations it records, against what the event has in force;
+// any other is applied in the binop's verb, as a bare setter's is. Channels the layer has a
+// continuous signal for are pieces, read already.
+function applyStamps(target, plan, step, from, cycle, at) {
+  let out = step;
+  const apply = (p, v, found) => {
+    const inForce = inForceOf(target, p, out, cycle, at);
+    const chain = found ?? [{ op: plan.op, fn: plan.fn, v }];
+    out = applyPiece(target, p, out, chain.reduce((acc, e) => e.fn(acc, e.v), inForce), chain);
+  };
+  for (const name of plan.stampNames) {
+    const v = from[name];
+    if (typeof v !== 'number' || Number.isNaN(v)) continue;
+    apply({ kind: 'note', name, unset: NOTE_CONTROLS[name].unset }, v, from.pend?.[name]);
+  }
+  if (!target.sampler || !from.cfg) return out;
+  for (const key of plan.stampKeys) {
+    const v = from.cfg[key];
+    if (typeof v !== 'number' || Number.isNaN(v)) continue;
+    apply({ kind: 'sampler', key, unset: samplerUnsetByKey(key) }, v, from.cfgPend?.[key]);
+  }
+  return out;
+}
+
+// One layer applied to one incoming event, pushing what it plays onto `out`. Every grid in the
+// layer cuts the event where it changes - the pieces' own and the operands recorded on pending
+// channels - and within each cut the pieces apply in order, each reading what the one before it
+// wrote, so two pieces on one channel compose. Stacked readings cross-product, as they do in
+// _binop; a rest in any piece silences the cut, keeping the grid's shape for the highlighter.
+function applyLayer(target, plan, s, cycle, out) {
+  const grids = [];
+  for (const p of plan.pieces) {
+    for (const sig of [p.sig, ...(p.pending ?? []).map((e) => e.raw).filter(Boolean)]) {
+      const steps = mixableSteps(sig, cycle);
+      if (steps) grids.push(...steps);
+    }
+  }
+  const edges = mixEdges(s, grids);
+  for (let e = 0; e + 1 < edges.length; e++) {
+    const start = edges[e];
+    const end = edges[e + 1];
+    const at = (start + end) / 2; // read INSIDE the cut - never on a boundary
+    let combos = [{ step: { ...s, start, end }, locs: stepLocs(s), edges: [] }];
+    for (const p of plan.pieces) {
+      const next = [];
+      for (const c of combos) {
+        const inForce = inForceOf(target, p, c.step, cycle, at);
+        for (const o of pieceOutcomes(target, p, inForce, cycle, at)) {
+          if (o == null) continue;
+          let step = applyPiece(target, p, c.step, o.value, o.chain);
+          if ((p.kind === 'pitch' || p.kind === 'pack') && o.from) step = applyStamps(target, plan, step, o.from, cycle, at);
+          next.push({ step, locs: [...c.locs, ...o.locs], edges: [...c.edges, ...o.edges] });
+        }
+      }
+      combos = next;
+      if (!combos.length) break;
+    }
+    if (!combos.length) {
+      out.push({ ...s, start, end, value: null });
+      continue;
+    }
+    for (const c of combos) {
+      // A merged event continues only where every side continues (the mixedCont rule).
+      const cont = (start > s.start + MIX_EPS || s.cont) && c.edges.every((b) => start > b.start + MIX_EPS || b.cont);
+      const step = { ...c.step, cont: cont || undefined };
+      if (c.locs.length) step.locs = c.locs;
+      else delete step.locs;
+      out.push(step);
+    }
+  }
+}
+
 function stampCfg(key) {
-  const stamp = (step, value) => {
+  const stamp = (step, value, from) => {
     const v = Number(value);
-    if (!Number.isNaN(v)) step.cfg = { ...step.cfg, [key]: v };
+    if (Number.isNaN(v)) return;
+    step.cfg = { ...step.cfg, [key]: v };
+    // The control step's operation chain rides along under cfgPend - see stampField.
+    if (from?.chain) step.cfgPend = { ...step.cfgPend, [key]: from.chain };
   };
   stamp.clear = (step) => {
-    if (step.cfg?.[key] === undefined) return step;
-    const { [key]: _old, ...cfg } = step.cfg;
-    const out = { ...step, cfg };
-    if (!Object.keys(cfg).length) delete out.cfg; // the last channel off leaves no cfg at all
-    return out;
+    if (step.cfg?.[key] === undefined && step.cfgPend?.[key] === undefined) return step;
+    const { cfg, cfgPend, ...rest } = step;
+    return withKeyDropped(withKeyDropped(rest, 'cfg', cfg, key), 'cfgPend', cfgPend, key); // the last channel off leaves no cfg at all
   };
   return stamp;
 }
@@ -3402,7 +3836,7 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
         // lights the repitch degrees. Same union _binop/.when() do for their operands.
         const locs = [...stepLocs(s), ...stepLocs(c)];
         if (locs.length) step.locs = locs;
-        if (stamp) stamp(step, c.value);
+        if (stamp) stamp(step, c.value, c);
         out.push(step);
         keys.push(stepKey(step));
         baseKeys.push(baseKey);
@@ -4098,6 +4532,44 @@ export const nudge = controlBuilder('nudge');
 export const swing = controlBuilder('swing');
 /** Which grid swing swings, as an operand - the top-level form of `.swing()`'s second argument. */
 export const swinggrid = controlBuilder('swinggrid');
+
+/**
+ * The binops as TOP-LEVEL builders - a layer's own verb (see Sig#_layers). A layer's pieces take
+ * the verb of the binop they are handed to; a wrapper names a different one for the layer's own
+ * values: `.set(note(30), add(note(12)))` pins one voice and transposes the other, where a bare
+ * `note(12)` under .set() would pin it to 12. The argument is anything a signal takes - a control
+ * builder included, so `mul(vel(0.7))` is the velocity channel with its own verb - and a chain may
+ * go on after it (`add(note(12)).vel(0.7)`). As the sole plain operand of a binop the wrapper is
+ * the verb: `.set(add(note(2)))` is `.add(2)`.
+ */
+const ARITHMETIC = {
+  add: (a, b) => a + b,
+  sub: (a, b) => a - b,
+  mul: (a, b) => a * b,
+  div: (a, b) => a / b,
+  mod: (a, b) => ((a % b) + b) % b,
+  set: (_a, b) => b,
+};
+function operatorBuilder(op) {
+  return (value) => {
+    const sig = toSignal(value);
+    // A copy, not a mark on the caller's own signal - and one that keeps a control's tag, so
+    // add(vel(-0.3)) is still the velocity channel.
+    return sig._keepCtl(sig._clone({ pending: [{ op, fn: ARITHMETIC[op], raw: null }] }));
+  };
+}
+/** A layer piece that adds its values to what the event has - `add(note(12))`, `add(vel(-0.3))`. */
+export const add = operatorBuilder('add');
+/** A layer piece that subtracts its values from what the event has - `sub(clip(0.5))`. */
+export const sub = operatorBuilder('sub');
+/** A layer piece that multiplies what the event has by its values - `mul(vel(0.7))`. */
+export const mul = operatorBuilder('mul');
+/** A layer piece that divides what the event has by its values - `div(clip(2))`. */
+export const div = operatorBuilder('div');
+/** A layer piece that folds what the event has by its values - `mod(note(12))`. */
+export const mod = operatorBuilder('mod');
+/** A layer piece that replaces what the event has with its values - `set(note(30))`, `set(vel(0.7))`. */
+export const set = operatorBuilder('set');
 
 /** Every top-level control, by name - what the host puts in userland scope. */
 export const SAMPLER_CONTROL_NAMES = [
