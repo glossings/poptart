@@ -19675,6 +19675,10 @@ fileSearchInput.addEventListener('input', () => {
 // so a collision is something you're told about *while typing it*, on the button you're about to
 // press, rather than after the fact: saving over an existing pattern says so and reads "overwrite",
 // and renaming onto one is refused outright (the server won't clobber on a rename either).
+//
+// The same box names a TRACK when one is duplicated (see duplicateTrack): the caller hands over
+// the names already taken and the rule a name has to pass, in place of the folder's and the file
+// rule, and the rest - the live note, the disabled button - is the same.
 
 const nameDialogBackdrop = document.getElementById('nameDialogBackdrop');
 const nameDialogTitle = document.getElementById('nameDialogTitle');
@@ -19683,18 +19687,18 @@ const nameDialogNote = document.getElementById('nameDialogNote');
 const nameDialogConfirm = document.getElementById('nameDialogConfirm');
 
 let nameDialogResolve = null;
-let nameDialogState = { names: new Set(), allow: null, blockExisting: false, confirmLabel: 'save' };
+let nameDialogState = { names: new Set(), allow: null, blockExisting: false, confirmLabel: 'save', problem: () => '', takenNote: 'already exists' };
 
 // patternNameProblem comes from pattern-meta.js - the same rule the server rejects on, so a bad
 // name is a disabled button with a reason on it rather than a failed request.
 function updateNameDialogState() {
   const name = nameDialogInput.value.trim();
-  const { names, allow, blockExisting, confirmLabel } = nameDialogState;
-  const problem = patternNameProblem(name);
+  const { names, allow, blockExisting, confirmLabel, problem: rule, takenNote } = nameDialogState;
+  const problem = rule(name);
   const collides = !problem && name !== allow && names.has(name);
   nameDialogNote.textContent = problem
     || (collides
-      ? (blockExisting ? `"${name}" already exists` : `"${name}" already exists - saving replaces it`)
+      ? (blockExisting ? `"${name}" ${takenNote}` : `"${name}" already exists - saving replaces it`)
       : '');
   nameDialogNote.classList.toggle('warn', !problem && collides && !blockExisting);
   nameDialogConfirm.disabled = !!problem || (collides && blockExisting);
@@ -19709,24 +19713,32 @@ function closeNameDialog(result) {
   done(result);
 }
 
-// Resolves to a name, or null if the user backed out.
-async function askPatternName({ title, value = '', confirmLabel = 'save', allow = null, blockExisting = false }) {
+// Resolves to a name, or null if the user backed out. `names` are the ones already taken - the
+// folder's patterns when not given - and `problem` is the rule a name must pass (the file rule by
+// default); `takenNote` is what a refused collision reads.
+async function askPatternName({
+  title, value = '', confirmLabel = 'save', allow = null, blockExisting = false,
+  names = null, problem = patternNameProblem, takenNote = 'already exists',
+}) {
   let resolveThis;
   const answer = new Promise((resolve) => { resolveThis = resolve; });
   // Registered before the round trip below, so a second opener arriving mid-fetch resolves this
   // one instead of leaving its caller waiting on a dialog it no longer owns.
   closeNameDialog(null);
   nameDialogResolve = resolveThis;
-  let names = new Set();
-  try {
-    const { patterns } = await api('GET', '/api/patterns?q=');
-    names = new Set(patterns.map((p) => p.name));
-  } catch {
-    // no live collision warning this time - the save itself still works, and rename still refuses
-    // to clobber server-side
+  let known = names;
+  if (!known) {
+    known = new Set();
+    try {
+      const { patterns } = await api('GET', '/api/patterns?q=');
+      known = new Set(patterns.map((p) => p.name));
+    } catch {
+      // no live collision warning this time - the save itself still works, and rename still
+      // refuses to clobber server-side
+    }
+    if (nameDialogResolve !== resolveThis) return answer; // superseded, and already resolved null
   }
-  if (nameDialogResolve !== resolveThis) return answer; // superseded, and already resolved null
-  nameDialogState = { names, allow, blockExisting, confirmLabel };
+  nameDialogState = { names: known, allow, blockExisting, confirmLabel, problem, takenNote };
   nameDialogTitle.textContent = title;
   nameDialogInput.value = value;
   nameDialogBackdrop.classList.remove('hidden');
@@ -25719,6 +25731,12 @@ function openEditorMenu(ed, e) {
   } else {
     const block = editorTrackAt(ed);
     if (block) {
+      // A group is a mixdown of other tracks, not a pattern: duplicating one would mean duplicating
+      // every member, which is not offered (yet). Copy a member.
+      if (!block.group) {
+        items.push([`duplicate ${block.label}…`, () => duplicateTrack(ed, block),
+          'the same code under a new name, right below this one and in its group, with its own copies of the roll, preset, LFO shape, slice set and automation it plays; a sample pack stays shared; painted where this one is']);
+      }
       if (block.group) items.push([`ungroup ${block.label}`, () => arUngroup(block.label, ed), 'the tracks in it play on their own again']);
       if (block.parent != null) items.push([`take ${block.label} out of ${block.parent}`, () => arTakeOut(block.label, ed)]);
     }
@@ -25756,6 +25774,152 @@ function editorTrackAt(ed) {
 
 function writeClipboard(text) {
   navigator.clipboard?.writeText(text).catch(() => logLine("couldn't reach the clipboard - use Cmd/Ctrl+C", true));
+}
+
+// ------------------------------------------------------------------------- duplicating a track
+//
+// "duplicate kick…" on the editor menu: the same code again under a new name, directly below its
+// original and inside the same group, with its OWN copies of everything the buffer defines for it
+// - its roll, its preset, its LFO shape, its slice set, its automation lane - and its clips painted
+// where the original's are, so the copy sounds exactly where the original does until one of them is
+// changed. Then they are two tracks: editing the copy's notes or turning its knobs never reaches
+// the original, which is the whole point of duplicating rather than writing copy("kick").
+//
+// What is NOT copied is what was never this track's. A sample pack is a kit picked off the disk
+// for the drums to share (and one the engine would have to load again, to no end). A library
+// definition - a ★ pinned roll, a built-in LFO shape - is a reference in the original and stays one
+// in the copy. The planning is planDuplicate (snippet-code.js); this is the buffer work around it,
+// on the same registries and the same defsEdit the snippet browser writes with.
+
+/**
+ * Why `name` can't be a track's label, or '' when it can. The parser reads a leading or trailing
+ * `_` as the mute marker and `S` as the solo marker (see labels.mjs's stripMarkers), so a name
+ * spelled that way would come back as a different, muted or soloed track.
+ */
+function labelNameProblem(name) {
+  if (!name) return 'a track needs a name';
+  if (!/^[A-Za-z_$][\w$]*$/.test(name)) return 'a track name is one plain word - letters, digits and _';
+  if (name.startsWith('$')) return 'a name starting with $ is an unnamed track';
+  if (/^_|_$/.test(name)) return 'a leading or trailing _ would read as the mute marker';
+  if (/^S.|.S$/.test(name)) return 'a leading or trailing S would read as the solo marker';
+  return '';
+}
+
+/** The clips painted on `label`'s row in `ed`'s buffer - the painter's own copy while it is open on it. */
+function arTrackClips(ed, label) {
+  if (!arrangeMod) return [];
+  const clips = arState && ed === arCM ? arState.clips : (arReadDef(ed.getValue())?.clips ?? []);
+  return clips.filter((c) => c.label === label);
+}
+
+/**
+ * Paint `to`'s row where `from`'s is: a copy of each clip, its roll (on a clips() row) mapped
+ * through `rollOf` to the copy that was just filed. Through the painter when it is open on this
+ * buffer, since it writes its own clips back over the buffer at the next gesture; straight into
+ * the `_arrange` call otherwise. Returns how many clips were painted - none when the song has no
+ * arrangement yet, in which case the copy joins it filled edge to edge like any new track when
+ * there is one (see arReconcileTracks).
+ */
+function arCopyTrackClips(ed, from, to, rollOf) {
+  const mine = arTrackClips(ed, from);
+  if (!mine.length) return 0;
+  const copies = mine.map((c) => (c.roll ? { ...c, label: to, roll: rollOf(c.roll) } : { ...c, label: to }));
+  if (arState && ed === arCM) {
+    arState.clips.push(...copies);
+    if (!arState.tracks.includes(to)) arState.tracks.push(to);
+    writeArrangeCall(true, { evaluate: false }); // the copy plays when the buffer is evaluated, like anything typed
+    drawArrange();
+    return copies.length;
+  }
+  const read = arReadDef(ed.getValue());
+  if (!read) return 0;
+  const tracks = read.opts.tracks.includes(to) ? read.opts.tracks : [...read.opts.tracks, to];
+  const text = serializeArrangeCall({ ...read.opts, clips: [...read.clips, ...copies], tracks });
+  ed.replaceRange(text, ed.posFromIndex(read.def.start), ed.posFromIndex(read.def.close + 1));
+  return copies.length;
+}
+
+/** The track under the caret, again, under a name asked for in the naming dialog. */
+async function duplicateTrack(ed, block) {
+  if (!labelsMod) return;
+  const blocksNow = () => labelsMod.splitLabeledBlocks(ed.getValue());
+  const labels = new Set(blocksNow().map((b) => b.label));
+  const suggested = freshName(block.kind === 'anon' ? 'track' : block.label, (n) => labels.has(n) || !!labelNameProblem(n));
+  const to = await askPatternName({
+    title: `duplicate ${block.label} as`,
+    value: suggested,
+    confirmLabel: 'duplicate',
+    names: labels,
+    blockExisting: true,
+    problem: labelNameProblem,
+    takenNote: 'is already a track in this buffer',
+  });
+  if (!to) return;
+  // The dialog was up for a while: the block is found again in the buffer as it stands now.
+  const src = blocksNow().find((b) => b.label === block.label && b.kind === block.kind);
+  if (!src) { logLine(`duplicate: "${block.label}" is no longer in the buffer`, true); return; }
+  if (blocksNow().some((b) => b.label === to)) { logLine(`duplicate: "${to}" is already a track in this buffer`, true); return; }
+  const code = ed.getValue();
+  const text = code.slice(src.start, src.end).trimEnd();
+
+  // What the block plays that this buffer defines. A library name has no definition here and stays
+  // a reference; a pack is left to be shared on purpose. A clips() row's rolls are named by its
+  // clips rather than by its code, so they are read off the arrangement.
+  const carried = [];
+  const carry = (reg, id, scope) => {
+    const def = reg.findDef(code, id, scope || null);
+    if (!def) return;
+    const sc = def.scope ?? '';
+    if (carried.some((c) => c.kind === reg.kind && c.id === id && c.scope === sc)) return;
+    carried.push({ kind: reg.kind, id, scope: sc, code: code.slice(def.start, def.close + 1) });
+  };
+  for (const r of snippetRefsIn(code, src.start, src.end)) if (r.kind !== 'pack') carry(r.reg, r.id, r.scope);
+  if (rollDefs) for (const c of arTrackClips(ed, src.label)) if (c.roll) carry(rollDefs, c.roll, '');
+  const taken = (kind, id, scope) => {
+    const reg = DEF_REGISTRIES.find((r) => r.kind === kind);
+    return !!reg && !!(reg.findDef(code, id, scope || null) || reg.inLibrary(id, scope || null));
+  };
+  const plan = planDuplicate({
+    body: text,
+    label: src.label,
+    anon: src.kind === 'anon',
+    to,
+    carried,
+    idCalls: snippetBodyIdCalls(text),
+    taken,
+  });
+
+  const at = src.start + text.length;
+  const indent = /^[ \t]*/.exec(text)[0].length;
+  ed.operation(() => {
+    ed.replaceRange(`\n\n${plan.body}`, ed.posFromIndex(at), ed.posFromIndex(at));
+    // Each kind's definitions filed against the buffer as it now stands - the body just moved
+    // everything below it along. The same sequencing as insertSnippet's, for the same reason.
+    for (const reg of DEF_REGISTRIES) {
+      const mine = plan.defs.filter((d) => d.kind === reg.kind);
+      if (!mine.length) continue;
+      const bodies = new Map(mine.map((d) => [d.id, defBody(d.code)]));
+      const [from, upto, str] = reg.defsEdit(
+        ed.getValue(),
+        mine.map((d) => ({ id: d.id, scope: d.scope })),
+        (id) => bodies.get(id),
+      );
+      ed.replaceRange(str, ed.posFromIndex(from), ed.posFromIndex(upto));
+    }
+  });
+  const rollOf = (id) => plan.renames.find((r) => r.kind === 'roll' && r.from === id)?.to ?? id;
+  const painted = arCopyTrackClips(ed, src.label, to, rollOf);
+  refoldEditor(ed);
+  ed.setCursor(ed.posFromIndex(at + 2 + indent));
+  ed.focus();
+  const own = plan.renames.map((r) => {
+    const reg = DEF_REGISTRIES.find((x) => x.kind === r.kind);
+    return `${reg?.label ?? r.kind} "${r.from}" as "${r.to}"`;
+  });
+  logLine(`duplicated ${src.label} as ${to}`
+    + (own.length ? ` with its own ${own.join(', ')}` : '')
+    + (painted ? `, painted where ${src.label} is` : '')
+    + ' - evaluate to hear it');
 }
 
 document.addEventListener('contextmenu', (e) => {

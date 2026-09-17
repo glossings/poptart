@@ -95,7 +95,7 @@ function rewriteIdStrings(body, calls, renameOf) {
       if (to2 != null) edits.push([call.from + from, call.from + to, to2]);
     }
   }
-  return applyEdits(body, edits);
+  return applyTextEdits(body, edits);
 }
 
 /** Every bare word in an id string, as [start, end) spans - `<bass lead>` gives two. */
@@ -110,8 +110,12 @@ function pairsOf(str) {
   return out;
 }
 
-/** [from, to, text] edits against one string, applied last-first so the offsets hold. */
-function applyEdits(text, edits) {
+/**
+ * [from, to, text] edits against one string, applied last-first so the offsets hold. Named apart
+ * from client.js's applyEdits (which writes into the editor): both files are plain scripts sharing
+ * one global scope, and the later declaration wins.
+ */
+function applyTextEdits(text, edits) {
   let out = String(text);
   for (const [from, to, str] of [...edits].sort((a, b) => b[0] - a[0])) {
     out = out.slice(0, from) + str + out.slice(to);
@@ -164,21 +168,7 @@ function planInjection({ body = '', carried = [], idCalls = [], bufferDefs = [],
     moved.get(kind).set(id, id2);
   }
 
-  // The body's `pianoroll("bass")` has to follow its definition. Only the id STRINGS are touched,
-  // occurrence by occurrence - a blanket replace would also rewrite a `bass` that is a variable, a
-  // sample name or a word in a comment.
-  let out = String(body);
-  if (moved.size) {
-    out = rewriteIdStrings(out, idCalls, (word, call) => {
-      const byKind = moved.get(call.kind);
-      const to = byKind?.get(word);
-      // A scoped kind only follows a rename made under the same owner: renaming ValhallaDelay's
-      // `disco` must not repoint a Serum track's .preset("disco").
-      if (to == null) return null;
-      const rename = renames.find((r) => r.kind === call.kind && r.from === word);
-      return rename && sameScope(call.kind, rename.scope, call.scope ?? '') ? to : null;
-    });
-  }
+  let out = followRenames(body, idCalls, renames);
 
   // Block labels last, against the body as it now stands. Two blocks under one label are two
   // tracks fighting over a single engine track id, so a collision is renamed like any other.
@@ -188,6 +178,80 @@ function planInjection({ body = '', carried = [], idCalls = [], bufferDefs = [],
     renames.push({ kind: 'label', from, to, scope: '' });
     out = out.replace(new RegExp(`^([ \\t]*)${from}(?=[ \\t]*:)`, 'm'), `$1${to}`);
   }
+  return { body: out, defs, renames };
+}
+
+/**
+ * The body's `pianoroll("bass")` has to follow its definition. Only the id STRINGS are touched,
+ * occurrence by occurrence - a blanket replace would also rewrite a `bass` that is a variable, a
+ * sample name or a word in a comment.
+ */
+function followRenames(body, idCalls, renames) {
+  const out = String(body);
+  if (!renames.length) return out;
+  return rewriteIdStrings(out, idCalls, (word, call) => {
+    // A scoped kind only follows a rename made under the same owner: renaming ValhallaDelay's
+    // `disco` must not repoint a Serum track's .preset("disco").
+    const rename = renames.find((r) => r.kind === call.kind && r.from === word
+      && sameScope(call.kind, r.scope, call.scope ?? ''));
+    return rename ? rename.to : null;
+  });
+}
+
+/**
+ * The name a definition takes when the track it is named after is called `to` instead of `label`:
+ * `kick` becomes `tom`, and the `kick2` an auto-named roll or preset was filed under becomes
+ * `tom2`. Any other name is its own word and stays.
+ */
+function followLabel(id, label, to) {
+  if (id === label) return to;
+  const word = String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp(`^${word}(\\d+)$`).exec(id);
+  return m ? `${to}${m[1]}` : id;
+}
+
+/**
+ * What to write when a track is DUPLICATED under a new name - the injection above turned round.
+ * An injection reuses a definition the buffer already has; a duplicate must not, because the whole
+ * point of one is a track whose roll, preset or shape can be edited without touching the
+ * original's. So every definition carried here is filed again under a name of its own, and the
+ * copy of the body is rewritten to name the copies.
+ *
+ *   body      the block's text, its label line first
+ *   label     that label; `anon` when the block is an unnamed `$:` one
+ *   to        the new label - free, which is the caller's to check
+ *   carried   [{ kind, id, scope, code }] the definitions the block plays that the BUFFER defines.
+ *             A library name is not among them (it is a reference in the original and stays one in
+ *             the copy), and neither is a pack: a kit is picked off the disk for the drums to share,
+ *             not drawn for one of them.
+ *   idCalls   the id-string spans inside `body`, as planInjection takes them
+ *   taken     (kind, id, scope) => boolean - every name the buffer or the library already holds
+ *
+ * A definition named after the track follows the new name (see followLabel); anything else keeps
+ * its word and takes a number, `growl` becoming `growl2`, since the buffer still has `growl`.
+ * Returns { body, defs, renames } shaped as planInjection's, with every carried definition in
+ * `defs` and a rename for each - a duplicate's renames are the record of what it now owns.
+ */
+function planDuplicate({ body = '', label = '', anon = false, to = '', carried = [], idCalls = [], taken = null }) {
+  const claimed = [];
+  const isTaken = (kind, id, scope) =>
+    claimed.some((d) => sameDef(d, { kind, id, scope })) || !!taken?.(kind, id, scope);
+  const renames = [];
+  const defs = [];
+  for (const one of carried) {
+    const kind = String(one.kind);
+    const id = String(one.id);
+    const scope = String(one.scope ?? '');
+    const id2 = freshName(followLabel(id, label, to), (n) => isTaken(kind, n, scope));
+    claimed.push({ kind, id: id2, scope });
+    defs.push({ kind, id: id2, scope, code: withDefId(one.code, id2) });
+    renames.push({ kind, from: id, to: id2, scope });
+  }
+  let out = followRenames(body, idCalls, renames);
+  // The label line: the name inside the label word changes and its mute/solo markers stand, so a
+  // muted track duplicates muted. An unnamed block's `$` is replaced whole.
+  out = out.replace(/^([ \t]*)([A-Za-z_$][\w$]*)(?=\s*:(?!:))/, (m, indent, raw) =>
+    `${indent}${anon ? to : raw.replace(label, to)}`);
   return { body: out, defs, renames };
 }
 
@@ -238,5 +302,5 @@ function renameNote({ kind, from, to }) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { planInjection, placeSnippet, defBody, withDefId, freshName, renameNote };
+  module.exports = { planInjection, planDuplicate, followLabel, placeSnippet, defBody, withDefId, freshName, renameNote };
 }

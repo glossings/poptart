@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { planInjection, placeSnippet, defBody, withDefId, freshName, renameNote } = require('./public/snippet-code.js');
+const { planInjection, planDuplicate, followLabel, placeSnippet, defBody, withDefId, freshName, renameNote } = require('./public/snippet-code.js');
 
 // The id-string spans client.js reads off its registries, worked out here from the body so a test
 // reads as the code it is about rather than as a list of offsets.
@@ -243,4 +243,74 @@ test('placeSnippet never writes into the definitions block', () => {
   assert.equal(at, floor);
   // ...and one above it is left where it is.
   assert.equal(placeSnippet(code, 'b: s("sd")', 5, floor)[0], 5);
+});
+
+// ------------------------------------------------------------------------- duplicating a track
+
+const presetCalls = (body, scope) => callsFor(body, [['roll', 'pianoroll'], ['preset', 'preset', scope], ['shape', 'lfo']]);
+
+test('followLabel carries a track-named definition over to the new name, numbers and all', () => {
+  assert.equal(followLabel('kick', 'kick', 'tom'), 'tom');
+  assert.equal(followLabel('kick2', 'kick', 'tom'), 'tom2');
+  // A different word is its own name; so is one that merely starts with the label.
+  assert.equal(followLabel('growl', 'kick', 'tom'), 'growl');
+  assert.equal(followLabel('kickB', 'kick', 'tom'), 'kickB');
+  assert.equal(followLabel('a.b2', 'a.b', 'c'), 'c2'); // the label is quoted, not read as a pattern
+});
+
+test('a duplicate files its own copy of every definition it plays, and the body names the copies', () => {
+  const body = 'kick: pianoroll("kick").synth("Serum 2").preset("kick").lfo("growl")';
+  const taken = (kind, id) => ({ roll: ['kick'], preset: ['kick'], shape: ['growl'] })[kind].includes(id);
+  const plan = planDuplicate({
+    body, label: 'kick', to: 'tom',
+    carried: [
+      { kind: 'roll', id: 'kick', scope: '', code: '_roll("kick", "36,0,4")' },
+      { kind: 'preset', id: 'kick', scope: 'Serum 2', code: '_preset("kick", "Serum 2", "@aa")' },
+      { kind: 'shape', id: 'growl', scope: '', code: '_shape("growl", "0,0 1,1")' },
+    ],
+    idCalls: presetCalls(body, 'Serum 2'),
+    taken,
+  });
+  assert.equal(plan.body, 'tom: pianoroll("tom").synth("Serum 2").preset("tom").lfo("growl2")');
+  assert.deepEqual(plan.defs.map((d) => d.code), [
+    '_roll("tom", "36,0,4")',
+    '_preset("tom", "Serum 2", "@aa")',
+    '_shape("growl2", "0,0 1,1")',
+  ]);
+  assert.deepEqual(plan.renames.map((r) => [r.kind, r.from, r.to]), [
+    ['roll', 'kick', 'tom'], ['preset', 'kick', 'tom'], ['shape', 'growl', 'growl2'],
+  ]);
+});
+
+test('a duplicate steps over a name the buffer already uses for something else', () => {
+  const body = 'kick: pianoroll("kick")';
+  const plan = planDuplicate({
+    body, label: 'kick', to: 'tom',
+    carried: [{ kind: 'roll', id: 'kick', scope: '', code: '_roll("kick", "36,0,4")' }],
+    idCalls: rollCalls(body),
+    taken: (kind, id) => ['kick', 'tom'].includes(id), // somebody already drew a roll called tom
+  });
+  assert.equal(plan.body, 'tom: pianoroll("tom2")');
+  assert.equal(plan.defs[0].code, '_roll("tom2", "36,0,4")');
+});
+
+test('a duplicate keeps the label line as it stood: indent, mute marker, an unnamed block', () => {
+  const muted = planDuplicate({ body: '  _kick: s("bd*4")', label: 'kick', to: 'tom' });
+  assert.equal(muted.body, '  _tom: s("bd*4")');
+  const anon = planDuplicate({ body: '$: s("bd*4")', label: '$3', anon: true, to: 'tom' });
+  assert.equal(anon.body, 'tom: s("bd*4")');
+  // Only the label: a `kick` deeper in the code is a sample, a variable, or a word in a comment.
+  const deeper = planDuplicate({ body: 'kick: s("kick").fx("x") // kick', label: 'kick', to: 'tom' });
+  assert.equal(deeper.body, 'tom: s("kick").fx("x") // kick');
+});
+
+test('a duplicate only follows a preset rename under the plugin that owns it', () => {
+  const body = 'kick: s("bd").fx("Valhalla").preset("kick")';
+  const plan = planDuplicate({
+    body, label: 'kick', to: 'tom',
+    carried: [{ kind: 'preset', id: 'kick', scope: 'Serum 2', code: '_preset("kick", "Serum 2", "@aa")' }],
+    idCalls: callsFor(body, [['preset', 'preset', 'Valhalla']]),
+    taken: () => false,
+  });
+  assert.equal(plan.body, 'tom: s("bd").fx("Valhalla").preset("kick")');
 });
