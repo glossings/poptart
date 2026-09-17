@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import { s, group, audio } from './src/signal.mjs';
 import {
-  isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf,
+  isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf, markerResolver,
   groupOrder, GROUP_ROOT,
 } from './src/groups.mjs';
 
@@ -65,6 +65,36 @@ test('ancestorsOf / descendantsOf: up the tree nearest first, down it in order',
   assert.deepEqual(ancestorsOf('drums', parentsOf(t)), []);
   assert.deepEqual(descendantsOf('drums', t), ['kick', 'kickMain', 'kickFill', 'snare']);
   assert.deepEqual(descendantsOf('kickMain', t), []);
+});
+
+test('markerResolver: a muted block does not silence an unmarked block of the same name', () => {
+  const muted = { label: 'test', muted: true, soloed: false };
+  const live = { label: 'test', muted: false, soloed: false };
+  const r = markerResolver([muted, live], new Map(), new Map());
+  assert.equal(r.isMuted(muted), true);
+  assert.equal(r.isMuted(live), false);
+  const soloed = { label: 'lead', muted: false, soloed: true };
+  const twin = { label: 'lead', muted: false, soloed: false };
+  const s = markerResolver([soloed, twin], new Map(), new Map());
+  assert.equal(s.isSoloed(soloed), true);
+  assert.equal(s.isSoloed(twin), false);
+});
+
+test('markerResolver: markers travel the tree, mute down, solo down and up, mute wins', () => {
+  const t = normalizeGroupTree({ drums: ['kick', 'snare'], kick: ['kickMain', 'kickFill'] });
+  const b = (label, muted = false, soloed = false) => ({ label, muted, soloed });
+  const m = markerResolver([b('drums', true), b('kick'), b('kickFill')], t, parentsOf(t));
+  assert.equal(m.isMuted(b('kickFill')), true, 'a group mute reaches the grandchildren');
+  assert.equal(m.isMuted(b('bass')), false);
+  const s = markerResolver([b('kick', false, true), b('drums'), b('snare')], t, parentsOf(t));
+  assert.equal(s.isSoloed(b('kickMain')), true, 'solo reaches down');
+  assert.equal(s.isSoloed(b('drums')), true, 'solo climbs to the group it mixes into');
+  assert.equal(s.isSoloed(b('snare')), false, 'siblings are not soloed');
+  const both = b('kick', true, true);
+  const w = markerResolver([both], t, parentsOf(t));
+  assert.equal(w.isSoloed(both), false, 'mute wins over solo');
+  assert.equal(w.isSoloed(b('drums')), false);
+  assert.equal(w.isMuted(b('kickMain')), true);
 });
 
 test('groupOrder: a group, then everything under it, indented by depth', () => {

@@ -4708,21 +4708,11 @@ const routes = {
     // tracks under it, so `_drums:` silences the whole kit and `Sdrums:` solos it. Mute wins over
     // solo, as it always has, and it wins wherever it is written - a muted member stays silent
     // inside a soloed group.
-    const muted = new Set();
-    const soloed = new Set();
-    for (const b of built) {
-      if (!b.muted && !b.soloed) continue;
-      const reach = [b.label, ...patternCore.descendantsOf(b.label, groupTree)];
-      for (const label of reach) (b.muted ? muted : soloed).add(label);
-    }
-    // ...and solo travels UP it as well: a soloed track is only audible through the groups it mixes
-    // into, so each of them has to play too. Its SIBLINGS don't - that is what soloing means.
-    for (const label of [...soloed]) {
-      for (const up of patternCore.ancestorsOf(label, routed.routedParents)) soloed.add(up);
-    }
-    const isMuted = (b) => muted.has(b.label);
-    const anySolo = built.some((b) => soloed.has(b.label) && !isMuted(b));
-    const active = built.filter((b) => !isMuted(b) && (!anySolo || soloed.has(b.label)));
+    // Solo travels UP it as well: a soloed track is only audible through the groups it mixes into.
+    // A block's own marker stays on that block, so `_lead:` beside `lead:` leaves the second playing.
+    const { isMuted, isSoloed } = patternCore.markerResolver(built, groupTree, routed.routedParents);
+    const anySolo = built.some((b) => isSoloed(b) && !isMuted(b));
+    const active = built.filter((b) => !isMuted(b) && (!anySolo || isSoloed(b)));
 
     // Stop tracks whose label disappeared (or that are now muted / un-soloed) - within THIS
     // deck only: the other deck's tracks are not in this buffer, and this eval must not touch
@@ -4857,8 +4847,8 @@ const routes = {
       key: keyOfBlock(b.label), // what this track is called server-side (deck b keys are "b:<label>")
       // The EFFECTIVE flags - a member of a muted group reads as muted, which is what the
       // mixer's buttons and the editor's dimmed code both want to show.
-      muted: muted.has(b.label),
-      soloed: soloed.has(b.label),
+      muted: isMuted(b),
+      soloed: isSoloed(b),
       active: active.includes(b),
       start: b.start,
       end: b.end,

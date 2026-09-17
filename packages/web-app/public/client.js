@@ -2026,21 +2026,14 @@ function updateMutedDim() {
   // Markers travel the group tree exactly as the host applies them (see /api/evaluate): mute and
   // solo reach everything UNDER the marked label, and a soloed track keeps the groups ABOVE it -
   // so what dims here is what will actually fall silent.
+  // A block's own marker stays on that block, so `_lead:` beside `lead:` dims only the first.
   const tree = groupsMod ? groupsMod.treeOfBlocks(blocks) : new Map();
-  const muted = new Set();
-  const soloed = new Set();
+  const { isMuted, isSoloed } = groupsMod
+    ? groupsMod.markerResolver(blocks, tree, groupsMod.parentsOf(tree))
+    : { isMuted: (b) => b.muted, isSoloed: (b) => b.soloed && !b.muted };
+  const anySolo = blocks.some((b) => isSoloed(b) && !isMuted(b));
   for (const b of blocks) {
-    if (!b.muted && !b.soloed) continue;
-    const reach = [b.label, ...(groupsMod ? groupsMod.descendantsOf(b.label, tree) : [])];
-    for (const label of reach) (b.muted ? muted : soloed).add(label);
-  }
-  if (groupsMod) {
-    const parents = groupsMod.parentsOf(tree);
-    for (const label of [...soloed]) for (const up of groupsMod.ancestorsOf(label, parents)) soloed.add(up);
-  }
-  const anySolo = blocks.some((b) => soloed.has(b.label) && !muted.has(b.label));
-  for (const b of blocks) {
-    if (!muted.has(b.label) && !(anySolo && !soloed.has(b.label))) continue;
+    if (!isMuted(b) && !(anySolo && !isSoloed(b))) continue;
     mutedDimMarks.push(
       cm.markText(cm.posFromIndex(b.start), cm.posFromIndex(b.end), { className: 'cm-muted-code' }),
     );

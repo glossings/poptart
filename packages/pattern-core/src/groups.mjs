@@ -142,6 +142,37 @@ export function descendantsOf(label, tree) {
 }
 
 /**
+ * Who a mute or solo marker silences, with the group tree applied. Mute and solo travel DOWN the
+ * tree: `_drums:` silences every track under drums, and `Sdrums:` solos them. Solo also travels UP:
+ * a soloed track is heard through its groups, so each of them plays too. Mute wins over solo.
+ *
+ * A block's OWN marker applies to that block only. Two blocks can strip to the same name, as in
+ * `_lead:` beside `lead:`, and the unmarked one keeps playing. Inherited markers go by name, since
+ * the tree is keyed by name.
+ *
+ * Returns `{ isMuted(block), isSoloed(block) }`. `parents` is the child-to-group map that solo
+ * climbs, which the host takes from its routing and the editor from parentsOf(tree).
+ */
+export function markerResolver(blocks, tree, parents) {
+  const mutedUnder = new Set();
+  const soloedUnder = new Set();
+  const soloSources = [];
+  for (const b of blocks) {
+    if (!b.muted && !b.soloed) continue;
+    const under = descendantsOf(b.label, tree);
+    for (const label of under) (b.muted ? mutedUnder : soloedUnder).add(label);
+    if (!b.muted) soloSources.push(b.label, ...under);
+  }
+  for (const label of soloSources) {
+    for (const up of ancestorsOf(label, parents)) soloedUnder.add(up);
+  }
+  return {
+    isMuted: (b) => !!b.muted || mutedUnder.has(b.label),
+    isSoloed: (b) => (!!b.soloed && !b.muted) || soloedUnder.has(b.label),
+  };
+}
+
+/**
  * The tracks in TREE order with their depth: a group immediately followed by everything under it,
  * groups before loose tracks, and anything the tree doesn't mention in the order it was given
  * (which is the buffer's order - the rows follow the code, as they always have).
