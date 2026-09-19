@@ -232,7 +232,18 @@ var bundleNow;
 var modFreeDelay = 0.3, freeModulatorLater;
 // The ramp behind every polled control - see poptartSetParam.
 var rampTo, dropRamp, dropSlotRamps;
-var steppedChannelControls = #[\out, \cue, \mdeck]; // selectors, not levels: set outright, never ramped
+// Set outright, never ramped. The first three are selectors, not levels. The grain controls are
+// levels, but their reader is a grain, which takes one value as it starts and keeps it: a ramp has
+// nothing to smooth there, and it would turn a polled rand() - a fresh draw per poll - into a
+// line wandering between draws, which is drift and not scatter.
+var steppedChannelControls = #[\out, \cue, \mdeck, \grainpos, \grainsize, \grainrate, \grainpan];
+// The granular voice (see the poptart_sample_grain_ defs). GrainBuf reads ONE channel, so a stereo
+// file is granulated from a one-channel copy of each side, read the first time it is asked for:
+// bufnum -> [left, right], or \loading while the reads are out. Windows are keyed by the very
+// breakpoint string the event carries: String -> Buffer, or \loading.
+var grainSides = IdentityDictionary.new, grainWindows = Dictionary.new;
+var grainWindowFrames = 1024, grainMaxOverlap = 128;
+var grainSidesFor, grainWindowFor, freeGrainSides;
 // Pitch bend (Sig#bend). The track synth republishes its bend control on a bus of the track's own
 // (see buildTrackDef): sample voices map it, and this rate is how often the synth posts the value
 // back to sclang to be sent on as a MIDI pitch-bend message. 100 Hz is a compromise with a reason
@@ -324,6 +335,7 @@ buildTrackDef = { |key|
     // the setSidechain OSCdef.
     SynthDef(trackDefName.(key), { |inBus, gain = 1, postgain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
         bend = 0, bendrange = 2, bendOut,
+        grainpos = 0, grainsize = 0.08, grainrate = 20, grainpan = 0, grainOut,
         trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         recOut, recSend = 0, mixOut, mixSend = 0|
@@ -366,6 +378,13 @@ buildTrackDef = { |key|
         // actually bending, plus a tail after it centres so the centring message is never the one
         // that gets dropped: a track that never calls .bend() posts nothing at all. bendrange rides
         // along because the 14-bit encoding depends on it and it is a control like any other.
+        // The granular voice's live controls (Sig#grainsize and friends, and a streamed .begin()
+        // as grainpos): channel controls for the same reason bend is one - whichever route drives
+        // them, a ramp, a native LFO's bus or a plain set, they arrive here - and republished the
+        // same way, four wide, for the track's granular voices to map. Unlagged on purpose: a
+        // grain reads them once, as it starts, so there is no zipper to smooth, and a lag would
+        // smear a per-grain rand() back into a drift (see steppedChannelControls).
+        ReplaceOut.kr(grainOut, [grainpos, grainsize, grainrate, grainpan]);
         bendOn = (bendV.abs > 1e-4);
         SendReply.kr(
             Impulse.kr(bendPollHz) * (bendOn + Trig1.kr(1 - bendOn, 0.1)).min(1),
@@ -536,7 +555,13 @@ channelDefault = { |name|
     // wet1..wet7 (Sig#wet, the per-fx-slot dry/wet) belong with the unity controls: neutral for a
     // wet control is the plugin's own output, and a modulator cleared off one must leave the
     // effect sounding rather than silently bypassing it.
-    if (name == "bendrange") { 2 } {
+    // grainsize and grainrate likewise: a granular voice left reading 0 seconds at 0 grains a
+    // second plays nothing. The same numbers as CHANNEL_DEFAULTS in signal.mjs.
+    case
+    { name == "bendrange" } { 2 }
+    { name == "grainsize" } { 0.08 }
+    { name == "grainrate" } { 20 }
+    {
         if ((name == "gain") or: { name == "postgain" } or: { name == "out" } or: { name == "dry" } or: { name == "width" }
             or: { name == "trim" } or: { name == "fader" } or: { name == "deck" }
             or: { name == "eqlo" } or: { name == "eqmid" } or: { name == "eqhi" }
@@ -1316,6 +1341,55 @@ server.waitForBoot {
             var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
+        // Granular voice (Sig#grain): the file read as a stream of short overlapping grains cut
+        // from around a position, instead of one pass from it. One synth per event like the defs
+        // above, so the ADSR here is the envelope of the whole cloud and the gate is the event's -
+        // the voice has no length of its own and sounds until it is told to stop.
+        //
+        // GrainBuf, for the reason the one-shot def uses PlayBuf: each grain's read phase lives in
+        // a double inside the UGen, so a grain cut from minute four of a long file is as clean as
+        // one from its first second. What it costs is that GrainBuf reads ONE channel - so the
+        // voice takes a buffer per side (bufL/bufR, the same mono buffer twice for a mono file;
+        // see grainSidesFor) and a stereo file is two GrainBufs off one trigger. Every input is
+        // read as a grain starts and both read the same wires on the same sample, so the two
+        // sides of a grain are always the same cut of the file, a matched pair.
+        //
+        // size, rate, pan and (when posLive says so) position are MAPPED to the track's grain bus
+        // at spawn (see the playSample OSCdef), like bend: they are live controls, and a grain
+        // reading one as it starts is what lets a signal place, size or pan every grain
+        // separately. The trigger is audio rate, so grains start on their sample and a steady rate
+        // is steady - no block-sized jitter to turn a pitched grain rate into noise.
+        //
+        // Pan is equal-power. A mono grain at center would sit 3 dB under the plain def's copy of
+        // the same file on both sides, so it gets that back; a stereo pair is panned as a balance -
+        // at 0 the left side is hard left and the right hard right, which is the file as recorded,
+        // and either way out both sides travel together until they meet at the edge.
+        //
+        // Overlapping grains add up. They are copies of nearby audio at unrelated phases, so it is
+        // their POWER that adds, and the sum grows as the square root of the overlap - half the
+        // nominal count, since a bell window is half empty. Divided back out, so opening up
+        // .grainsize() or .grainrate() thickens the cloud without also turning it up.
+        SynthDef(("poptart_sample_grain_" ++ nc).asSymbol, { |out, bufL, bufR, begin = 0, rate = 1, gate = 1, amp = 1,
+            atk = 0, dec = 0, sus = 1, rel = 0, bend = 0,
+            grainpos = 0, grainsize = 0.08, grainrate = 20, grainpan = 0, posLive = 0, win = -1|
+            var size = grainsize.clip(0.002, 4);
+            var density = grainrate.clip(0.1, 1000);
+            var trig = Impulse.ar(density);
+            var pos = Select.kr(posLive, [begin, grainpos]).clip(0, 1);
+            var pitch = rate * BufRateScale.kr(bufL) * bend.midiratio;
+            var pan = grainpan.clip(-1, 1);
+            var sig = if (nc == 1) {
+                GrainBuf.ar(2, trig, size, bufL, pitch, pos, 4, pan, win, grainMaxOverlap) * 2.sqrt
+            } {
+                GrainBuf.ar(2, trig, size, bufL, pitch, pos, 4, ((2 * pan) - 1).clip(-1, 1), win, grainMaxOverlap)
+                + GrainBuf.ar(2, trig, size, bufR, pitch, pos, 4, ((2 * pan) + 1).clip(-1, 1), win, grainMaxOverlap)
+            };
+            var level = (size * density * 0.5).max(1).sqrt.reciprocal.lag(0.05);
+            // Same envelope and floors as every sampler def above; the gate is the event's alone.
+            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
+            var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
+            Out.ar(out, sig * level * env * amp);
+        }).add;
         // Song-deck player (see the songLoad/songStart OSCdefs): one long file, played straight
         // through at `rate` into the track's input bus, so the whole DJ stage (EQ, filter,
         // crossfader, cue, meters) applies to a real song exactly as to a pattern track. One
@@ -1649,6 +1723,8 @@ OSCdef(\poptartCreateTrack, { |msg|
             // life, so a voice spawned at any moment has somewhere to read from; it sits at 0 -
             // no bend - until something writes it.
             var bendBus = Bus.control(server, 1);
+            // ...and the four grain controls, likewise (pos, size, rate, pan - in that order).
+            var grainBus = Bus.control(server, 4);
             var synth;
             var def = buildTrackDef.(key);
             // Control buses keep whatever the last owner left in them - the server never clears
@@ -1656,9 +1732,10 @@ OSCdef(\poptartCreateTrack, { |msg|
             // else's bend for the block before its track synth first writes. Zeroed explicitly,
             // ahead of the sync, so the bus is at centre before anything can read it.
             bendBus.set(0);
+            grainBus.setn([0, 0.08, 20, 0]);
             def.add; // sends to server + global SynthDescLib
             server.sync;
-            synth = Synth(trackDefName.(key), [\inBus, inBus.index, \bendOut, bendBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
+            synth = Synth(trackDefName.(key), [\inBus, inBus.index, \bendOut, bendBus.index, \grainOut, grainBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
             // SendReply names its sender by node id and nothing else, so the bend messages coming
             // back from this synth need a way home (see the bendOut OSCFunc).
             bendTracks[synth.nodeID] = key;
@@ -1668,6 +1745,7 @@ OSCdef(\poptartCreateTrack, { |msg|
                 voices: voices,
                 inBus: inBus,
                 bendBus: bendBus,
+                grainBus: grainBus,
                 synth: synth,
                 controllers: Array.newClear(maxSlots),
                 loaded: Array.newClear(maxSlots), // slot -> pluginId once open() succeeds
@@ -1721,6 +1799,7 @@ destroyTrack = { |key|
             track[\group].free;
             track[\inBus].free;
             track[\bendBus] !? { |b| b.free };
+            track[\grainBus] !? { |b| b.free };
             tracks[key] = nil;
             reorderTracks.(); // whatever read this track sits shallower now
             ("poptart: destroyed track " ++ key).postln;
@@ -3151,6 +3230,78 @@ OSCdef(\poptartClearMidiInject, { |msg|
 
 // --- sampler ---
 
+// The buffer a granular voice reads each side of a file from (see the poptart_sample_grain_
+// defs): a mono file is both of its own sides, and a stereo one gets a one-channel copy of each,
+// read from disk the first time an event asks. nil means "not yet" - the reads are asynchronous -
+// and the playSample handler waits out what lead the event has rather than playing the wrong voice.
+grainSidesFor = { |buf|
+    var have = grainSides[buf.bufnum];
+    case
+    { buf.numChannels == 1 } { [buf, buf] }
+    { have.isKindOf(Array) } { have }
+    { have.notNil } { nil } // \loading, or \failed - which stays failed until the pack is reloaded
+    {
+        var done = 0, pair;
+        grainSides[buf.bufnum] = \loading;
+        // Buffer.read* THROWS once the allocator is empty (see loadSamplePack).
+        try {
+            pair = [0, 1].collect { |ch|
+                Buffer.readChannel(server, buf.path, channels: [ch], action: {
+                    done = done + 1;
+                    if (done == 2) {
+                        // The pack may have been reloaded under the reads, and taken the entry with it.
+                        if (grainSides[buf.bufnum] == \loading) { grainSides[buf.bufnum] = pair } { pair.do { |b| b.free } };
+                    };
+                });
+            };
+        } {
+            grainSides[buf.bufnum] = \failed;
+            ("poptart: .grain(): the audio server is out of buffers - " ++ buf.path ++ " plays nothing granular until the engine restarts").warn;
+        };
+        nil
+    };
+};
+freeGrainSides = { |buf|
+    var have = grainSides.removeAt(buf.bufnum);
+    if (have.isKindOf(Array)) { have.do { |b| b.free } };
+};
+
+// The buffer holding a grain window (Sig#grainshape), by the breakpoint JSON the event carried -
+// the same x/y/c points a drawn LFO shape arrives as, turned into the same Env, and rendered here
+// instead of played. -1 is GrainBuf's built-in bell: what an event with no window asks for, and
+// what one whose window is still being sent gets for the few milliseconds that takes.
+//
+// Every edit in the shape editor is a new string and so a new buffer, and buffers are the one
+// thing this server can run out of - so past a few dozen, the ones nothing has asked for lately
+// go. "Lately" has to outlast the longest grain a voice could still be reading one with.
+grainWindowFor = { |json|
+    var have, now = Main.elapsedTime;
+    if (json.size == 0) { -1 } {
+        have = grainWindows[json];
+        if (have.notNil) {
+            have[\used] = now;
+            have[\buf] !? { |b| b.bufnum } ? -1
+        } {
+            var points = json.parseJSON; // string values throughout - converted explicitly
+            var xs = points.collect { |p| p["x"].asFloat };
+            var ys = points.collect { |p| p["y"].asFloat };
+            var cs = points.collect { |p| (p["c"] ? "0").asFloat };
+            var times = (1..xs.size - 1).collect { |k| max(0, xs[k] - xs[k - 1]) };
+            var entry = (used: now, buf: nil);
+            grainWindows[json] = entry;
+            Buffer.sendCollection(server, Env(ys, times, cs.copyRange(0, cs.size - 2)).asSignal(grainWindowFrames), 1,
+                action: { |b| entry[\buf] = b });
+            if (grainWindows.size > 48) {
+                grainWindows.keys.copy.do { |k|
+                    var e = grainWindows[k];
+                    if ((now - e[\used]) > 30) { e[\buf] !? { |b| b.free }; grainWindows.removeAt(k) };
+                };
+            };
+            -1
+        };
+    };
+};
+
 // Reads a pack's files (enumerated Node-side, filename order) into buffers and replies with
 // per-file metadata - Node needs frames/sampleRate for the fit/one-shot-duration math it does
 // per event. A file scsynth can't read still occupies its index (frames 0), so pack indices
@@ -3163,7 +3314,7 @@ OSCdef(\poptartLoadSamplePack, { |msg|
         var paths = File.use(pathsFile, "r", { |f| f.readAllString }).parseJSON;
         var done = 0, tries = 0, bufs = [], starved = false;
         File.delete(pathsFile);
-        samplePacks[pack] !? { |old| old.do { |b| b.free } };
+        samplePacks[pack] !? { |old| old.do { |b| freeGrainSides.(b); b.free } };
         // Buffer.read THROWS once the buffer allocator is empty, which would kill this routine and
         // leave Node waiting out its whole 2-minute timeout for a reply that never comes. Catch it,
         // and turn a library too big for numBuffers above into an immediate, explicable failure.
@@ -3178,7 +3329,7 @@ OSCdef(\poptartLoadSamplePack, { |msg|
         while { (done < bufs.size) and: { tries < 2200 } } { 0.05.wait; tries = tries + 1 };
         if (starved) {
             // Waited for the in-flight reads above first, so freeing here can't race their /done.
-            bufs.do { |b| b.free };
+            bufs.do { |b| freeGrainSides.(b); b.free };
             samplePacks[pack] = nil;
             replyErr.("/poptart/loadSamplePack", requestId,
                 "the audio server ran out of buffers loading " ++ paths.size ++ " file(s) ("
@@ -3214,7 +3365,13 @@ OSCdef(\poptartPlaySample, { |msg|
     // whether it bounces off the edges instead of wrapping. See .loop()'s wrap/dir options.
     var loopLo = (msg[18] ? 0).asFloat, loopHi = (msg[19] ? 1).asFloat;
     var entry = (msg[20] ? 0).asFloat, pingpong = (msg[21] ? 0).asInteger;
-    var args;
+    // The granular voice (Sig#grain): size/rate/pan are this onset's values of controls the voice
+    // reads live, posLive says its position is one of them too, and the window is breakpoint JSON.
+    var grain = (msg[22] ? 0).asInteger;
+    var grainSize = (msg[23] ? 0.08).asFloat, grainRate = (msg[24] ? 20).asFloat, grainPan = (msg[25] ? 0).asFloat;
+    var posLive = (msg[26] ? 0).asInteger, windowJson = (msg[27] ? "").asString;
+    var arrived = Main.elapsedTime;
+    var args, spawn;
     var track = tracks[key];
     var bufs = samplePacks[pack];
     var buf = bufs !? { bufs.wrapAt(idx) };
@@ -3222,10 +3379,25 @@ OSCdef(\poptartPlaySample, { |msg|
     var gated = (loop == 1) or: { cut == 1 };
     var defName, synth;
     if (track.isKindOf(Event) and: { buf.notNil } and: { (buf.numFrames ? 0) > 0 }) {
-        defName = ("poptart_sample_" ++ (if (warp) { "warp_" } { "" })
-            ++ (if (loop == 1) { "loop_" } { "" }) ++ buf.numChannels).asSymbol;
+      // `sides` is the granular voice's buffer pair (see grainSidesFor), nil for every other voice.
+      spawn = { |latency, stopLatency, sides|
+        defName = if (sides.notNil) {
+            ("poptart_sample_grain_" ++ if (buf.numChannels == 1) { 1 } { 2 }).asSymbol
+        } {
+            ("poptart_sample_" ++ (if (warp) { "warp_" } { "" })
+                ++ (if (loop == 1) { "loop_" } { "" }) ++ buf.numChannels).asSymbol
+        };
         track[\held] = track[\held] + 1;
-        args = [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
+        args = if (sides.notNil) {
+            var bus = track[\grainBus].index;
+            [\out, track[\inBus].index, \bufL, sides[0], \bufR, sides[1], \begin, begin,
+             \rate, rate, \gate, 1, \amp, amp, \atk, atk, \dec, dec, \sus, sus, \rel, rel,
+             \bend, track[\bendBus].asMap, \posLive, posLive, \win, grainWindowFor.(windowJson),
+             // Mapped, like bend, and in the bus's own order (see buildTrackDef's ReplaceOut).
+             \grainpos, ("c" ++ bus).asSymbol, \grainsize, ("c" ++ (bus + 1)).asSymbol,
+             \grainrate, ("c" ++ (bus + 2)).asSymbol, \grainpan, ("c" ++ (bus + 3)).asSymbol]
+        } {
+          [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
                 \rate, rate, \dur, dur, \gate, 1, \amp, amp,
                 \atk, atk, \dec, dec, \sus, sus, \rel, rel,
                 // Pitch bend (Sig#bend) as a MAP rather than a value: the voice reads the track's
@@ -3233,13 +3405,23 @@ OSCdef(\poptartPlaySample, { |msg|
                 // started before it. Mapped in the creation message itself (Bus#asMap is the "c7"
                 // spelling the server reads as "follow this bus"), which is what keeps a voice from
                 // ever sounding one block unbent.
-                \bend, track[\bendBus].asMap];
+                \bend, track[\bendBus].asMap]
+        };
         // Only the loop defs have these controls - appended just for them rather than sent to a
         // one-shot def that would ignore them (and log a "control not found" for each).
-        if (loop == 1) {
+        if (loop == 1 and: { sides.isNil }) {
             args = args ++ [\loopLo, loopLo, \loopHi, loopHi, \entry, entry, \pingpong, pingpong];
         };
         bundleNow.(latency, {
+            if (sides.notNil) {
+                // The voice's first grain fires with it, a block before the track synth next
+                // republishes these - so the bus is seeded with this onset's own values, ahead of
+                // the voice in the same bundle, and the track synth told the same so the value
+                // holds. On a control a modulator is mapped onto, the set is simply never read.
+                track[\grainBus].setn([if (posLive == 1) { begin } { 0 }, grainSize, grainRate, grainPan]);
+                track[\synth].set(\grainsize, grainSize, \grainrate, grainRate, \grainpan, grainPan);
+                if (posLive == 1) { track[\synth].set(\grainpos, begin) };
+            };
             synth = Synth(defName, args, target: track[\voices] ? track[\group], addAction: \addToHead);
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
             track[\lfos].do { |e|
@@ -3254,6 +3436,25 @@ OSCdef(\poptartPlaySample, { |msg|
             if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
             nil
         });
+      };
+      if (grain == 1) {
+        var sides = grainSidesFor.(buf);
+        if (sides.notNil) { spawn.(latency, stopLatency, sides) } {
+            // A stereo file's first granular event: its sides are being read. Events arrive a
+            // lookahead early and a read is a few milliseconds, so wait out the lead it has - and
+            // play nothing if that isn't enough, since the plain voice is a different sound
+            // entirely, not a quieter version of this one.
+            fork {
+                var spent = 0;
+                while { sides.isNil and: { spent < (latency - 0.02) } } {
+                    0.01.wait;
+                    sides = grainSidesFor.(buf);
+                    spent = Main.elapsedTime - arrived;
+                };
+                if (sides.notNil) { spawn.(latency - spent, stopLatency - spent, sides) };
+            };
+        };
+      } { spawn.(latency, stopLatency, nil) };
     };
 }, '/poptart/playSample');
 

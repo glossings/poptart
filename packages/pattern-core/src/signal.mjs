@@ -1139,12 +1139,28 @@ export class Sig {
   }
 
   _binopValues(op, other, fn, linear) {
-    if (typeof other === 'number' && linear) {
+    // A plain number, or a signal that is one (Signal(2), a channel holding a constant).
+    const k = typeof other === 'number' ? other
+      : other instanceof Sig && typeof other.constVal === 'number' && !other.stepsForCycle ? other.constVal : null;
+    if (k !== null && linear) {
       // Bounds may be signals (see range()) - map those through fn instead of applying it directly.
-      const mapBound = (b) => (typeof b === 'number' ? fn(b, other) : b.mapValue((v) => fn(Number(v), other)));
+      const mapBound = (b) => (typeof b === 'number' ? fn(b, k) : b.mapValue((v) => fn(Number(v), k)));
       if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min: mapBound(this.lfoIR.min), max: mapBound(this.lfoIR.max) });
       if (this.envIR) return withEnvIR({ ...this.envIR, min: mapBound(this.envIR.min), max: mapBound(this.envIR.max) });
       if (this.ccIR) return withCcIR({ ...this.ccIR, min: mapBound(this.ccIR.min), max: mapBound(this.ccIR.max) });
+    }
+    // The same rewrite with the operands the other way round: a CONSTANT on the left of a
+    // modulator. `Signal(0.4).add(rand().mul(0.01))` is the sum `rand().mul(0.01).add(0.4)` is, and
+    // it is the spelling a control operand produces - `.begin(0.4).add(begin(rand().mul(0.01)))`
+    // combines the channel's constant with the operand in exactly this order - so demoting it
+    // would make the native path depend on which side of the operator the number was typed.
+    // Everything linear but .div(): c / lfo is not a straight line in the lfo.
+    if (linear && op !== 'div' && typeof this.constVal === 'number' && !this.stepsForCycle && other instanceof Sig) {
+      const c = this.constVal;
+      const mapBound = (b) => (typeof b === 'number' ? fn(c, b) : b.mapValue((v) => fn(c, Number(v))));
+      if (other.lfoIR) return withLfoIR({ ...other.lfoIR, min: mapBound(other.lfoIR.min), max: mapBound(other.lfoIR.max) });
+      if (other.envIR) return withEnvIR({ ...other.envIR, min: mapBound(other.envIR.min), max: mapBound(other.envIR.max) });
+      if (other.ccIR) return withCcIR({ ...other.ccIR, min: mapBound(other.ccIR.min), max: mapBound(other.ccIR.max) });
     }
     // Anything else - another modulator included - is the generic product/sum below, a polled
     // signal. env() and the note-gated lfo() modes sample from the track's own note grid (see
@@ -1290,9 +1306,12 @@ export class Sig {
     // Ahead of the source the channel is pending (see _samplerOpt) and combines the same way:
     // note("c3").mul(speed(-1)).s("bd") reads as the s("bd").mul(speed(-1)) it means.
     const current = (this.sampler ?? this.samplerPending ?? {})[spec.key];
+    // Under its real verb, so linear arithmetic between a constant and a modulator stays a native
+    // modulator (see _binopValues): `.begin(0.4).add(begin(rand().mul(0.01)))` is one rand() with
+    // moved bounds, not a sum to be polled.
     const combined = withPending(
       current instanceof Sig
-        ? bareSig(current)._binop(ctl, otherSig, fn, false)
+        ? bareSig(current)._binop(op, otherSig, fn, LINEAR_OPS.has(op))
         : composedChannel(otherSig, spec.unset, op, fn),
       current, op, fn, otherSig,
     );
@@ -2503,6 +2522,67 @@ export class Sig {
     // Ahead of the source it waits like any other sampler option (see _samplerOpt).
     if (!this.sampler) return this._clone({ samplerPending: { ...(this.samplerPending ?? {}), slices: slicesSignal(v) } });
     return this._clone({ sampler: { ...this.sampler, slices: slicesSignal(v) } });
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Granular voice. One synth per event, like every other sampler voice, so the amplitude ADSR,
+  // the gate, .note()/.speed() and the fx chain all mean what they mean anywhere else - what
+  // changes is how the file is read: as a stream of short overlapping grains cut from around
+  // .begin(), instead of one pass from it.
+  //
+  // .grain() is the switch, a per-event sampler channel like .loop(). The three controls that
+  // tune it are CHANNEL controls (Sig#channel, the family .pan()/.gain() belong to), because the
+  // thing that reads them is the grain, not the event: a grain fires many times inside one note,
+  // so its size, rate and place in the stereo field have to be values that are still moving while
+  // the note sounds. That is also what makes `.grainpan(rand().range(-1, 1))` scatter grains
+  // rather than notes. Each of them turns the switch on if nothing has set it, so a lone
+  // .grainsize(0.05) is a granular voice and not a control waiting for one.
+  //
+  // .begin() does the same double duty on a granular track: a begin with a rhythm of its own still
+  // makes events and is read at their onsets, and a continuous one - an LFO, rand(), a constant
+  // plus either - is streamed and read by every grain (see the scheduler's _grainPosSig).
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Plays the sample as a stream of short overlapping grains cut from around .begin(), instead of
+   * one pass through it. Over 0.5 is on, so it patterns like .loop(): `.grain("<0 1>")` alternates
+   * plain and granular playback. The voice sounds for the event's length and takes the amplitude
+   * envelope as a whole; .grainsize(), .grainrate(), .grainshape() and .grainpan() set the grains.
+   *
+   *   s("pad").grain().begin(saw(0.25).range(0.2, 0.6)).attack(0.4).release(1.5)
+   */
+  grain(v = 1) { return this._samplerOpt('grain', 'grain', toSignal(v)); }
+  /** Length of each grain in seconds. Read as each grain starts, so it can move inside a note. */
+  grainsize(v) { return this._grainChannel('grainsize', v); }
+  /** Grains per second. Overlap is .grainsize() times this. Read continuously. */
+  grainrate(v) { return this._grainChannel('grainrate', v); }
+  /**
+   * Stereo position of each grain, -1 (left) .. 1 (right), read as the grain starts - so a fast
+   * signal places every grain separately: `.grainpan(rand().range(-0.6, 0.6))`. Applied ahead of
+   * the fx chain; .pan() still places the whole track after it.
+   */
+  grainpan(v) { return this._grainChannel('grainpan', v); }
+  /**
+   * The amplitude window of each grain: a drawn shape ("0,0 0.1,1,-4 1,0"), the name of a shape
+   * definition or preset ("pluck"), or a pattern of names ("<pluck swell>") read at each event.
+   * Unset, grains take a symmetric bell.
+   */
+  grainshape(v) {
+    const shape = grainShapeSignal(v);
+    const on = this._grainOn();
+    if (!on.sampler) return on._clone({ samplerPending: { ...(on.samplerPending ?? {}), grainShape: shape } });
+    return on._clone({ sampler: { ...on.sampler, grainShape: shape } });
+  }
+
+  _grainChannel(name, v) {
+    return this._grainOn()._clone({ channel: { ...this.channel, [name]: toSignal(v) } });
+  }
+
+  // A grain control implies the switch - unless the chain has already said something about it, in
+  // which case `.grain("<0 1>").grainsize(0.05)` keeps its pattern.
+  _grainOn() {
+    if (this.sampler?.grain || this.samplerPending?.grain) return this;
+    return this.grain();
   }
 
   // ADSR amplitude envelope over the voice. attack/decay/release are SECONDS, the way a sampler
@@ -4156,9 +4236,17 @@ export function bendRangeWarning(semitones, range) {
 // parameters, which is what lets them ramp, take a modulator and reset on re-eval for free. 1 is
 // the plugin's own output, so a chain nobody has called .wet() on sounds exactly as it always did.
 export const MAX_FX_SLOTS = 20; // must match maxSlots - 1 in poptart.scd (slot 0 is the instrument)
+// The binops a constant can be folded into a modulator's bounds through (see _binopValues).
+const LINEAR_OPS = new Set(['add', 'sub', 'mul', 'div']);
+
+/** The channel controls a granular voice reads per grain rather than per block (see the scheduler). */
+export const GRAIN_CHANNELS = ['grainsize', 'grainrate', 'grainpan', 'grainpos'];
 export const CHANNEL_DEFAULTS = {
   gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1,
   bend: 0, bendrange: DEFAULT_BEND_RANGE,
+  // The granular voice's live controls (Sig#grainsize and friends; grainpos is .begin(), streamed -
+  // see the scheduler's _grainPosSig). Seconds, grains per second, -1..1, 0..1 of the file.
+  grainsize: 0.08, grainrate: 20, grainpan: 0, grainpos: 0,
   ...Object.fromEntries(Array.from({ length: MAX_FX_SLOTS }, (_, i) => [`wet${i + 1}`, 1])),
 };
 
@@ -4426,6 +4514,7 @@ const SAMPLER_CONTROLS = {
   sustain: { key: 'sustain', unset: 1 },
   release: { key: 'release', unset: 0 },
   envscale: { key: 'envScale', unset: 1 },
+  grain: { key: 'grain', unset: 0 },
   note: { key: 'note', unset: DEFAULT_SYNTH_NOTE }, // reached by bare arithmetic, not a builder
 };
 
@@ -4548,6 +4637,8 @@ export const sustain = controlBuilder('sustain');
 export const release = controlBuilder('release');
 /** Envelope time multiplier - the top-level form of `.envscale()`. */
 export const envscale = controlBuilder('envscale');
+/** Granular playback (over 0.5 = on) - the top-level form of `.grain()`. */
+export const grain = controlBuilder('grain');
 
 /** Per-note velocity as an operand - the top-level form of `.vel()`. */
 export const vel = controlBuilder('vel');
@@ -6076,6 +6167,30 @@ export function lfoShapes(ir) {
     Object.defineProperty(ir, '_shapes', { value: (ir.shapeNames ?? []).map(shapeNamed), writable: true });
   }
   return ir._shapes;
+}
+
+// The value of a `.grainshape()` call as a signal whose per-onset value is the shape's BREAKPOINTS -
+// the grain window the engine renders into a buffer. It takes what lfo() takes (drawn data, a
+// name, a pattern of names) and resolves names as lazily as lfoShapes does, for the same reason: a
+// `_shape(...)` definition sits at the foot of the buffer, below the pattern naming it. Like
+// .slices() it adds no structure: a window is a property of the grains an event plays, not a
+// rhythm, so a `<pluck swell>` is read at the events the pattern already has.
+function grainShapeSignal(v) {
+  if (v === undefined || v === null || v === '') return new Sig(() => null);
+  const resolved = new Map(); // name -> points, so an unknown name warns once and not per event
+  const pointsFor = (value) => {
+    if (value == null) return null;
+    const name = String(value).trim();
+    if (!name) return null;
+    if (!resolved.has(name)) resolved.set(name, shapeNamed(name));
+    return resolved.get(name);
+  };
+  if (typeof v === 'string' && !SHAPE_PATTERN_CHARS.test(v)) {
+    validateShapeData(v.trim());
+    return new Sig(() => pointsFor(v));
+  }
+  const selector = typeof v === 'string' ? mini(v) : toSignal(v);
+  return new Sig((sec, cps, cycle) => pointsFor(selector.sample(sec, cps, cycle)));
 }
 
 /** The one shape a custom LFO starts on - the first of the set it can reach. */

@@ -68,6 +68,40 @@ export function sampleShape(points, phase) {
   return points[points.length - 1].y;
 }
 
+// A looping shape wraps from its last breakpoint straight back to its first, and a grain plays
+// its window from one to the other - so where the two ENDS sit relative to each other is the one
+// thing about a shape that can click. Ends at the same level are a seam nobody hears, and keeping
+// them there by hand is fiddly anywhere but the floor and the ceiling, so the editor treats them
+// as one: ends that meet move together, and an end dragged near the other's level catches on it.
+//
+// Ends that DON'T meet are left alone, because plenty of shapes mean it: a saw's jump is the saw,
+// a pluck starts high and dies away, and an envelope-mode shape never wraps at all. Nothing is
+// ever pulled together behind your back - you bring an end to the other once, and from then on
+// they are a pair.
+
+/** Whether a shape's first and last breakpoints sit at the same level (to the precision it is written at). */
+export function shapeEndsMeet(points) {
+  return points.length >= 2 && Math.abs(points[0].y - points[points.length - 1].y) < 1e-3;
+}
+
+/**
+ * The shape with one END breakpoint (index 0 or the last) moved to level `y`. `linked` carries the
+ * other end along; otherwise `snap` is how close (in y) the level has to come to the other end's
+ * to catch on it, 0 for never. Returns new points - the ones passed in are not touched.
+ */
+export function moveShapeEnd(points, index, y, { linked = false, snap = 0 } = {}) {
+  const other = index === 0 ? points.length - 1 : 0;
+  const level = clamp01(y);
+  const out = points.map((p) => ({ ...p }));
+  if (linked) {
+    out[index].y = level;
+    out[other].y = level;
+  } else {
+    out[index].y = snap > 0 && Math.abs(level - points[other].y) <= snap ? points[other].y : level;
+  }
+  return out;
+}
+
 // Automation breakpoints - the same `x,y[,c]` text as a shape, but x is an ABSOLUTE bar (cycle)
 // rather than a phase: "0,0 16,0 20,1,-2 32,0.3" holds 0 until bar 16, curves up to 1 by bar 20,
 // falls to 0.3 by bar 32. One pass over the arrangement, no period. Neither axis is clamped - x

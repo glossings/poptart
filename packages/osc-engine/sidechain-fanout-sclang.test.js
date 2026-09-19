@@ -117,7 +117,11 @@ SystemClock.sched(0.4, {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-scfanout-')), 'harness.scd');
   fs.writeFileSync(file, script);
   try {
-    return execFileSync(resolveSclangPath(), [file], {
+    // A lang port of its own. sclang tries ten (57120-57129) and then starts without a network,
+    // and the *-sclang test files all launch at once - more of them than there are ports. Most
+    // never notice, since they only build graphs; this one sends OSC, and without a port every
+    // send throws. Measured 2026-09-19: sixteen sclangs started together, ten got a port.
+    return execFileSync(resolveSclangPath(), ['-u', '57292', file], {
       encoding: 'utf8',
       timeout: 60000,
       stdio: ['ignore', 'pipe', 'pipe'],

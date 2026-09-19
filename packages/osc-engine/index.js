@@ -1325,7 +1325,13 @@ class OscEngine {
     // voice to the step's end below. Sign is all it touches; fit/note keep scaling the magnitude.
     const flip = (cfg.flip ?? 0) > 0.5;
     if (flip) speed *= -1;
-    let stretch = cfg.stretch > 0 ? cfg.stretch : 1;
+    // .grain(): the file is read as a stream of grains cut from around `begin` (see the
+    // poptart_sample_grain_ defs). Everything that decides WHICH voice plays defers to it: a
+    // granular voice has no playhead to loop, stretch or re-anchor, and it sounds for exactly as
+    // long as its event, so it is always gated. speed still sets the pitch of each grain (its
+    // sign, their direction), which is what keeps .note(), .fit() and .flip() meaning what they do.
+    const grain = (cfg.grain ?? 0) > 0.5;
+    let stretch = !grain && cfg.stretch > 0 ? cfg.stretch : 1;
     const spanSec = file.duration * (end - begin);
     if (speed === 0 || spanSec <= 0) return { skipped: speed === 0 ? 'speed 0' : 'empty begin..end window' };
     const eventSec = offsetSec - onsetSec;
@@ -1378,7 +1384,7 @@ class OscEngine {
     // sample is the familiar "play it backwards from the end", repeating for the event. An
     // explicit .loop(0) opts out: one backwards pass from `end`, then silence. .flip() is a
     // single anchored pass by definition, so it never picks up the auto-loop.
-    const loop = (cfg.loop ?? (speed < 0 && !flip ? 1 : 0)) ? 1 : 0;
+    const loop = !grain && (cfg.loop ?? (speed < 0 && !flip ? 1 : 0)) ? 1 : 0;
     // Where a loop runs and where it enters it (the SC loop defs take the three as arguments, so
     // one def covers both wrap modes). "file" - mode 0, the default - makes the loop the whole
     // sample and `begin` only the entry point, so .begin(0.9).loop() runs out the end and carries
@@ -1398,7 +1404,7 @@ class OscEngine {
     // .flip() reverses the window AND re-anchors it: playback runs from one step's worth of audio
     // past `begin` back down to `begin`, landing on `begin` exactly at the step's end, so a
     // flipped hit sweeps *into* the next one (s("sd").flip("<1 0>*2")).
-    if (flip && speed < 0 && !loop) {
+    if (flip && speed < 0 && !loop && !grain) {
       if (durSec > eventSec + 0.005) {
         // Window longer than the step: the start position lands inside it, so trim to that head.
         end = begin + (eventSec * Math.abs(speed)) / stretch / file.duration;
@@ -1418,8 +1424,12 @@ class OscEngine {
     // (.vel()/.note()/.slice()/.i()...) subdivides it further. To let a sample ring longer, make its *event* longer
     // ("long/2", "long@2", "long _"). Loops already gate there; the small margin avoids
     // cutting a voice that ends naturally anyway.
-    const cut = !loop && durSec > eventSec + 0.005 ? 1 : 0;
+    const cut = grain || (!loop && durSec > eventSec + 0.005) ? 1 : 0;
     const env = envelopeSeconds(cfg);
+    const finite = (v, dflt) => (Number.isFinite(v) ? v : dflt);
+    const grainSize = finite(cfg.grainSize, 0.08);
+    const grainRate = finite(cfg.grainRate, 20);
+    const grainPan = finite(cfg.grainPan, 0);
     this._send('/poptart/playSample', [
       trackId,
       ref,
@@ -1445,10 +1455,25 @@ class OscEngine {
       loopHi,
       loopEntry,
       pingpong,
+      // The granular voice. Size, rate and pan are the values at this onset of controls the voice
+      // goes on reading live off the track (pattern-core's GRAIN_CHANNELS) - sent so its first
+      // grain, which fires with it, reads this event's values and not the last poll's. The defaults
+      // mirror CHANNEL_DEFAULTS over there, duplicated across the package boundary like the repitch
+      // anchor above. posLive says the position is streamed too; otherwise the voice stays on
+      // `begin`. The window travels as its breakpoints (a few dozen bytes) rather than as an id
+      // Node would have to remember sending: sclang keys its buffers by this very string, so an
+      // engine restart needs nothing re-sent.
+      grain ? 1 : 0,
+      grainSize,
+      grainRate,
+      grainPan,
+      grain && cfg.grainPosLive ? 1 : 0,
+      grain && cfg.grainShape ? JSON.stringify(cfg.grainShape) : '',
     ]);
     return {
       index: idx, begin, end, loop, speed, stretch, durSec, cut, amp, fileSec: file.duration, ...env,
       loopWrap: windowed ? 'window' : 'file', loopDir: pingpong ? 'pingpong' : 'forward',
+      ...(grain ? { grain: true, grainSize, grainRate } : {}),
     };
   }
 

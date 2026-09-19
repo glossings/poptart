@@ -154,11 +154,12 @@ export function isPatternPosition(before, after, text = '') {
   const first = near.match(/([A-Za-z_$][\w$]*)\s*\(\s*\[?\s*$/);
   if (first) {
     // pianoroll() and lfo() each take either DRAWN DATA or a pattern of names, in the same
-    // argument position, and only the names are mini notation worth tagging. These are the two
-    // calls whose argument is judged by what it SAYS rather than by which call it is - see
-    // looksLikeNoteString / looksLikeShapeData.
+    // argument position, and only the names are mini notation worth tagging - as does
+    // .grainshape(), which takes what lfo() takes. These are the calls whose argument is judged
+    // by what it SAYS rather than by which call it is - see looksLikeNoteString /
+    // looksLikeShapeData.
     if (first[1] === 'pianoroll') return !!text.trim() && !looksLikeNoteString(text);
-    if (first[1] === 'lfo') return !!text.trim() && !looksLikeShapeData(text);
+    if (first[1] === 'lfo' || first[1] === 'grainshape') return !!text.trim() && !looksLikeShapeData(text);
     if (NAME_ARG_CALLS.has(first[1])) return false;
     if (METHOD_NAME_ARG_CALLS.has(first[1])) {
       // Method form only: scan left from the callee (a suffix of `before` starting inside `near`)

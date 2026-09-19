@@ -531,3 +531,80 @@ test('playSample reports the envelope seconds it sent', () => {
   assert.ok(Math.abs(info.release - 0.8) < 1e-12);
   assert.strictEqual(info.decay, 0);
 });
+
+// .grain(): the granular voice. Everything that picks a playhead voice defers to it, it is always
+// gated, and the live controls' onset values ride along for its first grain.
+const GRAIN = { on: 21, size: 22, rate: 23, pan: 24, posLive: 25, window: 26 };
+
+test('a plain event sends the granular voice switched off', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { secPerCycle: 2 }, 0, 0.5);
+  const args = sent.pop().args;
+  assert.strictEqual(args[GRAIN.on], 0);
+  assert.strictEqual(args[GRAIN.posLive], 0);
+  assert.strictEqual(args[GRAIN.window], '');
+});
+
+test('grain is always gated, and never loops, stretches or re-anchors', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  const info = engine.playSample('t1', 'breaks',
+    { grain: 1, begin: 0.4, speed: -1, stretch: 2, flip: 0, secPerCycle: 2 }, 1, 1.5);
+  const args = sent.pop().args;
+  assert.strictEqual(args[GRAIN.on], 1);
+  assert.strictEqual(args[ARG.cut], 1, 'gated to its event');
+  assert.strictEqual(args[ARG.loop], 0, 'a negative speed does not pick the loop voice');
+  assert.strictEqual(args[ARG.stretch], 1, 'nor a stretch the warp voice');
+  assert.strictEqual(args[ARG.speed], -1, 'speed keeps its sign - grains play backwards');
+  assert.strictEqual(args[ARG.begin], 0.4);
+  assert.strictEqual(args[ARG.onset], 1, 'the onset is where the pattern put it');
+  assert.strictEqual(info.grain, true);
+});
+
+test('flip reverses the grains without delaying the voice', () => {
+  const { engine, sent } = engineWithFile(0.2); // shorter than the step: a plain flip would delay it
+  engine.playSample('t1', 'breaks', { grain: 1, flip: 1, secPerCycle: 2 }, 1, 2);
+  const args = sent.pop().args;
+  assert.strictEqual(args[ARG.speed], -1);
+  assert.strictEqual(args[ARG.onset], 1);
+});
+
+test('note still repitches a granular voice', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { grain: 1, note: 72, secPerCycle: 2 }, 0, 0.5);
+  assert.ok(Math.abs(sent.pop().args[ARG.speed] - 2) < 1e-9);
+});
+
+test('the live controls ride along at their onset values, defaults where unset', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { grain: 1, grainSize: 0.25, grainPan: -0.5, secPerCycle: 2 }, 0, 0.5);
+  let args = sent.pop().args;
+  assert.strictEqual(args[GRAIN.size], 0.25);
+  assert.strictEqual(args[GRAIN.rate], 20, "pattern-core's CHANNEL_DEFAULTS.grainrate");
+  assert.strictEqual(args[GRAIN.pan], -0.5);
+  engine.playSample('t1', 'breaks', { grain: 1, secPerCycle: 2 }, 0, 0.5);
+  args = sent.pop().args;
+  assert.strictEqual(args[GRAIN.size], 0.08, "pattern-core's CHANNEL_DEFAULTS.grainsize");
+});
+
+test('a streamed position is flagged, and only on a granular event', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { grain: 1, begin: 0.3, grainPosLive: 1, secPerCycle: 2 }, 0, 0.5);
+  assert.strictEqual(sent.pop().args[GRAIN.posLive], 1);
+  engine.playSample('t1', 'breaks', { begin: 0.3, grainPosLive: 1, secPerCycle: 2 }, 0, 0.5);
+  assert.strictEqual(sent.pop().args[GRAIN.posLive], 0);
+});
+
+test('the window travels as its breakpoints', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  const points = [{ x: 0, y: 0, c: 0 }, { x: 0.1, y: 1, c: -4 }, { x: 1, y: 0, c: 0 }];
+  engine.playSample('t1', 'breaks', { grain: 1, grainShape: points, secPerCycle: 2 }, 0, 0.5);
+  assert.deepStrictEqual(JSON.parse(sent.pop().args[GRAIN.window]), points);
+});
+
+test('every argument of a granular event encodes as OSC', () => {
+  const { engine } = engineWithFile(4.8);
+  const sent = [];
+  engine._send = (addr, args) => sent.push(args);
+  engine.playSample('t1', 'breaks', { grain: 1, grainSize: 1, grainRate: 40.5, secPerCycle: 2 }, 0, 0.5);
+  for (const v of sent[0]) assert.ok(typeof v === 'string' || Number.isFinite(v), `argument ${v}`);
+});

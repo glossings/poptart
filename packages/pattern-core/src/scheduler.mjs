@@ -24,7 +24,7 @@
 //    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
-import { sampleBound, CHANNEL_DEFAULTS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { songSteps } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
@@ -141,6 +141,26 @@ const CHANNEL_SLOT = -1;
 // midicc() and osc() share one IR (see withCcIR in signal.mjs) but are distinct KINDS here, so a
 // control that moves from one to the other clears the old engine binding instead of updating a
 // MIDI entry in place with an OSC address.
+// How often a native rand() refreshes when a GRAIN reads it (see GRAIN_CHANNELS). rand() is an
+// independent draw per read, and everywhere else the reader is a parameter, for which the engine's
+// stock refresh is the right pace. A grain is a reader too, and a much faster one: at the stock
+// pace every grain in a second would share one draw, which is a jump once a second and not a
+// scatter. Anything at or above the engine's control rate is a fresh value every control block,
+// so each grain - they cannot start closer together than a block - gets a draw of its own.
+const GRAIN_RAND_HZ = 1000;
+
+/**
+ * The .begin() a granular track streams, or null. A begin with a step grid of its own makes
+ * events and is read at their onsets like any sampler control; a constant needs no stream. What
+ * is left - an LFO, rand(), arithmetic on those - has no onsets to be read at and is still moving
+ * while a note sounds, so it goes to the engine as the `grainpos` channel control and every grain
+ * reads it as it starts.
+ */
+export function grainPosSig(sig) {
+  const begin = sig.sampler?.grain ? sig.sampler.begin : null;
+  return begin && begin.constVal === undefined && !begin.stepsForCycle ? begin : null;
+}
+
 const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC', osc: 'clearParamOSC' };
 
 /** Which native modulator a control signal is, or null for a polled one. */
@@ -213,6 +233,10 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
   }
   if ((cfg.splice ?? 0) > 0.5) bits.push(`splice=${mode('spliceMode')}`);
   if (stretch !== 1) bits.push(`stretch=${num(stretch)}`);
+  // Size and rate as the voice STARTS with them; both are live controls and may move under it.
+  if (res.grain ?? ((cfg.grain ?? 0) > 0.5)) {
+    bits.push(`grain=${num(res.grainSize ?? cfg.grainSize ?? CHANNEL_DEFAULTS.grainsize)}s@${num(res.grainRate ?? cfg.grainRate ?? CHANNEL_DEFAULTS.grainrate)}hz`);
+  }
   if (cfg.vel !== undefined) bits.push(`vel=${num(cfg.vel)}`);
   if (cfg.note !== undefined) bits.push(`note=${num(cfg.note)}`);
   if (cfg.slice !== undefined) bits.push(`slice=${num(cfg.slice)}`);
@@ -231,7 +255,7 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
     const audioCycles = res.durSec / cfg.secPerCycle;
     bits.push(`dur=${num(audioCycles, 3)}c/${num(eventCycles, 3)}c`);
     if (res.cut) bits.push('cut');
-    else if (!loop && audioCycles < eventCycles - 1e-4) bits.push(`gap=${num(eventCycles - audioCycles, 3)}c`);
+    else if (!loop && !res.grain && audioCycles < eventCycles - 1e-4) bits.push(`gap=${num(eventCycles - audioCycles, 3)}c`);
   }
   return bits.join(' ');
 }
@@ -650,8 +674,16 @@ export class Scheduler {
   _controlEntries(sig) {
     return [
       ...Object.values(sig.paramSignals).map(({ slot, name, sig: s }) => ({ slot, name, sig: s })),
-      ...Object.entries(sig.channel).map(([name, s]) => ({ slot: CHANNEL_SLOT, name, sig: s })),
+      ...Object.entries(this._channelSigs(sig)).map(([name, s]) => ({ slot: CHANNEL_SLOT, name, sig: s })),
     ];
+  }
+
+  // The channel controls the engine is sent: the pattern's own, plus a granular track's streamed
+  // position (see grainPosSig). Everything that walks the channel map goes through here, so the
+  // stream is polled, runs natively and snaps back on re-eval exactly as a control set by name.
+  _channelSigs(sig) {
+    const pos = grainPosSig(sig);
+    return pos ? { ...sig.channel, grainpos: pos } : sig.channel;
   }
 
   // Records a state as already live in the plugin, without sending it. Auto-pin captures a state
@@ -802,14 +834,15 @@ export class Scheduler {
     const resetSec = this.engine.getTime() + DEFAULT_LOOKAHEAD_SEC;
     const resetCycle = this.transport.cycleAt(resetSec);
     const resetSong = this._songAt(resetCycle);
-    const speaks = (name) => name in sig.channel
-      && this._withNoteGate(() => sig.channel[name].sample(resetSec, this.transport.cps, resetSong), resetCycle) != null;
+    const channel = this._channelSigs(sig);
+    const speaks = (name) => name in channel
+      && this._withNoteGate(() => channel[name].sample(resetSec, this.transport.cps, resetSong), resetCycle) != null;
     for (const name of this._prevChannelNames) {
       if (!speaks(name)) {
         this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, resetSec);
       }
     }
-    this._prevChannelNames = Object.keys(sig.channel);
+    this._prevChannelNames = Object.keys(channel);
 
     // Live head input from the midi()/audio() source builders (Sig#inputSource): play a named
     // MIDI source on this track's instrument, or feed a named audio source into the chain input.
@@ -960,9 +993,11 @@ export class Scheduler {
     // A rate written in cycles is worth a different number of Hz at every tempo, so a synced LFO
     // has to be re-sent when setbpm moves - the same in-place update a signal-valued bound gets,
     // which keeps it native and phase-continuous rather than restarting it.
-    const rateHz = m.sig.lfoIR ? lfoRateHz(ir, cps) : null;
+    // A rand() a grain reads refreshes per grain rather than per second (see GRAIN_RAND_HZ).
+    const grainRand = ir.shape === 'rand' && m.slot === CHANNEL_SLOT && GRAIN_CHANNELS.includes(m.name);
+    const rateHz = m.sig.lfoIR ? (grainRand ? GRAIN_RAND_HZ : lfoRateHz(ir, cps)) : null;
     const synced = m.sig.lfoIR != null && ir.rateHz == null;
-    m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number' || synced;
+    m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number' || synced || grainRand;
     const pos = this._songAt(this.transport.cycleAt(nowSec));
     // A resting signal bound (a mini-string bound mid-`~`) holds the last sent value; on the
     // very first send there's nothing to hold, so fall back to the unipolar default.
@@ -1472,7 +1507,7 @@ export class Scheduler {
     const merged = step.cfg;
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
     for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch',
-      'slice', 'splice', 'spliceMode', 'note', 'attack', 'decay', 'sustain', 'release', 'envScale']) {
+      'slice', 'splice', 'spliceMode', 'note', 'attack', 'decay', 'sustain', 'release', 'envScale', 'grain']) {
       if (merged && merged[key] !== undefined) {
         cfg[key] = merged[key];
       } else if (src[key]) {
@@ -1496,6 +1531,7 @@ export class Scheduler {
       const set = src.slices.sample(onsetSec, this.transport.cps, onsetCycle);
       if (set && !sliceSetIsEmpty(set)) cfg.slices = set;
     }
+    if (cfg.grain > 0.5) this._grainConfigAt(cfg, onsetSec, onsetCycle);
     if (src.fit === 'auto') {
       cfg.fit = 'auto';
     } else if (merged && merged.fit !== undefined) {
@@ -1505,6 +1541,29 @@ export class Scheduler {
       if (v !== undefined && !Number.isNaN(v)) cfg.fit = v;
     }
     return cfg;
+  }
+
+  // What a granular event carries beyond the ordinary sampler config. The window is per event, like
+  // a slice set: breakpoints, which the engine renders. The live controls are the odd ones - the
+  // voice reads them off the track for as long as it sounds (see GRAIN_CHANNELS), so an event has no
+  // need of them EXCEPT at its very first grain, which fires with the voice and would otherwise
+  // read whatever the last poll left there, or nothing at all on the first event after play. So
+  // the onset's own values ride along and the engine seeds the track with them as the voice starts.
+  _grainConfigAt(cfg, onsetSec, onsetCycle) {
+    const at = (sig) => {
+      const v = sig?.sample(onsetSec, this.transport.cps, onsetCycle);
+      return typeof v === 'number' && !Number.isNaN(v) ? v : undefined;
+    };
+    const channel = this.pattern.channel;
+    cfg.grainSize = at(channel.grainsize);
+    cfg.grainRate = at(channel.grainrate);
+    cfg.grainPan = at(channel.grainpan);
+    const shape = this.pattern.sampler.grainShape?.sample(onsetSec, this.transport.cps, onsetCycle);
+    if (shape) cfg.grainShape = shape;
+    // A streamed position is the voice's position, and cfg.begin - sampled off the same signal a
+    // moment ago - is where it starts. Otherwise the voice stays on the event's own begin, which is
+    // the engine's to resolve (a .slice() lands there too).
+    if (grainPosSig(this.pattern)) cfg.grainPosLive = 1;
   }
 
   // Pins every free-running LFO's phase to the transport clock (see LFO_ANCHOR_INTERVAL_SEC).

@@ -736,7 +736,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape. Double-click
             the word <code>lfo</code> and a shape editor opens — drag points, bend segments — writing
-            the string for you as you go. Modes: <code>free</code> (its own clock),
+            the string for you as you go. The two ends move as a pair while they sit at the same level, which
+            is what keeps a loop (or a grain) from clicking at its seam; an end dragged near the
+            other's level catches on it, and <kbd>alt</kbd> moves one by itself. Modes: <code>free</code> (its own clock),
             <code>retrigger</code> (phase resets on each note), <code>envelope</code> (once per note,
             then hold). The editor's playhead follows all three.
           </p>
@@ -870,6 +872,29 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             others the chain names, so all of them get their markers under the one name. A sample the set says nothing about
             (and a set with no markers at all) chops on its own transients, which is where a new one
             starts.
+          </div>
+          <div class="callout">
+            <span class="tag">grains</span>
+            <code>.grain()</code> reads the sample as a stream of short overlapping grains cut from
+            around <code>.begin()</code>, instead of one pass through it. It is still one voice per
+            hit, so <code>.adsr()</code> is the envelope of the whole cloud, <code>.note()</code>
+            pitches it, and the hit's length is how long it sounds.
+            <pre><code>cloud: s(<span class="s">"pad"</span>).note(<span class="s">"c3 eb3 g3"</span>)
+  .grain()                            <span class="c">// .grain("&lt;0 1&gt;") alternates plain and granular hits</span>
+  .grainsize(0.08)                    <span class="c">// seconds per grain</span>
+  .grainrate(40)                      <span class="c">// grains per second — size x rate is how many overlap</span>
+  .grainshape(<span class="s">"pluck"</span>)                <span class="c">// each grain's window — double-click `grainshape` to draw it</span>
+  .begin(saw(0.25).range(0.2, 0.6)    <span class="c">// position: a slow scan through the file…</span>
+    .add(rand().mul(0.02)))           <span class="c">// …with every grain scattered around it</span>
+  .grainpan(rand().range(-0.6, 0.6))  <span class="c">// and placed somewhere of its own</span>
+  .adsr(0.4, 0.2, 0.8, 1.5)</code></pre>
+            Size, rate, pan and a <code>.begin()</code> with no rhythm of its own are read by each
+            grain as it starts, not once per hit — which is why <code>rand()</code> scatters grains
+            rather than notes, and why an LFO on any of them is heard moving inside a held note. A
+            <code>.begin("0 0.5")</code> still makes hits, and each hit stays where it was put.
+            <code>.bend()</code> repitches grains the same way. The window takes what
+            <code>lfo()</code> takes — drawn points, a shape's name, or
+            <code>"&lt;pluck swell&gt;"</code> — and opens in the same editor.
           </div>
           <div class="callout">
             <span class="tag">loops &amp; breaks</span>

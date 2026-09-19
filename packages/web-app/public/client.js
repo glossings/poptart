@@ -132,6 +132,7 @@ const shapeDefs = makeDefRegistry({
   section: 'lfos',
   defCall: '_shape',
   useCall: 'lfo',
+  alsoCalls: ['grainshape'], // a grain's window is a shape too, named the same way (see lfoCallee)
   legacyCall: 'shape',
   emptyBody: '"0,0 0.5,1 1,0"',
   isData: (str) => (shapeMod ? shapeMod.looksLikeShapeData(str) : null),
@@ -1004,10 +1005,11 @@ function foldConfigBlobs() {
   // hide, and a "⋯" chip would imply content that isn't there.
   const DATA_ARG_TITLES = {
     lfo: 'lfo shape — click to expand, or use the shape editor',
+    grainshape: 'grain window — click to expand, or use the shape editor',
     pianoroll: 'piano roll notes — click to expand, or use the piano roll editor',
     arrange: 'the arrangement — click to expand, or press ctrl+A to paint it',
   };
-  const dataArgRe = /\b(lfo|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
+  const dataArgRe = /\b(lfo|grainshape|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
   while ((m = dataArgRe.exec(code))) {
     const str = m[2];
     if (str.length <= 2) continue; // "" - already as small as it gets
@@ -1016,7 +1018,7 @@ function foldConfigBlobs() {
     // that can tell them apart has loaded, nothing folds rather than the wrong thing; coreReady
     // refolds once it can.
     if (m[1] === 'pianoroll' && (!pianorollMod || rollDefs.isIdString(str.slice(1, -1)))) continue;
-    if (m[1] === 'lfo' && !shapeMod?.looksLikeShapeData(str.slice(1, -1))) continue;
+    if (m[1] !== 'pianoroll' && !shapeMod?.looksLikeShapeData(str.slice(1, -1))) continue;
     const start = m.index + m[0].length - str.length;
     // Keyed by where the CALL starts: drawing into a roll rewrites what is inside it and leaves
     // its own offset alone, which is exactly the run of edits this has to hold across.
@@ -2929,13 +2931,22 @@ const lfoModeWrap = document.getElementById('lfoModeWrap');
 
 let lfoState = null; // { marker, callStart, points, rate, mode, shapeId, idLiteral }
 let lfoSuppressCursor = false;
+const LFO_END_SNAP_PX = 6; // how near the other end's level a dragged end has to come to catch on it
 const LFO_EVAL_DEBOUNCE_MS = 150; // quiet time after the last shape edit before it re-evaluates
 
 // The lfo(...) call containing idx, plus whether idx is on the *handle* that opens the editor -
 // the `lfo` name itself. Its arguments - the shape string, rate:, mode: - are ordinary code you may
 // want to edit by hand, so they are never a handle. Same rule as pianoroll's and record's.
+//
+// .grainshape(...) is the other call the panel opens from: it takes exactly what lfo() takes - drawn
+// points, a name, a pattern of names - and plays the shape as each grain's amplitude window. So it
+// is found here and edited by the same panel, which only has to remember which of the two it is
+// writing back to (`callee`), and that a window has no rate or mode (see lfoCallee).
 function findLfoCallAt(code, idx) {
-  return findNamedCallAt(code, idx, /\blfo\s*\(/g, 'lfo');
+  const lfo = findNamedCallAt(code, idx, /\blfo\s*\(/g, 'lfo');
+  if (lfo) return lfo;
+  const grain = findNamedCallAt(code, idx, /\bgrainshape\s*\(/g, 'grainshape');
+  return grain && { ...grain, callee: 'grainshape' };
 }
 
 function parseLfoCall(inner) {
@@ -2979,6 +2990,7 @@ function serializeLfoCall(state) {
   // A definition holds the shape and nothing else: rate and mode are how one lfo() PLAYS a shape,
   // and two calls naming the same shape are free to play it at different rates.
   if (state.idLiteral) return `_shape(${state.idLiteral}, "${pts}")`;
+  if (state.callee === 'grainshape') return `grainshape("${pts}")`;
   return `lfo("${pts}", ${lfoCfgText(state)})`;
 }
 
@@ -3000,7 +3012,13 @@ function lfoCallParts() {
   // frame, and cm.getValue() rebuilds the whole document each time it is called.
   const rel = idStringRange({ open, close }, text);
   const start = cm.indexFromPos(range.from);
-  return { range, shape, opts: opts.trim(), idRange: rel && [start + rel[0], start + rel[1]] };
+  const callee = (/^\s*([\w$]+)/.exec(text) ?? [])[1] ?? 'lfo';
+  return { range, shape, opts: opts.trim(), callee, idRange: rel && [start + rel[0], start + rel[1]] };
+}
+
+/** The call the panel writes back to: the one it was opened through, else the inline one it IS. */
+function lfoCallee() {
+  return lfoCallParts()?.callee ?? lfoState?.callee ?? 'lfo';
 }
 
 /** Rewrites that call whole, keeping the marker over it so the panel goes on following it. */
@@ -3020,7 +3038,7 @@ function writeLfoSourceCall(range, text) {
 // where they live. Opened from the picker there is no call to write to, and the panel hides them.
 function writeLfoOptions() {
   const parts = lfoCallParts();
-  if (!parts) return;
+  if (!parts || parts.callee !== 'lfo') return; // a grain window has neither (see lfoSyncHead)
   writeLfoSourceCall(parts.range, `lfo(${parts.shape}, ${lfoCfgText(lfoState)})`);
   refoldAll(); // rate/mode rewrite the call too, taking the shape's fold with it - see writeLfoCall
   lfoScheduleEval();
@@ -3045,10 +3063,10 @@ function lfoSourceShapeId() {
 function lfoUseInCall(id) {
   const parts = lfoCallParts();
   if (!parts || idLiteralValue(parts.shape) === id) return;
-  writeLfoSourceCall(parts.range, `lfo(${JSON.stringify(id)}${parts.opts ? `, ${parts.opts}` : ''})`);
+  writeLfoSourceCall(parts.range, `${parts.callee}(${JSON.stringify(id)}${parts.opts ? `, ${parts.opts}` : ''})`);
   refoldAll();
   lfoHead.closePicker(); // sending one is the end of a browse - hand the canvas back
-  logLine(`lfo(${parts.shape}) now plays "${id}"`);
+  logLine(`${parts.callee}(${parts.shape}) now plays "${id}"`);
   // Following it is only possible into a definition this buffer holds. A built-in preset plays
   // perfectly well from the call - shapeNamed resolves it - but there is nothing of ours to put
   // under the editor, and writing a definition just to have something to show would be forking one
@@ -3143,6 +3161,8 @@ function openLfoEditor(call) {
     // The lfo() a definition was opened THROUGH, if any: rate and mode belong to it, not to the
     // shape, so that is where the panel's rate control writes. Null when opened from the picker.
     callSource: call.callSource ?? null,
+    // Which call an INLINE shape is the argument of - lfo(), or .grainshape() (see findLfoCallAt).
+    callee: call.callee ?? 'lfo',
     ...parseLfoCall(call.idLiteral ? splitFirstArg(inner)[1] : inner),
     ...(call.options ?? {}),
   };
@@ -3277,7 +3297,7 @@ function syncLfoFromCode() {
   // Read off the registry rather than spelled out here: a definition is `_shape(`, and a guard that
   // still said `shape(` would fail on every definition there is - closing the panel on the next
   // keystroke anywhere in the buffer. Same shape of test as syncPianorollFromCode's.
-  const stillTheCall = new RegExp(`^\\s*${lfoState.idLiteral ? shapeDefs.defCall : 'lfo'}\\s*\\(`);
+  const stillTheCall = new RegExp(`^\\s*${lfoState.idLiteral ? shapeDefs.defCall : lfoState.callee ?? 'lfo'}\\s*\\(`);
   if (!stillTheCall.test(text)) { closeLfoEditor(); return; }
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
@@ -3465,6 +3485,7 @@ function lastGateBefore(region, cyclePos) {
 // and drifts within a pass otherwise.
 function lfoPhaseNow() {
   if (!lfoState || transport.paused) return null;
+  if (lfoCallee() !== 'lfo') return null; // a grain window is played per grain - nothing to follow
   const pos = currentCyclePos();
   let turns;
   if (lfoState.mode === 'free') {
@@ -3518,6 +3539,18 @@ function drawLfoShape() {
     const gy = LFO_PAD + ((H - 2 * LFO_PAD) * i) / 4;
     ctx.beginPath(); ctx.moveTo(gx, LFO_PAD); ctx.lineTo(gx, H - LFO_PAD); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(LFO_PAD, gy); ctx.lineTo(W - LFO_PAD, gy); ctx.stroke();
+  }
+
+  // An end in hand, level with the other: the line they share, so a catch is something you see
+  // happen and not something you find out from the code.
+  if (lfoDrag?.end && shapeMod.shapeEndsMeet(lfoState.points)) {
+    const { py } = lfoToCanvas(lfoState.points[0]);
+    ctx.save();
+    ctx.strokeStyle = col('--accent');
+    ctx.globalAlpha = 0.45;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(LFO_PAD, py); ctx.lineTo(W - LFO_PAD, py); ctx.stroke();
+    ctx.restore();
   }
 
   ctx.strokeStyle = col('--accent');
@@ -3588,22 +3621,28 @@ function initLfoCanvas() {
     const { px, py } = canvasPos(e);
     const pointIdx = hitPoint(px, py);
     lfoDrag = pointIdx != null ? { kind: 'point', index: pointIdx } : { kind: 'curve', index: segmentAt(px) };
+    // Ends that meet are dragged as a pair (see shape.mjs's moveShapeEnd). Decided once, as the
+    // drag starts, so a pair stays a pair however far it is carried.
+    const last = lfoState.points.length - 1;
+    lfoDrag.end = pointIdx === 0 || pointIdx === last;
+    lfoDrag.linked = lfoDrag.end && shapeMod.shapeEndsMeet(lfoState.points);
   });
 
   lfoCanvas.addEventListener('pointermove', (e) => {
     if (!lfoDrag || !lfoState || lfoDrag.index == null) return;
     const { px, py } = canvasPos(e);
     const pts = lfoState.points;
-    if (lfoDrag.kind === 'point') {
+    if (lfoDrag.kind === 'point' && lfoDrag.end) {
+      // An end keeps its x (the shape always spans the full period) and minds the other end: a
+      // pair moves together, a lone end catches on the other's level within a few pixels. alt is
+      // the way out of both, as it is for the slice editor's magnets.
+      const { y } = canvasToLfo(px, py);
+      const snap = e.altKey ? 0 : LFO_END_SNAP_PX / (lfoCanvas.height - 2 * LFO_PAD);
+      lfoState.points = shapeMod.moveShapeEnd(pts, lfoDrag.index, y, { linked: lfoDrag.linked && !e.altKey, snap });
+    } else if (lfoDrag.kind === 'point') {
       const i = lfoDrag.index;
       const { x, y } = canvasToLfo(px, py);
-      const isEnd = i === 0 || i === pts.length - 1;
-      pts[i] = {
-        ...pts[i],
-        // endpoints keep their x (the shape always spans the full period)
-        x: isEnd ? pts[i].x : Math.min(pts[i + 1].x, Math.max(pts[i - 1].x, x)),
-        y,
-      };
+      pts[i] = { ...pts[i], x: Math.min(pts[i + 1].x, Math.max(pts[i - 1].x, x)), y };
     } else {
       // vertical drag bends the segment: push the curve toward the pointer
       const seg = pts[lfoDrag.index];
@@ -4954,7 +4993,7 @@ function makeDefRegistry(opts) {
   // also the wire name a pinned definition is filed under (`_slices`, not `_sliceSet`), so the two
   // come apart wherever the call is named for the list it holds rather than for one of them.
   const {
-    kind, label = kind, section, defCall, useCall, legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null,
+    kind, label = kind, section, defCall, useCall, alsoCalls = [], legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null,
     // References to one of these that are NOT calls in the code. Only rolls have any: an
     // arrangement's clips name a roll (see clips()), so a rename has to carry them and a delete
     // has to see them, exactly as it does for the patterns that say the name.
@@ -5023,7 +5062,7 @@ function makeDefRegistry(opts) {
   // Every call that NAMES definitions, with the span of the id string inside it.
   function idCalls(code) {
     const isCode = codeOnly(code);
-    const re = new RegExp(`\\b${useCall}\\s*\\(`, 'g');
+    const re = new RegExp(`\\b(?:${[useCall, ...alsoCalls].join('|')})\\s*\\(`, 'g');
     const out = [];
     let m;
     while ((m = re.exec(code)) !== null) {
@@ -5154,7 +5193,7 @@ function makeDefRegistry(opts) {
     const rewrites = []; // [from, to, text] against `code`, applied last-first so offsets hold
 
     const isCode = codeOnly(code);
-    const bare = new RegExp(`\\b${useCall}\\s*\\(\\s*\\)`, 'g');
+    const bare = new RegExp(`\\b(${[useCall, ...alsoCalls].join('|')})\\s*\\(\\s*\\)`, 'g');
     let m;
     while ((m = bare.exec(code)) !== null) {
       if (!isCode(m.index)) continue;
@@ -5165,7 +5204,7 @@ function makeDefRegistry(opts) {
       if (inLibrary(wanted, sc)) libraryBumpNote(label, wanted, id, libraryNote);
       claim(id, sc);
       created.push({ id, scope: sc });
-      rewrites.push([m.index, m.index + m[0].length, `${useCall}(${JSON.stringify(id)})`]);
+      rewrites.push([m.index, m.index + m[0].length, `${m[1]}(${JSON.stringify(id)})`]);
     }
     for (const call of idCalls(code)) {
       for (const id of idsNamedIn(call.str)) {
@@ -5752,14 +5791,17 @@ function lfoSyncHead() {
   // rate and mode belong to the lfo() CALL. An inline one is the call; a definition has them only
   // while the panel still knows which call it was opened through.
   const editable = !named || !!lfoState?.callSource?.find();
-  lfoRateWrap.classList.toggle('hidden', !editable);
-  lfoModeWrap.classList.toggle('hidden', !editable);
+  // ...and to lfo() alone: .grainshape() plays the shape once per grain, over the grain's own
+  // length, so there is no rate to set and no mode to choose.
+  const timed = editable && lfoCallee() === 'lfo';
+  lfoRateWrap.classList.toggle('hidden', !timed);
+  lfoModeWrap.classList.toggle('hidden', !timed);
   // The → is offered only when it would change something: there is a call behind the panel, and it
   // isn't already playing what you are looking at. A call that names several (`lfo("<a b>")`) is
   // never "already" it - sending collapses the pattern onto this one, which is a real edit.
   const plays = named && editable ? lfoSourceShapeId() : lfoState?.shapeId;
   lfoUseBtn.classList.toggle('hidden', plays === lfoState?.shapeId);
-  lfoUseBtn.title = `play "${lfoState?.shapeId}" in the lfo() this panel came from`
+  lfoUseBtn.title = `play "${lfoState?.shapeId}" in the ${lfoCallee()}() this panel came from`
     + (plays == null ? '' : ` (it plays "${plays}" now)`);
   // The lock, like the roll's, only appears when there is something to follow: a shape opened
   // straight from the picker follows nothing, and an inline lfo() is the whole of its own pattern.
