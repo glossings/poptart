@@ -613,6 +613,84 @@ test('thawing hands the slot back to its pattern', () => {
   assert.deepEqual(argsTo('setPluginState').map((c) => c[2]), ['H4sIa', 'H4sIb']);
 });
 
+// A load resets the plugin's voices, and a constant `.preset("sub")` comes round every cycle: a
+// thaw that re-loaded the program already in the plugin silenced a note held across that bar line
+// (an eight-bar sub, cut at a random bar by a look at the plugin's window) until its next onset.
+// The engine answers each load with how it ended (OscEngine#setPluginState). `answers` are the
+// promises handed back, in order, for the test to settle.
+function answeringEngine() {
+  const mock = mockEngine();
+  const pushes = [];
+  mock.engine.setPluginState = (...args) => {
+    const push = { args };
+    pushes.push(push);
+    return new Promise((resolve) => { push.land = resolve; });
+  };
+  return { ...mock, pushes };
+}
+
+test('a freeze and thaw after the load is confirmed does not re-load the program the plugin holds', async () => {
+  clearRolls('buffer');
+  _preset('sub', 'Serum 2', 'H4sIsub');
+  const { engine, pushes } = answeringEngine();
+  const sch = new Scheduler(engine, { trackId: 'sub' });
+  sch.setPattern(track('sub'));
+  sch._schedulePresetSwaps(0, 1);
+  assert.equal(pushes.length, 1, 'the one real load, at the downbeat');
+  pushes[0].land(true); // sclang: the program is in
+  await null;
+
+  sch.holdPluginState(0, true); // the plugin's window opened...
+  sch._schedulePresetSwaps(1, 2);
+  sch.holdPluginState(0, false); // ...and the code was clicked again, nothing touched
+  sch._schedulePresetSwaps(2, 5);
+  assert.equal(pushes.length, 1, 'the same program is not loaded over itself');
+});
+
+test('a freeze before the load is confirmed still owes the slot that program', () => {
+  clearRolls('buffer');
+  _preset('sub', 'Serum 2', 'H4sIsub');
+  const { engine, pushes } = answeringEngine();
+  const sch = new Scheduler(engine, { trackId: 'sub' });
+  sch.setPattern(track('sub'));
+  sch._schedulePresetSwaps(0, 1); // sent, never answered: it may be the swap the freeze cancels
+  sch.holdPluginState(0, true);
+  sch.holdPluginState(0, false);
+  sch._schedulePresetSwaps(1, 2);
+  assert.deepEqual(pushes.map((p) => p.args[2]), ['H4sIsub', 'H4sIsub']);
+});
+
+test('an engine that never answers leaves every push in doubt, so a freeze forgets it', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  const { engine, argsTo, clock } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('a'));
+  sch._schedulePresetSwaps(0, 1);
+  sch.holdPluginState(0, true);
+  assert.equal(argsTo('cancelPluginState').length, 1);
+  sch.holdPluginState(0, false);
+  clock.now = 2;
+  sch._schedulePresetSwaps(1, 2);
+  assert.deepEqual(argsTo('setPluginState').map((c) => c[2]), ['H4sIa', 'H4sIa'], 'sent again: nothing ever said the first arrived');
+});
+
+test('an edit that was never filed gives the slot back to its pattern with a real load', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIa');
+  const { engine, argsTo, clock } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('a'));
+  sch._schedulePresetSwaps(0, 1);
+  sch.markStateApplied(0, 'Serum 2', 'H4sIa'); // as certain as it gets: read back out of the plugin
+  clock.now = 60;
+  sch.holdPluginState(0, true);
+  sch.forgetAppliedState(0); // the server's verdict: the plugin no longer holds what was sent
+  sch.holdPluginState(0, false);
+  sch._schedulePresetSwaps(30, 31);
+  assert.deepEqual(argsTo('setPluginState').map((c) => c[2]), ['H4sIa', 'H4sIa']);
+});
+
 test('freezing one slot leaves the rest of the chain swapping', () => {
   clearRolls('buffer');
   _preset('a', 'Serum 2', 'H4sIa');

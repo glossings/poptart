@@ -134,11 +134,14 @@ function loadHoldFns() {
 function fakeScheduler() {
   const calls = [];
   const frozen = [];
+  const forgotten = [];
   return {
     calls,
     frozen, // every holdPluginState the slot is asked for, in order (see the hand-editing tests)
+    forgotten, // every slot whose next program push was made unconditional
     holdPreset: (slot, name) => { calls.push([slot, name]); return null; },
     holdPluginState: (slot, on) => { frozen.push([slot, on]); },
+    forgetAppliedState: (slot) => { forgotten.push(slot); },
     livePreset: (slot) => `sounding${slot}`, // what currentHolds reports as loaded there
   };
 }
@@ -341,6 +344,19 @@ test('a capture that never reaches the code times out rather than freezing the s
 
   assert.equal(uncaptured.size, 0);
   assert.deepEqual(sch.frozen.at(-1), [0, false]);
+  // The one thaw that owes the pattern a real load: the plugin holds an edit nothing filed.
+  assert.deepEqual(sch.forgotten, [0]);
+});
+
+test('handing a slot back by hand does not make its next program push unconditional', () => {
+  const { takeSlotByHand, releaseSlotsHeldByHand, schedulers } = loadHoldFns();
+  const sch = fakeScheduler();
+  schedulers.set('lead', sch);
+  takeSlotByHand('lead', 0);
+  releaseSlotsHeldByHand();
+  assert.deepEqual(sch.frozen.at(-1), [0, false]);
+  // Re-loading the program already in the plugin resets its voices - a held note would stop.
+  assert.deepEqual(sch.forgotten, []);
 });
 
 test('the eval that rebuilds a scheduler re-asserts every frozen slot of that track', () => {

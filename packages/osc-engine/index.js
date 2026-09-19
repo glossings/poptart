@@ -351,6 +351,7 @@ class OscEngine {
     this._namedPacks = new Map();
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
+    this._stateAcks = new Map(); // same key -> { seq, resolve }: the one restore still unanswered
     this._stateCache = new Map(); // captured state -> inflated program, LRU (see _inflateState)
     // Resolves a "@id" handle to the state it stands for. A patch keeps its captured programs out
     // of the code (see web-app's blobs.js), so what reaches setPluginState is usually a handle and
@@ -992,11 +993,31 @@ class OscEngine {
    * out of order and leave the plugin on the older program. `_stateSeq` drops any restore a newer
    * one has already superseded - before it is sent here, and after it, on the .scd side, where a
    * timestamped one waits for its onset.
+   *
+   * Returns a promise of how it ended: true once the plugin has the program (sclang says so, see
+   * '/poptart/stateLanded'), false if it never will - superseded, cancelled, or failed. Until it
+   * settles nobody knows which, and that is the point: the scheduler counts a program as loaded
+   * from the moment it is sent, and this is the only thing that can tell it otherwise.
    */
   setPluginState(trackId, slotIndex, state, targetTime) {
     const key = `${trackId}|${slotIndex}`;
     const seq = (this._stateSeq.get(key) ?? 0) + 1;
     this._stateSeq.set(key, seq);
+    this._settleState(key, false); // the restore this one supersedes will never land
+    const landed = new Promise((resolve) => this._stateAcks.set(key, { seq, resolve }));
+    this._sendPluginState(trackId, slotIndex, state, targetTime, key, seq);
+    return landed;
+  }
+
+  // Answers the restore waiting on a slot, if there is one (and, given a seq, only that one).
+  _settleState(key, ok, seq) {
+    const ack = this._stateAcks.get(key);
+    if (!ack || (seq != null && ack.seq !== seq)) return;
+    this._stateAcks.delete(key);
+    ack.resolve(ok);
+  }
+
+  _sendPluginState(trackId, slotIndex, state, targetTime, key, seq) {
     const superseded = () => this._stateSeq.get(key) !== seq;
     // The program takes real time to reach sclang - resolving the handle, inflating and writing
     // the file below are all async - but the notes at the swap's onset go out synchronously the
@@ -1051,6 +1072,7 @@ class OscEngine {
     const key = `${trackId}|${slotIndex}`;
     const seq = (this._stateSeq.get(key) ?? 0) + 1;
     this._stateSeq.set(key, seq);
+    this._settleState(key, false);
     this._send('/poptart/cancelPluginState', [trackId, slotIndex, seq]);
   }
 
@@ -1849,6 +1871,12 @@ class OscEngine {
       // A parameter moved in a plugin's own editor GUI: [trackId, slot, paramName, paramIndex, value 0..1].
       const [track, slot, name, index, value] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onParamAutomated === 'function') this.onParamAutomated(String(track), Number(slot), String(name), Number(index), Number(value));
+      return;
+    }
+    if (msg.address === '/poptart/stateLanded') {
+      // A program restore finished: [trackId, slot, seq, ok] (see setPluginState).
+      const [track, slot, seq, ok] = (msg.args ?? []).map((a) => a?.value ?? a);
+      this._settleState(`${track}|${Number(slot)}`, Number(ok) > 0, Number(seq));
       return;
     }
     if (msg.address === '/poptart/pluginEdited') {

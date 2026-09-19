@@ -3520,8 +3520,12 @@ OSCdef(\poptartSetPluginState, { |msg|
                     endSelfLoad.(seqKey);
                     clearPending.(seqKey, seq);
                     File.delete(path);
+                    // Node marks a program as sent the moment it sends it; this is what lets it
+                    // know the program is IN, which nothing else reports (see OscEngine#setPluginState).
+                    nodeAddr.sendMsg("/poptart/stateLanded", key, slot, seq, ok.binaryValue);
                 });
             } {
+                nodeAddr.sendMsg("/poptart/stateLanded", key, slot, seq, 0);
                 ("poptart: setPluginState: no loaded plugin in " ++ key ++ " slot " ++ slot).warn;
                 clearPending.(seqKey, seq); // nothing to load into: don't hold its notes back
                 File.delete(path);

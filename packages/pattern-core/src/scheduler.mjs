@@ -470,6 +470,7 @@ export class Scheduler {
     this._busRouted = false; // track output currently diverted to a named bus (see Sig#bus)
     this._sentBusSends = null; // bus sends as last resolved and pushed, for diffing (see _syncBusSends)
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
+    this._statePending = new Map(); // same key -> the push the engine has not answered for yet (see holdPluginState)
     this._livePresets = new Map(); // slot -> preset name currently sounding (auto-pin writes into it)
     this._presetWarned = new Set(); // "slot name" already complained about, so a bad name says it once
     this._earlyShiftWarned = false; // an over-early nudge says so once, not once per event
@@ -577,13 +578,46 @@ export class Scheduler {
     if (typeof this.engine.cancelPluginState === 'function') {
       this.engine.cancelPluginState(this.trackId, slot);
     }
-    // A cancelled swap never reached the plugin, so what _appliedStates believes about this slot is
-    // now a guess. Forget it: the plugin holds whatever the hands make of it from here, and the
-    // first push after the freeze lifts has to be unconditional or the slot can be left sounding a
-    // program the cache thinks it already loaded.
-    for (const key of this._appliedStates.keys()) {
-      if (key.startsWith(`${slot}:`)) this._appliedStates.delete(key);
+    // A cancelled swap never reached the plugin, so what _appliedStates believes about it is now a
+    // guess - forget it, or the slot can be left sounding a program the cache thinks it already
+    // loaded. But ONLY a push the engine has not answered for (see _noteStatePush): one it has
+    // confirmed is not a guess, and forgetting it makes the first swap after the thaw re-load the
+    // very program the plugin is holding. A load resets the plugin's voices, and a constant
+    // `.preset("sub")` comes round every cycle - so looking at a plugin's window and clicking back
+    // into the code silenced a note held across the next bar line, until that track's next onset.
+    for (const key of [...this._statePending.keys()]) {
+      if (key.startsWith(`${slot}:`)) this._forgetState(key);
     }
+  }
+
+  /**
+   * Makes the next push into a slot unconditional: what its plugin holds is no longer what was
+   * last sent. The server calls this for a hand edit that never reached the code, which is the one
+   * thaw that owes the pattern its program back.
+   */
+  forgetAppliedState(slot) {
+    for (const key of [...this._appliedStates.keys()]) {
+      if (key.startsWith(`${slot}:`)) this._forgetState(key);
+    }
+  }
+
+  _forgetState(key) {
+    this._appliedStates.delete(key);
+    this._statePending.delete(key);
+  }
+
+  // Records one program as sent. It counts as loaded from here - a swap is sent a lookahead early
+  // and the next eval must not send it twice - but it is only KNOWN to be once the engine says how
+  // the load ended (`landed`, see OscEngine#setPluginState). An engine that never says leaves
+  // every push in doubt, which is the cautious reading: a freeze forgets it.
+  _noteStatePush(key, state, landed) {
+    this._appliedStates.set(key, state);
+    const push = {};
+    this._statePending.set(key, push);
+    if (typeof landed?.then !== 'function') return;
+    landed.then(() => {
+      if (this._statePending.get(key) === push) this._statePending.delete(key);
+    });
   }
 
   /**
@@ -628,6 +662,7 @@ export class Scheduler {
   markStateApplied(slot, pluginId, state) {
     if (pluginId == null) return;
     this._appliedStates.set(`${slot}:${pluginId}`, state);
+    this._statePending.delete(`${slot}:${pluginId}`); // read OUT of the plugin: nothing in flight to doubt
   }
 
   // The program this slot's plugin was last given or last handed over - what it should still be
@@ -693,9 +728,7 @@ export class Scheduler {
     if (typeof this.engine.unloadEffect === 'function') {
       for (let slot = sig.fxChain.length + 1; slot < MAX_CHAIN_SLOTS; slot++) {
         this.engine.unloadEffect(this.trackId, slot);
-        for (const key of this._appliedStates.keys()) {
-          if (key.startsWith(`${slot}:`)) this._appliedStates.delete(key);
-        }
+        this.forgetAppliedState(slot);
       }
     }
 
@@ -733,8 +766,7 @@ export class Scheduler {
         if (this._stateHold.has(slot)) continue;
         const key = `${slot}:${chain[slot]}`;
         if (this._appliedStates.get(key) === state) continue;
-        this._appliedStates.set(key, state);
-        this.engine.setPluginState(this.trackId, slot, state);
+        this._noteStatePush(key, state, this.engine.setPluginState(this.trackId, slot, state));
       }
     }
 
@@ -1364,8 +1396,7 @@ export class Scheduler {
     if (!state) return why;
     const key = `${slot}:${plugin}`;
     if (this._appliedStates.get(key) === state) return null;
-    this._appliedStates.set(key, state);
-    this.engine.setPluginState(this.trackId, slot, state, atSec);
+    this._noteStatePush(key, state, this.engine.setPluginState(this.trackId, slot, state, atSec));
     return null;
   }
 

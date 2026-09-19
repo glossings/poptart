@@ -3846,6 +3846,9 @@ function expireStateHolds() {
     if (now - held.at < UNCAPTURED_TTL_MS) continue;
     uncaptured.delete(key);
     console.log(`[auto-pin] ${key.slice(0, key.lastIndexOf('|'))} slot ${key.slice(key.lastIndexOf('|') + 1)}: the capture never reached the code - the slot goes back to its pattern`);
+    // An edit nothing filed: the plugin no longer holds what was last sent, so the pattern's
+    // program is owed a real load. The one thaw that is (see Scheduler#holdPluginState).
+    schedulers.get(key.slice(0, key.lastIndexOf('|')))?.forgetAppliedState(Number(key.slice(key.lastIndexOf('|') + 1)));
     syncStateHold(key);
   }
 }
@@ -4020,7 +4023,15 @@ async function captureDirtyPlugins() {
         || handle === stateHandle(schedulers.get(trackId)?.appliedState(slot, now));
       lastCapturedState.set(key, handle);
       if (speculative) {
-        if (unchanged) continue;
+        if (unchanged) {
+          // The plugin has just shown it holds this program, so a scheduler with no record of the
+          // slot gets one: otherwise its next swap re-loads what is already in, and a load resets
+          // the plugin's voices. Only where it has none - a record kept as a whole state (a shared
+          // file's) is the same program under a string the code would no longer compare equal to.
+          const sch = schedulers.get(trackId);
+          if (sch && sch.appliedState(slot, now) == null) sch.markStateApplied(slot, now, handle);
+          continue;
+        }
         // It WAS an edit, just an unreported one. From here it is one: frozen until the code has
         // it, exactly as if the plugin had said so itself.
         noteHandEdit(key);
