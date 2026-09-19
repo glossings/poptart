@@ -119,7 +119,7 @@ function harness({ bend = [], sel = null, notes = [], grid = 16, len = 16, start
   // minCell/cols are the RENDERED span - what prMetrics works out from the loop plus whatever is
   // drawn outside it. They are the only fence a bend point has left, so the tests need them real.
   const m = {
-    gridTop: GRID_TOP, gridH: GRID_H, rowH: GRID_H / PR_ROWS, cellW, scroll, W: 660,
+    gridTop: GRID_TOP, gridH: GRID_H, rowH: GRID_H / PR_ROWS, rows: PR_ROWS, cellW, scroll, W: 660,
     minCell: Math.min(0, start), cols: start + len + 24,
   };
   const prState = {
@@ -179,7 +179,7 @@ test('pixels and semitones are inverses, clamped to the half-grid either way', (
   for (const v of [-12, -3, -0.5, 0, 1.75, 12]) {
     assert.ok(Math.abs(fns.prBendSemisAt(fns.prBendY(v, m), m) - v) < 1e-9, `round trip at ${v}`);
   }
-  assert.equal(PR_BEND_RANGE, PR_ROWS / 2, 'the reach is the half-grid, which is an octave at 24 rows');
+  assert.equal(PR_BEND_RANGE, 12, 'an octave either way - a musical reach, not half of however many rows are on screen');
   assert.equal(fns.prBendSemisAt(-500, m), PR_BEND_RANGE, 'dragging off the top stops at the reach');
   assert.equal(fns.prBendSemisAt(5000, m), -PR_BEND_RANGE, '...and off the bottom likewise');
 });
@@ -483,7 +483,7 @@ test('the zero line lands on a note\'s row centre at pitchTop = pos + half the g
   // The alignment that makes the curve readable as pitch: with zero parked on the note being bent,
   // where the curve goes IS where the note goes.
   const { fns, m, GRID_TOP, GRID_H } = harness({ notes: [{ midi: 60 }] });
-  const aligned = fns.prBendAlignTop(60);
+  const aligned = fns.prBendAlignTop(60, m);
   assert.equal(aligned, 60 + PR_ROWS / 2 - 0.5);
   // Check it really centres the row: the row's top is (pitchTop - pos) rows below the grid's top.
   const rowTop = GRID_TOP + (aligned - 60) * m.rowH;
@@ -492,13 +492,13 @@ test('the zero line lands on a note\'s row centre at pitchTop = pos + half the g
 
 test('the wheel is pulled onto the nearest drawn note, and let go past the magnet', () => {
   const { fns, m } = harness({ notes: [{ midi: 60 }, { midi: 67 }] });
-  const near = fns.prBendAlignTop(60);
+  const near = fns.prBendAlignTop(60, m);
   assert.equal(fns.prBendMagnet(near + PR_BEND_MAGNET / 2, m), near, 'inside the magnet: snapped');
   assert.equal(fns.prBendMagnet(near - PR_BEND_MAGNET / 2, m), near, '...from either side');
   const loose = near + PR_BEND_MAGNET + 0.1;
   assert.equal(fns.prBendMagnet(loose, m), loose, 'past it: scrolling is scrolling again');
   // Two notes in reach of each other would be unusual, but the nearer one wins either way.
-  assert.equal(fns.prBendMagnet(fns.prBendAlignTop(67) + 0.1, m), fns.prBendAlignTop(67));
+  assert.equal(fns.prBendMagnet(fns.prBendAlignTop(67, m) + 0.1, m), fns.prBendAlignTop(67, m));
 });
 
 test('a roll with no notes has nothing to magnetize to', () => {
@@ -516,7 +516,7 @@ test('hidden notes are not magnet targets, and a duplicated row is one target', 
 
 test('the centre line knows when it is sitting on a note', () => {
   const { fns, m, prState } = harness({ notes: [{ midi: 64 }] });
-  prState.pitchTop = fns.prBendAlignTop(64);
+  prState.pitchTop = fns.prBendAlignTop(64, m);
   assert.equal(fns.prBendAlignedRow(m), 64);
   prState.pitchTop += 0.2;
   assert.equal(fns.prBendAlignedRow(m), null, 'off the alignment, the line is just a line');

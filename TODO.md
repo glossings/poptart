@@ -232,6 +232,44 @@ no completion notes.
     worth it if drawing-while-hearing turns out to matter; the 150ms debounce already covers
     "pause mid-drag and listen", which may well be enough.
 
+[ ] `.warp()` - stretching, the half the waveform view can only show you the need for. What landed
+    2026-09-18: a roll offers only the axes its chain is about, and a `wave` view draws each note's
+    own audio inside it - laid against time, so a box too short cuts the waveform off at its edge
+    and a box too long leaves the rest of itself empty, which is what each of those sounds like.
+    prNatCells is where a file's length under a chain is worked out, and it already folds in fit,
+    speed, stretch and the note's own repitch around MIDI 60. What none of it can do is change how
+    long a sample LASTS without changing its pitch, so a stem written at another tempo still has to
+    be `.fit()`-ed whole and a phrase that drifts cannot be pulled onto the grid at all.
+
+    The command is `.warp()` on a sampler chain, no argument: play this chain's files keylocked at
+    the song tempo, against their own beatgrid. The engine half is machinery that exists - the song
+    deck already plays a long file at a tempo ratio through the PoptartPitchShift UGen, and
+    song-detect.js's fitBeatGrid already gives a file its native tempo and downbeat. What is new is
+    that the rate becomes a CURVE rather than one number: an envelope over the note, piecewise
+    between the markers, so the audio between two of them is stretched by whatever it takes to get
+    from one to the next. Warp1 stays for `.stretch()` on short hits - it is the better answer for a
+    patterned factor, and it is already correct there. (`warp` is also an internal flag name on the
+    song decks for exactly this player, so keep the two straight.)
+
+    Markers live on the FILE. A stem placed in the intro and again in the drop wants the same warp
+    both times, and there is already a per-file marker editor to hang them on: the slice panel's,
+    whose markers are dragged on the waveform and filed in the pack sidecar. A warp marker is that
+    object with a second coordinate - a position in the file AND a position on the grid - so the
+    panel grows a marker kind rather than a second editor. It then wants a bpm field prefilled from
+    the detector and a quantize button that snaps every detected transient to its nearest grid line
+    and writes the pairs, which is the whole of "quantize this audio".
+
+    The roll needs nothing new for it. Warping a chain changes what prNatCells should answer, which
+    is one more factor in a function that already takes four - and the `wave` view then draws the
+    stretched length, so the picture keeps agreeing with the sound for free.
+
+    NOT per-note regions. Per-note begin/end were built and taken back out the same day (2026-09-18):
+    they wanted a region editor to be edited in, which wanted the note format to carry fades too, and
+    the format is positional - it was heading for ten fields where a note that sets one writes nine
+    ahead of it. The chain's own `.begin()`/`.end()` cover what long material actually needs, and the
+    waveform is the part that was worth having. Don't revive them without a reason the chain can't
+    meet.
+
 [ ] Evict sample packs that haven't been played in a while. Packs load whole and stay for the
     session (`_packs` in osc-engine/index.js, `samplePacks` in poptart.scd) — nothing frees them
     but reloading the same pack. numBuffers is 16384 now so the *count* is fine, but the audio is
@@ -326,7 +364,7 @@ no completion notes.
     10-stroke shell pattern and presents SEVEN variants per clave direction, and 2-3 vs 3-2 is a
     half-cycle rotation sources disagree on as the default. To ship: either the 7-stroke under the
     hedged name "palito" (it's 3-2 son clave + two pickups), or transcribe the 10-stroke from the
-    Dicciani engraving by eye (accents carry the risk). Aria's call which.
+    Dicciani engraving by eye (accents carry the risk). Undecided which.
 
 [ ] Harmony phase 5 - next-chord suggestions: functional-harmony transition table (T->S->D->T,
     circle-of-fifths pull, secondary dominants + modal interchange as a "borrowed" section),
@@ -362,3 +400,45 @@ no completion notes.
     package) in place of the child process - same handle shape ({ pid: null, stop() }), no
     pidfile entry needed since nothing outlives Node. Do it alongside the keylock Linux/Windows
     builds above, which need the same test machines.
+
+[ ] Web build - poptart in the browser: native Web Audio synths/effects behind the same
+    synth()/fx()/param() DSL, the sampler, pianoroll, arrange and the other widgets kept; DJ
+    mode, plugin hosting, OSC input, Link and the sample map stay desktop-only. Planned
+    2026-09-18, nothing built, ~3-4 weeks to a v1. A public, static site (no backend, no
+    accounts); AGPL section 13 means a source link in the UI.
+    Shape: a second target in this repo, not a fork. The server's host role (routes table, eval,
+    Scheduler, Transport, highlight grid) runs in a Worker; engine calls cross as timestamped
+    postMessage, the same model as the OSC bundles; a WebAudioEngine implements the ~30 engine
+    methods the scheduler calls (getTime = AudioContext.currentTime). client.js keeps its /api
+    calls behind a thin transport. main must not be put at risk: no up-front server.js split -
+    the web host starts with its own rough copy of the evaluate wiring and logic is extracted
+    from server.js lazily, one pure-move function at a time. Grow the MappedEngine forwarding
+    test into a conformance suite both engines run.
+    Order: (1) spike, ~2 days - Worker host + AudioBufferSourceNode sampler, first sound from a
+    static page, proves the clock model; (2) host port - storage adapter, sample packs by URL +
+    drag-drop + (Chromium) a picked folder, widgets answering; (3) track graph - chains, bus
+    sends, teardown on re-eval, modulators as AudioParam ramps (native LFOs later), devices,
+    a generic device panel generated from the param descriptors (no plugin editor windows
+    here); (4) wavetable synth, sampler warp (needs a stretcher - read what the SC warp def
+    does first and match its character), recording, Web MIDI.
+    Devices are web-only in v1 (mirroring them into SC is a later, optional job): built-in
+    nodes for filter/delay/compressor/distortion, a hand-written AudioWorklet for an
+    algorithmic reverb, and the wavetable synth as a plain JS AudioWorklet with internal voice
+    allocation (2 oscs with table/position/level/detune/unison, sub, noise, filter, amp + filter
+    ADSR in seconds, glide; loads the common 2048-sample-frame wavetable WAVs). The param
+    descriptor (id, names, units, ranges) is the contract a later SC mirror would match, so
+    the care goes into names and units; write the voice flat and allocation-free so it ports.
+    A shipped device's sound is frozen - shared songs depend on it - so a better reverb is a new
+    id or version, never a silent swap. On desktop an unknown web device warns and plays silent.
+    Public-site constraints: shared code never auto-evaluates, and everything the host touches
+    goes through messages so it can later move into an opaque-origin sandboxed iframe (a Worker
+    alone is same-origin: saved songs and persisted folder grants are readable). Define one JSON
+    song bundle (pattern text + rolls + macros + whatever else lives outside the text) first -
+    it is the storage unit, the export file and the share payload. Storage is browser-local:
+    IndexedDB (localStorage's ~5 MB cap is too small for wip history and rolls),
+    navigator.storage.persist(), an export button. Default sounds: host our own copy of a
+    cleanly licensed set (VCSL is CC0; the classic drum-machine and Dirt sets that Strudel
+    serves from its CDN have murkier licensing - read the dough-samples README before relying
+    on them, and never hotlink another project's CDN). No code is copied from superdough.
+    Open: the v1 device list above is a first draft; delay time in seconds (consistent with
+    the physical units elsewhere) or in cycles (more natural in a pattern language).

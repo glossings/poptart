@@ -3074,7 +3074,32 @@ function mixedCont(step, other, start) {
 // A number, an LFO, or a within-cycle signal like irand()/choose() (whose stepsForCycle is only the
 // phase-0 draw, hence `eventAt`) has no triggers of its own - it is read per event instead.
 function mixableSteps(sig, cycle) {
-  return sig.stepsForCycle && !sig.eventAt ? sig.stepsForCycle(cycle) : null;
+  return sig.stepsForCycle && !sig.eventAt ? seamedSteps(sig.stepsForCycle, cycle) : null;
+}
+
+// A grid is cut into cycles, but a pattern that merely HOLDS - `note(-36)`, `"0.8"`, a bar of
+// `<0 0 12>` that repeats the one before - has no edge at the cycle line: the line is where the
+// grid is stored, not something the pattern does. Read naively it is both an end and an onset, and
+// an event ringing across it (a roll note drawn over the bar, a .slow()ed one) gets cut there and,
+// having no onset of its own in the next cycle, is never heard again - or is struck a second time
+// where it has a tail. So the seam is closed: where a cycle's steps all span the whole cycle and
+// the neighboring cycle's are the same steps, the step runs on past the line (no end to cut at)
+// and arrives already sounding (`cont`, so a tie landing on it stays a tie). `.add(note(-36))` and
+// `.add(-36)` then play the same, as they read. An operand that really changes at the line still
+// cuts there.
+function seamedSteps(stepsForCycle, cycle) {
+  const steps = stepsForCycle(cycle);
+  if (!holdsCycle(steps)) return steps;
+  const keys = steps.map(stepKey);
+  const same = (other) => holdsCycle(other) && other.length === steps.length && other.every((o, i) => stepKey(o) === keys[i]);
+  const fromBefore = same(stepsForCycle(cycle - 1));
+  const intoNext = same(stepsForCycle(cycle + 1));
+  if (!fromBefore && !intoNext) return steps;
+  return steps.map((o) => ({ ...o, ...(fromBefore ? { cont: true } : {}), ...(intoNext ? { end: Infinity } : {}) }));
+}
+
+function holdsCycle(steps) {
+  return steps.length > 0 && steps.every((o) => o.value != null && !o.cont && o.start <= MIX_EPS && Math.abs(o.end - 1) < MIX_EPS);
 }
 
 // Reading a step's value as a GATE - what .mask()/.struct()/.hold() ask of a boolean pattern. Off
@@ -3813,7 +3838,9 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
     };
   }
   return (cycle) => {
-    const ctlSteps = ctlSig.stepsForCycle(cycle).filter((c) => c.value != null);
+    // Seamed: a control that only holds across the cycle line ("0.8") neither ends an event ringing
+    // over it nor re-strikes one tied across it - it plays as the bare 0.8 does (see seamedSteps).
+    const ctlSteps = seamedSteps(ctlSig.stepsForCycle, cycle).filter((c) => c.value != null);
     const out = [];
     const keys = []; // out[i]'s identity, for the collapse below
     const baseKeys = [];

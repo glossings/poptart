@@ -494,6 +494,26 @@ test('pianoroll(): a note running past the last cell rings on past the cycle (en
   assert.equal(steps[0].end, 1.25); // 12/16 + 8/16
 });
 
+test('pianoroll(): a note ringing past the cycle survives an operand that merely holds across the line', () => {
+  // Every gridded spelling of a constant has a step ending at the cycle line. Read as an edge it cut
+  // the note there, and the rest - a `cont` piece with no onset - never sounded (see seamedSteps).
+  const roll = () => pianoroll('60,12,8 64,0,4', { grid: 16, len: 16 });
+  const spans = (sig, cycle = 0) => sig.stepsForCycle(cycle).map((x) => [x.start, x.end, x.value, !!x.cont]);
+  const whole = [[0, 0.25, 28, false], [0.75, 1.25, 24, false]];
+  assert.deepEqual(spans(roll().add(-36)), whole);
+  assert.deepEqual(spans(roll().add(note(-36))), whole);
+  assert.deepEqual(spans(roll().add('-36')), whole);
+  assert.deepEqual(spans(roll().add('<-36 -36>'), 1), whole);
+  assert.deepEqual(spans(roll().add(note(-36).vel(0.1))), whole, 'the layer form too');
+  assert.deepEqual(spans(roll().add(note('0,7'))).filter((x) => x[0] === 0.75), [[0.75, 1.25, 60, false], [0.75, 1.25, 67, false]], 'a stack still fans out');
+  for (const sig of [roll().vel('0.8'), roll().clip('1'), roll().mask('1')]) {
+    assert.deepEqual(spans(sig).map((x) => x.slice(0, 2)), [[0, 0.25], [0.75, 1.25]]);
+  }
+  // An operand that really changes at the line still cuts there, as it does anywhere else.
+  assert.deepEqual(spans(roll().add('<0 12>')).filter((x) => !x[3]).map((x) => x.slice(0, 2)), [[0, 0.25], [0.75, 1]]);
+  assert.deepEqual(spans(roll().mask('<1 0>')).map((x) => x.slice(0, 2)), [[0, 0.25], [0.75, 1]], 'the note ends where the mask closes');
+});
+
 test('pianoroll(): grid as a bare-number shorthand, len defaults to a full cycle', () => {
   assert.deepEqual(pianoroll('60,0,4', 8).stepsForCycle(0), pianoroll('60,0,4', { grid: 8, len: 8 }).stepsForCycle(0));
   assert.equal(pianoroll('60,0,4', 8).stepsForCycle(0)[0].end, 0.5); // 4 / 8

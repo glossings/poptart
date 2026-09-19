@@ -109,12 +109,26 @@ test('a continuous (non-step) vel leaves a held tie intact', () => {
 });
 
 test('a vel edge landing on a held tie retriggers it', () => {
-  // Same held tail, but now the vel is a mini onset (a fresh edge) at the boundary: a change on
-  // the vel channel restrikes the held note.
-  const g = grid(n('0').slow(2).vel('0.5'), 1);
+  // Same held tail, but now the vel changes at the boundary: a change on the vel channel restrikes
+  // the held note.
+  const g = grid(n('0').slow(2).vel('<1 0.5>'), 1);
   assert.equal(g.length, 1);
   assert.ok(!g[0].cont, 'the vel edge turns the held tail into a fresh strike');
   close(g[0].vel, 0.5);
+});
+
+test('a vel that only holds across the cycle line is no edge: "0.5" plays as 0.5 does', () => {
+  // The cycle line is where a grid is stored, not something a one-value pattern does (see
+  // seamedSteps) - so the tie holds, and the head keeps its full length instead of ending at the line.
+  const tail = grid(n('0').slow(2).vel('0.5'), 1);
+  assert.equal(tail.length, 1);
+  assert.ok(tail[0].cont, 'the tie holds across a vel that did not change');
+  close(tail[0].vel, 0.5);
+  const head = grid(n('0').slow(2).vel('0.5'), 0);
+  assert.deepEqual(head.map((x) => [x.start, x.end]), [[0, 2]]);
+  // <0.5 0.5 1>: cycles 0 and 1 hold, the change into cycle 2 is a real edge on both sides of it
+  assert.ok(grid(n('0').slow(4).vel('<0.5 0.5 1>'), 1)[0].cont);
+  assert.ok(!grid(n('0').slow(4).vel('<0.5 0.5 1>'), 2)[0].cont);
 });
 
 // ---------------------------------------------------------------------------------------------
