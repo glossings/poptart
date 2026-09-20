@@ -58,7 +58,11 @@ function waitForServer(port, { host = '127.0.0.1', timeoutMs = 120000, intervalM
           reject(new Error(`the poptart server did not start within ${Math.round(timeoutMs / 1000)}s`));
           return;
         }
-        setTimeout(attempt, intervalMs).unref?.();
+        // Deliberately NOT unref'd: someone is awaiting this, so it has to hold the event loop
+        // open. Unref'd, a wait whose server had already died left nothing alive between
+        // attempts, and the process wound down mid-wait with the promise still pending (Node 20
+        // reports exactly that; newer versions happened to mask it).
+        setTimeout(attempt, intervalMs);
       });
     };
     attempt();
