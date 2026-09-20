@@ -35,6 +35,29 @@ no completion notes.
       match the bundle branch). Next fork release; worth reporting upstream too.
     - Workaround for a user today: POPTART_VST_EXCLUDE with the file's path, or delete it.
 
+[ ] Windows/Linux keyboard model: the two modifier families collapse onto one key (found
+    2026-09-20 on Windows). On macOS cmd carries the editing verbs (select all, duplicate, copy,
+    undo - everything that asks editMod()) and ctrl carries the app's own chords (ctrl+A
+    arrangement, ctrl+D DJ mode, ctrl+C cue, ctrl+P panel, ctrl+G mixer, ctrl+R record, ctrl+B
+    bounce, ctrl+M, ctrl+Q, ctrl+J) - editMod's own comment explains the split. Off macOS
+    editMod() is ctrl, correctly, but the app chords are STILL ctrl, so ctrl+D / ctrl+A / ctrl+C
+    each mean two things and focus decides which; DJ mode could not be opened at all, and
+    several app chords are also browser shortcuts there (ctrl+P print, ctrl+R reload, ctrl+J
+    downloads).
+    Needs a second modifier off macOS. DECISION OPEN. Candidates: alt+letter (one stroke, sits
+    where cmd does on a PC keyboard, rule becomes "cmd->ctrl, ctrl->alt"; browsers bind a few
+    alt chords such as alt+D, believed interceptable but unverified, and no conflict inside the
+    desktop shell); ctrl+shift+letter (collides with ctrl+shift+D duplicate-time and more
+    browser chords); a leader key like ctrl+K then the letter (conflict-free, but two strokes
+    per chord in a performance tool).
+    The work, whichever is chosen: an appMod(e) beside editMod(e) and an `app+` token in
+    comboToSpec/specMatches beside `mod+`; route every app chord through it - the seven in
+    builtinHotkeys AND the ones hardcoded outside the dispatcher (the document keydown handler's
+    ctrl+C / ctrl+A / ctrl+D, CodeMirror's extraKeys 'Ctrl-D', the arrange editor's ctrl+A);
+    and make the labels platform-aware from one place - 63 hardcoded ⌘ today (40 client.js, 7
+    index.html, 16 docs.html), plus every "ctrl+X" in tooltips, log lines and api-docs, none of
+    which a Windows user can act on as written. Needs a person on Windows to test.
+
 [ ] First-run plugin scan is invisible. Found on a fresh machine (2026-09-20), and only a fresh
     machine shows it: with a scan cache, pluginList reads it at boot and the list is there
     instantly. With none, the app loads and looks ready while nothing works - .synth("X") fails
