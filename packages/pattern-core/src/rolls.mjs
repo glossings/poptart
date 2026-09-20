@@ -109,18 +109,28 @@ function makeStore(what) {
       }
       return `[signal] ${what} ${JSON.stringify(id)} is defined twice - the later definition wins`;
     },
-    /** What a name means, buffer first, or null if nothing defines it. */
-    lookup(id) {
+    /**
+     * What a name means, buffer first, or null if nothing defines it. `layer` asks one layer alone -
+     * 'prebake' is how a host reads the LIBRARY's copy of a name some buffer also defines.
+     */
+    lookup(id, layer = null) {
+      if (layer != null) return pick(layer).get(id) ?? null;
       return layers.buffer.get(id) ?? layers.prebake.get(id) ?? null;
     },
     /**
      * Every name currently defined, buffer first then prebake, each with the layer it came from.
      * This is what the editor's pickers list - it names what is actually playable right now, which
      * the code text alone can't say (prebake isn't in the buffer).
+     *
+     * `layer` is where the name resolves; `library` is whether prebake defines it AT ALL, which is
+     * a different question the moment a buffer carries its own copy of a library name. The editor
+     * needs the second one: it decides what a bare `sp("hats")` in a new buffer means by asking
+     * whether the library has a "hats", and a list that forgot the library's copy whenever some
+     * song shadowed it had the editor writing an empty definition over it (2026-09-20).
      */
     ids() {
-      const out = [...layers.buffer.keys()].map((id) => ({ id, layer: 'buffer' }));
-      for (const id of layers.prebake.keys()) if (!layers.buffer.has(id)) out.push({ id, layer: 'prebake' });
+      const out = [...layers.buffer.keys()].map((id) => ({ id, layer: 'buffer', library: layers.prebake.has(id) }));
+      for (const id of layers.prebake.keys()) if (!layers.buffer.has(id)) out.push({ id, layer: 'prebake', library: true });
       return out;
     },
   };
@@ -228,13 +238,13 @@ export function lookupPreset(id, plugin = null) {
 
 /** Every preset, its name and the plugin it was captured from split back out of the key. */
 function presetEntries() {
-  return stores.preset.ids().map(({ id: key, layer }) => {
+  return stores.preset.ids().map(({ id: key, layer, library }) => {
     const at = key.indexOf(PRESET_KEY_SEP);
-    return { id: key.slice(at + 1), plugin: key.slice(0, at), layer, entry: stores.preset.lookup(key) };
+    return { id: key.slice(at + 1), plugin: key.slice(0, at), layer, library, entry: stores.preset.lookup(key) };
   });
 }
 
-export const presetIds = () => presetEntries().map(({ id, plugin, layer }) => ({ id, plugin, layer }));
+export const presetIds = () => presetEntries().map(({ id, plugin, layer, library }) => ({ id, plugin, layer, library }));
 
 /**
  * Which plugins define a preset by this name - what turns "no preset called disco" into "there is
@@ -250,7 +260,7 @@ export const presetPluginsFor = (id) =>
 // buffers (see OscEngine#defineSamplePacks), and `sp("kit")` addresses it by name plus index the
 // way `s("bd")` addresses a folder.
 export const registerPack = (id, entry) => stores.pack.register(id, entry);
-export const lookupPack = (id) => stores.pack.lookup(id);
+export const lookupPack = (id, layer = null) => stores.pack.lookup(id, layer);
 export const packIds = () => stores.pack.ids();
 
 // A named slice set's value is the set itself - normalized (0..1) start points in ascending order,
@@ -259,12 +269,12 @@ export const packIds = () => stores.pack.ids();
 // looks the name up at emit time and puts the set on the event, the engine picks the entry for the
 // file it resolved, and `.slice(n)` indexes into that (see Sig#slices).
 export const registerSlices = (id, set) => stores.slices.register(id, set);
-export const lookupSlices = (id) => stores.slices.lookup(id);
+export const lookupSlices = (id, layer = null) => stores.slices.lookup(id, layer);
 export const sliceSetIds = () => stores.slices.ids();
 
 // A named automation's value is its breakpoint list ({x: bar, y: value, c: curve}, ascending x -
 // see shape.mjs parseAutoPoints). Plain data like a shape's points: `auto("intro")` samples the
 // list by name at read time, so a lane drag re-registering the id is heard without a re-eval.
 export const registerAuto = (id, points) => stores.auto.register(id, points);
-export const lookupAuto = (id) => stores.auto.lookup(id);
+export const lookupAuto = (id, layer = null) => stores.auto.lookup(id, layer);
 export const autoIds = () => stores.auto.ids();

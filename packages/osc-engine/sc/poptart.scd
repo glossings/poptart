@@ -450,7 +450,16 @@ buildTrackDef = { |key|
             side,
             HPF.ar(side, bassmono.lag(0.05).clip(20, 2000)),
             ((bassmono > 0) * 2 - 1).lag(0.05));
-        sig = Balance2.ar(mid + side, mid - side, pan.lag(0.02).clip(-1, 1), postgain.lag(0.02).clip(0, 4));
+        // The pan is constant-power (a sine/cosine pair), referenced to the CENTER: x sqrt(2), so a
+        // track at pan 0 leaves the strip at the level it came in at, and one panned all the way
+        // out is +3 dB on the side it went to. The curve is the same either way - the factor is a
+        // constant, so how a pan move feels does not depend on it - but where the 0 dB sits does
+        // matter. Referenced to the hard-panned end, as Balance2 is on its own, every strip cost a
+        // centered track 3 dB: a sample at default settings came out 3 dB under its own file, and a
+        // track inside a group() - which passes its own strip and then the group's - 6 dB under,
+        // so wrapping a part in a group turned it down (measured 2026-09-20). What this costs is
+        // headroom on a hard-panned side, which is the usual trade and the one a mix can see.
+        sig = Balance2.ar(mid + side, mid - side, pan.lag(0.02).clip(-1, 1), postgain.lag(0.02).clip(0, 4)) * 2.sqrt;
         // Sidechain send: a copy of this track's post-fader output written to another track's
         // aux bus (scSend). Parked to trashBus when this track feeds nothing, so the graph stays
         // static; scSendGain scales the amount. Always-on Out keeps the UGen graph fixed.
@@ -1210,7 +1219,14 @@ server.waitForBoot {
             // a double INSIDE the UGen, so nothing is ever quantized to a bus. Its rate is frames
             // per output sample, so the span/dur the Line ran over becomes the step, sign and all -
             // the read is the same read, just measured accurately.
-            var step = ((endF - startF) / max(dur, 1e-6) / SampleRate.ir) * Select.kr(rate < 0, [1, -1]) * bendRatio;
+            //
+            // The span is the window's length as Node measured it for `dur` - (end - begin) of the
+            // whole frame count - and NOT endF - startF, which is a frame short (endF is the last
+            // frame that can be read, not the window's far edge). A frame short made a file at
+            // speed 1 step by (n-1)/n: no audible pitch, but every frame after the first was read
+            // at a fractional position, through the interpolator, where a step of exactly 1 reads
+            // the file's own samples (measured 2026-09-20: -55 dB of difference from the file).
+            var step = ((((end - begin) * frames).max(1)) / max(dur, 1e-6) / SampleRate.ir) * Select.kr(rate < 0, [1, -1]) * bendRatio;
             // PlayBuf stops at the BUFFER's edge, not at `end`, so past the region it reads on
             // instead of holding the last frame. Only the release tail is ever out there (the env
             // below closes the gate at `dur`), and a few ms of the next slice under a fade beats a
@@ -1220,13 +1236,25 @@ server.waitForBoot {
             // ends. A gate held open for exactly dur runs attack->decay->sustain across playback,
             // then releases when the region ends; a cut event (gate->0 early) releases sooner. Tiny
             // floors keep the fade-in/out declicked.
-            // The release floor is 15ms rather than the attack's 3ms because Env.adsr's default
+            //
+            // The envelope runs at AUDIO rate, and the attack floor is half a millisecond - and
+            // nothing at all for a read that starts at the file's own edge. Both are about the
+            // transient. A control-rate EnvGen holds its start level for its whole first block and
+            // only then begins to ramp, block by block, so under the 3ms control-rate floor this
+            // used to have a voice was SILENT for its first 64 samples and did not reach full
+            // level for ~4ms (measured 2026-09-20: -inf to 1.35ms, -7.5 dB at 2ms) - which is the
+            // click of a kick drum, removed. A declick fade only has a job where the read starts
+            // mid-waveform (a .begin(), a .slice()); a file played from its first frame starts
+            // wherever the file does, and has to come out as recorded.
+            //
+            // The release floor is 15ms rather than the attack's because Env.adsr's default
             // curve (-4) front-loads a fall: two thirds of the drop lands in the first quarter of
             // the segment, so an 8ms floor was ~2ms of real fade and thumped on bass-heavy material
             // cut short by a pianoroll note. Every sampler def below uses the same floors.
-            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
+            var atEdge = ((from < 1) + (from > (frames - 2))).min(1);
+            var atkS = max((1 - atEdge) * 0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
-            var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
+            var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
         // Looping voice. Node decides WHERE the loop runs (loopLo..loopHi - the whole file or just
@@ -1291,9 +1319,11 @@ server.waitForBoot {
             var patch = BufRd.ar(nc, buf, pos, loop: 1, interpolation: 4);
             var sig = (play * (1 - hold)) + (patch * hold);
             // atk/dec/rel are seconds; sustain is held until the loop's gate-off, then released.
-            // Floors preserve the original declick fade.
-            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
-            var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
+            // Audio rate, with the one-shot's floors: no attack fade where the loop is entered at
+            // the file's own edge, half a millisecond of declick anywhere else.
+            var atEdge = ((from < 1) + (from > (frames - 2))).min(1);
+            var atkS = max((1 - atEdge) * 0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
+            var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
         SynthDef(("poptart_sample_warp_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
@@ -1308,10 +1338,12 @@ server.waitForBoot {
             // atk/dec/rel are seconds, so an attack longer than the note never reaches 1 before it
             // ends. A gate held open for exactly dur runs attack->decay->sustain across playback,
             // then releases when the region ends; a cut event (gate->0 early) releases sooner. Tiny
-            // floors keep the fade-in/out declicked.
-            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
+            // floors keep the fade-in/out declicked. Audio rate like the one-shot's, but with no
+            // edge case: every grain here fades in under its own window wherever it is cut from,
+            // so the floor is the same half millisecond everywhere.
+            var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
-            var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
+            var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
         // Timestretched loop - same loopLo/loopHi/entry/pingpong contract as the plain loop above,
@@ -1337,9 +1369,9 @@ server.waitForBoot {
             // freqScale again, not the pointer: the loop keeps its length and bends in pitch.
             var sig = Warp1.ar(nc, buf, ptr, rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2) * (2 / overlaps);
             // atk/dec/rel are seconds; sustain is held until the loop's gate-off, then released.
-            // Floors preserve the original declick fade.
-            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
-            var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
+            // Audio rate, and the windowed voices' half-millisecond floor (see the warp def above).
+            var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
+            var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, toStereo.(sig) * env * amp);
         }).add;
         // Granular voice (Sig#grain): the file read as a stream of short overlapping grains cut
@@ -1386,9 +1418,10 @@ server.waitForBoot {
                 + GrainBuf.ar(2, trig, size, bufR, pitch, pos, 4, ((2 * pan) + 1).clip(-1, 1), win, grainMaxOverlap)
             };
             var level = (size * density * 0.5).max(1).sqrt.reciprocal.lag(0.05);
-            // Same envelope and floors as every sampler def above; the gate is the event's alone.
-            var atkS = max(0.003, atk), decS = max(0, dec), relS = max(0.015, rel);
-            var env = EnvGen.kr(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
+            // The windowed voices' envelope and floors (see the warp def above); the gate is the
+            // event's alone.
+            var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
+            var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             Out.ar(out, sig * level * env * amp);
         }).add;
         // Song-deck player (see the songLoad/songStart OSCdefs): one long file, played straight

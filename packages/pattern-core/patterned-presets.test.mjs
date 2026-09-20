@@ -77,8 +77,8 @@ test('presetIds lists what is playable, buffer first', () => {
   setRollLayer('buffer');
   _preset('mine', 'Serum 2', 'H4sImine');
   assert.deepEqual(presetIds(), [
-    { id: 'mine', plugin: 'Serum 2', layer: 'buffer' },
-    { id: 'library', plugin: 'Serum 2', layer: 'prebake' },
+    { id: 'mine', plugin: 'Serum 2', layer: 'buffer', library: false },
+    { id: 'library', plugin: 'Serum 2', layer: 'prebake', library: true },
   ]);
   clearRolls('prebake');
 });
@@ -195,8 +195,8 @@ test('presetIds keeps each name with the plugin that owns it', () => {
   _preset('disco', 'ValhallaDelay', 'H4sIdelay');
   _preset('disco', 'ValhallaVintageVerb', 'H4sIverb');
   assert.deepEqual(presetIds(), [
-    { id: 'disco', plugin: 'ValhallaDelay', layer: 'buffer' },
-    { id: 'disco', plugin: 'ValhallaVintageVerb', layer: 'buffer' },
+    { id: 'disco', plugin: 'ValhallaDelay', layer: 'buffer', library: false },
+    { id: 'disco', plugin: 'ValhallaVintageVerb', layer: 'buffer', library: false },
   ]);
 });
 

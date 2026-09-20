@@ -4402,7 +4402,11 @@ const routes = {
     // `key` is how a slice set names this file (see samples.js sampleKey). Handed back rather than
     // derived in the browser so the markers the editor files under it and the ones the engine looks
     // up while playing are keyed by the same rule.
-    return { status: 200, body: { ref, file: files[i], key: sampleKey(files[i]), index: i, count: files.length } };
+    const body = { ref, file: files[i], key: sampleKey(files[i]), index: i, count: files.length };
+    // `names=1`: every file's name as well, in index order - what the piano roll's index axis
+    // labels its rows with. Asked for separately since the waveform fetches never need the list.
+    if (query.names) body.names = files.map((f) => path.basename(f));
+    return { status: 200, body };
   },
 
   // The slice editor's auto-slice: one file's transients, at a sensitivity the slider sets.
@@ -5005,13 +5009,18 @@ const routes = {
       presets: patternCore.presetIds(),
       // A pack's files come too: the pack panel shows a library pack's contents, which - unlike a
       // buffer pack's - are nowhere in the code it can read.
-      packs: patternCore.packIds().map((p) => ({ ...p, files: patternCore.lookupPack(p.id)?.files ?? [] })),
+      //
+      // The LIBRARY's copy, wherever the library has one (`library` - see the store's ids()): a
+      // buffer that carries its own "hats" does not make the library's any less there, and the
+      // buffer's copy is the one thing the editor can already read for itself. The same goes for
+      // the slice sets and automations below.
+      packs: patternCore.packIds().map((p) => ({ ...p, files: patternCore.lookupPack(p.id, p.library ? 'prebake' : null)?.files ?? [] })),
       // A slice set's markers come too, for the same reason a pack's files do: the slice editor
       // draws a library set, and it is nowhere in the buffer to be read.
-      sliceSets: patternCore.sliceSetIds().map((p) => ({ ...p, set: patternCore.lookupSlices(p.id) ?? [] })),
+      sliceSets: patternCore.sliceSetIds().map((p) => ({ ...p, set: patternCore.lookupSlices(p.id, p.library ? 'prebake' : null) ?? [] })),
       // An automation's breakpoints come too, for the reason a slice set's markers do: the arrange
       // view draws a library lane, and it is nowhere in the buffer to be read.
-      autos: patternCore.autoIds().map((p) => ({ ...p, points: patternCore.lookupAuto(p.id) ?? [] })),
+      autos: patternCore.autoIds().map((p) => ({ ...p, points: patternCore.lookupAuto(p.id, p.library ? 'prebake' : null) ?? [] })),
       pinned: pinnedList(),
     },
   }),
@@ -5278,7 +5287,7 @@ const routes = {
   // A one-off audition of a chop from the slice editor, THROUGH the track the panel was opened
   // from: the engine plays it on that track, so it comes out through the track's own chain - its
   // fx, its gain and postgain, its sends - which is what the pattern will sound like. Body:
-  // { trackId, ref, index, begin, end, attack?, decay?, sustain?, release?, speed?, stretch? } to
+  // { trackId, ref, index, begin, end, attack?, decay?, sustain?, release?, speed?, stretch?, note?, slice? } to
   // play (the envelope panel sends the envelope it is drawing, in seconds, at the rate it draws it
   // at); { trackId, stop: true } to hush the track (the
   // client asks only while the transport is paused, since a hush takes every voice on the track).
@@ -5303,9 +5312,20 @@ const routes = {
     // nothing gates it - the chop plays out at the rate the panel's own player would play it, only
     // through the track.
     const cfg = { index: Math.round(Number(body.index) || 0), begin, end, vel: 1 };
-    for (const key of ['attack', 'decay', 'sustain', 'release', 'speed', 'stretch']) {
+    // `note` is the piano roll's audition of a sampler track: the file repitched as a note at that
+    // pitch would play it.
+    for (const key of ['attack', 'decay', 'sustain', 'release', 'speed', 'stretch', 'note']) {
       const v = Number(body[key]);
       if (body[key] != null && Number.isFinite(v)) cfg[key] = v;
+    }
+    // `slice`: a chop by NUMBER (the piano roll's slice rows), where the slice editor sends the
+    // begin..end it drew. Cut by whatever set the track's own pattern chops by right now, so row 3
+    // is the chop an event on row 3 plays; with no set, the engine's transient analysis, as ever.
+    const k = Number(body.slice);
+    if (body.slice != null && Number.isFinite(k)) {
+      cfg.slice = Math.round(k);
+      const set = schedulers.get(trackId).sliceSetAt(now);
+      if (set) cfg.slices = set;
     }
     const info = engine.playSample(tid, ref, cfg, now, now + PREVIEW_SLICE_MAX_SEC);
     return { status: 200, body: { ok: !info?.skipped, why: info?.skipped ?? null, durSec: info?.durSec ?? null } };

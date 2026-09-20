@@ -457,7 +457,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             is finished; while you're still editing, they come back on their own if you drag the loop
             end out. Changing
             <strong>grid</strong> re-meshes without moving the music (a quarter note on the 1/4 grid is
-            four cells on the 1/16 grid). <strong>🎧</strong> auditions notes as you draw.
+            four cells on the 1/16 grid). <strong>🎧</strong> auditions notes as you draw — through the
+            track's plugin, or on a sampler track as the file itself, at the note's pitch.
             <strong>⌨</strong> plays the roll's track from your typing keyboard (<a href="#s9">Study 9</a>).
             <strong>→♪</strong> converts the roll to the equivalent <code>&lt;…&gt;*grid</code>
             mini-notation, written into the pattern — handy when a drawn idea is done and you want to
@@ -469,7 +470,10 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             thing <code>.i()</code> sets) and a <strong>slice</strong> (what <code>.slice()</code>
             sets). The <strong>note</strong> / <strong>index</strong> / <strong>slice</strong> button
             cycles which one the rows show. On <strong>index</strong> the keyboard becomes
-            <code>0, 1, 2, …</code> — a pack's files — so
+            <code>0, 1, 2, …</code> — a pack's files, which <strong>🎧</strong> auditions row by row,
+            as it does the chops on <strong>slice</strong>
+            (<strong>settings → piano roll → file names on the index axis</strong> labels the rows
+            with the files' names instead of their numbers) — so
             <code>pianoroll("chops").s("breaks")</code> sequences a break by file, with lengths, velocity
             and probability meaning exactly what they do on the keyboard. On <strong>slice</strong>
             the rows are the chops of whatever file the note plays, which is how a break gets

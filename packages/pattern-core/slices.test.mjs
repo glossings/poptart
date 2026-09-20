@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 
 import { s, note, _slices, liveSlices, setPatternWarn } from './src/signal.mjs';
 import { clearRolls, setRollLayer, lookupSlices, sliceSetIds } from './src/rolls.mjs';
+import { Scheduler } from './src/scheduler.mjs';
 import {
   normalizeSlicePositions, parseSlicePositions, serializeSlicePositions,
   normalizeSliceSet, normalizeSliceEntry, parseSliceSet, serializeSliceSet,
@@ -249,4 +250,22 @@ test('.slices() written before the source waits for it', () => {
   fresh();
   assert.deepEqual(setAt(note('60 62').slices([0, 0.5]).s('breaks')), setAt(s('breaks').slices([0, 0.5])));
   assert.equal(note('60 62').slices([0, 0.5]).sampler, null, 'no source yet: not a sampler');
+});
+
+// An audition from outside the pattern (the piano roll's slice rows) has to cut where the pattern
+// would, so the scheduler answers for the set the track chops by - the same read an event gets.
+test('sliceSetAt is the set an event would carry, and null where an event would carry none', () => {
+  fresh();
+  const engine = new Proxy({ getTime: () => 0 }, { get: (t, p) => (p in t ? t[p] : () => {}) });
+  const sch = new Scheduler(engine, { trackId: 'breaks' });
+  assert.equal(sch.sliceSetAt(0), null, 'no pattern yet');
+  sch.setPattern(s('breaks').slice(0).slices([0, 0.25, 0.5]));
+  assert.deepEqual(sch.sliceSetAt(0), setAt(s('breaks').slices([0, 0.25, 0.5])));
+  sch.setPattern(s('breaks').slice(0));
+  assert.equal(sch.sliceSetAt(0), null, 'no .slices(): the file\'s own transients, which is the engine\'s to know');
+  _slices('break', {});
+  sch.setPattern(s('breaks').slice(0).slices('break'));
+  assert.equal(sch.sliceSetAt(0), null, 'an empty set says nothing, exactly as on an event');
+  sch.setPattern(note('60 62'));
+  assert.equal(sch.sliceSetAt(0), null, 'not a sampler at all');
 });

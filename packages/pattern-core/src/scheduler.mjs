@@ -1502,6 +1502,19 @@ export class Scheduler {
     return Math.max(shiftSec, nowSec + MIN_SEND_LEAD_SEC - onsetSec);
   }
 
+  /**
+   * The slice set this track's sampler chops by at `sec` - what `.slices()` resolves to then, read
+   * exactly as an event's is (see _sampleConfigAt) - or null where the pattern defines none and the
+   * engine falls back to the file's own transients. For an audition of a chop from outside the
+   * pattern (the piano roll's slice rows), which has to cut where the pattern would.
+   */
+  sliceSetAt(sec) {
+    const slices = this.pattern?.sampler?.slices;
+    if (!slices) return null;
+    const set = slices.sample(sec, this.transport.cps, this.transport.cycleAt(sec));
+    return set && !sliceSetIsEmpty(set) ? set : null;
+  }
+
   // Sampler config signals evaluated at one event's onset. `fit: 'auto'` passes through as-is
   // (the engine resolves it against the sample's length); everything else becomes a number or
   // stays undefined for the engine's default.

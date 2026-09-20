@@ -67,12 +67,54 @@ engine) does:
   `sclang`/`scsynth` processes holding ports or the audio device (warn + name the pkill,
   don't kill — it could be a deliberately open SC IDE).
 
-## Stage 1.5 (parked, 2026-07-30) — auto-install SuperCollider too
+## Stage 1.5 (parked, 2026-07-30) — a private SuperCollider, fetched by setup
 
-Considered and deliberately not built yet: setup could also download SuperCollider itself,
-making macOS truly clone → run with zero manual steps. Recorded here because the reasoning
-changes how Stage 2 should be approached if it ever happens:
+Considered and deliberately not built yet: setup could also fetch SuperCollider itself, making
+poptart clone → run with zero manual steps and nothing installed system-wide. Recorded here
+because the reasoning changes how Stage 2 should be approached if it ever happens:
 
+- **A private copy, not a system install.** The target is `~/.poptart/sc/<version>/`, not
+  `/Applications` or `Program Files`: no admin rights, no Homebrew, nothing for an existing SC
+  install (or its IDE) to collide with, and uninstalling is deleting one folder. SC needs no
+  installer on either desktop platform - the macOS dmg holds a self-contained
+  `SuperCollider.app` (sclang, scsynth, class library and UGens all inside the bundle), and
+  every release ships a `win64.zip` next to the Windows installer (3.14.1: 250 MB universal
+  dmg, 139 MB zip). Linux has no official binaries, so it stays on the package manager.
+- **Private Extensions too.** Two things write into the user's SC Extensions folder today:
+  `setup.js` (VSTPlugin) and `extensions.js` (the keylock UGen). With a private SC both go to
+  `~/.poptart/sc/Extensions/` instead, and sclang is spawned with `-l <generated
+  sclang_conf.yaml>` - `excludeDefaultPaths: true`, `includePaths` = the private copy's
+  `SCClassLibrary` plus the private Extensions - while scsynth gets the matching
+  `ugenPluginsPath` (the copy's own `plugins` dir plus the private Extensions; setting it
+  replaces the defaults, so both must be listed). This is the same isolation Stage 2 needs, so
+  Stage 2 reuses it rather than building its own.
+  - What it removes from SETUP.md's troubleshooting: broken files in the user's Extensions
+    folder, a VSTPlugin build that doesn't match the SC it sits under, and the stale `sclang`
+    symlink (a private copy is resolved by full path, never through PATH).
+  - What it does not remove: sclang still runs the user's own `startup.scd` before poptart's
+    script, and `-l` has no say over that. Needs its own answer.
+  - To confirm on the first build, not assumed: that `excludeDefaultPaths` drops the user and
+    system Extensions as well as the default class library, and that the generated conf's
+    paths survive spaces on both platforms.
+- **How it gets verified.** Everything short of sound is checkable without a person: the
+  install root is injectable, so a test can run the real download → checksum → unpack →
+  generate conf → spawn `sclang -l` sequence into a temp dir (one with a space in its name)
+  and assert that the class library compiles, VSTPlugin is found, and the user's own
+  Extensions are not. A GitHub Actions job runs that on `windows-latest` and `macos-latest`
+  (free on a public repo), which is what makes the Windows half buildable without a Windows
+  machine to hand. Runners have no audio device, so the last step stays human on each
+  platform: boot the engine from the private copy, scan, play a plugin, open its editor. A
+  `doctor` script that writes the resolved paths, the generated conf, the Extensions listing
+  and the head of the sclang log to one file keeps that to a single round trip.
+- **Resolution order** becomes `POPTART_SCLANG` → private copy → PATH → standard install
+  location. An existing system SC keeps working untouched; the private copy only exists once
+  someone has opted into the download.
+- **A portable folder falls out of this.** Once every SC path is private, a no-install
+  poptart is the same layout with Node's official zip/tarball beside it (Node also runs from
+  any folder) and a launch script that points `POPTART_SCLANG` and the per-directory
+  variables in SETUP.md inside the folder. No Electron and no signing of our own, which makes
+  it the cheap answer for someone who can't or won't install system-wide, well short of
+  Stage 2.
 - **No signing needed if we download instead of redistribute.** SC's official macOS releases
   are Developer-ID-signed and notarized *by the SC project*. If the user's machine fetches the
   pinned release dmg from SC's GitHub (checksummed, like the VSTPlugin flow), Gatekeeper is
@@ -81,15 +123,16 @@ changes how Stage 2 should be approached if it ever happens:
 - **Same trick works on Windows**: SmartScreen only screens files carrying the Mark of the
   Web, which browsers apply and Node's fetch does not — so programmatically fetched SC
   binaries would run without warnings (only the standard one-click firewall prompt for
-  scsynth). But poptart has never been run on Windows, so the install mechanics are ~20% of
-  the risk there; don't advertise Windows support until someone has actually booted it once.
+  scsynth). poptart already runs on Windows from a standard SC install (`sclang.exe` found in
+  `Program Files`, pinned win64 VSTPlugin build), so the zip is the same binaries in a
+  different folder.
 - **Why parked**: current audience is terminal-comfortable, and setup already prints the exact
-  `brew install --cask supercollider` command when SC is missing — one manual step, zero
-  maintenance. Also, silently dropping a ~150MB app from a dev script needs a consent prompt
-  (y/N in terminal or `POPTART_INSTALL_SC=1`), which is design work.
+  install command when SC is missing — one manual step, zero maintenance. Also, silently
+  dropping a 140-250 MB download from a dev script needs a consent prompt (y/N in terminal or
+  `POPTART_INSTALL_SC=1`), which is design work.
 - **Un-park trigger** (same as Stage 2's): someone who won't open a terminal wants poptart —
-  a workshop, a musician friend, a residency. Then build this (macOS-first, `/Applications`
-  as target) before reaching for Electron.
+  a workshop, a musician friend, a residency — or someone who can't install system-wide (no
+  admin rights, a locked-down machine). Then build this before reaching for Electron.
 
 ## Stage 2 — the dmg: Electron + bundled SuperCollider
 
@@ -114,6 +157,18 @@ piece — but real distribution mechanics:
   hardened runtime. **scsynth needs the `com.apple.security.cs.disable-library-validation`
   entitlement** — loading arbitrary third-party VSTs is the whole point, and without it a
   signed scsynth refuses plugins signed by other teams (or unsigned).
+  - Checked against SC 3.14.1's macOS build: `sclang` and `scsynth` already ship Developer-ID
+    signed with hardened runtime, and both carry `disable-library-validation`,
+    `allow-unsigned-executable-memory` and the audio-input entitlements. That leaves two
+    routes, to be settled in the spike. Embed `SuperCollider.app` untouched and keep it out of
+    our signing pass (electron-builder's `signIgnore`), so SC's own signature stands: least
+    work, but the app is 556 MB unpacked, 504 MB of it `Frameworks` (the IDE's Qt). Or strip
+    the IDE and re-sign what remains with our identity and the same entitlements: smaller
+    download, more to get wrong. Unconfirmed: that notarization accepts the first route
+    (nested code signed by another team), and how much of `Frameworks` sclang itself needs.
+  - poptart's own helpers (`native/bin/poptart-audio`, `native/link/bin/poptart-link`,
+    `native/rubberband/bin/PoptartPitchShift.scx`) are universal binaries with ad-hoc
+    signatures today; the release build has to sign them with the Developer ID.
 - **Small gotchas**: if scsynth boots with audio inputs, macOS requires a mic-permission
   prompt + `NSMicrophoneUsageDescription` in the bundle (or boot with 0 inputs by default);
   kill child sclang/scsynth on app quit so orphans can't accumulate; dmg + signing also avoids
@@ -122,6 +177,48 @@ piece — but real distribution mechanics:
   SC + VSTPlugin builds per platform/arch (macOS arm64 + x64 at minimum).
 - **Licensing is clear**: SC and VSTPlugin are GPLv3, poptart is AGPL-3.0 — redistribution of
   the binaries is fine as long as source is available (it is).
+
+### Cutting a release
+
+Releases are cut by tag, never by push; day-to-day commits build nothing. There is no CI in
+the repo yet. GitHub Actions has macOS and Windows runners, so neither installer needs a local
+machine of that platform to build.
+
+1. A local release script checks for a clean tree, runs the tests, bumps `version` in the
+   root and workspace `package.json` files, and drafts the changelog section from the commits
+   since the last tag. The commit style (one line, semicolon-separated capability clauses)
+   splits mechanically into bullets grouped by leading verb (Add / Fix / Change); the draft
+   then gets an editing pass by hand. It stops there, committing nothing.
+2. Review, commit, tag `vX.Y.Z`, push the tag.
+3. The tag triggers the workflow: build macOS (arm64 + x64) and Windows, sign, notarize,
+   attach the installers to a **draft** GitHub Release whose notes are the changelog section.
+4. Smoke-test the draft's installers, then publish.
+
+Step 4 cannot be automated away: CI runners have no audio device, so a green build proves the
+packaging and nothing about sound. Each platform needs a person with that machine running a
+short checklist (installs, boots, scans plugins, a note plays, a VST editor opens) on every
+release candidate.
+
+Windows gap to close first: the keylock UGen and the Link helper are built for macOS only
+(one binary in each `bin/`), and `poptart-audio` is Swift. Keylock falls back to the SOLA def
+and Link disables itself when its helper is absent, so a first Windows installer can ship
+without them, but their `build.sh` scripts need Windows counterparts before parity.
+
+### One-time setup outside the repo
+
+- **Apple Developer Program**, $99/yr. Enrolling as an individual puts the account holder's
+  legal name in the Developer ID certificate, where `codesign -dv` shows it to anyone who
+  looks; enrolling as an organization shows the organization's name instead, but requires a
+  legal entity and a D-U-N-S number. Then: create a *Developer ID Application* certificate,
+  export it as a `.p12`, create an App Store Connect API key for `notarytool`, and store all
+  of it as Actions secrets.
+- **Windows signing is optional.** An unsigned installer downloaded through a browser gets the
+  SmartScreen "Windows protected your PC" dialog, passable with More info → Run anyway;
+  unlike macOS this is an acceptable first release. Removing it means an OV certificate
+  (private keys must live on a hardware token or cloud HSM) or a cloud signing service;
+  prices and eligibility rules to be checked when it's wanted.
+- Actions minutes are free on a public repo; on a private one macOS minutes count tenfold
+  against the monthly allowance, which occasional tagged releases still fit inside.
 
 ## Stage 3 (someday, optional) — drop sclang, talk to scsynth directly
 

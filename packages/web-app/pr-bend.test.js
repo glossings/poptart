@@ -53,7 +53,7 @@ function constantRaw(name) {
 }
 
 const PR_ROWS = constantRaw('PR_ROWS');
-const PR_GUTTER = constantRaw('PR_GUTTER');
+const PR_GUTTER = constantRaw('PR_GUTTER_KEYS'); // the keyboard's gutter - the width a bend is drawn against
 const PR_BEND_RANGE = constant('PR_BEND_RANGE');
 const PR_BEND_HIT = constantRaw('PR_BEND_HIT');
 const PR_BEND_MAGNET = constantRaw('PR_BEND_MAGNET');

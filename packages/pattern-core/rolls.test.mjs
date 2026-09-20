@@ -149,8 +149,8 @@ test('rollIds() lists what is playable, buffer first, without duplicates', () =>
   setRollLayer('buffer');
   _roll('bass', '48,0,4', { grid: 16 });
   assert.deepEqual(rollIds(), [
-    { id: 'bass', layer: 'buffer' },
-    { id: 'pad', layer: 'prebake' },
+    { id: 'bass', layer: 'buffer', library: true }, // the buffer's copy plays; the library still has one
+    { id: 'pad', layer: 'prebake', library: true },
   ]);
 });
 

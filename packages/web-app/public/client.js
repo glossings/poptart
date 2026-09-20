@@ -4148,7 +4148,13 @@ const PR_ROWS = 24; // visible semitone rows (2 octaves) at vzoom 1 - see prMetr
 const PR_GUTTER_DRAG_PX = 4; // travel that turns a press on the keyboard from an audition into a zoom
 const PR_MAX_VZOOM = 6; // deepest vertical zoom: rows six times taller than "fit"
 const PR_MIN_VZOOM = 0.5; // and the shallowest, which is two octaves again either side
-const PR_GUTTER = 54; // left piano-keyboard gutter, px
+const PR_GUTTER_KEYS = 54; // left piano-keyboard gutter, px
+const PR_GUTTER_NAMES = 132; // the same gutter when its rows are file names (see prSyncGutter)...
+const PR_GUTTER_NAMES_MAX = 420; // ...and as far as its edge can be dragged out (see prGutterEdgeAt)
+const PR_GUTTER_EDGE_PX = 3; // how near the edge a press has to be to take hold of it
+// The gutter's width NOW. Everything reads it at draw or hit-test time and nothing keeps a copy, so
+// it is simply reassigned when the index axis starts or stops showing names.
+let PR_GUTTER = PR_GUTTER_KEYS;
 // Top row when a fresh/empty roll opens - a MIDI note, framed 24 rows down to 60, so the window is
 // the two octaves starting at middle C. The bottom row is the sampler's native pitch: MIDI 60 is
 // where a sample plays as recorded (DEFAULT_SYNTH_NOTE, and the engine's repitch anchor), so on a
@@ -4240,6 +4246,8 @@ let prState = null; // see openPianorollEditor for the full shape (notes, steps,
 let prSuppressCursor = false;
 let prPreviewEnabled = localStorage.getItem('poptartPianorollPreview') !== '0';
 let prSounding = null; // midi note currently ringing from a preview (so we can note-off it)
+// Settings -> piano roll: the index axis labels each row with the file it plays, not its number.
+let prIndexNamesOn = localStorage.getItem('poptartPianorollIndexNames') === '1';
 let prTool = localStorage.getItem('poptartPianorollTool') === 'select' ? 'select' : 'draw'; // pencil vs arrow
 // The channels the value lane edits, in the order its gutter label cycles them. vel and prob are
 // 0..1; nudge is the drawn time offset (see pianoroll.mjs), bipolar around 0 and measured in cells.
@@ -4503,6 +4511,112 @@ function prModesFor() {
     || (name === 'index' && files) || (name === 'slice' && chops));
 }
 
+// --- file names on the index axis ---------------------------------------------------------------
+// A row on the index axis is a file, and with the setting on it says which one. The names come from
+// the server (only it can read a pack's folder - see /api/sampleFile), once per source, and are cut
+// down to the part that tells the files apart: a pack's files tend to share everything up to a
+// number, and the gutter is narrow.
+
+// source ref -> { labels?, pending?, stale? }. An entry keeps the labels it has while a newer list
+// is fetched: a row that fell back to its number for the length of a request is a flicker, and an
+// eval - which is what makes a list stale - happens on every arrow-key move of a note.
+const PR_NAMES_CACHE = new Map();
+
+/** Do this roll's index rows have names to show - the setting on, the axis up, a pack to read? */
+const prNamesWanted = () => prIndexNamesOn && prIndexMode() && !!prState?.chain?.ref;
+
+// How wide the names are given. The gutter's edge drags (see prGutterEdgeAt): out to read a pack
+// of long names, in to give the grid its room back - down to the keyboard's own width, where a
+// name is its first few letters. Sticky, like the rest of the roll's view.
+const PR_NAMES_W_KEY = 'poptartPianorollNamesWidth';
+const prClampNamesW = (w) => Math.round(Math.min(PR_GUTTER_NAMES_MAX, Math.max(PR_GUTTER_KEYS, w)));
+let prNamesW = prClampNamesW(Number(localStorage.getItem(PR_NAMES_W_KEY)) || PR_GUTTER_NAMES);
+
+/** Widen the gutter for names, or take it back. Wanted, not arrived, so it moves once and not twice. */
+function prSyncGutter() {
+  PR_GUTTER = prNamesWanted() ? prNamesW : PR_GUTTER_KEYS;
+}
+
+/** Is (px, py) on the names gutter's draggable edge? Beside the rows only - the ruler above and the
+ * value lane below have handles of their own at this x. */
+function prGutterEdgeAt(px, py, m) {
+  return prNamesWanted() && Math.abs(px - PR_GUTTER) <= PR_GUTTER_EDGE_PX && py >= PR_TOPBAR && py < m.laneTop;
+}
+
+/** Put the gutter's edge at `px`. */
+function prSetNamesWidth(px) {
+  prNamesW = prClampNamesW(px);
+  localStorage.setItem(PR_NAMES_W_KEY, String(prNamesW));
+  prSyncGutter();
+}
+
+/** The label of every file in the roll's pack, in index order - null until they are here. */
+function prIndexLabels() {
+  if (!prNamesWanted()) return null;
+  const ref = prState.chain.ref.ref;
+  const hit = PR_NAMES_CACHE.get(ref);
+  if (!hit || (hit.stale && !hit.pending)) prNamesLoad(ref, hit);
+  return hit?.labels ?? null;
+}
+
+async function prNamesLoad(ref, had = null) {
+  // Claimed before the first await, so nothing asks twice - and still holding what it had.
+  PR_NAMES_CACHE.set(ref, { labels: had?.labels ?? null, pending: true });
+  let labels = null;
+  try {
+    const res = await api('GET', `/api/sampleFile?ref=${encodeURIComponent(ref)}&names=1`);
+    if (res.names?.length) labels = prShortNames(res.names);
+  } catch {
+    labels = had?.labels ?? null; // a failed refresh is no reason to take the names away
+  }
+  PR_NAMES_CACHE.set(ref, { labels });
+  const same = (had?.labels ?? []).join('\n') === (labels ?? []).join('\n');
+  if (prState && !same) drawPianoroll(); // only when there is something new to show
+}
+
+/** Every list may have changed (see the eval): keep showing them, and ask again when next drawn. */
+function prNamesStale() {
+  for (const entry of PR_NAMES_CACHE.values()) entry.stale = true;
+}
+
+/**
+ * File names as row labels: the audio extension off (every one of them - "kick.wav.wav" happens),
+ * then whatever ALL the names start with. The shared start is backed up to a separator, so the cut
+ * never lands inside a word: "909BD01" and "909BD02" share "909BD0", and the rows should still read
+ * 909BD01 and 909BD02.
+ */
+function prShortNames(names) {
+  const bare = names.map((name) => {
+    const ext = /\.(wav|aiff?|flac|mp3|ogg|m4a)$/i;
+    let s = String(name);
+    while (ext.test(s)) s = s.replace(ext, '');
+    return s;
+  });
+  if (bare.length < 2) return bare;
+  const first = bare[0];
+  let cut = 0;
+  while (cut < first.length && bare.every((s) => s[cut] === first[cut])) cut++;
+  while (cut > 0 && !/[\s\-_.]/.test(first[cut - 1])) cut--;
+  return bare.map((s) => s.slice(cut) || s);
+}
+
+/** `text` cut to `width` px in the context's current font, with an ellipsis where it was cut. */
+function prFitText(ctx, text, width) {
+  if (ctx.measureText(text).width <= width) return text;
+  let n = text.length;
+  while (n > 1 && ctx.measureText(`${text.slice(0, n)}…`).width > width) n--;
+  return `${text.slice(0, n)}…`;
+}
+
+/** The settings choice. */
+function setPrIndexNames(on) {
+  prIndexNamesOn = !!on;
+  localStorage.setItem('poptartPianorollIndexNames', prIndexNamesOn ? '1' : '0');
+  if (!prState) return;
+  prSyncGutter();
+  drawPianoroll();
+}
+
 /** The axis the mode button moves to: the next available one, wrapping. */
 function prNextMode() {
   const list = prState?.modes ?? ['note'];
@@ -4514,6 +4628,7 @@ function prNextMode() {
 function prSyncMode() {
   if (!prState) return;
   prReadChain();
+  prSyncGutter();
   prState.modes = prModesFor();
   const mode = prNoteMode() ? 'note' : prState.mode;
   const pitched = mode === 'note';
@@ -4530,17 +4645,19 @@ function prSyncMode() {
     ? `rows are ${PR_MODE_ROWS[mode]}`
     : `rows are ${PR_MODE_ROWS[mode]} — click for ${PR_MODE_ROWS[prNextMode()]}`;
   // Grayed rather than hidden: a toolbar that reshuffles itself under the pointer is worse than a
-  // button that plainly doesn't apply here. Both of these are keyboard things - a key to fold to,
-  // and a pitch to audition - and the numbered rows have neither. (Preview would happily play the c2
-  // every index note sits at, which is worse than silence: it would sound the same on every row.)
+  // button that plainly doesn't apply here. The fold is a keyboard thing - a key to fold to - and
+  // the numbered rows have none. The audition follows what a row can be played AS: a pitch on the
+  // keyboard, and on the numbered axes a file or a chop of one - given a sampler chain to say
+  // which pack they are counted in (see prPreview).
   prScaleFoldBtn.disabled = !pitched;
   prScaleFoldBtn.title = pitched
     ? 'show only the scale set by setscale()'
     : 'a key is a note-axis thing — switch to note rows to fold to the scale';
-  prPreviewBtn.disabled = !pitched;
-  prPreviewBtn.title = pitched
-    ? 'preview notes as you draw'
-    : `the ${mode} rows name ${mode === 'index' ? 'files' : 'chops'}, not pitches — nothing to audition`;
+  const sampled = !!prState.chain?.ref;
+  prPreviewBtn.disabled = !pitched && !sampled;
+  prPreviewBtn.title = pitched ? 'preview notes as you draw'
+    : sampled ? `preview ${mode === 'index' ? 'files' : 'slices'} as you draw`
+      : `no sampler on this chain to say which ${mode === 'index' ? 'files' : 'slices'} the rows are — nothing to audition`;
   prScaleLabel.textContent = pitched ? (patchScale ?? '') : '';
   prSyncKeyboardBtn();
 }
@@ -4677,18 +4794,68 @@ function prPreviewSend(note, isOn) {
   if (!trackId) return;
   api('POST', '/api/previewNote', { trackId, note, vel: PR_DEFAULT_VEL, isOn }).catch(() => {});
 }
-function prPreview(midi) {
-  // An index roll's rows are files in a pack, not pitches: there is nothing here that knows what
-  // row 3 sounds like, and playing it as MIDI note 3 would be a lie rather than a preview.
-  if (!prPreviewEnabled || !prNoteMode() || prSounding === midi) return;
+/**
+ * Audition row `row` of the axis on screen - `nt` is the note being drawn or moved, where there is
+ * one (the gutter has a row and no note).
+ *
+ * A SAMPLER chain is auditioned as a file, not as MIDI: a note-on reaches a plugin, and a sampler
+ * track has none, so the file is played through the track the way an event would play it (see
+ * prPreviewFile). That is also what gives the numbered axes something to audition - an index row
+ * is a file and a slice row is a chop, and row 3 sounds like the one an event on row 3 plays.
+ */
+function prPreview(row, nt = null) {
+  if (!prPreviewEnabled) return;
+  if (prState?.chain?.ref) return prPreviewFile(row, nt);
+  if (!prNoteMode() || prSounding === row) return;
   if (prSounding != null) prPreviewSend(prSounding, false);
-  prPreviewSend(midi, true);
-  prSounding = midi;
+  prPreviewSend(row, true);
+  prSounding = row;
 }
+
+// A file audition is a one-shot with no note-off to pair it with: a drum rings out its own length,
+// which is the whole point of hearing it. What IS kept is which one is sounding (so a drag along
+// one row doesn't re-fire it on every pixel) and how long it lasts - a long file is hushed when the
+// pointer lets go, where a hit that was nearly over anyway is left to finish.
+const PR_FILE_HUSH_SEC = 1.5;
+let prFileSounding = null; // { key, track, until } - the file audition in the air, if any
+
+function prPreviewFile(row, nt) {
+  const ref = prState.chain.ref;
+  const track = prPlayingTrack();
+  if (!track) return;
+  // The row is one of the note's three channels; the other two are the note's own where there is a
+  // note, and what an event with nothing set plays where there is only a gutter row.
+  const index = prIndexMode() ? row : (nt ? prNoteFile(nt) : ref.index);
+  const note = prNoteMode() ? row : (nt?.midi ?? pianorollMod.PIANOROLL_DEFAULT_NOTE);
+  const slice = prSliceMode() ? row : (nt ? pianorollMod.noteSlice(nt) : null);
+  const key = `${index}:${note}:${slice}`;
+  if (prFileSounding?.key === key) return;
+  const { begin, end } = prChainRegion();
+  const body = { trackId: track, ref: ref.ref, index, note, begin, end };
+  // Cut server-side, by the set the track's own pattern chops by (see /api/previewSlice) - the
+  // markers are not the roll's to know.
+  if (slice != null) body.slice = slice;
+  if (prState.chain.speed != null) body.speed = prState.chain.speed;
+  if (prState.chain.stretch != null) body.stretch = prState.chain.stretch;
+  const mine = { key, track, until: 0 }; // unknown until the engine answers - and unknown is not hushed
+  prFileSounding = mine;
+  api('POST', '/api/previewSlice', body)
+    .then((res) => { if (res.ok && res.durSec != null) mine.until = performance.now() / 1000 + res.durSec; })
+    .catch(() => {});
+}
+
 function prPreviewOff() {
   if (prSounding != null) {
     prPreviewSend(prSounding, false);
     prSounding = null;
+  }
+  if (prFileSounding) {
+    const { track, until } = prFileSounding;
+    prFileSounding = null;
+    // A hush takes every voice on the track, so only while nothing else is playing on it.
+    if (transport.paused && until - performance.now() / 1000 > PR_FILE_HUSH_SEC) {
+      api('POST', '/api/previewSlice', { trackId: track, stop: true }).catch(() => {});
+    }
   }
   prChordOff();
 }
@@ -4712,7 +4879,9 @@ function prPreviewChord(midis) {
 // switched off, and moving it around is no reason to hear it.
 function prPreviewNotes(notes) {
   const live = notes.filter((n) => !n.mute);
-  if (live.length) prPreview(Math.max(...live.map((n) => n.midi)));
+  if (!live.length) return;
+  const top = live.reduce((a, b) => (prRowOf(b) > prRowOf(a) ? b : a));
+  prPreview(prRowOf(top), top);
 }
 
 // Splits `roll(id, "notes", { … })`'s argument list at its first TOP-LEVEL comma - the id, then
@@ -5196,6 +5365,9 @@ function makeDefRegistry(opts) {
   /** Gives every un-named and un-defined one in the buffer a definition. True if it wrote. */
   function materialize() {
     if (isData('') === null || !labelsMod) return false; // can't yet tell a name from data
+    // ...or a new name from a library one. A definition written now would be written OVER the
+    // library's, empty, and shadow it from then on - so nothing is written until the list is in.
+    if (!prLibraryKnown) return false;
     const code = cm.getValue();
     // { id, scope } rather than a flat set of names: for a scoped kind the same name is free again
     // under a different plugin, and the definition written for it records which one it belongs to.
@@ -6523,25 +6695,40 @@ function makeNamePicker({
 }
 
 // The buffer's own definitions the editor can read; the prebake library it has to ask for.
+//
+// "In the library" is the server's `library` flag, NOT `layer === 'prebake'`: the layer says where a
+// name resolves, and a name some buffer also defines resolves to the buffer. Every saved song
+// carries its own copy of the packs it uses, so going by the layer made a starred pack drop out of
+// this list whenever one of those songs was the one evaluated - and the next buffer to say its name
+// was then taken to be naming a NEW pack, and had an empty definition written over the library's
+// (2026-09-20). `layer` is still read for a server that predates the flag.
+//
+// prLibraryKnown is the other half of that: until this has answered once, nobody knows what the
+// library holds, and "not known to be in the library" must never be read as "not in it" (see
+// materialize, which writes nothing until then, and evaluate, which waits for it).
+let prLibraryKnown = false;
+const inLibraryLayer = (r) => r.library ?? r.layer === 'prebake';
+
 function prRefreshRollList() {
-  api('GET', '/api/rolls')
+  return api('GET', '/api/rolls')
     .then((res) => {
-      const prebake = (list) => (list ?? []).filter((r) => r.layer === 'prebake').map((r) => String(r.id));
+      prLibraryKnown = true;
+      const prebake = (list) => (list ?? []).filter(inLibraryLayer).map((r) => String(r.id));
       prPrebakeRolls = prebake(res.rolls);
       prPrebakeShapes = prebake(res.shapes);
       // Presets carry the plugin they were captured from, since that is half of what names one
       // (see makeDefRegistry's scope) - so the library's entries keep it rather than flattening.
       prPrebakePresets = (res.presets ?? [])
-        .filter((r) => r.layer === 'prebake')
+        .filter(inLibraryLayer)
         .map((r) => ({ id: String(r.id), scope: String(r.plugin ?? '') }));
       prPrebakePacks = (res.packs ?? [])
-        .filter((r) => r.layer === 'prebake')
+        .filter(inLibraryLayer)
         .map((r) => ({ id: String(r.id), files: (r.files ?? []).map(String) }));
       prPrebakeSlices = (res.sliceSets ?? [])
-        .filter((r) => r.layer === 'prebake')
+        .filter(inLibraryLayer)
         .map((r) => ({ id: String(r.id), set: slicesMod ? slicesMod.normalizeSliceSet(r.set ?? []) : (r.set ?? []) }));
       prPrebakeAutos = (res.autos ?? [])
-        .filter((r) => r.layer === 'prebake')
+        .filter(inLibraryLayer)
         .map((r) => ({ id: String(r.id), points: Array.isArray(r.points) ? r.points : [] }));
       pinnedDefs = res.pinned ?? pinnedDefs; // the ★s every picker draws
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
@@ -7066,6 +7253,7 @@ function drawPianoKeys(ctx, col, m, info) {
 // file, and neither has black notes or a key.
 function drawIndexRows(ctx, col, m) {
   const { H, gridTop, rowH, laneTop } = m;
+  const labels = prIndexMode() ? prIndexLabels() : null; // file names, where the setting asks for them
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'right';
   ctx.fillStyle = col('--bg-panel');
@@ -7080,8 +7268,19 @@ function drawIndexRows(ctx, col, m) {
     ctx.strokeStyle = col('--border');
     ctx.lineWidth = 0.5;
     ctx.beginPath(); ctx.moveTo(0, y + rowH); ctx.lineTo(PR_GUTTER, y + rowH); ctx.stroke();
-    const marked = row % PR_INDEX_GROUP === 0;
+    // Every fourth NUMBER is called out so a row can be counted to. A name needs no counting - it
+    // says which row it is - so under names every row is set the same.
+    const marked = !labels && row % PR_INDEX_GROUP === 0;
     ctx.font = `${marked ? '600 ' : ''}9px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    if (labels) {
+      // The file this row PLAYS: an index past the pack's last file wraps round it (see
+      // playSample), so those rows repeat the names from the top. All in the numbered rows' own
+      // gray - the gutter is a ruler, and the notes beside it are what should catch the eye.
+      ctx.fillStyle = col('--text-dim');
+      ctx.textAlign = 'left';
+      ctx.fillText(prFitText(ctx, labels[row % labels.length], PR_GUTTER - 10), 5, y + rowH / 2 + 0.5);
+      continue;
+    }
     ctx.fillStyle = col(marked ? '--text' : '--text-dim');
     ctx.fillText(String(row), PR_GUTTER - 5, y + rowH / 2 + 0.5);
   }
@@ -9381,9 +9580,10 @@ function prCursorFor(px, py, m, velMod) {
     if (prTool === 'draw') return CUR_PENCIL; // ...and the pencil paints values across it
     return prLaneNoteAt(px, py, m) ? CUR_UPDOWN : 'default';
   }
-  // The gutter: the keyboard half plays on a click (and zooms once dragged - see the press), a
-  // numbered one only zooms.
-  if (px < PR_GUTTER) return prNoteMode() ? 'pointer' : CUR_ZOOM;
+  if (prGutterEdgeAt(px, py, m)) return 'col-resize'; // the names gutter's edge (see prSetNamesWidth)
+  // The gutter: a row plays on a click where there is something to play it as (and zooms once
+  // dragged - see the press); otherwise it only zooms.
+  if (px < PR_GUTTER) return prNoteMode() || prState.chain?.ref ? 'pointer' : CUR_ZOOM;
   // With the bend overlay up the grid is the curve's: a breakpoint (or the curve itself) drags,
   // and everywhere else places a point.
   if (prBendOn) {
@@ -9771,7 +9971,7 @@ function initPianorollCanvas() {
   // the panel simply being shown. (While it's hidden the callback sees zero and waits.)
   new ResizeObserver(prSizeCanvas).observe(prCanvas);
 
-  let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'lane'|'marquee'|'loop'|'nav'|'audition', ... }
+  let drag = null; // { kind: 'create'|'move'|'resize'|'vel'|'lane'|'marquee'|'loop'|'nav'|'audition'|'gutterW', ... }
   const snapshotPos = () => [...prState.sel].map((n) => ({ n, start: n.start, row: prRowOf(n) }));
   const snapshotLen = () => [...prState.sel].map((n) => ({ n, len: n.len }));
   // Raise the dragged notes over whatever they land on - but only once the drag has actually moved
@@ -9822,6 +10022,8 @@ function initPianorollCanvas() {
     const m = prMetrics();
     const { px, py } = prCanvasPos(e);
     prPointer = { px, py };
+    // The names gutter's edge, before anything either side of it gets the press.
+    if (prGutterEdgeAt(px, py, m)) { drag = { kind: 'gutterW' }; return; }
     // What a keyboard zoom aims at from here (see prZoomFocusPx): the cell this gesture is on,
     // recorded once for every kind of gesture there is.
     if (px >= PR_GUTTER) prState.focusCell = prCellFloat(px, m);
@@ -9934,7 +10136,7 @@ function initPianorollCanvas() {
       // the ordinary answer: the note sounds on the press, and the first real travel takes it back
       // and starts zooming (see the move). A modifier would have been the other answer, and the
       // wrong one - a magnifier nobody can find by dragging the thing is a magnifier nobody finds.
-      const plays = prNoteMode() && pos <= prState.pitchTop && pos >= m.bottomPos;
+      const plays = pos <= prState.pitchTop && pos >= m.bottomPos;
       drag = {
         kind: plays ? 'audition' : 'vnav',
         pos, x0: px, y0: py, lx: px, ly: py, gx: 0, gy: 0, vz0: m.vzoom, gate: axisGateState(),
@@ -9988,7 +10190,7 @@ function initPianorollCanvas() {
       prState._dragCols = m.cols; // see the move/resize drags above
       prState._dragMin = m.minCell;
       prResolveOverlaps(); // pushed last, so it takes the lane from whatever was under the pencil
-      prPreview(nt.midi);
+      prPreview(prRowOf(nt), nt);
     } else {
       prState.sel = new Set(); // click in the dimmed area outside the loop window - just clear selection
       prResolveOverlaps();
@@ -10013,6 +10215,8 @@ function initPianorollCanvas() {
       drag.gx += g.dx; drag.gy += g.dy;
       prState.zoom = Math.min(PR_MAX_ZOOM, Math.max(1, drag.zoom0 * Math.exp(drag.gy * NAV_ZOOM_PER_PX)));
       prState.scrollCells = drag.cell - (drag.x0 + drag.gx - PR_GUTTER) / prMetrics().cellW; // clamped on the next prMetrics
+    } else if (drag.kind === 'gutterW') {
+      prSetNamesWidth(px);
     } else if (drag.kind === 'audition') {
       // Travelled far enough to have meant it: this was a magnifier drag all along. The note being
       // auditioned goes quiet, and the zoom measures from HERE rather than from the press, so the
@@ -10183,7 +10387,7 @@ function initPianorollCanvas() {
       else if (drag.kind === 'bendGroup') { if (drag.mid) prBendCommit(); }
       else if (drag.kind === 'bendPoint' || drag.kind === 'bendCurve') { prBendCommit(); }
       else if (drag.kind === 'paint') { if (drag.painted) prWriteNow(); }
-      else if (!['audition', 'nav', 'vnav'].includes(drag.kind)) { // (a magnifier drag moved the view, not the music)
+      else if (!['audition', 'nav', 'vnav', 'gutterW'].includes(drag.kind)) { // (a magnifier drag moved the view, not the music)
         prResolveOverlaps(); // already resolved live on every frame; the notes stay selected, so nothing settles yet
         prWriteNow();
       }
@@ -13703,6 +13907,11 @@ async function evaluate(start, { byHand = false } = {}) {
   // has no files yet, so it plays silence - and the one thing you want at that moment is the
   // panel to fill it. Noted before materialize writes the definitions and opened once the eval
   // is away, so the prompt never sits between the keystroke and the sound.
+  // The one thing allowed in front of an eval: an editor that has not yet heard what the library
+  // holds (a page still loading, a server that was restarting when it asked) asks again and waits,
+  // since materialize below decides what every un-defined name MEANS from that list. Once, in
+  // practice - after the first answer this is a flag test.
+  if (!prLibraryKnown) await prRefreshRollList();
   const packsBefore = new Set(packDefs.defsInBuffer().map((d) => d.id));
   for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset()/sp() gets its definition first
   openBareGroups(byHand); // `drums: group()` grows its braces - and, by hand, the cursor goes inside them
@@ -13741,6 +13950,9 @@ async function evaluate(start, { byHand = false } = {}) {
     renderTracks(result);
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
     refoldAll();
+    // A pack's file list is the buffer's to change (a `_pack()` line), and an eval is when it does.
+    prNamesStale();
+    if (prState && prNamesWanted()) prIndexLabels(); // re-asks now; redraws only if the list changed
     if (start) playing = true; // Update keeps the current play state; Play begins it
     const nActive = result.tracks.filter((t) => t.active).length;
     logLine(`${start ? 'playing' : 'updated'} (${nActive}/${result.tracks.length} pattern(s))`);
@@ -15010,6 +15222,11 @@ docTooltipsToggle.addEventListener('change', () => setDocTooltips(docTooltipsTog
 const kbLayoutSelect = document.getElementById('kbLayoutSelect');
 kbLayoutSelect.value = kbLayout;
 kbLayoutSelect.addEventListener('change', () => setKbLayout(kbLayoutSelect.value));
+
+// Piano roll: whether the index axis names its rows (see prIndexLabels).
+const prIndexNamesToggle = document.getElementById('prIndexNamesToggle');
+prIndexNamesToggle.checked = prIndexNamesOn;
+prIndexNamesToggle.addEventListener('change', () => setPrIndexNames(prIndexNamesToggle.checked));
 
 
 // Sample-library folder. The saved folder is what `s(...)` reads packs from; when

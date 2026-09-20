@@ -27,7 +27,7 @@ test('_pack files a list of paths under a name, in the order given', () => {
   fresh();
   _pack('kit', ['drums/kick.wav', '/abs/snare.wav', 'hats']);
   assert.deepEqual(lookupPack('kit'), { files: ['drums/kick.wav', '/abs/snare.wav', 'hats'] });
-  assert.deepEqual(packIds(), [{ id: 'kit', layer: 'buffer' }]);
+  assert.deepEqual(packIds(), [{ id: 'kit', layer: 'buffer', library: false }]);
 });
 
 test('a single string, an empty list and blanks are all tolerated', () => {
@@ -74,12 +74,33 @@ test('the buffer layer shadows prebake, and clearing the buffer uncovers it agai
   setRollLayer('buffer');
   _pack('kit', ['mine.wav']);
   assert.deepEqual(lookupPack('kit').files, ['mine.wav']);
-  assert.deepEqual(packIds(), [{ id: 'kit', layer: 'buffer' }]);
+  assert.deepEqual(packIds(), [{ id: 'kit', layer: 'buffer', library: true }]);
   const had = clearRolls('buffer');
   assert.deepEqual(lookupPack('kit').files, ['lib.wav']);
-  assert.deepEqual(packIds(), [{ id: 'kit', layer: 'prebake' }]);
+  assert.deepEqual(packIds(), [{ id: 'kit', layer: 'prebake', library: true }]);
   restoreRolls(had, 'buffer');
   assert.deepEqual(lookupPack('kit').files, ['mine.wav']);
+});
+
+// The bug this pins (2026-09-20): every saved song carries its own copy of the packs it plays, and
+// the id list used to say only where a name RESOLVES. So while such a song was the one evaluated,
+// a starred pack was reported as a buffer pack and nothing more - the editor's library list dropped
+// it, and the next buffer to say the name had an EMPTY definition written over the library's. What
+// the library holds is its own question, with its own answer, and its own copy to read.
+test('a library pack some buffer also defines is still reported as in the library, with its own files', () => {
+  fresh();
+  setRollLayer('prebake');
+  _pack('hats', ['lib1.wav', 'lib2.wav']);
+  setRollLayer('buffer');
+  _pack('hats', []); // the stub - or any song's own copy
+  _pack('mine', ['a.wav']);
+  assert.deepEqual(packIds(), [
+    { id: 'hats', layer: 'buffer', library: true },
+    { id: 'mine', layer: 'buffer', library: false },
+  ]);
+  assert.deepEqual(lookupPack('hats').files, [], 'the buffer still wins at play time');
+  assert.deepEqual(lookupPack('hats', 'prebake').files, ['lib1.wav', 'lib2.wav'], 'and the library copy is still there to be read');
+  assert.equal(lookupPack('mine', 'prebake'), null);
 });
 
 test('sp() is a sampler whose step values are pack names', () => {

@@ -211,7 +211,7 @@ test('a tone read from past the float32 phase cliff comes back as a tone, not al
     const outPath = path.join(dir, 'render.wav');
     // dur is what Node sends for this window: its natural length at speed 1 (see playSample),
     // which is what makes the def's step exactly FILE_SR/RENDER_SR frames per output sample.
-    const dur = (FRAMES - 1 - START_FRAME) / FILE_SR;
+    const dur = (FRAMES - START_FRAME) / FILE_SR;
     const script = `(
 var toStereo, sampleDef, songDef;
 ${scoreProgram()}

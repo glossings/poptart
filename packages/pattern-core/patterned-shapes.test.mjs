@@ -166,8 +166,8 @@ test('shapeIds lists what is playable, buffer first', () => {
   setRollLayer('buffer');
   _shape('mine', '0,0 1,1');
   assert.deepEqual(shapeIds(), [
-    { id: 'mine', layer: 'buffer' },
-    { id: 'library', layer: 'prebake' },
+    { id: 'mine', layer: 'buffer', library: false },
+    { id: 'library', layer: 'prebake', library: true },
   ]);
   clearRolls('prebake');
 });
