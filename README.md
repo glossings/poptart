@@ -42,7 +42,10 @@ editor — no Electron). See [ARCHITECTURE.md](ARCHITECTURE.md) for the long ver
 - **Node 20+**
 - **SuperCollider** — `brew install --cask supercollider` on macOS. poptart finds `sclang` at the
   standard install location by itself; if yours lives elsewhere, set
-  `POPTART_SCLANG=/full/path/to/sclang`.
+  `POPTART_SCLANG=/full/path/to/sclang`. Don't have it and don't want to install it system-wide?
+  poptart will offer to download its own copy into `~/.poptart/sc` — no admin rights, nothing
+  else on the machine touched, `rm -rf ~/.poptart/sc` to undo. See
+  [SETUP.md](SETUP.md#where-supercollider-comes-from).
 - **The VSTPlugin server extension** — installed for you on first run (downloaded, checksum-verified
   and unzipped into SuperCollider's `Extensions` folder). Manual install: see
   [SETUP.md](SETUP.md).
@@ -57,7 +60,8 @@ npm run dev     # starts the server; it spawns sclang itself
 ```
 
 Then open <http://localhost:4000>. The first run prints a short setup report (SuperCollider found?
-VSTPlugin installed? anything known to wreck a boot?) before the engine comes up.
+VSTPlugin installed? anything known to wreck a boot?) before the engine comes up. If that report
+ever disagrees with what you expected, `npm run doctor` explains every path it chose.
 
 1. Click **rescan** to scan your installed plugins. Click a result to copy its exact name — that's
    the string `.synth()` and `.fx()` want.

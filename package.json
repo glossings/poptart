@@ -4,11 +4,14 @@
   "version": "0.1.0",
   "description": "A Strudel-flavored livecoding environment that hosts real VST/AU plugins as instruments and effects, with continuous parameter modulation.",
   "workspaces": [
-    "packages/*"
+    "packages/osc-engine",
+    "packages/pattern-core",
+    "packages/web-app"
   ],
   "scripts": {
     "dev": "npm run dev --workspace packages/web-app",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "doctor": "node packages/osc-engine/doctor.js"
   },
   "engines": {
     "node": ">=20"

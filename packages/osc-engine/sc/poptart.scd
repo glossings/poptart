@@ -84,6 +84,12 @@ var maxBusSends = 4; // a track can send to this many named buses at once (Sig#b
 // scsynth's own port, overridable so a second poptart stack (tests, parallel session) doesn't
 // collide with a running one on the default 57110.
 var scsynthPort = ("POPTART_SCSYNTH_PORT".getenv ? "57110").asInteger;
+// Where scsynth looks for UGen plugins, set only when poptart is running its own private
+// SuperCollider (see private-sc.js): the copy's own plugins folder plus poptart's private
+// Extensions, split on the platform's path delimiter - ':' on macOS/Linux, ';' on Windows,
+// which is why this can't use $: like the VST dirs above (a Windows path is full of colons).
+// Unset - the normal system-install case - leaves scsynth's default search alone.
+var ugenPlugins = "POPTART_UGEN_PLUGINS".getenv !? { |p| p.split(Platform.pathDelimiter) };
 var server = Server(\poptart, NetAddr("127.0.0.1", scsynthPort), Server.default.options);
 var nodeAddr = NetAddr("127.0.0.1", nodePort);
 // trackId (Symbol) -> (def:, group:, synth:, controllers:, loaded:, lfos:, envs:, held:).
@@ -1116,6 +1122,14 @@ server.options.numOutputBusChannels = max(2, outChannels);
 // s("...")). The table itself is only a few hundred bytes per slot (the audio lives in separate
 // allocations made at read time), so size it for a whole library rather than one pack.
 server.options.numBuffers = 16384;
+// Private SuperCollider only. This becomes scsynth's -U, which REPLACES the default plugin
+// search rather than adding to it, so the list has to carry the SC build's own plugins folder
+// as well as poptart's Extensions - without the former there would be no SinOsc, let alone
+// VSTPlugin.
+if (ugenPlugins.notNil and: { ugenPlugins.isEmpty.not }) {
+    server.options.ugenPluginsPath = ugenPlugins;
+    "poptart: private UGen plugin path: %".format(ugenPlugins.join(", ")).postln;
+};
 
 // Second boot-progress checkpoint (see "engine script running" above) - also puts the exact
 // boot config into the log, so a failure report carries it and the README's IDE-replay

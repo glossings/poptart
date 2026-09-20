@@ -43,15 +43,32 @@ const defaultKill = (pid, signal) => process.kill(pid, signal);
 
 // The only command names we will ever kill. A remembered pid that now names anything else has
 // been recycled and is somebody else's process. dns-sd is the Bonjour announcer of the OSC
-// input port (see bonjour.js) - ours only while it is the pid we wrote down.
-const OURS = /^(sclang|scsynth|supernova|dns-sd)$/;
+// input port (see bonjour.js) - ours only while it is the pid we wrote down. The optional .exe
+// is Windows, where the image name carries its extension.
+const OURS = /^(sclang|scsynth|supernova|dns-sd)(\.exe)?$/i;
 
 /**
- * The command of a running pid as `ps` reports it - the full path it was launched with - or null
- * when it isn't running (or can't be read).
+ * The command of a running pid as the OS reports it - the full path it was launched with - or
+ * null when it isn't running (or can't be read).
+ *
+ * Windows has no `ps`, and returning null there would have made every reap a silent no-op: the
+ * pidfile is written, the next boot reads it, and isOurProcess() answers "not ours" for a
+ * perfectly live scsynth. `tasklist` is the equivalent, and is present on every supported
+ * Windows. It prints a CSV row per match and, unhelpfully, exits 0 with an INFO line when
+ * nothing matched - hence parsing the image name out rather than trusting the exit code.
  */
 function commandName(pid) {
+  if (!Number.isInteger(Number(pid))) return null;
   try {
+    if (process.platform === 'win32') {
+      const out = execFileSync(
+        'tasklist',
+        ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'],
+        { encoding: 'utf8', timeout: 5000, windowsHide: true },
+      );
+      const match = out.match(/^"([^"]+)"/m);
+      return match ? match[1] : null;
+    }
     return execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', timeout: 5000 }).trim();
   } catch {
     return null; // no such process - ps exits non-zero
@@ -67,7 +84,8 @@ function commandName(pid) {
 function isOurProcess(pid, { comm = commandName } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   const name = comm(pid);
-  return !!name && OURS.test(name.split('/').pop());
+  // Split on both separators: `ps` reports the launch path, and a Windows one uses backslashes.
+  return !!name && OURS.test(name.split(/[/\\]/).pop());
 }
 
 /**
@@ -136,8 +154,41 @@ function reapOrphanedEngine({ file, comm = commandName, kill = defaultKill } = {
   return killed;
 }
 
+/**
+ * Every recorded stack whose processes are still alive, as
+ * `[{ file, pids: { sclang, scsynth, ... } }]`.
+ *
+ * The difference between "an orphan from a crashed run" and "the poptart you have open in
+ * another terminal" is exactly this: a live stack still has its pidfile, because the pidfile is
+ * only cleared on a clean shutdown or by the next boot that reaps it. Setup uses this to decide
+ * what to advise - telling someone to `pkill sclang` when the thing they are seeing is their own
+ * running session is advice that kills their work.
+ *
+ * Read-only: it never kills or clears anything.
+ */
+function liveEngineStacks({ dir = path.join(os.homedir(), '.poptart'), comm = commandName } = {}) {
+  let names;
+  try {
+    names = fs.readdirSync(dir).filter((n) => /^engine-\d+\.pid$/.test(n));
+  } catch {
+    return []; // no state directory yet
+  }
+  const live = [];
+  for (const name of names) {
+    const file = path.join(dir, name);
+    const pids = readEnginePids({ file });
+    const alive = {};
+    for (const [proc, pid] of Object.entries(pids)) {
+      if (isOurProcess(pid, { comm })) alive[proc] = pid;
+    }
+    if (Object.keys(alive).length) live.push({ file, pids: alive });
+  }
+  return live;
+}
+
 module.exports = {
   pidfilePath,
+  liveEngineStacks,
   commandName,
   isOurProcess,
   recordEnginePids,

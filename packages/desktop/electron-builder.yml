@@ -1,0 +1,94 @@
+# Packaging config for the desktop builds (PACKAGING.md, Stage 2).
+#
+# NOT YET RUN. The shell itself works - main.js starts the server and points a window at it, and
+# server-process.js is unit-tested - but no installer has been produced from this file, so treat
+# every path and glob below as a first draft to be corrected on the first real build rather than
+# as something known to work. The build also needs Apple Developer credentials it cannot be given
+# here (see "Signing" below), so a first pass will produce an unsigned app.
+#
+# The app directory is the repository root, not this folder: poptart is an npm workspace, so the
+# server's own package (`packages/web-app`) and the engine (`packages/osc-engine`) live outside
+# this directory and electron-builder's `files` globs cannot reach above the app root. Pointing
+# the app root at the repository and naming this file's entry point through `extraMetadata.main`
+# is what lets one archive contain all of it with the require() paths unchanged.
+
+appId: dev.glossing.poptart
+productName: poptart
+copyright: poptart contributors
+
+directories:
+  app: ../..
+  output: packages/desktop/dist
+  buildResources: packages/desktop/build
+
+# The root package.json has no `main` and no electron dependency (deliberately - see README.md),
+# so both are supplied here.
+extraMetadata:
+  main: packages/desktop/main.js
+electronVersion: 34.0.0
+
+files:
+  - "package.json"
+  - "packages/desktop/main.js"
+  - "packages/desktop/server-process.js"
+  - "packages/desktop/loading.html"
+  - "packages/desktop/package.json"
+  - "packages/web-app/**/*"
+  - "packages/pattern-core/**/*"
+  - "packages/osc-engine/**/*"
+  - "node_modules/**/*"
+  # Tests, build scripts and the C++/Swift sources of the native helpers are not needed at
+  # runtime; the built binaries in native/*/bin are (see below).
+  - "!**/*.test.js"
+  - "!**/node_modules/.cache"
+  - "!packages/osc-engine/native/**/build/**"
+  - "!packages/desktop/dist/**"
+
+asar: true
+asarUnpack:
+  # Anything that has to exist as a real file on disk rather than inside the asar archive:
+  # binaries that get executed, and the SuperCollider extension that scsynth loads by path.
+  - "packages/osc-engine/native/**"
+  - "packages/osc-engine/sc/**"
+
+mac:
+  category: public.app-category.music
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  # scsynth opens the audio device for input as well as output, which macOS treats as microphone
+  # access - without this key the prompt cannot be shown and the engine fails to boot.
+  extendInfo:
+    NSMicrophoneUsageDescription: poptart's audio engine opens your audio device, which macOS counts as microphone access.
+    NSAudioCaptureUsageDescription: poptart's audio engine opens your audio device for input as well as output.
+  # Signing: poptart's own native helpers (native/bin/poptart-audio, native/link/bin/poptart-link,
+  # native/rubberband/bin/PoptartPitchShift.scx) are ad-hoc signed today and must be re-signed
+  # with a Developer ID for distribution. hardenedRuntime + these entitlements are what SC's own
+  # binaries ship with, and disable-library-validation is not optional: loading third-party VSTs
+  # is the point of the program.
+  hardenedRuntime: true
+  entitlements: packages/desktop/build/entitlements.mac.plist
+  entitlementsInherit: packages/desktop/build/entitlements.mac.plist
+  # Left unset on purpose: with no identity electron-builder produces an unsigned app, which is
+  # the right default until there is an Apple Developer account to sign with. Set CSC_LINK /
+  # CSC_KEY_PASSWORD in CI to sign, and see PACKAGING.md for notarization.
+  identity: null
+
+dmg:
+  artifactName: poptart-${version}-${arch}.dmg
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: poptart-${version}-setup.exe
+
+# SuperCollider is NOT bundled. The app fetches SuperCollider's own officially signed release on
+# first run instead (osc-engine/private-sc.js), which keeps this download small and means we are
+# not redistributing and re-signing another project's binaries. PACKAGING.md Stage 2 discusses
+# the alternative.

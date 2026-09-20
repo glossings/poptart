@@ -67,11 +67,13 @@ engine) does:
   `sclang`/`scsynth` processes holding ports or the audio device (warn + name the pkill,
   don't kill — it could be a deliberately open SC IDE).
 
-## Stage 1.5 (parked, 2026-07-30) — a private SuperCollider, fetched by setup
+## Stage 1.5 ✅ — a private SuperCollider, fetched by setup
 
-Considered and deliberately not built yet: setup could also fetch SuperCollider itself, making
-poptart clone → run with zero manual steps and nothing installed system-wide. Recorded here
-because the reasoning changes how Stage 2 should be approached if it ever happens:
+Setup can now fetch SuperCollider itself, making poptart clone → run with zero manual steps and
+nothing installed system-wide. `packages/osc-engine/private-sc.js` holds all of it: the pinned
+release, the install, the generated class-library config and the consent rules. `doctor.js`
+reports what it resolved, `private-sc.test.js` verifies it, and the resolution order and
+Extensions destination are threaded through `index.js` and `setup.js`.
 
 - **A private copy, not a system install.** The target is `~/.poptart/sc/<version>/`, not
   `/Applications` or `Program Files`: no admin rights, no Homebrew, nothing for an existing SC
@@ -92,20 +94,30 @@ because the reasoning changes how Stage 2 should be approached if it ever happen
     folder, a VSTPlugin build that doesn't match the SC it sits under, and the stale `sclang`
     symlink (a private copy is resolved by full path, never through PATH).
   - What it does not remove: sclang still runs the user's own `startup.scd` before poptart's
-    script, and `-l` has no say over that. Needs its own answer.
-  - To confirm on the first build, not assumed: that `excludeDefaultPaths` drops the user and
-    system Extensions as well as the default class library, and that the generated conf's
-    paths survive spaces on both platforms.
-- **How it gets verified.** Everything short of sound is checkable without a person: the
-  install root is injectable, so a test can run the real download → checksum → unpack →
-  generate conf → spawn `sclang -l` sequence into a temp dir (one with a space in its name)
-  and assert that the class library compiles, VSTPlugin is found, and the user's own
-  Extensions are not. A GitHub Actions job runs that on `windows-latest` and `macos-latest`
-  (free on a public repo), which is what makes the Windows half buildable without a Windows
-  machine to hand. Runners have no audio device, so the last step stays human on each
-  platform: boot the engine from the private copy, scan, play a plugin, open its editor. A
-  `doctor` script that writes the resolved paths, the generated conf, the Extensions listing
-  and the head of the sclang log to one file keeps that to a single round trip.
+    script, and `-l` has no say over that. Confirmed in 3.14.1's `Platform.sc` —
+    `loadStartupFiles` reads `userConfigDir +/+ "startup.scd"` unconditionally, and
+    `userConfigDir` is a primitive over the home directory. So it stays a preflight warning.
+  - **Confirmed, not assumed** (2026-09-20, macOS, against the real 3.14.1 artifacts):
+    `excludeDefaultPaths: true` does drop the user Extensions — the test's canary is that a
+    machine with VSTPlugin installed in `~/Library/.../Extensions` boots the private sclang and
+    gets `nil` for `\VSTPlugin.asClass`, then resolves it once the same extension is installed
+    privately. Paths with spaces survive: the config is written in single-quoted YAML, where
+    the only escape is `''`, so a space is a space and a Windows backslash is not an escape
+    (double quotes would have mangled `C:\Users\…`). Also confirmed: `ugenPluginsPath` becomes
+    scsynth's `-U`, which *replaces* the default search, so the list must carry the SC build's
+    own `plugins` directory as well as ours.
+- **How it gets verified.** Everything short of sound is checkable without a person, and is:
+  `private-sc.test.js` runs the real download → checksum → unpack → generate conf → spawn
+  `sclang -l` sequence into a temp directory with a space in its name and asserts the class
+  library compiled from the private copy, that the machine's own Extensions are invisible, and
+  that VSTPlugin resolves once installed privately. It is opt-in via `POPTART_SC_INSTALL_TEST=1`
+  so an ordinary `npm test` doesn't pull 139–250 MB; `.github/workflows/private-sc.yml` sets it
+  and runs the job on `windows-latest` and `macos-latest` (free on a public repo), which is what
+  makes the Windows half buildable without a Windows machine to hand. Runners have no audio
+  device, so the last step stays human on each platform: boot the engine from the private copy,
+  scan, play a plugin, open its editor. `doctor.js` writes the resolved paths, the generated
+  conf, the Extensions listing and sclang's own report to one file, keeping that to a single
+  round trip.
 - **Resolution order** becomes `POPTART_SCLANG` → private copy → PATH → standard install
   location. An existing system SC keeps working untouched; the private copy only exists once
   someone has opted into the download.
@@ -126,28 +138,51 @@ because the reasoning changes how Stage 2 should be approached if it ever happen
   scsynth). poptart already runs on Windows from a standard SC install (`sclang.exe` found in
   `Program Files`, pinned win64 VSTPlugin build), so the zip is the same binaries in a
   different folder.
-- **Why parked**: current audience is terminal-comfortable, and setup already prints the exact
-  install command when SC is missing — one manual step, zero maintenance. Also, silently
-  dropping a 140-250 MB download from a dev script needs a consent prompt (y/N in terminal or
-  `POPTART_INSTALL_SC=1`), which is design work.
-- **Un-park trigger** (same as Stage 2's): someone who won't open a terminal wants poptart —
-  a workshop, a musician friend, a residency — or someone who can't install system-wide (no
-  admin rights, a locked-down machine). Then build this before reaching for Electron.
+- **Consent, because it is a 139-250 MB download.** Nothing is fetched on a script's own
+  initiative: `POPTART_INSTALL_SC` settles it outright (`1` installs even when a system SC
+  exists, `0` never), otherwise an interactive terminal is asked y/N, and with no terminal and
+  no variable the answer is no — with the variable named, so it can be made yes. An existing
+  SuperCollider is left alone by default; the private copy is for people who don't have one or
+  can't install one.
+- **Old copies are cleaned up on a version bump**, and only then: after a new install has been
+  verified runnable, sibling version directories are deleted. Nothing sweeps in the background,
+  so there is always a working copy at the moment anything is removed. Two guards — only
+  directories named like a version are candidates, which is what keeps the shared (deliberately
+  unversioned) `Extensions` folder safe, and a copy `POPTART_SCLANG` points at is never touched.
+- **Windows gaps closed along the way.** Orphan reaping was a silent no-op on Windows: it reads
+  a pid's command name to make sure a recycled pid isn't killed by mistake, and did that with
+  `ps`, which Windows has not got — so every reap answered "not ours" for a live scsynth.
+  `tasklist` is the equivalent and is now used on win32, in both the reaper and setup's
+  preflight. This matters more under the desktop shell, where Windows cannot deliver the SIGINT
+  that shuts the engine down gracefully.
 
-## Stage 2 — the dmg: Electron + bundled SuperCollider
+## Stage 2 (in progress) — the dmg: Electron
 
 The "double-click and you're livecoding" build. No research risk — Sonic Pi has proven every
-piece — but real distribution mechanics:
+piece — but real distribution mechanics.
+
+**What exists** (`packages/desktop/`): the shell itself. `main.js` makes sure there is a
+SuperCollider, starts `packages/web-app/server.js` unchanged as a child process on a free
+loopback port, and points a `BrowserWindow` at it; `server-process.js` holds the supervision
+(port, readiness, shutdown) and is unit-tested; `loading.html` is what the window shows while
+the engine comes up. The package is deliberately **outside** the npm workspaces so a plain
+`npm install` doesn't pull ~200 MB of Electron on people who only want `npm run dev`.
+
+**What does not exist yet**: any actual installer. `electron-builder.yml` is written but has
+never been run, so its globs are a first draft; and nothing is signed. Both are the next step.
 
 - **Electron shell.** The web-app is a plain Node server + browser page, which is the easy
-  case: main process runs `server.js` basically unchanged, window loads `localhost`. Keep the
-  page browser-compatible (no Electron-only APIs in the UI) so `npm run dev` in a browser
-  keeps working for development.
-- **Bundle SC in `Resources/`**: `sclang`, `scsynth`, class library, plugins dir, plus a
-  bundled `sclang_conf.yaml` whose include paths point at a bundled Extensions folder with
-  VSTPlugin already in it. `POPTART_SCLANG`-style override already exists, so pointing the
-  engine at the bundled copy is small. This *removes* whole failure classes (symlinks,
-  version mismatches, manual Extensions surgery) because we control every path.
+  case. Keep the page browser-compatible (no Electron-only APIs in the UI) so `npm run dev` in
+  a browser keeps working for development. Two things the shell must not get wrong, both
+  covered by tests: the server is forced to `127.0.0.1` regardless of `POPTART_HOST` (it evals
+  arbitrary JS — Stage 0), and quitting signals the server so sclang can stop scsynth, rather
+  than orphaning the process that holds the audio device.
+- **SuperCollider is fetched, not bundled** — Stage 1.5 does this already, so the app reuses it
+  instead of embedding a 556 MB `SuperCollider.app`. The user's own machine downloads
+  SuperCollider's officially signed release, which keeps the installer small and means we are
+  not redistributing and re-signing another project's binaries. The GUI equivalent of the
+  terminal's y/N is a dialog on first run. The bundled-SC alternative is still written up below,
+  because it is what a fully offline installer would need.
 - **Signing & notarization (the genuinely annoying part — and not optional).** Since macOS
   Sequoia there is no right-click → Open bypass for unsigned apps; users must dig through
   System Settings → Privacy & Security → "Open Anyway", which is *worse* UX than the

@@ -28,6 +28,43 @@ function tmpPidfile() {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-orphans-')), 'engine.pid');
 }
 
+// A state directory holding one pidfile per named stack, the way ~/.poptart does.
+function tmpStateDir(stacks) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-stacks-'));
+  for (const [port, pids] of Object.entries(stacks)) {
+    orphans.recordEnginePids(pids, { file: path.join(dir, `engine-${port}.pid`) });
+  }
+  return dir;
+}
+
+test('liveEngineStacks() finds a running poptart, so setup can say so instead of advising a kill', () => {
+  const dir = tmpStateDir({ 57140: { sclang: 100, scsynth: 101 } });
+  const live = orphans.liveEngineStacks({ dir, comm: table({ 100: 'sclang', 101: 'scsynth' }) });
+  assert.equal(live.length, 1);
+  assert.deepEqual(live[0].pids, { sclang: 100, scsynth: 101 });
+});
+
+test('liveEngineStacks() ignores a stale pidfile whose processes are gone', () => {
+  // This is the difference that matters: nothing alive means the leftovers really are orphans,
+  // and the pkill advice is correct. Something alive means it is somebody's session.
+  const dir = tmpStateDir({ 57140: { sclang: 100, scsynth: 101 } });
+  assert.deepEqual(orphans.liveEngineStacks({ dir, comm: table({}) }), []);
+  // ...and a recycled pid now belonging to something else is not ours either.
+  assert.deepEqual(orphans.liveEngineStacks({ dir, comm: table({ 100: 'Google Chrome' }) }), []);
+});
+
+test('liveEngineStacks() reports each stack separately and skips unrelated files', () => {
+  const dir = tmpStateDir({ 57140: { sclang: 100 }, 57240: { sclang: 200 } });
+  fs.writeFileSync(path.join(dir, 'settings.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'engine-notaport.pid'), '{"sclang":300}');
+  const live = orphans.liveEngineStacks({ dir, comm: table({ 100: 'sclang', 200: 'sclang', 300: 'sclang' }) });
+  assert.equal(live.length, 2, 'only engine-<port>.pid files count');
+});
+
+test('liveEngineStacks() on a machine with no state directory is empty, not an error', () => {
+  assert.deepEqual(orphans.liveEngineStacks({ dir: path.join(os.tmpdir(), 'poptart-nope-nope') }), []);
+});
+
 test('isOurProcess() accepts only live sclang/scsynth pids', () => {
   const comm = table({ 100: 'sclang', 101: '/usr/local/bin/scsynth', 102: 'supernova', 103: 'Google Chrome' });
   assert.equal(orphans.isOurProcess(100, { comm }), true);

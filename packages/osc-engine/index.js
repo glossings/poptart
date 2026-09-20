@@ -22,7 +22,15 @@ const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, kill
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
-const { ensurePoptartExtension } = require('./extensions');
+const { ensurePoptartExtension, userExtensionsDir } = require('./extensions');
+const {
+  privateScInstalled,
+  privateSclangPath,
+  privateExtensionsDir,
+  privateUgenPluginsPath,
+  isPrivateSclang,
+  writeSclangConf,
+} = require('./private-sc');
 const { advertiseOsc } = require('./bonjour');
 
 // Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
@@ -74,11 +82,14 @@ function onPath(name) {
 }
 
 // Decide which sclang to spawn. Priority: explicit POPTART_SCLANG override (points straight at a
-// binary, no PATH surgery needed), then a bare `sclang` when it's actually on PATH (let spawn
-// resolve it normally), then the platform's standard install location. Falls back to 'sclang' so
-// a genuine "not installed" still fails with the binary named in the error.
+// binary, no PATH surgery needed), then poptart's own private copy if one has been fetched (see
+// private-sc.js - it outranks the system install because it is the one whose class library and
+// Extensions we control), then a bare `sclang` when it's actually on PATH (let spawn resolve it
+// normally), then the platform's standard install location. Falls back to 'sclang' so a genuine
+// "not installed" still fails with the binary named in the error.
 function resolveSclangPath() {
   if (process.env.POPTART_SCLANG) return process.env.POPTART_SCLANG;
+  if (privateScInstalled()) return privateSclangPath();
   if (onPath('sclang')) return 'sclang';
   for (const loc of knownSclangLocations()) {
     try {
@@ -91,10 +102,38 @@ function resolveSclangPath() {
   return 'sclang';
 }
 
+// Is the sclang we would spawn poptart's private copy? When it is, every SC path moves inside
+// `~/.poptart/sc` - the class library, the Extensions, the UGen plugins - and the machine's own
+// SuperCollider directories stop being consulted at all (see private-sc.js).
+function usingPrivateSc() {
+  return isPrivateSclang(resolveSclangPath());
+}
+
+// The SC Extensions directory poptart installs into: its own when the private copy is in use,
+// the platform's user-level one otherwise.
+function activeExtensionsDir() {
+  return usingPrivateSc() ? privateExtensionsDir() : userExtensionsDir();
+}
+
 // Where the VSTPlugin server extension lives when installed per the README. Used only for
 // diagnostics - sclang_conf.yaml can include other dirs, so absence here is a strong hint, not
 // proof. User dir first (the README's instruction), then the system-wide one.
+//
+// With the private copy this collapses to a single directory, and that is the whole point: the
+// generated sclang_conf.yaml excludes the machine's Extensions folders, so a VSTPlugin sitting
+// in one of them is genuinely not available and must not be reported as installed. Everything
+// downstream follows from this list - the install destination is its first entry, and
+// vstPluginExtensionInstalled() is what decides whether to download.
 function vstPluginExtensionDirs() {
+  if (usingPrivateSc()) return [path.join(privateExtensionsDir(), 'VSTPlugin')];
+  return systemVstPluginExtensionDirs();
+}
+
+// The machine's own VSTPlugin locations, whether or not poptart is currently looking at them.
+// Kept separate from vstPluginExtensionDirs() so the private-copy tests can ask "is there a
+// system VSTPlugin here?" - which is the canary for whether the generated config really does
+// exclude the default Extensions paths.
+function systemVstPluginExtensionDirs() {
   if (process.platform === 'darwin') {
     return [
       path.join(os.homedir(), 'Library/Application Support/SuperCollider/Extensions/VSTPlugin'),
@@ -641,7 +680,12 @@ class OscEngine {
         }
         // poptart's own UGen (the keylock pitch shifter) must be in the SC Extensions folder
         // before sclang compiles its class library, which it does on the way up.
-        const ext = ensurePoptartExtension();
+        // Decided from this.sclangPath - the binary actually about to be spawned - and not by
+        // re-resolving: an explicit sclangPath passed to the constructor can differ from what
+        // resolution would pick, and the extension has to land where THAT sclang will look.
+        const ext = ensurePoptartExtension({
+          extensionsDir: isPrivateSclang(this.sclangPath) ? privateExtensionsDir() : userExtensionsDir(),
+        });
         if (ext.skipped) {
           // eslint-disable-next-line no-console
           console.warn(`[poptart] keylock pitch shifter not installed (${ext.skipped}); decks fall back to the SOLA keylock`);
@@ -649,14 +693,34 @@ class OscEngine {
           // eslint-disable-next-line no-console
           console.log(`[poptart] installed SC extension: ${ext.installed.join(', ')}`);
         }
+        // With the private copy, sclang is handed a generated class-library config (-l) that
+        // excludes the default paths, so it compiles our class library and our Extensions and
+        // nothing of the machine's. Written here rather than at install time so it always
+        // describes where the files are right now. scsynth's matching plugin path rides along
+        // in the environment for poptart.scd to apply (see POPTART_UGEN_PLUGINS there).
+        let confArgs = [];
+        let ugenPluginsPath = null;
+        if (isPrivateSclang(this.sclangPath)) {
+          try {
+            confArgs = ['-l', writeSclangConf()];
+            ugenPluginsPath = privateUgenPluginsPath();
+          } catch (err) {
+            // Booting the private sclang against the machine's default config would silently
+            // reintroduce everything the private copy exists to avoid, so this is fatal rather
+            // than a degraded boot.
+            fail(new Error(`could not write the private SuperCollider config: ${err.message}`));
+            return;
+          }
+        }
         this._sclangProcess = spawn(
           this.sclangPath,
           // -u makes sclang listen for our commands on scPort (its default 57120 would clash
           // with a user's own running SC session anyway).
-          ['-u', String(this.scPort), SC_SCRIPT_PATH],
+          [...confArgs, '-u', String(this.scPort), SC_SCRIPT_PATH],
           {
             env: {
               ...process.env,
+              ...(ugenPluginsPath ? { POPTART_UGEN_PLUGINS: ugenPluginsPath.join(path.delimiter) } : {}),
               POPTART_NODE_PORT: String(this.nodePort),
               POPTART_HOTKEY_PORT: String(this.nodePort), // read by VSTPlugin's editor windows (see onHotkey)
               POPTART_OSC_IN_PORT: String(this.oscInPort),
@@ -1961,5 +2025,8 @@ module.exports = {
   diagnoseSclangOutput,
   clarifySclangLine,
   vstPluginExtensionDirs,
+  systemVstPluginExtensionDirs,
   vstPluginExtensionInstalled,
+  usingPrivateSc,
+  activeExtensionsDir,
 };

@@ -1,0 +1,89 @@
+# Verifies poptart's private SuperCollider (PACKAGING.md, Stage 1.5) on both desktop platforms.
+#
+# This exists mainly for the Windows half. Everything up to making a sound can be checked without
+# a person - download, checksum, unpack, generate the class-library config, boot sclang, compile -
+# and a free runner is the only Windows machine this project has. What it cannot check is sound:
+# runners have no audio device, so a green build proves the packaging and nothing about audio.
+# That last step stays a human with a checklist (see PACKAGING.md, "Cutting a release").
+#
+# Nothing here builds, signs or publishes anything, and the job needs no secrets.
+#
+# Actions are pinned to commit SHAs, not tags: a tag can be moved, and these run with access to
+# the checkout. The trailing comment is the human-readable version.
+
+name: private-sc
+
+on:
+  workflow_dispatch: # run by hand from the Actions tab
+  push:
+    branches: [glossing/private-sc]
+    paths:
+      - 'packages/osc-engine/**'
+      - '.github/workflows/private-sc.yml'
+  pull_request:
+    paths:
+      - 'packages/osc-engine/**'
+      - '.github/workflows/private-sc.yml'
+
+permissions:
+  contents: read # the job reads the repository and nothing else
+
+jobs:
+  install-and-compile:
+    strategy:
+      fail-fast: false # a Windows failure must not hide the macOS result, or the reverse
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      POPTART_SC_INSTALL_TEST: '1'
+      POPTART_SC_CACHE_DIR: ${{ github.workspace }}/.sc-cache
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Don't pull 139-250MB from SuperCollider's releases on every run. Keyed by the pinned
+      # version, so bumping it in private-sc.js invalidates the cache by itself.
+      - name: Cache the SuperCollider download
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .sc-cache
+          key: sc-${{ runner.os }}-${{ hashFiles('packages/osc-engine/private-sc.js') }}
+
+      - run: npm ci
+
+      # The gate. Runs the real sequence: download -> checksum -> unpack into a directory with a
+      # space in its name -> generate sclang_conf.yaml -> boot sclang -l -> assert the class
+      # library compiled from the private copy, that the machine's own Extensions are NOT
+      # visible, and that VSTPlugin is found once installed privately.
+      - name: Private SuperCollider install and isolation
+        run: node --test packages/osc-engine/private-sc.test.js
+
+      # Informational. The rest of the engine suite has never run on Windows, and some of it is
+      # known not to (orphans.test.js shells out to `ps`). Surfacing that without gating on it
+      # is the point: the sclang tests in particular now have a SuperCollider to run against on
+      # Windows for the first time.
+      - name: Full engine test suite (informational)
+        continue-on-error: true
+        run: npm test --workspace packages/osc-engine
+
+      - name: Desktop shell tests
+        run: node --test packages/desktop/server-process.test.js
+
+      # When something fails, the report is worth more than the log: it carries every resolved
+      # path, the generated config, the Extensions listing and what sclang itself reported.
+      - name: Collect diagnostics
+        if: failure()
+        run: node packages/osc-engine/doctor.js --out doctor-${{ matrix.os }}.txt
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: doctor-${{ matrix.os }}
+          path: doctor-${{ matrix.os }}.txt
+          if-no-files-found: warn

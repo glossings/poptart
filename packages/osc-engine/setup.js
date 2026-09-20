@@ -24,6 +24,15 @@ const {
   vstPluginExtensionDirs,
   vstPluginExtensionInstalled,
 } = require('./index');
+const {
+  privateScInstalled,
+  privateSclangPath,
+  privateScRoot,
+  installPrivateSc,
+  consentToInstall,
+  SC_RELEASE,
+} = require('./private-sc');
+const { liveEngineStacks } = require('./orphans');
 
 // ---------------------------------------------------------------------------------------------
 // Pinned VSTPlugin release. URLs and checksums are pinned (not scraped from the release page)
@@ -198,19 +207,27 @@ async function installVstPlugin({ log = console } = {}) {
 
 // Like resolveSclangPath(), but answers "is it actually installed?" instead of "what do we
 // spawn?" (resolveSclangPath falls back to bare 'sclang' precisely so the not-installed case
-// fails with the binary named - here we want to catch that case before it fails).
+// fails with the binary named - here we want to catch that case before it fails). `source` says
+// which rule matched, which is the thing worth printing: "found" is not interesting, "found the
+// private copy rather than the one in /Applications" is.
+//
+// The order has to match resolveSclangPath()'s exactly, or setup would report on one SC while
+// the engine booted another.
 function sclangStatus() {
-  if (process.env.POPTART_SCLANG) return { found: true, path: process.env.POPTART_SCLANG };
-  if (onPath('sclang')) return { found: true, path: 'sclang' };
+  if (process.env.POPTART_SCLANG) {
+    return { found: true, path: process.env.POPTART_SCLANG, source: 'POPTART_SCLANG' };
+  }
+  if (privateScInstalled()) return { found: true, path: privateSclangPath(), source: 'private' };
+  if (onPath('sclang')) return { found: true, path: 'sclang', source: 'PATH' };
   for (const loc of knownSclangLocations()) {
     try {
       fs.accessSync(loc, fs.constants.X_OK);
-      return { found: true, path: loc };
+      return { found: true, path: loc, source: 'system' };
     } catch {
       // not here - try the next candidate
     }
   }
-  return { found: false, path: null };
+  return { found: false, path: null, source: null };
 }
 
 // A symlinked sclang on PATH shadows nothing poptart needs (it resolves the real binary
@@ -235,14 +252,24 @@ function findSclangSymlinkOnPath(pathDirs = (process.env.PATH || '').split(path.
 // (deliberate - don't touch) or orphans from a crashed run holding poptart's ports or the
 // audio device. We can't tell which, so warn with the pkill rather than killing.
 function runningEngineProcesses() {
-  if (process.platform === 'win32') return []; // best-effort; pgrep has no clean equivalent
   const found = [];
   for (const name of ['sclang', 'scsynth']) {
     try {
-      execFileSync('pgrep', ['-x', name], { stdio: ['ignore', 'pipe', 'ignore'] });
-      found.push(name); // pgrep exits 0 only when something matched
+      if (process.platform === 'win32') {
+        // tasklist exits 0 whether or not it matched, printing an INFO line when it didn't, so
+        // the image name has to be looked for in the output rather than inferred from the code.
+        const out = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${name}.exe`, '/NH', '/FO', 'CSV'], {
+          encoding: 'utf8',
+          timeout: 5000,
+          windowsHide: true,
+        });
+        if (out.toLowerCase().includes(`${name}.exe`)) found.push(name);
+      } else {
+        execFileSync('pgrep', ['-x', name], { stdio: ['ignore', 'pipe', 'ignore'] });
+        found.push(name); // pgrep exits 0 only when something matched
+      }
     } catch {
-      // exit 1: no such process (or no pgrep) - nothing to report
+      // exit 1: no such process (or no pgrep/tasklist) - nothing to report
     }
   }
   return found;
@@ -261,19 +288,48 @@ const SC_INSTALL_HINT =
       : 'install it via your package manager (e.g. apt install supercollider)';
 
 async function runSetup({ log = console } = {}) {
-  const summary = { sclangFound: false, vstPlugin: 'present', warnings: [] };
+  const summary = { sclangFound: false, sclangSource: null, privateSc: null, vstPlugin: 'present', warnings: [] };
   const warn = (msg) => {
     summary.warnings.push(msg);
     log.warn(`[poptart]   ! ${msg}`);
   };
   log.log('[poptart] setup:');
 
-  const sc = sclangStatus();
+  let sc = sclangStatus();
+  // Offer poptart its own SuperCollider when there isn't one to use - and, when
+  // POPTART_INSTALL_SC=1 says so, even if there is (someone deliberately moving off a system
+  // install). consentToInstall() decides; it never downloads on its own initiative, because
+  // this is 139-250MB (see private-sc.js).
+  if (!privateScInstalled()) {
+    const consent = await consentToInstall({ systemScFound: sc.found });
+    if (consent.install) {
+      try {
+        await installPrivateSc({ log });
+        summary.privateSc = 'installed';
+        sc = sclangStatus();
+      } catch (err) {
+        summary.privateSc = 'failed';
+        warn(`could not install poptart's own SuperCollider (${err.message})`);
+      }
+    } else if (!sc.found) {
+      summary.privateSc = 'declined';
+      log.log(`[poptart]   . not fetching SuperCollider: ${consent.reason}`);
+    }
+  }
+
   summary.sclangFound = sc.found;
-  if (sc.found) {
+  summary.sclangSource = sc.source;
+  if (sc.source === 'private') {
+    log.log(
+      `[poptart]   + SuperCollider ${SC_RELEASE.version}, poptart's own copy (${privateScRoot()})`,
+    );
+  } else if (sc.found) {
     log.log(`[poptart]   + SuperCollider found (${sc.path})`);
   } else {
-    warn(`SuperCollider not found - ${SC_INSTALL_HINT} (or set POPTART_SCLANG to your sclang binary)`);
+    warn(
+      `SuperCollider not found - ${SC_INSTALL_HINT}, or let poptart fetch its own copy with ` +
+        'POPTART_INSTALL_SC=1 (or set POPTART_SCLANG to your sclang binary)',
+    );
   }
 
   const stale = vstPluginExtensionInstalled() ? outdatedHostDir() : null;
@@ -319,7 +375,9 @@ async function runSetup({ log = console } = {}) {
     }
   }
 
-  const symlink = findSclangSymlinkOnPath();
+  // A symlinked sclang on PATH only matters when PATH is how sclang gets found. The private
+  // copy is resolved by full path and outranks PATH entirely, so the warning would be noise.
+  const symlink = sc.source === 'private' ? null : findSclangSymlinkOnPath();
   if (symlink) {
     warn(
       `${symlink} is a symlink - a symlinked sclang can't find its class library and poptart ` +
@@ -329,10 +387,29 @@ async function runSetup({ log = console } = {}) {
 
   const running = runningEngineProcesses();
   if (running.length) {
-    warn(
-      `${running.join(' and ')} already running - if that's not a SuperCollider IDE you're using, ` +
-        "it's an orphan that may hold poptart's ports or the audio device: pkill -x sclang; pkill -x scsynth",
-    );
+    // Before advising anything: is this our own other session? A live pidfile says yes, and the
+    // advice then has to be the opposite of the orphan advice - killing by name would take down
+    // a poptart someone is working in.
+    const ours = liveEngineStacks();
+    if (ours.length) {
+      const pids = ours
+        .map((s) => Object.entries(s.pids).map(([name, pid]) => `${name} ${pid}`).join(', '))
+        .join('; ');
+      warn(
+        `another poptart is already running (${pids}). Quit it before starting this one - two ` +
+          "stacks fight over poptart's OSC ports and the audio device. Don't kill sclang or " +
+          'scsynth by name; that would take the other session down with them.',
+      );
+    } else {
+      const kill =
+        process.platform === 'win32'
+          ? 'taskkill /IM sclang.exe /F & taskkill /IM scsynth.exe /F'
+          : 'pkill -x sclang; pkill -x scsynth';
+      warn(
+        `${running.join(' and ')} already running - if that's not a SuperCollider IDE you're using, ` +
+          `it's an orphan that may hold poptart's ports or the audio device: ${kill}`,
+      );
+    }
   }
 
   return summary;

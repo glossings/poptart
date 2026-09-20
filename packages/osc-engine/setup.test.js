@@ -95,7 +95,14 @@ test('sclangStatus trusts a POPTART_SCLANG override', () => {
   const saved = process.env.POPTART_SCLANG;
   process.env.POPTART_SCLANG = '/custom/sclang';
   try {
-    assert.deepStrictEqual(sclangStatus(), { found: true, path: '/custom/sclang' });
+    // `source` names the rule that matched, so a report says which SuperCollider is in play -
+    // the private copy and the one in /Applications are otherwise indistinguishable in a log.
+    // The full ordering is covered in private-sc.test.js.
+    assert.deepStrictEqual(sclangStatus(), {
+      found: true,
+      path: '/custom/sclang',
+      source: 'POPTART_SCLANG',
+    });
   } finally {
     if (saved === undefined) delete process.env.POPTART_SCLANG;
     else process.env.POPTART_SCLANG = saved;

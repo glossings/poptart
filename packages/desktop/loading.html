@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+    <title>poptart</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #14161a;
+        --fg: #e7e9ee;
+        --muted: #8b93a3;
+        --accent: #f2a65a;
+        --bad: #e2686a;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      main { width: 100%; max-width: 560px; text-align: center; }
+      h1 {
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.32em;
+        text-transform: lowercase;
+        margin: 0 0 28px;
+        color: var(--accent);
+      }
+      #status { font-size: 16px; margin: 0 0 10px; }
+      #detail {
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin: 0;
+        max-height: 40vh;
+        overflow-y: auto;
+        text-align: left;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #bar {
+        height: 2px;
+        margin: 22px auto 18px;
+        background: #262a31;
+        overflow: hidden;
+        border-radius: 2px;
+      }
+      #bar::after {
+        content: "";
+        display: block;
+        height: 100%;
+        width: 35%;
+        background: var(--accent);
+        animation: slide 1.4s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(340%); }
+      }
+      body.failed #bar { display: none; }
+      body.failed #status { color: var(--bad); }
+      @media (prefers-reduced-motion: reduce) {
+        #bar::after { animation: none; width: 100%; opacity: 0.4; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>poptart</h1>
+      <p id="status">Starting…</p>
+      <div id="bar"></div>
+      <p id="detail"></p>
+    </main>
+    <script>
+      // Called by the main process (see main.js's setStatus) - this page has no other logic.
+      window.poptartStatus = function (update) {
+        document.getElementById('status').textContent = update.text || '';
+        document.getElementById('detail').textContent = update.detail || '';
+        document.body.classList.toggle('failed', Boolean(update.failed));
+      };
+    </script>
+  </body>
+</html>

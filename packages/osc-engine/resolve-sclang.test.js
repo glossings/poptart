@@ -13,10 +13,18 @@ const path = require('node:path');
 const { resolveSclangPath, onPath } = require('./index.js');
 
 // Run `fn` with PATH and POPTART_SCLANG forced to known values, restoring them after.
+// POPTART_SC_ROOT is pointed at an empty directory throughout: a private SuperCollider outranks
+// PATH (see private-sc.js), so on a machine that has fetched one these cases would otherwise be
+// testing that instead of the rule they name. The private copy's own ordering is covered in
+// private-sc.test.js.
+const NO_PRIVATE_SC = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-no-private-sc-'));
+
 function withEnv({ PATH, POPTART_SCLANG }, fn) {
   const savedPath = process.env.PATH;
   const savedOverride = process.env.POPTART_SCLANG;
+  const savedRoot = process.env.POPTART_SC_ROOT;
   process.env.PATH = PATH ?? '';
+  process.env.POPTART_SC_ROOT = NO_PRIVATE_SC;
   if (POPTART_SCLANG === undefined) delete process.env.POPTART_SCLANG;
   else process.env.POPTART_SCLANG = POPTART_SCLANG;
   try {
@@ -25,6 +33,8 @@ function withEnv({ PATH, POPTART_SCLANG }, fn) {
     process.env.PATH = savedPath;
     if (savedOverride === undefined) delete process.env.POPTART_SCLANG;
     else process.env.POPTART_SCLANG = savedOverride;
+    if (savedRoot === undefined) delete process.env.POPTART_SC_ROOT;
+    else process.env.POPTART_SC_ROOT = savedRoot;
   }
 }
 
