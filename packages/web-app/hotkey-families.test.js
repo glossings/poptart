@@ -185,6 +185,32 @@ test('the editor binds its app chords through CM_APP, so a keymap cannot keep th
   assert.ok(!/'Ctrl-[ADF]':/.test(CLIENT), 'a literal Ctrl- binding is back in extraKeys');
 });
 
+test('the unlock-loop chord is the app\'s, because mod+L is the editor\'s selectLine', () => {
+  // It was taken with either of cmd/ctrl, and the sublime keymap binds both to selectLine (cmd on
+  // macOS, ctrl elsewhere) - so from inside the editor, where the guide says to press it, only
+  // macOS's ctrl+L ever arrived. As an app chord it is a key CodeMirror leaves alone everywhere.
+  assert.match(CLIENT, /app && e\.key\.toLowerCase\(\) === 'l' && !e\.shiftKey\) \{/);
+  const docs = fs.readFileSync(path.join(__dirname, 'public', 'docs.html'), 'utf8');
+  assert.ok(docs.includes('{app+l}') && !docs.includes('{mod+l}'), 'the guide names the chord that is bound');
+});
+
+test('no string a person reads spells a chord by hand, in any of the spellings', () => {
+  // The first sweep looked for "ctrl+X", "cmd+X" and the cmd glyph, and so walked past every
+  // "cmd-D" in the context menus and log lines - 27 of them, each naming a key a Windows keyboard
+  // doesn't have. What is asked here is the general thing: inside a string literal, a modifier
+  // joined to a key by - or + is a label that should have come from chordLabel.
+  const spelled = /['`"][^'`"]*\b(cmd|ctrl|alt|option)[-+](shift[-+])?([A-Z]\b|enter\b|backspace\b)/;
+  // Conventions of their own, on every platform, and not chords at all (see the head of chords.js).
+  const allowed = /ctrl\+wheel|ctrl[-+]hover/;
+  const offenders = CLIENT.split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => !/^\s*(\/\/|\*|\/\*)/.test(line)) // comments may say what they like
+    .filter(([, line]) => !/^\s*'(Shift-)?(Cmd|Ctrl|Alt)-[^']+'\s*:/.test(line)) // CodeMirror's own key names
+    .filter(([, line]) => !/addHotkey\(/.test(line))
+    .filter(([, line]) => spelled.test(line.replace(/\/\/.*$/, '')) && !allowed.test(line));
+  assert.deepEqual(offenders.map(([n, line]) => `${n}: ${line.trim().slice(0, 90)}`), []);
+});
+
 test('the pages carry chords as combos, not as one platform\'s keycaps', () => {
   const index = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
   const docs = fs.readFileSync(path.join(__dirname, 'public', 'docs.html'), 'utf8');
@@ -194,5 +220,6 @@ test('the pages carry chords as combos, not as one platform\'s keycaps', () => {
     // half a Windows user cannot act on.
     const visible = html.replace(/<!--[\s\S]*?-->/g, '');
     assert.ok(!visible.includes('⌘'), `${name} still writes ⌘ into the page`);
+    assert.ok(!/\boption-|\bcmd[-+]/i.test(visible), `${name} still names a Mac key in words`);
   }
 });

@@ -147,6 +147,7 @@ function harness({ bend = [], sel = null, notes = [], grid = 16, len = 16, start
     // the roll's other tests), and the note axis is the identity here - a note's row IS its lane.
     prBendCommit: () => committed.push(prBendKeyOf(prState.bend)),
     logLine: (text, kind) => log.push({ text, kind }),
+    chordLabel: (combo) => combo, // chords.js's, as the browser has it - the log lines name a key
     drawPianoroll: () => {},
     prLiveNotes: (ns) => ns.filter((n) => !n.hidden),
     prRowOf: (n) => n.midi,

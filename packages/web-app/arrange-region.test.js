@@ -212,6 +212,7 @@ function ops({ clips = [], sel = [], insert = null, regionSpan = null, regionRow
   const env = {
     arState,
     logLine: (line) => logged.push(line),
+    chordLabel: (combo) => combo, // chords.js's, as the browser has it - the log lines name a key
     writeArrangeCall: () => {},
     drawArrange: () => {},
     arSyncControls: () => {},

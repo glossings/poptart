@@ -429,7 +429,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><th>At the grid</th><th></th></tr>
             <tr><td>draw / erase</td><td>drag with the pencil · double-click a note</td></tr>
             <tr><td>select</td><td><strong>B</strong> for the arrow tool; click, shift-click, marquee, <strong>{mod+a}</strong></td></tr>
-            <tr><td>move / resize / copy</td><td>drag · drag the right edge (<strong>{mod}</strong> for a free length, off the grid) · <strong>option</strong>-drag</td></tr>
+            <tr><td>move / resize / copy</td><td>drag · drag the right edge (<strong>{mod}</strong> for a free length, off the grid) · <strong>{alt}</strong>-drag</td></tr>
             <tr><td>nudge</td><td>arrow keys; <strong>shift</strong>+↑↓ an octave, <strong>shift</strong>+←→ lengthens/shortens a cell; <strong>{mod}</strong>+←→ nudges the onset a pixel's worth (zoom in for finer), <strong>{mod+shift}</strong>+←→ the length</td></tr>
             <tr><td>velocity</td><td><strong>{mod}</strong>-drag up/down</td></tr>
             <tr><td>overlaps</td><td>a note dropped on another at its pitch cuts it off, or buries it — undone by moving the top note away, for as long as it stays selected; deselect to make the cut final</td></tr>
@@ -589,7 +589,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <strong>A clip is a title and a body.</strong> The title along its top is the clip as a
             thing: click to select it, drag to move it (onto another track's row too — it becomes
-            that track's), option-drag to duplicate. <strong>{mod}-click</strong> adds one to the
+            that track's), {alt}-drag to duplicate. <strong>{mod}-click</strong> adds one to the
             selection (or takes it back out) and <strong>shift-click</strong> reaches through from
             the last clip you clicked to this one — every clip in the rectangle of rows and bars
             between the two, the same shape a marquee marks (shift- or {mod}-drag over empty song for
@@ -599,7 +599,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             marks a stretch of song — one that starts inside a clip and ends wherever you let go,
             past its end or halfway through the next. That stretch is a selection too: press any
             clip inside it and drag, and it moves — whole clips whole, a clip it cuts through cut at
-            its edges — and option-drag copies it, exactly as a hand-picked set of clips would.
+            its edges — and {alt}-drag copies it, exactly as a hand-picked set of clips would.
             With playback stopped, <strong>{mod+enter}</strong>
             starts from the marker rather than from bar 0.
           </p>
@@ -638,7 +638,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             above the bar ruler (with either tool) to mark a region and name it; each time playback
             enters it, it loops there. Shift-drag the strip to mark a time selection over every row
             instead. Press
-            <strong>{mod+l}</strong> anywhere in the editor to release the loop you are in — playback
+            <strong>{app+l}</strong> anywhere in the editor to release the loop you are in — playback
             runs on to the next region and loops that instead, or to the end of the song, where
             playback stops. Stopping, or starting from the marker, arms every region again. A new
             arrangement comes with one region over its whole length, so it loops until you remove
@@ -1249,7 +1249,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
             <tr><td><code>{mod+enter}</code> · <code>{mod+.}</code> · <code>{app+b}</code> · <code>{app+g}</code></td><td>eval · stop · bounce · mixer</td></tr>
-            <tr><td><code>{app+a}</code> · <code>{mod+l}</code> · <code>{app+d}</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode (the lit header button)</td></tr>
+            <tr><td><code>{app+a}</code> · <code>{app+l}</code> · <code>{app+d}</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode (the lit header button)</td></tr>
             <tr><td>right-click · <code>{app+j}</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>

@@ -61,6 +61,7 @@ function strip({ points = [{ x: 0, y: 0 }, { x: 8, y: 1 }], sel = null, own = tr
     arState,
     shapeMod: { sampleAutoPoints },
     logLine: (m) => log.push(m),
+    chordLabel: (combo) => combo, // chords.js's, as the browser has it - the log lines name a key
     arWriteAuto: () => { env.writes++; },
     arRefreshAutoRange: () => {},
     drawArrange: () => {},
@@ -356,7 +357,8 @@ test('an op with no target yet warns rather than erroring', () => {
   // the collapsed console red (see logLine)
   for (const m of ['the time ops need a region', 'edit ops need a span',
     'clipboard yet - select a span', 'clipboard yet - drag a span']) {
-    assert.match(SRC, new RegExp(`${m}[^)]*?', 'warn'\\)`), m);
+    // the message may name a chord now (a chordLabel call), so it is no longer paren-free
+    assert.match(SRC, new RegExp(`${m}[^\\n]*?[\`'], 'warn'\\)`), m);
   }
 });
 

@@ -50,6 +50,7 @@ function harness({ notes = [], caret = null, clipboard = null, regionSpan = null
     writePianorollCall: () => wrote.push(prState.notes.map((n) => `${n.midi}@${n.start}`).join(' ')),
     drawPianoroll: () => {},
     logLine: () => {},
+    chordLabel: (combo) => combo, // chords.js's, as the browser has it - the log lines name a key
   };
   // eslint-disable-next-line no-new-func
   const build = new Function(...Object.keys(env),

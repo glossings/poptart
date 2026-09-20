@@ -111,9 +111,8 @@ const CM_MOD = IS_MAC ? 'Cmd-' : 'Ctrl-';
 
 // How each modifier and the awkward keys are WRITTEN, per platform: [macOS, elsewhere]. A Mac
 // spells a chord in glyphs and no separators (⇧⌘S); everywhere else it is words joined by + .
+// (`mod` and `app` have no rows: chordLabel has resolved them to one of these by the time it asks.)
 const CHORD_MODS = {
-  mod: ['⌘', 'ctrl+'], // the editing modifier - editMod
-  app: ['⌃', 'alt+'], // the app's own - appMod
   ctrl: ['⌃', 'ctrl+'],
   alt: ['⌥', 'alt+'],
   shift: ['⇧', 'shift+'],

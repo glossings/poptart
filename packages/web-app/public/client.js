@@ -540,7 +540,9 @@ document.addEventListener('keydown', (e) => {
     // nothing is taken from someone who meant to copy. The editing modifier is never touched here.
     e.preventDefault();
     if (!e.repeat) songCueKeyDown(e);
-  } else if (edit && e.key.toLowerCase() === 'l' && !e.shiftKey && !e.altKey) {
+  } else if (app && e.key.toLowerCase() === 'l' && !e.shiftKey) {
+    // An app chord like the arrangement's own, and not only by meaning: mod+L is the sublime
+    // keymap's selectLine on every platform, so with the editor focused it never got this far.
     e.preventDefault();
     arrangeUnlock(); // release the loop region the arrangement is in (see the arrange section)
   } else if (app && e.key.toLowerCase() === 'a' && !e.shiftKey && !arKeyInField()) {
@@ -7888,7 +7890,7 @@ function prBendCopySel({ cut = false } = {}) {
   const [a, b] = prState.bendSel;
   const points = prBendPointsIn(a, b);
   prBendClipboard = { width: b - a, points };
-  logLine(`copied ${points.length} bend point${points.length === 1 ? '' : 's'} over ${Math.round((b - a) * 100) / 100} cells - cmd-V pastes them`);
+  logLine(`copied ${points.length} bend point${points.length === 1 ? '' : 's'} over ${Math.round((b - a) * 100) / 100} cells - ${chordLabel('mod+v')} pastes them`);
   if (!cut) return;
   prBendClearSpan(a, b);
   prBendCommit();
@@ -7902,7 +7904,7 @@ function prBendDeleteSel() {
 
 function prBendPaste() {
   if (!prBendClipboard?.points.length) {
-    logLine('nothing on the bend clipboard yet - drag a span out and cmd-C first', 'warn');
+    logLine(`nothing on the bend clipboard yet - drag a span out and ${chordLabel('mod+c')} first`, 'warn');
     return;
   }
   const w = prBendClipboard.width;
@@ -9712,7 +9714,7 @@ async function prQuantize() {
     dropped ? `${dropped} note${dropped === 1 ? '' : 's'} deleted` : null,
     snipped ? `${snipped} shortened` : null,
   ].filter(Boolean);
-  if (lost.length) logLine(`piano roll: quantized to ${prDivLabel(div)} - ${lost.join(', ')} (cmd-Z with the grid focused puts them back)`);
+  if (lost.length) logLine(`piano roll: quantized to ${prDivLabel(div)} - ${lost.join(', ')} (${chordLabel('mod+z')} with the grid focused puts them back)`);
   // The notes are on the grid now, and the knob still pushes them off it as they play - which is
   // worth saying, since "quantize" and "still swinging" look like a contradiction on screen.
   if (prState.swing) logLine(`piano roll: the swing knob is still at ${prState.swing} - the notes are quantized, but the roll's groove is still applied to them as they play.`);
@@ -9739,7 +9741,7 @@ function prCleanUp() {
   for (const n of [...prState.sel]) if (!kept.has(n)) prState.sel.delete(n); // deleted for good
   writePianorollCall();
   drawPianoroll();
-  logLine(`piano roll: cleaned up - deleted ${outside} note${outside === 1 ? '' : 's'} outside the loop (cmd-Z with the grid focused puts them back)`);
+  logLine(`piano roll: cleaned up - deleted ${outside} note${outside === 1 ? '' : 's'} outside the loop (${chordLabel('mod+z')} with the grid focused puts them back)`);
 }
 
 // `0`: switch notes off without deleting them. They stay on the grid grayed out - still
@@ -9773,7 +9775,7 @@ function prToggleMute() {
 // with the copy, so pressing again keeps laying the block down the timeline.
 function prDuplicate() {
   if (!prState.sel.size) {
-    if (prState.regionSpan) logLine('nothing in the marked span to duplicate - cmd-shift-D repeats the time itself', 'warn');
+    if (prState.regionSpan) logLine(`nothing in the marked span to duplicate - ${chordLabel('mod+shift+d')} repeats the time itself`, 'warn');
     return;
   }
   const sel = [...prState.sel];
@@ -9813,7 +9815,7 @@ function prCopy(notes) {
   const at = region ? region[0] : Math.min(...notes.map((n) => n.start));
   const w = region ? region[1] - region[0] : Math.max(...notes.map((n) => n.start + n.len)) - at;
   prClipboard = { notes: notes.map((n) => ({ ...n, hidden: false })), at, w };
-  logLine(`copied ${notes.length} note${notes.length === 1 ? '' : 's'} - cmd-V pastes them into any roll`);
+  logLine(`copied ${notes.length} note${notes.length === 1 ? '' : 's'} - ${chordLabel('mod+v')} pastes them into any roll`);
 }
 
 function prPaste() {
@@ -26343,7 +26345,7 @@ function openEditorMenu(ed, e) {
   const items = [selected
     ? ['save as snippet…', () => openSnippetSave(ed), 'keep this selection - and the rolls, shapes, presets and packs it names - for every project']
     : ['insert snippet…', () => openSnippetBrowser(ed), 'put a kept phrase in here, sidecar and all']];
-  items.push(['add an effect…', () => insertFxCall(ed), 'ctrl-F — an .fx("") at the caret, with the plugin list open']);
+  items.push(['add an effect…', () => insertFxCall(ed), `${chordLabel('app+f')} — an .fx("") at the caret, with the plugin list open`]);
   // The envelope panel for the sampler track under the caret - the way in for a chain that has no
   // envelope call yet to double-click.
   if (ed === cm && !selected && samplerctlMod) {
@@ -26355,7 +26357,7 @@ function openEditorMenu(ed, e) {
   // The tree, where it is edited: grouping is a gesture over a selection, and ungrouping is aimed
   // at whatever track the caret is in.
   if (selected) {
-    items.push(['group these tracks…', () => groupSelection(ed), 'cmd-G — one fader, one mute, and they fold away together']);
+    items.push(['group these tracks…', () => groupSelection(ed), `${chordLabel('mod+g')} — one fader, one mute, and they fold away together`]);
   } else {
     const block = editorTrackAt(ed);
     if (block) {
@@ -29209,9 +29211,9 @@ function arOpenMenu(clientX, clientY, hit, row) {
     items.push([`delete${targets.length > 1 ? ` ${targets.length} clips` : ''}`, () => arDeleteClips(targets)]);
     items.push([targets.some((c) => !c.mute) ? 'mute' : 'unmute', () => arToggleMute(targets),
       '0 — it keeps its place and stops sounding']);
-    items.push(['duplicate after', () => arDuplicate(targets), 'cmd-D — the copy overwrites what it lands on']);
-    if (arSplitPoints().length) items.push(['split here', () => arSplitClips(), 'cmd-E — at the marker, or at both edges of a marked span']);
-    if (targets.length > 1 || arState.regionSpan) items.push(['join', () => arJoinClips(), 'cmd-J — one clip from here to the end of the last']);
+    items.push(['duplicate after', () => arDuplicate(targets), `${chordLabel('mod+d')} — the copy overwrites what it lands on`]);
+    if (arSplitPoints().length) items.push(['split here', () => arSplitClips(), `${chordLabel('mod+e')} — at the marker, or at both edges of a marked span`]);
+    if (targets.length > 1 || arState.regionSpan) items.push(['join', () => arJoinClips(), `${chordLabel('mod+j')} — one clip from here to the end of the last`]);
     const entries = targets.map(arClipEntryBar).filter((b) => b != null);
     if (entries.length) {
       items.push(['enter at bar 1', () => arResetEntry(targets),
@@ -29271,16 +29273,16 @@ function arOpenMenu(clientX, clientY, hit, row) {
     const bars = arFmtBars(span[1] - span[0]);
     const rows = arRegionRows();
     const where = rows ? ` on ${rows.size === 1 ? [...rows][0] : `${rows.size} tracks`}` : '';
-    items.push([`copy ${bars}${where}`, () => arCopyTime(), 'cmd-C']);
-    items.push([`cut ${bars}${where}`, () => arCopyTime({ cut: true }), 'cmd-X — clears the span, leaves the time']);
-    if (!hit && arState.regionSpan) items.push([`repeat ${bars}${where}`, () => arDuplicate(), 'cmd-D — the copy overwrites what follows']);
-    items.push(['duplicate after', () => arTimeDuplicate(), 'cmd-shift-D — every track, opening time for the copy']);
-    items.push(['delete time', () => arTimeDelete(), 'cmd-shift-backspace — every track, closing the span up']);
+    items.push([`copy ${bars}${where}`, () => arCopyTime(), chordLabel('mod+c')]);
+    items.push([`cut ${bars}${where}`, () => arCopyTime({ cut: true }), `${chordLabel('mod+x')} — clears the span, leaves the time`]);
+    if (!hit && arState.regionSpan) items.push([`repeat ${bars}${where}`, () => arDuplicate(), `${chordLabel('mod+d')} — the copy overwrites what follows`]);
+    items.push(['duplicate after', () => arTimeDuplicate(), `${chordLabel('mod+shift+d')} — every track, opening time for the copy`]);
+    items.push(['delete time', () => arTimeDelete(), `${chordLabel('mod+shift+backspace')} — every track, closing the span up`]);
     if (!arState.selRegion) items.push([`loop ${bars}`, () => arLoopSpan(span), 'a loop region over the span - name it, and playback holds there']);
   }
   if (arClipboard?.clips.length) {
     if (items.length && !span) items.push('-');
-    items.push(['paste here', () => arPasteTime(), 'cmd-V']);
+    items.push(['paste here', () => arPasteTime(), chordLabel('mod+v')]);
   }
   if (!items.length) return;
   openCtxMenu(arMenu, clientX, clientY, { items });
@@ -29301,7 +29303,7 @@ function arClipMenuItems(targets) {
   const one = labels.length === 1 ? labels[0] : null;
   if (one) {
     items.push([`edit ${one}`, () => arEditBlock(one), `the code, on this block - double-clicking the clip is the same (${chordLabel('app+a')} comes back)`]);
-    items.push(['rename…', () => arRenameClip(targets[0]), 'cmd-R — the block, its clips and its place in the tree']);
+    items.push(['rename…', () => arRenameClip(targets[0]), `${chordLabel('mod+r')} — the block, its clips and its place in the tree`]);
   }
   // Color is about the CLIPS you right-clicked and no others. A whole track at once is the row's
   // own menu (right-click its name), which is the thing that IS the track - a clip is one part of
@@ -29625,7 +29627,7 @@ function arDuplicate(clips) {
     const w = b - a;
     made = arClipsIn(a, b, arRegionRows()).map((c) => ({ ...c, start: c.start + b }));
     if (!made.length) {
-      logLine('nothing in the marked span to duplicate - cmd-shift-D repeats the time itself', 'warn');
+      logLine(`nothing in the marked span to duplicate - ${chordLabel('mod+shift+d')} repeats the time itself`, 'warn');
       return;
     }
     arState.clips.push(...made);
@@ -29833,7 +29835,7 @@ function arCopyTime({ cut = false } = {}) {
   const clips = arClipsIn(a, b, rows);
   arClipboard = { width: b - a, clips };
   arClipSource = 'clips';
-  logLine(`${cut ? 'cut' : 'copied'} ${clips.length} clip${clips.length === 1 ? '' : 's'} over ${arFmtBars(b - a)}${rows ? ` on ${rows.size} track${rows.size === 1 ? '' : 's'}` : ''} - cmd-V pastes them`);
+  logLine(`${cut ? 'cut' : 'copied'} ${clips.length} clip${clips.length === 1 ? '' : 's'} over ${arFmtBars(b - a)}${rows ? ` on ${rows.size} track${rows.size === 1 ? '' : 's'}` : ''} - ${chordLabel('mod+v')} pastes them`);
   if (!cut) return;
   arClearTime(a, b, rows);
   arSyncControls();
@@ -29900,7 +29902,7 @@ function arSpanClips(a, b, rows = null) {
 function arPasteTime() {
   if (!arState) return;
   if (!arClipboard?.clips.length) {
-    logLine('nothing on the painter\'s clipboard yet - select a span and cmd-C first', 'warn');
+    logLine(`nothing on the painter's clipboard yet - select a span and ${chordLabel('mod+c')} first`, 'warn');
     return;
   }
   const region = arTimeRegion();
@@ -30236,7 +30238,7 @@ function arCommitLaneName(save) {
       return;
     }
     if (!save) return;
-    // A name that is one word, unique among the regions: it is what the console names on ctrl+L.
+    // A name that is one word, unique among the regions: it is what the console names on app+L.
     const taken = new Set(arState.loops.filter((r) => r !== edit.region).map((r) => r.name));
     let candidate = name.replace(/\s+/g, '_') || `loop${arState.loops.indexOf(edit.region) + 1}`;
     while (taken.has(candidate)) candidate += '_';
@@ -30719,7 +30721,7 @@ function arAutoCopySel({ cut = false } = {}) {
   const points = arAutoPointsIn(a, b);
   arAutoClipboard = { width: b - a, points };
   arClipSource = 'auto';
-  logLine(`${cut ? 'cut' : 'copied'} ${points.length} breakpoint${points.length === 1 ? '' : 's'} over ${arFmtBars(b - a)} - cmd-V pastes them`);
+  logLine(`${cut ? 'cut' : 'copied'} ${points.length} breakpoint${points.length === 1 ? '' : 's'} over ${arFmtBars(b - a)} - ${chordLabel('mod+v')} pastes them`);
   if (!cut || !arAutoEditable()) return;
   arAutoClearSpan(a, b);
   arAutoLanded();
@@ -30735,7 +30737,7 @@ function arAutoDeleteSel() {
 function arAutoPaste() {
   if (!arState) return;
   if (!arAutoClipboard?.points.length) {
-    logLine('nothing on the lane\'s clipboard yet - drag a span out and cmd-C first', 'warn');
+    logLine(`nothing on the lane's clipboard yet - drag a span out and ${chordLabel('mod+c')} first`, 'warn');
     return;
   }
   if (!arAutoEditable()) return;
@@ -30765,14 +30767,14 @@ function arOpenAutoMenu(clientX, clientY) {
   // the ops on whatever the strip has marked, spelled out so the keys are discoverable
   if (arState.autoSel) {
     const bars = arFmtBars(arState.autoSel[1] - arState.autoSel[0]);
-    items.push([`copy ${bars}`, () => arAutoCopySel(), 'cmd-C']);
-    items.push([`cut ${bars}`, () => arAutoCopySel({ cut: true }), 'cmd-X']);
-    items.push(['duplicate after', () => arAutoDuplicateSel(), 'cmd-D — repeats it into the next span']);
+    items.push([`copy ${bars}`, () => arAutoCopySel(), chordLabel('mod+c')]);
+    items.push([`cut ${bars}`, () => arAutoCopySel({ cut: true }), chordLabel('mod+x')]);
+    items.push(['duplicate after', () => arAutoDuplicateSel(), `${chordLabel('mod+d')} — repeats it into the next span`]);
     items.push(['clear span', () => arAutoDeleteSel(), 'backspace']);
     items.push(['raise', () => arAutoNudge(arAutoNudgeStep(false)), '↑ — shift for a coarse step, or drag the band']);
     items.push(['lower', () => arAutoNudge(-arAutoNudgeStep(false)), '↓']);
   }
-  if (arAutoClipboard?.points.length) items.push(['paste here', () => arAutoPaste(), 'cmd-V — replaces what it lands on']);
+  if (arAutoClipboard?.points.length) items.push(['paste here', () => arAutoPaste(), `${chordLabel('mod+v')} — replaces what it lands on`]);
   if (items.length) items.push('-');
   // The lane list is a set of PINS: a pinned lane has a strip of its own under the clips, and
   // clicking one here puts it up or takes it away. Several at once is the whole point - a curve is
@@ -30817,7 +30819,7 @@ function arRegionAt(x) {
 
 // --- the song clock ---
 // The server gates the tracks by its ArrangeClock; the painter draws the playhead by a twin built
-// from the same snapshot (see arrange.mjs), refreshed by every eval and every ctrl+L.
+// from the same snapshot (see arrange.mjs), refreshed by every eval and every app+L.
 
 let arClockSnap = null;
 let arClockTwin = null;
@@ -30871,7 +30873,7 @@ function songEndTick() {
   }
 }
 
-/** ctrl+L: release the loop region playback is in. Works from anywhere in the editor. */
+/** app+L: release the loop region playback is in. Works from anywhere in the editor. */
 function arrangeUnlock() {
   // The deck being painted, if the painter is up; otherwise the one you are performing on.
   const deck = arState ? arDeck : (mixModeOn ? djActiveDeck : 'a');
