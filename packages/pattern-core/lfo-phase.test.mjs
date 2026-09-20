@@ -101,3 +101,44 @@ test('a shape swap re-bases the anchor to the swap cycle', () => {
   const since = transport.cycleAt(args[4]) - 1;
   assert.equal(args[3], ((since * 2) % 1 + 1) % 1);
 });
+
+test('a re-eval that leaves an LFO alone does not re-anchor it', () => {
+  // The engine keeps the running synth for an unchanged modulator, phase and all, so the
+  // scheduler keeps what it knows about it: an anchor on the first tick after every eval lands
+  // while the engine is busiest with that eval, and an anchor applied late is a phase step.
+  const now = 1e9 + 3.7;
+  const { engine, argsTo } = mockEngine(now);
+  const transport = new Transport(() => engine.getTime(), { cps: 0.5 });
+  const sch = new Scheduler(engine, { trackId: 't', transport });
+  sch.setPattern(withLfo(lfo('pluck', { rate: 0.25 })));
+  sch._anchorLFOs(now);
+  assert.equal(argsTo('anchorParamLFO').length, 1);
+
+  sch.setPattern(withLfo(lfo('pluck', { rate: 0.25 }).range(0.2, 0.8))); // a moved bound is the same oscillation
+  sch._anchorLFOs(now + 0.03);
+  assert.equal(argsTo('anchorParamLFO').length, 1, 'the unchanged LFO waits for its periodic anchor');
+
+  sch.setPattern(withLfo(lfo('pluck', { rate: 0.5 }))); // a new rate is a new phase formula
+  sch._anchorLFOs(now + 0.06);
+  assert.equal(argsTo('anchorParamLFO').length, 2, 'an edited LFO is anchored at once');
+});
+
+test('a re-eval keeps a swapped shape counting from its swap', () => {
+  const now = 1e9 + 3.7;
+  const { engine, argsTo } = mockEngine(now);
+  const transport = new Transport(() => engine.getTime(), { cps: 1 });
+  const sch = new Scheduler(engine, { trackId: 't', transport });
+  sch.setPattern(withLfo(lfo('<pluck swell>', { rate: 2 })));
+  sch._scheduleShapeSwaps(0, 2);
+  const swaps = argsTo('setParamShape').length;
+
+  sch.setPattern(withLfo(lfo('<pluck swell>', { rate: 2 })));
+  // The next window holds the same shape the engine is already on: nothing to assert, and no
+  // swap for the phase origin to be re-based to.
+  sch._scheduleShapeSwaps(3, 3.5);
+  assert.equal(argsTo('setParamShape').length, swaps);
+  sch._anchorLFOs(now + 10); // past the anchor interval
+  const args = argsTo('anchorParamLFO').at(-1);
+  const since = transport.cycleAt(args[4]) - 1; // still counted from the swap at cycle 1
+  assert.ok(Math.abs(args[3] - (((since * 2) % 1) + 1) % 1) < 1e-9);
+});

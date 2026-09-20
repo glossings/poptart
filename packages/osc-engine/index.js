@@ -1773,7 +1773,8 @@ class OscEngine {
   }
   /**
    * Release everything sounding on a track, now: its sample voices (at their own release floor),
-   * the plugins' held notes (MIDI all-notes-off) and the env modulators' gates. The host sends it
+   * the plugins' held notes (each released by name; MIDI all-notes-off as well for a VST2 plugin,
+   * the only kind that has one) and the env modulators' gates. The host sends it
    * when a stopped track is played again: a stop lets everything ring out (every event already
    * sent plays on to its own gate-off - a fitted break to the end of its bar - and that is wanted),
    * but the restart must not play the top of the bar over the old copy. `againSec` repeats the

@@ -13,23 +13,22 @@ no completion notes.
     with no scsynth: `host probe notes.vst3 _ out.ini` on a text file exits by SIGSEGV. File it at
     git.iem.at/pd/vstplugin along with the other unfiled scan bugs.
 
-[ ] Re-evaluating during playback produces a crunchy click (heard 2026-09-20). NOT plugin state
-    being re-injected: the scheduler already skips a state the plugin holds, and no
-    "restored plugin state for #N" line appears at the click. Untraced. Suspects, in the order
-    worth checking: a track SynthDef being rebuilt and swapped under sounding audio; the hush of
-    stopped tracks that evaluate performs on play (see Scheduler/evaluate); sample voices or
-    modulators being freed without a release ramp; a chain/route teardown (clearMidiRoute closes
-    every envelope gate at once). First step is a minimal repro: one sustained plugin note,
-    re-eval with no edits, and see which of the above fires in the log.
-
-[ ] "VST3Plugin: MIDI CC control number 123 not supported" floods the log. Tearing down a
-    midi()/midikeys() route sends CC 123 (all notes off) on all 16 channels so a held key doesn't
-    drone (poptartClearMidiRoute in poptart.scd), and a VST3 plugin that doesn't map that
-    controller warns once per channel - 16 lines per teardown, on every re-eval of a sketch with a
-    route. Harmless, but it buries real warnings. VST3 has no CC 123 unless the plugin maps it, so
-    for those the message does nothing anyway: release the notes poptart knows are held instead
-    (the route already tracks \held), and send CC 123 only to VST2 plugins, or only on channels
-    that were actually used.
+[ ] Re-evaluating during playback produces a crunchy click (heard 2026-09-20). Not yet
+    reproduced. Ruled out by reading what a no-edit re-eval sends: plugin state (skipped when
+    the plugin holds it, and no "restored plugin state for #N" line appears at the click); a
+    track SynthDef rebuild (there is no such path - the track synth is never swapped); the hush
+    (only on play-from-stop, never mid-play); loadInstrument / loadEffect / the blanket
+    unloadEffect (engine-side no-ops on an unchanged chain); env and LFO re-sends (updated in
+    place, synth and phase kept); bus sends (same bus index re-set, groups moved within their
+    own depth); a route teardown (only when the route is actually dropped). The open suspect is
+    timing rather than teardown: every timestamped message carries a latency RELATIVE to Node's
+    send time, and sclang adds it to its own clock when it handles the message (bundleNow), so
+    anything queued behind an eval's burst (25+ messages a track, each forking) lands late by
+    however long the queue took - layered hits flam against each other. The cure would be
+    absolute target times (Node and sclang share the machine's wall clock). Measure before
+    building it: have evaluate send its wall-clock send time as the last message of the burst
+    and log how late sclang handles it. Repro to try first: one sustained note with no
+    modulators, re-eval with no edits; then two tracks layering the same sample.
 
 [ ] Unlock plugins one at a time during a scan. They now unlock a FOLDER at a time: the scan
     runs one VSTPlugin.search per search directory (runScan in poptart.scd) instead of one search

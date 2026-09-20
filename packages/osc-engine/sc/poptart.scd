@@ -178,7 +178,7 @@ var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued;
 var destroyTrack;
 var slotKey, waitForLoad, flushNotes, clearPending;
-var hushTrack;
+var hushTrack, clearMidiRoute, markSounding;
 var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
@@ -1851,7 +1851,8 @@ OSCdef(\poptartCreateTrack, { |msg|
                 oscs: IdentityDictionary.new,     // \slotN_param -> same shape as ccs, bound to an OSC address (see setParamOSC)
                 ramps: IdentityDictionary.new,    // \slotN_param -> (synth:, bus:, index:, slot:) - polled controls (see rampTo)
                 editWatch: Array.newClear(maxSlots), // slot -> [OSCFunc] watching for plugin edits
-                held: 0                           // active-note count, drives env gates
+                held: 0,                          // active-note count, drives env gates
+                sounding: Array.fill(maxSlots, { IdentityDictionary.new }) // slot -> (note -> when its off lands), see markSounding
             );
             // A track born while the mixer is open joins its meters right away (an eval that adds
             // a block mid-session), instead of staying dark until the mixer is reopened - if Node
@@ -2259,6 +2260,21 @@ bundleNow = { |latency, func|
     server.makeBundle(if (latency.notNil and: { latency > 0.001 }) { latency } { nil }, func);
 };
 
+// Which notes a slot's plugin has sounding, as note -> the time its note-off lands (inf until one
+// is known). Times, not a set that an off empties: the scheduler sends a note's on and its off
+// together, a lookahead before either happens, so at any moment the messages HANDLED say nothing
+// about what is ringing - only when each note ends does. This is what a hush releases by name
+// (see hushTrack); entries whose end has passed are dropped as new ones arrive.
+markSounding = { |track, slot, note, offAt|
+    track[\sounding] !? { |slots|
+        slots[slot] !? { |notes|
+            var now = Main.elapsedTime;
+            notes.keys.do { |n| if (notes[n] < now) { notes.removeAt(n) } };
+            notes[note] = offAt;
+        };
+    };
+};
+
 // Note events also gate any env modulators on the track (in the same timestamped bundle, so
 // envelope attacks line up sample-accurately with their notes). The gate follows a held-note
 // count: opens on the first held note, closes (release phase) when the last one ends. The
@@ -2287,6 +2303,7 @@ OSCdef(\poptartNoteOn, { |msg|
             });
         };
         track[\held] = track[\held] + 1;
+        markSounding.(track, 0, note, inf);
         // A swap due at or before this note's onset means the plugin will be mid-load when it would
         // have sounded, so it waits for the program instead (see waitForLoad) - the note at a
         // `.preset("<a b>")` boundary is the one that used to be eaten.
@@ -2307,6 +2324,7 @@ OSCdef(\poptartNoteOff, { |msg|
             });
         };
         track[\held] = max(0, track[\held] - 1);
+        markSounding.(track, 0, note, Main.elapsedTime + latency);
         // Queued behind its own note-on when one is waiting, or the note would never be released.
         if (waitForLoad.(key, 0, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
@@ -2319,27 +2337,45 @@ OSCdef(\poptartNoteOff, { |msg|
 // a show's last notes. What must not happen is the restart playing the top of the bar over the
 // old copy's middle (a quick stop/start's doubled, out-of-time drums), so the play hushes first.
 // The sample voices sit in a group of their own (see createTrack), so one gate-off releases them
-// all at their own release floor; the plugins get MIDI all-notes-off; the env modulators' gate
-// closes as it does when the last note ends. Notes still waiting on a program load (see
-// waitForLoad) are dropped - they were due before the stop. `again` repeats the release that many
+// all at their own release floor; each plugin has the notes it still has sounding released by
+// name (see markSounding), with MIDI all-notes-off behind that as a net for a VST2 plugin only -
+// VST3 has no such message (see clearMidiRoute), so there it released nothing and logged a
+// warning; the env modulators' gate closes as it does when the last note ends. Notes still
+// waiting on a program load (see waitForLoad) are dropped - they were due before the stop, and a
+// note-off dropped there is one of the notes released here. `again` repeats the release that many
 // seconds on, for a caller hushing while events are still in flight (sent a lookahead early, they
 // are already the server's and spawn AFTER the first release) - on the same track object only,
 // since by then the key may belong to a track built afresh (a label removed and re-added).
 hushTrack = { |key, again|
     var track = tracks[key];
-    var release = { |t|
+    var release = { |t, notes|
         bundleNow.(nil, {
             t[\voices] !? { |g| g.set(\gate, 0) };
-            t[\controllers].do { |ctl| ctl !? { ctl.midi.allNotesOff(0) } };
+            t[\controllers].do { |ctl, slot|
+                ctl !? {
+                    notes[slot].do { |note| ctl.midi.noteOff(0, note, 0) };
+                    if (ctl.info.notNil and: { ctl.info.sdkVersion.asString.find("VST 3").isNil }) {
+                        ctl.midi.allNotesOff(0);
+                    };
+                };
+            };
             t[\envs].do { |e| e[\synth].set(\gate, 0) };
         });
         t[\held] = 0;
         maxSlots.do { |slot| noteQueues[slotKey.(key, slot)] = nil };
     };
     if (track.isKindOf(Event)) {
-        release.(track);
+        // Everything whose end is still to come: ringing now, or sent a lookahead early and not
+        // begun. Read once - the repeat releases the same notes, which by then have all begun.
+        var now = Main.elapsedTime;
+        var notes = (track[\sounding] ? []).collect { |slotNotes|
+            var due = slotNotes.select { |offAt| offAt > now }.keys.asArray;
+            slotNotes.clear;
+            due;
+        };
+        release.(track, notes);
         if (again > 0) {
-            SystemClock.sched(again, { if (tracks[key] === track) { release.(track) }; nil });
+            SystemClock.sched(again, { if (tracks[key] === track) { release.(track, notes) }; nil });
         };
     };
 };
@@ -2360,6 +2396,7 @@ OSCdef(\poptartNoteOnSlot, { |msg|
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
         var fire = { |lat| bundleNow.(lat, { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) }) };
+        markSounding.(track, slot, note, inf);
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOnSlot');
@@ -2370,6 +2407,7 @@ OSCdef(\poptartNoteOffSlot, { |msg|
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
         var fire = { |lat| bundleNow.(lat, { ctl.midi.noteOff(0, note, 0) }) };
+        markSounding.(track, slot, note, Main.elapsedTime + latency);
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOffSlot');
@@ -3098,7 +3136,7 @@ OSCdef(\poptartMidiRoute, { |msg|
     var defer = if (msg.size > 6) { msg[6].asInteger > 0 } { false };
     fork {
         var track = awaitTrack.(key);
-        var src, uid, chanArg, kOn, kOff, kBend, kTouch, kPoly, kCc, scalePcs, quantize;
+        var src, uid, chanArg, kOn, kOff, kBend, kTouch, kPoly, kCc, scalePcs, quantize, sounding;
         // .scale() on a midikeys() chain: snap each incoming note to the nearest of the scale's
         // pitch classes (ties resolve downward). noteOff/polytouch quantize identically, so
         // releases always match their onsets. Two adjacent keys can land on the same note - the
@@ -3132,8 +3170,15 @@ OSCdef(\poptartMidiRoute, { |msg|
                 // Free previous defs before re-registering: MIDIdef re-init keeps old filters
                 // where the new one is nil, so a channel -> all-channels edit needs a fresh create.
                 [kOn, kOff, kBend, kTouch, kPoly, kCc].do { |k| MIDIdef.all[k] !? { |d| d.free } };
+                // What the route has sounding: incoming (channel, key) -> the pitch its note-on
+                // actually played. A note-off releases THAT pitch, never a fresh mapping - a key
+                // held across an edit to the chain's transpose or scale would otherwise be
+                // released at a pitch that was never played, and drone - and a teardown releases
+                // exactly these by name (see clearMidiRoute). Kept across a re-registration for
+                // the same reason. Empty in defer mode, where Node holds the same table.
+                sounding = (track[\midiRoute] !? { |r| r[\sounding] }) ?? { IdentityDictionary.new };
                 MIDIdef.noteOn(kOn, { |veloc, note, chan|
-                    var ctl;
+                    var ctl, rawKey = (chan * 128) + note;
                     if (defer) {
                         // Raw edge to Node; Node's answer comes back as /poptart/noteOn and does
                         // the playing (and the midiNoteIn record feed, with the mapped pitch).
@@ -3150,6 +3195,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                         if (ctl.notNil) {
                             if (veloc > 0) {
                                 track[\held] = track[\held] + 1;
+                                sounding[rawKey] = note;
                                 ctl.midi.noteOn(chan, note, veloc);
                                 track[\envs].do { |e| e[\synth].set(\gate, 1) };
                                 track[\lfos].do { |e|
@@ -3158,14 +3204,14 @@ OSCdef(\poptartMidiRoute, { |msg|
                             } {
                                 // running-status note-on with velocity 0 = note-off
                                 track[\held] = max(0, track[\held] - 1);
-                                ctl.midi.noteOff(chan, note, 0);
+                                ctl.midi.noteOff(chan, sounding.removeAt(rawKey) ? note, 0);
                                 if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
                             };
                         };
                     };
                 }, chan: chanArg, srcID: uid);
                 MIDIdef.noteOff(kOff, { |veloc, note, chan|
-                    var ctl;
+                    var ctl, rawKey = (chan * 128) + note;
                     if (defer) {
                         nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note, veloc / 127.0, 0);
                     } {
@@ -3174,7 +3220,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                         nodeAddr.sendMsg("/poptart/midiNoteIn", key.asString, note, veloc / 127.0, 0);
                         if (ctl.notNil) {
                             track[\held] = max(0, track[\held] - 1);
-                            ctl.midi.noteOff(chan, note, veloc);
+                            ctl.midi.noteOff(chan, sounding.removeAt(rawKey) ? note, veloc);
                             if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
                         };
                     };
@@ -3191,7 +3237,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                 MIDIdef.cc(kCc, { |val, num, chan|
                     track[\controllers][0] !? { |c| c.midi.control(chan, num, val) };
                 }, chan: chanArg, srcID: uid);
-                track[\midiRoute] = (keys: [kOn, kOff, kBend, kTouch, kPoly, kCc]);
+                track[\midiRoute] = (keys: [kOn, kOff, kBend, kTouch, kPoly, kCc], sounding: sounding);
                 ("poptart: track " ++ key ++ " playing live from " ++ src.device ++ " " ++ src.name
                     ++ (if (channel > 0) { " (channel " ++ channel ++ ")" } { " (all channels)" })
                     ++ (if (defer) { " (pitch ops in Node)" } { "" })).postln;
@@ -3200,18 +3246,31 @@ OSCdef(\poptartMidiRoute, { |msg|
     };
 }, '/poptart/midiRoute');
 
-// Tearing a route down also silences anything still sounding: gates close, and CC 123 (all
-// notes off) goes out on every channel so a key held across a mute/stop doesn't drone.
-OSCdef(\poptartClearMidiRoute, { |msg|
-    var key = msg[1].asSymbol;
+// Tearing a route down also silences anything still sounding, so a key held across a mute/stop
+// doesn't drone: gates close, and every note the route still has sounding is released by name
+// (see \sounding in midiRoute). CC 123 (all notes off) follows on every channel as a net for a
+// VST2 plugin only. VST3 has no such message - a controller reaches a VST3 plugin only where the
+// plugin maps it to a parameter, almost none map 123, and for the rest VSTPlugin drops it with a
+// warning per channel: sixteen log lines a teardown, for nothing.
+clearMidiRoute = { |key|
     var track = tracks[key];
     if (track.isKindOf(Event) and: { track[\midiRoute].notNil }) {
+        var sounding = track[\midiRoute][\sounding];
         track[\midiRoute][\keys].do { |k| MIDIdef.all[k] !? { |d| d.free } };
         track[\midiRoute] = nil;
         track[\held] = 0;
         track[\envs].do { |e| e[\synth].set(\gate, 0) };
-        track[\controllers][0] !? { |ctl| 16.do { |c| ctl.midi.control(c, 123, 0) } };
+        track[\controllers][0] !? { |ctl|
+            sounding !? { sounding.keysValuesDo { |rawKey, note| ctl.midi.noteOff(rawKey div: 128, note, 0) } };
+            if (ctl.info.notNil and: { ctl.info.sdkVersion.asString.find("VST 3").isNil }) {
+                16.do { |c| ctl.midi.control(c, 123, 0) };
+            };
+        };
     };
+};
+
+OSCdef(\poptartClearMidiRoute, { |msg|
+    clearMidiRoute.(msg[1].asSymbol);
 }, '/poptart/clearMidiRoute');
 
 // --- audio + MIDI routing (the midi()/audio() source builders and injector methods) ---

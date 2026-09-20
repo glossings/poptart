@@ -171,6 +171,16 @@ function modulatorKind(sig) {
   return null;
 }
 
+// Everything that decides where a running LFO's phase IS: what the engine keeps its synth for
+// (shape, mode, the drawn breakpoints, the swap glide) and what the anchor formula counts with
+// (rate, phase offset). Two IRs that agree here are the same oscillation, so a re-eval carrying
+// both leaves the modulator exactly where it was - the range is not part of it, since a bound
+// moving updates the running synth in place.
+function lfoPhaseKey(ir) {
+  return JSON.stringify([ir.shape, ir.mode ?? null, ir.rateHz ?? null, ir.rateCycles ?? null,
+    ir.phaseCycles ?? null, ir.glide ?? null, ir.shape === 'custom' ? lfoShapes(ir) : null]);
+}
+
 // Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
 const MAX_CHAIN_SLOTS = MAX_FX_SLOTS + 1;
 
@@ -945,7 +955,23 @@ export class Scheduler {
       if (kind) nextModulators.set(`${c.slot} ${c.name}`, { ...c, kind });
     }
     for (const [key, prev] of this._activeModulators) {
-      if (nextModulators.get(key)?.kind === prev.kind) continue; // survives - updated in place below
+      const next = nextModulators.get(key);
+      if (next?.kind === prev.kind) {
+        // Survives - updated in place below. An LFO the eval left as it was is still the same
+        // running synth at the phase it had reached, so what the scheduler knows about that phase
+        // goes with it: when it was last anchored, where its phase counts from (the last shape
+        // swap) and which shape it holds. Starting those afresh re-anchored every LFO on the first
+        // tick after every eval - the one moment the engine is busiest, and an anchor applied late
+        // is a phase step - and counted a swapped shape's phase from the grid origin again, a jump
+        // to a phase it never had. One the edit did change starts afresh, as it must.
+        if (prev.kind === 'lfo' && lfoPhaseKey(prev.sig.lfoIR) === lfoPhaseKey(next.sig.lfoIR)) {
+          next.anchoredAtSec = prev.anchoredAtSec;
+          next.phaseOriginSec = prev.phaseOriginSec;
+          next.phaseOriginCycle = prev.phaseOriginCycle;
+          next.shapeIndex = prev.shapeIndex;
+        }
+        continue;
+      }
       this.engine[MODULATOR_CLEARS[prev.kind]](this.trackId, prev.slot, prev.name);
     }
     this._activeModulators = nextModulators;
@@ -1322,10 +1348,12 @@ export class Scheduler {
         if (step.value == null || step.cont) continue; // a rest holds the shape that is playing
         const at = cycle + step.start - delta; // transport: the phase below counts in it
         const index = ir.shapeNames.indexOf(String(step.value).trim());
-        // The first step of an eval asserts the shape rather than assuming it: an unchanged
-        // spec keeps the running synth, which may be holding any shape, and a scheduler that
-        // assumed the first would skip the message that puts it right. The engine no-ops when
-        // it already agrees.
+        // A modulator this scheduler has not tracked (a fresh one, or an LFO the eval changed)
+        // asserts the shape at its first step rather than assuming it: the engine may be holding
+        // any shape, and a scheduler that assumed the first would skip the message that puts it
+        // right. The engine no-ops when it already agrees. An LFO the eval left alone carries its
+        // index over (see setPattern), so its phase origin is not re-based to a swap that the
+        // engine never made.
         if (index < 0 || index === m.shapeIndex) continue;
         m.shapeIndex = index;
         const atSec = this.transport.secAt(at);
