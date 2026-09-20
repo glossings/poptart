@@ -6,7 +6,7 @@
   "description": "Electron shell: runs the web-app server as a child process and points a window at it. Packaging target for the dmg/exe builds. Deliberately outside the npm workspaces - see README.md.",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node start.js",
     "test": "node --test",
     "pack": "electron-builder --dir --config electron-builder.yml",
     "dist": "electron-builder --config electron-builder.yml"

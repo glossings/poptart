@@ -1,8 +1,9 @@
 # Setup, configuration & troubleshooting
 
-The README covers the short path (`npm install`, `npm run dev`, open the page). This is everything
-else about getting poptart running on a particular machine — where it looks for things, what you
-can point elsewhere, and what to do when the engine won't boot.
+The README covers the short path (`npm install`, `npm run dev`, open the page), and that path is
+meant to be the whole of it: poptart fetches and configures what it needs on first run. This is
+everything else — where it looks for things, what you can point elsewhere, and what to do when
+something doesn't come up.
 
 ## Configuration
 
@@ -86,35 +87,35 @@ Link is macOS-only for now; on other systems the toggle is disabled.
 
 ## Where SuperCollider comes from
 
-SuperCollider is the audio engine poptart plays through. There are two ways to have one, and
-poptart is happy either way.
+SuperCollider is the audio engine poptart plays through. You don't have to install it: poptart
+looks for one on first run, and if there isn't one it offers to download its own.
 
-**Your own install** is the default. Install it however you like —
-`brew install --cask supercollider` on macOS, the installer from
-[supercollider.github.io](https://supercollider.github.io/downloads) on Windows, your package
-manager on Linux — and poptart finds it.
-
-**Or let poptart fetch its own copy.** If SuperCollider isn't installed, poptart offers to
-download one for itself. Say yes and it lands in `~/.poptart/sc`, and that is the whole
-footprint:
+**poptart's own copy.** Say yes at the prompt and it lands in `~/.poptart/sc`, and that is the
+whole footprint:
 
 - Nothing is installed system-wide and no administrator password is needed, so this works on a
   locked-down or shared machine.
 - An existing SuperCollider, and its IDE, are left completely alone.
-- Uninstalling is `rm -rf ~/.poptart/sc`.
+- Uninstalling is deleting `~/.poptart/sc`.
 - It is a download of 139–250 MB, which is why poptart asks first rather than doing it quietly.
   Answer in advance with `POPTART_INSTALL_SC=1`, or refuse once and for all with `=0`. With no
-  terminal to ask in — a service, an editor's integrated runner — the answer is no.
+  terminal to ask in — a service, an editor's integrated runner — the answer is no. (The desktop
+  app asks with a dialog instead.)
 
 macOS and Windows only: SuperCollider publishes no official Linux binaries, so on Linux this is
-not offered and the package manager is the way.
+not offered — install it from your package manager and poptart finds it.
 
-The private copy is more isolated than an ordinary install, which is the real reason to want
-one. sclang is started with a generated `sclang_conf.yaml` that excludes SuperCollider's default
+**Your own install.** If SuperCollider is already on the machine — Homebrew, the official
+installer, a package manager — poptart finds it and uses it, and never offers the download. To
+move to poptart's own copy anyway, run once with `POPTART_INSTALL_SC=1`. To point at a build in
+an unusual place, set `POPTART_SCLANG` to the `sclang` binary.
+
+poptart's own copy is the more isolated of the two, which is the real reason to prefer it.
+sclang is started with a generated `sclang_conf.yaml` that excludes SuperCollider's default
 search paths, so it compiles *only* the private copy's class library and poptart's own
 `~/.poptart/sc/Extensions` folder. A broken extension in your SuperCollider user folder, a
-VSTPlugin build that doesn't match your SC version, or a stale `sclang` symlink on your `PATH`
-cannot affect it — those entries in Troubleshooting below simply stop applying.
+plugin-hosting extension that doesn't match your SC version, or a stale `sclang` symlink on
+your `PATH` cannot affect it — those entries in Troubleshooting below simply stop applying.
 
 One thing it does **not** change: sclang still runs your personal `startup.scd` before poptart's
 engine script, because SuperCollider derives that path from your home directory and no config
@@ -130,24 +131,6 @@ npm run doctor -- --out doctor.txt  # to a file, for pasting into a bug report
 
 The order poptart resolves in: `POPTART_SCLANG` → the private copy → `sclang` on your `PATH` →
 the standard install location for your platform.
-
-## Installing VSTPlugin by hand
-
-On first run poptart detects that the VSTPlugin server extension is missing, downloads the pinned
-build for your platform (checksum-verified), and unzips it into your SuperCollider `Extensions`
-directory. On macOS the pinned build comes from
-[poptart's vstplugin fork](https://github.com/glossings/vstplugin/releases), which is upstream
-v0.6.2 plus a fix for a probe crash that made some plugins (Auto-Tune Pro, sforzando, Arturia V
-Collection, …) vanish from the scan.
-
-Should the auto-install fail: it's a compiled binary extension, *not* a Quark. Download the macOS
-zip from the fork releases page (other platforms: <https://git.iem.at/pd/vstplugin/-/releases>)
-and unzip its `sc/VSTPlugin` folder into the `Extensions` directory (on macOS,
-`~/Library/Application Support/SuperCollider/Extensions/`).
-
-If poptart is running its own SuperCollider, that directory is `~/.poptart/sc/Extensions/`
-instead — and only that one counts, since the private copy does not read your SuperCollider
-user folder at all. `npm run doctor` prints the directory it is actually using.
 
 ## Troubleshooting
 
@@ -177,8 +160,18 @@ suspects:
   rm "$(which sclang)"       # add sudo if it lives in /usr/local/bin or /opt/homebrew/bin and rm reports "Permission denied"
   ```
   Repeat `which -a sclang` until it prints nothing, then retry poptart.
-- **VSTPlugin missing** — see above; poptart warns at startup if it isn't in the standard
-  Extensions folder.
+- **The plugin-hosting extension didn't install.** SuperCollider hosts VST plugins through an
+  extension called VSTPlugin, which poptart downloads (pinned, checksum-verified) and puts in
+  place by itself on first run — you should never have to think about it. If that step failed,
+  the setup report at startup says so and names the folder it wanted. To do it by hand: it is a
+  compiled binary extension, *not* a Quark. On macOS take the zip from
+  [poptart's vstplugin fork](https://github.com/glossings/vstplugin/releases) (upstream v0.6.2
+  plus fixes for a probe crash that made some plugins vanish from the scan); elsewhere from
+  <https://git.iem.at/pd/vstplugin/-/releases>. Unzip its `sc/VSTPlugin` folder into the
+  Extensions directory poptart is using — `~/.poptart/sc/Extensions/` with poptart's own
+  SuperCollider (the only one that counts then; your SuperCollider user folder is not read at
+  all), otherwise your SuperCollider user Extensions folder (on macOS,
+  `~/Library/Application Support/SuperCollider/Extensions/`). `npm run doctor` prints which.
 - **Broken files in `~/Library/Application Support/SuperCollider/`** (a half-installed
   extension, a bad `startup.scd`) left over from other SuperCollider projects. In the error's
   sclang output, look for lines starting with `ERROR:` or `WARNING:` — especially
@@ -186,12 +179,13 @@ suspects:
   successfully` — and for any file path under `.../SuperCollider/Extensions/`. That path is the
   culprit. Move the offending extension out and retry:
   ```sh
-  # back the whole Extensions folder out of the way (keeps VSTPlugin too, so you'll re-add that)
+  # back the whole Extensions folder out of the way
   mv ~/Library/Application\ Support/SuperCollider/Extensions ~/Desktop/sc-extensions-backup
   ```
-  then reinstall just VSTPlugin (see above) into a fresh `Extensions/` and retry. Reinstalling
-  SuperCollider itself does **not** help — the installer never touches this user directory, so
-  the broken file survives.
+  then start poptart again — it notices its plugin-hosting extension went with the folder and
+  reinstalls it into a fresh `Extensions/` by itself. Reinstalling SuperCollider does **not**
+  help: the installer never touches this user directory, so the broken file survives. (Or
+  sidestep the whole category: with poptart's own SuperCollider this folder is never read.)
 - **The log has no `ERROR:` at all — it just stops.** The `poptart:` checkpoint lines say how
   far boot got, and the diagnosis reads them for you. The three cases:
   - *Nothing after the `Welcome to SuperCollider` banner*: sclang runs your personal

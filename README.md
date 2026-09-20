@@ -32,48 +32,64 @@ Everything past that is in the built-in guide — the **docs ↗** button in the
 
 ## How it works
 
-Three packages: `pattern-core` (the pattern language and scheduler, pure JS), `osc-engine`
-(spawns SuperCollider and talks OSC to it; SuperCollider hosts the plugins via the `VSTPlugin`
-extension and runs the native modulators), and `web-app` (a small Node server plus the browser
-editor — no Electron). See [ARCHITECTURE.md](ARCHITECTURE.md) for the long version.
+Three packages do the work: `pattern-core` (the pattern language and scheduler, pure JS),
+`osc-engine` (spawns SuperCollider and talks OSC to it; SuperCollider hosts the plugins and runs
+the native modulators), and `web-app` (a small Node server plus the browser editor). A fourth,
+`desktop`, is an optional Electron window around that same server. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the long version.
 
 ## Requirements
 
-- **Node 20+**
-- **SuperCollider** — `brew install --cask supercollider` on macOS. poptart finds `sclang` at the
-  standard install location by itself; if yours lives elsewhere, set
-  `POPTART_SCLANG=/full/path/to/sclang`. Don't have it and don't want to install it system-wide?
-  poptart will offer to download its own copy into `~/.poptart/sc` — no admin rights, nothing
-  else on the machine touched, `rm -rf ~/.poptart/sc` to undo. See
-  [SETUP.md](SETUP.md#where-supercollider-comes-from).
-- **The VSTPlugin server extension** — installed for you on first run (downloaded, checksum-verified
-  and unzipped into SuperCollider's `Extensions` folder). Manual install: see
-  [SETUP.md](SETUP.md).
+**Node 20+.** That is the only thing you install yourself.
 
-No AudioUnit support — `VSTPlugin` is VST2/VST3 only; in practice nearly every AU also ships a VST3.
+The audio engine underneath poptart is [SuperCollider](https://supercollider.github.io), and
+poptart sets it up for you on first run:
+
+- **Don't have SuperCollider?** poptart asks, then downloads its own private copy into
+  `~/.poptart/sc`. No administrator password, nothing installed system-wide, nothing else on
+  your machine touched; deleting that folder undoes it. (macOS and Windows. SuperCollider
+  publishes no Linux binaries, so on Linux install it from your package manager first.)
+- **Already have it?** poptart finds it and uses it, and leaves it alone.
+
+Everything SuperCollider needs in order to host plugins is fetched and put in place the same
+way. There is nothing to configure.
+
+No AudioUnit support — plugins are VST2/VST3 only; in practice nearly every AU also ships a VST3.
+
+macOS is where poptart is developed and where everything works. It runs on Windows too, with
+two gaps for now: no Ableton Link, and the decks' keylock uses its rougher fallback.
 
 ## Getting started
 
 ```sh
-npm install     # installs all workspaces
-npm run dev     # starts the server; it spawns sclang itself
+npm install
+npm run dev
 ```
 
-Then open <http://localhost:4000>. The first run prints a short setup report (SuperCollider found?
-VSTPlugin installed? anything known to wreck a boot?) before the engine comes up. If that report
-ever disagrees with what you expected, `npm run doctor` explains every path it chose.
+Then open <http://localhost:4000>.
 
-1. Click **rescan** to scan your installed plugins. Click a result to copy its exact name — that's
-   the string `.synth()` and `.fx()` want.
+The first run takes a little longer than the rest. If poptart needs its own SuperCollider it
+asks first (`[y/N]` — it is a 140–250 MB download), and it scans your installed plugins, which
+on a machine with a lot of them can take several minutes. The scan runs in the background: the
+editor is usable straight away, and the plugin list fills in when the scan finishes. After
+that first time, startup is quick.
+
+1. Open the **Plugins** panel and click a plugin to copy its exact name — that's the string
+   `.synth()` and `.fx()` want. (**rescan** picks up anything you install later.)
 2. Write a pattern and press **eval** (Cmd/Ctrl+Enter). **stop** is Cmd/Ctrl+.
 3. Open **docs ↗** and follow the studies.
+
+Prefer a window of its own to a browser tab? `npm run desktop` opens the same thing as an app
+(it installs what it needs the first time). It is early — there is no downloadable installer
+yet — but it is the same poptart.
 
 The server listens on `127.0.0.1` only — evaluated code runs with your user's privileges, so it
 must not be reachable from the network. (`POPTART_HOST=0.0.0.0` opts into LAN access, with a
 warning.)
 
-Where things live on disk, every environment variable, how to narrow the plugin scan, and what to
-do when the engine won't boot: [SETUP.md](SETUP.md).
+If something doesn't come up, `npm run doctor` prints everything poptart decided and why. Where
+things live on disk, every setting, how to narrow the plugin scan, and what to do when the engine
+won't boot: [SETUP.md](SETUP.md).
 
 ## License
 

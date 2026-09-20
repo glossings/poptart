@@ -19,20 +19,28 @@ normal browser keeps working exactly as before.
 | Part | State |
 | --- | --- |
 | Server supervision (`server-process.js`) | Unit-tested (`npm test` here) |
+| Self-installing launcher (`start.js`, `ensure-electron.js`) | Unit-tested; the repair path verified against a real broken install on macOS |
 | The shell (`main.js`) | Written, syntax-checked, **not yet run** — needs Electron installed |
 | Packaging (`electron-builder.yml`) | **Draft, never executed.** Treat every path in it as unconfirmed |
 | Signing / notarization | Not done. Needs an Apple Developer account — see PACKAGING.md |
 
 ## Running it
 
-This package is **not** an npm workspace member, so a plain `npm install` at the repository root
-does not download Electron (~200 MB). Nobody who just wants `npm run dev` pays for the desktop
-build. Install it separately:
-
 ```sh
-npm install --prefix packages/desktop     # downloads Electron
-npm start   --prefix packages/desktop     # opens the app
+npm run desktop        # from the repository root
 ```
+
+That is the whole procedure, including the first time. This package is **not** an npm workspace
+member, so a plain `npm install` at the repository root does not download Electron (~200 MB) -
+nobody who just wants `npm run dev` pays for the desktop build. Instead the launcher
+(`start.js` → `ensure-electron.js`) installs Electron the first time the app is asked for, and
+launches it.
+
+It also repairs the one install failure seen in practice: Electron's own postinstall can
+download its zip and then unpack nothing (its unzip library misbehaving on newer Node versions),
+which otherwise surfaces as "Electron failed to install correctly". The launcher notices the
+empty install and unpacks the cached download itself, so that error should never reach anyone.
+(`npm start --prefix packages/desktop` is the same launcher.)
 
 The sibling packages are not listed as dependencies here, and that is not an oversight: Node
 resolves `@poptart/osc-engine` and friends by walking up to the repository's root
