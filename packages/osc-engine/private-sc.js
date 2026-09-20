@@ -559,9 +559,13 @@ async function consentToInstall({
         'poptart fetch its own SuperCollider',
     };
   }
+  // Three short lines rather than one long one: the path alone can be most of a terminal's
+  // width (C:\Users\<name>\.poptart\sc), and a wrapped question buries its own [y/N].
   const yes = await ask(
-    `[poptart] SuperCollider is not installed. Download poptart's own copy ` +
-      `(${mb(asset.bytes)} MB, into ${privateScRoot()}, nothing installed system-wide)? [y/N] `,
+    '[poptart] SuperCollider is not installed. poptart can download its own copy:\n' +
+      `[poptart]   ${mb(asset.bytes)} MB, into ${privateScRoot()}\n` +
+      '[poptart]   (nothing installed system-wide, no admin rights needed)\n' +
+      '[poptart] Download it? [y/N] ',
   );
   return { install: yes, reason: yes ? 'confirmed at the prompt' : 'declined at the prompt' };
 }

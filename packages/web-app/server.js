@@ -1858,13 +1858,18 @@ function applyMidiClockSetting() {
 // and in a live set that must never pass silently. 30ms resolution, logged with the overrun so
 // the terminal says when it happened and how long it was; the eval timer below says whether an
 // evaluation was the culprit.
+//
+// Silent until there is an engine: with nothing able to play, a stall cannot be a stutter, and
+// startup is full of legitimate synchronous work - module loading, and first-run setup
+// checksumming and unpacking a SuperCollider download. Reported then, the warning is only noise,
+// and it lands in the middle of setup's y/N prompt.
 {
   let lastTick = process.hrtime.bigint();
   setInterval(() => {
     const now = process.hrtime.bigint();
     const stalledMs = Number(now - lastTick) / 1e6 - 30;
     lastTick = now;
-    if (stalledMs > 100) {
+    if (stalledMs > 100 && engine) {
       // eslint-disable-next-line no-console
       console.warn(`[poptart] event loop stalled ~${Math.round(stalledMs)}ms - long enough to delay note scheduling`);
     }
