@@ -15,14 +15,18 @@ name: private-sc
 
 on:
   workflow_dispatch: # run by hand from the Actions tab
+  # The paths cover everything the job tests. packages/desktop is listed because the job runs
+  # the desktop shell's tests too - without it, a desktop-only change is silently never checked.
   push:
     branches: [glossing/private-sc]
     paths:
       - 'packages/osc-engine/**'
+      - 'packages/desktop/**'
       - '.github/workflows/private-sc.yml'
   pull_request:
     paths:
       - 'packages/osc-engine/**'
+      - 'packages/desktop/**'
       - '.github/workflows/private-sc.yml'
 
 permissions:
