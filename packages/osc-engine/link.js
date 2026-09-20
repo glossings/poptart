@@ -18,10 +18,17 @@ const fs = require('node:fs');
 
 const HELPER = path.join(__dirname, 'native', 'link', 'bin', 'poptart-link');
 
-/** Is there a Link helper for this platform? (Only macOS is built so far.) */
+/**
+ * Is there a Link helper for this platform? (Only macOS is built so far.)
+ *
+ * The platform check is not redundant with the file check: the helper is committed, so the
+ * macOS binary is sitting on disk in every checkout, Windows and Linux included. Without it the
+ * settings tab offers Link there and the toggle fails trying to run a Mach-O executable. Same
+ * shape as audio-devices.js's helperAvailable().
+ */
 function helperAvailable(helper = HELPER) {
   try {
-    return fs.statSync(helper).isFile();
+    return process.platform === 'darwin' && fs.statSync(helper).isFile();
   } catch {
     return false;
   }

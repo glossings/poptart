@@ -43,7 +43,9 @@ test('songCachePath: stable for the same file identity, new for a changed one', 
   assert.notEqual(a, songCachePath('/music/a.mp3', { mtimeMs: 2000, size: 42 }, '/cache'));
   assert.notEqual(a, songCachePath('/music/a.mp3', { mtimeMs: 1000.4, size: 43 }, '/cache'));
   assert.notEqual(a, songCachePath('/music/b.mp3', stat, '/cache'));
-  assert.ok(a.startsWith(`/cache${path.sep}`));
+  // Compared as directories, not as string prefixes: on Windows path.join() turns the leading
+  // '/' into '\', so the result starts with '\cache\' and a literal '/cache' prefix never matches.
+  assert.equal(path.dirname(a), path.normalize('/cache'));
   assert.ok(a.endsWith('.wav'));
 });
 

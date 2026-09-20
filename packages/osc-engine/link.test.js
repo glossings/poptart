@@ -11,6 +11,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const { joinLink, helperAvailable, HELPER } = require('./link');
@@ -111,6 +112,12 @@ test('a helper that will not spawn leaves a handle that does nothing', () => {
   link.setTempo(120); // no throw
   link.setPlaying(true);
   link.stop();
+});
+
+test('helperAvailable is false off macOS whatever is on disk', () => {
+  // The helper is committed, so the macOS binary exists in a Windows or Linux checkout too -
+  // the file being there says nothing about whether it can run here.
+  assert.equal(helperAvailable(), process.platform === 'darwin' && fs.existsSync(HELPER));
 });
 
 test('helperAvailable answers for a path that is not there', () => {
