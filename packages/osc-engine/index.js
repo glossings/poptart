@@ -397,6 +397,7 @@ class OscEngine {
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateAcks = new Map(); // same key -> { seq, resolve }: the one restore still unanswered
+    this._stateWork = new Set(); // restores still inflating/writing, so "all sent" is awaitable (see _stateIdle)
     this._stateCache = new Map(); // captured state -> inflated program, LRU (see _inflateState)
     // Resolves a "@id" handle to the state it stands for. A patch keeps its captured programs out
     // of the code (see web-app's blobs.js), so what reaches setPluginState is usually a handle and
@@ -1103,7 +1104,7 @@ class OscEngine {
     // would sound the INIT preset until it lands. Latency 0: the hold starts now, and the cold
     // path in poptart.scd keeps it up (and then drops the missed notes) until the program is in.
     this._send('/poptart/statePending', [trackId, slotIndex, targetTime == null ? 0 : this._latency(targetTime), seq]);
-    (async () => {
+    const work = (async () => {
       const data = await this._inflateState(String(state), trackId, slotIndex);
       if (superseded()) return;
       if (!data) {
@@ -1127,7 +1128,17 @@ class OscEngine {
     })().catch((e) => {
       this._warnOnce(`state-write:${trackId}:${slotIndex}`, `[poptart] could not restore plugin state for ${trackId}/slot ${slotIndex}: ${e.message ?? e}`);
       if (!superseded()) this.cancelPluginState(trackId, slotIndex); // release the announced hold (see above)
-    });
+    }).finally(() => this._stateWork.delete(work));
+    this._stateWork.add(work);
+  }
+
+  // Resolves once every restore that was inflating or writing has either gone out or been
+  // dropped - including any started while waiting. The pipeline above is fire-and-forget by
+  // design (the scheduler never awaits it), which left "has it been sent yet?" answerable only by
+  // sleeping and hoping; the unit tests did exactly that, with a fixed 50ms, and lost the race on
+  // a slow machine. This is the signal to wait on instead of a clock.
+  async _stateIdle() {
+    while (this._stateWork.size) await Promise.all([...this._stateWork]);
   }
 
   /**
