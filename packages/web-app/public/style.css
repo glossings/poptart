@@ -690,6 +690,18 @@ aside h2 {
   font-weight: 400;
 }
 
+/* The plugin scan's running count and the plugin being probed, in the plugins heading. Unlike the
+   other .dim labels this one has to be able to shrink: a plugin's filename is as long as its
+   vendor felt like making it, and the heading is the width of the panel. */
+#pluginScan {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-transform: none;
+}
+
 .panel {
   background: var(--bg-panel);
   border: 1px solid var(--border);

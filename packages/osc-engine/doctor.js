@@ -43,6 +43,8 @@ const {
   writeSclangConf,
 } = require('./private-sc');
 const { sclangStatus, findSclangSymlinkOnPath, runningEngineProcesses } = require('./setup');
+const { resolveSearchDirs, walkPluginDirs, readJournal, describeFormat, splitPathList } = require('./plugin-scan');
+const { engineLogPath, tailEngineLog } = require('./engine-log');
 
 // A port of its own: the sclang test harnesses run in parallel and sclang only tries ten ports
 // up from its default before giving up on networking entirely.
@@ -208,9 +210,39 @@ function main() {
   say(`contents of ${activeExtensionsDir()}:`);
   listTree(activeExtensionsDir(), 3);
 
+  heading('plugin scan');
+  // Resolved without touching the journal: doctor must never decide that something gets skipped
+  // on the next boot (preparePluginScan does, which is why it isn't used here).
+  const scanDirs = resolveSearchDirs();
+  const userExclude = splitPathList(process.env.POPTART_VST_EXCLUDE);
+  const journal = readJournal();
+  say(`folders: ${scanDirs.length ? scanDirs.join(', ') : 'none found - VSTPlugin will use its own defaults'}`);
+  const walk = walkPluginDirs({ dirs: scanDirs, exclude: userExclude });
+  say(`plugins to probe: ${walk.plugins.length}${walk.truncated ? ' (walk hit its entry limit)' : ''}`);
+  if (walk.foreign.length) {
+    say(`excluded as unloadable here (probing one crashes the audio server):`);
+    for (const f of walk.foreign) say(`  ${f.path} - ${describeFormat(f.format)}`);
+  } else {
+    say('excluded as unloadable here: none');
+  }
+  say(`skipped after killing an earlier scan: ${journal.skip.length ? journal.skip.map((s) => s.path).join(', ') : 'none'}`);
+  if (journal.inFlight) say(`a probe of ${journal.inFlight.path} is recorded as unfinished (the scan died on it)`);
+  if (userExclude.length) say(`excluded by POPTART_VST_EXCLUDE: ${userExclude.join(', ')}`);
+
   heading('running processes');
   const running = runningEngineProcesses();
   say(running.length ? `already running: ${running.join(', ')}` : 'no sclang/scsynth running');
+
+  heading('engine log');
+  // The tail of the last run's output, which is where a scan crash or a boot failure actually
+  // explains itself. Two files: the current run and the one before it, and after a crash the
+  // interesting one is usually .1.
+  for (const file of [engineLogPath(), `${engineLogPath()}.1`]) {
+    const tail = tailEngineLog({ file, lines: 60 });
+    say('');
+    say(`${file}: ${exists(file) ? `last ${tail.split('\n').length} line(s)` : 'not written yet'}`);
+    if (tail) say(tail.trimEnd());
+  }
 
   if (withSclang) {
     heading('sclang probe');

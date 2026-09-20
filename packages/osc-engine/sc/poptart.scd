@@ -53,19 +53,27 @@ var inChannels = ("POPTART_IN_CHANNELS".getenv ? "0").asInteger;
 // engine on an aggregate that really contains the chosen cue device; the track SynthDefs
 // compile their cue send only when it is here.
 var cueOffset = "POPTART_CUE_OFFSET".getenv !? { |v| v.asInteger };
-// Plugin directories to scan. Priority: POPTART_VST_DIRS (colon-separated) if set, else
-// ~/.poptart/plugins if it exists (a folder of symlinks to just the plugins being played),
-// else VSTPlugin's standard locations. The curated folder stays the default because it keeps
-// first-scan time down and sidesteps plugins that won't probe headlessly; it is no longer load-
-// bearing for stability, though - the full-scan crash it was working around was VSTPlugin's
-// parallel probing, now off by default (see parallelScan below).
-var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split($:) }
+// Plugin directories to scan. Priority: POPTART_VST_DIRS if set, else ~/.poptart/plugins if it
+// exists (a folder of symlinks to just the plugins being played), else VSTPlugin's standard
+// locations. The curated folder stays the default because it keeps first-scan time down and
+// sidesteps plugins that won't probe headlessly; it is no longer load-bearing for stability,
+// though - the full-scan crash it was working around was VSTPlugin's parallel probing, now off
+// by default (see parallelScan below).
+// Normally this arrives already resolved from Node (see plugin-scan.js), which makes the same
+// three-way choice and has walked the folders looking for entries that would crash the scan -
+// one resolution, so the list that gets scanned and the list that got checked cannot differ. The
+// fallback below is for an sclang run by hand.
+// Split on the platform's path delimiter - ';' on Windows, where ':' cannot separate paths
+// because every absolute path contains one.
+var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split(Platform.pathDelimiter).reject(_.isEmpty) }
     ?? { var d = "~/.poptart/plugins".standardizePath; if (File.exists(d)) { [d] } };
 // Plugins skipped explicitly during scans (VSTPlugin's exclude option, which prunes these
 // paths from the directory traversal so they're never probed). Set POPTART_VST_EXCLUDE
-// (colon-separated absolute paths) to skip plugins that crash or spam errors on your machine
-// during a scan, e.g. copy-protection or analysis plugins that fail to probe headlessly.
-var excludePaths = ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
+// (absolute paths, same separator as above) to skip plugins that crash or spam errors on your
+// machine during a scan, e.g. copy-protection or analysis plugins that fail to probe headlessly.
+// Node adds to this: any file with a plugin extension that isn't a binary this machine could
+// load (probing one segfaults scsynth), plus whatever a previous scan died on.
+var excludePaths = ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split(Platform.pathDelimiter).reject(_.isEmpty) } ? []);
 // Probe one plugin at a time. VSTPlugin's default is parallel probing (one worker per core), and
 // on this machine a parallel scan of a full plugin folder reliably segfaults scsynth partway
 // through - always the same null deref inside VSTPlugin.scx, reached from SC_AudioDriver::RunThread
@@ -76,6 +84,9 @@ var excludePaths = ("POPTART_VST_EXCLUDE".getenv !? { |p| p.split($:) } ? []);
 var parallelScan = ("POPTART_VST_PARALLEL".getenv ? "0") == "1";
 // Shared by the boot scan and the /poptart/scanPlugins rescan, so the two can't drift.
 var searchOptions = (timeout: 20, exclude: excludePaths, parallel: parallelScan);
+// True while a search is running. A plugin name that misses during one usually isn't a typo -
+// it just hasn't been probed yet - and the message says so (see loadInstrument/loadEffect).
+var scanning = false;
 // Slot 0 = instrument, 1..20 = effects. An empty slot is a pass-through costing ~0.002% of a core
 // (offline render: 15 tracks of 21 empty slots vs 8 slots, 09-14), and adds no latency.
 var maxSlots = 21;
@@ -162,7 +173,7 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 // synced LFOs/delays/arps follow setbpm instead of assuming their own default. Updated by
 // '/poptart/setTempo' and applied to plugins as they open (see loadInstrument/loadEffect).
 var currentTempo = 120;
-var jsonEscape, toJson, replyOk, replyErr, pluginList, trackDefName, buildTrackDef, channelDefault;
+var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
 var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued;
 var destroyTrack;
@@ -322,6 +333,42 @@ pluginList = {
             numOutputChannels: desc.outputs[0] !? _.channels ?? 0,
             numParameters: desc.numParameters
         )
+    };
+};
+
+// The plugin scan, shared by the boot scan and the /poptart/scanPlugins rescan.
+//
+// One search per directory rather than one search for all of them. VSTPlugin writes its plugin
+// cache when a search FINISHES, and hands its results back at the same moment - so a single
+// search over every folder is all-or-nothing: minutes of probing, and a server that dies partway
+// (a crash-inducing plugin, a quit) leaves nothing behind at all and the next launch starts over.
+// Split per folder, each finished folder saves its own work and its plugins become playable
+// while the rest is still being probed.
+//
+// The brackets around it are the only way anything outside sclang can know a scan is running:
+// VSTPlugin says nothing until a search returns, and /poptart/ready is deliberately sent BEFORE
+// the scan starts (a fresh machine would otherwise wait minutes for an editor that needs no
+// plugins at all). Node counts the individual probes off the log; this says when to start and
+// stop counting.
+runScan = { |onDone|
+    var dirs = searchDirs ?? [nil]; // nil = VSTPlugin's own default locations
+    scanning = true;
+    nodeAddr.sendMsg("/poptart/scanState", "started", dirs.size);
+    fork {
+        dirs.do { |dir, i|
+            var done = Condition.new;
+            VSTPlugin.search(server, dir: dir, options: searchOptions, verbose: true, action: {
+                done.test = true;
+                done.signal;
+            });
+            done.wait;
+            // This folder's plugins are in the dict (and the cache) as of now - say so, so the
+            // plugin list can refill folder by folder instead of all at the end.
+            nodeAddr.sendMsg("/poptart/scanState", "folder", i + 1);
+        };
+        scanning = false;
+        nodeAddr.sendMsg("/poptart/scanState", "finished", VSTPlugin.plugins(server).size);
+        onDone.value;
     };
 };
 
@@ -1740,7 +1787,7 @@ server.waitForBoot {
     // Populate the plugin dict in the background so .synth("Name") can resolve names. Cached
     // plugins re-verify instantly; only new/changed ones get probed (out-of-process, with a
     // per-plugin timeout so a hang skips that plugin instead of stalling the scan).
-    VSTPlugin.search(server, dir: searchDirs, options: searchOptions, verbose: true, action: {
+    runScan.({
         "poptart: initial plugin search done (% plugins)".format(VSTPlugin.plugins(server).size).postln;
     });
 };
@@ -1955,8 +2002,13 @@ OSCdef(\poptartLoadInstrument, { |msg|
                         };
                     } {
                         track[\wanted][0] = nil;
-                        ("poptart: FAILED to load instrument '" ++ pluginId
-                            ++ "' (name must match a scanned plugin - see the plugin browser)").warn;
+                        ("poptart: FAILED to load instrument '" ++ pluginId ++ "' "
+                            ++ if (scanning) {
+                                "- the plugin scan is still running, so it may simply not have been "
+                                ++ "probed yet; try again when the scan finishes"
+                            } {
+                                "(name must match a scanned plugin - see the plugin browser)"
+                            }).warn;
                     };
                 });
             };
@@ -2002,7 +2054,11 @@ OSCdef(\poptartLoadEffect, { |msg|
                         };
                     } {
                         track[\wanted][slot] = nil;
-                        ("poptart: FAILED to load effect '" ++ pluginId ++ "'").warn;
+                        ("poptart: FAILED to load effect '" ++ pluginId ++ "'"
+                            ++ if (scanning) {
+                                " - the plugin scan is still running, so it may simply not have "
+                                ++ "been probed yet; try again when the scan finishes"
+                            } { "" }).warn;
                     };
                 });
             };
@@ -3830,7 +3886,7 @@ OSCdef(\poptartScanPlugins, { |msg|
     var requestId = msg[1];
     // extraPaths (msg[2], JSON array) not wired through yet; POPTART_VST_DIRS covers the
     // custom-directory need for now.
-    VSTPlugin.search(server, dir: searchDirs, options: searchOptions, verbose: true, action: {
+    runScan.({
         replyOk.("/poptart/scanPlugins", requestId, toJson.((plugins: pluginList.(), crashed: [])));
     });
 }, '/poptart/scanPlugins');

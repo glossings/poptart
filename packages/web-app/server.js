@@ -2162,9 +2162,14 @@ let engineRestarting = false;
 // output device change is applied, since scsynth only picks its device at boot. Playing tracks
 // are stopped rather than migrated (their synths and plugins lived in the old scsynth); the
 // editor tells the user to re-evaluate.
-async function restartEngine() {
+async function restartEngine(reason = 'unspecified') {
   if (engineRestarting) throw new Error('an engine restart is already in progress');
   engineRestarting = true;
+  // Say it, every time, with the reason. An engine that goes away is either poptart's doing or
+  // something's death, and an afternoon was spent last time working out which - a line here
+  // means an exit with no line before it is known to be external.
+  // eslint-disable-next-line no-console
+  console.log(`[poptart] restarting the engine: ${reason}`);
   try {
     for (const [label, sch] of schedulers) {
       sch.stop();
@@ -2237,6 +2242,10 @@ async function restartEngine() {
     engineRestarting = false;
   }
 }
+
+// The last plugin-scan phase a console line was printed for, so the transitions are announced
+// once each and the per-probe updates behind them stay quiet.
+let scanPhase = null;
 
 // ALL post-start engine wiring, shared by init() and restartEngine(). Single function on
 // purpose: when these were two hand-maintained copies, onParamAutomated existed only on the
@@ -2316,6 +2325,28 @@ function wireEngine() {
   // ⌘↵ / ⌘. typed into a plugin's own window - the browser never sees those keys, so the page is
   // told to run them (see broadcastHotkey).
   engine.onHotkey = broadcastHotkey;
+
+  // The plugin scan, as one logged operation rather than a wall of per-plugin lines (those go to
+  // the engine log file - see osc-engine's engine-log.js). Only the transitions are worth a
+  // console line; the editor shows the running count, which it gets from /api/status.
+  scanPhase = null;
+  engine.onScanState = (s) => {
+    if (s.phase === scanPhase) return;
+    scanPhase = s.phase;
+    if (s.phase === 'scanning') {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[poptart] scanning plugins${s.total ? ` (${s.total} to probe)` : ''} - .synth()/.fx() names ` +
+          'cannot resolve until this finishes; everything else works meanwhile',
+      );
+    } else if (s.phase === 'done') {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[poptart] plugin scan finished: ${s.found ?? 0} plugin(s) known, ${s.probed} probed in ` +
+          `${Math.round(s.elapsedMs / 1000)}s`,
+      );
+    }
+  };
   // Peak level of a track tapped for recording - what the record panel's meter draws.
   engine.onRecLevel = (trackId, left, right) => handleRecLevel(trackLabel(trackId), left, right);
   // A song player's actual playhead, ~2/sec - the drift servo's measurement (songs phase 4).
@@ -4205,7 +4236,16 @@ const routes = {
     status: 200,
     // `scale` is whatever setscale() last set (the prebake may have, before any eval), so a fresh
     // page load already knows the key its piano roll should be drawing.
-    body: { loaded: !!engine, error: engineError, scale: patternCore ? patternCore.globalScale() : null },
+    // `scan` is the plugin scan's live state (see osc-engine's scan-progress.js). It is here
+    // rather than on its own endpoint because the editor already polls this one, and because on
+    // a fresh machine the scan IS the status: the engine is up, and nothing that needs a plugin
+    // will work until it finishes.
+    body: {
+      loaded: !!engine,
+      error: engineError,
+      scale: patternCore ? patternCore.globalScale() : null,
+      scan: engine?.scanStatus ? engine.scanStatus() : null,
+    },
   }),
 
   // Both plugin-list endpoints run through the prefer-VST3 filter (settings tab, default on):
@@ -6479,7 +6519,7 @@ const routes = {
       console.warn(`[poptart] ${rebuildWarning.detail}`);
     }
     saveSettings();
-    await restartEngine();
+    await restartEngine('the headphone-cue device changed');
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
     return {
       status: 200,
@@ -6501,7 +6541,7 @@ const routes = {
     const pairs = Math.max(1, Math.floor(Number(body?.channels) / 2) || 1);
     settings.audioOutputChannels = pairs * 2;
     saveSettings();
-    await restartEngine();
+    await restartEngine('the output channel count changed');
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
     const { channels, choices, audible } = outputChannelState();
     return { status: 200, body: { outputChannels: channels, outputChannelChoices: choices, audibleChannels: audible } };
@@ -6538,7 +6578,7 @@ const routes = {
       }
     }
     saveSettings();
-    await restartEngine();
+    await restartEngine('the audio output device changed');
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
     return { status: 200, body: { device, warning: rebuildWarning ?? audioDeviceWarning() } };
   },
@@ -6596,7 +6636,7 @@ const routes = {
       uids.map((uid) => [uid, nameOf.get(uid) ?? inputDeviceName(uid)]),
     );
     saveSettings();
-    await restartEngine();
+    await restartEngine('the input device selection changed');
     if (!engine) throw new Error(engineError ?? 'engine failed to restart');
     const skipped = absent.length
       ? {

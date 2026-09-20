@@ -32,6 +32,9 @@ const {
   writeSclangConf,
 } = require('./private-sc');
 const { advertiseOsc } = require('./bonjour');
+const { preparePluginScan, scanWarnings, joinPathList, noteProbe, noteProbeDone, markProbeCrashed } = require('./plugin-scan');
+const { ScanProgress } = require('./scan-progress');
+const { openEngineLog, engineLogPath } = require('./engine-log');
 
 // Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
 // this process also runs the note scheduler against a 150ms lookahead - gzipSync of that is
@@ -394,6 +397,24 @@ class OscEngine {
     // last pushed them (see defineSamplePacks). Resolved to files per load, so a folder entry
     // picks up what is in it at the time. A fresh engine starts empty; the host re-pushes.
     this._namedPacks = new Map();
+    // The plugin scan's live state, fed by sclang's log and by /poptart/scanState (see
+    // scan-progress.js). Exists before the engine starts so a host can ask at any time.
+    this._scan = new ScanProgress({
+      // Only once start() has said where the journal lives: an engine that was never started
+      // (every unit test) must not write into the real ~/.poptart.
+      onProbeStart: (p) => this._journalFile && noteProbe(p, { file: this._journalFile }),
+      onProbeEnd: (p) => this._journalFile && noteProbeDone(p, { file: this._journalFile }),
+      onChange: (s) => this.onScanState?.(s),
+    });
+    this._journalFile = null; // set by start(), from preparePluginScan
+    // Set by stop(), so the server going away can be told apart from the server dying. Quitting
+    // poptart during its first scan is an ordinary thing to do, and it must not be reported as a
+    // crash or blamed on whichever plugin happened to be under the needle.
+    this._stopping = false;
+    this._log = null; // the engine's file log for this run (engine-log.js)
+    // Plugin-scan feed, (snapshot) - see scanStatus(). Fires on every probe and at both ends of
+    // a scan, so a host can show "47 of 312" while nothing else works yet.
+    this.onScanState = null;
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateAcks = new Map(); // same key -> { seq, resolve }: the one restore still unanswered
@@ -713,6 +734,32 @@ class OscEngine {
             return;
           }
         }
+        // Everything about the plugin scan is settled here, before anything is spawned: which
+        // folders it will walk, which entries would crash it (a file with a plugin extension
+        // that isn't a binary this machine can load takes scsynth down with it - see
+        // plugin-scan.js), what the last run died on, and how many plugins are out there. The
+        // engine script is then handed the result rather than working the folders out again.
+        const scan = preparePluginScan();
+        this._stopping = false;
+        this._journalFile = scan.journalFile;
+        this._scan.total = scan.plugins.length;
+        for (const line of scanWarnings(scan)) {
+          // eslint-disable-next-line no-console
+          console.warn(`[poptart] ${line}`);
+        }
+        // One file per run, rotated, so the afternoon after a crash starts with the log instead
+        // of with "can you paste your terminal".
+        this._log = openEngineLog();
+        this._log.note(
+          `engine starting - device: ${this.outDevice ?? 'system default'}, sr: ${sampleRate}, block: ${bufferSize}, ` +
+            `sclang: ${this.sclangPath}`,
+        );
+        this._log.note(
+          `plugin scan: ${scan.plugins.length} candidate(s) in ${scan.dirs.join(', ') || '(no plugin folders found)'}` +
+            (scan.exclude.length ? `, ${scan.exclude.length} excluded` : ''),
+        );
+        for (const line of scanWarnings(scan)) this._log.note(line);
+
         this._sclangProcess = spawn(
           this.sclangPath,
           // -u makes sclang listen for our commands on scPort (its default 57120 would clash
@@ -732,6 +779,13 @@ class OscEngine {
               POPTART_PLAY_CHANNELS: String(this.playChannels),
               POPTART_IN_CHANNELS: String(this.inChannels),
               ...(this.cueOffset != null ? { POPTART_CUE_OFFSET: String(this.cueOffset) } : {}),
+              // Resolved here, not in the .scd, so that what gets scanned and what got checked
+              // for crashers are the same list by construction. Left alone when this side found
+              // no plugin folders at all: the engine script then falls back to VSTPlugin's own
+              // defaults exactly as before, so a location poptart doesn't know about can only
+              // cost the pre-check and the progress count, never the plugins themselves.
+              ...(scan.dirs.length ? { POPTART_VST_DIRS: joinPathList(scan.dirs) } : {}),
+              POPTART_VST_EXCLUDE: joinPathList(scan.exclude),
             },
             stdio: ['ignore', 'pipe', 'pipe'],
           },
@@ -742,10 +796,15 @@ class OscEngine {
         // main debugging surface for plugin problems anyway.
         this._sclangProcess.stdout.on('data', (d) => {
           logBoot(d);
+          this._scan.feed(d); // raw, not clarified - the progress parser reads VSTPlugin's own wording
+          this._log?.write(String(d));
+          this._watchServerDeath(String(d));
           process.stdout.write(`[sclang] ${clarifySclangLine(d)}`);
         });
         this._sclangProcess.stderr.on('data', (d) => {
           logBoot(d);
+          this._scan.feed(d);
+          this._log?.write(String(d));
           process.stderr.write(`[sclang] ${clarifySclangLine(d)}`);
         });
 
@@ -757,6 +816,10 @@ class OscEngine {
           fail(new Error(`failed to spawn '${this.sclangPath}': ${err.message}${hint}`));
         });
         this._sclangProcess.on('exit', (code) => {
+          this._watchServerDeath(`Server exited (sclang exited with code ${code})`);
+          this._log?.note(`sclang exited (code ${code})`);
+          this._log?.close();
+          this._log = null;
           // Dying before ready is a boot failure - reject now with the log's diagnosis instead
           // of leaving the user staring at a 60s timeout.
           if (!settled) {
@@ -795,6 +858,11 @@ class OscEngine {
   // e.g. across an output-device change) - escalating to SIGKILL if it doesn't exit in time.
   // Await it before starting a replacement engine.
   async stop() {
+    // From here on, a server that exits did so because we asked. Clearing the journal matters as
+    // much as the flag: an interrupted scan's last probe is innocent, and leaving it recorded
+    // would skip a perfectly good plugin on the next start.
+    this._stopping = true;
+    if (this._journalFile) noteProbe(null, { file: this._journalFile });
     if (this._sclangProcess) {
       const proc = this._sclangProcess;
       this._sclangProcess = null;
@@ -836,6 +904,9 @@ class OscEngine {
       this._oscAd = null;
     }
     clearEnginePids({ file: this._pidfile });
+    // Normally closed by sclang's exit handler; a spawn that failed outright never emits one.
+    this._log?.close();
+    this._log = null;
     if (this._port) {
       this._port.close();
       this._port = null;
@@ -1872,7 +1943,79 @@ class OscEngine {
     });
   }
 
+  // What the plugin scan is doing right now: { scanning, phase, probed, total, current, ... }.
+  // The host shows it (the first run of a fresh machine is minutes of nothing otherwise) and the
+  // engine's own "no such plugin" answers consult it.
+  scanStatus() {
+    return this._scan.snapshot();
+  }
+
+  // Where this run's engine log is being written, for doctor.js and for anyone being asked to
+  // send one in.
+  engineLogFile() {
+    return engineLogPath();
+  }
+
+  // sclang says "Server 'poptart' exited with exit code 0" when scsynth dies - including when it
+  // dies of a signal, which is how the exit code is 0 for a segfault. Nothing else noticed: the
+  // UI kept claiming a working engine and a scan minutes in vanished without a word. Say it
+  // loudly, and say what was lost, because what was lost is the whole scan: VSTPlugin writes its
+  // plugin cache only when a search finishes, so an interrupted one leaves nothing behind.
+  _watchServerDeath(text) {
+    if (!/Server ['"]?\w*['"]? exited|Server exited/i.test(text)) return;
+    if (this._stopping) {
+      this._scan.cancel(); // expected; nothing to report
+      return;
+    }
+    const died = this._scan.abort('the audio server exited during the scan');
+    if (!died) return;
+    const elapsed = Math.round(died.elapsedMs / 1000);
+    const lines = [
+      `the audio server exited during the plugin scan, after ${died.probed} of ${died.total || '?'} ` +
+        `plugin(s) in ${elapsed}s. Those results were NOT saved - the plugin cache is only written ` +
+        'when a scan finishes, so the next run starts over.',
+    ];
+    if (died.current) {
+      if (this._journalFile) markProbeCrashed({ file: this._journalFile });
+      lines.push(
+        `it was probing ${died.current} at the time; poptart will skip that one on the next start ` +
+          '(see ~/.poptart/scan-journal.json).',
+      );
+    }
+    for (const line of lines) {
+      // eslint-disable-next-line no-console
+      console.error(`[poptart] ${line}`);
+      this._log?.note(line);
+    }
+  }
+
   _handleMessage(msg) {
+    if (msg.address === '/poptart/scanState') {
+      // The engine script's own bracketing of a scan: ['started', folders] | ['folder', how many
+      // are done] | ['finished', plugin count]. The
+      // per-plugin counting comes from the log (see scan-progress.js); this is what says a scan
+      // is running at all, which nothing downstream could otherwise know.
+      const [state, count] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (String(state) === 'started') {
+        this._scan.begin();
+      } else if (String(state) === 'folder') {
+        // One search directory finished: its plugins are in the dict and in the cache from this
+        // moment, which is the host's cue to refetch the list.
+        this._scan.folderDone(Number(count) || 0);
+        return;
+      } else {
+        this._scan.end({ found: Number(count) || 0 });
+        // A finished scan is proof that nothing in it was fatal, whatever the last probe printed.
+        if (this._journalFile) noteProbe(null, { file: this._journalFile });
+      }
+      const at = this._scan.snapshot();
+      this._log?.note(
+        String(state) === 'started'
+          ? `plugin scan started (${at.total || '?'} candidate(s))`
+          : `plugin scan finished: ${at.found} plugin(s), ${at.probed} probed in ${Math.round(at.elapsedMs / 1000)}s`,
+      );
+      return;
+    }
     if (msg.address === '/poptart/midiIn') {
       // Live input feed: [deviceName, channel (1-16), number, value 0..1, kind]. `kind` is 'cc'
       // or 'note' - a cc 7 and a note 7 are different controls, and the DJ desk's learned

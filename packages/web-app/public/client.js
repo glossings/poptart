@@ -13788,16 +13788,87 @@ cm.on('change', scheduleMixerSync);
 // doesn't reprint itself each time.
 let lastEngineError = null;
 
+// ---------------------------------------------------------------------------------------------
+// The plugin scan (see osc-engine's scan-progress.js), as reported by /api/status.
+//
+// On a machine with a scan cache this is over before the page loads. On a fresh one it is
+// minutes long, and for those minutes the engine is genuinely up while every .synth("X") misses -
+// which, said nowhere, reads as poptart being broken. So it is said: in the header pill, in the
+// plugins panel, and once in the console when it starts and when it ends.
+// ---------------------------------------------------------------------------------------------
+
+const pluginScanLabel = document.getElementById('pluginScan');
+let lastScan = null;
+let scanPollTimer = null;
+
+function scanPillText(scan) {
+  if (!scan?.scanning) return null;
+  return scan.total ? `scanning ${scan.probed}/${scan.total}` : `scanning plugins`;
+}
+
+// The panel line, which has room to name what is being probed. A plugin can put a window up
+// during its own probe (one asked to be activated, mid-scan, on a machine nobody was watching) -
+// seeing which one is being probed is the difference between "hung" and "waiting for you".
+function scanPanelText(scan) {
+  if (!scan?.scanning) return '';
+  const name = scan.current ? scan.current.split(/[\\/]/).pop() : null;
+  const count = scan.total ? `${scan.probed}/${scan.total}` : `${scan.probed}`;
+  return name ? `scanning ${count} · ${name}` : `scanning ${count}`;
+}
+
+function applyScanState(scan) {
+  const before = lastScan;
+  lastScan = scan ?? null;
+  pluginScanLabel.textContent = scanPanelText(lastScan);
+  if (lastScan?.scanning) {
+    if (!before?.scanning) {
+      logLine(
+        `scanning plugins${lastScan.total ? ` (${lastScan.total} to probe)` : ''} — this happens once per ` +
+          "machine and takes a while; .synth()/.fx() names won't resolve until it finishes",
+      );
+    }
+    // A directory finishing is the moment new plugins become usable (the scan runs one folder at
+    // a time so each one's work lands as it completes), so that is when the list is refetched.
+    if ((before?.foldersDone ?? 0) !== lastScan.foldersDone) loadKnownPlugins().catch(() => {});
+    if (!scanPollTimer) scanPollTimer = setInterval(() => refreshStatus().catch(() => {}), 2000);
+    return;
+  }
+  clearInterval(scanPollTimer);
+  scanPollTimer = null;
+  if (!before?.scanning) return;
+  if (lastScan?.phase === 'died') {
+    logLine(
+      `the plugin scan stopped early — the audio server exited after ${lastScan.probed} plugin(s). ` +
+        'Nothing was saved, so it will start over next time. See the terminal, or ~/.poptart/engine.log.',
+      true,
+    );
+  } else {
+    logLine(
+      `plugin scan finished: ${lastScan?.found ?? 0} plugin(s) in ${Math.round((lastScan?.elapsedMs ?? 0) / 1000)}s`,
+    );
+  }
+  loadKnownPlugins().catch(() => {});
+}
+
 async function refreshStatus() {
-  const { loaded, error, scale } = await api('GET', '/api/status');
+  const { loaded, error, scale, scan } = await api('GET', '/api/status');
   setPatchScale(scale); // the prebake may have called setscale() before anything was evaluated
+  applyScanState(scan);
   // Two words, because this is a status indicator in the header and it has room for two words.
   // A boot failure's error is a diagnosis plus a tail of sclang's output - paragraphs of it - and
   // putting that in here turned the indicator into a wall of text and shoved the header around.
   // It goes to the console instead, which is where a message that long can actually be read.
-  engineStatus.textContent = loaded ? 'engine ready' : 'engine down';
-  engineStatus.className = `status ${loaded ? 'ok' : 'error'}`;
-  engineStatus.title = loaded ? '' : 'engine down — see the console';
+  // A scan in progress takes the pill over while it runs: the engine is up, but the thing a user
+  // is most likely to try first won't work yet, and "engine ready" said flatly is what made that
+  // confusing. Neutral colour (no ok/error class), because it is neither.
+  const scanning = loaded ? scanPillText(scan) : null;
+  engineStatus.textContent = scanning ?? (loaded ? 'engine ready' : 'engine down');
+  engineStatus.className = `status ${scanning ? '' : loaded ? 'ok' : 'error'}`;
+  engineStatus.title = scanning
+    ? 'poptart is probing your plugins one by one — everything except plugin names works meanwhile'
+    : loaded
+      ? ''
+      : 'engine down — see the console';
   if (!loaded && error && error !== lastEngineError) logLine(`engine down: ${error}`, true);
   lastEngineError = loaded ? null : error;
   return loaded;
@@ -14492,7 +14563,7 @@ function renderPlugins(plugins) {
   knownPlugins = plugins;
   pluginList.innerHTML = '';
   if (!plugins.length) {
-    pluginList.textContent = 'no plugins found';
+    pluginList.textContent = lastScan?.scanning ? 'scanning…' : 'no plugins found';
     return;
   }
   for (const p of plugins) {
@@ -14513,6 +14584,9 @@ function renderPlugins(plugins) {
 
 async function doScan() {
   logLine('scanning for plugins…');
+  // The scan's own progress arrives through /api/status, and nothing is polling it until a
+  // refresh notices a scan is running - so start one rather than waiting for the next tick.
+  setTimeout(() => refreshStatus().catch(() => {}), 500);
   try {
     const { plugins, crashed } = await api('POST', '/api/scanPlugins', { extraPaths: [] });
     renderPlugins(plugins);
@@ -14532,7 +14606,9 @@ async function loadKnownPlugins() {
     const plugins = await api('GET', '/api/knownPlugins');
     if (plugins.length) {
       renderPlugins(plugins);
-      logLine(`${plugins.length} plugin(s) known`);
+      // Quiet while a scan is running: this is called every time a folder finishes, and a
+      // console line per folder would bury the scan's own messages.
+      if (!lastScan?.scanning) logLine(`${plugins.length} plugin(s) known`);
     }
   } catch {
     // engine not up yet - the rescan button still works later

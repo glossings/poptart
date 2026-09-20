@@ -71,8 +71,9 @@ Then open <http://localhost:4000>.
 The first run takes a little longer than the rest. If poptart needs its own SuperCollider it
 asks first (`[y/N]` — it is a 140–250 MB download), and it scans your installed plugins, which
 on a machine with a lot of them can take several minutes. The scan runs in the background: the
-editor is usable straight away, and the plugin list fills in when the scan finishes. After
-that first time, startup is quick.
+editor is usable straight away, the header counts the plugins as they are probed, and the list
+fills in folder by folder as it goes. Plugin *names* are the one thing that won't resolve until
+it has finished. After that first time, startup is quick.
 
 1. Open the **Plugins** panel and click a plugin to copy its exact name — that's the string
    `.synth()` and `.fx()` want. (**rescan** picks up anything you install later.)

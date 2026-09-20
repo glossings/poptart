@@ -5,85 +5,60 @@ no completion notes.
 
 ---
 
-[ ] A non-Mac file with a plugin extension segfaults scsynth during a scan (found 2026-09-20,
-    fresh machine). A Windows `phasereplicant.vst3` - a PE DLL, a plain FILE rather than a
-    bundle directory - was sitting in /Library/Audio/Plug-Ins/VST3, and every scan died when
-    it reached it. Reproduced with no scsynth involved: VSTPlugin's standalone `host probe`
-    on that file exits by SIGSEGV with no output, and so does the same command on a text file
-    named `notes.vst3`. So it is any regular file that is not Mach-O, not that one plugin.
-    The bug is in VSTPlugin (vst/CpuArch.cpp + vst/PluginFactory.cpp). For a bundle directory
-    getPluginCpuArchitectures() throws "bundle doesn't contain any plugins" when it finds no
-    architectures. For a plain file it returns doGetCpuArchitectures() unchecked, and on macOS
-    readMach() answers an unrecognized magic with an EMPTY vector instead of throwing. The
-    PluginFactory constructor then builds its "Can't bridge CPU architecture" message from
-    archs.front() - on an empty vector, which is undefined behavior and here a segfault. That
-    constructor runs inside scsynth (it is what decides how to probe), so the crash takes the
-    server, not a probe subprocess.
-    Why it is worse than one bad scan: VSTPlugin writes its cache only when a whole search
-    finishes (the `if (save)` at the end of the search command in sc/src/VSTPlugin.cpp), so a
-    machine with such a file never completes a scan - no cache, no plugin list, the same death
-    on every launch, nothing saying why.
-    Also learned: sclang reports this as "Server 'poptart' exited with exit code 0". That is
-    NOT evidence of a clean exit - a signal death shows as 0 there. Look for a crash report
-    (~/Library/Logs/DiagnosticReports/scsynth-*) before believing it.
-    - Fix 1, poptart-side, no rebuild: before any scan, walk the search dirs and exclude every
-      regular FILE with a plugin extension (on macOS a .vst3/.vst is always a bundle
-      directory, so a plain file is never loadable), feeding them into the same exclude list
-      POPTART_VST_EXCLUDE uses, and warn naming the file. Don't descend into bundles.
-    - Fix 2, the real one, in the vstplugin fork: throw ModuleError when archs is empty (in the
-      PluginFactory constructor, and/or make the file branch of getPluginCpuArchitectures
-      match the bundle branch). Next fork release; worth reporting upstream too.
-    - Workaround for a user today: POPTART_VST_EXCLUDE with the file's path, or delete it.
+[ ] Report the non-plugin-file crash upstream. Fixed in the fork (v0.6.2-poptart.4: the file
+    branch of getPluginCpuArchitectures throws on an empty architecture list, as the bundle branch
+    always did, and the PluginFactory constructor no longer reads archs.front() on one), and
+    poptart keeps such files away from VSTPlugin regardless (plugin-scan.js). Upstream still
+    segfaults the host on any regular file with a plugin extension that is not a module - repro
+    with no scsynth: `host probe notes.vst3 _ out.ini` on a text file exits by SIGSEGV. File it at
+    git.iem.at/pd/vstplugin along with the other unfiled scan bugs.
 
-[ ] First-run plugin scan is invisible. Found on a fresh machine (2026-09-20), and only a fresh
-    machine shows it: with a scan cache, pluginList reads it at boot and the list is there
-    instantly. With none, the app loads and looks ready while nothing works - .synth("X") fails
-    as not-found, the Plugins panel is empty - for the minutes a first serial scan takes, and
-    plugins that have visibly finished probing in the log still don't appear. Both follow from
-    how the scan is wired: poptart.scd sends /poptart/ready BEFORE starting the background
-    VSTPlugin.search, its completion is only a postln (Node never learns a scan is running or
-    done), and VSTPlugin delivers results only when a whole search call returns (prSearchLocal
-    reads the server's temp file after server.sync).
-    Not the fix: blocking launch until the scan ends. It punishes exactly the first run, by
-    minutes (serial probing, 20s timeout each), and samples and the editor need no plugins.
-    - Part 1, say what is happening. Add the missing signal rather than inferring it: a
-      /poptart/scanState message (started / finished, plugin count) from poptart.scd for both
-      the boot scan and /poptart/scanPlugins; surface it through /api/status; the Plugins panel
-      shows "scanning... N probed" and which plugin is being probed, and refetches its list on
-      finish (check whether it refetches at all today - untraced); a .synth()/.fx() name that
-      misses DURING a scan says the scan is still running instead of a bare not-found. The
-      running count can come from the `probing ... ok` lines Node already forwards from sclang
-      - no SC change for that part. Naming the plugin being probed matters because a probe can
-      put up UI: a plugin wanting activation showed a modal "Quit | Activate" dialog from the
-      probe subprocess mid-scan, which reads as the scan having hung (unattended, the 20s
-      timeout moves past it).
-    - Part 2, unlock plugins one by one as they finish, and survive a scan that dies.
-      Feasible in principle: prAddPlugin ADDS to the existing dict, so many small searches
-      accumulate, and per-call overhead (one server command, one temp file) is nothing next to
-      a probe's subprocess. Each small search also saves the cache at its own end, so a scan
-      that dies loses one plugin's work instead of all of it - which is the real prize, given
-      the entry above. With per-plugin searches a journal becomes possible: record the plugin
-      about to be examined, clear it after; an engine that dies mid-scan leaves the entry
-      behind, and the next boot skips that plugin and says so ("skipped X - it ended the scan
-      last time; remove it from the skip list to retry") - the self-healing VSTPlugin already
-      does for a probe that crashes, extended to a file that takes the server with it.
-      The costs: Node has to enumerate the plugins itself (every .vst3/.vst/.dll under the
-      search dirs, nested vendor folders, honoring POPTART_VST_EXCLUDE) instead of leaving the
-      traversal to VSTPlugin; and it is UNVERIFIED that search accepts a single plugin bundle
-      as its `dir` (the API says directories; a .vst3 is one, but whether the server-side
-      traversal then recognizes it as a bundle needs a spike). Fallback needing no new
-      assumption: one search per top-level entry of each search dir, so a vendor folder unlocks
-      as a unit. Keep probing serial either way - the parallel-probe segfault (see parallelScan
-      in poptart.scd) is reason enough to change this path carefully, with a full-folder scan
-      as the test.
-    - Part 3, logging. Diagnosing the entry above took an afternoon of copied scrollback, and
-      when scsynth died poptart did nothing: no message, no restart, the UI still claiming a
-      working engine. (a) Log every restart poptart itself asks for, with the reason, so an
-      exit with no such line before it is known to be external; (b) treat the scan as one
-      logged operation - started, N probed, elapsed - and when the server goes away mid-scan
-      say so, with the count and that the results were not saved; (c) write the engine log to
-      a file under ~/.poptart and have doctor.js attach its tail. Related and already open:
-      nothing restarts scsynth when it dies mid-session (SETUP.md says so).
+[ ] Re-evaluating during playback produces a crunchy click (heard 2026-09-20). NOT plugin state
+    being re-injected: the scheduler already skips a state the plugin holds, and no
+    "restored plugin state for #N" line appears at the click. Untraced. Suspects, in the order
+    worth checking: a track SynthDef being rebuilt and swapped under sounding audio; the hush of
+    stopped tracks that evaluate performs on play (see Scheduler/evaluate); sample voices or
+    modulators being freed without a release ramp; a chain/route teardown (clearMidiRoute closes
+    every envelope gate at once). First step is a minimal repro: one sustained plugin note,
+    re-eval with no edits, and see which of the above fires in the log.
+
+[ ] "VST3Plugin: MIDI CC control number 123 not supported" floods the log. Tearing down a
+    midi()/midikeys() route sends CC 123 (all notes off) on all 16 channels so a held key doesn't
+    drone (poptartClearMidiRoute in poptart.scd), and a VST3 plugin that doesn't map that
+    controller warns once per channel - 16 lines per teardown, on every re-eval of a sketch with a
+    route. Harmless, but it buries real warnings. VST3 has no CC 123 unless the plugin maps it, so
+    for those the message does nothing anyway: release the notes poptart knows are held instead
+    (the route already tracks \held), and send CC 123 only to VST2 plugins, or only on channels
+    that were actually used.
+
+[ ] Unlock plugins one at a time during a scan. They now unlock a FOLDER at a time: the scan
+    runs one VSTPlugin.search per search directory (runScan in poptart.scd) instead of one search
+    over all of them, so each folder's plugins reach the dict AND the on-disk cache as that folder
+    finishes - a scan that dies no longer throws away everything before it. Finer than that is not
+    reachable from outside VSTPlugin, and the earlier plan here assumed it was: search() always
+    ITERATES the directory it is handed (vst/Search.cpp), so passing it a single .vst3 bundle walks
+    INTO the bundle and finds nothing. A bundle cannot be its own search dir, which also kills the
+    "one search per top-level entry" fallback, since those entries are bundles.
+    The two ways in, both with costs:
+    - /vst_query (VSTPlugin.prQuery) probes one path and adds it to the server's dict. But it
+      probes with timeout 0, so a plugin that puts up a dialog hangs with no way out; it never
+      writes the cache, so nothing is persisted; and scsynth runs async plugin commands one at a
+      time, so it would queue behind the search it is meant to be reporting on.
+    - a fork change: have the search report each plugin as it is probed, rather than only when the
+      whole search returns. The honest fix, and it belongs in the same fork release as the
+      archs.front() crash above.
+    Unverified and worth knowing either way: whether a long search blocks OTHER async commands
+    (SynthDef sends, buffer loads) on scsynth's single NRT thread for its whole duration. If it
+    does, a first scan is not merely "plugin names don't resolve yet" - new tracks and samples are
+    queuing up behind it too, and both the docs and the scanning message should say so.
+
+[ ] Nothing restarts scsynth when it dies mid-session. Poptart now notices and says so - index.js
+    watches sclang's "Server ... exited" line, reports what a scan lost, and every restart poptart
+    itself asks for logs its reason, so an exit with no such line is known to be external - but the
+    UI still says "engine ready" afterwards and nothing brings the server back. Re-picking the
+    output device is the only cure today (SETUP.md says so). Wants: the status to go red on that
+    line, and an offer to restart (the restart path already exists - restartEngine(reason) in
+    server.js - and already tears down every piece of state that died with the old server).
 
 [ ] LUFS metering in the ctrl+g console — short-term and integrated, alongside the existing
     stereo/spectral views.

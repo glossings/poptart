@@ -60,9 +60,9 @@ const { liveEngineStacks } = require('./orphans');
 const VSTPLUGIN_UPLOAD_BASE = 'https://git.iem.at/-/project/485/uploads';
 
 const MACOS_ASSET = {
-  file: 'vstplugin_v0.6.2-poptart.3_macOS.zip',
-  url: 'https://github.com/glossings/vstplugin/releases/download/v0.6.2-poptart.3/vstplugin_v0.6.2-poptart.3_macOS.zip',
-  sha256: 'f77c89d7a89f819d79627041ce7669d35b54bb9891e4e1b41636658ff2d875fb',
+  file: 'vstplugin_v0.6.2-poptart.4_macOS.zip',
+  url: 'https://github.com/glossings/vstplugin/releases/download/v0.6.2-poptart.4/vstplugin_v0.6.2-poptart.4_macOS.zip',
+  sha256: 'dcddc7f15dcf093e30f11a1861a19ea697a729f819565dbc480b9388b3dab272',
 };
 
 const VSTPLUGIN_RELEASE = {
@@ -111,6 +111,9 @@ const OUTDATED_MACOS_HOSTS = {
   // v0.6.2-poptart.2
   '27030af745d7d28b492f7db6d7f58854c2880a3d02cb2c9c06b9594dbf2cae12':
     'an older poptart build that cannot restore a preset bigger than 64KB into a bridged (Intel-only) plugin',
+  // v0.6.2-poptart.3
+  '8eec27662a62e95928b6b32dd57a9a7f9432858ef1fcc1a9c627d56212311032':
+    'an older poptart build, which a file that is not really a plugin (a Windows DLL in a macOS plugin folder, say) crashes during scans',
 };
 
 // The first installed extension dir whose plugins/host is an outdated macOS build, as

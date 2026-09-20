@@ -14,8 +14,8 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Sample library folder | **settings** tab, or `POPTART_SAMPLES_DIR` | `~/.poptart/samples` |
 | Audio output device | **settings** tab | system default |
 | Extra audio **inputs** (combined into one device, so `input()` can reach several interfaces) | **settings** tab | none |
-| Plugin scan directories | `POPTART_VST_DIRS` (colon-separated) | `~/.poptart/plugins` if it exists, else the standard VST locations |
-| Plugins to skip when scanning | `POPTART_VST_EXCLUDE` (colon-separated paths) | none |
+| Plugin scan directories | `POPTART_VST_DIRS` (separated by `:`, or `;` on Windows) | `~/.poptart/plugins` if it exists, else the standard VST locations |
+| Plugins to skip when scanning | `POPTART_VST_EXCLUDE` (same separator) | none |
 | Prefer VST3 over VST2 (hide VST2 builds whose name also exists as VST3) | **settings** tab | on |
 | Probe plugins in parallel while scanning | `POPTART_VST_PARALLEL=1` | off (one plugin at a time) |
 | Saved patterns (and autosaved sessions, under `wip/`) | `POPTART_PATTERNS_DIR` | `~/.poptart/patterns` |
@@ -50,9 +50,27 @@ Two knobs help:
 - `POPTART_VST_EXCLUDE` skips individual plugins by absolute path, so they are never probed. Use
   it for copy-protection, metering, or analysis plugins that fail to probe headlessly.
 
+Poptart adds two exclusions of its own, and says so at startup when it does. The first is any
+file that has a plugin extension but is not a binary this machine could load — the Windows
+build of a plugin left in a macOS plugin folder, say, or a text file someone named `notes.vst3`.
+Probing one of those crashes the audio server outright, and because the plugin cache is only
+written when a whole scan finishes, a single such file means no scan ever completes and no
+plugin is ever found. The second is whatever a previous scan died on: the plugin being probed
+is noted in `~/.poptart/scan-journal.json`, and if poptart sees the audio server die during
+that probe, it skips that plugin from then on. (Quitting poptart mid-scan blames nothing.)
+Delete that file to try the skipped plugins again.
+
 Plugins are probed one at a time. Probing them in parallel is faster but has crashed the audio
 server partway through a large scan, so it is off by default; set `POPTART_VST_PARALLEL=1` to
 turn it on. Either way only plugins that are new or changed since the last scan get probed.
+
+While a scan is running the header says so and counts the plugins as they are probed, and the
+plugins panel names the one being probed right now — a plugin whose probe puts up its own
+window (an activation dialog, typically) otherwise looks exactly like a scan that has hung.
+Everything except plugin names works meanwhile; `.synth("Name")` says the scan is still running
+rather than claiming the name does not exist. The scan runs one folder at a time, so each
+folder's plugins become playable — and are saved to the cache — as it finishes, rather than
+everything arriving at the end or nothing arriving at all.
 
 A probe that fails is not fatal — it is reported as `error!` in the scan log and that plugin is
 simply absent from the list. Plugins with copy protection or their own startup dialogs commonly
@@ -214,6 +232,16 @@ suspects:
     at a time — whichever one breaks the boot is what your hardware rejects (and worth
     reporting as a poptart issue: forced 48 kHz on a rate-locked device is the usual one).
 
+**The plugin scan never finishes, or the engine dies during it.** Everything the engine prints
+is also written to `~/.poptart/engine.log` (the previous run is kept as `engine.log.1`), which
+is the first thing to read and what `npm run doctor` attaches. If the audio server dies mid-scan
+poptart now says so, names the plugin it was probing, and skips that one on the next start.
+Note that SuperCollider reports a crashed server as `exited with exit code 0` — that is not
+evidence of a clean exit.
+
 **The engine was fine, then every track went silent.** If `scsynth` dies mid-session nothing
-restarts it yet — the UI keeps saying "engine ready" while notes go nowhere. Re-pick the output
+restarts it yet — the UI keeps saying "engine ready" while notes go nowhere. The terminal and
+`~/.poptart/engine.log` do say it: look for `Server 'poptart' exited`, and for a
+`[poptart] restarting the engine: …` line before it — if there is none, poptart did not ask for
+this and something killed the server. Re-pick the output
 device in the settings tab (any device change restarts the engine), or restart `npm run dev`.
