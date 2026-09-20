@@ -56,6 +56,12 @@ process.on('exit', () => {
 // Run `fn` with the private-SC environment forced to known values. Every test that touches
 // resolution goes through this, so a real ~/.poptart/sc on the developer's machine can't change
 // an outcome (and a test can never write into one).
+//
+// Works for async `fn` too: the environment is restored when the returned promise settles, not
+// when it is handed back. A plain try/finally restores it at the first `await` inside fn - which
+// for an install is midway through the download, so everything after it ran against the real
+// environment. That went unnoticed on a machine with a system VSTPlugin (the post-install check
+// found THAT one) and failed on a clean CI runner, which is the only reason it was caught.
 function withEnv(vars, fn) {
   const keys = ['POPTART_SC_ROOT', 'POPTART_SCLANG', 'POPTART_INSTALL_SC', 'PATH'];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
@@ -64,14 +70,22 @@ function withEnv(vars, fn) {
     if (vars[k] === undefined) delete process.env[k];
     else process.env[k] = vars[k];
   }
-  try {
-    return fn();
-  } finally {
+  const restore = () => {
     for (const k of keys) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
     }
+  };
+  let result;
+  try {
+    result = fn();
+  } catch (err) {
+    restore();
+    throw err;
   }
+  if (result && typeof result.then === 'function') return result.finally(restore);
+  restore();
+  return result;
 }
 
 // A directory tree that looks like an unpacked private SuperCollider, without being one: enough
@@ -469,13 +483,14 @@ test('a private SuperCollider installs, isolates itself, and compiles', { skip: 
     );
   });
 
-  await t.test('does not see the machine\'s own Extensions', () => {
+  await t.test('does not see the machine\'s own Extensions', (st) => {
     const { systemVstPluginExtensionDirs } = require('./index.js');
     const systemVst = systemVstPluginExtensionDirs().find((d) => fs.existsSync(d));
     if (!systemVst) {
       // On a clean CI runner there is nothing to be isolated from, so there is nothing to
-      // prove here - the excludeDefaultPaths assertion above still stands.
-      return t.skip('no system VSTPlugin on this machine to be isolated from');
+      // prove here - the excludeDefaultPaths assertion above still stands. `st`, not `t`:
+      // skipping through the parent's context marks the whole install test as skipped.
+      return st.skip('no system VSTPlugin on this machine to be isolated from');
     }
     const output = probeSclang(sclang, confPath, 57297);
     assert.match(output, /PROBE done/);
@@ -490,7 +505,8 @@ test('a private SuperCollider installs, isolates itself, and compiles', { skip: 
 
   await t.test('sees VSTPlugin once it is installed into the private Extensions', async () => {
     const dest = path.join(privateExtensionsDir(root), 'VSTPlugin');
-    const { installVstPlugin } = require('./setup.js');
+    // The environment has to hold for the WHOLE install, including its own "did it land?"
+    // check at the end - see withEnv.
     await withEnv({ POPTART_SC_ROOT: root, POPTART_SCLANG: undefined }, async () => {
       delete require.cache[require.resolve('./index.js')];
       delete require.cache[require.resolve('./setup.js')];
@@ -504,7 +520,6 @@ test('a private SuperCollider installs, isolates itself, and compiles', { skip: 
       'VSTPlugin',
       `VSTPlugin in ${dest} was not picked up:\n${output.slice(-2000)}`,
     );
-    void installVstPlugin;
     delete require.cache[require.resolve('./index.js')];
     delete require.cache[require.resolve('./setup.js')];
   });
