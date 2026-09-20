@@ -4633,6 +4633,26 @@ function prBlockLabelAt(idx) {
  * one whose pianoroll("<…>") the panel was opened through (the `source` marker), or failing that
  * the first call in the buffer that names it. Null when nothing plays it.
  */
+// Where the open roll's TRACK is reading its pattern right now, in cycles. With an arrangement that
+// is clip-relative: inside each of its clips a track plays its pattern from the clip's own start
+// (see arrange.mjs's ClipClock), and the roll's playhead has to be where the sound is. Built from
+// the deck's clock twin and the clips in the buffer, and rebuilt only when either changes - this
+// is asked every frame, and finding the track means lexing the buffer.
+let prClipClock = { gen: -1, twin: null, roll: null, clock: null };
+function prSongPos() {
+  const twin = songEndClocks.a ?? (arDeck === 'a' ? arClockTwin : null);
+  if (!twin || !arrangeMod) return currentCyclePos();
+  const gen = cm.changeGeneration();
+  if (prClipClock.gen !== gen || prClipClock.twin !== twin || prClipClock.roll !== prState.rollId) {
+    const label = prPlayingTrack();
+    const own = label == null ? [] : arrangeMod.clipsOfLabel(arReadDef(cm.getValue())?.clips ?? [], label);
+    // A clips() row places its rolls itself, so its track stays on the song's own clock.
+    const clock = own.length && !own.some((c) => c.roll) ? new arrangeMod.ClipClock(twin, own) : null;
+    prClipClock = { gen, twin, roll: prState.rollId, clock };
+  }
+  return (prClipClock.clock ?? twin).posAt(currentCyclePos());
+}
+
 function prPlayingTrack() {
   if (!prState || !labelsMod) return null;
   const code = cm.getValue();
@@ -9318,7 +9338,7 @@ function drawPianoroll() {
   // song time when there is an arrangement, which is where the scheduler reads the roll.
   prPlayheadOn = false;
   if (!transport.paused) {
-    const abs = (arClockState()?.pos ?? currentCyclePos()) * prState.grid;
+    const abs = prSongPos() * prState.grid;
     const x = prCellToX(prState.start + (((abs % prState.len) + prState.len) % prState.len), m);
     if (x >= PR_GUTTER && x <= W) {
       ctx.strokeStyle = col('--accent');
@@ -27465,8 +27485,9 @@ function arBlocks() {
   const seen = new Set();
   const out = [];
   for (const b of labelsMod.splitLabeledBlocks(arCM.getValue())) {
-    // A BUS (audio() at the head) is no row: it sounds when what feeds it does. See arDropBusClips.
-    if (!b.label || b.kind === 'bare' || seen.has(b.label) || arIsBus(b)) continue;
+    // A BUS (audio() at the head) is no row: it sounds when what feeds it does. Nor is a group with
+    // no braces - `main: group().fx(...)`, the master chain, which is always on. See arDropBusClips.
+    if (!b.label || b.kind === 'bare' || seen.has(b.label) || arIsRowless(b)) continue;
     seen.add(b.label);
     out.push(b);
   }
@@ -27487,7 +27508,8 @@ function arGroupLabels() {
 }
 
 /** Whether a block is a BUS - headed by audio(): a return that plays whatever feeds it. */
-const arIsBus = (block) => !!labelsMod && labelsMod.isBusBlock(block);
+// A track with NO ROW: a bus, or a group without braces - the master chain (see labels.mjs's isRowlessBlock).
+const arIsRowless = (block) => !!labelsMod && labelsMod.isRowlessBlock(block);
 
 /**
  * A bus is not in the arrangement at all - no row, no clips (see arBlocks): the tracks feeding it
@@ -27495,13 +27517,15 @@ const arIsBus = (block) => !!labelsMod && labelsMod.isBusBlock(block);
  * could only cut a tail off. Clips it holds anyway are from before it was one (`audio("bus:verb")`
  * typed over an ordinary track's head) and are dropped here, on the same pass that fills a new
  * track - so making the track ordinary again finds nothing painted and fills it, as any new track
- * is. Read off the splitter directly, since arBlocks no longer lists a bus.
+ * is. Read off the splitter directly, since arBlocks no longer lists a bus. A group with no braces
+ * (the master chain) is the other track with no row, and clips painted on it back when it had one
+ * go the same way - left in, they would gate the whole mix from a row nobody can see.
  */
 function arDropBusClips(clips) {
   if (!labelsMod) return { clips, dropped: false };
   const buses = new Set();
   for (const b of labelsMod.splitLabeledBlocks(arCM.getValue())) {
-    if (b.label && b.kind !== 'bare' && arIsBus(b)) buses.add(b.label);
+    if (b.label && b.kind !== 'bare' && arIsRowless(b)) buses.add(b.label);
   }
   const kept = buses.size ? clips.filter((c) => !buses.has(c.label)) : clips;
   return { clips: kept, dropped: kept.length !== clips.length };
@@ -27729,17 +27753,36 @@ function arOpenClipRoll(clip) {
  */
 function arClipPiece(c, start, len) {
   const piece = { ...c, start, len };
-  if (c.roll) {
-    const off = (c.off ?? 0) + (start - c.start);
-    if (off) piece.off = off;
-    else delete piece.off;
-  }
+  // Every clip plays its pattern from its own start (see arrange.mjs's ClipClock), so a piece that
+  // starts later enters the pattern that much later - on any track, not only a clips() one.
+  const off = (c.off ?? 0) + (start - c.start);
+  if (off) piece.off = off;
+  else delete piece.off;
   return piece;
 }
 
 /** What a clip is titled: the roll it plays on a clips() row, else its track's name. */
 function arClipTitle(label, clip = null) {
   return clip?.roll && arIsClipsRow(label) ? clip.roll : label;
+}
+
+/**
+ * Which bar of its pattern (or roll) a clip ENTERS at, 1-based like the ruler - or null for the
+ * ordinary clip, which enters at bar 1. A clip plays its pattern from its own start plus its
+ * offset (see arrange.mjs's ClipClock); the offset is what a split or a front trim leaves behind,
+ * and it changes what the clip plays, so it is never left for the folded call alone to say: the
+ * clip wears it (the corner mark and the number after its title) and its menu can take it off.
+ */
+function arClipEntryBar(clip) {
+  const off = Math.round((clip?.off ?? 0) * 100) / 100;
+  return off ? off + 1 : null;
+}
+
+/** Take the offsets off `targets`: each plays its pattern from bar 1 again. */
+function arResetEntry(targets) {
+  for (const c of targets) delete c.off;
+  writeArrangeCall();
+  drawArrange();
 }
 
 // --- colors ---
@@ -28347,9 +28390,18 @@ function drawArrange() {
       ctx.beginPath(); ctx.rect(dx + 2, boxY, w - 4, AR_CLIP_TITLE_H); ctx.clip();
       ctx.fillStyle = text;
       ctx.globalAlpha = dim ? 0.5 : 0.95;
-      ctx.fillText(arClipTitle(c.label, c), dx + 6, boxY + AR_CLIP_TITLE_H / 2);
+      const entry = arClipEntryBar(c);
+      ctx.fillText(entry == null ? arClipTitle(c.label, c) : `${arClipTitle(c.label, c)}  \u25b8${entry}`, dx + 6, boxY + AR_CLIP_TITLE_H / 2);
       ctx.globalAlpha = 1;
       ctx.restore();
+    }
+    // ...and the corner mark that says so at any width: a clip too narrow for its title still
+    // shows that it does not enter its pattern at bar 1 (see arClipEntryBar).
+    if (arClipEntryBar(c) != null && x1 >= AR_GUTTER) {
+      ctx.fillStyle = text;
+      ctx.globalAlpha = dim ? 0.5 : 0.9;
+      ctx.beginPath(); ctx.moveTo(dx, boxY); ctx.lineTo(dx + 6, boxY); ctx.lineTo(dx, boxY + 6); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
     }
   }
 
@@ -28973,6 +29025,11 @@ function arOpenMenu(clientX, clientY, hit, row) {
     items.push(['duplicate after', () => arDuplicate(targets), 'cmd-D — the copy overwrites what it lands on']);
     if (arSplitPoints().length) items.push(['split here', () => arSplitClips(), 'cmd-E — at the marker, or at both edges of a marked span']);
     if (targets.length > 1 || arState.regionSpan) items.push(['join', () => arJoinClips(), 'cmd-J — one clip from here to the end of the last']);
+    const entries = targets.map(arClipEntryBar).filter((b) => b != null);
+    if (entries.length) {
+      items.push(['enter at bar 1', () => arResetEntry(targets),
+        `${entries.length === 1 ? `enters its pattern at bar ${entries[0]}` : `${entries.length} clips enter their patterns part-way in`} (\u25b8 on the clip) — this plays from the pattern's start`]);
+    }
     // On a clips() row a clip owns its notes, so the two things you do to notes live here: open
     // them, and stop sharing them. Both are about the clip, which is why they sit above the block
     // lines rather than among them.
@@ -31107,13 +31164,11 @@ function initArrangeCanvas() {
         // the edge snaps to the grid, and a clip is never thinner than one cell
         if (d.side === 'left') {
           const start = Math.max(0, Math.min(arSnapTo(o.start + dBars), o.start + o.len - arCell()));
-          // Trimming the front of a clip on a clips() row moves where it ENTERS its roll, so every
+          // Trimming the front of a clip moves where it ENTERS its pattern (or its roll), so every
           // bar that stays in the clip goes on playing what it played - the same rule a split
           // follows (see arClipPiece). Dragging the edge back out again undoes it exactly.
-          if (c.roll) {
-            const off = (o.off ?? 0) + (start - o.start);
-            if (off) c.off = off; else delete c.off;
-          }
+          const off = (o.off ?? 0) + (start - o.start);
+          if (off) c.off = off; else delete c.off;
           c.start = start;
           c.len = o.start + o.len - start;
         } else {

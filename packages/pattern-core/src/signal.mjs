@@ -240,6 +240,10 @@ export class Sig {
     // Metadata like everything above, so it survives the rest of the chain (.log() can go
     // anywhere in it) - see _meta().
     this.logging = opts.logging ?? false;
+    // Headed by clips(): the track plays the rolls painted along its row, and places them in the
+    // song ITSELF (see clips()). The host reads this to leave such a track on the song's own
+    // clock - handing it clip-relative time as well would move every roll twice.
+    this.clipsHead = opts.clipsHead ?? false;
     // What this signal means as a LAYER of a binop (see _layers). null (the common case) says its
     // values take the verb of the binop they are handed to; a list of { op, fn, raw } says they are to be combined
     // with what those events already have in force, one operation at a time. `add(note(2))` is
@@ -286,6 +290,7 @@ export class Sig {
       pitchKind: this.pitchKind,
       scaleName: this.scaleName,
       logging: this.logging,
+      clipsHead: this.clipsHead,
       pending: this.pending,
     };
   }
@@ -5319,10 +5324,11 @@ function rollPattern(str, opts) {
 // every clip of the lead. That is the same division rolls have always had - rolls are data,
 // transforms are patterns - drawn out along the song instead of along one bar.
 //
-// TIME IS CLIP-LOCAL here, and only here. A painted block runs on the song's timeline (see
-// _arrangeGate), so a `<a b>` keeps its place through the bars it is gated out of; a clip's roll
-// instead starts where the clip starts, because a part dropped at bar 33 has to play from its
-// beginning. The `o` field is the exception that proves it: splitting a clip gives the second
+// TIME IS CLIP-LOCAL, as it is for every painted track (see arrange.mjs's ClipClock) - but here
+// the head does the placing itself, roll by roll, because each clip names a DIFFERENT roll and a
+// clock can only move one pattern. A clip's roll starts where the clip starts, because a part
+// dropped at bar 33 has to play from its beginning. The `o` field is what keeps a split honest:
+// splitting a clip gives the second
 // piece an offset into the same roll, so the cut changes where you can grab the part and nothing
 // you hear.
 //
@@ -5457,6 +5463,7 @@ export function clips() {
   };
   const joined = selectorJoin(slotsForCycle, resolve);
   joined.pitchKind = 'note'; // every clip is a roll, so this one is never in doubt
+  joined.clipsHead = true; // ...and the rolls are already placed in the song: see Sig#clipsHead
   return joined;
 }
 

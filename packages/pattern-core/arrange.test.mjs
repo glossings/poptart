@@ -19,6 +19,8 @@ import {
   reconcileArrangement,
   inSpans,
   ArrangeClock,
+  ClipClock,
+  clipsOfLabel,
   songSteps,
 } from './src/index.mjs';
 
@@ -342,4 +344,62 @@ test('_arrangeGate takes a position function', () => {
   const clock = new ArrangeClock({ end: 4, regions: [{ name: 'A', start: 0, end: 1 }] });
   const sig = n('0 1')._arrangeGate([[0, 1]], (c) => clock.posAt(c));
   assert.deepEqual(sig.stepsForCycle(3).map((s) => s.value), [0, 1], 'cycle 3 is still bar 0, looping');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Clip-relative time: a track reads its pattern from the start of each of its clips
+// ---------------------------------------------------------------------------------------------
+
+const notesThrough = (pattern, clock, from, to) => songSteps(n(pattern).stepsForCycle, from, to, clock)
+  .filter(({ step }) => step.value != null)
+  .map(({ step, cycle, delta }) => [Math.round((cycle + step.start - delta) * 1e6) / 1e6, step.value]);
+
+test('ClipClock: the pattern starts where the clip starts, wherever that is', () => {
+  // A four-bar phrase in a clip at bar 6: it used to need a start divisible by four to be heard whole.
+  const clock = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,6,4'));
+  assert.deepEqual(notesThrough('<0 1 2 3>', clock, 0, 16), [[6, 0], [7, 1], [8, 2], [9, 3]]);
+  assert.equal(clock.posAt(6), 0);
+  assert.equal(clock.posAt(8.5), 2.5);
+});
+
+test('ClipClock: every clip starts the pattern over, and between clips nothing is read', () => {
+  const clock = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,1,2 lead,5,3'));
+  assert.deepEqual(notesThrough('<0 1 2>', clock, 0, 10), [[1, 0], [2, 1], [5, 0], [6, 1], [7, 2]]);
+  assert.deepEqual(new ClipClock(new ArrangeClock({ end: 16 }), []).segments(0, 8), [], 'an emptied row is silence');
+});
+
+test('ClipClock: a clip on a fraction of a bar plays from inside no bar but its own first', () => {
+  const clock = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,2.5,1'));
+  assert.deepEqual(notesThrough('0 1', clock, 0, 8), [[2.5, 0], [3, 1]]);
+});
+
+test('ClipClock: the offset is where the clip enters the pattern - a split changes nothing heard', () => {
+  const whole = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,2,6'));
+  const split = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,2,2 lead,4,4,o2'));
+  assert.deepEqual(notesThrough('<0 1 2 3 4 5>', split, 0, 12), notesThrough('<0 1 2 3 4 5>', whole, 0, 12));
+  // ...and an offset equal to the start is the song's own timeline, bar for bar
+  const song = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,6,2,o6'));
+  assert.deepEqual(notesThrough('<0 1 2 3>', song, 0, 16), [[6, 2], [7, 3]]);
+  assert.equal(serializeArrangement(parseArrangement('lead,6,2,o6')), 'lead,6,2,o6', 'written on any clip, not only one with a roll');
+});
+
+test('ClipClock rides the deck clock: a loop region replays the clip, a seek lands inside it', () => {
+  const deck = new ArrangeClock({ end: 8, regions: [{ name: 'A', start: 0, end: 4 }] });
+  const clock = new ClipClock(deck, parseArrangement('lead,1,2'));
+  assert.deepEqual(notesThrough('<0 1>', clock, 0, 8), [[1, 0], [2, 1], [5, 0], [6, 1]]);
+  deck.seek(8, 2); // play from bar 2: halfway through the clip
+  assert.deepEqual(notesThrough('<0 1>', clock, 8, 10), [[8, 1]]);
+});
+
+test('ClipClock: where old clips overlap, the one that starts later has the bar', () => {
+  const clock = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,0,8 lead,2,2'));
+  assert.deepEqual(clock.windows, [{ from: 0, to: 2, shift: 0 }, { from: 2, to: 4, shift: -2 }, { from: 4, to: 8, shift: 0 }]);
+  assert.deepEqual(clipsOfLabel(parseArrangement('lead,0,4,m lead,4,4'), 'lead').map((c) => c.start), [4], 'and a muted clip is not read at all');
+});
+
+test('ClipClock: a polled control between clips runs on from the clip before', () => {
+  const clock = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,4,2 lead,10,2'));
+  assert.equal(clock.posAt(1), -3, 'ahead of the first clip it counts in toward it');
+  assert.equal(clock.posAt(7), 3);
+  assert.equal(clock.posAt(10), 0);
 });

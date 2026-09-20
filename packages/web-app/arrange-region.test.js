@@ -364,7 +364,7 @@ test('a clip is a block: double-clicking it opens that block to edit, and the ti
   assert.ok(!/arBrushFor|arSetBrush|arCreateVariation/.test(SRC), 'the brush that chose between variations is gone');
   assert.ok(!/#fill|variant|baseLabel/.test(grab('arSplitClips')), 'and a clip carries no variation of its own');
   assert.match(SRC, /if \(arIsClipsRow\(clip\.label\) && arOpenClipRoll\(clip\)\) \{ drawArrange\(\); return; \}\n\s+arEditBlock\(clip\.label\);/);
-  assert.match(SRC, /ctx\.fillText\(arClipTitle\(c\.label, c\)/);
+  assert.match(SRC, /ctx\.fillText\(entry == null \? arClipTitle\(c\.label, c\) :/, 'the title, plus the bar it enters at when that is not bar 1');
 });
 
 test('a clips() row is the one place a clip carries its own notes - and it says so in its title', () => {
@@ -1027,4 +1027,26 @@ test('a cut piece on a clips() row enters its roll where the cut falls', () => {
   assert.equal(held.off, 2);
   assert.equal(arState.clips.find((c) => c.start === 6).off, 6);
   assert.equal(arState.clips.find((c) => c.start === 0).off, undefined);
+});
+
+// ---------------------------------------------------------------------------------------------
+// A clip's entry point is never invisible: an offset changes what the clip plays, so the clip
+// wears it and its menu can take it off.
+// ---------------------------------------------------------------------------------------------
+
+test('a clip says which bar of its pattern it enters at, and an ordinary clip says nothing', () => {
+  // eslint-disable-next-line no-new-func
+  const arClipEntryBar = new Function(`${grab('arClipEntryBar')}\nreturn arClipEntryBar;`)();
+  assert.equal(arClipEntryBar({ label: 'kick', start: 8, len: 4 }), null);
+  assert.equal(arClipEntryBar({ label: 'kick', start: 8, len: 4, off: 0 }), null);
+  assert.equal(arClipEntryBar({ label: 'kick', start: 7, len: 1, off: 7 }), 8, '1-based, like the ruler');
+  assert.equal(arClipEntryBar({ label: 'kick', start: 2, len: 1, off: 2.5 }), 3.5);
+  assert.equal(arClipEntryBar({ label: 'kick', start: 0, len: 4, off: -1 }), 0, 'a front edge dragged out past the pattern\'s start');
+});
+
+test('the wiring: the title and a corner mark show it, and the menu resets it', () => {
+  assert.match(SRC, /\$\{arClipTitle\(c\.label, c\)\}  \\u25b8\$\{entry\}/);
+  assert.match(SRC, /if \(arClipEntryBar\(c\) != null && x1 >= AR_GUTTER\) \{/, 'the corner mark, for a clip too narrow to read');
+  assert.match(SRC, /items\.push\(\['enter at bar 1', \(\) => arResetEntry\(targets\),/);
+  assert.match(grab('arResetEntry'), /for \(const c of targets\) delete c\.off;\s+writeArrangeCall\(\);/);
 });

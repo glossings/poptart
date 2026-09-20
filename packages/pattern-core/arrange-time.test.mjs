@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 
 import { note, _auto, auto } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
-import { ArrangeClock } from './src/arrange.mjs';
+import { ArrangeClock, ClipClock, parseArrangement } from './src/arrange.mjs';
 
 // Same stand-in engine the other scheduler tests use: every method records its call, getTime is 0.
 function mockEngine() {
@@ -89,4 +89,23 @@ test('a polled control reads the song position too', () => {
   const sent = callsTo('setParam').filter((c) => c.args[2] === 'pan').map((c) => c.args[3]);
   // Applied a lookahead ahead (0.15s = 0.15 cycles at cps 1), from bar 8.
   assert.ok(Math.abs(sent.at(-1) - (8.15 / 16)) < 1e-6, `pan read at bar 8, got ${sent.at(-1)}`);
+});
+
+// --- clip-relative time, through the scheduler: the notes AND everything read at them ---
+
+test('a track on a ClipClock plays its pattern from the start of each clip', () => {
+  const clock = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,1,2 lead,6,2'));
+  const { sch, notes } = schedulerFor(note('<60 62 64 65>').synth('X'), clock);
+  sch._scheduleNoteEdges(0, 10, 0);
+  assert.deepEqual(round(notes()), [[1, 60], [2, 62], [6, 60], [7, 62]], 'silent between the clips, and each one starts over');
+});
+
+test('a polled control is read in clip time too', () => {
+  _auto('climb', '0,0 16,1');
+  const clock = new ClipClock(new ArrangeClock({ end: 32 }), parseArrangement('lead,8,8'));
+  clock.clock.seek(0, 12); // bar 12 of the song is bar 4 of the clip
+  const { sch, callsTo } = schedulerFor(note('60').synth('X').pan(auto('climb')), clock);
+  sch._pollGenericParams(0);
+  const sent = callsTo('setParam').filter((c) => c.args[2] === 'pan').map((c) => c.args[3]);
+  assert.ok(Math.abs(sent.at(-1) - (4.15 / 16)) < 1e-6, `pan read at bar 4 of the clip, got ${sent.at(-1)}`);
 });

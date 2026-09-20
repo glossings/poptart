@@ -59,8 +59,8 @@ test('the clip format carries a roll and an offset into it, and nothing else', (
   ], 'a clip with no extras is the same three-key object it always was');
   assert.deepEqual(parseArrangement('kick,0,8,ra,o0'), [{ label: 'kick', start: 0, len: 8, roll: 'a' }],
     'a zero offset is spelled by leaving it out');
-  assert.equal(serializeArrangement([{ label: 'k', start: 0, len: 4, off: 2 }]), 'k,0,4',
-    'an offset with no roll to be into is not written');
+  assert.equal(serializeArrangement([{ label: 'k', start: 0, len: 4, off: 2 }]), 'k,0,4,o2',
+    'an offset is any clip\'s: every track plays its pattern from the clip\'s own start (see ClipClock)');
 });
 
 test('each clip plays its own roll, from where the clip starts', () => {

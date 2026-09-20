@@ -610,8 +610,12 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             there unless a loop region holds it. The ruler along the bottom is the same axis in
             minutes and seconds, at the tempo playing now; <strong>snap</strong> sets how finely clips
             land, <strong>+</strong>/<strong>−</strong> and ctrl+wheel zoom. Inside a clip the pattern
-            runs on absolute bar time, so a <code>&lt;a b&gt;</code> keeps alternating through the
-            bars it is painted out of.
+            starts where the clip starts: a four-bar note plays its four bars wherever you put the
+            clip, and a <code>&lt;a b&gt;</code> begins on <code>a</code> in every clip. Splitting a
+            clip, or trimming its front edge, changes nothing you hear — the later piece enters
+            the pattern where the cut fell, and says so: a clip that does not start its pattern at
+            bar 1 wears a corner mark and <strong>▸</strong><em>bar</em> after its title, and
+            right-click → <strong>enter at bar 1</strong> takes the offset off.
           </p>
           <p>
             <strong>Editing what a clip plays.</strong> A clip is a block, and double-clicking it

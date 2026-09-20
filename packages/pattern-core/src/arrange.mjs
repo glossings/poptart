@@ -18,9 +18,11 @@
 //            track reads it: every other track plays its own one pattern wherever it is painted,
 //            and a clip of it says only WHEN. Two clips naming one roll are linked - one set of
 //            notes, drawn once, heard in both places.
-//   o<num> - how far INTO that roll the clip starts, in cycles (omitted when 0, the usual case).
-//            What splitting a clip leaves behind: the second piece starts where the first left
-//            off, so cutting a clip in two changes where you can grab it and nothing you hear.
+//   o<num> - how far INTO its pattern (or, on a clips() track, its roll) the clip starts, in cycles
+//            (omitted when 0, the usual case). What splitting a clip leaves behind: the second
+//            piece starts where the first left off, so cutting a clip in two changes where you can
+//            grab it and nothing you hear. A clip whose offset equals its start plays the pattern
+//            on the song's own timeline, bar for bar.
 //   c<hex>  - a color chosen for THIS clip, six hex digits without the `#`. The `colors` option
 //            below is the same choice made for a whole track; this one overrides it for one clip,
 //            which is what right-clicking a clip and picking a color writes. Editor metadata:
@@ -40,7 +42,9 @@
 // it are rows already and gate themselves, so it sounds when they do, and a row for it could only
 // cut a tail off. The painter leaves it out (labels.mjs's isBusBlock, arBlocks in the web app)
 // and the host never gates it. A group() is the other track with no notes of its own, but it
-// keeps a row: its members sit under it.
+// keeps a row: its members sit under it. A group with NO BRACES - `main: group().fx(...)`, the
+// master chain - has nothing under it and is always on, so it gets no row either (labels.mjs's
+// isBodylessGroup; isRowlessBlock asks both questions at once).
 //
 // (An earlier design gave a track's VARIATIONS its row and asked each clip which variation it
 // meant. Every gesture then needed a "which one" answer the painter had nowhere good to put, so
@@ -57,10 +61,15 @@
 // because it was emptied. A GROUP is the exception: it joins with nothing painted, since it has no
 // notes of its own and what sounds on it is whatever its members are doing. The song runs from bar
 // 0 to the end of its last clip and STOPS there: the only thing that keeps it going is a loop
-// region (the `loops` option), so painting more song never moves where the playhead is. The
-// pattern inside a clip runs on the song's cycle time, so a `<a b>` alternation keeps its place
-// whether or not its block was sounding the bar before. (A clips() track is the one exception, and
-// deliberately: each of its clips plays its roll from the clip's own start. See signal.mjs.)
+// region (the `loops` option), so painting more song never moves where the playhead is.
+//
+// TIME INSIDE A CLIP IS THE CLIP'S OWN: the pattern starts where the clip starts (plus its `o`
+// offset), so a clip is a thing you can put anywhere - a four-bar note plays its four bars
+// wherever the clip sits, not only where the clip happens to begin on a multiple of four, and a
+// `<a b>` starts on `a` in every clip. Everything the track reads follows: its notes, the channels
+// read at their onsets, its polled controls (see ClipClock). A clips() track has always worked
+// this way for its rolls (see signal.mjs); a painted GROUP does not - it has no pattern of its
+// own to restart, and its clips only gate the submix.
 //
 // The options are editor metadata plus the loop regions:
 //   snap   - the painter's grid, in cells per cycle (default 1 - one cell is one bar)
@@ -153,7 +162,7 @@ export function serializeArrangement(clips) {
     .filter((c) => c && c.label && c.len > 0)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) || a.start - b.start)
     .map((c) => `${c.label},${fmt(c.start)},${fmt(c.len)}${c.mute ? ',m' : ''}`
-      + `${c.roll ? `,r${c.roll}` : ''}${c.roll && c.off ? `,o${fmt(c.off)}` : ''}`
+      + `${c.roll ? `,r${c.roll}` : ''}${c.off ? `,o${fmt(c.off)}` : ''}`
       + `${/^#[0-9a-f]{6}$/i.test(c.color ?? '') ? `,c${c.color.slice(1).toLowerCase()}` : ''}`)
     .join(' ');
 }
@@ -515,6 +524,73 @@ export class ArrangeClock {
       if (b >= to) return out;
       a = b;
     }
+  }
+}
+
+/**
+ * One TRACK's reading of the song clock: clip-relative time (see the note at the top). Inside a
+ * clip the track reads its pattern at `position - clip.start + clip.off`, so each clip plays the
+ * pattern from its own beginning; between clips it reads nothing at all, which is the silence an
+ * unpainted bar means - so a track read through this needs no gate of its own.
+ *
+ * It answers the two questions ArrangeClock answers for a reader (posAt, segments) and is handed
+ * to the scheduler and the highlighter in the deck clock's place, so every read a track makes -
+ * steps, channels at their onsets, polled controls, preset and shape swaps - lands in clip time
+ * without any of them knowing. It holds the deck's clock rather than a copy, so a release or a
+ * seek on that is followed at once.
+ *
+ * `clips` are this track's own, muted ones already left out (see clipsOfLabel). Clips of one
+ * track do not overlap - the painter sees to that - but a song from before it did may hold some:
+ * where two cover a bar, the one that starts LATER has it, which is the clip drawn on top.
+ */
+export class ClipClock {
+  constructor(clock, clips = []) {
+    this.clock = clock;
+    const edges = [...new Set(clips.flatMap((c) => [c.start, c.start + c.len]))].sort((a, b) => a - b);
+    this.windows = []; // [{ from, to, shift }], in song order: pattern time = song position + shift
+    for (let i = 0; i + 1 < edges.length; i++) {
+      const from = edges[i];
+      const to = edges[i + 1];
+      let top = null;
+      for (const c of clips) {
+        if (c.start <= from + EPS && c.start + c.len >= to - EPS && (!top || c.start > top.start)) top = c;
+      }
+      if (!top) continue;
+      const shift = (top.off ?? 0) - top.start;
+      const last = this.windows[this.windows.length - 1];
+      if (last && Math.abs(last.to - from) < EPS && Math.abs(last.shift - shift) < EPS) last.to = to;
+      else this.windows.push({ from, to, shift });
+    }
+  }
+
+  /**
+   * Where the track's pattern is at transport cycle `cycle`. Between clips - where nothing plays,
+   * but a polled control is still read - it runs on from the clip before, and ahead of the first
+   * clip it counts in toward that one.
+   */
+  posAt(cycle) {
+    const pos = this.clock.posAt(cycle);
+    let shift = this.windows.length ? this.windows[0].shift : 0;
+    for (const w of this.windows) {
+      if (w.from > pos + EPS) break;
+      shift = w.shift;
+    }
+    return pos + shift;
+  }
+
+  /** The deck clock's segments, cut down to this track's clips and moved into their time. */
+  segments(from, to) {
+    const out = [];
+    for (const seg of this.clock.segments(from, to)) {
+      const lo = seg.from + seg.delta;
+      const hi = seg.to + seg.delta;
+      for (const w of this.windows) {
+        const a = Math.max(lo, w.from);
+        const b = Math.min(hi, w.to);
+        if (b > a + EPS) out.push({ from: a - seg.delta, to: b - seg.delta, delta: seg.delta + w.shift });
+      }
+    }
+    return out;
   }
 }
 

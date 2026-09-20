@@ -78,7 +78,7 @@ const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arReadDef', 'parseArrang
   // the clips() rows' half of the same reconcile pass: every clip on one carries a roll
   'arClipsLabels', 'arAllClips', 'arFillClipRolls', 'arMintRolls', 'arDropBusClips']
   .map(grab)
-  .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup'), grabConst('arIsBus')])
+  .concat([grabConst('arRowLabel'), grabConst('arFillClip'), grabConst('arIsGroup'), grabConst('arIsRowless')])
   .join('\n\n');
 
 /** The lifted functions over a fake editor and (optionally) a fake open panel. */
@@ -495,4 +495,15 @@ test('a bus made ordinary again joins as a new track: filled', () => {
   const p = panel({ code });
   assert.equal(p.fns.arReconcileTracks(), true);
   assert.deepEqual(p.fns.arReadDef().clips.filter((c) => c.label === 'verb'), [{ label: 'verb', start: 0, len: 8 }]);
+});
+
+test('a group with no braces - the master chain - gets no row, joins nothing, and indents nobody', () => {
+  const code = 'main: group().fx("Pro-L 2")\nkick: s("bd*4")\nhats: s("hh*8")';
+  const st = { ...state(arrangeMod.parseArrangement('kick,0,8 main,0,4')), tracks: ['main', 'kick'] };
+  const { fns } = panel({ code, arState: st });
+  assert.equal(fns.arReconcileTracks(), true);
+  assert.deepEqual(st.rows.map((r) => [r.label, r.depth]), [['kick', 0], ['hats', 0]], 'no row for main, and no tree hanging off a row that is not there');
+  assert.deepEqual(st.clips.map((c) => c.label).sort(), ['hats', 'kick'], 'a clip it held from when it had a row is dropped - it would gate the whole mix unseen');
+  assert.deepEqual(st.tracks, ['kick', 'hats']);
+  assert.deepEqual(fns.arGroupLabels(), []);
 });

@@ -2947,7 +2947,7 @@ function dryRunPattern(sig) {
 
 const HL_WINDOW = 32; // cycles of grid shipped per track (initial window and each top-up)
 
-const hlTracks = new Map(); // label -> { sig, start, end } for the last eval's active tracks
+const hlTracks = new Map(); // label -> { sig, start, end, clock } for the last eval's active tracks
 
 // The sounding steps of a track for cycles [from, from+count), each as { start, end, cont?, locs }.
 // Every pattern signal on the track contributes (see patternSigs), so a `.param("x","0 1")` /
@@ -4791,10 +4791,20 @@ const routes = {
         // sounds exactly when they do and a gate of its own could only cut a tail off. Clips it
         // still holds from before it was one are dropped by the painter, and ignored here.
         if (!painted && (b.kind === 'bare' || routed.groups.has(b.label))) continue;
-        if (patternCore.isBusBlock(b)) continue;
-        // Gated in SONG positions: the schedulers and the highlighter read every track through this
-        // deck's clock (see arrangeClocks), so the gate is asked where the song is, not the transport.
-        b.sig = b.sig._arrangeGate(painted ?? []);
+        // A group with no braces (the master chain - labels.mjs's isBodylessGroup) has no row
+        // either, for much the same reason: it is always on, and clips it still holds from before
+        // it lost its row must not gate the whole mix.
+        if (patternCore.isRowlessBlock(b)) continue;
+        // An ordinary track reads the song through a clock of ITS OWN (pattern-core's ClipClock):
+        // inside each of its clips the pattern starts where the clip does, and between them it is
+        // read not at all - so that clock is its gate as well. The scheduler and the highlighter
+        // are handed it in the deck clock's place (see trackClockFor).
+        //
+        // Two kinds of track stay on the deck's clock, gated in SONG positions instead. A clips()
+        // track places its rolls in the song itself, clip by clip (see Sig#clipsHead). A painted
+        // GROUP has no pattern of its own to restart: its clips only gate the submix.
+        if (b.sig.clipsHead || routed.groups.has(b.label)) b.sig = b.sig._arrangeGate(painted ?? []);
+        else b.trackClock = new patternCore.ClipClock(clock, patternCore.clipsOfLabel(clips, b.label));
       }
     } else {
       arrangeClocks[deck] = null;
@@ -4891,7 +4901,7 @@ const routes = {
       // A slot this eval puts a different plugin in is let go first (see thawReplacedSlots).
       thawReplacedSlots(key, [b.sig.instrument ?? null, ...b.sig.fxChain]);
       for (const slot of stateHeldSlotsFor(key)) sch.holdPluginState(slot, true);
-      sch.setSongClock(arrangeClocks[deck]); // before setPattern, whose note gate reads it
+      sch.setSongClock(b.trackClock ?? arrangeClocks[deck]); // before setPattern, whose note gate reads it
       sch.setPattern(b.sig);
       for (const [holdKey, held] of presetHolds) {
         const at = holdKey.lastIndexOf('|');
@@ -4928,7 +4938,7 @@ const routes = {
     // Refresh the highlight-grid source set to this eval's active tracks, and ship each active
     // track's first window inline so playback lights up immediately without a follow-up request.
     for (const k of [...hlTracks.keys()]) if (deckOfKey(k) === deck) hlTracks.delete(k);
-    for (const b of active) hlTracks.set(keyOfBlock(b.label), { sig: b.sig, start: b.start, end: b.end });
+    for (const b of active) hlTracks.set(keyOfBlock(b.label), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? null });
     const gridFrom = currentGridCycle();
 
     // Pairs with the event-loop watchdog above: an evaluation that held the process this long
@@ -4952,7 +4962,7 @@ const routes = {
       instrument: b.sig.instrument,
       fxChain: b.sig.fxChain,
       paramNames: paramLabels(b.sig),
-      grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW, arrangeClocks[deck]) : null,
+      grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? arrangeClocks[deck]) : null,
     }));
     // The clock starts now that everything above is in place (see scheduleFrom), and this
     // eval's schedulers with it, their windows opening on its start position.
@@ -5165,7 +5175,9 @@ const routes = {
     const count = Math.min(HL_WINDOW * 4, Math.max(1, Math.floor(Number(q.count)) || HL_WINDOW));
     const tracks = [...hlTracks.entries()].map(([label, t]) => ({
       label,
-      grid: highlightGrid(t.sig, t.start, t.end, from, count, arrangeClocks[deckOfKey(label)]),
+      // Through the track's own clock where it has one (clip-relative time - see the arrangement
+      // pass of /api/evaluate), which holds the deck's clock and so follows its releases and seeks.
+      grid: highlightGrid(t.sig, t.start, t.end, from, count, t.clock ?? arrangeClocks[deckOfKey(label)]),
     }));
     return { status: 200, body: { gridFrom: from, gridCount: count, tracks } };
   },

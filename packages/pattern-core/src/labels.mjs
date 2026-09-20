@@ -382,6 +382,25 @@ export function isBusBlock(block) {
   return BUS_HEAD_RE.test(bare);
 }
 
+/**
+ * Whether a block is a group with NO BRACES - `main: group().fx("Pro-L 2")`, the master chain (see
+ * groups.mjs's GROUP_ROOT). Its members are implicit, so nothing is written under it, and what it
+ * does is carry a chain that is always on: there is no part of the song it could be painted in or
+ * out of, and a row for it could only ever gate the whole mix by accident.
+ */
+export function isBodylessGroup(block) {
+  return !!block && block.group === true && block.bodyStart == null;
+}
+
+/**
+ * The tracks the arrangement gives NO ROW: a bus (isBusBlock) and a group without braces
+ * (isBodylessGroup). The painter leaves them out and drops clips they still hold; the host never
+ * gates them. One question, asked by both, so they cannot disagree about which tracks are rows.
+ */
+export function isRowlessBlock(block) {
+  return isBusBlock(block) || isBodylessGroup(block);
+}
+
 // Is any line of `text` more than whitespace and not a `//` comment? Walks the lines and stops at
 // the first one that is, rather than splitting the whole text into an array first: this is asked
 // of entire blocks, which a pinned plugin state makes megabytes long, and the answer is almost

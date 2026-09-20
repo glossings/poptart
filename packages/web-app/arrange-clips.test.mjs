@@ -107,7 +107,7 @@ const LIFTED = ['matchParen', 'codeOnly', 'splitFirstArg', 'freshDefId', 'arFind
   'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece',
   'arHue', 'arHsl', 'hexToHsl', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor']
   .map(grab)
-  .concat([grabConst('preferredDefId'), grabConst('arClipsOfRoll'), grabConst('arMintRoll'), grabConst('arIsBus'),
+  .concat([grabConst('preferredDefId'), grabConst('arClipsOfRoll'), grabConst('arMintRoll'), grabConst('arIsRowless'),
     grabConst('AR_MEMBER_HUE_STEP'), grabConst('AR_ROLL_LIGHT_STEP'),
     grabConst('AR_ROLL_LIGHT_SPAN'), grabConst('AR_ROLL_WRAP_HUE')])
   .join('\n\n');
@@ -272,14 +272,14 @@ test('the track that plays a roll is the row its clip is on - what the panel pre
 // Pieces
 // ---------------------------------------------------------------------------------------------
 
-test('a piece of a clip enters its roll that much further in - and a plain clip has no offset', () => {
+test('a piece of a clip enters its roll - or its pattern - that much further in', () => {
   const { fns } = painter();
   const c = { label: 'kick', start: 4, len: 8, roll: 'verse' };
   assert.deepEqual(fns.arClipPiece(c, 8, 4), { label: 'kick', start: 8, len: 4, roll: 'verse', off: 4 });
   assert.deepEqual(fns.arClipPiece(c, 4, 4), { label: 'kick', start: 4, len: 4, roll: 'verse' },
     'the first piece starts where the clip did, so it carries no offset at all');
-  assert.deepEqual(fns.arClipPiece({ label: 'bass', start: 0, len: 8 }, 4, 4), { label: 'bass', start: 4, len: 4 },
-    'an ordinary track has nothing to be offset into');
+  assert.deepEqual(fns.arClipPiece({ label: 'bass', start: 0, len: 8 }, 4, 4), { label: 'bass', start: 4, len: 4, off: 4 },
+    'an ordinary track enters its PATTERN that much further in - the same rule, so a split is never heard');
 });
 
 test('the painter reads the clips in hand while it is open, and the buffer when it is not', () => {

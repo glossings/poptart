@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { splitLabeledBlocks, isBareCallBlock, isBusBlock, codeMask } from './src/labels.mjs';
+import { splitLabeledBlocks, isBareCallBlock, isBusBlock, isBodylessGroup, isRowlessBlock, codeMask } from './src/labels.mjs';
 
 const labels = (src) => splitLabeledBlocks(src).map((b) => b.label);
 
@@ -413,4 +413,23 @@ test('isBusBlock: audio() at the head, and only at the head', () => {
   assert.equal(isBusBlock(by.kickMain), false);
   assert.equal(isBusBlock(by.live), false);
   assert.equal(isBusBlock(null), false);
+});
+
+test('isBodylessGroup: a group with no braces - the master chain - and isRowlessBlock covers it and a bus', () => {
+  const code = [
+    'main: group().fx("Pro-L 2")',
+    'drums: group({',
+    '  kick: s("bd*4")',
+    '}).fx("Saturn 2")',
+    'empty: group({})',
+    'verb: audio("bus:verb").fx("ValhallaRoom")',
+    'bass: n("0").synth("Serum 2")',
+  ].join('\n');
+  const by = Object.fromEntries(splitLabeledBlocks(code).map((b) => [b.label, b]));
+  assert.equal(isBodylessGroup(by.main), true);
+  assert.equal(isBodylessGroup(by.drums), false, 'braces are a body, and its members sit under its row');
+  assert.equal(isBodylessGroup(by.empty), false, 'empty braces are still braces: a group waiting for members');
+  assert.equal(isBodylessGroup(by.kick), false);
+  assert.equal(isBodylessGroup(by.bass), false);
+  assert.deepEqual(Object.keys(by).filter((l) => isRowlessBlock(by[l])), ['main', 'verb'], 'the two kinds of track the arrangement gives no row');
 });
