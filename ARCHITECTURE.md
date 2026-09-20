@@ -62,7 +62,7 @@ the most unit-testable part.
   under the lane's name and plays with `pianoroll("name")` — so an import lands in the editable form
   and the roll's own →♪ converts it to mini-notation when that's wanted.
 - `arrange.mjs` — the arrangement's clip format (`label,start,len`, in cycles, plus tagged extras)
-  and span math. The `_arrange(...)` definition is always in force (ctrl+A paints it): one row per
+  and span math. The `_arrange(...)` definition is always in force (app+A paints it): one row per
   track, a block plays only inside its clips (the host gates its Sig with `_arrangeGate`, on
   absolute cycle time, looping over the arrangement's length), and an emptied row is silent.
 - **`clips()` turns that round for one track.** A block headed by `clips()` has no pattern of its
@@ -120,6 +120,12 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   browser and pattern-core + osc-engine.
 - `public/client.js` — the browser app: CodeMirror editor, transport, plugin browser, sample
   browser, params panel, macros, settings, theming.
+- `public/chords.js` — the keyboard model, loaded by the app and the guide alike: the two modifier
+  families (`mod+`, the editing verbs — cmd on macOS, ctrl elsewhere; and `app+`, poptart's own
+  chords — ctrl on macOS, alt elsewhere), the hotkey dispatcher's combo parser, and `chordLabel()`,
+  which is how every tooltip, log line and doc spells a chord. One file because a chord's binding
+  and its label have to move together: they did not, and off macOS the app's chords landed on the
+  editing modifier's key and on the browser's own shortcuts.
 - `public/api-docs.js` — the editor's API reference: one entry per userland name (signature +
   description). Drives the autocomplete word lists, the popup's doc panel, and the ctrl-hover
   tooltip; `api-docs.test.js` checks it against the real builders and `Sig.prototype`.
@@ -288,7 +294,7 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   bug this rule exists for — and most packs are never sliced at all. A `.slice()` on a file whose
   analysis hasn't landed skips that one event, matching the rule the sampler already followed for
   events arriving during a pack load: don't stall the music, just don't play *that sound* yet.
-- **A bounce is recorded wide and trimmed in Node.** Per-track recording (`.record()` / ctrl+b)
+- **A bounce is recorded wide and trimmed in Node.** Per-track recording (`.record()` / app+B)
   taps the track's post-fader output to a private bus and runs a `DiskOut` synth on it, started and
   stopped by *timestamped bundles* — the same mechanism note events use — so the window's edges are
   sample-accurate rather than however long an OSC message took to arrive. But freeing a `DiskOut`
@@ -327,7 +333,7 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   engine reloads only a pack whose file list actually changed.
 - **`.record()` is a marker, not a mechanism.** It carries the panel's settings in the code and
   gives the editor something to hang the panel off, and changes nothing about playback. The actual
-  bounce is keyed on the *block label*, which is why ctrl+b works on any block without it.
+  bounce is keyed on the *block label*, which is why app+B works on any block without it.
 - **Plain HTTP + browser, no Electron.** Open the served page in any browser; keeps the footprint
   small.
 

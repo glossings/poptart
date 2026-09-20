@@ -234,9 +234,11 @@ test('the painter refuses a deck that holds a song FILE', () => {
   assert.match(grab('openArrangePainter'), /if \(songPanes\[want\]\?\.song\) \{[\s\S]{0,300}return;/);
 });
 
-test('ctrl+A means THIS pane\'s arrangement, in either editor', () => {
-  assert.match(SRC, /'Ctrl-A': \(\) => \(arState && arDeck === 'a' \? closeArrangeEditor\(\) : openArrangePainter\('a'\)\)/);
-  assert.match(SRC, /'Ctrl-A': \(\) => \(arState && arDeck === 'b' \? closeArrangeEditor\(\) : openArrangePainter\('b'\)\)/);
+test('the arrangement chord means THIS pane\'s arrangement, in either editor', () => {
+  // Bound through CM_APP, so the keystroke follows the platform (ctrl on macOS, alt elsewhere)
+  // while staying one chord in the source - see the modifier-families note in client.js.
+  assert.match(SRC, /\[`\$\{CM_APP\}A`\]: \(\) => \(arState && arDeck === 'a' \? closeArrangeEditor\(\) : openArrangePainter\('a'\)\)/);
+  assert.match(SRC, /\[`\$\{CM_APP\}A`\]: \(\) => \(arState && arDeck === 'b' \? closeArrangeEditor\(\) : openArrangePainter\('b'\)\)/);
   // ...and the painter no longer refuses to open during a mix
   assert.ok(!/leave DJ mode first \(ctrl\+D\)/.test(SRC), 'the refusal is gone - that is the whole feature');
 });

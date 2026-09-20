@@ -414,11 +414,16 @@ test('leaving the arrangement with a clip selected lands on its block', () => {
   assert.match(grab('closeArrangeEditor'), /if \(picked\) arGotoBlock\(picked\);/);
 });
 
-test('the editing verbs take cmd, never ctrl - the ctrl chords are the app\'s own', () => {
-  // ctrl+A opens the arrangement, cmd+A selects every clip in it. A panel that took either for its
-  // editing verbs made those two the same keystroke, which is what this asks about: every keydown
-  // that offers copy / paste / duplicate / select-all reads the platform modifier, not both.
-  assert.match(SRC, /function editMod\(e\) \{\n\s+return IS_MAC \? e\.metaKey && !e\.ctrlKey : e\.ctrlKey && !e\.metaKey;/);
+test('the editing verbs take the edit modifier, never both - the app chords are their own family', () => {
+  // app+A opens the arrangement, mod+A selects every clip in it. A panel that took either key for
+  // its editing verbs made those two the same keystroke, which is what this asks about: every
+  // keydown that offers copy / paste / duplicate / select-all reads one family, not both.
+  //
+  // The two families themselves live in public/chords.js, shared with the guide so a chord is
+  // bound and written by the same rule - see the note at the head of that file.
+  const CHORDS = fs.readFileSync(path.join(__dirname, 'public', 'chords.js'), 'utf8');
+  assert.match(CHORDS, /function editMod\(e\) \{\n\s+return IS_MAC \? e\.metaKey && !e\.ctrlKey : e\.ctrlKey && !e\.metaKey;/);
+  assert.match(CHORDS, /function appMod\(e\) \{\n\s+return IS_MAC \? e\.ctrlKey && !e\.metaKey && !e\.altKey : e\.altKey && !e\.ctrlKey && !e\.metaKey;/);
   const keys = grab('initArrangeCanvas');
   assert.match(keys, /const mod = editMod\(e\);/);
   assert.ok(!/const mod = e\.metaKey \|\| e\.ctrlKey;/.test(keys), 'no key handler takes either modifier');
@@ -538,9 +543,12 @@ test('a group gets a caret in the gutter and does NOT fold itself', () => {
   assert.match(grab('forgetExpandedFolds'), /collapsedGroups\.clear\(\);/);
 });
 
-test('cmd+G groups the selection, and the gesture asks for a name in place', () => {
-  assert.match(SRC, /'Cmd-G': \(ed\) => groupSelection\(ed\),/);
-  assert.match(SRC, /'Shift-Ctrl-G': \(ed\) => groupSelection\(ed\),/, 'plain ctrl\+G is the mixer');
+test('mod+G groups the selection, and the gesture asks for a name in place', () => {
+  // The editing modifier, taking the sublime keymap's find-next. It is the same chord on both
+  // platforms now that the mixer is app+G; shift+ctrl+G stays bound because off macOS that was
+  // this gesture back when plain ctrl+G was the mixer.
+  assert.match(SRC, /\[`\$\{CM_MOD\}G`\]: \(ed\) => groupSelection\(ed\),/);
+  assert.match(SRC, /'Shift-Ctrl-G': \(ed\) => groupSelection\(ed\),/, 'the old off-macOS chord still works');
   const sel = grab('groupSelection');
   // The membership rule lives in pattern-core (mixctl's selectionMembers, tested there): the
   // outermost blocks the selection touches, never a group whose body holds the whole selection.

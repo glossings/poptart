@@ -458,20 +458,23 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     'Alt-Up': 'swapLineUp',
     'Alt-Down': 'swapLineDown',
     'Ctrl-Space': (ed) => showPoptartHint(ed),
-    // The arrangement (ctrl+A, never cmd+A - select-all is select-all). CodeMirror's Mac keymap
-    // binds Ctrl-A to goLineStart, so it has to be taken here rather than left to the document
-    // handler below, which never sees it.
-    // This pane is deck A, so ctrl+A here is deck A's arrangement (deck B's editor has its own).
-    'Ctrl-A': () => (arState && arDeck === 'a' ? closeArrangeEditor() : openArrangePainter('a')),
-    // DJ mode (ctrl+D), the header's toggle. The Mac keymap's Ctrl-D is delete-forward, which
-    // nobody reaches for by that name.
-    'Ctrl-D': () => toggleMixMode(),
-    // An effect at the caret (ctrl+F, see insertFxCall). The Mac keymap's Ctrl-F is cursor-right.
-    'Ctrl-F': (ed) => insertFxCall(ed),
-    // Group the selected tracks (see groupSelection). Cmd on a Mac, where the sublime keymap's
-    // Cmd-G (find-next) is the thing being taken; shift+ctrl elsewhere, because plain ctrl+G is
-    // the mixer and the global dispatcher gets it before CodeMirror does.
-    'Cmd-G': (ed) => groupSelection(ed),
+    // The app's own chords have to be taken HERE as well as on the document, because CodeMirror's
+    // keymaps bind several of them to editing commands of their own (the Mac keymap's Ctrl-A is
+    // goLineStart, Ctrl-D delete-forward, Ctrl-F cursor-right) and it never lets the keystroke
+    // reach the document handler below. CM_APP is the app modifier in CodeMirror's spelling.
+    //
+    // The arrangement, never mod+A - select-all is select-all. This pane is deck A, so the chord
+    // here is deck A's arrangement (deck B's editor has its own).
+    [`${CM_APP}A`]: () => (arState && arDeck === 'a' ? closeArrangeEditor() : openArrangePainter('a')),
+    // DJ mode, the header's toggle.
+    [`${CM_APP}D`]: () => toggleMixMode(),
+    // An effect at the caret (see insertFxCall).
+    [`${CM_APP}F`]: (ed) => insertFxCall(ed),
+    // Group the selected tracks (see groupSelection). The editing modifier, taking the sublime
+    // keymap's find-next - the mixer is app+G and the global dispatcher gets that first, so the
+    // two are a different keystroke on every platform. shift+ctrl+G is kept as it is: off macOS
+    // that was this chord back when plain ctrl+G meant the mixer.
+    [`${CM_MOD}G`]: (ed) => groupSelection(ed),
     'Shift-Ctrl-G': (ed) => groupSelection(ed),
   },
 });
@@ -504,49 +507,55 @@ function transportStop() {
   doStop(mixModeOn ? djActiveDeck : null);
 }
 document.addEventListener('keydown', (e) => {
-  if (e.defaultPrevented || !(e.metaKey || e.ctrlKey)) return;
+  // Both families reach this handler, and every branch below says which one it belongs to.
+  //
+  // `edit` is deliberately looser than editMod: the transport and save have always answered to cmd
+  // OR ctrl on any platform (CodeMirror binds both in extraKeys, and that is what every tooltip
+  // promises), and neither key means anything else here. `app` is exact, because those chords are
+  // the ones that used to collide - see appMod.
+  const edit = e.metaKey || e.ctrlKey;
+  const app = appMod(e);
+  if (e.defaultPrevented || !(edit || app)) return;
   const dialogs = [...document.querySelectorAll('.dir-picker-backdrop:not(.hidden)')];
   if (dialogs.length) {
     if (dialogs.some((d) => !d.classList.contains('keeps-transport'))) return;
     if (!TRANSPORT_KEY(e)) return;
   }
-  if (e.key === 'Enter') {
+  if (edit && e.key === 'Enter') {
     e.preventDefault();
     transportPlay();
-  } else if (e.key === '.' && !e.shiftKey) {
+  } else if (edit && e.key === '.' && !e.shiftKey) {
     e.preventDefault();
     transportStop();
-  } else if ((e.key === '>' || e.key === '.') && e.shiftKey) {
+  } else if (edit && (e.key === '>' || e.key === '.') && e.shiftKey) {
     e.preventDefault();
     stepDeckBQueue(); // mix mode: load the active set's next song into deck B
-  } else if ((e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') && mixModeOn && songActiveDeck()) {
-    // Cmd ± zooms the active song pane's waveform (the piano roll's own handler takes these
+  } else if (edit && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') && mixModeOn && songActiveDeck()) {
+    // ⌘± zooms the active song pane's waveform (the piano roll's own handler takes these
     // first when it has focus; this is the pane's turn).
     e.preventDefault();
     songPanes[songActiveDeck()].zoomBy(e.key === '-' || e.key === '_' ? 1 / PR_BTN_ZOOM : PR_BTN_ZOOM);
-  } else if (e.key.toLowerCase() === 'c' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
-    && songCueTarget(e)) {
-    // Ctrl+C is the CUE button, held until the key comes up. Ctrl specifically, and only where
-    // the gesture has a target that isn't someone trying to copy - Cmd+C is never touched.
+  } else if (app && e.key.toLowerCase() === 'c' && !e.shiftKey && songCueTarget(e)) {
+    // The CUE button, held until the key comes up - and only where the gesture has a target, so
+    // nothing is taken from someone who meant to copy. The editing modifier is never touched here.
     e.preventDefault();
     if (!e.repeat) songCueKeyDown(e);
-  } else if (e.key.toLowerCase() === 'l' && !e.shiftKey && !e.altKey) {
+  } else if (edit && e.key.toLowerCase() === 'l' && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     arrangeUnlock(); // release the loop region the arrangement is in (see the arrange section)
-  } else if (e.key.toLowerCase() === 'a' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
-    && !arKeyInField()) {
-    // ctrl+A is the arrangement, both ways: it opens the painter and it puts it away again - on the
-    // deck you are working on (in DJ mode, the armed one). Ctrl rather than cmd because cmd+A is
-    // select-all wherever you are: in the editor, and inside the painter, where it means every clip.
+  } else if (app && e.key.toLowerCase() === 'a' && !e.shiftKey && !arKeyInField()) {
+    // The arrangement, both ways: it opens the painter and it puts it away again - on the deck you
+    // are working on (in DJ mode, the armed one). The app modifier rather than the editing one
+    // because mod+A is select-all wherever you are: in the editor, and inside the painter, where
+    // it means every clip.
     e.preventDefault();
     if (arState) closeArrangeEditor();
     else openArrangePainter();
-  } else if (e.key.toLowerCase() === 's') {
+  } else if (edit && e.key.toLowerCase() === 's') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
     if (e.shiftKey) savePatternFileAs();
     else savePatternFile();
-  } else if (e.key.toLowerCase() === 'd' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
-    && !arKeyInField()) {
+  } else if (app && e.key.toLowerCase() === 'd' && !e.shiftKey && !arKeyInField()) {
     e.preventDefault();
     toggleMixMode(); // the performance mixer's split (see the mix section at the foot of this file)
   }
@@ -646,8 +655,8 @@ function setCurrentSavedName(name) {
   const saveBtn = document.getElementById('fileSaveBtn');
   if (saveBtn) {
     saveBtn.title = currentSavedName
-      ? `save the buffer over "${currentSavedName}" (⌘/Ctrl+S)`
-      : 'name this pattern and save it (⌘/Ctrl+S)';
+      ? `save the buffer over "${currentSavedName}" (${chordLabel('mod+s')})`
+      : `name this pattern and save it (${chordLabel('mod+s')})`;
   }
 }
 
@@ -758,7 +767,7 @@ async function importPatch(file) {
     // suggestion for when they do save it.
     await openInEditor(light?.code ?? text, null);
     saveNameHint = file.name.replace(/\.js$/i, '');
-    logLine(`imported ${file.name} - Cmd/Ctrl+Enter to play it`);
+    logLine(`imported ${file.name} - ${chordLabel('mod+enter')} to play it`);
   } catch (e) {
     logLine(`could not import ${file.name}: ${e.message ?? e}`, true);
   }
@@ -864,7 +873,7 @@ window.addEventListener('popstate', async () => {
   setBufferQuietly(code);
   saveRestoreBuffer(code);
   checkpointSeq++; // an in-flight checkpoint must not push its URL over where we just landed
-  logLine('restored code from browser history - Cmd/Ctrl+Enter to play it');
+  logLine(`restored code from browser history - ${chordLabel('mod+enter')} to play it`);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1007,7 +1016,7 @@ function foldConfigBlobs() {
     lfo: 'lfo shape — click to expand, or use the shape editor',
     grainshape: 'grain window — click to expand, or use the shape editor',
     pianoroll: 'piano roll notes — click to expand, or use the piano roll editor',
-    arrange: 'the arrangement — click to expand, or press ctrl+A to paint it',
+    arrange: `the arrangement — click to expand, or press ${chordLabel('app+a')} to paint it`,
   };
   const dataArgRe = /\b(lfo|grainshape|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
   while ((m = dataArgRe.exec(code))) {
@@ -2456,7 +2465,10 @@ function renderDocBox(el, doc) {
   sig.textContent = doc.display;
   const desc = document.createElement('div');
   desc.className = 'doc-desc';
-  desc.textContent = doc.desc;
+  // api-docs.js writes chords as {app+b} / {mod+g}: it is required by Node in the tests as well as
+  // loaded here, so it cannot reach chordLabel itself - the expansion happens at the one place the
+  // text is shown.
+  desc.textContent = expandChords(doc.desc);
   el.append(sig, desc);
   if (doc.eg) {
     const eg = document.createElement('div');
@@ -5462,7 +5474,7 @@ function makeDefRegistry(opts) {
     const clipped = otherRefs(code, id);
     if (clipped) {
       return refuse(`${clipped} clip${clipped === 1 ? '' : 's'} in the arrangement still play${clipped === 1 ? 's' : ''} it `
-        + '- delete the clips (ctrl+A) first, or the part goes silent where they are');
+        + `- delete the clips (${chordLabel('app+a')}) first, or the part goes silent where they are`);
     }
     const [from, to] = removalRange(code, def);
     const wasOpen = panel.current() === id;
@@ -12298,14 +12310,14 @@ function initRecordPanel() {
   recordClose.addEventListener('click', closeRecordPanel);
 }
 
-// ctrl+b - bounce the block the cursor is in, with no .record() call needed. Uses that block's
+// app+b - bounce the block the cursor is in, with no .record() call needed. Uses that block's
 // .record() options if it has them, so the hotkey and the panel agree on the length.
 function bounceBlockAtCursor() {
   const code = cm.getValue();
   const idx = cm.indexFromPos(cm.getCursor());
   const label = blockLabelAt(idx);
   if (!label || label.startsWith('$')) {
-    logLine('ctrl+b: put the cursor in a named block to bounce it', true);
+    logLine(`${chordLabel('app+b')}: put the cursor in a named block to bounce it`, true);
     return;
   }
   if (trackRecState) return cancelTrackRecord(true);
@@ -13853,7 +13865,7 @@ function badge(text, cls) {
 function updateTransportButtons() {
   playBtn.innerHTML = playing ? '<span class="ico">■</span> stop' : '<span class="ico">▶</span> play';
   playBtn.classList.toggle('is-playing', playing);
-  playBtn.title = playing ? 'Cmd/Ctrl + .' : 'Cmd/Ctrl + Enter';
+  playBtn.title = playing ? chordLabel('mod+.') : chordLabel('mod+enter');
 }
 
 // The one code-evaluation path. `start: true` (Play) un-freezes the clock so playback (re)starts
@@ -14138,8 +14150,8 @@ function prSyncKeyboardBtn() {
   prKeysBtn.classList.toggle('active', prKbOn);
   const tonic = kbInKey() ? kbTonicName() : null;
   prKeysBtn.title = prKbOn
-    ? `computer keyboard: on - the keys play this roll's track (ctrl+m)${tonic ? `, in the key: a = ${tonic}, shift raises a semitone` : ''}`
-    : 'computer keyboard: play this roll\'s track from the typing keyboard (ctrl+m)';
+    ? `computer keyboard: on - the keys play this roll's track (${chordLabel('app+m')})${tonic ? `, in the key: a = ${tonic}, shift raises a semitone` : ''}`
+    : `computer keyboard: play this roll's track from the typing keyboard (${chordLabel('app+m')})`;
 }
 
 function kbSend(trackId, note, isOn, index = null) {
@@ -14915,10 +14927,10 @@ audioCueSelect.addEventListener('change', async () => {
     updateTransportButtons();
     transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
     logLine(res.active
-      ? `headphone cue is on "${res.active}" - re-evaluate (Cmd/Ctrl+Enter) to resume playback`
+      ? `headphone cue is on "${res.active}" - re-evaluate (${chordLabel('mod+enter')}) to resume playback`
       : device
         ? `cue device saved, but the engine came up WITHOUT a cue pair - check it is plugged in`
-        : 'headphone cue is off - re-evaluate (Cmd/Ctrl+Enter) to resume playback', device && !res.active);
+        : `headphone cue is off - re-evaluate (${chordLabel('mod+enter')}) to resume playback`, device && !res.active);
     setAudioDeviceWarning(res.warning);
     previewSink.for = undefined; // a new cue device: the audition routing is re-derived
     syncPreviewRouting();
@@ -14947,8 +14959,8 @@ audioChannelSelect.addEventListener('change', async () => {
     transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
     renderChannelChoices(res.outputChannelChoices, res.outputChannels, res.audibleChannels);
     logLine(res.outputChannels === 2
-      ? 'every .o(n) now plays to channels 1/2 - re-evaluate (Cmd/Ctrl+Enter) to resume playback'
-      : `.o(n) now wraps at ${res.outputChannels / 2} stereo pairs - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
+      ? `every .o(n) now plays to channels 1/2 - re-evaluate (${chordLabel('mod+enter')}) to resume playback`
+      : `.o(n) now wraps at ${res.outputChannels / 2} stereo pairs - re-evaluate (${chordLabel('mod+enter')}) to resume playback`);
   } catch (e) {
     logLine(e.message ?? String(e), true);
     refreshAudioDevices().catch(() => {}); // put the control back to what the engine actually has
@@ -14976,7 +14988,7 @@ audioDeviceSelect.addEventListener('change', async () => {
     playing = false;
     updateTransportButtons();
     transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
-    logLine(`audio output is now ${label} - re-evaluate (Cmd/Ctrl+Enter) to resume playback`);
+    logLine(`audio output is now ${label} - re-evaluate (${chordLabel('mod+enter')}) to resume playback`);
     setAudioDeviceWarning(warning);
     refreshAudioInputs().catch(() => {});
     // A different interface has a different number of pairs, and the saved channel count is
@@ -15123,7 +15135,7 @@ audioInputApply.addEventListener('click', async () => {
     audioInputs = layout ?? null; // the input(" popup's channel ranges just changed
     renderAudioInputLayout(layout, null);
     setAudioDeviceWarning(warning);
-    logLine('audio inputs updated - re-evaluate (Cmd/Ctrl+Enter) to resume playback');
+    logLine(`audio inputs updated - re-evaluate (${chordLabel('mod+enter')}) to resume playback`);
     refreshAudioDevices().catch(() => {});
   } catch (e) {
     logLine(e.message ?? String(e), true);
@@ -16458,12 +16470,12 @@ packEntriesEl.addEventListener('contextmenu', (e) => {
   if (!packState || e.shiftKey) return;
   e.preventDefault();
   if (!packState.own) return; // a library pack takes nothing - no menu is better than a dead one
-  const items = [['paste files from the clipboard', () => packPasteFromClipboard(), 'the files copied in Finder or a sample app, added where they live (⌘V)']];
+  const items = [['paste files from the clipboard', () => packPasteFromClipboard(), `the files copied in Finder or a sample app, added where they live (${chordLabel('mod+v')})`]];
   const nSel = packSel.entries.size;
   if (packState.entries.length) {
     items.push('-');
     if (nSel) items.push([nSel > 1 ? `remove ${nSel} files` : 'remove', () => packRemoveSelected(), 'take the selection out of the pack (→ or delete)']);
-    items.push(['select all', () => packSelectAll('entries'), '⌘A']);
+    items.push(['select all', () => packSelectAll('entries'), chordLabel('mod+a')]);
   }
   openCtxMenu(packMenu, e.clientX, e.clientY, { items, after: () => packEntriesEl.focus({ preventScroll: true }) });
 });
@@ -18286,7 +18298,7 @@ function sliceGridChop() {
   sliceCommit();
   sliceRender();
   sliceSay(`${marks.length} × ${name} across ${sliceFitNum(cycles)} cy`
-    + (had ? ` — ${had} hand-drawn marker${had === 1 ? '' : 's'} replaced (⌘Z puts them back)` : ''));
+    + (had ? ` — ${had} hand-drawn marker${had === 1 ? '' : 's'} replaced (${chordLabel('mod+z')} puts them back)` : ''));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -19271,7 +19283,7 @@ function initSlicePanel() {
     sliceLivePush();
     sliceCommit();
     sliceRender();
-    if (had) sliceSay(`re-detected — ${had} hand-drawn marker${had === 1 ? '' : 's'} replaced (⌘Z puts them back)`);
+    if (had) sliceSay(`re-detected — ${had} hand-drawn marker${had === 1 ? '' : 's'} replaced (${chordLabel('mod+z')} puts them back)`);
   });
   sliceClearBtn.addEventListener('click', () => {
     if (!sliceState) return;
@@ -20098,7 +20110,7 @@ const prebakeEditBtn = document.getElementById('prebakeEditBtn');
 const prebakeSaveBtn = document.getElementById('prebakeSave');
 const prebakeCloseBtn = document.getElementById('prebakeClose');
 const prebakeNote = document.getElementById('prebakeNote');
-const PREBAKE_HINT = 'saved to ~/.poptart/prebake.js · ⌘S / ⌘↵ to save';
+const PREBAKE_HINT = `saved to ~/.poptart/prebake.js · ${chordLabel('mod+s')} / ${chordLabel('mod+enter')} to save`;
 let prebakeCM = null;
 
 function ensurePrebakeCM() {
@@ -20495,7 +20507,7 @@ async function loadPatternFile(name) {
   try {
     const { code } = await api('POST', '/api/patterns/load', { name });
     await openInEditor(code, name);
-    logLine(`loaded pattern "${name}" - Cmd/Ctrl+Enter to play it`);
+    logLine(`loaded pattern "${name}" - ${chordLabel('mod+enter')} to play it`);
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -20974,7 +20986,7 @@ function runMidiImport() {
   logLine(
     `midi import: ${st.file.name} → ${names.length} piano roll${names.length === 1 ? '' : 's'} (${names.join(', ')})` +
       `${takeKey ? ` in ${key}` : ''} - the notes are in the pianorolls block at the bottom; double-click a` +
-      ' pianoroll name to edit or convert one, and add a .synth() then Cmd/Ctrl+Enter to play',
+      ` pianoroll name to edit or convert one, and add a .synth() then ${chordLabel('mod+enter')} to play`,
   );
   if (unquantized) {
     logLine(
@@ -21242,6 +21254,10 @@ refreshStatus().then((loaded) => {
   if (loaded) loadKnownPlugins();
 });
 initMacros();
+// Every chord index.html writes as {app+d} / {mod+s} becomes this platform's keystroke. The markup
+// carries the combo rather than a spelling of it, so a tooltip cannot promise a key that isn't
+// bound here - see chordLabel.
+paintChordLabels();
 
 // ---------------------------------------------------------------------------------------------
 // Hotkeys - a small dispatcher plus a userland API. Built-in transport/UI chords are registered
@@ -21252,62 +21268,13 @@ initMacros();
 //
 // Matching is on event.code (physical key position), so a chord fires regardless of which
 // character Shift/AltGr would produce - `cmd+shift+.` matches the `.` key even though the event's
-// .key is `>`. Combos are strings like 'cmd+shift+0', 'ctrl+p', 'mod+enter' (mod = cmd on macOS,
-// ctrl elsewhere). Modifiers: cmd/meta, ctrl, alt/option, shift, mod.
+// .key is `>`. Combos are strings like 'cmd+shift+0', 'ctrl+p', 'mod+enter', 'app+g'. Modifiers:
+// cmd/meta, ctrl, alt/option, shift, and the two PLATFORM ones - `mod` is the editing modifier
+// (cmd on macOS, ctrl elsewhere) and `app` is the app's own (ctrl on macOS, alt elsewhere). A
+// built-in chord takes `app+`; a literal `ctrl+` means ctrl on every platform, which is almost
+// never what an app chord wants. The parser and matcher themselves (comboToSpec / specMatches)
+// live in public/chords.js with the rest of the keyboard model - see the note at its head.
 // ---------------------------------------------------------------------------------------------
-
-const IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
-
-const KEY_CODE_MAP = {
-  '.': 'Period', ',': 'Comma', '/': 'Slash', ';': 'Semicolon', "'": 'Quote',
-  '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash', '-': 'Minus', '=': 'Equal', '`': 'Backquote',
-  enter: 'Enter', return: 'Enter', space: 'Space', tab: 'Tab', esc: 'Escape', escape: 'Escape',
-  backspace: 'Backspace', delete: 'Delete', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
-};
-
-// A combo token -> KeyboardEvent.code, or null if we should fall back to matching event.key.
-function keyTokenToCode(tok) {
-  if (/^[a-z]$/.test(tok)) return 'Key' + tok.toUpperCase();
-  if (/^[0-9]$/.test(tok)) return 'Digit' + tok;
-  return KEY_CODE_MAP[tok] ?? null;
-}
-
-function comboToSpec(combo) {
-  const spec = { meta: false, ctrl: false, shift: false, alt: false, mod: false, code: null, key: null };
-  for (const raw of String(combo).toLowerCase().split('+')) {
-    const tok = raw.trim();
-    if (!tok) continue;
-    if (tok === 'cmd' || tok === 'meta' || tok === 'command' || tok === 'win' || tok === 'super') spec.meta = true;
-    else if (tok === 'ctrl' || tok === 'control') spec.ctrl = true;
-    else if (tok === 'shift') spec.shift = true;
-    else if (tok === 'alt' || tok === 'option' || tok === 'opt') spec.alt = true;
-    else if (tok === 'mod') spec.mod = true;
-    else { spec.code = keyTokenToCode(tok); spec.key = tok; }
-  }
-  return spec;
-}
-
-/**
- * The WORKHORSE modifier - cmd on macOS, ctrl everywhere else. Every editing verb a panel offers
- * (select all, copy, cut, paste, duplicate, undo) asks this rather than taking cmd OR ctrl, so the
- * ctrl+letter chords stay the app's own: ctrl+A opens the arrangement, cmd+A selects everything in
- * it, and neither has to guess which was meant. Pointer modifiers (a fine drag, ctrl+wheel zoom)
- * are deliberately NOT this - those are conventions of their own and take either key.
- */
-function editMod(e) {
-  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-}
-
-function specMatches(spec, e) {
-  const wantMeta = spec.meta || (spec.mod && IS_MAC);
-  const wantCtrl = spec.ctrl || (spec.mod && !IS_MAC);
-  if (e.metaKey !== wantMeta) return false;
-  if (e.ctrlKey !== wantCtrl) return false;
-  if (e.altKey !== spec.alt) return false;
-  if (e.shiftKey !== spec.shift) return false;
-  if (spec.code) return e.code === spec.code;
-  return spec.key != null && e.key.toLowerCase() === spec.key;
-}
 
 const builtinHotkeys = []; // app chords - persist for the session
 let userHotkeys = []; // registered from the prebake - cleared and rebuilt on every prebake run
@@ -21356,28 +21323,29 @@ window.addEventListener(
   true, // capture, so we beat CodeMirror and can suppress the keystroke
 );
 
-// --- built-in chords (Ctrl-based: free on macOS where Cmd owns the browser shortcuts) ---
+// --- built-in chords (app+, so they sit clear of the editing verbs on every platform: ctrl on
+// macOS, where cmd owns the browser's shortcuts, and alt elsewhere, where ctrl does) ---
 
-// ctrl+p - minimize/restore the RHS panel, keeping whatever tab was open.
-addHotkey(builtinHotkeys, 'ctrl+p', () => {
+// app+p - minimize/restore the RHS panel, keeping whatever tab was open.
+addHotkey(builtinHotkeys, 'app+p', () => {
   setSidebarCollapsed(!document.documentElement.hasAttribute('data-sidebar-collapsed'));
 }, 'toggle sidebar');
 
-// ctrl+r - arm/stop MIDI recording (mirrors the ● rec button).
-addHotkey(builtinHotkeys, 'ctrl+r', () => (recState ? cancelMidiRecord(true) : startMidiRecord()), 'toggle record');
+// app+r - arm/stop MIDI recording (mirrors the ● rec button).
+addHotkey(builtinHotkeys, 'app+r', () => (recState ? cancelMidiRecord(true) : startMidiRecord()), 'toggle record');
 
 // ctrl+b - bounce the block the cursor is in to audio (mirrors the record panel's button).
-addHotkey(builtinHotkeys, 'ctrl+b', () => bounceBlockAtCursor(), 'bounce block to audio');
+addHotkey(builtinHotkeys, 'app+b', () => bounceBlockAtCursor(), 'bounce block to audio');
 
-// ctrl+m - toggle the open piano roll's computer keyboard (its ⌨ button).
-addHotkey(builtinHotkeys, 'ctrl+m', () => { if (prState) prSetKeyboard(!prKbOn); else logLine('open a piano roll first - ⌨ plays the roll on screen', true); }, 'toggle the roll\'s computer keyboard');
+// app+m - toggle the open piano roll's computer keyboard (its ⌨ button).
+addHotkey(builtinHotkeys, 'app+m', () => { if (prState) prSetKeyboard(!prKbOn); else logLine('open a piano roll first - ⌨ plays the roll on screen', true); }, 'toggle the roll\'s computer keyboard');
 
-// ctrl+q - quantize the open roll (a dialog asks which division). Ctrl, not cmd: cmd+Q is the
-// browser quitting, and no page gets to intercept that.
-addHotkey(builtinHotkeys, 'ctrl+q', () => (prState ? prQuantize() : logLine('open a piano roll first - ctrl+Q quantizes the roll on screen', true)), 'quantize the roll');
+// app+q - quantize the open roll (a dialog asks which division). Never cmd+Q: that is the
+// browser quitting, and no page gets to intercept it.
+addHotkey(builtinHotkeys, 'app+q', () => (prState ? prQuantize() : logLine(`open a piano roll first - ${chordLabel('app+q')} quantizes the roll on screen`, true)), 'quantize the roll');
 
-// ctrl+g - open/close the mixer (mirrors settings → open mixer…).
-addHotkey(builtinHotkeys, 'ctrl+g', () => toggleMixer(), 'toggle mixer');
+// app+g - open/close the mixer (mirrors settings → open mixer…).
+addHotkey(builtinHotkeys, 'app+g', () => toggleMixer(), 'toggle mixer');
 
 // ---------------------------------------------------------------------------------------------
 // Userland API + sandbox. runUserPrebake() executes the prebake source in a function scope where
@@ -21811,13 +21779,13 @@ async function openMixMode() {
         'Cmd-.': () => doStop('b'), // this pane's deck only; deck A plays on
         'Ctrl-.': () => doStop('b'),
         'Ctrl-Space': (ed) => showPoptartHint(ed),
-        // ...and ctrl+A from this pane is THIS deck's arrangement - the painter moves into deck B's
-        // half rather than taking the page (see openArrangePainter).
-        'Ctrl-A': () => (arState && arDeck === 'b' ? closeArrangeEditor() : openArrangePainter('b')),
-        'Ctrl-F': (ed) => insertFxCall(ed),
+        // ...and the arrangement chord from this pane is THIS deck's arrangement - the painter
+        // moves into deck B's half rather than taking the page (see openArrangePainter).
+        [`${CM_APP}A`]: () => (arState && arDeck === 'b' ? closeArrangeEditor() : openArrangePainter('b')),
+        [`${CM_APP}F`]: (ed) => insertFxCall(ed),
         // Grouping works on this pane's own tracks too (its edits land in ITS buffer; there is
         // just no fold gutter here to draw the result - see refoldEditor).
-        'Cmd-G': (ed) => groupSelection(ed),
+        [`${CM_MOD}G`]: (ed) => groupSelection(ed),
         'Shift-Ctrl-G': (ed) => groupSelection(ed),
       },
     });
@@ -22156,7 +22124,7 @@ function deckHeadRender(state) {
     const playBtnD = document.getElementById(`deck${U}Play`);
     playBtnD.innerHTML = on ? '&#9632; stop' : '&#9654; play';
     playBtnD.classList.toggle('is-playing', on);
-    playBtnD.title = on ? `stop deck ${U} (Cmd/Ctrl+. in this pane)` : 'Cmd/Ctrl+Enter in this pane';
+    playBtnD.title = on ? `stop deck ${U} (${chordLabel('mod+.')} in this pane)` : `${chordLabel('mod+enter')} in this pane`;
   }
 }
 
@@ -23368,24 +23336,25 @@ function djPlayActive() {
   else evaluate(true, { byHand: true });
 }
 
-// --- Ctrl+C: the CUE button on the keyboard ---
+// --- app+C: the CUE button on the keyboard ---
 //
 // Same deck the other transport hotkeys aim at: the pane clicked last, or deck A when it holds
 // a file and nothing has been claimed. Held for as long as the key is, so it is the same
 // press-and-hold gesture the button is - which means the keyUP is what must never be missed.
-// It can go missing three ways, and all three land in songCueKeyUp: the C comes up, Ctrl comes
-// up first (browsers stop reporting the C in that state on some layouts), or the window loses
-// focus mid-hold.
+// It can go missing three ways, and all three land in songCueKeyUp: the C comes up, the modifier
+// comes up first (browsers stop reporting the C in that state on some layouts), or the window
+// loses focus mid-hold.
 
 /**
- * The deck Ctrl+C would cue right now, or null - which is also what gates the hotkey.
+ * The deck app+C would cue right now, or null - which is also what gates the hotkey.
  *
- * Ctrl+C is copy everywhere else in the world, and unlike the other transport hotkeys nothing
- * upstream claims it first (CodeMirror leaves copy to the browser, so `defaultPrevented` never
- * saves us here). It stays copy whenever there is a selection to copy or the caret is in a text
- * surface - deck B can be holding CODE while deck A holds the song, and taking the copy out of
- * that editor would be indefensible. With nothing selected and no caret in text there is
- * nothing to copy, so the key is free.
+ * The guard is older than the modifier split: this chord was ctrl+C on every platform, which is
+ * copy on most of them, and unlike the other transport hotkeys nothing upstream claims it first
+ * (CodeMirror leaves copy to the browser, so `defaultPrevented` never saves us here). The app
+ * modifier means the clash is gone - copy is mod+C now, on both families' terms - but the rule it
+ * bought is worth keeping on its own: the key stays out of the way whenever there is a selection
+ * or the caret is in a text surface, because deck B can be holding CODE while deck A holds the
+ * song, and a cue that fires while someone is typing in it is a cue nobody asked for.
  */
 function songCueTarget(e) {
   if (!mixModeOn) return null;
@@ -23408,8 +23377,11 @@ function songCueKeyUp() {
   songCueKeyDeck = null;
   songPanes[deck].cueUp();
 }
+// The app modifier by its KeyboardEvent name, for the keyup that has to end the hold: ctrl on
+// macOS, alt elsewhere (see appMod).
+const APP_MOD_KEY = IS_MAC ? 'Control' : 'Alt';
 document.addEventListener('keyup', (e) => {
-  if (e.key.toLowerCase() === 'c' || e.key === 'Control') songCueKeyUp();
+  if (e.key.toLowerCase() === 'c' || e.key === APP_MOD_KEY) songCueKeyUp();
 });
 window.addEventListener('blur', songCueKeyUp);
 
@@ -24074,7 +24046,7 @@ function mixTrackRow(t, soloed, { depth = 0, group = false, carets = false } = {
   gate.className = 'mix-gate' + (fader > 0 ? ' on' : '') + (soloed ? ' solo' : '');
   gate.title = 'gate this stem in/out (fader to 1/0)'
     + '; with swap on, gating IN throws the other deck\'s same-named stem out and gating OUT brings it back - toggle to audition either'
-    + '; cmd+click solos it within its deck (blue) - cmd+click another to move the solo there, cmd+shift+click to add one, cmd+click a soloed stem to drop it. A plain click on any soloed stem ends the solo and puts the deck back as it was';
+    + `; ${MOD_LABEL}+click solos it within its deck (blue) - ${MOD_LABEL}+click another to move the solo there, ${MOD_LABEL}+shift+click to add one, ${MOD_LABEL}+click a soloed stem to drop it. A plain click on any soloed stem ends the solo and puts the deck back as it was`;
   gate.addEventListener('click', async (e) => {
     try {
       // cmd (ctrl elsewhere) + click: solo within the deck rather than toggle this one gate.
@@ -24842,7 +24814,7 @@ function orgRenderItems() {
     if (orgItemSel.has(i)) li.classList.add('selected');
     li.title = orgForDeck
       ? `click to select · Enter or double-click loads onto deck ${orgForDeck.toUpperCase()} · ⌫ removes it from the playlist`
-      : 'click to select (shift/⌘-click for more) · ⌫ removes it from the playlist';
+      : `click to select (shift/${chordLabel('mod')}-click for more) · ⌫ removes it from the playlist`;
     const n = document.createElement('i');
     n.className = 'org-n';
     n.textContent = i + 1;
@@ -24995,7 +24967,7 @@ function orgRenderAll() {
     if (orgForDeck) li.classList.add('org-pick');
     li.title = orgForDeck
       ? `click to select · Enter or double-click loads onto deck ${orgForDeck.toUpperCase()} · ← adds to the open playlist`
-      : 'click to select (shift/⌘-click for more) · ← or double-click adds to the open playlist';
+      : `click to select (shift/${chordLabel('mod')}-click for more) · ← or double-click adds to the open playlist`;
     const name = document.createElement('span');
     name.textContent = s.title || s.name;
     li.appendChild(name);
@@ -26410,7 +26382,7 @@ function openEditorMenu(ed, e) {
         ed.replaceSelection(await navigator.clipboard.readText());
         ed.focus();
       } catch {
-        logLine("the browser wouldn't hand over the clipboard - use Cmd/Ctrl+V", true);
+        logLine(`the browser wouldn't hand over the clipboard - use ${chordLabel('mod+v')}`, true);
       }
     }]);
   }
@@ -26429,7 +26401,7 @@ function editorTrackAt(ed) {
 }
 
 function writeClipboard(text) {
-  navigator.clipboard?.writeText(text).catch(() => logLine("couldn't reach the clipboard - use Cmd/Ctrl+C", true));
+  navigator.clipboard?.writeText(text).catch(() => logLine(`couldn't reach the clipboard - use ${chordLabel('mod+c')}`, true));
 }
 
 // ------------------------------------------------------------------------- duplicating a track
@@ -26688,13 +26660,11 @@ snippetBrowseBackdrop.addEventListener('keydown', (e) => {
   e.stopPropagation();
 });
 
-// ctrl+J - the same two entry points from the keyboard, for when the mouse is somewhere else: with
-// a selection it keeps one, with none it opens the browser.
-addHotkey(builtinHotkeys, 'ctrl+j', () => {
-  // Off macOS ctrl IS the edit modifier, so this chord and the roll's clean-up are one keystroke.
-  // The grid having focus decides between them - the same scope every other roll verb is bound in,
-  // and the reason the canvas handler never sees this key here (the chord runs in capture).
-  if (prState && document.activeElement === prCanvas) { prCleanUp(); return; }
+// app+J - the same two entry points from the keyboard, for when the mouse is somewhere else: with
+// a selection it keeps one, with none it opens the browser. The roll's clean-up is mod+J and the
+// two are separate keystrokes on every platform now that the families are (they were one chord off
+// macOS, where this used to be ctrl+J and so did the edit modifier).
+addHotkey(builtinHotkeys, 'app+j', () => {
   const ed = activeCM();
   if (ed.somethingSelected()) openSnippetSave(ed);
   else openSnippetBrowser(ed);
@@ -27004,7 +26974,7 @@ function openArrangePainter(deck = mixModeOn ? djActiveDeck : 'a') {
   if (!def) {
     const labels = arTrackLabels();
     if (!labels.length) {
-      logLine('nothing to arrange yet - label a block (kick: s("bd*4")) and press ctrl+A again', 'warn');
+      logLine(`nothing to arrange yet - label a block (kick: s("bd*4")) and press ${chordLabel('app+a')} again`, 'warn');
       return;
     }
     const groups = arGroupLabels();
@@ -29330,7 +29300,7 @@ function arClipMenuItems(targets) {
   const labels = [...new Set(targets.map((c) => c.label))];
   const one = labels.length === 1 ? labels[0] : null;
   if (one) {
-    items.push([`edit ${one}`, () => arEditBlock(one), 'the code, on this block - double-clicking the clip is the same (ctrl+A comes back)']);
+    items.push([`edit ${one}`, () => arEditBlock(one), `the code, on this block - double-clicking the clip is the same (${chordLabel('app+a')} comes back)`]);
     items.push(['rename…', () => arRenameClip(targets[0]), 'cmd-R — the block, its clips and its place in the tree']);
   }
   // Color is about the CLIPS you right-clicked and no others. A whole track at once is the row's
@@ -30225,7 +30195,7 @@ function arFollowHandRenames() {
     if (!edits.length) continue;
     apply(edits);
     if (arState) { arApplyRename(map); arRefreshRows(); drawArrange(); }
-    logLine(`${old.label} is ${to} now - its clips followed (cmd+Z undoes)`);
+    logLine(`${old.label} is ${to} now - its clips followed (${chordLabel('mod+z')} undoes)`);
     now = snapshot();
     arLastBlocks[arPassDeck] = now;
   }
@@ -31772,10 +31742,10 @@ function initArrangeCanvas() {
       return;
     }
     if (mod && e.key.toLowerCase() === 'z') { arHistoryStep(e.shiftKey ? 1 : -1); e.preventDefault(); return; }
-    // ctrl+A shuts the painter (the key that opened it), cmd+A takes every clip in it. Guarded by
-    // editMod so this only claims ctrl where ctrl isn't the editing modifier: off macOS ctrl+A IS
-    // select-all, and that has to win inside a panel - escape closes it there.
-    if (e.ctrlKey && !e.metaKey && !editMod(e) && e.key.toLowerCase() === 'a') { closeArrangeEditor(); e.preventDefault(); return; }
+    // app+A shuts the painter (the key that opened it), mod+A takes every clip in it. Two chords
+    // on every platform now, so neither has to give way: the guard this used to need - off macOS
+    // ctrl+A was select-all, which had to win inside a panel - is what appMod does for it.
+    if (appMod(e) && !e.shiftKey && e.key.toLowerCase() === 'a') { closeArrangeEditor(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { arDuplicate(); e.preventDefault(); return; }
     if (!mod && e.key.toLowerCase() === 'b') { arToggleTool(); e.preventDefault(); return; }

@@ -233,7 +233,7 @@
           <h3>The editor &amp; the loop</h3>
           <p>
             The whole workflow is one gesture: <strong>type, then evaluate</strong>.
-            <code>Cmd/Ctrl + Enter</code> plays what's in the editor; <code>Cmd/Ctrl + .</code> stops.
+            <code>{mod+enter}</code> plays what's in the editor; <code>{mod+.}</code> stops.
             Re-evaluating swaps the running sound out from under itself without a gap — that's the
             livecoding part. (<strong>update</strong> re-evaluates without touching play/stop.)
           </p>
@@ -251,7 +251,7 @@
           <ul>
             <li><code>_bass:</code> (or <code>bass_:</code>) <strong>mutes</strong> a track without deleting it.</li>
             <li><code>Sdrums:</code> <strong>solos</strong> it — if anything is soloed, only soloed tracks play. Mute still wins.</li>
-            <li>Select a few tracks and press <strong>⌘G</strong> to put them in a <strong>group</strong> — the editor wraps them in <code>name: group({ … })</code>, the mixdown they all send into (see <a href="#s4">arranging</a>). The braces are the membership: no side table, nothing hidden. Groups nest, fold away in the gutter, and muting or soloing one takes everything under it along.</li>
+            <li>Select a few tracks and press <strong>{mod+g}</strong> to put them in a <strong>group</strong> — the editor wraps them in <code>name: group({ … })</code>, the mixdown they all send into (see <a href="#s4">arranging</a>). The braces are the membership: no side table, nothing hidden. Groups nest, fold away in the gutter, and muting or soloing one takes everything under it along.</li>
           </ul>
           <p>
             <code>$:</code> is a track you didn't feel like naming — it plays like any other and gets
@@ -428,17 +428,17 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <table>
             <tr><th>At the grid</th><th></th></tr>
             <tr><td>draw / erase</td><td>drag with the pencil · double-click a note</td></tr>
-            <tr><td>select</td><td><strong>B</strong> for the arrow tool; click, shift-click, marquee, <strong>cmd-A</strong></td></tr>
-            <tr><td>move / resize / copy</td><td>drag · drag the right edge (<strong>cmd</strong> for a free length, off the grid) · <strong>option</strong>-drag</td></tr>
-            <tr><td>nudge</td><td>arrow keys; <strong>shift</strong>+↑↓ an octave, <strong>shift</strong>+←→ lengthens/shortens a cell; <strong>cmd</strong>+←→ nudges the onset a pixel's worth (zoom in for finer), <strong>cmd-shift</strong>+←→ the length</td></tr>
-            <tr><td>velocity</td><td><strong>cmd</strong>-drag up/down</td></tr>
+            <tr><td>select</td><td><strong>B</strong> for the arrow tool; click, shift-click, marquee, <strong>{mod+a}</strong></td></tr>
+            <tr><td>move / resize / copy</td><td>drag · drag the right edge (<strong>{mod}</strong> for a free length, off the grid) · <strong>option</strong>-drag</td></tr>
+            <tr><td>nudge</td><td>arrow keys; <strong>shift</strong>+↑↓ an octave, <strong>shift</strong>+←→ lengthens/shortens a cell; <strong>{mod}</strong>+←→ nudges the onset a pixel's worth (zoom in for finer), <strong>{mod+shift}</strong>+←→ the length</td></tr>
+            <tr><td>velocity</td><td><strong>{mod}</strong>-drag up/down</td></tr>
             <tr><td>overlaps</td><td>a note dropped on another at its pitch cuts it off, or buries it — undone by moving the top note away, for as long as it stays selected; deselect to make the cut final</td></tr>
             <tr><td>mute a note</td><td><strong>0</strong> — it grays out and stays (a <code>!</code> in the code); <strong>0</strong> again un-mutes</td></tr>
-            <tr><td>clipboard</td><td><strong>cmd-C / X / V / D</strong> — into another roll too</td></tr>
-            <tr><td>quantize</td><td><strong>ctrl+Q</strong> — pick a division; onsets snap, nudges clear, buried notes go; tick <em>lengths too</em> to land the ends on it as well</td></tr>
-            <tr><td>clean up</td><td><strong>cmd-J</strong> — delete every note the loop window doesn't play</td></tr>
-            <tr><td>undo</td><td><strong>cmd-Z</strong> / <strong>cmd-shift-Z</strong> while the grid has focus</td></tr>
-            <tr><td>zoom · close</td><td><strong>cmd −/+</strong> · <strong>Esc</strong>, <strong>✕</strong>, or click outside</td></tr>
+            <tr><td>clipboard</td><td><strong>{mod+c} / {mod+x} / {mod+v} / {mod+d}</strong> — into another roll too</td></tr>
+            <tr><td>quantize</td><td><strong>{app+q}</strong> — pick a division; onsets snap, nudges clear, buried notes go; tick <em>lengths too</em> to land the ends on it as well</td></tr>
+            <tr><td>clean up</td><td><strong>{mod+j}</strong> — delete every note the loop window doesn't play</td></tr>
+            <tr><td>undo</td><td><strong>{mod+z}</strong> / <strong>{mod+shift+z}</strong> while the grid has focus</td></tr>
+            <tr><td>zoom · close</td><td><strong>{mod}−/+</strong> · <strong>Esc</strong>, <strong>✕</strong>, or click outside</td></tr>
           </table>
           <h4>The value lane</h4>
           <p>
@@ -452,7 +452,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <strong>⧉</strong> repeats the loop after itself. <strong>÷2</strong> / <strong>×2</strong>
             halve or double the rhythm — of the selection, or the whole roll.
-            <strong>clean up</strong> (<strong>cmd-J</strong>) throws away the notes the roll is
+            <strong>clean up</strong> (<strong>{mod+j}</strong>) throws away the notes the roll is
             carrying but not playing — the ones that start outside the loop window. Handy once a part
             is finished; while you're still editing, they come back on their own if you drag the loop
             end out. Changing
@@ -516,7 +516,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <h4>Arranging: painting parts into a song</h4>
           <p>
             Every labeled block loops forever. To turn loops into a song, press
-            <strong>ctrl+A</strong>: the arrangement takes the editor's place — one row per track, your labeled
+            <strong>{app+a}</strong>: the arrangement takes the editor's place — one row per track, your labeled
             blocks and your <code>$:</code> ones in the order you wrote them, bars along the top.
             Setup at column 0 (<code>setbpm(140)</code>, a shared <code>const</code>) is not a track
             and gets no row. What you paint is kept in the buffer as a folded
@@ -525,11 +525,11 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             nothing sounds different until you carve: click-drag on a row to paint a clip, and that
             track plays <em>only</em> inside its clips. A row you empty is silent. A track you type
             later joins the arrangement filled, the same way, so arranging never quietly takes a
-            part away from you. ctrl+A again takes you back — onto the
+            part away from you. {app+a} again takes you back — onto the
             block of whichever clip you had selected.
           </p>
           <p>
-            <strong>Groups.</strong> Select a few tracks and press <strong>⌘G</strong> (or
+            <strong>Groups.</strong> Select a few tracks and press <strong>{mod+g}</strong> (or
             right-click → <strong>group these tracks…</strong>), give the group a name, and they
             mix as one: the editor wraps them in <code>name: group({ … })</code>. The braces
             <em>are</em> the membership — where a track is written is what it belongs to, so
@@ -584,15 +584,15 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             gate the whole submix — a one-row way to bring the entire kit in and out. Only a row
             whose block has gone takes no paint, and dims with the pencil in hand. To add another
             track to a group, duplicate one of its blocks inside the braces, or paint the new track
-            and ⌘G it in after.
+            and {mod+g} it in after.
           </p>
           <p>
             <strong>A clip is a title and a body.</strong> The title along its top is the clip as a
             thing: click to select it, drag to move it (onto another track's row too — it becomes
-            that track's), option-drag to duplicate. <strong>⌘-click</strong> adds one to the
+            that track's), option-drag to duplicate. <strong>{mod}-click</strong> adds one to the
             selection (or takes it back out) and <strong>shift-click</strong> reaches through from
             the last clip you clicked to this one — every clip in the rectangle of rows and bars
-            between the two, the same shape a marquee marks (shift- or ⌘-drag over empty song for
+            between the two, the same shape a marquee marks (shift- or {mod}-drag over empty song for
             one of those, which starts from what you already hold). With either key down the whole
             clip is the clip, body included. The body below is the <em>time</em>: the bars
             run on through it, clicking puts the <strong>insert marker</strong> there, and dragging
@@ -600,14 +600,14 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             past its end or halfway through the next. That stretch is a selection too: press any
             clip inside it and drag, and it moves — whole clips whole, a clip it cuts through cut at
             its edges — and option-drag copies it, exactly as a hand-picked set of clips would.
-            With playback stopped, <strong>⌘⏎</strong>
+            With playback stopped, <strong>{mod+enter}</strong>
             starts from the marker rather than from bar 0.
           </p>
           <p>
-            From those two, the edits an arrangement is mostly made of: <strong>⌘E</strong> splits at
+            From those two, the edits an arrangement is mostly made of: <strong>{mod+e}</strong> splits at
             the marker (or at both edges of a marked span, on every track it crosses), and
-            <strong>⌘J</strong> makes one clip of what you have selected or marked. Drag an edge to
-            resize, ⌘D duplicates after, ⌘C / X / V move a stretch of song, ⌘Z undoes.
+            <strong>{mod+j}</strong> makes one clip of what you have selected or marked. Drag an edge to
+            resize, {mod+d} duplicates after, {mod+c} / {mod+x} / {mod+v} move a stretch of song, {mod+z} undoes.
             <strong>0</strong> mutes what you have selected or marked — the clips stay where they
             are, drawn washed out and dashed, and stop sounding until you press it again. The
             song ends at the right edge of its last clip (the dashed line), and playback stops
@@ -624,8 +624,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <strong>Editing what a clip plays.</strong> A clip is a block, and double-clicking it
             flips you to the code with the cursor on that block — where the part gets its sound,
-            with the editor's own completion and handles. ctrl+A comes straight back. Right-click →
-            <strong>rename…</strong> (or <strong>⌘R</strong> with a clip selected) renames the
+            with the editor's own completion and handles. {app+a} comes straight back. Right-click →
+            <strong>rename…</strong> (or <strong>{mod+r}</strong> with a clip selected) renames the
             block from the clip, its clips along with it (its group needs nothing — membership is
             where the block sits). Renaming
             a track by hand in the code is caught at the next evaluation and follows the same way.
@@ -638,7 +638,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             above the bar ruler (with either tool) to mark a region and name it; each time playback
             enters it, it loops there. Shift-drag the strip to mark a time selection over every row
             instead. Press
-            <strong>ctrl+L</strong> anywhere in the editor to release the loop you are in — playback
+            <strong>{mod+l}</strong> anywhere in the editor to release the loop you are in — playback
             runs on to the next region and loops that instead, or to the end of the song, where
             playback stops. Stopping, or starting from the marker, arms every region again. A new
             arrangement comes with one region over its whole length, so it loops until you remove
@@ -656,8 +656,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           </p>
           <p>
             Several pinned at once is the point: a filter curve reads against a gain curve as much
-            as against the sections, and a span copied out of one lane (⌘C) pastes straight into
-            another (⌘V). Past three, the strips scroll (wheel over them, or pick a lane and it
+            as against the sections, and a span copied out of one lane ({mod+c}) pastes straight into
+            another ({mod+v}). Past three, the strips scroll (wheel over them, or pick a lane and it
             comes into view) and the track rows give up height first, so the panel stays on screen
             however many you pin. Which lanes are pinned travels with the song, not with the
             browser.
@@ -799,7 +799,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
   .bus(<span class="s">"space"</span>, 0.3)
 
 verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</span>)</code></pre>
-          <h4>The mixer: ctrl+g</h4>
+          <h4>The mixer: {app+g}</h4>
           <p>
             A strip per track — meter, fader, pan, width, mute/solo, a <strong>▽ mono</strong> button
             for bass mono — plus a spectrum analyzer and a stereo image where anything spilling into
@@ -856,9 +856,9 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             double-click a marker to take it away — right-click does it in one),
             <code>←</code>/<code>→</code> to walk the slices and hear them.
             Markers snap to transients (and to zero crossings) unless you hold <kbd>alt</kbd>;
-            <kbd>⌘</kbd> while dragging is the fine adjustment, and turns the magnets off with it. The
-            wheel pans along the sample, <kbd>⌘</kbd>-wheel and <kbd>⌘</kbd><kbd>+</kbd>/<kbd>−</kbd>
-            zoom, <kbd>⌘</kbd><kbd>0</kbd> fits the whole file. The slices the pattern plays light up
+            <kbd data-chord="mod"></kbd> while dragging is the fine adjustment, and turns the magnets off with it. The
+            wheel pans along the sample, <kbd data-chord="mod"></kbd>-wheel and <kbd data-chord="mod"></kbd><kbd>+</kbd>/<kbd>−</kbd>
+            zoom, <kbd data-chord="mod"></kbd><kbd>0</kbd> fits the whole file. The slices the pattern plays light up
             as it runs. <strong>fit</strong> says how many cycles this sample is repitched to last —
             auto picks the nearest power of two, and this is the only place that tells you which —
             while <code>÷2</code>/<code>×2</code> try the numbers either side. It is kept
@@ -949,9 +949,9 @@ loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8
             and pressing ← adds every audio file under it, subfolders and all.
           </p>
 
-          <h4>Bounce a track: ctrl+b</h4>
+          <h4>Bounce a track: {app+b}</h4>
           <p>
-            Cursor in a block, <strong>ctrl+b</strong>: that track's audio is recorded from the next
+            Cursor in a block, <strong>{app+b}</strong>: that track's audio is recorded from the next
             phrase boundary for the chosen cycles, filed under <code>~/.poptart/recordings/</code>, and
             the bounce is written in below the (now muted) source under the same label:
           </p>
@@ -1160,7 +1160,7 @@ pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Seru
             A pinned row's code is editable on the right (<code>Tab</code> gets you there from the
             keyboard) — save or cancel in the footer — and clicking a row's <em>name</em> renames it
             in place.
-            <code>ctrl+J</code> is the same two gestures from the keyboard.
+            <code>{app+j}</code> is the same two gestures from the keyboard.
           </p>
           <p>
             The body lands where you clicked and the definitions join the block at the bottom, as
@@ -1190,9 +1190,11 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             you're typing in deck B reads and writes deck B's code, not deck A's.
           </p>
           <p>
-            Combos are <code>+</code>-joined — <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>/<code>mod</code>
-            plus one key. <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>, <code>prompt</code>
-            and <code>log</code> are on hand. <code>ctrl+p</code>/<code>r</code>/<code>m</code>/<code>g</code>/<code>q</code>/<code>j</code>
+            Combos are <code>+</code>-joined — <code>cmd</code>/<code>ctrl</code>/<code>alt</code>/<code>shift</code>
+            plus one key, and two that follow the platform: <code>mod</code> is the editing modifier
+            (cmd on a Mac, ctrl elsewhere) and <code>app</code> is poptart's own (ctrl on a Mac, alt
+            elsewhere) — the split that keeps the two families off each other's keys. <code>bjorklund</code>, <code>rotate</code>, <code>clamp</code>, <code>prompt</code>
+            and <code>log</code> are on hand. <code>app+p</code>/<code>r</code>/<code>m</code>/<code>g</code>/<code>q</code>/<code>j</code>
             are taken.
           </p>
         </section>
@@ -1206,7 +1208,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
-            <tr><td><strong>⌘G</strong> · <code>group({…})</code> · <strong>ctrl+A</strong></td><td>wrap the selected tracks in a group (the braces are the membership; groups nest, and <code>main: group()</code> is where mastering goes) · the mixdown the tracks in its braces send into · the arrangement page: a row per track, clips say when each plays, group rows fold their members away</td></tr>
+            <tr><td><strong>{mod+g}</strong> · <code>group({…})</code> · <strong>{app+a}</strong></td><td>wrap the selected tracks in a group (the braces are the membership; groups nest, and <code>main: group()</code> is where mastering goes) · the mixdown the tracks in its braces send into · the arrangement page: a row per track, clips say when each plays, group rows fold their members away</td></tr>
             <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
             <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
             <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>
@@ -1246,9 +1248,9 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>$:</code> / bare lines</td><td>setup</td></tr>
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
-            <tr><td><code>Cmd/Ctrl+Enter</code> · <code>Cmd/Ctrl+.</code> · <code>ctrl+b</code> · <code>ctrl+g</code></td><td>eval · stop · bounce · mixer</td></tr>
-            <tr><td><code>ctrl+A</code> · <code>ctrl+L</code> · <code>ctrl+D</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode (the lit header button)</td></tr>
-            <tr><td>right-click · <code>ctrl+J</code></td><td>save the selection as a snippet · insert one</td></tr>
+            <tr><td><code>{mod+enter}</code> · <code>{mod+.}</code> · <code>{app+b}</code> · <code>{app+g}</code></td><td>eval · stop · bounce · mixer</td></tr>
+            <tr><td><code>{app+a}</code> · <code>{mod+l}</code> · <code>{app+d}</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode (the lit header button)</td></tr>
+            <tr><td>right-click · <code>{app+j}</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>
 
@@ -1260,5 +1262,18 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
         </footer>
       </main>
     </div>
+    <!-- Every chord above is written as {mod+s} / {app+a} rather than a spelling of it, and this
+         fills them in for the platform reading the page - the same file the app binds them with,
+         so the guide cannot promise a key that isn't bound. See chords.js. -->
+    <script src="chords.js"></script>
+    <script>
+      (function () {
+        var walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        var hits = [], n;
+        while ((n = walk.nextNode())) if (n.nodeValue.indexOf('{') >= 0) hits.push(n);
+        for (var i = 0; i < hits.length; i++) hits[i].nodeValue = expandChords(hits[i].nodeValue);
+        paintChordLabels();
+      })();
+    </script>
   </body>
 </html>

@@ -46,11 +46,11 @@
         <span class="logo"></span>
         <h1>poptart</h1>
         <span id="engineStatus" class="status">checking engine…</span>
-        <!-- DJ mode is a MODE, so the header carries it as one lit on/off button (ctrl+D). It used
+        <!-- DJ mode is a MODE, so the header carries it as one lit on/off button (app+D). It used
              to be the third segment of a code | arrange | dj switch, which read as a third place to
-             be; the switch itself is gone too - ctrl+A flips a pane between code and arrangement,
+             be; the switch itself is gone too - app+A flips a pane between code and arrangement,
              and a chrome control saying the same thing was one control too many. -->
-        <button id="viewDjBtn" title="DJ mode — two decks and a crossfader (ctrl+D)">dj mode</button>
+        <button id="viewDjBtn" data-chord-title="DJ mode — two decks and a crossfader ({app+d})">dj mode</button>
         <div class="spacer"></div>
         <div id="phraseViz" title="position in the 4-cycle phrase - one circle per cycle"></div>
         <div class="rec-wrap">
@@ -79,7 +79,7 @@
         <select id="themeSelect" title="color theme"></select>
         <button id="themeEditBtn" title="edit theme colors"><span class="ico">🎨</span></button>
         <a id="docsLink" class="hbtn" href="/docs.html" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs <span class="ico">↗</span></a>
-        <button id="playBtn" class="primary" title="Cmd/Ctrl + Enter"><span class="ico">▶</span> play</button>
+        <button id="playBtn" class="primary" data-chord-title="{mod+enter}"><span class="ico">▶</span> play</button>
         <button id="updateBtn" title="evaluate without changing play state"><span class="ico">↻</span> update</button>
       </header>
 
@@ -100,7 +100,7 @@
         <div id="editorPane">
           <!-- The pane's own head: deck chrome, shown only in DJ mode (body.mix-on), where the
                main editor IS deck A: load a song, play it, or leave DJ mode keeping this pane.
-               ctrl+A flips the pane between code and arrangement - there is no switch for it. -->
+               app+A flips the pane between code and arrangement - there is no switch for it. -->
           <div id="deckAHead" class="deck-head">
             <span class="deck-b-title deck-only">deck A</span>
             <!-- The picker is the organize window (→A / →B on its rows); the select behind it
@@ -109,7 +109,7 @@
             <button id="deckASong" class="small deck-song deck-only" title="the song on this deck - click to pick another (opens organize; loading clears this deck's current tracks)">pick a song…</button>
             <button id="deckAPrev" class="small deck-only" title="load the previous song in the active playlist onto this deck">&#9198;</button>
             <button id="deckANext" class="small deck-only" title="load the next song in the active playlist onto this deck">&#9197;</button>
-            <button id="deckAPlay" class="small deck-only" title="Cmd/Ctrl+Enter">&#9654; play</button>
+            <button id="deckAPlay" class="small deck-only" data-chord-title="{mod+enter}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <button id="deckAKeep" class="small deck-only" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
           </div>
@@ -134,7 +134,7 @@
             <canvas id="songDetailA" class="song-detail"></canvas>
             <canvas id="songOverviewA" class="song-overview"></canvas>
             <div class="song-ctl-row">
-              <button id="songCueA" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
+              <button id="songCueA" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnA" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
               <button id="songNudgeDnA" class="small" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
@@ -150,7 +150,7 @@
           </div>
         </div>
 
-        <!-- Deck B - the incoming song of a mix (mix mode, ctrl+D). Evaluated as
+        <!-- Deck B - the incoming song of a mix (mix mode, app+D). Evaluated as
              deck "b" server-side: same clock (it joins in phase), namespaced labels (its kick
              and yours are separate tracks), silent on arrival (the crossfader owns its gain). -->
         <div id="deckBPane" class="hidden">
@@ -159,10 +159,10 @@
             <select id="deckBFile" hidden></select>
             <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>
             <button id="deckBPrev" class="small" title="queue the previous song in the active playlist">&#9198;</button>
-            <button id="deckBNext" class="small" title="queue the next song in the active playlist (⇧⌘/Ctrl+Shift+.)">⏭</button>
-            <button id="deckBPlay" class="small" title="Cmd/Ctrl+Enter in this pane">▶ play</button>
+            <button id="deckBNext" class="small" data-chord-title="queue the next song in the active playlist ({mod+shift+.})">⏭</button>
+            <button id="deckBPlay" class="small" data-chord-title="{mod+enter} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
-            <button id="deckBKeep" class="small" title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn (Shift+Cmd/Ctrl+Enter)">&#9167; keep</button>
+            <button id="deckBKeep" class="small" data-chord-title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn ({mod+shift+enter})">&#9167; keep</button>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
           <!-- Songs phase 3: when deck B holds a disk FILE this replaces the editor - a zoomed
@@ -177,7 +177,7 @@
             <canvas id="songDetailB" class="song-detail"></canvas>
             <canvas id="songOverviewB" class="song-overview"></canvas>
             <div class="song-ctl-row">
-              <button id="songCueB" class="small song-cue" title="cue - hold to preview from the cue point (Ctrl+C), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
+              <button id="songCueB" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnB" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
               <button id="songNudgeDnB" class="small" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
@@ -279,8 +279,8 @@
               </h2>
               <input id="fileImportInput" type="file" accept=".js,text/javascript" hidden />
               <div class="file-save-row">
-                <button id="fileSaveBtn" title="name this pattern and save it (⌘/Ctrl+S)">save</button>
-                <button id="fileSaveAsBtn" class="small" title="save the buffer under a new name (⇧⌘/Ctrl+Shift+S)">save as…</button>
+                <button id="fileSaveBtn" data-chord-title="name this pattern and save it ({mod+s})">save</button>
+                <button id="fileSaveAsBtn" class="small" data-chord-title="save the buffer under a new name ({mod+shift+s})">save as…</button>
                 <span class="spacer"></span>
                 <button id="fileExportBtn" class="small" title="download the buffer as a file">export</button>
               </div>
@@ -321,7 +321,7 @@
               <h2>mixer</h2>
               <div class="settings-actions">
                 <button id="mixerOpenBtn" class="small"
-                  title="level meters, spectrum and stereo field for every playing track (ctrl+g)">open mixer…</button>
+                  data-chord-title="level meters, spectrum and stereo field for every playing track ({app+g})">open mixer…</button>
               </div>
             </section>
             <section id="editorSection">
@@ -557,7 +557,7 @@
         </label>
       </div>
       <div class="record-actions">
-        <button id="recordGo" class="small" title="Bounce this block (ctrl+b)">● bounce</button>
+        <button id="recordGo" class="small" data-chord-title="Bounce this block ({app+b})">● bounce</button>
         <span class="spacer"></span>
         <button id="recordAgain" class="small hidden" title="Record another take over this one">↺ again</button>
       </div>
@@ -586,7 +586,7 @@
           <button id="pianorollScaleFold" class="small pr-text-btn" title="show only the scale set by setscale()">scale</button>
           <button id="pianorollFold" class="small pr-text-btn" title="show only the rows that have notes">fold</button>
           <button id="pianorollWave" class="small pr-text-btn" title="draw each note's audio inside it">wave</button>
-          <button id="pianorollKeys" class="small" title="computer keyboard: play this roll's track from the typing keyboard (ctrl+m)">⌨</button>
+          <button id="pianorollKeys" class="small" data-chord-title="computer keyboard: play this roll's track from the typing keyboard ({app+m})">⌨</button>
           <button id="pianorollCapture" class="small pr-text-btn" title="capture what was just played on this roll's track into the roll — as if record had been on">capture</button>
           <button id="pianorollPreview" class="small" title="preview notes as you draw">🎧</button>
           <button id="pianorollToMini" class="small" title="convert to mini-notation">→♪</button>
@@ -606,7 +606,7 @@
             <button id="pianorollDupLoop" class="small" title="repeat the loop after itself">⧉</button>
           </div>
           <div class="pr-side-row">
-            <button id="pianorollCleanUp" class="small pr-text-btn" title="delete every note the loop window doesn't play (cmd+J)">clean up</button>
+            <button id="pianorollCleanUp" class="small pr-text-btn" data-chord-title="delete every note the loop window doesn't play ({mod+j})">clean up</button>
           </div>
           <div class="pr-side-row">
             <button id="pianorollBend" class="small pr-text-btn" title="draw this roll's pitch bend over the grid — semitones, one row each, flat at zero until you move it">bend</button>
@@ -780,7 +780,7 @@
           <!-- insert while browsing; cancel/save while an edit is open (.editing on the backdrop) -->
           <button id="snippetBrowseInsert" class="small primary snippet-when-browsing">insert</button>
           <button id="snippetBrowseCancel" class="small snippet-when-editing">cancel</button>
-          <button id="snippetBrowseSave" class="small primary snippet-when-editing" title="Cmd/Ctrl+S">save</button>
+          <button id="snippetBrowseSave" class="small primary snippet-when-editing" data-chord-title="{mod+s}">save</button>
         </div>
       </div>
     </div>
@@ -808,7 +808,7 @@
           </div>
           <div class="pack-col pack-col-entries">
             <div class="pack-col-head">in the pack<span id="packEntriesHead" class="pack-col-sub"></span><span class="spacer"></span><button id="packSwapSel" class="small" title="swap the selection for the next sound like it on the map (], or [ for the one before)">⇄</button><button id="packReshuffle" class="small" title="every file in the pack hops to a sound like it - same roles, different flavor">reshuffle</button><button id="packRemoveSel" class="small" title="take the selection out of the pack (→ or delete)">remove →</button></div>
-            <div id="packEntries" class="pack-entries" tabindex="0" title="the pack's files, in index order · drop audio files here from the desktop to add them, or paste files copied in Finder or a sample app (⌘V, or right-click)"></div>
+            <div id="packEntries" class="pack-entries" tabindex="0" data-chord-title="the pack's files, in index order · drop audio files here from the desktop to add them, or paste files copied in Finder or a sample app ({mod+v}, or right-click)"></div>
           </div>
           <!-- The third column is the two ways of picking: the disk as folders, or the sample map -
                every indexed sample placed by how it sounds (see sample-map.js). Same column, same
@@ -833,7 +833,7 @@
             <div id="packMap" class="pack-map hidden">
               <div id="packMapLegend" class="pack-map-legend"></div>
               <canvas id="packMapCanvas" class="pack-map-canvas" tabindex="0"
-                title="click a sound to hear and select it · ← (or double-click) adds it · → (or delete) takes it out · [ ] walk the sounds like it · drag or wheel to pan, ⌘+wheel or ⌘± to zoom, ⌘0 to fit"></canvas>
+                data-chord-title="click a sound to hear and select it · ← (or double-click) adds it · → (or delete) takes it out · [ ] walk the sounds like it · drag or wheel to pan, {mod}+wheel or {mod}± to zoom, {mod}0 to fit"></canvas>
               <div id="packMapEmpty" class="pack-map-empty hidden"></div>
               <div id="packMapBuild" class="pack-map-build hidden"><span id="packMapBuildText"></span><div class="pack-play-bar"><div id="packMapBuildHead" class="pack-play-head"></div></div></div>
             </div>
@@ -876,7 +876,7 @@
         </div>
         <div class="slice-body">
           <canvas id="sliceCanvas" class="slice-canvas" tabindex="0"
-            title="drag a tab to move it (⌘ for fine, ⌥ to ignore the magnets) · double-click to add a marker, or on one to remove it · right-click to remove · ←/→ to walk the slices · [ ] for the other files this chain plays"></canvas>
+            data-chord-title="drag a tab to move it ({mod} for fine, {alt} to ignore the magnets) · double-click to add a marker, or on one to remove it · right-click to remove · ←/→ to walk the slices · [ ] for the other files this chain plays"></canvas>
         </div>
         <div class="dir-picker-foot slice-foot">
           <button id="slicePlayBtn" class="small slice-play" title="play the selected slice (space)">▶</button>
@@ -932,7 +932,7 @@
         </div>
         <div class="slice-body">
           <canvas id="envCanvas" class="slice-canvas" tabindex="0"
-            title="drag a point to set the envelope, a tab to set begin or end (⌘ for fine control) · double-click a point or tab to reset it · wheel scrolls, ⌘-wheel zooms, 0 shows the whole file · space plays the note"></canvas>
+            data-chord-title="drag a point to set the envelope, a tab to set begin or end ({mod} for fine control) · double-click a point or tab to reset it · wheel scrolls, {mod}-wheel zooms, 0 shows the whole file · space plays the note"></canvas>
         </div>
         <div class="dir-picker-foot slice-foot">
           <button id="envPlayBtn" class="small slice-play" title="play one note from begin to the end of its release, through the track's chain (space)">▶</button>
@@ -960,7 +960,7 @@
       </div>
     </div>
 
-    <!-- The mixer (ctrl+g). Its own backdrop class, NOT dir-picker-backdrop: that class makes the
+    <!-- The mixer (app+G). Its own backdrop class, NOT dir-picker-backdrop: that class makes the
          global hotkey handler stand down, and the transport keys (cmd+enter, cmd+.) must keep
          working while mixing. -->
     <div id="mixerBackdrop" class="mixer-backdrop hidden">
@@ -1001,6 +1001,9 @@
     <script src="/vendor/codemirror/addon/comment/comment.js"></script>
     <script src="/vendor/codemirror/addon/search/searchcursor.js"></script>
     <script src="/vendor/codemirror/keymap/sublime.js"></script>
+    <!-- The keyboard model (the two modifier families, and how every chord is spelled on this
+         platform) - before client.js, which is written in its terms, and shared with docs.html. -->
+    <script src="chords.js"></script>
     <script src="api-docs.js"></script>
     <script src="pattern-meta.js"></script>
     <script src="snippet-code.js"></script>

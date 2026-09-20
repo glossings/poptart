@@ -98,6 +98,8 @@ function panel({ code = '', arState = null, collapsed = [] } = {}) {
     arApplyRename: () => {},
     arSuppressClose: false,
     logLine: (line) => logged.push(line),
+    // chords.js's, as the browser has it: the log lines name a key, and this harness is macOS.
+    chordLabel: (combo) => combo,
     arRefold: () => {}, // refoldAll, but only for the main buffer - deck B has no folds
     arSizeCanvas: () => {},
     groupsMod,

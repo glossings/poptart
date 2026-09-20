@@ -15,7 +15,7 @@
 // binaries. See PACKAGING.md for what is still outstanding before this ships to strangers.
 
 const path = require('node:path');
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 
 const {
   findFreePort,
@@ -56,6 +56,14 @@ function setStatus(text, { detail = '', failed = false } = {}) {
   // eslint-disable-next-line no-console
   console.log(`[poptart] ${text}${detail ? ` - ${detail}` : ''}`);
 }
+
+// Off macOS, Electron's default menu bar takes the whole alt family: alt on its own focuses it and
+// alt+F/E/V/W/H open its menus. alt is where poptart's own chords live on those platforms (see
+// public/chords.js), and alt+F inserts an effect - so the menu would eat it before the page saw the
+// key. Nothing in that default menu is reachable any other way except reload and devtools, and this
+// window has no use for either. macOS keeps its menu: the application menu is where cmd+Q and the
+// editing accelerators live there, and the app's chords are on ctrl anyway.
+if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
 function createWindow() {
   win = new BrowserWindow({

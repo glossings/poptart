@@ -63,7 +63,7 @@ const API_DOCS = {
   record: {
     kind: 'method',
     sig: 'record({ cycles, name, wrapTail })',
-    desc: 'Marks the track for recording; double-click the name, or press ctrl+b inside the block, to open the recorder. cycles is the length (4 by default), name the file name (the track label by default), and wrapTail: true folds the release tail back onto the start, for a track that begins in silence.',
+    desc: 'Marks the track for recording; double-click the name, or press {app+b} inside the block, to open the recorder. cycles is the length (4 by default), name the file name (the track label by default), and wrapTail: true folds the release tail back onto the start, for a track that begins in silence.',
     eg: 'note("c2 eb2").synth("Serum 2").record({ cycles: 8 })',
   },
   mini: {
@@ -93,7 +93,7 @@ const API_DOCS = {
   clips: {
     kind: 'builder',
     sig: 'clips()',
-    desc: 'A track whose notes come from the clips painted on its row in the arrangement (ctrl+A). Each clip holds its own notes, played from the clip\'s start; double-click a clip to draw in it. Copied clips share their notes until you choose "make unique" in the clip\'s menu.',
+    desc: 'A track whose notes come from the clips painted on its row in the arrangement ({app+a}). Each clip holds its own notes, played from the clip\'s start; double-click a clip to draw in it. Copied clips share their notes until you choose "make unique" in the clip\'s menu.',
     eg: 'kick: clips().s("bd")',
   },
 
@@ -131,7 +131,7 @@ const API_DOCS = {
   group: {
     kind: 'builder',
     sig: 'group({ ...tracks })',
-    desc: 'Mixes the tracks inside its braces into one channel. Members no longer play on their own, and .postgain(), .fx() or .bus() on the group apply to all of them. Groups can be nested. Select tracks and press cmd+G to wrap them. A main: group() with no braces receives every track that is not in another group. Any other group written as name: group() with nothing inside gets its braces added on the next run, with the cursor placed between them.',
+    desc: 'Mixes the tracks inside its braces into one channel. Members no longer play on their own, and .postgain(), .fx() or .bus() on the group apply to all of them. Groups can be nested. Select tracks and press {mod+g} to wrap them. A main: group() with no braces receives every track that is not in another group. Any other group written as name: group() with nothing inside gets its braces added on the next run, with the cursor placed between them.',
     eg: 'kick: group({\n  kickMain: s("mbd*4")\n  kickFill: s("mbd*8")\n}).postgain(0.8)',
   },
   copy: {
@@ -249,7 +249,7 @@ const API_DOCS = {
   fx: {
     kind: 'method',
     sig: 'fx(plugin, { state })',
-    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; ctrl+F inserts one at the cursor. .param() calls after it set this plugin\'s parameters.',
+    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; {app+f} inserts one at the cursor. .param() calls after it set this plugin\'s parameters.',
     eg: '.fx("ValhallaRoom").param("Mix", 0.3)',
   },
   param: {

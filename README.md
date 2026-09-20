@@ -76,7 +76,7 @@ that first time, startup is quick.
 
 1. Open the **Plugins** panel and click a plugin to copy its exact name — that's the string
    `.synth()` and `.fx()` want. (**rescan** picks up anything you install later.)
-2. Write a pattern and press **eval** (Cmd/Ctrl+Enter). **stop** is Cmd/Ctrl+.
+2. Write a pattern and press **eval** (⌘↵, or ctrl+enter off a Mac). **stop** is ⌘. / ctrl+.
 3. Open **docs ↗** and follow the studies.
 
 Prefer a window of its own to a browser tab? `npm run desktop` opens the same thing as an app
