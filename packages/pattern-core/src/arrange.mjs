@@ -55,15 +55,14 @@
 // silent. That is only safe because every track is FILLED when it joins the arrangement (the
 // painter paints it edge to edge, see arReconcileTracks in the web app), so a row is empty only
 // because it was emptied. A GROUP is the exception: it joins with nothing painted, since it has no
-// notes of its own and what sounds on it is whatever its members are doing. The arrangement loops
-// over its length (`len` option, or the end of the last clip rounded
-// up to a whole cycle), and the pattern inside a clip runs on absolute cycle time, so a `<a b>`
-// alternation keeps its place whether or not its block was sounding the bar before. (A clips()
-// track is the one exception, and deliberately: each of its clips plays its roll from the clip's
-// own start. See signal.mjs.)
+// notes of its own and what sounds on it is whatever its members are doing. The song runs from bar
+// 0 to the end of its last clip and STOPS there: the only thing that keeps it going is a loop
+// region (the `loops` option), so painting more song never moves where the playhead is. The
+// pattern inside a clip runs on the song's cycle time, so a `<a b>` alternation keeps its place
+// whether or not its block was sounding the bar before. (A clips() track is the one exception, and
+// deliberately: each of its clips plays its roll from the clip's own start. See signal.mjs.)
 //
-// The options are editor metadata plus the loop length:
-//   len    - loop length in cycles (default: the last clip's end, rounded up)
+// The options are editor metadata plus the loop regions:
 //   snap   - the painter's grid, in cells per cycle (default 1 - one cell is one bar)
 //   tracks - the tracks that are IN the arrangement, by label. Membership, not order (the rows
 //            follow the buffer): it is what tells a track that has never been arranged - fill it -
@@ -76,14 +75,26 @@
 //   autos  - the automation lanes PINNED into the painter's strip, by name, top to bottom
 //   loops - loop regions, [[name, start, end], …] in cycles: while a region is ARMED, playback
 //           entering it loops it until the player releases it (ctrl+L), then runs on to the next
-//           armed region. Reaching the song's end and wrapping to the top re-arms every region.
-//           See ArrangeClock below for the timing.
+//           armed region, or to the end of the song. A fresh arrangement is given one region over
+//           its whole length, so a song that has never been arranged loops as it always did, and
+//           deleting that region is what makes it play through. The painter always writes this
+//           key, empty or not. See ArrangeClock below for the timing.
+//   len   - RETIRED, read only from a call that has no `loops` key at all: a song from before the
+//           song stopped at its end looped over its whole length, and this was that length. Such a
+//           call plays as one region over it (see arrangementLoops); the painter writes `loops`
+//           in its place the first time it touches the call.
 
 // The paint grid is editor metadata - nothing about playback reads it - and it defaults to
 // 'auto': the painter picks a division from how far it is zoomed in, so the grid you snap to is
 // always the grid you can see (see arSnapAuto in the web app). A number here pins it instead, and
 // is written into the call only when it has been pinned, so the default stays absent.
 export const ARRANGE_DEFAULT_SNAP = 'auto';
+// How long a fresh arrangement is, in cycles: what a track is filled over when nothing is painted
+// yet, and the loop region the painter seeds it with.
+export const ARRANGE_DEFAULT_LEN = 8;
+// The name of the region a fresh arrangement loops over, and of the one a retired whole-song loop
+// is read as.
+export const ARRANGE_SONG_LOOP = 'song';
 const EPS = 1e-9;
 
 const num = (s) => {
@@ -201,7 +212,10 @@ export function normalizeArrangeOpts(opts = {}) {
     }
     loops.sort((x, y) => x.start - y.start || x.end - y.end);
   }
-  return { snap, len, tracks, colors, autos, loops };
+  // No `loops` key at all is a call from before the song stopped at its end, when the whole song
+  // looped (see arrangementLoops). Carried as a flag so normalizing twice reads the same.
+  const wholeLoop = !Array.isArray(o.loops) || o.wholeLoop === true;
+  return { snap, len, tracks, colors, autos, loops, wholeLoop };
 }
 
 /**
@@ -228,8 +242,11 @@ export function reconcileArrangement(clips, opts = {}, labels = [], unfilled = [
   const kept = o.tracks.filter((l) => labels.includes(l) || named.has(l));
   const joining = labels.filter((l) => !kept.includes(l));
   // Only a track with nothing painted is filled. One that already has clips is in the arrangement
-  // whatever the membership says.
-  const len = arrangementLength(clips, opts);
+  // whatever the membership says. Filled to the end of the song as it stands; with nothing painted
+  // anywhere, over the last loop region, and failing that the default length.
+  const len = arrangementEnd(clips)
+    || Math.max(0, ...arrangementLoops(clips, opts).map((r) => r.end))
+    || ARRANGE_DEFAULT_LEN;
   const added = joining
     .filter((l) => !named.has(l) && !unfilled.includes(l))
     .map((label) => ({ label, start: 0, len }));
@@ -239,16 +256,26 @@ export function reconcileArrangement(clips, opts = {}, labels = [], unfilled = [
 }
 
 /**
- * How long the arrangement's loop is, in cycles: the explicit `len`, else the end of the last clip
- * rounded up to a whole cycle (never less than one - an empty arrangement still has to loop
- * something rather than divide by zero).
+ * Where the song ends, in cycles: the right edge of its last clip, muted or not (0 with nothing
+ * painted). Playback that reaches it with no armed loop region ahead stops there.
  */
-export function arrangementLength(clips, opts = {}) {
-  const { len } = normalizeArrangeOpts(opts);
-  if (len != null) return len;
+export function arrangementEnd(clips) {
   let end = 0;
-  for (const c of clips) end = Math.max(end, c.start + c.len);
-  return Math.max(1, Math.ceil(end - EPS));
+  for (const c of clips) if (c.len > 0) end = Math.max(end, c.start + c.len);
+  return end;
+}
+
+/**
+ * The loop regions the song plays by. A call with a `loops` key plays exactly those. One without
+ * it is from before the song stopped at its end, and looped over its whole length - the retired
+ * `len`, else the last clip's end rounded up to a whole cycle, never less than one - so it is read
+ * as one region over that, and plays as it always did.
+ */
+export function arrangementLoops(clips, opts = {}) {
+  const o = normalizeArrangeOpts(opts);
+  if (!o.wholeLoop) return o.loops;
+  const end = o.len ?? Math.max(1, Math.ceil(arrangementEnd(clips) - EPS));
+  return [{ name: ARRANGE_SONG_LOOP, start: 0, end }];
 }
 
 /**
@@ -282,7 +309,7 @@ export function arrangementSpans(clips) {
   return byLabel;
 }
 
-/** Is cycle position `pos` (already reduced modulo the loop) inside one of `spans`? */
+/** Is song position `pos` inside one of `spans`? */
 export function inSpans(spans, pos) {
   for (const [s, e] of spans) {
     if (pos >= s - EPS && pos < e - EPS) return true;
@@ -328,9 +355,11 @@ export function _arrange(str = '', opts = {}) {
 
 /**
  * The song clock: where in the arrangement the transport's cycle IS, once loop regions are taken
- * into account. Without regions it is `cycle mod len`; with them, playback entering an armed
- * region wraps back to its start every time it reaches the end, until the region is released,
- * and wrapping at the song's end re-arms every region.
+ * into account. Without regions it is the cycle itself, running on past the song's `end` (where
+ * the host stops the deck - see endCycle); with them, playback entering an armed region wraps back
+ * to its start every time it reaches the region's end, until the region is released. Nothing else
+ * wraps, so the song's end is not part of where the playhead is: painting the song longer or
+ * shorter moves no position.
  *
  * The map is kept as ANCHORS - (cycle, position, released set) triples, one per wrap or release -
  * and a position is read by walking forward from the last anchor before it. That makes it a pure
@@ -341,10 +370,10 @@ export function _arrange(str = '', opts = {}) {
  * anchors past its cycle and they are walked again.
  */
 export class ArrangeClock {
-  constructor({ len = 1, regions = [], anchors = null } = {}) {
-    this.len = Math.max(1e-9, Number(len) || 1);
+  constructor({ end = 0, regions = [], anchors = null } = {}) {
+    this.setEnd(end);
     this.regions = (regions ?? [])
-      .map((r) => ({ name: String(r.name), start: Math.max(0, Number(r.start)), end: Math.min(this.len, Number(r.end)) }))
+      .map((r) => ({ name: String(r.name), start: Math.max(0, Number(r.start)), end: Number(r.end) }))
       .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start + EPS)
       .sort((a, b) => a.start - b.start || a.end - b.end);
     this.anchors = anchors?.length
@@ -357,10 +386,37 @@ export class ArrangeClock {
     this.anchors = [{ cycle: 0, pos: 0, released: new Set() }];
   }
 
+  /** Where the song ends (see arrangementEnd). No position depends on it, so it is simply set. */
+  setEnd(end) {
+    this.end = Math.max(0, Number(end) || 0);
+  }
+
+  /**
+   * The transport cycle at which the song ends, or null while an armed region lies ahead of the
+   * playhead - that one will loop until it is released, so there is no end to name yet. Read off
+   * the last anchor: with no region ahead of it, walking on records no more.
+   */
+  endCycle() {
+    const a = this.anchors[this.anchors.length - 1];
+    if (this._loopFrom(a.pos, a.released)) return null;
+    return a.cycle + Math.max(0, this.end - a.pos);
+  }
+
+  /**
+   * A clock over different `regions` that is where this one is at `cycle`: the same position, the
+   * same regions let go of (those that still exist). What editing a loop region mid-song builds,
+   * so the playhead stays where it is rather than being walked again from the top.
+   */
+  rebuilt({ end = this.end, regions = [] } = {}, cycle = 0) {
+    const { pos, released } = this.stateAt(cycle);
+    const names = new Set((regions ?? []).map((r) => String(r.name)));
+    return new ArrangeClock({ end, regions, anchors: [{ cycle, pos, released: released.filter((n) => names.has(n)) }] });
+  }
+
   /** What the editor needs to run an identical clock: plain data, sets as arrays. */
   snapshot() {
     return {
-      len: this.len,
+      end: this.end,
       regions: this.regions.map((r) => ({ ...r })),
       anchors: this.anchors.map((a) => ({ cycle: a.cycle, pos: a.pos, released: [...a.released] })),
     };
@@ -382,7 +438,7 @@ export class ArrangeClock {
     return best;
   }
 
-  /** Song position (0 <= p < len) at transport cycle `cycle`, recording the wraps on the way. */
+  /** Song position (p >= 0) at transport cycle `cycle`, recording the wraps on the way. */
   posAt(cycle) {
     let i = this._anchorIndexAt(cycle);
     for (let guard = 0; guard < 100000; guard++) {
@@ -390,9 +446,8 @@ export class ArrangeClock {
       const p = a.pos + (cycle - a.cycle);
       if (p < a.pos - EPS) return Math.max(0, p); // before the first anchor (cycle < 0): nothing to wrap
       const region = this._loopFrom(a.pos, a.released);
-      const boundary = region ? region.end : this.len;
-      if (p < boundary - EPS) return p;
-      const next = { cycle: a.cycle + (boundary - a.pos), pos: region ? region.start : 0, released: region ? new Set(a.released) : new Set() };
+      if (!region || p < region.end - EPS) return p; // no armed region ahead: the song runs on
+      const next = { cycle: a.cycle + (region.end - a.pos), pos: region.start, released: new Set(a.released) };
       const existing = this.anchors[i + 1];
       if (existing && Math.abs(existing.cycle - next.cycle) < EPS) {
         i++;
@@ -430,10 +485,10 @@ export class ArrangeClock {
    * From `cycle` on, the song is at `pos` - what starting playback from the painter's marker
    * means. One more anchor, with every region armed again (a seek is a fresh run at the song
    * from there, not a continuation of a loop you had let go of); whatever had been walked beyond
-   * it is dropped and walked again. Returns the position it landed on, folded into the song.
+   * it is dropped and walked again. Returns the position it landed on.
    */
   seek(cycle, pos) {
-    const at = ((Number(pos) % this.len) + this.len) % this.len;
+    const at = Math.max(0, Number(pos) || 0);
     const i = this._anchorIndexAt(cycle);
     const next = { cycle, pos: at, released: new Set() };
     // A seek at the very cycle an anchor already sits on replaces it rather than stacking a

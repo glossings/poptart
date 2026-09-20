@@ -1984,19 +1984,18 @@ export class Sig {
 
   /**
    * The arrangement painter's gate (see arrange.mjs): keeps only the events whose onset falls
-   * inside one of `spans` ([start, end) in cycles, sorted and merged), the position taken modulo
-   * `len` so the arrangement loops. Everything else becomes a rest, so the step grid keeps its
-   * shape and the highlighter simply has nothing to light. The pattern still runs on the song's
-   * whole timeline - a `<a b>` keeps alternating through the bars it is gated out of - which is
-   * what makes painting a part in and out leave its own rhythm alone. Host-applied, not userland.
+   * inside one of `spans` ([start, end) in cycles, sorted and merged). Everything else becomes a
+   * rest, so the step grid keeps its shape and the highlighter simply has nothing to light - and
+   * past the last span that is everything, which is the song having ended. The pattern still runs
+   * on the song's whole timeline - a `<a b>` keeps alternating through the bars it is gated out
+   * of - which is what makes painting a part in and out leave its own rhythm alone. Host-applied,
+   * not userland.
    *
-   * The host's readers already ask in song positions (see arrange.mjs's songSteps), so the host
-   * passes the song length; a position function is taken too, for a caller asking in raw cycles.
+   * The host's readers already ask in song positions (see arrange.mjs's songSteps), so a cycle is
+   * taken as one; a position function may be passed for a caller asking in raw transport cycles.
    */
-  _arrangeGate(spans, len) {
+  _arrangeGate(spans, posOf = (c) => c) {
     if (!this.stepsForCycle) return this; // nothing event-shaped to gate - a bare control signal
-    const loop = Math.max(1e-9, Number(len) || 1);
-    const posOf = typeof len === 'function' ? len : (c) => ((c % loop) + loop) % loop;
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) =>
       base(cycle).map((s) => {

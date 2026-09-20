@@ -247,7 +247,7 @@ test('a clip counts as a reference to its roll, so the picker cannot delete one 
 });
 
 test('renaming a roll carries every clip that plays it, and the open painter with them', () => {
-  const code = 'kick: clips().s("bd")\n\n_arrange("kick,0,4,rverse kick,4,4,rverse,o4 hat,0,8", { len: 8 })';
+  const code = 'kick: clips().s("bd")\n\n_arrange("kick,0,4,rverse kick,4,4,rverse,o4 hat,0,8", { snap: 4, loops: [["A",0,4]] })';
   const clips = arrangeMod.parseArrangement('kick,0,4,rverse kick,4,4,rverse,o4 hat,0,8');
   const { fns } = painter({ code, clips });
   const edits = fns.arClipRenameEdits(code, 'verse', 'chorus');
@@ -255,7 +255,7 @@ test('renaming a roll carries every clip that plays it, and the open painter wit
   const [from, to, text] = edits[0];
   assert.equal(code.slice(from, to).slice(0, 9), '_arrange(');
   assert.match(text, /hat,0,8 kick,0,4,rchorus kick,4,4,rchorus,o4/, 'the offsets ride along untouched');
-  assert.match(text, /len: 8/, 'and so do the options');
+  assert.match(text, /snap: 4, loops: \[\["A",0,4\]\]/, 'and so do the options');
   assert.deepEqual(clips.map((c) => c.roll ?? null), ['chorus', 'chorus', null],
     'the painter holds its own copy while it is open, so it follows rather than reverting');
   assert.deepEqual(fns.arClipRenameEdits(code, 'nobody', 'x'), [], 'a roll no clip plays needs no edit');

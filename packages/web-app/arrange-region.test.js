@@ -190,7 +190,7 @@ test('the insert marker outlives the painter, per deck', () => {
   assert.match(grab('closeArrangeEditor'), /if \(arState\) arKeptInsert\[arDeck\] = arState\.insert;/);
   assert.match(grab('openArrangeEditor'), /const kept = arKeptInsert\[arDeck\];/);
   assert.match(grab('arMarkerFor'), /arState && arDeck === deck \? arState\.insert : arKeptInsert\[deck\]/);
-  assert.match(SRC, /const arrangeFrom = start && transport\.paused && arMarkerFor\('a'\) != null/);
+  assert.match(SRC, /const arrangeFrom = start && arMarkerFor\('a'\) != null/);
   assert.match(grab('arDropSelection'), /if \(!opts\?\.keepInsert\) arState\.insert = null;/);
 });
 
@@ -205,7 +205,7 @@ test('the insert marker outlives the painter, per deck', () => {
 /** The split/join/duplicate ops over a fake painter. Writes and redraws are counted, not performed. */
 function ops({ clips = [], sel = [], insert = null, regionSpan = null, regionRows = null, track = null } = {}) {
   const arState = {
-    clips, sel: new Set(sel), insert, regionSpan, regionRows, selRegion: null, focus: 0,
+    clips, sel: new Set(sel), insert, regionSpan, regionRows, selRegion: null, focus: 0, loops: [],
     track: track ?? baseOf(clips[0]?.label ?? '') ?? null,
   };
   const logged = [];
@@ -214,13 +214,16 @@ function ops({ clips = [], sel = [], insert = null, regionSpan = null, regionRow
     logLine: (line) => logged.push(line),
     writeArrangeCall: () => {},
     drawArrange: () => {},
+    arSyncControls: () => {},
+    arTimeHint: () => {},
     ...rowEnv, // rows are bases; a variation's clips sit on its base's row
   };
   const LIFT = ['arSplitPoints', 'arOpTargets', 'arSplitClips', 'arJoinClips',
-    'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClipOverlaps', 'arDuplicate', 'arClipPiece'].map(grab).join('\n\n');
+    'arRegionRows', 'arRowInRegion', 'arClipsIn', 'arClipOverlaps', 'arDuplicate', 'arClipPiece',
+    'arTimeRegion', 'arInsertTime', 'arTimeDuplicate', 'arReserveStands', 'arSettleReserve', 'arResolveOverlaps'].map(grab).join('\n\n');
   const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
-  const build = new Function(...keys, `${LIFT}\nreturn { arSplitClips, arJoinClips, arSplitPoints, arOpTargets, arClipOverlaps, arDuplicate };`);
+  const build = new Function(...keys, `const arHeldClips = () => new Set([...arState.sel, ...(arState.drag?.targets ?? [])]);\n${LIFT}\nreturn { arResolveOverlaps, arSettleReserve, arSplitClips, arJoinClips, arSplitPoints, arOpTargets, arClipOverlaps, arDuplicate, arInsertTime, arTimeDuplicate };`);
   return { fns: build(...keys.map((k) => env[k])), arState, logged };
 }
 
@@ -687,6 +690,85 @@ test('a clip only partly under the new one keeps the end that survives', () => {
   assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 8]]);
 });
 
+// --- moved or resized onto another clip: the held clip wins, and what gave way waits in reserve ---
+
+test('an edge dragged through the next clip pushes it back, buries it, and lets it out again', () => {
+  const a = { label: 'kick', start: 0, len: 4 };
+  const { fns, arState } = ops({ clips: [a, { label: 'kick', start: 4, len: 4 }, { label: 'bass', start: 4, len: 4 }], sel: [a] });
+  a.len = 6;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['bass', 4, 4], ['kick', 0, 6], ['kick', 6, 2]], 'and another track is never touched');
+  a.len = 9;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['bass', 4, 4], ['kick', 0, 9]], 'right over it: nothing of it is left showing');
+  a.len = 5;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['bass', 4, 4], ['kick', 0, 5], ['kick', 5, 3]]);
+  a.len = 4;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['bass', 4, 4], ['kick', 0, 4], ['kick', 4, 4]], 'dragged back, it is all there again');
+  assert.deepEqual(arState.reserve, [], 'and nothing is left in reserve once nothing is covered');
+});
+
+test('a clip dropped in the middle of a long one leaves its two ends, and moving on gives it back', () => {
+  const a = { label: 'kick', start: 20, len: 2 };
+  const { fns, arState } = ops({ clips: [{ label: 'kick', start: 0, len: 16 }, a], sel: [a] });
+  a.start = 6;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['kick', 0, 6], ['kick', 6, 2], ['kick', 8, 8]]);
+  a.start = 10;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['kick', 0, 10], ['kick', 10, 2], ['kick', 12, 4]], 'carved where it is NOW, not where it has been');
+  a.start = 20;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['kick', 0, 16], ['kick', 20, 2]]);
+});
+
+test('deselecting settles it: what gave way is gone for good', () => {
+  const a = { label: 'kick', start: 0, len: 4 };
+  const { fns, arState } = ops({ clips: [a, { label: 'kick', start: 4, len: 4 }], sel: [a] });
+  a.len = 6;
+  fns.arResolveOverlaps();
+  arState.sel.clear();
+  fns.arSettleReserve(); // what drawArrange does on the way past
+  assert.deepEqual(arState.reserve, []);
+  arState.sel.add(a); // picked up again later: there is nothing to give back
+  a.len = 4;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 6, 2]]);
+});
+
+test('a reserved clip something else has edited is let go rather than put back over the edit', () => {
+  const a = { label: 'kick', start: 0, len: 4 };
+  const { fns, arState } = ops({ clips: [a, { label: 'kick', start: 4, len: 4 }], sel: [a] });
+  a.len = 6;
+  fns.arResolveOverlaps();
+  arState.clips.find((c) => c.start === 6).len = 1; // trimmed by some other op while A is still held
+  a.len = 4;
+  fns.arResolveOverlaps();
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 6, 1]]);
+});
+
+test('on a clips() row what is pushed back enters its roll later, and comes back exactly as it was', () => {
+  const a = { label: 'lead', start: 0, len: 4 };
+  const b = { label: 'lead', start: 4, len: 4, roll: 'verse', off: 1 };
+  const { fns, arState } = ops({ clips: [a, b], sel: [a] });
+  a.len = 6;
+  fns.arResolveOverlaps();
+  assert.deepEqual(arState.clips.filter((c) => c.roll).map((c) => [c.start, c.len, c.off]), [[6, 2, 3]]);
+  a.len = 4;
+  fns.arResolveOverlaps();
+  assert.deepEqual(arState.clips.filter((c) => c.roll), [b]);
+  assert.deepEqual([b.start, b.len, b.off], [4, 4, 1]);
+});
+
+test('the wiring: every write resolves, the drags resolve live, and a draw settles a dropped selection', () => {
+  assert.match(SRC, /arResolveOverlaps\(\);[^\n]*\n\s+if \(record\) arPushHistory\(\);/, 'before the history entry, so undo never restores an overlap');
+  assert.match(SRC, /arResolveOverlaps\(\); \/\/ clips it passes over give way/);
+  assert.match(SRC, /arResolveOverlaps\(\); \/\/ an edge dragged through the next clip/);
+  assert.match(grab('drawArrange'), /arSettleReserve\(\);/);
+});
+
 test('cmd+D on selected clips repeats them after themselves, overwriting', () => {
   const a = { label: 'kick', start: 0, len: 4 };
   const { fns, arState } = ops({ clips: [a, { label: 'kick', start: 4, len: 12 }], sel: [a] });
@@ -716,6 +798,47 @@ test('a span duplicate stays on its own rows', () => {
   });
   fns.arDuplicate();
   assert.deepEqual(clips(arState).filter((c) => c[0] === 'bass'), [['bass', 0, 16]]);
+});
+
+test('cmd+shift+D inside a long clip copies the marked bars only, and cuts the clip where time opens', () => {
+  // Mark the first 4 bars of an 8-bar clip: the song grows by 4, the copy is 4 bars at 4..8, and
+  // the clip's second half rides right to 8..12. It used to copy the whole 8 bars to 4..12, on top
+  // of a clip that had not moved.
+  const { fns, arState } = ops({ clips: [{ label: 'kick', start: 0, len: 8 }], regionSpan: [0, 4], regionRows: new Set(['kick']) });
+  fns.arTimeDuplicate();
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 4], ['kick', 8, 4]]);
+  assert.deepEqual([...arState.sel].map((c) => [c.start, c.len]), [[4, 4]], 'the copy is what you hold');
+  assert.deepEqual(arState.regionSpan, [4, 8]);
+  fns.arTimeDuplicate(); // and the gesture walks: the next press repeats the copy
+  assert.deepEqual(clips(arState), [['kick', 0, 4], ['kick', 4, 4], ['kick', 8, 4], ['kick', 12, 4]]);
+});
+
+test('cmd+shift+D takes the marked bars of a clip that starts before the span, on every row', () => {
+  const { fns, arState } = ops({
+    clips: [{ label: 'kick', start: 0, len: 16 }, { label: 'bass', start: 6, len: 1 }, { label: 'hat', start: 12, len: 4 }],
+    regionSpan: [4, 8],
+    regionRows: new Set(['kick']),
+  });
+  fns.arTimeDuplicate();
+  assert.deepEqual(clips(arState), [
+    ['bass', 6, 1], ['bass', 10, 1],
+    ['hat', 16, 4],
+    ['kick', 0, 8], ['kick', 8, 4], ['kick', 12, 8],
+  ]);
+  for (const label of ['kick', 'bass', 'hat']) {
+    const own = clips(arState).filter((c) => c[0] === label);
+    for (let i = 1; i < own.length; i++) assert.ok(own[i][1] >= own[i - 1][1] + own[i - 1][2] - 1e-9, `${label} never overlaps itself`);
+  }
+});
+
+test('opening time through a clips() clip keeps its tail reading the roll where the cut fell', () => {
+  const held = { label: 'lead', start: 2, len: 6, roll: 'verse', off: 1 };
+  const { fns, arState } = ops({ clips: [held], sel: [held] });
+  arState.loops.push({ name: 'A', start: 0, end: 8 });
+  fns.arInsertTime(4, 2);
+  assert.deepEqual(arState.clips.map((c) => [c.start, c.len, c.off ?? 0]), [[2, 2, 1], [6, 4, 3]]);
+  assert.ok(arState.sel.has(arState.clips[0]), 'the head is still the clip that was held');
+  assert.deepEqual([arState.loops[0].start, arState.loops[0].end], [0, 10], 'a loop region across the seam stretches');
 });
 
 test('cmd+D with an empty span says so rather than doing nothing', () => {
@@ -751,13 +874,11 @@ test('a time drag carries the row it started on', () => {
   assert.match(SRC, /arState\.regionRows = arRowsBetween\(arRowOf\(Math\.min\(d\.y0, d\.y1\)\), arRowOf\(Math\.max\(d\.y0, d\.y1\)\)\);/);
 });
 
-test('the arrangement\'s length box fits a fractional one', () => {
-  // A length dragged out in the ruler lands on the snap grid, so 12.75 is ordinary here where the
-  // roll's grid and length are always whole - 46px clipped it and step="1" flagged it invalid.
+test('the song has no length control: it ends where its last clip does', () => {
   const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
-  assert.match(html, /id="arrangeLen" type="number" step="any"/);
-  const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
-  assert.match(css, /#arrangeLen \{\n\s+width: 68px;\n\}/);
+  assert.doesNotMatch(html, /arrangeLen/);
+  assert.doesNotMatch(SRC, /arState\.len\b/, 'and the painter keeps no length of its own');
+  assert.match(SRC, /const arSongEnd = \(\) => arrangeMod\.arrangementEnd\(arState\.clips\);/);
 });
 
 // ---------------------------------------------------------------------------------------------

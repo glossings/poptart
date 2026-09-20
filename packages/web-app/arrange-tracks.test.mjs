@@ -265,21 +265,35 @@ test('a buffer with no arrangement is left completely alone', () => {
 // Writing the definition
 // ---------------------------------------------------------------------------------------------
 
-test('the painter writes _arrange(...), options only when they say something', () => {
+test('the painter writes _arrange(...), options only when they say something - and always the loops', () => {
   const { fns } = panel();
-  const base = { clips: arrangeMod.parseArrangement('kick,0,8'), snap: 'auto', len: null, autos: [], loops: [] };
-  assert.equal(fns.serializeArrangeCall(base), '_arrange("kick,0,8")');
+  const base = { clips: arrangeMod.parseArrangement('kick,0,8'), snap: 'auto', autos: [], loops: [] };
+  // `loops` is written even when empty: a call without the key is a song that loops over its whole length.
+  assert.equal(fns.serializeArrangeCall(base), '_arrange("kick,0,8", { loops: [] })');
   assert.equal(
-    fns.serializeArrangeCall({ ...base, len: 24, snap: 4, autos: ['filter'] }),
-    '_arrange("kick,0,8", { snap: 4, len: 24, autos: ["filter"] })',
+    fns.serializeArrangeCall({ ...base, len: 24, snap: 4, autos: ['filter'], loops: [{ name: 'A', start: 0, end: 4 }] }),
+    '_arrange("kick,0,8", { snap: 4, autos: ["filter"], loops: [["A",0,4]] })',
+    'the retired len is never written',
   );
-  assert.equal(fns.serializeArrangeCall({ ...base, clips: [] }), '_arrange()');
+  assert.equal(fns.serializeArrangeCall({ ...base, clips: [] }), '_arrange("", { loops: [] })');
+});
+
+test('a call from before the song stopped at its end is read as the one region it looped over', () => {
+  const old = panel({ code: '_arrange("kick,0,6", { len: 8 })' }).fns.arReadDef();
+  assert.deepEqual(old.opts.loops, [{ name: 'song', start: 0, end: 8 }]);
+  const bare = panel({ code: '_arrange("kick,0,5.5")' }).fns.arReadDef();
+  assert.deepEqual(bare.opts.loops, [{ name: 'song', start: 0, end: 6 }], 'no len: the last clip end, rounded up');
+  const { fns } = panel();
+  assert.equal(fns.serializeArrangeCall({ ...old.opts, clips: old.clips }), '_arrange("kick,0,6", { loops: [["song",0,8]] })',
+    'and whatever writes it next writes the region in place of the len');
+  const through = panel({ code: '_arrange("kick,0,8", { loops: [] })' }).fns.arReadDef();
+  assert.deepEqual(through.opts.loops, [], 'a song that says it has no loops plays through');
 });
 
 test('a chosen color round-trips through the call', () => {
   const { fns } = panel();
   const text = fns.serializeArrangeCall({ clips: arrangeMod.parseArrangement('kick,0,8 kickFill,12,4'), snap: 'auto', len: null, autos: [], loops: [], colors: { kickFill: '#ff8800' } });
-  assert.equal(text, '_arrange("kick,0,8 kickFill,12,4", { colors: {"kickFill":"#ff8800"} })');
+  assert.equal(text, '_arrange("kick,0,8 kickFill,12,4", { colors: {"kickFill":"#ff8800"}, loops: [] })');
   const read = panel({ code: text }).fns.arReadDef();
   assert.deepEqual(read.clips.map((c) => c.label), ['kick', 'kickFill']);
   assert.deepEqual(read.opts.colors, { kickFill: '#ff8800' });

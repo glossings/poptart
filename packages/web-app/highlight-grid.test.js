@@ -107,7 +107,7 @@ test('every cycle of the window carries its own gates', () => {
 test('with a song clock, each transport cycle lights the bar the song is on', async () => {
   // Started from the painter's marker at bar 2: transport cycle 0 plays - and so lights - bar 2.
   const { ArrangeClock, songSteps } = await import('../pattern-core/src/arrange.mjs');
-  const clock = new ArrangeClock({ len: 4 });
+  const clock = new ArrangeClock({ end: 4 });
   clock.seek(0, 2);
   const sig = {
     stepsForCycle: (cycle) => [{ start: 0.5, end: 1, value: 'bd', locs: [[10 + cycle, 11 + cycle]] }],

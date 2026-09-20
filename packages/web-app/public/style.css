@@ -2546,13 +2546,6 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
-/* The one exception to the 46px above: the ARRANGEMENT's length is bars, and it lands wherever the
-   snap grid does, so it is routinely a fraction - `12.75`, `128.25` - where the roll's grid and
-   length are always whole numbers. 46px clipped those. Same box otherwise; only the width moves. */
-#arrangeLen {
-  width: 68px;
-}
-
 /* Every dropdown that sits in a panel's HEADER row - the arrangement's snap, the LFO's shape
    presets - is this one shape, so two panels open side by side don't show two different chevron
    insets. Anything new in a header joins this list rather than inventing its own metrics. */

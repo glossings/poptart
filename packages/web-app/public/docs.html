@@ -606,8 +606,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             resize, ⌘D duplicates after, ⌘C / X / V move a stretch of song, ⌘Z undoes.
             <strong>0</strong> mutes what you have selected or marked — the clips stay where they
             are, drawn washed out and dashed, and stop sounding until you press it again. The
-            arrangement loops at the last clip's end, or drag in the ruler (or type
-            <strong>len</strong>) to set the length; <strong>snap</strong> sets how finely clips
+            song ends at the right edge of its last clip (the dashed line), and playback stops
+            there unless a loop region holds it. The ruler along the bottom is the same axis in
+            minutes and seconds, at the tempo playing now; <strong>snap</strong> sets how finely clips
             land, <strong>+</strong>/<strong>−</strong> and ctrl+wheel zoom. Inside a clip the pattern
             runs on absolute bar time, so a <code>&lt;a b&gt;</code> keeps alternating through the
             bars it is painted out of.
@@ -630,9 +631,11 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             enters it, it loops there. Shift-drag the strip to mark a time selection over every row
             instead. Press
             <strong>ctrl+L</strong> anywhere in the editor to release the loop you are in — playback
-            runs on to the next region and loops that instead. When the song reaches its end and
-            wraps to the top, every region is armed again. Right-click a region in the ruler to
-            rename or remove it.
+            runs on to the next region and loops that instead, or to the end of the song, where
+            playback stops. Stopping, or starting from the marker, arms every region again. A new
+            arrangement comes with one region over its whole length, so it loops until you remove
+            that region; a track added later is filled from the top to the end of the song.
+            Right-click a region in the ruler to rename or remove it.
           </p>
           <p>
             <strong>Automation lanes</strong> live under the clips, on the same bars, and the strip

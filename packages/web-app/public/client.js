@@ -1024,7 +1024,7 @@ function foldConfigBlobs() {
     // its own offset alone, which is exactly the run of edits this has to hold across.
     foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]], `data@${m.index}`);
   }
-  // _arrange(...): the WHOLE CALL folds, the way a definitions run does. The clips, the loop length,
+  // _arrange(...): the WHOLE CALL folds, the way a definitions run does. The clips, the membership,
   // the loops and the pinned lanes are all the painter's - and so is the call around them, which
   // nobody types either. Leaving `_arrange(⋯)` on screen showed the one part of it that says
   // nothing; a chip naming what it is says the same thing in less room.
@@ -11012,6 +11012,7 @@ function highlightTick() {
 }
 setInterval(() => {
   highlightTick();
+  songEndTick();
   updatePhraseViz();
   updateRecButton();
   updateRecordButton();
@@ -13699,8 +13700,10 @@ async function evaluate(start, { byHand = false } = {}) {
   // Starting from stopped with the painter's marker down plays from THERE: the marker is where you
   // were looking, and a song that always starts at bar 0 is a song whose outro you never hear
   // without sitting through it. Sent with the eval so it lands on the same song clock the eval
-  // builds, rather than racing it as a request of its own.
-  const arrangeFrom = start && transport.paused && arMarkerFor('a') != null ? arMarkerFor('a') : undefined;
+  // builds, rather than racing it as a request of its own - and with every start, since only the
+  // server knows whether this DECK is stopped (in a mix the clock may be running for the other
+  // one); it ignores the marker for a deck that is already playing.
+  const arrangeFrom = start && arMarkerFor('a') != null ? arMarkerFor('a') : undefined;
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.
   const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom });
@@ -13714,6 +13717,7 @@ async function evaluate(start, { byHand = false } = {}) {
     // The arrangement's song clock, for the painter's playhead - but only when the painter is on
     // THIS deck. Each deck runs its own (arrangeClocks in server.js), and there is one playhead.
     if (arDeck === 'a') arSetClock(result.arrange ?? null);
+    songEndSetClock('a', result.arrange ?? null);
     renderTracks(result);
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
     refoldAll();
@@ -13749,7 +13753,13 @@ async function doStop(deck = null) {
     // never come round. The panel (and its meter) stays open.
     if (trackRecState) cancelTrackRecord(true);
   }
-  const result = await api('POST', '/api/stop', perDeck ? { deck: perDeck } : undefined);
+  stopLanded(await api('POST', '/api/stop', perDeck ? { deck: perDeck } : undefined), perDeck);
+}
+
+/** What a stop leaves on screen, given the server's answer to it (see stopPlayback in server.js). */
+function stopLanded(result, perDeck) {
+  // A stopped deck has no end left to reach; its next eval hands the end watch a fresh clock.
+  for (const d of result.transport ? ['a', 'b'] : [perDeck]) songEndSetClock(d, null);
   if (!result.transport) {
     // Per-deck stop with the other deck still playing: the clock ran on. Just drop this deck's
     // playback highlights; everything else (transport, play button) still reflects the set.
@@ -23225,12 +23235,13 @@ async function evalDeckB(start) {
     // hand-renames followed in, and every track of this song filled into its
     // arrangement (see arSyncBuffer). Without it a track typed into deck B would fall silent.
     arSyncBuffer('b');
-    // Same deal as the main pane's: with the transport stopped, deck B's marker - kept while the
+    // Same deal as the main pane's: for a deck that is stopped, deck B's marker - kept while the
     // painter is shut, like deck A's (see arKeptInsert) - says which bar of its song to start from.
-    const arrangeFrom = start && transport.paused && arMarkerFor('b') != null ? arMarkerFor('b') : undefined;
+    const arrangeFrom = start && arMarkerFor('b') != null ? arMarkerFor('b') : undefined;
     const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start, arrangeFrom });
     if (result.transport) transport = result.transport;
     if (arDeck === 'b') arSetClock(result.arrange ?? null); // deck B's own song clock, for the playhead
+    songEndSetClock('b', result.arrange ?? null);
     // Deck B gets the same live playback highlighting as the main pane: its regions mark the
     // split editor, keyed "b:<label>" (which is how the /api/highlight top-ups find them).
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32, 'b', deckBCM);
@@ -26489,7 +26500,6 @@ const arPicker = document.getElementById('arrangePicker');
 const arAutoSearch = document.getElementById('arrangeAutoSearch');
 const arPickList = document.getElementById('arrangePickList');
 const arSnapSelect = document.getElementById('arrangeSnap');
-const arLenInput = document.getElementById('arrangeLen');
 const arZoomInBtn = document.getElementById('arrangeZoomIn');
 const arZoomOutBtn = document.getElementById('arrangeZoomOut');
 const arToolBtn = document.getElementById('arrangeTool');
@@ -26512,6 +26522,11 @@ const AR_INDENT = 9;
 const AR_MAX_INDENT = 3;
 const AR_CARET_W = 11;
 const AR_PAD_BOTTOM = 6;
+const AR_TIME_H = 18; // px: the clock ruler along the bottom, under the automation strips
+// The steps the clock ruler may tick in, in seconds, and how far apart its labels have to land to
+// stay readable. The step is the first that clears that spacing at the current zoom and tempo.
+const AR_TIME_STEPS = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 3600];
+const AR_TIME_LABEL_PX = 56;
 const AR_DEFAULT_PX_PER_CYCLE = 44; // one bar is comfortably wide by default: the unit you paint in
 const AR_MIN_PX_PER_CYCLE = 6;
 const AR_MAX_PX_PER_CYCLE = 400;
@@ -26625,6 +26640,7 @@ function arMarkerFor(deck) {
 let arPlayheadOn = false;
 let arW = 0;
 let arH = 0;
+let arDrawnCps = null; // the tempo the clock ruler was last drawn at (see arPlayheadLoop)
 let arEvalTimer = null;
 let arSuppressClose = false; // set while the panel's own write is changing the buffer
 let arTool = localStorage.getItem('poptartArrangeTool') === 'select' ? 'select' : 'draw'; // pencil vs arrow, sticky like the roll's
@@ -26685,7 +26701,7 @@ function arReconcileTracks() {
   if (arState) {
     // The panel owns the data while it is open; writing the buffer under it would fight its marker.
     const own = arDropBusClips(arState.clips);
-    const next = arrangeMod.reconcileArrangement(own.clips, { len: arState.len, tracks: arState.tracks }, labels, groups);
+    const next = arrangeMod.reconcileArrangement(own.clips, { tracks: arState.tracks, loops: arState.loops ?? [] }, labels, groups);
     // ...and a clip on a clips() row gets a roll to draw in, whether it was just painted or the
     // row only became one now (`kick: clips()` typed over an ordinary track).
     const rolled = arFillClipRolls(next.clips);
@@ -26755,8 +26771,12 @@ function openArrangePainter(deck = mixModeOn ? djActiveDeck : 'a') {
       return;
     }
     const groups = arGroupLabels();
-    const clips = labels.filter((l) => !groups.includes(l)).map((l) => arFillClip(l, AR_NEW_LEN));
-    const text = serializeArrangeCall({ clips, snap: arrangeMod.ARRANGE_DEFAULT_SNAP, len: AR_NEW_LEN, tracks: labels, autos: [], loops: [] });
+    // ...and ONE LOOP REGION over all of it: a song stops at its end, and a song nobody has
+    // arranged yet is a loop. Deleting the region is what makes it play through.
+    const bars = arrangeMod.ARRANGE_DEFAULT_LEN;
+    const clips = labels.filter((l) => !groups.includes(l)).map((l) => arFillClip(l, bars));
+    const loops = [{ name: arrangeMod.ARRANGE_SONG_LOOP, start: 0, end: bars }];
+    const text = serializeArrangeCall({ clips, snap: arrangeMod.ARRANGE_DEFAULT_SNAP, tracks: labels, autos: [], loops });
     const code = arCM.getValue();
     // Into the foot, flush under the definitions if the buffer has any (the same rule defsEdit
     // follows, so the chips stack without a hole between them); else at the end, a blank line
@@ -26769,7 +26789,7 @@ function openArrangePainter(deck = mixModeOn ? djActiveDeck : 'a') {
       arCM.replaceRange(`${gap}${text}`, arCM.posFromIndex(code.length));
     }
     arRefold();
-    logLine(`arrangement made: ${labels.length} track${labels.length === 1 ? '' : 's'}, ${AR_NEW_LEN} bars, every one playing throughout - carve it up`);
+    logLine(`arrangement made: ${labels.length} track${labels.length === 1 ? '' : 's'}, ${bars} bars on a loop, every one playing throughout - carve it up`);
     def = arFindDef();
     arScheduleEval();
   }
@@ -26777,10 +26797,6 @@ function openArrangePainter(deck = mixModeOn ? djActiveDeck : 'a') {
   openArrangeEditor(def);
   arCanvas.focus({ preventScroll: true }); // the keys (delete, undo, the tool) belong to the clips now
 }
-
-// How long a song is before anyone says otherwise. Eight bars is a phrase: long enough that the
-// first cut you make (a break at 4, an intro) is a real edit, short enough to see whole.
-const AR_NEW_LEN = 8;
 
 /**
  * Is a form field taking the keystroke? ctrl+A reaches the painter from anywhere EXCEPT somewhere
@@ -26840,13 +26856,17 @@ function parseArrangeCall(inner) {
       opts = {};
     }
   }
-  return { clips: arrangeMod.parseArrangement(clipStr), opts: arrangeMod.normalizeArrangeOpts(opts) };
+  // A call with no `loops` key is from before a song stopped at its end, and looped over its whole
+  // length: it is read as the one region it played as (see arrangementLoops), so whatever writes
+  // the call next writes that region down and the retired `len` goes.
+  const clips = arrangeMod.parseArrangement(clipStr);
+  const read = arrangeMod.normalizeArrangeOpts(opts);
+  return { clips, opts: { ...read, loops: arrangeMod.arrangementLoops(clips, read), len: null, wholeLoop: false } };
 }
 
 function arCallOpts(state) {
   const opts = {};
   if (state.snap !== arrangeMod.ARRANGE_DEFAULT_SNAP) opts.snap = state.snap;
-  if (state.len != null) opts.len = state.len;
   // Which tracks are IN the arrangement - what tells a new one (fill it) from one you emptied
   // (leave it silent). See reconcileArrangement.
   if (state.tracks?.length) opts.tracks = state.tracks.slice();
@@ -26856,7 +26876,9 @@ function arCallOpts(state) {
   // anywhere puts the same curves back under the clips they were drawn against.
   const autos = (state.autos ?? []).map((a) => (typeof a === 'string' ? a : a.id)).filter(Boolean);
   if (autos.length) opts.autos = autos;
-  if (state.loops.length) opts.loops = state.loops.map((r) => [r.name, r.start, r.end]);
+  // Always written, empty or not: a call without the key is read as a song that loops over its
+  // whole length, so "no loops" has to be said.
+  opts.loops = (state.loops ?? []).map((r) => [r.name, r.start, r.end]);
   return opts;
 }
 
@@ -26866,14 +26888,14 @@ function serializeArrangeCall(state) {
   const optsText = Object.entries(opts)
     .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
     .join(', ');
-  if (!clips && !optsText) return '_arrange()';
-  return optsText ? `_arrange(${JSON.stringify(clips)}, { ${optsText} })` : `_arrange(${JSON.stringify(clips)})`;
+  return `_arrange(${JSON.stringify(clips)}, { ${optsText} })`; // never optionless: `loops` is always written
 }
 
 function writeArrangeCall(record = true, { evaluate = true } = {}) {
   if (!arState) return;
   const range = arState.marker.find();
   if (!range) return;
+  arResolveOverlaps(); // no edit leaves an overlap behind (the held clip wins - see the reserve's note)
   if (record) arPushHistory();
   // Every clip edit comes through here, so this is where a row appears or goes: a clip pasted onto
   // a track the buffer no longer has needs its orphan row before anything tries to draw it.
@@ -26917,8 +26939,8 @@ const arRegionData = (r) => ({ name: r.name, start: r.start, end: r.end }); // w
 // the same way it undoes a clip - the panel owns the keystroke, and a gesture it can't undo would
 // read as the shortcut being broken. Only the FOCUSED lane's: the others are on screen to be read
 // against it, and undoing into a lane you are not holding would be a change you can't see happen.
-const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), len: arState.len, snap: arState.snap, tracks: arState.tracks.slice(), colors: { ...arState.colors }, loops: arState.loops.map(arRegionData), autoId: arState.autoId, autoPts: arState.autoPts.map((p) => ({ ...p })) });
-const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.len}|${s.snap}|${s.tracks.join(',')}|${JSON.stringify(s.colors)}|${JSON.stringify(s.loops.map(arRegionData))}|${s.autoId}|${JSON.stringify(s.autoPts)}`;
+const arSnapshot = () => ({ clips: arState.clips.map((c) => ({ ...c })), snap: arState.snap, tracks: arState.tracks.slice(), colors: { ...arState.colors }, loops: arState.loops.map(arRegionData), autoId: arState.autoId, autoPts: arState.autoPts.map((p) => ({ ...p })) });
+const arSnapKey = (s) => `${arrangeMod.serializeArrangement(s.clips)}|${s.snap}|${s.tracks.join(',')}|${JSON.stringify(s.colors)}|${JSON.stringify(s.loops.map(arRegionData))}|${s.autoId}|${JSON.stringify(s.autoPts)}`;
 
 function arPushHistory() {
   const snap = arSnapshot();
@@ -26937,7 +26959,6 @@ function arHistoryStep(delta) {
   arState.histIdx = next;
   const snap = arState.history[next];
   arState.clips = snap.clips.map((c) => ({ ...c }));
-  arState.len = snap.len;
   arState.snap = snap.snap;
   arState.tracks = snap.tracks.slice();
   arState.colors = { ...snap.colors };
@@ -27025,7 +27046,7 @@ function arRestoreView() {
   }
   const scroll = Number(v.scroll);
   if (Number.isFinite(scroll)) {
-    arState.scroll = Math.max(0, Math.min(scroll, Math.max(0, arLoopLen() - arVisibleBars() / 2)));
+    arState.scroll = Math.max(0, Math.min(scroll, Math.max(0, arExtent() - arVisibleBars() / 2)));
   }
   const lane = Number(v.lane);
   if (Number.isFinite(lane)) arState.scrollLane = Math.max(0, lane);
@@ -27048,8 +27069,8 @@ function openArrangeEditor(call) {
     callStart: call.start,
     clips,
     snap: opts.snap, // cells per bar the painter snaps to (editor metadata, written to the call)
-    len: opts.len, // explicit loop length in bars, or null for "the last clip's end"
     loops: opts.loops.map((r) => ({ ...r })), // loop regions [{ name, start, end }] - see ArrangeClock
+    reserve: [], // what gave way to a clip that is still selected, kept until it is not (see arResolveOverlaps)
     tracks: opts.tracks.slice(), // the tracks that are IN it (membership, not order - see reconcileArrangement)
     colors: { ...opts.colors }, // chosen clip colors by label; everything else takes a derived hue (see arHsl)
     rows: [], // one per track: { label, own, depth, parent, group } - filled by arRefreshRows below
@@ -27114,7 +27135,7 @@ function openArrangeEditor(call) {
   arRestoreView(); // after the sizing: the clamps need to know how much is on screen
   // ...and the marker, where it was left - unless the song has since got shorter than it.
   const kept = arKeptInsert[arDeck];
-  arState.insert = kept != null && kept < arLoopLen() ? kept : null;
+  arState.insert = kept != null && kept < arExtent() ? kept : null;
   drawArrange();
   if (!arRaf) arRaf = requestAnimationFrame(arPlayheadLoop);
   // The song clock the server is running for THIS deck: the painter opened after the eval that
@@ -27155,7 +27176,8 @@ function arReflectView() {
 function arPlayheadLoop() {
   if (!arState) { arRaf = null; return; }
   arWatchView();
-  if (!transport.paused || arPlayheadOn) drawArrange();
+  // ...and a tempo change while stopped: the clock ruler is drawn at the tempo it was read at
+  if (!transport.paused || arPlayheadOn || transport.cps !== arDrawnCps) drawArrange();
   arRaf = requestAnimationFrame(arPlayheadLoop);
 }
 
@@ -27868,7 +27890,6 @@ function arSyncControls() {
     arSnapSelect.appendChild(o);
   }
   arSnapSelect.value = String(arState.snap);
-  arLenInput.value = arState.len == null ? '' : String(arState.len);
   arReflectSnap();
 }
 
@@ -27887,8 +27908,12 @@ function arReflectSnap() {
   if (opt.textContent !== text) opt.textContent = text;
 }
 
-/** The loop length the painter shows and the server plays: explicit, or the last clip's end. */
-const arLoopLen = () => arrangeMod.arrangementLength(arState.clips, { len: arState.len });
+/** Where the song ends, in bars: the right edge of its last clip. Playback stops there. */
+const arSongEnd = () => arrangeMod.arrangementEnd(arState.clips);
+/** How far anything reaches - the song's end or a loop region past it. What the view clamps to. */
+const arExtent = () => Math.max(arSongEnd(), ...arState.loops.map((r) => r.end));
+/** What a track joining the arrangement is filled over (the rule reconcileArrangement follows). */
+const arFillLen = () => arSongEnd() || Math.max(0, ...arState.loops.map((r) => r.end)) || arrangeMod.ARRANGE_DEFAULT_LEN;
 
 // --- geometry ---
 
@@ -27923,7 +27948,7 @@ function arVisibleRows() {
   const head = arPanel.querySelector('.pianoroll-panel-head')?.offsetHeight ?? 0;
   const page = arPanel.clientHeight ? arPanel.clientHeight - head - 24 : 0; // 24: the body's padding
   const room = Math.max(AR_PANEL_MIN_H, page || Math.round((window.innerHeight || 900) * AR_PANEL_SHARE))
-    - AR_LANES_TOP - arAutoVisible() * AR_AUTO_H - AR_PAD_BOTTOM;
+    - AR_LANES_TOP - arAutoVisible() * AR_AUTO_H - AR_TIME_H - AR_PAD_BOTTOM;
   const fit = Math.max(AR_SQUEEZE_ROWS, Math.floor(room / AR_ROW));
   return Math.min(fit, Math.max(AR_MIN_ROWS, arRowCount()));
 }
@@ -27938,6 +27963,39 @@ const arClampRows = () => {
 const arGridBottom = () => AR_LANES_TOP + arVisibleRows() * AR_ROW;
 const arInLoops = (y) => y < AR_LOOPS_H;
 const arInRuler = (y) => y >= AR_RULER_TOP && y < AR_LANES_TOP;
+
+// --- the clock ruler ---
+//
+// The bar ruler along the top says where in the SONG a thing is; this one, along the bottom, says
+// WHEN - minutes and seconds from bar 1, at the tempo the transport is running at now. One tempo
+// for the whole axis: a patterned or ramped tempo is read as whatever it is at this moment, so
+// the ruler is exact for a song at one tempo and a fair estimate for one that moves.
+
+/** The clock ruler's tick step in seconds, given how many pixels a second is worth. */
+function arTimeStep(pxPerSec) {
+  return AR_TIME_STEPS.find((step) => step * pxPerSec >= AR_TIME_LABEL_PX) ?? AR_TIME_STEPS[AR_TIME_STEPS.length - 1];
+}
+
+/** Seconds as m:ss - with the decimals a sub-second `step` needs, and none otherwise. */
+function arFmtClock(sec, step = 1) {
+  const places = step >= 1 ? 0 : step >= 0.5 ? 1 : 2;
+  const unit = 10 ** places;
+  const t = Math.round(Math.max(0, sec) * unit) / unit;
+  const m = Math.floor(t / 60);
+  return `${m}:${(t - m * 60).toFixed(places).padStart(places ? places + 3 : 2, '0')}`;
+}
+
+/** The ticks to draw across [scroll, scroll + visible) bars at `cps`: [{ sec, bars }], and their step. */
+function arTimeTicks(scroll, visible, cps, pxPerCycle) {
+  if (!(cps > 0) || !(pxPerCycle > 0)) return { step: 0, ticks: [] };
+  const step = arTimeStep(pxPerCycle * cps);
+  const ticks = [];
+  // Counted in whole steps, so the thousandth tick is as exact as the first.
+  for (let k = Math.max(0, Math.ceil(scroll / cps / step - 1e-9)); k * step * cps <= scroll + visible + 1e-9; k++) {
+    ticks.push({ sec: k * step, bars: k * step * cps });
+  }
+  return { step, ticks };
+}
 
 // --- the automation strips' own geometry ---
 //
@@ -28018,7 +28076,7 @@ function arSizeCanvas() {
   if (!w) return;
   const dpr = Math.min(3, window.devicePixelRatio || 1);
   arW = w;
-  arH = arAutoAreaBottom() + AR_PAD_BOTTOM;
+  arH = arAutoAreaBottom() + AR_TIME_H + AR_PAD_BOTTOM;
   arCanvas._dpr = dpr;
   arCanvas.width = w * dpr;
   arCanvas.height = arH * dpr;
@@ -28100,6 +28158,7 @@ function arZoomFocusX() {
 
 function drawArrange() {
   if (!arState || !arrangeMod) return;
+  arSettleReserve(); // a clip that has left the selection gives up what it was covering
   const css = getComputedStyle(document.documentElement);
   const col = (v) => css.getPropertyValue(v).trim();
   const dpr = arCanvas._dpr || 1;
@@ -28112,7 +28171,7 @@ function drawArrange() {
   ctx.textBaseline = 'middle';
 
   arReflectSnap(); // the auto division follows the zoom, and every zoom comes through here
-  const loopLen = arLoopLen();
+  const songEnd = arSongEnd();
   const gridTop = AR_LANES_TOP;
   const gridBottom = arGridBottom();
   const firstLane = Math.floor(arState.scrollLane);
@@ -28133,12 +28192,12 @@ function drawArrange() {
       ctx.globalAlpha = 1;
     }
   }
-  // past the loop's end: dimmed, nothing there plays
-  const loopX = arXOf(loopLen);
-  if (loopX < W) {
+  // past the song's end: dimmed, nothing there plays
+  const endX = arXOf(songEnd);
+  if (endX < W) {
     ctx.fillStyle = col('--bg');
     ctx.globalAlpha = 0.55;
-    ctx.fillRect(Math.max(AR_GUTTER, loopX), gridTop, W - Math.max(AR_GUTTER, loopX), gridBottom - gridTop);
+    ctx.fillRect(Math.max(AR_GUTTER, endX), gridTop, W - Math.max(AR_GUTTER, endX), gridBottom - gridTop);
     ctx.globalAlpha = 1;
   }
 
@@ -28227,14 +28286,13 @@ function drawArrange() {
     const y = arYOf(row);
     const w = Math.max(2, dx2 - dx - 1);
     const selected = arState.sel.has(c);
-    const past = c.start >= loopLen - 1e-9;
     // A member's clip on its folded group's row: the thin sub-lane bar (see squishLanes above).
     // No border, title or bar lines - at this height it is a picture, not a handle.
     const squish = squishLanes.get(row);
     if (squish?.has(c.label)) {
       const bandH = (AR_ROW - 8) / squish.size;
       const sy = y + 4 + squish.get(c.label) * bandH;
-      ctx.fillStyle = arClipColor(c, selected ? 0.95 : past || c.mute ? 0.3 : 0.7, c.mute ? AR_MUTED_SAT : 1);
+      ctx.fillStyle = arClipColor(c, selected ? 0.95 : c.mute ? 0.3 : 0.7, c.mute ? AR_MUTED_SAT : 1);
       ctx.fillRect(dx, sy, Math.max(2, dx2 - dx - 1), Math.max(1.5, bandH - 1));
       continue;
     }
@@ -28245,7 +28303,7 @@ function drawArrange() {
     // is still a clip, in its place and ready to be picked up, it just isn't sounding. Faded the
     // same way a clip PAST the loop end is, since both mean "drawn here, not heard here".
     const sat = c.mute ? AR_MUTED_SAT : 1;
-    const dim = past || c.mute;
+    const dim = c.mute;
     ctx.fillStyle = arClipColor(c, dim ? 0.1 : 0.22, sat);
     prRoundRect(ctx, dx + 0.5, boxY, w, boxH, 4); ctx.fill();
     // the title, solid: it is the clip as a thing you can pick up, and it has to read as a handle
@@ -28358,7 +28416,7 @@ function drawArrange() {
   }
   ctx.restore();
 
-  // ruler: bar numbers, and the loop's end as a marker you can drag
+  // ruler: bar numbers
   ctx.fillStyle = col('--bg-panel');
   ctx.fillRect(0, AR_RULER_TOP, W, AR_RULER);
   ctx.strokeStyle = col('--border');
@@ -28446,15 +28504,14 @@ function drawArrange() {
     ctx.fillRect(x1, 3, x2 - x1, AR_LOOPS_H - 6);
     ctx.globalAlpha = 1;
   }
-  // loop end
-  if (loopX >= AR_GUTTER && loopX <= W + 1) {
+  // the song's end: where playback stops. A line and not a handle - it is the last clip's edge,
+  // and moving it means moving the clip.
+  if (songEnd > 0 && endX >= AR_GUTTER && endX <= W + 1) {
     ctx.strokeStyle = col('--accent');
     ctx.setLineDash([4, 3]);
-    ctx.globalAlpha = arState.len == null ? 0.5 : 0.9;
-    ctx.beginPath(); ctx.moveTo(Math.round(loopX) + 0.5, AR_RULER_TOP); ctx.lineTo(Math.round(loopX) + 0.5, gridBottom); ctx.stroke();
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath(); ctx.moveTo(Math.round(endX) + 0.5, AR_RULER_TOP); ctx.lineTo(Math.round(endX) + 0.5, gridBottom); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = col('--accent');
-    ctx.beginPath(); ctx.moveTo(loopX, AR_LANES_TOP - 1); ctx.lineTo(loopX - 5, AR_RULER_TOP + 1); ctx.lineTo(loopX + 5, AR_RULER_TOP + 1); ctx.closePath(); ctx.fill();
     ctx.globalAlpha = 1;
   }
 
@@ -28574,16 +28631,34 @@ function drawArrange() {
     }
   }
 
+  // the clock ruler: the same axis in minutes and seconds (see arTimeTicks)
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, autoBottom, W, AR_TIME_H);
+  ctx.strokeStyle = col('--border');
+  ctx.beginPath(); ctx.moveTo(0, autoBottom + 0.5); ctx.lineTo(W, autoBottom + 0.5); ctx.stroke();
+  arDrawnCps = transport.cps;
+  const clock = arTimeTicks(arState.scroll, arVisibleBars(), transport.cps, arState.pxPerCycle);
+  ctx.fillStyle = col('--text-dim');
+  for (const tick of clock.ticks) {
+    const x = arXOf(tick.bars);
+    if (x < AR_GUTTER) continue;
+    ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, autoBottom); ctx.lineTo(Math.round(x) + 0.5, autoBottom + 4); ctx.stroke();
+    ctx.fillText(arFmtClock(tick.sec, clock.step), x + 3, autoBottom + AR_TIME_H / 2 + 1);
+  }
+  ctx.globalAlpha = 0.7;
+  ctx.fillText('time', 8, autoBottom + AR_TIME_H / 2 + 1);
+  ctx.globalAlpha = 1;
+
   // playhead
   arPlayheadOn = false;
   if (!transport.paused) {
-    const pos = clockState ? clockState.pos : ((currentCyclePos() % loopLen) + loopLen) % loopLen;
+    const pos = clockState ? clockState.pos : currentCyclePos();
     const x = arXOf(pos);
     if (x >= AR_GUTTER && x <= W) {
       ctx.strokeStyle = col('--accent');
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = 0.85;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, autoBottom); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, autoBottom + AR_TIME_H); ctx.stroke(); // through the clock ruler, so the time reads off it
       ctx.globalAlpha = 1;
       ctx.lineWidth = 1;
       arPlayheadOn = true;
@@ -28791,7 +28866,7 @@ function arCursorFor(x, y) {
     return arTool === 'draw' ? CUR_PENCIL : 'crosshair';
   }
   // the ruler: the loop-end marker sets the length; everywhere else is the zoom/pan magnifier
-  if (arInRuler(y)) return x < AR_GUTTER ? 'default' : arNearLoopEnd(x) ? 'col-resize' : CUR_ZOOM;
+  if (arInRuler(y)) return x < AR_GUTTER ? 'default' : CUR_ZOOM;
   if (arInLoops(y)) {
     if (x < AR_GUTTER) return 'default';
     const rh = arRegionHit(x);
@@ -29175,7 +29250,7 @@ function arJoinClips() {
 
 /** A clip over the whole song, the way a track joins the arrangement (see arReconcileTracks). */
 function arFillTrack(label) {
-  arState.clips.push(arFillClip(label, arLoopLen()));
+  arState.clips.push(arFillClip(label, arFillLen()));
   writeArrangeCall();
   drawArrange();
 }
@@ -29193,7 +29268,8 @@ function arFillTrack(label) {
  */
 function arClipOverlaps(winners) {
   const win = new Set(winners);
-  if (!win.size) return;
+  const carved = []; // { orig, pieces }: every clip that gave way, and what is left of it
+  if (!win.size) return carved;
   const spans = new Map(); // label -> the bars that track has been claimed over
   for (const w of win) {
     if (!spans.has(w.label)) spans.set(w.label, []);
@@ -29215,10 +29291,70 @@ function arClipOverlaps(winners) {
     const whole = pieces.length === 1 && Math.abs(pieces[0][0] - c.start) < 1e-9
       && Math.abs(pieces[0][1] - c.start - c.len) < 1e-9;
     if (whole) { kept.push(c); continue; }
-    for (const [s, e] of pieces) kept.push(arClipPiece(c, s, e - s));
+    const left = pieces.map(([s, e]) => arClipPiece(c, s, e - s));
+    kept.push(...left);
+    carved.push({ orig: c, pieces: left });
     arState.sel.delete(c); // whatever survived it is a new clip; the one that was held has gone
   }
   arState.clips = kept;
+  return carved;
+}
+
+// The overlap rule for clips that are MOVED or RESIZED onto others - the roll's rule (see
+// prResolveOverlaps), clip-shaped. A track's clips never overlap: the clip in the hand is on top,
+// and whatever it lies over gives way (arClipOverlaps). But what gave way is kept in RESERVE for
+// as long as the clip on top stays selected, so dragging it back off - or shortening it again, or
+// nudging it away - gives the part underneath everything back. The moment it leaves the selection
+// (a click elsewhere, escape, another clip picked, the painter shut) the reserve is let go and
+// what gave way is gone for good: the song then says exactly what it plays, with nothing
+// remembered that could spring back on an unrelated edit later.
+//
+// arState.clips is always the carved truth - what is drawn, hit, written and heard - so nothing
+// that reads clips has to know the reserve exists. It is kept beside them: for each clip that gave
+// way, the clip as it was, the pieces standing in for it, and the clips it gave way to.
+
+/** Is every reserved clip still exactly as it was carved, and still under a clip that is held? */
+function arReserveStands(held) {
+  const live = new Set(arState.clips);
+  return (arState.reserve ?? []).every((r) => r.by.every((w) => held.has(w) && live.has(w))
+    && r.pieces.every((pc, i) => live.has(pc) && !held.has(pc)
+      && Math.abs(pc.start - r.stamps[i][0]) < 1e-9 && Math.abs(pc.len - r.stamps[i][1]) < 1e-9));
+}
+
+/** The clips on top right now: the selection, and whatever a drag is carrying. */
+const arHeldClips = () => new Set([...arState.sel, ...(arState.drag?.targets ?? [])]);
+
+/**
+ * Let go of a reserve that no longer stands - its clip on top was deselected, or something else
+ * edited the pieces - without touching a clip: what is on screen is already the carved truth.
+ * Called from drawArrange, which every change to the selection comes through.
+ */
+function arSettleReserve() {
+  if (arState.reserve?.length && !arReserveStands(arHeldClips())) arState.reserve = [];
+}
+
+/**
+ * Apply the overlap rule under the clips that are held (see the note above): what they were
+ * covering comes back, then gives way again to where they are NOW. Called on every frame of a move
+ * or a resize, and by writeArrangeCall - the one door every edit leaves through - so no gesture
+ * can write an overlap into the song.
+ */
+function arResolveOverlaps() {
+  if (!arState) return;
+  const held = arHeldClips();
+  arSettleReserve();
+  // Everything in reserve comes back whole...
+  // (a clip buried outright has no pieces standing in for it, and comes back all the same)
+  const pieces = new Set((arState.reserve ?? []).flatMap((r) => r.pieces));
+  if (arState.reserve?.length) arState.clips = [...arState.clips.filter((c) => !pieces.has(c)), ...arState.reserve.map((r) => r.orig)];
+  // ...and gives way to the held clips as they lie now. A clip they have moved off is simply a
+  // clip again; one they still cover is carved, and remembered.
+  const winners = [...held].filter((c) => arState.clips.includes(c));
+  arState.reserve = arClipOverlaps(winners).map((r) => ({
+    ...r,
+    by: winners.filter((w) => w.label === r.orig.label),
+    stamps: r.pieces.map((pc) => [pc.start, pc.len]),
+  }));
 }
 
 /**
@@ -29537,21 +29673,34 @@ function arPasteTime() {
   drawArrange();
 }
 
-// Open `w` bars of empty time at `at`: clips at or past it move right, loop-region edges and the
-// explicit length ride along (an edge at or past the seam shifts, so a region straddling it
-// stretches rather than losing its tail).
+// Open `w` bars of empty time at `at`: clips at or past it move right, a clip lying ACROSS it is
+// cut there - its head stays, its tail rides right with everything else, entering its roll where
+// the cut fell (see arClipPiece) - and loop-region edges ride along (an edge at or past the seam
+// shifts, so a region straddling it stretches rather than losing its tail). Left whole, a clip
+// across the seam sat over the time that had just been opened, and whatever was put there
+// overlapped it.
 function arInsertTime(at, w) {
-  for (const c of arState.clips) if (c.start >= at) c.start += w;
+  const tails = [];
+  for (const c of arState.clips) {
+    const end = c.start + c.len;
+    if (c.start >= at - 1e-9) c.start += w;
+    else if (end > at + 1e-9) {
+      const tail = arClipPiece(c, at, end - at);
+      tail.start += w;
+      tails.push(tail);
+      c.len = at - c.start; // the head is still the clip that was held, if it was
+    }
+  }
+  arState.clips.push(...tails);
   for (const r of arState.loops) {
     if (r.start >= at) r.start += w;
     if (r.end >= at) r.end += w;
   }
-  if (arState.len != null && arState.len >= at) arState.len += w;
 }
 
 // Close the [a, b) span: clips starting in it go, later ones slide left, a clip running into it
-// is trimmed by what the span took, and loop-region edges and the explicit length map the same
-// way (a region squeezed to nothing is dropped).
+// is trimmed by what the span took, and loop-region edges map the same way (a region squeezed to
+// nothing is dropped).
 function arRemoveTime(a, b) {
   const w = b - a;
   const pt = (t) => (t <= a ? t : t >= b ? t - w : a);
@@ -29569,7 +29718,6 @@ function arRemoveTime(a, b) {
     return r.end - r.start > 1e-9;
   });
   if (arState.selRegion && !arState.loops.includes(arState.selRegion)) arState.selRegion = null;
-  if (arState.len != null) arState.len = Math.max(arCell(), pt(arState.len));
 }
 
 function arTimeDuplicate() {
@@ -29578,7 +29726,9 @@ function arTimeDuplicate() {
   const [a, b] = region;
   const w = b - a;
   arInsertTime(b, w);
-  const copies = arState.clips.filter((c) => c.start >= a && c.start < b).map((c) => ({ ...c, start: c.start + w }));
+  // What is copied is the SPAN, not the clips that happen to start in it: a clip running into it
+  // or out of it contributes the bars of it that are marked, and nothing else (see arClipsIn).
+  const copies = arClipsIn(a, b).map((c) => ({ ...c, start: c.start + b }));
   arState.clips.push(...copies);
   arState.sel = new Set(copies);
   arState.regionSpan = [b, b + w]; // the copy is the new region, so the gesture repeats down the song
@@ -30421,8 +30571,6 @@ function arRegionAt(x) {
   return best;
 }
 
-const arNearLoopEnd = (x) => Math.abs(x - arXOf(arLoopLen())) <= 6;
-
 // --- the song clock ---
 // The server gates the tracks by its ArrangeClock; the painter draws the playhead by a twin built
 // from the same snapshot (see arrange.mjs), refreshed by every eval and every ctrl+L.
@@ -30441,12 +30589,52 @@ function arClockState() {
   return arClockTwin.stateAt(currentCyclePos());
 }
 
+// --- the end of the song ---
+// A song stops at the end of its last clip unless a loop region holds it (see arrange.mjs), and it
+// is the SERVER that stops it. This side only has to notice: each deck's clock gets a twin here as
+// well, painter or no painter, and when one says its song is over the server is asked. Asked, not
+// told - the twin is as good as this page's mirror of the transport and no better - and the answer
+// carries the transport and the clock as they stand, so a twin that was early or stale is put
+// right and asks again.
+const songEndClocks = { a: null, b: null };
+const songEndAsked = { a: 0, b: 0 }; // when each deck last asked, so an early twin doesn't ask every frame
+const SONG_END_ASK_MS = 250;
+
+function songEndSetClock(deck, snap) {
+  songEndClocks[deck] = snap && arrangeMod ? new arrangeMod.ArrangeClock(snap) : null;
+}
+
+function songEndTick() {
+  if (!playing || transport.paused) return;
+  for (const deck of ['a', 'b']) {
+    const end = songEndClocks[deck]?.endCycle();
+    if (end == null || currentCyclePos() < end || Date.now() - songEndAsked[deck] < SONG_END_ASK_MS) continue;
+    songEndAsked[deck] = Date.now();
+    api('POST', '/api/arrangeEnd', { deck })
+      .then((res) => {
+        songEndSetClock(deck, res.ended ? null : res.arrange ?? null);
+        if (arDeck === deck) arSetClock(res.arrange ?? null);
+        if (!res.ended) return;
+        const all = !!res.transport?.paused; // nothing else was playing, so the clock stopped with it
+        if (all || deck === 'a') {
+          if (recState) cancelMidiRecord(true);
+          if (trackRecState) cancelTrackRecord(true);
+        }
+        logLine(`[arrange] ${mixModeOn ? `deck ${deck.toUpperCase()}` : 'the song'} reached its end`);
+        stopLanded(all ? { transport: res.transport } : { transport: null }, deck);
+      })
+      .catch(() => {});
+  }
+}
+
 /** ctrl+L: release the loop region playback is in. Works from anywhere in the editor. */
 function arrangeUnlock() {
   // The deck being painted, if the painter is up; otherwise the one you are performing on.
-  api('POST', '/api/arrangeUnlock', { deck: arState ? arDeck : (mixModeOn ? djActiveDeck : 'a') })
+  const deck = arState ? arDeck : (mixModeOn ? djActiveDeck : 'a');
+  api('POST', '/api/arrangeUnlock', { deck })
     .then((res) => {
       arSetClock(res.arrange ?? null);
+      songEndSetClock(deck, res.arrange ?? null);
       logLine(res.released ? `[arrange] loop ${res.released} released` : '[arrange] no loop to release');
       if (arState) drawArrange();
       // The grid window in hand was walked through the clock as it was - looping - so from here on
@@ -30526,15 +30714,7 @@ function initArrangeCanvas() {
 
     if (arInRuler(y)) {
       if (x < AR_GUTTER) return;
-      // the loop-end marker: drag it to set the length, which is where the song wraps
-      if (arNearLoopEnd(x)) {
-        arState.drag = { kind: 'len', moved: false };
-        arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
-        arSyncControls();
-        drawArrange();
-        return;
-      }
-      // the rest of the ruler is a magnifier: drag down to zoom in, up to zoom out, and the bar
+      // the ruler is a magnifier: drag down to zoom in, up to zoom out, and the bar
       // you grabbed stays under the pointer, so a sideways drag pans as well
       arState.drag = { kind: 'zoom', bar: arBarsOf(x), x0: x, lx: x, ly: y, gx: 0, gy: 0, px0: arState.pxPerCycle, gate: axisGateState() };
       return;
@@ -30859,10 +31039,6 @@ function initArrangeCanvas() {
       d.gx += g.dx; d.gy += g.dy;
       arState.pxPerCycle = Math.min(AR_MAX_PX_PER_CYCLE, Math.max(AR_MIN_PX_PER_CYCLE, d.px0 * Math.exp(d.gy * NAV_ZOOM_PER_PX)));
       arState.scroll = Math.max(0, d.bar - (d.x0 + d.gx - AR_GUTTER) / arState.pxPerCycle);
-    } else if (d.kind === 'len') {
-      arState.len = Math.max(arCell(), arSnapTo(arBarsOf(x)));
-      d.moved = true;
-      arSyncControls();
     } else if (d.kind === 'region') {
       const bars = arBarsOf(x);
       d.b = bars >= d.a ? Math.max(d.a + arCell(), arSnapTo(bars)) : Math.max(0, Math.floor(bars / arCell()) * arCell());
@@ -30922,6 +31098,7 @@ function initArrangeCanvas() {
         // deliberate way to gate it.
         c.label = rowShift !== 0 ? arDropLabel(o.row + rowShift) ?? o.label : o.label;
       }
+      arResolveOverlaps(); // clips it passes over give way, and come back behind it
       d.moved = d.moved || shift !== 0 || rowShift !== 0;
     } else if (d.kind === 'resize') {
       const dBars = arBarsOf(x) - arBarsOf(d.x0);
@@ -30943,6 +31120,7 @@ function initArrangeCanvas() {
           c.len = Math.max(arCell(), arSnapTo(o.start + o.len + dBars) - o.start);
         }
       }
+      arResolveOverlaps(); // an edge dragged through the next clip pushes it back, and lets it out again
       d.moved = true;
     } else if (d.kind === 'regionMove') {
       const shift = Math.max(arSnapTo(arBarsOf(x) - arBarsOf(d.x0)), -d.orig.start);
@@ -31059,7 +31237,7 @@ function initArrangeCanvas() {
       arRefreshCursor();
       return;
     }
-    if (d.kind === 'len' || d.moved || d.painted) writeArrangeCall();
+    if (d.moved || d.painted) writeArrangeCall();
     drawArrange();
     arRefreshCursor();
   };
@@ -31154,13 +31332,6 @@ function initArrangeCanvas() {
       arState.sel.clear();
       drawArrange();
       arNameRegion(region);
-    }
-    else if (arInRuler(y) && arState.len != null && arNearLoopEnd(x)) {
-      // the ruler: back to an automatic length
-      arState.len = null;
-      arSyncControls();
-      writeArrangeCall();
-      drawArrange();
     }
     else if (arInRuler(y)) {
       // double-click the ruler: back to the top of the song, first lane at the top
@@ -31414,14 +31585,6 @@ function initArrangeEditor() {
   arSnapSelect.addEventListener('change', () => {
     if (!arState) return;
     arState.snap = arSnapSelect.value === 'auto' ? 'auto' : Math.max(1, Math.round(Number(arSnapSelect.value) || 1));
-    writeArrangeCall();
-    drawArrange();
-  });
-  arLenInput.addEventListener('change', () => {
-    if (!arState) return;
-    const v = Number(arLenInput.value);
-    arState.len = Number.isFinite(v) && v > 0 ? v : null;
-    arSyncControls();
     writeArrangeCall();
     drawArrange();
   });

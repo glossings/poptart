@@ -2501,9 +2501,80 @@ const HOST_BUILDERS = { setbpm, setscale };
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
 // with the loop regions' wraps and releases recorded in it. Built by the arrangement pass of
-// /api/evaluate and KEPT across evals whose length and regions are unchanged, so editing a clip
-// mid-song doesn't forget which loop the playhead is in. Null while the deck has no arrangement.
+// /api/evaluate and KEPT across evals whose regions are unchanged, so editing a clip mid-song
+// doesn't forget which loop the playhead is in; an eval that changes the regions builds the new
+// clock where the old one stands (ArrangeClock#rebuilt). Null while the deck has no arrangement.
 const arrangeClocks = { a: null, b: null };
+
+/** Is any of this deck's pattern tracks playing? */
+function deckRunning(deck) {
+  return [...schedulers].some(([key, sch]) => deckOfKey(key) === deck && sch.running);
+}
+
+// The end of a deck's arrangement. A song runs from bar 0 to the end of its last clip, and only a
+// loop region keeps it from getting there (see pattern-core's arrange.mjs), so a deck that arrives
+// stops - the same stop the editor's Cmd+. asks for, which leaves whatever is sounding to ring out
+// and, with nothing else playing, takes the clock back to the top. Read off the clock rather than
+// timed: a tempo change or a released region moves the end, and a poll has nothing to re-arm.
+const ARRANGE_END_POLL_MS = 50;
+
+/** Has this deck's playback run off the end of its arrangement? */
+function arrangeEnded(deck) {
+  const clock = arrangeClocks[deck];
+  if (!clock || !engine || !transport || transport.paused || !deckRunning(deck)) return false;
+  const end = clock.endCycle();
+  return end != null && transport.cycleAt(engine.getTime()) >= end;
+}
+
+function arrangeEndWatch() {
+  for (const deck of ['a', 'b']) {
+    if (!arrangeEnded(deck)) continue;
+    stopPlayback(deck);
+  }
+}
+setInterval(arrangeEndWatch, ARRANGE_END_POLL_MS).unref();
+
+/**
+ * Stop playback: one deck's (DJ mode's per-pane Cmd+., or a deck reaching the end of its
+ * arrangement) or, with no deck named, everything. A deck's schedulers stop, its tracks stay warm,
+ * and the shared clock keeps running for the other deck. Only when nothing is left playing
+ * anywhere does it fall through to the full stop - so stopping the last playing deck behaves
+ * exactly like a normal stop. Returns the /api/stop body: `transport` is null when the clock ran
+ * on for the other deck.
+ */
+function stopPlayback(deck = null) {
+  // A deck's song pauses where it stands (a stop is not an unload - play resumes from here).
+  const pauseSong = (d) => {
+    if (!songDecks[d]) return;
+    songDecks[d].cueHeld = false; // a stop under a held cue wins; the release finds nothing to undo
+    songPause(d);
+  };
+  if (deck) {
+    for (const [key, sch] of schedulers) if (deckOfKey(key) === deck) sch.stop();
+    pauseSong(deck);
+    for (const id of [...kbHeld.keys()]) if (deckOfKey(id) === deck) releaseKbNotes(id);
+    const otherPlaying = [...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)
+      || ['a', 'b'].some((d) => d !== deck && songDecks[d]?.playing);
+    if (otherPlaying) {
+      mixNotify(); // the paused song's pane must hear playing:false, or its playhead sweeps on
+      return { deck, transport: null };
+    }
+  }
+  for (const sch of schedulers.values()) sch.stop();
+  for (const d of ['a', 'b']) pauseSong(d);
+  // Release any live-keyboard notes still held so nothing rings through the stop.
+  for (const id of [...kbHeld.keys()]) releaseKbNotes(id);
+  // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top. The
+  // live note log counts in that clock's cycles, so it goes too.
+  transport?.stop();
+  clearLiveLog();
+  for (const d of ['a', 'b']) arrangeClocks[d]?.reset(); // back to the top, every loop armed
+  // Now that nothing is playing, any plugin edit held back during the performance is free to
+  // capture (the suspension it costs has nothing left to interrupt).
+  flushPluginCaptures();
+  mixNotify(); // both decks' songs just paused - the panes' playheads follow the SSE frame
+  return { transport: transport?.snapshot() ?? null };
+}
 
 // Each deck's painted clips, kept for the same reason and read the same lazily: a clips() head
 // (see signal.mjs) asks for its own row's clips as each cycle is built, so the rolls painted along
@@ -4663,33 +4734,48 @@ const routes = {
     // a row you emptied has to mean. Only real tracks: an anonymous block (`$: …`, a bare
     // statement) is never a row, so it is left playing whatever it plays.
     //
-    // Every arrangement in the buffer contributes clips to ONE timeline - they are one song - and
-    // its length is the longest of them. A clip naming a block that isn't here is worth a line: the
+    // Every arrangement in the buffer contributes clips to ONE timeline - they are one song, which
+    // ends where the last of their clips does. A clip naming a block that isn't here is worth a line: the
     // painter offers only the labels it can see, so this is a rename or a deleted block, and the
     // part it stood for is silently gone.
     const arrangements = evaluated.map((b) => b.sig).filter((v) => v?.poptartArrangeBlock);
     if (arrangements.length) {
       const clips = arrangements.flatMap((a) => a.clips);
-      const loopLen = Math.max(...arrangements.map((a) => patternCore.arrangementLength(a.clips, a.opts)));
+      const songEnd = patternCore.arrangementEnd(clips);
       const spans = patternCore.arrangementSpans(clips);
       const labels = new Set(built.map((b) => b.label));
       for (const label of spans.keys()) {
         if (!labels.has(label)) eventLogQueue.push(`[arrange] no block called ${JSON.stringify(label)} - its clips play nothing`);
       }
-      const regions = arrangements.flatMap((a) => a.opts.loops);
-      const clockKey = JSON.stringify([loopLen, regions]);
+      const regions = arrangements.flatMap((a) => patternCore.arrangementLoops(a.clips, a.opts));
+      const nowCycle = transport ? transport.cycleAt(engine ? engine.getTime() : transport.getTime()) : 0;
+      // The clock is a function of the regions alone - where the song ends is not part of where
+      // the playhead is - so painting clips keeps it, and changed regions rebuild it in place.
+      const clockKey = JSON.stringify(regions);
       if (arrangeClocks[deck]?.key !== clockKey) {
-        arrangeClocks[deck] = new patternCore.ArrangeClock({ len: loopLen, regions });
+        arrangeClocks[deck] = arrangeClocks[deck]
+          ? arrangeClocks[deck].rebuilt({ regions }, nowCycle)
+          : new patternCore.ArrangeClock({ regions });
         arrangeClocks[deck].key = clockKey;
       }
+      arrangeClocks[deck].setEnd(songEnd);
       arrangeClips[deck] = clips; // what a clips() track plays by, until the next evaluation
       const clock = arrangeClocks[deck];
-      // `arrangeFrom`: play from this bar of the song (the painter's marker) rather than wherever
-      // the clock sits - anchored at the cycle the transport is about to start from, which after a
-      // stop is 0. Done here, on the clock this eval plays by, so it can't race the eval.
-      if (body.arrangeFrom != null && Number.isFinite(Number(body.arrangeFrom)) && transport) {
-        const at = clock.seek(transport.cycleAt(engine ? engine.getTime() : transport.getTime()), Number(body.arrangeFrom));
-        eventLogQueue.push(`[arrange] playing from bar ${Math.round(at * 100) / 100}`);
+      // Where this deck's song starts from. `arrangeFrom` is the painter's marker: play from that
+      // bar rather than wherever the clock sits - anchored at the cycle the transport is about to
+      // start from, which after a stop is 0. A deck JOINING a clock the other deck already has
+      // running starts its song too - from the marker, else the top - since the transport's cycle
+      // count says nothing about this song and is as likely as not past its end; it comes in at
+      // the transport's place in the bar, so the two decks' bar lines agree. Done here, on the
+      // clock this eval plays by, so it can't race the eval.
+      // The editor sends its marker with every start; it means something only to a deck that is
+      // not already playing - an eval mid-song must leave the playhead where it is.
+      const stopped = !deckRunning(deck);
+      const from = stopped && body.arrangeFrom != null && Number.isFinite(Number(body.arrangeFrom)) ? Number(body.arrangeFrom) : null;
+      const joining = !!transport && !transport.paused && stopped;
+      if (transport && (from != null || joining)) {
+        const at = clock.seek(nowCycle, (from ?? 0) + (joining ? nowCycle - Math.floor(nowCycle) : 0));
+        if (from != null) eventLogQueue.push(`[arrange] playing from bar ${Math.round(at * 100) / 100}`);
       }
       for (const b of built) {
         const painted = spans.get(b.label);
@@ -4708,7 +4794,7 @@ const routes = {
         if (patternCore.isBusBlock(b)) continue;
         // Gated in SONG positions: the schedulers and the highlighter read every track through this
         // deck's clock (see arrangeClocks), so the gate is asked where the song is, not the transport.
-        b.sig = b.sig._arrangeGate(painted ?? [], loopLen);
+        b.sig = b.sig._arrangeGate(painted ?? []);
       }
     } else {
       arrangeClocks[deck] = null;
@@ -5084,43 +5170,24 @@ const routes = {
     return { status: 200, body: { gridFrom: from, gridCount: count, tracks } };
   },
 
-  'POST /api/stop': async (body) => {
-    // { deck } stops just that deck's playback (DJ mode's per-pane Cmd+.): its schedulers stop,
-    // tracks stay warm, and the shared clock keeps running for the other deck. Only when
-    // nothing is left playing anywhere does it fall through to the full stop below - so
-    // stopping the last playing deck behaves exactly like a normal stop.
-    const deck = body?.deck === 'a' || body?.deck === 'b' ? body.deck : null;
-    // A deck's song pauses where it stands (a stop is not an unload - play resumes from here).
-    const pauseSong = (d) => {
-      if (!songDecks[d]) return;
-      songDecks[d].cueHeld = false; // a stop under a held cue wins; the release finds nothing to undo
-      songPause(d);
+  // Body: { deck? } - see stopPlayback.
+  'POST /api/stop': async (body) => ({
+    status: 200,
+    body: stopPlayback(body?.deck === 'a' || body?.deck === 'b' ? body.deck : null),
+  }),
+
+  // The editor's song clock says this deck has reached the end of its arrangement. Its twin of
+  // the clock is only as good as its mirror of the transport, so nothing is taken on its word:
+  // the deck is stopped here only if this side agrees (the end watch may well have got there
+  // first). Body: { deck? }. Returns whether the deck is stopped now, with the transport and the
+  // clock as they stand, so an editor that was early or out of date corrects itself.
+  'POST /api/arrangeEnd': async (body) => {
+    const deck = body?.deck === 'b' ? 'b' : 'a';
+    if (arrangeEnded(deck)) arrangeEndWatch();
+    return {
+      status: 200,
+      body: { ended: !deckRunning(deck), transport: transport?.snapshot() ?? null, arrange: arrangeClocks[deck]?.snapshot() ?? null },
     };
-    if (deck) {
-      for (const [key, sch] of schedulers) if (deckOfKey(key) === deck) sch.stop();
-      pauseSong(deck);
-      for (const id of [...kbHeld.keys()]) if (deckOfKey(id) === deck) releaseKbNotes(id);
-      const otherPlaying = [...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)
-        || ['a', 'b'].some((d) => d !== deck && songDecks[d]?.playing);
-      if (otherPlaying) {
-        mixNotify(); // the paused song's pane must hear playing:false, or its playhead sweeps on
-        return { status: 200, body: { deck, transport: null } };
-      }
-    }
-    for (const sch of schedulers.values()) sch.stop();
-    for (const d of ['a', 'b']) pauseSong(d);
-    // Release any live-keyboard notes still held so nothing rings through the stop.
-    for (const id of [...kbHeld.keys()]) releaseKbNotes(id);
-    // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top. The
-    // live note log counts in that clock's cycles, so it goes too.
-    transport?.stop();
-    clearLiveLog();
-    for (const d of ['a', 'b']) arrangeClocks[d]?.reset(); // back to the top, every loop armed
-    // Now that nothing is playing, any plugin edit held back during the performance is free to
-    // capture (the suspension it costs has nothing left to interrupt).
-    flushPluginCaptures();
-    mixNotify(); // both decks' songs just paused - the panes' playheads follow the SSE frame
-    return { status: 200, body: { transport: transport?.snapshot() ?? null } };
   },
 
   // A live computer-keyboard note edge from the browser - the piano roll's ⌨ button, aimed at the

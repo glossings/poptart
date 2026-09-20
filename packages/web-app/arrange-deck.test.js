@@ -126,8 +126,9 @@ test('each deck\'s eval sets the playhead clock only when the painter is on it',
 });
 
 test('deck B honors the painter\'s marker as a start bar, like the main pane', () => {
+  // Sent with every start: only the server knows whether THIS deck is stopped while the other plays.
   assert.match(grab('evalDeckB'),
-    /const arrangeFrom = start && transport\.paused && arMarkerFor\('b'\) != null/);
+    /const arrangeFrom = start && arMarkerFor\('b'\) != null/);
   assert.match(grab('evalDeckB'), /deck: 'b', start, arrangeFrom \}/);
 });
 
@@ -135,7 +136,7 @@ test('the clock is fetched for the deck being opened, and ctrl+L releases that d
   assert.match(SRC, /api\('GET', `\/api\/arrange\?deck=\$\{arDeck\}`\)/);
   assert.match(SRC, /arClockSnap = null;\n\s+api\('GET', `\/api\/arrange\?deck=/,
     'a stale clock from the other deck must not be left driving the playhead');
-  assert.match(grab('arrangeUnlock'), /deck: arState \? arDeck : \(mixModeOn \? djActiveDeck : 'a'\)/);
+  assert.match(grab('arrangeUnlock'), /const deck = arState \? arDeck : \(mixModeOn \? djActiveDeck : 'a'\);/);
   // ...and the server answers per deck, as it has kept the clocks all along
   assert.match(SERVER, /'GET \/api\/arrange': async \(query\) => \(\{[\s\S]{0,200}arrangeClocks\[query\?\.deck === 'b' \? 'b' : 'a'\]/);
 });

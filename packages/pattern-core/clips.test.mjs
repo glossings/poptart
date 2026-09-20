@@ -154,7 +154,7 @@ test('with no arrangement at all a clips() track is silent, and says so', () => 
 test('read through the song clock, a loop region replays the clips', () => {
   _roll('a', '60,0,1', { grid: 4 });
   _roll('b', '70,0,1', { grid: 4 });
-  const clock = new ArrangeClock({ len: 4, regions: [{ name: 'intro', start: 0, end: 2 }] });
+  const clock = new ArrangeClock({ end: 4, regions: [{ name: 'intro', start: 0, end: 2 }] });
   paint('lead,0,1,ra lead,1,1,rb');
   const sig = headFor('lead');
   // How the scheduler and the highlighter read every track (see songSteps).

@@ -121,7 +121,7 @@ test('the roll records its focus on press and through a drag, and its keys pass 
 function arRestore(saved, { loopLen = 32, rows = 8, visibleRows = 8, visibleBars = 20 } = {}) {
   const arState = { pxPerCycle: 44, scroll: 0, scrollLane: 0 };
   // eslint-disable-next-line no-new-func
-  new Function('arState', 'arDeck', 'arReadViews', 'arLoopLen', 'arVisibleBars', 'arRowCount',
+  new Function('arState', 'arDeck', 'arReadViews', 'arExtent', 'arVisibleBars', 'arRowCount',
     'arVisibleRows', 'AR_MIN_PX_PER_CYCLE', 'AR_MAX_PX_PER_CYCLE', `
     let arViewSaved = null;
     const arViewOf = (st) => \`\${st.pxPerCycle}|\${st.scroll}|\${st.scrollLane}\`;
@@ -165,4 +165,57 @@ test('a zoom out of range is clamped, and junk leaves the default alone', () => 
 
 test('nothing remembered for this deck opens the painter exactly as it always did', () => {
   assert.deepEqual(arRestore(undefined), { pxPerCycle: 44, scroll: 0, scrollLane: 0 });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The clock ruler along the bottom: the bar axis again, in minutes and seconds at the tempo now
+// playing. What is worth pinning is that the labels stay apart at every zoom, land on round
+// times, and are counted rather than accumulated - a long song's last tick is as exact as its first.
+// ---------------------------------------------------------------------------------------------
+
+function clockRuler() {
+  // eslint-disable-next-line no-new-func
+  return new Function('AR_TIME_STEPS', 'AR_TIME_LABEL_PX', `
+    ${grab('arTimeStep')}
+    ${grab('arFmtClock')}
+    ${grab('arTimeTicks')}
+    return { arTimeStep, arFmtClock, arTimeTicks };`)(
+    [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 3600], 56,
+  );
+}
+
+test('the clock ruler ticks in the first round step whose labels clear each other', () => {
+  const { arTimeStep } = clockRuler();
+  assert.equal(arTimeStep(233), 0.25, 'zoomed right in: quarter seconds');
+  assert.equal(arTimeStep(56), 1);
+  assert.equal(arTimeStep(25), 5);
+  assert.equal(arTimeStep(3.5), 30);
+  assert.equal(arTimeStep(0.001), 3600, 'and never nothing, however far out');
+});
+
+test('clock labels are m:ss, with decimals only when the step needs them', () => {
+  const { arFmtClock } = clockRuler();
+  assert.equal(arFmtClock(0, 5), '0:00');
+  assert.equal(arFmtClock(75, 15), '1:15');
+  assert.equal(arFmtClock(3600, 60), '60:00');
+  assert.equal(arFmtClock(61.5, 0.5), '1:01.5');
+  assert.equal(arFmtClock(0.25, 0.25), '0:00.25');
+  assert.equal(arFmtClock(59.999, 1), '1:00', 'a rounding that carries into the minute carries');
+});
+
+test('the ticks sit where the tempo puts them on the bar axis', () => {
+  const { arTimeTicks } = clockRuler();
+  // 120 bpm in 4/4 is half a cycle a second: a bar is 2s, and at 44px a bar 5s labels clear.
+  const { step, ticks } = arTimeTicks(0, 20, 0.5, 44);
+  assert.equal(step, 5);
+  assert.deepEqual(ticks.map((t) => [t.sec, t.bars]), [[0, 0], [5, 2.5], [10, 5], [15, 7.5], [20, 10], [25, 12.5], [30, 15], [35, 17.5], [40, 20]]);
+  const far = arTimeTicks(1000, 4, 0.5, 44).ticks;
+  assert.deepEqual(far.map((t) => t.sec), [2000, 2005], 'scrolled deep into a long song the ticks are still exact');
+  assert.deepEqual(arTimeTicks(0, 20, 0, 44), { step: 0, ticks: [] }, 'no tempo, no ruler - rather than a division by zero');
+});
+
+test('the clock ruler has its own strip: the rows give up its height and the canvas grows by it', () => {
+  assert.match(SRC, /- AR_LANES_TOP - arAutoVisible\(\) \* AR_AUTO_H - AR_TIME_H - AR_PAD_BOTTOM;/);
+  assert.match(SRC, /arH = arAutoAreaBottom\(\) \+ AR_TIME_H \+ AR_PAD_BOTTOM;/);
+  assert.match(grab('arPlayheadLoop'), /transport\.cps !== arDrawnCps/, 'a tempo change while stopped redraws it');
 });
