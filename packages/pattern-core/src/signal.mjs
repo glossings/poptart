@@ -4516,7 +4516,7 @@ const SAMPLER_CONTROLS = {
   attack: { key: 'attack', unset: 0 },
   decay: { key: 'decay', unset: 0 },
   sustain: { key: 'sustain', unset: 1 },
-  release: { key: 'release', unset: 0 },
+  release: { key: 'release', unset: 0.05 },
   envscale: { key: 'envScale', unset: 1 },
   grain: { key: 'grain', unset: 0 },
   note: { key: 'note', unset: DEFAULT_SYNTH_NOTE }, // reached by bare arithmetic, not a builder

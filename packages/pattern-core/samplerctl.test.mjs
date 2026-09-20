@@ -14,7 +14,7 @@ const set = (code, label, values) => apply(code, samplerControlEdits(code, label
 
 test('unset controls read as the engine defaults', () => {
   const r = readSamplerControls('kick: s("bd")\n', 'kick');
-  assert.deepEqual([r.attack.value, r.decay.value, r.sustain.value, r.release.value], [0, 0, 1, 0]);
+  assert.deepEqual([r.attack.value, r.decay.value, r.sustain.value, r.release.value], [0, 0, 1, 0.05]);
   assert.deepEqual([r.begin.value, r.end.value, r.loop.value, r.envscale.value], [0, 1, 0, 1]);
   assert.equal(r.attack.set, false);
   assert.equal(r.fit, null);

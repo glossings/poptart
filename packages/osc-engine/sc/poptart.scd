@@ -1185,7 +1185,8 @@ server.waitForBoot {
     // below: their grains are pitch-shifted (freqScale is the rate), so they do not line up the
     // way a transparent keylock's do, and a little scatter is what keeps a stretch from combing. atk/dec/rel are the amplitude ADSR times
     // in seconds, already scaled by .envscale() on the Node side; sus is a 0..1 level. All default to
-    // 0/0/1/0, which floors down to the old tiny declick fade.
+    // 0/0/1/0, which floors down to the old tiny declick fade - the defs' own defaults, that is:
+    // Node sends every event's envelope, and an unset release arrives as its 50ms default.
     [1, 2].do { |nc|
         var toStereo = { |sig| if (nc == 1) { sig ! 2 } { sig } };
         SynthDef(("poptart_sample_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
@@ -3358,7 +3359,8 @@ OSCdef(\poptartPlaySample, { |msg|
     var latency = msg[10].asFloat, stopLatency = msg[11].asFloat;
     var amp = (msg[12] ? 1).asFloat, cut = (msg[13] ? 0).asInteger;
     // ADSR envelope: atk/dec/rel are seconds (Node applies .envscale()), sus is a 0..1 level.
-    // Defaults of 0/0/1/0 floor down to the old declick env inside the synthdef.
+    // Defaults of 0/0/1/0 floor down to the old declick env inside the synthdef (Node sends an
+    // unset release as 50ms, so the 0 here is only ever a message without one).
     var atk = (msg[14] ? 0).asFloat, dec = (msg[15] ? 0).asFloat;
     var sus = (msg[16] ? 1).asFloat, rel = (msg[17] ? 0).asFloat;
     // Loop shape (only read by the loop defs): the region it runs round, where it enters, and

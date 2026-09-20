@@ -514,10 +514,17 @@ test('envscale multiplies attack, decay and release but not sustain', () => {
   assert.ok(Math.abs(args[ENV.release] - 0.15) < 1e-12);
 });
 
-test('unset envelope sends the declick defaults, and a negative scale sends 0', () => {
+test('unset envelope sends the declick defaults and a 50ms release, and a negative scale sends 0', () => {
   const { engine, sent } = engineWithFile(4.8);
   engine.playSample('t1', 'breaks', { secPerCycle: 2 }, 0, 1);
-  assert.deepStrictEqual(sent.pop().args.slice(ENV.attack, ENV.release + 1), [0, 0, 1, 0]);
+  const unset = sent.pop().args.slice(ENV.attack, ENV.release + 1);
+  assert.deepStrictEqual(unset.slice(0, 3), [0, 0, 1]);
+  assert.ok(Math.abs(unset[3] - 0.05) < 1e-12);
+  // The default is the control's value like any other: .envscale() scales it, .release(0) beats it.
+  engine.playSample('t1', 'breaks', { envScale: 2, secPerCycle: 2 }, 0, 1);
+  assert.ok(Math.abs(sent.pop().args[ENV.release] - 0.1) < 1e-12);
+  engine.playSample('t1', 'breaks', { release: 0, secPerCycle: 2 }, 0, 1);
+  assert.strictEqual(sent.pop().args[ENV.release], 0);
   engine.playSample('t1', 'breaks', { attack: 0.1, release: 0.2, envScale: -1, secPerCycle: 2 }, 0, 1);
   const args = sent.pop().args;
   assert.strictEqual(args[ENV.attack], 0);

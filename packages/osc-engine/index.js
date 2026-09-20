@@ -287,14 +287,20 @@ const clamp01 = (v) => Math.min(1, Math.max(0, v));
  * as the pattern wrote them, each times `envScale` (.envscale(), 1 when unset). Nothing here knows
  * the note's length - `.envscale(dur())` is how a pattern asks for times that follow it. A negative
  * or non-numeric result is 0, which the voice floors to its declick fade.
+ *
+ * An unset release is DEFAULT_RELEASE_SEC, not 0: a note that ends while its sample is still loud
+ * (a kick under a one-cell pianoroll note, a loop cut at a clip's edge) needs a fade a low
+ * frequency can survive, and the declick floor is only a few milliseconds of real fall. It is the
+ * control's value like any other, so .envscale() scales it and .release(0) still asks for the floor.
  */
+const DEFAULT_RELEASE_SEC = 0.05; // mirrors pattern-core's SAMPLER_CONTROLS / SAMPLER_CTL_DEFAULTS
 function envelopeSeconds(cfg) {
   const scale = Number.isFinite(cfg.envScale) ? cfg.envScale : 1;
   const secs = (v) => {
     const out = (Number.isFinite(v) ? v : 0) * scale;
     return out > 0 ? out : 0;
   };
-  return { attack: secs(cfg.attack), decay: secs(cfg.decay), release: secs(cfg.release) };
+  return { attack: secs(cfg.attack), decay: secs(cfg.decay), release: secs(cfg.release ?? DEFAULT_RELEASE_SEC) };
 }
 
 function toOscArgs(values) {
@@ -1445,8 +1451,8 @@ class OscEngine {
       amp,
       cut,
       // ADSR amplitude envelope: attack/decay/release in seconds, each times .envscale() (see
-      // envelopeSeconds), sustain a 0..1 level. Defaults of 0/0/1/0 floor down to the sampler's
-      // original tiny declick envelope, so unset ADSR is unchanged.
+      // envelopeSeconds), sustain a 0..1 level. Unset is 0/0/1 and a 50ms release; the zeros floor
+      // down to the sampler's tiny declick fades.
       env.attack,
       env.decay,
       cfg.sustain ?? 1,

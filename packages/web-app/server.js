@@ -4885,11 +4885,13 @@ const routes = {
       let sch = schedulers.get(key);
       // A track coming back from stopped: whatever it is still sounding from before the stop goes
       // now, so the top of the bar does not play over the old copy's middle - the doubled,
-      // out-of-time drums of a quick stop/start while auditioning a part. Only on the play. The
-      // stop itself lets everything ring out, and that is a feature: long notes and top loops
-      // running on after the stop, a show's last notes. Nothing new can be clipped by it: the
-      // release is immediate, and this track's first new event is at least a send lead away.
-      if (sch && !sch.running) mappedEngine.hush(tid);
+      // out-of-time drums of a quick stop/start while auditioning a part. Only on the play - an
+      // update that lands while stopped (a panel's debounced write, a capture filed after the
+      // stop) must leave the tail alone. The stop itself lets everything ring out, and that is a
+      // feature: long notes and top loops running on after the stop, a show's last notes. Nothing
+      // new can be clipped by it: the release is immediate, and this track's first new event is at
+      // least a send lead away.
+      if (sch && !sch.running && starting) mappedEngine.hush(tid);
       if (!sch) {
         sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: key });
         schedulers.set(key, sch);

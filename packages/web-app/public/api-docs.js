@@ -439,7 +439,7 @@ const API_DOCS = {
   attack: { kind: 'both', sig: 'attack(seconds)', desc: 'Sampler envelope attack time, in seconds: the fade in from silence at the start of each note.', eg: '.attack(0.005)' },
   decay: { kind: 'both', sig: 'decay(seconds)', desc: 'Sampler envelope decay time, in seconds: the fall from full level to the sustain level.', eg: '.decay(0.3)' },
   sustain: { kind: 'both', sig: 'sustain(level)', desc: 'Sampler envelope sustain level, from 0 to 1.', eg: '.sustain(0.5)' },
-  release: { kind: 'both', sig: 'release(seconds)', desc: 'Sampler envelope release time, in seconds: the fade out once the note ends.', eg: '.release(0.1)' },
+  release: { kind: 'both', sig: 'release(seconds)', desc: 'Sampler envelope release time, in seconds: the fade out once the note ends. 0.05 where unset.', eg: '.release(0.1)' },
   grain: { kind: 'both', sig: 'grain(on)', desc: 'Plays the sample as a stream of short overlapping grains cut from around begin(), instead of one pass through it. Above 0.5 is on. The voice sounds for the length of its event and the sampler envelope shapes it as a whole. A begin() with no rhythm of its own, such as an LFO or rand(), is read by every grain as it starts.', eg: 's("pad").grain().begin(saw(0.25).range(0.2, 0.6))' },
   grainsize: { kind: 'method', sig: 'grainsize(seconds)', desc: 'Length of each grain, in seconds. Read as each grain starts, so a signal can change it within a note. Turns grain() on if nothing has set it.', eg: '.grainsize(0.08)' },
   grainrate: { kind: 'method', sig: 'grainrate(hz)', desc: 'Grains per second. The number of grains sounding at once is grainsize() times this. Turns grain() on if nothing has set it.', eg: '.grainrate(40)' },

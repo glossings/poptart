@@ -22,7 +22,7 @@ export const SAMPLER_CTL_DEFAULTS = {
   attack: 0,
   decay: 0,
   sustain: 1,
-  release: 0,
+  release: 0.05,
   envscale: 1,
   begin: 0,
   end: 1,
