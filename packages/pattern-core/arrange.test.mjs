@@ -22,6 +22,7 @@ import {
   ClipClock,
   clipsOfLabel,
   songSteps,
+  clipShiftNow,
 } from './src/index.mjs';
 
 test('parse/serialize round-trip, malformed tokens dropped', () => {
@@ -402,4 +403,20 @@ test('ClipClock: a polled control between clips runs on from the clip before', (
   assert.equal(clock.posAt(1), -3, 'ahead of the first clip it counts in toward it');
   assert.equal(clock.posAt(7), 3);
   assert.equal(clock.posAt(10), 0);
+});
+
+test('ClipClock: shiftAt is how far a read sits off the song, and songSteps builds each grid under it', () => {
+  const clock = new ClipClock(new ArrangeClock({ end: 16 }), parseArrangement('lead,4,2 lead,10,2'));
+  assert.deepEqual([1, 5, 7, 10].map((c) => clock.shiftAt(c)), [-4, -4, -4, -10]);
+  assert.equal(new ArrangeClock({ end: 16 }).shiftAt(7), 0, 'the deck\'s own clock moves nothing');
+  const built = [];
+  const grid = (cycle) => {
+    built.push([cycle, clipShiftNow()]);
+    return n('0').stepsForCycle(cycle);
+  };
+  const entries = songSteps(grid, 0, 16, clock);
+  assert.deepEqual(built, [[0, -4], [1, -4], [0, -10], [1, -10]], 'so a lane that shapes the structure is read on the song');
+  assert.deepEqual(entries.map((e) => e.shift), [-4, -4, -10, -10]);
+  assert.equal(clipShiftNow(), 0);
+  assert.deepEqual(songSteps(grid, 0, 1).map((e) => e.shift), [0], 'no clock: the song is the transport');
 });

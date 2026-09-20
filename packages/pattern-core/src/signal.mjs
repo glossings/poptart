@@ -15,7 +15,7 @@ import {
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints, parseBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_NUDGE, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
-import { inSpans } from './arrange.mjs';
+import { inSpans, clipShiftNow } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
@@ -5590,6 +5590,10 @@ function defineAuto(id, str, quiet) {
  * deck's song clock when the buffer has an arrangement (see Scheduler#setSongClock), so playing
  * from the painter's marker reads the lane from the marker. Without an arrangement the transport
  * cycle is the song.
+ *
+ * A painted track reads its pattern in CLIP time - every clip starts it over (see arrange.mjs's
+ * ClipClock) - and a lane does not follow it there: the read says how far off the song it was
+ * made (clipShiftNow), and that is taken back off before the lane is looked up.
  */
 export function auto(id) {
   const key = String(id).trim();
@@ -5603,7 +5607,7 @@ export function auto(id) {
       }
       return null;
     }
-    return sampleAutoPoints(points, pos ?? t * cps);
+    return sampleAutoPoints(points, (pos ?? t * cps) - clipShiftNow());
   });
 }
 

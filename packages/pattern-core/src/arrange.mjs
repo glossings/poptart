@@ -71,6 +71,10 @@
 // this way for its rolls (see signal.mjs); a painted GROUP does not - it has no pattern of its
 // own to restart, and its clips only gate the submix.
 //
+// One reader stays on the SONG: an automation lane (signal.mjs's auto()) is drawn against the
+// arrangement, so bar 48 of the lane is bar 48 of the song whichever clip is playing over it. A
+// read made in clip time says how far it was moved (see withClipShift), and auto() moves it back.
+//
 // The options are editor metadata plus the loop regions:
 //   snap   - the painter's grid, in cells per cycle (default 1 - one cell is one bar)
 //   tracks - the tracks that are IN the arrangement, by label. Membership, not order (the rows
@@ -468,6 +472,11 @@ export class ArrangeClock {
     return 0;
   }
 
+  /** The deck's clock reads the song where it is, so nothing it reads was moved (see ClipClock#shiftAt). */
+  shiftAt() {
+    return 0;
+  }
+
   /** The playhead's state at `cycle`: its position, the region it is looping (if any), the released names. */
   stateAt(cycle) {
     const pos = this.posAt(cycle);
@@ -527,6 +536,49 @@ export class ArrangeClock {
   }
 }
 
+// The clip shift in force: how far the read being made right now was moved off the song, pattern
+// time = song position + shift (a ClipClock window's `shift`). Whoever reads a pattern in clip
+// time binds it for the length of the read - songSteps for a grid, the scheduler for everything
+// it samples - and a signal that belongs to the song takes it back off (signal.mjs's auto()).
+// Reads are synchronous, so one module-level value is the whole mechanism, as it is for the note
+// gate. Outside any such read it is 0: the position handed over is the song's.
+let clipShift = 0;
+
+/** Runs `fn` as a read made in clip time, `shift` cycles off the song (see above). */
+export function withClipShift(shift, fn) {
+  const prev = clipShift;
+  clipShift = shift;
+  try {
+    return fn();
+  } finally {
+    clipShift = prev;
+  }
+}
+
+/** The clip shift the current read was made under - 0 for a read made in song time. */
+export function clipShiftNow() {
+  return clipShift;
+}
+
+/**
+ * songSteps entries handed over one at a time, each with its own `shift` bound for as long as the
+ * caller's loop body holds it - withClipShift for a loop, where the reads made at a step are
+ * spread through a body too long to wrap. A generator because that is what can hold a binding
+ * between two turns of someone else's loop; for...of closes it on the way out of a loop left
+ * early, which is what unbinds. Spread into an array, the entries arrive with nothing bound.
+ */
+export function* stepsUnderShift(entries) {
+  const prev = clipShift;
+  try {
+    for (const entry of entries) {
+      clipShift = entry.shift ?? 0;
+      yield entry;
+    }
+  } finally {
+    clipShift = prev;
+  }
+}
+
 /**
  * One TRACK's reading of the song clock: clip-relative time (see the note at the top). Inside a
  * clip the track reads its pattern at `position - clip.start + clip.off`, so each clip plays the
@@ -537,7 +589,8 @@ export class ArrangeClock {
  * to the scheduler and the highlighter in the deck clock's place, so every read a track makes -
  * steps, channels at their onsets, polled controls, preset and shape swaps - lands in clip time
  * without any of them knowing. It holds the deck's clock rather than a copy, so a release or a
- * seek on that is followed at once.
+ * seek on that is followed at once. What it moved a read by is on offer too (shiftAt, and the
+ * `shift` on each segment), for the signals that are read on the song whatever the clip.
  *
  * `clips` are this track's own, muted ones already left out (see clipsOfLabel). Clips of one
  * track do not overlap - the painter sees to that - but a song from before it did may hold some:
@@ -570,15 +623,31 @@ export class ClipClock {
    */
   posAt(cycle) {
     const pos = this.clock.posAt(cycle);
+    return pos + this._shiftAtPos(pos);
+  }
+
+  /**
+   * How far the track's pattern sits off the song at transport cycle `cycle`: posAt less the
+   * deck's own position. What a read made there is bound with (see withClipShift), so a signal on
+   * song time can find the song again.
+   */
+  shiftAt(cycle) {
+    return this._shiftAtPos(this.clock.posAt(cycle));
+  }
+
+  _shiftAtPos(pos) {
     let shift = this.windows.length ? this.windows[0].shift : 0;
     for (const w of this.windows) {
       if (w.from > pos + EPS) break;
       shift = w.shift;
     }
-    return pos + shift;
+    return shift;
   }
 
-  /** The deck clock's segments, cut down to this track's clips and moved into their time. */
+  /**
+   * The deck clock's segments, cut down to this track's clips and moved into their time. Each
+   * carries the `shift` that moved it, which `delta` has folded in with the deck's own jumps.
+   */
   segments(from, to) {
     const out = [];
     for (const seg of this.clock.segments(from, to)) {
@@ -587,7 +656,7 @@ export class ClipClock {
       for (const w of this.windows) {
         const a = Math.max(lo, w.from);
         const b = Math.min(hi, w.to);
-        if (b > a + EPS) out.push({ from: a - seg.delta, to: b - seg.delta, delta: seg.delta + w.shift });
+        if (b > a + EPS) out.push({ from: a - seg.delta, to: b - seg.delta, delta: seg.delta + w.shift, shift: w.shift });
       }
     }
     return out;
@@ -602,7 +671,8 @@ export class ClipClock {
  * Returns `{ step, cycle, delta }`: `step` exactly as the pattern gave it for song cycle `cycle`,
  * so its onset is at song position `cycle + step.start` - where every channel, swing grid and
  * sampler control is read - and at transport cycle `cycle + step.start - delta`, which is when it
- * plays. Both readers of a track's grid (the scheduler that plays it and the host's highlighter)
+ * plays. `shift` is the clip shift that position was read under, 0 on the deck's own clock. Both
+ * readers of a track's grid (the scheduler that plays it and the host's highlighter)
  * walk it through here, so the two cannot disagree about which bar is sounding.
  *
  * With no clock (a deck without an arrangement) the song is the transport: delta 0, never a wrap.
@@ -611,13 +681,16 @@ export class ClipClock {
  */
 export function songSteps(stepsForCycle, from, to, clock = null) {
   const out = [];
-  for (const { from: a, to: b, delta } of clock ? clock.segments(from, to) : [{ from, to, delta: 0 }]) {
+  for (const { from: a, to: b, delta, shift = 0 } of clock ? clock.segments(from, to) : [{ from, to, delta: 0 }]) {
     const lo = a + delta - EPS;
     const hi = b + delta - EPS;
     for (let cycle = Math.floor(lo + 2 * EPS); cycle < hi; cycle++) {
-      for (const step of stepsForCycle(cycle)) {
+      // The grid is built under the shift it is read at, so a lane that decides the structure -
+      // .when(auto("drop").gt(0.5), ...) - is read where the song is. `shift` rides on each entry
+      // for whoever samples the step's channels afterwards (see withClipShift).
+      for (const step of withClipShift(shift, () => stepsForCycle(cycle))) {
         const at = cycle + step.start;
-        if (at >= lo && at < hi) out.push({ step, cycle, delta });
+        if (at >= lo && at < hi) out.push({ step, cycle, delta, shift });
       }
     }
   }

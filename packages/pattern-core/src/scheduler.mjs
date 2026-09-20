@@ -26,7 +26,7 @@
 
 import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
-import { songSteps } from './arrange.mjs';
+import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 
@@ -725,10 +725,25 @@ export class Scheduler {
     return this._songClock ? this._songClock.posAt(cycle) : cycle;
   }
 
+  // Runs `fn` as a read made at transport cycle `cycle`, handing it the song position to sample at.
+  // A track on a clock of its own (arrange.mjs's ClipClock) reads in clip time, and the read is
+  // bound with how far that is off the song, so a signal that belongs to the song - an auto()
+  // lane - still finds it. Every read outside a step loop goes through here; inside one,
+  // _songSteps has done the binding.
+  _readAt(cycle, fn) {
+    if (!this._songClock) return fn(cycle);
+    return withClipShift(this._songClock.shiftAt(cycle), () => fn(this._songClock.posAt(cycle)));
+  }
+
   // The steps a pattern plays in the transport span [from, to), each with the song cycle it came
   // from and the song-minus-transport offset in force there (see arrange.mjs's songSteps).
+  //
+  // Each step is handed over with ITS clip shift bound (see _readAt, and arrange.mjs's
+  // stepsUnderShift) for as long as the caller's loop body holds it: everything sampled at a step
+  // - velocity, clip, the sampler's config, swing - is sampled inside that body, and two steps of
+  // one window can sit in different clips. So this is walked with for...of and nothing else.
   _songSteps(stepsForCycle, from, to) {
-    return songSteps(stepsForCycle, from, to, this._songClock);
+    return stepsUnderShift(songSteps(stepsForCycle, from, to, this._songClock));
   }
 
   setPattern(sig) {
@@ -833,10 +848,9 @@ export class Scheduler {
     // signal, rather than only the name, is what closes that.
     const resetSec = this.engine.getTime() + DEFAULT_LOOKAHEAD_SEC;
     const resetCycle = this.transport.cycleAt(resetSec);
-    const resetSong = this._songAt(resetCycle);
     const channel = this._channelSigs(sig);
-    const speaks = (name) => name in channel
-      && this._withNoteGate(() => channel[name].sample(resetSec, this.transport.cps, resetSong), resetCycle) != null;
+    const readAtReset = (name) => this._readAt(resetCycle, (resetSong) => channel[name].sample(resetSec, this.transport.cps, resetSong));
+    const speaks = (name) => name in channel && this._withNoteGate(() => readAtReset(name), resetCycle) != null;
     for (const name of this._prevChannelNames) {
       if (!speaks(name)) {
         this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, resetSec);
@@ -998,11 +1012,12 @@ export class Scheduler {
     const rateHz = m.sig.lfoIR ? (grainRand ? GRAIN_RAND_HZ : lfoRateHz(ir, cps)) : null;
     const synced = m.sig.lfoIR != null && ir.rateHz == null;
     m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number' || synced || grainRand;
-    const pos = this._songAt(this.transport.cycleAt(nowSec));
     // A resting signal bound (a mini-string bound mid-`~`) holds the last sent value; on the
     // very first send there's nothing to hold, so fall back to the unipolar default.
-    const lo = sampleBound(ir.min, nowSec, cps, pos) ?? (initial ? 0 : null);
-    const hi = sampleBound(ir.max, nowSec, cps, pos) ?? (initial ? 1 : null);
+    const [lo, hi] = this._readAt(this.transport.cycleAt(nowSec), (pos) => [
+      sampleBound(ir.min, nowSec, cps, pos) ?? (initial ? 0 : null),
+      sampleBound(ir.max, nowSec, cps, pos) ?? (initial ? 1 : null),
+    ]);
     if (lo == null || hi == null) return;
     if (!initial && lo === m.lastLo && hi === m.lastHi && rateHz === m.lastRateHz) return;
     m.lastLo = lo;
@@ -1166,8 +1181,7 @@ export class Scheduler {
   // its layers rather than fanning the note into a chord.
   _buildNoteMap(pitchOps) {
     const resolved = pitchOps.map((e) => (e.op === 'scale' ? { pcs: scalePitchClasses(e.name) ?? [] } : e));
-    return (noteIn, sec) => {
-      const cycle = this._songAt(this.transport.cycleAt(sec));
+    return (noteIn, sec) => this._readAt(this.transport.cycleAt(sec), (cycle) => {
       let v = noteIn;
       for (const e of resolved) {
         if (e.pcs) {
@@ -1179,7 +1193,7 @@ export class Scheduler {
         v = e.fn(v, Number(b));
       }
       return Number.isFinite(v) ? Math.min(127, Math.max(0, Math.round(v))) : null;
-    };
+    });
   }
 
   // `nowSec` is the tick's own clock reading, passed in so every event of one tick is measured
@@ -1607,29 +1621,30 @@ export class Scheduler {
   _syncBusSends(nowSec) {
     if (typeof this.engine.setBusSends !== 'function') return;
     const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
-    const applyCycle = this._songAt(this.transport.cycleAt(applySec));
     const sends = [];
-    for (const send of this.pattern?.busSends ?? []) {
-      // A patterned name resting (a `~` step, or a value the pattern doesn't cover) means no send
-      // at all for as long as the rest lasts - the send drops out of the set, which frees the bus
-      // if nothing else feeds it, rather than sending to it at zero.
-      let name = send.name;
-      if (typeof name !== 'string') {
-        const v = name.sample(applySec, this.transport.cps, applyCycle);
-        if (v == null) continue;
-        name = String(v).trim();
-        if (!name) continue;
+    this._readAt(this.transport.cycleAt(applySec), (applyCycle) => {
+      for (const send of this.pattern?.busSends ?? []) {
+        // A patterned name resting (a `~` step, or a value the pattern doesn't cover) means no send
+        // at all for as long as the rest lasts - the send drops out of the set, which frees the bus
+        // if nothing else feeds it, rather than sending to it at zero.
+        let name = send.name;
+        if (typeof name !== 'string') {
+          const v = name.sample(applySec, this.transport.cps, applyCycle);
+          if (v == null) continue;
+          name = String(v).trim();
+          if (!name) continue;
+        }
+        let amount = send.amount;
+        if (typeof amount !== 'number') {
+          const v = Number(amount.sample(applySec, this.transport.cps, applyCycle));
+          // A resting/non-numeric level holds the last one sent, same as a polled param (see
+          // _pollGenericParams) - the send is still routed, so silently dropping to 0 would be a
+          // louder mistake than staying where it was.
+          amount = Number.isNaN(v) ? this._sentAmountFor(sends.length, name) : v;
+        }
+        sends.push({ name, amount });
       }
-      let amount = send.amount;
-      if (typeof amount !== 'number') {
-        const v = Number(amount.sample(applySec, this.transport.cps, applyCycle));
-        // A resting/non-numeric level holds the last one sent, same as a polled param (see
-        // _pollGenericParams) - the send is still routed, so silently dropping to 0 would be a
-        // louder mistake than staying where it was.
-        amount = Number.isNaN(v) ? this._sentAmountFor(sends.length, name) : v;
-      }
-      sends.push({ name, amount });
-    }
+    });
 
     if (sends.length === 0) {
       if (this._busRouted) this.engine.clearBusSends(this.trackId);
@@ -1697,19 +1712,22 @@ export class Scheduler {
     // setParam in a timestamped bundle at applySec) - sampling at nowSec instead would put
     // every polled control a constant lookahead (150ms) behind the note grid.
     const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
-    const applyCycle = this._songAt(this.transport.cycleAt(applySec)); // read in song time (see setSongClock)
-    for (const c of this._controlEntries(this.pattern)) {
-      if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // runs natively, programmed once in setPattern()
-      // A mixer control being dragged holds this one at the value under your finger (see
-      // holdChannel); the pattern's own value is what it returns to when you let go. Read with a
-      // conditional rather than `&&` so a plugin param can't come out as `false ?? sample`.
-      const held = c.slot === CHANNEL_SLOT ? this._channelHold.get(c.name) : undefined;
-      const value = held ?? c.sig.sample(applySec, this.transport.cps, applyCycle);
-      if (typeof value === 'number') {
-        if (c.name === 'bend' && c.slot === CHANNEL_SLOT) this._checkBendRange(value, applySec, applyCycle);
-        this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);
+    // Read in song time (see setSongClock) - which on a painted track is the clip's own, with the
+    // way back to the song bound for the lanes that want it (see _readAt).
+    this._readAt(this.transport.cycleAt(applySec), (applyCycle) => {
+      for (const c of this._controlEntries(this.pattern)) {
+        if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // runs natively, programmed once in setPattern()
+        // A mixer control being dragged holds this one at the value under your finger (see
+        // holdChannel); the pattern's own value is what it returns to when you let go. Read with a
+        // conditional rather than `&&` so a plugin param can't come out as `false ?? sample`.
+        const held = c.slot === CHANNEL_SLOT ? this._channelHold.get(c.name) : undefined;
+        const value = held ?? c.sig.sample(applySec, this.transport.cps, applyCycle);
+        if (typeof value === 'number') {
+          if (c.name === 'bend' && c.slot === CHANNEL_SLOT) this._checkBendRange(value, applySec, applyCycle);
+          this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);
+        }
       }
-    }
+    });
     // Held controls the pattern doesn't carry at all - a block with no .pan() still has a pan knob,
     // and grabbing it has to sound. The loop above only walks what the pattern set.
     for (const [name, value] of this._channelHold) {
