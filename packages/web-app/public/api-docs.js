@@ -62,8 +62,8 @@ const API_DOCS = {
   },
   record: {
     kind: 'method',
-    sig: 'record({ cycles, name, wrapTail })',
-    desc: 'Marks the track for recording; double-click the name, or press {app+b} inside the block, to open the recorder. cycles is the length (4 by default), name the file name (the track label by default), and wrapTail: true folds the release tail back onto the start, for a track that begins in silence.',
+    sig: 'record({ cycles, name, wrapTail, normalize })',
+    desc: 'Marks the track for recording; double-click the name, or press {app+b} inside the block, to open the recorder. cycles is the length (4 by default), name the file name (the track label by default), and wrapTail: true folds the release tail back onto the start, for a track that begins in silence. The finished take is scaled to a −1 dBFS peak; normalize: false keeps the recorded level.',
     eg: 'note("c2 eb2").synth("Serum 2").record({ cycles: 8 })',
   },
   mini: {

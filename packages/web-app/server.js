@@ -2081,13 +2081,25 @@ function audioDeviceWarning() {
     layout: audioDevices.deviceLayout(audioDevices.AGGREGATE_UID),
     outDevice: plainOutputDevice(audioOutputDevices()),
     absent: splitSelectedInputs().absent.map(inputDeviceName),
-  });
+  }) ?? inputLayoutChange();
   return problem ? { message: problem.message, detail: problem.detail } : null;
+}
+
+// Non-null when the inputs have moved under the running engine - a selected device connected or
+// disconnected since boot. Only an engine restart takes that in, which is what apply does (the
+// settings tab enables it whenever there is a warning to act on).
+function inputLayoutChange() {
+  if (!engine || !activeAudioDevice) return null;
+  return audioSelection.layoutChangeSinceBoot({ booted: bootedInputLayout, live: readInputLayout() });
 }
 
 // The device scsynth actually opened, as reported by audioOutputDevices() - set by loadEngine on
 // every start and read by wireEngine to tell pattern-core which input channels input() can address.
 let activeAudioDevice = null;
+// The input layout as it stood when the engine opened the device - what input() resolves against
+// and what the settings tab shows. Deliberately not re-read while the engine runs: scsynth sized
+// its input buses at boot, so a later read describes channels the engine cannot address.
+let bootedInputLayout = [];
 // Non-null when the engine booted with a headphone-cue pair: { offset, name }. `offset` is the
 // pair's first channel inside the combined device - what the track SynthDefs' cue send writes to.
 let activeCue = null;
@@ -2369,7 +2381,8 @@ function wireEngine() {
   // Which input channels input() can address, and what a device-relative input("name", n) resolves
   // against. Only the booted device has any, so this is re-fed on every start (a device change is
   // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
-  patternCore.setAudioInputLayout(audioInputLayout());
+  bootedInputLayout = readInputLayout();
+  patternCore.setAudioInputLayout(bootedInputLayout);
   // A fresh engine knows no named packs; the registry (buffer + prebake) is still standing.
   syncSamplePacks();
 }
@@ -2378,7 +2391,10 @@ function wireEngine() {
 // makes input("Scarlett", 1) resolve to the right absolute channel across several interfaces. The
 // order is read back from CoreAudio rather than assumed, and only ACTIVE subdevices are counted,
 // since an unplugged one contributes no channels and renumbers everything after it.
-function audioInputLayout() {
+//
+// This is the LIVE read. Everything user-facing goes through audioInputLayout() below, which is
+// the layout the running engine booted with.
+function readInputLayout() {
   if (!activeAudioDevice || !activeAudioDevice.inChannels) return [];
   const layout = audioDevices.deviceLayout(activeAudioDevice.uid);
   const subs = (layout?.subDevices ?? []).filter((d) => d.inChannels > 0);
@@ -2389,6 +2405,10 @@ function audioInputLayout() {
   }
   if (!subs.length) return [{ name: activeAudioDevice.name, inChannels: activeAudioDevice.inChannels }];
   return subs.map((d) => ({ name: d.name, inChannels: d.inChannels }));
+}
+
+function audioInputLayout() {
+  return bootedInputLayout.map((d) => ({ ...d }));
 }
 
 async function init() {
@@ -3388,6 +3408,7 @@ async function finalizeTrackRec(wrote = {}) {
       startSec: REC_PRE_ROLL_SEC,
       lengthSec: rec.endSec - rec.startSec,
       wrapTail: rec.wrapTail,
+      normalize: rec.normalize,
     });
     if (!info) throw new Error(`couldn't read the capture the engine wrote (${rec.capture})`);
     rec.result = { name, file: dest, cycles: rec.cycles, ...info };
@@ -5765,7 +5786,7 @@ const routes = {
     return { status: 200, body: trackRecStatus() };
   },
 
-  // Arm a bounce of one labeled block. Body: { label, cycles, name, wrapTail }. Starts at the next
+  // Arm a bounce of one labeled block. Body: { label, cycles, name, wrapTail, normalize }. Starts at the next
   // phrase boundary that leaves room for the pre-roll; the response carries the start/end cycles so
   // the editor can draw the count-in against its own copy of the transport.
   // --- the performance mixer (two decks + the DJ stage; see TODO.md) ---
@@ -6320,6 +6341,7 @@ const routes = {
       endSec,
       name: String(body.name ?? '').trim(),
       wrapTail: body.wrapTail === true,
+      normalize: body.normalize !== false,
       capture: recordings.captureFile(label),
       result: null,
       error: null,
@@ -6583,7 +6605,7 @@ const routes = {
     return { status: 200, body: { device, warning: rebuildWarning ?? audioDeviceWarning() } };
   },
 
-  // Input-capable devices, the saved extra-input selection, and the live channel layout input()
+  // Input-capable devices, the saved extra-input selection, and the booted channel layout input()
   // resolves against. `available: false` means no poptart-audio helper, so only the booted device's
   // own inputs can be used (absolute channel numbers still work).
   'GET /api/audioInputs': async () => ({

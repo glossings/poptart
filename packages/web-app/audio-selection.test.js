@@ -10,7 +10,7 @@ const assert = require('node:assert');
 
 const {
   plainOutputDevice, deviceToOpen, audibleChannels, playbackChannels, outputChannelChoices,
-  aggregateProblem, aggregateMembers, splitConnected, aggregateStaleReason,
+  aggregateProblem, aggregateMembers, splitConnected, aggregateStaleReason, layoutChangeSinceBoot,
 } = require('./audio-selection.js');
 
 const AGG = 'com.poptart.aggregate';
@@ -291,4 +291,29 @@ test('aggregateMembers: output device first, and never twice', () => {
   // Picking the output device as an extra input too is the ordinary case for an interface that
   // does both - it stays the clock master and does not get a second membership.
   assert.deepStrictEqual(aggregateMembers('OUT', ['OUT', 'BH']), ['OUT', 'BH']);
+});
+
+// --- inputs that moved under a running engine ---
+
+test('layoutChangeSinceBoot: silent while the inputs are what the engine booted with', () => {
+  const layout = [{ name: 'Scarlett 6i6 USB', inChannels: 6 }, { name: 'BlackHole 2ch', inChannels: 2 }];
+  assert.equal(layoutChangeSinceBoot({ booted: layout, live: layout.map((d) => ({ ...d })) }), null);
+  assert.equal(layoutChangeSinceBoot({ booted: [], live: [] }), null);
+});
+
+test('layoutChangeSinceBoot: a device connected after boot is named, and the message says what to press', () => {
+  const booted = [{ name: 'Scarlett 6i6 USB', inChannels: 6 }];
+  const live = [...booted, { name: 'iPhone Microphone', inChannels: 1 }];
+  const change = layoutChangeSinceBoot({ booted, live });
+  assert.equal(change.kind, 'changed-since-boot');
+  assert.match(change.message, /press apply/);
+  assert.match(change.detail, /connected: iPhone Microphone/);
+  assert.doesNotMatch(change.detail, /disconnected:/);
+});
+
+test('layoutChangeSinceBoot: a device that went away, and a reorder, both count', () => {
+  const a = { name: 'Scarlett 6i6 USB', inChannels: 6 };
+  const b = { name: 'BlackHole 2ch', inChannels: 2 };
+  assert.match(layoutChangeSinceBoot({ booted: [a, b], live: [a] }).detail, /disconnected: BlackHole 2ch/);
+  assert.match(layoutChangeSinceBoot({ booted: [a, b], live: [b, a] }).detail, /channel order or counts differ/);
 });

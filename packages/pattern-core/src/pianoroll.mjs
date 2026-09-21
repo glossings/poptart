@@ -192,6 +192,30 @@ export function normalizePianoRollMode(mode) {
   return PIANOROLL_MODES.includes(name) ? name : 'note';
 }
 
+/**
+ * Which axes a roll can be drawn on, in PIANOROLL_MODES order. An axis nothing can be about is
+ * worse than an absent one, so each has to be about something:
+ *
+ *   note   always - every event has a pitch.
+ *   index  a sampler source with files to choose between: a folder pack or a named one. A source
+ *          that is one file - a `file:` path, a `rec:` bounce - has no "which file" to ask.
+ *   slice  a sampler chain that chops (`.slice()`/`.slices()`).
+ *
+ * `ref` is the chain's source in the engine's namespaced spelling (null on a synth track), `chops`
+ * whether the chain chops, `hasIndex`/`hasSlice` whether the roll's own notes already carry a file
+ * index or a slice. Data already drawn keeps its axis, and so does the axis the roll is on now:
+ * deleting a `.slices()` call must not silently move a drawn roll onto another ruler.
+ */
+export function pianoRollModesFor({ mode = 'note', ref = null, chops = false, hasIndex = false, hasSlice = false } = {}) {
+  const current = normalizePianoRollMode(mode);
+  const source = ref == null ? '' : String(ref);
+  const oneFile = source.startsWith('file:') || source.startsWith('rec:');
+  const files = (source !== '' && !oneFile) || hasIndex;
+  const chopped = (source !== '' && !!chops) || hasSlice;
+  return PIANOROLL_MODES.filter((name) => name === 'note' || name === current
+    || (name === 'index' && files) || (name === 'slice' && chopped));
+}
+
 /** The channel `mode` draws on, and the ones it leaves at their defaults. */
 export const PIANOROLL_ROW_FIELD = { note: 'midi', index: 'index', slice: 'slice' };
 

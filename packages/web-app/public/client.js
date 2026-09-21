@@ -4506,7 +4506,8 @@ const PR_MODE_ROWS = {
 // isn't. So each one has to be about something -
 //
 //   note   always. Every event has a pitch, and a roll with no sampler under it has only that.
-//   index  a sampler chain (or a roll already drawn on files) - "which file" needs files.
+//   index  a sampler chain with files to choose between (or a roll already drawn on files). A
+//          source that is one file - se(), sr() - has no "which file", so it is not offered one.
 //   slice  a sampler chain that CHOPS - one that says .slice()/.slices(), or a roll that already
 //          carries chops. Slice numbers mean nothing against a sample nothing has cut up, which is
 //          why this one is gated where index isn't.
@@ -4517,12 +4518,13 @@ const PR_MODE_ROWS = {
 function prModesFor() {
   const chain = prState?.chain;
   const notes = prState ? prLiveNotes(prState.notes) : [];
-  const mode = prState?.mode ?? 'note';
-  const files = !!chain?.ref
-    || notes.some((nt) => pianorollMod.noteIndex(nt) !== pianorollMod.PIANOROLL_DEFAULT_INDEX);
-  const chops = (chain?.ref && chain.chops) || notes.some((nt) => pianorollMod.noteSlice(nt) !== null);
-  return pianorollMod.PIANOROLL_MODES.filter((name) => name === 'note' || name === mode
-    || (name === 'index' && files) || (name === 'slice' && chops));
+  return pianorollMod.pianoRollModesFor({
+    mode: prState?.mode ?? 'note',
+    ref: chain?.ref?.ref ?? null,
+    chops: !!chain?.chops,
+    hasIndex: notes.some((nt) => pianorollMod.noteIndex(nt) !== pianorollMod.PIANOROLL_DEFAULT_INDEX),
+    hasSlice: notes.some((nt) => pianorollMod.noteSlice(nt) !== null),
+  });
 }
 
 // --- file names on the index axis ---------------------------------------------------------------
@@ -11751,12 +11753,13 @@ const recordLabelEl = document.getElementById('recordLabel');
 const recordCycles = document.getElementById('recordCycles');
 const recordName = document.getElementById('recordName');
 const recordWrapTail = document.getElementById('recordWrapTail');
+const recordNormalize = document.getElementById('recordNormalize');
 const recordGo = document.getElementById('recordGo');
 const recordAgain = document.getElementById('recordAgain');
 const recordStatus = document.getElementById('recordStatus');
 const recordClose = document.getElementById('recordClose');
 
-let recordState = null; // { marker, callStart, label, cycles, name, wrapTail } while a panel is open
+let recordState = null; // { marker, callStart, label, cycles, name, wrapTail, normalize } while a panel is open
 let recordSuppressCursor = false;
 let trackRecState = null; // latest /api/trackRecord status while armed/recording, else null
 let trackRecPoll = null;
@@ -11789,13 +11792,15 @@ function findRecordCallAt(code, idx) {
 function parseRecordCall(inner) {
   const cycles = Math.max(1, Math.round(Number((/cycles\s*:\s*(\d+)/.exec(inner) ?? [])[1] ?? 4) || 4));
   const name = (/name\s*:\s*['"]([^'"]*)['"]/.exec(inner) ?? [])[1] ?? '';
-  return { cycles, name, wrapTail: /wrapTail\s*:\s*true/.test(inner) };
+  // normalize is the one option that is ON unless the call says otherwise, so only `false` is read.
+  return { cycles, name, wrapTail: /wrapTail\s*:\s*true/.test(inner), normalize: !/normalize\s*:\s*false/.test(inner) };
 }
 
-function serializeRecordCall({ cycles, name, wrapTail }) {
+function serializeRecordCall({ cycles, name, wrapTail, normalize }) {
   const parts = [`cycles: ${cycles}`];
   if (name) parts.push(`name: "${name}"`);
   if (wrapTail) parts.push('wrapTail: true');
+  if (normalize === false) parts.push('normalize: false');
   return `.record({ ${parts.join(', ')} })`;
 }
 
@@ -11830,6 +11835,7 @@ function showRecordPanel(label, opts, anchor = null) {
   recordCycles.value = recordState.cycles;
   recordName.value = recordState.name;
   recordWrapTail.checked = recordState.wrapTail;
+  recordNormalize.checked = recordState.normalize !== false;
   showLiveMeter();
   recordPanel.classList.remove('hidden');
   bringPanelToFront(recordPanel);
@@ -11908,11 +11914,12 @@ function syncRecordFromCode() {
   recordCycles.value = parsed.cycles;
   recordName.value = parsed.name;
   recordWrapTail.checked = parsed.wrapTail;
+  recordNormalize.checked = parsed.normalize;
 }
 
 // --- the bounce itself ---
 
-async function startTrackRecord(label, { cycles, name, wrapTail } = {}) {
+async function startTrackRecord(label, { cycles, name, wrapTail, normalize } = {}) {
   if (trackRecState) return cancelTrackRecord(true);
   try {
     trackRecState = await api('POST', '/api/trackRecord/start', {
@@ -11920,6 +11927,7 @@ async function startTrackRecord(label, { cycles, name, wrapTail } = {}) {
       cycles: cycles ?? (Number(recordCycles.value) || 4),
       name: name ?? '',
       wrapTail: !!wrapTail,
+      normalize: normalize !== false,
     });
     if (trackRecState.transport) transport = trackRecState.transport;
     showLiveMeter(); // watch the signal go in, not the last take
@@ -12009,7 +12017,7 @@ async function pollTrackRecord() {
 // (a ctrl+b panel), where a change would silently vanish. CSS grays them either way.
 function syncRecordControls() {
   const locked = !recordState?.marker || !!trackRecState;
-  for (const el of [recordCycles, recordName, recordWrapTail]) {
+  for (const el of [recordCycles, recordName, recordWrapTail, recordNormalize]) {
     if (el.disabled !== locked) el.disabled = locked;
   }
 }
@@ -12062,7 +12070,11 @@ function applyBounce(label, result) {
   cm.replaceRange(replacement, cm.posFromIndex(blockEnd), cm.posFromIndex(blockEnd));
   cm.replaceRange('_', cm.posFromIndex(labelIdx), cm.posFromIndex(labelIdx));
 
-  const summary = `saved as "${result.name}" · ${result.cycles} cycles · ${result.seconds.toFixed(2)}s`;
+  // What normalizing did, where it did anything worth a number - the waveform below is drawn from
+  // the file as written, so this is the only place the take's original level is still on show.
+  const gained = Math.abs(result.gainDb ?? 0) >= 0.05
+    ? ` · normalized ${result.gainDb > 0 ? '+' : '−'}${Math.abs(result.gainDb).toFixed(1)} dB` : '';
+  const summary = `saved as "${result.name}" · ${result.cycles} cycles · ${result.seconds.toFixed(2)}s${gained}`;
   setRecordStatus(`✓ ${summary}`, result.silent ? 'bad' : 'ok');
   logLine(`bounce: "${label}" ${summary} - muted the source and added sr("${result.name}").slow(${result.cycles})`);
   // Swap the panel to the finished take: what it captured is the thing you now want to look at,
@@ -12296,11 +12308,13 @@ function initRecordPanel() {
     recordState.cycles = Math.max(1, Math.round(Number(recordCycles.value) || 4));
     recordState.name = recordName.value.trim();
     recordState.wrapTail = recordWrapTail.checked;
+    recordState.normalize = recordNormalize.checked;
     writeRecordCall();
   };
   recordCycles.addEventListener('change', fromPanel);
   recordName.addEventListener('change', fromPanel);
   recordWrapTail.addEventListener('change', fromPanel);
+  recordNormalize.addEventListener('change', fromPanel);
 
   recordGo.addEventListener('click', () => {
     if (trackRecState) return cancelTrackRecord(true);
@@ -12324,7 +12338,7 @@ function bounceBlockAtCursor() {
   }
   if (trackRecState) return cancelTrackRecord(true);
   const call = findRecordCallAt(code, idx);
-  const opts = call ? parseRecordCall(code.slice(call.open + 1, call.close)) : { cycles: 4, name: '', wrapTail: false };
+  const opts = call ? parseRecordCall(code.slice(call.open + 1, call.close)) : { cycles: 4, name: '', wrapTail: false, normalize: true };
   // Open the panel on the way in, so a hotkey bounce still shows its count-in, its meter, and -
   // the point of it - what actually got recorded when it lands.
   if (!recordState || recordState.label !== label) {
@@ -15092,6 +15106,10 @@ audioDeviceSelect.addEventListener('change', async () => {
 
 let audioInputSelection = new Set();
 let audioInputSaved = '';
+// The server reported a problem with the combined device (a member unplugged, the inputs changed
+// since the engine booted). Every one of those is fixed by the rebuild-and-restart apply does, so
+// apply is enabled with the selection as it stands.
+let audioInputNeedsApply = false;
 
 function renderAudioInputLayout(layout, activeName) {
   if (!layout?.length) {
@@ -15110,7 +15128,7 @@ function renderAudioInputLayout(layout, activeName) {
 
 function syncAudioInputApply() {
   const current = [...audioInputSelection].sort().join(',');
-  audioInputApply.disabled = current === audioInputSaved;
+  audioInputApply.disabled = current === audioInputSaved && !audioInputNeedsApply;
 }
 
 // The one place a degraded combined device is visible. `warning` is { message, detail }: the panel
@@ -15136,6 +15154,7 @@ function setAudioDeviceWarning(warning) {
 async function refreshAudioInputs() {
   try {
     const { available, devices, selected, names, layout, active, warning } = await api('GET', '/api/audioInputs');
+    audioInputNeedsApply = !!warning;
     audioInputSelection = new Set(selected);
     audioInputSaved = [...audioInputSelection].sort().join(',');
     audioInputList.innerHTML = '';
@@ -15210,6 +15229,7 @@ audioInputApply.addEventListener('click', async () => {
     updateTransportButtons();
     transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
     audioInputSaved = [...uids].sort().join(',');
+    audioInputNeedsApply = false; // the rebuild and restart just happened
     audioInputs = layout ?? null; // the input(" popup's channel ranges just changed
     renderAudioInputLayout(layout, null);
     setAudioDeviceWarning(warning);

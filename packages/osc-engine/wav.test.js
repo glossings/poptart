@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
-  decodeWavRaw, encodeWav, writeWav, readWavRaw, trimWindow, trimRecording,
+  decodeWavRaw, encodeWav, writeWav, readWavRaw, trimWindow, trimRecording, normalizePeak, NORMALIZE_PEAK,
   envelope, reduceEnvelope, songWaveform, peaks, bands,
 } = require('./wav');
 
@@ -132,12 +132,59 @@ test('trimRecording takes the window in seconds and converts against the file it
   const dest = path.join(dir, 'take.wav');
   writeWav(capture, ramp(SR * 2)); // 2 seconds
 
-  const info = trimRecording(capture, dest, { startSec: 0.25, lengthSec: 1 });
+  // normalize off: the ramp's sample values are what say which frame is which.
+  const info = trimRecording(capture, dest, { startSec: 0.25, lengthSec: 1, normalize: false });
   assert.equal(info.frames, SR);
   assert.ok(Math.abs(info.seconds - 1) < 1e-9);
   assert.equal(readWavRaw(dest).frames, SR, 'and it actually wrote that file');
   // The window starts a quarter-second in, i.e. at frame 12000 of the capture.
   assert.equal(frameAt(readWavRaw(dest), 0), 12000);
+});
+
+// --- normalize ---
+
+const peakOf = (audio) => audio.data.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0);
+
+test('normalizePeak brings a quiet take up to -1 dBFS and a hot one down to it', () => {
+  const quiet = { sampleRate: SR, channels: 1, frames: 4, data: new Float32Array([0.05, -0.1, 0.02, 0]) };
+  const gain = normalizePeak(quiet);
+  assert.ok(Math.abs(gain - NORMALIZE_PEAK / 0.1) < 1e-6);
+  assert.ok(Math.abs(peakOf(quiet) - NORMALIZE_PEAK) < 1e-6, 'the negative sample was the peak');
+  assert.ok(Math.abs(quiet.data[0] / quiet.data[1] + 0.5) < 1e-6, 'one gain for everything - the shape is untouched');
+
+  const hot = { sampleRate: SR, channels: 1, frames: 2, data: new Float32Array([1.5, -0.75]) };
+  assert.ok(normalizePeak(hot) < 1);
+  assert.ok(Math.abs(peakOf(hot) - NORMALIZE_PEAK) < 1e-6);
+});
+
+test('normalizePeak leaves silence alone rather than amplifying the noise floor', () => {
+  const hiss = { sampleRate: SR, channels: 1, frames: 2, data: new Float32Array([0.0004, -0.0002]) };
+  assert.equal(normalizePeak(hiss), 1);
+  assert.ok(Math.abs(hiss.data[0] - 0.0004) < 1e-9);
+});
+
+test('trimRecording normalizes by default, reports the gain, and can be told not to', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-wav-'));
+  const capture = path.join(dir, 'capture.wav');
+  writeWav(capture, ramp(SR)); // peaks at 0.048 - a quiet take
+
+  const on = trimRecording(capture, path.join(dir, 'on.wav'), { startSec: 0, lengthSec: 1 });
+  assert.ok(Math.abs(peakOf(readWavRaw(path.join(dir, 'on.wav'))) - NORMALIZE_PEAK) < 1e-4);
+  assert.ok(on.gainDb > 20, 'and says how much it added');
+  assert.ok(Math.max(...on.peaks) > 0.8, 'the drawn envelope is the file as written');
+
+  const off = trimRecording(capture, path.join(dir, 'off.wav'), { startSec: 0, lengthSec: 1, normalize: false });
+  assert.ok(peakOf(readWavRaw(path.join(dir, 'off.wav'))) < 0.05);
+  assert.equal(off.gainDb, 0);
+});
+
+test('a silent take stays silent, and is still flagged, with normalize on', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-wav-'));
+  const capture = path.join(dir, 'capture.wav');
+  writeWav(capture, { sampleRate: SR, channels: 2, frames: SR, data: new Float32Array(SR * 2) });
+  const info = trimRecording(capture, path.join(dir, 'take.wav'), { startSec: 0, lengthSec: 0.5 });
+  assert.equal(info.silent, true);
+  assert.equal(info.gainDb, 0);
 });
 
 test('trimRecording flags a silent take', () => {

@@ -37,8 +37,8 @@ function captureWarnings(fn) {
 const SCARLETT = { name: 'Scarlett 6i6 USB', inChannels: 6 };
 const BUILTIN = { name: 'MacBook Pro Microphone', inChannels: 1 };
 
-test('input() defaults to channels 1 and 2', () => {
-  assert.deepEqual(input().inputSource, { io: 'audio', name: 'dev:', hw: { device: null, chans: [1, 2] } });
+test('input() leaves omitted channels empty - the default depends on the layout', () => {
+  assert.deepEqual(input().inputSource, { io: 'audio', name: 'dev:', hw: { device: null, chans: [] } });
 });
 
 test('input(n) is mono, input(a, b) a stereo pair - stored 1-indexed, as written', () => {
@@ -52,7 +52,7 @@ test('input() accepts a non-adjacent pair', () => {
 
 test('input("device", ...) carries the device name, with and without channels', () => {
   assert.deepEqual(input('Scarlett', 1).inputSource.hw, { device: 'Scarlett', chans: [1] });
-  assert.deepEqual(input('Scarlett').inputSource.hw, { device: 'Scarlett', chans: [1, 2] });
+  assert.deepEqual(input('Scarlett').inputSource.hw, { device: 'Scarlett', chans: [] });
   assert.equal(input('Scarlett', 1).inputSource.name, 'dev:Scarlett');
 });
 
@@ -84,6 +84,33 @@ test('device matching is a case-insensitive substring, like MIDI device names', 
   setAudioInputLayout([BUILTIN, SCARLETT]);
   assert.deepEqual(resolveInputChannels({ device: 'scarlett', chans: [1] }).chans, [1, -1]);
   assert.deepEqual(resolveInputChannels({ device: '6i6', chans: [1] }).chans, [1, -1]);
+});
+
+test('omitted channels are the first pair of a wide device', () => {
+  setAudioInputLayout([BUILTIN, SCARLETT]);
+  assert.deepEqual(resolveInputChannels({ device: 'Scarlett', chans: [] }), { chans: [1, 2], warning: null });
+  assert.deepEqual(resolveInputChannels({ device: null, chans: [] }), { chans: [0, 1], warning: null });
+});
+
+// A one-channel microphone asked for as a pair reads a channel it hasn't got: the engine clamps
+// that to the last real channel and warns, on a line of code that named no channel at all.
+test('omitted channels on a one-channel device are that channel, mono, with no warning', () => {
+  setAudioInputLayout([SCARLETT, BUILTIN]); // the microphone is the aggregate's LAST channel
+  assert.deepEqual(resolveInputChannels({ device: 'MacBook', chans: [] }), { chans: [6, -1], warning: null });
+  setAudioInputLayout([BUILTIN]);
+  assert.deepEqual(resolveInputChannels({ device: null, chans: [] }), { chans: [0, -1], warning: null });
+});
+
+test('an explicit pair on a one-channel device still warns - it was asked for', () => {
+  setAudioInputLayout([SCARLETT, BUILTIN]);
+  assert.match(resolveInputChannels({ device: 'MacBook', chans: [1, 2] }).warning, /has 1 input channel/);
+});
+
+test('omitted channels with an unknown device or no layout fall back to the absolute first pair', () => {
+  setAudioInputLayout([SCARLETT]);
+  assert.deepEqual(resolveInputChannels({ device: 'Behringer', chans: [] }).chans, [0, 1]);
+  setAudioInputLayout([]);
+  assert.deepEqual(resolveInputChannels({ device: null, chans: [] }), { chans: [0, 1], warning: null });
 });
 
 test('an unknown device warns and falls back to absolute rather than going silent', () => {

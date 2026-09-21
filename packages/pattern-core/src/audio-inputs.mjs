@@ -57,21 +57,25 @@ function findDevice(name) {
  *
  * `req` is { device, chans } - `device` null for absolute channel numbers, and `chans` a 1-indexed
  * array of 1 (mono, duplicated to both sides engine-side) or 2 (a stereo pair, in that order; they
- * need not be adjacent) channels.
+ * need not be adjacent) channels. An empty `chans` means "whatever this input is": the first pair,
+ * or the only channel when the named device (or, unnamed, the whole booted device) has just one -
+ * a one-channel microphone asked for as a pair would otherwise read a channel it hasn't got.
  *
  * Returns { chans: [a, b|-1], warning }. Never throws and never returns null: an unresolvable
  * request still yields playable channels (falling back to absolute numbering) plus a warning, per
  * the "warn, don't block sound" rule - a typo'd device name shouldn't take the whole set down.
  */
 export function resolveInputChannels(req = {}) {
-  const wanted = (Array.isArray(req.chans) && req.chans.length ? req.chans : [1, 2]).slice(0, 2);
   const total = audioInputChannelCount();
+  const hit = req.device ? findDevice(req.device) : null;
+  const given = Array.isArray(req.chans) && req.chans.length > 0;
+  const width = req.device ? hit?.device.inChannels : total;
+  const wanted = (given ? req.chans : (width === 1 ? [1] : [1, 2])).slice(0, 2);
   let offset = 0;
   let warning = null;
   let scope = 'hardware';
 
   if (req.device) {
-    const hit = findDevice(req.device);
     if (hit) {
       offset = hit.offset;
       scope = `"${hit.device.name}"`;

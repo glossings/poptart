@@ -220,7 +220,7 @@ export class Sig {
     // OUTSIDE `sampler` on purpose: that object is walked generically wherever a pattern is
     // time-warped or condition-switched, and everything in it has to be a signal.
     this.samplerKind = opts.samplerKind ?? null;
-    // .record()'s settings: { cycles, name, wrapTail }, or null. Nothing in playback reads this -
+    // .record()'s settings: { cycles, name, wrapTail, normalize }, or null. Nothing in playback reads this -
     // it's a marker for the editor's recorder panel, which finds the call in the code (see
     // client.js's findRecordCallAt) and bounces the block by its label.
     this.recordOpts = opts.recordOpts ?? null;
@@ -2972,7 +2972,8 @@ export class Sig {
    * called (the block's label if you leave it out; either way a name already in use gets a "-2"),
    * and `wrapTail` folds the release tail back over the head for a track that was silent going in
    * - leave it off when bouncing a loop that's already running, whose head already carries the
-   * previous pass's tail.
+   * previous pass's tail. The finished take is normalized to a -1 dBFS peak; `normalize: false`
+   * keeps the level it was recorded at.
    *
    * ctrl+b needs none of this: it bounces whichever block the cursor is in. .record() is for
    * seeing the signal and setting the length up front.
@@ -2990,7 +2991,7 @@ export class Sig {
       throw new Error('[signal] .record() name must be a string, e.g. .record({ name: "bassline" })');
     }
     return this._clone({
-      recordOpts: { cycles: Math.round(Number(cycles)), name: opts.name ?? null, wrapTail: opts.wrapTail === true },
+      recordOpts: { cycles: Math.round(Number(cycles)), name: opts.name ?? null, wrapTail: opts.wrapTail === true, normalize: opts.normalize !== false },
     });
   }
 
@@ -6727,7 +6728,7 @@ function bareNotes(sig, name) {
  *
  * Channels are numbered from 1, matching the numbers on the interface. One channel is mono and
  * lands centered (duplicated to both sides); two make a stereo pair, in the order given - they need
- * not be adjacent. Omit them for channels 1 and 2.
+ * not be adjacent. Omit them for channels 1 and 2, or for the only channel of a one-channel device.
  *
  * The optional leading device name picks which device's channels those are, matched
  * case-insensitively by substring. It's only meaningful when the booted audio device is a poptart
@@ -6754,8 +6755,10 @@ export function input(...args) {
     throw new Error('[signal] input() channels are numbers from 1, as labeled on the interface, e.g. input(1) or input(3, 4)');
   }
   // Resolution to absolute channels is deliberately NOT done here: the device layout is a runtime
-  // fact that changes when the aggregate is rebuilt, so the scheduler resolves it per eval.
+  // fact that changes when the aggregate is rebuilt, so the scheduler resolves it per eval. That
+  // includes the default: omitted channels stay empty here, because whether they mean a pair or a
+  // one-channel device's only channel depends on the layout.
   return new Sig(() => null, {
-    inputSource: { io: 'audio', name: `dev:${device ?? ''}`, hw: { device, chans: chans.length ? chans : [1, 2] } },
+    inputSource: { io: 'audio', name: `dev:${device ?? ''}`, hw: { device, chans } },
   });
 }

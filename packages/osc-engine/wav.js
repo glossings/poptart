@@ -177,6 +177,27 @@ function trimWindow(src, { startFrame, lengthFrames, wrapTail = false }) {
   return { sampleRate, channels, frames: length, data: out };
 }
 
+/** What a normalized take peaks at: -1 dBFS, which leaves a resampler's overshoot somewhere to go. */
+const NORMALIZE_PEAK = 10 ** (-1 / 20);
+/** Below this a take is silence (see `silent` below), and gain would only bring up the noise floor. */
+const SILENT_PEAK = 0.001;
+
+/**
+ * Scale a take, in place, so its loudest sample sits at NORMALIZE_PEAK - up for a quiet one, down
+ * for one that went over. A bounce is a sample from here on, and a sample that has to be found
+ * again with .gain() every time it is used is a worse sample. A silent take is left alone.
+ *
+ * @returns {number} the linear gain applied (1 when nothing was done).
+ */
+function normalizePeak(audio, target = NORMALIZE_PEAK) {
+  let peak = 0;
+  for (let i = 0; i < audio.data.length; i++) peak = Math.max(peak, Math.abs(audio.data[i]));
+  if (peak < SILENT_PEAK) return 1;
+  const gain = target / peak;
+  for (let i = 0; i < audio.data.length; i++) audio.data[i] *= gain;
+  return gain;
+}
+
 /**
  * Read a raw capture, cut the window out of it, and write the result. Takes the window in SECONDS
  * because that is what the caller knows - the transport's times - and the sample rate it would
@@ -184,10 +205,11 @@ function trimWindow(src, { startFrame, lengthFrames, wrapTail = false }) {
  * computed here because the samples are already in memory), or null if the capture couldn't be
  * read at all.
  *
- * @param {{ startSec: number, lengthSec: number, wrapTail?: boolean, peakBuckets?: number }} opts
- *   `startSec` is the pre-roll's length; see trimWindow for `wrapTail`.
+ * @param {{ startSec: number, lengthSec: number, wrapTail?: boolean, normalize?: boolean, peakBuckets?: number }} opts
+ *   `startSec` is the pre-roll's length; see trimWindow for `wrapTail`. `normalize` (on by default)
+ *   brings the take's peak to NORMALIZE_PEAK - after the wrap, since a folded tail adds to the head.
  */
-function trimRecording(srcPath, destPath, { startSec, lengthSec, wrapTail = false, peakBuckets = DEFAULT_BUCKETS }) {
+function trimRecording(srcPath, destPath, { startSec, lengthSec, wrapTail = false, normalize = true, peakBuckets = DEFAULT_BUCKETS }) {
   const src = readWavRaw(srcPath);
   if (!src) return null;
   const out = trimWindow(src, {
@@ -195,6 +217,7 @@ function trimRecording(srcPath, destPath, { startSec, lengthSec, wrapTail = fals
     lengthFrames: lengthSec * src.sampleRate,
     wrapTail,
   });
+  const gain = normalize ? normalizePeak(out) : 1;
   writeWav(destPath, out);
   const env = envelope(out, peakBuckets);
   return {
@@ -202,10 +225,11 @@ function trimRecording(srcPath, destPath, { startSec, lengthSec, wrapTail = fals
     channels: out.channels,
     frames: out.frames,
     seconds: out.frames / out.sampleRate,
+    gainDb: 20 * Math.log10(gain), // what normalizing added (0 when off, or nothing to do)
     ...env,
     // Nothing came out of the track - almost always a routing or mute mistake, and worth saying so
     // before the bounce is written into the code rather than after.
-    silent: Math.max(...env.peaks) < 0.001,
+    silent: Math.max(...env.peaks) < SILENT_PEAK,
   };
 }
 
@@ -375,6 +399,8 @@ module.exports = {
   encodeWav,
   writeWav,
   trimWindow,
+  normalizePeak,
+  NORMALIZE_PEAK,
   trimRecording,
   envelope,
   reduceEnvelope,

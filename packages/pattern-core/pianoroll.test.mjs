@@ -14,6 +14,7 @@ import {
   clipOverlaps,
   normalizePianoRollSteps,
   normalizePianoRollMode,
+  pianoRollModesFor,
   pianoRollEventAt,
   noteIndex,
   noteNudge,
@@ -1535,4 +1536,30 @@ test('quantize: lengths are left alone unless asked, then land on the division t
   const { notes: clipped, snipped } = quantizePianoRoll(parsePianoRoll('60,0,5 60,9,2'), { grid: 16, div: 4, ends: true });
   assert.equal(snipped, 0, 'a 5 rounded to 4 no longer reaches the note at 8');
   assert.equal(serializePianoRoll(clipped), '60,0,4 60,8,4');
+});
+
+// --- which axes a roll offers ---
+
+test('pianoRollModesFor: a synth track has the keyboard and nothing else', () => {
+  assert.deepEqual(pianoRollModesFor({}), ['note']);
+});
+
+test('pianoRollModesFor: a pack has files to choose between, and chops only once the chain chops', () => {
+  assert.deepEqual(pianoRollModesFor({ ref: 'breaks' }), ['note', 'index']);
+  assert.deepEqual(pianoRollModesFor({ ref: 'sp:kit', chops: true }), ['note', 'index', 'slice']);
+});
+
+// A bounce or an exact file is ONE file: an index axis over it is a column of rows that all play
+// the same thing.
+test('pianoRollModesFor: a one-file source offers no index axis', () => {
+  assert.deepEqual(pianoRollModesFor({ ref: 'rec:bass' }), ['note']);
+  assert.deepEqual(pianoRollModesFor({ ref: 'file:drums/kick.wav' }), ['note']);
+  assert.deepEqual(pianoRollModesFor({ ref: 'rec:bass', chops: true }), ['note', 'slice']);
+});
+
+test('pianoRollModesFor: what is already drawn, and the axis the roll is on, keep their place', () => {
+  assert.deepEqual(pianoRollModesFor({ ref: 'rec:bass', hasIndex: true }), ['note', 'index']);
+  assert.deepEqual(pianoRollModesFor({ ref: 'rec:bass', mode: 'index' }), ['note', 'index']);
+  assert.deepEqual(pianoRollModesFor({ hasSlice: true }), ['note', 'slice']);
+  assert.deepEqual(pianoRollModesFor({ mode: 'nonsense' }), ['note']);
 });

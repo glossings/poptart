@@ -120,6 +120,36 @@ function aggregateProblem({ layout, outDevice, absent = [] }) {
 }
 
 /**
+ * The input layout has moved under a running engine: a device was connected or disconnected after
+ * scsynth opened the combined device.
+ *
+ * `booted` is the layout read when the engine started, `live` the same read now, both
+ * [{ name, inChannels }] in channel order. scsynth sized its input buses at boot and input()
+ * resolves against the booted layout, so a device that arrives later is listed by the system and
+ * unreachable by the engine - and a name that does not resolve falls back to absolute channels,
+ * which is some other device's input, playing as though it were the one asked for.
+ */
+function layoutChangeSinceBoot({ booted = [], live = [] }) {
+  const key = (layout) => layout.map((d) => `${d.name}:${d.inChannels}`).join('|');
+  if (key(booted) === key(live)) return null;
+  const names = (layout) => new Set(layout.map((d) => d.name));
+  const added = live.filter((d) => !names(booted).has(d.name)).map((d) => d.name);
+  const removed = booted.filter((d) => !names(live).has(d.name)).map((d) => d.name);
+  const what = [
+    added.length ? `connected: ${added.join(', ')}` : null,
+    removed.length ? `disconnected: ${removed.join(', ')}` : null,
+  ].filter(Boolean).join('; ') || 'the channel order or counts differ';
+  return {
+    kind: 'changed-since-boot',
+    message: 'audio inputs changed since the engine started - press apply to restart with them',
+    detail: `the audio inputs have changed since the engine started (${what}). The engine keeps the `
+      + 'inputs it opened at boot, so input() cannot reach a device that arrived later and its '
+      + 'channel numbers are those of the booted layout. Press apply under "extra inputs" to rebuild '
+      + 'the combined device and restart the engine.',
+  };
+}
+
+/**
  * How many of the opened device's output channels actually reach a speaker.
  *
  * Normally that is the whole device. But when the device scsynth opened is poptart's aggregate,
@@ -231,4 +261,5 @@ function splitConnected(uids, knownUids) {
 module.exports = {
   plainOutputDevice, deviceToOpen, audibleChannels, playbackChannels, outputChannelChoices,
   DEFAULT_OUTPUT_CHANNELS, aggregateProblem, aggregateMembers, splitConnected, aggregateStaleReason,
+  layoutChangeSinceBoot,
 };
