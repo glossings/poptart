@@ -1,0 +1,159 @@
+# Builds the installers (PACKAGING.md, "Cutting a release").
+#
+# A release is cut by pushing a tag - `v0.2.0` - and never by pushing a branch: day-to-day commits
+# build nothing. The tag produces a dmg for each Mac architecture and a Windows installer, and
+# attaches them to a DRAFT release whose description is that version's CHANGELOG.md section.
+# Nothing is public until a person has installed the draft's files and pressed Publish, because a
+# green build proves the packaging and nothing about sound: runners have no audio device.
+#
+# Run by hand from the Actions tab it is a dry run: the same build, with the installers left as
+# workflow artifacts and no release made. That is how to find out whether a build works before
+# there is a version to call it.
+#
+# Signing is decided by which secrets exist, so this file is the same before and after there is
+# a certificate:
+#
+#   MAC_CERT_P12_BASE64, MAC_CERT_PASSWORD   the Developer ID Application certificate, exported
+#                                            as .p12 and base64-encoded. With them the Mac build
+#                                            is signed; without them it is not, and says so.
+#   APPLE_API_KEY_P8, APPLE_API_KEY_ID,      an App Store Connect API key, for notarization.
+#   APPLE_API_ISSUER                         Only used when the certificate is there too.
+#
+# An unsigned Mac build is for testing only - macOS will not open it for someone who downloaded
+# it. An unsigned Windows installer works, behind SmartScreen's "More info > Run anyway".
+#
+# Actions are pinned to commit SHAs, not tags: a tag can be moved, and these run with access to
+# the checkout. The trailing comment is the human-readable version.
+
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch: # a dry run - see above
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false # one platform's failure must not hide the other's result
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      HAS_MAC_CERT: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+      HAS_NOTARY_KEY: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The Node inside the Electron the app ships (electron-builder.yml's electronVersion), so
+      # the tests below run on what users will run.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/desktop/package-lock.json
+
+      - name: The tag is the version the packages carry
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node packages/desktop/release.js --check-tag "$GITHUB_REF_NAME"
+
+      - run: npm ci
+      # electron-builder downloads the Electron it packages; the copy npm would fetch here is
+      # only for running the app in development.
+      - run: npm ci --prefix packages/desktop
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Tests
+        run: |
+          npm test --workspace packages/pattern-core --workspace packages/web-app
+          npm test --prefix packages/desktop
+      # As in private-sc.yml: parts of the engine suite are known not to pass on a runner (no
+      # SuperCollider, no `ps` on Windows), so it informs without gating.
+      - name: Engine test suite (informational)
+        continue-on-error: true
+        run: npm test --workspace packages/osc-engine
+
+      - name: Signing credentials
+        if: runner.os == 'macOS'
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ "$HAS_MAC_CERT" != "true" ]; then
+            echo "::warning title=Unsigned macOS build::No signing certificate is configured, so this dmg is for testing only."
+            # Without this electron-builder goes looking through the runner's keychain.
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # electron-builder reads these names itself: the certificate, then - when all three
+          # APPLE_API_* are set - it notarizes what it signed.
+          echo "CSC_LINK=$MAC_CERT_P12_BASE64" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=$MAC_CERT_PASSWORD" >> "$GITHUB_ENV"
+          if [ "$HAS_NOTARY_KEY" = "true" ]; then
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+            echo "APPLE_API_KEY=$RUNNER_TEMP/notary-key.p8" >> "$GITHUB_ENV"
+            echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+          else
+            echo "::warning title=Not notarized::A certificate is configured but no notarization key, so macOS will still refuse this dmg."
+          fi
+
+      - name: Build the installers
+        run: npm run dist --prefix packages/desktop -- --publish never
+
+      - name: Remove the notarization key
+        if: always() && runner.os == 'macOS'
+        run: rm -f "$RUNNER_TEMP/notary-key.p8"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installers-${{ runner.os }}
+          path: |
+            packages/desktop/dist/*.dmg
+            packages/desktop/dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creates the draft release - the only job that can write anything
+    env:
+      HAS_MAC_CERT: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+      HAS_NOTARY_KEY: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          {
+            if [ "$HAS_MAC_CERT" != "true" ] || [ "$HAS_NOTARY_KEY" != "true" ]; then
+              echo "> **The macOS builds in this release are not signed and notarized, and macOS will not open them after a download. They are for testing only.**"
+              echo
+            fi
+            node packages/desktop/release.js --notes "$GITHUB_REF_NAME"
+          } > notes.md
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" installers/* --draft --verify-tag --title "poptart ${GITHUB_REF_NAME#v}" --notes-file notes.md

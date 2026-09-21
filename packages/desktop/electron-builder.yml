@@ -63,10 +63,12 @@ mac:
   hardenedRuntime: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
-  # Left unset on purpose: with no identity electron-builder produces an unsigned app, which is
-  # the right default until there is an Apple Developer account to sign with. Set CSC_LINK /
-  # CSC_KEY_PASSWORD in CI to sign, and see PACKAGING.md for notarization.
-  identity: null
+  # No identity is named here, so whether a build is signed is decided by where it runs. The
+  # release workflow passes the certificate as CSC_LINK / CSC_KEY_PASSWORD (and the APPLE_API_*
+  # key that makes electron-builder notarize what it signed) when those secrets exist, and sets
+  # CSC_IDENTITY_AUTO_DISCOVERY=false when they do not. A local build signs with a Developer ID
+  # certificate if the keychain has one and is otherwise unsigned - fine for running it here,
+  # useless for giving to anyone (PACKAGING.md).
 
 dmg:
   artifactName: poptart-${version}-${arch}.dmg

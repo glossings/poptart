@@ -13,7 +13,8 @@
     "dev": "npm run dev --workspace packages/web-app",
     "test": "npm run test --workspaces --if-present",
     "doctor": "node packages/osc-engine/doctor.js",
-    "desktop": "node packages/desktop/start.js"
+    "desktop": "node packages/desktop/start.js",
+    "release": "node packages/desktop/release.js"
   },
   "overrides": {
     "ws": "^8.21.0"

@@ -245,20 +245,26 @@ that file, including when doctor itself cannot run.
 
 ### Cutting a release
 
-Releases are cut by tag, never by push; day-to-day commits build nothing. The only workflow in
-the repo today is `private-sc.yml` (Stage 1.5's install check); nothing builds an installer
-yet. GitHub Actions has macOS and Windows runners, so neither installer needs a local machine
-of that platform to build.
+Releases are cut by tag, never by push; day-to-day commits build nothing. GitHub Actions has
+macOS and Windows runners, so neither installer needs a local machine of that platform to build.
 
-1. A local release script checks for a clean tree, runs the tests, bumps `version` in the
-   root and workspace `package.json` files, and drafts the changelog section from the commits
-   since the last tag. The commit style (one line, semicolon-separated capability clauses)
-   splits mechanically into bullets grouped by leading verb (Add / Fix / Change); the draft
-   then gets an editing pass by hand. It stops there, committing nothing.
-2. Review, commit, tag `vX.Y.Z`, push the tag.
-3. The tag triggers the workflow: build macOS (arm64 + x64) and Windows, sign, notarize,
-   attach the installers to a **draft** GitHub Release whose notes are the changelog section.
+1. `npm run release -- 0.2.0` (`packages/desktop/release.js`) refuses a dirty tree, runs the
+   tests, sets the version in every `package.json` and both lockfiles, and drafts the
+   `CHANGELOG.md` section from the commits since the last tag. The commit style (one line,
+   semicolon-separated clauses) splits mechanically into bullets grouped by leading verb (Added
+   / Fixed / Changed); the draft then gets an editing pass by hand. It stops there, committing
+   nothing.
+2. Review, commit, tag `v0.2.0`, push the tag.
+3. The tag triggers `.github/workflows/release.yml`: on macOS and Windows runners it checks
+   that the tag is the version the packages carry, runs the tests on the Node the app ships,
+   builds a dmg per Mac architecture and the Windows installer, and attaches them to a
+   **draft** GitHub Release whose notes are the changelog section. Signing and notarization
+   happen when their secrets exist (below) and are skipped, loudly, when they do not - the
+   draft's notes then say the Mac builds are for testing only.
 4. Smoke-test the draft's installers, then publish.
+
+Running the workflow by hand from the Actions tab is a dry run: the same build, installers left
+as workflow artifacts, no release. Neither path has been run yet.
 
 Step 4 cannot be automated away: CI runners have no audio device, so a green build proves the
 packaging and nothing about sound. Each platform needs a person with that machine running a
@@ -277,7 +283,10 @@ without them, but their `build.sh` scripts need Windows counterparts before pari
   looks; enrolling as an organization shows the organization's name instead, but requires a
   legal entity and a D-U-N-S number. Then: create a *Developer ID Application* certificate,
   export it as a `.p12`, create an App Store Connect API key for `notarytool`, and store all
-  of it as Actions secrets.
+  of it as Actions secrets under the names `release.yml` lists at its top
+  (`MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD`, `APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`,
+  `APPLE_API_ISSUER`). That electron-builder notarizes on those variables alone is from its
+  documentation, unconfirmed here until there is a certificate to try it with.
 - **Windows signing is optional.** An unsigned installer downloaded through a browser gets the
   SmartScreen "Windows protected your PC" dialog, passable with More info → Run anyway;
   unlike macOS this is an acceptable first release. Removing it means an OV certificate

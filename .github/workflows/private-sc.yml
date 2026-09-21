@@ -79,7 +79,10 @@ jobs:
       # Files named explicitly: what a bare directory argument to `node --test` means has changed
       # between Node versions, and these need neither Electron nor node_modules.
       - name: Desktop shell tests
-        run: node --test packages/desktop/server-process.test.js packages/desktop/ensure-electron.test.js
+        run: >-
+          node --test
+          packages/desktop/server-process.test.js packages/desktop/ensure-electron.test.js
+          packages/desktop/stage.test.js packages/desktop/diagnostics.test.js packages/desktop/release.test.js
 
       # When something fails, the report is worth more than the log: it carries every resolved
       # path, the generated config, the Extensions listing and what sclang itself reported.
