@@ -1,55 +1,46 @@
 # Packaging config for the desktop builds (PACKAGING.md, Stage 2).
 #
-# NOT YET RUN. The shell itself works - main.js starts the server and points a window at it, and
-# server-process.js is unit-tested - but no installer has been produced from this file, so treat
-# every path and glob below as a first draft to be corrected on the first real build rather than
-# as something known to work. The build also needs Apple Developer credentials it cannot be given
-# here (see "Signing" below), so a first pass will produce an unsigned app.
+# What is packaged is not the repository but `stage/`, a folder stage.js assembles from it first
+# (`npm run pack` and `npm run dist` do both steps). The repository itself cannot be the app
+# directory: electron-builder collects node_modules by walking package.json `dependencies`, of
+# which a workspace root has none, and the workspace packages resolve by name only through
+# symlinks, which a Windows installer cannot carry. stage.js explains the layout it builds; the
+# short version is that the staged folder is a plain, flat, symlink-free Node app, which is the
+# case electron-builder is built for. It also means `files` needs no globs: everything staged
+# ships, and deciding what ships is stage.js's job, where it is unit-tested.
 #
-# The app directory is the repository root, not this folder: poptart is an npm workspace, so the
-# server's own package (`packages/web-app`) and the engine (`packages/osc-engine`) live outside
-# this directory and electron-builder's `files` globs cannot reach above the app root. Pointing
-# the app root at the repository and naming this file's entry point through `extraMetadata.main`
-# is what lets one archive contain all of it with the require() paths unchanged.
+# The build also needs Apple Developer credentials it cannot be given here (see "Signing" below),
+# so without them it produces an unsigned app.
 
 appId: dev.glossing.poptart
 productName: poptart
 copyright: poptart contributors
 
+# All of these resolve against the project directory - this folder, where the build runs - as do
+# the entitlements and icon paths further down. Only `asarUnpack` is relative to the app.
 directories:
-  app: ../..
-  output: packages/desktop/dist
-  buildResources: packages/desktop/build
+  app: stage
+  output: dist
+  buildResources: build
 
-# The root package.json has no `main` and no electron dependency (deliberately - see README.md),
-# so both are supplied here.
-extraMetadata:
-  main: packages/desktop/main.js
-electronVersion: 34.0.0
+# The staged package.json has no electron dependency to read a version from, so it is named
+# here - the exact version package-lock.json installs, which stage.test.js holds it to: the app
+# must ship the Electron the launcher runs in development, not a neighbor of it.
+electronVersion: 44.4.3
 
-files:
-  - "package.json"
-  - "packages/desktop/main.js"
-  - "packages/desktop/server-process.js"
-  - "packages/desktop/loading.html"
-  - "packages/desktop/package.json"
-  - "packages/web-app/**/*"
-  - "packages/pattern-core/**/*"
-  - "packages/osc-engine/**/*"
-  - "node_modules/**/*"
-  # Tests, build scripts and the C++/Swift sources of the native helpers are not needed at
-  # runtime; the built binaries in native/*/bin are (see below).
-  - "!**/*.test.js"
-  - "!**/node_modules/.cache"
-  - "!packages/osc-engine/native/**/build/**"
-  - "!packages/desktop/dist/**"
+# Nothing here needs compiling against Electron's headers. The one native module in the tree is
+# serialport (osc pulls it in), which ships N-API prebuilds for darwin-x64+arm64 and win32-x64,
+# and the server runs as plain Node (ELECTRON_RUN_AS_NODE) where those load as they are. A rebuild
+# could only replace a working prebuild with whatever the build machine's toolchain produces.
+npmRebuild: false
 
-asar: true
-asarUnpack:
-  # Anything that has to exist as a real file on disk rather than inside the asar archive:
-  # binaries that get executed, and the SuperCollider extension that scsynth loads by path.
-  - "packages/osc-engine/native/**"
-  - "packages/osc-engine/sc/**"
+# No asar archive. The app is a plain Node server that hands other programs paths into itself:
+# sclang is given sc/poptart.scd, the native helpers are spawned, the keylock UGen is copied out
+# and the analysis worker is loaded, each by a path built from __dirname. Inside an archive those
+# paths exist only to Electron's patched fs - sclang answered 'file ".../app.asar/.../poptart.scd"
+# does not exist' - and asarUnpack does not help, because nothing rewrites a __dirname path to
+# app.asar.unpacked. An archive buys faster reads of many small files, which this app does not do.
+asar: false
 
 mac:
   category: public.app-category.music
@@ -60,6 +51,9 @@ mac:
   # access - without this key the prompt cannot be shown and the engine fails to boot.
   extendInfo:
     NSMicrophoneUsageDescription: poptart's audio engine opens your audio device, which macOS counts as microphone access.
+    # Asked the first time anything in the app reaches for the local network. Ableton Link is the
+    # part of poptart that does so by design - its peers find each other over multicast.
+    NSLocalNetworkUsageDescription: poptart uses the local network for Ableton Link, to find and sync with other Link apps. Nothing else needs it.
     NSAudioCaptureUsageDescription: poptart's audio engine opens your audio device for input as well as output.
   # Signing: poptart's own native helpers (native/bin/poptart-audio, native/link/bin/poptart-link,
   # native/rubberband/bin/PoptartPitchShift.scx) are ad-hoc signed today and must be re-signed
@@ -67,8 +61,8 @@ mac:
   # binaries ship with, and disable-library-validation is not optional: loading third-party VSTs
   # is the point of the program.
   hardenedRuntime: true
-  entitlements: packages/desktop/build/entitlements.mac.plist
-  entitlementsInherit: packages/desktop/build/entitlements.mac.plist
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
   # Left unset on purpose: with no identity electron-builder produces an unsigned app, which is
   # the right default until there is an Apple Developer account to sign with. Set CSC_LINK /
   # CSC_KEY_PASSWORD in CI to sign, and see PACKAGING.md for notarization.
@@ -77,7 +71,10 @@ mac:
 dmg:
   artifactName: poptart-${version}-${arch}.dmg
 
+# Icons: build/icon.png is picked up by name for macOS (converted to .icns); Windows gets the
+# full-bleed variant. Both are drawn by build/make-icon.js.
 win:
+  icon: build/icon-win.png
   target:
     - target: nsis
       arch: [x64]

@@ -21,7 +21,9 @@ normal browser keeps working exactly as before.
 | Server supervision (`server-process.js`) | Unit-tested (`npm test` here) |
 | Self-installing launcher (`start.js`, `ensure-electron.js`) | Unit-tested; the repair path verified against a real broken install on macOS |
 | The shell (`main.js`) | Run by hand on macOS and Windows through `npm run desktop`; never run from a packaged build |
-| Packaging (`electron-builder.yml`) | **Draft, never executed.** Treat every path in it as unconfirmed |
+| Logs and the diagnostic report (`diagnostics.js`) | Unit-tested; the Help menu items and the failure screen's links are **not yet exercised by hand** |
+| Staging (`stage.js`) | Unit-tested; run for real against this repository |
+| Packaging (`electron-builder.yml`) | An unpacked, unsigned macOS arm64 app has been built and inspected: contents, icon, `Info.plist`, and every `require` resolved under the packed runtime. Launched by hand once, which is what moved it to `asar: false`; an engine boot from the packaged app is **unconfirmed**, and no dmg or Windows installer has been produced |
 | Signing / notarization | Not done. Needs an Apple Developer account — see PACKAGING.md |
 
 ## Running it
@@ -54,15 +56,26 @@ npm run pack --prefix packages/desktop    # an unpacked app, fastest way to see 
 npm run dist --prefix packages/desktop    # a dmg / NSIS installer
 ```
 
-Read `electron-builder.yml` before trusting the output. Two things about it are worth knowing:
+Both run `stage.js` first. Three things are worth knowing:
 
-- **The app root is the repository, not this folder.** electron-builder's `files` globs cannot
-  reach above the app root, and the server and engine live in sibling packages, so the config
-  sets `directories.app: ../..` and names the entry point through `extraMetadata.main`.
+- **What gets packaged is `stage/`, not the repository.** electron-builder collects
+  `node_modules` by walking package.json `dependencies`, and a workspace root has none; the
+  workspace packages also resolve by name only through symlinks, which a Windows installer
+  cannot carry. So `stage.js` assembles a plain, symlink-free app folder: `web-app` and this
+  package keep their places under `packages/`, `osc-engine` and `pattern-core` become real
+  folders under `node_modules/@poptart`, and the third-party modules are copied from the
+  repository's own `node_modules` - the versions `package-lock.json` pinned, not a fresh
+  install.
+- **Only files git tracks are staged.** A glob over a package folder ships whatever is lying in
+  it, personal files included. Untracked files are left out and listed at the end of the run,
+  so a new source file has to be `git add`-ed before a build can see it.
 - **SuperCollider is not bundled.** The app downloads SuperCollider's own officially signed
   release on first run. That keeps this installer small and means poptart is not redistributing
   and re-signing another project's binaries — which, per PACKAGING.md, may remove the hardest
   part of Stage 2 entirely.
+
+The icons in `build/` are drawn by `build/make-icon.js` (the favicon's chip, on Apple's icon
+grid for macOS and full bleed for Windows); run it again after changing the colors.
 
 An unsigned macOS build cannot be shipped to other people: since Sequoia there is no
 right-click → Open bypass, and the System Settings route is worse than the terminal install it

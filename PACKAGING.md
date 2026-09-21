@@ -168,8 +168,27 @@ loopback port, and points a `BrowserWindow` at it; `server-process.js` holds the
 the engine comes up. The package is deliberately **outside** the npm workspaces so a plain
 `npm install` doesn't pull ~200 MB of Electron on people who only want `npm run dev`.
 
-**What does not exist yet**: any actual installer. `electron-builder.yml` is written but has
-never been run, so its globs are a first draft; and nothing is signed. Both are the next step.
+**Packaging** starts from `stage.js`, which assembles the folder electron-builder is pointed
+at: electron-builder collects modules from package.json `dependencies` (a workspace root has
+none) and a Windows installer cannot carry the workspace symlinks, so the app is staged as a
+flat, symlink-free folder of git-tracked files plus the exact third-party modules installed in
+the repository. An unpacked, unsigned macOS arm64 app has been built from it and inspected -
+contents, icon, `Info.plist`, every `require` resolved under the packed runtime. Its first
+launch failed exactly where expected: packed into an asar archive, the engine handed sclang a
+script path that exists only to Electron's patched `fs`, and `asarUnpack` does not help because
+nothing rewrites a `__dirname` path to `app.asar.unpacked`. The app is now packaged unarchived
+(`asar: false`), and the engine fails at once with the right cause when sclang cannot read its
+script, where it used to wait out the boot timeout and blame the user's `startup.scd`.
+
+**What does not exist yet**: any actual installer (no dmg or NSIS build has been run), and
+nothing is signed.
+
+**Diagnostics** (`packages/desktop/diagnostics.js`): a packaged app has no terminal, so the shell
+writes its own status lines and everything the server prints to `~/.poptart/desktop.log`, beside
+the `engine.log` sclang's output already goes to. "Save Diagnostic Report…" - in the Help menu on
+macOS, and as a link on the failure screen on every platform - runs `doctor.js` as a child of
+the app's own binary and appends the desktop log, producing one file to send. It always produces
+that file, including when doctor itself cannot run.
 
 - **Electron shell.** The web-app is a plain Node server + browser page, which is the easy
   case. Keep the page browser-compatible (no Electron-only APIs in the UI) so `npm run dev` in
@@ -204,6 +223,17 @@ never been run, so its globs are a first draft; and nothing is signed. Both are 
   - poptart's own helpers (`native/bin/poptart-audio`, `native/link/bin/poptart-link`,
     `native/rubberband/bin/PoptartPitchShift.scx`) are universal binaries with ad-hoc
     signatures today; the release build has to sign them with the Developer ID.
+- **SuperCollider's Dock icon cannot be suppressed with the official binaries.** sclang is a Qt
+  application living inside `SuperCollider.app`, so macOS registers it as a foreground app from
+  that bundle's `Info.plist`. Tried and measured (LaunchServices' own report of the process
+  type): Qt's `QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM` has no effect on a bundled
+  executable; `lsappinfo setinfo ... ApplicationType=UIElement` is accepted and ignored; Qt's
+  `offscreen` platform plugin is not shipped (only `libqcocoa`); and adding `LSUIElement` to a
+  private copy's `Info.plist` leaves sclang's and scsynth's own signatures valid but breaks the
+  bundle's seal, after which Gatekeeper refuses to launch sclang at all ("damaged"), and once
+  the copy has been launched macOS refuses the edit itself. What remains is not running that
+  sclang: Stage 3, or a Qt-less sclang (`SC_QT=OFF`) built, signed and shipped by poptart,
+  which gives up "fetched, not bundled" for that one binary.
 - **Small gotchas**: if scsynth boots with audio inputs, macOS requires a mic-permission
   prompt + `NSMicrophoneUsageDescription` in the bundle (or boot with 0 inputs by default);
   kill child sclang/scsynth on app quit so orphans can't accumulate; dmg + signing also avoids

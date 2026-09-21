@@ -15,6 +15,7 @@ const net = require('node:net');
 const path = require('node:path');
 
 const {
+  createBootNarrator,
   findFreePort,
   waitForServer,
   fetchEngineStatus,
@@ -246,4 +247,33 @@ test('stopping something already stopped is not an error', async () => {
   await new Promise((resolve) => child.once('exit', resolve));
   assert.strictEqual(await stopServer(child), 'already stopped');
   assert.strictEqual(await stopServer(null), 'already stopped');
+});
+
+test('the loading screen is told the phase, not the output', () => {
+  const narrate = createBootNarrator();
+  const said = [];
+  const feed = (line) => {
+    const update = narrate(line);
+    if (update) said.push(update.detail ? `${update.text} - ${update.detail}` : update.text);
+  };
+  feed('[sclang] compiling class library...');
+  feed('[sclang] \tFound 872 primitives.');
+  feed('[sclang] *** Welcome to SuperCollider 3.14.1. *** For help type cmd-d.');
+  feed('[sclang] poptart: booting scsynth');
+  feed('[sclang] Booting server \'poptart\' on address 127.0.0.1:57151.');
+  for (let i = 1; i <= 25; i += 1) feed(`[sclang] /Library/Audio/Plug-Ins/VST3/Plugin ${i}.vst3`);
+  feed('/Library/Audio/Plug-Ins/VST/Unprefixed Old One.vst');
+  feed('[sclang] \t[1/2] A shell plugin\'s sub-plugin');
+  feed('[sclang] WARNING: VSTPlugin: no plugin loaded!');
+  feed('[sclang] poptart: initial plugin search done (392 plugins)');
+  feed('[poptart] plugin scan finished: 392 plugin(s) known, 396 probed in 5s');
+  feed('[sclang] poptart: loaded instrument Serum 2');
+  assert.deepStrictEqual(said, [
+    'Starting SuperCollider',
+    'Starting the audio server',
+    'Scanning plugins',
+    'Scanning plugins - 10 checked',
+    'Scanning plugins - 20 checked',
+    'Loading the session',
+  ]);
 });

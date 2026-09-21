@@ -4,6 +4,8 @@ build/
 # ...except electron-builder's, which is source: the signing entitlements and (later) the app
 # icons live in a folder it expects to be called `build`.
 !packages/desktop/build/
+# The app folder packages/desktop/stage.js assembles for electron-builder; rebuilt on every run.
+packages/desktop/stage/
 *.node
 .DS_Store
 packages/native-engine/build/

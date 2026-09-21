@@ -65,3 +65,27 @@ test('skips (does not throw) when the prebuilt is missing or the destination is 
   assert.deepStrictEqual(unwritable.installed, []);
   assert.match(unwritable.skipped, /could not install/);
 });
+
+test('refuses a prebuilt for another platform and removes a copy installed earlier', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-ext-'));
+  const machO = Buffer.concat([Buffer.from([0xca, 0xfe, 0xba, 0xbe]), Buffer.from('universal binary')]);
+  const sources = fakeSources(tmp, { 'PoptartPitchShift.scx': machO });
+  const extensionsDir = path.join(tmp, 'Extensions');
+
+  // The platform it was built for: installed as usual.
+  const mac = ensurePoptartExtension({ extensionsDir, sources, platform: 'darwin' });
+  assert.deepStrictEqual(mac.installed, [...EXTENSION_FILES]);
+
+  // The same files on Windows: nothing installed, and what is already there is taken out - the
+  // class file too, since its presence alone switches the engine onto the native keylock.
+  const win = ensurePoptartExtension({ extensionsDir, sources, platform: 'win32' });
+  assert.deepStrictEqual(win.installed, []);
+  assert.match(win.skipped, /no prebuilt extension for this platform .*darwin build/);
+  for (const f of EXTENSION_FILES) {
+    assert.strictEqual(fs.existsSync(path.join(extensionsDir, 'poptart', f)), false, `${f} removed`);
+  }
+
+  // Nothing to remove is not an error either.
+  const again = ensurePoptartExtension({ extensionsDir: path.join(tmp, 'Fresh'), sources, platform: 'linux' });
+  assert.match(again.skipped, /darwin build/);
+});

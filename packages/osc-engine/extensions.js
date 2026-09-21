@@ -35,6 +35,31 @@ function userExtensionsDir() {
   return path.join(os.homedir(), '.local', 'share', 'SuperCollider', 'Extensions');
 }
 
+/**
+ * Which platform a native binary was built for, read off its magic number: 'darwin' (Mach-O,
+ * thin or universal), 'win32' (PE), 'linux' (ELF), or null when it is none of those. The .scx
+ * extension says nothing - SuperCollider uses it on macOS and Windows alike - and bin/ holds
+ * whichever platform's build.sh ran last, so the file itself is the only thing to ask.
+ */
+function binaryPlatform(file) {
+  const head = Buffer.alloc(4);
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    fs.readSync(fd, head, 0, 4, 0);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  const magic = head.readUInt32BE(0);
+  // Universal (either byte order), then 64-bit and 32-bit thin, each in both byte orders.
+  if ([0xcafebabe, 0xbebafeca, 0xfeedfacf, 0xcffaedfe, 0xfeedface, 0xcefaedfe].includes(magic)) return 'darwin';
+  if (magic === 0x7f454c46) return 'linux';
+  if (head[0] === 0x4d && head[1] === 0x5a) return 'win32';
+  return null;
+}
+
 function sameContent(a, b) {
   let sa;
   let sb;
@@ -57,8 +82,9 @@ function sameContent(a, b) {
  * @param {object} [opts]
  * @param {string} [opts.extensionsDir] - override the destination (tests).
  * @param {Record<string,string>} [opts.sources] - override the source files (tests).
+ * @param {string} [opts.platform] - override process.platform (tests).
  */
-function ensurePoptartExtension({ extensionsDir = userExtensionsDir(), sources = SOURCES } = {}) {
+function ensurePoptartExtension({ extensionsDir = userExtensionsDir(), sources = SOURCES, platform = process.platform } = {}) {
   const result = { installed: [], upToDate: [], skipped: null };
   const missing = FILES.filter((f) => !fs.existsSync(sources[f]));
   if (missing.length) {
@@ -66,6 +92,23 @@ function ensurePoptartExtension({ extensionsDir = userExtensionsDir(), sources =
     return result;
   }
   const dest = path.join(extensionsDir, 'poptart');
+  // A prebuilt for another platform is the same as no prebuilt - and must not be installed:
+  // scsynth fails to load it (an error on every boot), while the class file beside it compiles
+  // fine, so poptart.scd would see the class, skip the SOLA fallback, and build the keylock
+  // around a UGen the server does not have. Both files go, including a copy an earlier version
+  // installed before this check existed.
+  const builtFor = binaryPlatform(sources['PoptartPitchShift.scx']);
+  if (builtFor && builtFor !== platform) {
+    for (const f of FILES) {
+      try {
+        fs.rmSync(path.join(dest, f), { force: true });
+      } catch {
+        // Left in place it fails the way it always did; nothing here is worth stopping a boot for.
+      }
+    }
+    result.skipped = `no prebuilt extension for this platform (the PoptartPitchShift.scx in native/rubberband is a ${builtFor} build)`;
+    return result;
+  }
   try {
     fs.mkdirSync(dest, { recursive: true });
     for (const f of FILES) {

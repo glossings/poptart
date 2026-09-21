@@ -189,8 +189,41 @@ function stopServer(child, { graceMs = 5000, platform = process.platform, timers
   });
 }
 
+/**
+ * Turns the server's boot output into what the loading screen says. The output itself is no use
+ * there: a plugin scan prints a file path per plugin, hundreds a second, which on screen is a
+ * blur nobody can read. So the screen names the phase the boot is in, with a count while
+ * plugins are being scanned, and the lines themselves go to the log (diagnostics.js).
+ *
+ * Returns a function to feed each line to. It answers `{ text, detail }` when the screen should
+ * change and null when it should not - which is most lines: a phase is announced once, and the
+ * scan count moves in steps, so the text holds still long enough to be read.
+ */
+function createBootNarrator({ countStep = 10 } = {}) {
+  let phase = null;
+  let scanned = 0;
+  const enter = (next, text) => {
+    if (phase === next) return null;
+    phase = next;
+    return { text, detail: '' };
+  };
+  return (line) => {
+    if (/\.(vst3?|component|clap)\s*$/i.test(line)) {
+      scanned += 1;
+      const first = enter('scan', 'Scanning plugins');
+      if (first) return first;
+      return scanned % countStep === 0 ? { text: 'Scanning plugins', detail: `${scanned} checked` } : null;
+    }
+    if (/plugin scan finished|initial plugin search done/i.test(line)) return enter('scanned', 'Loading the session');
+    if (/booting scsynth|Booting server/i.test(line)) return enter('scsynth', 'Starting the audio server');
+    if (/compiling class library|Welcome to SuperCollider/i.test(line)) return enter('sclang', 'Starting SuperCollider');
+    return null;
+  };
+}
+
 module.exports = {
   SERVER_ENTRY,
+  createBootNarrator,
   findFreePort,
   waitForServer,
   fetchEngineStatus,

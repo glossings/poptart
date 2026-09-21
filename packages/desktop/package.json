@@ -8,14 +8,15 @@
   "scripts": {
     "start": "node start.js",
     "test": "node --test",
-    "pack": "electron-builder --dir --config electron-builder.yml",
-    "dist": "electron-builder --config electron-builder.yml"
+    "pack": "node stage.js && electron-builder --dir --config electron-builder.yml",
+    "dist": "node stage.js && electron-builder --config electron-builder.yml",
+    "stage": "node stage.js"
   },
   "devDependencies": {
-    "electron": "^34.0.0",
+    "electron": "^44.4.3",
     "electron-builder": "^25.1.8"
   },
   "allowScripts": {
-    "electron@34.5.8": true
+    "electron@44.4.3": true
   }
 }

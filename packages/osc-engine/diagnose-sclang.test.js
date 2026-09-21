@@ -52,6 +52,17 @@ test('compile failure wins over a later Class not defined (root cause first)', (
 
 // --- silent-stall localization via the .scd's boot-progress checkpoints ---
 
+test('an unreadable engine script is an installation fault, not the user\'s startup.scd', () => {
+  // Verbatim from a packaged build whose script path pointed inside an asar archive.
+  const d = diagnoseSclangOutput(
+    'Class tree inited in 0.04 seconds\n\n\n*** Welcome to SuperCollider 3.14.1. *** For help type cmd-d.\n' +
+      'file "/Applications/poptart.app/Contents/Resources/app.asar/node_modules/@poptart/osc-engine/sc/poptart.scd" does not exist.\n',
+    true,
+  );
+  assert.match(d, /could not read poptart's engine script/);
+  assert.doesNotMatch(d, /startup\.scd/);
+});
+
 test('silence right after the Welcome banner -> blames a hanging user startup.scd', () => {
   // The real-world log this was built from: compile succeeds, banner prints, then nothing -
   // sclang runs the user's startup.scd before our script, so ours never even started.

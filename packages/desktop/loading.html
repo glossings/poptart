@@ -25,7 +25,10 @@
         padding: 32px;
         -webkit-user-select: none;
         user-select: none;
+        /* With no title bar on macOS, this page is what the window is dragged by. */
+        -webkit-app-region: drag;
       }
+      #detail, #actions a { -webkit-app-region: no-drag; }
       main { width: 100%; max-width: 560px; text-align: center; }
       h1 {
         font-size: 15px;
@@ -68,6 +71,10 @@
         0% { transform: translateX(-100%); }
         100% { transform: translateX(340%); }
       }
+      #actions { display: none; margin: 18px 0 0; gap: 18px; justify-content: center; }
+      #actions a { color: var(--accent); text-decoration: none; font-size: 13px; }
+      #actions a:hover, #actions a:focus-visible { text-decoration: underline; }
+      body.failed #actions { display: flex; }
       body.failed #bar { display: none; }
       body.failed #status { color: var(--bad); }
       @media (prefers-reduced-motion: reduce) {
@@ -81,14 +88,13 @@
       <p id="status">Starting…</p>
       <div id="bar"></div>
       <p id="detail"></p>
+      <!-- Shown on failure. Plain links the main process answers (its window-open handler, by
+           URL - see diagnostics.js): the policy above allows this page no script, so it has
+           none, and main.js's setStatus writes the text above directly. -->
+      <p id="actions">
+        <a href="poptart://save-diagnostics" target="_blank">Save diagnostic report…</a>
+        <a href="poptart://show-logs" target="_blank">Show log files</a>
+      </p>
     </main>
-    <script>
-      // Called by the main process (see main.js's setStatus) - this page has no other logic.
-      window.poptartStatus = function (update) {
-        document.getElementById('status').textContent = update.text || '';
-        document.getElementById('detail').textContent = update.detail || '';
-        document.body.classList.toggle('failed', Boolean(update.failed));
-      };
-    </script>
   </body>
 </html>

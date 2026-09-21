@@ -174,12 +174,24 @@ function clarifySclangLine(text) {
     .replace(/Black-?listed plugin /gi, 'Skipped plugin (a previous probe crashed) ');
 }
 
+// sclang's answer when the script it was started with is not a file it can open. It then sits
+// idle at its prompt, so without this the boot waits out the whole timeout and the silent-stall
+// diagnosis below blames the user's startup.scd for what is an installation fault.
+const ENGINE_SCRIPT_UNREADABLE = /file ".*poptart\.scd" does not exist/;
+
 // Map sclang's boot log to a human diagnosis of why /poptart/ready never arrived. The log is
 // the only place the real cause appears, and users hitting this are exactly the ones not reading
 // it - so pattern-match the handful of failure modes we've actually seen and say what to do.
 // Returns null when nothing matches (the raw log tail still gets shown). `vstInstalled` is
 // injected (default: filesystem check) so tests can exercise both branches.
 function diagnoseSclangOutput(output, vstInstalled = vstPluginExtensionInstalled()) {
+  if (ENGINE_SCRIPT_UNREADABLE.test(output)) {
+    return (
+      "sclang could not read poptart's engine script, so nothing ran. This is a fault in how " +
+      'poptart is installed or was packaged - the script is missing, or sits somewhere another ' +
+      'program cannot read - not something in your SuperCollider setup. Please report this log.'
+    );
+  }
   if (/Library has not been compiled successfully|duplicate Class found|There is a discrepancy/i.test(output)) {
     return (
       "sclang's class library failed to compile, so poptart's engine script never ran. " +
@@ -796,6 +808,10 @@ class OscEngine {
         // main debugging surface for plugin problems anyway.
         this._sclangProcess.stdout.on('data', (d) => {
           logBoot(d);
+          // Nothing more is coming: sclang is idle at its prompt. Fail now, not in a minute.
+          if (!settled && ENGINE_SCRIPT_UNREADABLE.test(bootLog)) {
+            fail(bootFailure("sclang started but could not read poptart's engine script."));
+          }
           this._scan.feed(d); // raw, not clarified - the progress parser reads VSTPlugin's own wording
           this._log?.write(String(d));
           this._watchServerDeath(String(d));

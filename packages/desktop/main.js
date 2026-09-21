@@ -14,10 +14,14 @@
 // instead of us redistributing it - avoids having to re-sign and notarize somebody else's
 // binaries. See PACKAGING.md for what is still outstanding before this ships to strangers.
 
+const fs = require('node:fs');
 const path = require('node:path');
 const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 
+const { openDesktopLog, desktopLogPath, reportFileName, writeDiagnosticReport, actionFor } = require('./diagnostics');
+
 const {
+  createBootNarrator,
   findFreePort,
   waitForServer,
   fetchEngineStatus,
@@ -39,23 +43,70 @@ const LOADING_PAGE = path.join(__dirname, 'loading.html');
 let win = null;
 let serverChild = null;
 let quitting = false;
+let desktopLog = null; // ~/.poptart/desktop.log, opened in boot() - see diagnostics.js
+let booted = false; // the editor has replaced the loading page; nothing is left to narrate
 
 // ---------------------------------------------------------------------------------------------
 // The loading window
 // ---------------------------------------------------------------------------------------------
 
-function setStatus(text, { detail = '', failed = false } = {}) {
+// The update is written into the page from here, whole, instead of calling a function the page
+// defines: loading.html's Content-Security-Policy allows no script of its own (an inline one is
+// blocked, which is how the status line came to say "Starting..." for a whole failed boot), and
+// executeJavaScript is not subject to it.
+// `log: false` is for updates that only echo a server line onto the loading screen: that line
+// is in the log already, and a plugin scan produces hundreds of them.
+function setStatus(text, { detail = '', failed = false, log = true } = {}) {
+  if (log) {
+    // eslint-disable-next-line no-console
+    console.log(`[poptart] ${text}${detail ? ` - ${detail}` : ''}`);
+    desktopLog?.note(`${failed ? 'FAILED: ' : ''}${text}${detail ? ` - ${detail}` : ''}`);
+  }
   if (!win || win.isDestroyed()) return;
   const payload = JSON.stringify({ text, detail, failed });
   win.webContents
-    .executeJavaScript(`window.poptartStatus && window.poptartStatus(${payload})`)
+    .executeJavaScript(
+      `(() => {
+        const update = ${payload};
+        const status = document.getElementById('status');
+        if (!status) return; // not the loading page
+        status.textContent = update.text;
+        document.getElementById('detail').textContent = update.detail;
+        document.body.classList.toggle('failed', update.failed);
+      })()`,
+    )
     .catch(() => {
-      // The page may not have finished loading yet; the next update will land, and the
-      // terminal log below is the real record either way.
+      // The page may not have finished loading yet; the next update will land, and the log
+      // above is the real record either way.
     });
-  // eslint-disable-next-line no-console
-  console.log(`[poptart] ${text}${detail ? ` - ${detail}` : ''}`);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------------------------
+
+async function saveDiagnostics() {
+  const { canceled, filePath } = await dialog.showSaveDialog(win ?? undefined, {
+    title: 'Save diagnostic report',
+    defaultPath: path.join(app.getPath('desktop'), reportFileName()),
+  });
+  if (canceled || !filePath) return;
+  desktopLog?.note(`writing a diagnostic report to ${filePath}`);
+  try {
+    await writeDiagnosticReport({ outFile: filePath, appVersion: app.getVersion() });
+    shell.showItemInFolder(filePath);
+  } catch (err) {
+    dialog.showErrorBox('The report could not be written', err.message);
+  }
+}
+
+function showLogs() {
+  const file = desktopLogPath();
+  if (fs.existsSync(file)) shell.showItemInFolder(file);
+  else shell.openPath(path.dirname(file));
+}
+
+const runAction = { saveDiagnostics, showLogs };
 
 // Off macOS, Electron's default menu bar takes the whole alt family: alt on its own focuses it and
 // alt+F/E/V/W/H open its menus. alt is where poptart's own chords live on those platforms (see
@@ -63,7 +114,54 @@ function setStatus(text, { detail = '', failed = false } = {}) {
 // key. Nothing in that default menu is reachable any other way except reload and devtools, and this
 // window has no use for either. macOS keeps its menu: the application menu is where cmd+Q and the
 // editing accelerators live there, and the app's chords are on ctrl anyway.
-if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
+if (process.platform !== 'darwin') {
+  Menu.setApplicationMenu(null);
+} else {
+  // The default menu, role for role, with the two diagnostics items where a Mac user looks for
+  // them. Off macOS there is no menu to put them in; the failure screen carries them everywhere.
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { role: 'fileMenu' },
+      { role: 'editMenu' },
+      { role: 'viewMenu' },
+      { role: 'windowMenu' },
+      {
+        role: 'help',
+        submenu: [
+          { label: 'Save Diagnostic Report…', click: () => saveDiagnostics() },
+          { label: 'Show Log Files', click: () => showLogs() },
+        ],
+      },
+    ]),
+  );
+}
+
+// macOS: no title bar of the system's own. The window's close/minimize/zoom buttons float over
+// the page's header instead, so the app has one top bar in its own colors rather than a system
+// strip above it. The page is not told: it stays a plain browser page (npm run dev), and the few
+// rules this needs are injected from here - room for the buttons at the header's left, and the
+// header as the handle the window is dragged by. Its controls are excluded from that handle, or
+// they would stop receiving clicks; the name stays part of it, like a title. The logo chip is
+// hidden while the buttons are showing: a fourth small rounded shape beside three reads as one
+// of them. In full screen the buttons go, and the header is the browser's again, chip and all.
+const MAC_TITLE_BAR = process.platform === 'darwin';
+const TRAFFIC_LIGHTS = { x: 16, y: 18 }; // vertically centered in the editor's ~52px header
+const MAC_TITLE_BAR_CSS = `
+  header { -webkit-app-region: drag; }
+  header > * { -webkit-app-region: no-drag; }
+  header > .logo, header > h1 { -webkit-app-region: drag; }
+  html:not(.poptart-fullscreen) header { padding-left: 94px; }
+  html:not(.poptart-fullscreen) header > .logo { display: none; }
+`;
+
+function syncFullScreenClass() {
+  if (!win || win.isDestroyed()) return;
+  // In full screen the buttons are gone, and so is the reason for the room left for them.
+  win.webContents
+    .executeJavaScript(`document.documentElement.classList.toggle('poptart-fullscreen', ${win.isFullScreen()})`)
+    .catch(() => {});
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -74,6 +172,7 @@ function createWindow() {
     backgroundColor: '#14161a',
     show: true,
     title: 'poptart',
+    ...(MAC_TITLE_BAR ? { titleBarStyle: 'hiddenInset', trafficLightPosition: TRAFFIC_LIGHTS } : {}),
     webPreferences: {
       // The page is our own server's, but it also evaluates user code and can load plugin
       // metadata; there is no reason for it to reach Node, so it doesn't.
@@ -86,9 +185,20 @@ function createWindow() {
   // Links to documentation and plugin vendors belong in the user's browser, not in a window
   // with no address bar.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/.test(url)) shell.openExternal(url);
+    const action = actionFor(url);
+    if (action) runAction[action]();
+    else if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+  if (MAC_TITLE_BAR) {
+    // Injected CSS belongs to the document, so it goes in again on every load.
+    win.webContents.on('did-finish-load', () => {
+      win?.webContents.insertCSS(MAC_TITLE_BAR_CSS).catch(() => {});
+      syncFullScreenClass();
+    });
+    win.on('enter-full-screen', syncFullScreenClass);
+    win.on('leave-full-screen', syncFullScreenClass);
+  }
   win.on('closed', () => {
     win = null;
   });
@@ -149,10 +259,7 @@ async function ensureSuperCollider() {
 }
 
 function showFailure(text, detail) {
-  setStatus(text, {
-    detail: `${detail}\n\nFor a full diagnosis run:  node packages/osc-engine/doctor.js --out doctor.txt`,
-    failed: true,
-  });
+  setStatus(text, { detail, failed: true });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -160,6 +267,8 @@ function showFailure(text, detail) {
 // ---------------------------------------------------------------------------------------------
 
 async function boot() {
+  desktopLog = openDesktopLog();
+  desktopLog.note(`poptart desktop ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform}-${process.arch}, packaged: ${app.isPackaged})`);
   createWindow();
 
   if (!(await ensureSuperCollider())) {
@@ -178,17 +287,19 @@ async function boot() {
   // If the server dies during startup, stop waiting immediately rather than sitting out the
   // whole timeout - the log lines it printed on the way down are the actual diagnosis.
   const died = new AbortController();
+  const narrate = createBootNarrator();
   let lastLines = [];
   serverChild = startServer({
     port,
     onLog: (line, stream) => {
       lastLines = [...lastLines, line].slice(-25);
       process[stream].write(`${line}\n`);
-      if (/booting|SuperCollider|VSTPlugin|scanning/i.test(line)) {
-        setStatus('Starting the audio engine', { detail: line.replace(/^\[\w+\]\s*/, '') });
-      }
+      desktopLog?.write(`${line}\n`);
+      const update = booted ? null : narrate(line);
+      if (update) setStatus(update.text, { detail: update.detail, log: false });
     },
-    onExit: ({ code }) => {
+    onExit: ({ code, signal }) => {
+      desktopLog?.note(`the server exited (code ${code}, signal ${signal})`);
       serverChild = null;
       if (quitting) return;
       died.abort(`the poptart server exited (code ${code})`);
@@ -227,6 +338,7 @@ async function boot() {
   } else {
     setStatus('Ready');
   }
+  booted = true;
   if (win && !win.isDestroyed()) win.loadURL(`http://127.0.0.1:${port}/`);
 }
 

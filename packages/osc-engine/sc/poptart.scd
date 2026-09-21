@@ -177,7 +177,7 @@ var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, bu
 var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued;
 var destroyTrack;
-var slotKey, waitForLoad, flushNotes, clearPending;
+var slotKey, slotLive, waitForLoad, flushNotes, clearPending;
 var hushTrack, clearMidiRoute, markSounding;
 var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
@@ -911,6 +911,14 @@ awaitLoaded = { |track, slot, graceSec = 1|
 };
 
 slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
+
+// Whether a slot has a plugin to send MIDI to: one open, or one whose open is still in flight. A
+// slot whose open FAILED (a plugin this machine does not have) keeps its controller but has
+// neither mark, and scsynth answers every unit command sent to it with "VSTPlugin: no plugin
+// loaded!" - once per note, for as long as the pattern plays. The failed load has already said
+// what is wrong, once; the notes are dropped quietly. Asked at send time, not at arrival: a note
+// queued behind a load (see waitForLoad) is judged by how the load turned out.
+slotLive = { |track, slot| track[\loaded][slot].notNil or: { track[\wanted][slot].notNil } };
 
 // A note due at or after the start of a program load WAITS for that load instead of being bundled
 // through it. Loading suspends the plugin and resets its voices, so a note timestamped inside that
@@ -2291,7 +2299,7 @@ OSCdef(\poptartNoteOn, { |msg|
     if (ctl.notNil) {
         fire = { |lat|
             bundleNow.(lat, {
-                ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger);
+                if (slotLive.(track, 0)) { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger) };
                 track[\envs].do { |e| e[\synth].set(\gate, 1) };
                 // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
                 // patterned shape's swap actually happens in those modes, just before the trigger, so
@@ -2319,7 +2327,7 @@ OSCdef(\poptartNoteOff, { |msg|
     if (ctl.notNil) {
         fire = { |lat|
             bundleNow.(lat, {
-                ctl.midi.noteOff(0, note, 0);
+                if (slotLive.(track, 0)) { ctl.midi.noteOff(0, note, 0) };
                 if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
             });
         };
@@ -2395,7 +2403,7 @@ OSCdef(\poptartNoteOnSlot, { |msg|
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        var fire = { |lat| bundleNow.(lat, { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) }) };
+        var fire = { |lat| bundleNow.(lat, { if (slotLive.(track, slot)) { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) } }) };
         markSounding.(track, slot, note, inf);
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
@@ -2406,7 +2414,7 @@ OSCdef(\poptartNoteOffSlot, { |msg|
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        var fire = { |lat| bundleNow.(lat, { ctl.midi.noteOff(0, note, 0) }) };
+        var fire = { |lat| bundleNow.(lat, { if (slotLive.(track, slot)) { ctl.midi.noteOff(0, note, 0) } }) };
         markSounding.(track, slot, note, Main.elapsedTime + latency);
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
@@ -2497,7 +2505,7 @@ OSCFunc({ |msg|
     var semis = msg[3].asFloat, range = max(msg[4].asFloat, 1e-6);
     var track = key !? { tracks[key] };
     var ctl = if (track.isKindOf(Event)) { track[\controllers][0] };
-    ctl !? { ctl.midi.bend(0, (8192 + (semis / range * 8192)).round.clip(0, 16383)) };
+    if (ctl.notNil and: { slotLive.(track, 0) }) { ctl.midi.bend(0, (8192 + (semis / range * 8192)).round.clip(0, 16383)) };
 }, '/poptart/bendOut', server.addr);
 
 // Native modulators: map a control bus to the VST parameter once, drive the bus with a UGen

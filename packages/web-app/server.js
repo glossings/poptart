@@ -42,7 +42,9 @@ const MIME_TYPES = {
 // sources are served under /pattern-core/ so the browser can run the same mini-notation parser
 // and label splitter the server uses (playback highlighting needs identical step math).
 const CODEMIRROR_DIR = path.dirname(require.resolve('codemirror/package.json'));
-const PATTERN_CORE_SRC_DIR = path.join(__dirname, '..', 'pattern-core', 'src');
+// Resolved by package name like CodeMirror, not as a sibling folder: in the desktop build
+// pattern-core is a real folder under node_modules, not a neighbor (desktop/stage.js).
+const PATTERN_CORE_SRC_DIR = path.join(path.dirname(require.resolve('@poptart/pattern-core/package.json')), 'src');
 
 const DEFAULT_CPS = 0.5; // 120 bpm at 4 beats/cycle - overridable from code via setbpm()
 
