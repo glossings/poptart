@@ -10,6 +10,10 @@ const path = require('node:path');
 
 const { portableHome, appContainer, DATA_FOLDER } = require('./portable');
 
+// Every case names a platform, so the expectations are built with that platform's path rules -
+// these run on macOS and on the Windows runner alike, and used to pass only on the first.
+const posix = path.posix;
+
 const dirs = (...present) => ({
   statSync: (p) => {
     if (!present.includes(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -20,9 +24,9 @@ const dirs = (...present) => ({
 test('macOS: the folder is looked for beside poptart.app, not inside it', () => {
   const execPath = '/Volumes/Gig/poptart.app/Contents/MacOS/poptart';
   assert.strictEqual(appContainer({ platform: 'darwin', execPath }), '/Volumes/Gig');
-  const beside = path.join('/Volumes/Gig', DATA_FOLDER);
+  const beside = posix.join('/Volumes/Gig', DATA_FOLDER);
   assert.strictEqual(portableHome({ isPackaged: true, platform: 'darwin', execPath, env: {}, fsImpl: dirs(beside) }), beside);
-  const inside = path.join('/Volumes/Gig/poptart.app/Contents/MacOS', DATA_FOLDER);
+  const inside = posix.join('/Volumes/Gig/poptart.app/Contents/MacOS', DATA_FOLDER);
   assert.strictEqual(portableHome({ isPackaged: true, platform: 'darwin', execPath, env: {}, fsImpl: dirs(inside) }), null);
 });
 
@@ -33,11 +37,12 @@ test('macOS: a translocated app has no "beside"', () => {
 });
 
 test('Windows and Linux: next to the executable; an AppImage means next to the AppImage', () => {
-  const win = path.win32.join('D:\\tools\\poptart', 'poptart.exe');
   assert.strictEqual(appContainer({ platform: 'linux', execPath: '/opt/poptart/poptart', env: {} }), '/opt/poptart');
   assert.strictEqual(appContainer({ platform: 'linux', execPath: '/tmp/.mount_pop123/poptart', env: { APPIMAGE: '/home/u/apps/poptart.AppImage' } }), '/home/u/apps');
-  assert.ok(appContainer({ platform: 'win32', execPath: win, env: {} }));
-  const beside = path.join('/opt/poptart', DATA_FOLDER);
+  assert.strictEqual(appContainer({ platform: 'win32', execPath: 'D:\\tools\\poptart\\poptart.exe', env: {} }), 'D:\\tools\\poptart');
+  const win = portableHome({ isPackaged: true, platform: 'win32', execPath: 'D:\\tools\\poptart\\poptart.exe', env: {}, fsImpl: dirs('D:\\tools\\poptart\\' + DATA_FOLDER) });
+  assert.strictEqual(win, 'D:\\tools\\poptart\\' + DATA_FOLDER);
+  const beside = posix.join('/opt/poptart', DATA_FOLDER);
   assert.strictEqual(portableHome({ isPackaged: true, platform: 'linux', execPath: '/opt/poptart/poptart', env: {}, fsImpl: dirs(beside) }), beside);
 });
 

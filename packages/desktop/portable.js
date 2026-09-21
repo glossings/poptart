@@ -26,18 +26,25 @@ const path = require('node:path');
 
 const { DATA_FOLDER } = require('@poptart/osc-engine/home'); // one name, for the app and for a checkout
 
+// Path rules come from the `platform` argument, not from the host: everything below is written
+// per platform, and reading "/Applications/poptart.app" with Windows rules answers nonsense.
+// In production the two are the same thing; the difference is what lets the macOS cases be
+// tested on the Windows runner, where they first went wrong.
+const pathFor = (platform) => (platform === 'win32' ? path.win32 : path.posix);
+
 /** The folder the app itself sits in, or null when "beside the app" has no meaning. */
 function appContainer({ platform = process.platform, execPath = process.execPath, env = process.env } = {}) {
+  const p = pathFor(platform);
   if (platform === 'darwin') {
     // .../poptart.app/Contents/MacOS/poptart
-    const bundle = path.resolve(execPath, '..', '..', '..');
+    const bundle = p.resolve(execPath, '..', '..', '..');
     if (!bundle.endsWith('.app')) return null;
-    if (bundle.includes('/AppTranslocation/')) return null;
-    return path.dirname(bundle);
+    if (bundle.split(p.sep).includes('AppTranslocation')) return null;
+    return p.dirname(bundle);
   }
   // An AppImage runs from a temporary mount; the file the user has is named here.
-  if (platform === 'linux' && env.APPIMAGE) return path.dirname(env.APPIMAGE);
-  return path.dirname(execPath);
+  if (platform === 'linux' && env.APPIMAGE) return p.dirname(env.APPIMAGE);
+  return p.dirname(execPath);
 }
 
 /**
@@ -49,7 +56,7 @@ function portableHome({ isPackaged, platform = process.platform, execPath = proc
   if (!isPackaged || env.POPTART_HOME) return null;
   const container = appContainer({ platform, execPath, env });
   if (!container) return null;
-  const candidate = path.join(container, DATA_FOLDER);
+  const candidate = pathFor(platform).join(container, DATA_FOLDER);
   try {
     return fsImpl.statSync(candidate).isDirectory() ? candidate : null;
   } catch {
