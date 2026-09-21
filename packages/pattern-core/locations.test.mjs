@@ -320,8 +320,11 @@ test('transpiling a buffer with a big blob stays off the scheduler\'s critical p
   for (let i = 0; i < 5; i++) injectLocations(code, 0);
   const ms = (performance.now() - t0) / 5;
   // Was ~30ms for this size before tailWindow, and grew linearly with the blob. The bound is
-  // deliberately loose - it's here to catch a return to scanning the buffer per literal.
-  assert.ok(ms < 5, `injectLocations took ${ms.toFixed(1)}ms on a ${(code.length / 1024) | 0}kb buffer`);
+  // deliberately loose - it's here to catch a return to scanning the buffer per literal. Loose
+  // enough for a shared CI machine too: a Windows runner measured 8.5ms for what takes under
+  // 1ms on a laptop, and the regression it guards against would be several times the old 30ms
+  // there.
+  assert.ok(ms < 20, `injectLocations took ${ms.toFixed(1)}ms on a ${(code.length / 1024) | 0}kb buffer`);
 });
 
 // The editor WRITES definitions into the buffer by itself (a bare pianoroll()/lfo() gets a name and

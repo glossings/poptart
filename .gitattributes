@@ -1,0 +1,13 @@
+# Line endings. Every text file is LF in a checkout on every platform - without this, git on
+# Windows (core.autocrlf) rewrites them to CRLF, and the tests that read the app's own source
+# (matching it against a regex, or lifting a function out of it to run) stop matching: 20 of them
+# failed that way on the first Windows CI run. Nothing in the app wants CRLF, so there is no
+# platform to make an exception for.
+* text=auto eol=lf
+
+# Never text, whatever their bytes happen to look like.
+*.png binary
+*.scx binary
+*.wav binary
+packages/osc-engine/native/bin/** binary
+packages/osc-engine/native/link/bin/** binary
