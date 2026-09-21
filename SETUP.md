@@ -11,6 +11,7 @@ Most things work out of the box; a few can be pointed elsewhere.
 
 | What | Where | Default |
 | --- | --- | --- |
+| Everything poptart writes - settings, songs, samples, recordings, caches, logs, its private SuperCollider | `POPTART_HOME` | `~/.poptart` |
 | Sample library folder | **settings** tab, or `POPTART_SAMPLES_DIR` | `~/.poptart/samples` |
 | Audio output device | **settings** tab | system default |
 | Extra audio **inputs** (combined into one device, so `input()` can reach several interfaces) | **settings** tab | none |
@@ -28,6 +29,48 @@ Most things work out of the box; a few can be pointed elsewhere.
 | Let poptart fetch its own SuperCollider | `POPTART_INSTALL_SC=1` (never: `=0`) | asks, when there's a terminal to ask in |
 | Where that private copy lives | `POPTART_SC_ROOT` | `~/.poptart/sc` |
 | Keep the SuperCollider download for reuse | `POPTART_SC_CACHE_DIR` | not kept (deleted after unpacking) |
+
+`POPTART_HOME` moves the whole folder at once - onto an external drive, or to keep a second,
+separate setup - and every `~/.poptart/...` default in this table moves with it; the narrower
+variables still win for the one location each names.
+
+No variable is needed to keep everything with poptart itself: make a folder called
+`poptart-data` and it is used instead of `~/.poptart`, so poptart and everything it has written
+travel as one folder. Where it goes depends on which poptart you have:
+
+- **A checkout** (you cloned the repository): at its root, beside `packages/`. git ignores it.
+- **The desktop app**: next to `poptart.app` on macOS, next to `poptart.exe` in the unpacked zip
+  on Windows. On macOS the app must first be moved out of the folder it was downloaded into.
+  Don't put it inside an *installed* Windows copy: uninstalling removes the install folder and
+  everything in it.
+
+The folder has to exist before poptart starts - it is looked for, never created. To bring what
+you already have, move the contents of `~/.poptart` into it; an empty folder is a fresh start
+(including a fresh SuperCollider download, if poptart fetched its own). Pointing
+`POPTART_HOME` at the checkout itself also works and is a bad idea: git would list your songs
+as untracked files, and one `git clean` would delete them.
+
+### Removing poptart
+
+Delete the app (drag it to the Trash on macOS; on Windows use its uninstaller, which offers to
+delete your data as well and keeps it unless you say otherwise), then delete the folder above -
+that is where poptart keeps everything it wrote, including the SuperCollider copy it may have
+downloaded for itself, which is most of its size.
+
+One thing can live outside that folder: if you had SuperCollider installed already, poptart put
+its pitch-shifting UGen in *your* SuperCollider Extensions folder rather than its own, as
+`Extensions/poptart/`. Delete that folder too. (It may also have installed `Extensions/VSTPlugin/`
+there, which is not poptart's - it is the SuperCollider extension that hosts plugins, useful on
+its own, so poptart leaves that decision to you.) The Extensions folder is:
+
+| macOS | `~/Library/Application Support/SuperCollider/Extensions` |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\SuperCollider\Extensions` |
+| Linux | `~/.local/share/SuperCollider/Extensions` |
+
+If poptart downloaded its own SuperCollider, none of this applies - it used its own Extensions
+folder inside the data folder. Either way, the diagnostic report says which one it used:
+`npm run doctor` from a checkout, or Help > Save Diagnostic Report in the desktop app.
 
 To make an environment variable permanent, add it to your shell profile. For the default zsh on
 macOS:

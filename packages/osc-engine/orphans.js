@@ -21,8 +21,8 @@
 // pids now belong to something else is a no-op, which is the correct outcome.
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('./home');
 const { execFileSync } = require('node:child_process');
 
 // Beside settings.json, for the same reason it lives there: user-owned state that has to outlive
@@ -34,7 +34,7 @@ const { execFileSync } = require('node:child_process');
 // already what keeps those stacks apart everywhere else.
 function pidfilePath(nodePort) {
   return process.env.POPTART_PIDFILE
-    || path.join(os.homedir(), '.poptart', `engine-${nodePort}.pid`);
+    || path.join(poptartHome(), `engine-${nodePort}.pid`);
 }
 
 // Killing is done through a wrapper rather than passing `process.kill` itself: it is a method, and
@@ -166,7 +166,7 @@ function reapOrphanedEngine({ file, comm = commandName, kill = defaultKill } = {
  *
  * Read-only: it never kills or clears anything.
  */
-function liveEngineStacks({ dir = path.join(os.homedir(), '.poptart'), comm = commandName } = {}) {
+function liveEngineStacks({ dir = poptartHome(), comm = commandName } = {}) {
   let names;
   try {
     names = fs.readdirSync(dir).filter((n) => /^engine-\d+\.pid$/.test(n));

@@ -22,6 +22,7 @@ normal browser keeps working exactly as before.
 | Self-installing launcher (`start.js`, `ensure-electron.js`) | Unit-tested; the repair path verified against a real broken install on macOS |
 | The shell (`main.js`) | Run by hand on macOS and Windows through `npm run desktop`; never run from a packaged build |
 | Logs and the diagnostic report (`diagnostics.js`) | Unit-tested; the Help menu items and the failure screen's links are **not yet exercised by hand** |
+| Portable mode (`portable.js`) | Unit-tested, and detection checked from inside a packed binary; a full session from a `poptart-data` folder is **not yet tried** |
 | Staging (`stage.js`) | Unit-tested; run for real against this repository |
 | Packaging (`electron-builder.yml`) | An unpacked, unsigned macOS arm64 app has been built and inspected: contents, icon, `Info.plist`, and every `require` resolved under the packed runtime. Launched by hand once, which is what moved it to `asar: false`; an engine boot from the packaged app is **unconfirmed**, and no dmg or Windows installer has been produced |
 | Signing / notarization | Not done. Needs an Apple Developer account — see PACKAGING.md |

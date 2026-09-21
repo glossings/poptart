@@ -80,12 +80,21 @@ win:
   target:
     - target: nsis
       arch: [x64]
+    # The same app, not installed: unpack it anywhere. This is the build for portable mode (a
+    # `poptart-data` folder beside poptart.exe holds everything - see portable.js), because an
+    # installed copy's folder belongs to its uninstaller.
+    - target: zip
+      arch: [x64]
 
 nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
   artifactName: poptart-${version}-setup.exe
+  # Uninstalling offers to delete poptart's data folder too - mainly because of the ~600 MB
+  # SuperCollider it downloaded on first run, which nobody asked to keep. It defaults to keeping
+  # it, and an upgrade never asks. See build/uninstall.nsh.
+  include: build/uninstall.nsh
 
 # SuperCollider is NOT bundled. The app fetches SuperCollider's own officially signed release on
 # first run instead (osc-engine/private-sc.js), which keeps this download small and means we are

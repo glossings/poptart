@@ -34,13 +34,13 @@
 // its sound - the same reason the sweep already scans the prebake folder for the ★ library.
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('@poptart/osc-engine/home');
 
 const { parseMeta, displayLabel, matchesQuery, patternNameProblem } = require('./public/pattern-meta.js');
 const { parsePinned } = require('./pinned-defs.js');
 
-const SNIPPETS_DIR = process.env.POPTART_SNIPPETS_DIR || path.join(os.homedir(), '.poptart', 'snippets');
+const SNIPPETS_DIR = process.env.POPTART_SNIPPETS_DIR || path.join(poptartHome(), 'snippets');
 
 // A snippet is code someone selected, not a whole patch - but a selection can be a whole track with
 // a captured program on it, so the ceiling is the same as a pattern's rather than something tight.

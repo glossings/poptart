@@ -143,10 +143,27 @@ function sha256File(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
-async function downloadTo(url, destPath) {
-  const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${url}`);
-  fs.writeFileSync(destPath, Buffer.from(await res.arrayBuffer()));
+// Retried, because the first Windows install failed here: the connection dropped mid-body
+// (fetch reports that as "terminated"), setup carried on without VSTPlugin, and the engine then
+// sat for a minute waiting for a boot that could not happen. A second attempt costs seconds; the
+// alternative costs that minute and a failure the user cannot act on. A 4xx is not retried -
+// nothing about asking again changes a wrong URL.
+async function downloadTo(url, destPath, { attempts = 3, pauseMs = 1500, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const res = await fetch(url, { redirect: 'follow' });
+      if (!res.ok) {
+        const err = new Error(`download failed: HTTP ${res.status} for ${url}`);
+        if (res.status >= 400 && res.status < 500) throw Object.assign(err, { permanent: true });
+        throw err;
+      }
+      fs.writeFileSync(destPath, Buffer.from(await res.arrayBuffer()));
+      return;
+    } catch (err) {
+      if (err.permanent || attempt >= attempts) throw err;
+      await sleep(pauseMs);
+    }
+  }
 }
 
 // macOS ships `unzip`; Windows 10+ ships bsdtar (which reads zips) as `tar`; Linux `unzip` is
@@ -421,6 +438,7 @@ async function runSetup({ log = console } = {}) {
 module.exports = {
   runSetup,
   installVstPlugin,
+  downloadTo,
   pickAsset,
   assetUrl,
   outdatedHostDir,

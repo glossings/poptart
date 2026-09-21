@@ -21,8 +21,8 @@
 // decks use (songs.js) so the JS-side reader sees a WAV.
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('./home');
 
 const sm = require('./sample-map');
 const { walkAudioFiles } = require('./samples');
@@ -34,7 +34,7 @@ const BATCH = 32; // files per worker message
 const NEIGHBORS = 15;
 
 function defaultCacheFile() {
-  return path.join(os.homedir(), '.poptart', 'cache', 'sample-map.json');
+  return path.join(poptartHome(), 'cache', 'sample-map.json');
 }
 
 const b64 = {

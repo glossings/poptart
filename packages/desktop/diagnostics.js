@@ -15,15 +15,15 @@
 //   the main process - it spawns sclang and blocks while it waits, which must not freeze a window.
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 
+const { poptartHome } = require('@poptart/osc-engine/home');
 const { openEngineLog, tailEngineLog, engineLogPath } = require('@poptart/osc-engine/engine-log');
 
 const DOCTOR_TIMEOUT_MS = 90000; // doctor's sclang probe compiles the class library; be generous
 
-function desktopLogPath({ dir = path.join(os.homedir(), '.poptart') } = {}) {
+function desktopLogPath({ dir = poptartHome() } = {}) {
   return path.join(dir, 'desktop.log');
 }
 

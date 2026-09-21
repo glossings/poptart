@@ -37,11 +37,11 @@
 
 const fsp = require('node:fs/promises');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('@poptart/osc-engine/home');
 const crypto = require('node:crypto');
 
-const BLOB_DIR = process.env.POPTART_BLOB_DIR || path.join(os.homedir(), '.poptart', 'blobs');
+const BLOB_DIR = process.env.POPTART_BLOB_DIR || path.join(poptartHome(), 'blobs');
 
 const ID_RE = /^[0-9a-f]{12}$/;
 

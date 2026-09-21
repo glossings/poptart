@@ -41,6 +41,17 @@ function userExtensionsDir() {
  * extension says nothing - SuperCollider uses it on macOS and Windows alike - and bin/ holds
  * whichever platform's build.sh ran last, so the file itself is the only thing to ask.
  */
+/**
+ * sclang's personal startup file - run before poptart's script on every boot, private copy or
+ * not (Platform.userConfigDir +/+ "startup.scd"). Used to tell "a startup.scd is hanging the
+ * boot" from "there is no such file, look elsewhere".
+ */
+function sclangStartupFile({ platform = process.platform, env = process.env, home = os.homedir() } = {}) {
+  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'SuperCollider', 'startup.scd');
+  if (platform === 'win32') return path.win32.join(env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local'), 'SuperCollider', 'startup.scd');
+  return path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), 'SuperCollider', 'startup.scd');
+}
+
 function binaryPlatform(file) {
   const head = Buffer.alloc(4);
   let fd;
@@ -130,4 +141,5 @@ function ensurePoptartExtension({ extensionsDir = userExtensionsDir(), sources =
   return result;
 }
 
-module.exports = { ensurePoptartExtension, userExtensionsDir, EXTENSION_FILES: FILES };
+module.exports = {
+  sclangStartupFile, ensurePoptartExtension, userExtensionsDir, EXTENSION_FILES: FILES };

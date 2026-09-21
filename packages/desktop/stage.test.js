@@ -36,6 +36,7 @@ const TRACKED = [
   'packages/desktop/main.js',
   'packages/desktop/server-process.js',
   'packages/desktop/diagnostics.js',
+  'packages/desktop/portable.js',
   'packages/desktop/loading.html',
   'packages/desktop/package.json',
   'packages/desktop/start.js',

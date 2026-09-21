@@ -66,7 +66,7 @@ var cueOffset = "POPTART_CUE_OFFSET".getenv !? { |v| v.asInteger };
 // Split on the platform's path delimiter - ';' on Windows, where ':' cannot separate paths
 // because every absolute path contains one.
 var searchDirs = "POPTART_VST_DIRS".getenv !? { |p| p.split(Platform.pathDelimiter).reject(_.isEmpty) }
-    ?? { var d = "~/.poptart/plugins".standardizePath; if (File.exists(d)) { [d] } };
+    ?? { var d = ("POPTART_HOME".getenv ?? { "~/.poptart".standardizePath }) +/+ "plugins"; if (File.exists(d)) { [d] } };
 // Plugins skipped explicitly during scans (VSTPlugin's exclude option, which prunes these
 // paths from the directory traversal so they're never probed). Set POPTART_VST_EXCLUDE
 // (absolute paths, same separator as above) to skip plugins that crash or spam errors on your

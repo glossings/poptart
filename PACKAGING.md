@@ -234,6 +234,25 @@ that file, including when doctor itself cannot run.
   the copy has been launched macOS refuses the edit itself. What remains is not running that
   sclang: Stage 3, or a Qt-less sclang (`SC_QT=OFF`) built, signed and shipped by poptart,
   which gives up "fetched, not bundled" for that one binary.
+- **Where data lives, and portable mode.** Everything poptart writes goes in one folder,
+  `~/.poptart` by default (`osc-engine/home.js` is the only place that names it, and a test
+  holds the rest of the code to that). It is deliberately not the install folder: that is often
+  unwritable (a write inside a signed macOS bundle breaks its signature; Program Files wants an
+  administrator), it is what an update or an uninstall deletes, and every poptart on a machine
+  should share one set of songs and one SuperCollider download. `POPTART_HOME` moves the whole
+  folder. The desktop app sets it by itself when a `poptart-data` folder sits beside it
+  (`desktop/portable.js`: beside `poptart.app`, never inside; beside `poptart.exe`), so the app
+  and its data can travel as one folder - which is why Windows also gets a plain zip build, an
+  installed copy's folder belonging to its uninstaller. The folder is looked for, never
+  created, and a translocated Mac app has no portable mode. Detection is unit-tested and checked
+  from inside a packed binary; a whole session run from a portable folder is not yet tried.
+- **Uninstalling (Windows).** The uninstaller offers, once and defaulting to no, to delete the
+  data folder as well (`desktop/build/uninstall.nsh`). It asks because of the ~600 MB
+  SuperCollider poptart downloaded on first run - nobody chose to keep that, and nobody knows to
+  look for it. An upgrade, which runs the old uninstaller, never asks; a per-machine install
+  never asks, since the data folder belongs to each user and not to whoever is uninstalling. On
+  macOS there is no uninstaller to hook: dragging the app to the Trash leaves the folder, which
+  is why the README says where it is.
 - **Small gotchas**: if scsynth boots with audio inputs, macOS requires a mic-permission
   prompt + `NSMicrophoneUsageDescription` in the bundle (or boot with 0 inputs by default);
   kill child sclang/scsynth on app quit so orphans can't accumulate; dmg + signing also avoids

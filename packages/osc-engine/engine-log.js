@@ -13,12 +13,12 @@
 // are exactly what a buffered stream loses.
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('./home');
 
 const MAX_BYTES = 8 * 1024 * 1024;
 
-function engineLogPath({ dir = path.join(os.homedir(), '.poptart') } = {}) {
+function engineLogPath({ dir = poptartHome() } = {}) {
   return path.join(dir, 'engine.log');
 }
 

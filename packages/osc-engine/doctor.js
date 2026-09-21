@@ -45,6 +45,7 @@ const {
 const { sclangStatus, findSclangSymlinkOnPath, runningEngineProcesses } = require('./setup');
 const { resolveSearchDirs, walkPluginDirs, readJournal, describeFormat, splitPathList } = require('./plugin-scan');
 const { engineLogPath, tailEngineLog } = require('./engine-log');
+const { describeHome } = require('./home');
 
 // A port of its own: the sclang test harnesses run in parallel and sclang only tries ten ports
 // up from its default before giving up on networking entirely.
@@ -153,6 +154,7 @@ function main() {
   say(`os: ${os.type()} ${os.release()}`);
   say(`node: ${process.version}`);
   say(`home: ${os.homedir()}`);
+  say(`poptart's data folder: ${describeHome().dir}${describeHome().why ? ` (${describeHome().why})` : ''}`);
 
   heading('environment overrides');
   const interesting = Object.keys(process.env)

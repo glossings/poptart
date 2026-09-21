@@ -25,6 +25,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('./home');
 const crypto = require('node:crypto');
 const readline = require('node:readline');
 const { Readable } = require('node:stream');
@@ -103,7 +104,7 @@ function layoutFor(platform = process.platform) {
 // spawn sequence into a temp directory instead of the user's home. Same shape as the other
 // per-directory overrides in SETUP.md.
 function privateScRoot() {
-  return process.env.POPTART_SC_ROOT || path.join(os.homedir(), '.poptart', 'sc');
+  return process.env.POPTART_SC_ROOT || path.join(poptartHome(), 'sc');
 }
 
 // Versioned, so a future bump installs beside the old copy rather than over it (and so a

@@ -18,6 +18,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 
+// Before anything else is loaded: a `poptart-data` folder beside the app becomes poptart's home
+// (portable.js). Several modules work their paths out once, as they load, and the server child
+// inherits this environment - so this is the one moment the answer can be given to all of them.
+const PORTABLE_HOME = require('./portable').portableHome({ isPackaged: app.isPackaged });
+if (PORTABLE_HOME) process.env.POPTART_HOME = PORTABLE_HOME;
+
+const { describeHome } = require('@poptart/osc-engine/home');
 const { openDesktopLog, desktopLogPath, reportFileName, writeDiagnosticReport, actionFor } = require('./diagnostics');
 
 const {
@@ -44,6 +51,7 @@ let win = null;
 let serverChild = null;
 let quitting = false;
 let desktopLog = null; // ~/.poptart/desktop.log, opened in boot() - see diagnostics.js
+const launchedAt = Date.now();
 let booted = false; // the editor has replaced the loading page; nothing is left to narrate
 
 // ---------------------------------------------------------------------------------------------
@@ -269,6 +277,8 @@ function showFailure(text, detail) {
 async function boot() {
   desktopLog = openDesktopLog();
   desktopLog.note(`poptart desktop ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform}-${process.arch}, packaged: ${app.isPackaged})`);
+  const dataFolder = describeHome();
+  desktopLog.note(`data folder: ${dataFolder.dir}${PORTABLE_HOME ? ' (portable: found beside the app)' : dataFolder.why ? ` (${dataFolder.why})` : ''}`);
   createWindow();
 
   if (!(await ensureSuperCollider())) {
@@ -294,7 +304,9 @@ async function boot() {
     onLog: (line, stream) => {
       lastLines = [...lastLines, line].slice(-25);
       process[stream].write(`${line}\n`);
-      desktopLog?.write(`${line}\n`);
+      // Seconds since launch on every line: a boot that stalls leaves no other trace of WHERE
+      // the time went, and "it hung for a minute" was all the first such report could say.
+      desktopLog?.write(`[+${((Date.now() - launchedAt) / 1000).toFixed(1).padStart(5)}s] ${line}\n`);
       const update = booted ? null : narrate(line);
       if (update) setStatus(update.text, { detail: update.detail, log: false });
     },
@@ -320,17 +332,24 @@ async function boot() {
   if (status && !status.loaded) {
     const reason = status.error ?? 'no reason given';
     setStatus('The audio engine did not start', { detail: reason, failed: true });
-    const { response } = await dialog.showMessageBox(win, {
-      type: 'warning',
-      message: 'The audio engine did not start',
-      detail:
-        `${reason}\n\npoptart will open, but nothing will make sound until the engine starts. ` +
-        'The usual cause is another copy of poptart already running - the two fight over the ' +
-        "same ports. You can also restart the engine from the editor's settings tab.",
-      buttons: ['Open anyway', 'Quit'],
-      defaultId: 0,
-      cancelId: 1,
-    });
+    // The dialog is modal, so it covers the failure screen's own links - and off macOS there is
+    // no Help menu to find the report in once it is dismissed. The report is therefore one of
+    // its buttons; saving one brings the question back rather than answering it.
+    let response;
+    do {
+      ({ response } = await dialog.showMessageBox(win, {
+        type: 'warning',
+        message: 'The audio engine did not start',
+        detail:
+          `${reason}\n\npoptart will open, but nothing will make sound until the engine starts. ` +
+          'The usual cause is another copy of poptart already running - the two fight over the ' +
+          "same ports. You can also restart the engine from the editor's settings tab.",
+        buttons: ['Open anyway', 'Save diagnostic report…', 'Quit'],
+        defaultId: 0,
+        cancelId: 2,
+      }));
+      if (response === 1) await saveDiagnostics();
+    } while (response === 1);
     if (response !== 0) {
       app.quit();
       return;

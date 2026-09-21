@@ -15,6 +15,10 @@ packages/native-engine/.cmake-js/
 
 tmp/
 
+# A data folder kept with the checkout instead of in ~/.poptart (osc-engine/home.js): somebody's
+# songs, settings and a SuperCollider install - never the repository's business.
+poptart-data/
+
 # Local userland hotkey repro - paste into ~/.poptart/prebake.js; not part of the repo
 packages/web-app/prebake.hotkeys.js
 

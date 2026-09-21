@@ -268,6 +268,7 @@ test('the loading screen is told the phase, not the output', () => {
   feed('[sclang] poptart: initial plugin search done (392 plugins)');
   feed('[poptart] plugin scan finished: 392 plugin(s) known, 396 probed in 5s');
   feed('[sclang] poptart: loaded instrument Serum 2');
+  feed('[poptart] the audio engine did not come up in time - trying once more');
   assert.deepStrictEqual(said, [
     'Starting SuperCollider',
     'Starting the audio server',
@@ -275,5 +276,6 @@ test('the loading screen is told the phase, not the output', () => {
     'Scanning plugins - 10 checked',
     'Scanning plugins - 20 checked',
     'Loading the session',
+    'Starting the audio engine again',
   ]);
 });

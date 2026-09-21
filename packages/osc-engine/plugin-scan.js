@@ -34,6 +34,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('./home');
 
 // --- where plugins live ---
 
@@ -101,14 +102,14 @@ function defaultPluginDirs({ platform = process.platform, env = process.env, hom
 function resolveSearchDirs({
   platform = process.platform,
   env = process.env,
-  home = os.homedir(),
+  home, // named by tests only - see home.js, which skips a checkout's data folder for a named home
   fsImpl = fs,
 } = {}) {
   const explicit = splitPathList(env.POPTART_VST_DIRS, platform);
   if (explicit.length) return explicit;
-  const curated = path.join(home, '.poptart', 'plugins');
+  const curated = path.join(poptartHome({ env, home }), 'plugins');
   if (existsDir(curated, fsImpl)) return [curated];
-  return defaultPluginDirs({ platform, env, home }).filter((d) => existsDir(d, fsImpl));
+  return defaultPluginDirs({ platform, env, home: home ?? os.homedir() }).filter((d) => existsDir(d, fsImpl));
 }
 
 // POPTART_VST_DIRS and POPTART_VST_EXCLUDE hold several paths in one variable, and ':' cannot be
@@ -288,7 +289,7 @@ function walkPluginDirs({
 //
 // Beside settings.json and the pid file, for the same reason those are there: user-owned state
 // that has to outlive the process.
-function journalPath({ dir = path.join(os.homedir(), '.poptart') } = {}) {
+function journalPath({ dir = poptartHome() } = {}) {
   return path.join(dir, 'scan-journal.json');
 }
 
@@ -372,9 +373,9 @@ function forgetSkips({ file = journalPath(), fsImpl = fs } = {}) {
 function preparePluginScan({
   platform = process.platform,
   env = process.env,
-  home = os.homedir(),
+  home, // as in resolveSearchDirs
   fsImpl = fs,
-  journalFile = journalPath({ dir: path.join(home, '.poptart') }),
+  journalFile = journalPath({ dir: poptartHome({ env, home }) }),
 } = {}) {
   const dirs = resolveSearchDirs({ platform, env, home, fsImpl });
   const userExclude = splitPathList(env.POPTART_VST_EXCLUDE, platform);
@@ -392,7 +393,7 @@ function preparePluginScan({
 
 // The lines the user reads at startup when any of this had an effect. Silent when nothing did,
 // which is the normal case.
-function scanWarnings({ foreign, crashed, skipped, truncated }, { platform = process.platform } = {}) {
+function scanWarnings({ foreign, crashed, skipped, truncated, journalFile = journalPath() }, { platform = process.platform } = {}) {
   const lines = [];
   for (const f of foreign) {
     lines.push(
@@ -403,14 +404,14 @@ function scanWarnings({ foreign, crashed, skipped, truncated }, { platform = pro
   if (crashed) {
     lines.push(
       `skipping ${crashed.path} - the last plugin scan ended while probing it. ` +
-        'Delete it from the skip list in ~/.poptart/scan-journal.json to try it again.',
+        `Delete it from the skip list in ${journalFile} to try it again.`,
     );
   }
   const stale = skipped.filter((s) => !crashed || s.path !== crashed.path);
   if (stale.length) {
     lines.push(
       `${stale.length} plugin(s) skipped from earlier failed scans: ${stale.map((s) => s.path).join(', ')} ` +
-        '(clear the skip list in ~/.poptart/scan-journal.json to retry them).',
+        `(clear the skip list in ${journalFile} to retry them).`,
     );
   }
   if (truncated) {

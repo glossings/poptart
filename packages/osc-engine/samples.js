@@ -10,7 +10,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
+const { poptartHome } = require('./home');
 
 const { readWavRaw } = require('./wav');
 
@@ -31,7 +31,7 @@ function setSamplesRoot(dir) {
 function samplesRoot() {
   if (process.env.POPTART_SAMPLES_DIR) return process.env.POPTART_SAMPLES_DIR;
   if (configuredRoot) return configuredRoot;
-  return path.join(os.homedir(), '.poptart', 'samples');
+  return path.join(poptartHome(), 'samples');
 }
 
 /** Absolute paths of a pack's audio files in filename order, or null if the folder is missing. */

@@ -17,6 +17,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('./home');
 
 let configuredRoot = null;
 
@@ -27,7 +28,7 @@ function setRecordingsRoot(dir) {
 function recordingsRoot() {
   if (process.env.POPTART_RECORDINGS_DIR) return process.env.POPTART_RECORDINGS_DIR;
   if (configuredRoot) return configuredRoot;
-  return path.join(os.homedir(), '.poptart', 'recordings');
+  return path.join(poptartHome(), 'recordings');
 }
 
 const MONTH_RE = /^\d{4}-\d{2}$/;

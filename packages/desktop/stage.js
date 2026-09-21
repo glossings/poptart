@@ -38,7 +38,7 @@ const LAYOUT = [
   {
     from: 'packages/desktop',
     to: 'packages/desktop',
-    only: ['main.js', 'server-process.js', 'diagnostics.js', 'loading.html', 'package.json'],
+    only: ['main.js', 'server-process.js', 'diagnostics.js', 'portable.js', 'loading.html', 'package.json'],
   },
   { from: 'packages/web-app', to: 'packages/web-app', workspace: true },
   { from: 'packages/osc-engine', to: 'node_modules/@poptart/osc-engine', workspace: true, byName: true },
@@ -241,8 +241,13 @@ if (require.main === module) {
     const { files, modules, untracked } = stage();
     console.log(`[poptart] staged ${files} files and ${modules.length} modules in ${path.relative(process.cwd(), STAGE_DIR) || '.'}`);
     if (untracked.length) {
-      console.warn(`[poptart] left out ${untracked.length} file(s) git does not track - add them if the app needs them:`);
-      for (const file of untracked) console.warn(`[poptart]   ${file}`);
+      // Not a warning: a new source file is the usual reason for one of these, and an app built
+      // without it dies on launch. Files git IGNORES are not in this list - those are left out
+      // silently, which is the point of staging from git.
+      console.error(`[poptart] ${untracked.length} file(s) in the app's folders are not tracked by git, so they were left out:`);
+      for (const file of untracked) console.error(`[poptart]   ${file}`);
+      console.error('[poptart] `git add` them if the app needs them, or add them to .gitignore if it does not, and run this again.');
+      process.exit(1);
     }
   } catch (err) {
     console.error(`[poptart] could not stage the app: ${err.message}`);

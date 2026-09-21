@@ -63,12 +63,35 @@ test('an unreadable engine script is an installation fault, not the user\'s star
   assert.doesNotMatch(d, /startup\.scd/);
 });
 
-test('silence right after the Welcome banner -> blames a hanging user startup.scd', () => {
-  // The real-world log this was built from: compile succeeds, banner prints, then nothing -
-  // sclang runs the user's startup.scd before our script, so ours never even started.
-  const d = diagnoseSclangOutput('compile done\nWelcome to SuperCollider 3.14.1.\nFor help type cmd-d.\n', true);
+// The real-world log both of these were built from: compile succeeds, banner prints, then
+// nothing - sclang never got as far as poptart's script.
+const WENT_QUIET = 'compile done\nWelcome to SuperCollider 3.14.1.\nFor help type cmd-d.\n';
+
+test('silence after the banner with no VSTPlugin -> names VSTPlugin, not the startup file', () => {
+  // The first Windows install, exactly: VSTPlugin's download dropped, setup carried on, and
+  // sclang stopped on the missing class without printing a word. The old answer blamed a
+  // startup.scd at a macOS path on a Windows machine that had no such file.
+  const d = diagnoseSclangOutput(WENT_QUIET, false, { startupFile: 'C:\\Users\\x\\…\\startup.scd', startupExists: false });
+  assert.match(d, /VSTPlugin SuperCollider extension is missing/);
+  assert.match(d, /starting poptart again retries it/);
+  assert.doesNotMatch(d, /startup file/);
+});
+
+test('silence right after the Welcome banner -> blames the startup file, when there is one', () => {
+  const d = diagnoseSclangOutput(WENT_QUIET, true, { startupFile: '/Users/x/…/SuperCollider/startup.scd', startupExists: true });
   assert.match(d, /never ran poptart's engine script/);
-  assert.match(d, /startup\.scd/);
+  assert.match(d, /you have one: \/Users\/x\/…\/SuperCollider\/startup\.scd/);
+});
+
+test('...and does not blame a startup file that does not exist', () => {
+  // What the first Windows install reported: a 60s boot timeout, no startup.scd, and a second
+  // launch that worked - so the advice is to try again, not to go looking for a file.
+  const win = 'C:\\Users\\x\\AppData\\Local\\SuperCollider\\startup.scd';
+  const d = diagnoseSclangOutput(WENT_QUIET, true, { startupFile: win, startupExists: false });
+  assert.match(d, /went quiet/);
+  assert.match(d, /starting poptart again/);
+  assert.doesNotMatch(d, /you have one/);
+  assert.match(d, /looked for C:\\Users/, 'names the path it checked, so a report can say it was wrong');
 });
 
 test('script ran, scsynth never spoke -> Gatekeeper / permissions guidance', () => {

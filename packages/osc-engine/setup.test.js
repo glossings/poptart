@@ -19,6 +19,7 @@ const {
   sclangStatus,
   findSclangSymlinkOnPath,
   VSTPLUGIN_RELEASE,
+  downloadTo,
 } = require('./setup.js');
 
 test('release table covers the supported platforms and pins full checksums', () => {
@@ -143,4 +144,40 @@ test('the outdated-host hashes are full digests, and the pinned asset is not amo
   assert.ok(hashes.length >= 2);
   for (const sha of hashes) assert.match(sha, /^[0-9a-f]{64}$/);
   assert.ok(!hashes.includes(pickAsset('darwin', 'arm64').sha256));
+});
+
+// --- downloadTo: a dropped connection is retried ------------------------------------------------
+// The first Windows install failed exactly here. fetch reports a connection closed mid-body as
+// "terminated"; setup then carried on without VSTPlugin and the engine stalled for a minute.
+
+test('a dropped download is retried, and the file still lands', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-dl-'));
+  const dest = path.join(dir, 'x.zip');
+  let calls = 0;
+  const realFetch = global.fetch;
+  global.fetch = async () => {
+    calls += 1;
+    if (calls < 3) throw new TypeError('terminated');
+    return { ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode('the payload').buffer };
+  };
+  t.after(() => { global.fetch = realFetch; });
+  await downloadTo('https://example.invalid/x.zip', dest, { pauseMs: 0 });
+  assert.strictEqual(calls, 3);
+  assert.strictEqual(fs.readFileSync(dest, 'utf8'), 'the payload');
+});
+
+test('it gives up after the last attempt, and never retries a 404', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-dl-'));
+  const realFetch = global.fetch;
+  t.after(() => { global.fetch = realFetch; });
+
+  let calls = 0;
+  global.fetch = async () => { calls += 1; throw new TypeError('terminated'); };
+  await assert.rejects(() => downloadTo('https://example.invalid/x.zip', path.join(dir, 'a.zip'), { pauseMs: 0 }), /terminated/);
+  assert.strictEqual(calls, 3, 'three attempts, then the error the caller reports');
+
+  calls = 0;
+  global.fetch = async () => { calls += 1; return { ok: false, status: 404 }; };
+  await assert.rejects(() => downloadTo('https://example.invalid/gone.zip', path.join(dir, 'b.zip'), { pauseMs: 0 }), /HTTP 404/);
+  assert.strictEqual(calls, 1, 'asking again cannot fix a wrong URL');
 });

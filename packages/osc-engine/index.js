@@ -22,7 +22,7 @@ const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, kill
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
-const { ensurePoptartExtension, userExtensionsDir } = require('./extensions');
+const { ensurePoptartExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
 const {
   privateScInstalled,
   privateSclangPath,
@@ -184,7 +184,11 @@ const ENGINE_SCRIPT_UNREADABLE = /file ".*poptart\.scd" does not exist/;
 // it - so pattern-match the handful of failure modes we've actually seen and say what to do.
 // Returns null when nothing matches (the raw log tail still gets shown). `vstInstalled` is
 // injected (default: filesystem check) so tests can exercise both branches.
-function diagnoseSclangOutput(output, vstInstalled = vstPluginExtensionInstalled()) {
+function diagnoseSclangOutput(
+  output,
+  vstInstalled = vstPluginExtensionInstalled(),
+  { startupFile = sclangStartupFile(), startupExists = fs.existsSync(startupFile) } = {},
+) {
   if (ENGINE_SCRIPT_UNREADABLE.test(output)) {
     return (
       "sclang could not read poptart's engine script, so nothing ran. This is a fault in how " +
@@ -261,11 +265,34 @@ function diagnoseSclangOutput(output, vstInstalled = vstPluginExtensionInstalled
     );
   }
   if (/Welcome to SuperCollider/i.test(output) && !/poptart: engine script running/.test(output)) {
+    // Checked before anything else is blamed: the engine script needs the VSTPlugin class, and
+    // without it sclang stops there and prints NOTHING - no "Class not defined", just silence
+    // until the timeout. Setup already said the install had failed; this is the same fact
+    // arriving where the user reads it.
+    if (!vstInstalled) {
+      return (
+        'the VSTPlugin SuperCollider extension is missing, so the engine script stopped before it ' +
+        'could start. poptart installs it on first run, and that download can fail on a flaky ' +
+        'connection - starting poptart again retries it. If it keeps failing, install it by hand ' +
+        `(see the setup notes) into ${vstPluginExtensionDirs()[0]}.`
+      );
+    }
+    // sclang runs the user's startup file before our script, so one that hangs is the classic
+    // cause - but only if there is one. Blaming a file that does not exist (at a macOS path, on
+    // Windows) sent the first person to hit this looking for nothing.
+    if (startupExists) {
+      return (
+        "sclang started but never ran poptart's engine script. sclang runs your personal startup " +
+        `file first, and you have one: ${startupFile}. If it boots a server, waits on something or ` +
+        'opens a GUI, it blocks poptart forever - move it aside and retry.'
+      );
+    }
     return (
-      "sclang started but never ran poptart's engine script. sclang runs your personal startup " +
-      'file first, so a hanging ~/Library/Application Support/SuperCollider/startup.scd (one that ' +
-      'boots a server, waits on something, or opens a GUI) blocks poptart forever - move it aside ' +
-      'and retry. If you have no startup.scd, please report this log.'
+      "sclang started and then went quiet before running poptart's engine script, and there is " +
+      `no personal startup file to blame (looked for ${startupFile}). On a first launch this is ` +
+      'usually the computer still checking newly installed files - antivirus scanning ' +
+      'SuperCollider, on Windows especially - and starting poptart again gets past it. If it ' +
+      'keeps happening, please report this log.'
     );
   }
   return null;
@@ -695,11 +722,11 @@ class OscEngine {
         // demonstrably worked. The boot config rides along so a pasted report carries the
         // device/rate/channel picture even when the .scd's checkpoint line isn't in the tail -
         // it's also what the README's IDE-replay procedure tells the user to copy from.
-        fail(bootFailure(
+        fail(Object.assign(bootFailure(
           `sclang started but the engine did not finish booting within ${READY_TIMEOUT_MS / 1000}s ` +
           `(boot config - device: ${this.outDevice ?? 'system default'}, sr: ${sampleRate}, ` +
           `block: ${bufferSize}, out: ${this.outChannels}ch, in: ${this.inChannels}ch).`,
-        ));
+        ), { code: 'BOOT_TIMEOUT' }));
       }, READY_TIMEOUT_MS);
 
       this._port.once('ready', () => {
@@ -1996,7 +2023,7 @@ class OscEngine {
       if (this._journalFile) markProbeCrashed({ file: this._journalFile });
       lines.push(
         `it was probing ${died.current} at the time; poptart will skip that one on the next start ` +
-          '(see ~/.poptart/scan-journal.json).',
+          `(see ${this._journalFile ?? 'the scan journal in poptart\'s data folder'}).`,
       );
     }
     for (const line of lines) {

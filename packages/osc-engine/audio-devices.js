@@ -56,6 +56,10 @@ function helperError(err) {
 // Same shape as the helper's `list`, minus UIDs (which system_profiler doesn't report). Without
 // UIDs there's no aggregate management, but device selection and absolute input channels work.
 function listDevicesViaSystemProfiler() {
+  // macOS-only, and the helper it backs up is too - so off macOS there is nothing to fall back
+  // to and nothing to say about it. Spawning it anyway put "could not list audio devices:
+  // spawnSync system_profiler ENOENT" in every Windows log, once per listing.
+  if (process.platform !== 'darwin') return [];
   try {
     const raw = execFileSync('system_profiler', ['SPAudioDataType', '-json'], { encoding: 'utf8', timeout: 15000 });
     const groups = JSON.parse(raw).SPAudioDataType ?? [];

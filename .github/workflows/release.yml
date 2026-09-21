@@ -124,6 +124,7 @@ jobs:
           path: |
             packages/desktop/dist/*.dmg
             packages/desktop/dist/*.exe
+            packages/desktop/dist/*.zip
           if-no-files-found: error
           retention-days: 14
 

@@ -215,6 +215,9 @@ function createBootNarrator({ countStep = 10 } = {}) {
       return scanned % countStep === 0 ? { text: 'Scanning plugins', detail: `${scanned} checked` } : null;
     }
     if (/plugin scan finished|initial plugin search done/i.test(line)) return enter('scanned', 'Loading the session');
+    // The server gives a timed-out engine one more try (web-app/server.js); say so, since the
+    // same phases are about to go past a second time.
+    if (/did not come up in time - trying once more/i.test(line)) return enter('retry', 'Starting the audio engine again');
     if (/booting scsynth|Booting server/i.test(line)) return enter('scsynth', 'Starting the audio server');
     if (/compiling class library|Welcome to SuperCollider/i.test(line)) return enter('sclang', 'Starting SuperCollider');
     return null;

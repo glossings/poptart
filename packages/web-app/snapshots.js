@@ -21,11 +21,11 @@
 // the editor's share action still builds a self-contained base64 URL, on demand.
 
 const fsp = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('@poptart/osc-engine/home');
 const crypto = require('node:crypto');
 
-const SNAPSHOT_DIR = process.env.POPTART_SNAPSHOT_DIR || path.join(os.homedir(), '.poptart', 'snapshots');
+const SNAPSHOT_DIR = process.env.POPTART_SNAPSHOT_DIR || path.join(poptartHome(), 'snapshots');
 
 // Roughly a long session's worth of evals. Each file is one buffer - and a buffer is kilobytes
 // now that captured plugin programs are stored once and referenced by handle (see blobs.js), so

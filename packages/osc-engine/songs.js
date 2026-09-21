@@ -12,8 +12,8 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('./home');
 const { execFile } = require('node:child_process');
 
 // What scsynth reads natively vs what needs an afconvert pass first. Anything else is a clear
@@ -22,7 +22,7 @@ const NATIVE_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac']);
 const DECODE_EXTS = new Set(['.mp3', '.m4a', '.aac', '.caf']);
 
 function songCacheDir() {
-  return path.join(os.homedir(), '.poptart', 'cache', 'songs');
+  return path.join(poptartHome(), 'cache', 'songs');
 }
 
 /** 'native' (Buffer.read handles it), 'decode' (afconvert first), or null (unsupported). */

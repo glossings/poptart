@@ -6,6 +6,7 @@
 
 const http = require('node:http');
 const path = require('node:path');
+const { poptartHome, describeHome } = require('@poptart/osc-engine/home');
 const fs = require('node:fs');
 const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
@@ -52,6 +53,7 @@ let patternCore = null; // loaded via dynamic import() since it's an ESM package
 let engine = null; // raw OscEngine (introspection/record endpoints talk to this directly)
 let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.js) - what the scheduler drives
 let engineError = null;
+let engineErrorCode = null; // 'BOOT_TIMEOUT' when the engine simply did not come up in time
 let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
 // The keys inside a real GROUP (written inside a `group({ ... })` body - see groups.mjs): their
@@ -1883,7 +1885,7 @@ function applyMidiClockSetting() {
 // ~/.poptart so they survive restarts and are hand-editable.
 // ---------------------------------------------------------------------------------------------
 
-const SETTINGS_FILE = process.env.POPTART_SETTINGS_FILE || path.join(os.homedir(), '.poptart', 'settings.json');
+const SETTINGS_FILE = process.env.POPTART_SETTINGS_FILE || path.join(poptartHome(), 'settings.json');
 
 function loadSettings() {
   try {
@@ -2161,9 +2163,11 @@ async function loadEngine() {
     });
     await e.start(48000, 256);
     engineError = null;
+    engineErrorCode = null;
     return e;
   } catch (err) {
     engineError = err.message ?? String(err);
+    engineErrorCode = err.code ?? null;
     // eslint-disable-next-line no-console
     console.error('[poptart] osc-engine failed to start:', err);
     return null;
@@ -2437,6 +2441,18 @@ async function init() {
   // loadEngine()'s own diagnostics remain the backstop if something is still wrong.
   await require('@poptart/osc-engine/setup').runSetup();
   engine = await loadEngine();
+  if (!engine && engineErrorCode === 'BOOT_TIMEOUT') {
+    // Once, and only for a timeout. Setup runs again first, because the cause of the one such
+    // failure seen in the wild was upstream of the engine entirely: VSTPlugin's download dropped
+    // mid-transfer, setup warned and carried on, and sclang then stopped silently on the missing
+    // class - a minute of nothing, and a second launch that worked because the download did.
+    // Re-running setup is what makes this retry more than a second identical wait.
+    // eslint-disable-next-line no-console
+    console.warn('[poptart] the audio engine did not come up in time - checking its dependencies and trying once more');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await require('@poptart/osc-engine/setup').runSetup();
+    engine = await loadEngine();
+  }
   if (engine) wireEngine();
   runPrebake(); // once, after builders + transport exist and before the first eval
   // The Link peer is its own process and has nothing to do with the audio engine, so it is
@@ -2781,8 +2797,8 @@ function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS 
 // name in any pattern.
 // ---------------------------------------------------------------------------------------------
 
-const PREBAKE_FILE = process.env.POPTART_PREBAKE_FILE || path.join(os.homedir(), '.poptart', 'prebake.js');
-const PREBAKE_DIR = process.env.POPTART_PREBAKE_DIR || path.join(os.homedir(), '.poptart', 'prebake');
+const PREBAKE_FILE = process.env.POPTART_PREBAKE_FILE || path.join(poptartHome(), 'prebake.js');
+const PREBAKE_DIR = process.env.POPTART_PREBAKE_DIR || path.join(poptartHome(), 'prebake');
 
 let prebakeDefs = new Map(); // top-level bindings from the prebake sources, injected into every eval
 
@@ -6963,6 +6979,11 @@ init().then(() => {
   server.listen(PORT, HOST, () => {
     // eslint-disable-next-line no-console
     console.log(`[poptart] listening on http://localhost:${PORT}`);
+    // Where the songs are: the first thing to know for a backup, and the only place the
+    // non-default cases (POPTART_HOME, a poptart-data folder - see SETUP.md) announce themselves.
+    const dataFolder = describeHome();
+    // eslint-disable-next-line no-console
+    console.log(`[poptart] data folder: ${dataFolder.dir}${dataFolder.why ? ` (${dataFolder.why})` : ''}`);
     // Only now, with the engine up and the port open: the map's cache read is instant, but the
     // library walk behind it is real disk work and should never delay the first eval.
     sampleMapApi.start();

@@ -20,12 +20,12 @@
 // directory without a server.
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { poptartHome } = require('@poptart/osc-engine/home');
 
 const { parseMeta, displayLabel, patternNameProblem } = require('./public/pattern-meta.js');
 
-const PATTERNS_DIR = process.env.POPTART_PATTERNS_DIR || path.join(os.homedir(), '.poptart', 'patterns');
+const PATTERNS_DIR = process.env.POPTART_PATTERNS_DIR || path.join(poptartHome(), 'patterns');
 const WIP_DIR = path.join(PATTERNS_DIR, 'wip');
 
 // Don't slurp something enormous that wandered into the folder just to search it.

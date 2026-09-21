@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { ensurePoptartExtension, EXTENSION_FILES } = require('./extensions.js');
+const { ensurePoptartExtension, EXTENSION_FILES, sclangStartupFile } = require('./extensions.js');
 
 function fakeSources(dir, contents) {
   const sources = {};
@@ -88,4 +88,22 @@ test('refuses a prebuilt for another platform and removes a copy installed earli
   // Nothing to remove is not an error either.
   const again = ensurePoptartExtension({ extensionsDir: path.join(tmp, 'Fresh'), sources, platform: 'linux' });
   assert.match(again.skipped, /darwin build/);
+});
+
+test("sclang's startup file is found where each platform's SuperCollider keeps it", () => {
+  // Not a guess: Platform.userConfigDir, which is where sclang reads startup.scd from before it
+  // runs poptart's script. Getting this wrong means blaming a file the user does not have.
+  assert.strictEqual(
+    sclangStartupFile({ platform: 'darwin', env: {}, home: '/Users/x' }),
+    path.join('/Users/x', 'Library', 'Application Support', 'SuperCollider', 'startup.scd'),
+  );
+  assert.strictEqual(
+    sclangStartupFile({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local' }, home: 'C:\\Users\\x' }),
+    'C:\\Users\\x\\AppData\\Local\\SuperCollider\\startup.scd',
+  );
+  assert.match(sclangStartupFile({ platform: 'win32', env: {}, home: 'C:\\Users\\x' }), /AppData.Local.SuperCollider.startup\.scd$/);
+  assert.strictEqual(
+    sclangStartupFile({ platform: 'linux', env: {}, home: '/home/x' }),
+    path.join('/home/x', '.config', 'SuperCollider', 'startup.scd'),
+  );
 });
