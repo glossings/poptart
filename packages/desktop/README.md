@@ -20,7 +20,7 @@ normal browser keeps working exactly as before.
 | --- | --- |
 | Server supervision (`server-process.js`) | Unit-tested (`npm test` here) |
 | Self-installing launcher (`start.js`, `ensure-electron.js`) | Unit-tested; the repair path verified against a real broken install on macOS |
-| The shell (`main.js`) | Written, syntax-checked, **not yet run** — needs Electron installed |
+| The shell (`main.js`) | Run by hand on macOS and Windows through `npm run desktop`; never run from a packaged build |
 | Packaging (`electron-builder.yml`) | **Draft, never executed.** Treat every path in it as unconfirmed |
 | Signing / notarization | Not done. Needs an Apple Developer account — see PACKAGING.md |
 

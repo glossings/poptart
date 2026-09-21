@@ -215,9 +215,10 @@ never been run, so its globs are a first draft; and nothing is signed. Both are 
 
 ### Cutting a release
 
-Releases are cut by tag, never by push; day-to-day commits build nothing. There is no CI in
-the repo yet. GitHub Actions has macOS and Windows runners, so neither installer needs a local
-machine of that platform to build.
+Releases are cut by tag, never by push; day-to-day commits build nothing. The only workflow in
+the repo today is `private-sc.yml` (Stage 1.5's install check); nothing builds an installer
+yet. GitHub Actions has macOS and Windows runners, so neither installer needs a local machine
+of that platform to build.
 
 1. A local release script checks for a clean tree, runs the tests, bumps `version` in the
    root and workspace `package.json` files, and drafts the changelog section from the commits
