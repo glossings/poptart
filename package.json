@@ -1,7 +1,7 @@
 {
   "name": "poptart",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A Strudel-flavored livecoding environment that hosts real VST/VST3 plugins as instruments and effects, with continuous parameter modulation.",
   "author": "Glossing",
   "workspaces": [

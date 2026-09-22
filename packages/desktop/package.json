@@ -1,7 +1,7 @@
 {
   "name": "@poptart/desktop",
   "license": "AGPL-3.0-only",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Electron shell: runs the web-app server as a child process and points a window at it. Packaging target for the dmg/exe builds. Deliberately outside the npm workspaces - see README.md.",
   "main": "main.js",

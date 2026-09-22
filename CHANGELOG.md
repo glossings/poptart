@@ -2,6 +2,15 @@
 
 What changed in each release, newest first.
 
+## 0.1.2 - 2026-09-22
+
+### Fixed
+
+- Fix sampler onset drift
+- Fix bug where tracks could fail to load and be unrecoverable
+- Don't send notes to a plugin that is loading
+- Fix sample pack and organizer paths on Windows
+
 ## 0.1.1 - 2026-09-22
 
 ### Added
