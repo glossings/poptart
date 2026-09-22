@@ -2,6 +2,16 @@
 
 What changed in each release, newest first.
 
+## 0.1.1 - 2026-09-22
+
+### Added
+
+- Allow mp3 as a file format for samples and songs
+
+### Fixed
+
+- Fix scsynth continuing to play on Windows after an app shutdown or crash
+
 ## 0.1.0 - 2026-09-22
 
 First release. Poptart is like a livecoding environment, a CDJ, and a DAW had a baby.
