@@ -22,25 +22,25 @@ const dirs = (...present) => ({
     if (!present.includes(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     return { isDirectory: () => true };
   },
-  readdirSync: () => ['poptart.exe', 'resources'],
+  readdirSync: () => ['Poptart.exe', 'resources'],
 });
 const installedDirs = (...present) => ({
   ...dirs(...present),
-  readdirSync: () => ['poptart.exe', 'Uninstall poptart.exe', 'resources'],
+  readdirSync: () => ['Poptart.exe', 'Uninstall Poptart.exe', 'resources'],
 });
 const found = (opts) => portableHome(opts).dir;
 
-test('macOS: the folder is looked for beside poptart.app, not inside it', () => {
-  const execPath = '/Volumes/Gig/poptart.app/Contents/MacOS/poptart';
+test('macOS: the folder is looked for beside Poptart.app, not inside it', () => {
+  const execPath = '/Volumes/Gig/Poptart.app/Contents/MacOS/Poptart';
   assert.strictEqual(appContainer({ platform: 'darwin', execPath }), '/Volumes/Gig');
   const beside = posix.join('/Volumes/Gig', DATA_FOLDER);
   assert.strictEqual(found({ isPackaged: true, platform: 'darwin', execPath, env: {}, fsImpl: dirs(beside) }), beside);
-  const inside = posix.join('/Volumes/Gig/poptart.app/Contents/MacOS', DATA_FOLDER);
+  const inside = posix.join('/Volumes/Gig/Poptart.app/Contents/MacOS', DATA_FOLDER);
   assert.strictEqual(found({ isPackaged: true, platform: 'darwin', execPath, env: {}, fsImpl: dirs(inside) }), null);
 });
 
 test('macOS: a translocated app has no "beside"', () => {
-  const execPath = '/private/var/folders/xy/T/AppTranslocation/1B2C-3D/d/poptart.app/Contents/MacOS/poptart';
+  const execPath = '/private/var/folders/xy/T/AppTranslocation/1B2C-3D/d/Poptart.app/Contents/MacOS/Poptart';
   assert.strictEqual(appContainer({ platform: 'darwin', execPath }), null);
   assert.strictEqual(
     found({ isPackaged: true, platform: 'darwin', execPath, env: {}, fsImpl: { statSync: () => ({ isDirectory: () => true }), readdirSync: () => [] } }),
@@ -54,21 +54,21 @@ test('Windows and Linux: next to the executable; an AppImage means next to the A
     appContainer({ platform: 'linux', execPath: '/tmp/.mount_pop123/poptart', env: { APPIMAGE: '/home/u/apps/poptart.AppImage' } }),
     '/home/u/apps',
   );
-  assert.strictEqual(appContainer({ platform: 'win32', execPath: 'D:\\tools\\poptart\\poptart.exe', env: {} }), 'D:\\tools\\poptart');
+  assert.strictEqual(appContainer({ platform: 'win32', execPath: 'D:\\tools\\poptart\\Poptart.exe', env: {} }), 'D:\\tools\\poptart');
 
   const linux = posix.join('/opt/poptart', DATA_FOLDER);
   assert.strictEqual(found({ isPackaged: true, platform: 'linux', execPath: '/opt/poptart/poptart', env: {}, fsImpl: dirs(linux) }), linux);
   const win = `D:\\tools\\poptart\\${DATA_FOLDER}`;
-  assert.strictEqual(found({ isPackaged: true, platform: 'win32', execPath: 'D:\\tools\\poptart\\poptart.exe', env: {}, fsImpl: dirs(win) }), win);
+  assert.strictEqual(found({ isPackaged: true, platform: 'win32', execPath: 'D:\\tools\\poptart\\Poptart.exe', env: {}, fsImpl: dirs(win) }), win);
 });
 
 test('an installed copy refuses portable mode, and says why', () => {
   // electron-builder's uninstaller ends with `RMDir /r $INSTDIR`, and an upgrade runs the old
-  // uninstaller first - so a data folder next to an installed poptart.exe is deleted by a routine
+  // uninstaller first - so a data folder next to an installed Poptart.exe is deleted by a routine
   // update. The uninstaller beside the app is the marker; the folder is ignored, not filled.
   const installDir = 'C:\\Users\\x\\AppData\\Local\\Programs\\poptart';
   const data = `${installDir}\\${DATA_FOLDER}`;
-  const opts = { isPackaged: true, platform: 'win32', execPath: `${installDir}\\poptart.exe`, env: {} };
+  const opts = { isPackaged: true, platform: 'win32', execPath: `${installDir}\\Poptart.exe`, env: {} };
 
   const unpacked = portableHome({ ...opts, fsImpl: dirs(data) });
   assert.strictEqual(unpacked.dir, data, 'a folder the user unpacked themselves is fine');
@@ -82,7 +82,7 @@ test('an installed copy refuses portable mode, and says why', () => {
 
 test('with no data folder there, an installed copy has nothing to decline', () => {
   const installDir = 'C:\\Users\\x\\AppData\\Local\\Programs\\poptart';
-  const r = portableHome({ isPackaged: true, platform: 'win32', execPath: `${installDir}\\poptart.exe`, env: {}, fsImpl: installedDirs() });
+  const r = portableHome({ isPackaged: true, platform: 'win32', execPath: `${installDir}\\Poptart.exe`, env: {}, fsImpl: installedDirs() });
   assert.deepStrictEqual(r, { dir: null, declined: null });
 });
 

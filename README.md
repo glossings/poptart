@@ -38,9 +38,40 @@ the native modulators), and `web-app` (a small Node server plus the browser edit
 `desktop`, is an optional Electron window around that same server. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the long version.
 
+## Download
+
+[**Latest release**](https://github.com/glossings/poptart/releases/latest) - the app, with
+nothing to install first. Everything below about SuperCollider applies: poptart sets that up
+itself on first run.
+
+| | |
+| --- | --- |
+| **Windows** | `poptart-<version>-setup.exe` - the normal installer. |
+| **Windows, portable** | `poptart-<version>-portable-x64.zip` - unpack it anywhere, and poptart keeps your songs in the `poptart-data` folder inside it instead of your user folder. For an external drive, or two separate setups. |
+| **macOS** | `poptart-<version>-arm64.dmg` for Apple Silicon, `-x64.dmg` for Intel Macs. **Not yet signed - see below.** |
+
+**The macOS builds are not signed by a registered developer yet**, so macOS will refuse to open
+them the first time. Drag Poptart to your Applications folder, then open **System Settings →
+Privacy & Security**, scroll down to **Security**, and click **Open Anyway** next to the message
+about Poptart. You only do this once.
+
+If no such message appears there, remove the download flag from a terminal instead and open it
+again:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Poptart.app
+```
+
+(Apple Developer signing is in progress. Once it lands, neither step is needed.)
+
+Every installer is built by GitHub Actions from a tagged commit in this repository - the build
+log for any release is public, so you can see exactly what went into it.
+
+Intel Macs: the `-x64` build is produced by CI but has not been run by hand on an Intel machine.
+
 ## Requirements
 
-**Node 20+.** That is the only thing you install yourself.
+**To build from source: Node 20+.** The downloads above need nothing installed.
 
 The audio engine underneath poptart is [SuperCollider](https://supercollider.github.io), and
 poptart sets it up for you on first run:
@@ -59,7 +90,7 @@ No AudioUnit support — plugins are VST2/VST3 only; in practice nearly every AU
 macOS is where poptart is developed and where everything works. It runs on Windows too, with
 two gaps for now: no Ableton Link, and the decks' keylock uses its rougher fallback.
 
-## Getting started
+## Getting started from source
 
 ```sh
 npm install
@@ -81,8 +112,8 @@ it has finished. After that first time, startup is quick.
 3. Open **docs ↗** and follow the studies.
 
 Prefer a window of its own to a browser tab? `npm run desktop` opens the same thing as an app
-(it installs what it needs the first time). It is early — there is no downloadable installer
-yet — but it is the same poptart.
+(it installs what it needs the first time) - the same window the downloads above give you,
+running straight from your checkout.
 
 The server listens on `127.0.0.1` only — evaluated code runs with your user's privileges, so it
 must not be reachable from the network. (`POPTART_HOST=0.0.0.0` opts into LAN access, with a

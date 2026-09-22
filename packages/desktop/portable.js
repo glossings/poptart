@@ -15,7 +15,7 @@
 //                    `RMDir /r $INSTDIR`, and an upgrade runs the old uninstaller first, so a
 //                    data folder there would be deleted by a routine update. An uninstaller
 //                    sitting beside the app is the marker that the folder is owned by one.
-//   macOS            next to poptart.app, never in it - a write inside the bundle breaks its
+//   macOS            next to Poptart.app, never in it - a write inside the bundle breaks its
 //                    signature. macOS runs an app that was never moved out of its download
 //                    folder from a random read-only path ("translocation"); no folder can be
 //                    beside that, so there is no portable mode until the app has been moved.
@@ -29,7 +29,7 @@ const path = require('node:path');
 const { DATA_FOLDER } = require('@poptart/osc-engine/home'); // one name, for the app and for a checkout
 
 // Path rules come from the `platform` argument, not from the host: everything below is written
-// per platform, and reading "/Applications/poptart.app" with Windows rules answers nonsense.
+// per platform, and reading "/Applications/Poptart.app" with Windows rules answers nonsense.
 // In production the two are the same thing; the difference is what lets the macOS cases be
 // tested on the Windows runner, where they first went wrong.
 const pathFor = (platform) => (platform === 'win32' ? path.win32 : path.posix);
@@ -38,7 +38,7 @@ const pathFor = (platform) => (platform === 'win32' ? path.win32 : path.posix);
 function appContainer({ platform = process.platform, execPath = process.execPath, env = process.env } = {}) {
   const p = pathFor(platform);
   if (platform === 'darwin') {
-    // .../poptart.app/Contents/MacOS/poptart
+    // .../Poptart.app/Contents/MacOS/Poptart
     const bundle = p.resolve(execPath, '..', '..', '..');
     if (!bundle.endsWith('.app')) return null;
     if (bundle.split(p.sep).includes('AppTranslocation')) return null;

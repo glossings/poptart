@@ -40,7 +40,7 @@ travel as one folder. Where it goes depends on which poptart you have:
 
 - **A checkout** (you cloned the repository): at its root, beside `packages/`. git ignores it.
 - **Windows, the portable download**: already there. Unpack `poptart-<version>-portable-x64.zip`
-  wherever you like and `poptart-data` is inside it, next to `poptart.exe` - that is the whole
+  wherever you like and `poptart-data` is inside it, next to `Poptart.exe` - that is the whole
   setup. To update, unpack the new zip over the same folder; your files are not in the zip, so
   they are left alone.
 - **Windows, the installer**: not available, and poptart **refuses** a folder next to an
@@ -48,7 +48,7 @@ travel as one folder. Where it goes depends on which poptart you have:
   installed copy deletes its whole folder and would take your songs with it - and the
   uninstaller travels with the app, so moving it elsewhere does not help. Use the portable
   download, or set `POPTART_HOME`.
-- **macOS**: next to `poptart.app`. Make the folder yourself. The app must first be moved out of
+- **macOS**: next to `Poptart.app`. Make the folder yourself. The app must first be moved out of
   the folder it was downloaded into.
 
 Except in the portable download, the folder has to exist before poptart starts - it is looked

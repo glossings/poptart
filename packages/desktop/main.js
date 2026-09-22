@@ -179,7 +179,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#14161a',
     show: true,
-    title: 'poptart',
+    title: 'Poptart',
     ...(MAC_TITLE_BAR ? { titleBarStyle: 'hiddenInset', trafficLightPosition: TRAFFIC_LIGHTS } : {}),
     webPreferences: {
       // The page is our own server's, but it also evaluates user code and can load plugin

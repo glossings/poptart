@@ -13,7 +13,12 @@
 # so without them it produces an unsigned app.
 
 appId: dev.glossing.poptart
-productName: poptart
+# Capitalized: this is the name the OS shows - in the Dock, in Applications, in the Start menu -
+# and every app beside it there is capitalized. It names the bundle and the executable too
+# (Poptart.app, Poptart.exe), because Finder shows the file name while the Dock and the menu bar
+# show the display name, and having those disagree is worse than either. The lowercase wordmark
+# stays lowercase inside the app, and the downloads keep their lowercase file names.
+productName: Poptart
 copyright: poptart contributors
 
 # All of these resolve against the project directory - this folder, where the build runs - as do
@@ -33,6 +38,10 @@ electronVersion: 44.4.3
 # and the server runs as plain Node (ELECTRON_RUN_AS_NODE) where those load as they are. A rebuild
 # could only replace a working prebuild with whatever the build machine's toolchain produces.
 npmRebuild: false
+
+# Ad-hoc signs an otherwise unsigned macOS app, which is the difference between "damaged, use a
+# terminal" and Apple's ordinary "unverified developer, click Open Anyway" - see the script.
+afterPack: build/adhoc-sign.js
 
 # No asar archive. The app is a plain Node server that hands other programs paths into itself:
 # sclang is given sc/poptart.scd, the native helpers are spawned, the keylock UGen is copied out

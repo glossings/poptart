@@ -241,7 +241,7 @@ that file, including when doctor itself cannot run.
   administrator), it is what an update or an uninstall deletes, and every poptart on a machine
   should share one set of songs and one SuperCollider download. `POPTART_HOME` moves the whole
   folder. The desktop app sets it by itself when a `poptart-data` folder sits beside it
-  (`desktop/portable.js`: beside `poptart.app`, never inside; beside `poptart.exe`), so the app
+  (`desktop/portable.js`: beside `Poptart.app`, never inside; beside `Poptart.exe`), so the app
   and its data can travel as one folder. An installed Windows copy refuses it and logs why -
   electron-builder's uninstaller ends with `RMDir /r $INSTDIR` and an upgrade runs the old
   uninstaller first, so a data folder there is deleted by a routine update; the uninstaller
