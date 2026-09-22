@@ -17,7 +17,7 @@
 //
 // Analysis runs on the analysis worker in batches (analysis.js's mapFeatures) so the note
 // scheduler never waits on it; the index reports progress as it goes so the UI can show a bar.
-// Non-WAV files that scsynth can play (aiff, flac) go through the same afconvert cache the song
+// Non-WAV files that scsynth can play (aiff, flac, mp3) go through the same afconvert cache the song
 // decks use (songs.js) so the JS-side reader sees a WAV.
 
 const fs = require('node:fs');

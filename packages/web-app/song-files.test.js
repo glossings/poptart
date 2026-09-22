@@ -66,7 +66,7 @@ test('statSongPaths: existing files true; missing files and directories false; j
 
 test('walkSongFiles: every playable file under the tree, mp3/m4a included, junk excluded', async () => {
   // The organize modal's folder adds and tree search (mirroring the pack browser's walk, which
-  // only knows the sample formats - a song folder is mostly mp3s).
+  // only knows the sample formats - no m4a/aac, which a song folder often has).
   const dir = tmpdir();
   fs.mkdirSync(path.join(dir, 'crates'));
   fs.writeFileSync(path.join(dir, 'a.mp3'), 'x');

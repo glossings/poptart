@@ -29,7 +29,8 @@ test('classifySongFile: native vs decode vs unsupported', () => {
   assert.equal(classifySongFile('/a/track.wav'), 'native');
   assert.equal(classifySongFile('/a/track.AIFF'), 'native');
   assert.equal(classifySongFile('/a/track.flac'), 'native');
-  assert.equal(classifySongFile('/a/track.mp3'), 'decode');
+  assert.equal(classifySongFile('/a/track.mp3'), 'native');
+  assert.equal(classifySongFile('/a/track.aac'), 'decode');
   assert.equal(classifySongFile('/a/track.M4A'), 'decode');
   assert.equal(classifySongFile('/a/track.ogg'), null);
   assert.equal(classifySongFile('/a/notes.txt'), null);
@@ -59,15 +60,17 @@ test('resolveSongFile: a native file passes through untouched', async () => {
   assert.equal(calls.length, 0);
 });
 
-test('resolveSongFile with wav: only a real .wav passes through; aiff/flac decode like mp3', async () => {
+test('resolveSongFile with wav: only a real .wav passes through; aiff/flac/mp3 decode like m4a', async () => {
   // The waveform analysis (songs phase 3) reads with Node's own WAV parser, which scsynth's
-  // wider "native" set (aiff, flac) would defeat - so wav mode narrows the pass-through.
+  // wider "native" set (aiff, flac, mp3) would defeat - so wav mode narrows the pass-through.
   const dir = tmpdir();
   const cache = tmpdir();
   const wav = path.join(dir, 'song.wav');
   const aiff = path.join(dir, 'song.aiff');
+  const mp3 = path.join(dir, 'song.mp3');
   fs.writeFileSync(wav, 'riff');
   fs.writeFileSync(aiff, 'form');
+  fs.writeFileSync(mp3, 'mpeg');
 
   const calls = [];
   const direct = await resolveSongFile(wav, { exec: fakeExec(calls), cacheDir: cache, wav: true });
@@ -83,13 +86,21 @@ test('resolveSongFile with wav: only a real .wav passes through; aiff/flac decod
   const play = await resolveSongFile(aiff, { exec: fakeExec(calls), cacheDir: cache });
   assert.deepEqual(play, { path: aiff, decoded: false, cached: false });
   assert.equal(calls.length, 1);
+
+  // mp3 is native to scsynth's libsndfile too: the deck plays it as-is, the wav pass decodes it.
+  const mp3Play = await resolveSongFile(mp3, { exec: fakeExec(calls), cacheDir: cache });
+  assert.deepEqual(mp3Play, { path: mp3, decoded: false, cached: false });
+  assert.equal(calls.length, 1);
+  const mp3Wav = await resolveSongFile(mp3, { exec: fakeExec(calls), cacheDir: cache, wav: true });
+  assert.equal(calls.length, 2, 'the mp3 took an afconvert pass for the WAV reader');
+  assert.ok(mp3Wav.decoded && mp3Wav.path.endsWith('.wav'));
 });
 
 test('resolveSongFile: decodes once, then hits the cache', async () => {
   const dir = tmpdir();
   const cache = path.join(dir, 'cache');
-  const src = path.join(dir, 'song.mp3');
-  fs.writeFileSync(src, 'mpeg');
+  const src = path.join(dir, 'song.m4a');
+  fs.writeFileSync(src, 'mp4a');
   const calls = [];
   const first = await resolveSongFile(src, { exec: fakeExec(calls), cacheDir: cache });
   assert.equal(calls.length, 1);
@@ -109,11 +120,11 @@ test('resolveSongFile: decodes once, then hits the cache', async () => {
 test('resolveSongFile: an edited source re-decodes (identity includes mtime/size)', async () => {
   const dir = tmpdir();
   const cache = path.join(dir, 'cache');
-  const src = path.join(dir, 'song.mp3');
-  fs.writeFileSync(src, 'mpeg');
+  const src = path.join(dir, 'song.m4a');
+  fs.writeFileSync(src, 'mp4a');
   const calls = [];
   const first = await resolveSongFile(src, { exec: fakeExec(calls), cacheDir: cache });
-  fs.writeFileSync(src, 'mpeg-re-exported-longer');
+  fs.writeFileSync(src, 'mp4a-re-exported-longer');
   const second = await resolveSongFile(src, { exec: fakeExec(calls), cacheDir: cache });
   assert.equal(calls.length, 2);
   assert.notEqual(second.path, first.path);

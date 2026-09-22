@@ -6096,7 +6096,7 @@ const routes = {
   // --- song decks (files on a DJ deck - see the song section near mixState) ---
 
   // Load a file onto a deck's song track, replacing whatever song it held. Body: { deck, path,
-  // bpm?, title?, key? }. wav/aiff/flac load directly; mp3/m4a/aac/caf go through the afconvert
+  // bpm?, title?, key? }. wav/aiff/flac/mp3 load directly; m4a/aac/caf go through the afconvert
   // cache (~/.poptart/cache/songs). The track is created (or reused) wearing the desk's current
   // state, so a song queued onto deck b arrives silent exactly like a queued pattern deck.
   // The song's native bpm - the playlist item's if it says, the file's own tags otherwise
@@ -6821,6 +6821,7 @@ const AUDIO_MIME = {
   '.aif': 'audio/aiff',
   '.aiff': 'audio/aiff',
   '.flac': 'audio/flac',
+  '.mp3': 'audio/mpeg',
 };
 
 // Song preview bytes - the organize disk pane's audition (the pack browser's, mirrored onto
@@ -6998,12 +6999,30 @@ init().then(() => {
   });
 });
 
-process.on('SIGINT', () => {
-  // stop() is async (it waits for sclang to quit scsynth cleanly) - give it a moment, but
-  // never hang the Ctrl-C.
-  setTimeout(() => process.exit(0), 4000).unref();
+// Shutting down: stop the engine (sclang quits scsynth) and only then exit, whoever asked -
+// Ctrl-C in a terminal, the desktop shell quitting (a message over the IPC channel it starts us
+// with, because Windows cannot deliver a signal), or the shell vanishing (the channel drops when
+// it crashes or is killed, and an engine with nobody driving it must not keep playing).
+// Idempotent, since a message and a signal can both arrive. The backstop sits ABOVE
+// engine.stop()'s own escalation - 5s for sclang to answer /poptart/quit, then SIGKILL, then
+// scsynth by pid - a shorter one used to fire first and abandon the very kill it was there for.
+let shuttingDown = false;
+function shutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  // eslint-disable-next-line no-console
+  console.log(`[poptart] ${reason} - stopping the engine`);
+  setTimeout(() => process.exit(0), 8000).unref();
   Promise.resolve(engine?.stop()).finally(() => process.exit(0));
-});
+}
+process.on('SIGINT', () => shutdown('interrupted'));
+process.on('SIGTERM', () => shutdown('terminated'));
+if (process.send) {
+  process.on('message', (msg) => {
+    if (msg?.type === 'shutdown') shutdown('the desktop shell is quitting');
+  });
+  process.on('disconnect', () => shutdown('the desktop shell went away'));
+}
 
 // Last line of defence: an error thrown where nobody can catch it - a timer callback, an OSC reply
 // handler, a stray rejected promise - must not take the server down. Node's default for both of

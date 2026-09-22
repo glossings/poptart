@@ -4,9 +4,10 @@
 // folder of audio files under the samples root; files are addressed by index (`.i(4)`) in
 // filename-sorted order, strudel-style. A NAMED pack (`sp("kit")`, a `_pack()` definition) is a
 // hand-picked list of files and folders instead - see expandPackEntries. scsynth does the actual playback (Buffer.read supports
-// whatever libsndfile does - wav/aiff/flac); the JS-side analysis here only needs the raw
-// samples for transient detection (`.slice()`), so that part is WAV-only: non-WAV files simply
-// have no slices rather than failing the pack.
+// whatever libsndfile does - wav/aiff/flac, and mp3 since the libsndfile 1.2.2 that SC 3.14
+// bundles on macOS and Windows carries the mpg123 decoder); the JS-side analysis here only
+// needs the raw samples for transient detection (`.slice()`), so that part is WAV-only: non-WAV
+// files simply have no slices rather than failing the pack.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -14,7 +15,7 @@ const { poptartHome } = require('./home');
 
 const { readWavRaw } = require('./wav');
 
-const AUDIO_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac']);
+const AUDIO_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac', '.mp3']);
 
 // Sample library location, in priority order:
 //   1. POPTART_SAMPLES_DIR - environment override, always wins (useful for tests/CI).

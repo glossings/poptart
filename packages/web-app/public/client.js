@@ -16035,7 +16035,7 @@ function packEntryFor(abs) {
 }
 const packAbsOf = (entry) => (entry.startsWith('/') ? entry : `${packBrowse.samplesRoot}/${entry}`);
 const packBasename = (entry) => entry.replace(/\/+$/, '').split('/').pop() || entry;
-const isAudioPath = (p) => /\.(wav|aif|aiff|flac)$/i.test(p);
+const isAudioPath = (p) => /\.(wav|aif|aiff|flac|mp3)$/i.test(p);
 
 function packAdd(absPaths) {
   if (!packState?.own) return packRefuseLibrary();
@@ -16588,7 +16588,7 @@ async function packPasteFromClipboard() {
   }
   if (packState !== state) return;
   if (r.files.length) packAdd(r.files);
-  if (r.skipped.length) return packSay(`${r.files.length ? `added ${r.files.length} · ` : ''}${r.skipped.length === 1 ? `${r.skipped[0]} isn't` : `${r.skipped.length} of them aren't`} a wav, aif, aiff or flac that exists`, true);
+  if (r.skipped.length) return packSay(`${r.files.length ? `added ${r.files.length} · ` : ''}${r.skipped.length === 1 ? `${r.skipped[0]} isn't` : `${r.skipped.length} of them aren't`} a wav, aif, aiff, flac or mp3 that exists`, true);
   if (r.files.length) return;
   if (!r.types.length) return packSay('the clipboard is empty', true);
   packSay('nothing on the clipboard is a file - see the console', true);
@@ -16634,7 +16634,7 @@ async function packDropFiles({ files = [], paths = [] }) {
     ...files.filter((f) => isAudioPath(f.name)).map((file) => ({ name: file.name, file })),
     ...paths.filter((p) => isAudioPath(p)).map((path) => ({ name: packBasename(path), path })),
   ];
-  if (!items.length) return packSay('drop wav, aif, aiff or flac files', true);
+  if (!items.length) return packSay('drop wav, aif, aiff, flac or mp3 files', true);
   if (files.length && !globalThis.crypto?.subtle) return packSay("can't hash the file here - open poptart at localhost", true);
   const state = packState;
   const found = [];

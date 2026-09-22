@@ -28,8 +28,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-desktop-'));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
 
 // A stand-in for server.js: reads PORT from the environment exactly as the real one does, and
-// reports the signal handling we depend on for a clean shutdown.
-function fakeServer({ ignoreSigint = false, exitImmediately = false, delayMs = 0 } = {}) {
+// reports the shutdown handling we depend on - the IPC message, the channel dropping, SIGINT.
+function fakeServer({ ignoreShutdown = false, exitImmediately = false, delayMs = 0 } = {}) {
   const file = path.join(tmp, `fake-${Math.random().toString(36).slice(2)}.js`);
   fs.writeFileSync(
     file,
@@ -42,11 +42,14 @@ setTimeout(() => {
     console.log('[poptart] listening on http://localhost:' + process.env.PORT);
   });
 }, ${delayMs});
-process.on('SIGINT', () => {
-  if (${ignoreSigint}) { console.log('ignoring SIGINT'); return; }
-  console.log('stopping the engine');
+const stop = (how) => {
+  if (${ignoreShutdown}) { console.log('ignoring ' + how); return; }
+  console.log('stopping the engine (' + how + ')');
   process.exit(0);
-});
+};
+process.on('SIGINT', () => stop('SIGINT'));
+process.on('message', (msg) => { if (msg && msg.type === 'shutdown') stop('shutdown message'); });
+process.on('disconnect', () => stop('disconnect'));
 `,
   );
   return file;
@@ -133,8 +136,8 @@ test('waiting fails with a clear message when nothing ever listens', async () =>
   await assert.rejects(() => waitForServer(port, { timeoutMs: 600, intervalMs: 50 }), /did not start within/);
 });
 
-test('shutdown signals first, so the engine can stop scsynth cleanly', async (t) => {
-  if (process.platform === 'win32') return t.skip('Windows has no SIGINT to deliver');
+test('shutdown asks over the channel first, so the engine can stop scsynth cleanly', async () => {
+  // No platform skip: the ask is a message, not a signal, and it must work on Windows too.
   const port = await findFreePort();
   const logs = [];
   const child = startServer({ port, entry: fakeServer(), onLog: (l) => logs.push(l) });
@@ -142,15 +145,27 @@ test('shutdown signals first, so the engine can stop scsynth cleanly', async (t)
   const how = await stopServer(child, { graceMs: 5000 });
   assert.strictEqual(how, 'exited');
   assert.ok(
-    logs.some((l) => l.includes('stopping the engine')),
-    'the child should have been given the chance to shut its engine down',
+    logs.some((l) => l.includes('stopping the engine (shutdown message)')),
+    `the child should have been asked, not signalled: ${logs.join(' | ')}`,
   );
 });
 
-test('shutdown forces the issue when the signal is ignored', async (t) => {
-  if (process.platform === 'win32') return t.skip('Windows has no SIGINT to deliver');
+test('a server whose shell vanished shuts itself down', async () => {
+  // The shell crashing or being killed drops the channel; the server must treat that as the
+  // quit it never got, or scsynth plays on with nobody driving it.
   const port = await findFreePort();
-  const child = startServer({ port, entry: fakeServer({ ignoreSigint: true }) });
+  const logs = [];
+  const child = startServer({ port, entry: fakeServer(), onLog: (l) => logs.push(l) });
+  await waitForServer(port, { timeoutMs: 15000 });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.disconnect();
+  await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('the child outlived its channel')), 8000))]);
+  assert.ok(logs.some((l) => l.includes('stopping the engine (disconnect)')), logs.join(' | '));
+});
+
+test('shutdown forces the issue when the request is ignored', async () => {
+  const port = await findFreePort();
+  const child = startServer({ port, entry: fakeServer({ ignoreShutdown: true }) });
   await waitForServer(port, { timeoutMs: 15000 });
   const started = Date.now();
   // A server that won't quit must not hang the app's own quit forever.
@@ -227,18 +242,26 @@ test('an unreadable status is null, not a false alarm', async () => {
   }
 });
 
-test('the Windows shutdown path resolves (it has no grace timer to clear)', async () => {
-  // Windows cannot be sent SIGINT, so stopServer takes a branch with no timer. `platform` is
-  // injected so that branch runs on any machine - it is the one CI's macOS half never touches,
-  // and it once referenced the timer before its declaration, which hung the app's quit.
+test('the Windows shutdown path asks too, and forces when ignored', async () => {
+  // Windows cannot be sent SIGINT, and the first desktop build hard-killed there - which left
+  // sclang and scsynth running and audible after the app closed. `platform` is injected so the
+  // branch runs on any machine - it is the one CI's macOS half never touches.
   const port = await findFreePort();
-  const child = startServer({ port, entry: fakeServer() });
+  const logs = [];
+  const child = startServer({ port, entry: fakeServer(), onLog: (l) => logs.push(l) });
   await waitForServer(port, { timeoutMs: 15000 });
   const how = await Promise.race([
     stopServer(child, { platform: 'win32' }),
     new Promise((resolve) => setTimeout(() => resolve('hung'), 8000)),
   ]);
   assert.strictEqual(how, 'exited');
+  assert.ok(logs.some((l) => l.includes('stopping the engine (shutdown message)')), logs.join(' | '));
+
+  const deaf = startServer({ port: await findFreePort(), entry: fakeServer({ ignoreShutdown: true }) });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const forced = await stopServer(deaf, { platform: 'win32', graceMs: 300 });
+  assert.ok(['forced', 'exited'].includes(forced), `unexpected outcome: ${forced}`);
+  assert.ok(deaf.killed || deaf.exitCode !== null || deaf.signalCode !== null);
 });
 
 test('stopping something already stopped is not an error', async () => {

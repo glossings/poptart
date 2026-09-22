@@ -106,7 +106,7 @@ async function locateDroppedFile({
 }) {
   const base = path.basename(String(name ?? '').trim());
   if (!base || base === '.' || base === '..') throw new Error('that file has no usable name');
-  if (isAudioName && !isAudioName(base)) throw new Error(`${base} is not a sample the sampler plays (wav, aif, aiff, flac)`);
+  if (isAudioName && !isAudioName(base)) throw new Error(`${base} is not a sample the sampler plays (wav, aif, aiff, flac, mp3)`);
   const want = { size: Number(size), sha256: String(sha256 ?? '').toLowerCase() };
   if (!Number.isInteger(want.size) || want.size <= 0) throw new Error('locateSample needs the file size');
   if (!/^[0-9a-f]{64}$/.test(want.sha256)) throw new Error('locateSample needs the file hash');
@@ -140,7 +140,7 @@ async function locateDroppedFile({
 async function verifyDroppedPath(dropped, { isAudioName } = {}) {
   const raw = String(dropped ?? '').trim();
   if (!raw || !path.isAbsolute(raw)) throw new Error('a dropped path has to be absolute');
-  if (isAudioName && !isAudioName(raw)) throw new Error(`${path.basename(raw)} is not a sample the sampler plays (wav, aif, aiff, flac)`);
+  if (isAudioName && !isAudioName(raw)) throw new Error(`${path.basename(raw)} is not a sample the sampler plays (wav, aif, aiff, flac, mp3)`);
   const abs = path.resolve(raw);
   try {
     return (await fs.promises.stat(abs)).isFile() ? abs : null;

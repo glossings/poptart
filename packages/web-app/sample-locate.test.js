@@ -82,7 +82,7 @@ test('the name is a basename; only audio the sampler plays is looked for; the re
   const found = await locateDroppedFile({ ...dropped('RIFF-r', '../../kick.wav'), isAudioName, findByName });
   assert.strictEqual(found, right);
   assert.strictEqual(asked, 'kick.wav');
-  await assert.rejects(locateDroppedFile({ ...dropped('x', 'loop.mp3'), isAudioName, findByName }), /not a sample/);
+  await assert.rejects(locateDroppedFile({ ...dropped('x', 'loop.ogg'), isAudioName, findByName }), /not a sample/);
   await assert.rejects(locateDroppedFile({ ...dropped('x', '..'), isAudioName, findByName }), /usable name/);
   await assert.rejects(locateDroppedFile({ name: 'kick.wav', size: 0, sha256: sha('x'), isAudioName, findByName }), /file size/);
   await assert.rejects(locateDroppedFile({ name: 'kick.wav', size: 3, sha256: 'nope', isAudioName, findByName }), /file hash/);

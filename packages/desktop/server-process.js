@@ -131,7 +131,10 @@ function startServer({
       // (see PACKAGING.md Stage 0), and a window on this machine is the only intended client.
       POPTART_HOST: '127.0.0.1',
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // The IPC channel is how the shell asks the server to shut down (see stopServer): unlike a
+    // signal it exists on Windows, and it drops when the shell dies, which server.js treats as
+    // the same request - an engine with nobody driving it must not keep playing.
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
 
   for (const stream of ['stdout', 'stderr']) {
@@ -149,20 +152,25 @@ function startServer({
 /**
  * Shut the server down, giving it a chance to stop the audio engine first.
  *
- * server.js handles SIGINT by asking sclang to quit scsynth cleanly, which matters: scsynth is
- * sclang's child, not ours, so a hard kill of the server leaves it holding the audio device
- * (that is the whole subject of osc-engine/orphans.js). So: signal, wait, and only then force.
+ * server.js answers a shutdown request by asking sclang to quit scsynth cleanly, which matters:
+ * scsynth is sclang's child, not ours, so a hard kill of the server leaves it holding the audio
+ * device and PLAYING (that is the whole subject of osc-engine/orphans.js). So: ask, wait, and
+ * only then force.
  *
- * Windows has no real signals - Node's kill() terminates the process whatever you pass - so the
- * graceful path simply does not exist there and the grace period is skipped. The engine's own
- * pidfile reaping cleans up the leftovers on the next boot, which is what it is for.
+ * The ask goes over the IPC channel startServer opened, not a signal. Windows has no signals -
+ * Node's kill() terminates the process whatever you pass - and the first desktop build took
+ * that as "no graceful path on Windows" and hard-killed, leaving sclang and scsynth running,
+ * still audible, until the next launch reaped them. The channel exists on every platform. SIGINT
+ * stays as the fallback for a child without one (a stand-in spawned some other way).
+ *
+ * The grace period sits above server.js's own 8s backstop, which sits above the engine's 5s
+ * wait for sclang: each layer must outlast the one beneath it, or it kills the process that
+ * was about to kill scsynth. Returns 'exited', 'forced', or 'already stopped'.
  */
-function stopServer(child, { graceMs = 5000, platform = process.platform, timers = { setTimeout } } = {}) {
+function stopServer(child, { graceMs = 12000, platform = process.platform, timers = { setTimeout } } = {}) {
   return new Promise((resolve) => {
     if (!child || child.exitCode !== null || child.signalCode !== null) return resolve('already stopped');
     let settled = false;
-    // Declared up here, not where it is armed: done() closes over it, and the Windows branch
-    // below returns before the grace timer exists.
     let timer = null;
     const done = (how) => {
       if (settled) return;
@@ -172,11 +180,25 @@ function stopServer(child, { graceMs = 5000, platform = process.platform, timers
     };
     child.once('exit', () => done('exited'));
 
-    if (platform === 'win32') {
+    let asked = false;
+    if (child.connected) {
+      try {
+        child.send({ type: 'shutdown' });
+        asked = true;
+      } catch {
+        // the channel closed under us - fall through to the signal
+      }
+    }
+    if (!asked && platform !== 'win32') {
+      child.kill('SIGINT');
+      asked = true;
+    }
+    if (!asked) {
+      // Windows and no channel: there is nothing to ask through. The engine's pidfile reaping
+      // cleans up on the next boot, which is what it is for.
       child.kill();
       return;
     }
-    child.kill('SIGINT');
     timer = timers.setTimeout(() => {
       try {
         child.kill('SIGKILL');

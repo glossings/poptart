@@ -1,9 +1,11 @@
 'use strict';
 
 // Song files for the DJ decks: resolving a user's audio file into something scsynth's
-// Buffer.read can load. wav/aiff/flac go straight through (libsndfile decodes those
-// everywhere); compressed formats CoreAudio knows (mp3, m4a/aac, caf) are converted ONCE with
-// macOS's stock afconvert - no new dependency - into a cache under ~/.poptart/cache/songs,
+// Buffer.read can load. wav/aiff/flac/mp3 go straight through (libsndfile decodes those on
+// every platform poptart ships SC for - the 1.2.2 in SC 3.14 bundles the mpg123 decoder on
+// macOS and Windows alike); the compressed formats only CoreAudio knows (m4a/aac, caf) are
+// converted ONCE with macOS's stock afconvert - no new dependency - into a cache under
+// ~/.poptart/cache/songs,
 // keyed by the source's (path, mtime, size) so an edited or replaced file re-decodes and an
 // untouched one never does. Decodes land under a temp name and rename into place, so a crash
 // mid-convert can't leave a half-written file that later reads as a cache hit.
@@ -18,8 +20,8 @@ const { execFile } = require('node:child_process');
 
 // What scsynth reads natively vs what needs an afconvert pass first. Anything else is a clear
 // error - better than handing scsynth a file it will fail on with a cryptic read error.
-const NATIVE_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac']);
-const DECODE_EXTS = new Set(['.mp3', '.m4a', '.aac', '.caf']);
+const NATIVE_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac', '.mp3']);
+const DECODE_EXTS = new Set(['.m4a', '.aac', '.caf']);
 
 function songCacheDir() {
   return path.join(poptartHome(), 'cache', 'songs');
@@ -47,9 +49,10 @@ function songCachePath(filePath, stat, dir = songCacheDir()) {
  * file, an unsupported format, or a failed decode.
  *
  * `opts.wav` asks for a path Node's own WAV reader can parse (the waveform analysis, songs
- * phase 3): only an actual .wav passes through then - aiff/flac, native to scsynth but not to
- * wav.js, take the same afconvert pass as mp3, landing in the same cache entry a compressed
- * source's playback decode already uses.
+ * phase 3): only an actual .wav passes through then - aiff/flac/mp3, native to scsynth but not
+ * to wav.js, take the same afconvert pass as m4a, landing in the same cache entry a compressed
+ * source's playback decode already uses. (afconvert is macOS-only, so on Windows this wav pass
+ * is what still fails for a non-wav source, while playback of it works.)
  *
  * `opts.exec` (execFile-shaped) and `opts.cacheDir` are injectable for tests.
  */
@@ -66,7 +69,7 @@ async function resolveSongFile(filePath, { exec = execFile, cacheDir, wav = fals
   if (!kind) {
     throw new Error(
       `unsupported audio format "${path.extname(src) || '(none)'}" - `
-      + `wav/aiff/flac play directly, mp3/m4a/aac/caf are converted via afconvert`,
+      + `wav/aiff/flac/mp3 play directly, m4a/aac/caf are converted via afconvert`,
     );
   }
   const passesThrough = wav ? path.extname(src).toLowerCase() === '.wav' : kind === 'native';

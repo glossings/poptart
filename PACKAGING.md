@@ -153,8 +153,10 @@ Extensions destination are threaded through `index.js` and `setup.js`.
   a pid's command name to make sure a recycled pid isn't killed by mistake, and did that with
   `ps`, which Windows has not got — so every reap answered "not ours" for a live scsynth.
   `tasklist` is the equivalent and is now used on win32, in both the reaper and setup's
-  preflight. This matters more under the desktop shell, where Windows cannot deliver the SIGINT
-  that shuts the engine down gracefully.
+  preflight. Under the desktop shell the graceful stop does not depend on a signal at all: the
+  shell asks over the server's IPC channel, which Windows has, and the server also stops the
+  engine itself when that channel drops (the shell crashed or was killed). The first build
+  hard-killed on Windows and left scsynth playing after the app closed.
 
 ## Stage 2 (in progress) — the dmg: Electron
 
@@ -194,8 +196,8 @@ that file, including when doctor itself cannot run.
   case. Keep the page browser-compatible (no Electron-only APIs in the UI) so `npm run dev` in
   a browser keeps working for development. Two things the shell must not get wrong, both
   covered by tests: the server is forced to `127.0.0.1` regardless of `POPTART_HOST` (it evals
-  arbitrary JS — Stage 0), and quitting signals the server so sclang can stop scsynth, rather
-  than orphaning the process that holds the audio device.
+  arbitrary JS — Stage 0), and quitting asks the server to stop so sclang can quit scsynth,
+  rather than orphaning the process that holds the audio device.
 - **SuperCollider is fetched, not bundled** — Stage 1.5 does this already, so the app reuses it
   instead of embedding a 556 MB `SuperCollider.app`. The user's own machine downloads
   SuperCollider's officially signed release, which keeps the installer small and means we are
