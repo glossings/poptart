@@ -1833,20 +1833,12 @@ OSCdef(\poptartCreateTrack, { |msg|
             // Control buses keep whatever the last owner left in them - the server never clears
             // one, on free or on allocation - so a recycled index could hand a new track somebody
             // else's bend for the block before its track synth first writes. Zeroed explicitly,
-            // before the def goes out, so the bus is at centre before anything can read it.
+            // ahead of the sync, so the bus is at centre before anything can read it.
             bendBus.set(0);
             grainBus.setn([0, 0.08, 20, 0]);
-            // The /s_new rides along as /d_recv's completion message, so the server makes the
-            // synth the moment THIS def has landed. The obvious spelling - `def.add; server.sync`
-            // - waited on every async job the server had queued, and a plugin scan is async
-            // server work: on a first run with a few hundred plugins that is fifteen minutes in
-            // which no track could be created, awaitTrack timed out after five seconds, and
-            // patterns played nothing while auditioning (which makes no track) worked fine.
-            // Nothing here needs a sync: the bus sets above are synchronous commands, already
-            // in order ahead of this, and everything below only needs the node id, which
-            // basicNew assigns client-side without asking the server.
-            synth = Synth.basicNew(trackDefName.(key), server);
-            def.add(nil, synth.newMsg(group, [\inBus, inBus.index, \bendOut, bendBus.index, \grainOut, grainBus.index] ++ scArgsFor.() ++ birth, \addToTail));
+            def.add; // sends to server + global SynthDescLib
+            server.sync;
+            synth = Synth(trackDefName.(key), [\inBus, inBus.index, \bendOut, bendBus.index, \grainOut, grainBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
             // SendReply names its sender by node id and nothing else, so the bend messages coming
             // back from this synth need a way home (see the bendOut OSCFunc).
             bendTracks[synth.nodeID] = key;

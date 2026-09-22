@@ -51,16 +51,24 @@ no completion notes.
     and a bundle cannot be its own search dir, so per-plugin resumption needs a fork change.
     Moot if the entry above lands - there is no long scan left to lose.
 
-[ ] The other `server.sync` sites block behind a plugin scan too. Track creation is fixed (its
-    /s_new rides along as the def's completion message - see buildTrackDef's caller and
-    track-def-sclang.test.js), but the same shape is left in three places, each of which would
-    stall for as long as a scan runs: the glide/LFO def around poptart.scd:2707, the mixer's
-    analysis defs (buildMixDef, ~4183), and recording's `Buffer.alloc; server.sync` (~4263).
-    The first is the one to care about - an LFO is ordinary use, where the other two are opening
-    the mixer with changed bands and starting a bounce. All three take the same treatment: a
-    completion message instead of a global sync (Buffer.alloc takes one as well). Whack-a-mole
-    though: the real cure is for a scan to stop occupying the server's async queue for a quarter
-    of an hour, which is the entry above.
+[ ] Do NOT remove the `server.sync` after `def.add` in track creation without solving message
+    ordering first. Tried and reverted (2026-09-21): sending the `/s_new` as `/d_recv`'s
+    completion message does remove the wait, but that sync was doing a second job - `/d_recv` is
+    asynchronous, so the node is created on the server's NRT thread while the plugin open's
+    `/u_cmd` and the parameter `/n_set`s are handled immediately on the RT thread. They arrive
+    before the node exists and are dropped: 58 `FAILURE IN SERVER /u_cmd Node 1087 not found`
+    lines in one session, plugins that never opened, and "no plugin loaded in that slot" for
+    every params request. A delay became a silent permanent failure, which is worse.
+
+    If it is worth another attempt, the shape is to wait for OUR node instead of for the whole
+    queue: an OSCFunc on `/n_go` with the node id, signalled through a Condition, in place of
+    `server.sync`. That is strictly narrower and still correct. But it does not help the case
+    that motivated the change - if a scan really is occupying the async queue then `/d_recv`
+    waits behind it too - so it buys precision, not speed. The speed comes from the entry above.
+
+    Note the same shape exists at poptart.scd:2707 (the glide/LFO def), ~4183 (the mixer's
+    analysis defs) and ~4263 (recording's `Buffer.alloc; server.sync`). Those syncs are
+    load-bearing for the same reason; leave them alone.
 
 [ ] Report the non-plugin-file crash upstream. Fixed in the fork (v0.6.2-poptart.4: the file
     branch of getPluginCpuArchitectures throws on an empty architecture list, as the bundle branch
