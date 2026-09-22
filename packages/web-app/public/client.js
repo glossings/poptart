@@ -14053,8 +14053,13 @@ async function evaluate(start, { byHand = false } = {}) {
     prNamesStale();
     if (prState && prNamesWanted()) prIndexLabels(); // re-asks now; redraws only if the list changed
     if (start) playing = true; // Update keeps the current play state; Play begins it
-    const nActive = result.tracks.filter((t) => t.active).length;
-    logLine(`${start ? 'playing' : 'updated'} (${nActive}/${result.tracks.length} pattern(s))`);
+    // Only for an eval the player asked for. The panels re-evaluate as you drag - a piano roll
+    // edit, an LFO breakpoint, a knob - and one console line per drag buries whatever the console
+    // was actually being read for.
+    if (byHand) {
+      const nActive = result.tracks.filter((t) => t.active).length;
+      logLine(`${start ? 'playing' : 'updated'} (${nActive}/${result.tracks.length} pattern(s))`);
+    }
     loadChainParams();
     commitQueue.push(...filed); // the programs are in the store now; their slots can swap again
     if (mixModeOn) mixRefresh(); // the strip mirrors what's playing
