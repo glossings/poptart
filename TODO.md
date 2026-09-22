@@ -51,6 +51,14 @@ no completion notes.
     and a bundle cannot be its own search dir, so per-plugin resumption needs a fork change.
     Moot if the entry above lands - there is no long scan left to lose.
 
+[ ] No way to reach the diagnostic report off macOS unless something has already failed. The two
+    items live in the Help menu, and there is no menu bar on Windows or Linux - alt is where
+    poptart's own chords live there, so the default menu was removed deliberately (cd61d2a). The
+    failure screen's links cover a boot that fails, but a Windows user whose poptart is running
+    and misbehaving has nowhere to click. Options: a right-click item in the editor's context
+    menu (the growth point for this sort of thing), or something in the settings tab beside the
+    data-folder path. The report itself works everywhere; it is only unreachable.
+
 [ ] Do NOT remove the `server.sync` after `def.add` in track creation without solving message
     ordering first. Tried and reverted (2026-09-21): sending the `/s_new` as `/d_recv`'s
     completion message does remove the wait, but that sync was doing a second job - `/d_recv` is

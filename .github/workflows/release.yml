@@ -165,7 +165,7 @@ jobs:
         run: |
           {
             if [ "$HAS_MAC_CERT" != "true" ] || [ "$HAS_NOTARY_KEY" != "true" ]; then
-              echo "> **The macOS builds in this release are not signed and notarized, and macOS will not open them after a download. They are for testing only.**"
+              echo "> **The macOS builds are not yet signed by a registered developer.** macOS will refuse them once; the notes below say how to open them."
               echo
             fi
             node packages/desktop/release.js --notes "$GITHUB_REF_NAME"

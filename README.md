@@ -1,7 +1,6 @@
 # Poptart
 
-A livecoding environment for real instruments. You arrange your music in simple notation; Poptart
-plays and continuously modulates actual VST/VST3 plugins.
+Poptart is like a livecoding environment, a CDJ, and a DAW had a baby.
 
 ```js
 n("0 2 3")
@@ -16,17 +15,20 @@ If you somehow ended up here without previously checking out [Tidal Cycles](http
 
 ## What it does
 
-- **Real plugins as instruments and effects.** `.synth("…")` loads any VST2/VST3 instrument,
-  `.fx("…")` chains effects after it, and `.param("Filter 1 Freq", …)` addresses knobs by their
-  real names.
-- **Modulation that actually moves.** LFOs, hand-drawn shapes and per-note envelopes run natively
-  inside the audio engine, sample-accurate.
-- **Strudel-style mini-notation** for notes, degrees, scales, rhythms and randomness.
-- **A sampler, a piano roll, a mixer, MIDI in and out** — all of it writing code rather than
-  hiding state, so the patch *is* the sound and a single file plays exactly what you heard.
-- **Extensible from the editor.** Extend `Signal.prototype` live, the way you would in Strudel.
-- **Shares its clock.** MIDI clock out for hardware, Ableton Link for the other apps on the
-  network.
+- **Your real VST plugins** as instruments and effects, with their knobs addressed by name and
+  modulated live from inside the audio engine via hand-drawn LFOs and envelopes.
+- **Piano rolls**, with tools to help you write rhythms, harmonies, and melodies.
+- **An arrangement view and a mixer.**
+- **Two DJ decks**, with a crossfader, keylock, a filter, and headphone cue.
+- **A sampler**, with chops and granular playback.
+- **A sample map**: your whole library laid out by how the samples sound, so the ones like the
+  one you're using are the ones beside it.
+- **Recording, both ways**: play your MIDI keys into a piano roll, or bounce a track to a file
+  and play it straight back as a sample. Hardware inputs work as a track's source too.
+- **A snippet browser**: save a block of code and drop it into any song - the rolls, shapes, and
+  presets it needs come along automatically.
+- **MIDI in and out, MIDI clock out, OSC in, and Ableton Link**, for your hardware and the other
+  apps on the network.
 
 Everything past that is in the built-in guide — the **docs ↗** button in the app.
 
@@ -41,13 +43,13 @@ the native modulators), and `web-app` (a small Node server plus the browser edit
 ## Download
 
 [**Latest release**](https://github.com/glossings/poptart/releases/latest) - the app, with
-nothing to install first. Everything below about SuperCollider applies: poptart sets that up
+nothing to install first. Everything below about SuperCollider applies: Poptart sets that up
 itself on first run.
 
 | | |
 | --- | --- |
 | **Windows** | `poptart-<version>-setup.exe` - the normal installer. |
-| **Windows, portable** | `poptart-<version>-portable-x64.zip` - unpack it anywhere, and poptart keeps your songs in the `poptart-data` folder inside it instead of your user folder. For an external drive, or two separate setups. |
+| **Windows, portable** | `poptart-<version>-portable-x64.zip` - unpack it anywhere, and Poptart keeps your songs in the `poptart-data` folder inside it instead of your user folder. For an external drive, or two separate setups. |
 | **macOS** | `poptart-<version>-arm64.dmg` for Apple Silicon, `-x64.dmg` for Intel Macs. **Not yet signed - see below.** |
 
 **The macOS builds are not signed by a registered developer yet**, so macOS will refuse to open
@@ -62,7 +64,7 @@ again:
 xattr -dr com.apple.quarantine /Applications/Poptart.app
 ```
 
-(Apple Developer signing is in progress. Once it lands, neither step is needed.)
+(A build signed by a registered developer would need neither step.)
 
 Every installer is built by GitHub Actions from a tagged commit in this repository - the build
 log for any release is public, so you can see exactly what went into it.
@@ -73,21 +75,21 @@ Intel Macs: the `-x64` build is produced by CI but has not been run by hand on a
 
 **To build from source: Node 20+.** The downloads above need nothing installed.
 
-The audio engine underneath poptart is [SuperCollider](https://supercollider.github.io), and
-poptart sets it up for you on first run:
+The audio engine underneath Poptart is [SuperCollider](https://supercollider.github.io), and
+Poptart sets it up for you on first run:
 
-- **Don't have SuperCollider?** poptart asks, then downloads its own private copy into
+- **Don't have SuperCollider?** Poptart asks, then downloads its own private copy into
   `~/.poptart/sc`. No administrator password, nothing installed system-wide, nothing else on
   your machine touched; deleting that folder undoes it. (macOS and Windows. SuperCollider
   publishes no Linux binaries, so on Linux install it from your package manager first.)
-- **Already have it?** poptart finds it and uses it, and leaves it alone.
+- **Already have it?** Poptart finds it and uses it, and leaves it alone.
 
 Everything SuperCollider needs in order to host plugins is fetched and put in place the same
 way. There is nothing to configure.
 
 No AudioUnit support — plugins are VST2/VST3 only; in practice nearly every AU also ships a VST3.
 
-macOS is where poptart is developed and where everything works. It runs on Windows too, with
+macOS is where Poptart is developed and where everything works. It runs on Windows too, with
 two gaps for now: no Ableton Link, and the decks' keylock uses its rougher fallback.
 
 ## Getting started from source
@@ -99,7 +101,7 @@ npm run dev
 
 Then open <http://localhost:4000>.
 
-The first run takes a little longer than the rest. If poptart needs its own SuperCollider it
+The first run takes a little longer than the rest. If Poptart needs its own SuperCollider it
 asks first (`[y/N]` — it is a 140–250 MB download), and it scans your installed plugins, which
 on a machine with a lot of them can take several minutes. The scan runs in the background: the
 editor is usable straight away, the header counts the plugins as they are probed, and the list
@@ -119,7 +121,7 @@ The server listens on `127.0.0.1` only — evaluated code runs with your user's 
 must not be reachable from the network. (`POPTART_HOST=0.0.0.0` opts into LAN access, with a
 warning.)
 
-If something doesn't come up, `npm run doctor` prints everything poptart decided and why. Where
+If something doesn't come up, `npm run doctor` prints everything Poptart decided and why. Where
 things live on disk, every setting, how to narrow the plugin scan, and what to do when the engine
 won't boot: [SETUP.md](SETUP.md).
 

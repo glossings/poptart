@@ -130,7 +130,12 @@ const git = (args, repoRoot = REPO_ROOT) => execFileSync('git', ['-C', repoRoot,
 
 function lastReleaseTag(repoRoot = REPO_ROOT) {
   try {
-    return git(['describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*'], repoRoot);
+    // stderr swallowed: with no release yet git says 'No names found', which is an answer
+    // rather than a fault, and printing it makes a clean first run look like it failed.
+    return execFileSync('git', ['-C', repoRoot, 'describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
   } catch {
     return null; // no release yet
   }

@@ -2,7 +2,7 @@
   "name": "poptart",
   "private": true,
   "version": "0.1.0",
-  "description": "A Strudel-flavored livecoding environment that hosts real VST/AU plugins as instruments and effects, with continuous parameter modulation.",
+  "description": "A Strudel-flavored livecoding environment that hosts real VST/VST3 plugins as instruments and effects, with continuous parameter modulation.",
   "author": "Glossing",
   "workspaces": [
     "packages/osc-engine",
