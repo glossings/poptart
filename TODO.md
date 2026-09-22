@@ -5,6 +5,32 @@ no completion notes.
 
 ---
 
+[ ] Resolve plugin names on demand instead of scanning everything first. A first run with 400
+    plugins is 15-20 minutes of probing (serial, ~2-3s each) before a plugin name resolves, and
+    that is the first thing a new user sees. The reason a full scan exists is that a plugin's
+    NAME is only knowable by probing it - Serum2.vst3 holds both "Serum 2" and "Serum 2 FX", so
+    a name cannot be mapped to a file from the file alone. But the file name is a strong hint:
+    on `.synth("Serum 2")`, probe candidates ranked by file-name similarity and stop at the
+    first whose reported name matches - seconds, not minutes. Probe results are already cached
+    per plugin by VSTPlugin, so each one is paid for once ever. The full scan stays, as what
+    **rescan** does and what fills the browser's complete list, but it stops being the price of
+    admission. Open questions: what to do when no candidate matches (fall back to a full scan,
+    or a full scan of that folder first); whether the browser should show "not scanned yet"
+    rather than an empty list; and whether a background scan should still run at idle so the
+    list fills in for someone who never asks. Ties into POPTART_VST_PARALLEL, which would cut
+    the full scan several-fold but crashed when it was tried.
+
+[ ] The other `server.sync` sites block behind a plugin scan too. Track creation is fixed (its
+    /s_new rides along as the def's completion message - see buildTrackDef's caller and
+    track-def-sclang.test.js), but the same shape is left in three places, each of which would
+    stall for as long as a scan runs: the glide/LFO def around poptart.scd:2707, the mixer's
+    analysis defs (buildMixDef, ~4183), and recording's `Buffer.alloc; server.sync` (~4263).
+    The first is the one to care about - an LFO is ordinary use, where the other two are opening
+    the mixer with changed bands and starting a bounce. All three take the same treatment: a
+    completion message instead of a global sync (Buffer.alloc takes one as well). Whack-a-mole
+    though: the real cure is for a scan to stop occupying the server's async queue for a quarter
+    of an hour, which is the entry above.
+
 [ ] Report the non-plugin-file crash upstream. Fixed in the fork (v0.6.2-poptart.4: the file
     branch of getPluginCpuArchitectures throws on an empty architecture list, as the bundle branch
     always did, and the PluginFactory constructor no longer reads archs.front() on one), and
