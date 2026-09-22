@@ -38,10 +38,12 @@ function grabArrow(name) {
 }
 // eslint-disable-next-line no-new-func
 const makeOrg = new Function('orgQuery', 'orgSongs', `
+  ${grabFn('pathBasename')}
+  ${grabArrow('stripExt')}
   ${grabArrow('libItemIsFile')}
   ${grabArrow('libFileTitle')}
   ${NAMES.map(grabFn).join('\n')}
-  return { ${NAMES.join(', ')} };
+  return { ${NAMES.join(', ')}, libFileTitle };
 `);
 
 const SAVED = [
@@ -103,6 +105,11 @@ test('an untitled file falls back to its filename, as the row itself displays it
   assert.equal(org('untitled').orgItemMatches(it), true);
   assert.equal(org('bounce').orgItemMatches(it), true);
   assert.equal(org('.wav').orgItemMatches(it), true); // still in the path, if not the title
+  // The server on Windows spells the path with a drive letter and backslashes; the title is
+  // still the file's own name, not the whole path.
+  const win = file('C:\\Music\\Untitled Bounce.wav');
+  assert.equal(org('').libFileTitle(win), 'Untitled Bounce');
+  assert.equal(org('untitled').orgItemMatches(win), true);
 });
 
 test('a saved song deleted out from under the set still matches by the name the row holds', () => {

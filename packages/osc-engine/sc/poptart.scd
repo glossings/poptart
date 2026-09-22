@@ -107,6 +107,10 @@ var nodeAddr = NetAddr("127.0.0.1", nodePort);
 // Symbol keys, NOT Strings: IdentityDictionary lookups are by identity, and two equal Strings
 // are distinct objects (incoming OSC string args arrive as Symbols anyway).
 var tracks = IdentityDictionary.new;
+// key -> generation of the build allowed to commit that key (see poptartCreateTrack). Bumped by
+// every build and by every reclaim, so a build that comes back after its reservation was taken
+// away can tell that the key is no longer its to fill.
+var trackGen = IdentityDictionary.new;
 // '<track>_<slot>' -> the newest plugin-state restore seen for that slot. A restore carrying a
 // timestamp waits here for its onset (see poptartSetPluginState), so anything sent afterwards has
 // to be able to cancel it - otherwise an older program lands on top of a newer one, which is what
@@ -174,9 +178,9 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 // '/poptart/setTempo' and applied to plugins as they open (see loadInstrument/loadEffect).
 var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
-var awaitTrack, awaitLoaded, resolvePlugin, resolveParamIndex, watchPluginEdits;
+var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued;
-var destroyTrack;
+var destroyTrack, buildTrack;
 var slotKey, slotLive, waitForLoad, flushNotes, clearPending;
 var hushTrack, clearMidiRoute, markSounding;
 var beginSelfLoad, endSelfLoad, selfLoading;
@@ -891,7 +895,33 @@ awaitTrack = { |key, timeoutSec = 5|
     while { t.isKindOf(Event).not and: { tries < max } } {
         0.05.wait; tries = tries + 1; t = tracks[key];
     };
-    if (t.isKindOf(Event)) { t } { nil };
+    // Waited the whole build out and the key is STILL reserved: that build is not coming back,
+    // and without this the reservation would outlive the session (see reclaimStuckTrack).
+    if (t.isKindOf(Event)) { t } { reclaimStuckTrack.(key); nil };
+};
+// Gives up on a build that never committed, so the key can be built again.
+//
+// createTrack reserves a key with \pending and only writes the real track at the very end of an
+// async build. A build that never gets there - it threw, or its routine was dropped when the
+// scheduler queue overflowed and a `.wait` or a /sync reply never came back - used to leave
+// \pending in place for the rest of the session: createTrack guards on isNil and so no-oped on
+// every evaluation after, destroyTrack's whole body sits inside a `track !? {}` and so skipped
+// it too, and meanwhile every note, param and route aimed at that key was dropped without a
+// sound (a track that is silent forever, which is how this was found). Clearing the reservation
+// is enough to recover: Node re-sends createTrack for every active track on every evaluation.
+//
+// Bumping the generation is what makes this safe against a build that is merely slow rather than
+// lost - it cannot tell the two apart, and must not have to. A reclaimed build finds its
+// generation stale when it finally wakes and frees what it made instead of committing over the
+// rebuild; its group and buses are leaked until then, which is the price of a track that comes
+// back at all.
+reclaimStuckTrack = { |key|
+    if (tracks[key] == \pending) {
+        trackGen[key] = (trackGen[key] ? 0) + 1;
+        tracks[key] = nil;
+        ("poptart: track " ++ key ++ " never finished being built - cleared it, and the next "
+            ++ "evaluation will build it again").warn;
+    };
 };
 // Waits for the plugin in a slot to be open, for as long as an open is actually in flight for it
 // (`wanted` is set by loadInstrument/loadEffect before the open is queued and cleared when the
@@ -912,13 +942,16 @@ awaitLoaded = { |track, slot, graceSec = 1|
 
 slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
 
-// Whether a slot has a plugin to send MIDI to: one open, or one whose open is still in flight. A
-// slot whose open FAILED (a plugin this machine does not have) keeps its controller but has
-// neither mark, and scsynth answers every unit command sent to it with "VSTPlugin: no plugin
-// loaded!" - once per note, for as long as the pattern plays. The failed load has already said
-// what is wrong, once; the notes are dropped quietly. Asked at send time, not at arrival: a note
-// queued behind a load (see waitForLoad) is judged by how the load turned out.
-slotLive = { |track, slot| track[\loaded][slot].notNil or: { track[\wanted][slot].notNil } };
+// Whether a slot has a plugin to send MIDI to: one that is OPEN. Not one whose open is still in
+// flight - the UGen has no plugin until the open lands, and answers every unit command sent to
+// it meanwhile with "VSTPlugin: no plugin loaded!": a line per note, per slot, for as long as the
+// opens take, which for a full song coming up is a hundred lines saying nothing (and `wanted`
+// is never cleared by a successful open, so it added nothing once the plugin was in). Same for
+// a slot whose open FAILED (a plugin this machine does not have): it keeps its controller but
+// has no plugin, the failed load has already said what is wrong, once, and the notes are
+// dropped quietly. Asked at send time, not at arrival: a note queued behind a load (see
+// waitForLoad) is judged by how the load turned out.
+slotLive = { |track, slot| track[\loaded][slot].notNil };
 
 // A note due at or after the start of a program load WAITS for that load instead of being bundled
 // through it. Loading suspends the plugin and resets its voices, so a note timestamped inside that
@@ -1267,6 +1300,20 @@ server.waitForBoot {
     // Node sends every event's envelope, and an unset release arrives as its 50ms default.
     [1, 2].do { |nc|
         var toStereo = { |sig| if (nc == 1) { sig ! 2 } { sig } };
+        // Every voice below writes through OffsetOut, not Out. A synth spawned by a timestamped
+        // bundle starts computing at the START of the block its time falls in, and Out would put
+        // its first sample there - up to a block EARLY (256 samples at the engine's block size:
+        // 5.3ms at 48k), by however far into the block the onset fell. A grid step is almost never
+        // a whole number of blocks, so that phase walked a little further through the block each
+        // event: hits crept earlier one by one, then jumped forward a block when it wrapped
+        // (heard 2026-09-22 on a 16th-note hat line at 144 BPM). OffsetOut delays the whole
+        // output by the bundle's sub-block offset, which lands the first sample on the scheduled
+        // sample exactly (sample-onset-sclang.test.js). Plugin notes never had this: VSTPlugin
+        // applies the same offset to its MIDI events itself.
+        //
+        // The delay holds each block's last `offset` samples back for the next one, and doneAction
+        // frees the node the moment the envelope ends - but OffsetOut writes what it still holds
+        // out as the node goes (its destructor does), so the release is not cut short by it.
         SynthDef(("poptart_sample_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
             var frames = BufFrames.ir(buf);
             // Pitch bend (Sig#bend), in semitones, read live off the track's bend bus - every voice
@@ -1324,7 +1371,7 @@ server.waitForBoot {
             var atkS = max((1 - atEdge) * 0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
             var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
-            Out.ar(out, toStereo.(sig) * env * amp);
+            OffsetOut.ar(out, toStereo.(sig) * env * amp);
         }).add;
         // Looping voice. Node decides WHERE the loop runs (loopLo..loopHi - the whole file or just
         // the begin..end window, see .loop()'s wrap option) and where it enters (entry); this only
@@ -1393,7 +1440,7 @@ server.waitForBoot {
             var atEdge = ((from < 1) + (from > (frames - 2))).min(1);
             var atkS = max((1 - atEdge) * 0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
             var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
-            Out.ar(out, toStereo.(sig) * env * amp);
+            OffsetOut.ar(out, toStereo.(sig) * env * amp);
         }).add;
         SynthDef(("poptart_sample_warp_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
             var overlaps = 8;
@@ -1413,7 +1460,7 @@ server.waitForBoot {
             var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
             var noteGate = gate * (Line.kr(0, 1, dur) < 1);
             var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
-            Out.ar(out, toStereo.(sig) * env * amp);
+            OffsetOut.ar(out, toStereo.(sig) * env * amp);
         }).add;
         // Timestretched loop - same loopLo/loopHi/entry/pingpong contract as the plain loop above,
         // on Warp1's normalized 0..1 pointer. The warp defs are exempt from the float32 precision
@@ -1441,7 +1488,7 @@ server.waitForBoot {
             // Audio rate, and the windowed voices' half-millisecond floor (see the warp def above).
             var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
             var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
-            Out.ar(out, toStereo.(sig) * env * amp);
+            OffsetOut.ar(out, toStereo.(sig) * env * amp);
         }).add;
         // Granular voice (Sig#grain): the file read as a stream of short overlapping grains cut
         // from around a position, instead of one pass from it. One synth per event like the defs
@@ -1491,7 +1538,7 @@ server.waitForBoot {
             // event's alone.
             var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
             var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
-            Out.ar(out, sig * level * env * amp);
+            OffsetOut.ar(out, sig * level * env * amp);
         }).add;
         // Song-deck player (see the songLoad/songStart OSCdefs): one long file, played straight
         // through at `rate` into the track's input bus, so the whole DJ stage (EQ, filter,
@@ -1802,45 +1849,52 @@ server.waitForBoot {
 
 // --- track / chain management ---
 
-OSCdef(\poptartCreateTrack, { |msg|
-    var key = msg[1].asSymbol;
-    // Optional birth values (name/value pairs after the key): channel controls baked into the
-    // Synth's own args, so a track created into a live mix comes up ALREADY wearing the desk's
-    // state (deck gain 0 = born silent). They have to ride the creation itself: a setParam sent
-    // while the track is still \pending is dropped (see poptartSetParam), which is the race
-    // that had freshly evaled stems flash in at full volume before the desk caught them.
-    var birth = if (msg.size > 2) {
-        msg.copyRange(2, msg.size - 1).clump(2).collect { |p| [p[0].asSymbol, p[1].asFloat] }.flatten;
-    } { [] };
-    if (tracks[key].isNil) {
-        tracks[key] = \pending;
-        fork {
-            var group = Group.new(levelGroups[0]); // depth 0 until a route says otherwise (see reorderTracks)
-            // Sample voices spawn into a group of their own at the head of the track's, so one
-            // gate-off releases every one of them at once (see hushTrack); the modulators, the
-            // ramps and the chain sit outside it, in the track group as before.
-            var voices = Group.new(group, \addToHead);
-            var inBus = Bus.audio(server, 2); // sample synths write here, the track synth mixes it in
-            // The track's pitch-bend value, republished by the track synth for its sample voices to
-            // map and for the MIDI sender to read (see buildTrackDef). One per track for the track's
-            // life, so a voice spawned at any moment has somewhere to read from; it sits at 0 -
-            // no bend - until something writes it.
-            var bendBus = Bus.control(server, 1);
-            // ...and the four grain controls, likewise (pos, size, rate, pan - in that order).
-            var grainBus = Bus.control(server, 4);
-            var synth;
-            var def = buildTrackDef.(key);
-            // Control buses keep whatever the last owner left in them - the server never clears
-            // one, on free or on allocation - so a recycled index could hand a new track somebody
-            // else's bend for the block before its track synth first writes. Zeroed explicitly,
-            // ahead of the sync, so the bus is at centre before anything can read it.
-            bendBus.set(0);
-            grainBus.setn([0, 0.08, 20, 0]);
-            def.add; // sends to server + global SynthDescLib
-            server.sync;
-            synth = Synth(trackDefName.(key), [\inBus, inBus.index, \bendOut, bendBus.index, \grainOut, grainBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
-            // SendReply names its sender by node id and nothing else, so the bend messages coming
-            // back from this synth need a way home (see the bendOut OSCFunc).
+// Builds the track for a key nobody holds: reserves it with \pending, and commits the real track
+// at the end of the async build below. `birth` is the list of channel-control name/value pairs
+// the track synth is born with (see poptartCreateTrack).
+buildTrack = { |key, birth|
+    // This build's claim on the key. Only the holder of the current generation may commit, and a
+    // reclaim bumps it - see reclaimStuckTrack for why a build has to be able to find out that
+    // the key stopped being its to fill.
+    var gen = (trackGen[key] ? 0) + 1;
+    trackGen[key] = gen;
+    tracks[key] = \pending;
+    fork {
+        var group = Group.new(levelGroups[0]); // depth 0 until a route says otherwise (see reorderTracks)
+        // Sample voices spawn into a group of their own at the head of the track's, so one
+        // gate-off releases every one of them at once (see hushTrack); the modulators, the
+        // ramps and the chain sit outside it, in the track group as before.
+        var voices = Group.new(group, \addToHead);
+        var inBus = Bus.audio(server, 2); // sample synths write here, the track synth mixes it in
+        // The track's pitch-bend value, republished by the track synth for its sample voices to
+        // map and for the MIDI sender to read (see buildTrackDef). One per track for the track's
+        // life, so a voice spawned at any moment has somewhere to read from; it sits at 0 -
+        // no bend - until something writes it.
+        var bendBus = Bus.control(server, 1);
+        // ...and the four grain controls, likewise (pos, size, rate, pan - in that order).
+        var grainBus = Bus.control(server, 4);
+        var synth;
+        var def = buildTrackDef.(key);
+        // Control buses keep whatever the last owner left in them - the server never clears
+        // one, on free or on allocation - so a recycled index could hand a new track somebody
+        // else's bend for the block before its track synth first writes. Zeroed explicitly,
+        // ahead of the sync, so the bus is at centre before anything can read it.
+        bendBus.set(0);
+        grainBus.setn([0, 0.08, 20, 0]);
+        def.add; // sends to server + global SynthDescLib
+        server.sync;
+        synth = Synth(trackDefName.(key), [\inBus, inBus.index, \bendOut, bendBus.index, \grainOut, grainBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
+        // Somebody gave up on this build while it was in flight and the key has been built
+        // again since (see reclaimStuckTrack). Committing now would overwrite a live track
+        // with a synth nothing else can reach, so this one is taken back down instead -
+        // freeing the group takes the voices group and the track synth with it.
+        if (trackGen[key] != gen) {
+            group.free; inBus.free; bendBus.free; grainBus.free;
+            ("poptart: track " ++ key ++ " finished building after it was given up on - "
+                ++ "discarded it and kept the track that replaced it").warn;
+        } {
+            // SendReply names its sender by node id and nothing else, so the bend messages
+            // coming back from this synth need a way home (see the bendOut OSCFunc).
             bendTracks[synth.nodeID] = key;
             tracks[key] = (
                 def: def,
@@ -1862,10 +1916,38 @@ OSCdef(\poptartCreateTrack, { |msg|
                 held: 0,                          // active-note count, drives env gates
                 sounding: Array.fill(maxSlots, { IdentityDictionary.new }) // slot -> (note -> when its off lands), see markSounding
             );
-            // A track born while the mixer is open joins its meters right away (an eval that adds
-            // a block mid-session), instead of staying dark until the mixer is reopened - if Node
-            // has asked for it; the ask may have arrived while this track was still pending.
+            // A track born while the mixer is open joins its meters right away (an eval that
+            // adds a block mid-session), instead of staying dark until the mixer is reopened
+            // - if Node has asked for it; the ask may have arrived while this was pending.
             if (mixOn) { mixReconcile.() };
+        };
+    };
+};
+
+OSCdef(\poptartCreateTrack, { |msg|
+    var key = msg[1].asSymbol;
+    // Optional birth values (name/value pairs after the key): channel controls baked into the
+    // Synth's own args, so a track created into a live mix comes up ALREADY wearing the desk's
+    // state (deck gain 0 = born silent). They have to ride the creation itself: a setParam sent
+    // while the track is still \pending is dropped (see poptartSetParam), which is the race
+    // that had freshly evaled stems flash in at full volume before the desk caught them.
+    var birth = if (msg.size > 2) {
+        msg.copyRange(2, msg.size - 1).clump(2).collect { |p| [p[0].asSymbol, p[1].asFloat] }.flatten;
+    } { [] };
+    if (tracks[key].isNil) {
+        buildTrack.(key, birth);
+    } {
+        // Asked to build a key that is still being built. Nearly always that is the same
+        // evaluation asking twice (the eval loop pre-claims every track, and the scheduler's
+        // setPattern asks again a moment later), and there is nothing to do. But this is also
+        // the ONLY message a plain track - no plugins, no routes, nothing that waits on it - ever
+        // sends about the key, so if that build was lost (see reclaimStuckTrack) this is where
+        // it has to be found out: wait the build out, and if the key comes back empty, build it
+        // again now rather than leaving that to an evaluation that may never come.
+        if (tracks[key] == \pending) {
+            fork {
+                if (awaitTrack.(key).isNil and: { tracks[key].isNil }) { buildTrack.(key, birth) };
+            };
         };
     };
 }, '/poptart/createTrack');
@@ -2079,29 +2161,42 @@ OSCdef(\poptartLoadEffect, { |msg|
 // close the plugin (close is what frees the plugin instance and its memory). The controller
 // object is kept for reuse - a later loadEffect re-opens into it. No-op when the slot is
 // already empty, so the scheduler can blanket-clear all trailing slots on every eval.
+//
+// Decided HERE, synchronously, whether there is anything to do - and there almost never is. The
+// scheduler clears every slot past its chain's end on every evaluation, twenty messages a track,
+// and nearly all of them land on an empty slot of a live track, or on a track still being built
+// (which has no plugin anywhere: its own chain's loads are still queued behind its birth, and
+// they are all INSIDE the chain). Forking a routine to find that out cost a clock-queue entry
+// each, several hundred at once per evaluation of a full song, against a queue of ~680 - and a
+// routine the queue refuses never runs, which is how a track's birth got lost (see
+// reclaimStuckTrack). So no routine unless a slot really has something in it.
 OSCdef(\poptartUnloadEffect, { |msg|
     var key = msg[1].asSymbol;
     var slot = msg[2].asInteger;
-    fork {
-        var track = awaitTrack.(key);
-        if (track.isNil) { ("poptart: unloadEffect: no track " ++ key).warn } {
-            if ((slot < 1) or: { slot >= maxSlots }) {
-                ("poptart: unloadEffect: bad slot " ++ slot).warn;
-            } {
-                var ctl = track[\controllers][slot];
-                track[\wanted][slot] = nil; // an in-flight open() must no longer commit
-                if (track[\loaded][slot].notNil or: { ctl.notNil }) {
-                    track[\synth].set(("active" ++ slot).asSymbol, 0); // bypass before the close
-                    ctl !? { ctl.close };
-                    dropSlotRamps.(key, track, slot); // nothing left to drive
-                    // A closed plugin can't be edited - drop its auto-pin watchers (see
-                    // watchPluginEdits) so they don't outlive it or fire on a reused node id.
-                    track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free } };
-                    track[\editWatch][slot] = nil;
-                    track[\loaded][slot] !? { |id|
-                        ("poptart: unloaded effect " ++ id ++ " from slot " ++ slot).postln;
+    var track = tracks[key];
+    if ((slot < 1) or: { slot >= maxSlots }) {
+        ("poptart: unloadEffect: bad slot " ++ slot).warn;
+    } {
+        if (track.isKindOf(Event).not) {
+            if (track.isNil) { ("poptart: unloadEffect: no track " ++ key).warn }; // \pending: empty, nothing to do
+        } {
+            if (track[\loaded][slot].notNil or: { track[\controllers][slot].notNil } or: { track[\wanted][slot].notNil }) {
+                fork {
+                    var ctl = track[\controllers][slot];
+                    track[\wanted][slot] = nil; // an in-flight open() must no longer commit
+                    if (track[\loaded][slot].notNil or: { ctl.notNil }) {
+                        track[\synth].set(("active" ++ slot).asSymbol, 0); // bypass before the close
+                        ctl !? { ctl.close };
+                        dropSlotRamps.(key, track, slot); // nothing left to drive
+                        // A closed plugin can't be edited - drop its auto-pin watchers (see
+                        // watchPluginEdits) so they don't outlive it or fire on a reused node id.
+                        track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free } };
+                        track[\editWatch][slot] = nil;
+                        track[\loaded][slot] !? { |id|
+                            ("poptart: unloaded effect " ++ id ++ " from slot " ++ slot).postln;
+                        };
+                        track[\loaded][slot] = nil;
                     };
-                    track[\loaded][slot] = nil;
                 };
             };
         };
@@ -2360,7 +2455,9 @@ hushTrack = { |key, again|
         bundleNow.(nil, {
             t[\voices] !? { |g| g.set(\gate, 0) };
             t[\controllers].do { |ctl, slot|
-                ctl !? {
+                // Only a slot with a plugin in it: a controller kept for reuse after its plugin
+                // closed, or one whose open failed, would answer each of these with a warning.
+                if (ctl.notNil and: { slotLive.(t, slot) }) {
                     notes[slot].do { |note| ctl.midi.noteOff(0, note, 0) };
                     if (ctl.info.notNil and: { ctl.info.sdkVersion.asString.find("VST 3").isNil }) {
                         ctl.midi.allNotesOff(0);
@@ -3269,9 +3366,13 @@ clearMidiRoute = { |key|
         track[\held] = 0;
         track[\envs].do { |e| e[\synth].set(\gate, 0) };
         track[\controllers][0] !? { |ctl|
-            sounding !? { sounding.keysValuesDo { |rawKey, note| ctl.midi.noteOff(rawKey div: 128, note, 0) } };
-            if (ctl.info.notNil and: { ctl.info.sdkVersion.asString.find("VST 3").isNil }) {
-                16.do { |c| ctl.midi.control(c, 123, 0) };
+            // A plugin has to be there to release anything (see slotLive) - past a close or a
+            // failed open, each of these would only draw a warning from the empty slot.
+            if (slotLive.(track, 0)) {
+                sounding !? { sounding.keysValuesDo { |rawKey, note| ctl.midi.noteOff(rawKey div: 128, note, 0) } };
+                if (ctl.info.notNil and: { ctl.info.sdkVersion.asString.find("VST 3").isNil }) {
+                    16.do { |c| ctl.midi.control(c, 123, 0) };
+                };
             };
         };
     };

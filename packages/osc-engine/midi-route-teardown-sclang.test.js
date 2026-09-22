@@ -34,6 +34,13 @@ function extractClearMidiRoute() {
   assert.ok(m, 'could not find the clearMidiRoute closure in sc/poptart.scd');
   return m[0];
 }
+// The teardown only releases through a slot whose plugin is open (slotLive) - a one-liner, lifted
+// on its own.
+function extractSlotLive() {
+  const m = fs.readFileSync(SCD, 'utf8').match(/^slotLive = \{ \|track, slot\|.*$/m);
+  assert.ok(m, 'could not find slotLive in sc/poptart.scd');
+  return m[0];
+}
 
 function runSclang() {
   // The env modulator's synth is a real Synth on a Server whose address prints what it is handed
@@ -42,9 +49,10 @@ function runSclang() {
   const script = `(
 var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
-var clearMidiRoute;
+var clearMidiRoute, slotLive;
 var mk = { |name, sdk, envId| (
     midiRoute: (keys: [], sounding: IdentityDictionary[(0 * 128) + 60 -> 62, (3 * 128) + 64 -> 64]),
+    loaded: ["plugin"], // slot 0 has its plugin open (see slotLive) - the one the teardown releases through
     controllers: [(
         info: (sdkVersion: sdk),
         midi: (
@@ -58,6 +66,7 @@ var mk = { |name, sdk, envId| (
 srv.addr = (addr: 1, isLocal: true, hostname: "127.0.0.1", ip: "127.0.0.1", port: 57999,
     sendMsg: { |self ...msg| ("NSET<" ++ msg[1] ++ ">" ++ msg[2] ++ "," ++ msg[3]).postln });
 ${extractClearMidiRoute()}
+${extractSlotLive()}
 ("COMPILES<" ++ clearMidiRoute.isKindOf(Function) ++ ">").postln;
 
 tracks[\\three] = mk.(\\three, "VST 3.7.8", 150);

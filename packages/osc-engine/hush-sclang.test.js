@@ -39,6 +39,13 @@ function extractClosure(name) {
   assert.ok(m, `could not find the ${name} closure in sc/poptart.scd`);
   return m[0];
 }
+// slotLive is a one-liner, which the closure regex above (it wants the closing brace on its own
+// line) does not match.
+function extractSlotLive() {
+  const m = fs.readFileSync(SCD, 'utf8').match(/^slotLive = \{ \|track, slot\|.*$/m);
+  assert.ok(m, 'could not find slotLive in sc/poptart.scd');
+  return m[0];
+}
 
 function runSclang() {
   // The nodes are real Group/Synth objects (an Event can't stand in for a node: Event has a set
@@ -50,11 +57,12 @@ var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new, noteQueues = IdentityDictionary.new, maxSlots = 2;
 var slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
 var bundleNow = { |latency, func| func.value };
-var hushTrack, markSounding;
+var hushTrack, markSounding, slotLive;
 // Slot 0 holds one note with no end known yet, one ending in five seconds and one that ended a
 // second ago - the first two are what a hush has to release.
 var mk = { |name, id, sdk = "VST 2.4"| (
     voices: Group.basicNew(srv, id),
+    loaded: ["plugin", nil], // slot 0 has its plugin open (see slotLive) - the one a hush releases
     controllers: [(
         info: (sdkVersion: sdk),
         midi: (
@@ -71,6 +79,7 @@ srv.addr = (addr: 1, isLocal: true, hostname: "127.0.0.1", ip: "127.0.0.1", port
     sendMsg: { |self ...msg| ("NSET<" ++ msg[1] ++ ">" ++ msg[2] ++ "," ++ msg[3]).postln });
 ${extractClosure('hushTrack')}
 ${extractClosure('markSounding')}
+${extractSlotLive()}
 ("COMPILES<" ++ hushTrack.isKindOf(Function) ++ ">").postln;
 
 tracks[\\living] = mk.(\\living, 100);

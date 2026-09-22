@@ -9122,7 +9122,7 @@ async function prSliceToNotes(targets) {
         marks = (await api('GET', `/api/sampleSlices?file=${encodeURIComponent(res.file)}`)).slices;
       }
       if (!marks?.length) {
-        logLine(`slice to notes: nothing to chop in ${res.file.split('/').pop()} - only WAV files are analyzed`, true);
+        logLine(`slice to notes: nothing to chop in ${pathBasename(res.file)} - only WAV files are analyzed`, true);
         continue;
       }
       const buffer = await packLoadBuffer(res.file);
@@ -9130,7 +9130,7 @@ async function prSliceToNotes(targets) {
       const cycles = prFitCycles(fit, buffer.duration);
       if (!cycles) {
         const why = fitCall ? `this chain's .fit(${fitCall.value}) is a pattern` : 'the sample has no length yet';
-        logLine(`slice to notes: ${why}, so there is no one span to lay ${res.file.split('/').pop()} against`, true);
+        logLine(`slice to notes: ${why}, so there is no one span to lay ${pathBasename(res.file)} against`, true);
         continue;
       }
       plans.push({ notes, opts: { marks, cycles }, file: res.file });
@@ -9173,7 +9173,7 @@ async function prSliceToNotes(targets) {
   writePianorollCall();
   drawPianoroll();
   const dropped = cut.reduce((n, c) => n + c.dropped, 0);
-  const parts = [`${made.length} hit${made.length === 1 ? '' : 's'} from ${plans.length === 1 ? plans[0].file.split('/').pop() : `${plans.length} files`}`];
+  const parts = [`${made.length} hit${made.length === 1 ? '' : 's'} from ${plans.length === 1 ? pathBasename(plans[0].file) : `${plans.length} files`}`];
   if (minRatio > 1) parts.push(`grid ${prState.grid}`);
   if (dropped) parts.push(`${dropped} too close together to place`);
   if (cut.some((c) => c.truncated)) parts.push('and stopped at the cap - check the fit');
@@ -16026,15 +16026,28 @@ function packWrite() {
   packScheduleEval();
 }
 
+// Paths reach the page spelled the way the server's platform spells them: POSIX on macOS, a
+// drive letter and backslashes on Windows - and a search hit's relative name is '/'-joined onto
+// either, which both platforms read. So anything here that splits a path or asks whether it is
+// absolute has to accept both separators; a leading '/' alone is a macOS assumption.
+function isAbsPath(p) {
+  return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(String(p ?? ''));
+}
+function pathBasename(p) {
+  const parts = String(p ?? '').replace(/[\\/]+$/, '').split(/[\\/]/);
+  return parts[parts.length - 1] || p;
+}
+const stripExt = (name) => String(name ?? '').replace(/\.[^.]+$/, '');
+
 // A path as the definition should say it: under the sample library it is written relative to the
 // root (so the pack travels with the library, and reads short); anywhere else, as it is.
 function packEntryFor(abs) {
   const root = packBrowse.samplesRoot;
-  if (root && (abs === root || abs.startsWith(`${root}/`))) return abs.slice(root.length + 1);
+  if (root && (abs === root || abs.startsWith(`${root}/`) || abs.startsWith(`${root}\\`))) return abs.slice(root.length + 1);
   return abs;
 }
-const packAbsOf = (entry) => (entry.startsWith('/') ? entry : `${packBrowse.samplesRoot}/${entry}`);
-const packBasename = (entry) => entry.replace(/\/+$/, '').split('/').pop() || entry;
+const packAbsOf = (entry) => (isAbsPath(entry) ? entry : `${packBrowse.samplesRoot}/${entry}`);
+const packBasename = pathBasename;
 const isAudioPath = (p) => /\.(wav|aif|aiff|flac|mp3)$/i.test(p);
 
 function packAdd(absPaths) {
@@ -16503,9 +16516,9 @@ function packDropPaths(dt) {
     if (!t || t.startsWith('#')) return;
     let p = t;
     if (/^file:/i.test(t)) {
-      try { p = decodeURIComponent(new URL(t).pathname); } catch { return; }
+      try { p = decodeURIComponent(new URL(t).pathname).replace(/^\/(?=[A-Za-z]:)/, ''); } catch { return; }
     }
-    if (p.startsWith('/') && !out.includes(p)) out.push(p);
+    if (isAbsPath(p) && !out.includes(p)) out.push(p);
   };
   for (const type of ['text/uri-list', 'text/plain']) {
     let text = '';
@@ -18163,7 +18176,7 @@ async function sliceLoadSample() {
       // "breaks:27 · amen.wav" for a pack (the index is half the address); just the name for the
       // one-file sources, where an index would be a fiction.
       const paged = !/^(file|rec):/.test(src.ref);
-      state.label = `${paged ? `${src.name}:${index}` : src.name} · ${res.file.split('/').pop()}`;
+      state.label = `${paged ? `${src.name}:${index}` : src.name} · ${pathBasename(res.file)}`;
       // The set's own name for this file, straight from the side that can read the disk - which is
       // the whole reason the panel waits for the file before drawing a marker (see sampleKey).
       sliceApplyKey(state, res.key ?? null);
@@ -19625,7 +19638,7 @@ async function envLoadSample() {
     state.file = res.file;
     state.index = res.index;
     const paged = !/^(file|rec):/.test(state.ref);
-    envFileEl.textContent = `${paged ? `${state.name}:${res.index}` : state.name} · ${res.file.split('/').pop()}`;
+    envFileEl.textContent = `${paged ? `${state.name}:${res.index}` : state.name} · ${pathBasename(res.file)}`;
     envFileEl.title = res.file;
     state.buffer = await packLoadBuffer(res.file);
     if (gen !== envLoadGen || envState !== state) return;
@@ -22041,7 +22054,7 @@ function closeMixMode() {
 // set goes through these three, so the kinds stay one concept.
 const libItemIsFile = (it) => !!it && typeof it === 'object' && it.kind === 'file';
 const libItemKey = (it) => (libItemIsFile(it) ? `file:${it.path}` : it);
-const libFileTitle = (it) => it.title || it.path.split('/').pop().replace(/\.[^.]+$/, '');
+const libFileTitle = (it) => it.title || stripExt(pathBasename(it.path));
 
 // Which file items' paths still exist on disk, keyed by path - refreshed alongside the views
 // that render them, so a moved or deleted file shows as missing (the deleted-save contract).
@@ -25462,7 +25475,7 @@ function orgDiskFindNote() {
 // --- inserting the selection (packAddSelected, mirrored onto playlist items) ---
 
 const orgOpenPlaylist = () => libDoc.playlists.find((x) => x.id === orgSelected) ?? null;
-const orgDiskItem = (abs) => ({ kind: 'file', path: abs, title: abs.split('/').pop().replace(/\.[^.]+$/, '') });
+const orgDiskItem = (abs) => ({ kind: 'file', path: abs, title: stripExt(pathBasename(abs)) });
 
 /** Paths already in the open playlist - the rows' ✓ marks, and what a bulk add skips. */
 function orgDiskHave() {
@@ -25481,7 +25494,7 @@ function orgDiskAddPaths(paths) {
   if (!added.length) return orgSay('already in the playlist');
   saveLibraryDoc();
   orgRender();
-  orgSay(`added ${added.length === 1 ? added[0].split('/').pop() : `${added.length} files`} to ${p.name}`);
+  orgSay(`added ${added.length === 1 ? pathBasename(added[0]) : `${added.length} files`} to ${p.name}`);
 }
 
 /**
@@ -25559,7 +25572,7 @@ async function orgLoadBuffer(abs) {
   if (orgBuffers.has(abs)) return orgBuffers.get(abs);
   previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
   const res = await fetch(`/api/songAudio?file=${encodeURIComponent(abs)}`);
-  if (!res.ok) throw new Error(`can't read ${abs.split('/').pop()} (${res.status})`);
+  if (!res.ok) throw new Error(`can't read ${pathBasename(abs)} (${res.status})`);
   const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
   if (orgBuffers.size >= ORG_BUFFER_CACHE) orgBuffers.delete(orgBuffers.keys().next().value);
   orgBuffers.set(abs, buf);
