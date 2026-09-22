@@ -77,12 +77,18 @@ dmg:
 # full-bleed variant. Both are drawn by build/make-icon.js.
 win:
   icon: build/icon-win.png
+  # Applies to every Windows target that does not name itself - which is the zip, since `nsis`
+  # below sets its own. There is no `zip:` config section to put this in (electron-builder
+  # rejects the whole file over an unknown top-level key).
+  artifactName: poptart-${version}-portable-${arch}.${ext}
   target:
     - target: nsis
       arch: [x64]
-    # The same app, not installed: unpack it anywhere. This is the build for portable mode (a
-    # `poptart-data` folder beside poptart.exe holds everything - see portable.js), because an
-    # installed copy's folder belongs to its uninstaller.
+    # The same app, not installed: unpack it anywhere. This is the portable build, and it is
+    # named that way because that is what it is FOR - an installed copy cannot be portable
+    # (its folder belongs to its uninstaller, which deletes the lot), so this is the only
+    # Windows download where a `poptart-data` folder works. The release workflow puts that
+    # folder inside the zip, so unpacking it is the whole setup.
     - target: zip
       arch: [x64]
 

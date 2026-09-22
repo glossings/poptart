@@ -39,16 +39,23 @@ No variable is needed to keep everything with poptart itself: make a folder call
 travel as one folder. Where it goes depends on which poptart you have:
 
 - **A checkout** (you cloned the repository): at its root, beside `packages/`. git ignores it.
-- **The desktop app**: next to `poptart.app` on macOS, next to `poptart.exe` in the unpacked zip
-  on Windows. On macOS the app must first be moved out of the folder it was downloaded into.
-  Don't put it inside an *installed* Windows copy: uninstalling removes the install folder and
-  everything in it.
+- **Windows, the portable download**: already there. Unpack `poptart-<version>-portable-x64.zip`
+  wherever you like and `poptart-data` is inside it, next to `poptart.exe` - that is the whole
+  setup. To update, unpack the new zip over the same folder; your files are not in the zip, so
+  they are left alone.
+- **Windows, the installer**: not available, and poptart **refuses** a folder next to an
+  installed copy rather than filling it (it says so in its log). Uninstalling or updating an
+  installed copy deletes its whole folder and would take your songs with it - and the
+  uninstaller travels with the app, so moving it elsewhere does not help. Use the portable
+  download, or set `POPTART_HOME`.
+- **macOS**: next to `poptart.app`. Make the folder yourself. The app must first be moved out of
+  the folder it was downloaded into.
 
-The folder has to exist before poptart starts - it is looked for, never created. To bring what
-you already have, move the contents of `~/.poptart` into it; an empty folder is a fresh start
-(including a fresh SuperCollider download, if poptart fetched its own). Pointing
-`POPTART_HOME` at the checkout itself also works and is a bad idea: git would list your songs
-as untracked files, and one `git clean` would delete them.
+Except in the portable download, the folder has to exist before poptart starts - it is looked
+for, never created. To bring what you already have, move the contents of `~/.poptart` into it;
+an empty folder is a fresh start (including a fresh SuperCollider download, if poptart fetched
+its own). Pointing `POPTART_HOME` at the checkout itself also works and is a bad idea: git would
+list your songs as untracked files, and one `git clean` would delete them.
 
 ### Removing poptart
 

@@ -118,6 +118,23 @@ jobs:
         if: always() && runner.os == 'macOS'
         run: rm -f "$RUNNER_TEMP/notary-key.p8"
 
+      # The portable zip ships the data folder it is portable BECAUSE of, so unpacking it is the
+      # whole setup - poptart only ever looks for that folder, it never creates one. It cannot be
+      # added through electron-builder's extraFiles: those apply to every Windows target, and the
+      # installer's folder is the one place this folder must NOT be (its uninstaller deletes the
+      # lot - see desktop/portable.js, which refuses it there).
+      - name: Put the data folder in the portable zip
+        if: runner.os == 'Windows'
+        working-directory: packages/desktop/dist
+        run: |
+          set -euo pipefail
+          zip=$(ls *-portable-*.zip)
+          mkdir -p poptart-data
+          cp ../build/portable-readme.txt poptart-data/README.txt
+          7z a -tzip "$zip" poptart-data > /dev/null
+          7z l "$zip" | grep -q 'poptart-data[/\\]README.txt'
+          echo "added poptart-data/README.txt to $zip"
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installers-${{ runner.os }}

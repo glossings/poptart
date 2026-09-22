@@ -242,9 +242,15 @@ that file, including when doctor itself cannot run.
   should share one set of songs and one SuperCollider download. `POPTART_HOME` moves the whole
   folder. The desktop app sets it by itself when a `poptart-data` folder sits beside it
   (`desktop/portable.js`: beside `poptart.app`, never inside; beside `poptart.exe`), so the app
-  and its data can travel as one folder - which is why Windows also gets a plain zip build, an
-  installed copy's folder belonging to its uninstaller. The folder is looked for, never
-  created, and a translocated Mac app has no portable mode. Detection is unit-tested and checked
+  and its data can travel as one folder. An installed Windows copy refuses it and logs why -
+  electron-builder's uninstaller ends with `RMDir /r $INSTDIR` and an upgrade runs the old
+  uninstaller first, so a data folder there is deleted by a routine update; the uninstaller
+  beside the app is the marker. That is what the zip build is for, and why it is named
+  `-portable`: the release workflow puts a `poptart-data` folder (holding a README that explains
+  itself) inside that zip, so unpacking it is the entire setup. It cannot be done with
+  electron-builder's `extraFiles`, which would put the folder in the installer's directory too -
+  the one place it must not be. The folder is looked
+  for, never created, and a translocated Mac app has no portable mode. Detection is unit-tested and checked
   from inside a packed binary; a whole session run from a portable folder is not yet tried.
 - **Uninstalling (Windows).** The uninstaller offers, once and defaulting to no, to delete the
   data folder as well (`desktop/build/uninstall.nsh`). It asks because of the ~600 MB

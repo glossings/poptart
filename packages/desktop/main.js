@@ -21,8 +21,8 @@ const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 // Before anything else is loaded: a `poptart-data` folder beside the app becomes poptart's home
 // (portable.js). Several modules work their paths out once, as they load, and the server child
 // inherits this environment - so this is the one moment the answer can be given to all of them.
-const PORTABLE_HOME = require('./portable').portableHome({ isPackaged: app.isPackaged });
-if (PORTABLE_HOME) process.env.POPTART_HOME = PORTABLE_HOME;
+const PORTABLE = require('./portable').portableHome({ isPackaged: app.isPackaged });
+if (PORTABLE.dir) process.env.POPTART_HOME = PORTABLE.dir;
 
 const { describeHome } = require('@poptart/osc-engine/home');
 const { openDesktopLog, desktopLogPath, reportFileName, writeDiagnosticReport, actionFor } = require('./diagnostics');
@@ -278,7 +278,8 @@ async function boot() {
   desktopLog = openDesktopLog();
   desktopLog.note(`poptart desktop ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform}-${process.arch}, packaged: ${app.isPackaged})`);
   const dataFolder = describeHome();
-  desktopLog.note(`data folder: ${dataFolder.dir}${PORTABLE_HOME ? ' (portable: found beside the app)' : dataFolder.why ? ` (${dataFolder.why})` : ''}`);
+  desktopLog.note(`data folder: ${dataFolder.dir}${PORTABLE.dir ? ' (portable: found beside the app)' : dataFolder.why ? ` (${dataFolder.why})` : ''}`);
+  if (PORTABLE.declined) desktopLog.note(PORTABLE.declined);
   createWindow();
 
   if (!(await ensureSuperCollider())) {
