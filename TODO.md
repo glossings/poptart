@@ -12,13 +12,44 @@ no completion notes.
     a name cannot be mapped to a file from the file alone. But the file name is a strong hint:
     on `.synth("Serum 2")`, probe candidates ranked by file-name similarity and stop at the
     first whose reported name matches - seconds, not minutes. Probe results are already cached
-    per plugin by VSTPlugin, so each one is paid for once ever. The full scan stays, as what
-    **rescan** does and what fills the browser's complete list, but it stops being the price of
-    admission. Open questions: what to do when no candidate matches (fall back to a full scan,
-    or a full scan of that folder first); whether the browser should show "not scanned yet"
-    rather than an empty list; and whether a background scan should still run at idle so the
-    list fills in for someone who never asks. Ties into POPTART_VST_PARALLEL, which would cut
-    the full scan several-fold but crashed when it was tried.
+    per plugin by VSTPlugin, so each one is paid for once ever. VSTPlugin already probes a single
+    plugin on demand - VSTPluginController:open -> VSTPlugin:prQuery falls through to a
+    /vst_query on one path when the name is not in its dict - so the piece to build is the
+    name-to-candidate ranking, a persistent name->path map in poptart's data folder, and crash
+    safety.
+
+    The background scan STAYS, automatic, exactly as it is: it is what fills the plugin browser
+    and autocomplete (`knownPlugins` in client.js, which is also the completion pool), and a
+    plugin's name is not something anyone can guess - "Serum 2" is not Serum2.vst3, and a shell
+    plugin's names have nothing to do with its file. Lazy resolution is for USE and the scan is
+    for DISCOVERY; making the scan manual would trade twenty minutes of waiting for a permanent
+    guessing game. Framed that way this is purely additive and can ship on its own.
+
+    Crash safety is the risk, not the ranking: probing a bad file segfaults scsynth, and the
+    scan's protections (non-Mach-O pre-exclusion, the crash journal, per-plugin timeouts) all
+    have to cover the lazy path too, or one wrong guess takes the engine down mid-session.
+    Also: prQueryLocal does a `server.sync`, so a lazy probe blocks behind a running scan (the
+    entry below). Open questions: what to do when no candidate matches; how to present two
+    plugins with the same name, or a shell plugin holding dozens.
+
+[ ] Show plugin FILES in the browser before they are probed, so the panel is never an empty
+    "scanning…". Node enumerates every plugin file in well under a second (preparePluginScan
+    walks the dirs already); only the NAMES need probing. Listing the files immediately and
+    filling in real names as they arrive turns a blank twenty minutes into something browsable
+    at once, and clicking an unprobed file is a natural place to probe just that one. Autocomplete
+    could offer confirmed names plus unconfirmed filename candidates, marked as such.
+
+[ ] Pause the background plugin scan while the transport is playing. Probing is hundreds of
+    short-lived processes, which is a dropout risk during a set, and there is no reason for it to
+    compete with playback. True today, independent of everything above.
+
+[ ] Finer-grained plugin scan progress. A scan is only saved per folder (VSTPlugin writes its
+    cache when a search finishes, and a search takes a directory), so an engine restart in the
+    middle loses the folder in progress - on a machine with hundreds of plugins in one VST3
+    folder, nearly everything. poptart now asks before an audio setting throws that away, which
+    is as far as this goes from the outside: search() iterates whatever directory it is handed
+    and a bundle cannot be its own search dir, so per-plugin resumption needs a fork change.
+    Moot if the entry above lands - there is no long scan left to lose.
 
 [ ] The other `server.sync` sites block behind a plugin scan too. Track creation is fixed (its
     /s_new rides along as the def's completion message - see buildTrackDef's caller and

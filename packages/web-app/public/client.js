@@ -13830,6 +13830,22 @@ function scanPanelText(scan) {
   return name ? `scanning ${count} · ${name}` : `scanning ${count}`;
 }
 
+// scsynth picks its audio device at boot, so every audio setting below costs an engine restart -
+// and a restart takes the plugin scan with it. VSTPlugin writes its cache only when a search
+// finishes and poptart searches one folder at a time, so what is lost is the folder in progress:
+// on a machine whose plugins sit in one big folder, that is very nearly the whole scan, and the
+// scan is measured in minutes. So the choice gets made by the person who would lose the work,
+// with the numbers in front of them, instead of silently on their behalf.
+function scanSurvivesRestart(what) {
+  if (!lastScan?.scanning) return true;
+  const done = lastScan.total ? `${lastScan.probed} of ${lastScan.total} plugins` : `${lastScan.probed} plugins`;
+  return window.confirm(
+    `A plugin scan is running (${done} probed).\n\n`
+      + `Changing ${what} restarts the audio engine, which starts the scan over - folders it has `
+      + 'already finished are kept, the one in progress is not.\n\nChange it anyway?',
+  );
+}
+
 function applyScanState(scan) {
   const before = lastScan;
   lastScan = scan ?? null;
@@ -15012,6 +15028,10 @@ async function refreshAudioDevices() {
 const audioCueSelect = document.getElementById('audioCueSelect');
 audioCueSelect.addEventListener('change', async () => {
   const device = audioCueSelect.value || null;
+  if (!scanSurvivesRestart('the headphone cue device')) {
+    refreshAudioDevices().catch(() => {}); // put the menu back on the cue still in use
+    return;
+  }
   audioCueSelect.disabled = true;
   audioDeviceSelect.disabled = true;
   engineStatus.textContent = 'restarting engine…';
@@ -15043,6 +15063,10 @@ audioCueSelect.addEventListener('change', async () => {
 
 audioChannelSelect.addEventListener('change', async () => {
   const channels = Number(audioChannelSelect.value);
+  if (!scanSurvivesRestart('the output channel count')) {
+    refreshAudioDevices().catch(() => {});
+    return;
+  }
   audioChannelSelect.disabled = true;
   audioDeviceSelect.disabled = true;
   engineStatus.textContent = 'restarting engine…';
@@ -15071,6 +15095,10 @@ audioChannelSelect.addEventListener('change', async () => {
 audioDeviceSelect.addEventListener('change', async () => {
   const device = audioDeviceSelect.value || null;
   const label = device ?? 'the system default';
+  if (!scanSurvivesRestart('the output device')) {
+    refreshAudioDevices().catch(() => {}); // put the menu back on the device still in use
+    return;
+  }
   audioInputs = null; // a different device exposes different inputs - refetch on the next popup
   audioDeviceSelect.disabled = true;
   engineStatus.textContent = 'restarting engine…';
@@ -15221,6 +15249,7 @@ async function refreshAudioInputs() {
 
 audioInputApply.addEventListener('click', async () => {
   const uids = [...audioInputSelection];
+  if (!scanSurvivesRestart('the input devices')) return; // the selection stands; apply again later
   audioInputApply.disabled = true;
   engineStatus.textContent = 'restarting engine…';
   engineStatus.className = 'status';
