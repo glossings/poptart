@@ -255,8 +255,8 @@ const API_DOCS = {
   param: {
     kind: 'method',
     sig: 'param(name, value)',
-    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Names autocomplete inside the quotes. The value can be a number, pattern or signal.',
-    eg: '.param("Filter 1 Freq", sine(0.2).range(300, 6000))',
+    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Names autocomplete inside the quotes. The value is a position from 0 to 1, as a number, pattern or signal; a mapping file can give a plugin parameter real units instead. A browser device\'s switch takes its option\'s name, its on/off takes 0 or 1, and a control that loads a sample takes the sample\'s name, "pack:index" or "pack:file". Given an audio() handle instead, the parameter is wired to that track or bus and follows it at the sample rate; .mul() and .add() on the handle set its gain and offset. Wiring audio onto a parameter is a browser-build feature: the desktop engine reports it on the console and plays the rest of the track as written.',
+    eg: '.param("Cutoff", sine(0.2).range(0.3, 0.8))',
   },
   preset: {
     kind: 'method',

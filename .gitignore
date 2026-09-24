@@ -4,6 +4,10 @@ build/
 # ...except electron-builder's, which is source: the signing entitlements and (later) the app
 # icons live in a folder it expects to be called `build`.
 !packages/desktop/build/
+# ...and except the web engine's, which is the scripts that DO the building rather than anything
+# they produce: the worklet bundler, the pack renderer and the upstream sample sources. Their
+# output goes to public/, which is committed; these are source and the tests import them.
+!packages/web-engine/build/
 # The app folder packages/desktop/stage.js assembles for electron-builder; rebuilt on every run.
 packages/desktop/stage/
 *.node
@@ -27,3 +31,7 @@ packages/osc-engine/native/rubberband/.deps/
 
 # Ableton Link SDK + asio fetched by native/link/build.sh
 packages/osc-engine/native/link/.deps/
+
+# The scratch area build/fetch-packs.mjs downloads upstream sample archives into. Hundreds of
+# megabytes of other people's audio, kept only long enough to take one file out of each.
+packages/web-engine/.pack-cache/

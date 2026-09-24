@@ -165,6 +165,13 @@ export class Sig {
     // ever a Map key: slot and name are read off the entry, never parsed back out of it, so a
     // parameter whose name contains a colon is safe.
     this.paramSignals = opts.paramSignals ?? {};
+    // "slot:name" -> { slot, name, source, gain, offset }. The other half of .param(): where
+    // paramSignals holds a value to SAMPLE, this holds a CONNECTION - another track's or bus's
+    // audio wired straight onto the parameter, running at the sample rate rather than at the
+    // scheduler's poll. `.param("Osc 1 Phase", audio("mod"))` is what puts an entry here, and
+    // phase modulation is what it is for: a value polled every 30 ms cannot be a modulator at
+    // audio rate however finely it is interpolated.
+    this.paramRoutes = opts.paramRoutes ?? {};
     // MIDI injected into a specific plugin in the chain (see Sig#midi, the injector form): each
     // { slot, name, note } routes another track's notes (or a MIDI device) into the plugin at
     // `slot` (1..n = fx). The engine fans a track source's notes to the plugin, or wires a device.
@@ -274,6 +281,7 @@ export class Sig {
       instrument: this.instrument,
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
+      paramRoutes: this.paramRoutes,
       midiInjects: this.midiInjects,
       audioInjects: this.audioInjects,
       inputSource: this.inputSource,
@@ -953,9 +961,24 @@ export class Sig {
    */
   param(name, value) {
     const slot = this.fxChain.length; // 0 = instrument, 1..n = effects, in call order
+    const key = `${slot}:${name}`;
+    // An audio handle in value position is a CONNECTION: wire that track or bus onto the
+    // parameter and let it run at the sample rate. `.param("Osc 1 Phase", audio("mod"))` is
+    // phase modulation, and `.param("Cutoff", audio("env").mul(2000).add(400))` is an audio-rate
+    // sweep - neither is something a polled value could be.
+    if (value instanceof Sig && value._isBareAudioHandle()) {
+      const src = value.inputSource;
+      const routes = { ...this.paramRoutes, [key]: { slot, name, source: src.name, gain: src.gain ?? 1, offset: src.offset ?? 0 } };
+      // A parameter is one thing: a connection replaces whatever value was set on it, the same
+      // way setting a control twice keeps the last one.
+      const { [key]: _dropped, ...signals } = this.paramSignals;
+      return this._clone({ paramRoutes: routes, paramSignals: signals });
+    }
     const sig = toSignal(value);
+    const { [key]: _unrouted, ...routes } = this.paramRoutes;
     return this._clone({
-      paramSignals: { ...this.paramSignals, [`${slot}:${name}`]: { slot, name, sig } },
+      paramRoutes: routes,
+      paramSignals: { ...this.paramSignals, [key]: { slot, name, sig } },
     });
   }
 
@@ -1074,6 +1097,16 @@ export class Sig {
   // -------------------------------------------------------------------------------------------
 
   _unop(op, fn) {
+    // An audio connection has no values to operate on - it samples to null - so anything but the
+    // gain and offset .mul()/.add() carry would quietly do nothing. Saying so is the whole point:
+    // silently accepting `.round()` here is how somebody spends an afternoon on a modulation that
+    // was never connected.
+    if (this._isBareAudioHandle()) {
+      throw new Error(
+        `[signal] .${op}() is not something an audio connection can do. `
+        + 'Only a constant gain (.mul) and offset (.add) ride on one.',
+      );
+    }
     return this.mapValue((v) => fn(Number(v)));
   }
 
@@ -1085,6 +1118,16 @@ export class Sig {
   // `inScale` says fn already works in scale degrees (see _arith) - it only matters to the
   // live-route fold below.
   _binop(op, other, fn, linear, inScale = false) {
+    // An audio connection has no values to operate on - it samples to null - so anything but the
+    // gain and offset .mul()/.add() carry would quietly do nothing. Saying so is the whole point:
+    // silently accepting `.round()` here is how somebody spends an afternoon on a modulation that
+    // was never connected.
+    if (this._isBareAudioHandle()) {
+      throw new Error(
+        `[signal] .${op}() is not something an audio connection can do. `
+        + 'Only a constant gain (.mul) and offset (.add) ride on one.',
+      );
+    }
     // A CONTROL operand - one of the top-level sampler builders, `speed("-1")`/`begin(0.5)`/… -
     // names a CHANNEL rather than a value stream, so the operation lands on that channel instead
     // of on this pattern's own values: `x.mul(speed("-1"))` lands on the speed channel and leaves
@@ -1447,6 +1490,56 @@ export class Sig {
     return this._clone({ inputSource: { ...src, pitchOps: [...(src.pitchOps ?? []), entry] } });
   }
 
+  /**
+   * A bare `audio("x")` or `bsend`-fed bus reference: a handle on somebody else's output that
+   * has not yet been built into a track of its own. Once it carries an instrument, effects or a
+   * step pattern it is a track reading a live input and ordinary arithmetic applies again.
+   */
+  _isBareAudioHandle() {
+    return this.inputSource?.io === 'audio'
+      && !this.stepsForCycle
+      && !this.instrument
+      && this.fxChain.length === 0;
+  }
+
+  /**
+   * Scales and offsets an audio handle. The result is another handle, so the chain reads the way
+   * the rest of the language reads - and the engine gets one gain and one offset rather than a
+   * signal it would have to sample.
+   *
+   * Only a constant operand is allowed. A patterned one would have to be sampled to mean
+   * anything, and a connection has no onsets to sample it at; saying so plainly beats accepting
+   * it and quietly using its value at cycle zero forever. A CONTINUOUS one is refused for the
+   * same reason and needs saying separately: sine() and lfo() carry no step grid, so a test for
+   * steps alone lets them through to be read once at cycle zero and wired as a fixed gain - the
+   * exact silent misbehavior this refuses, and harder to notice because it does make a sound.
+   */
+  _audioScale(op, xs) {
+    const src = this.inputSource;
+    const where = `audio(${JSON.stringify(src.name)})`;
+    if (xs.length !== 1) {
+      throw new Error(`[signal] .${op}() on ${where} takes one number - it is a connection, not a pattern`);
+    }
+    const x = xs[0];
+    const k = typeof x === 'number' ? x : constantOf(x);
+    if (typeof k !== 'number' || !Number.isFinite(k)) {
+      throw new Error(
+        `[signal] .${op}() on ${where} needs a plain number. An audio signal patched into a parameter is a connection, `
+        + 'so only a constant gain (.mul) and offset (.add) can ride on it.',
+      );
+    }
+    let gain = src.gain ?? 1;
+    let offset = src.offset ?? 0;
+    if (op === 'mul') { gain *= k; offset *= k; }
+    else if (op === 'div') {
+      if (k === 0) throw new Error(`[signal] .div(0) on ${where}`);
+      gain /= k; offset /= k;
+    } else if (op === 'add') offset += k;
+    else if (op === 'sub') offset -= k;
+    else throw new Error(`[signal] .${op}() is not something an audio connection can do - use .mul() or .add()`);
+    return this._clone({ inputSource: { ...src, gain, offset } });
+  }
+
   add(...xs) { return this._arith('add', xs, ARITHMETIC.add, true); }
   sub(...xs) { return this._arith('sub', xs, ARITHMETIC.sub, true); }
   mul(...xs) { return this._arith('mul', xs, ARITHMETIC.mul, true); }
@@ -1476,6 +1569,11 @@ export class Sig {
     // _layers). A bare value or a bare control is the one-operand arithmetic below. .set() has no
     // one-operand arithmetic to speak of - replacing values IS the one-layer edit - so everything
     // but a bare control (which .set() aims at its channel, like every binop) goes the layer way.
+    // A bare audio handle is a CONNECTION, not a series of values - it samples to null, so
+    // ordinary arithmetic on it would compose over nothing. Scaling and offsetting it are still
+    // meaningful though, and they are what `.param("phase", audio("mod").mul(0.5))` needs, so
+    // they are carried on the handle and become a gain and an offset in the graph.
+    if (this._isBareAudioHandle()) return this._audioScale(op, xs);
     const x = xs[0];
     if (xs.length !== 1 || isLayer(x) || (op === 'set' && !isBareControl(x))) return this._layers(op, fn, xs);
     const inScale = x instanceof Sig && x.pitchKind === 'degree' && this._holdsNotes();
@@ -4334,6 +4432,31 @@ function productGain(a, b) {
 function withPitchKind(sig, kind) {
   sig.pitchKind = kind;
   return sig;
+}
+
+/**
+ * The number a signal is worth everywhere, or null if it is not the same everywhere.
+ *
+ * A literal says so itself (`constVal`, the tag toSignal leaves). Anything else is read at a
+ * handful of unrelated moments and accepted only if they all agree - which keeps arithmetic that
+ * folds to a constant usable (`Signal(0.5).mul(2)` has no tag of its own) while still refusing
+ * anything that moves. Used where a value has to be settled once and read forever, so "it happened
+ * to be 0.5 at cycle zero" is not good enough.
+ */
+function constantOf(x) {
+  if (typeof x === 'number') return Number.isFinite(x) ? x : null;
+  if (!(x instanceof Sig)) return null;
+  if (Number.isFinite(x.constVal)) return x.constVal;
+  if (x.stepsForCycle || typeof x.sample !== 'function') return null;
+  // The POSITION moves with the time. A continuous signal is a function of its position - the
+  // third argument - and probing it with that held at zero is what makes a sine look like the
+  // constant 0.5, which is exactly the reading this exists to refuse.
+  const first = x.sample(0, 1, 0);
+  if (typeof first !== 'number' || !Number.isFinite(first)) return null;
+  for (const t of [0.37, 1.13, 2.71]) {
+    if (x.sample(t, 1, t) !== first) return null;
+  }
+  return first;
 }
 
 function toSignal(value) {

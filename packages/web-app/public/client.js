@@ -294,6 +294,14 @@ const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs, sliceDefs, au
 let pinnedDefs = [];
 
 async function api(method, path, body) {
+  // The browser build has no server: the same route table runs in this page, and the editor
+  // reaches it by calling rather than by asking (see public/web/boot.mjs). Awaiting the boot
+  // promise rather than checking for a finished host is what stops a request made during
+  // startup - and the editor makes several - from racing it.
+  if (window.__poptartHostReady) {
+    const host = await window.__poptartHostReady;
+    return host.call(method, path, body ?? null);
+  }
   const res = await fetch(path, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
@@ -887,6 +895,9 @@ window.addEventListener('popstate', async () => {
 // ---------------------------------------------------------------------------------------------
 
 (() => {
+  // There is no server to be restarted in the browser build, and an EventSource pointed at a
+  // path nothing serves retries for as long as the page is open.
+  if (window.__poptartHostReady) return;
   const es = new EventSource('/api/devReload');
   let bootId = null;
   // An edit to a file the server ALSO loads (public/pattern-meta.js) both broadcasts a reload and
@@ -1453,6 +1464,53 @@ function slotOfPluginNow(code, trackLabel, slot, plugin) {
   return found.length === 1 ? found[0] : slot;
 }
 
+/**
+ * The `.param()` calls a capture has just made redundant, as buffer edits.
+ *
+ * A device we wrote is captured WHOLE - every control it has is in the preset - so a `.param()`
+ * that sets one of them is a second copy of a number the preset already carries, and the louder
+ * of the two: a polled control is re-sent every tick, so the call would quietly win over the
+ * preset it sits beside. Dropping them is also what makes the window usable at all, since
+ * otherwise a synth with thirty knobs writes thirty calls across the track.
+ *
+ * Only calls whose argument is a plain setting. A `.param("Cutoff", lfo(2))`, an `audio("x")` or
+ * a pattern like `"<a b>"` is not a setting a preset can hold - it is modulation, and it stays.
+ */
+function settingParamEdits(code, trackLabel, slot) {
+  if (!labelsMod) return [];
+  const block = blockForTrack(code, trackLabel);
+  if (!block) return [];
+  const isCode = blockOwnCode(code, block);
+  const re = /\.param\s*\(/g;
+  re.lastIndex = block.start;
+  const edits = [];
+  let m;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue; // a commented-out call is not setting anything
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0 || close > block.end) continue;
+    const lit = firstStringLiteral(code, open + 1, close);
+    if (!lit) continue;
+    let i = lit.end;
+    while (i < close && code[i] !== ',') i++;
+    if (code[i] !== ',') continue;
+    if (!isPlainSetting(code.slice(i + 1, close).trim())) continue;
+    if (presetTargetAt(code, m.index)?.slot !== slot) continue;
+    edits.push([m.index, close + 1, '']);
+  }
+  return edits;
+}
+
+/** Whether a `.param()` argument is a value and not a signal or a pattern of them. */
+function isPlainSetting(arg) {
+  if (/^-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(arg)) return true;
+  const str = /^"([^"\\]*)"$/.exec(arg) ?? /^'([^'\\]*)'$/.exec(arg);
+  // A quoted argument is either the name of one of an enum's choices or a pattern of them; the
+  // characters mini-notation is written with are what tells the two apart.
+  return !!str && !/[\s<>\[\]{}~*!?|,@]/.test(str[1]);
+}
+
 function writePluginState(trackLabel, slot, state, plugin, preset) {
   if (!labelsMod) return null;
   const code = cm.getValue();
@@ -1763,6 +1821,13 @@ async function pollPluginEdits({ flush = false } = {}) {
   // rather than leaving a slot frozen until it times out.
   commitQueue = commitQueue.filter((c) => !committed.includes(c));
   for (const e of edits ?? []) {
+    // A capture that carries every one of a device's settings replaces the `.param()` calls that
+    // set them (see settingParamEdits). Written first and with the same origin, so the whole
+    // capture is one undo step.
+    if (e.replacesParams) {
+      const drop = settingParamEdits(cm.getValue(), e.trackId, e.slot);
+      if (drop.length) applyBufferEdits(drop, '+autopin');
+    }
     const filed = writePluginState(e.trackId, e.slot, e.state, e.plugin, e.preset);
     const commit = { trackId: e.trackId, slot: e.slot, seq: e.seq };
     if (filed === 'already') commitQueue.push(commit);
@@ -1836,7 +1901,7 @@ async function pollConf(labelOverride) {
   const trackLabel = labelOverride ?? confSession?.trackLabel;
   if (!trackLabel) return;
   const { active, params } = await api('POST', '/api/confPending', { trackId: trackLabel });
-  for (const p of params ?? []) upsertParam(trackLabel, p.slot, p.name, p.value);
+  for (const p of params ?? []) upsertParam(trackLabel, p.slot, paramSpellingInCode(trackLabel, p), p.value);
   // active:false on a session we think is live means the server restarted out from under it -
   // stop and say so instead of silently polling a dead session with the button still lit.
   // (Not on the final-drain call from stopConf, which passes labelOverride and expects this.)
@@ -2903,6 +2968,10 @@ function findChainHandleAt(code, idx) {
  */
 function showPluginEditor(trackId, slot) {
   queueHandOp(() => api('POST', '/api/showEditor', { trackId, slot })
+    // A device with no window of its own is answered with the panel to draw instead of an
+    // opened window. That is the only thing distinguishing the two here: not which build this
+    // is, but whether what answered had a window to open.
+    .then((res) => { if (res?.panel) showDevicePanel(trackId, slot, res.panel); })
     .catch((e) => logLine(e.message, true))
     // Ops are serialized, so by the time this one is answered any release before it has landed:
     // the server's view of what is held by hand is current again, and the mark can come back.
@@ -2913,6 +2982,1962 @@ function showPluginEditor(trackId, slot) {
     logLine(`${trackId} slot ${slot}: holding its preset while you work in the plugin - click in the code to hand it back`);
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The generated device window.
+//
+// A device that is not a plugin has no window of its own, so the host builds one from the
+// device's descriptor and this draws it. Nothing here knows what any particular device is: the
+// sections, the widgets, the units and the curves all arrive as data, which is what keeps a new
+// device from needing a line of UI written for it.
+//
+// TURNING A KNOB DOES TWO THINGS, and the split is the same one the mixer's held controls make.
+// While the gesture is running the value goes straight to the engine, because a drag that
+// re-evaluated the buffer per frame would be unusable. When it is let go the value is written
+// into the code as a `.param()` call, because the code is the single source of truth and a
+// setting that lives only in a knob is a setting that is lost on the next evaluation. The host
+// hands back the exact text to write, so a value heard and a value written cannot disagree.
+// ---------------------------------------------------------------------------------------------
+
+const devicePanelEl = document.getElementById('devicePanel');
+const deviceTitleEl = document.getElementById('deviceTitle');
+const deviceTargetEl = document.getElementById('deviceTarget');
+const deviceSectionsEl = document.getElementById('deviceSections');
+const deviceCreditEl = document.getElementById('deviceCredit');
+
+// Which track and slot the open panel is pointed at, so an evaluation can redraw it against
+// whatever the buffer now says, and a knob knows where to send what it is doing.
+let devicePanelAt = null;
+
+/** Controls whose value changes what the open window has on it, rather than only what it reads. */
+let devicePanelRelayout = new Set();
+
+function hideDevicePanel() {
+  devicePanelEl.classList.add('hidden');
+  if (devicePanelAt) {
+    const { trackLabel, slot } = devicePanelAt;
+    api('POST', '/api/deviceWatch', { trackId: trackLabel, slot, on: false }).catch(() => {});
+  }
+  devicePanelAt = null;
+  stopDeviceLive();
+  deviceFigureEls.clear();
+  deviceLiveEls.clear();
+  deviceWidgetEls.clear();
+}
+
+document.getElementById('deviceClose').onclick = hideDevicePanel;
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && devicePanelAt) hideDevicePanel();
+});
+// A figure is a canvas the stylesheet gives its width, so its backing store is only right for as
+// long as the window is the size it was drawn at.
+window.addEventListener('resize', () => {
+  for (const entry of deviceFigureEls.values()) entry.paint();
+});
+
+/**
+ * One knob, in the desk's shape and on the desk's metrics: the same class, the same sweep, the
+ * same fine-drag modifier. It works in 0..1 positions throughout - the parameter's real units
+ * and its curve live in the descriptor, on the other side of the call.
+ */
+function deviceKnob(widget, { onDrag, onCommit, register }) {
+  const knob = document.createElement('div');
+  knob.className = 'mix-knob';
+  let pos = widget.position;
+  let dragging = false;
+  const paint = () => knob.style.setProperty('--ang', `${-135 + pos * 270}deg`);
+  paint();
+  // How something else moves this knob: a drag on the picture the same parameter is drawn in, or
+  // the poll that follows a control a modulator owns. The position is kept here, so a later drag
+  // starts from where the knob actually is rather than from where the panel was built - but never
+  // while a gesture is running: a control under a hand belongs to that hand until it lets go.
+  register?.((position) => {
+    if (dragging) return;
+    pos = Math.min(1, Math.max(0, Number(position) || 0));
+    paint();
+  });
+  if (widget.modulatedBy) return knob; // driven from elsewhere - drawn, not turned
+
+  const moveTo = (next) => {
+    pos = Math.min(1, Math.max(0, next));
+    paint();
+    onDrag(pos);
+  };
+  knob.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    knob.setPointerCapture(e.pointerId);
+    knob.classList.add('dragging');
+    dragging = true;
+    const y0 = e.clientY;
+    const p0 = pos;
+    // The desk's sweep, and the macro bank's fine-drag modifier: a filter cutoff wants both the
+    // whole range in one gesture and a way to land on a number.
+    const move = (ev) => moveTo(p0 + (y0 - ev.clientY) / (ev.shiftKey ? 1200 : 150));
+    const up = () => {
+      dragging = false;
+      knob.classList.remove('dragging');
+      knob.removeEventListener('pointermove', move);
+      knob.removeEventListener('pointerup', up);
+      knob.removeEventListener('pointercancel', up);
+      onCommit(pos);
+    };
+    knob.addEventListener('pointermove', move);
+    knob.addEventListener('pointerup', up);
+    knob.addEventListener('pointercancel', up);
+  });
+  knob.addEventListener('dblclick', () => {
+    moveTo(widget.defaultPosition);
+    onCommit(pos);
+  });
+  knob.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    moveTo(pos + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.002 : 0.02));
+    onCommit(pos);
+  }, { passive: false });
+  return knob;
+}
+
+/**
+ * A number box: the value itself, dragged up and down or typed. The honest widget for a count or
+ * a transposition, where a knob's sweep says nothing the number does not say better. It sends
+ * REAL values - what is typed is in the parameter's own units - and the host clamps and steps.
+ */
+function deviceNumber(widget, { onDrag, onCommit, register }) {
+  const box = document.createElement('div');
+  box.className = 'device-number';
+  let value = widget.value;
+  let dragging = false;
+  const step = widget.step ?? (widget.max - widget.min) / 200;
+  // The box IS the readout - there is no second line under it - so it prints the value it is
+  // on. While a drag runs it prints what it has locally, because the pointer must not wait for
+  // a round trip; the host's own text lands over that as each answer comes back.
+  // Fixed digits, the descriptor's own count (see decimalsFor): a number that changes width as
+  // it is dragged makes the whole panel shift sideways on every frame of the gesture.
+  const digits = widget.decimals ?? 3;
+  const paint = (text) => {
+    if (box.querySelector('input')) return;
+    box.textContent = text ?? `${value.toFixed(digits)}${widget.unit ? ` ${widget.unit}` : ''}`;
+  };
+  paint(widget.text);
+  // Never while a gesture is running - see the knob, and for the same reason.
+  register?.((v, text) => { if (dragging) return; value = v; paint(text); });
+  if (widget.modulatedBy) return box;
+
+  const clamp = (v) => Math.min(widget.max, Math.max(widget.min, Math.round(v / step) * step));
+  box.addEventListener('pointerdown', (e) => {
+    if (box.querySelector('input')) return;
+    e.preventDefault();
+    box.setPointerCapture(e.pointerId);
+    box.classList.add('dragging');
+    dragging = true;
+    const y0 = e.clientY;
+    const v0 = value;
+    let moved = false;
+    // Six pixels a step, a quarter of that with shift held, the same way the knobs go fine.
+    const move = (ev) => {
+      const px = ev.shiftKey ? 24 : 6;
+      const next = clamp(v0 + Math.round((y0 - ev.clientY) / px) * step);
+      if (next === value) return;
+      moved = true;
+      value = next;
+      onDrag(value, paint);
+    };
+    const up = () => {
+      dragging = false;
+      box.classList.remove('dragging');
+      box.removeEventListener('pointermove', move);
+      box.removeEventListener('pointerup', up);
+      box.removeEventListener('pointercancel', up);
+      if (moved) onCommit(value, paint);
+    };
+    box.addEventListener('pointermove', move);
+    box.addEventListener('pointerup', up);
+    box.addEventListener('pointercancel', up);
+  });
+  // A double-click opens the number for typing; enter or leaving it commits, escape cancels.
+  box.addEventListener('dblclick', () => {
+    if (box.querySelector('input')) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = value.toFixed(digits);
+    box.textContent = '';
+    box.appendChild(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      const typed = Number(input.value);
+      input.remove();
+      if (commit && Number.isFinite(typed)) {
+        value = clamp(typed);
+        onCommit(value, paint);
+      } else {
+        paint();
+      }
+    };
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') finish(true);
+      else if (ev.key === 'Escape') finish(false);
+      ev.stopPropagation();
+    });
+    input.addEventListener('blur', () => finish(true));
+  });
+  box.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    value = clamp(value + (e.deltaY < 0 ? 1 : -1) * step);
+    onCommit(value, paint);
+  }, { passive: false });
+  return box;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The figures in that window.
+//
+// A knob is the honest widget for a parameter whose whole meaning is its number. It is the wrong
+// one for a wavetable's position, a filter's mode or an envelope's four times - and those are most
+// of what a synth we wrote is made of - so a descriptor may declare FIGURES, and this draws them.
+//
+// Nothing here knows what device it is drawing. A figure arrives as data computed in web-engine's
+// figures.mjs - a waveform's points, a response curve's decibels, an envelope's handles - and is
+// matched to a renderer by its `kind`; a kind with no renderer is skipped, so a device can ship a
+// picture the editor has never been taught about and lose nothing but the picture.
+//
+// A figure DRAGS on the same terms a knob does, and for the same reason: straight to the engine
+// while the gesture runs, written into the code as a `.param()` call when it is let go. Which shape
+// the drag takes depends on what was grabbed. A FIELD - the response curve, the spread, the table -
+// is grabbed anywhere, so it moves by how far the pointer went and taking hold of it never jumps
+// the value. A HANDLE on an envelope was grabbed because it was under the pointer, so it follows
+// the pointer. A parameter something else is driving does not move at all, the same way its knob
+// does not turn.
+// ---------------------------------------------------------------------------------------------
+
+/** Each drawn figure by id, so a parameter's answer repaints the pictures it appears in. */
+const deviceFigureEls = new Map();
+
+/**
+ * Each drawn control by PARAMETER id, so an answer about that parameter moves it - whatever moved
+ * it. A parameter can be on screen twice, as a knob and as a picture (a wavetable's position is
+ * both), and a drag on either has to leave the other saying the same thing.
+ */
+const deviceWidgetEls = new Map();
+
+/**
+ * The controls something else is driving, by parameter id, each with a way to move its readout:
+ * while the window is open they are polled from the processor's own reports, so a knob under an
+ * LFO turns and a picture under an envelope moves.
+ */
+const deviceLiveEls = new Map();
+let deviceLiveTimer = null;
+
+/** How often a window with driven controls asks where they are. About the rate the eye needs. */
+
+function stopDeviceLive() {
+  if (deviceLiveTimer) cancelAnimationFrame(deviceLiveTimer);
+  deviceLiveTimer = null;
+}
+
+/** Starts the poll, if anything in the open window is driven. */
+function startDeviceLive(trackLabel, slot, panel) {
+  stopDeviceLive();
+  const figures = [...panel.sections.flatMap((s) => s.figures), ...panel.figures];
+  // Polled while something is being driven - and while a picture is of what the device is DOING,
+  // which moves with nothing on a knob at all (a granulator's grains).
+  const follows = panel.sections.some((s) => s.widgets.some((w) => w.modulatedBy))
+    || figures.some((f) => Object.keys(f.driven ?? {}).length || LIVE_FIGURE_KINDS.has(f.kind));
+  if (!follows) return;
+  // On the frame clock rather than a timer, and one request at a time so it can never run ahead
+  // of itself. A grain lives about a tenth of a second: polled four times a second it is a dot
+  // that blinks on somewhere new, and polled every frame it is a dot that travels, which is the
+  // whole thing the picture is for.
+  let inFlight = false;
+  const tick = () => {
+    if (!devicePanelAt || devicePanelAt.trackLabel !== trackLabel || devicePanelAt.slot !== slot) return;
+    deviceLiveTimer = requestAnimationFrame(tick);
+    if (inFlight) return;
+    inFlight = true;
+    api('POST', '/api/deviceLive', { trackId: trackLabel, slot })
+      .then((res) => {
+        if (!res?.values) return;
+        for (const [id, live] of Object.entries(res.values)) deviceLiveEls.get(id)?.(live);
+        applyDeviceFigures(res.figures);
+      })
+      .catch(() => {})
+      .finally(() => { inFlight = false; });
+  };
+  deviceLiveTimer = requestAnimationFrame(tick);
+}
+
+/** Figures that draw what a device is doing rather than how it is set, and so always follow. */
+const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer']);
+
+/** How tall each kind of figure is drawn, in CSS pixels. */
+const FIGURE_HEIGHT = { wavetable: 132, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 112 };
+
+/** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
+const FIGURE_HIT_PX = 9;
+
+/** An envelope handle's radius, and the room above and below that keeps the extremes grabbable. */
+const FIGURE_POINT_R = 4;
+const FIGURE_PAD_Y = 10;
+
+/** The strip a figure keeps under its plot for a meter, in CSS pixels. */
+const FIGURE_METER_H = 14;
+
+/** How far down a gain-reduction meter reads. Past this a compressor is not compressing. */
+const FIGURE_GR_RANGE = 24;
+
+/** The height of the wavetable figure's position scrubber, under the waveform. */
+const FIGURE_SCRUB_H = 15;
+
+/**
+ * How far a drag on a two-axis figure has to go before it decides which of the two it means, as
+ * a share of the figure's own size. Small enough that the control starts moving at once, big
+ * enough that the first frame of a gesture does not decide it (see fieldGrab).
+ */
+const AXIS_LATCH = 0.02;
+
+/**
+ * The breakpoints a drawn control is currently on, read off the figure that draws it - the one
+ * place the panel is told what a drawn curve actually is.
+ */
+function figureShapeData(paramId) {
+  for (const entry of deviceFigureEls.values()) {
+    const f = entry.figure();
+    if (f.data && f.widgets?.some((w) => w.id === paramId)) return f.data;
+  }
+  return null;
+}
+
+/** Repaints whichever open figures the host says a parameter changed. */
+function applyDeviceFigures(figures) {
+  for (const f of figures ?? []) deviceFigureEls.get(f.id)?.update(f);
+}
+
+/** The panel's colors, read per paint so a theme change is picked up without rebuilding the DOM. */
+function figureColors() {
+  const css = getComputedStyle(document.documentElement);
+  const col = (v, fallback) => css.getPropertyValue(v).trim() || fallback;
+  return {
+    accent: col('--accent', '#6cf'),
+    text: col('--text', '#ccc'),
+    dim: col('--text-dim', '#888'),
+    grid: col('--border', '#333'),
+    warn: col('--warn', '#d29922'),
+  };
+}
+
+/**
+ * Every readout in a device window is padded to a width it never leaves.
+ *
+ * Nothing in a panel may move because a value changed. These numbers are read WHILE they are
+ * being dragged, and a readout that grows a digit shoves everything beside it sideways on that
+ * frame - which is not a cosmetic complaint, it is a number you cannot read because it will not
+ * hold still. So the digits are fixed (see decimalsFor), every optional clause is printed
+ * whether or not it has anything to say, and what is left is padded with a figure space, which
+ * is exactly as wide as a digit.
+ */
+function figurePad(text, width) {
+  return String(text).padStart(width, '\u2007');
+}
+
+/** A time in the unit it reads best in - the envelope readout spans microseconds to seconds. */
+function figureSeconds(s) {
+  if (s < 0.0005) return figurePad('0.0 ms', 8);
+  if (s < 1) return figurePad(`${(s * 1000).toFixed(1)} ms`, 8);
+  return figurePad(`${s.toFixed(2)} s`, 8);
+}
+
+/** A frequency the way the rest of the app prints one. */
+function figureHz(hz) {
+  return figurePad(hz >= 1000 ? `${(hz / 1000).toFixed(2)} kHz` : `${Math.round(hz)} Hz`, 9);
+}
+
+/**
+ * One figure: a heading with its readout, and the canvas under it.
+ *
+ * The element carries an `update(figure)` that takes a freshly computed figure and repaints - which
+ * is what a drag calls per frame, and what an evaluation calls once.
+ */
+function deviceFigure(trackLabel, slot, figure) {
+  const cell = document.createElement('div');
+  cell.className = 'device-figure';
+
+  const head = document.createElement('div');
+  head.className = 'device-figure-head';
+  const title = document.createElement('span');
+  title.className = 'device-figure-title';
+  // A figure with no title has none: the multiband's three curves sit under headings that have
+  // already named them, and "transfer" over each one said nothing three times.
+  title.textContent = figure.title ?? '';
+  const readout = document.createElement('span');
+  readout.className = 'device-figure-read';
+  head.append(title);
+  // Controls this figure took over (see the panel's `widgets`): a table control belongs on the
+  // picture of the table, where its name is, rather than under it as a second copy of the name.
+  for (const widget of figure.widgets ?? []) head.appendChild(deviceWidget(trackLabel, slot, widget, { bare: true }));
+  head.appendChild(readout);
+  cell.appendChild(head);
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'device-figure-canvas';
+  canvas.style.height = `${FIGURE_HEIGHT[figure.kind] ?? 96}px`;
+  cell.appendChild(canvas);
+
+  // What the picture is, then how to work it: the same ctrl+hover a knob answers to, and the only
+  // place a drag on a picture is discoverable at all.
+  const driving = Object.entries(figure.driven ?? {}).map(([id, by]) => `${id} is driven by ${by}.`);
+  cell.title = [figure.description, ...driving].filter(Boolean).join(' ');
+  if (driving.length) cell.classList.add('driven');
+
+  let current = figure;
+  const paint = () => {
+    songSizeCanvas(canvas);
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+    const drawer = FIGURE_DRAWERS[current.kind];
+    if (!drawer) { readout.textContent = ''; return; }
+    const shown = { ...current, focus: entry.focus };
+    if (current.kind === 'transfer' || current.kind === 'meter') {
+      const raw = Number(current.kind === 'meter' ? current.db : current.grDb) || 0;
+      // Toward a deeper reading at once, back to rest slowly.
+      entry.meter += (raw - entry.meter) * (Math.abs(raw) > Math.abs(entry.meter) ? 0.6 : 0.08);
+      if (current.kind === 'meter') shown.db = entry.meter;
+      else shown.grDb = entry.meter;
+    }
+    readout.textContent = drawer(ctx, w, h, shown, figureColors()) ?? '';
+  };
+
+  const entry = {
+    figure: () => current,
+    update: (next) => { current = next; paint(); },
+    paint,
+    // Where a meter on this figure has got to. A device reports the deepest gain reduction of
+    // each block, thirty times a second, and a meter that followed that exactly would be a
+    // blur - so it falls fast and comes back slowly, which is what makes one readable.
+    meter: 0,
+    // Which part of a many-part figure the last gesture was on. Set by the gesture, read by the
+    // drawer, and carried across repaints - a figure is rebuilt from the host on every frame of
+    // a drag, so it cannot live on the figure data.
+    focus: 1,
+  };
+  deviceFigureEls.set(figure.id, entry);
+  wireFigureDrag(canvas, trackLabel, slot, entry);
+  // A canvas has no size until it is laid out, so the first paint waits a frame rather than
+  // drawing into a one-pixel box.
+  requestAnimationFrame(paint);
+  return cell;
+}
+
+/**
+ * Sends a figure's parameter the way a knob's gesture does: straight through while the drag runs,
+ * and into the code when it ends. One request at a time with the latest winning, the rule every
+ * streamed control in here follows - a drag fires far faster than a round trip, and what matters is
+ * that the gesture's last value is the one that lands.
+ */
+function figureSender(trackLabel, slot) {
+  let inFlight = false;
+  let queued = null;
+  const send = (body, commit) => {
+    if (inFlight) { queued = [body, commit]; return; }
+    inFlight = true;
+    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, commit, ...body })
+      .then((res) => {
+        applyDeviceFigures(res.figures);
+        // The same parameter's knob, if it is on screen: dragging the waveform moves the
+        // position knob under it, and dragging the response curve moves the cutoff. A gesture
+        // that moved two controls answers for both.
+        for (const one of res.batch ?? [res]) deviceWidgetEls.get(one.id)?.(one);
+      })
+      .catch((e) => logLine(e.message ?? String(e), true))
+      .finally(() => {
+        inFlight = false;
+        if (queued) { const [b, c] = queued; queued = null; send(b, c); }
+      });
+  };
+  return send;
+}
+
+/** Where a level sits on a figure's vertical axis. */
+function figureLevelY(level, h) {
+  return FIGURE_PAD_Y + (1 - level) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+}
+
+/** And the way back, from a pointer to the level it is pointing at. */
+function figureLevelAt(y, h) {
+  return Math.min(1, Math.max(0, 1 - (y - FIGURE_PAD_Y) / Math.max(1, h - 2 * FIGURE_PAD_Y)));
+}
+
+/**
+ * The gestures on a figure.
+ *
+ * An `adsr` has named handles and is dragged by them; everything else is a field whose `drag` map
+ * says which parameter each axis moves.
+ */
+function wireFigureDrag(canvas, trackLabel, slot, entry) {
+  const figure = entry.figure();
+  const handled = new Set(['adsr', 'eq', 'band', 'matrix']);
+  if (!handled.has(figure.kind) && !figure.drag) return;
+  const send = figureSender(trackLabel, slot);
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const f = entry.figure();
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const grab = f.kind === 'adsr' ? adsrGrab(f, px, py, rect.width, rect.height)
+      : f.kind === 'eq' ? eqGrab(f, px, py, rect.width, rect.height)
+        : f.kind === 'band' ? bandGrab(f, px, rect.width)
+          : f.kind === 'matrix' ? matrixGrab(f, px, py, rect.width, rect.height)
+            : fieldGrab(f);
+    if (!grab) return;
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+
+    const bodyFor = (ev) => {
+      // Shift is the fine drag, the same modifier the desk's knobs take.
+      const fine = ev.shiftKey ? 0.125 : 1;
+      return grab.at(
+        ((ev.clientX - x0) / Math.max(1, rect.width)) * fine,
+        ((ev.clientY - y0) / Math.max(1, rect.height)) * fine,
+        ev.clientY - rect.top,
+        rect.height,
+        ev.clientX - rect.left,
+        rect.width,
+      );
+    };
+    // Which band the gesture is on, so the heading names the one under your hand rather than
+    // reciting all four - see the equalizer's drawer.
+    if (grab.band !== undefined) entry.focus = grab.band;
+    if (grab.role !== undefined) entry.focus = grab.role;
+    const move = (ev) => { const b = bodyFor(ev); if (b) send(b, false); };
+    const up = (ev) => {
+      canvas.removeEventListener('pointermove', move);
+      canvas.removeEventListener('pointerup', up);
+      canvas.removeEventListener('pointercancel', up);
+      const b = bodyFor(ev);
+      if (b) send(b, true);
+    };
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+  });
+
+  // The wheel sets what a drag has nowhere to put: a band's Q, and a stage's curvature. Both
+  // are shapes rather than places - there is no point on the picture that means "more curved" -
+  // so they go on the wheel over the thing they bend. Shift makes it fine, as everywhere else.
+  if (figure.kind !== 'eq' && figure.kind !== 'adsr') return;
+  canvas.addEventListener('wheel', (e) => {
+    const f = entry.figure();
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    let target = null;
+    if (f.kind === 'eq') {
+      const grab = eqGrab(f, px, e.clientY - rect.top, rect.width, rect.height);
+      const band = grab && f.bands.find((b) => b.band === grab.band);
+      if (band?.movesQ) {
+        target = { id: band.movesQ, position: band.qPosition, focus: band.band };
+      }
+    } else {
+      // Whichever stage the pointer is over. The sustain has no curve: it is a level, not a ramp.
+      const at = px / Math.max(1, rect.width);
+      const stage = f.stages?.find((x) => at >= x.x0 && at <= x.x1);
+      if (stage) target = { id: stage.moves, position: stage.position, focus: stage.role };
+    }
+    if (!target || f.driven?.[target.id]) return;
+    e.preventDefault();
+    entry.focus = target.focus;
+    const step = (e.shiftKey ? 0.01 : 0.05) * (e.deltaY < 0 ? 1 : -1);
+    send({ id: target.id, position: Math.min(1, Math.max(0, target.position + step)) }, true);
+  }, { passive: false });
+}
+
+/**
+ * A field grab: each axis moves by how far the pointer went, in 0..1 POSITIONS, so the parameter
+ * arrives at the host on its own curve. That is what makes the response curve's horizontal drag
+ * land where the eye expects it - the cutoff's curve is exponential and the axis is logarithmic,
+ * so the two are the same axis - and it is why a field sends positions where an envelope sends
+ * seconds.
+ */
+function fieldGrab(f) {
+  const axes = [];
+  for (const [axis, paramId] of Object.entries(f.drag ?? {})) {
+    if (f.driven?.[paramId]) continue; // something else is moving it
+    axes.push({ axis, paramId, from: figurePosition(f, axis) });
+  }
+  if (!axes.length) return null;
+  // One parameter per request, so a two-axis drag has to choose. The choice is made ONCE, as
+  // soon as the gesture has gone far enough to mean something, and held for the rest of it: a
+  // hand sweeping sideways still wanders a few pixels up and down, and deciding again every
+  // frame handed those pixels to the other axis - the one being dragged stopped moving until
+  // the hand happened to go straight again, which reads as a control stuck at a value.
+  let axis = axes.length > 1 ? null : axes[0].axis;
+  return {
+    at: (dx, dy) => {
+      if (!axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_LATCH) return null;
+        axis = Math.abs(dy) > Math.abs(dx) ? 'y' : 'x';
+      }
+      const pick = axes.find((a) => a.axis === axis) ?? axes[0];
+      const delta = pick.axis === 'y' ? -dy : dx;
+      return { id: pick.paramId, position: Math.min(1, Math.max(0, pick.from + delta)) };
+    },
+  };
+}
+
+/** Where a field figure's axis currently sits, 0..1, so a relative drag has somewhere to start. */
+function figurePosition(f, axis) {
+  if (f.kind === 'wavetable') return f.position;
+  if (f.kind === 'sample') return axis === 'y' ? f.spray : f.position;
+  if (f.kind === 'unison') return axis === 'y' ? f.spread : f.detune / 100;
+  if (f.kind === 'response') {
+    if (axis === 'y') return f.resonance;
+    const { lowHz, highHz } = f.range;
+    return Math.log(f.cutoff / lowHz) / Math.log(highHz / lowHz);
+  }
+  return 0;
+}
+
+/** Where a frequency sits on a figure's log axis, 0..1 - the same place its exp knob puts it. */
+function figureLogX(hz, range) {
+  return Math.min(1, Math.max(0, Math.log(hz / range.lowHz) / Math.log(range.highHz / range.lowHz)));
+}
+
+/**
+ * An equalizer band's handle: pressed on, it follows the pointer - across for its frequency on
+ * the log axis (which is the exp knob's own curve, so a position is a position), up for its
+ * gain in the decibel window. A band with no gain to move only moves sideways.
+ */
+function eqGrab(f, x, y, w, h) {
+  const { topDb, bottomDb } = f.range;
+  const yOf = (db) => FIGURE_PAD_Y + ((topDb - db) / (topDb - bottomDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+  let best = null;
+  let bestD = FIGURE_HIT_PX * 1.5;
+  for (const band of f.bands) {
+    const d = Math.hypot(figureLogX(band.hz, f.range) * w - x, yOf(band.gainDb) - y);
+    if (d <= bestD) { best = band; bestD = d; }
+  }
+  if (!best) return null;
+  const movesX = best.movesX && !f.driven?.[best.movesX] ? best.movesX : null;
+  const movesY = best.movesY && !f.driven?.[best.movesY] ? best.movesY : null;
+  if (!movesX && !movesY) return null;
+  // BOTH axes at once, unlike every other figure here. A band is a point on a curve, and a
+  // point follows the pointer - picking whichever axis the hand favored would mean dragging a
+  // vertex somewhere it was never put. The route takes the pair in one call so the two can
+  // never land a frame apart.
+  return {
+    band: best.band,
+    at: (dx, dy, pointerY, height, pointerX, width) => {
+      const params = [];
+      if (movesX) params.push({ id: movesX, position: Math.min(1, Math.max(0, pointerX / Math.max(1, width))) });
+      if (movesY) {
+        const db = topDb - ((pointerY - FIGURE_PAD_Y) / Math.max(1, height - 2 * FIGURE_PAD_Y)) * (topDb - bottomDb);
+        params.push({ id: movesY, position: Math.min(1, Math.max(0, (db - bottomDb) / (topDb - bottomDb))) });
+      }
+      return params.length === 1 ? params[0] : { params };
+    },
+  };
+}
+
+/** A region's edge: whichever corner the press was nearer follows the pointer along the log axis. */
+function bandGrab(f, x, w) {
+  const lowX = figureLogX(f.low, f.range) * w;
+  const highX = figureLogX(f.high, f.range) * w;
+  const id = Math.abs(x - lowX) <= Math.abs(x - highX) ? f.movesLow : f.movesHigh;
+  if (!id || f.driven?.[id]) return null;
+  return { at: (dx, dy, pointerY, height, pointerX, width) => ({ id, position: Math.min(1, Math.max(0, pointerX / Math.max(1, width))) }) };
+}
+
+/** Where a matrix cell sits: the operator rows and columns, plus the level column on the right. */
+/**
+ * Where the matrix's grid sits inside its canvas.
+ *
+ * ONE definition, read by both the drawing and the hit test. They used to compute it separately
+ * from the same formula, which is a pair that can drift: a gutter added to one of them would put
+ * every cell a row away from the cell it draws.
+ */
+function matrixGeometry(f, w, h) {
+  const gx = 15;            // the column of operator numbers down the left
+  const gy = 11;            // the row of them across the top
+  const cols = f.ops + 1;   // every operator, then the output column
+  return { gx, gy, cols, cw: (w - gx) / cols, rh: (h - gy) / f.ops };
+}
+
+function matrixCell(f, x, y, w, h) {
+  const { gx, gy, cols, cw, rh } = matrixGeometry(f, w, h);
+  const col = Math.floor((x - gx) / cw);
+  const row = Math.floor((y - gy) / rh);
+  if (row < 0 || row >= f.ops || col < 0 || col >= cols) return null;
+  return { row, col, cell: col < f.ops ? f.cells[row][col] : null, level: col === f.ops ? f.levels[row] : null };
+}
+
+/** A matrix cell: pressed, dragged up and down for its amount, from where it was. */
+function matrixGrab(f, x, y, w, h) {
+  const at = matrixCell(f, x, y, w, h);
+  if (!at) return null;
+  const id = at.cell ? at.cell.param : at.level.param;
+  const from = at.cell ? at.cell.amount : at.level.level;
+  if (!id || f.driven?.[id]) return null;
+  // Which cell the hand is on, so the heading can name the connection it is changing and the
+  // grid can light the two operators it runs between.
+  return { role: `${at.row}:${at.col}`, at: (dx, dy) => ({ id, position: Math.min(1, Math.max(0, from - dy * 2)) }) };
+}
+
+/**
+ * An envelope handle grab.
+ *
+ * Times move by how far the pointer went, measured against the span the figure had when it was
+ * grabbed: the span is computed FROM the times, so measuring against a live one would have the
+ * handle sliding out from under the pointer as it moved. Levels are absolute, because the level
+ * axis does not rescale and a grabbed point should sit under the finger.
+ *
+ * What goes back is UNSCALED seconds - `.param("Amp Attack", …)` is the time before envscale, and
+ * the figure is drawn in scaled ones - so a patch with an envscale keeps its handle under the
+ * pointer instead of moving by the scale twice.
+ */
+function adsrGrab(f, x, y, w, h) {
+  let best = null;
+  let bestD = FIGURE_HIT_PX;
+  for (const hd of f.handles) {
+    const d = Math.hypot(hd.x * w - x, figureLevelY(hd.y, h) - y);
+    if (d <= bestD) { best = hd; bestD = d; }
+  }
+  // The plateau is a line rather than a point, and is only reachable where no point was nearer.
+  if (!best && f.plateau) {
+    const pl = f.plateau;
+    if (x >= pl.x0 * w - 3 && x <= pl.x1 * w + 3 && Math.abs(figureLevelY(pl.y, h) - y) <= 5) best = pl;
+  }
+  // No handle under the pointer: the press is on a SEGMENT, and a vertical drag there bends it,
+  // exactly as it does in the shape editor and the piano roll's bend lane. No modifier - that is
+  // the gesture those two already use, and a curve has no handle to give it because a curve is
+  // not a place on the picture.
+  if (!best) {
+    const at = x / Math.max(1, w);
+    const stage = f.stages?.find((st) => at >= st.x0 && at <= st.x1 && !f.driven?.[st.moves]);
+    if (!stage) return null;
+    return {
+      role: stage.role,
+      at: (dx, dy) => ({ id: stage.moves, position: Math.min(1, Math.max(0, stage.position - dy)) }),
+    };
+  }
+
+  const movesX = best.movesX && !f.driven?.[best.movesX] ? best.movesX : null;
+  const movesY = best.movesY && !f.driven?.[best.movesY] ? best.movesY : null;
+  if (!movesX && !movesY) return null;
+
+  const scale = f.scale || 1;
+  const startSec = { attack: f.attack, decay: f.decay, release: f.release }[best.role] ?? 0;
+  // The decay point is two controls at once, exactly as it is in the sampler's panel: its x is
+  // the decay and its y the sustain. Which one the gesture means is decided once and held - see
+  // fieldGrab, and the same wobble that stuck a detune stuck a decay.
+  let axis = movesX && movesY ? null : (movesX ? 'x' : 'y');
+  return {
+    at: (dx, dy, pointerY, height) => {
+      if (!axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_LATCH) return null;
+        axis = Math.abs(dy) > Math.abs(dx) ? 'y' : 'x';
+      }
+      if (axis === 'y') return { id: movesY, value: figureLevelAt(pointerY, height) };
+      return { id: movesX, value: Math.max(0, (startSec + dx * f.span) / scale) };
+    },
+  };
+}
+
+// --- the drawers ------------------------------------------------------------------------------
+
+/** A polyline through points already in canvas coordinates. */
+function figureStroke(ctx, pts, color, width = 1.5) {
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
+/** The same polyline, closed down to a baseline and filled faintly under itself. */
+function figureFill(ctx, pts, color, baseline) {
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], baseline);
+  for (const [px, py] of pts) ctx.lineTo(px, py);
+  ctx.lineTo(pts[pts.length - 1][0], baseline);
+  ctx.closePath();
+  ctx.globalAlpha = 0.16;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+const FIGURE_DRAWERS = {
+  /**
+   * The waveform this oscillator is reading, over the stack it is reading from, with a scrubber
+   * for the position under it.
+   *
+   * Every frame in the table is drawn faintly in the same axes and the live one boldly on top, so
+   * the position sweep reads as a shape moving through a family of shapes rather than as a number.
+   * The warp is already in the bold curve - it is the phase the oscillator really reads.
+   */
+  wavetable(ctx, w, h, f, c) {
+    const waveH = Math.max(8, h - FIGURE_SCRUB_H - 4);
+    if (!f.wave.length) return figurePad(f.loading ? 'loading' : 'no table', 24);
+
+    // The table as a stack leaning away from you, the same drawing the file picker makes, with
+    // the cycle the oscillator is actually reading - blended and warped - in front of it. One
+    // cycle over another says "a waveform"; this says "a table", which is what the position
+    // knob is moving through.
+    const lean = { x: w * 0.14, y: waveH * 0.3 };
+    const rowH = (waveH - lean.y) * 0.5 - 2;
+    const base = 2 + lean.y + rowH;
+    const width = w - lean.x;
+    const rowAt = (frame, points, color, alpha, weight) => {
+      const t = f.stack.length <= 1 ? 1 : frame / (f.stack.length - 1);
+      const x0 = lean.x * t;
+      const y0 = base - lean.y * t;
+      ctx.globalAlpha = alpha;
+      figureStroke(ctx, points.map((v, j) => [x0 + (j / (points.length - 1)) * width, y0 - v * rowH]), color, weight);
+    };
+    // Back to front, so a nearer frame covers the one behind it.
+    for (let i = f.stack.length - 1; i >= 0; i--) {
+      const near = Math.min(Math.abs(i - f.between[0]), Math.abs(i - f.between[1]));
+      rowAt(i, f.stack[i], c.dim, near === 0 ? 0.34 : 0.13, 1);
+    }
+    rowAt(f.frame, f.wave, c.accent, 1, 1.75);
+    ctx.globalAlpha = 1;
+
+    // The scrubber: a tick per frame and a handle where the position is, which is what makes a
+    // drag on this figure something somebody would think to try.
+    const sy = h - FIGURE_SCRUB_H / 2;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(1, sy);
+    ctx.lineTo(w - 1, sy);
+    ctx.stroke();
+    ctx.fillStyle = c.grid;
+    for (let i = 0; i < f.frameCount; i++) {
+      const tx = 1 + (i / Math.max(1, f.frameCount - 1)) * (w - 2);
+      ctx.fillRect(tx - 0.5, sy - 3, 1, 6);
+    }
+    const hx = 1 + f.position * (w - 2);
+    ctx.fillStyle = c.accent;
+    ctx.beginPath();
+    ctx.arc(hx, sy, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Which frame the position is on, in the corner of the picture it belongs to rather than in
+    // a heading above it - the frame is a fact about the drawing, and the heading carries the
+    // name of the table already.
+    const [lo, hi] = f.between;
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textAlign = 'end';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = c.dim;
+    ctx.fillText(`${lo + 1} / ${f.frameCount}`, w - 3, waveH);
+    ctx.textAlign = 'start';
+
+    // The heading says what the position is between, where the table names its frames, and what
+    // the warp is doing - both printed whether or not they have anything to say.
+    const names = f.frameNames;
+    const between = figurePad(!names ? '' : lo === hi ? names[lo] : `${names[lo]} \u2192 ${names[hi]}`, 16);
+    const warp = `${figurePad(f.warpModeName ?? 'warp', 9)} ${figurePad(`${Math.round(f.warp * 100)}%`, 4)}`;
+    return `${between} \u00b7 ${warp}${f.cross ? ' (not drawn)' : figurePad('', 12)}`;
+  },
+
+  /**
+   * Where the unison copies sit: detune across, pan up and down.
+   *
+   * Two spreads on two axes, which is what they are - the copies fan out sideways as the detune
+   * widens and vertically as the spread does - so one picture answers both knobs at once.
+   */
+  unison(ctx, w, h, f, c) {
+    const mx = w / 2;
+    const my = h / 2;
+    // The axis is fixed at the detune control's full reach, so the copies spread as the knob
+    // turns rather than always sitting at the edges of the box.
+    const xOf = (copy) => mx + copy.x * (w / 2 - 8);
+    const yOf = (pan) => my + pan * (h / 2 - 8);
+
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mx, 4);
+    ctx.lineTo(mx, h - 4);
+    ctx.moveTo(8, my);
+    ctx.lineTo(w - 8, my);
+    ctx.stroke();
+
+    for (const copy of f.copies) {
+      const px = xOf(copy);
+      const py = yOf(copy.pan);
+      // A stalk to the center line, so a copy's pan is readable as a distance and not only as a
+      // position - a single dot in the middle of a box says very little.
+      ctx.strokeStyle = c.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, my);
+      ctx.lineTo(px, py);
+      ctx.stroke();
+      ctx.fillStyle = c.accent;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = c.dim;
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('L', 2, 8);
+    ctx.fillText('R', 2, h - 8);
+
+    // Nothing: the count, the detune and the spread are three knobs under this picture and
+    // they each print their own value.
+    return '';
+  },
+
+  /**
+   * The filter's magnitude response, on a log frequency axis and a decibel one.
+   *
+   * The corner is marked where the filter actually put it rather than where the knob was set, which
+   * are the same number until the cutoff is asked for something past what the sample rate allows.
+   */
+  response(ctx, w, h, f, c) {
+    const { lowHz, topDb, bottomDb } = f.range;
+    const highHz = f.points[f.points.length - 1].hz;
+    const xOf = (hz) => (Math.log(hz / lowHz) / Math.log(highHz / lowHz)) * w;
+    const yOf = (db) => FIGURE_PAD_Y + ((topDb - db) / (topDb - bottomDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      if (hz > highHz) continue;
+      const gx = xOf(hz);
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, h);
+      ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    // Unity, so how far the resonance is lifting the corner above the passband is visible.
+    ctx.beginPath();
+    ctx.moveTo(0, yOf(0));
+    ctx.lineTo(w, yOf(0));
+    ctx.stroke();
+
+    const pts = f.points.map((p) => [xOf(p.hz), yOf(p.db)]);
+    figureFill(ctx, pts, c.accent, h);
+    figureStroke(ctx, pts, c.accent, 1.75);
+
+    const cx = xOf(Math.min(highHz, Math.max(lowHz, f.corner)));
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = c.warn;
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, h);
+    ctx.stroke();
+    ctx.restore();
+
+    // The corner the filter actually landed on, which is NOT where the cutoff knob is set:
+    // resonance and the ladder's own droop move it. Everything else here is on a knob.
+    return figureHz(f.corner);
+  },
+
+  /**
+   * An equalizer's summed response, with a handle per band. The same axes as the filter's
+   * response, and the bands' own numbers beside their handles.
+   */
+  eq(ctx, w, h, f, c) {
+    const { topDb, bottomDb } = f.range;
+    const xOf = (hz) => figureLogX(hz, f.range) * w;
+    const yOf = (db) => FIGURE_PAD_Y + ((topDb - db) / (topDb - bottomDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      const gx = xOf(hz);
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    for (const db of [-12, 0, 12]) {
+      ctx.beginPath(); ctx.moveTo(0, yOf(db)); ctx.lineTo(w, yOf(db)); ctx.stroke();
+    }
+    const pts = f.points.map((p) => [xOf(p.hz), yOf(p.db)]);
+    figureFill(ctx, pts, c.accent, yOf(0));
+    figureStroke(ctx, pts, c.accent, 1.75);
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    for (const band of f.bands) {
+      const px = xOf(band.hz);
+      const py = yOf(band.gainDb);
+      ctx.fillStyle = f.driven?.[band.movesX] || f.driven?.[band.movesY] ? c.dim : c.accent;
+      ctx.beginPath(); ctx.arc(px, py, FIGURE_POINT_R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = c.text;
+      ctx.fillText(String(band.band), px + FIGURE_POINT_R + 3, py - 7);
+    }
+    // One band, the one last touched: four of them recited across the heading was a line that
+    // rewrote itself whenever any of them moved, and said nothing about the one under your hand.
+    const band = f.bands.find((b) => b.band === f.focus) ?? f.bands[0];
+    if (!band) return '';
+    const gain = band.hasGain ? `${band.gainDb >= 0 ? '+' : '\u2212'}${figurePad(Math.abs(band.gainDb).toFixed(1), 4)} dB` : figurePad('', 9);
+    return `${figurePad(band.band, 1)} ${figurePad(band.typeName, 9)} ${figureHz(band.hz)} ${gain} Q ${figurePad(band.q.toFixed(2), 5)}`;
+  },
+
+  /** A region of the spectrum between two edges, on the log axis, each edge a handle. */
+  band(ctx, w, h, f, c) {
+    const xOf = (hz) => figureLogX(hz, f.range) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      const gx = xOf(hz);
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    const lo = xOf(f.low);
+    const hi = xOf(f.high);
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = c.accent;
+    ctx.fillRect(lo, 4, Math.max(1, hi - lo), h - 8);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 2;
+    for (const x of [lo, hi]) { ctx.beginPath(); ctx.moveTo(x, 2); ctx.lineTo(x, h - 2); ctx.stroke(); }
+    return ''; // both corners are knobs under it
+  },
+
+  /**
+   * A modulation matrix: rows modulate columns, the cell's fill is the amount, and the last
+   * column is each operator's level to the output.
+   */
+  matrix(ctx, w, h, f, c) {
+    // WHICH CELL IS WHICH. The grid used to be eight rows of unlabeled squares with the operator
+    // number buried in the diagonal, so "2 modulating 1" and "1 modulating 2" were two squares
+    // either side of a line with nothing to tell you which was which. The numbers now run down
+    // the left (the operator doing the modulating) and across the top (the one being modulated),
+    // the cell under your hand lights both of them, and the heading spells the pair out with an
+    // arrow - which is the only place the DIRECTION can be stated rather than implied.
+    const { gx, gy, cols, cw, rh } = matrixGeometry(f, w, h);
+    const [fr, fc] = String(f.focus ?? '').split(':').map(Number);
+    const hasFocus = Number.isInteger(fr) && Number.isInteger(fc);
+
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+
+    // The axes. The one the hand is on is drawn bright, the rest dim.
+    for (let col = 0; col < f.ops; col++) {
+      ctx.fillStyle = hasFocus && col === fc ? c.accent : c.dim;
+      ctx.fillText(String(col + 1), gx + col * cw + cw / 2, gy / 2);
+    }
+    ctx.fillStyle = hasFocus && fc === f.ops ? c.warn : c.dim;
+    ctx.fillText('out', gx + f.ops * cw + cw / 2, gy / 2);
+    ctx.textAlign = 'end';
+    for (let r = 0; r < f.ops; r++) {
+      ctx.fillStyle = hasFocus && r === fr ? c.accent : c.dim;
+      ctx.fillText(String(r + 1), gx - 3, gy + r * rh + rh / 2);
+    }
+
+    ctx.textAlign = 'center';
+    for (let r = 0; r < f.ops; r++) {
+      for (let col = 0; col < cols; col++) {
+        const cell = col < f.ops ? f.cells[r][col] : null;
+        const amount = cell ? cell.amount : f.levels[r].level;
+        const x = gx + col * cw;
+        const y = gy + r * rh;
+        ctx.strokeStyle = hasFocus && r === fr && col === fc ? c.accent : c.grid;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, rh - 1);
+        if (amount > 0.001) {
+          ctx.globalAlpha = 0.15 + 0.85 * amount;
+          ctx.fillStyle = col < f.ops ? c.accent : c.warn;
+          ctx.fillRect(x + 2, y + 2, cw - 4, rh - 4);
+          ctx.globalAlpha = 1;
+        }
+        // An operator modulating ITSELF is the feedback diagonal, and it is worth marking: it is
+        // the one cell in the row whose two ends are the same operator.
+        if (col === r) {
+          ctx.fillStyle = c.dim;
+          ctx.globalAlpha = amount > 0.001 ? 0.5 : 1;
+          ctx.fillText('\u21ba', x + cw / 2, y + rh / 2);
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+    ctx.textAlign = 'start';
+
+    // The heading: what the hand is on, or what the matrix adds up to when it is on nothing.
+    // Padded either way, so nothing moves when one replaces the other.
+    if (hasFocus) {
+      const amount = fc < f.ops ? f.cells[fr][fc].amount : f.levels[fr].level;
+      const pair = fc < f.ops ? `op ${fr + 1} \u2192 op ${fc + 1}` : `op ${fr + 1} \u2192 out`;
+      return `${figurePad(pair, 13)} ${figurePad(amount.toFixed(2), 5)}`;
+    }
+    const on = f.cells.flat().filter((cell) => cell.amount > 0.001).length;
+    return `${figurePad(on, 2)} connections ${figurePad('', 13)}`;
+  },
+
+  /**
+   * An envelope, with a handle per stage - the sampler's envelope panel, for a synth that has no
+   * sample to lay one over.
+   *
+   * The curve is the voice's own: it is computed through the same shaping function the envelope
+   * generator runs, so the default's fast-then-levelling attack looks the way it sounds rather
+   * than being drawn as the straight line it is not.
+   */
+  adsr(ctx, w, h, f, c) {
+    const yOf = (level) => figureLevelY(level, h);
+
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, yOf(0));
+    ctx.lineTo(w, yOf(0));
+    ctx.moveTo(0, yOf(1));
+    ctx.lineTo(w, yOf(1));
+    ctx.stroke();
+
+    const pts = f.points.map((p) => [p.x * w, yOf(p.y)]);
+    figureFill(ctx, pts, c.accent, yOf(0));
+    figureStroke(ctx, pts, c.accent, 1.75);
+
+    // The plateau, drawn heavier than the curve because it is a handle and the rest of that line
+    // is not: it is what the sustain level is grabbed by.
+    if (f.plateau) {
+      ctx.strokeStyle = c.accent;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(f.plateau.x0 * w, yOf(f.plateau.y));
+      ctx.lineTo(f.plateau.x1 * w, yOf(f.plateau.y));
+      ctx.stroke();
+    }
+
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    for (const hd of f.handles) {
+      const px = hd.x * w;
+      const py = yOf(hd.y);
+      ctx.fillStyle = c.accent;
+      ctx.beginPath();
+      ctx.arc(px, py, FIGURE_POINT_R, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = c.dim;
+      ctx.fillText(hd.label, px + FIGURE_POINT_R + 3, hd.role === 'release' ? py - 7 : py + 8);
+    }
+
+    // HOW LONG THE PICTURE IS. The curve is drawn to fit its own width, so every stage keeps its
+    // shape whether the envelope runs for five milliseconds or ten seconds - which is what makes
+    // it readable, and what made the scale look like it did nothing: multiplying every stage by
+    // the same number leaves the shape exactly where it was. The span is the one thing that does
+    // change, so the span is what this says.
+    return `${figureSeconds(f.span)}${f.scale && Math.abs(f.scale - 1) > 1e-6 ? ` ${figurePad(`${f.scale.toFixed(2)}x`, 6)}` : figurePad('', 7)}`;
+  },
+
+  /**
+   * The file a granulator is reading, and the cloud it is reading out of it.
+   *
+   * The waveform is the file; the band is where a grain may start, which is the spray about the
+   * position; and the dots are the grains themselves, each drawn where it has got to and as
+   * bright as its window has it. The dots are the whole point - a still picture of a position
+   * and a spray says what was set, and this says what is being heard.
+   */
+  sample(ctx, w, h, f, c) {
+    const mid = h / 2;
+    const half = h / 2 - 4;
+    ctx.strokeStyle = c.grid;
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(w, mid);
+    ctx.stroke();
+
+    if (!f.peaks.length) return f.name ? 'reading…' : 'no sample - pick one above';
+
+    // Where the grains may start: the position, plus or minus the spray, wrapped like the read.
+    if (f.spray > 0) {
+      ctx.fillStyle = c.accent;
+      ctx.globalAlpha = 0.1;
+      for (const [from, to] of wrappedSpans(f.position - f.spray, f.position + f.spray)) {
+        ctx.fillRect(from * w, 0, Math.max(1, (to - from) * w), h);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.fillStyle = c.dim;
+    const colW = Math.max(1, w / f.peaks.length);
+    for (let i = 0; i < f.peaks.length; i++) {
+      const [lo, hi] = f.peaks[i];
+      ctx.fillRect((i / f.peaks.length) * w, mid - hi * half, colW, Math.max(1, (hi - lo) * half));
+    }
+
+    // The position itself, then every grain in the air on top of it.
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(f.position * w, 0);
+    ctx.lineTo(f.position * w, h);
+    ctx.stroke();
+    for (const [at, level] of f.grains ?? []) {
+      ctx.globalAlpha = 0.25 + 0.75 * Math.min(1, Math.max(0, level));
+      ctx.fillStyle = c.accent;
+      ctx.beginPath();
+      ctx.arc(at * w, mid, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // The length of the file, and how many grains are in the air - neither of which is on a
+    // knob. The position is, so it is not repeated here; a device with no grains says nothing
+    // about them.
+    const held = f.grains ? ` · ${figurePad(f.grains.length, 2)} grains` : '';
+    return `${figurePad(`${f.seconds.toFixed(2)} s`, 8)}${held}`;
+  },
+
+  /**
+   * What a device is doing to the level: a bar from the middle of the scale, and the number.
+   *
+   * A control that silently changes the volume is, from the outside, the same as a broken one -
+   * so an auto gain that takes twelve decibels off says twelve decibels.
+   */
+  meter(ctx, w, h, f, c) {
+    const [lo, hi] = f.range;
+    const at = (db) => ((Math.min(hi, Math.max(lo, db)) - lo) / (hi - lo)) * w;
+    const zero = at(0);
+    const y = h / 2 - 3;
+    ctx.fillStyle = c.grid;
+    ctx.fillRect(0, y, w, 6);
+    if (f.on) {
+      ctx.fillStyle = c.accent;
+      const x = at(f.db);
+      ctx.fillRect(Math.min(zero, x), y, Math.max(1, Math.abs(x - zero)), 6);
+    }
+    ctx.fillStyle = c.dim;
+    ctx.fillRect(zero - 0.5, y - 2, 1, 10);
+    return f.on ? `${figurePad(f.db.toFixed(1), 5)} dB` : figurePad('off', 8);
+  },
+
+  /**
+   * A compressor's transfer curve: what comes out for what goes in.
+   *
+   * Four controls that only mean something together - a ratio says nothing without a threshold,
+   * and a knee is invisible in both. The diagonal is "unchanged"; the curve is what the device
+   * does to that; the dot is where the signal is on it right now.
+   */
+  transfer(ctx, w, h, f, c) {
+    const { lowDb, highDb } = f.range;
+    const xOf = (db) => ((Math.min(highDb, Math.max(lowDb, db)) - lowDb) / (highDb - lowDb)) * w;
+    const plot = h - FIGURE_METER_H;
+    const yOf = (db) => plot - ((Math.min(highDb, Math.max(lowDb, db)) - lowDb) / (highDb - lowDb)) * plot;
+
+    // Unity, and the threshold it departs from.
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(xOf(lowDb), yOf(lowDb));
+    ctx.lineTo(xOf(highDb), yOf(highDb));
+    ctx.stroke();
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(xOf(f.threshold), 0);
+    ctx.lineTo(xOf(f.threshold), plot);
+    ctx.stroke();
+    ctx.restore();
+
+    figureStroke(ctx, f.points.map((p) => [xOf(p.inDb), yOf(p.outDb)]), c.accent, 1.75);
+
+    // GAIN REDUCTION, along the bottom. This used to be a dot travelling on the curve, which
+    // was two things at once and neither of them legible: it jumped about with the signal, and
+    // the number it was really carrying - how much is being taken off - had to be read as a
+    // vertical distance from a diagonal line. A bar is the shape of that one number.
+    //
+    // Smoothed on the way in: the device reports the deepest reduction of each block, thirty
+    // times a second, and a meter that follows that exactly is a blur. Fast down and slow back,
+    // which is what every gain-reduction meter does and what makes one readable.
+    const range = FIGURE_GR_RANGE;
+    const shown = Math.min(0, Math.max(-range, f.grDb));
+    ctx.fillStyle = c.grid;
+    ctx.fillRect(0, plot + 4, w, FIGURE_METER_H - 6);
+    if (shown < -0.05) {
+      // From the right, because a compressor takes gain AWAY: the bar grows leftward from zero.
+      const width = (Math.abs(shown) / range) * w;
+      ctx.fillStyle = c.accent;
+      ctx.fillRect(w - width, plot + 4, width, FIGURE_METER_H - 6);
+    }
+    // Where the signal is on the input axis, as a tick under the curve rather than a dot on it.
+    if (f.inDb !== null && f.inDb > lowDb) {
+      ctx.fillStyle = c.dim;
+      ctx.fillRect(xOf(f.inDb) - 0.5, plot - 5, 1, 5);
+    }
+
+    // The one number here that is not already on a knob.
+    return `gr ${figurePad(shown.toFixed(1), 5)} dB`;
+  },
+
+  /** One grain's amplitude across its own length, the window the synth is applying. */
+  grain(ctx, w, h, f, c) {
+    const pts = f.points.map((pt) => [pt.x * w, figureLevelY(pt.y, h)]);
+    figureFill(ctx, pts, c.accent, figureLevelY(0, h));
+    figureStroke(ctx, pts, c.accent);
+    return ''; // the grain's length is a knob beside it
+  },
+};
+
+/**
+ * A span that may run off either end of a 0..1 axis, as the one or two pieces that are on it -
+ * which is what a read position wrapping round the end of a file looks like drawn.
+ */
+function wrappedSpans(from, to) {
+  if (to - from >= 1) return [[0, 1]];
+  const start = ((from % 1) + 1) % 1;
+  const end = start + (to - from);
+  return end <= 1 ? [[start, end]] : [[start, 1], [0, end - 1]];
+}
+
+/**
+ * Draws one device's panel and wires every control to the track and slot it belongs to.
+ *
+ * `panel` is the model the host built from the descriptor - see web-engine's panel.mjs, which
+ * decides the sections and the widget kinds and is unit-tested without a DOM.
+ */
+function showDevicePanel(trackLabel, slot, panel) {
+  devicePanelAt = { trackLabel, slot, deviceId: panel.id };
+  devicePanelRelayout = new Set(panel.relayoutOn ?? []);
+  deviceTitleEl.textContent = panel.title;
+  deviceTargetEl.textContent = `${trackLabel} · slot ${slot}`;
+  // What the device is, and whose DSP it is, on the heading's ctrl+hover: the credit is part
+  // of what a ported device has to say about itself, and this is where it says it.
+  deviceTitleEl.title = panel.description ?? '';
+  // Whose DSP it is, ON the window and not only on a tooltip. A ported module is somebody's
+  // work and its license asks for the credit; a tooltip is not a credit anybody reads.
+  deviceCreditEl.textContent = panel.credit ? panel.credit.vendor : '';
+  deviceCreditEl.title = panel.credit
+    ? `${panel.title} is ${panel.credit.vendor}'s DSP, ${panel.credit.license}${panel.credit.source ? ` - ${panel.credit.source}` : ''}.`
+    : '';
+  deviceSectionsEl.innerHTML = '';
+  // The figures are rebuilt with the panel, so the register of what is on screen is emptied here
+  // rather than being left holding entries whose canvases have been thrown away.
+  deviceFigureEls.clear();
+  deviceLiveEls.clear();
+  deviceWidgetEls.clear();
+  // As wide as the device asks: two oscillators side by side want more than a rack of knobs.
+  devicePanelEl.style.width = `${panel.width ?? 560}px`;
+
+  const drawFigures = (into, figures) => {
+    for (const figure of figures ?? []) into.appendChild(deviceFigure(trackLabel, slot, figure));
+  };
+  // A figure belonging to no section - a device with one picture and no groups - goes above the lot.
+  drawFigures(deviceSectionsEl, panel.figures);
+
+  // The sections in the rows the device laid out, side by side within a row.
+  for (const row of panel.rows ?? panel.sections.map((_, i) => [i])) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'device-row';
+    for (const index of row) {
+      const section = panel.sections[index];
+      if (!section || (!section.widgets.length && !section.figures?.length)) continue;
+      const sectionEl = document.createElement('div');
+      sectionEl.className = 'device-section';
+      if (section.title) {
+        const head = document.createElement('div');
+        head.className = 'device-section-head';
+        head.textContent = section.title;
+        sectionEl.appendChild(head);
+      }
+      // The picture first, then whatever knobs it did not replace: an envelope's curve stands in
+      // for its four knobs, while a filter's response curve joins its six.
+      drawFigures(sectionEl, section.figures);
+      if (section.widgets.length) {
+        const widgets = document.createElement('div');
+        widgets.className = 'device-widgets';
+        for (const widget of section.widgets) widgets.appendChild(deviceWidget(trackLabel, slot, widget));
+        sectionEl.appendChild(widgets);
+      }
+      rowEl.appendChild(sectionEl);
+    }
+    if (rowEl.childElementCount) deviceSectionsEl.appendChild(rowEl);
+  }
+
+  devicePanelEl.classList.remove('hidden');
+  bringPanelToFront(devicePanelEl);
+  startDeviceLive(trackLabel, slot, panel);
+}
+
+/**
+ * Which spelling of a parameter to write.
+ *
+ * A device parameter answers to two names - its id and its display name - and `.param()` resolves
+ * either. So a call already in the buffer keeps whatever it was written with: writing "Filter
+ * Cutoff" over a line that says "filter.cutoff" would leave two calls for one control, both live,
+ * with the lower one quietly winning.
+ */
+function paramSpellingInCode(trackLabel, { name, id }) {
+  if (!labelsMod) return name;
+  const code = cm.getValue();
+  const block = blockForTrack(code, trackLabel);
+  if (!block) return name;
+  return [name, id].find((spelling) => findParamCall(code, block, spelling)) ?? name;
+}
+
+/** One control: its name, the widget itself, and what it currently reads. */
+function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
+  const cell = document.createElement('div');
+  cell.className = bare ? 'device-widget device-widget-bare' : 'device-widget';
+  if (widget.modulatedBy) cell.classList.add('driven');
+
+  // A control drawn inside a figure's heading has the figure's own title beside it already, so
+  // it carries no label of its own.
+  if (!bare) {
+    const name = document.createElement('div');
+    name.className = 'device-widget-name';
+    name.textContent = widget.name;
+    cell.appendChild(name);
+  }
+  // The whole cell answers to ctrl+hover, and what it says is what the control DOES. It used to
+  // add "takes a signal" to every one of them, which is true of nearly every control here and
+  // so told nobody anything - it crowded out the only sentence worth reading. What is already
+  // driving a control is worth saying, because that one is news.
+  cell.title = [
+    widget.description,
+    widget.modulatedBy ? `Driven by ${widget.modulatedBy}.` : null,
+  ].filter(Boolean).join(' ');
+
+  // Under the control, except on a number box: that prints its own value, and a second copy of
+  // it below was two numbers for one control, one of them stale.
+  const isNumber = widget.widget === 'number' && !widget.modulatedBy;
+  // A control that takes a file prints the file's name on the button that opens the picker, so
+  // like a number box it is its own readout.
+  const isFile = widget.takes === 'sample' && !widget.modulatedBy;
+  // One that takes a drawn curve is a menu of the shapes it ships with, plus a way to draw one.
+  const isShape = widget.takes === 'shape' && !widget.modulatedBy;
+  const readout = document.createElement('div');
+  readout.className = 'device-widget-value';
+  readout.textContent = widget.modulatedBy ?? widget.text;
+  /** Where this control's value is printed, whichever element that is. */
+  let showValue = (text) => { readout.textContent = text; };
+
+  // One request at a time, the latest value winning - the same rule every streamed control in
+  // here follows. A drag fires far faster than a round trip, and what matters is that the last
+  // position of the gesture is the one that lands.
+  //
+  // `commit` is the end of a gesture, and it is the host that decides what a finished gesture
+  // means: a `.param()` call while conf is on for this track, and otherwise a capture of the
+  // whole device into a preset, exactly as touching a plugin's own window does on the desktop.
+  // Nothing is written from here (see the auto-pin section).
+  let inFlight = false;
+  let queued = null;
+  const send = (body, commit) => {
+    if (inFlight) { queued = [body, commit]; return; }
+    inFlight = true;
+    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, commit, ...body })
+      .then((res) => {
+        showValue(res.text);
+        // A knob and a figure can be two views of one parameter - the filter's cutoff is both -
+        // so turning the knob redraws the picture.
+        applyDeviceFigures(res.figures);
+        // Some controls switch other controls in and out - a sync setting decides whether there
+        // is a rate knob at all. That changes what the window HAS, so it is rebuilt rather than
+        // repainted (see the panel's relayoutOn).
+        if (commit && devicePanelRelayout.has(widget.id)) refreshDevicePanel();
+      })
+      .catch((e) => logLine(e.message ?? String(e), true))
+      .finally(() => {
+        inFlight = false;
+        if (queued) { const [b, c] = queued; queued = null; send(b, c); }
+      });
+  };
+
+  // What moves this control when something else changes it. Filled in per widget kind below.
+  let setPosition = () => {};
+
+  if (widget.modulatedBy) {
+    const knob = deviceKnob(widget, { register: (fn) => { setPosition = fn; } });
+    cell.appendChild(knob);
+    // Followed from the processor's reports while the window is open: the knob turns and the
+    // readout prints where the modulator has it, rather than sitting where it was set.
+    deviceLiveEls.set(widget.id, (live) => {
+      setPosition(live.position);
+      readout.textContent = `${widget.modulatedBy} · ${live.text}`;
+    });
+  } else if (isShape) {
+    // The shapes it ships with, and the editor. Drawing one fills a spare slot on the same list,
+    // so a curve somebody made is picked back off the menu like any other - and is written into
+    // the code as its breakpoints, which is what `.param("Window", "0,0 0.1,1 1,0")` takes.
+    const select = document.createElement('select');
+    select.className = 'small';
+    const fill = (options, current) => {
+      select.innerHTML = '';
+      options.forEach((label, i) => {
+        if (label === undefined) return;
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        // A drawn one is a wall of numbers; on a menu it is "drawn" and the numbers are the hover.
+        opt.textContent = i < (widget.fixed ?? options.length) ? label : `drawn ${i - (widget.fixed ?? 0) + 1}`;
+        opt.title = label;
+        if (i === Math.round(current)) opt.selected = true;
+        select.appendChild(opt);
+      });
+    };
+    fill(widget.options, widget.value);
+    select.onchange = () => send({ value: Number(select.value) }, true);
+    cell.appendChild(select);
+
+    const draw = document.createElement('button');
+    draw.className = 'small device-draw';
+    draw.textContent = 'draw…';
+    draw.title = `Draw ${widget.name.toLowerCase()} by hand, in the same editor an lfo() shape uses.`;
+    draw.onclick = () => openShapeSink({
+      title: `${trackLabel} · ${widget.name}`,
+      // Opens on what it is playing: the drawn breakpoints where there are some, and otherwise a
+      // plain ramp to start from rather than an empty box.
+      points: figureShapeData(widget.id) ?? '0,0 0.5,1 1,0',
+      onChange: (data) => {
+        api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: data, commit: true })
+          .then((res) => {
+            if (res.options) { widget.options = res.options; fill(res.options, res.value); }
+            widget.value = res.value;
+            showValue(res.text);
+            applyDeviceFigures(res.figures);
+          })
+          .catch((e) => logLine(e.message ?? String(e), true));
+      },
+    });
+    cell.appendChild(draw);
+    setPosition = (_position, value) => { if (Number.isFinite(value)) { widget.value = value; select.value = String(Math.round(value)); } };
+  } else if (isFile) {
+    // A control that takes a file shows the file it is on, and opens the picker. No menu beside
+    // it: a wavetable folder is a couple of thousand files in subfolders, which is a browser's
+    // job and not a dropdown's, and two ways to set one control is one too many.
+    const button = document.createElement('button');
+    button.className = 'small device-file';
+    // A loaded slot is named by the reference it was loaded from - "wt:Basic/saw.wav" - and the
+    // button has room for the file, not the path. The whole of it is on the tooltip.
+    const shortName = (ref) => { const tail = ref.slice(ref.indexOf(':') + 1); return tail.slice(tail.lastIndexOf('/') + 1); };
+    const named = () => widget.options?.[Math.round(widget.value)] ?? 'none';
+    const paint = (ref) => {
+      button.textContent = shortName(ref);
+      button.title = `${widget.name}: ${ref}. Click to pick another.`;
+    };
+    paint(named());
+    button.onclick = () => openFilePicker({
+      kind: widget.sampleAs === 'wavetable' ? 'wavetable' : 'audio',
+      pack: widget.pack ?? 'files',
+      // The device's own tables, which are not files and are written by their label. Offered
+      // only where there is more than one: a lone "none" is not a list to browse.
+      builtIn: (widget.fixed ?? 0) > 1 ? widget.options.slice(0, widget.fixed) : [],
+      target: `${trackLabel} \u00b7 ${widget.name}`,
+      current: named(),
+      onPick: (ref) => {
+        api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: ref, commit: true })
+          .then((res) => {
+            if (res.options) widget.options = res.options;
+            widget.value = res.value;
+            paint(res.text);
+            applyDeviceFigures(res.figures);
+          })
+          .catch((e) => logLine(e.message ?? String(e), true));
+      },
+    });
+    showValue = (text) => paint(text);
+    setPosition = (_position, value) => { if (Number.isFinite(value)) widget.value = value; };
+    cell.appendChild(button);
+  } else if (widget.widget === 'enum') {
+    const select = document.createElement('select');
+    select.className = 'small';
+    const fill = (options, current) => {
+      select.innerHTML = '';
+      options.forEach((label, i) => {
+        if (label === undefined) return;
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = label;
+        if (i === Math.round(current)) opt.selected = true;
+        select.appendChild(opt);
+      });
+    };
+    fill(widget.options, widget.value);
+    select.onchange = () => send({ value: Number(select.value) }, true);
+    setPosition = (_position, value) => { if (Number.isFinite(value)) select.value = String(Math.round(value)); };
+    cell.appendChild(select);
+  } else if (isNumber) {
+    const box = deviceNumber(widget, {
+      onDrag: (value, paint) => { paint(); send({ value }, false); },
+      onCommit: (value, paint) => { paint(); send({ value }, true); },
+      register: (fn) => { setPosition = (_position, value, text) => fn(value, text); },
+    });
+    // The box prints its own value, so the answer lands there rather than on a second line.
+    showValue = (text) => { if (!box.querySelector('input')) box.textContent = text; };
+    cell.appendChild(box);
+  } else if (widget.widget === 'toggle') {
+    const button = document.createElement('button');
+    button.className = 'small device-toggle';
+    let on = widget.value >= 0.5;
+    const paint = () => { button.textContent = on ? 'on' : 'off'; button.classList.toggle('on', on); };
+    paint();
+    button.onclick = () => { on = !on; paint(); send({ value: on ? 1 : 0 }, true); };
+    setPosition = (_position, value) => { if (Number.isFinite(value)) { on = value >= 0.5; paint(); } };
+    cell.appendChild(button);
+  } else {
+    cell.appendChild(deviceKnob(widget, {
+      onDrag: (position) => send({ position }, false),
+      onCommit: (position) => send({ position }, true),
+      register: (fn) => { setPosition = fn; },
+    }));
+  }
+
+  deviceWidgetEls.set(widget.id, (res) => {
+    setPosition(res.position, res.value, res.text);
+    showValue(res.text);
+  });
+
+  if (!isNumber && !isFile) cell.appendChild(readout);
+  return cell;
+}
+
+/**
+ * Redraws the open panel from the engine, after something else may have changed what is in the
+ * slot. An evaluation is the usual something else: it can load a different device there, or set
+ * the very parameter the panel is showing.
+ */
+function refreshDevicePanel() {
+  if (!devicePanelAt) return;
+  const { trackLabel, slot } = devicePanelAt;
+  api('POST', '/api/showEditor', { trackId: trackLabel, slot })
+    .then((res) => { if (res?.panel) showDevicePanel(trackLabel, slot, res.panel); })
+    // The track may have been renamed or deleted by the edit that triggered this - that is not
+    // an error worth a console line, it just means there is nothing to show any more.
+    .catch(() => hideDevicePanel());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The file picker.
+//
+// One window for every control that takes a file: an oscillator's wavetable, a granulator's
+// sample, a convolver's impulse response. It is the ONLY way in - a control that takes a file
+// shows the name of the file it is on and opens this, rather than carrying a menu as well, which
+// for a wavetable folder was two thousand lines of dropdown.
+//
+// Three columns: the folders, the files in the one selected, and a picture of the file the
+// cursor is on. The picture is drawn from the same functions the engine reads the file with (see
+// the host's wavetablePreview and samplePreview), so what is drawn is what would sound - a
+// wavetable as the stack of frames it will be cut into, a sample as its waveform.
+//
+// Nothing is loaded into the device until a file is chosen, and a file is chosen the way a file
+// is chosen anywhere: double-click it, or press enter with it selected.
+// ---------------------------------------------------------------------------------------------
+
+const filePickPanelEl = document.getElementById('filePickPanel');
+const filePickKindEl = document.getElementById('filePickKind');
+const filePickTargetEl = document.getElementById('filePickTarget');
+const filePickFoldersEl = document.getElementById('filePickFolders');
+const filePickFilesEl = document.getElementById('filePickFiles');
+const filePickSearchEl = document.getElementById('filePickSearch');
+const filePickCanvas = document.getElementById('filePickCanvas');
+const filePickNoteEl = document.getElementById('filePickNote');
+
+/** What the open picker is pointed at, and what it has to show. */
+let filePicker = null;
+
+function hideFilePicker() {
+  filePickPanelEl.classList.add('hidden');
+  filePicker = null;
+}
+
+document.getElementById('filePickClose').onclick = hideFilePicker;
+
+/** The name a built-in table is written with in the code - not a file, so it carries no pack. */
+const BUILT_IN_GROUP = 'built in';
+
+/**
+ * Every file the picker offers, as `{ ref, group, name }`.
+ *
+ * `ref` is the string a `.param()` would name - "wt:Basic/saw.wav" for a file, or a plain label
+ * for one of the device's own tables. `group` is the folder column: a pack's subfolder for a
+ * wavetable library, the pack itself for a sample, since that is the division each one is
+ * organized by.
+ */
+async function filePickEntries({ kind, pack, builtIn }) {
+  const out = (builtIn ?? []).map((name) => ({ ref: name, group: BUILT_IN_GROUP, name }));
+  if (kind === 'wavetable') {
+    const { files } = await api('GET', `/api/files?pack=${encodeURIComponent(pack)}`);
+    for (const file of files) {
+      const cut = file.lastIndexOf('/');
+      out.push({ ref: `${pack}:${file}`, group: cut < 0 ? pack : file.slice(0, cut), name: file.slice(cut + 1) });
+    }
+    return out;
+  }
+  // A sample: every pack this build knows, the sourced library and what was added here alike,
+  // which is the same list `sp()` reads (see the sounds tab).
+  const { packs } = await api('GET', '/api/samples');
+  for (const p of packs ?? []) {
+    for (const file of p.files ?? []) {
+      const cut = file.lastIndexOf('/');
+      out.push({ ref: `${p.name}:${file}`, group: cut < 0 ? p.name : `${p.name}/${file.slice(0, cut)}`, name: file.slice(cut + 1) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Opens the picker for one control. `onPick` is handed the reference somebody chose - the same
+ * string a `.param()` would name - and does whatever loading it into that control means.
+ */
+async function openFilePicker({ kind, pack, builtIn, target, current, onPick }) {
+  let entries;
+  try {
+    entries = await filePickEntries({ kind, pack, builtIn });
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    return;
+  }
+  const selected = entries.find((e) => e.ref === current) ?? null;
+  filePicker = { kind, entries, onPick, folder: selected?.group ?? null, selected: selected?.ref ?? null, filter: '', preview: null, at: 0 };
+  filePickKindEl.textContent = kind === 'wavetable' ? 'wavetables' : 'samples';
+  filePickTargetEl.textContent = target;
+  filePickSearchEl.value = '';
+  filePickNoteEl.textContent = entries.length
+    ? 'double-click a file, or press enter'
+    : kind === 'wavetable' ? 'nothing read in yet - settings has the folder to choose' : 'no samples here yet';
+  clearFilePickPreview();
+  drawFilePickFolders();
+  filePickPanelEl.classList.remove('hidden');
+  bringPanelToFront(filePickPanelEl);
+  filePickSearchEl.focus();
+  if (filePicker.selected) selectFilePick(filePicker.selected);
+}
+
+/** The entries the filter leaves, which is everything when there is no filter. */
+function filePickMatching() {
+  const { entries, filter } = filePicker;
+  if (!filter) return entries;
+  const want = filter.toLowerCase();
+  return entries.filter((e) => `${e.group}/${e.name}`.toLowerCase().includes(want));
+}
+
+function drawFilePickFolders() {
+  const matching = filePickMatching();
+  const counts = new Map();
+  for (const e of matching) counts.set(e.group, (counts.get(e.group) ?? 0) + 1);
+  // The device's own tables first, then the folders in the order a folder listing would have
+  // them - a library is organized by its paths, so sorting them IS the tree.
+  const folders = [...counts.keys()].sort((a, b) => (
+    (a === BUILT_IN_GROUP ? -1 : 0) - (b === BUILT_IN_GROUP ? -1 : 0) || a.localeCompare(b)
+  ));
+  // A filter that matches across folders opens on the first one that still has anything in it.
+  if (!folders.includes(filePicker.folder)) filePicker.folder = folders[0] ?? null;
+
+  filePickFoldersEl.innerHTML = '';
+  for (const folder of folders) {
+    const row = document.createElement('div');
+    // Indented by depth, so a library of nested folders reads as the tree it is on disk.
+    const depth = folder === BUILT_IN_GROUP ? 0 : folder.split('/').length - 1;
+    const leaf = folder === BUILT_IN_GROUP ? folder : folder.slice(folder.lastIndexOf('/') + 1);
+    row.textContent = `${'  '.repeat(depth)}${leaf}`;
+    const count = document.createElement('span');
+    count.className = 'file-pick-count';
+    count.textContent = counts.get(folder);
+    row.appendChild(count);
+    row.title = folder;
+    row.dataset.folder = folder;
+    if (folder === filePicker.folder) row.classList.add('on');
+    row.onclick = () => { filePicker.folder = folder; drawFilePickFolders(); };
+    filePickFoldersEl.appendChild(row);
+  }
+  drawFilePickFiles();
+}
+
+function drawFilePickFiles() {
+  const { folder } = filePicker;
+  const here = filePickMatching().filter((e) => e.group === folder);
+  filePickFilesEl.innerHTML = '';
+  for (const entry of here) {
+    const row = document.createElement('div');
+    row.textContent = entry.name;
+    row.title = entry.ref;
+    if (entry.ref === filePicker.selected) row.classList.add('on');
+    row.onclick = () => selectFilePick(entry.ref);
+    row.ondblclick = () => { selectFilePick(entry.ref); takeFilePick(); };
+    filePickFilesEl.appendChild(row);
+  }
+}
+
+/** Moves the selection within the folder on screen - what the arrow keys do. */
+function stepFilePick(by) {
+  const rows = [...filePickFilesEl.children];
+  if (!rows.length) return;
+  const at = rows.findIndex((r) => r.title === filePicker.selected);
+  const next = rows[Math.min(rows.length - 1, Math.max(0, (at < 0 ? -1 : at) + by))];
+  selectFilePick(next.title);
+  next.scrollIntoView({ block: 'nearest' });
+}
+
+/** Shows one file: the table or the waveform it would become, read from its own bytes. */
+function selectFilePick(ref) {
+  filePicker.selected = ref;
+  for (const row of filePickFilesEl.children) row.classList.toggle('on', row.title === ref);
+  const route = filePicker.kind === 'wavetable' ? '/api/wavetablePreview' : '/api/samplePreview';
+  filePickNoteEl.textContent = 'reading…';
+  api('POST', route, { ref })
+    .then((preview) => {
+      // Another file may have been clicked while this one was being read.
+      if (filePicker?.selected !== ref) return;
+      if (preview.stack) {
+        // Kept, so a drag across the picture can walk the table the way the position knob does.
+        filePicker.preview = preview;
+        filePicker.at = 0;
+        drawTableStack(preview.stack, 0);
+        filePickNoteEl.textContent = previewNote();
+      } else {
+        filePicker.preview = null;
+        drawSampleWave(preview.peaks ?? []);
+        filePickNoteEl.textContent = `${preview.seconds.toFixed(2)} s · ${preview.channels} ch`;
+      }
+    })
+    .catch((e) => {
+      if (filePicker?.selected !== ref) return;
+      clearFilePickPreview();
+      filePickNoteEl.textContent = e.message ?? String(e);
+    });
+}
+
+/** What a table preview says under it: which frame is in front, of how many, at what length. */
+function previewNote() {
+  const { preview, at } = filePicker;
+  const frame = Math.min(preview.frameCount, Math.round(at * (preview.frameCount - 1)) + 1);
+  return `${frame} / ${preview.frameCount} · ${preview.frameLength} long`;
+}
+
+/** The preview canvas, sized to its box and cleared, with the drawing context ready. */
+function filePickCanvasCtx() {
+  songSizeCanvas(filePickCanvas);
+  const ctx = filePickCanvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = filePickCanvas.clientWidth;
+  const h = filePickCanvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  return { ctx, w, h, c: figureColors() };
+}
+
+function clearFilePickPreview() {
+  filePickCanvasCtx();
+}
+
+/**
+ * A table as a stack: every frame drawn in turn, each one a little higher and further right, the
+ * near ones brighter. One cycle overlaid on another says "a waveform"; this says "a table",
+ * which is the question somebody looking through a folder of them is asking.
+ */
+function drawTableStack(stack, at = 0) {
+  const { ctx, w, h, c } = filePickCanvasCtx();
+  if (!stack.length) return;
+  // Which frame is drawn in front. A folder is browsed to find a table with a MOVE in it, and a
+  // table only ever shows that when you walk through it, so the picture takes the same drag the
+  // position knob does.
+  const front = Math.round(Math.min(1, Math.max(0, at)) * (stack.length - 1));
+
+  // The room the stack leans into: a third of the height and a fifth of the width, so a table of
+  // one frame still uses the box and a table of fifty is still legible at the back.
+  const leanY = h * 0.34;
+  const leanX = w * 0.18;
+  const rowH = (h - leanY) * 0.5 - 4;
+  // Where the FRONT row's centerline goes. Measured rather than pinned to the bottom edge: the
+  // stack is as tall as the lean plus a row either side of it, and anchoring the near row at the
+  // bottom pushed half of the front frame off the canvas.
+  const base = 4 + leanY + rowH;
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const t = stack.length === 1 ? 1 : i / (stack.length - 1);
+    const x0 = leanX * (1 - t);
+    const y0 = base - leanY * (1 - t);
+    const width = w - leanX;
+    const pts = stack[i].map((v, j) => [x0 + (j / (stack[i].length - 1)) * width, y0 - v * rowH]);
+    const chosen = i === front;
+    ctx.globalAlpha = chosen ? 1 : 0.12 + 0.3 * (1 - t);
+    figureStroke(ctx, pts, chosen ? c.accent : c.dim, chosen ? 1.6 : 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// A drag across a table preview walks it, frame by frame, exactly as the position knob does.
+filePickCanvas.addEventListener('pointerdown', (e) => {
+  if (!filePicker?.preview) return;
+  e.preventDefault();
+  filePickCanvas.setPointerCapture(e.pointerId);
+  const walk = (ev) => {
+    const rect = filePickCanvas.getBoundingClientRect();
+    filePicker.at = Math.min(1, Math.max(0, (ev.clientX - rect.left) / Math.max(1, rect.width)));
+    drawTableStack(filePicker.preview.stack, filePicker.at);
+    filePickNoteEl.textContent = previewNote();
+  };
+  const up = () => {
+    filePickCanvas.removeEventListener('pointermove', walk);
+    filePickCanvas.removeEventListener('pointerup', up);
+    filePickCanvas.removeEventListener('pointercancel', up);
+  };
+  filePickCanvas.addEventListener('pointermove', walk);
+  filePickCanvas.addEventListener('pointerup', up);
+  filePickCanvas.addEventListener('pointercancel', up);
+  walk(e);
+});
+
+/** A sample as its outline: the loudest sample either way per column, filled between. */
+function drawSampleWave(peaks) {
+  const { ctx, w, h, c } = filePickCanvasCtx();
+  if (!peaks.length) return;
+  const mid = h / 2;
+  const half = h / 2 - 4;
+  ctx.strokeStyle = c.grid;
+  ctx.beginPath();
+  ctx.moveTo(0, mid);
+  ctx.lineTo(w, mid);
+  ctx.stroke();
+  ctx.fillStyle = c.accent;
+  for (let i = 0; i < peaks.length; i++) {
+    const x = (i / peaks.length) * w;
+    const [lo, hi] = peaks[i];
+    ctx.fillRect(x, mid - hi * half, Math.max(1, w / peaks.length), Math.max(1, (hi - lo) * half));
+  }
+}
+
+/** Hands the chosen file back to whatever opened the picker. */
+function takeFilePick() {
+  if (!filePicker?.selected) return;
+  const { selected, onPick } = filePicker;
+  hideFilePicker();
+  onPick(selected);
+}
+
+filePickSearchEl.addEventListener('input', () => {
+  if (!filePicker) return;
+  filePicker.filter = filePickSearchEl.value.trim();
+  drawFilePickFolders();
+});
+filePickSearchEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); takeFilePick(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); stepFilePick(1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); stepFilePick(-1); }
+  e.stopPropagation();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && filePicker) hideFilePicker();
+});
+window.addEventListener('resize', () => {
+  if (filePicker?.selected) selectFilePick(filePicker.selected);
+});
 
 // ---------------------------------------------------------------------------------------------
 // Interactive LFO shape editor - double-click the `lfo` name in any `lfo(...)` call (just the
@@ -3032,6 +5057,7 @@ function lfoCallParts() {
 
 /** The call the panel writes back to: the one it was opened through, else the inline one it IS. */
 function lfoCallee() {
+  if (lfoState?.sink) return lfoState.callee ?? 'lfo';
   return lfoCallParts()?.callee ?? lfoState?.callee ?? 'lfo';
 }
 
@@ -3148,10 +5174,46 @@ function lfoSetFollowLock(locked) {
   lfoSyncHead();
 }
 
-/** Whichever of the two the current state should write to. */
+/** Whichever of the three the current state should write to. */
 function writeLfoRateMode() {
+  // A SINK is a shape being drawn for something that is not a call in the buffer - a device
+  // control that takes a curve (see openShapeSink). There is nothing to rewrite and nothing to
+  // re-evaluate; the points go straight to whoever asked for them.
+  if (lfoState?.sink) { lfoState.sink(shapeMod.serializeShapePoints(lfoState.points)); return; }
   if (lfoState?.idLiteral) writeLfoOptions();
   else writeLfoCall();
+}
+
+/**
+ * Opens the shape editor on a curve that lives in a DEVICE rather than in the buffer - a
+ * granulator's grain window, and anything else that grows a `takes: 'shape'` control.
+ *
+ * The same editor, because it is the same question: the breakpoints, the curvature between
+ * them, the presets and the dice. What it does not have is a call to rewrite, so `onChange` is
+ * handed the serialized points each time they move and decides what that means.
+ */
+function openShapeSink({ title, points, onChange }) {
+  if (lfoState?.marker) lfoState.marker.clear();
+  if (lfoState?.callSource) lfoState.callSource.clear();
+  lfoState = {
+    marker: null,
+    callSource: null,
+    callStart: -1,
+    shapeId: null,
+    idLiteral: null,
+    callee: 'lfo',
+    sink: onChange,
+    points: shapeMod.parseShapePoints(points),
+    rate: 1,
+    mode: 'free',
+  };
+  lfoTitle.textContent = title;
+  lfoPreset.value = '';
+  lfoSyncHead();
+  if (!lfoRaf) lfoRaf = requestAnimationFrame(lfoPlayheadLoop);
+  lfoPanel.classList.remove('hidden');
+  bringPanelToFront(lfoPanel);
+  drawLfoShape();
 }
 
 function openLfoEditor(call) {
@@ -3299,7 +5361,7 @@ function lfoScheduleEval() {
 // `rate:`/`mode:`/the shape string in the code updates the panel instead of being silently reverted
 // by the next drag.
 function syncLfoFromCode() {
-  if (!lfoState || lfoSuppressCursor || !shapeMod) return;
+  if (!lfoState || lfoState.sink || lfoSuppressCursor || !shapeMod) return;
   const range = lfoState.marker.find();
   // The call the panel is anchored to was deleted (or typed into something that is no longer an
   // lfo call) - there is nothing left to edit, so the panel goes with it. This is the only thing
@@ -3451,7 +5513,7 @@ function canvasToLfo(px, py) {
 // through (or the inline lfo() itself). Null for a definition opened straight from the picker -
 // a _shape(...) on its own belongs to no track, and several calls may be playing it at once.
 function lfoGateRegion() {
-  const range = (lfoState?.callSource ?? lfoState?.marker)?.find();
+  const range = (lfoState?.callSource ?? lfoState?.marker)?.find?.();
   if (!range) return null;
   const from = cm.indexFromPos(range.from);
   const to = cm.indexFromPos(range.to);
@@ -5995,6 +8057,17 @@ const lfoHead = makeNamePicker({
 });
 
 function lfoSyncHead() {
+  // A shape being drawn for a device control has no call behind it: no name, no rate, no mode,
+  // nothing to send anywhere (see openShapeSink). The head is the title and the dice.
+  if (lfoState?.sink) {
+    lfoRateWrap.classList.add('hidden');
+    lfoModeWrap.classList.add('hidden');
+    lfoUseBtn.classList.add('hidden');
+    lfoLockBtn.classList.add('hidden');
+    lfoPickWrap.classList.add('hidden');
+    return;
+  }
+  lfoPickWrap.classList.remove('hidden');
   const named = !!lfoState?.shapeId;
   // rate and mode belong to the lfo() CALL. An inline one is the call; a definition has them only
   // while the panel still knows which call it was opened through.
@@ -14063,6 +16136,9 @@ async function evaluate(start, { byHand = false } = {}) {
     if (arDeck === 'a') arSetClock(result.arrange ?? null);
     songEndSetClock('a', result.arrange ?? null);
     renderTracks(result);
+    // An evaluation can put a different device in the slot the panel is showing, or set the very
+    // parameter it is showing, so the open panel is redrawn from what the engine now holds.
+    refreshDevicePanel();
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
     refoldAll();
     // A pack's file list is the buffer's to change (a `_pack()` line), and an eval is when it does.
@@ -14617,6 +16693,11 @@ function renderPlugins(plugins) {
   }
 }
 
+// There are no plugins to scan for in the browser build: the devices are the catalog, fixed when
+// the page was built. The section says so in its own words (see renderPlugins) and the button
+// that would rescan them is not drawn at all.
+if (window.__poptartHostReady) document.getElementById('pluginsSection')?.classList.add('no-scan');
+
 async function doScan() {
   logLine('scanning for plugins…');
   // The scan's own progress arrives through /api/status, and nothing is polling it until a
@@ -14778,8 +16859,11 @@ function stopPreview() {
   }
 }
 
-function previewSample(pack, i, row) {
-  return previewSampleUrl(`/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`, row);
+async function previewSample(pack, i, row) {
+  let url = `/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`;
+  // The browser build has no server to stream from: the host answers with where the file is.
+  if (window.__poptartHostReady) ({ url } = await api('GET', url));
+  return previewSampleUrl(url, row);
 }
 
 async function previewSampleUrl(url, row) {
@@ -15380,6 +17464,150 @@ const samplesDirInput = document.getElementById('samplesDirInput');
 const samplesDirSave = document.getElementById('samplesDirSave');
 const samplesDirReset = document.getElementById('samplesDirReset');
 const samplesDirNote = document.getElementById('samplesDirNote');
+
+// ---------------------------------------------------------------------------------------------
+// The wavetable folder (browser build).
+//
+// A wavetable is a file, and the Wavetable synth's table control takes one by name - but naming
+// a file one at a time is not how anybody keeps wavetables. So a folder is read in once: its
+// audio files are kept in this browser under the `wt` pack, and from then on they are what the
+// table control lists and what `.param("Osc 1 Table", "wt:mytable.wav")` resolves.
+//
+// Read in rather than pointed at, because a page cannot go back to a folder on its own later.
+// The bytes live in the same store the patterns do, so they survive a reload; "forget" empties it.
+// ---------------------------------------------------------------------------------------------
+
+const wavetableSection = document.getElementById('wavetableSection');
+const wavetableFolderPick = document.getElementById('wavetableFolderPick');
+const wavetableFolderClear = document.getElementById('wavetableFolderClear');
+const wavetableFolderInput = document.getElementById('wavetableFolderInput');
+const wavetableFolderNote = document.getElementById('wavetableFolderNote');
+
+/** What the table control can be pointed at, so a reopened window lists what was read in. */
+let wavetableFiles = [];
+
+/** Files worth reading as wavetables. Anything else in the folder is passed over in silence. */
+const WAVETABLE_EXTS = /\.(wav|aif|aiff)$/i;
+
+/** A byte count somebody can read at a glance. */
+function wavetableSize(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} kB`;
+}
+
+async function refreshWavetableFolder() {
+  if (!window.__poptartHostReady) return;
+  try {
+    const { files, bytes } = await api('GET', '/api/files?pack=wt');
+    wavetableFiles = files;
+    if (!files.length) {
+      wavetableFolderNote.textContent = '';
+      wavetableFolderClear.disabled = true;
+      return;
+    }
+    // What it costs, and what the browser is willing to give this site - the second half is the
+    // part worth knowing, since a folder of a couple of thousand tables is a real amount of
+    // storage and the browser is the one that decides when there is no more.
+    let quota = '';
+    try {
+      const estimate = await navigator.storage?.estimate?.();
+      if (estimate?.quota) {
+        quota = ` - this site is using ${wavetableSize(estimate.usage ?? 0)} of the ${wavetableSize(estimate.quota)} the browser allows it`;
+      }
+    } catch {
+      // A browser that will not say. The count and the size are the useful half anyway.
+    }
+    wavetableFolderNote.textContent =
+      `${files.length} wavetables, ${wavetableSize(bytes)} copied into this browser${quota}`;
+    wavetableFolderClear.disabled = false;
+  } catch {
+    // A build with no file store: the section is hidden anyway.
+  }
+}
+
+/**
+ * Reads a folder in, through the ordinary folder chooser.
+ *
+ * NOT through `showDirectoryPicker`, which would be the other way to do this. That asks the
+ * browser for standing permission over the folder, and the browser asks in its own words - about
+ * viewing and copying files, which reads like a page helping itself to a disk. The permission
+ * would only be worth that if the folder were kept open and read from later, and it is not: the
+ * files are copied in here and the folder is not touched again. So the milder of the two is the
+ * honest one, and it is also the one every browser has.
+ */
+function pickWavetableFolder() {
+  wavetableFolderInput.click();
+}
+
+/** Keeps each file under the `wt` pack, reporting as it goes: a folder can be a few hundred. */
+async function readWavetables(files) {
+  const wanted = [...files].filter((f) => WAVETABLE_EXTS.test(f.name));
+  if (!wanted.length) {
+    wavetableFolderNote.textContent = 'no .wav or .aiff files in that folder';
+    return;
+  }
+  wavetableFolderPick.disabled = true;
+  // Choosing a folder REPLACES what is kept rather than adding to it: a folder is the library,
+  // not an installment of one. Merging instead would leave the files of an older choice behind
+  // for ever, under names nothing points at any more, taking up the same room as the real ones.
+  await api('POST', '/api/files/clear', { pack: 'wt' }).catch(() => {});
+  let kept = 0;
+  let failed = 0;
+  for (const file of wanted) {
+    // Every tenth, so a folder of a couple of thousand is not two thousand layouts.
+    if ((kept + failed) % 10 === 0) wavetableFolderNote.textContent = `reading ${kept + failed + 1} of ${wanted.length}…`;
+    try {
+      // The path INSIDE the chosen folder is the name - "Basic/saw.wav" - so the folders a
+      // library is organized by survive being read in. The chosen folder's own name is dropped:
+      // it is the same for every file and says nothing.
+      const relative = file.webkitRelativePath || file.name;
+      const name = relative.includes('/') ? relative.slice(relative.indexOf('/') + 1) : relative;
+      // Deferred: the pack's index is written and registered once, after the loop. Per file it is
+      // a rewrite of the whole list, which a folder of a couple of thousand turns into minutes of
+      // writing the same names over and over.
+      await api('POST', '/api/files/add', { name, bytes: await file.arrayBuffer(), pack: 'wt', defer: true });
+      kept += 1;
+    } catch (e) {
+      failed += 1;
+      logLine(`wavetables: ${file.name} - ${e.message ?? e}`, 'warn');
+    }
+  }
+  await api('POST', '/api/files/flush', { pack: 'wt' }).catch((e) => logLine(`wavetables: ${e.message ?? e}`, 'warn'));
+  wavetableFolderPick.disabled = false;
+  await refreshWavetableFolder();
+  logLine(`wavetables: kept ${kept}${failed ? `, ${failed} could not be read` : ''}`);
+  if (devicePanelAt) refreshDevicePanel();
+}
+
+if (window.__poptartHostReady) {
+  wavetableSection.classList.remove('hidden');
+  wavetableFolderPick.addEventListener('click', pickWavetableFolder);
+  wavetableFolderInput.addEventListener('change', () => {
+    const files = [...(wavetableFolderInput.files ?? [])];
+    wavetableFolderInput.value = '';
+    readWavetables(files).catch((e) => logLine(e.message ?? String(e), true));
+
+  });
+  // Forgetting a couple of thousand files takes a moment, so it says it is doing it and says
+  // when it is done. A button that goes quiet and then changes something else on the page is a
+  // button you press twice.
+  wavetableFolderClear.addEventListener('click', async () => {
+    const kept = wavetableFiles.length;
+    wavetableFolderClear.disabled = true;
+    wavetableFolderNote.textContent = 'forgetting\u2026';
+    try {
+      await api('POST', '/api/files/clear', { pack: 'wt' });
+      await refreshWavetableFolder();
+      wavetableFolderNote.textContent = `forgot ${kept} wavetable${kept === 1 ? '' : 's'}`;
+      if (devicePanelAt) refreshDevicePanel();
+    } catch (e) {
+      wavetableFolderNote.textContent = e.message ?? String(e);
+      wavetableFolderClear.disabled = false;
+    }
+  });
+  refreshWavetableFolder();
+}
 
 async function refreshSamplesDir() {
   try {

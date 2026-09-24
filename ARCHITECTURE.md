@@ -15,11 +15,16 @@ instruments and effects, with LFOs and per-note envelopes running sample-accurat
 engine. There is no Strudel/Tidal dependency — the pattern language is its own small
 implementation.
 
-## The three-package split
+## The package split
 
-The system is a Node workspace of three packages, each independently usable and testable. The split
+The system is a Node workspace of four packages, each independently usable and testable. The split
 is deliberate: the pattern language knows nothing about audio, and the audio engine knows nothing
 about the language.
+
+There are now **two** engines behind that boundary - `osc-engine` for the desktop and
+`web-engine` for the browser - and the pattern language cannot tell them apart. That was the
+promise the interface was designed to make good on, and it is the reason the browser build is a
+second target in this repository rather than a fork.
 
 ```
 ┌──────────────────┐     evaluates patterns,      ┌──────────────────┐
@@ -114,6 +119,70 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   which is what turns `input("Scarlett", 1)` into an absolute channel. Everything degrades to
   `system_profiler` and a single device if the helper is unavailable.
 
+### `packages/web-engine` — the browser engine adapter
+The second concrete engine: Web Audio in place of SuperCollider, and a catalog of built-in
+devices in place of plugin hosting. Browser-only; the desktop build does not load it.
+
+- `src/descriptor.mjs` — what a device says about itself, and the load-bearing idea of the whole
+  package. A VST describes itself, so the desktop host can ask it what its parameters are called;
+  in the browser there is nobody to ask, so every device ships a descriptor and that one object
+  is what `synth("Wavetable")` resolves, what `.param("Cutoff", 2000)` looks a name up in, what
+  the params panel draws, and what a later SuperCollider mirror of a web device would match.
+  A parameter takes a 0..1 position, exactly as a plugin parameter does, so an `lfo()` or a
+  macro points at any control without a `.range()`; the descriptor's `min`, `max` and `curve`
+  say what the position means (a cutoff sweeps by ratio), and the readouts, the pictures and a
+  saved state are in those real units. A switch takes its option's name, and a control that
+  loads a sample takes the sample's name.
+- `src/registry.mjs` — name to device, keeping every version resolvable for ever. A shipped
+  device's sound is frozen because somebody's song is a recording of how it sounded on the day it
+  was written, so an improvement that changes the sound is a new version beside the old one.
+- `src/panel.mjs` — a device editor as data, generated from the descriptor. There is no plugin
+  GUI to open, so every device gets a usable window without anybody drawing one: it decides the
+  sections, the widget kinds and the units, and the editor only renders what it is handed. It
+  also owns both directions of an edit — a knob position onto the parameter's curve, and the
+  resulting value back out as the `.param()` call text — so a value heard and a value written
+  into the buffer cannot disagree about how the same number is spelled.
+- `src/dsp/` — the synthesis, in plain modules that unit-test in node with no audio context. The
+  wavetable oscillator band-limits against the POST-WARP traversal rate, which is what lets the
+  warp modes exist without aliasing: a warp like sync reads the table sixteen times per cycle,
+  and band-limiting for the note's own frequency would be wrong by that factor.
+- `src/devices/` — one file per device: its descriptor beside its processor. `Wavetable` and
+  `Distort` are poptart's own, `Reverb` is a feedback delay network written here, and the rest
+  are stock Web Audio nodes behind the same descriptor contract.
+- **The ported devices.** Nineteen more are somebody else's C++ compiled to WebAssembly, and they
+  all speak one tiny ABI — set up, hand me a block, here is the output — so `wasm.worklet.js`
+  hosts every one of them and a new port is a wrapper and a descriptor rather than any new
+  plumbing. Audio crosses into a module through its linear memory rather than through calls.
+  The binaries are COMMITTED, under `public/devices`, and so are the descriptors generated
+  beside them: a clone, a test run and a deploy all need the devices, and none of them should
+  need emscripten. Only `build/devices/build-devices.mjs` does, and only when a device is added
+  or an upstream pin moves. Each module is pinned to a commit for the reason the sample packs
+  are: a device whose DSP changed underneath a song is a song that no longer sounds the way it
+  was written. `build/devices/sources.json` records every source, its license as read from the
+  source rather than the repository page, and — for Mutable — which modules cannot be ported at
+  all, because several of them are analog hardware with no DSP to port.
+- `src/engine/` — the track graph (a source, numbered effect slots, a channel strip, bus sends),
+  the modulators, and `WebAudioEngine` itself. Every LFO shape is one implementation: the shape
+  is rendered into an AudioBuffer and looped into the parameter, so a drawn shape and a sine are
+  the same three lines where an oscillator-node approach would need a different graph per shape
+  and would leave the drawn ones with nothing to build from.
+- `src/worklets/` + `build/bundle-worklets.mjs` — thin processors, flattened into single classic
+  scripts. Whether a browser honors an `import` inside a worklet varies by engine and version,
+  and a wrong guess fails at load time in somebody else's browser; one file always works.
+- `build/render-packs.mjs` — the default sample packs, rendered from this package's own DSP. The
+  web build serves its own sounds, which means redistributing audio, and the usual free drum pack
+  grants permission to USE rather than to PUBLISH. Rendering them sidesteps the question: these
+  are sounds poptart made, so poptart can give them away.
+- `src/packs/library.mjs` + `build/fetch-packs.mjs` — the packs that come from somebody else.
+  They are recordings released under a public domain dedication, they are far too large to live
+  in this repository, and they are not ours to re-license — so they are assembled into a
+  repository of their own and served from a CDN, and this package holds the index format and the
+  build that produces them. Every upstream reference is pinned to a commit in
+  `build/packs/upstream.lock.json`, because a pack that changed underneath a song is a song that
+  no longer sounds the way it was written. The index is fetched at run time, so it is validated
+  as untrusted input: a pack may not name a path outside its own folder, and one that fails is
+  dropped with a reason rather than dropping the whole library.
+
 ### `packages/web-app` — the server and editor
 - `server.js` — a plain Node HTTP server (no Electron). Serves the page, exposes plugin scan /
   sample browse / settings / pattern-save endpoints, spawns the engine, and mediates between the
@@ -153,6 +222,53 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   commas) is not JavaScript until the transpile, and the JavaScript mode's indenter derails on
   it. Loaded in the browser and required by its test through CodeMirror's node shim.
 
+#### `public/web/` — the same app with no server behind it
+
+The editor talks to poptart through one function and a table of `"METHOD /path"` handlers. On the
+desktop that function is a fetch and the table is in `server.js`; in the browser build the table
+is in the page and the function calls it. Keeping the shape is what let the editor stay as it is,
+and it is what leaves room for the host to move into a worker or a sandboxed frame later.
+
+- `boot.mjs` — brings up the audio context, the worklets, the store, the packs and the host, and
+  leaves the promise `api()` waits on. Started from a classic script tag the static build injects
+  ahead of the editor, because a module script is deferred and the editor asks for things while
+  it is still being evaluated.
+- `host.mjs` — the route table, in three kinds. Served (the language, the transport, storage, the
+  device catalog); answered empty (MIDI devices, audio devices — there are none, and the
+  editor's code for "none" is already written); and refused by name, with a sentence saying what
+  is missing. A path with no handler is refused rather than answered empty, so a route added to
+  the desktop and forgotten here shows up instead of quietly doing nothing. Every answer is
+  written by reading what the editor pulls out of it and what the desktop server returns, never
+  from the route's name — a test reads the editor's own destructurings back out of `client.js`
+  and checks each key is there, because an answer in the wrong shape is a panel that throws
+  while drawing, a long way from anything that names the route.
+  `/api/showEditor` is where the two builds visibly part: the desktop opens the plugin's own
+  window and says nothing, and this answers with the panel to draw instead, which is what the
+  editor branches on rather than on knowing which build it is.
+- `evaluate.mjs` — the browser's `/api/evaluate`, following the desktop's order of operations,
+  minus the second deck, the plugin capture and the MIDI enable. Holds the state that outlives an
+  evaluation: the schedulers, the engine track ids, the song clock. Also the highlight grid,
+  which is pure pattern-core and therefore the same code on both sides in everything but where it
+  lives.
+- `block-eval.mjs` — the names an evaluated block is given. Not shared with `server.js` yet, so a
+  test reads the lists out of its source and fails if they drift: a builder on one side only is a
+  pattern that runs in one build and throws in the other.
+- `storage.mjs` + `kv.mjs` + `blobs.mjs` + `library-doc.mjs` — `~/.poptart` in IndexedDB, under
+  the same names the files have on disk, so an export is a walk of one producing the other.
+  `kv.mjs` falls back to memory when the browser will not open a store, which happens for real
+  in a private window; the page says so once rather than silently keeping nothing.
+  `library-doc.mjs` is the desktop's coercion of the playlists document, so the same file reads
+  the same in both builds.
+- `samples.mjs` — packs decoded ahead of time and held in memory, because the engine asks for a
+  sample inside a scheduler tick and nothing can be fetched at that moment. A pack that has not
+  loaded answers null, which the engine reports and carries on from.
+
+`build-web.mjs` assembles all of it into one folder: a copy of the editor, the language and the
+engine as source, the worklets and the built-in packs, plus that one injected script tag. No
+bundler and nothing compiled — which is why a broken import would be a blank page rather than a
+build error, and why `web-build.test.mjs` resolves every import and every named asset in the
+built tree.
+
 ## How a pattern becomes sound (data flow)
 
 1. Editor sends code to the server on **eval**.
@@ -171,8 +287,17 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   thread. Cost: an external `sclang`/`scsynth` dependency and a compiled `VSTPlugin` extension
   (VST2/VST3 only — no AudioUnit, though nearly every AU also ships a VST3).
 - **Language decoupled from engine via a tiny plain-object interface.** pattern-core can be
-  developed and unit-tested with a mock engine; the OSC engine is one concrete implementation. New
-  backends are possible without touching the language.
+  developed and unit-tested with a mock engine; the OSC engine is one concrete implementation,
+  and the Web Audio engine is the second. Nothing in the language changed to add it, which is
+  the strongest evidence the boundary was drawn in the right place.
+- **A signal can be patched onto a parameter, not just sampled into one.** A control set from a
+  pattern is polled every 30 ms and ramped between polls, which is right for a filter sweep and
+  wrong for phase modulation - a modulator has to run at the sample rate to be one. So
+  `.param("Osc 1 Phase", audio("mod"))` files a CONNECTION rather than a value, and the engine
+  wires it. `.mul()` and `.add()` on the handle become a gain and an offset and are the only
+  arithmetic it accepts: there is nothing to sample, so anything else would quietly do nothing.
+  In Web Audio this is a real patch cable; the OSC engine does not implement it yet and warns
+  once per track rather than failing.
 - **Real plugin parameter names, no alias layer.** `.param("Filter 1 Freq", …)` addresses the VST
   directly. Optional `mappings/*.json` files add real-world units on top; absent a mapping,
   parameters are normalized `0..1`. Avoids maintaining a translation table per plugin.

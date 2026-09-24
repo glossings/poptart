@@ -1,0 +1,64 @@
+{
+  "id": "pt_kit",
+  "title": "poptart kit",
+  "description": "A starter drum kit, synthesized.",
+  "kind": "drums",
+  "files": [
+    {
+      "file": "kick.wav",
+      "name": "kick",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "snare.wav",
+      "name": "snare",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "rim.wav",
+      "name": "rim",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "clap.wav",
+      "name": "clap",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "hat.wav",
+      "name": "hat",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "hatopen.wav",
+      "name": "hatopen",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "tomlo.wav",
+      "name": "tomlo",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "tomhi.wav",
+      "name": "tomhi",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    }
+  ]
+}

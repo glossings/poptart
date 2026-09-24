@@ -1,0 +1,311 @@
+{
+  "comment": [
+    "The upstream DSP poptart's browser build ports, as data rather than as prose, so that the",
+    "build script, the license report and the planning all read the same list.",
+    "",
+    "Every license here was verified on 2026-09-22 by reading the source rather than the",
+    "repository page - which mattered: the Mutable repository declares no license at all, and the",
+    "grant is in each file's own header.",
+    "",
+    "status \"built\" means a binary is committed under public/devices and the device is in the",
+    "catalog. \"planned\" means nothing is built yet.",
+    "",
+    "The web build is AGPL-3.0-only. Everything built so far is MIT, which imposes nothing; the",
+    "Faust entry is the one that would make the build permanently copyleft, and it is untouched.",
+    "A device with status \"retired\" was built and then removed from the catalog; its entry stays so the reason is on record."
+  ],
+  "target": "AGPL-3.0-only",
+  "sources": [
+    {
+      "id": "mutable",
+      "title": "Mutable Instruments",
+      "repository": "https://github.com/pichenettes/eurorack",
+      "license": "MIT",
+      "licenseVerified": true,
+      "licenseNote": "MIT, copyright Emilie Gillet, read from the header of each file used. The repository itself declares no license, so the header is the grant.",
+      "copyleft": false,
+      "toolchain": "emscripten",
+      "status": "built",
+      "notes": "Portable C++ over stmlib. Built with -DTEST, which is upstream's own switch for compiling off the target chip: stmlib's inner loops are ARM inline assembly with portable C beside them. Each module renders at its own fixed rate and the wrapper resamples. Tides was ported and then retired: see its entry.",
+      "devices": [
+        {
+          "id": "Plaits",
+          "kind": "synth",
+          "status": "built",
+          "note": "Twenty-four engines behind three controls."
+        },
+        {
+          "id": "Braids",
+          "kind": "synth",
+          "status": "built",
+          "note": "Forty-eight shapes; the oscillator Plaits replaced."
+        },
+        {
+          "id": "Tides",
+          "kind": "synth",
+          "status": "retired",
+          "note": "Was built; retired from the catalog on 2026-09-23 because an lfo() on any control already is what it did. The build script no longer compiles it."
+        },
+        {
+          "id": "Rings",
+          "kind": "synth",
+          "status": "built",
+          "note": "Resonator, struck by its own exciter. Resonating external audio is not exposed yet."
+        },
+        {
+          "id": "Elements",
+          "kind": "synth",
+          "status": "built",
+          "note": "Bow, breath and mallet into a modal resonator."
+        },
+        {
+          "id": "Peaks",
+          "kind": "synth",
+          "status": "built",
+          "note": "Its four drum models. The envelope half is not exposed."
+        },
+        {
+          "id": "Clouds",
+          "kind": "fx",
+          "status": "built",
+          "note": "Granular, with its four playback modes."
+        },
+        {
+          "id": "Warps",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Was built; retired from the catalog on 2026-09-23. It needs a carrier patched in with .audio(), and after two rounds of wrapper fixes (the fifo feeding it whole 96-frame blocks, and dropping the internal carrier that made it drone through rests) it still produced digital noise across most of its algorithm range. The Wavetable's FM, PM and ring warp modes cover what it was here for. The build script still compiles it."
+        },
+        {
+          "id": "Ripples",
+          "kind": "fx",
+          "status": "impossible",
+          "note": "ANALOG. The repository holds hardware_design and nothing else; there is no DSP to port."
+        },
+        {
+          "id": "Shelves",
+          "kind": "fx",
+          "status": "impossible",
+          "note": "ANALOG, same as Ripples."
+        },
+        {
+          "id": "Veils",
+          "kind": "fx",
+          "status": "impossible",
+          "note": "ANALOG, same as Ripples."
+        },
+        {
+          "id": "Streams",
+          "kind": "fx",
+          "status": "impossible",
+          "note": "Digital control over an analog audio path; the firmware is envelope and gain law, not the sound."
+        },
+        {
+          "id": "Frames",
+          "kind": "fx",
+          "status": "impossible",
+          "note": "Analog mixer. The firmware is the keyframer, not the audio."
+        },
+        {
+          "id": "Marbles",
+          "kind": "synth",
+          "status": "impossible",
+          "note": "A random voltage source. Real DSP, but it makes no audio."
+        },
+        {
+          "id": "Grids",
+          "kind": "synth",
+          "status": "impossible",
+          "note": "A trigger pattern generator, and the pattern language already does this."
+        },
+        {
+          "id": "Stages",
+          "kind": "fx",
+          "status": "impossible",
+          "note": "A segment generator; control voltages, not audio."
+        },
+        {
+          "id": "Beads",
+          "kind": "fx",
+          "status": "impossible",
+          "note": "NOT PUBLISHED. It is not in the repository."
+        }
+      ]
+    },
+    {
+      "id": "airwindows",
+      "title": "Airwindows",
+      "repository": "https://github.com/airwindows/airwindows",
+      "license": "MIT",
+      "licenseVerified": true,
+      "copyleft": false,
+      "toolchain": "emscripten",
+      "status": "built",
+      "notes": "Per-sample C++ against the VST2 SDK, which is not redistributable - so it is compiled against a shim of the handful of declarations these files touch (build/devices/shim/audioeffectx.h). Names, defaults and control counts are read out of each plugin's source at build time. Only Galactic remains in the catalog; the other eight were retired on 2026-09-23 in favor of poptart's own effects, and the build script's list holds only the one.",
+      "devices": [
+        {
+          "id": "Density",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        },
+        {
+          "id": "Drive",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        },
+        {
+          "id": "ToTape",
+          "kind": "fx",
+          "status": "retired",
+          "note": "The ninth revision. Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        },
+        {
+          "id": "ConsoleChannel",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Console9; needs ConsoleBuss on the group to mean anything. Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        },
+        {
+          "id": "ConsoleBuss",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        },
+        {
+          "id": "Pressure",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Pressure6. Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        },
+        {
+          "id": "Galactic",
+          "kind": "fx",
+          "status": "built"
+        },
+        {
+          "id": "DeEss",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        },
+        {
+          "id": "Tremolo",
+          "kind": "fx",
+          "status": "retired",
+          "note": "Retired on 2026-09-23: poptart writes its own saturation, dynamics and modulation effects now, in worklets whose controls follow the same contract as every other device. The binary is no longer built or shipped."
+        }
+      ],
+      "licenseNote": "MIT, copyright Chris Johnson, stated in each plugin's own header."
+    },
+    {
+      "id": "cloudseed",
+      "title": "CloudSeed",
+      "repository": "https://github.com/GhostNoteAudio/CloudSeedCore",
+      "license": "MIT",
+      "licenseVerified": true,
+      "copyleft": false,
+      "toolchain": "emscripten",
+      "status": "built",
+      "notes": "MOVED: the original repository (ValdemarOrn/CloudSeed) now holds only a readme pointing at the algorithm core, which is published separately and is what this builds. Its label array is out of step with its parameter enum, so the control names are written out here rather than read from it. Needs far more memory than any other device: its delay lines are allocated up front.",
+      "devices": [
+        {
+          "id": "CloudSeed",
+          "kind": "fx",
+          "status": "built"
+        }
+      ],
+      "licenseNote": "MIT, copyright Ghost Note Engineering Ltd."
+    },
+    {
+      "id": "signalsmith-stretch",
+      "title": "Signalsmith Stretch",
+      "repository": "https://github.com/Signalsmith-Audio/signalsmith-stretch",
+      "license": "MIT",
+      "licenseVerified": true,
+      "copyleft": false,
+      "toolchain": "emscripten",
+      "status": "built",
+      "notes": "Header-only. Only the pitch half is exposed: a track's time belongs to the scheduler. Still wanted as the stretcher behind the sampler's warp modes.",
+      "devices": [
+        {
+          "id": "Shift",
+          "kind": "fx",
+          "status": "built"
+        }
+      ],
+      "licenseNote": "MIT, copyright Signalsmith Audio Ltd. Its signalsmith-linear dependency is MIT as well and is pinned separately."
+    },
+    {
+      "id": "faust",
+      "title": "Faust standard library",
+      "repository": "https://github.com/grame-cncm/faustlibraries",
+      "license": "per-function",
+      "licenseVerified": false,
+      "licenseNote": "The license differs PER FUNCTION and is stated in the library source above each one. Several of the reverbs are GPL. Check the function actually used, not the repository.",
+      "copyleft": "some",
+      "toolchain": "faustwasm",
+      "status": "planned",
+      "notes": "NOT BEING BUILT, decided 2026-09-23, and the reason is the library rather than the toolchain: the Faust compiler is GPL but exempts what it generates, so compiling with it would not reach this package. The LIBRARY is the risk - its license differs per function, and the reverbs, which are most of what would be wanted here, are the GPL ones. GPL-3 is not allowed in this build, so those are out, and none of the per-function licenses below has been read. Nothing here is built.",
+      "devices": [
+        {
+          "id": "Plate",
+          "kind": "fx",
+          "note": "Dattorro plate reverb."
+        },
+        {
+          "id": "Zita",
+          "kind": "fx",
+          "note": "zita-rev1."
+        },
+        {
+          "id": "Greyhole",
+          "kind": "fx",
+          "note": "Diffusing delay."
+        },
+        {
+          "id": "JPverb",
+          "kind": "fx"
+        },
+        {
+          "id": "Moog",
+          "kind": "fx",
+          "note": "Ladder filter, as a counterpart to the one written here."
+        },
+        {
+          "id": "Oberheim",
+          "kind": "fx"
+        },
+        {
+          "id": "Korg35",
+          "kind": "fx"
+        },
+        {
+          "id": "Diode",
+          "kind": "fx"
+        },
+        {
+          "id": "Phaser",
+          "kind": "fx"
+        },
+        {
+          "id": "Flanger",
+          "kind": "fx"
+        },
+        {
+          "id": "Chorus",
+          "kind": "fx"
+        },
+        {
+          "id": "Wah",
+          "kind": "fx"
+        },
+        {
+          "id": "Limiter",
+          "kind": "fx"
+        }
+      ]
+    }
+  ]
+}

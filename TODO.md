@@ -530,42 +530,86 @@ no completion notes.
 
 [ ] Web build - poptart in the browser: native Web Audio synths/effects behind the same
     synth()/fx()/param() DSL, the sampler, pianoroll, arrange and the other widgets kept; DJ
-    mode, plugin hosting, OSC input, Link and the sample map stay desktop-only. Planned
-    2026-09-18, nothing built, ~3-4 weeks to a v1. A public, static site (no backend, no
-    accounts); AGPL section 13 means a source link in the UI.
-    Shape: a second target in this repo, not a fork. The server's host role (routes table, eval,
-    Scheduler, Transport, highlight grid) runs in a Worker; engine calls cross as timestamped
-    postMessage, the same model as the OSC bundles; a WebAudioEngine implements the ~30 engine
-    methods the scheduler calls (getTime = AudioContext.currentTime). client.js keeps its /api
-    calls behind a thin transport. main must not be put at risk: no up-front server.js split -
-    the web host starts with its own rough copy of the evaluate wiring and logic is extracted
-    from server.js lazily, one pure-move function at a time. Grow the MappedEngine forwarding
-    test into a conformance suite both engines run.
-    Order: (1) spike, ~2 days - Worker host + AudioBufferSourceNode sampler, first sound from a
-    static page, proves the clock model; (2) host port - storage adapter, sample packs by URL +
-    drag-drop + (Chromium) a picked folder, widgets answering; (3) track graph - chains, bus
-    sends, teardown on re-eval, modulators as AudioParam ramps (native LFOs later), devices,
-    a generic device panel generated from the param descriptors (no plugin editor windows
-    here); (4) wavetable synth, sampler warp (needs a stretcher - read what the SC warp def
-    does first and match its character), recording, Web MIDI.
-    Devices are web-only in v1 (mirroring them into SC is a later, optional job): built-in
-    nodes for filter/delay/compressor/distortion, a hand-written AudioWorklet for an
-    algorithmic reverb, and the wavetable synth as a plain JS AudioWorklet with internal voice
-    allocation (2 oscs with table/position/level/detune/unison, sub, noise, filter, amp + filter
-    ADSR in seconds, glide; loads the common 2048-sample-frame wavetable WAVs). The param
-    descriptor (id, names, units, ranges) is the contract a later SC mirror would match, so
-    the care goes into names and units; write the voice flat and allocation-free so it ports.
-    A shipped device's sound is frozen - shared songs depend on it - so a better reverb is a new
-    id or version, never a silent swap. On desktop an unknown web device warns and plays silent.
+    mode, plugin hosting, OSC input, Link and the sample map stay desktop-only. A public, static
+    site (no backend, no accounts); AGPL section 13 means a source link in the UI.
+
+    BUILT, and deployable: `npm run build:web` writes dist/web, vercel.json points a host at it.
+    The editor, the pattern language, the arrangement, the pianoroll and the widgets all run
+    against a host that lives in the page (packages/web-app/public/web - see ARCHITECTURE.md).
+    Storage is IndexedDB under the same names the desktop uses on disk, with an export that
+    carries the whole store. Devices: twenty-seven. Ours are `Wavetable`, `Distort` and `Reverb`,
+    plus `Filter`/`Delay`/`Compressor`/`Pan`/`Gain` from stock nodes. Nineteen more are ported
+    C++ compiled to WebAssembly and committed as binaries, so nothing downstream of the port
+    needs a toolchain: nine Airwindows effects, eight Mutable Instruments modules (`Plaits`,
+    `Braids`, `Tides`, `Rings`, `Elements`, `Peaks`, `Clouds`, `Warps`), `CloudSeed` and `Shift`.
+    They are built by packages/web-engine/build/devices/build-devices.mjs, which needs emscripten
+    and is run by hand when a device is added or a pin moves. Packs: `pt_kit` and `pt_keys` rendered from our
+    own DSP and committed; the sourced ones are built by packages/web-engine/build/fetch-packs.mjs
+    into a repository of their own. A device has no window of its own, so a double-click on a
+    synth("…")/fx("…") name opens one generated from its descriptor: turning a control is heard
+    at once and written into the code as a .param() call when the gesture ends. A descriptor may
+    also declare FIGURES - the pictures its window draws, computed in web-engine's figures.mjs from
+    the DSP that plays them - and the Wavetable declares seven: a waveform and a unison spread per
+    oscillator, the filter's response, and a curve per envelope in place of that envelope's four
+    knobs. They drag like the knobs do. A ported module declares none and is fine as knobs.
+
+    STILL TO DO, roughly in order:
+    (1) Publish the sample packs. `node build/fetch-packs.mjs --out ../../../poptart-packs` in
+        packages/web-engine assembles them beside this checkout; that folder then needs a
+        repository, a push and a TAG, and the tag goes in DEFAULT_PACK_BASE in
+        src/packs/library.mjs. Until that exists the app runs on the two rendered packs and says
+        so; once it does, a pack loads the first time a pattern names it.
+    (2) The first real load (09-22) played the sampler through the page. Still unheard: the
+        Wavetable, Distort and Reverb devices, a parameter driven by an LFO, the generated device
+        window and the figures in it, and whether a reload brings the store back. Everything
+        testable without a browser is tested - including every figure's numbers and every gesture's
+        arithmetic - but nothing in that window has been drawn on a screen once, so it needs a
+        careful look rather than a glance: work through a manual checklist of the rest before this
+        goes anywhere public.
+    (3) The sampler's remaining half: slices, warp (needs a stretcher - read what the SC warp def
+        does first and match its character), dropping a file on the window, and honoring the
+        loop points the sourced packs already carry in their manifests.
+    (4) The star library and the prebake are stored but not yet run. The host says so rather
+        than pretending: pinning and unpinning are refused by name, `snippets/resolveDefs`
+        answers each name with a `why`, and saving the prebake reports that it was kept and not
+        evaluated. Running them means loading pinned-defs.js in the page (it is CommonJS today,
+        the way pattern-meta.js was made dual) and evaluating the prebake sources into
+        `prebakeDefs` at boot and on save - the parsing is already shared.
+        The whole-store export (`GET /api/export`, `POST /api/import`) is built and tested and
+        has no button: on a public site with no accounts it is the only way somebody takes their
+        work with them, so it needs one before the site is public.
+    (5) The compiled devices: nineteen are built and committed (see build/devices/sources.json
+        for every one and its license). What is left of that list is FAUST, and it is the entry
+        to be careful with - the license differs per FUNCTION, several reverbs are GPL where the
+        filters are not, and GPL is a one-way door for a build that might ever want to be offered
+        under other terms. Check the function, not the repository.
+        Still open on what IS built: Rings and Elements resonate their own exciter only, so
+        resonating a track's audio is not exposed; Peaks ships its drums but not its envelopes;
+        Plaits and Rings are monophonic, as the modules are. Nine of Mutable's modules cannot be
+        ported at all - five are analog hardware with no DSP published, three make control
+        voltages rather than audio, and one was never published; sources.json says which.
+    (6) What the engine warns about instead of doing: MIDI input (Web MIDI), hardware audio
+        input, sidechain injection into a device, and the channel-strip controls beyond gain/
+        postgain/pan/dry/wetN - width, bassmono, bend, the grain channels. Recording too.
+    (7) Move the host behind a message boundary so it can go in a worker or an opaque-origin
+        frame. The seam is already there - the editor calls one function and the host is a route
+        table - so this is a postMessage shim on each side rather than a redesign. Note the audio
+        context cannot follow it: Web Audio is main-thread only, so the engine stays where it is
+        and only the storage and the language would move.
+    The nine-oh-nine and the rest: there is NO redistributable recording of any classic drum
+    machine except the eight-oh-eight, checked exhaustively 09-22. The sets that circulate are
+    either unlicensed (the widely used ones have open, unanswered requests for a license file
+    going back years) or carry a dedication from somebody who was not the person who recorded
+    them. The answer is to synthesize our own, the way pt_kit already is: build/render-packs.mjs
+    has the kick/snare/clap/hat generators, and a second kit in that style is a contained piece of
+    DSP work with no provenance to defend. Ship it under a name of its own, not the machine's.
+
     Public-site constraints: shared code never auto-evaluates, and everything the host touches
-    goes through messages so it can later move into an opaque-origin sandboxed iframe (a Worker
-    alone is same-origin: saved songs and persisted folder grants are readable). Define one JSON
-    song bundle (pattern text + rolls + macros + whatever else lives outside the text) first -
-    it is the storage unit, the export file and the share payload. Storage is browser-local:
-    IndexedDB (localStorage's ~5 MB cap is too small for wip history and rolls),
-    navigator.storage.persist(), an export button. Default sounds: host our own copy of a
-    cleanly licensed set (VCSL is CC0; the classic drum-machine and Dirt sets that Strudel
-    serves from its CDN have murkier licensing - read the dough-samples README before relying
-    on them, and never hotlink another project's CDN). No code is copied from superdough.
-    Open: the v1 device list above is a first draft; delay time in seconds (consistent with
-    the physical units elsewhere) or in cycles (more natural in a pattern language).
+    goes through the route table so it can later move behind a message boundary. AGPL section 13
+    means a source link in the UI - not yet added.
+
+    Open: delay time in seconds (consistent with the physical units elsewhere, and what it does
+    now) or in cycles (more natural in a pattern language). Whether the sourced packs should be
+    mirrored into our own repository at all, or referenced upstream through a CDN - mirroring is
+    what the build does now, and it costs a repository to maintain in exchange for a pin nobody
+    else can move.

@@ -64,6 +64,23 @@ class MappedEngine {
     this.mappings = loadMappings();
     this.chains = new Map(); // trackId -> [instrument, ...fx plugin names], set on every eval
     this.resolveTrack = null; // label -> engine track id, installed by the server (setTrackResolver)
+
+    // A capability the wrapped engine does not have must not LOOK like one it has.
+    //
+    // The forwarding rule in this class is "forward everything the scheduler calls", because a
+    // method missing here silently does nothing (see the note at the top of param-mapping.test.js).
+    // For the handful of calls the scheduler feature-detects with
+    // `typeof this.engine.X === 'function'`, forwarding unconditionally is the opposite mistake:
+    // the wrapper answers yes on the engine's behalf, the scheduler wires the route, and the
+    // forward lands on undefined. That turns "warn once and keep playing" into a TypeError that
+    // takes the whole evaluation down. `.param(name, audio("mod"))` on the desktop did exactly
+    // that - OscEngine has no connectParam, and it is the only feature-detected call it lacks.
+    //
+    // So an optional capability is hidden here when the engine underneath cannot do it, which
+    // puts the scheduler back on its own refusal path.
+    for (const name of MappedEngine.OPTIONAL) {
+      if (typeof engine?.[name] !== 'function') this[name] = undefined;
+    }
   }
 
   // Track references INSIDE arguments: audio("kick") / .audio("kick") / .midi("kick") name
@@ -116,7 +133,12 @@ class MappedEngine {
 
   setParam(trackId, slot, name, value, targetTime) {
     const spec = this._spec(trackId, slot, name);
-    this.engine.setParam(trackId, slot, name, spec ? toNormalized(value, spec) : value, targetTime);
+    // Only a NUMBER is converted. The scheduler passes strings through now (an enum label, which
+    // the browser build's devices take), and a word run through toNormalized comes back NaN -
+    // which is a number, so it would sail past the engine's own type guard and be sent to sclang.
+    // Handed on as it stands instead, for the engine to drop and name.
+    const mapped = spec && typeof value === 'number' ? toNormalized(value, spec) : value;
+    this.engine.setParam(trackId, slot, name, mapped, targetTime);
   }
 
   setParamLFO(trackId, slot, name, ir) {
@@ -230,6 +252,29 @@ class MappedEngine {
   clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
   injectMidi(trackId, slot, name, ...a) { return this.engine.injectMidi(trackId, slot, this._trackRef(name, trackId), ...a); }
   clearMidiInject(...a) { return this.engine.clearMidiInject(...a); }
+  // Audio patched onto a parameter (.param("Osc 1 Phase", audio("mod"))). The SOURCE is a
+  // routing name and is translated like the injectors above; the gain and offset ride on the
+  // connection and are already in whatever units the parameter takes, so no mapping applies to
+  // them - a connection is wired once and then runs in the audio graph, where there is nothing
+  // left to convert per value.
+  connectParam(trackId, slot, name, source, ...a) {
+    return this.engine.connectParam(trackId, slot, name, this._trackRef(source, trackId), ...a);
+  }
+  disconnectParam(...a) { return this.engine.disconnectParam(...a); }
+  // What the engine already has patched onto this track's parameters, which a fresh Scheduler
+  // reads so that a route the new pattern dropped is torn down. Nothing to map: the keys and the
+  // route spelling are the scheduler's own, and they come straight back.
+  paramRoutes(...a) { return this.engine.paramRoutes(...a); }
 }
+
+/**
+ * The engine methods the scheduler asks about before it calls them, rather than simply calling.
+ *
+ * Only these may be hidden by the constructor, and only when the engine underneath lacks them:
+ * everything else the scheduler calls outright, so hiding one would be the silent no-op this
+ * whole file exists to prevent. Kept in step with the `typeof this.engine.X === 'function'`
+ * checks in scheduler.mjs by a test, not by memory.
+ */
+MappedEngine.OPTIONAL = Object.freeze(['connectParam', 'disconnectParam', 'paramRoutes']);
 
 module.exports = { MappedEngine, loadMappings, toNormalized, toRealWorld };

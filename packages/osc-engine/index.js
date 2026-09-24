@@ -1687,6 +1687,11 @@ class OscEngine {
     this._fanoutMidi(trackId, note, 0, targetTime, false);
   }
   setParam(trackId, slotIndex, paramName, value, targetTime) {
+    // A plugin parameter is a number. A word - an enum label the browser build's devices take -
+    // means nothing to a VST and is dropped rather than sent to sclang as the wrong type. NaN is
+    // dropped with it: it is typeof number, and it is what a unit conversion returns when it is
+    // handed something that was never a quantity.
+    if (typeof value !== 'number' || !Number.isFinite(value)) return;
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
   }
   // ir: { shape: 'sine'|'saw'|'isaw'|'tri'|'square'|'rand', rateHz, phaseCycles, min, max } for

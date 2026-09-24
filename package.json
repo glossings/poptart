@@ -7,14 +7,17 @@
   "workspaces": [
     "packages/osc-engine",
     "packages/pattern-core",
-    "packages/web-app"
+    "packages/web-app",
+    "packages/web-engine"
   ],
   "scripts": {
     "dev": "npm run dev --workspace packages/web-app",
     "test": "npm run test --workspaces --if-present",
     "doctor": "node packages/osc-engine/doctor.js",
     "desktop": "node packages/desktop/start.js",
-    "release": "node packages/desktop/release.js"
+    "release": "node packages/desktop/release.js",
+    "build:web": "node packages/web-app/build-web.mjs",
+    "web": "node packages/web-app/serve-web.mjs"
   },
   "overrides": {
     "ws": "^8.21.0"

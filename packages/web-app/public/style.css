@@ -1853,6 +1853,322 @@ li.CodeMirror-hint-active {
   color: var(--err);
 }
 
+/* The generated device window. It borrows the preset panel's chrome and the desk's knob, so the
+   only thing written here is the grid they sit in: a device with thirty parameters has to stay a
+   window somebody can find a control in, not a wall. */
+.device-panel {
+  width: 560px;
+}
+
+.device-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 2px;
+  max-height: 78vh;
+  overflow-y: auto;
+}
+
+.device-section-head {
+  padding: 8px 10px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.device-widgets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 10px;
+  padding: 4px 10px 8px;
+}
+
+/* The sections a device lays out side by side: each row a flex line, each section a column
+   that shares the width with its neighbors. Two oscillators are twins and read as twins. */
+.device-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 0 4px;
+}
+
+.device-section {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.device-row + .device-row {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 2px;
+}
+
+/* One control: the knob (or select, toggle or number) with its name over it and its value under it. */
+.device-widget {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 64px;
+}
+
+/* A number box: the value itself, dragged up and down or typed. The knob's height, so a row of
+   knobs and boxes lines up. */
+.device-number {
+  /* Digits of one width, so a number dragged past a power of ten does not shuffle sideways. */
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  height: 28px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.device-number.dragging {
+  border-color: var(--accent);
+}
+
+.device-number input {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  outline: none;
+}
+
+/* The name of the file a sample control is pointed at, in place of a menu of two thousand. */
+.device-widget .device-file {
+  width: 100%;
+  font-size: 9px;
+  padding: 1px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-widget-name {
+  font-size: 9px;
+  color: var(--text-dim);
+  line-height: 1.1;
+  text-align: center;
+}
+
+.device-widget-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  font-family: var(--mono);
+  color: var(--text);
+  line-height: 1;
+}
+
+/* A control something else is already moving. Turning it would be overwritten on the next block,
+   so it does not turn, and what is moving it is named where its value would be. */
+.device-widget.driven .mix-knob {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.device-widget.driven .device-widget-value {
+  color: var(--accent);
+}
+
+.device-widget select,
+.device-widget .device-toggle {
+  width: 100%;
+  font-size: 10px;
+}
+
+.device-widget .small.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* A figure: a picture of what some of the knobs above it add up to. Same gutter as a widget row,
+   so a curve lines up with the controls it belongs to. */
+.device-figure {
+  padding: 2px 10px 6px;
+}
+
+/* Whose DSP a ported device is, said on its window rather than only on a tooltip. */
+.device-credit {
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+.device-credit a {
+  color: inherit;
+}
+
+.device-figure-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 2px;
+}
+
+/* The readout sits at the right-hand end whatever else is on the heading. */
+.device-figure-head .device-figure-read {
+  margin-left: auto;
+}
+
+/* A control a figure took over, drawn on its heading: the control alone, sized to its text. */
+.device-widget-bare {
+  display: flex;
+  min-width: 0;
+  max-width: 45%;
+}
+
+.device-widget-bare .device-file {
+  width: auto;
+  max-width: 100%;
+}
+
+.device-figure-title {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* What the picture currently reads, in the same mono the knobs print their values in. */
+.device-figure-read {
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  font-family: var(--mono);
+  color: var(--text);
+  text-align: right;
+}
+
+.device-figure-canvas {
+  display: block;
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  /* Every figure poptart draws is draggable, and most of them on both axes at once, so it is the
+     crosshair rather than the knobs' ns-resize. */
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Something else is moving a parameter this picture is drawn from, so the picture still moves but
+   the gesture does nothing - the same bargain a driven knob makes. */
+.device-figure.driven .device-figure-canvas {
+  cursor: not-allowed;
+}
+
+.device-figure.driven .device-figure-read {
+  color: var(--accent);
+}
+
+/* The browser build has no plugins to scan for - its devices are the catalog, fixed when the page
+   was built - so the button that would rescan them is not drawn. */
+.no-scan #scanBtn {
+  display: none;
+}
+
+/* The wavetable browser: folders, files and a picture of the table, in one row. Wider than the
+   preset panel it borrows its chrome from, because three columns is what it is. */
+/* The file picker: folders, files, and a picture of the one selected. The three columns are
+   given one height rather than three of their own, so their boxes line up. */
+.file-pick-panel {
+  width: 720px;
+}
+
+.file-pick-body {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 14px;
+  height: 268px;
+  box-sizing: content-box;
+}
+
+.file-pick-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 190px;
+}
+
+.file-pick-col input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.file-pick-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 11px;
+}
+
+.file-pick-files {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.file-pick-list div {
+  padding: 3px 8px;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-pick-list div:hover {
+  background: var(--bg-raised);
+}
+
+.file-pick-list div.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+}
+
+.file-pick-count {
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+
+.file-pick-preview {
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-pick-preview canvas {
+  display: block;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
 .lfo-panel {
   position: fixed;
   left: 50%;

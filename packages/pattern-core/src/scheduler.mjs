@@ -498,6 +498,9 @@ export class Scheduler {
     // return to dry=1. Same reasoning as clearing all trailing fx slots rather than diffing.
     this._prevChannelNames = Object.keys(CHANNEL_DEFAULTS);
     this._sentAudioInjects = new Map(); // fx slot -> audioRouteKey last wired, for diffing and teardown
+    this._sentParamRoutes = new Map();  // "slot:name" -> route key last wired (see .param() connections)
+    this._adoptedParamRoutes = false;   // whether the routes the engine already held have been read in
+    this._warnedNoParamRoutes = false;  // the "this engine cannot patch audio into a parameter" warning, once
     this._sentInputRoute = null; // audioRouteKey of the head audio input last wired (null: none, or MIDI)
     this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
@@ -929,6 +932,57 @@ export class Scheduler {
         if (!next.has(slot)) this.engine.clearAudioInject(this.trackId, slot);
       }
       this._sentAudioInjects = next;
+    }
+
+    // Audio patched straight onto a PARAMETER (Sig#param given an audio handle): another track's
+    // or bus's output wired onto the parameter itself, running at the sample rate. Phase
+    // modulation is the case that needs it - a value the scheduler polls every 30 ms and ramps
+    // between cannot be a modulator at audio rate however finely it is interpolated.
+    //
+    // Diffed per parameter, and for the same reason the sidechain injects above are: re-wiring
+    // cuts the signal for a moment, and a parameter being fed at audio rate is audibly part of
+    // the sound. An engine that cannot do this at all says so once and keeps playing - the rest
+    // of the pattern is fine, and a track that refuses to sound is the worse failure.
+    const paramRoutes = Object.values(sig.paramRoutes ?? {});
+    if (typeof this.engine.connectParam === 'function') {
+      // What the ENGINE holds, not what this Scheduler sent, the first time through. The engine
+      // track outlives us - a re-eval, or a label removed and re-added, builds a fresh Scheduler
+      // on a synth still wired by the old pattern - so a route the new pattern dropped has to be
+      // found by asking rather than by remembering. The answer is in the same spelling as the
+      // keys below, so a route that did not change is still left alone.
+      if (!this._adoptedParamRoutes) {
+        this._adoptedParamRoutes = true;
+        // Feature-detected like every other optional engine call, and the ANSWER is checked too:
+        // an engine that has no routes to report may answer anything, and a Scheduler that threw
+        // here would take the whole pattern down over a capability it can do without.
+        const held = typeof this.engine.paramRoutes === 'function' ? this.engine.paramRoutes(this.trackId) : null;
+        if (held && typeof held[Symbol.iterator] === 'function') {
+          for (const [at, key] of held) this._sentParamRoutes.set(at, key);
+        }
+      }
+      const next = new Map();
+      for (const route of paramRoutes) {
+        const key = `${route.source}|${route.gain}|${route.offset}`;
+        const at = `${route.slot}:${route.name}`;
+        next.set(at, key);
+        if (this._sentParamRoutes.get(at) !== key) {
+          this.engine.connectParam(this.trackId, route.slot, route.name, route.source, route.gain, route.offset);
+        }
+      }
+      for (const at of this._sentParamRoutes.keys()) {
+        if (!next.has(at)) {
+          const [slot, ...rest] = at.split(':');
+          this.engine.disconnectParam(this.trackId, Number(slot), rest.join(':'));
+        }
+      }
+      this._sentParamRoutes = next;
+    } else if (paramRoutes.length && !this._warnedNoParamRoutes) {
+      this._warnedNoParamRoutes = true;
+      const names = paramRoutes.map((r) => `"${r.name}"`).join(', ');
+      warnPattern(
+        `[scheduler] this engine cannot patch audio into a parameter, so ${names} on ${this.label ?? this.trackId} `
+        + 'is not connected. Everything else in the track plays as written.',
+      );
     }
 
     // MIDI injected into a plugin from a named source (Sig#midi injector): another track's notes
@@ -1765,6 +1819,10 @@ export class Scheduler {
         const value = held ?? c.sig.sample(applySec, this.transport.cps, applyCycle);
         if (typeof value === 'number') {
           if (c.name === 'bend' && c.slot === CHANNEL_SLOT) this._checkBendRange(value, applySec, applyCycle);
+          this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);
+        } else if (typeof value === 'string' && c.slot !== CHANNEL_SLOT) {
+          // A word reaches a device parameter as written: an enum's label, or the name of a
+          // sample for a parameter that takes one. A channel control is always a number.
           this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);
         }
       }

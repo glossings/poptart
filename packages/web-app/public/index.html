@@ -379,6 +379,20 @@
               </div>
               <div id="samplesDirNote" class="files-note"></div>
             </section>
+            <!-- The wavetable folder. Only the browser build has one: there the files are kept in
+                 the browser rather than read off a disk it cannot see, so the row is a folder to
+                 read once rather than a path to remember. The client hides this section on the
+                 desktop, where a wavetable is named by its path like any other file. -->
+            <section id="wavetableSection" class="hidden">
+              <h2>wavetables</h2>
+              <div class="settings-actions">
+                <button id="wavetableFolderPick" class="small"
+                  title="Copies a folder of wavetables into this browser's own storage, replacing whatever was there before. Subfolders are kept, so a file is named wt:&lt;folder&gt;/&lt;file&gt;. Nothing is sent anywhere: this page has no server to send it to.">choose folder…</button>
+                <button id="wavetableFolderClear" class="small" title="delete the copies this browser is keeping">forget</button>
+              </div>
+              <input id="wavetableFolderInput" type="file" webkitdirectory multiple hidden />
+              <div id="wavetableFolderNote" class="files-note"></div>
+            </section>
             <!-- The sample map's sources: the folders whose sounds get analyzed and placed. A
                  choice, not the library by default - the map is only as useful as what is on it,
                  and a folder of impulse responses or full songs is not what a kit is built from. -->
@@ -507,6 +521,44 @@
         <div id="presetSize" class="preset-size"></div>
       </div>
       <div id="presetStatus" class="preset-status"></div>
+    </div>
+
+    <!-- The generated device window. Empty here because every row of it comes from the device's
+         own descriptor: a build whose devices are plugins opens the plugin's window instead and
+         never shows this one. -->
+    <div id="devicePanel" class="preset-panel device-panel hidden">
+      <div class="preset-panel-head">
+        <span id="deviceTitle">device</span>
+        <span id="deviceTarget" class="preset-target"></span>
+        <span class="spacer"></span>
+        <span id="deviceCredit" class="device-credit"></span>
+        <button id="deviceClose" class="small">✕</button>
+      </div>
+      <div id="deviceSections" class="device-sections"></div>
+    </div>
+
+    <!-- The wavetable browser. A table control can be pointed at any file in the wavetable
+         folder, and a folder is a couple of thousand files in subfolders - which is a thing to
+         look through, not a dropdown. Folders down the left, files beside them, and the table
+         the selected file would become drawn on the right before anything is loaded. -->
+    <div id="filePickPanel" class="preset-panel file-pick-panel hidden">
+      <div class="preset-panel-head">
+        <span id="filePickKind">files</span>
+        <span id="filePickTarget" class="preset-target"></span>
+        <span class="spacer"></span>
+        <button id="filePickClose" class="small">✕</button>
+      </div>
+      <div class="file-pick-body">
+        <div class="file-pick-col">
+          <input id="filePickSearch" type="text" placeholder="filter" spellcheck="false" />
+          <div id="filePickFolders" class="file-pick-list"></div>
+        </div>
+        <div id="filePickFiles" class="file-pick-list file-pick-files"></div>
+        <div class="file-pick-preview">
+          <canvas id="filePickCanvas"></canvas>
+          <div id="filePickNote" class="files-note"></div>
+        </div>
+      </div>
     </div>
 
     <div id="lfoPanel" class="lfo-panel hidden">
