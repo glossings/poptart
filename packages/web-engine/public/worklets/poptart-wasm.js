@@ -137,6 +137,23 @@ function defineParam(deviceId, spec, seen) {
   } else if (spec.capacity !== undefined) {
     fail(deviceId, `param "${id}": only an enum has a capacity`);
   }
+  // Headings over runs of an enum's options - `[{ label, from }]`, `from` the index the run starts
+  // at - for a list long enough that one column of it is not something to read. The panel's
+  // menu draws a heading per group, a column each.
+  let optionGroups = null;
+  if (spec.optionGroups !== undefined) {
+    if (!options) fail(deviceId, `param "${id}": only an enum has option groups`);
+    const groups = Array.isArray(spec.optionGroups) ? spec.optionGroups : [];
+    let last = -1;
+    for (const g of groups) {
+      if (!String(g?.label ?? '').trim() || !Number.isInteger(g?.from) || g.from <= last || g.from >= options.length) {
+        fail(deviceId, `param "${id}": option groups need a label each and rising start indexes inside the list`);
+      }
+      last = g.from;
+    }
+    if (!groups.length || groups[0].from !== 0) fail(deviceId, `param "${id}": the first option group starts at 0`);
+    optionGroups = Object.freeze(groups.map((g) => Object.freeze({ label: String(g.label), from: g.from })));
+  }
   const min = options ? 0 : spec.min;
   const max = options ? capacity - 1 : spec.max;
   if (!isFiniteNumber(min) || !isFiniteNumber(max)) fail(deviceId, `param "${id}" needs numeric min and max`);
@@ -201,6 +218,7 @@ function defineParam(deviceId, spec, seen) {
     decimals,
     step,
     options: options ? Object.freeze(options) : null,
+    optionGroups,
     capacity,
     takes,
     sampleAs,
@@ -2323,12 +2341,14 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
     const outR = outL + this.maxBlock;
     const base = this.paramPtr / 4;
     const input = inputs[0] ?? [];
-    const left = input[0];
+    let left = input[0];
     let right = input[1] ?? input[0];
     // A device with a sidechain hears the track on its first channel and the other signal on
     // its second, summed to mono either way: the modules that take two signals take one each.
-    const side = this.descriptor.sidechain ? (inputs[1]?.[0] ?? null) : null;
-    if (this.descriptor.sidechain) right = side ?? this.silence(frames);
+    if (this.descriptor.sidechain) {
+      if (left && input[1]) left = this.mono(left, input[1], frames);
+      right = inputs[1]?.[0] ?? this.silence(frames);
+    }
 
     // Controls are read once a block, as a position, and reach the module in its own units.
     // Written once even where the block is rendered in pieces: a control did not move inside a
@@ -2376,6 +2396,14 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
     }
     this.reporter.tick(parameters);
     return true;
+  }
+
+  /** The track's two channels as one, into a buffer kept rather than made. */
+  mono(left, right, frames) {
+    if (!this._mono || this._mono.length < frames) this._mono = new Float32Array(frames);
+    const into = this._mono;
+    for (let i = 0; i < frames; i++) into[i] = (left[i] + right[i]) * 0.5;
+    return into;
   }
 
   /** A block of zeros, kept rather than made, for a sidechain nobody has patched. */

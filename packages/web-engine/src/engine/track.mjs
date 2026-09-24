@@ -456,6 +456,14 @@ export class Track {
     this.sends.clear();
     for (const conn of this.paramConnections.values()) teardownParamConnection(conn);
     this.paramConnections.clear();
+    for (const index of [...this.sidechains.keys()]) this.clearSidechain(index);
+    // The bend constant is a started source: unplugged but not stopped, it runs for the life of
+    // the page.
+    if (this.bendNode) {
+      try { this.bendNode.stop(); } catch { /* already stopped */ }
+      try { this.bendNode.disconnect(); } catch { /* already detached */ }
+      this.bendNode = null;
+    }
     try {
       this.input.disconnect();
       this.chainIn.disconnect();

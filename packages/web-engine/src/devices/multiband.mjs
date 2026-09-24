@@ -180,6 +180,9 @@ export class MultibandProcessor {
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
     }
+    // Checked on their own: a NaN that is gone from the output by the end of the block can
+    // still be sitting in a detector, and it stays there.
+    for (const d of this.detectors) if (!Number.isFinite(d.env)) d.reset();
   }
 
   /** Where each band sits on its own curve, and where it has been, for the three pictures the panel draws. */

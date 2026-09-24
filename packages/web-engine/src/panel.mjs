@@ -90,6 +90,7 @@ export function buildPanel(descriptor, values = {}, modulated = new Map(), opts 
         decimals: decimalsFor(p),
         // An enum's choices: the descriptor's own, then whatever was loaded into its spare slots.
         options: p.options ? optionsWithExtras(p, loaded) : null,
+        optionGroups: p.optionGroups,
         takes: p.takes,
         // What a file loaded here becomes, and how many of the options are the device's OWN -
         // the ones past that are files somebody loaded, and the picker tells the two apart.

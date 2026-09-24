@@ -16,7 +16,7 @@
 // The pinned file's format - one definition per line, found and replaced by name - belongs to the
 // desktop's pinned-defs.js, which is handed in rather than copied.
 
-export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEvaluator, pinnedDefs, log = () => {}, dehydrate = async (code) => ({ code }) }) {
+export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEvaluator, pinnedDefs, log = () => {}, dehydrate = async (code) => ({ code }), afterClear = () => {} }) {
   /** Runs everything again. Answers the per-block errors, empty on success. */
   async function run() {
     const sources = [];
@@ -29,6 +29,9 @@ export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEv
     const evalBlock = createBlockEvaluator(patternCore, { defs: new Map() });
     patternCore.setRollLayer('prebake');
     patternCore.clearRolls('prebake');
+    // What the host keeps in this layer and is not the prebake's to drop: the sample packs.
+    afterClear();
+    patternCore.setRollLayer('prebake');
     try {
       for (const src of sources) {
         for (const b of patternCore.splitLabeledBlocks(src.code)) {

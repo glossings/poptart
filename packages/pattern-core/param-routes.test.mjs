@@ -65,20 +65,41 @@ test('the order of the arithmetic is respected, the way it would be on a number'
   assert.deepEqual(Object.values(before.paramRoutes)[0], { slot: 0, name: 'P', source: 'm', gain: 100, offset: 1 });
 });
 
+/**
+ * Runs fn with pattern warnings captured, and returns them. A refused operation on a connection
+ * is a warning and the handle unchanged, never an exception that takes the evaluation down.
+ */
+function warningsFrom(fn) {
+  const lines = [];
+  setPatternWarn((line) => lines.push(line));
+  try { fn(); } finally { setPatternWarn(null); }
+  return lines;
+}
+
+/** The refused operation is said, and the handle comes back at unity. */
+function assertRefused(make, pattern) {
+  let handle;
+  const lines = warningsFrom(() => { handle = make(); });
+  assert.equal(lines.length, 1, `one warning, got ${JSON.stringify(lines)}`);
+  assert.match(lines[0], pattern);
+  const route = Object.values(synth('Wavetable').param('P', handle).paramRoutes)[0];
+  assert.deepEqual([route.gain, route.offset], [1, 0], 'the connection still plays, unscaled');
+}
+
 test('subtraction and division work too, and dividing by nothing is refused', () => {
   const sig = synth('Wavetable').param('P', audio('m').sub(0.5).div(2));
   assert.deepEqual(Object.values(sig.paramRoutes)[0], { slot: 0, name: 'P', source: 'm', gain: 0.5, offset: -0.25 });
-  assert.throws(() => audio('m').div(0), /div\(0\)/);
+  assertRefused(() => audio('m').div(0), /div\(0\)/);
 });
 
 test('a patterned operand on a connection is refused, and says why', () => {
-  assert.throws(() => audio('m').mul('1 2'), /connection, so only a constant gain/);
-  assert.throws(() => audio('m').mul(1, 2), /it is a connection, not a pattern/);
+  assertRefused(() => audio('m').mul('1 2'), /connection, so only a constant gain/);
+  assertRefused(() => audio('m').mul(1, 2), /it is a connection, not a pattern/);
   // The paths that do not go through the arithmetic dispatcher have to refuse it too, or they
   // return a handle that quietly ignored the operation.
-  assert.throws(() => audio('m').round(), /Only a constant gain/);
-  assert.throws(() => audio('m').clamp(0, 1), /Only a constant gain/);
-  assert.throws(() => audio('m').gte(1), /Only a constant gain/);
+  assertRefused(() => audio('m').round(), /Only a constant gain/);
+  assertRefused(() => audio('m').clamp(0, 1), /Only a constant gain/);
+  assertRefused(() => audio('m').gte(1), /Only a constant gain/);
 });
 
 test('a handle that has become a track is an ordinary pattern again', () => {
@@ -218,11 +239,7 @@ test('a moving operand on a connection is refused rather than frozen at cycle ze
     ['an lfo', lfo(2)],
     ['a pattern', mini('0.2 0.8')],
   ]) {
-    assert.throws(
-      () => synth('Wavetable').param('Osc 1 Phase', audio('mod').mul(operand)),
-      /needs a plain number|takes one number/,
-      `${what} must be refused`,
-    );
+    assertRefused(() => audio('mod').mul(operand), /needs a plain number|takes one number/, `${what} must be refused`);
   }
 });
 

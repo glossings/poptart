@@ -49,7 +49,12 @@ export const DELAY = defineDevice({
   ],
 });
 
-const clipTail = (x) => (x > 2 ? 1 : x < -2 ? -1 : x - (x * x * x) / 12);
+/**
+ * The soft clip on what is fed back, so a feedback near one saturates instead of running away.
+ * A cubic with unity slope at zero that flattens out exactly where it meets the clamp: at 1.5
+ * it is at 1 with no slope left, so the curve is continuous and never turns back down.
+ */
+export const clipTail = (x) => (x >= 1.5 ? 1 : x <= -1.5 ? -1 : x - (4 * x * x * x) / 27);
 
 export class DelayProcessor {
   constructor(sampleRate) {

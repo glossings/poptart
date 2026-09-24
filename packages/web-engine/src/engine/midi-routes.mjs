@@ -119,6 +119,22 @@ export class MidiRoutes {
     this.held.delete(key);
   }
 
+  /**
+   * Releases every note a track's routes are holding in the tracks they feed, and forgets them -
+   * for a source that is hushed or taken away, whose offs will not come to release them. The
+   * routes stay: a hush is not a re-evaluation, and the next note through plays as before.
+   */
+  releaseFrom(sourceTrackId, atTime = 0) {
+    for (const r of this.routes) {
+      if (!this._fromTrack(r, sourceTrackId)) continue;
+      const key = `${r.targetTrackId}:${r.slot}`;
+      const held = this.held.get(key);
+      if (!held) continue;
+      for (const played of held.values()) this.deliver(false, r.targetTrackId, r.slot, played, 0, atTime);
+      this.held.delete(key);
+    }
+  }
+
   /** Whether any route is into this sink - an effect is told when it starts and stops being played. */
   has(targetTrackId, slot) {
     return this.routes.some((r) => r.targetTrackId === targetTrackId && r.slot === slot);

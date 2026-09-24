@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { midi, note, mini, sine, irand, midikeys, resetRandomSeeds } from './src/signal.mjs';
+import { audio, midi, note, mini, sine, irand, midikeys, resetRandomSeeds } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 function mockEngine() {
@@ -115,4 +115,29 @@ test('a normal pattern is untouched by any of this', () => {
   const sig = note('c3 e3').add(note(12));
   assert.equal(sig.inputSource, null);
   assert.deepEqual(sig.stepsForCycle(0).map((s) => s.value), [72, 76]);
+});
+
+test('stopping a track fed by another track\'s notes unplugs that route, and the next pattern plugs it back', () => {
+  // A muted or deleted b: midi("a").synth(...) went on playing a's notes: the route lives
+  // engine-side, and nothing but a new pattern ever cleared it.
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'b', cps: 1 });
+  sch.setPattern(midi('a').synth('Serum 2'));
+  assert.equal(callsTo('setInputSource').length, 1);
+  sch.stop();
+  assert.deepEqual(callsTo('clearInputSource').map((c) => c.args[0]), ['b']);
+  sch.stop();
+  assert.equal(callsTo('clearInputSource').length, 1, 'cleared once, not on every stop');
+  sch.setPattern(midi('a').synth('Serum 2'));
+  assert.equal(callsTo('setInputSource').length, 2, 'the evaluation that brings the track back sends it again');
+});
+
+test('stopping a track that reads another track\'s AUDIO leaves that route up to ring out', () => {
+  // A group row reads its members' bus as its head input; cutting it on stop cuts their tails.
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'grp', cps: 1 });
+  sch.setPattern(audio('drums').fx('Distort'));
+  assert.equal(callsTo('setInputSource').length, 1);
+  sch.stop();
+  assert.equal(callsTo('clearInputSource').length, 0);
 });

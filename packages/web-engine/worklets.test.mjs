@@ -648,3 +648,37 @@ test('a bend moves the ported instruments\' notes while they sound', () => {
     assert.ok(Math.abs(ratio - 2) < 0.1, `${id}: an octave of bend moved the pitch by ${ratio.toFixed(2)}x (${flat.toFixed(1)} -> ${up.toFixed(1)} Hz)`);
   }
 });
+
+test('a ported device with a sidechain hears both of the track\'s channels', () => {
+  // With a sidechain the module's second input is the other signal, so the track has to arrive
+  // on the first one summed to mono. Taking only its left channel would drop anything panned
+  // right. The same sine on the left alone and on the right alone should therefore be heard
+  // identically. No catalog device declares a sidechain today, so one is given one here.
+  const base = DEVICES.find((d) => d.id === 'Galactic');
+  const render = (side) => {
+    const { context } = loadBundle('poptart-wasm.js');
+    const Processor = vm.runInContext('WasmDeviceProcessor', context);
+    const bytes = fs.readFileSync(path.join(here, 'public', 'devices', `${base.id}.wasm`));
+    const descriptor = { ...base, sidechain: true };
+    const node = new Processor({ processorOptions: { module: new WebAssembly.Module(bytes) } }, descriptor);
+    const params = paramsFor(base);
+    const out = [[new Float32Array(BLOCK), new Float32Array(BLOCK)]];
+    const heard = [];
+    let phase = 0;
+    for (let b = 0; b < 40; b++) {
+      const made = stereoBlock(phase);
+      phase = made.phase;
+      const silent = new Float32Array(BLOCK);
+      const track = side === 'left' ? [made.input[0][0], silent] : [silent, made.input[0][1]];
+      node.process([track, [new Float32Array(BLOCK)]], out, params);
+      heard.push(...out[0][0], ...out[0][1]);
+    }
+    return heard;
+  };
+  const left = render('left');
+  const right = render('right');
+  assert.ok(peak(left) > 1e-3, 'the track should be heard at all');
+  for (let i = 0; i < left.length; i++) {
+    assert.ok(Math.abs(left[i] - right[i]) < 1e-6, `sample ${i}: ${left[i]} from the left, ${right[i]} from the right`);
+  }
+});

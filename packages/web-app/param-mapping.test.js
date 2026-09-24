@@ -196,3 +196,27 @@ test('a word on a MAPPED parameter is handed on as it stands, not converted into
   const [, , , , mappedValue] = calls.pop();
   assert.ok(mappedValue > 0 && mappedValue < 1, `a real value still maps: ${mappedValue}`);
 });
+
+test('a word on a plugin parameter is reported on the console once per evaluation', () => {
+  // The desktop engine drops it (a VST parameter is a number), and dropping it without a word is
+  // a line of the pattern that silently does nothing.
+  const engine = {};
+  for (const name of schedulerEngineCalls()) engine[name] = () => {};
+  const mapped = new MappedEngine(engine);
+  const lines = [];
+  mapped.warn = (line) => lines.push(line);
+  mapped.setChain('#1', ['Serum 2']);
+
+  mapped.setParam('#1', 0, 'Filter Type', 'lowpass', 0);
+  mapped.setParam('#1', 0, 'Filter Type', 'lowpass', 0.1);
+  assert.equal(lines.length, 1, 'the scheduler resends a held value every step; it is said once');
+  assert.match(lines[0], /"Filter Type" on Serum 2/);
+  assert.match(lines[0], /"lowpass"/);
+
+  mapped.setParam('#1', 0, 'Filter Type', 0.25, 0.2);
+  assert.equal(lines.length, 1, 'a number says nothing');
+
+  mapped.setChain('#1', ['Serum 2']); // the next evaluation
+  mapped.setParam('#1', 0, 'Filter Type', 'lowpass', 0.3);
+  assert.equal(lines.length, 2, 'still wrong after a re-evaluation, so said again');
+});

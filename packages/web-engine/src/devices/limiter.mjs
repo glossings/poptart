@@ -91,6 +91,14 @@ export class LimiterProcessor {
       this.pos = read;
       if (g < reduction) reduction = g;
     }
+    // A gain that is not a number would stay that way through every smoothing step after it,
+    // and the lookahead would hand on anything unplayable it is holding: both start again.
+    if (!Number.isFinite(this.gain) || !Number.isFinite(outL[count - 1])) {
+      this.gain = 1;
+      this.bufL.fill(0);
+      this.bufR.fill(0);
+      this.need.fill(1);
+    }
     this.reduction = reduction;
     this.level = loudest > 1e-6 ? 20 * Math.log10(loudest) : -120;
     this.levels.push(this.level);

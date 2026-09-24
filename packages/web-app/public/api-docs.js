@@ -255,8 +255,8 @@ const API_DOCS = {
   param: {
     kind: 'method',
     sig: 'param(name, value)',
-    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Names autocomplete inside the quotes. The value is a position from 0 to 1, as a number, pattern or signal; a mapping file can give a plugin parameter real units instead. A browser device\'s switch takes its option\'s name, its on/off takes 0 or 1, and a control that loads a sample takes the sample\'s name, "pack:index" or "pack:file". Given an audio() handle instead, the parameter is wired to that track or bus and follows it at the sample rate; .mul() and .add() on the handle set its gain and offset. Wiring audio onto a parameter is a browser-build feature: the desktop engine reports it on the console and plays the rest of the track as written.',
-    eg: '.param("Cutoff", sine(0.2).range(0.3, 0.8))',
+    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Names autocomplete inside the quotes. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some (a filter frequency in Hz, for example). On the browser build\'s devices a switch also takes its option\'s name, an on/off takes 0 or 1, and a control that loads a sample takes "pack:index" or "pack:file". An audio() handle in place of the value wires that track or bus onto the parameter at the sample rate, with .mul() and .add() on the handle as its gain and offset; the browser build does this, and the desktop engine reports it on the console and plays the rest of the track.',
+    eg: '.param("Filter 1 Freq", sine(0.2).range(300, 6000))',
   },
   preset: {
     kind: 'method',
@@ -368,7 +368,7 @@ const API_DOCS = {
   sometimes: {
     kind: 'method',
     sig: 'sometimes(share, fn, { seed })',
-    desc: 'Applies fn at a random share of the pattern\'s events: 0.3 is three in ten, and sometimes(fn) alone is one in two. Each call tosses its own coin, so two sometimes() on one track fire independently; give both the same seed to make them agree. Same as when() with a rand() condition.',
+    desc: 'Applies fn at a random share of the pattern\'s events: 0.3 is three in ten, and sometimes(fn) alone is one in two. Each call draws its own random numbers, so two sometimes() on one track fire independently; give both the same seed to make them agree. The draws repeat on every play of the same document.',
     eg: '.sometimes(0.25, x => x.flip(1))',
   },
   as: {

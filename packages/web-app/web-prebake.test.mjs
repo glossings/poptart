@@ -10,6 +10,7 @@ import { memoryStore } from './public/web/kv.mjs';
 import { createStorage } from './public/web/storage.mjs';
 import { createBlockEvaluator } from './public/web/block-eval.mjs';
 import { createPrebake } from './public/web/prebake.mjs';
+import { registerPacks, restorePacks } from './public/web/samples.mjs';
 
 const require = createRequire(import.meta.url);
 const pinnedDefs = require('./pinned-defs.js');
@@ -56,4 +57,23 @@ test('a definition a snippet needs is found in the library, or said not to be th
   assert.match(hit.code, /pluck2/);
   assert.equal(miss.code, null);
   assert.match(miss.why, /no roll definition named "nothing"/);
+});
+
+test('a prebake run leaves the sample packs registered, and a prebake pack of the same name still wins', async () => {
+  // The shipped, library and added packs are definitions in the layer the prebake clears. The
+  // run used to empty them at every boot, so the pack list the editor browses and completes from
+  // came back empty although the sounds still played.
+  const storage = createStorage(memoryStore(), { meta });
+  const prebake = createPrebake({
+    patternCore, storage, prebakeDefs: new Map(), createBlockEvaluator, pinnedDefs,
+    afterClear: () => restorePacks(patternCore),
+  });
+  registerPacks(patternCore, [{ id: 'pt_testkit', files: [{ file: 'a.wav' }, { file: 'b.wav' }] }]);
+  await prebake.run();
+  assert.ok(patternCore.packIds().some((p) => p.id === 'pt_testkit'), 'still registered after a run');
+  assert.deepEqual(patternCore.lookupPack('pt_testkit').files, ['pt_testkit/a.wav', 'pt_testkit/b.wav']);
+
+  await storage.writePrebake('_pack("pt_testkit", ["mine/x.wav"])');
+  await prebake.run();
+  assert.deepEqual(patternCore.lookupPack('pt_testkit').files, ['mine/x.wav'], 'somebody\'s own definition is not overwritten');
 });

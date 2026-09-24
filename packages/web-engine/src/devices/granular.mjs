@@ -165,11 +165,14 @@ class GrainVoice {
 
   process(outL, outR, count, offset, p, sample, drawn) {
     if (!this.env.active) return;
-    this.env.set({ attack: p.attack, decay: p.decay, sustain: p.sustain, release: p.release, curve: -4 });
+    this.env.setStages(p.attack, p.decay, p.sustain, p.release, -4, -4, -4);
     const sr = this.sampleRate;
     const data = sample?.data;
     const len = data ? data.length : 0;
-    const ratioBase = Math.pow(2, (this.note - 60 + p.pitch + (p.bend ?? 0)) / 12) * (sample ? sample.sampleRate / sr : 1);
+    // The file's own rate against the context's: a sample read at one step a sample plays at its
+    // recorded speed only when the two agree.
+    const fileRate = sample ? sample.sampleRate / sr : 1;
+    const ratioBase = Math.pow(2, (this.note - 60 + p.pitch + (p.bend ?? 0)) / 12) * fileRate;
     const window = p.window;
     // A drawn window is a table rather than a formula (see drawnWindow).
     const table = drawn ?? null;
@@ -179,7 +182,6 @@ class GrainVoice {
         this.until = Math.max(1, Math.round((sr / p.density) * (0.8 + 0.4 * this.random())));
         const g = this.grains.find((x) => !x.on);
         if (g) {
-          this.scanned += 0;
           const spray = (this.random() * 2 - 1) * p.spray * len;
           const center = (p.position * len + this.scanned + spray + len * 4) % len;
           g.len = Math.max(32, Math.round(p.size * 0.001 * sr));
@@ -193,7 +195,9 @@ class GrainVoice {
           g.on = true;
         }
       }
-      this.scanned += p.scan * ratioBase;
+      // The scan moves through the file at the same speed whatever note is playing: the note
+      // repitches the grains, not the journey through the sample.
+      this.scanned += p.scan * fileRate;
       let l = 0;
       let r = 0;
       if (len > 0) {

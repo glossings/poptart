@@ -2056,10 +2056,21 @@ async function rollWipSession(id = null) {
 }
 
 // Closing the tab inside the debounce window would otherwise lose the last seconds of typing.
-// sendBeacon survives teardown, which fetch() does not.
+//
+// The page going out of sight is the first sign, and the page is still whole when it fires, so
+// the ordinary save runs then - that is the one the browser build has, since its store is this
+// page's own IndexedDB and there is no server to beacon to (a beacon there is a request for a
+// route a static site does not have, and the words were lost). A tab closed while in view gets
+// no such warning, so the desktop also beacons on the way out: sendBeacon survives teardown,
+// which fetch() does not. The browser build's last try then is the save itself, which an
+// IndexedDB write started during pagehide usually outlives.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') saveWip();
+});
 window.addEventListener('pagehide', () => {
   const code = cm.getValue();
   if (code === wipLastSent) return;
+  if (window.__poptartHostReady) { saveWip(); return; }
   const body = new Blob([JSON.stringify({ id: wipSessionId, code })], { type: 'application/json' });
   navigator.sendBeacon('/api/patterns/wip/save', body);
 });
@@ -4924,13 +4935,22 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     select.className = 'small';
     const fill = (options, current) => {
       select.innerHTML = '';
+      // A long list the device heads in groups (the warp modes) is drawn a group to a column.
+      const groups = widget.optionGroups ?? [];
+      let into = select;
       options.forEach((label, i) => {
         if (label === undefined) return;
+        const starts = groups.find((g) => g.from === i);
+        if (starts) {
+          into = document.createElement('optgroup');
+          into.label = starts.label;
+          select.appendChild(into);
+        }
         const opt = document.createElement('option');
         opt.value = String(i);
         opt.textContent = label;
         if (i === Math.round(current)) opt.selected = true;
-        select.appendChild(opt);
+        into.appendChild(opt);
       });
     };
     fill(widget.options, widget.value);
@@ -4959,6 +4979,10 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     button.onclick = () => { on = !on; paint(); send({ value: on ? 1 : 0 }, true); };
     setPosition = (_position, value) => { if (Number.isFinite(value)) { on = value >= 0.5; paint(); } };
     cell.appendChild(button);
+    // The button says on or off itself, so the readout under it stays blank, as an enum's does:
+    // printing it again doubled every switch. Blank, not removed, to keep the row's height.
+    showValue = () => { readout.textContent = ''; };
+    readout.textContent = '';
   } else {
     cell.appendChild(deviceKnob(widget, {
       onDrag: (position) => send({ position }, false),
@@ -11652,6 +11676,9 @@ async function prSliceToNotes(targets) {
 // tell the difference. Arrow keys on a CLOSED select still step its value, as they natively do.
 // ---------------------------------------------------------------------------------------------
 
+/** Past this many options a list is laid out in columns rather than one long one. */
+const SEL_MENU_ROWS = 14;
+
 const selMenuEl = document.createElement('div');
 selMenuEl.className = 'sel-menu hidden';
 document.body.appendChild(selMenuEl);
@@ -11683,16 +11710,23 @@ function openSelMenu(select) {
   if (!select.options.length) return;
   selMenuFor = select;
   select.classList.add('sel-open');
-  // The options in order, under their group heads where the select has groups.
+  // The options in order, under their group heads where the select has groups. Each group is a
+  // block of its own, so a long grouped list lays out a group to a column (see below).
   let lastGroup = null;
-  for (const option of select.options) {
-    if (option.hidden) continue;
+  let block = selMenuEl;
+  const visible = [...select.options].filter((o) => !o.hidden);
+  for (const option of visible) {
     const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
     if (group && group !== lastGroup) {
+      block = document.createElement('div');
+      block.className = 'sel-menu-group';
+      selMenuEl.appendChild(block);
       const head = document.createElement('div');
       head.className = 'sel-menu-head';
       head.textContent = group.label;
-      selMenuEl.appendChild(head);
+      block.appendChild(head);
+    } else if (!group && lastGroup) {
+      block = selMenuEl;
     }
     lastGroup = group;
     const b = document.createElement('button');
@@ -11703,16 +11737,37 @@ function openSelMenu(select) {
     if (option.selected) b.classList.add('on', 'hi');
     b.addEventListener('mouseenter', () => selMenuHighlight(b));
     b.addEventListener('click', () => selMenuPick(select, option));
-    selMenuEl.appendChild(b);
+    block.appendChild(b);
   }
+  // A long list goes into columns rather than down past the window: a group to a column where
+  // the select has groups, otherwise as many columns as it takes to keep each one readable.
+  const groupCount = selMenuEl.querySelectorAll('.sel-menu-group').length;
+  const columns = visible.length <= SEL_MENU_ROWS ? 1
+    : groupCount > 1 ? groupCount
+      : Math.min(4, Math.ceil(visible.length / SEL_MENU_ROWS));
+  selMenuEl.classList.toggle('sel-menu-cols', columns > 1);
+  selMenuEl.style.columnCount = columns > 1 ? String(columns) : '';
+  selMenuEl.style.maxHeight = '';
   selMenuEl.classList.remove('hidden');
-  // Under the select, at least as wide as it; above it when the bottom of the window is nearer.
+  // Under the select, at least as wide as it, or above it when it only fits there. When it fits
+  // neither way it takes the roomier side and scrolls inside the room it has: it used to open
+  // below regardless and run off the bottom of the window.
   const r = select.getBoundingClientRect();
   selMenuEl.style.minWidth = `${Math.ceil(r.width)}px`;
   const mw = selMenuEl.offsetWidth;
   const mh = selMenuEl.offsetHeight;
-  let top = r.bottom + 3;
-  if (top + mh > window.innerHeight - 4 && r.top - mh - 3 >= 4) top = r.top - mh - 3;
+  const below = window.innerHeight - r.bottom - 7;
+  const above = r.top - 7;
+  let top;
+  if (mh <= below) top = r.bottom + 3;
+  else if (mh <= above) top = r.top - mh - 3;
+  else if (below >= above) {
+    selMenuEl.style.maxHeight = `${below}px`;
+    top = r.bottom + 3;
+  } else {
+    selMenuEl.style.maxHeight = `${above}px`;
+    top = 4;
+  }
   selMenuEl.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - mw - 4))}px`;
   selMenuEl.style.top = `${Math.max(4, top)}px`;
   selMenuEl.querySelector('button.on')?.scrollIntoView({ block: 'nearest' });
@@ -11738,7 +11793,22 @@ document.addEventListener('mousedown', (e) => {
   if (selMenuFor && !selMenuEl.contains(e.target)) closeSelMenu();
 }, true);
 
-document.addEventListener('keydown', (e) => {
+// A press ON the list belongs to the select it was opened from. The list hangs off the body so it
+// can sit over anything, which puts it outside every panel - and the panels close on a press
+// outside themselves (the piano roll, the lfo and slice pickers, the arrangement's name picker).
+// Without this, picking a grid value in an open roll closed the roll before the pick landed.
+// Stopped at the window, in the capture phase, so no document listener sees it; the pick itself
+// is the button's click, a separate event this does not touch.
+for (const type of ['pointerdown', 'mousedown']) {
+  window.addEventListener(type, (e) => {
+    if (selMenuFor && selMenuEl.contains(e.target)) e.stopPropagation();
+  }, true);
+}
+
+// At the window and in the capture phase, ahead of every panel's own keys: while the list is
+// open the keys it uses are its own. Escape closing the list must not also close the piano roll
+// or the picker the select sits in, the way a native popup's Escape never reaches the page.
+window.addEventListener('keydown', (e) => {
   const select = e.target instanceof HTMLSelectElement ? e.target : null;
   if (selMenuFor) {
     // The list is open: the keys walk it.
@@ -11746,12 +11816,18 @@ document.addEventListener('keydown', (e) => {
     const at = buttons.findIndex((b) => b.classList.contains('hi'));
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
+      e.stopPropagation();
       const step = e.key === 'ArrowDown' ? 1 : -1;
       selMenuHighlight(buttons[Math.min(buttons.length - 1, Math.max(0, at + step))]);
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
+      e.stopPropagation();
       buttons[at]?.click();
-    } else if (e.key === 'Escape' || e.key === 'Tab') {
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSelMenu();
+    } else if (e.key === 'Tab') {
       closeSelMenu();
     }
     return;
@@ -17199,6 +17275,18 @@ function renderPlugins(plugins) {
 // that would rescan them is not drawn at all.
 if (window.__poptartHostReady) document.getElementById('pluginsSection')?.classList.add('no-scan');
 
+// What the browser build does not have at all - the DJ desk, the sample map, and the organizer's
+// view of the disk - is not drawn there (style.css, .web-build). Each one also refuses at its
+// opener with a line in the console, because a keyboard shortcut reaches past a hidden button:
+// opened anyway, they asked a server the page does not have and one kept retrying for the rest
+// of the session.
+if (window.__poptartHostReady) document.body.classList.add('web-build');
+function desktopOnly(what) {
+  if (!window.__poptartHostReady) return false;
+  logLine(`${what} is part of the desktop app - the browser build does not have it`, true);
+  return true;
+}
+
 async function doScan() {
   logLine('scanning for plugins…');
   // The scan's own progress arrives through /api/status, and nothing is polling it until a
@@ -18211,7 +18299,10 @@ async function exportStore() {
   try {
     const withAudio = document.getElementById('storeExportAudio')?.checked;
     const bundle = await api('GET', withAudio ? '/api/export?audio=1' : '/api/export');
-    const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
+    // In parts, never one string: with audio in it the export can be longer than the longest
+    // string the browser will make (see web/export-file.mjs).
+    const { exportParts } = await import('/web/export-file.mjs');
+    const blob = new Blob(exportParts(bundle), { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `poptart-${new Date().toISOString().slice(0, 10)}.json`;
@@ -18230,7 +18321,8 @@ async function exportStore() {
 async function importStore(file) {
   storeNote.textContent = `reading ${file.name}…`;
   try {
-    const bundle = JSON.parse(await file.text());
+    const { readExport } = await import('/web/export-file.mjs');
+    const bundle = await readExport(file);
     const { written, skipped, audio } = await api('POST', '/api/import', { bundle, overwrite: false });
     const kept = skipped + (audio?.skipped ?? 0);
     storeNote.textContent = `imported ${written}${audio ? ` and ${audio.written} audio file${audio.written === 1 ? '' : 's'}` : ''}${kept ? ` · kept ${kept} already here` : ''}`;
@@ -20482,6 +20574,7 @@ async function packReshuffle() {
 // The sounds tab's "map" button: the pack panel, on its map, on a pack - the first one defined
 // here, or a new one called kit if there is none.
 function openSampleMap() {
+  if (desktopOnly('the sample map')) return;
   if (!packState) {
     const first = packDefs.defsInBuffer()[0]?.id ?? prPrebakePacks[0]?.id;
     if (first != null) openPackById(first);
@@ -24791,6 +24884,7 @@ function askText(message, { label, value = '', confirm = 'ok', problem = null } 
 let preMix = null;
 
 async function openMixMode() {
+  if (desktopOnly('DJ mode')) return;
   // The current song is about to become deck A of a mix. Keep it first: a named song is saved
   // over silently (saving over the open pattern is what saving is), a nameless one gets one
   // three-way offer - "don't save" just means the pre-mix buffer only lives in this browser
@@ -28216,6 +28310,7 @@ function orgSay(text, isError = false) {
 }
 
 function setOrgPane3(mode) {
+  if (mode === 'disk' && desktopOnly('browsing audio files on disk')) return;
   orgPane3 = mode;
   if (mode === 'disk') {
     if (!orgDisk) orgBrowseTo(orgBrowseDir);

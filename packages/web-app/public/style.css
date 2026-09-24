@@ -1966,14 +1966,20 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
-/* The name of the file a sample control is pointed at, in place of a menu of two thousand. */
+/* The name of the file a sample control is pointed at, in place of a menu of two thousand. It
+   carries the select's own chevron: it is a choice, and on a figure's heading, a bare name beside
+   the title did not look like something to click - the Convolver's impulse went unfound. */
 .device-widget .device-file {
   width: 100%;
   font-size: 9px;
-  padding: 1px 0;
+  padding: 1px 16px 1px 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888e99' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 5px center;
+  background-size: 7px 4px;
 }
 
 .device-widget-name {
@@ -2109,6 +2115,14 @@ li.CodeMirror-hint-active {
 /* The browser build has no plugins to scan for - its devices are the catalog, fixed when the page
    was built - so the button that would rescan them is not drawn. */
 .no-scan #scanBtn {
+  display: none;
+}
+
+/* Nor a DJ desk, a sample map, or a disk to browse: the browser build does not draw their
+   buttons (client.js, desktopOnly). */
+.web-build #viewDjBtn,
+.web-build #sampleMapBtn,
+.web-build #orgTabDisk {
   display: none;
 }
 
@@ -2963,6 +2977,16 @@ li.CodeMirror-hint-active {
 
 .sel-menu.hidden {
   display: none;
+}
+
+/* A long list, in columns (openSelMenu sets how many). A group never splits across two. */
+.sel-menu.sel-menu-cols {
+  column-gap: 4px;
+  max-height: none;
+}
+
+.sel-menu-group {
+  break-inside: avoid;
 }
 
 .sel-menu-head {

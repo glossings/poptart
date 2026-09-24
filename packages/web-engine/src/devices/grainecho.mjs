@@ -89,10 +89,21 @@ export class GrainEchoProcessor {
           const time = Math.min(GRAIN_MAX_SEC * 0.9, syncedSeconds(sync, this.bpm, at(params.time, i)));
           const spray = at(params.spray, i) * time * (this.random() * 2 - 1);
           const back = Math.max(0.001, time + spray) * sr;
-          g.len = Math.max(32, Math.round(at(params.size, i) * 0.001 * sr));
-          g.pos = (this.write - back - g.len * 0.5 + this.size * 4) % this.size;
+          let len = Math.max(32, Math.round(at(params.size, i) * 0.001 * sr));
+          const rate = Math.pow(2, (at(params.pitch, i) + at(params.random, i) * (this.random() * 2 - 1)) / 12);
+          // A grain read faster than time passes gains on the write head by (rate - 1) samples
+          // a sample, and one read slower falls behind by (1 - rate). It has to stay inside the
+          // recorded audio for its whole life: start it far enough back that it never reaches
+          // the head, where it would read what was written a whole buffer ago, and not so far
+          // that it runs off the far end. A grain too long to fit either way is shortened.
+          if (rate > 1 && (rate - 1) * len > this.size - 8) len = Math.max(32, Math.floor((this.size - 8) / (rate - 1)));
+          const gains = rate > 1 ? (rate - 1) * len : 0;
+          const loses = rate < 1 ? (1 - rate) * len : 0;
+          const start = Math.min(this.size - 2 - loses, Math.max(2 + gains, back + len * 0.5));
+          g.len = len;
+          g.rate = rate;
+          g.pos = (this.write - start + this.size * 4) % this.size;
           g.at = 0;
-          g.rate = Math.pow(2, (at(params.pitch, i) + at(params.random, i) * (this.random() * 2 - 1)) / 12);
           const pan = (this.random() * 2 - 1) * at(params.spread, i);
           g.l = Math.cos(((pan + 1) * Math.PI) / 4) * Math.SQRT2;
           g.r = Math.sin(((pan + 1) * Math.PI) / 4) * Math.SQRT2;
@@ -119,8 +130,12 @@ export class GrainEchoProcessor {
         if (++g.at >= g.len) g.on = false;
       }
       const fb = at(params.feedback, i);
-      this.bufL[this.write] = l + Math.tanh(wetL * fb);
-      this.bufR[this.write] = r + Math.tanh(wetR * fb);
+      // A number that cannot be played is stored as silence: kept, it would come back round
+      // the feedback for as long as the device lives.
+      const keepL = l + Math.tanh(wetL * fb);
+      const keepR = r + Math.tanh(wetR * fb);
+      this.bufL[this.write] = Number.isFinite(keepL) ? keepL : 0;
+      this.bufR[this.write] = Number.isFinite(keepR) ? keepR : 0;
       this.write = (this.write + 1) % this.size;
       const mix = at(params.mix, i);
       outL[i] = l + (wetL - l) * mix;

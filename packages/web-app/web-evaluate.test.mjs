@@ -303,3 +303,18 @@ test('a seeded choice is the same performance every time the same buffer is eval
   assert.deepEqual(first, second, 'stop and replay has to be the same take, not a new one');
   shutdown(rig);
 });
+
+test('an evaluation that fails leaves the key the playing tracks are in', () => {
+  // Every evaluation starts with no key, so a key the buffer no longer sets does not linger - but
+  // one that throws applies nothing, and that includes clearing the key.
+  const rig = makeRig();
+  try {
+    rig.evaluator.evaluate('setscale("d:minor")\n\nlead: n("0 2 4").synth("Wavetable")');
+    const key = patternCore.globalScale();
+    assert.ok(key, 'the buffer set a key');
+    assert.throws(() => rig.evaluator.evaluate('setscale("e:major")\n\nlead: n("0 2 4").synth('));
+    assert.deepEqual(patternCore.globalScale(), key, 'still the key the tracks are playing in');
+  } finally {
+    shutdown(rig);
+  }
+});

@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createSampleStore } from './public/web/samples.mjs';
+import { createSampleStore, RETRY_FAILED_MS } from './public/web/samples.mjs';
 
 const PACK = { id: 'pt_piano', title: 'Piano', kind: 'melodic', files: [{ file: 'a.wav', rootNote: 60 }, { file: 'b.wav' }] };
 const urlFor = (id, file) => `https://cdn.invalid/${id}/${file}`;
@@ -67,12 +67,45 @@ test('a pack whose files cannot be fetched is asked for once, not on every note'
   const { samples, asked, warnings } = rig({ fail: true });
   samples.register([PACK], urlFor);
   samples.get('pt_piano', 0);
-  assert.ok(await until(() => warnings.length >= PACK.files.length));
+  assert.ok(await until(() => warnings.length >= 1));
   for (let i = 0; i < 5; i++) samples.get('pt_piano', 0);
   await until(() => false, 5);
   assert.equal(asked.length, PACK.files.length, 'the failure is remembered');
-  assert.match(warnings[0], /pt_piano:0 \(a\.wav\)/);
+  assert.equal(warnings.length, 1, 'one line for the pack, not one per file');
+  assert.match(warnings[0], /pt_piano did not load - none of its 2 files loaded - 404/);
   assert.equal(samples.countOf('pt_piano'), 0);
+  // Not downloaded: nothing came down, and the sounds tab must not say it did.
+  assert.equal(samples.has('pt_piano'), false);
+  assert.match(samples.problems().pt_piano, /none of its 2 files/);
+});
+
+test('a pack that failed is tried again once the retry wait has passed', async () => {
+  const { samples, asked, warnings } = rig({ fail: true });
+  samples.register([PACK], urlFor);
+  samples.get('pt_piano', 0);
+  assert.ok(await until(() => warnings.length >= 1));
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + RETRY_FAILED_MS + 1;
+    samples.get('pt_piano', 0);
+    assert.ok(await until(() => asked.length === 2 * PACK.files.length), 'the network may be back');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('a pack with SOME files missing still loads, and names the ones that did not', async () => {
+  const warnings = [];
+  const context = { decodeAudioData: async (bytes) => ({ length: bytes.byteLength }) };
+  const fetchImpl = async (url) => (url.endsWith('b.wav')
+    ? { ok: false, status: 404, statusText: 'Not Found' }
+    : { ok: true, arrayBuffer: async () => new ArrayBuffer(4) });
+  const samples = createSampleStore({ context, fetchImpl, warn: (line) => warnings.push(line) });
+  samples.register([PACK], urlFor);
+  samples.get('pt_piano', 0);
+  assert.ok(await until(() => samples.has('pt_piano')));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /pt_piano:1 \(b\.wav\)/);
 });
 
 // ---- the files somebody adds from the page ----------------------------------------------------

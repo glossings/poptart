@@ -59,7 +59,7 @@ class DriveChannel {
     this.detector.setTimes(5, 80);
   }
 
-  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); }
+  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); this.detector.reset(); }
 }
 
 export class OverdriveProcessor {
@@ -102,7 +102,7 @@ export class OverdriveProcessor {
         const mix = at(params.mix, i);
         out[i] = x + (wet - x) * mix;
       }
-      if (!Number.isFinite(out[count - 1])) c.reset();
+      if (!Number.isFinite(out[count - 1]) || !Number.isFinite(c.detector.env)) c.reset();
     }
   }
 }

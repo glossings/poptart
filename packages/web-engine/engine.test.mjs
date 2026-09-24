@@ -310,7 +310,8 @@ test('a bus send is built once and its level moved after that', () => {
   const track = engine.tracks.get('t1');
   const send = track.sends.get('reverb');
   assert.ok(send, 'the send should exist');
-  assert.ok(send.gain.rampedTo(0.4));
+  assert.equal(send.gain.value, 0.4, 'born at its level');
+  assert.equal(send.gain.calls.length, 0, 'not at unity and ramped down afterwards');
   assert.ok(track.panner.reaches(engine.buses.get('reverb')));
 
   engine.setBusSendAmount('t1', 0, 0.9, 0);

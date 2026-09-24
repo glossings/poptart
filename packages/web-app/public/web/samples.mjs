@@ -23,6 +23,9 @@
 /** Where a pack's audio is held once it has been decoded, keyed "<pack>/<index>". */
 const keyOf = (pack, index) => `${pack}/${index}`;
 
+/** How long a pack that failed to load is left alone before a note may try it again. */
+export const RETRY_FAILED_MS = 60_000;
+
 export function createSampleStore({
   context,
   store = null,
@@ -33,7 +36,7 @@ export function createSampleStore({
   const decoded = new Map();     // "<pack>/<index>" -> { buffer, rootNote }
   const manifests = new Map();   // pack id -> its manifest
   const loading = new Map();     // pack id -> the promise that is loading it, so two asks are one
-  const failed = new Map();      // pack id -> why, so a broken pack is reported once
+  const failed = new Map();      // pack id -> { why, at }, so a broken pack is reported once
   const known = new Map();       // pack id -> { manifest, urlFor } for a pack that loads on demand
 
   /** The bytes of one file, from the cache if it is there and the network if it is not. */
@@ -62,6 +65,7 @@ export function createSampleStore({
    */
   async function loadPack(manifest, { urlFor }) {
     let index = 0;
+    const misses = [];
     for (const file of manifest.files) {
       try {
         const bytes = await bytesFor(manifest.id, file.file, urlFor(manifest.id, file.file));
@@ -76,11 +80,29 @@ export function createSampleStore({
           loop: file.loop && Number.isFinite(file.loop.start) && file.loop.end > file.loop.start ? { start: file.loop.start, end: file.loop.end } : null,
         });
       } catch (err) {
-        warn(`[samples] ${manifest.id}:${index} (${file.file}) did not load - ${err.message}`);
+        misses.push({ index, file: file.file, why: err.message });
       }
       index += 1;
     }
+    // Nothing at all came down: that is the pack failing, not a few bad files in it, and it is
+    // recorded as that - so it is reported once, is not shown as downloaded, and can be tried
+    // again later (see ensure). Recorded as loaded, it said "downloaded" with nothing in it and
+    // was never asked for again.
+    if (manifest.files.length && misses.length === manifest.files.length) {
+      throw new Error(`none of its ${manifest.files.length} files loaded - ${misses[0].why}`);
+    }
+    for (const m of misses) warn(`[samples] ${manifest.id}:${m.index} (${m.file}) did not load - ${m.why}`);
     manifests.set(manifest.id, manifest);
+  }
+
+  /**
+   * Whether a pack failed too recently to ask for again. Not forever: a failure is usually the
+   * network, and a network comes back, so after RETRY_FAILED_MS the next note that names the
+   * pack tries once more. Until then its notes are skipped rather than each starting a download.
+   */
+  function recentlyFailed(pack) {
+    const f = failed.get(pack);
+    return !!f && Date.now() - f.at < RETRY_FAILED_MS;
   }
 
   /**
@@ -91,9 +113,9 @@ export function createSampleStore({
     if (manifests.has(manifest.id)) return Promise.resolve(true);
     if (loading.has(manifest.id)) return loading.get(manifest.id);
     const work = loadPack(manifest, { urlFor })
-      .then(() => true)
+      .then(() => { failed.delete(manifest.id); return true; })
       .catch((err) => {
-        failed.set(manifest.id, err.message);
+        failed.set(manifest.id, { why: err.message, at: Date.now() });
         warn(`[samples] ${manifest.id} did not load - ${err.message}`);
         return false;
       })
@@ -361,8 +383,8 @@ export function createSampleStore({
      * a wavetable is never played as a sample, it is read from its bytes and cut into frames.
      *
      * A registered pack that is not in memory is started here and answered null this once. A
-     * pack that already failed is not asked for again: with no network, every note of a pattern
-     * would otherwise be one more download attempt.
+     * pack that failed is not asked for again until RETRY_FAILED_MS has passed: with no network,
+     * every note of a pattern would otherwise be one more download attempt.
      */
     /**
      * A file in one of the added packs by its name, with or without the .wav - how sr("bass")
@@ -392,7 +414,7 @@ export function createSampleStore({
       const held = decoded.get(keyOf(pack, index));
       if (held) return held;
       const lazy = known.get(pack);
-      if (lazy && !manifests.has(pack) && !failed.has(pack)) ensure(lazy.manifest, lazy.urlFor);
+      if (lazy && !manifests.has(pack) && !recentlyFailed(pack)) ensure(lazy.manifest, lazy.urlFor);
       return null;
     },
     ensure,
@@ -410,7 +432,7 @@ export function createSampleStore({
     register,
     put,
     loaded: () => [...manifests.keys()],
-    problems: () => Object.fromEntries(failed),
+    problems: () => Object.fromEntries([...failed].map(([id, f]) => [id, f.why])),
     /** Whether a pack is in memory, for the browser's "downloaded" mark. */
     has: (id) => manifests.has(id),
     /** How many of a pack's files actually decoded, which is not always all of them. */
@@ -433,6 +455,18 @@ export function createSampleStore({
  * saved song using that pack plays.
  */
 export function registerPacks(patternCore, manifests) {
+  // Remembered, because the layer below is also the one the prebake clears wholesale every time
+  // it runs (see restorePacks) - and it runs at every boot, pin and unpin.
+  let known = registered.get(patternCore);
+  if (!known) registered.set(patternCore, known = new Map());
+  for (const manifest of manifests) known.set(manifest.id, manifest);
+  filePacks(patternCore, manifests);
+}
+
+/** Every pack registerPacks has been handed, per pattern-core instance, by id. */
+const registered = new WeakMap();
+
+function filePacks(patternCore, manifests) {
   // In the library layer, the one the desktop's prebake fills: every evaluation clears the
   // buffer layer before it refills it from the buffer, and a pack filed there would be gone by
   // the first note of the first pattern to name it.
@@ -444,4 +478,18 @@ export function registerPacks(patternCore, manifests) {
   } finally {
     patternCore.setRollLayer('buffer');
   }
+}
+
+/**
+ * Files every registered pack again, after the prebake has cleared its layer.
+ *
+ * On the desktop a pack is a folder the engine finds by name, so clearing the prebake's
+ * definitions leaves the shipped sounds alone. Here the shipped, library and added packs are
+ * definitions in that same layer, and without this every prebake run - which is every boot -
+ * emptied the pack list the editor completes and browses from. Run before the prebake's own
+ * code, so a pack somebody defines under the same name still wins, as it would on the desktop.
+ */
+export function restorePacks(patternCore) {
+  const known = registered.get(patternCore);
+  if (known?.size) filePacks(patternCore, [...known.values()]);
 }

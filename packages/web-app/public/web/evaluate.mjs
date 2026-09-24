@@ -212,7 +212,9 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     patternCore.setDefOwner('a');
     const definitionsBefore = patternCore.clearRolls('buffer', 'a');
     // Enter with no key in force: the buffer's own setscale is the only thing that sets one, or
-    // the last song's key leaks into a song that never asked for one.
+    // the last song's key leaks into a song that never asked for one. Kept, for an evaluation
+    // that fails to put back: the tracks still playing are still in that key.
+    const scaleBefore = patternCore.globalScale();
     patternCore.setGlobalScale(null);
 
     let sawSetbpm = false;
@@ -302,6 +304,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       patternCore.setCopyResolver(null);
       arrangeClips = clipsBefore;
       patternCore.restoreRolls(definitionsBefore, 'buffer', 'a');
+      patternCore.setGlobalScale(scaleBefore);
       throw err;
     }
     patternCore.setCopyResolver(null);

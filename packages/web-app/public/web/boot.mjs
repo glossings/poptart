@@ -21,7 +21,7 @@ import { memoryStore, openStore } from './kv.mjs';
 import { createBlobs } from './blobs.mjs';
 import { createStorage } from './storage.mjs';
 import { createEvaluator } from './evaluate.mjs';
-import { createSampleStore, registerPacks } from './samples.mjs';
+import { createSampleStore, registerPacks, restorePacks } from './samples.mjs';
 import { createHost } from './host.mjs';
 import { createAudioOutputs } from './audio-output.mjs';
 import { createWebMidi } from './midi.mjs';
@@ -74,6 +74,9 @@ export async function readBuiltInPacks(fetchImpl) {
   }
   return out;
 }
+
+/** How long boot waits for the library index before starting without it (see boot()). */
+export const LIBRARY_WAIT_MS = 3000;
 
 /**
  * The sourced packs, from the index published beside them.
@@ -168,11 +171,32 @@ export async function boot({
   engine.setTempo(transport.cps * 240, transport.secAt(0));
 
   // The sourced packs are registered, not loaded: the first pattern to name one starts it.
+  //
+  // Waited for, but only briefly. The index is on a CDN, and a network that drops the connection
+  // rather than refusing it - a filter, a captive portal - leaves the fetch hanging for as long
+  // as the browser's own connect timeout, a minute or more, with the whole editor waiting behind
+  // it. Past LIBRARY_WAIT_MS the page comes up on the built-in packs and the library joins when
+  // it answers; a pack registered late is registered all the same (registerPacks remembers it
+  // across prebake runs).
   const base = packBase ?? webEngine.DEFAULT_PACK_BASE;
-  const library = await readLibrary(fetchImpl, base, webEngine.validateIndex);
-  registerPacks(patternCore, library.packs);
-  library.urlFor = (id, file) => webEngine.fileUrl(base, id, file);
-  samples.register(library.packs, library.urlFor);
+  // One object the host keeps and reads at every call, filled in whenever the index answers.
+  const library = { packs: [], problems: [], urlFor: (id, file) => webEngine.fileUrl(base, id, file) };
+  const addLibrary = (read) => {
+    library.packs = read.packs;
+    library.problems = read.problems;
+    registerPacks(patternCore, read.packs);
+    samples.register(read.packs, library.urlFor);
+  };
+  const libraryRead = readLibrary(fetchImpl, base, webEngine.validateIndex);
+  const early = await Promise.race([libraryRead, new Promise((r) => setTimeout(() => r(null), LIBRARY_WAIT_MS))]);
+  if (early) addLibrary(early);
+  else {
+    say('the sample library is taking a while to answer - starting on the built-in packs, the rest join when it does');
+    libraryRead.then((late) => {
+      addLibrary(late);
+      if (late.packs.length) say(`sample library: ${late.packs.length} packs`);
+    });
+  }
 
   // The output device chosen last time, if it is still plugged in. Not awaited past a moment:
   // a device that takes its time to answer should not hold up the editor.
@@ -224,6 +248,7 @@ export async function boot({
       pinnedDefs: globalThis.poptartPinnedDefs,
       dehydrate: (code) => storage.dehydrateOnLoad(code),
       log: say,
+      afterClear: () => restorePacks(patternCore),
     });
     for (const line of await prebake.run()) warn(`prebake ${line}`);
   } catch (err) {

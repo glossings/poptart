@@ -1,12 +1,20 @@
 // The Stutter effect: catches a slice of what is playing and repeats it on the grid.
 //
-// The incoming audio is written into a buffer without pause. Every interval on the transport's
-// clock the effect may - with the chance set - grab the slice that just went by, one grid
-// division long, and play it over and over for the number of repeats, each one quieter and
+// The incoming audio is written into a buffer. Every interval on the transport's clock the effect
+// may - with the chance set - grab the slice that just went by, one grid division long, and play
+// it over and over for the number of repeats, each one quieter and
 // lower than the last if asked. The chance is decided by a hash of the beat it falls on, so a
 // song stutters in the same places every time it is played. While a repeat sounds the original
 // is held at the dry level - cut, by default, so the repeats take its place - and the repeats
 // themselves at the wet level.
+//
+// The caught slice is frozen for as long as it repeats. Recording carries on around it, so a
+// catch made later - even one that interrupts a repeat - is still of what just went by, but the
+// write head never enters the slice: a long grid times many repeats would otherwise have it
+// overwrite what is playing, and the later repeats would be the live input instead. If the head
+// comes all the way round to the slice it waits there, and once the repeat ends the buffer is
+// short of fresh audio until a whole grid division has been recorded again; a catch that falls
+// in that gap is let go rather than stitched together from audio seconds apart.
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
@@ -69,6 +77,9 @@ export class StutterProcessor {
     this.bufR = new Float32Array(size);
     this.size = size;
     this.write = 0;
+    // How much contiguous, current audio sits behind the write head. The buffer starts out as
+    // silence, which counts: it is what went by before anything played.
+    this.fresh = size;
     this.bpm = 120;
     this.anchorSec = 0;
     this.lastInterval = -1;
@@ -101,15 +112,23 @@ export class StutterProcessor {
     for (let i = 0; i < count; i++) {
       const l = inL ? inL[i] : 0;
       const r = inR ? inR[i] : 0;
-      this.bufL[this.write] = l;
-      this.bufR[this.write] = r;
+      // Recording stops where the slice being repeated begins, so it is never written over.
+      const recording = !(this.active && this.write === this.start);
+      if (recording) {
+        // A number that cannot be played is stored as silence, or it would be repeated.
+        this.bufL[this.write] = Number.isFinite(l) ? l : 0;
+        this.bufR[this.write] = Number.isFinite(r) ? r : 0;
+      } else {
+        this.fresh = 0;
+      }
 
       // A new interval on the clock: maybe catch the slice that just went by.
       const t = (timeSec ?? this.frames / sr) - this.anchorSec;
       const beat = Math.floor(t / interval);
       if (beat !== this.lastInterval) {
-        if (this.lastInterval >= 0 && hashChance(beat, seed) < at(params.chance, i)) {
-          this.length = Math.max(1, Math.round(grid * sr));
+        const length = Math.max(1, Math.round(grid * sr));
+        if (this.lastInterval >= 0 && this.fresh >= length && hashChance(beat, seed) < at(params.chance, i)) {
+          this.length = length;
           this.start = (this.write - this.length + this.size) % this.size;
           this.pos = 0;
           this.count = 0;
@@ -145,7 +164,10 @@ export class StutterProcessor {
           if (this.count >= this.total) this.active = false;
         }
       }
-      this.write = (this.write + 1) % this.size;
+      if (recording) {
+        this.write = (this.write + 1) % this.size;
+        if (this.fresh < this.size) this.fresh += 1;
+      }
       // The original at its own level only while a repeat is sounding: between repeats the
       // track plays as it is, whatever the dry control says.
       const dry = playing ? at(params.dry, i) : 1;

@@ -133,6 +133,23 @@ function defineParam(deviceId, spec, seen) {
   } else if (spec.capacity !== undefined) {
     fail(deviceId, `param "${id}": only an enum has a capacity`);
   }
+  // Headings over runs of an enum's options - `[{ label, from }]`, `from` the index the run starts
+  // at - for a list long enough that one column of it is not something to read. The panel's
+  // menu draws a heading per group, a column each.
+  let optionGroups = null;
+  if (spec.optionGroups !== undefined) {
+    if (!options) fail(deviceId, `param "${id}": only an enum has option groups`);
+    const groups = Array.isArray(spec.optionGroups) ? spec.optionGroups : [];
+    let last = -1;
+    for (const g of groups) {
+      if (!String(g?.label ?? '').trim() || !Number.isInteger(g?.from) || g.from <= last || g.from >= options.length) {
+        fail(deviceId, `param "${id}": option groups need a label each and rising start indexes inside the list`);
+      }
+      last = g.from;
+    }
+    if (!groups.length || groups[0].from !== 0) fail(deviceId, `param "${id}": the first option group starts at 0`);
+    optionGroups = Object.freeze(groups.map((g) => Object.freeze({ label: String(g.label), from: g.from })));
+  }
   const min = options ? 0 : spec.min;
   const max = options ? capacity - 1 : spec.max;
   if (!isFiniteNumber(min) || !isFiniteNumber(max)) fail(deviceId, `param "${id}" needs numeric min and max`);
@@ -197,6 +214,7 @@ function defineParam(deviceId, spec, seen) {
     decimals,
     step,
     options: options ? Object.freeze(options) : null,
+    optionGroups,
     capacity,
     takes,
     sampleAs,

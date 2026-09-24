@@ -38,14 +38,12 @@ function opParams(n) {
     { id: `${p}.fixed`, name: `Op ${n} Fixed`, min: 0, max: 1, default: 0, ui: 'toggle', rate: 'k', group,
       description: 'Ignore the note: the ratio times a hundred Hertz, whatever is played.' },
     { id: `${p}.wave`, name: `Op ${n} Wave`, default: 0, options: [...WAVES], rate: 'k', group },
-    { id: `${p}.feedback`, name: `Op ${n} Feedback`, min: 0, max: 1, default: 0, group,
-      description: 'The operator modulating itself, which is how a sine turns into a saw.' },
     opSeconds(`${p}.attack`, `Op ${n} Attack`, 0.005, group),
     opSeconds(`${p}.decay`, `Op ${n} Decay`, 0.3, group),
     { id: `${p}.sustain`, name: `Op ${n} Sustain`, min: 0, max: 1, default: 0.7, group },
     opSeconds(`${p}.release`, `Op ${n} Release`, 0.3, group),
-    { id: `${p}.velocity`, name: `Op ${n} Velocity`, min: 0, max: 1, default: 0.5, group,
-      description: 'How much the note\'s velocity scales this operator. On a modulator that is brightness by velocity.' },
+    { id: `${p}.velocity`, name: `Op ${n} Vel > Level`, min: 0, max: 1, default: 0.5, group,
+      description: 'How much the note\'s velocity sets this operator\'s level. At 0 every note plays it at full level; at 1 its level follows velocity all the way, so a soft note barely sounds it. On an operator that modulates others, that makes soft notes darker and hard ones brighter.' },
   ];
 }
 
@@ -55,7 +53,9 @@ function matrixParams() {
     for (let to = 1; to <= OPS; to++) {
       out.push({
         id: `mod.${from}.${to}`, name: `Mod ${from} to ${to}`, min: 0, max: 1, default: 0, group: 'Matrix',
-        description: `How much operator ${from} modulates operator ${to}'s phase.`,
+        description: from === to
+          ? `Operator ${from}'s feedback: how much it modulates its own phase, which is how a sine turns into a saw.`
+          : `How much operator ${from} modulates operator ${to}'s phase.`,
       });
     }
   }
@@ -195,7 +195,6 @@ class FmParams {
     // The three that are read per sample, and so are ramped across the block.
     this.matrix = new Ramped(OPS * OPS);
     this.level = new Ramped(OPS);
-    this.feedback = new Ramped(OPS);
     this.depth = new Ramped(1, 0.5);
     this.glide = 0;
     this.out = 0.6;
@@ -206,7 +205,6 @@ class FmParams {
   beginBlock(samples) {
     this.matrix.begin(samples);
     this.level.begin(samples);
-    this.feedback.begin(samples);
     this.depth.begin(samples);
   }
 
@@ -214,7 +212,6 @@ class FmParams {
   commitBlock() {
     this.matrix.commit();
     this.level.commit();
-    this.feedback.commit();
     this.depth.commit();
   }
 }
@@ -229,7 +226,7 @@ class FmVoice {
     // already spent.
     this.mtx = new Float64Array(OPS * OPS);
     this.lvl = new Float64Array(OPS);
-    this.fbk = new Float64Array(OPS);
+    this.inc = new Float64Array(OPS);    // each operator's phase step this block
     this.envs = Array.from({ length: OPS }, () => new Adsr(sampleRate));
     this.note = -1;
     this.velocity = 1;
@@ -266,12 +263,12 @@ class FmVoice {
     } else {
       this.currentHz = this.targetHz;
     }
-    const inc = new Float64Array(OPS);
+    const inc = this.inc;
     for (let o = 0; o < OPS; o++) {
       // A fixed operator holds its frequency; the rest follow the note, bent.
       const base = p.fixed[o] ? 100 : this.currentHz * (p.bend ? Math.pow(2, p.bend / 12) : 1);
       inc[o] = (base * p.ratio[o] * Math.pow(2, p.detune[o] / 1200)) / this.sampleRate;
-      this.envs[o].set({ attack: p.attack[o], decay: p.decay[o], sustain: p.sustain[o], release: p.release[o], curve: -4 });
+      this.envs[o].setStages(p.attack[o], p.decay[o], p.sustain[o], p.release[o], -4, -4, -4);
     }
     const vel = this.velocity;
 
@@ -280,14 +277,11 @@ class FmVoice {
     // modulated - so the arrays below are the parameters themselves and this costs nothing.
     const mMoving = p.matrix.moving;
     const lMoving = p.level.moving;
-    const fMoving = p.feedback.moving;
     const dMoving = p.depth.moving.length > 0;
     const matrix = mMoving.length ? this.mtx : p.matrix.value;
     const level = lMoving.length ? this.lvl : p.level.value;
-    const feedback = fMoving.length ? this.fbk : p.feedback.value;
     if (mMoving.length) matrix.set(p.matrix.value);
     if (lMoving.length) level.set(p.level.value);
-    if (fMoving.length) feedback.set(p.feedback.value);
 
     for (let i = 0; i < count; i++) {
       // Where this sample sits in the WHOLE block, not in this piece of it: the block is cut at
@@ -295,15 +289,14 @@ class FmVoice {
       const t = offset + i;
       for (let r = 0; r < mMoving.length; r++) matrix[mMoving[r]] = p.matrix.at(mMoving[r], t);
       for (let r = 0; r < lMoving.length; r++) level[lMoving[r]] = p.level.at(lMoving[r], t);
-      for (let r = 0; r < fMoving.length; r++) feedback[fMoving[r]] = p.feedback.at(fMoving[r], t);
       const depth = (dMoving ? p.depth.at(0, t) : p.depth.value[0]) * 4;
 
       let sum = 0;
       for (let o = 0; o < OPS; o++) {
         const env = this.envs[o].next() * (1 - p.velocity[o] + p.velocity[o] * vel);
         // The phase this operator reads: its own, plus everything modulating it from the last
-        // sample, plus its own feedback.
-        let mod = feedback[o] * this.last[o] * 0.5;
+        // sample - itself included, which is the matrix's diagonal: an operator's feedback.
+        let mod = 0;
         const row = o;
         for (let from = 0; from < OPS; from++) {
           const amount = matrix[from * OPS + row];
@@ -348,7 +341,6 @@ export class FmSynth {
       // The ramped ones are AIMED rather than set, at where the block ends: a signal driving one
       // arrives as a whole block of values, and the last of them is where it has got to.
       p.level.aim(o, last(values[`${id}.level`]));
-      p.feedback.aim(o, last(values[`${id}.feedback`]));
       const fixed = num(values[`${id}.fixed`]); if (Number.isFinite(fixed)) p.fixed[o] = fixed >= 0.5 ? 1 : 0;
       const w = num(values[`${id}.wave`]); if (Number.isFinite(w)) p.wave[o] = Math.round(w);
       for (let t = 0; t < OPS; t++) p.matrix.aim(o * OPS + t, last(values[`mod.${o + 1}.${t + 1}`]));

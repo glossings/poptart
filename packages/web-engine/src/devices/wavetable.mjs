@@ -20,7 +20,7 @@
 // draws its response - and it costs nothing to put one there.
 
 import { defineDevice } from '../descriptor.mjs';
-import { WARP_MODES } from '../dsp/warp.mjs';
+import { PHASE_WARPS, WARP_MODES } from '../dsp/warp.mjs';
 import { MAX_UNISON } from '../dsp/oscillator.mjs';
 import { VoiceParams, WavetableVoice, midiToHz } from '../dsp/voice.mjs';
 import { buildTable, powerOfTwoAtLeast, resampleFrame, sharedBuiltInTables, tableFromMips } from '../dsp/tables.mjs';
@@ -48,6 +48,7 @@ function oscParams(n, group, levelDefault) {
     { id: `${p}.position`, name: `Osc ${n} Position`, min: 0, max: 1, default: 0, group,
       description: 'Where in the table stack this oscillator reads. Sweeping it morphs one waveform into the next.' },
     { id: `${p}.warpmode`, name: `Osc ${n} Warp Mode`, default: 0, options: [...WARP_MODES], rate: 'k', group,
+      optionGroups: [{ label: 'phase', from: 0 }, { label: 'cross-mod', from: PHASE_WARPS.length }],
       description: 'How the warp bends this oscillator. The phase warps reshape the cycle; the fm, pm and ring modes bend it with another source in the voice - the other oscillator, the sub, the noise - and the warp amount is their depth.' },
     { id: `${p}.warp`, name: `Osc ${n} Warp`, min: 0, max: 1, default: 0, group,
       description: 'How hard the warp mode bends the phase, or the depth of a cross-modulation. Zero is neutral in every mode.' },

@@ -1164,6 +1164,16 @@ export class Scheduler {
       this.engine.clearMidiNotes(this.trackId);
       this._midiRouted = false;
     }
+    // The same goes for a head MIDI route, midi("a"): another track's notes, played into this
+    // one's instrument engine-side. Left up, a muted or deleted b: midi("a").synth(...) went on
+    // playing a's notes. Clearing it releases what it holds, and setPattern sends it again on the
+    // evaluation that brings the track back. A head AUDIO route stays, for the reason the bus
+    // sends below do: it is a group row's whole sound, and cutting it cuts the ring-out.
+    if (this._prevInputSource?.io === 'midi' && typeof this.engine.clearInputSource === 'function') {
+      this.engine.clearInputSource(this.trackId);
+      this._prevInputSource = null;
+      this._sentInputRoute = null;
+    }
     // Bus sends stay up. A group member plays nothing directly - its whole sound goes through its
     // send into the group's bus - and clearing that send here swapped the send's output bus on
     // one sample: the hit that was ringing out simply vanished from the group, a click on every

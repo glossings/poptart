@@ -90,3 +90,23 @@ test('a dry mix passes the signal through, and nothing it renders is out of rang
     }
   }
 });
+
+test('the top of the rate range holds nothing, at every sample rate', () => {
+  // A hold at 24 kHz is not the top of anything: at 48 kHz it holds every other sample, at 44.1
+  // kHz it holds some samples and not others, and at 96 kHz four at a time. The top of the
+  // range, which is also the default, takes every sample as it comes - only the bits apply.
+  for (const rate of [44100, 48000, 96000]) {
+    const fx = new CrushProcessor(rate);
+    const params = defaultValues(CRUSH);
+    const levels = Math.pow(2, params.bits - 1);
+    const input = Float32Array.from({ length: N }, (_, i) => Math.sin((2 * Math.PI * 1234 * i) / rate) * 0.8);
+    const out = new Float32Array(N);
+    for (let at = 0; at < N; at += 128) {
+      fx.process([input.subarray(at, at + 128)], [out.subarray(at, at + 128)], 128, params);
+    }
+    for (let i = 0; i < N; i++) {
+      const expected = Math.fround(Math.round(input[i] * levels) / levels);
+      assert.equal(out[i], expected, `at ${rate} Hz, sample ${i} was held rather than taken`);
+    }
+  }
+});

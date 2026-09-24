@@ -64,6 +64,10 @@ class MappedEngine {
     this.mappings = loadMappings();
     this.chains = new Map(); // trackId -> [instrument, ...fx plugin names], set on every eval
     this.resolveTrack = null; // label -> engine track id, installed by the server (setTrackResolver)
+    // Where a userland mistake this layer notices is reported: the editor console, installed by
+    // the server. Unset (tests, scripts) means say nothing.
+    this.warn = null;
+    this._warnedWords = new Set(); // "track|slot|name" already reported, cleared on every eval
 
     // A capability the wrapped engine does not have must not LOOK like one it has.
     //
@@ -108,6 +112,9 @@ class MappedEngine {
   setChain(trackId, chain) {
     this.chains.set(trackId, chain);
     this.mappings = loadMappings();
+    // Said once per evaluation rather than once per session: a word fixed and then written
+    // again is a new mistake, and the scheduler sends a held value on every step.
+    for (const key of this._warnedWords) if (key.startsWith(`${trackId}|`)) this._warnedWords.delete(key);
   }
 
   removeChain(trackId) {
@@ -136,7 +143,19 @@ class MappedEngine {
     // Only a NUMBER is converted. The scheduler passes strings through now (an enum label, which
     // the browser build's devices take), and a word run through toNormalized comes back NaN -
     // which is a number, so it would sail past the engine's own type guard and be sent to sclang.
-    // Handed on as it stands instead, for the engine to drop and name.
+    // A plugin parameter is a number, so a word can only be a mistake here - the engine drops
+    // it, and this says so on the console instead of the track quietly ignoring the line.
+    if (typeof value === 'string') {
+      const key = `${trackId}|${slot}|${name}`;
+      if (!this._warnedWords.has(key)) {
+        this._warnedWords.add(key);
+        const plugin = this.chains.get(trackId)?.[slot];
+        this.warn?.(
+          `[param] ${trackId}: "${name}"${plugin ? ` on ${plugin}` : ''} was given the word ${JSON.stringify(value)}. `
+          + 'A plugin parameter takes a number - a 0 to 1 position, or real units where a mapping file gives them - so it is left where it was.',
+        );
+      }
+    }
     const mapped = spec && typeof value === 'number' ? toNormalized(value, spec) : value;
     this.engine.setParam(trackId, slot, name, mapped, targetTime);
   }

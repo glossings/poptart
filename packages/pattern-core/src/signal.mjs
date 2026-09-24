@@ -1100,10 +1100,10 @@ export class Sig {
     // An audio connection has no values to operate on - it samples to null - so anything but the
     // gain and offset .mul()/.add() carry would quietly do nothing. Saying so is the whole point:
     // silently accepting `.round()` here is how somebody spends an afternoon on a modulation that
-    // was never connected.
+    // was never connected. Said, not thrown: the connection still plays, just without this.
     if (this._isBareAudioHandle()) {
-      throw new Error(
-        `[signal] .${op}() is not something an audio connection can do. `
+      return this._audioRefuse(
+        `[signal] .${op}() is not something an audio connection can do, so it is left out. `
         + 'Only a constant gain (.mul) and offset (.add) ride on one.',
       );
     }
@@ -1121,10 +1121,10 @@ export class Sig {
     // An audio connection has no values to operate on - it samples to null - so anything but the
     // gain and offset .mul()/.add() carry would quietly do nothing. Saying so is the whole point:
     // silently accepting `.round()` here is how somebody spends an afternoon on a modulation that
-    // was never connected.
+    // was never connected. Said, not thrown: the connection still plays, just without this.
     if (this._isBareAudioHandle()) {
-      throw new Error(
-        `[signal] .${op}() is not something an audio connection can do. `
+      return this._audioRefuse(
+        `[signal] .${op}() is not something an audio connection can do, so it is left out. `
         + 'Only a constant gain (.mul) and offset (.add) ride on one.',
       );
     }
@@ -1518,13 +1518,13 @@ export class Sig {
     const src = this.inputSource;
     const where = `audio(${JSON.stringify(src.name)})`;
     if (xs.length !== 1) {
-      throw new Error(`[signal] .${op}() on ${where} takes one number - it is a connection, not a pattern`);
+      return this._audioRefuse(`[signal] .${op}() on ${where} takes one number - it is a connection, not a pattern - so it is left out`);
     }
     const x = xs[0];
     const k = typeof x === 'number' ? x : constantOf(x);
     if (typeof k !== 'number' || !Number.isFinite(k)) {
-      throw new Error(
-        `[signal] .${op}() on ${where} needs a plain number. An audio signal patched into a parameter is a connection, `
+      return this._audioRefuse(
+        `[signal] .${op}() on ${where} needs a plain number, so it is left out. An audio signal patched into a parameter is a connection, `
         + 'so only a constant gain (.mul) and offset (.add) can ride on it.',
       );
     }
@@ -1532,12 +1532,22 @@ export class Sig {
     let offset = src.offset ?? 0;
     if (op === 'mul') { gain *= k; offset *= k; }
     else if (op === 'div') {
-      if (k === 0) throw new Error(`[signal] .div(0) on ${where}`);
+      if (k === 0) return this._audioRefuse(`[signal] .div(0) on ${where} is left out`);
       gain /= k; offset /= k;
     } else if (op === 'add') offset += k;
     else if (op === 'sub') offset -= k;
-    else throw new Error(`[signal] .${op}() is not something an audio connection can do - use .mul() or .add()`);
+    else return this._audioRefuse(`[signal] .${op}() is not something an audio connection can do, so it is left out - use .mul() or .add()`);
     return this._clone({ inputSource: { ...src, gain, offset } });
+  }
+
+  /**
+   * An operation a connection cannot carry: said on the console, and the handle comes back as it
+   * was. A mistake in one modulation is not a reason for the whole evaluation to fail and every
+   * other track with it - the connection still plays, at the gain and offset it had.
+   */
+  _audioRefuse(line) {
+    warnPattern(line);
+    return this;
   }
 
   add(...xs) { return this._arith('add', xs, ARITHMETIC.add, true); }
@@ -1585,6 +1595,8 @@ export class Sig {
   ceil() { return this._unop('ceil', Math.ceil); }
   /** Bounds each value into [lo, hi]. Both bounds take patterns/signals, like every other control. */
   clamp(lo, hi) {
+    // Two operations underneath; a connection refuses the first, and one refusal is the message.
+    if (this._isBareAudioHandle()) return this._binop('clamp', lo, (a, b) => Math.max(a, b), false);
     return this._binop('clamp', lo, (a, b) => Math.max(a, b), false)._binop('clamp', hi, (a, b) => Math.min(a, b), false);
   }
 

@@ -163,6 +163,10 @@ export class DuckerProcessor {
       const a = Math.max(l < 0 ? -l : l, r < 0 ? -r : r);
       if (a > peak) peak = a;
     }
+    // The key's envelope follows the sidechain, and a NaN from it would hold every trigger off
+    // for good. The same for the gain, which smooths toward its target from where it was.
+    if (!Number.isFinite(this.env)) this.env = 0;
+    if (!Number.isFinite(this.gain)) this.gain = 1;
     this.gains.push(this.gain);
     this.peaks.push(peak);
     this.keys.push(keyed ? this.env : byNotes ? this.hit : 0);

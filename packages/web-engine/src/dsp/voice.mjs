@@ -282,11 +282,10 @@ export class WavetableVoice {
       }
     }
 
-    this.ampEnv.set({
-      attack: p.ampAttack, decay: p.ampDecay, sustain: p.ampSustain, release: p.ampRelease,
-      attackCurve: p.envAttackCurve, decayCurve: p.envDecayCurve, releaseCurve: p.envReleaseCurve,
-      scale: p.envScale,
-    });
+    this.ampEnv.setStages(
+      p.ampAttack, p.ampDecay, p.ampSustain, p.ampRelease,
+      p.envAttackCurve, p.envDecayCurve, p.envReleaseCurve, p.envScale,
+    );
 
     const velocity = this.velocity;
     const levelA = a.level;

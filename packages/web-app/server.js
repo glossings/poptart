@@ -2271,6 +2271,11 @@ let scanPhase = null;
 // first audio-device change. Any new engine callback goes here and nowhere else.
 function wireEngine() {
   mappedEngine = new MappedEngine(engine);
+  // The wrapper's own warnings (a word given to a plugin parameter) go where pattern warnings go.
+  mappedEngine.warn = (line) => {
+    eventLogQueue.push(line);
+    if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
+  };
   // audio("kick")/.midi("kick") reference other tracks by label inside engine-call arguments;
   // the wrapper turns those into engine track ids on the way down (see MappedEngine._trackRef).
   // A reference from inside a deck resolves within that deck first - deck b's audio("kick")

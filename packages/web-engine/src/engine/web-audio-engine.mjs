@@ -18,7 +18,7 @@
 
 import { catalog as defaultCatalog } from '../catalog.mjs';
 import { buildNodeDevice } from '../devices/builtins.mjs';
-import { defaultValues, denormalize, findParam } from '../descriptor.mjs';
+import { defaultValues, denormalize, findParam, normalize } from '../descriptor.mjs';
 import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
@@ -187,6 +187,9 @@ export class WebAudioEngine {
     this.modulators = new Map();    // trackId -> Map("slot:name" -> connection)
     this.envelopes = new Map();     // trackId -> Map("slot:name" -> EnvConnection), gated per note
     this.feeds = new Map();         // "device|cc" or "osc:address" -> Set(FeedConnection)
+    this.held = new Map();          // trackId -> how many of its notes are held, which gates its env()s
+    this.sounding = new Map();      // trackId -> Map("slot:note" -> the time its off is due; Infinity until sent)
+    this.voices = new Map();        // trackId -> Set of sample voices still to finish (see _voice)
     this._hw = null;                // the open hardware inputs: { node, splitter, channels }
     this._taps = new Map();         // track id ('*' for the master) -> recorder tap
     this._transients = new WeakMap(); // AudioBuffer -> slice starts (undefined while working, null for none)
@@ -299,14 +302,46 @@ export class WebAudioEngine {
     return track;
   }
 
+  /**
+   * Takes a track down completely: everything wired into it and everything it started, not only
+   * its own nodes. What is left behind here makes no sound and raises no error - a bus still
+   * feeding a gain nobody reads, a bend constant running for the life of the page, a route that
+   * plays notes into an id a later track may be given - so the whole list is spelled out.
+   */
   destroyTrack(trackId) {
     const track = this.tracks.get(trackId);
     if (!track) return;
+    const now = this.getTime();
     this._clearAllModulators(trackId);
+    // What reads into it: the head input (a bus, another track, a hardware input) and the
+    // hardware routes into its sidechains.
+    this.clearInputSource(trackId);
+    for (const key of [...this._hwRoutes.keys()]) {
+      if (key.startsWith(`side|${trackId}|`)) this._dropHardware(key);
+    }
+    // The routes played INTO it are dropped, and what they hold released; notes it routed into
+    // other tracks are released there, since the offs that would have ended them come from here.
+    for (const route of this.midiRoutes.routes.filter((r) => r.targetTrackId === trackId)) {
+      this.midiRoutes.remove(trackId, route.slot, now);
+    }
+    this.midiRoutes.releaseFrom(trackId, now);
+    // A record-panel meter or a bounce in progress on it.
+    const tap = this._taps.get(trackId);
+    if (tap) {
+      for (const take of tap.takes.values()) take.reject(new Error(`track "${trackId}" was removed`));
+      tap.takes.clear();
+      tap.metering = false;
+      this._untapIfIdle(trackId);
+    }
+    for (const voice of this.voices.get(trackId) ?? []) voice.release(now, 0.005);
     track.dispose();
+    for (const node of track._outNodes ?? []) { try { node.disconnect(); } catch { /* gone */ } }
     this.tracks.delete(trackId);
     this.modulators.delete(trackId);
     this.envelopes.delete(trackId);
+    this.held.delete(trackId);
+    this.sounding.delete(trackId);
+    this.voices.delete(trackId);
   }
 
   // -- devices -----------------------------------------------------------------------------
@@ -524,17 +559,45 @@ export class WebAudioEngine {
     if (this.midiRoutes.size) this.midiRoutes.noteEdge(trackId, note, 0, atTime, false);
   }
 
-  /** A note on a track's own instrument, and the envelopes it gates - with no routing onward. */
+  /**
+   * A note on a track's own instrument, and the modulators it plays - with no routing onward.
+   *
+   * The env()s follow the desktop's held-note count: the gate opens on the first held note and
+   * closes when the last one ends, so a chord does not start releasing at its first note-off.
+   * The note-gated lfo() shapes restart on every note.
+   */
   _playNote(trackId, note, velocity, atTime) {
     const source = this.tracks.get(trackId)?.source;
     if (source?.node?.port) source.node.port.postMessage({ kind: 'noteOn', note, velocity, time: atTime });
-    for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOn(atTime);
+    this._markSounding(trackId, 0, note, Infinity);
+    const held = this.held.get(trackId) ?? 0;
+    this.held.set(trackId, held + 1);
+    if (held === 0) for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOn(atTime);
+    for (const conn of this.modulators.get(trackId)?.values() ?? []) {
+      if (conn instanceof LfoConnection) conn.gate(atTime);
+    }
   }
 
   _stopNote(trackId, note, atTime) {
     const source = this.tracks.get(trackId)?.source;
     if (source?.node?.port) source.node.port.postMessage({ kind: 'noteOff', note, time: atTime });
-    for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOff(atTime);
+    this._markSounding(trackId, 0, note, atTime);
+    const held = Math.max(0, (this.held.get(trackId) ?? 0) - 1);
+    this.held.set(trackId, held);
+    if (held === 0) for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOff(atTime);
+  }
+
+  /**
+   * Remembers when a note a device was sent is due to end - Infinity until its off is sent - so a
+   * hush can release by name everything still to end, including notes sent a lookahead early that
+   * have not begun. The desktop keeps the same table (markSounding in poptart.scd).
+   */
+  _markSounding(trackId, slot, note, offAt) {
+    let notes = this.sounding.get(trackId);
+    if (!notes) this.sounding.set(trackId, (notes = new Map()));
+    const now = this.getTime();
+    for (const [key, at] of notes) if (at < now) notes.delete(key);
+    notes.set(`${slot}:${note}`, offAt === Infinity || Number.isFinite(offAt) ? offAt : now);
   }
 
   /**
@@ -551,6 +614,7 @@ export class WebAudioEngine {
     }
     const port = this.tracks.get(trackId)?.slots.get(slot)?.built?.node?.port;
     try { port?.postMessage(on ? { kind: 'noteOn', note, velocity, time: atTime } : { kind: 'noteOff', note, time: atTime }); } catch { /* no port */ }
+    if (port) this._markSounding(trackId, slot, note, on ? Infinity : atTime);
   }
 
   // -- the granular sample voice -----------------------------------------------------------------
@@ -585,12 +649,14 @@ export class WebAudioEngine {
     amp.gain.setValueAtTime(vel, Math.max(start + attack, start + gate));
     amp.gain.linearRampToValueAtTime(0, end);
     amp.connect(track.input);
+    let cut = false;
+    const voice = this._voice(track, { amp, start, release, onRelease: () => { cut = true; } });
 
     const mono = buffer.numberOfChannels === 1;
     let next = start;
     let count = 0;
     const lay = () => {
-      const horizon = Math.min(end, this.getTime() + 0.1);
+      const horizon = cut ? next : Math.min(end, this.getTime() + 0.1);
       while (next < horizon) {
         const size = Math.min(4, Math.max(0.002, g.size));
         const density = Math.min(1000, Math.max(0.1, g.rate));
@@ -600,7 +666,11 @@ export class WebAudioEngine {
         next += 1 / density;
         count += 1;
       }
-      if (next >= end) { clearInterval(timer); setTimeout(() => { try { amp.disconnect(); } catch { /* gone */ } }, Math.max(0, (end - this.getTime()) * 1000) + 500); }
+      if (next >= end || cut) {
+        clearInterval(timer);
+        const finish = setTimeout(() => { voice.finished(); try { amp.disconnect(); } catch { /* gone */ } }, Math.max(0, (end - this.getTime()) * 1000) + 500);
+        finish?.unref?.();
+      }
     };
     const timer = setInterval(lay, 25);
     timer?.unref?.(); // a node test's process need not wait on a cloud whose clock never moves
@@ -613,7 +683,9 @@ export class WebAudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = buffer;
     src.playbackRate.value = rate;
-    if (track.bendNode) { try { track.bendNode.connect(src.detune); } catch { /* no detune */ } }
+    // The bend constant is held by the one the voice was connected to, which is the one to undo.
+    const bend = track.bendNode ?? null;
+    if (bend) { try { bend.connect(src.detune); } catch { /* no detune */ } }
     const shape = this.ctx.createGain();
     shape.gain.value = 0;
     try { shape.gain.setValueCurveAtTime(window.map((v) => v * level), at, size); } catch { shape.gain.value = level; }
@@ -624,7 +696,12 @@ export class WebAudioEngine {
     const offset = ((offsetSec % buffer.duration) + buffer.duration) % buffer.duration;
     src.start(at, offset, size * rate + 0.01);
     src.stop(at + size + 0.005);
-    src.onended = () => { try { src.disconnect(); shape.disconnect(); panner.disconnect(); } catch { /* gone */ } };
+    src.onended = () => {
+      try { src.disconnect(); shape.disconnect(); panner.disconnect(); } catch { /* gone */ }
+      // An inbound connection is not undone by disconnecting the voice's outputs: left in place,
+      // the track's bend constant keeps a reference to every grain it ever reached.
+      if (bend) { try { bend.disconnect(src.detune); } catch { /* never connected */ } }
+    };
   }
 
   /** The window each grain is shaped by: a drawn one, or a Hann bell, as the desktop's default. */
@@ -706,13 +783,73 @@ export class WebAudioEngine {
     try { source.node.port.postMessage({ kind: 'bend', semitones: track.bendSemis ?? 0, time: atTime }); } catch { /* gone */ }
   }
 
-  /** Releases everything on a track without cutting what is already sounding. */
+  /**
+   * Releases everything on a track without cutting what is already sounding - the desktop's
+   * hushTrack. The instrument, and any effect played by notes, has every note still to end
+   * released by name - notes sent a lookahead early and not begun included - with all-notes-off
+   * behind that as a net. The env()s' gate closes as it does when the last note ends. The sample
+   * voices release at their own release, and one sent early that has not begun never does. The
+   * notes this track was routing into other tracks are released there, since the offs that would
+   * have ended them will not come. `againSec` repeats the by-name release that far on, for notes
+   * that begin after the first one.
+   */
   hush(trackId, againSec = 0) {
-    const source = this.tracks.get(trackId)?.source;
-    if (source?.node?.port) {
-      source.node.port.postMessage({ kind: 'allNotesOff', time: this.getTime() });
-      if (againSec > 0) source.node.port.postMessage({ kind: 'allNotesOff', time: this.getTime() + againSec });
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    const now = this.getTime();
+    const due = [];
+    for (const [key, offAt] of this.sounding.get(trackId) ?? []) {
+      if (offAt <= now) continue;
+      const cut = key.indexOf(':');
+      due.push({ slot: Number(key.slice(0, cut)), note: Number(key.slice(cut + 1)) });
     }
+    this.sounding.get(trackId)?.clear();
+    const release = (at) => {
+      for (const { slot, note } of due) {
+        try { track.slots.get(slot)?.built?.node?.port?.postMessage({ kind: 'noteOff', note, time: at }); } catch { /* no port */ }
+      }
+    };
+    try { track.source?.node?.port?.postMessage({ kind: 'allNotesOff', time: now }); } catch { /* no port */ }
+    release(now);
+    if (againSec > 0) release(now + againSec);
+    for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOff(now);
+    this.held.set(trackId, 0);
+    for (const voice of [...(this.voices.get(trackId) ?? [])]) voice.release(now);
+    this.midiRoutes.releaseFrom(trackId, now);
+  }
+
+  /**
+   * Keeps a sample voice on its track's list until it has finished, so a hush can release it.
+   * `amp` is the voice's level, `start` when it begins, `release` its own release time, `sources`
+   * what to stop once the release is over and `onRelease` anything else to call off - a grain
+   * cloud's timer.
+   */
+  _voice(track, { amp, start, release = 0, sources = [], onRelease = null }) {
+    let live = this.voices.get(track.id);
+    if (!live) this.voices.set(track.id, (live = new Set()));
+    const voice = {
+      finished: () => live.delete(voice),
+      release: (now, floor = null) => {
+        if (!live.delete(voice)) return;
+        onRelease?.();
+        const g = amp.gain;
+        if (start > now) {
+          // Sent a lookahead early and not begun: it is silenced before it starts.
+          try { g.cancelScheduledValues(now); g.setValueAtTime(0, now); } catch { g.value = 0; }
+          for (const src of sources) { try { src.stop(now); } catch { /* already stopped */ } }
+          return;
+        }
+        const fade = floor ?? Math.max(0.015, Number(release) || 0);
+        try {
+          if (typeof g.cancelAndHoldAtTime === 'function') g.cancelAndHoldAtTime(now);
+          else { const v = g.value; g.cancelScheduledValues(now); g.setValueAtTime(v, now); }
+          g.linearRampToValueAtTime(0, now + fade);
+        } catch { g.value = 0; }
+        for (const src of sources) { try { src.stop(now + fade + 0.005); } catch { /* already stopped */ } }
+      },
+    };
+    live.add(voice);
+    return voice;
   }
 
   // -- parameters --------------------------------------------------------------------------
@@ -1003,10 +1140,14 @@ export class WebAudioEngine {
     const held = this.modulators.get(trackId);
     if (!held) return;
     const existing = held.get(key);
-    if (existing) {
-      // An in-place update must not restart the shape or re-gate the envelope: the scheduler
-      // re-sends a modulator whose range or rate is itself a signal, every tick.
+    if (existing && existing.method !== method) this._clearModulator(trackId, slot, name);
+    else if (existing) {
+      // A re-send goes to the connection, which decides what changed: the scheduler re-sends every
+      // modulator after each evaluation, and one whose range or rate is a signal every tick, and
+      // neither may restart the shape or re-gate the envelope. What it listens to may have moved,
+      // though - another controller, another address - so a feed is filed again under its key.
       existing.update(ir);
+      if (existing._feedKey) this._fileFeed(existing, this._feedKeyOf(method, existing.ir));
       return;
     }
     const target = this._targetParam(trackId, slot, name);
@@ -1018,7 +1159,27 @@ export class WebAudioEngine {
     connection.kind = kind;
     connection.method = method;
     held.set(key, connection);
-    if (connection instanceof EnvConnection) this.envelopes.get(trackId)?.set(key, connection);
+    if (connection instanceof EnvConnection) {
+      this.envelopes.get(trackId)?.set(key, connection);
+      // Born open when notes are already held, as the desktop's env synth is.
+      if ((this.held.get(trackId) ?? 0) > 0) connection.gateOn(this.getTime());
+    }
+  }
+
+  /** The feeds table's key for what a midicc() or osc() modulator listens to. */
+  _feedKeyOf(method, ir) {
+    return method === 'setParamOSC'
+      ? `osc|${ir.osc}|${ir.index ?? 0}`
+      : `cc|${String(ir.device ?? '').toLowerCase()}|${ir.cc}`;
+  }
+
+  /** Files a feed connection under a key, taking it out from under the one it had. */
+  _fileFeed(conn, key) {
+    if (conn._feedKey === key) return;
+    if (conn._feedKey) this.feeds.get(conn._feedKey)?.delete(conn);
+    if (!this.feeds.has(key)) this.feeds.set(key, new Set());
+    this.feeds.get(key).add(conn);
+    conn._feedKey = key;
   }
 
   setParamLFO(trackId, slot, name, ir) {
@@ -1032,10 +1193,7 @@ export class WebAudioEngine {
   setParamCC(trackId, slot, name, ir) {
     this._setModulator(trackId, slot, name, ir, (target) => {
       const conn = new FeedConnection(this.ctx, target, ir);
-      const key = `cc|${(ir.device ?? '').toLowerCase()}|${ir.cc}`;
-      if (!this.feeds.has(key)) this.feeds.set(key, new Set());
-      this.feeds.get(key).add(conn);
-      conn._feedKey = key;
+      this._fileFeed(conn, this._feedKeyOf('setParamCC', ir));
       this.onMidiWanted?.();
       return conn;
     }, 'a midi control', 'setParamCC');
@@ -1044,10 +1202,7 @@ export class WebAudioEngine {
   setParamOSC(trackId, slot, name, ir) {
     this._setModulator(trackId, slot, name, ir, (target) => {
       const conn = new FeedConnection(this.ctx, target, ir);
-      const key = `osc|${ir.osc}|${ir.index ?? 0}`;
-      if (!this.feeds.has(key)) this.feeds.set(key, new Set());
-      this.feeds.get(key).add(conn);
-      conn._feedKey = key;
+      this._fileFeed(conn, this._feedKeyOf('setParamOSC', ir));
       return conn;
     }, 'an osc message', 'setParamOSC');
   }
@@ -1057,10 +1212,24 @@ export class WebAudioEngine {
     const held = this.modulators.get(trackId);
     const conn = held?.get(key);
     if (!conn) return;
-    conn.stop();
+    this._recordLeft(trackId, slot, name, conn.stop());
     held.delete(key);
     this.envelopes.get(trackId)?.delete(key);
     if (conn._feedKey) this.feeds.get(conn._feedKey)?.delete(conn);
+  }
+
+  /**
+   * A cleared modulator leaves its parameter on the position it had reached (see LfoConnection's
+   * stop), and the slot's record of the control is brought into line with it - that record is
+   * what a panel prints and a preset captures, and it would otherwise still say whatever was set
+   * before the modulator took over.
+   */
+  _recordLeft(trackId, slot, name, position) {
+    if (!Number.isFinite(position)) return;
+    const found = this.tracks.get(trackId)?.slots.get(slot)?.paramFor(name);
+    if (found?.param && found.audioParam) {
+      this.tracks.get(trackId).slots.get(slot).values[found.param.id] = denormalize(found.param, Math.min(1, Math.max(0, position)));
+    }
   }
 
   clearParamLFO(trackId, slot, name) { this._clearModulator(trackId, slot, name); }
@@ -1070,20 +1239,21 @@ export class WebAudioEngine {
 
   _clearAllModulators(trackId) {
     for (const [key, conn] of this.modulators.get(trackId) ?? []) {
-      conn.stop();
+      conn.stop();   // the track is going, so there is no record to bring into line
       if (conn._feedKey) this.feeds.get(conn._feedKey)?.delete(conn);
       this.envelopes.get(trackId)?.delete(key);
     }
     this.modulators.get(trackId)?.clear();
   }
 
-  /** Swaps a drawn LFO to another of its shapes, at the time asked, keeping its phase. */
+  /**
+   * Swaps a drawn LFO to another of its shapes at the time asked. The new shape starts from its
+   * beginning, as the desktop's does and as the scheduler's phase anchors count; in the
+   * note-gated modes it waits for the next note (see LfoConnection#swapTo).
+   */
   setParamShape(trackId, slot, name, index, atTime) {
     const conn = this.modulators.get(trackId)?.get(keyOf(slot, name));
-    if (!(conn instanceof LfoConnection)) return;
-    const shapes = conn.ir?.shapes;
-    const points = Array.isArray(shapes) ? shapes[index] : null;
-    if (points) conn.setShape({ shape: 'custom', points }, atTime);
+    if (conn instanceof LfoConnection) conn.swapTo(index, atTime);
   }
 
   /** Puts a free-running LFO back on the grid's phase, which the scheduler does periodically. */
@@ -1163,12 +1333,23 @@ export class WebAudioEngine {
     track.paramConnections.set(key, { scale, bias, from, source, gain, offset });
   }
 
+  /**
+   * Unpatches a signal from a parameter and hands the parameter back at the value last set on it.
+   * The connection zeroed it, and what the signal was doing at the moment it went is not something
+   * the main thread can know, so the control returns to where the pattern or the panel last put
+   * it rather than being left at the bottom of its range.
+   */
   disconnectParam(trackId, slot, name) {
     const track = this.tracks.get(trackId);
     const conn = track?.paramConnections.get(keyOf(slot, name));
     if (!conn) return;
     teardownParamConnection(conn);
     track.paramConnections.delete(keyOf(slot, name));
+    const filled = track.slots.get(slot);
+    const found = filled?.paramFor(name);
+    if (found?.audioParam) {
+      try { found.audioParam.value = normalize(found.param, filled.values[found.param.id]); } catch { /* a param that refuses a direct set */ }
+    }
   }
 
   /**
@@ -1244,10 +1425,14 @@ export class WebAudioEngine {
     for (const send of wanted) {
       let node = track.sends.get(send.name);
       if (!node) {
+        // Born at its level, not at unity: a send connected first and ramped down after would
+        // put the whole track into the bus for the length of the ramp.
         node = this.ctx.createGain();
+        node.gain.value = send.amount ?? 1;
         track.panner.connect(node);
         node.connect(this._bus(send.name));
         track.sends.set(send.name, node);
+        continue;
       }
       rampParam(node.gain, send.amount ?? 1, now, now);
     }
@@ -1845,12 +2030,18 @@ export class WebAudioEngine {
     // Loops play to the gate; a one-shot to the gate or its own end, whichever comes first.
     const gateEnd = plan.loop || plan.cut || sustained ? Math.max(start, plan.offsetSec) : start + plan.durSec;
     const stopAt = this._envelope(amp, plan, start, gateEnd);
-    if (track.bendNode) { try { track.bendNode.connect(source.detune); } catch { /* no detune */ } }
+    const bend = track.bendNode ?? null;
+    if (bend) { try { bend.connect(source.detune); } catch { /* no detune */ } }
     if (playFor != null) source.start(start, offset, playFor);
     else source.start(start, offset);
     source.stop(stopAt + 0.005);
+    const voice = this._voice(track, { amp, start, release: plan.release, sources: [source] });
     source.onended = () => {
+      voice.finished();
       try { source.disconnect(); amp.disconnect(); } catch { /* already detached */ }
+      // Disconnecting the voice's outputs leaves the bend constant's connection INTO it, and with
+      // it a reference to every voice the track ever played.
+      if (bend) { try { bend.disconnect(source.detune); } catch { /* never connected */ } }
     };
   }
 
@@ -1870,6 +2061,8 @@ export class WebAudioEngine {
     const amp = this.ctx.createGain();
     amp.connect(track.input);
     const end = this._envelope(amp, plan, start, gateEnd);
+    let cut = false;
+    const voice = this._voice(track, { amp, start, release: plan.release, onRelease: () => { cut = true; } });
     const window = this._grainWindow(null);
     const rate = Math.abs(plan.speed);
     // Where the pointer is at a time, 0..1 of the file.
@@ -1890,7 +2083,7 @@ export class WebAudioEngine {
     const mono = buffer.numberOfChannels === 1;
     let next = start;
     const lay = () => {
-      const horizon = Math.min(end, this.getTime() + 0.1);
+      const horizon = cut ? next : Math.min(end, this.getTime() + 0.1);
       while (next < horizon) {
         const scatter = (Math.random() - 0.5) * 0.1 * size;
         // Scatter is kept inside the file: a grain at the very start scattered earlier would
@@ -1899,7 +2092,11 @@ export class WebAudioEngine {
         this._grain(buffer, amp, next, size, at, rate, 0, (2 / overlaps) * (mono ? Math.SQRT2 : 1), window, track);
         next += 1 / density;
       }
-      if (next >= end) clearInterval(timer);
+      if (next >= end || cut) {
+        clearInterval(timer);
+        const finish = setTimeout(() => { voice.finished(); try { amp.disconnect(); } catch { /* gone */ } }, Math.max(0, (end - this.getTime()) * 1000) + 500);
+        finish?.unref?.();
+      }
     };
     const timer = setInterval(lay, 25);
     timer?.unref?.();

@@ -459,25 +459,27 @@ test('every path the editor asks for is one the host has an answer for', () => {
   // belief that the tab hid them, it does not, and the page logged an error per row on load.
   // The test below this one is what keeps the list honest.
   const desktopOnly = new Set([
-    'POST /api/link', 'POST /api/midiClock',
-    // the DJ desk's song player, only reachable once a song is loaded, which is refused
+    // a toggle drawn disabled: the host answers `available: false` for it
+    'POST /api/link',
+    // the DJ desk's song player: DJ mode is refused at its opener (client.js, desktopOnly)
     'POST /api/song/play', 'POST /api/song/cue', 'POST /api/song/pause', 'POST /api/song/seek',
     'POST /api/song/stop', 'POST /api/song/meta', 'POST /api/song/nudge',
-    'GET /api/song/onsets', 'GET /api/song/waveform', 'GET /api/songfiles/find',
+    'GET /api/song/onsets', 'GET /api/song/waveform',
+    // the organizer's disk tab: not drawn, and refused at setOrgPane3
+    'GET /api/songfiles/find',
+    // asked inside a try whose failure is expected: a playlist's file rows render as missing
     'POST /api/songfiles/stat',
-    // recording, only reachable once a recording has started, which is refused
-    'GET /api/trackRecord/status', 'POST /api/trackRecord/cancel', 'POST /api/trackRecord/tap',
-    'GET /api/midiRecord/status', 'POST /api/midiRecord/cancel',
-    // audio device rows the settings tab draws from an empty device list
-    'POST /api/audioCueDevice', 'POST /api/audioOutputChannels', 'POST /api/audioDevice',
-    'POST /api/audioInputs',
-    // the sample map window, which is refused at the door
+    // the headphone cue device row, drawn disabled from cueAvailable: false
+    'POST /api/audioCueDevice',
+    // the sample map window: its button is not drawn, and openSampleMap refuses
     'GET /api/sampleMap',
     'GET /api/sampleMap/neighbors', 'GET /api/sampleMap/point', 'POST /api/sampleMap/unique',
     'POST /api/sampleMap/reshuffle',
-    // the slice editor, behind a sampler half that is not built yet
-    'GET /api/sampleSlices',
   ]);
+
+  // An entry that has since been given a handler is a stale promise: take it off the list.
+  const answeredAnyway = [...desktopOnly].filter((key) => rig.host.routes[key]);
+  assert.deepEqual(answeredAnyway, [], 'these are answered now and belong off the desktop-only list');
 
   const unanswered = [...asked].filter((key) => !rig.host.routes[key] && !desktopOnly.has(key));
   assert.deepEqual(unanswered, [], 'a path with no handler is a button that does nothing');

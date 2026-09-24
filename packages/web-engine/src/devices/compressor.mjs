@@ -70,6 +70,9 @@ export class Detector {
     this.down = 1 - Math.exp(-1 / (Math.max(0.01, releaseMs) * 0.001 * this.sampleRate));
   }
 
+  /** Back to silence - for a detector a number that cannot be played has got into. */
+  reset() { this.env = 0; }
+
   /** Feeds a rectified sample and returns the envelope, both linear. */
   next(x) {
     const k = x > this.env ? this.up : this.down;
@@ -121,6 +124,9 @@ export class CompressorProcessor {
       outL[i] = l + (l * g - l) * mix;
       if (outR !== outL) outR[i] = r + (r * g - r) * mix;
     }
+    // A NaN compares false against the envelope and is then added into it, and from there on
+    // every sample's gain is NaN: the detector starts again from silence instead.
+    if (!Number.isFinite(this.detector.env)) this.detector.reset();
     this.reduction = reduction;
     this.level = loudest;
     this.levels.push(loudest);

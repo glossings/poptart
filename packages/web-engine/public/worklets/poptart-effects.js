@@ -137,6 +137,23 @@ function defineParam(deviceId, spec, seen) {
   } else if (spec.capacity !== undefined) {
     fail(deviceId, `param "${id}": only an enum has a capacity`);
   }
+  // Headings over runs of an enum's options - `[{ label, from }]`, `from` the index the run starts
+  // at - for a list long enough that one column of it is not something to read. The panel's
+  // menu draws a heading per group, a column each.
+  let optionGroups = null;
+  if (spec.optionGroups !== undefined) {
+    if (!options) fail(deviceId, `param "${id}": only an enum has option groups`);
+    const groups = Array.isArray(spec.optionGroups) ? spec.optionGroups : [];
+    let last = -1;
+    for (const g of groups) {
+      if (!String(g?.label ?? '').trim() || !Number.isInteger(g?.from) || g.from <= last || g.from >= options.length) {
+        fail(deviceId, `param "${id}": option groups need a label each and rising start indexes inside the list`);
+      }
+      last = g.from;
+    }
+    if (!groups.length || groups[0].from !== 0) fail(deviceId, `param "${id}": the first option group starts at 0`);
+    optionGroups = Object.freeze(groups.map((g) => Object.freeze({ label: String(g.label), from: g.from })));
+  }
   const min = options ? 0 : spec.min;
   const max = options ? capacity - 1 : spec.max;
   if (!isFiniteNumber(min) || !isFiniteNumber(max)) fail(deviceId, `param "${id}" needs numeric min and max`);
@@ -201,6 +218,7 @@ function defineParam(deviceId, spec, seen) {
     decimals,
     step,
     options: options ? Object.freeze(options) : null,
+    optionGroups,
     capacity,
     takes,
     sampleAs,
@@ -1709,6 +1727,14 @@ class DistortProcessor {
 // asterisk on it. Two devices, each of which means what it says.
 
 
+/**
+ * The top of the rate control, where the hold is switched off rather than run at this rate.
+ * A hold at 24 kHz is not transparent anywhere: at 48 kHz it holds every other sample, at 44.1
+ * kHz it holds some and not others, and at 96 kHz it holds four at a time - so the top of the
+ * range means "not held at all", the same at every sample rate.
+ */
+const RATE_TOP = 24000;
+
 const CRUSH = defineDevice({
   id: 'Crush',
   kind: 'fx',
@@ -1720,8 +1746,8 @@ const CRUSH = defineDevice({
   params: [
     { id: 'bits', name: 'Bits', min: 1, max: 16, default: 8, unit: 'bit', group: 'Digital',
       description: 'How many levels the signal is rounded to. Sixteen is transparent; under six is the sound of the rounding.' },
-    { id: 'rate', name: 'Rate', min: 100, max: 24000, default: 24000, unit: 'Hz', curve: 'exp', group: 'Digital',
-      description: 'The rate the signal is held at. Everything above half of it folds back down as the aliasing this device is for.' },
+    { id: 'rate', name: 'Rate', min: 100, max: RATE_TOP, default: RATE_TOP, unit: 'Hz', curve: 'exp', group: 'Digital',
+      description: 'The rate the signal is held at. Everything above half of it folds back down as the aliasing this device is for. At the top of the range the signal is not held at all.' },
     { id: 'jitter', name: 'Jitter', min: 0, max: 1, default: 0, group: 'Digital',
       description: 'Wobbles the hold rate, which smears the aliasing into noise instead of leaving it as tones.' },
     { id: 'tone', name: 'Tone', min: 200, max: 20000, default: 20000, unit: 'Hz', curve: 'exp', group: 'Out',
@@ -1785,12 +1811,18 @@ class CrushProcessor {
       for (let i = 0; i < count; i++) {
         const dry = input[i];
         // Sample and hold. The phase carries across blocks, so the held rate is steady rather
-        // than restarting every hundred and twenty-eight samples.
-        const jitter = Math.min(1, Math.max(0, at(params.jitter, i)));
-        const rate = Math.max(1, at(params.rate, i)) * (1 - jitter * 0.5 * c.random());
-        c.phase += rate / this.sampleRate;
-        if (c.phase >= 1) {
-          c.phase -= Math.floor(c.phase);
+        // than restarting every hundred and twenty-eight samples. At the top of the range, or at
+        // a rate the context already runs at, every sample is taken as it comes and only the bit
+        // depth is applied.
+        const target = Math.max(1, at(params.rate, i));
+        let take = true;
+        if (target < RATE_TOP && target < this.sampleRate) {
+          const jitter = Math.min(1, Math.max(0, at(params.jitter, i)));
+          c.phase += (target * (1 - jitter * 0.5 * c.random())) / this.sampleRate;
+          take = c.phase >= 1;
+          if (take) c.phase -= Math.floor(c.phase);
+        }
+        if (take) {
           // Levels either side of zero. Using 2^bits - 1 as the step count overshoots full
           // scale by half a step at the very top, which is a quiet click on every peak.
           const bits = Math.max(1, Math.min(16, at(params.bits, i)));
@@ -2366,7 +2398,12 @@ const DELAY = defineDevice({
   ],
 });
 
-const clipTail = (x) => (x > 2 ? 1 : x < -2 ? -1 : x - (x * x * x) / 12);
+/**
+ * The soft clip on what is fed back, so a feedback near one saturates instead of running away.
+ * A cubic with unity slope at zero that flattens out exactly where it meets the clamp: at 1.5
+ * it is at 1 with no slope left, so the curve is continuous and never turns back down.
+ */
+const clipTail = (x) => (x >= 1.5 ? 1 : x <= -1.5 ? -1 : x - (4 * x * x * x) / 27);
 
 class DelayProcessor {
   constructor(sampleRate) {
@@ -2565,6 +2602,9 @@ class Detector {
     this.down = 1 - Math.exp(-1 / (Math.max(0.01, releaseMs) * 0.001 * this.sampleRate));
   }
 
+  /** Back to silence - for a detector a number that cannot be played has got into. */
+  reset() { this.env = 0; }
+
   /** Feeds a rectified sample and returns the envelope, both linear. */
   next(x) {
     const k = x > this.env ? this.up : this.down;
@@ -2616,6 +2656,9 @@ class CompressorProcessor {
       outL[i] = l + (l * g - l) * mix;
       if (outR !== outL) outR[i] = r + (r * g - r) * mix;
     }
+    // A NaN compares false against the envelope and is then added into it, and from there on
+    // every sample's gain is NaN: the detector starts again from silence instead.
+    if (!Number.isFinite(this.detector.env)) this.detector.reset();
     this.reduction = reduction;
     this.level = loudest;
     this.levels.push(loudest);
@@ -2730,6 +2773,14 @@ class LimiterProcessor {
       if (outR !== outL) outR[i] = this.bufR[read] * g;
       this.pos = read;
       if (g < reduction) reduction = g;
+    }
+    // A gain that is not a number would stay that way through every smoothing step after it,
+    // and the lookahead would hand on anything unplayable it is holding: both start again.
+    if (!Number.isFinite(this.gain) || !Number.isFinite(outL[count - 1])) {
+      this.gain = 1;
+      this.bufL.fill(0);
+      this.bufR.fill(0);
+      this.need.fill(1);
     }
     this.reduction = reduction;
     this.level = loudest > 1e-6 ? 20 * Math.log10(loudest) : -120;
@@ -3492,6 +3543,21 @@ class Adsr {
     if (releaseCurve !== undefined) this.releaseCurve = releaseCurve;
   }
 
+  /**
+   * Every stage at once, as plain arguments: what a voice calls each block. `set()` takes an
+   * object, and an object literal built per voice per block is garbage the audio thread has to
+   * collect.
+   */
+  setStages(attack, decay, sustain, release, attackCurve, decayCurve, releaseCurve, scale = 1) {
+    this.attack = Math.max(0, attack) * scale;
+    this.decay = Math.max(0, decay) * scale;
+    this.sustain = Math.min(1, Math.max(0, sustain));
+    this.release = Math.max(0, release) * scale;
+    this.attackCurve = attackCurve;
+    this.decayCurve = decayCurve;
+    this.releaseCurve = releaseCurve;
+  }
+
   /** Starts a note. `retrigger` keeps the current level so a restart does not click to zero. */
   gateOn(retrigger = true) {
     this.stageFrom = retrigger ? this.value : 0;
@@ -3750,6 +3816,10 @@ class DuckerProcessor {
       const a = Math.max(l < 0 ? -l : l, r < 0 ? -r : r);
       if (a > peak) peak = a;
     }
+    // The key's envelope follows the sidechain, and a NaN from it would hold every trigger off
+    // for good. The same for the gain, which smooths toward its target from where it was.
+    if (!Number.isFinite(this.env)) this.env = 0;
+    if (!Number.isFinite(this.gain)) this.gain = 1;
     this.gains.push(this.gain);
     this.peaks.push(peak);
     this.keys.push(keyed ? this.env : byNotes ? this.hit : 0);
@@ -3824,7 +3894,7 @@ class DriveChannel {
     this.detector.setTimes(5, 80);
   }
 
-  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); }
+  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); this.detector.reset(); }
 }
 
 class OverdriveProcessor {
@@ -3867,7 +3937,7 @@ class OverdriveProcessor {
         const mix = at(params.mix, i);
         out[i] = x + (wet - x) * mix;
       }
-      if (!Number.isFinite(out[count - 1])) c.reset();
+      if (!Number.isFinite(out[count - 1]) || !Number.isFinite(c.detector.env)) c.reset();
     }
   }
 }
@@ -4050,6 +4120,9 @@ class MultibandProcessor {
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
     }
+    // Checked on their own: a NaN that is gone from the output by the end of the block can
+    // still be sitting in a detector, and it stays there.
+    for (const d of this.detectors) if (!Number.isFinite(d.env)) d.reset();
   }
 
   /** Where each band sits on its own curve, and where it has been, for the three pictures the panel draws. */
@@ -4068,13 +4141,21 @@ class MultibandProcessor {
 // ---- src/devices/stutter.mjs -------------------------------------
 // The Stutter effect: catches a slice of what is playing and repeats it on the grid.
 //
-// The incoming audio is written into a buffer without pause. Every interval on the transport's
-// clock the effect may - with the chance set - grab the slice that just went by, one grid
-// division long, and play it over and over for the number of repeats, each one quieter and
+// The incoming audio is written into a buffer. Every interval on the transport's clock the effect
+// may - with the chance set - grab the slice that just went by, one grid division long, and play
+// it over and over for the number of repeats, each one quieter and
 // lower than the last if asked. The chance is decided by a hash of the beat it falls on, so a
 // song stutters in the same places every time it is played. While a repeat sounds the original
 // is held at the dry level - cut, by default, so the repeats take its place - and the repeats
 // themselves at the wet level.
+//
+// The caught slice is frozen for as long as it repeats. Recording carries on around it, so a
+// catch made later - even one that interrupts a repeat - is still of what just went by, but the
+// write head never enters the slice: a long grid times many repeats would otherwise have it
+// overwrite what is playing, and the later repeats would be the live input instead. If the head
+// comes all the way round to the slice it waits there, and once the repeat ends the buffer is
+// short of fresh audio until a whole grid division has been recorded again; a catch that falls
+// in that gap is let go rather than stitched together from audio seconds apart.
 
 
 const REPEAT_MAX_SEC = 4;
@@ -4134,6 +4215,9 @@ class StutterProcessor {
     this.bufR = new Float32Array(size);
     this.size = size;
     this.write = 0;
+    // How much contiguous, current audio sits behind the write head. The buffer starts out as
+    // silence, which counts: it is what went by before anything played.
+    this.fresh = size;
     this.bpm = 120;
     this.anchorSec = 0;
     this.lastInterval = -1;
@@ -4166,15 +4250,23 @@ class StutterProcessor {
     for (let i = 0; i < count; i++) {
       const l = inL ? inL[i] : 0;
       const r = inR ? inR[i] : 0;
-      this.bufL[this.write] = l;
-      this.bufR[this.write] = r;
+      // Recording stops where the slice being repeated begins, so it is never written over.
+      const recording = !(this.active && this.write === this.start);
+      if (recording) {
+        // A number that cannot be played is stored as silence, or it would be repeated.
+        this.bufL[this.write] = Number.isFinite(l) ? l : 0;
+        this.bufR[this.write] = Number.isFinite(r) ? r : 0;
+      } else {
+        this.fresh = 0;
+      }
 
       // A new interval on the clock: maybe catch the slice that just went by.
       const t = (timeSec ?? this.frames / sr) - this.anchorSec;
       const beat = Math.floor(t / interval);
       if (beat !== this.lastInterval) {
-        if (this.lastInterval >= 0 && hashChance(beat, seed) < at(params.chance, i)) {
-          this.length = Math.max(1, Math.round(grid * sr));
+        const length = Math.max(1, Math.round(grid * sr));
+        if (this.lastInterval >= 0 && this.fresh >= length && hashChance(beat, seed) < at(params.chance, i)) {
+          this.length = length;
           this.start = (this.write - this.length + this.size) % this.size;
           this.pos = 0;
           this.count = 0;
@@ -4210,7 +4302,10 @@ class StutterProcessor {
           if (this.count >= this.total) this.active = false;
         }
       }
-      this.write = (this.write + 1) % this.size;
+      if (recording) {
+        this.write = (this.write + 1) % this.size;
+        if (this.fresh < this.size) this.fresh += 1;
+      }
       // The original at its own level only while a repeat is sounding: between repeats the
       // track plays as it is, whatever the dry control says.
       const dry = playing ? at(params.dry, i) : 1;
@@ -4310,10 +4405,21 @@ class GrainEchoProcessor {
           const time = Math.min(GRAIN_MAX_SEC * 0.9, syncedSeconds(sync, this.bpm, at(params.time, i)));
           const spray = at(params.spray, i) * time * (this.random() * 2 - 1);
           const back = Math.max(0.001, time + spray) * sr;
-          g.len = Math.max(32, Math.round(at(params.size, i) * 0.001 * sr));
-          g.pos = (this.write - back - g.len * 0.5 + this.size * 4) % this.size;
+          let len = Math.max(32, Math.round(at(params.size, i) * 0.001 * sr));
+          const rate = Math.pow(2, (at(params.pitch, i) + at(params.random, i) * (this.random() * 2 - 1)) / 12);
+          // A grain read faster than time passes gains on the write head by (rate - 1) samples
+          // a sample, and one read slower falls behind by (1 - rate). It has to stay inside the
+          // recorded audio for its whole life: start it far enough back that it never reaches
+          // the head, where it would read what was written a whole buffer ago, and not so far
+          // that it runs off the far end. A grain too long to fit either way is shortened.
+          if (rate > 1 && (rate - 1) * len > this.size - 8) len = Math.max(32, Math.floor((this.size - 8) / (rate - 1)));
+          const gains = rate > 1 ? (rate - 1) * len : 0;
+          const loses = rate < 1 ? (1 - rate) * len : 0;
+          const start = Math.min(this.size - 2 - loses, Math.max(2 + gains, back + len * 0.5));
+          g.len = len;
+          g.rate = rate;
+          g.pos = (this.write - start + this.size * 4) % this.size;
           g.at = 0;
-          g.rate = Math.pow(2, (at(params.pitch, i) + at(params.random, i) * (this.random() * 2 - 1)) / 12);
           const pan = (this.random() * 2 - 1) * at(params.spread, i);
           g.l = Math.cos(((pan + 1) * Math.PI) / 4) * Math.SQRT2;
           g.r = Math.sin(((pan + 1) * Math.PI) / 4) * Math.SQRT2;
@@ -4340,8 +4446,12 @@ class GrainEchoProcessor {
         if (++g.at >= g.len) g.on = false;
       }
       const fb = at(params.feedback, i);
-      this.bufL[this.write] = l + Math.tanh(wetL * fb);
-      this.bufR[this.write] = r + Math.tanh(wetR * fb);
+      // A number that cannot be played is stored as silence: kept, it would come back round
+      // the feedback for as long as the device lives.
+      const keepL = l + Math.tanh(wetL * fb);
+      const keepR = r + Math.tanh(wetR * fb);
+      this.bufL[this.write] = Number.isFinite(keepL) ? keepL : 0;
+      this.bufR[this.write] = Number.isFinite(keepR) ? keepR : 0;
       this.write = (this.write + 1) % this.size;
       const mix = at(params.mix, i);
       outL[i] = l + (wetL - l) * mix;

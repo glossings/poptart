@@ -81,6 +81,21 @@ export class Adsr {
     if (releaseCurve !== undefined) this.releaseCurve = releaseCurve;
   }
 
+  /**
+   * Every stage at once, as plain arguments: what a voice calls each block. `set()` takes an
+   * object, and an object literal built per voice per block is garbage the audio thread has to
+   * collect.
+   */
+  setStages(attack, decay, sustain, release, attackCurve, decayCurve, releaseCurve, scale = 1) {
+    this.attack = Math.max(0, attack) * scale;
+    this.decay = Math.max(0, decay) * scale;
+    this.sustain = Math.min(1, Math.max(0, sustain));
+    this.release = Math.max(0, release) * scale;
+    this.attackCurve = attackCurve;
+    this.decayCurve = decayCurve;
+    this.releaseCurve = releaseCurve;
+  }
+
   /** Starts a note. `retrigger` keeps the current level so a restart does not click to zero. */
   gateOn(retrigger = true) {
     this.stageFrom = retrigger ? this.value : 0;

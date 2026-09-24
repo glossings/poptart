@@ -12,6 +12,14 @@ import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
 import { OnePole } from '../dsp/filters.mjs';
 
+/**
+ * The top of the rate control, where the hold is switched off rather than run at this rate.
+ * A hold at 24 kHz is not transparent anywhere: at 48 kHz it holds every other sample, at 44.1
+ * kHz it holds some and not others, and at 96 kHz it holds four at a time - so the top of the
+ * range means "not held at all", the same at every sample rate.
+ */
+const RATE_TOP = 24000;
+
 export const CRUSH = defineDevice({
   id: 'Crush',
   kind: 'fx',
@@ -23,8 +31,8 @@ export const CRUSH = defineDevice({
   params: [
     { id: 'bits', name: 'Bits', min: 1, max: 16, default: 8, unit: 'bit', group: 'Digital',
       description: 'How many levels the signal is rounded to. Sixteen is transparent; under six is the sound of the rounding.' },
-    { id: 'rate', name: 'Rate', min: 100, max: 24000, default: 24000, unit: 'Hz', curve: 'exp', group: 'Digital',
-      description: 'The rate the signal is held at. Everything above half of it folds back down as the aliasing this device is for.' },
+    { id: 'rate', name: 'Rate', min: 100, max: RATE_TOP, default: RATE_TOP, unit: 'Hz', curve: 'exp', group: 'Digital',
+      description: 'The rate the signal is held at. Everything above half of it folds back down as the aliasing this device is for. At the top of the range the signal is not held at all.' },
     { id: 'jitter', name: 'Jitter', min: 0, max: 1, default: 0, group: 'Digital',
       description: 'Wobbles the hold rate, which smears the aliasing into noise instead of leaving it as tones.' },
     { id: 'tone', name: 'Tone', min: 200, max: 20000, default: 20000, unit: 'Hz', curve: 'exp', group: 'Out',
@@ -88,12 +96,18 @@ export class CrushProcessor {
       for (let i = 0; i < count; i++) {
         const dry = input[i];
         // Sample and hold. The phase carries across blocks, so the held rate is steady rather
-        // than restarting every hundred and twenty-eight samples.
-        const jitter = Math.min(1, Math.max(0, at(params.jitter, i)));
-        const rate = Math.max(1, at(params.rate, i)) * (1 - jitter * 0.5 * c.random());
-        c.phase += rate / this.sampleRate;
-        if (c.phase >= 1) {
-          c.phase -= Math.floor(c.phase);
+        // than restarting every hundred and twenty-eight samples. At the top of the range, or at
+        // a rate the context already runs at, every sample is taken as it comes and only the bit
+        // depth is applied.
+        const target = Math.max(1, at(params.rate, i));
+        let take = true;
+        if (target < RATE_TOP && target < this.sampleRate) {
+          const jitter = Math.min(1, Math.max(0, at(params.jitter, i)));
+          c.phase += (target * (1 - jitter * 0.5 * c.random())) / this.sampleRate;
+          take = c.phase >= 1;
+          if (take) c.phase -= Math.floor(c.phase);
+        }
+        if (take) {
           // Levels either side of zero. Using 2^bits - 1 as the step count overshoots full
           // scale by half a step at the very top, which is a quiet click on every peak.
           const bits = Math.max(1, Math.min(16, at(params.bits, i)));
