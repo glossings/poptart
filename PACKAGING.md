@@ -111,9 +111,11 @@ Extensions destination are threaded through `index.js` and `setup.js`.
   `sclang -l` sequence into a temp directory with a space in its name and asserts the class
   library compiled from the private copy, that the machine's own Extensions are invisible, and
   that VSTPlugin resolves once installed privately. It is opt-in via `POPTART_SC_INSTALL_TEST=1`
-  so an ordinary `npm test` doesn't pull 139–250 MB; `.github/workflows/private-sc.yml` sets it
+  so an ordinary `npm test` doesn't pull 139–250 MB; `.github/workflows/tests.yml` sets it
   and runs the job on `windows-latest` and `macos-latest` (free on a public repo), which is what
-  makes the Windows half buildable without a Windows machine to hand. Runners have no audio
+  makes the Windows half buildable without a Windows machine to hand. That workflow then
+  installs the private copy and VSTPlugin the way a first launch does and runs every suite
+  against it, the sclang harnesses included, on every push to `main`. Runners have no audio
   device, so the last step stays human on each platform: boot the engine from the private copy,
   scan, play a plugin, open its editor. `doctor.js` writes the resolved paths, the generated
   conf, the Extensions listing and sclang's own report to one file, keeping that to a single

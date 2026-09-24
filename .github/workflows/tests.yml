@@ -1,0 +1,160 @@
+# Runs every test suite on both desktop platforms, with a real SuperCollider for the sclang
+# harnesses to run against: poptart's own private copy (PACKAGING.md, Stage 1.5), installed the
+# way the app installs it, plus the VSTPlugin extension.
+#
+# Runners have no audio device. Everything short of sound is covered here - the class library
+# compiles from the private copy with VSTPlugin in it, every SynthDef in poptart.scd builds, the
+# harnesses that render through scsynth do so offline - and a Windows runner is the only Windows
+# machine this project has, so this is where a Windows-only regression is caught. What a green
+# run does NOT prove: that anything is audible, that a plugin window opens, how an audio driver
+# behaves, or what an installer does on first launch. Those stay with a person and headphones
+# (PACKAGING.md, "Cutting a release").
+#
+# The sclang harnesses skip rather than fail where sclang can't run, so that `npm test` passes
+# on a machine without SuperCollider. Here that would let a broken install turn into a green
+# run, so the last step fails the job if any test skipped for want of sclang or scsynth.
+#
+# Nothing here builds, signs or publishes anything, and the job needs no secrets.
+#
+# Actions are pinned to commit SHAs, not tags: a tag can be moved, and these run with access to
+# the checkout. The trailing comment is the human-readable version.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read # the job reads the repository and nothing else
+
+# A newer push to the same branch supersedes a run still going.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false # a Windows failure must not hide the macOS result, or the reverse
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Everything poptart writes - the private SuperCollider, its Extensions, the data folder -
+      # lands here rather than in the runner's home directory.
+      POPTART_HOME: ${{ runner.temp }}/poptart-home
+      # The SuperCollider archive is cached between runs (below); this is where it is kept.
+      POPTART_SC_CACHE_DIR: ${{ github.workspace }}/.sc-cache
+      # private-sc.test.js's real half: download, checksum, unpack into a directory with a space
+      # in its name, boot. Opt-in because it is 139-250MB; the cache makes it cheap here.
+      POPTART_SC_INSTALL_TEST: '1'
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The Node inside the Electron the app ships (electron-builder.yml's electronVersion), so
+      # the tests run on what users will run.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/desktop/package-lock.json
+
+      # Don't pull 139-250MB from SuperCollider's releases on every run. Keyed by the pinned
+      # version, so bumping it in private-sc.js invalidates the cache by itself.
+      - name: Cache the SuperCollider download
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .sc-cache
+          key: sc-${{ runner.os }}-${{ hashFiles('packages/osc-engine/private-sc.js') }}
+
+      - run: npm ci
+      # The desktop package has its own lockfile. Its Electron is only for running the app, and
+      # its tests don't need it.
+      - run: npm ci --prefix packages/desktop
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      # The same code path a first launch takes: fetch the pinned SuperCollider into the private
+      # root, then the VSTPlugin extension into its Extensions folder. POPTART_INSTALL_SC=1 is
+      # the consent a person would give at the prompt.
+      - name: Install SuperCollider and VSTPlugin the way the app does
+        env:
+          POPTART_INSTALL_SC: '1'
+        run: |
+          node - <<'EOF'
+          const { runSetup } = require('./packages/osc-engine/setup');
+          runSetup().then((summary) => {
+            if (summary.sclangSource !== 'private' || summary.vstPlugin === 'failed') {
+              console.error('setup did not end with the private SuperCollider and VSTPlugin in place:', summary);
+              process.exit(1);
+            }
+          });
+          EOF
+
+      # The sclang harnesses spawn sclang with no -l and render through scsynth with no -U: they
+      # are written for a developer machine whose SuperCollider already knows where everything
+      # is. Given no -l, sclang reads the config file in its user directory, so the config the
+      # engine generates for the private copy is put there; scsynth adds SC_PLUGIN_PATH to its
+      # UGen search, which is how it finds VSTPlugin's server half.
+      - name: Point a bare sclang and scsynth at the private copy
+        run: |
+          node - <<'EOF'
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const sc = require('./packages/osc-engine/private-sc');
+          const conf = sc.writeSclangConf();
+          const userDir = process.platform === 'win32'
+            ? path.join(process.env.LOCALAPPDATA, 'SuperCollider')
+            : path.join(os.homedir(), 'Library', 'Application Support', 'SuperCollider');
+          fs.mkdirSync(userDir, { recursive: true });
+          fs.copyFileSync(conf, path.join(userDir, 'sclang_conf.yaml'));
+          fs.appendFileSync(process.env.GITHUB_ENV, `SC_PLUGIN_PATH=${sc.privateExtensionsDir()}\n`);
+          console.log(`sclang_conf.yaml -> ${userDir}\n${fs.readFileSync(conf, 'utf8')}`);
+          EOF
+
+      - name: Pattern core and web app
+        run: npm test --workspace packages/pattern-core --workspace packages/web-app
+
+      - name: Desktop shell
+        run: npm test --prefix packages/desktop
+
+      # Kept as a log too, for the skip check below.
+      - name: Engine
+        run: |
+          set -o pipefail
+          npm test --workspace packages/osc-engine 2>&1 | tee engine-tests.log
+
+      # Skipped is what a harness does when it can't get an sclang or a render; on a developer's
+      # laptop that is fine, here it means the install above is broken in a way the tests
+      # didn't see. Other skips (a native helper that isn't built for this platform, a signal
+      # Windows can't deliver) are legitimate and pass through.
+      - name: Every sclang harness ran
+        run: |
+          if grep -E '# SKIP (sclang|scsynth)' engine-tests.log; then
+            echo "::error title=sclang harnesses skipped::The lines above skipped for want of sclang or scsynth, so the engine suite did not test what it looks like it tested. See the doctor report artifact."
+            exit 1
+          fi
+          echo "no harness skipped for want of sclang or scsynth"
+
+      # When something fails, the report is worth more than the log: it carries every resolved
+      # path, the generated config, the Extensions listing and what sclang itself reported.
+      - name: Collect diagnostics
+        if: failure()
+        run: node packages/osc-engine/doctor.js --out doctor-${{ matrix.os }}.txt
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: doctor-${{ matrix.os }}
+          path: doctor-${{ matrix.os }}.txt
+          if-no-files-found: warn

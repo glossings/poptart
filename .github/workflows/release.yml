@@ -77,8 +77,9 @@ jobs:
         run: |
           npm test --workspace packages/pattern-core --workspace packages/web-app
           npm test --prefix packages/desktop
-      # As in private-sc.yml: parts of the engine suite are known not to pass on a runner (no
-      # SuperCollider, no `ps` on Windows), so it informs without gating.
+      # The engine suite proper, with a SuperCollider to run its sclang harnesses against, is
+      # tests.yml's job on every push. A release build has no SuperCollider installed, so here
+      # the harnesses skip and the rest informs without gating.
       - name: Engine test suite (informational)
         continue-on-error: true
         run: npm test --workspace packages/osc-engine
