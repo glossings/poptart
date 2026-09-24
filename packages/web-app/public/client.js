@@ -18275,7 +18275,11 @@ async function readWavetables(files) {
   const source = 'https://github.com/glossings/poptart';
   const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
   licenseEl.innerHTML = `Poptart, copyright 2026 Glossing. Free software under the ${link(`${source}/blob/main/LICENSE`, 'GNU AGPL v3')}, with no warranty. Source: ${link(source, source.replace('https://', ''))}`;
-  if (!window.__poptartHostReady || !devicesEl) return;
+  if (!window.__poptartHostReady) return;
+  // The browser build counts visits (see build-web.mjs, injectAnalytics), and says so where the
+  // rest of what this page is lives. The desktop app counts nothing and prints nothing here.
+  licenseEl.insertAdjacentHTML('beforeend', '<br>This site counts visits anonymously: no cookies, and nothing that identifies you. Your patterns and files stay in this browser.');
+  if (!devicesEl) return;
   try {
     const about = await api('GET', '/api/about');
     const rows = (about.devices ?? []).filter((d) => d.vendor && d.vendor !== 'poptart');

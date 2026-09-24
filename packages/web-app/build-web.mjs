@@ -99,6 +99,48 @@ export function injectBoot(html) {
 }
 
 /**
+ * Puts the visit counter into the page's head: Vercel's Web Analytics, which counts page views
+ * and visitors without cookies or anything that identifies a person. The settings tab's about
+ * section says so (client.js, the credits).
+ *
+ * What it would report is cut down before it leaves: the URL goes without its query and its `#`,
+ * because a shared link carries the whole pattern after the `#`, and only a load's FIRST page
+ * view is sent, because the editor pushes a history entry per checkpoint and the script counts
+ * each one as a view.
+ *
+ * Only this build's page gets it - the desktop app serves the same index.html and counts nothing
+ * - and only off this machine: the script is served by the host at /_vercel/insights/, which a
+ * local serve-web.mjs does not have, and asking for it there is a 404 on every load.
+ */
+export function injectAnalytics(html) {
+  if (html.includes('/_vercel/insights/')) return html;
+  const anchor = '</head>';
+  if (!html.includes(anchor)) throw new Error('could not find the page head to put the visit counter in');
+  const tag = [
+    // The page's own indent before `</head>` stays in front of the first line, hence two here.
+    '  <!-- Anonymous visit counts (Vercel Web Analytics), off localhost only. -->',
+    '    <script>',
+    '      window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };',
+    '      // Only the page itself is reported: never the query or the #, which can hold a whole',
+    '      // shared pattern. And one page view per load, since every checkpoint is a history entry.',
+    '      let counted = false;',
+    '      window.va("beforeSend", (event) => {',
+    '        if (event.type === "pageview") { if (counted) return null; counted = true; }',
+    '        return { ...event, url: String(event.url).split(/[?#]/)[0] };',
+    '      });',
+    '      if (!["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) {',
+    '        const s = document.createElement("script");',
+    '        s.defer = true;',
+    '        s.src = "/_vercel/insights/script.js";',
+    '        document.head.appendChild(s);',
+    '      }',
+    '    </script>',
+    `  ${anchor}`,
+  ].join('\n');
+  return html.replace(anchor, tag);
+}
+
+/**
  * The buffer a fresh page opens on.
  *
  * The desktop's names a plugin, because on the desktop there is one. This one names only what
@@ -158,7 +200,7 @@ export function build({ out = DIST, quiet = false } = {}) {
   fs.copyFileSync(path.join(here, 'pinned-defs.js'), path.join(out, 'web', 'pinned-defs.js'));
 
   const indexPath = path.join(out, 'index.html');
-  fs.writeFileSync(indexPath, replaceSketch(injectBoot(fs.readFileSync(indexPath, 'utf8'))));
+  fs.writeFileSync(indexPath, replaceSketch(injectAnalytics(injectBoot(fs.readFileSync(indexPath, 'utf8')))));
 
   // The desktop server's own file, which the browser build has no use for and should not ship.
   for (const gone of ['docs.html.map']) {

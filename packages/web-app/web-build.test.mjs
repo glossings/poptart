@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { build, injectBoot, replaceSketch, WEB_SKETCH } from './build-web.mjs';
+import { build, injectAnalytics, injectBoot, replaceSketch, WEB_SKETCH } from './build-web.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-web-build-'));
@@ -201,3 +201,26 @@ test('nothing in the build reaches for a Node module', () => {
 });
 
 test.after(() => fs.rmSync(out, { recursive: true, force: true }));
+
+test('the visit counter goes in the head once, and never on this machine', () => {
+  const page = '<html><head><title>x</title></head><body></body></html>';
+  const once = injectAnalytics(page);
+  assert.equal(injectAnalytics(once), once, 'injecting twice is a no-op');
+  assert.ok(once.indexOf('/_vercel/insights/script.js') < once.indexOf('</head>'), 'in the head');
+  assert.match(once, /"localhost", "127\.0\.0\.1"/, 'a local serve does not ask for a script it cannot serve');
+  assert.throws(() => injectAnalytics('<body></body>'), /could not find the page head/);
+});
+
+test('the visit counter reports the page, never a pattern in the link, and one view per load', () => {
+  // Run the injected script against a stand-in window and read what it would send.
+  const html = injectAnalytics('<html><head></head></html>');
+  const code = html.slice(html.indexOf('<script>') + 8, html.indexOf('</script>'));
+  const win = {};
+  new Function('window', 'location', 'document', code)(win, { hostname: 'localhost' }, {});
+  const [name, beforeSend] = win.vaq[0];
+  assert.equal(name, 'beforeSend');
+  const shared = 'https://pastree.cc/?x=1#bm90ZTogYSBwYXR0ZXJu';
+  assert.deepEqual(beforeSend({ type: 'pageview', url: shared }), { type: 'pageview', url: 'https://pastree.cc/' });
+  assert.equal(beforeSend({ type: 'pageview', url: 'https://pastree.cc/#s=abc' }), null, 'a checkpoint is not another visit');
+  assert.equal(beforeSend({ type: 'event', url: shared }).url, 'https://pastree.cc/');
+});
