@@ -541,12 +541,15 @@ test('a parameter set by value glides, and the caller can say how long for', () 
   engine.setParam('t1', 1, 'Drive', 0.5, 0);
   const quick = drive.calls.find((c) => c.kind === 'ramp');
   assert.equal(quick.value, 0.5);
-  assert.ok(Math.abs(quick.time - 0.01) < 1e-9, `the default glide is ten milliseconds, got ${quick.time}`);
+  // Five milliseconds of lookahead before the ten of glide: a change asked for "now" is placed
+  // just past where the audio thread has already got to, so the ramp joins the curve rather
+  // than stepping off a value the thread rendered a moment ago (see rampParam).
+  assert.ok(Math.abs(quick.time - 0.015) < 1e-9, `the default glide is ten milliseconds after the lookahead, got ${quick.time}`);
 
   drive.calls.length = 0;
   engine.setParam('t1', 1, 'Drive', 0.75, 0, 0.03);
   const slow = drive.calls.find((c) => c.kind === 'ramp');
-  assert.ok(Math.abs(slow.time - 0.03) < 1e-9, `an asked-for glide is honored, got ${slow.time}`);
+  assert.ok(Math.abs(slow.time - 0.035) < 1e-9, `an asked-for glide is honored, after the lookahead, got ${slow.time}`);
 
   // Zero is a step, not a very fast ramp: a mode ramped through sweeps every setting on the way.
   drive.calls.length = 0;

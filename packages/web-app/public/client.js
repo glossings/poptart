@@ -3073,17 +3073,23 @@ function deviceKnob(widget, { onDrag, onCommit, register }) {
     // The desk's sweep, and the macro bank's fine-drag modifier: a filter cutoff wants both the
     // whole range in one gesture and a way to land on a number.
     const move = (ev) => moveTo(p0 + (y0 - ev.clientY) / (ev.shiftKey ? 1200 : 150));
+    // The gesture ends on ANY of these. A lost capture is the one that was missing: the window
+    // rebuilding under the hand, or the pointer taken by something else, ends the capture with
+    // no pointerup ever arriving, and a knob that never heard the end stayed lit as dragging and
+    // kept its listeners - so the next drag on any knob moved this one too.
     const up = () => {
       dragging = false;
       knob.classList.remove('dragging');
       knob.removeEventListener('pointermove', move);
       knob.removeEventListener('pointerup', up);
       knob.removeEventListener('pointercancel', up);
+      knob.removeEventListener('lostpointercapture', up);
       onCommit(pos);
     };
     knob.addEventListener('pointermove', move);
     knob.addEventListener('pointerup', up);
     knob.addEventListener('pointercancel', up);
+    knob.addEventListener('lostpointercapture', up);
   });
   knob.addEventListener('dblclick', () => {
     moveTo(widget.defaultPosition);
@@ -3269,11 +3275,12 @@ function startDeviceLive(trackLabel, slot, panel) {
   deviceLiveTimer = requestAnimationFrame(tick);
 }
 
-/** Figures that draw what a device is doing rather than how it is set, and so always follow. */
-const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer']);
+/** Figures that draw what a device is doing rather than how it is set, and so always follow. An
+ * equalizer's curve is drawn over the signal an analyser reads while its window is open. */
+const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq']);
 
 /** How tall each kind of figure is drawn, in CSS pixels. */
-const FIGURE_HEIGHT = { wavetable: 132, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 112 };
+const FIGURE_HEIGHT = { wavetable: 132, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120 };
 
 /** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
 const FIGURE_HIT_PX = 9;
@@ -3287,6 +3294,8 @@ const FIGURE_METER_H = 14;
 
 /** How far down a gain-reduction meter reads. Past this a compressor is not compressing. */
 const FIGURE_GR_RANGE = 24;
+/** The gain-reduction column down the right of a transfer figure, in pixels. */
+const FIGURE_GR_W = 10;
 
 /** The height of the wavetable figure's position scrubber, under the waveform. */
 const FIGURE_SCRUB_H = 15;
@@ -3409,6 +3418,11 @@ function deviceFigure(trackLabel, slot, figure) {
       entry.meter += (raw - entry.meter) * (Math.abs(raw) > Math.abs(entry.meter) ? 0.6 : 0.08);
       if (current.kind === 'meter') shown.db = entry.meter;
       else shown.grDb = entry.meter;
+      if (current.kind === 'transfer' && current.inDb !== null) {
+        const level = Number(current.inDb);
+        entry.level += (level - entry.level) * (level > entry.level ? 0.6 : 0.12);
+        shown.inDb = entry.level;
+      }
     }
     readout.textContent = drawer(ctx, w, h, shown, figureColors()) ?? '';
   };
@@ -3421,6 +3435,9 @@ function deviceFigure(trackLabel, slot, figure) {
     // each block, thirty times a second, and a meter that followed that exactly would be a
     // blur - so it falls fast and comes back slowly, which is what makes one readable.
     meter: 0,
+    // And where the signal's level has got to, smoothed the same way: a dot on a curve that
+    // followed every block's peak exactly would be a scribble.
+    level: -120,
     // Which part of a many-part figure the last gesture was on. Set by the gesture, read by the
     // drawer, and carried across repaints - a figure is rebuilt from the host on every frame of
     // a drag, so it cannot live on the figure data.
@@ -3573,22 +3590,18 @@ function fieldGrab(f) {
     axes.push({ axis, paramId, from: figurePosition(f, axis) });
   }
   if (!axes.length) return null;
-  // One parameter per request, so a two-axis drag has to choose. The choice is made ONCE, as
-  // soon as the gesture has gone far enough to mean something, and held for the rest of it: a
-  // hand sweeping sideways still wanders a few pixels up and down, and deciding again every
-  // frame handed those pixels to the other axis - the one being dragged stopped moving until
-  // the hand happened to go straight again, which reads as a control stuck at a value.
-  let axis = axes.length > 1 ? null : axes[0].axis;
+  // A two-axis figure is an x-y control: both parameters follow the hand at once, in one request
+  // (the route takes a batch, and answers for each). It used to pick ONE axis per gesture, which
+  // was a fix for an earlier version that re-decided the axis every frame and stuck - but a pad
+  // that only moves one way at a time is not a pad, and the thing somebody wants from a filter's
+  // picture is to sweep the cutoff and the resonance together.
   return {
-    at: (dx, dy) => {
-      if (!axis) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_LATCH) return null;
-        axis = Math.abs(dy) > Math.abs(dx) ? 'y' : 'x';
-      }
-      const pick = axes.find((a) => a.axis === axis) ?? axes[0];
-      const delta = pick.axis === 'y' ? -dy : dx;
-      return { id: pick.paramId, position: Math.min(1, Math.max(0, pick.from + delta)) };
-    },
+    at: (dx, dy) => ({
+      params: axes.map((a) => ({
+        id: a.paramId,
+        position: Math.min(1, Math.max(0, a.from + (a.axis === 'y' ? -dy : dx))),
+      })),
+    }),
   };
 }
 
@@ -3935,9 +3948,18 @@ const FIGURE_DRAWERS = {
     ctx.lineTo(w, yOf(0));
     ctx.stroke();
 
+    // CLIPPED, NOT CLAMPED. A steep mode falls past the bottom of the window within an octave or
+    // two of its corner, and a curve held at the bottom edge draws as a flat line from there to
+    // the right - which reads as a filter that stops filtering. Off the picture is the honest
+    // place for it, the same as a resonant peak runs off the top.
     const pts = f.points.map((p) => [xOf(p.hz), yOf(p.db)]);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h - FIGURE_PAD_Y);
+    ctx.clip();
     figureFill(ctx, pts, c.accent, h);
     figureStroke(ctx, pts, c.accent, 1.75);
+    ctx.restore();
 
     const cx = xOf(Math.min(highHz, Math.max(lowHz, f.corner)));
     ctx.save();
@@ -3974,6 +3996,15 @@ const FIGURE_DRAWERS = {
     }
     for (const db of [-12, 0, 12]) {
       ctx.beginPath(); ctx.moveTo(0, yOf(db)); ctx.lineTo(w, yOf(db)); ctx.stroke();
+    }
+    // THE SIGNAL, behind the curve: what is actually there to be shaped, from an analyser on the
+    // device's output while this window is open. On its own scale down the same axis - a
+    // spectrum is decibels below full scale and the curve is decibels of gain, and the two share
+    // a frequency axis and nothing else - and faint, so the curve stays the subject.
+    if (Array.isArray(f.spectrum) && f.spectrum.length) {
+      const floorDb = -90;
+      const ySpec = (db) => FIGURE_PAD_Y + ((0 - Math.max(floorDb, Math.min(0, db))) / (0 - floorDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+      figureFill(ctx, f.spectrum.map((p) => [xOf(p.hz), ySpec(p.db)]), c.dim, h);
     }
     const pts = f.points.map((p) => [xOf(p.hz), yOf(p.db)]);
     figureFill(ctx, pts, c.accent, yOf(0));
@@ -4030,8 +4061,9 @@ const FIGURE_DRAWERS = {
     // number buried in the diagonal, so "2 modulating 1" and "1 modulating 2" were two squares
     // either side of a line with nothing to tell you which was which. The numbers now run down
     // the left (the operator doing the modulating) and across the top (the one being modulated),
-    // the cell under your hand lights both of them, and the heading spells the pair out with an
-    // arrow - which is the only place the DIRECTION can be stated rather than implied.
+    // every cell names its own connection with an arrow pointing the way the signal goes, the
+    // cell under your hand lights both of its operators, and the heading spells that one out
+    // with its amount.
     const { gx, gy, cols, cw, rh } = matrixGeometry(f, w, h);
     const [fr, fc] = String(f.focus ?? '').split(':').map(Number);
     const hasFocus = Number.isInteger(fr) && Number.isInteger(fc);
@@ -4069,14 +4101,14 @@ const FIGURE_DRAWERS = {
           ctx.fillRect(x + 2, y + 2, cw - 4, rh - 4);
           ctx.globalAlpha = 1;
         }
-        // An operator modulating ITSELF is the feedback diagonal, and it is worth marking: it is
-        // the one cell in the row whose two ends are the same operator.
-        if (col === r) {
-          ctx.fillStyle = c.dim;
-          ctx.globalAlpha = amount > 0.001 ? 0.5 : 1;
-          ctx.fillText('\u21ba', x + cw / 2, y + rh / 2);
-          ctx.globalAlpha = 1;
-        }
+        // "2→1" is operator 2 modulating operator 1, and its mirror across the diagonal reads the
+        // other way round: a cell that names itself cannot be misread, which a grid of blank
+        // squares could. The diagonal reads "2→2", which is an operator modulating itself.
+        const focused = hasFocus && r === fr && col === fc;
+        ctx.fillStyle = focused || amount > 0.001 ? c.text : c.dim;
+        ctx.globalAlpha = focused || amount > 0.001 ? 1 : 0.5;
+        ctx.fillText(col < f.ops ? `${r + 1}→${col + 1}` : `${r + 1}→out`, x + cw / 2, y + rh / 2);
+        ctx.globalAlpha = 1;
       }
     }
     ctx.textAlign = 'start';
@@ -4238,12 +4270,19 @@ const FIGURE_DRAWERS = {
    * does to that; the dot is where the signal is on it right now.
    */
   transfer(ctx, w, h, f, c) {
+    // THREE THINGS, EACH IN ITS OWN PLACE. The curve says what the device does to a level. The
+    // bar along the bottom is the signal's level, on the same axis as the threshold so the two
+    // can be compared by eye, and the dot is that same level on the curve. The gain reduction
+    // hangs down its own column at the right, in a different color, because it is the one number
+    // here that is not a level. One unlabeled bar that could have been either was the complaint.
     const { lowDb, highDb } = f.range;
-    const xOf = (db) => ((Math.min(highDb, Math.max(lowDb, db)) - lowDb) / (highDb - lowDb)) * w;
-    const plot = h - FIGURE_METER_H;
-    const yOf = (db) => plot - ((Math.min(highDb, Math.max(lowDb, db)) - lowDb) / (highDb - lowDb)) * plot;
+    const plotW = w - FIGURE_GR_W - 6;
+    const plotH = h - FIGURE_METER_H;
+    const clampDb = (db) => Math.min(highDb, Math.max(lowDb, db));
+    const xOf = (db) => ((clampDb(db) - lowDb) / (highDb - lowDb)) * plotW;
+    const yOf = (db) => plotH - ((clampDb(db) - lowDb) / (highDb - lowDb)) * plotH;
 
-    // Unity, and the threshold it departs from.
+    // Unity, and the threshold (or the ceiling) the curve departs from.
     ctx.strokeStyle = c.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -4254,38 +4293,47 @@ const FIGURE_DRAWERS = {
     ctx.setLineDash([2, 3]);
     ctx.beginPath();
     ctx.moveTo(xOf(f.threshold), 0);
-    ctx.lineTo(xOf(f.threshold), plot);
+    ctx.lineTo(xOf(f.threshold), plotH);
     ctx.stroke();
     ctx.restore();
 
     figureStroke(ctx, f.points.map((p) => [xOf(p.inDb), yOf(p.outDb)]), c.accent, 1.75);
 
-    // GAIN REDUCTION, along the bottom. This used to be a dot travelling on the curve, which
-    // was two things at once and neither of them legible: it jumped about with the signal, and
-    // the number it was really carrying - how much is being taken off - had to be read as a
-    // vertical distance from a diagonal line. A bar is the shape of that one number.
-    //
-    // Smoothed on the way in: the device reports the deepest reduction of each block, thirty
-    // times a second, and a meter that follows that exactly is a blur. Fast down and slow back,
-    // which is what every gain-reduction meter does and what makes one readable.
+    // The level bar, with the threshold marked on it, and the dot on the curve.
+    const live = f.inDb !== null && f.inDb > lowDb;
+    ctx.fillStyle = c.grid;
+    ctx.fillRect(0, plotH + 4, plotW, FIGURE_METER_H - 6);
+    if (live) {
+      const inX = xOf(f.inDb);
+      ctx.fillStyle = c.accent;
+      ctx.fillRect(0, plotH + 4, inX, FIGURE_METER_H - 6);
+      const near = f.points.reduce((b, p) => (Math.abs(p.inDb - f.inDb) < Math.abs(b.inDb - f.inDb) ? p : b));
+      ctx.beginPath();
+      ctx.arc(inX, yOf(near.outDb), FIGURE_POINT_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = c.text;
+    ctx.fillRect(xOf(f.threshold) - 0.5, plotH + 2, 1, FIGURE_METER_H - 2);
+
+    // Gain reduction, hanging from the top of its column: gain being taken away.
     const range = FIGURE_GR_RANGE;
     const shown = Math.min(0, Math.max(-range, f.grDb));
+    const gx = w - FIGURE_GR_W;
     ctx.fillStyle = c.grid;
-    ctx.fillRect(0, plot + 4, w, FIGURE_METER_H - 6);
+    ctx.fillRect(gx, 0, FIGURE_GR_W, plotH);
     if (shown < -0.05) {
-      // From the right, because a compressor takes gain AWAY: the bar grows leftward from zero.
-      const width = (Math.abs(shown) / range) * w;
-      ctx.fillStyle = c.accent;
-      ctx.fillRect(w - width, plot + 4, width, FIGURE_METER_H - 6);
+      ctx.fillStyle = c.warn;
+      ctx.fillRect(gx, 0, FIGURE_GR_W, (Math.abs(shown) / range) * plotH);
     }
-    // Where the signal is on the input axis, as a tick under the curve rather than a dot on it.
-    if (f.inDb !== null && f.inDb > lowDb) {
-      ctx.fillStyle = c.dim;
-      ctx.fillRect(xOf(f.inDb) - 0.5, plot - 5, 1, 5);
-    }
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = c.dim;
+    ctx.fillText('gr', gx + FIGURE_GR_W / 2, plotH + 4);
+    ctx.textAlign = 'start';
 
-    // The one number here that is not already on a knob.
-    return `gr ${figurePad(shown.toFixed(1), 5)} dB`;
+    // Both numbers, each named, at widths that never change.
+    return `in ${live ? figurePad(f.inDb.toFixed(1), 5) : figurePad('', 5)} dB · gr ${figurePad(shown.toFixed(1), 5)} dB`;
   },
 
   /** One grain's amplitude across its own length, the window the synth is applying. */
@@ -4573,6 +4621,10 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     select.onchange = () => send({ value: Number(select.value) }, true);
     setPosition = (_position, value) => { if (Number.isFinite(value)) select.value = String(Math.round(value)); };
     cell.appendChild(select);
+    // The select shows its choice, so the readout under it is left blank rather than printing
+    // the same word twice. Blank, not removed: the cell keeps the height its neighbors have.
+    showValue = () => { readout.textContent = ''; };
+    readout.textContent = '';
   } else if (isNumber) {
     const box = deviceNumber(widget, {
       onDrag: (value, paint) => { paint(); send({ value }, false); },
@@ -5565,7 +5617,10 @@ function lfoPhaseNow() {
   const pos = currentCyclePos();
   let turns;
   if (lfoState.mode === 'free') {
-    turns = lfoState.rateHz ? (Date.now() / 1000) * lfoState.rate : pos * lfoState.rate;
+    // A free-running rate counts the ENGINE's seconds, which is what its anchor counts (see the
+    // scheduler's _anchorLFOs). On the desktop that is the wall clock; in the browser it is the
+    // audio context's own, and the transport mirror carries the offset between the two.
+    turns = lfoState.rateHz ? (Date.now() / 1000 - (transport.clockOffset ?? 0)) * lfoState.rate : pos * lfoState.rate;
   } else {
     const region = lfoGateRegion();
     const gate = region && playing ? lastGateBefore(region, pos) : null;
@@ -17579,6 +17634,27 @@ async function readWavetables(files) {
   logLine(`wavetables: kept ${kept}${failed ? `, ${failed} could not be read` : ''}`);
   if (devicePanelAt) refreshDevicePanel();
 }
+
+// The credits, in settings: the license, where the source is, and - in the browser build, whose
+// devices are compiled from other projects' code - whose each one is. The source link is here
+// and not only in the readme because a page served over a network has to offer its source to
+// whoever is using it (AGPL section 13); the device rows are the catalog's, not a list kept here.
+(async () => {
+  const licenseEl = document.getElementById('aboutLicense');
+  const devicesEl = document.getElementById('aboutDevices');
+  if (!licenseEl) return;
+  const source = 'https://github.com/glossings/poptart';
+  const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
+  licenseEl.innerHTML = `Poptart, copyright 2026 Glossing. Free software under the ${link(`${source}/blob/main/LICENSE`, 'GNU AGPL v3')}, with no warranty. Source: ${link(source, source.replace('https://', ''))}`;
+  if (!window.__poptartHostReady || !devicesEl) return;
+  try {
+    const about = await api('GET', '/api/about');
+    const rows = (about.devices ?? []).filter((d) => d.vendor && d.vendor !== 'poptart');
+    if (!rows.length) return;
+    const lines = rows.map((d) => `${d.id}: ${d.license}, ${d.vendor}${d.source ? ` (${link(d.source.split(' ')[0], 'source')})` : ''}`);
+    devicesEl.innerHTML = `Devices built from other projects' code, each under its own license (${link(about.notices, 'notices')}):<br>${lines.join('<br>')}`;
+  } catch { /* the desktop has no compiled devices, and no route to ask */ }
+})();
 
 if (window.__poptartHostReady) {
   wavetableSection.classList.remove('hidden');

@@ -221,8 +221,19 @@ export class LfoConnection {
     this.startedAt = when;
     this.startPhase = phase;
     if (previous) {
+      // The old source plays on until the new one takes over, and is unplugged only once it has
+      // stopped. Unplugging it here, at the time of the call, left the parameter with NOTHING on
+      // it for the whole lookahead - a hundred and fifty milliseconds at its intrinsic zero,
+      // which on a filter's cutoff is a drop to twenty hertz - every time the scheduler anchored
+      // the phase, which is every few seconds. An anchor that lands on the phase the LFO already
+      // has, which is the normal case, must be inaudible.
       try { previous.stop(when); } catch { /* not started, or already stopped */ }
-      try { previous.disconnect(); } catch { /* already detached */ }
+      const unplug = () => { try { previous.disconnect(); } catch { /* already detached */ } };
+      previous.onended = unplug;
+      // A source told to stop before it was started never fires `ended`; the timer is the
+      // fallback that guarantees nothing is left hanging off the parameter.
+      const timer = setTimeout(unplug, Math.max(0, when - this.ctx.currentTime) * 1000 + 250);
+      timer?.unref?.(); // a node test's process need not wait for it
     }
     try { this.target.value = 0; } catch { /* a param that refuses a direct set */ }
   }

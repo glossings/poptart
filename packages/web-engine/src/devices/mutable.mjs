@@ -57,7 +57,7 @@ export const PLAITS = defineDevice({
         "Snare Drum",
         "Hi-Hat"
       ],
-      "group": "Engine",
+      "group": "Model",
       "description": "Which synthesis model runs. Every other control means something different in each."
     },
     {
@@ -67,7 +67,7 @@ export const PLAITS = defineDevice({
       "min": 0,
       "max": 1,
       "default": 0.5,
-      "group": "Engine",
+      "group": "Model",
       "description": "The first of the three model controls. Broadly: how much material there is - the number of partials, the spread of a chord, the depth of the FM. It means something different in every engine."
     },
     {
@@ -77,7 +77,7 @@ export const PLAITS = defineDevice({
       "min": 0,
       "max": 1,
       "default": 0.5,
-      "group": "Engine",
+      "group": "Model",
       "description": "The second model control. Broadly: brightness, or the balance of what Harmonics set up. It means something different in every engine."
     },
     {
@@ -87,7 +87,7 @@ export const PLAITS = defineDevice({
       "min": 0,
       "max": 1,
       "default": 0.5,
-      "group": "Engine",
+      "group": "Model",
       "description": "The third model control. Broadly: the character of the waveform itself, often from soft to hard. It means something different in every engine."
     },
     {
@@ -97,7 +97,7 @@ export const PLAITS = defineDevice({
       "min": 0,
       "max": 1,
       "default": 0,
-      "group": "Engine",
+      "group": "Model",
       "description": "Plaits has two outputs, a main and a variation. Zero is the main one, one is the variation, in between is a mix."
     },
     {
@@ -542,78 +542,6 @@ export const BRAIDS = defineDevice({
   ]
 });
 
-export const PEAKS = defineDevice({
-  "id": "Peaks",
-  "kind": "synth",
-  "version": 1,
-  "description": "The four drum models from Peaks: a bass drum, a snare, a hi-hat and an FM drum, each struck by a note.",
-  "vendor": "Mutable Instruments",
-  "license": "MIT",
-  "source": "https://github.com/pichenettes/eurorack (peaks)",
-  "build": "wasm",
-  "processor": "poptart-wasm-peaks",
-  "channels": {
-    "in": 0,
-    "out": 2
-  },
-  "params": [
-    {
-      "rate": "k",
-      "id": "voice",
-      "name": "Voice",
-      "default": 0,
-      "options": [
-        "Bass Drum",
-        "Snare Drum",
-        "Hi-Hat",
-        "FM Drum"
-      ],
-      "group": "Drum",
-      "description": "Which of the module's four drum models is struck. The four controls below mean something a little different in each."
-    },
-    {
-      "rate": "a",
-      "id": "frequency",
-      "name": "Frequency",
-      "min": 0,
-      "max": 1,
-      "default": 0.5,
-      "group": "Drum",
-      "description": "The pitch of the drum, an octave either way around the note played. The bass drum and the snare reach seven semitones either side of their own center, so a note far from it is heard at the edge of the range."
-    },
-    {
-      "rate": "a",
-      "id": "punch",
-      "name": "Punch",
-      "min": 0,
-      "max": 1,
-      "default": 0.5,
-      "group": "Drum",
-      "description": "How hard the drum is hit: the depth of the pitch sweep at the start and the weight behind it."
-    },
-    {
-      "rate": "a",
-      "id": "tone",
-      "name": "Tone",
-      "min": 0,
-      "max": 1,
-      "default": 0.5,
-      "group": "Drum",
-      "description": "The brightness of the drum - how much top the body and the transient keep."
-    },
-    {
-      "rate": "a",
-      "id": "decay",
-      "name": "Decay",
-      "min": 0,
-      "max": 1,
-      "default": 0.4,
-      "group": "Drum",
-      "description": "How long the drum rings on after it is struck."
-    }
-  ]
-});
-
 export const CLOUDS = defineDevice({
   "id": "Clouds",
   "kind": "fx",
@@ -752,4 +680,7 @@ export const CLOUDS = defineDevice({
 // after two rounds of fixing the wrapper it still produced digital noise across most of its
 // algorithm range; the Wavetable's own FM/PM/ring warp modes cover what it was here for. The
 // build still knows how to compile it (see build/devices) if it is ever worth another go.
-export const MUTABLE_DEVICES = Object.freeze([PLAITS, RINGS, ELEMENTS, BRAIDS, PEAKS, CLOUDS]);
+// Peaks was retired on 2026-09-23. Its drums are Plaits' own Bass Drum, Snare Drum and Hi-Hat
+// engines by the same author, later and better, and its FM drum is what the FM synth does with
+// far more control; the build no longer compiles it (see build/devices/sources.json).
+export const MUTABLE_DEVICES = Object.freeze([PLAITS, RINGS, ELEMENTS, BRAIDS, CLOUDS]);

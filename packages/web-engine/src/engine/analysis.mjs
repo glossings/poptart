@@ -157,6 +157,48 @@ class Tap {
  * and is keyed '*'. A tap is built the first time a strip is asked for and thrown away when it
  * stops being asked for, so folding a group really does hand its share back.
  */
+/**
+ * One analyser on a device's output, for the picture an equalizer draws behind its curve.
+ *
+ * A curve on its own says what the device would do to a signal; drawn over what is actually
+ * there it says what it is doing, which is the thing somebody with a hand on a band wants to
+ * see. Attached while a window is open and disposed when it closes, because an FFT per frame is
+ * worth paying for a picture being looked at and for nothing else.
+ *
+ * Smoothed, where the mixer's taps are not: this is read at a glance under a curve, not measured.
+ */
+export class SpectrumTap {
+  constructor(ctx, source) {
+    this.ctx = ctx;
+    this.source = source;
+    this.node = ctx.createAnalyser();
+    this.node.fftSize = FFT_SIZE;
+    this.node.smoothingTimeConstant = 0.7;
+    source.connect(this.node);
+    this.freq = new Float32Array(FFT_SIZE / 2);
+    this.bins = bandBins(ctx.sampleRate);
+  }
+
+  /** Decibels below full scale per band, in MIX_BAND_FREQS order. */
+  bands() {
+    this.node.getFloatFrequencyData(this.freq);
+    const out = new Array(this.bins.length);
+    for (let b = 0; b < this.bins.length; b++) {
+      const [from, to] = this.bins[b];
+      let sum = 0;
+      for (let i = from; i < to; i++) sum += 10 ** (this.freq[i] / 20);
+      const amp = sum / (to - from);
+      out[b] = amp > 1e-6 ? 20 * Math.log10(amp) : -120;
+    }
+    return out;
+  }
+
+  dispose() {
+    try { this.source.disconnect(this.node); } catch { /* already detached */ }
+    try { this.node.disconnect(); } catch { /* already detached */ }
+  }
+}
+
 export class MixAnalysis {
   constructor(ctx, master) {
     this.ctx = ctx;

@@ -1878,6 +1878,19 @@ li.CodeMirror-hint-active {
   color: var(--text-dim);
 }
 
+/* Captions are read, not selected. A drag that begins on a knob's name must not start a text
+   selection, and a panel whose labels turn blue on a stray click reads as a web page rather
+   than an instrument. The inputs inside a number box keep their own selection: this is on the
+   text elements, not on the container. */
+.device-section-head,
+.device-widget-name,
+.device-widget-value,
+.device-figure-head,
+.device-figure-canvas {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .device-widgets {
   display: flex;
   flex-wrap: wrap;

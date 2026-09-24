@@ -24,7 +24,7 @@ test('the catalog resolves every device it ships, by the name userland would typ
 });
 
 test('the synths and the effects land on the right side of synth() and fx()', () => {
-  assert.deepEqual(catalog.list('synth').map((d) => d.id).sort(), ['Braids', 'Elements', 'FM', 'Granular', 'Peaks', 'Plaits', 'Rings', 'Wavetable']);
+  assert.deepEqual(catalog.list('synth').map((d) => d.id).sort(), ['Braids', 'Elements', 'FM', 'Granular', 'Plaits', 'Rings', 'Wavetable']);
   assert.deepEqual(
     catalog.list('fx').map((d) => d.id).sort(),
     [

@@ -143,6 +143,16 @@ export function build({ out = DIST, quiet = false } = {}) {
     log(`  ${s.to || '/'}  ${files} files, ${(bytes / 1e6).toFixed(1)} MB`);
   }
 
+  // The licenses, at the root of the site. AGPL section 13 asks a page served over a network to
+  // offer its source, and the MIT devices ask that their notices travel with any copy of them -
+  // so the served page carries both, at the paths the About screen links to.
+  for (const name of ['LICENSE', 'THIRD-PARTY-NOTICES.md', 'LICENSES/GPL-2.0.txt']) {
+    const from = path.join(repoRoot, name);
+    if (!fs.existsSync(from)) throw new Error(`the build ships ${name}, and it is not there`);
+    fs.mkdirSync(path.dirname(path.join(out, name)), { recursive: true });
+    fs.copyFileSync(from, path.join(out, name));
+  }
+
   const indexPath = path.join(out, 'index.html');
   fs.writeFileSync(indexPath, replaceSketch(injectBoot(fs.readFileSync(indexPath, 'utf8'))));
 

@@ -250,6 +250,29 @@ test('anchoring re-pins an ordinary LFO and leaves a random one alone', () => {
   assert.equal(sources(), beforeRand, 'pinning a random walk to a phase would make it repeat at the anchor rate');
 });
 
+test('an anchor a lookahead ahead keeps the old LFO source on the parameter until the new one starts', () => {
+  // The scheduler anchors every few seconds, at a time a lookahead ahead of now. Unplugging the
+  // old source at the time of the call left the parameter with nothing on it until the new one
+  // started: a hundred and fifty milliseconds at its intrinsic zero, which on a cutoff is a drop
+  // to twenty hertz, every four seconds, at anchors that otherwise change nothing.
+  const { ctx, engine } = makeEngine();
+  engine.createTrack('t1');
+  engine.loadEffect('t1', 'Filter', 1);
+  engine.setParamLFO('t1', 1, 'Cutoff', { shape: 'sine', rateHz: 2, min: 200, max: 4000 });
+  const conn = engine.modulators.get('t1').get('1:Cutoff');
+  const previous = conn.node;
+  const at = ctx.currentTime + 0.15;
+  engine.anchorParamLFO('t1', 1, 'Cutoff', 0.25, at);
+  assert.notEqual(conn.node, previous, 'the anchor builds a new source');
+  assert.ok(Math.abs(conn.node.started.when - at) < 1e-9, 'which starts at the time asked for');
+  assert.ok(Math.abs(previous.stopped.when - at) < 1e-9, 'and the old one stops at that same time');
+  assert.ok(conn.target.connectedFrom.includes(previous), 'the old source is still on the parameter until then');
+  assert.ok(conn.target.connectedFrom.includes(conn.node), 'alongside the new one');
+  previous.onended();
+  assert.ok(!conn.target.connectedFrom.includes(previous), 'and is unplugged once it has stopped');
+  assert.ok(conn.target.connectedFrom.includes(conn.node), 'leaving the new one in place');
+});
+
 test('an LFO whose range is swept keeps the phase it had reached', () => {
   const { ctx, engine } = makeEngine();
   engine.createTrack('t1');

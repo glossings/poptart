@@ -42,8 +42,21 @@ const PARAM_GLIDE_SEC = 0.01;
  * the same behavior the SuperCollider side gets from its ramp synth, which is what makes a
  * polled control sound like a sweep rather than a staircase.
  */
+/**
+ * How far ahead of "now" a change asked for now is placed.
+ *
+ * `now` is the main thread's reading of the clock, and the audio thread has already rendered
+ * past it by the time this call is heard. A hold and a ramp scheduled at a time already rendered
+ * are computed from the value the curve had THEN, so each one lands a step away from where the
+ * parameter has actually got to - a small click sixty times a second under a dragged knob,
+ * heard as noise riding the sound. A few milliseconds of lookahead puts every hold in the audio
+ * thread's future, where a ramp joins the curve it interrupts. Below anybody's threshold for a
+ * knob feeling late, and not applied to anything already scheduled ahead.
+ */
+const PARAM_LOOKAHEAD_SEC = 0.005;
+
 export function rampParam(param, value, atTime, now, glide = PARAM_GLIDE_SEC) {
-  const when = Math.max(now, atTime ?? now);
+  const when = Math.max(now + PARAM_LOOKAHEAD_SEC, atTime ?? now);
   try {
     // Firefox has no cancelAndHoldAtTime, and the obvious stand-in is worse than nothing:
     // cancelScheduledValues drops the parameter back to the last value SET rather than to where

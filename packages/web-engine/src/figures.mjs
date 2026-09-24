@@ -146,7 +146,7 @@ function figureData(descriptor, figure, values, opts) {
     case 'unison': return { ...common, ...unisonFigure(read) };
     case 'response': return { ...common, ...responseFigure(read, sampleRate) };
     case 'adsr': return { ...common, ...adsrFigure(figure, read, descriptor) };
-    case 'eq': return { ...common, ...eqFigure(figure, read, sampleRate, descriptor) };
+    case 'eq': return { ...common, ...eqFigure(figure, read, sampleRate, descriptor, report) };
     case 'band': return { ...common, ...bandFigure(figure, read) };
     case 'matrix': return { ...common, ...matrixFigure(figure, read) };
     case 'sample': return { ...common, ...sampleFigure(figure, read, { waves, extras, report }) };
@@ -487,10 +487,18 @@ function cornerOf(filter, modeName, cutoff, sampleRate) {
   }
 }
 
-/** A magnitude as decibels, floored rather than run off to negative infinity at a notch. */
+/**
+ * A magnitude as decibels, floored so a notch does not run off to negative infinity.
+ *
+ * Floored FAR below the window, not just under it: a steep mode falls past the bottom of the
+ * picture within an octave or two of its corner, and a floor six decibels under the window put
+ * the rest of the curve on a flat line across the picture's bottom padding - which read as a
+ * filter that stopped filtering. The panel clips the curve at the window's edge instead, so the
+ * value here only has to be finite.
+ */
 function toDb(mag, range) {
-  const db = 20 * Math.log10(Math.max(1e-7, mag));
-  return Math.max(range.bottomDb - 6, db);
+  const db = 20 * Math.log10(Math.max(1e-10, mag));
+  return Math.max(range.bottomDb - 150, db);
 }
 
 // --- the equalizer ---------------------------------------------------------------------------
@@ -500,7 +508,7 @@ function toDb(mag, range) {
  * handle per band at its frequency and gain. A band whose type has no gain - a cut or a pass -
  * has its handle on the unity line, and moves only sideways.
  */
-function eqFigure(figure, read, sampleRate, descriptor) {
+function eqFigure(figure, read, sampleRate, descriptor, report = null) {
   const bands = [];
   const coeffs = [];
   const scratch = new Float64Array(5);
@@ -532,7 +540,11 @@ function eqFigure(figure, read, sampleRate, descriptor) {
     for (const c of coeffs) mag *= biquadMagnitude(c, hz, sampleRate);
     points[i] = { hz, db: toDb(mag, EQ_RANGE) };
   }
-  return { bands, points, range: EQ_RANGE, sampleRate };
+  // What the signal actually is, behind the curve: decibels below full scale per band, from an
+  // analyser the engine puts on the device's output while its window is open. Null when nothing
+  // is reporting - a stopped track draws its curve over nothing, which is what it is doing.
+  const spectrum = Array.isArray(report?.spectrum) ? report.spectrum : null;
+  return { bands, points, range: EQ_RANGE, sampleRate, spectrum };
 }
 
 // --- a region of the spectrum ----------------------------------------------------------------
@@ -743,9 +755,15 @@ const TRANSFER_POINTS = 120;
  */
 function transferFigure(figure, read, report) {
   const threshold = read('threshold') ?? -18;
-  const ratio = Math.max(1, read('ratio') ?? 4);
+  // No ratio control means no ratio: a limiter is a compressor at infinity, and its curve is a
+  // wall at the ceiling rather than a bend.
+  const ratio = figure.params.ratio ? Math.max(1, read('ratio') ?? 4) : Infinity;
   const knee = read('knee') ?? 0;
   const makeup = read('makeup') ?? 0;
+  // Gain applied BEFORE the detector, for the devices that have one. It slides the input along
+  // the axis before the curve is read, which is a different picture from a makeup added after:
+  // a limiter's gain is what drives the signal into the ceiling.
+  const pregain = read('pregain') ?? 0;
   // How far a quiet signal is lifted toward the threshold, for the devices that do that. Zero
   // for the ones that do not, which is then an ordinary downward curve.
   const upward = read('upward') ?? 0;
@@ -753,13 +771,14 @@ function transferFigure(figure, read, report) {
 
   const { lowDb, highDb } = TRANSFER_RANGE;
   const outAt = (inDb) => {
-    let change = gainComputer(inDb, threshold, ratio, knee);
-    if (upward > 0 && inDb < threshold) {
-      const below = Math.min(reach, threshold - inDb);
+    const x = inDb + pregain;
+    let change = gainComputer(x, threshold, ratio, knee);
+    if (upward > 0 && x < threshold) {
+      const below = Math.min(reach, threshold - x);
       const taper = below >= reach ? 0 : 1 - below / reach;
       change += below * (1 - 1 / ratio) * upward * taper;
     }
-    return inDb + change + makeup;
+    return x + change + makeup;
   };
   const points = new Array(TRANSFER_POINTS);
   for (let i = 0; i < TRANSFER_POINTS; i++) {
@@ -768,7 +787,9 @@ function transferFigure(figure, read, report) {
   }
   const live = report?.meters?.[figure.id];
   return {
-    threshold, ratio, knee, makeup, upward,
+    threshold, ratio, knee, makeup, upward, pregain,
+    // A wall rather than a bend, which the panel names differently: a ceiling, not a threshold.
+    limiting: !Number.isFinite(ratio),
     range: TRANSFER_RANGE,
     points,
     // Null when the device is not reporting - a still picture of the settings, which is what an

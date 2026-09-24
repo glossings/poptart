@@ -464,7 +464,10 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
    */
   function transportForEditor() {
     const snap = transport.snapshot();
-    return { ...snap, baseSec: snap.baseSec + (Date.now() / 1000 - engine.getTime()) };
+    const clockOffset = Date.now() / 1000 - engine.getTime();
+    // The offset travels too: a free-running ("0.5hz") LFO is anchored on the engine's seconds,
+    // and the editor's picture of its phase has to count the same seconds.
+    return { ...snap, baseSec: snap.baseSec + clockOffset, clockOffset };
   }
 
   /** Every clip the buffer's arrangements carry, or null when it has none at all. */

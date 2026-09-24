@@ -93,38 +93,37 @@ test('a figure axis agrees with the knob curve of the parameter it drags', () =>
 test('a field drag is relative, so taking hold of it never jumps the value', () => {
   const f = figureOf('response', { 'cutoff': 1000, 'resonance': 0.4 });
   const grabbed = fieldGrab(f);
-  // Pressed and not moved: nothing is sent at all, because the gesture has not yet said which of
-  // the two controls it is.
-  assert.equal(grabbed.at(0, 0), null);
-  // And the first movement that does say carries on from where the control already was.
-  const moved = grabbed.at(0.05, 0);
-  assert.equal(moved.id, 'cutoff');
+  // Pressed and not moved: both controls are exactly where they were.
+  const still = grabbed.at(0, 0).params;
+  assert.deepEqual(still.map((p) => p.id), ['cutoff', 'resonance']);
+  assert.ok(Math.abs(still[0].position - figurePosition(f, 'x')) < 1e-12);
+  assert.ok(Math.abs(still[1].position - figurePosition(f, 'y')) < 1e-12);
+  // And a movement carries on from where the control already was.
+  const moved = grabbed.at(0.05, 0).params.find((p) => p.id === 'cutoff');
   assert.ok(Math.abs(moved.position - (figurePosition(f, 'x') + 0.05)) < 1e-12);
 });
 
-test('a two-axis field decides which axis it is once, and stays on it', () => {
+test('a two-axis field is an x-y control: both move at once, in one request', () => {
+  // It used to pick one axis per gesture, which was a fix for re-deciding the axis every frame
+  // and sticking. But a pad that moves one way at a time is not a pad: the thing wanted from a
+  // filter's picture is to sweep the cutoff and the resonance together.
   const f = figureOf('response', { 'cutoff': 1000, 'resonance': 0.4 });
-  const fresh = () => fieldGrab(f);
-  assert.equal(fresh().at(0.3, 0.05).id, 'cutoff', 'mostly sideways is the cutoff');
-  assert.equal(fresh().at(0.05, 0.3).id, 'resonance', 'mostly up is the resonance');
+  const both = fieldGrab(f).at(0.3, -0.2).params;
+  const cutoff = both.find((p) => p.id === 'cutoff');
+  const resonance = both.find((p) => p.id === 'resonance');
+  assert.ok(cutoff.position > figurePosition(f, 'x'), 'sideways moved the cutoff');
+  assert.ok(resonance.position > figurePosition(f, 'y'), 'and up raised the resonance, in the same gesture');
   // Up is more, not less - the y axis is inverted between the pointer and the value.
-  assert.ok(fresh().at(0, -0.2).position > figurePosition(f, 'y'), 'dragging up raises it');
-  assert.ok(fresh().at(0, 0.2).position < figurePosition(f, 'y'), 'and dragging down lowers it');
-
-  // The point of deciding once: a hand sweeping sideways wanders, and the wander must not take
-  // the gesture away from the control being dragged.
-  const g = fresh();
-  assert.equal(g.at(0.3, 0).id, 'cutoff');
-  assert.equal(g.at(0.31, 0.4).id, 'cutoff', 'still the cutoff, however far the hand strays');
+  assert.ok(fieldGrab(f).at(0, 0.2).params.find((p) => p.id === 'resonance').position < figurePosition(f, 'y'), 'dragging down lowers it');
 });
 
 test('a field drag cannot be pushed past either end of the parameter', () => {
   const f = figureOf('response', { 'cutoff': 1000, 'resonance': 0.5 });
-  const fresh = () => fieldGrab(f);
-  assert.equal(fresh().at(50, 0).position, 1);
-  assert.equal(fresh().at(-50, 0).position, 0);
-  assert.equal(fresh().at(0, -50).position, 1);
-  assert.equal(fresh().at(0, 50).position, 0);
+  const at = (dx, dy, id) => fieldGrab(f).at(dx, dy).params.find((p) => p.id === id).position;
+  assert.equal(at(50, 0, 'cutoff'), 1);
+  assert.equal(at(-50, 0, 'cutoff'), 0);
+  assert.equal(at(0, -50, 'resonance'), 1);
+  assert.equal(at(0, 50, 'resonance'), 0);
 });
 
 test('an axis something else is driving does not drag, and a figure driven throughout does not either', () => {
@@ -134,8 +133,8 @@ test('an axis something else is driving does not drag, and a figure driven throu
   // The cutoff is being moved by an LFO, so only the resonance is left to drag - whichever way the
   // gesture goes.
   const one = fieldGrab(driven([['cutoff', 'lfo']]));
-  assert.equal(one.at(0.5, 0).id, 'resonance');
-  assert.equal(one.at(0, 0.5).id, 'resonance');
+  assert.deepEqual(one.at(0.5, 0).params.map((p) => p.id), ['resonance']);
+  assert.deepEqual(one.at(0, 0.5).params.map((p) => p.id), ['resonance']);
 
   // Both driven: there is nothing to take hold of, and the gesture never starts.
   assert.equal(fieldGrab(driven([['cutoff', 'lfo'], ['resonance', 'env']])), null);

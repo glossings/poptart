@@ -243,8 +243,9 @@ const FIGURE_KINDS = new Map([
   // explains, so the picture is drawn beside the switch that turns it on.
   ['meter', ['amount']],
   // A compressor's transfer curve: what comes out for what goes in, with the knee drawn and the
-  // level it is working at right now marked on it.
-  ['transfer', ['threshold', 'ratio']],
+  // level it is working at right now marked on it. Only the threshold is required: a device with
+  // no ratio control is a limiter, whose curve is a wall at the ceiling rather than a bend.
+  ['transfer', ['threshold']],
 ]);
 
 /**
@@ -1817,6 +1818,19 @@ const ALLPASS_PRIMES = [223, 337, 457, 587];
 const REFERENCE_RATE = 48000;
 
 /**
+ * How much of the input each delay line takes, and how much of each line the output takes.
+ *
+ * MEASURED, not chosen: with a quarter in and a quarter out the wet signal sat twenty-two
+ * decibels under a sustained input at a two-second decay, and a reverb at full mix that is
+ * barely there is a reverb that reads as broken. These put a two-second tail about six
+ * decibels under the dry signal in steady state - a mix control's middle then means something -
+ * and a very long tail just short of it, which is the headroom that matters. The test in
+ * reverb.test.mjs holds the number.
+ */
+const INPUT_GAIN = 0.5;
+const OUTPUT_GAIN = 0.75;
+
+/**
  * Added to every value written back into the loop. A tail decays toward zero for ever, and a
  * float that gets close enough to zero is a denormal the processor handles many times slower -
  * on a thread with a deadline every three milliseconds. This is far below anything audible and
@@ -1998,7 +2012,7 @@ class Reverb {
       for (let k = 0; k < 8; k++) {
         const routed = (fb[k] - share) * g;
         // The input goes in on alternate lines from each side, so the two channels stay apart.
-        lines[k].write(routed + (k % 2 === 0 ? l : r) * 0.25 + FLOOR);
+        lines[k].write(routed + (k % 2 === 0 ? l : r) * INPUT_GAIN + FLOOR);
       }
 
       // Two different sums for the two outputs, so the result is genuinely stereo.
@@ -2007,8 +2021,8 @@ class Reverb {
       for (let k = 0; k < 8; k++) {
         if (k % 2 === 0) wetL += fb[k]; else wetR += fb[k];
       }
-      wetL *= 0.25;
-      wetR *= 0.25;
+      wetL *= OUTPUT_GAIN;
+      wetR *= OUTPUT_GAIN;
 
       // A reverb with a DC or sub-bass build-up gets muddy and never stops, so the tail is
       // high-passed on the way out rather than being left to accumulate in the loop.
@@ -2538,6 +2552,18 @@ const LIMITER = defineDevice({
     { id: 'ceiling', name: 'Ceiling', min: -24, max: 0, default: -0.3, unit: 'dB' },
     { id: 'release', name: 'Release', min: 5, max: 1000, default: 80, unit: 'ms', curve: 'exp' },
   ],
+  // The same picture a compressor draws, with no ratio to bend it: a wall at the ceiling, the
+  // signal's level laid against it, and how much is being held back. A limiter with no picture
+  // is a device whose one job cannot be seen happening.
+  figures: [
+    {
+      id: 'curve',
+      kind: 'transfer',
+      title: '',
+      description: 'What comes out for what goes in: everything above the ceiling is held to it. The dot is where the signal is on it right now, after the gain.',
+      params: { threshold: 'ceiling', pregain: 'gain' },
+    },
+  ],
 });
 
 class LimiterProcessor {
@@ -2551,6 +2577,7 @@ class LimiterProcessor {
     this.pos = 0;
     this.gain = 1;
     this.reduction = 0;
+    this.level = -120;       // the loudest the input reached this block, after the gain, in dB
   }
 
   process(inputs, outputs, count, params) {
@@ -2562,6 +2589,7 @@ class LimiterProcessor {
     const size = look + 1;
     const attackK = 1 - Math.exp(-1 / (look * 0.5));
     let reduction = 1;
+    let loudest = 0;
     for (let i = 0; i < count; i++) {
       const pre = dbToGain(at(params.gain, i));
       const ceiling = dbToGain(at(params.ceiling, i));
@@ -2569,6 +2597,7 @@ class LimiterProcessor {
       const l = (inL ? inL[i] : 0) * pre;
       const r = (inR ? inR[i] : 0) * pre;
       const peak = Math.max(Math.abs(l), Math.abs(r));
+      if (peak > loudest) loudest = peak;
       // Where this sample goes into the delay, and the gain it will need when it comes out.
       this.bufL[this.pos] = l;
       this.bufR[this.pos] = r;
@@ -2586,6 +2615,12 @@ class LimiterProcessor {
       if (g < reduction) reduction = g;
     }
     this.reduction = reduction;
+    this.level = loudest > 1e-6 ? 20 * Math.log10(loudest) : -120;
+  }
+
+  /** Where the signal is and how much is being held back, for the picture. */
+  report() {
+    return { meters: { curve: { inDb: this.level, grDb: this.reduction < 1 ? 20 * Math.log10(this.reduction) : 0 } } };
   }
 }
 

@@ -106,7 +106,8 @@ export const FMSYNTH = defineDevice({
       kind: 'matrix',
       ops: OPS,
       group: 'Matrix',
-      title: 'matrix',
+      // No title: it sits under the Matrix heading, which has named it already.
+      title: '',
       description: 'Rows modulate columns: the cell in row 2, column 1 is how much operator 2 bends operator 1. The last column is each operator\'s level to the output. Drag a cell up and down.',
       params: matrixRoles,
       subsumes: Object.keys(matrixRoles).filter((r) => r.startsWith('m')),

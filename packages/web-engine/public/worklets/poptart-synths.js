@@ -243,8 +243,9 @@ const FIGURE_KINDS = new Map([
   // explains, so the picture is drawn beside the switch that turns it on.
   ['meter', ['amount']],
   // A compressor's transfer curve: what comes out for what goes in, with the knee drawn and the
-  // level it is working at right now marked on it.
-  ['transfer', ['threshold', 'ratio']],
+  // level it is working at right now marked on it. Only the threshold is required: a device with
+  // no ratio control is a limiter, whose curve is a wall at the ceiling rather than a bend.
+  ['transfer', ['threshold']],
 ]);
 
 /**
@@ -2995,7 +2996,8 @@ const FMSYNTH = defineDevice({
       kind: 'matrix',
       ops: OPS,
       group: 'Matrix',
-      title: 'matrix',
+      // No title: it sits under the Matrix heading, which has named it already.
+      title: '',
       description: 'Rows modulate columns: the cell in row 2, column 1 is how much operator 2 bends operator 1. The last column is each operator\'s level to the output. Drag a cell up and down.',
       params: matrixRoles,
       subsumes: Object.keys(matrixRoles).filter((r) => r.startsWith('m')),

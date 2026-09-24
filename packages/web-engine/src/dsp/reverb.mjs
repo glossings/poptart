@@ -25,6 +25,19 @@ const ALLPASS_PRIMES = [223, 337, 457, 587];
 const REFERENCE_RATE = 48000;
 
 /**
+ * How much of the input each delay line takes, and how much of each line the output takes.
+ *
+ * MEASURED, not chosen: with a quarter in and a quarter out the wet signal sat twenty-two
+ * decibels under a sustained input at a two-second decay, and a reverb at full mix that is
+ * barely there is a reverb that reads as broken. These put a two-second tail about six
+ * decibels under the dry signal in steady state - a mix control's middle then means something -
+ * and a very long tail just short of it, which is the headroom that matters. The test in
+ * reverb.test.mjs holds the number.
+ */
+const INPUT_GAIN = 0.5;
+const OUTPUT_GAIN = 0.75;
+
+/**
  * Added to every value written back into the loop. A tail decays toward zero for ever, and a
  * float that gets close enough to zero is a denormal the processor handles many times slower -
  * on a thread with a deadline every three milliseconds. This is far below anything audible and
@@ -206,7 +219,7 @@ export class Reverb {
       for (let k = 0; k < 8; k++) {
         const routed = (fb[k] - share) * g;
         // The input goes in on alternate lines from each side, so the two channels stay apart.
-        lines[k].write(routed + (k % 2 === 0 ? l : r) * 0.25 + FLOOR);
+        lines[k].write(routed + (k % 2 === 0 ? l : r) * INPUT_GAIN + FLOOR);
       }
 
       // Two different sums for the two outputs, so the result is genuinely stereo.
@@ -215,8 +228,8 @@ export class Reverb {
       for (let k = 0; k < 8; k++) {
         if (k % 2 === 0) wetL += fb[k]; else wetR += fb[k];
       }
-      wetL *= 0.25;
-      wetR *= 0.25;
+      wetL *= OUTPUT_GAIN;
+      wetR *= OUTPUT_GAIN;
 
       // A reverb with a DC or sub-bass build-up gets muddy and never stops, so the tail is
       // high-passed on the way out rather than being left to accumulate in the loop.

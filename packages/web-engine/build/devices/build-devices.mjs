@@ -27,7 +27,7 @@ import { stretchDescriptor } from './stretch.mjs';
 import {
   PLAITS_ENGINES, RINGS_MODELS,
   braidsDescriptor, braidsWrapper, cloudsDescriptor, cloudsWrapper,
-  elementsDescriptor, elementsWrapper, peaksDescriptor, peaksWrapper,
+  elementsDescriptor, elementsWrapper,
   plaitsDescriptor, plaitsWrapper,
   ringsDescriptor, ringsWrapper, warpsDescriptor, warpsWrapper,
 } from './mutable.mjs';
@@ -146,7 +146,6 @@ const MEMORY = Object.freeze({
   Plaits: 4 * MB,       // measured 0.6
   Braids: 4 * MB,       // measured 0.6
   Warps: 2 * MB,        // measured 0.1
-  Peaks: 2 * MB,        // measured 0.1
   // The Airwindows effects are all `compile`'s default of 2 MB and stay there. Galactic is a
   // reverb and measures 1.6 of it, so this one is not headroom to spend.
 });
@@ -539,12 +538,6 @@ async function buildPlaits({ lock, planOnly, problems, repin }) {
     wrapper: braidsWrapper(MAX_BLOCK), exports: SYNTH_EXPORTS,
     files: ['analog_oscillator.cc', 'digital_oscillator.cc', 'macro_oscillator.cc', 'resources.cc'],
   });
-  const peaks = await buildMutableModule({
-    euro, stmlib, planOnly, problems,
-    id: 'Peaks', module: 'peaks', descriptor: peaksDescriptor(`https://github.com/${EURORACK_REPO} (peaks)`),
-    wrapper: peaksWrapper(MAX_BLOCK), exports: SYNTH_EXPORTS,
-    files: ['drums/bass_drum.cc', 'drums/snare_drum.cc', 'drums/high_hat.cc', 'drums/fm_drum.cc', 'resources.cc'],
-  });
   const clouds = await buildMutableModule({
     euro, stmlib, planOnly, problems,
     id: 'Clouds', module: 'clouds', descriptor: cloudsDescriptor(`https://github.com/${EURORACK_REPO} (clouds)`),
@@ -555,7 +548,7 @@ async function buildPlaits({ lock, planOnly, problems, repin }) {
     // note in that file for the upstream regression it puts right.
     includes: [SHIM],
   });
-  return [descriptor, rings, elements, braids, peaks, warps, clouds];
+  return [descriptor, rings, elements, braids, warps, clouds];
 }
 
 /** Signalsmith Stretch: header-only, plus the linear-algebra headers it includes. */

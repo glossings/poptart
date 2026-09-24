@@ -22,7 +22,7 @@ import { defaultValues, denormalize, findParam } from '../descriptor.mjs';
 import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
-import { MIX_BAND_FREQS, MIX_TRACK_MAX, MixAnalysis } from './analysis.mjs';
+import { MIX_BAND_FREQS, MIX_TRACK_MAX, MixAnalysis, SpectrumTap } from './analysis.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
 import { SUPPORTED_CHANNELS, Track, rampParam, teardownParamConnection } from './track.mjs';
 
@@ -1222,7 +1222,19 @@ export class WebAudioEngine {
     const filled = this.tracks.get(trackId)?.slots.get(slot);
     if (!filled) return false;
     try { filled.built.node?.port?.postMessage?.({ kind: 'watch', on: !!on }); } catch { /* no port */ }
-    if (!on) { filled.live = null; filled.report = null; }
+    // A device that draws an equalizer curve gets an analyser on its output for as long as its
+    // window is open, and not a moment longer: the curve is drawn over what the signal actually
+    // is (see SpectrumTap), and an FFT per frame is worth paying for a picture being looked at.
+    const wantsSpectrum = (filled.descriptor.figures ?? []).some((f) => f.kind === 'eq');
+    if (on && wantsSpectrum && !filled.spectrum && filled.built.node) {
+      try { filled.spectrum = new SpectrumTap(this.ctx, filled.built.node); } catch { filled.spectrum = null; }
+    }
+    if (!on) {
+      filled.live = null;
+      filled.report = null;
+      filled.spectrum?.dispose();
+      filled.spectrum = null;
+    }
     return true;
   }
 
@@ -1246,7 +1258,14 @@ export class WebAudioEngine {
    * shape is the device's own; only a granulator has one so far, and it reports its grains.
    */
   liveReport(trackId, slot) {
-    return this.tracks.get(trackId)?.slots.get(slot)?.report ?? null;
+    const filled = this.tracks.get(trackId)?.slots.get(slot);
+    if (!filled) return null;
+    const report = filled.report ?? null;
+    if (!filled.spectrum) return report;
+    // The spectrum rides on the report, as decibels below full scale per band, at the mixer's
+    // band centers - so a picture can draw it down the same frequency axis as its curve.
+    const db = filled.spectrum.bands();
+    return { ...(report ?? {}), spectrum: MIX_BAND_FREQS.map((hz, i) => ({ hz, db: db[i] })) };
   }
 
   /** Every parameter of one slot, in the shape the params panel and autocomplete expect. */

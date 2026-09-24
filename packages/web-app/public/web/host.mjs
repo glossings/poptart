@@ -28,6 +28,9 @@
 
 import { registerPacks } from './samples.mjs';
 
+/** Where this program's source is. AGPL section 13 asks a page served over a network to say. */
+const SOURCE_URL = 'https://github.com/glossings/poptart';
+
 /** What the editor is told when it asks for something this build does not have. */
 /**
  * How long a control dragged in the device panel takes to reach where it was put.
@@ -46,7 +49,7 @@ const PANEL_GLIDE_SEC = 0.03;
  * says when they change: a granulator's grains move on their own, and an auto gain works out
  * its own correction.
  */
-const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer']);
+const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq']);
 
 class Unsupported extends Error {
   constructor(what, why) {
@@ -779,6 +782,17 @@ export function createHost({
     },
     // What is in one of those packs - the wavetable folder's files, for the table control's list
     // and for the settings row that says how many are kept.
+    // The credits: what license this is, where its source is, and whose code each device is.
+    // The device rows come from the catalog rather than a list kept by hand, which is what the
+    // descriptor's license and source fields exist for. The notices file itself is served at
+    // the root of the site beside this page (see build-web.mjs).
+    'GET /api/about': async () => ({
+      version,
+      license: 'AGPL-3.0-only',
+      source: SOURCE_URL,
+      notices: 'THIRD-PARTY-NOTICES.md',
+      devices: typeof catalog?.licenses === 'function' ? catalog.licenses() : [],
+    }),
     'GET /api/files': async (_body, query) => {
       const pack = String(query.get('pack') ?? 'files');
       const manifest = samples.addedPack?.(pack) ?? null;

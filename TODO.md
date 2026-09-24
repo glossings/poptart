@@ -155,6 +155,15 @@ no completion notes.
       should build the poptart-link helper (see its own entry below), which needs the same
       per-platform machines.
 
+[ ] Swap Rubber Band out of the keylock UGen for Signalsmith Stretch. Rubber Band is GPL (or a
+    paid license from Breakfast Quay), and it and Ableton Link are the only GPL code Poptart
+    itself compiles - everything else the app links is MIT, and SuperCollider runs as its own
+    process. Signalsmith Stretch is MIT, is already vendored and pinned for the browser build's
+    Shift device, and is a single header, so this is a bounded port of PoptartPitchShift: same
+    player, same delay probe (its latency differs, and the probe reports whatever it is), same
+    keylock-sclang.test.js. Link has no permissive stand-in; that one is a license from Ableton
+    or nothing.
+
 [ ] Keylock control lag - uniform-latency graph option: with key on, a deck's controls (nudge,
     jog, cue jump, pause/resume) take effect ~60 ms after the gesture - the pitch shifter's
     pipeline (~rbDelay, probed at boot). The beat grid and position report are already
@@ -541,7 +550,7 @@ no completion notes.
     plus `Filter`/`Delay`/`Compressor`/`Pan`/`Gain` from stock nodes. Nineteen more are ported
     C++ compiled to WebAssembly and committed as binaries, so nothing downstream of the port
     needs a toolchain: nine Airwindows effects, eight Mutable Instruments modules (`Plaits`,
-    `Braids`, `Tides`, `Rings`, `Elements`, `Peaks`, `Clouds`, `Warps`), `CloudSeed` and `Shift`.
+    `Braids`, `Tides`, `Rings`, `Elements`, `Clouds`, `Warps`), `CloudSeed` and `Shift`.
     They are built by packages/web-engine/build/devices/build-devices.mjs, which needs emscripten
     and is run by hand when a device is added or a pin moves. Packs: `pt_kit` and `pt_keys` rendered from our
     own DSP and committed; the sourced ones are built by packages/web-engine/build/fetch-packs.mjs
@@ -584,8 +593,7 @@ no completion notes.
         filters are not, and GPL is a one-way door for a build that might ever want to be offered
         under other terms. Check the function, not the repository.
         Still open on what IS built: Rings and Elements resonate their own exciter only, so
-        resonating a track's audio is not exposed; Peaks ships its drums but not its envelopes;
-        Plaits and Rings are monophonic, as the modules are. Nine of Mutable's modules cannot be
+        resonating a track's audio is not exposed; Plaits and Rings are monophonic, as the modules are. Nine of Mutable's modules cannot be
         ported at all - five are analog hardware with no DSP published, three make control
         voltages rather than audio, and one was never published; sources.json says which.
     (6) What the engine warns about instead of doing: MIDI input (Web MIDI), hardware audio
@@ -605,8 +613,7 @@ no completion notes.
     DSP work with no provenance to defend. Ship it under a name of its own, not the machine's.
 
     Public-site constraints: shared code never auto-evaluates, and everything the host touches
-    goes through the route table so it can later move behind a message boundary. AGPL section 13
-    means a source link in the UI - not yet added.
+    goes through the route table so it can later move behind a message boundary.
 
     Open: delay time in seconds (consistent with the physical units elsewhere, and what it does
     now) or in cycles (more natural in a pattern language). Whether the sourced packs should be

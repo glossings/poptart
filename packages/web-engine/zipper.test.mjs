@@ -29,6 +29,9 @@ import { MULTIBAND, MultibandProcessor } from './src/devices/multiband.mjs';
 import { CRUSH, CrushProcessor } from './src/devices/crush.mjs';
 import { VOCODER, VocoderProcessor } from './src/devices/vocoder.mjs';
 import { FMSYNTH, FmSynth } from './src/devices/fmsynth.mjs';
+import { FLANGER, FlangerProcessor } from './src/devices/flanger.mjs';
+import { WAVETABLE, WavetableSynth } from './src/devices/wavetable.mjs';
+import { sharedBuiltInTables } from './src/dsp/tables.mjs';
 
 const SR = 48000;
 const BLOCK = 128;
@@ -74,18 +77,19 @@ function sidebandsDb(x, carrier = CARRIER) {
  * Renders a device with one control swept from `from` to `to`, and answers with the block-rate
  * artifact in each output channel.
  */
-function sweep(Processor, descriptor, sweptId, from, to, fixed = {}) {
+function sweep(Processor, descriptor, sweptId, from, to, fixed = {}, { blocks = BLOCKS } = {}) {
   const fx = new Processor(SR, BLOCK);
   const param = findParam(descriptor, sweptId);
   const values = { ...defaultValues(descriptor), ...fixed };
-  const left = new Float32Array(N);
-  const right = new Float32Array(N);
+  const total = BLOCK * blocks;
+  const left = new Float32Array(total);
+  const right = new Float32Array(total);
   const input = new Float32Array(BLOCK);
   const lowPos = normalize(param, from);
   const highPos = normalize(param, to);
   let phase = 0;
 
-  for (let b = 0; b < BLOCKS; b++) {
+  for (let b = 0; b < blocks; b++) {
     for (let i = 0; i < BLOCK; i++) {
       input[i] = Math.sin(2 * Math.PI * phase) * 0.5;
       phase += CARRIER / SR;
@@ -93,7 +97,7 @@ function sweep(Processor, descriptor, sweptId, from, to, fixed = {}) {
     // Handed over per SAMPLE, which is how an automated parameter really arrives.
     const swept = new Float64Array(BLOCK);
     for (let i = 0; i < BLOCK; i++) {
-      swept[i] = denormalize(param, lowPos + (highPos - lowPos) * ((b * BLOCK + i) / N));
+      swept[i] = denormalize(param, lowPos + (highPos - lowPos) * ((b * BLOCK + i) / total));
     }
     fx.process(
       [input, input],
@@ -145,8 +149,8 @@ test('the measurement can tell a smooth sweep from a stepped one', () => {
   );
 });
 
-function assertSmooth(what, Processor, descriptor, id, from, to, fixed = {}) {
-  const measured = sweep(Processor, descriptor, id, from, to, fixed);
+function assertSmooth(what, Processor, descriptor, id, from, to, fixed = {}, options = {}) {
+  const measured = sweep(Processor, descriptor, id, from, to, fixed, options);
   for (const channel of ['left', 'right']) {
     assert.ok(
       measured[channel] < LIMIT_DB,
@@ -271,3 +275,77 @@ test("sweeping an FM operator's level is smooth", () => {
 // self-modulation smears its artifact across the spectrum instead of putting it either side of
 // the carrier, so this instrument cannot see it, and an assertion that passes whatever the code
 // does is worse than no assertion. The three above do fail when the ramp is taken out.
+
+// --- the modulated delays ---------------------------------------------------------------------
+
+test('sweeping a flanger is smooth, on every control that was reported buzzing', () => {
+  // OVER A LONGER SWEEP than the effects above. A flanger is a comb, and its teeth move with the
+  // delay: swept through eight milliseconds in a sixth of a second the teeth cross the bins this
+  // measures faster than the measurement can tell a moving comb from an artifact - the number it
+  // gave was the same at every block size, which is what a real block-rate artifact cannot be.
+  // At a hand's speed the same sweep measures clean, and that is the speed that matters.
+  const slow = { blocks: BLOCKS * 8 };
+  assertSmooth('flanger depth', FlangerProcessor, FLANGER, 'depth', 0, 8, { rate: 0.2 }, slow);
+  // The base delay over the span a hand covers in a gesture: the whole range at once is the comb's
+  // teeth crossing two octaves of bins, which is the confounding case above.
+  assertSmooth('flanger delay', FlangerProcessor, FLANGER, 'delay', 1, 5, { rate: 0.2 }, slow);
+  assertSmooth('flanger feedback', FlangerProcessor, FLANGER, 'feedback', -0.8, 0.8, { rate: 0.2 }, slow);
+  assertSmooth('flanger spread', FlangerProcessor, FLANGER, 'spread', 0, 1, { rate: 0.2 }, slow);
+});
+
+
+// --- the wavetable synth ----------------------------------------------------------------------
+//
+// The three controls a hand is on most: where in the table the oscillator reads, how hard the
+// warp bends it, and its phase. Each is read per sample when it moves; what is pinned here is
+// that a sweep of each stays smooth at the speed a drag has, on a held note.
+
+const WT_NOTE = 84;                        // ~1046 Hz, well clear of the block-rate bins
+const WT_CARRIER = 440 * Math.pow(2, (WT_NOTE - 69) / 12);
+
+/** A sine at a fixed level with a flat envelope, so the only thing moving is the control. */
+const wtFlat = () => ({
+  ...defaultValues(WAVETABLE),
+  'ampenv.attack': 0, 'ampenv.decay': 0, 'ampenv.sustain': 1, 'ampenv.release': 0,
+  'osc1.level': 0.8, 'osc2.level': 0, 'sub.level': 0, 'noise.level': 0,
+  'osc1.unison': 1, 'osc1.phaserand': 0,
+});
+
+function wtSweep(sweptId, from, to, fixed = {}, blocks = BLOCKS * 4) {
+  const synth = new WavetableSynth(SR, sharedBuiltInTables());
+  const param = findParam(WAVETABLE, sweptId);
+  const values = { ...wtFlat(), ...fixed };
+  const total = BLOCK * blocks;
+  const left = new Float32Array(total);
+  const right = new Float32Array(total);
+  const lowPos = normalize(param, from);
+  const highPos = normalize(param, to);
+  synth.setParams(values);
+  synth.queueNoteOn(WT_NOTE, 1, 0);
+  for (let b = 0; b < blocks; b++) {
+    const swept = new Float64Array(BLOCK);
+    for (let i = 0; i < BLOCK; i++) swept[i] = denormalize(param, lowPos + (highPos - lowPos) * ((b * BLOCK + i) / total));
+    synth.setParams({ ...values, [sweptId]: swept });
+    synth.process(left.subarray(b * BLOCK, (b + 1) * BLOCK), right.subarray(b * BLOCK, (b + 1) * BLOCK), BLOCK);
+  }
+  const settled = (x) => x.subarray(BLOCK * 8);
+  return { left: sidebandsDb(settled(left), WT_CARRIER), right: sidebandsDb(settled(right), WT_CARRIER) };
+}
+
+function assertWavetableSmooth(what, id, from, to, fixed = {}) {
+  const measured = wtSweep(id, from, to, fixed);
+  for (const channel of ['left', 'right']) {
+    assert.ok(
+      measured[channel] < LIMIT_DB,
+      `${what} (${channel}): a swept control put ${measured[channel].toFixed(1)} dB of block-rate sidebands `
+      + `into the output, against ${SMOOTH_DB.toFixed(1)} for a smooth sweep and ${STEPPED_DB.toFixed(1)} for `
+      + 'a stepped one - it is stepping',
+    );
+  }
+}
+
+test('sweeping a wavetable position, warp and phase is smooth', () => {
+  assertWavetableSmooth('table position', 'osc1.position', 0, 1);
+  assertWavetableSmooth('warp', 'osc1.warp', 0, 0.8);
+  assertWavetableSmooth('phase', 'osc1.phase', 0, 1);
+});
