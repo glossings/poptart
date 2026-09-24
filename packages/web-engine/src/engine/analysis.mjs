@@ -35,14 +35,14 @@ export const MIX_TRACK_MAX = 8;
 const FFT_SIZE = 4096;
 
 /** Where each band reads in the transform: the bins between its neighbors' geometric midpoints. */
-function bandBins(sampleRate) {
+function bandBins(sampleRate, freqs = MIX_BAND_FREQS) {
   const binHz = sampleRate / FFT_SIZE;
-  const bins = MIX_BAND_FREQS.length;
+  const bins = freqs.length;
   const out = new Array(bins);
   for (let i = 0; i < bins; i++) {
-    const hz = MIX_BAND_FREQS[i];
-    const below = i === 0 ? hz * (MIX_BAND_FREQS[0] / MIX_BAND_FREQS[1]) : MIX_BAND_FREQS[i - 1];
-    const above = i === bins - 1 ? hz * (MIX_BAND_FREQS[bins - 1] / MIX_BAND_FREQS[bins - 2]) : MIX_BAND_FREQS[i + 1];
+    const hz = freqs[i];
+    const below = i === 0 ? hz * (freqs[0] / freqs[1]) : freqs[i - 1];
+    const above = i === bins - 1 ? hz * (freqs[bins - 1] / freqs[bins - 2]) : freqs[i + 1];
     const lo = Math.sqrt(hz * below);
     const hi = Math.sqrt(hz * above);
     // At least one bin, even where a band is narrower than the transform can resolve.
@@ -151,12 +151,13 @@ class Tap {
 }
 
 /**
- * The analysis the mixer reads, for as long as it is open.
- *
- * `want` is the strips the panel is showing, as engine track ids; the master is always analyzed
- * and is keyed '*'. A tap is built the first time a strip is asked for and thrown away when it
- * stops being asked for, so folding a group really does hand its share back.
+ * The bands a device window's spectrum is read in: the whole audible range, at the point count
+ * a response curve is drawn with, so the signal and the curve over it are sampled alike.
  */
+export const SPECTRUM_BAND_COUNT = 160;
+export const SPECTRUM_BAND_FREQS = Object.freeze(Array.from({ length: SPECTRUM_BAND_COUNT }, (_, i) =>
+  20 * (20000 / 20) ** (i / (SPECTRUM_BAND_COUNT - 1))));
+
 /**
  * One analyser on a device's output, for the picture an equalizer draws behind its curve.
  *
@@ -166,6 +167,12 @@ class Tap {
  * worth paying for a picture being looked at and for nothing else.
  *
  * Smoothed, where the mixer's taps are not: this is read at a glance under a curve, not measured.
+ *
+ * Each band reads the LOUDEST bin in it, not the average. The bands are log-spaced and the
+ * transform is not, so a band at the top covers a hundred bins where one at the bottom covers
+ * one - and averaging a single harmonic over a hundred bins of noise floor reported it forty
+ * decibels quieter than it was. The upper harmonics of every synth vanished from the picture,
+ * while a band moved up there plainly changed the sound.
  */
 export class SpectrumTap {
   constructor(ctx, source) {
@@ -176,19 +183,21 @@ export class SpectrumTap {
     this.node.smoothingTimeConstant = 0.7;
     source.connect(this.node);
     this.freq = new Float32Array(FFT_SIZE / 2);
-    this.bins = bandBins(ctx.sampleRate);
+    // Only the bands the transform can reach: at a low sample rate the top of the list is past
+    // Nyquist, and a band up there would read the transform's last bin for ever.
+    this.freqs = SPECTRUM_BAND_FREQS.filter((hz) => hz < ctx.sampleRate * 0.5);
+    this.bins = bandBins(ctx.sampleRate, this.freqs);
   }
 
-  /** Decibels below full scale per band, in MIX_BAND_FREQS order. */
+  /** Decibels below full scale per band, in `freqs` order. */
   bands() {
     this.node.getFloatFrequencyData(this.freq);
     const out = new Array(this.bins.length);
     for (let b = 0; b < this.bins.length; b++) {
       const [from, to] = this.bins[b];
-      let sum = 0;
-      for (let i = from; i < to; i++) sum += 10 ** (this.freq[i] / 20);
-      const amp = sum / (to - from);
-      out[b] = amp > 1e-6 ? 20 * Math.log10(amp) : -120;
+      let peak = -Infinity;
+      for (let i = from; i < to; i++) if (this.freq[i] > peak) peak = this.freq[i];
+      out[b] = Number.isFinite(peak) ? Math.max(-120, peak) : -120;
     }
     return out;
   }
@@ -199,6 +208,13 @@ export class SpectrumTap {
   }
 }
 
+/**
+ * The analysis the mixer reads, for as long as it is open.
+ *
+ * `want` is the strips the panel is showing, as engine track ids; the master is always analyzed
+ * and is keyed '*'. A tap is built the first time a strip is asked for and thrown away when it
+ * stops being asked for, so folding a group really does hand its share back.
+ */
 export class MixAnalysis {
   constructor(ctx, master) {
     this.ctx = ctx;

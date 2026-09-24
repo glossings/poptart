@@ -3277,10 +3277,10 @@ function startDeviceLive(trackLabel, slot, panel) {
 
 /** Figures that draw what a device is doing rather than how it is set, and so always follow. An
  * equalizer's curve is drawn over the signal an analyser reads while its window is open. */
-const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq']);
+const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
 
 /** How tall each kind of figure is drawn, in CSS pixels. */
-const FIGURE_HEIGHT = { wavetable: 132, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120 };
+const FIGURE_HEIGHT = { wavetable: 132, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112 };
 
 /** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
 const FIGURE_HIT_PX = 9;
@@ -3289,13 +3289,8 @@ const FIGURE_HIT_PX = 9;
 const FIGURE_POINT_R = 4;
 const FIGURE_PAD_Y = 10;
 
-/** The strip a figure keeps under its plot for a meter, in CSS pixels. */
-const FIGURE_METER_H = 14;
-
-/** How far down a gain-reduction meter reads. Past this a compressor is not compressing. */
-const FIGURE_GR_RANGE = 24;
-/** The gain-reduction column down the right of a transfer figure, in pixels. */
-const FIGURE_GR_W = 10;
+/** The gap between a transfer figure's curve and the lane that scrolls beside it, in pixels. */
+const FIGURE_LANE_GAP = 8;
 
 /** The height of the wavetable figure's position scrubber, under the waveform. */
 const FIGURE_SCRUB_H = 15;
@@ -3615,6 +3610,8 @@ function figurePosition(f, axis) {
     const { lowHz, highHz } = f.range;
     return Math.log(f.cutoff / lowHz) / Math.log(highHz / lowHz);
   }
+  // Every figure since those carries the positions of what it drags, by parameter id.
+  if (f.positions && f.drag?.[axis] != null) return f.positions[f.drag[axis]] ?? 0;
   return 0;
 }
 
@@ -3788,6 +3785,63 @@ function figureFill(ctx, pts, color, baseline) {
   ctx.fillStyle = color;
   ctx.fill();
   ctx.globalAlpha = 1;
+}
+
+/** A curve through points, rounded at each one - for a spectrum, which is a reading, not a shape. */
+function figureSmoothPath(ctx, pts) {
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i][0] + pts[i + 1][0]) / 2;
+    const my = (pts[i][1] + pts[i + 1][1]) / 2;
+    ctx.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+  }
+  ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+}
+
+function figureSmoothStroke(ctx, pts, color, width = 1) {
+  if (pts.length < 3) return figureStroke(ctx, pts, color, width);
+  ctx.beginPath();
+  figureSmoothPath(ctx, pts);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
+function figureSmoothFill(ctx, pts, color, baseline, alpha = 0.16) {
+  if (pts.length < 3) return figureFill(ctx, pts, color, baseline);
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], baseline);
+  ctx.lineTo(pts[0][0], pts[0][1]);
+  figureSmoothPath(ctx, pts);
+  ctx.lineTo(pts[pts.length - 1][0], baseline);
+  ctx.closePath();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+/** A dashed line, for a threshold or a marker. */
+function figureDashed(ctx, x0, y0, x1, y1, color) {
+  ctx.save();
+  ctx.setLineDash([2, 3]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** A small label in a figure's corner, in the dim monospace every figure annotates itself in. */
+function figureLabel(ctx, text, x, y, color, align = 'start') {
+  ctx.font = '8px ui-monospace, monospace';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = align;
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'start';
 }
 
 const FIGURE_DRAWERS = {
@@ -4002,9 +4056,11 @@ const FIGURE_DRAWERS = {
     // spectrum is decibels below full scale and the curve is decibels of gain, and the two share
     // a frequency axis and nothing else - and faint, so the curve stays the subject.
     if (Array.isArray(f.spectrum) && f.spectrum.length) {
-      const floorDb = -90;
+      const floorDb = -96;
       const ySpec = (db) => FIGURE_PAD_Y + ((0 - Math.max(floorDb, Math.min(0, db))) / (0 - floorDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
-      figureFill(ctx, f.spectrum.map((p) => [xOf(p.hz), ySpec(p.db)]), c.dim, h);
+      const spec = f.spectrum.map((p) => [xOf(p.hz), ySpec(p.db)]);
+      figureSmoothFill(ctx, spec, c.dim, h, 0.28);
+      figureSmoothStroke(ctx, spec, c.dim, 1);
     }
     const pts = f.points.map((p) => [xOf(p.hz), yOf(p.db)]);
     figureFill(ctx, pts, c.accent, yOf(0));
@@ -4270,70 +4326,326 @@ const FIGURE_DRAWERS = {
    * does to that; the dot is where the signal is on it right now.
    */
   transfer(ctx, w, h, f, c) {
-    // THREE THINGS, EACH IN ITS OWN PLACE. The curve says what the device does to a level. The
-    // bar along the bottom is the signal's level, on the same axis as the threshold so the two
-    // can be compared by eye, and the dot is that same level on the curve. The gain reduction
-    // hangs down its own column at the right, in a different color, because it is the one number
-    // here that is not a level. One unlabeled bar that could have been either was the complaint.
+    // TWO PICTURES SIDE BY SIDE. On the left the curve: what the device does to a level, with
+    // the dot where the signal is on it now. On the right the lane: the last second of what it
+    // has done, scrolling - the level coming in as a filled trace, the level going out as a line
+    // over it, and the gain being taken off hanging down from the top in its own color, on the
+    // same decibel scale, with the threshold drawn across so the two can be read against it.
+    // The lane is what shows an attack or a release actually happening, which no curve can.
     const { lowDb, highDb } = f.range;
-    const plotW = w - FIGURE_GR_W - 6;
-    const plotH = h - FIGURE_METER_H;
+    const plot = Math.min(h, w);
+    const laneX = plot + FIGURE_LANE_GAP;
+    const laneW = w - laneX;
     const clampDb = (db) => Math.min(highDb, Math.max(lowDb, db));
-    const xOf = (db) => ((clampDb(db) - lowDb) / (highDb - lowDb)) * plotW;
-    const yOf = (db) => plotH - ((clampDb(db) - lowDb) / (highDb - lowDb)) * plotH;
+    const share = (db) => (clampDb(db) - lowDb) / (highDb - lowDb);
+    const xOf = (db) => share(db) * plot;
+    const yOf = (db) => plot - share(db) * plot;
 
     // Unity, and the threshold (or the ceiling) the curve departs from.
     ctx.strokeStyle = c.grid;
     ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, plot - 1, plot - 1);
     ctx.beginPath();
     ctx.moveTo(xOf(lowDb), yOf(lowDb));
     ctx.lineTo(xOf(highDb), yOf(highDb));
     ctx.stroke();
-    ctx.save();
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath();
-    ctx.moveTo(xOf(f.threshold), 0);
-    ctx.lineTo(xOf(f.threshold), plotH);
-    ctx.stroke();
-    ctx.restore();
-
+    figureDashed(ctx, xOf(f.threshold), 0, xOf(f.threshold), plot, c.grid);
     figureStroke(ctx, f.points.map((p) => [xOf(p.inDb), yOf(p.outDb)]), c.accent, 1.75);
 
-    // The level bar, with the threshold marked on it, and the dot on the curve.
     const live = f.inDb !== null && f.inDb > lowDb;
-    ctx.fillStyle = c.grid;
-    ctx.fillRect(0, plotH + 4, plotW, FIGURE_METER_H - 6);
     if (live) {
       const inX = xOf(f.inDb);
-      ctx.fillStyle = c.accent;
-      ctx.fillRect(0, plotH + 4, inX, FIGURE_METER_H - 6);
       const near = f.points.reduce((b, p) => (Math.abs(p.inDb - f.inDb) < Math.abs(b.inDb - f.inDb) ? p : b));
+      ctx.fillStyle = c.accent;
       ctx.beginPath();
       ctx.arc(inX, yOf(near.outDb), FIGURE_POINT_R, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.fillStyle = c.text;
-    ctx.fillRect(xOf(f.threshold) - 0.5, plotH + 2, 1, FIGURE_METER_H - 2);
 
-    // Gain reduction, hanging from the top of its column: gain being taken away.
-    const range = FIGURE_GR_RANGE;
-    const shown = Math.min(0, Math.max(-range, f.grDb));
-    const gx = w - FIGURE_GR_W;
-    ctx.fillStyle = c.grid;
-    ctx.fillRect(gx, 0, FIGURE_GR_W, plotH);
-    if (shown < -0.05) {
-      ctx.fillStyle = c.warn;
-      ctx.fillRect(gx, 0, FIGURE_GR_W, (Math.abs(shown) / range) * plotH);
+    // The lane, where there is room for one: a multiband's three curves sit in narrow sections.
+    if (laneW > 24) {
+      ctx.strokeStyle = c.grid;
+      ctx.strokeRect(laneX + 0.5, 0.5, laneW - 1, plot - 1);
+      const hist = f.history;
+      if (hist && hist.inDb.length > 1) {
+        const n = hist.inDb.length;
+        const xs = (i) => laneX + (i / (n - 1)) * laneW;
+        // In, as a filled trace; out, as the line over it - the makeup is in the output and
+        // nowhere else, which is where the picture puts it.
+        figureFill(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db)]), c.dim, plot);
+        figureSmoothStroke(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db)]), c.dim, 1);
+        figureStroke(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db + hist.grDb[i] + (f.makeup ?? 0))]), c.accent, 1.25);
+        // The reduction, down from the top.
+        ctx.beginPath();
+        ctx.moveTo(xs(0), 0);
+        for (let i = 0; i < n; i++) ctx.lineTo(xs(i), (Math.max(0, -hist.grDb[i]) / (highDb - lowDb)) * plot);
+        ctx.lineTo(xs(n - 1), 0);
+        ctx.closePath();
+        ctx.globalAlpha = 0.75;
+        ctx.fillStyle = c.warn;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      figureDashed(ctx, laneX, yOf(f.threshold), w, yOf(f.threshold), c.text);
+      figureLabel(ctx, 'in', laneX + 3, plot - 11, c.dim);
+      figureLabel(ctx, 'gr', w - 3, 2, c.warn, 'end');
     }
-    ctx.font = '8px ui-monospace, monospace';
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = c.dim;
-    ctx.fillText('gr', gx + FIGURE_GR_W / 2, plotH + 4);
-    ctx.textAlign = 'start';
 
     // Both numbers, each named, at widths that never change.
+    const shown = Math.min(0, f.grDb);
     return `in ${live ? figurePad(f.inDb.toFixed(1), 5) : figurePad('', 5)} dB · gr ${figurePad(shown.toFixed(1), 5)} dB`;
+  },
+
+  /**
+   * A waveshaper's curve: in across, out up, through the device's own function at this drive
+   * and bias, with the auto gain's correction on it. The dashed diagonal is "unchanged"; how
+   * far the curve leaves it is the distortion, and the box is full scale - a curve running out
+   * of the top is what a fold or a hot chebyshev does, and is drawn doing it.
+   */
+  shaper(ctx, w, h, f, c) {
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const xOf = (x) => ((x + 1) / 2) * w;
+    const yOf = (y) => top + ((1 - y) / 2) * size;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, top + 0.5, w - 1, size - 1);
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), top);
+    ctx.lineTo(xOf(0), top + size);
+    ctx.moveTo(0, yOf(0));
+    ctx.lineTo(w, yOf(0));
+    ctx.stroke();
+    figureDashed(ctx, xOf(-1), yOf(-1), xOf(1), yOf(1), c.grid);
+    const pts = f.points.map((pt) => [xOf(pt.x), yOf(pt.y)]);
+    figureFill(ctx, pts, c.accent, yOf(0));
+    figureStroke(ctx, pts, c.accent, 1.75);
+    const auto = f.autogain
+      ? `${figurePad(`${f.compDb >= 0 ? '+' : '\u2212'}${Math.abs(f.compDb).toFixed(1)}`, 5)} dB`
+      : figurePad('off', 8);
+    return `${figurePad(f.modeName, 9)} · auto ${auto}`;
+  },
+
+  /**
+   * A delay's repeats: one hit at the left edge, then every repeat it makes, when it lands on
+   * the beat grid and how loud - the left channel's above the line, the right's below, so a
+   * ping-pong reads as the bounce it is.
+   */
+  echoes(ctx, w, h, f, c) {
+    const mid = h / 2;
+    const reach = h / 2 - 8;
+    const xOf = (t) => (t / f.span) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (let b = 1; b * f.beatSec < f.span; b++) {
+      const gx = xOf(b * f.beatSec);
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, h);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(w, mid);
+    ctx.stroke();
+    // The hit itself, full height, at time zero.
+    ctx.fillStyle = c.dim;
+    ctx.fillRect(0, mid - reach, 2, reach * 2);
+    for (const tap of f.taps) {
+      const x = xOf(tap.t);
+      const len = Math.max(1, tap.level * reach);
+      ctx.fillStyle = c.accent;
+      ctx.globalAlpha = 0.35 + 0.65 * tap.level;
+      if (tap.side <= 0) ctx.fillRect(x - 1, mid - len, 2.5, len);
+      if (tap.side >= 0) ctx.fillRect(x - 1, mid, 2.5, len);
+    }
+    ctx.globalAlpha = 1;
+    figureLabel(ctx, 'L', 4, 2, c.dim);
+    figureLabel(ctx, 'R', 4, h - 11, c.dim);
+    return `${figureSeconds(f.time)} ${f.synced ? figurePad(f.syncName, 6) : figurePad('', 6)} · fb ${figurePad(Math.round(f.feedback * 100), 3)}%`;
+  },
+
+  /**
+   * A beat repeat's catch: each repeat as a block as long as it plays for and as tall as its
+   * level, so a decay reads as a staircase and a pitch drop as blocks that stretch. The ticks
+   * along the bottom are the interval on which the next catch may start.
+   */
+  repeats(ctx, w, h, f, c) {
+    const floor = h - 6;
+    const reach = floor - 6;
+    const xOf = (t) => (t / f.span) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (let k = 1; k * f.interval < f.span; k++) {
+      const gx = xOf(k * f.interval);
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, h);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(0, floor + 0.5);
+    ctx.lineTo(w, floor + 0.5);
+    ctx.stroke();
+    for (const tap of f.taps) {
+      const x = xOf(tap.t);
+      const wd = Math.max(1, xOf(tap.length) - 1);
+      const ht = Math.max(1, tap.level * reach);
+      ctx.fillStyle = c.accent;
+      ctx.globalAlpha = 0.25 + 0.75 * tap.level;
+      ctx.fillRect(x, floor - ht, wd, ht);
+    }
+    ctx.globalAlpha = 1;
+    return `${figureSeconds(f.grid)} × ${figurePad(f.repeats, 2)} · ${figureSeconds(f.end)}`;
+  },
+
+  /**
+   * A reverb's tail: silence for the predelay, then sixty decibels down over the decay time.
+   * The dashed line is where the tail reaches the floor the decay is measured to.
+   */
+  decay(ctx, w, h, f, c) {
+    const { topDb, bottomDb } = f.range;
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const xOf = (t) => (t / f.span) * w;
+    const yOf = (db) => top + ((topDb - db) / (topDb - bottomDb)) * size;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (const db of [-20, -40]) {
+      ctx.beginPath();
+      ctx.moveTo(0, yOf(db));
+      ctx.lineTo(w, yOf(db));
+      ctx.stroke();
+    }
+    const step = f.span > 4 ? 1 : f.span > 1 ? 0.5 : 0.1;
+    for (let t = step; t < f.span; t += step) {
+      const gx = xOf(t);
+      ctx.beginPath();
+      ctx.moveTo(gx, top + size - 4);
+      ctx.lineTo(gx, top + size);
+      ctx.stroke();
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, top + size);
+    ctx.clip();
+    const pts = f.points.map((pt) => [xOf(pt.t), yOf(pt.db)]);
+    figureFill(ctx, pts, c.accent, top + size);
+    figureStroke(ctx, pts, c.accent, 1.75);
+    ctx.restore();
+    figureDashed(ctx, xOf(f.predelay + f.decay), 0, xOf(f.predelay + f.decay), h, c.warn);
+    figureLabel(ctx, '-60 dB', xOf(f.predelay + f.decay) + 3, 2, c.dim);
+    return `${figureSeconds(f.decay)} · pre ${figureSeconds(f.predelay)}`;
+  },
+
+  /**
+   * A modulated effect's sweep over one cycle of its LFO: the delay each copy is read at, or
+   * for a phaser the frequency its notches sit on, left and right in their own colors, and
+   * a playhead where the sweep is right now.
+   */
+  sweep(ctx, w, h, f, c) {
+    const { min, max, log } = f.axis;
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const yOf = (v) => {
+      const t = log ? Math.log(Math.max(min, v) / min) / Math.log(max / min) : (v - min) / (max - min);
+      return top + (1 - Math.min(1, Math.max(0, t))) * size;
+    };
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (const q of [0.25, 0.5, 0.75]) {
+      ctx.beginPath();
+      ctx.moveTo(q * w, 0);
+      ctx.lineTo(q * w, h);
+      ctx.stroke();
+    }
+    if (log) {
+      for (const hz of [100, 1000, 10000]) {
+        ctx.beginPath();
+        ctx.moveTo(0, yOf(hz));
+        ctx.lineTo(w, yOf(hz));
+        ctx.stroke();
+        figureLabel(ctx, hz >= 1000 ? `${hz / 1000}k` : String(hz), w - 3, yOf(hz) + 2, c.grid, 'end');
+      }
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(0, yOf((min + max) / 2));
+      ctx.lineTo(w, yOf((min + max) / 2));
+      ctx.stroke();
+      figureLabel(ctx, `${Math.round(max)} ms`, w - 3, top + 1, c.grid, 'end');
+    }
+    for (const tr of f.traces) {
+      figureStroke(ctx, tr.points.map((pt) => [pt.x * w, yOf(pt.y)]), tr.side < 0 ? c.accent : c.warn, 1.5);
+    }
+    if (f.phase != null) {
+      const px = f.phase * w;
+      ctx.strokeStyle = c.text;
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, h);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    figureLabel(ctx, 'L', 3, 2, c.accent);
+    figureLabel(ctx, 'R', 11, 2, c.warn);
+    return `${figurePad(f.rateHz.toFixed(2), 5)} Hz ${f.synced ? figurePad(f.syncName, 6) : figurePad('', 6)} · ${figureSeconds(f.periodSec)}`;
+  },
+
+  /**
+   * A ducker's dip. Stopped, it is the shape over one beat, as the controls draw it. Playing,
+   * it is the last second: the signal as it comes out, scaled to its loudest so the pump is
+   * visible at any level; the gain the dip is applying over it, which is the shape happening;
+   * and, when a key is patched in, the key's envelope underneath with the threshold it has to
+   * cross.
+   */
+  duck(ctx, w, h, f, c) {
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const yOf = (g) => top + (1 - Math.min(1, Math.max(0, g))) * size;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, top + 0.5, w - 1, size - 1);
+    if (f.history) {
+      const { gain, out, key } = f.history;
+      const n = gain.length;
+      const xOf = (i) => (i / (n - 1)) * w;
+      let loudest = 0.05;
+      for (const v of out) if (v > loudest) loudest = v;
+      // The signal, as it comes out: a bar per block.
+      ctx.fillStyle = c.dim;
+      ctx.globalAlpha = 0.45;
+      const bw = Math.max(1, w / n);
+      for (let i = 0; i < n; i++) {
+        const a = out[i] / loudest;
+        ctx.fillRect(xOf(i), yOf(a), bw, yOf(0) - yOf(a));
+      }
+      ctx.globalAlpha = 1;
+      // The key and its threshold, where there is an audio key; where notes trigger it, a tick
+      // at each note instead - a note has no level to cross anything with.
+      if (key && f.trigger === 'notes') {
+        figureStroke(ctx, key.map((v, i) => [xOf(i), yOf(v)]), c.warn, 1);
+        figureLabel(ctx, 'notes', 3, 2, c.warn);
+      } else if (key) {
+        let loudKey = 0.05;
+        for (const v of key) if (v > loudKey) loudKey = v;
+        const threshold = Math.pow(10, f.threshold / 20);
+        const scale = Math.max(loudKey, threshold * 1.25);
+        figureStroke(ctx, key.map((v, i) => [xOf(i), yOf(v / scale)]), c.warn, 1);
+        figureDashed(ctx, 0, yOf(threshold / scale), w, yOf(threshold / scale), c.warn);
+        figureLabel(ctx, 'key', 3, 2, c.warn);
+      }
+      // The gain, over everything: the dip as it is being applied.
+      figureStroke(ctx, gain.map((g, i) => [xOf(i), yOf(g)]), c.accent, 1.75);
+    } else {
+      // The shape over one beat, as set.
+      figureDashed(ctx, 0, yOf(1 - f.amount), w, yOf(1 - f.amount), c.grid);
+      const pts = f.points.map((pt) => [pt.x * w, yOf(pt.y)]);
+      figureFill(ctx, pts, c.accent, yOf(0));
+      figureStroke(ctx, pts, c.accent, 1.75);
+    }
+    const on = f.trigger === 'notes' ? figurePad('notes', 6) : f.keyed ? figurePad('key', 6) : f.synced ? figurePad(f.syncName, 6) : figurePad('', 6);
+    return `${figurePad(Math.round(f.amount * 100), 3)}% · ${figureSeconds(f.recovery)} ${on}`;
   },
 
   /** One grain's amplitude across its own length, the window the synth is applying. */
@@ -4604,6 +4916,8 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     setPosition = (_position, value) => { if (Number.isFinite(value)) widget.value = value; };
     cell.appendChild(button);
   } else if (widget.widget === 'enum') {
+    // Wider than a knob: a menu's whole job is its word, and "Str…" in a knob's width said none of it.
+    cell.classList.add('device-widget-enum');
     const select = document.createElement('select');
     select.className = 'small';
     const fill = (options, current) => {
@@ -11323,6 +11637,136 @@ async function prSliceToNotes(targets) {
  *   after      run once an item has been chosen, for a caller that has focus to give back
  *   onHoverOut run when the pointer leaves the menu itself, for a caller previewing on hover
  */
+// ---------------------------------------------------------------------------------------------
+// The dropdowns.
+//
+// Every <select> in the app stays a <select>: it is the value, the change event every listener
+// waits on, and the trigger every panel's stylesheet already has rules for. What is replaced
+// is the LIST it opens. The platform's popup is the one piece of the page no stylesheet can
+// reach, and it looked like it - a system menu over an instrument. Pressing a select opens
+// this list in the app's own menu skin instead, under the select or above it when there is no
+// room, with the current choice marked; the arrow keys walk it and enter picks; picking sets
+// the select and fires its input and change events, so nothing that listens to a select can
+// tell the difference. Arrow keys on a CLOSED select still step its value, as they natively do.
+// ---------------------------------------------------------------------------------------------
+
+const selMenuEl = document.createElement('div');
+selMenuEl.className = 'sel-menu hidden';
+document.body.appendChild(selMenuEl);
+let selMenuFor = null;
+
+function closeSelMenu() {
+  if (!selMenuFor) return;
+  selMenuEl.classList.add('hidden');
+  selMenuEl.innerHTML = '';
+  selMenuFor.classList.remove('sel-open');
+  selMenuFor = null;
+}
+
+/** Picks an option for the select the list is open on, and tells its listeners. */
+function selMenuPick(select, option) {
+  const changed = select.value !== option.value || select.selectedIndex !== option.index;
+  select.selectedIndex = option.index;
+  closeSelMenu();
+  select.focus();
+  if (changed) {
+    select.dispatchEvent(new Event('input', { bubbles: true }));
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+
+function openSelMenu(select) {
+  if (selMenuFor === select) { closeSelMenu(); return; }
+  closeSelMenu();
+  if (!select.options.length) return;
+  selMenuFor = select;
+  select.classList.add('sel-open');
+  // The options in order, under their group heads where the select has groups.
+  let lastGroup = null;
+  for (const option of select.options) {
+    if (option.hidden) continue;
+    const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
+    if (group && group !== lastGroup) {
+      const head = document.createElement('div');
+      head.className = 'sel-menu-head';
+      head.textContent = group.label;
+      selMenuEl.appendChild(head);
+    }
+    lastGroup = group;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = option.textContent;
+    if (option.title) b.title = option.title;
+    b.disabled = option.disabled || !!group?.disabled;
+    if (option.selected) b.classList.add('on', 'hi');
+    b.addEventListener('mouseenter', () => selMenuHighlight(b));
+    b.addEventListener('click', () => selMenuPick(select, option));
+    selMenuEl.appendChild(b);
+  }
+  selMenuEl.classList.remove('hidden');
+  // Under the select, at least as wide as it; above it when the bottom of the window is nearer.
+  const r = select.getBoundingClientRect();
+  selMenuEl.style.minWidth = `${Math.ceil(r.width)}px`;
+  const mw = selMenuEl.offsetWidth;
+  const mh = selMenuEl.offsetHeight;
+  let top = r.bottom + 3;
+  if (top + mh > window.innerHeight - 4 && r.top - mh - 3 >= 4) top = r.top - mh - 3;
+  selMenuEl.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - mw - 4))}px`;
+  selMenuEl.style.top = `${Math.max(4, top)}px`;
+  selMenuEl.querySelector('button.on')?.scrollIntoView({ block: 'nearest' });
+}
+
+function selMenuHighlight(button) {
+  for (const b of selMenuEl.querySelectorAll('button.hi')) b.classList.remove('hi');
+  button?.classList.add('hi');
+  button?.scrollIntoView({ block: 'nearest' });
+}
+
+// The press opens the list in place of the platform's popup - preventing the default on
+// mousedown is what keeps that popup shut - and a press anywhere else closes it.
+document.addEventListener('mousedown', (e) => {
+  const select = e.target instanceof HTMLSelectElement ? e.target : null;
+  if (select) {
+    if (select.disabled || select.multiple || select.size > 1) return;
+    e.preventDefault();
+    select.focus();
+    openSelMenu(select);
+    return;
+  }
+  if (selMenuFor && !selMenuEl.contains(e.target)) closeSelMenu();
+}, true);
+
+document.addEventListener('keydown', (e) => {
+  const select = e.target instanceof HTMLSelectElement ? e.target : null;
+  if (selMenuFor) {
+    // The list is open: the keys walk it.
+    const buttons = [...selMenuEl.querySelectorAll('button:not(:disabled)')];
+    const at = buttons.findIndex((b) => b.classList.contains('hi'));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      selMenuHighlight(buttons[Math.min(buttons.length - 1, Math.max(0, at + step))]);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      buttons[at]?.click();
+    } else if (e.key === 'Escape' || e.key === 'Tab') {
+      closeSelMenu();
+    }
+    return;
+  }
+  if (!select || select.disabled || select.multiple || select.size > 1) return;
+  // Closed: the keys that would open the platform's popup open this one.
+  if (e.key === ' ' || e.key === 'Enter' || (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'))) {
+    e.preventDefault();
+    openSelMenu(select);
+  }
+}, true);
+
+// A list that has come away from its select is wrong wherever it is.
+window.addEventListener('resize', closeSelMenu);
+window.addEventListener('blur', closeSelMenu);
+document.addEventListener('scroll', (e) => { if (e.target !== selMenuEl) closeSelMenu(); }, true);
+
 function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null, onHoverOut = null } = {}) {
   el.innerHTML = '';
   if (head) {
@@ -17130,7 +17574,7 @@ async function refreshAudioDevices() {
   try {
     const {
       devices, selected, outputChannels, outputChannelChoices, audibleChannels,
-      cueAvailable, cueSelected, cueActive,
+      cueAvailable, cueSelected, cueActive, canReveal, canChoose, warning,
     } = await api('GET', '/api/audioDevices');
     audioCueSelect.innerHTML = '';
     audioCueSelect.appendChild(new Option('none', ''));
@@ -17151,8 +17595,20 @@ async function refreshAudioDevices() {
     for (const d of devices) {
       const opt = document.createElement('option');
       opt.value = d.name;
-      opt.textContent = `${d.name} · ${d.channels} ch`;
+      // A browser does not say how many channels an output has, so the page leaves it off.
+      opt.textContent = d.channels ? `${d.name} · ${d.channels} ch` : d.name;
       audioDeviceSelect.appendChild(opt);
+    }
+    // The browser build only: a browser hides its outputs' names until the page has been let
+    // use a microphone, so the one way to see the list is to ask - said on the entry itself.
+    if (canReveal) {
+      const reveal = new Option('list every output… (asks for the microphone)', AUDIO_REVEAL);
+      reveal.title = 'the browser names its audio outputs only to a page allowed to use a microphone - poptart asks, closes it at once, and records nothing';
+      audioDeviceSelect.appendChild(reveal);
+    }
+    if (canChoose === false) {
+      audioDeviceSelect.disabled = true;
+      audioDeviceSelect.title = warning ?? 'this browser cannot choose an audio output';
     }
     // A saved device that's since been unplugged falls back to "" - the server already plays
     // on the system default in that case.
@@ -17231,7 +17687,35 @@ audioChannelSelect.addEventListener('change', async () => {
   }
 });
 
+/** The menu entry that asks the browser to name its outputs (see refreshAudioDevices). */
+const AUDIO_REVEAL = '\u0000reveal';
+
+/**
+ * The browser build's output switch. Nothing restarts - the page moves its audio to the other
+ * device and keeps playing - so none of the desktop's engine-restart handling applies.
+ */
+async function chooseWebAudioOutput(value) {
+  audioDeviceSelect.disabled = true;
+  try {
+    if (value === AUDIO_REVEAL) {
+      await api('POST', '/api/audioDevice', { reveal: true });
+      logLine('the browser has named its audio outputs - pick one from the menu');
+    } else {
+      const device = value || null;
+      await api('POST', '/api/audioDevice', { device });
+      logLine(`audio output is now ${device ?? 'the system default'}`);
+    }
+  } catch (e) {
+    // A refused permission lands here too, and says so in the browser's own words.
+    logLine(e.message ?? String(e), true);
+  } finally {
+    audioDeviceSelect.disabled = false;
+    refreshAudioDevices().catch(() => {});
+  }
+}
+
 audioDeviceSelect.addEventListener('change', async () => {
+  if (window.__poptartHostReady) { chooseWebAudioOutput(audioDeviceSelect.value); return; }
   const device = audioDeviceSelect.value || null;
   const label = device ?? 'the system default';
   if (!scanSurvivesRestart('the output device')) {

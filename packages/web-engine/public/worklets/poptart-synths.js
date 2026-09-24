@@ -246,6 +246,18 @@ const FIGURE_KINDS = new Map([
   // level it is working at right now marked on it. Only the threshold is required: a device with
   // no ratio control is a limiter, whose curve is a wall at the ceiling rather than a bend.
   ['transfer', ['threshold']],
+  // A waveshaper's curve: what comes out for what goes in, through the device's own function.
+  ['shaper', ['mode', 'drive']],
+  // The repeats a delay makes of one hit: when each lands and how loud.
+  ['echoes', ['time', 'feedback']],
+  // One catch of a beat repeat and the repeats it plays.
+  ['repeats', ['grid', 'repeats']],
+  // A reverb's tail falling away.
+  ['decay', ['decay']],
+  // A modulated effect's sweep over one LFO cycle, with a playhead where it is.
+  ['sweep', ['rate', 'depth']],
+  // A ducker's dip: the shape over a beat, and the signal it is pumping.
+  ['duck', ['amount', 'length']],
 ]);
 
 /**
@@ -411,6 +423,12 @@ function defineDevice(spec) {
   const sidechain = spec.sidechain === true;
   if (sidechain && kind !== 'fx') fail(id, 'only an effect can take a sidechain');
 
+  // Whether an effect is played by notes as well as fed audio: `.fx("Ducker").midi("kick")`
+  // triggers the dip on the kick track's notes. An instrument is always played by notes, so the
+  // flag is only an effect's to set, and an effect without it refuses `.midi()` by name.
+  const notes = spec.notes === true;
+  if (notes && kind !== 'fx') fail(id, 'an instrument takes notes already - only an effect declares notes');
+
   const license = String(spec.license ?? '').trim();
   if (!license) fail(id, 'every device records its license (it ends up in the About screen)');
 
@@ -429,6 +447,7 @@ function defineDevice(spec) {
     processor: String(spec.processor ?? '').trim() || null,
     channels: Object.freeze(channels),
     sidechain,
+    notes,
     params: Object.freeze(params),
     figures: Object.freeze(figures),
     panel: definePanel(id, spec.panel, params),
@@ -2535,11 +2554,14 @@ function oscParams(n, group, levelDefault) {
       description: 'Coarse tuning in semitones.' },
     { id: `${p}.cents`, name: `Osc ${n} Cents`, min: -100, max: 100, default: 0, step: 1, unit: 'ct', ui: 'number', group,
       description: 'Fine tuning. A signal here is vibrato.' },
-    { id: `${p}.unison`, name: `Osc ${n} Unison`, min: 1, max: MAX_UNISON, default: 1, step: 1, rate: 'k', ui: 'number', group },
-    { id: `${p}.detune`, name: `Osc ${n} Detune`, min: 0, max: 100, default: 15, unit: 'ct', group },
-    { id: `${p}.spread`, name: `Osc ${n} Spread`, min: 0, max: 1, default: 0.5, group,
+    // The unison controls sit in a section of their own, under the picture of the spread they
+    // move: in the oscillator's section they were the last four of thirteen knobs, a row and a
+    // half below the figure that answers to them.
+    { id: `${p}.unison`, name: `Osc ${n} Unison`, min: 1, max: MAX_UNISON, default: 1, step: 1, rate: 'k', ui: 'number', group: `${group} Unison` },
+    { id: `${p}.detune`, name: `Osc ${n} Detune`, min: 0, max: 100, default: 15, unit: 'ct', group: `${group} Unison` },
+    { id: `${p}.spread`, name: `Osc ${n} Spread`, min: 0, max: 1, default: 0.5, group: `${group} Unison`,
       description: 'How far apart the unison copies are panned.' },
-    { id: `${p}.phaserand`, name: `Osc ${n} Phase Rand`, min: 0, max: 1, default: 1, rate: 'k', group,
+    { id: `${p}.phaserand`, name: `Osc ${n} Phase Rand`, min: 0, max: 1, default: 1, rate: 'k', group: `${group} Unison`,
       description: 'Zero starts every copy together, which is a hard attack; one spreads them.' },
   ];
 }
@@ -2616,8 +2638,9 @@ const WAVETABLE = defineDevice({
     },
   ],
 
-  // The two oscillators side by side, because they are twins; the rest in a row beneath.
-  panel: { width: 920, rows: [['Osc 1', 'Osc 2'], ['Sub', 'Amp Env', 'Voice']] },
+  // The two oscillators side by side, because they are twins, each one's unison under it; the
+  // rest in a row beneath.
+  panel: { width: 920, rows: [['Osc 1', 'Osc 2'], ['Osc 1 Unison', 'Osc 2 Unison'], ['Sub', 'Amp Env', 'Voice']] },
 });
 
 /** The two pictures an oscillator gets: the waveform it is reading, and its unison spread. */
@@ -2640,7 +2663,7 @@ function oscFigures(n) {
     {
       id: `${p}.spread`,
       kind: 'unison',
-      group,
+      group: `${group} Unison`,
       title: 'unison',
       description: 'Where the unison copies sit: detune across, pan up and down. Drag across for the detune, up for the spread.',
       params: { count: `${p}.unison`, detune: `${p}.detune`, spread: `${p}.spread` },
@@ -3797,15 +3820,18 @@ class Reporter {
    * Called once per rendered block with the parameters it was handed.
    *
    * `report` is whatever else a device has to say about what it is doing right now - a
-   * granulator's grains, and nothing else so far. It rides the same message because it is the
-   * same question the panel is asking: what is this device doing, as opposed to what was it set
-   * to, and a second channel for it would only be a second thing to turn on and off.
+   * granulator's grains, a compressor's last second of levels. It rides the same message because
+   * it is the same question the panel is asking: what is this device doing, as opposed to what
+   * was it set to, and a second channel for it would only be a second thing to turn on and off.
+   * Given as a function, so a device that copies a history out to answer does so only on the
+   * blocks that post, and not on the four in between.
    */
   tick(parameters, report = null) {
     if (!this.on) return;
     if (++this.blocks < REPORT_EVERY_BLOCKS) return;
     this.blocks = 0;
-    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report });
+    const said = typeof report === 'function' ? report() : report;
+    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report: said ?? null });
   }
 }
 
@@ -3916,7 +3942,7 @@ class SynthProcessor extends AudioWorkletProcessor {
     out[0].fill(0);
     if (out[1]) out[1].fill(0);
     this.synth.process(out[0], out[1] ?? out[0], blockSize);
-    this.reporter.tick(parameters, this.synth.report?.() ?? null);
+    this.reporter.tick(parameters, () => this.synth.report?.());
 
     // A synth with nothing sounding and nothing queued still has to stay alive: the next note is
     // a message away, and a processor that returned false would have been torn down by then.

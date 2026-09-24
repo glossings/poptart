@@ -246,6 +246,18 @@ const FIGURE_KINDS = new Map([
   // level it is working at right now marked on it. Only the threshold is required: a device with
   // no ratio control is a limiter, whose curve is a wall at the ceiling rather than a bend.
   ['transfer', ['threshold']],
+  // A waveshaper's curve: what comes out for what goes in, through the device's own function.
+  ['shaper', ['mode', 'drive']],
+  // The repeats a delay makes of one hit: when each lands and how loud.
+  ['echoes', ['time', 'feedback']],
+  // One catch of a beat repeat and the repeats it plays.
+  ['repeats', ['grid', 'repeats']],
+  // A reverb's tail falling away.
+  ['decay', ['decay']],
+  // A modulated effect's sweep over one LFO cycle, with a playhead where it is.
+  ['sweep', ['rate', 'depth']],
+  // A ducker's dip: the shape over a beat, and the signal it is pumping.
+  ['duck', ['amount', 'length']],
 ]);
 
 /**
@@ -411,6 +423,12 @@ function defineDevice(spec) {
   const sidechain = spec.sidechain === true;
   if (sidechain && kind !== 'fx') fail(id, 'only an effect can take a sidechain');
 
+  // Whether an effect is played by notes as well as fed audio: `.fx("Ducker").midi("kick")`
+  // triggers the dip on the kick track's notes. An instrument is always played by notes, so the
+  // flag is only an effect's to set, and an effect without it refuses `.midi()` by name.
+  const notes = spec.notes === true;
+  if (notes && kind !== 'fx') fail(id, 'an instrument takes notes already - only an effect declares notes');
+
   const license = String(spec.license ?? '').trim();
   if (!license) fail(id, 'every device records its license (it ends up in the About screen)');
 
@@ -429,6 +447,7 @@ function defineDevice(spec) {
     processor: String(spec.processor ?? '').trim() || null,
     channels: Object.freeze(channels),
     sidechain,
+    notes,
     params: Object.freeze(params),
     figures: Object.freeze(figures),
     panel: definePanel(id, spec.panel, params),
@@ -1524,15 +1543,16 @@ const DISTORT = defineDevice({
   ],
   figures: [
     {
-      id: 'autogain',
-      kind: 'meter',
-      group: 'Out',
-      title: 'auto gain',
-      description: 'How much the auto gain is taking off, or putting back, to hold the level as the drive moves.',
-      params: { amount: 'autogain' },
-      range: [-36, 12],
+      id: 'curve',
+      kind: 'shaper',
+      group: 'Shape',
+      title: 'curve',
+      description: 'What comes out for what goes in, through the curve at this drive and bias, with the auto gain\'s correction applied - so the picture is the level you hear, and the heading says how much the auto gain is taking off. Drag up for the drive.',
+      params: { mode: 'mode', drive: 'drive', bias: 'bias', harmonic: 'harmonic', autogain: 'autogain' },
+      drag: { y: 'drive' },
     },
   ],
+  panel: { width: 640, rows: [['Shape', 'Out']] },
 });
 
 /** One channel's state. A stereo device holds two of these, so the channels never share history. */
@@ -2065,6 +2085,17 @@ const REVERB = defineDevice({
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.3, group: 'Tone' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB', group: 'Tone' },
   ],
+  figures: [
+    {
+      id: 'tail',
+      kind: 'decay',
+      group: 'Room',
+      title: 'tail',
+      description: 'How the tail falls away after a hit: nothing for the predelay, then sixty decibels down over the decay time. Drag across for the decay.',
+      params: { decay: 'decay', predelay: 'predelay' },
+      drag: { x: 'decay' },
+    },
+  ],
 });
 
 class ReverbProcessor {
@@ -2323,6 +2354,16 @@ const DELAY = defineDevice({
       description: 'Offsets the right channel\'s time from the left\'s, for width without ping-pong.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.35 },
   ],
+  figures: [
+    {
+      id: 'echoes',
+      kind: 'echoes',
+      title: 'echoes',
+      description: 'The repeats one hit makes: when each lands, on the beat grid, and how loud. Left above the line, right below; a ping-pong alternates. Drag up for the feedback.',
+      params: { time: 'time', feedback: 'feedback', sync: 'sync', pingpong: 'pingpong', spread: 'spread' },
+      drag: { y: 'feedback' },
+    },
+  ],
 });
 
 const clipTail = (x) => (x > 2 ? 1 : x < -2 ? -1 : x - (x * x * x) / 12);
@@ -2393,6 +2434,41 @@ class DelayProcessor {
     this.length[0] = lenL;
     this.length[1] = lenR;
     if (!Number.isFinite(outL[count - 1])) this.reset();
+  }
+}
+
+// ---- src/dsp/history.mjs -----------------------------------------
+// A short memory of what a device has been doing, for the pictures that scroll.
+//
+// A compressor's transfer curve says what the device would do to a level; the thing somebody
+// setting one wants to see is what it HAS been doing for the last second - the level coming
+// in, the gain being taken off, the pump of a ducker against the beat it is pumping to. That is
+// a ring of one number per block, kept on the audio thread where the numbers are, and copied
+// out whenever the device is asked to report.
+
+/** How many blocks a ring holds: about two thirds of a second at the usual rate and block size. */
+const HISTORY_BLOCKS = 256;
+
+class History {
+  constructor(size = HISTORY_BLOCKS, fill = 0) {
+    this.buf = new Float32Array(size).fill(fill);
+    this.at = 0;
+  }
+
+  push(v) {
+    this.buf[this.at] = v;
+    this.at = (this.at + 1) % this.buf.length;
+  }
+
+  /**
+   * Oldest first, newest last. A fresh array each time, because the answer is posted to
+   * another thread - which is why a device builds it only when asked (see Reporter#tick).
+   */
+  snapshot() {
+    const n = this.buf.length;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) out[i] = this.buf[(this.at + i) % n];
+    return out;
   }
 }
 
@@ -2481,6 +2557,10 @@ class CompressorProcessor {
     this.lastRelease = -1;
     this.reduction = 0;      // the last gain reduction in dB, for the panel's curve
     this.level = -120;       // and the level the detector was at, which is where on the curve
+    // The last second or so of both, one entry a block, for the lane the panel scrolls.
+    this.levels = new History(undefined, -120);
+    this.reductions = new History(undefined, 0);
+    this.blockSec = 128 / sampleRate;
   }
 
   process(inputs, outputs, count, params, sidechain) {
@@ -2515,14 +2595,25 @@ class CompressorProcessor {
     }
     this.reduction = reduction;
     this.level = loudest;
+    this.levels.push(loudest);
+    this.reductions.push(reduction);
+    this.blockSec = count / this.detector.sampleRate;
   }
 
   /**
    * Where the signal is on the transfer curve, and how far it is being pulled down - the two
-   * numbers a compressor's controls do not say on their own.
+   * numbers a compressor's controls do not say on their own - and the recent history of both,
+   * for the lane that shows the attack and the release actually happening.
    */
   report() {
-    return { meters: { curve: { inDb: this.level, grDb: this.reduction } } };
+    return {
+      meters: {
+        curve: {
+          inDb: this.level, grDb: this.reduction,
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+        },
+      },
+    };
   }
 }
 
@@ -2578,6 +2669,9 @@ class LimiterProcessor {
     this.gain = 1;
     this.reduction = 0;
     this.level = -120;       // the loudest the input reached this block, after the gain, in dB
+    this.levels = new History(undefined, -120);
+    this.reductions = new History(undefined, 0);
+    this.blockSec = 128 / sampleRate;
   }
 
   process(inputs, outputs, count, params) {
@@ -2616,11 +2710,21 @@ class LimiterProcessor {
     }
     this.reduction = reduction;
     this.level = loudest > 1e-6 ? 20 * Math.log10(loudest) : -120;
+    this.levels.push(this.level);
+    this.reductions.push(reduction < 1 ? 20 * Math.log10(reduction) : 0);
+    this.blockSec = count / this.sampleRate;
   }
 
-  /** Where the signal is and how much is being held back, for the picture. */
+  /** Where the signal is and how much is being held back, for the picture, and the last second of both. */
   report() {
-    return { meters: { curve: { inDb: this.level, grDb: this.reduction < 1 ? 20 * Math.log10(this.reduction) : 0 } } };
+    return {
+      meters: {
+        curve: {
+          inDb: this.level, grDb: this.reduction < 1 ? 20 * Math.log10(this.reduction) : 0,
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+        },
+      },
+    };
   }
 }
 
@@ -3022,6 +3126,16 @@ const CHORUS = defineDevice({
     { id: 'shape', name: 'Shape', default: 0, options: ['sine', 'triangle'], rate: 'k' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
   ],
+  figures: [
+    {
+      id: 'sweep',
+      kind: 'sweep',
+      title: 'sweep',
+      description: 'The delay each copy is read at over one cycle of the LFO - a voice per copy, left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      params: { rate: 'rate', depth: 'depth', delay: 'delay', sync: 'sync', spread: 'spread', shape: 'shape', voices: 'voices' },
+      drag: { y: 'depth' },
+    },
+  ],
 });
 
 class ChorusProcessor {
@@ -3060,6 +3174,11 @@ class ChorusProcessor {
     }
     if (!Number.isFinite(outL[count - 1])) this.delay.reset();
   }
+
+  /** Where the LFO is, so the picture's playhead follows the sound. */
+  report() {
+    return { phase: this.delay.phase };
+  }
 }
 
 // ---- src/devices/flanger.mjs -------------------------------------
@@ -3088,6 +3207,16 @@ const FLANGER = defineDevice({
       description: 'How far the right channel\'s sweep sits behind the left\'s.' },
     { id: 'shape', name: 'Shape', default: 0, options: ['sine', 'triangle'], rate: 'k' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
+  ],
+  figures: [
+    {
+      id: 'sweep',
+      kind: 'sweep',
+      title: 'sweep',
+      description: 'The delay each copy is read at over one cycle of the LFO - left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      params: { rate: 'rate', depth: 'depth', delay: 'delay', sync: 'sync', spread: 'spread', shape: 'shape' },
+      drag: { y: 'depth' },
+    },
   ],
 });
 
@@ -3125,6 +3254,11 @@ class FlangerProcessor {
     }
     if (!Number.isFinite(outL[count - 1])) this.delay.reset();
   }
+
+  /** Where the LFO is, so the picture's playhead follows the sound. */
+  report() {
+    return { phase: this.delay.phase };
+  }
 }
 
 // ---- src/devices/phaser.mjs --------------------------------------
@@ -3161,6 +3295,16 @@ const PHASER = defineDevice({
     { id: 'spread', name: 'Spread', min: 0, max: 1, default: 0.5,
       description: 'How far the right channel\'s sweep sits behind the left\'s.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
+  ],
+  figures: [
+    {
+      id: 'sweep',
+      kind: 'sweep',
+      title: 'sweep',
+      description: 'Where the notches are centered over one cycle of the LFO, in octaves around the center, left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      params: { rate: 'rate', depth: 'depth', center: 'center', sync: 'sync', spread: 'spread' },
+      drag: { y: 'depth' },
+    },
   ],
 });
 
@@ -3226,6 +3370,11 @@ class PhaserProcessor {
       if (outR !== outL) outR[i] = r + (wetR - r) * mix;
     }
     if (!Number.isFinite(outL[count - 1])) for (const c of this.chains) c.reset();
+  }
+
+  /** Where the LFO is, so the picture's playhead follows the sound. */
+  report() {
+    return { phase: this.phase };
   }
 }
 
@@ -3422,9 +3571,10 @@ class Adsr {
 // without needing the kick.
 //
 // The dip runs on the transport's clock - the engine tells every device the tempo and where the
-// beat falls - so it is on the grid whatever is playing through it. With a sidechain patched in
-// it triggers on that signal's transients instead, which is the same shape driven by a real
-// kick. Either way the shape is the thing: a curve from the dip's floor back up to full over the
+// beat falls - so it is on the grid whatever is playing through it. Played by another track's
+// notes (`.fx("Ducker").midi("kick")`) it dips on each note instead, at the note's own sample,
+// which is the way to duck to a kick exactly without listening for it. With a sidechain patched
+// in (`.audio("kick")`) it triggers on that signal's transients. Either way the shape is the thing: a curve from the dip's floor back up to full over the
 // length set, which is what a sidechain compressor's release does with far less to set.
 
 
@@ -3434,12 +3584,13 @@ const DUCKER = defineDevice({
   version: 1,
   license: 'AGPL-3.0-only',
   processor: 'poptart-ducker',
-  description: 'A level dip on the beat, or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
+  description: 'A level dip on the beat, on the notes of a track routed in with .midi(), or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
   channels: { in: 2, out: 2 },
   sidechain: true,
+  notes: true,
   params: [
     { id: 'sync', name: 'Sync', default: 8, options: [...SYNC_OPTIONS], rate: 'k',
-      description: 'How often the dip happens on the clock. Ignored when a sidechain is patched in, which triggers it instead.' },
+      description: 'How often the dip happens on the clock. Ignored when notes or a sidechain trigger it instead.' },
     { id: 'amount', name: 'Amount', min: 0, max: 1, default: 0.8,
       description: 'How far the level drops at the dip.' },
     { id: 'length', name: 'Length', min: 0.05, max: 1, default: 0.5,
@@ -3449,7 +3600,17 @@ const DUCKER = defineDevice({
     { id: 'curve', name: 'Curve', min: -8, max: 8, default: 3, step: 0.5, ui: 'number', rate: 'k',
       description: 'The shape of the recovery: positive starts slow and rises fast at the end, which is the classic pump; negative snaps back at once.' },
     { id: 'threshold', name: 'Threshold', min: -60, max: 0, default: -24, unit: 'dB',
-      description: 'The level a sidechained signal has to reach to trigger the dip.' },
+      description: 'The level a sidechained signal has to reach to trigger the dip. Notes trigger it whatever their level.' },
+  ],
+  figures: [
+    {
+      id: 'dip',
+      kind: 'duck',
+      title: 'dip',
+      description: 'The dip over one beat, as the shape controls draw it - and, while the track plays, the last second of the signal with the gain the dip is applying laid over it, and the key that triggers it underneath. Drag up for the amount, across for the length.',
+      params: { amount: 'amount', length: 'length', attack: 'attack', curve: 'curve', sync: 'sync', threshold: 'threshold' },
+      drag: { x: 'length', y: 'amount' },
+    },
   ],
 });
 
@@ -3464,12 +3625,47 @@ class DuckerProcessor {
     this.armed = true;
     this.env = 0;
     this.frames = 0;
+    this.keyed = false;
+    this.audioKeyed = false;
+    // Notes routed in with .midi(): while a route is set, notes are the only trigger, and the
+    // clock stops dipping on its own. `pending` is note-on times not yet reached, oldest first.
+    this.noteRouted = false;
+    this.pending = [];
+    this.hit = 0;             // a marker for the picture: one at a note, falling away after it
+    // The last second, one entry a block: the gain the dip left it at, the loudest the output
+    // got, and the key's envelope - what the panel draws the dip over.
+    this.gains = new History(undefined, 1);
+    this.peaks = new History(undefined, 0);
+    this.keys = new History(undefined, 0);
+    this.blockSec = 128 / sampleRate;
   }
 
   setTempo(bpm, anchorSec = null) {
     this.bpm = bpm;
     if (anchorSec != null) this.anchorSec = anchorSec;
   }
+
+  /** A route of notes was set or cleared (see the engine's injectMidi). */
+  setNoteRoute(on) {
+    this.noteRouted = !!on;
+    if (!this.noteRouted) this.pending.length = 0;
+  }
+
+  /**
+   * A note from the routed track: the dip starts at the note's time. Kept in order, because a
+   * scheduler sends a lookahead ahead and two notes can arrive in one message burst.
+   */
+  noteOn(_note, velocity, time) {
+    if (!(velocity > 0)) return;
+    this.noteRouted = true;
+    const t = Number.isFinite(time) ? time : 0;
+    let i = this.pending.length;
+    while (i > 0 && this.pending[i - 1] > t) i -= 1;
+    this.pending.splice(i, 0, t);
+    if (this.pending.length > 64) this.pending.shift();
+  }
+
+  noteOff() { /* the dip is a shape in time, not a gate: an off changes nothing */ }
 
   process(inputs, outputs, count, params, sidechain, timeSec = null) {
     const inL = inputs[0];
@@ -3480,13 +3676,28 @@ class DuckerProcessor {
     const period = syncedSeconds(sync, this.bpm, 0.5);
     const curve = at(params.curve, 0);
     const keyed = !!(sidechain && sidechain[0]);
+    const byNotes = this.noteRouted && !keyed;
+    this.keyed = keyed || byNotes;
+    this.audioKeyed = keyed;
+    const start = timeSec ?? this.frames / this.sampleRate;
     const sr = this.sampleRate;
+    let peak = 0;
     const attackK = 1 - Math.exp(-1 / Math.max(1, at(params.attack, 0) * 0.001 * sr));
     const threshold = Math.pow(10, at(params.threshold, 0) / 20);
     const releaseK = 1 - Math.exp(-1 / (0.05 * sr));
     for (let i = 0; i < count; i++) {
       // Where this sample sits on the clock: a trigger fires when the beat index changes.
-      if (keyed) {
+      if (byNotes) {
+        // A note at or before this sample starts the dip here. Anything that arrived late
+        // lands at the first sample it can.
+        const now = start + i / sr;
+        while (this.pending.length && this.pending[0] <= now) {
+          this.pending.shift();
+          this.elapsed = 0;
+          this.hit = 1;
+        }
+        this.hit -= this.hit * releaseK;
+      } else if (keyed) {
         const key = Math.abs(sidechain[0][i]);
         this.env += (key - this.env) * (key > this.env ? 0.5 : releaseK);
         if (this.armed && this.env > threshold) { this.elapsed = 0; this.armed = false; }
@@ -3508,9 +3719,27 @@ class DuckerProcessor {
       // Down at the attack, up at the shape's own pace.
       this.gain += (target - this.gain) * (target < this.gain ? attackK : 1);
       const g = this.gain;
-      outL[i] = (inL ? inL[i] : 0) * g;
-      if (outR !== outL) outR[i] = (inR ? inR[i] : 0) * g;
+      const l = (inL ? inL[i] : 0) * g;
+      const r = (inR ? inR[i] : 0) * g;
+      outL[i] = l;
+      if (outR !== outL) outR[i] = r;
+      const a = Math.max(l < 0 ? -l : l, r < 0 ? -r : r);
+      if (a > peak) peak = a;
     }
+    this.gains.push(this.gain);
+    this.peaks.push(peak);
+    this.keys.push(keyed ? this.env : byNotes ? this.hit : 0);
+    this.blockSec = count / sr;
+  }
+
+  /** The last second of the dip, the signal under it and the key driving it, for the picture. */
+  report() {
+    return {
+      history: { gain: this.gains.snapshot(), out: this.peaks.snapshot(), key: this.keyed ? this.keys.snapshot() : null, blockSec: this.blockSec },
+      keyed: this.keyed,
+      // What is triggering it, for the picture's label: 'notes', 'audio' or 'clock'.
+      trigger: this.audioKeyed ? 'audio' : this.noteRouted ? 'notes' : 'clock',
+    };
   }
 }
 
@@ -3711,6 +3940,11 @@ class MultibandProcessor {
     // panel draws on each band's curve.
     this.levels = [-120, -120, -120];
     this.changes = [0, 0, 0];
+    // And the last second of each, for the lane beside each curve.
+    this.levelHistory = BANDS.map(() => new History(undefined, -120));
+    this.changeHistory = BANDS.map(() => new History(undefined, 0));
+    this.blockSec = 128 / sampleRate;
+    this.sampleRate = sampleRate;
   }
 
   process(inputs, outputs, count, params) {
@@ -3784,16 +4018,24 @@ class MultibandProcessor {
       outL[i] = (l + (sumL - l) * mix) * out;
       if (outR !== outL) outR[i] = (r + (sumR - r) * mix) * out;
     }
+    for (let b = 0; b < 3; b++) {
+      this.levelHistory[b].push(this.levels[b]);
+      this.changeHistory[b].push(this.changes[b]);
+    }
+    this.blockSec = count / this.sampleRate;
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
     }
   }
 
-  /** Where each band sits on its own curve, for the three pictures the panel draws. */
+  /** Where each band sits on its own curve, and where it has been, for the three pictures the panel draws. */
   report() {
     const meters = {};
     BANDS.forEach((name, b) => {
-      meters[`${name.toLowerCase()}.curve`] = { inDb: this.levels[b], grDb: this.changes[b] };
+      meters[`${name.toLowerCase()}.curve`] = {
+        inDb: this.levels[b], grDb: this.changes[b],
+        history: { inDb: this.levelHistory[b].snapshot(), grDb: this.changeHistory[b].snapshot(), blockSec: this.blockSec },
+      };
     });
     return { meters };
   }
@@ -3806,7 +4048,9 @@ class MultibandProcessor {
 // clock the effect may - with the chance set - grab the slice that just went by, one grid
 // division long, and play it over and over for the number of repeats, each one quieter and
 // lower than the last if asked. The chance is decided by a hash of the beat it falls on, so a
-// song stutters in the same places every time it is played.
+// song stutters in the same places every time it is played. While a repeat sounds the original
+// is held at the dry level - cut, by default, so the repeats take its place - and the repeats
+// themselves at the wet level.
 
 
 const REPEAT_MAX_SEC = 4;
@@ -3831,10 +4075,21 @@ const STUTTER = defineDevice({
       description: 'How much quieter each repeat is than the one before.' },
     { id: 'pitch', name: 'Pitch', min: -12, max: 0, default: 0, unit: 'st', step: 1, ui: 'number',
       description: 'How far each repeat drops in pitch from the one before, in semitones.' },
-    { id: 'mode', name: 'Mode', default: 0, options: ['insert', 'mix'], rate: 'k',
-      description: 'Insert mutes what is playing while the repeats run; mix leaves it under them.' },
+    { id: 'dry', name: 'Dry', min: 0, max: 1, default: 0,
+      description: 'The level of what is playing while a repeat runs. Zero cuts it, so the repeats take its place; one leaves it under them.' },
+    { id: 'wet', name: 'Wet', min: 0, max: 1, default: 1,
+      description: 'The level of the repeats.' },
     { id: 'seed', name: 'Seed', min: 0, max: 99, default: 0, step: 1, rate: 'k', ui: 'number',
       description: 'Another seed is another pattern of chances.' },
+  ],
+  figures: [
+    {
+      id: 'repeats',
+      kind: 'repeats',
+      title: 'repeats',
+      description: 'One catch and its repeats: each one as long as it plays for, at the level and the pitch it falls to, against the interval the next catch may start on.',
+      params: { grid: 'grid', repeats: 'repeats', decay: 'decay', pitch: 'pitch', interval: 'interval' },
+    },
   ],
 });
 
@@ -3882,7 +4137,6 @@ class StutterProcessor {
     const sr = this.sampleRate;
     const interval = syncedSeconds(Math.round(at(params.interval, 0)), this.bpm, 2);
     const grid = Math.min(REPEAT_MAX_SEC * 0.9, syncedSeconds(Math.round(at(params.grid, 0)), this.bpm, 0.125));
-    const insert = Math.round(at(params.mode, 0)) === 0;
     const seed = Math.round(at(params.seed, 0));
     const total = Math.max(1, Math.round(at(params.repeats, 0)));
     for (let i = 0; i < count; i++) {
@@ -3933,9 +4187,12 @@ class StutterProcessor {
         }
       }
       this.write = (this.write + 1) % this.size;
-      const dry = playing && insert ? 0 : 1;
-      outL[i] = l * dry + wetL;
-      if (outR !== outL) outR[i] = r * dry + wetR;
+      // The original at its own level only while a repeat is sounding: between repeats the
+      // track plays as it is, whatever the dry control says.
+      const dry = playing ? at(params.dry, i) : 1;
+      const wet = at(params.wet, i);
+      outL[i] = l * dry + wetL * wet;
+      if (outR !== outL) outR[i] = r * dry + wetR * wet;
     }
   }
 }
@@ -4065,135 +4322,6 @@ class GrainEchoProcessor {
       const mix = at(params.mix, i);
       outL[i] = l + (wetL - l) * mix;
       if (outR !== outL) outR[i] = r + (wetR - r) * mix;
-    }
-  }
-}
-
-// ---- src/devices/vocoder.mjs -------------------------------------
-// The Vocoder effect: the spectrum of one signal imposed on another.
-//
-// The modulator is split into bands, each band's level is followed, and the carrier is split
-// into the same bands and each one scaled by the modulator's level in it. The effect sits on the
-// carrier's track - a synth, a pad - and `.audio("voice")` patches the modulator in; with no
-// modulator patched it turns the arrangement round and treats the track as the modulator over a
-// carrier of its own, so a voice track alone still speaks.
-
-
-const MAX_BANDS = 32;
-const BANDPASS = BIQUAD_TYPES.indexOf('bandpass');
-
-const VOCODER = defineDevice({
-  id: 'Vocoder',
-  kind: 'fx',
-  version: 1,
-  license: 'AGPL-3.0-only',
-  processor: 'poptart-vocoder',
-  description: 'A channel vocoder: the sidechained signal\'s spectrum, band by band, shapes this track. With nothing sidechained the track is the modulator and the carrier is the built-in one.',
-  channels: { in: 2, out: 2 },
-  sidechain: true,
-  params: [
-    { id: 'bands', name: 'Bands', min: 8, max: MAX_BANDS, default: 16, step: 4, rate: 'k', ui: 'number' },
-    { id: 'low', name: 'Low', min: 40, max: 1000, default: 100, unit: 'Hz', curve: 'exp',
-      description: 'The lowest band.' },
-    { id: 'high', name: 'High', min: 2000, max: 16000, default: 8000, unit: 'Hz', curve: 'exp',
-      description: 'The highest band.' },
-    { id: 'attack', name: 'Attack', min: 1, max: 200, default: 8, unit: 'ms', curve: 'exp' },
-    { id: 'release', name: 'Release', min: 5, max: 1000, default: 60, unit: 'ms', curve: 'exp' },
-    { id: 'carrier', name: 'Carrier', default: 0, options: ['track', 'saw', 'noise'], rate: 'k',
-      description: 'Track uses this track as the carrier and the sidechain as the modulator. Saw and noise are built-in carriers, and then this track is the modulator.' },
-    { id: 'note', name: 'Carrier Note', min: 24, max: 84, default: 48, step: 1, ui: 'number',
-      description: 'The built-in saw\'s pitch.' },
-    { id: 'emphasis', name: 'Emphasis', min: 0, max: 1, default: 0.5,
-      description: 'Lifts the high bands, which is where the consonants live.' },
-    { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1 },
-  ],
-});
-
-class VocoderProcessor {
-  constructor(sampleRate) {
-    this.sampleRate = sampleRate;
-    this.modBands = Array.from({ length: MAX_BANDS }, () => new Biquad());
-    this.carBands = Array.from({ length: MAX_BANDS }, () => new Biquad());
-    this.detectors = Array.from({ length: MAX_BANDS }, () => new Detector(sampleRate));
-    this.centers = new Float64Array(MAX_BANDS);
-    this.last = { bands: -1, low: -1, high: -1, attack: -1, release: -1 };
-    this.phase = 0;
-    this.seed = 0x3779b9;
-  }
-
-  _tune(bands, low, high, steps = 0) {
-    for (let b = 0; b < bands; b++) {
-      const hz = low * Math.pow(high / low, b / (bands - 1));
-      this.centers[b] = hz;
-      // Adjacent bands overlap at their skirts: the Q follows the spacing.
-      const q = 1 / (Math.pow(high / low, 1 / (bands - 1)) - 1) * 1.2;
-      this.modBands[b].glideTo(BANDPASS, hz, 0, q, this.sampleRate, steps);
-      this.carBands[b].follow(this.modBands[b]);
-    }
-  }
-
-  process(inputs, outputs, count, params, sidechain) {
-    const bands = Math.max(8, Math.min(MAX_BANDS, Math.round(at(params.bands, 0) / 4) * 4));
-    const low = at(params.low, 0);
-    const high = at(params.high, 0);
-    if (bands !== this.last.bands || low !== this.last.low || high !== this.last.high) {
-      // A band COUNT change is a different bank, so it lands at once; moving the edges of the
-      // same bank is a sweep and glides across the block like any other filter.
-      this._tune(bands, low, high, bands === this.last.bands ? count : 0);
-      this.last.bands = bands; this.last.low = low; this.last.high = high;
-    }
-    const attack = at(params.attack, 0);
-    const release = at(params.release, 0);
-    if (attack !== this.last.attack || release !== this.last.release) {
-      for (const d of this.detectors) d.setTimes(attack, release);
-      this.last.attack = attack; this.last.release = release;
-    }
-    const inL = inputs[0];
-    const inR = inputs[1] ?? inputs[0];
-    const side = sidechain?.[0] ?? null;
-    const carrierMode = Math.round(at(params.carrier, 0));
-    const useTrackAsCarrier = carrierMode === 0 && side;
-    const outL = outputs[0];
-    const outR = outputs[1] ?? outputs[0];
-    const sr = this.sampleRate;
-    const hz = 440 * Math.pow(2, (at(params.note, 0) - 69) / 12);
-    for (let i = 0; i < count; i++) {
-      const track = ((inL ? inL[i] : 0) + (inR ? inR[i] : 0)) * 0.5;
-      let modulator;
-      let carrier;
-      if (useTrackAsCarrier) {
-        modulator = side[i];
-        carrier = track;
-      } else {
-        modulator = track;
-        if (carrierMode === 2 || (carrierMode === 0 && !side)) {
-          let x = this.seed; x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; this.seed = x;
-          carrier = x / 2147483648 - 1;
-        } else {
-          this.phase += hz / sr;
-          if (this.phase >= 1) this.phase -= 1;
-          carrier = this.phase * 2 - 1;
-        }
-        if (carrierMode === 0 && !side) carrier *= 0.5;
-      }
-      const emphasis = at(params.emphasis, i);
-      let wet = 0;
-      for (let b = 0; b < bands; b++) {
-        const m = this.modBands[b].next(modulator);
-        const env = this.detectors[b].next(Math.abs(m));
-        const c = this.carBands[b].next(carrier);
-        const tilt = 1 + emphasis * 3 * (b / (bands - 1));
-        wet += c * env * tilt;
-      }
-      wet *= 2;
-      const mix = at(params.mix, i);
-      const dry = useTrackAsCarrier ? track : track;
-      outL[i] = dry + (wet - dry) * mix;
-      if (outR !== outL) outR[i] = outL[i];
-    }
-    if (!Number.isFinite(outL[count - 1])) {
-      for (const b of this.modBands) b.reset();
-      for (const b of this.carBands) b.reset();
     }
   }
 }
@@ -4331,15 +4459,18 @@ class Reporter {
    * Called once per rendered block with the parameters it was handed.
    *
    * `report` is whatever else a device has to say about what it is doing right now - a
-   * granulator's grains, and nothing else so far. It rides the same message because it is the
-   * same question the panel is asking: what is this device doing, as opposed to what was it set
-   * to, and a second channel for it would only be a second thing to turn on and off.
+   * granulator's grains, a compressor's last second of levels. It rides the same message because
+   * it is the same question the panel is asking: what is this device doing, as opposed to what
+   * was it set to, and a second channel for it would only be a second thing to turn on and off.
+   * Given as a function, so a device that copies a history out to answer does so only on the
+   * blocks that post, and not on the four in between.
    */
   tick(parameters, report = null) {
     if (!this.on) return;
     if (++this.blocks < REPORT_EVERY_BLOCKS) return;
     this.blocks = 0;
-    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report });
+    const said = typeof report === 'function' ? report() : report;
+    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report: said ?? null });
   }
 }
 
@@ -4392,6 +4523,11 @@ class EffectProcessor extends AudioWorkletProcessor {
     if (isDispose(message)) { this.alive = false; return; }
     if (this.reporter.receive(message)) return;
     if (message.kind === 'tempo' && typeof this.fx.setTempo === 'function') { this.fx.setTempo(message.bpm, message.anchorSec); return; }
+    // Notes, for an effect that is played by them (see the descriptor's `notes`). Timestamped on
+    // the context's clock like a synth's, and placed inside the block by the effect itself.
+    if (message.kind === 'noteOn') { this.fx.noteOn?.(message.note, message.velocity, message.time); return; }
+    if (message.kind === 'noteOff') { this.fx.noteOff?.(message.note, message.time); return; }
+    if (message.kind === 'noteRoute') { this.fx.setNoteRoute?.(!!message.on); return; }
     if (message.kind === 'sample' && typeof this.fx.loadSample === 'function') {
       this.fx.loadSample(message.param, message.index, message);
     }
@@ -4405,7 +4541,7 @@ class EffectProcessor extends AudioWorkletProcessor {
     const params = realParams(this.descriptor, parameters, this.real, this.scratch);
     // The clock rides along for the devices on the grid: a ducker, a beat repeat.
     this.fx.process(input, out, out[0].length, params, inputs[1] ?? null, currentTime);
-    this.reporter.tick(parameters, this.fx.report?.() ?? null);
+    this.reporter.tick(parameters, () => this.fx.report?.());
     // A quiet input is a rest, not a reason to stop: see the same note on the synth.
     return true;
   }
@@ -4416,7 +4552,7 @@ const EFFECTS = [
   [DELAY, DelayProcessor], [COMPRESSOR, CompressorProcessor], [LIMITER, LimiterProcessor],
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
-  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [VOCODER, VocoderProcessor],
+  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {

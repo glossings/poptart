@@ -28,6 +28,16 @@ export const FLANGER = defineDevice({
     { id: 'shape', name: 'Shape', default: 0, options: ['sine', 'triangle'], rate: 'k' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
   ],
+  figures: [
+    {
+      id: 'sweep',
+      kind: 'sweep',
+      title: 'sweep',
+      description: 'The delay each copy is read at over one cycle of the LFO - left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      params: { rate: 'rate', depth: 'depth', delay: 'delay', sync: 'sync', spread: 'spread', shape: 'shape' },
+      drag: { y: 'depth' },
+    },
+  ],
 });
 
 export class FlangerProcessor {
@@ -63,5 +73,10 @@ export class FlangerProcessor {
       if (outR !== outL) outR[i] = r + (wet[1] - r) * mix;
     }
     if (!Number.isFinite(outL[count - 1])) this.delay.reset();
+  }
+
+  /** Where the LFO is, so the picture's playhead follows the sound. */
+  report() {
+    return { phase: this.delay.phase };
   }
 }

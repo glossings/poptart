@@ -39,15 +39,16 @@ export const DISTORT = defineDevice({
   ],
   figures: [
     {
-      id: 'autogain',
-      kind: 'meter',
-      group: 'Out',
-      title: 'auto gain',
-      description: 'How much the auto gain is taking off, or putting back, to hold the level as the drive moves.',
-      params: { amount: 'autogain' },
-      range: [-36, 12],
+      id: 'curve',
+      kind: 'shaper',
+      group: 'Shape',
+      title: 'curve',
+      description: 'What comes out for what goes in, through the curve at this drive and bias, with the auto gain\'s correction applied - so the picture is the level you hear, and the heading says how much the auto gain is taking off. Drag up for the drive.',
+      params: { mode: 'mode', drive: 'drive', bias: 'bias', harmonic: 'harmonic', autogain: 'autogain' },
+      drag: { y: 'drive' },
     },
   ],
+  panel: { width: 640, rows: [['Shape', 'Out']] },
 });
 
 /** One channel's state. A stereo device holds two of these, so the channels never share history. */

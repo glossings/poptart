@@ -23,6 +23,7 @@ import { createStorage } from './storage.mjs';
 import { createEvaluator } from './evaluate.mjs';
 import { createSampleStore, registerPacks } from './samples.mjs';
 import { createHost } from './host.mjs';
+import { createAudioOutputs } from './audio-output.mjs';
 
 /** Where the pieces are served from. One place, so moving a folder is one edit. */
 export const PATHS = Object.freeze({
@@ -169,8 +170,14 @@ export async function boot({
   library.urlFor = (id, file) => webEngine.fileUrl(base, id, file);
   samples.register(library.packs, library.urlFor);
 
+  // The output device chosen last time, if it is still plugged in. Not awaited past a moment:
+  // a device that takes its time to answer should not hold up the editor.
+  const outputs = createAudioOutputs({ context });
+  const restored = await Promise.race([outputs.restore(), new Promise((r) => setTimeout(() => r(null), 1500))]);
+  if (restored) say(`playing to ${restored}`);
+
   const host = createHost({
-    patternCore, engine, transport, evaluator, storage, samples,
+    patternCore, engine, transport, evaluator, storage, samples, outputs,
     catalog: webEngine.catalog,
     // What the generated device window is built and edited through. Handed in rather than
     // imported so the host stays a plain route table with no idea where a device comes from.

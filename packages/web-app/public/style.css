@@ -2008,6 +2008,19 @@ li.CodeMirror-hint-active {
   font-size: 10px;
 }
 
+/* A menu is its word: wider than a knob, and its chevron pulled in so the word has the room. */
+.device-widget-enum {
+  width: 96px;
+}
+
+.device-widget select {
+  padding: 5px 20px 5px 8px;
+  background-position: right 7px center;
+  background-size: 8px 5px;
+  border-radius: 5px;
+  text-overflow: ellipsis;
+}
+
 .device-widget .small.on {
   color: var(--accent);
   border-color: var(--accent);
@@ -2930,6 +2943,73 @@ li.CodeMirror-hint-active {
 #pianorollKeys {
   font-size: 17px;
   padding: 0 7px;
+}
+
+/* The list a <select> opens in place of the platform's popup (see openSelMenu in client.js): the
+   context menu's skin, over everything, scrolling when a list is long. The select itself stays
+   the trigger, lit while its list is open. */
+.sel-menu {
+  position: fixed;
+  z-index: 300;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px var(--shadow);
+  font-size: 12px;
+}
+
+.sel-menu.hidden {
+  display: none;
+}
+
+.sel-menu-head {
+  padding: 5px 9px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.sel-menu button {
+  display: block;
+  width: 100%;
+  position: relative;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 12px 4px 22px;
+  font: inherit;
+  color: var(--text);
+  white-space: nowrap;
+  transition: none;
+}
+
+.sel-menu button.hi {
+  background: var(--hover-bg);
+}
+
+.sel-menu button.on {
+  color: var(--accent);
+}
+
+.sel-menu button.on::before {
+  content: '\2713';
+  position: absolute;
+  left: 8px;
+}
+
+.sel-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+select.sel-open {
+  border-color: var(--accent);
 }
 
 /* The app's context menus - the piano roll's value lane (prOpenLaneMenu) and the editor's own

@@ -26,7 +26,6 @@ import { OVERDRIVE, OverdriveProcessor } from '../devices/overdrive.mjs';
 import { MULTIBAND, MultibandProcessor } from '../devices/multiband.mjs';
 import { STUTTER, StutterProcessor } from '../devices/stutter.mjs';
 import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
-import { VOCODER, VocoderProcessor } from '../devices/vocoder.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
 
 class EffectProcessor extends AudioWorkletProcessor {
@@ -47,6 +46,11 @@ class EffectProcessor extends AudioWorkletProcessor {
     if (isDispose(message)) { this.alive = false; return; }
     if (this.reporter.receive(message)) return;
     if (message.kind === 'tempo' && typeof this.fx.setTempo === 'function') { this.fx.setTempo(message.bpm, message.anchorSec); return; }
+    // Notes, for an effect that is played by them (see the descriptor's `notes`). Timestamped on
+    // the context's clock like a synth's, and placed inside the block by the effect itself.
+    if (message.kind === 'noteOn') { this.fx.noteOn?.(message.note, message.velocity, message.time); return; }
+    if (message.kind === 'noteOff') { this.fx.noteOff?.(message.note, message.time); return; }
+    if (message.kind === 'noteRoute') { this.fx.setNoteRoute?.(!!message.on); return; }
     if (message.kind === 'sample' && typeof this.fx.loadSample === 'function') {
       this.fx.loadSample(message.param, message.index, message);
     }
@@ -60,7 +64,7 @@ class EffectProcessor extends AudioWorkletProcessor {
     const params = realParams(this.descriptor, parameters, this.real, this.scratch);
     // The clock rides along for the devices on the grid: a ducker, a beat repeat.
     this.fx.process(input, out, out[0].length, params, inputs[1] ?? null, currentTime);
-    this.reporter.tick(parameters, this.fx.report?.() ?? null);
+    this.reporter.tick(parameters, () => this.fx.report?.());
     // A quiet input is a rest, not a reason to stop: see the same note on the synth.
     return true;
   }
@@ -71,7 +75,7 @@ const EFFECTS = [
   [DELAY, DelayProcessor], [COMPRESSOR, CompressorProcessor], [LIMITER, LimiterProcessor],
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
-  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [VOCODER, VocoderProcessor],
+  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {

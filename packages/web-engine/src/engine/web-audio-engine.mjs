@@ -23,6 +23,7 @@ import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
 import { MIX_BAND_FREQS, MIX_TRACK_MAX, MixAnalysis, SpectrumTap } from './analysis.mjs';
+import { MidiRoutes } from './midi-routes.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
 import { SUPPORTED_CHANNELS, Track, rampParam, teardownParamConnection } from './track.mjs';
 
@@ -164,6 +165,12 @@ export class WebAudioEngine {
     // plainly right there in the buffer. The desktop puts this in the wrapper around its engine;
     // here the host installs it directly. See setTrackResolver.
     this.resolveTrack = null;
+    // Notes from one track played on another: `midi("a")` as a track's source, and `.midi("a")`
+    // into an effect that takes notes. See midi-routes.mjs, which has the desktop's rules.
+    this.midiRoutes = new MidiRoutes({
+      deliver: (on, trackId, slot, note, velocity, atTime) => this._deliverRouted(on, trackId, slot, note, velocity, atTime),
+      resolve: (name) => this.resolveTrack?.(name) ?? name,
+    });
     this.bpm = DEFAULT_BPM;
     // Where a beat falls on the context's clock: the time cycle zero was at. The devices on the
     // grid count from it.
@@ -473,18 +480,43 @@ export class WebAudioEngine {
    * up to a block - so the conversion happens here, once, rather than in every device.
    */
   noteOn(trackId, note, velocity, atTime) {
-    const track = this.tracks.get(trackId);
-    const source = track?.source;
-    if (!source?.node?.port) return;
-    source.node.port.postMessage({ kind: 'noteOn', note, velocity, time: atTime });
-    for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOn(atTime);
+    this._playNote(trackId, note, velocity, atTime);
+    // Then onward, to every track and effect this one's notes are routed into.
+    if (this.midiRoutes.size) this.midiRoutes.noteEdge(trackId, note, velocity, atTime, true);
   }
 
   noteOff(trackId, note, atTime) {
-    const track = this.tracks.get(trackId);
-    const source = track?.source;
+    this._stopNote(trackId, note, atTime);
+    if (this.midiRoutes.size) this.midiRoutes.noteEdge(trackId, note, 0, atTime, false);
+  }
+
+  /** A note on a track's own instrument, and the envelopes it gates - with no routing onward. */
+  _playNote(trackId, note, velocity, atTime) {
+    const source = this.tracks.get(trackId)?.source;
+    if (source?.node?.port) source.node.port.postMessage({ kind: 'noteOn', note, velocity, time: atTime });
+    for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOn(atTime);
+  }
+
+  _stopNote(trackId, note, atTime) {
+    const source = this.tracks.get(trackId)?.source;
     if (source?.node?.port) source.node.port.postMessage({ kind: 'noteOff', note, time: atTime });
     for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOff(atTime);
+  }
+
+  /**
+   * A routed note arriving at its sink: slot 0 is the track's instrument, played as its own notes
+   * are; any other slot is an effect that takes notes, which is told directly. A routed note is
+   * not routed again - a chain of routes would be a second scheduler, and the desktop does not
+   * do it either.
+   */
+  _deliverRouted(on, trackId, slot, note, velocity, atTime) {
+    if (slot === 0) {
+      if (on) this._playNote(trackId, note, velocity, atTime);
+      else this._stopNote(trackId, note, atTime);
+      return;
+    }
+    const port = this.tracks.get(trackId)?.slots.get(slot)?.built?.node?.port;
+    try { port?.postMessage(on ? { kind: 'noteOn', note, velocity, time: atTime } : { kind: 'noteOff', note, time: atTime }); } catch { /* no port */ }
   }
 
   /** Releases everything on a track without cutting what is already sounding. */
@@ -1033,7 +1065,12 @@ export class WebAudioEngine {
   setInputSource(trackId, io, name, channel, scalePcs, hwChans, transpose, noteMap) {
     const track = this.createTrack(trackId);
     if (io === 'midi') {
-      this._warnOnce('midi-in', '[web-engine] MIDI input is not wired up in the browser build yet, so midi() and midikeys() sources are silent here.');
+      if (String(name).startsWith('dev:')) {
+        this._warnOnce('midi-in', '[web-engine] MIDI devices are not wired up in the browser build yet, so a midi() source naming one is silent here. A track\'s notes - midi("lead") - play.');
+        return;
+      }
+      // Another track's notes, played on this one's instrument, through the source's pitch ops.
+      this.midiRoutes.add(name, trackId, 0, { transpose, pcs: scalePcs, noteMap });
       return;
     }
     const from = this._sourceNode(name);
@@ -1051,6 +1088,7 @@ export class WebAudioEngine {
   }
 
   clearInputSource(trackId) {
+    this.midiRoutes.remove(trackId, 0, this.getTime());
     const track = this.tracks.get(trackId);
     if (!track?._headSource) return;
     try { track._headSource.disconnect(track.input); } catch { /* already detached */ }
@@ -1092,11 +1130,32 @@ export class WebAudioEngine {
     this.tracks.get(trackId)?.clearSidechain(slot);
   }
 
-  injectMidi() {
-    this._warnOnce('inject-midi', '[web-engine] no browser device takes MIDI in yet, so .midi() into a plugin does nothing here.');
+  /**
+   * Plays an effect from another track's notes - `.fx("Ducker").midi("kick")`. Only an effect
+   * that declares it takes notes can be played; any other says so by name and plays as written.
+   * `note` pins the pitch the route plays, where the call gave one.
+   */
+  injectMidi(trackId, slot, name, note = null) {
+    const filled = this.tracks.get(trackId)?.slots.get(slot);
+    if (!filled) return;
+    if (String(name).startsWith('dev:')) {
+      this._warnOnce('midi-in', '[web-engine] MIDI devices are not wired up in the browser build yet, so .midi() from one does nothing here. A track\'s notes - .midi("kick") - play.');
+      return;
+    }
+    if (slot > 0 && !filled.descriptor.notes) {
+      const takers = this.registry?.list?.('fx')?.filter((d) => d.notes).map((d) => d.id) ?? [];
+      this._warnOnce(`inject-midi:${filled.descriptor.id}`, `[web-engine] "${filled.descriptor.id}" is not played by notes, so .midi() into it does nothing.${takers.length ? ` Effects that are: ${takers.join(', ')}.` : ''}`);
+      return;
+    }
+    this.midiRoutes.add(name, trackId, slot, { note });
+    try { filled.built.node?.port?.postMessage({ kind: 'noteRoute', on: true }); } catch { /* no port */ }
   }
 
-  clearMidiInject() { /* nothing was ever wired */ }
+  clearMidiInject(trackId, slot) {
+    this.midiRoutes.remove(trackId, slot, this.getTime());
+    const filled = this.tracks.get(trackId)?.slots.get(slot);
+    try { filled?.built.node?.port?.postMessage({ kind: 'noteRoute', on: false }); } catch { /* no port */ }
+  }
 
   // -- device state ------------------------------------------------------------------------
 
@@ -1207,6 +1266,9 @@ export class WebAudioEngine {
       driven: this.drivenParams(trackId, slot),
       extras: filled.extras,
       tables: filled.tables ?? null,
+      // The tempo, for the pictures drawn on the clock: a synced delay's repeats land where the
+      // beats are, and only the engine knows where those are.
+      bpm: this.bpm,
       // The outlines of whatever it is playing: files this slot loaded, and - for a device built
       // from stock nodes - whatever it synthesized for itself (a convolver's impulse).
       waves: (filled.waves || filled.built.outlines) ? { ...filled.built.outlines, ...filled.waves } : null,
@@ -1265,7 +1327,7 @@ export class WebAudioEngine {
     // The spectrum rides on the report, as decibels below full scale per band, at the mixer's
     // band centers - so a picture can draw it down the same frequency axis as its curve.
     const db = filled.spectrum.bands();
-    return { ...(report ?? {}), spectrum: MIX_BAND_FREQS.map((hz, i) => ({ hz, db: db[i] })) };
+    return { ...(report ?? {}), spectrum: filled.spectrum.freqs.map((hz, i) => ({ hz, db: db[i] })) };
   }
 
   /** Every parameter of one slot, in the shape the params panel and autocomplete expect. */
@@ -1294,6 +1356,9 @@ export class WebAudioEngine {
     // A named pack arrives as `sp:<id>` - the scheduler's spelling for a pack the language
     // defines, as against a folder or a recording - and the store keys packs by their bare id.
     const packId = typeof pack === 'string' && pack.startsWith('sp:') ? pack.slice(3) : pack;
+    // Routed onward as an on/off pair, whether or not this sample has loaded yet: a kick keys a
+    // ducker by being scheduled, not by being heard.
+    if (this.midiRoutes.size && (cfg.vel ?? 1) > 0) this.midiRoutes.sampleEvent(trackId, cfg.vel ?? 1, onsetSec, offsetSec, cfg.note ?? null);
     const got = this.samples?.get?.(packId, cfg.index ?? 0) ?? null;
     const buffer = got?.buffer ?? got;
     if (!buffer) return { skipped: 'source not ready' };

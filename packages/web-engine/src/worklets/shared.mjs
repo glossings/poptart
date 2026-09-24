@@ -131,15 +131,18 @@ export class Reporter {
    * Called once per rendered block with the parameters it was handed.
    *
    * `report` is whatever else a device has to say about what it is doing right now - a
-   * granulator's grains, and nothing else so far. It rides the same message because it is the
-   * same question the panel is asking: what is this device doing, as opposed to what was it set
-   * to, and a second channel for it would only be a second thing to turn on and off.
+   * granulator's grains, a compressor's last second of levels. It rides the same message because
+   * it is the same question the panel is asking: what is this device doing, as opposed to what
+   * was it set to, and a second channel for it would only be a second thing to turn on and off.
+   * Given as a function, so a device that copies a history out to answer does so only on the
+   * blocks that post, and not on the four in between.
    */
   tick(parameters, report = null) {
     if (!this.on) return;
     if (++this.blocks < REPORT_EVERY_BLOCKS) return;
     this.blocks = 0;
-    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report });
+    const said = typeof report === 'function' ? report() : report;
+    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report: said ?? null });
   }
 }
 

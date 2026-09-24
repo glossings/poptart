@@ -1620,6 +1620,25 @@ export class Sig {
    * a strip control a Tier-2 modulator drives (.gain(env()) - the engine runs that natively,
    * mapped onto the control). Put those inside the pattern you pass in, not inside the callback.
    */
+  /**
+   * `.sometimes(0.3, x => x.flip(1))` - applies `fn` at a share of the pattern's events, chosen
+   * at random: three in ten here, one in two for `.sometimes(fn)` with no share given. It is
+   * `.when(rand().lt(share), fn)` with the coin already tossed - every `.sometimes()` in a
+   * document draws its own rand(), so two of them on one track fire independently, and like
+   * every rand() the draws are the same on every play of the same document.
+   *
+   * The share is read at the pattern's own events, like any .when() condition, and can be a
+   * pattern itself (`.sometimes("<0.1 0.9>", …)`). To make two `.sometimes()` calls agree -
+   * a flip on the hats exactly where the kick drops out - give both the same `{ seed }`.
+   */
+  sometimes(share, fn, opts = {}) {
+    // `.sometimes(fn)` - the share left out, a coin toss.
+    if (typeof share === 'function') { opts = fn ?? {}; fn = share; share = 0.5; }
+    if (typeof fn !== 'function') throw new Error('[signal] .sometimes() takes a share and a callback: .sometimes(0.3, x => x.flip(1))');
+    const seed = opts && typeof opts === 'object' && opts.seed != null ? { seed: opts.seed } : {};
+    return this.when(rand(seed).lt(share ?? 0.5), fn);
+  }
+
   when(cond, fn) {
     const condSig = toSignal(cond);
     const transformed = fn(this);

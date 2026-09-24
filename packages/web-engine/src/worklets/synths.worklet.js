@@ -92,7 +92,7 @@ class SynthProcessor extends AudioWorkletProcessor {
     out[0].fill(0);
     if (out[1]) out[1].fill(0);
     this.synth.process(out[0], out[1] ?? out[0], blockSize);
-    this.reporter.tick(parameters, this.synth.report?.() ?? null);
+    this.reporter.tick(parameters, () => this.synth.report?.());
 
     // A synth with nothing sounding and nothing queued still has to stay alive: the next note is
     // a message away, and a processor that returned false would have been torn down by then.

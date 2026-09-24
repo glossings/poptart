@@ -37,6 +37,16 @@ export const DELAY = defineDevice({
       description: 'Offsets the right channel\'s time from the left\'s, for width without ping-pong.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.35 },
   ],
+  figures: [
+    {
+      id: 'echoes',
+      kind: 'echoes',
+      title: 'echoes',
+      description: 'The repeats one hit makes: when each lands, on the beat grid, and how loud. Left above the line, right below; a ping-pong alternates. Drag up for the feedback.',
+      params: { time: 'time', feedback: 'feedback', sync: 'sync', pingpong: 'pingpong', spread: 'spread' },
+      drag: { y: 'feedback' },
+    },
+  ],
 });
 
 const clipTail = (x) => (x > 2 ? 1 : x < -2 ? -1 : x - (x * x * x) / 12);

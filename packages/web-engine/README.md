@@ -86,7 +86,7 @@ says which few are read once a block and why. Cross-modulation between the sourc
 Wavetable - linear, through-zero FM, phase modulation and ring modulation from the other
 oscillator, the sub or the noise - is a mode on each oscillator's warp switch, with the warp
 amount as its depth (`warp.mjs`). The ported modules take a value per block, as the hardware they
-came from does, and a device with a **sidechain** - the compressor's key, the vocoder's
+came from does, and a device with a **sidechain** - the compressor's key, the ducker's
 modulator, a cross-modulator's carrier - takes it from `.audio("other")` on the effect.
 
 `.mul()` and `.add()` on the handle become a gain and an offset in the graph. They are the only

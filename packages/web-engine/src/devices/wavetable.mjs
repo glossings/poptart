@@ -58,11 +58,14 @@ function oscParams(n, group, levelDefault) {
       description: 'Coarse tuning in semitones.' },
     { id: `${p}.cents`, name: `Osc ${n} Cents`, min: -100, max: 100, default: 0, step: 1, unit: 'ct', ui: 'number', group,
       description: 'Fine tuning. A signal here is vibrato.' },
-    { id: `${p}.unison`, name: `Osc ${n} Unison`, min: 1, max: MAX_UNISON, default: 1, step: 1, rate: 'k', ui: 'number', group },
-    { id: `${p}.detune`, name: `Osc ${n} Detune`, min: 0, max: 100, default: 15, unit: 'ct', group },
-    { id: `${p}.spread`, name: `Osc ${n} Spread`, min: 0, max: 1, default: 0.5, group,
+    // The unison controls sit in a section of their own, under the picture of the spread they
+    // move: in the oscillator's section they were the last four of thirteen knobs, a row and a
+    // half below the figure that answers to them.
+    { id: `${p}.unison`, name: `Osc ${n} Unison`, min: 1, max: MAX_UNISON, default: 1, step: 1, rate: 'k', ui: 'number', group: `${group} Unison` },
+    { id: `${p}.detune`, name: `Osc ${n} Detune`, min: 0, max: 100, default: 15, unit: 'ct', group: `${group} Unison` },
+    { id: `${p}.spread`, name: `Osc ${n} Spread`, min: 0, max: 1, default: 0.5, group: `${group} Unison`,
       description: 'How far apart the unison copies are panned.' },
-    { id: `${p}.phaserand`, name: `Osc ${n} Phase Rand`, min: 0, max: 1, default: 1, rate: 'k', group,
+    { id: `${p}.phaserand`, name: `Osc ${n} Phase Rand`, min: 0, max: 1, default: 1, rate: 'k', group: `${group} Unison`,
       description: 'Zero starts every copy together, which is a hard attack; one spreads them.' },
   ];
 }
@@ -139,8 +142,9 @@ export const WAVETABLE = defineDevice({
     },
   ],
 
-  // The two oscillators side by side, because they are twins; the rest in a row beneath.
-  panel: { width: 920, rows: [['Osc 1', 'Osc 2'], ['Sub', 'Amp Env', 'Voice']] },
+  // The two oscillators side by side, because they are twins, each one's unison under it; the
+  // rest in a row beneath.
+  panel: { width: 920, rows: [['Osc 1', 'Osc 2'], ['Osc 1 Unison', 'Osc 2 Unison'], ['Sub', 'Amp Env', 'Voice']] },
 });
 
 /** The two pictures an oscillator gets: the waveform it is reading, and its unison spread. */
@@ -163,7 +167,7 @@ function oscFigures(n) {
     {
       id: `${p}.spread`,
       kind: 'unison',
-      group,
+      group: `${group} Unison`,
       title: 'unison',
       description: 'Where the unison copies sit: detune across, pan up and down. Drag across for the detune, up for the spread.',
       params: { count: `${p}.unison`, detune: `${p}.detune`, spread: `${p}.spread` },

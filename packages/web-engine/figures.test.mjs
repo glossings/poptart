@@ -14,6 +14,15 @@ import { sharedBuiltInTables } from './src/dsp/tables.mjs';
 import { WavetableOscillator } from './src/dsp/oscillator.mjs';
 import { curveShape } from './src/dsp/adsr.mjs';
 import { FILTER_MODES } from './src/dsp/filters.mjs';
+import { DISTORT } from './src/devices/distort.mjs';
+import { DELAY } from './src/devices/delay.mjs';
+import { STUTTER } from './src/devices/stutter.mjs';
+import { REVERB } from './src/devices/reverb.mjs';
+import { CHORUS } from './src/devices/chorus.mjs';
+import { PHASER } from './src/devices/phaser.mjs';
+import { DUCKER } from './src/devices/ducker.mjs';
+import { shape, autoGainFor } from './src/dsp/shapers.mjs';
+import { SYNC_OPTIONS } from './src/dsp/sync.mjs';
 
 const tables = sharedBuiltInTables();
 const opts = { tables, sampleRate: 48000 };
@@ -76,8 +85,8 @@ test('a device that declares no figures has none, and is not broken by asking', 
 
 test('the Wavetable draws a figure for each oscillator and its envelope', () => {
   assert.deepEqual(figures().map((f) => `${f.group}:${f.kind}`), [
-    'Osc 1:wavetable', 'Osc 1:unison',
-    'Osc 2:wavetable', 'Osc 2:unison',
+    'Osc 1:wavetable', 'Osc 1 Unison:unison',
+    'Osc 2:wavetable', 'Osc 2 Unison:unison',
     'Amp Env:adsr',
   ]);
 });
@@ -541,4 +550,128 @@ test('an upward band lifts what is below the threshold, which a downward one lea
   const up = band({ 'low.threshold': -20, 'low.ratio': 4, 'low.upward': 1, 'low.gain': 0 });
   assert.ok(outAt(up, -40) > -40 + 2, `a quiet signal is lifted toward the threshold, drew ${outAt(up, -40)}`);
   assert.ok(outAt(up, -40) < -20, 'but never up to it');
+});
+
+// --- the pictures of the effects: a shaper's curve, echoes, repeats, a tail, a sweep, a dip ----
+
+
+const only = (device, kind, over = {}, o = {}) => buildFigures(device, { ...defaultValues(device), ...over }, { sampleRate: 48000, ...o }).find((f) => f.kind === kind);
+
+test('a figure carries the position of every parameter it drags, so a drag starts where the knob is', () => {
+  const f = only(DELAY, 'echoes', { feedback: 0.55 });
+  assert.deepEqual(Object.keys(f.positions), ['feedback']);
+  assert.ok(Math.abs(f.positions.feedback - 0.55 / 1.1) < 1e-9, 'on the parameter\'s own 0..1 curve');
+  assert.equal(only(WAVETABLE, 'adsr').positions, null, 'a figure with no drag has none');
+});
+
+test('the shaper figure is the device\'s own curve with the auto gain on it', () => {
+  const f = only(DISTORT, 'shaper', { mode: 1, drive: 12, autogain: 1 });
+  assert.equal(f.modeName, 'hard');
+  const drive = Math.pow(10, 12 / 20);
+  const comp = autoGainFor(1, drive, 0, 2);
+  assert.ok(Math.abs(f.comp - comp) < 1e-12, 'stopped, the correction is what the processor would compute');
+  const mid = f.points[Math.floor(f.points.length / 2)];
+  assert.equal(mid.x, 0);
+  assert.equal(f.points[0].x, -1);
+  assert.equal(f.points[f.points.length - 1].x, 1);
+  assert.ok(Math.abs(f.points[f.points.length - 1].y - shape(1, 1, drive, 0, 2) * comp) < 1e-12);
+  // Running, the correction is the one being applied - the ramped value the device reports.
+  const live = only(DISTORT, 'shaper', { mode: 1, drive: 12, autogain: 1 }, { report: { meters: { autogain: -6 } } });
+  assert.ok(Math.abs(live.compDb + 6) < 1e-9);
+  assert.equal(only(DISTORT, 'shaper', { autogain: 0 }).comp, 1, 'off, nothing is corrected');
+  assert.equal(subsumedParams(DISTORT).size, 0, 'the curve joins the knobs rather than replacing any');
+});
+
+test('the echoes figure walks the delay\'s own feedback path', () => {
+  const plain = only(DELAY, 'echoes', { time: 0.25, feedback: 0.5, sync: 0 });
+  assert.equal(plain.synced, false);
+  assert.ok(Math.abs(plain.taps[0].t - 0.25) < 1e-12);
+  assert.equal(plain.taps[0].level, 1);
+  assert.equal(plain.taps[0].side, 0, 'no spread: both sides at once');
+  assert.ok(Math.abs(plain.taps[1].level - 0.5) < 1e-12);
+  assert.ok(plain.taps.every((t) => t.level >= 0.02));
+  // Synced, the time is the beat's at the tempo handed in.
+  const synced = only(DELAY, 'echoes', { sync: SYNC_OPTIONS.indexOf('1/8'), feedback: 0.5 }, { bpm: 60 });
+  assert.equal(synced.synced, true);
+  assert.equal(synced.syncName, '1/8');
+  assert.ok(Math.abs(synced.time - 0.5) < 1e-12, 'an eighth at sixty is half a second');
+  // A ping-pong alternates sides, each repeat after the far side's own time.
+  const pp = only(DELAY, 'echoes', { time: 0.25, feedback: 0.5, sync: 0, pingpong: 1, spread: 1 });
+  assert.deepEqual(pp.taps.slice(0, 3).map((t) => t.side), [-1, 1, -1]);
+  assert.ok(Math.abs(pp.taps[1].t - (0.25 + 0.375)) < 1e-12, 'the second lands after the right side\'s longer time');
+  assert.ok(pp.span >= pp.taps[pp.taps.length - 1].t);
+});
+
+test('the repeats figure stretches a repeat that has dropped in pitch', () => {
+  const f = only(STUTTER, 'repeats', { grid: SYNC_OPTIONS.indexOf('1/16'), repeats: 4, decay: 0.5, pitch: -12 }, { bpm: 120 });
+  assert.equal(f.taps.length, 4);
+  assert.ok(Math.abs(f.taps[0].length - 0.125) < 1e-12, 'a sixteenth at 120');
+  assert.ok(Math.abs(f.taps[1].length - 0.25) < 1e-12, 'an octave down plays it twice as long');
+  assert.deepEqual(f.taps.map((t) => t.level), [1, 0.5, 0.25, 0.125]);
+  assert.ok(Math.abs(f.taps[1].t - f.taps[0].length) < 1e-12, 'each starts when the last ends');
+  assert.ok(f.span >= f.end && f.span >= f.interval);
+});
+
+test('the tail figure is silence for the predelay, then sixty decibels down over the decay', () => {
+  const f = only(REVERB, 'decay', { decay: 2, predelay: 0.1 });
+  assert.equal(f.points[0].db, 0);
+  const at = (t) => f.points.reduce((b, p) => (Math.abs(p.t - t) < Math.abs(b.t - t) ? p : b));
+  assert.equal(at(0.05).db, 0, 'still nothing inside the predelay');
+  assert.ok(Math.abs(at(1.1).db + 30) < 1.5, 'halfway down halfway through');
+  assert.ok(f.span > 2.1);
+});
+
+test('the sweep figure reads the LFO the delay line reads, per voice and side', () => {
+  const f = only(CHORUS, 'sweep', { rate: 2, sync: 0, delay: 10, depth: 4, voices: 2, spread: 0.5, shape: 0 });
+  assert.equal(f.rateHz, 2);
+  assert.equal(f.periodSec, 0.5);
+  assert.deepEqual(f.traces.map((t) => t.label), ['L1', 'R1', 'L2', 'R2']);
+  assert.equal(f.axis.unit, 'ms');
+  assert.equal(f.axis.log, false);
+  const l1 = f.traces[0].points;
+  assert.ok(Math.abs(l1[0].y - 12) < 1e-9, 'a sine LFO starts at its middle: base plus half the depth');
+  assert.ok(l1.every((p) => p.y >= 10 - 1e-9 && p.y <= 14 + 1e-9), 'and sweeps the depth either side');
+  assert.equal(f.phase, null, 'stopped, there is no playhead');
+  assert.equal(only(CHORUS, 'sweep', {}, { report: { phase: 0.25 } }).phase, 0.25);
+  // A phaser sweeps octaves round its center, on a log axis.
+  const ph = only(PHASER, 'sweep', { center: 1000, depth: 1, sync: 0, rate: 1 });
+  assert.equal(ph.axis.log, true);
+  assert.equal(ph.axis.unit, 'Hz');
+  const ys = ph.traces[0].points.map((p) => p.y);
+  assert.ok(Math.abs(Math.max(...ys) / 8000 - 1) < 0.03, `three octaves up at full depth, got ${Math.max(...ys)}`);
+  assert.ok(Math.abs(Math.min(...ys) / 125 - 1) < 0.03, `and three down, got ${Math.min(...ys)}`);
+});
+
+test('the dip figure is the ducker\'s own recursion over one beat', () => {
+  const f = only(DUCKER, 'duck', { amount: 0.8, length: 0.5, attack: 2, curve: 3, sync: SYNC_OPTIONS.indexOf('1/4') }, { bpm: 120 });
+  assert.equal(f.period, 0.5);
+  assert.equal(f.recovery, 0.25);
+  assert.equal(f.points[0].y, 1, 'starts at unity, before the attack');
+  const lowest = Math.min(...f.points.map((p) => p.y));
+  assert.ok(Math.abs(lowest - 0.2) < 0.02, `dips to one minus the amount, got ${lowest}`);
+  assert.ok(f.points[f.points.length - 1].y > 0.99, 'and is back by the end of the beat');
+  assert.equal(f.history, null);
+  const live = only(DUCKER, 'duck', {}, { report: { keyed: true, history: { gain: [1, 0.5], out: [0.1, 0.2], key: [0, 0.3], blockSec: 0.01 } } });
+  assert.equal(live.keyed, true);
+  assert.deepEqual(live.history.gain, [1, 0.5]);
+  assert.deepEqual(live.history.key, [0, 0.3]);
+});
+
+test('the transfer figure carries the compressor\'s history when it reports one', () => {
+  const still = only(COMPRESSOR, 'transfer');
+  assert.equal(still.history, null);
+  const live = only(COMPRESSOR, 'transfer', {}, { report: { meters: { curve: { inDb: -12, grDb: -3, history: { inDb: [-20, -12], grDb: [0, -3], blockSec: 0.002 } } } } });
+  assert.deepEqual(live.history.inDb, [-20, -12]);
+  assert.deepEqual(live.history.grDb, [0, -3]);
+  assert.equal(live.inDb, -12);
+});
+
+test('the wavetable\'s unison controls sit under the picture of the spread', () => {
+  const panel = buildPanel(WAVETABLE, defaults, new Map(), opts);
+  const section = (title) => panel.sections.find((s) => s.title === title);
+  assert.deepEqual(section('Osc 1 Unison').figures.map((f) => f.kind), ['unison']);
+  assert.deepEqual(section('Osc 1 Unison').widgets.map((w) => w.id), ['osc1.unison', 'osc1.detune', 'osc1.spread', 'osc1.phaserand']);
+  assert.ok(!section('Osc 1').figures.some((f) => f.kind === 'unison'));
+  assert.deepEqual(panel.rows.map((row) => row.map((i) => panel.sections[i].title)),
+    [['Osc 1', 'Osc 2'], ['Osc 1 Unison', 'Osc 2 Unison'], ['Sub', 'Amp Env', 'Voice']]);
 });

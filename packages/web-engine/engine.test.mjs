@@ -16,6 +16,7 @@ import { FakeAudioContext, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
 import { renderRange, renderShape } from './src/engine/modulators.mjs';
+import { SPECTRUM_BAND_FREQS, SpectrumTap } from './src/engine/analysis.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -882,4 +883,25 @@ test('a positive speed is untouched by any of that', () => {
   const source = ctx.created.filter((n) => n.kind === 'bufferSource').pop();
   assert.equal(source.buffer, buffer, 'it plays the file it was given');
   assert.ok(Math.abs(source.started.offset - 0.25) < 1e-9, 'from where begin said');
+});
+
+// --- the spectrum behind an equalizer's curve ------------------------------------------------
+
+
+test('a spectrum tap reads the loudest bin of each band, over the audible range', () => {
+  const ctx = new FakeAudioContext();
+  const source = ctx.createGain();
+  const tap = new SpectrumTap(ctx, source);
+  assert.equal(tap.freqs.length, SPECTRUM_BAND_FREQS.length);
+  assert.ok(Math.abs(tap.freqs[0] - 20) < 1e-9);
+  assert.ok(Math.abs(tap.freqs[tap.freqs.length - 1] - 20000) < 1e-6);
+  // One harmonic in one bin, at the top of the band: a band up there covers many bins, and an
+  // average over them would have buried it.
+  const bins = tap.freq.length;
+  tap.node.getFloatFrequencyData = (into) => { into.fill(-100); into[Math.round(bins * 0.8)] = -10; };
+  const db = tap.bands();
+  assert.equal(db.length, tap.freqs.length);
+  assert.equal(Math.max(...db), -10, 'the harmonic is read at its level');
+  assert.equal(db.filter((v) => v === -10).length, 1, 'in one band');
+  tap.dispose();
 });

@@ -9,6 +9,7 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
+import { History } from '../dsp/history.mjs';
 
 export const COMPRESSOR = defineDevice({
   id: 'Compressor',
@@ -84,6 +85,10 @@ export class CompressorProcessor {
     this.lastRelease = -1;
     this.reduction = 0;      // the last gain reduction in dB, for the panel's curve
     this.level = -120;       // and the level the detector was at, which is where on the curve
+    // The last second or so of both, one entry a block, for the lane the panel scrolls.
+    this.levels = new History(undefined, -120);
+    this.reductions = new History(undefined, 0);
+    this.blockSec = 128 / sampleRate;
   }
 
   process(inputs, outputs, count, params, sidechain) {
@@ -118,13 +123,24 @@ export class CompressorProcessor {
     }
     this.reduction = reduction;
     this.level = loudest;
+    this.levels.push(loudest);
+    this.reductions.push(reduction);
+    this.blockSec = count / this.detector.sampleRate;
   }
 
   /**
    * Where the signal is on the transfer curve, and how far it is being pulled down - the two
-   * numbers a compressor's controls do not say on their own.
+   * numbers a compressor's controls do not say on their own - and the recent history of both,
+   * for the lane that shows the attack and the release actually happening.
    */
   report() {
-    return { meters: { curve: { inDb: this.level, grDb: this.reduction } } };
+    return {
+      meters: {
+        curve: {
+          inDb: this.level, grDb: this.reduction,
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+        },
+      },
+    };
   }
 }

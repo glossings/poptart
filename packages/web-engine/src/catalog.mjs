@@ -29,7 +29,6 @@ import { MULTIBAND } from './devices/multiband.mjs';
 import { LIMITER } from './devices/limiter.mjs';
 import { DUCKER } from './devices/ducker.mjs';
 import { STUTTER } from './devices/stutter.mjs';
-import { VOCODER } from './devices/vocoder.mjs';
 import { NODE_DEVICES } from './devices/builtins.mjs';
 import { AIRWINDOWS_DEVICES } from './devices/airwindows.mjs';
 import { CLOUDSEED_DEVICES } from './devices/cloudseed.mjs';
@@ -40,7 +39,7 @@ import { MUTABLE_DEVICES } from './devices/mutable.mjs';
 export const DEVICES = Object.freeze([
   WAVETABLE, FMSYNTH, GRANULAR,
   FILTER, EQ, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
-  DELAY, GRAINECHO, STUTTER, CHORUS, FLANGER, PHASER, VOCODER, REVERB, ...NODE_DEVICES,
+  DELAY, GRAINECHO, STUTTER, CHORUS, FLANGER, PHASER, REVERB, ...NODE_DEVICES,
   ...AIRWINDOWS_DEVICES, ...CLOUDSEED_DEVICES, ...STRETCH_DEVICES, ...MUTABLE_DEVICES,
 ]);
 

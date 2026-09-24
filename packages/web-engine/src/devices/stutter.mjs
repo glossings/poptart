@@ -4,7 +4,9 @@
 // clock the effect may - with the chance set - grab the slice that just went by, one grid
 // division long, and play it over and over for the number of repeats, each one quieter and
 // lower than the last if asked. The chance is decided by a hash of the beat it falls on, so a
-// song stutters in the same places every time it is played.
+// song stutters in the same places every time it is played. While a repeat sounds the original
+// is held at the dry level - cut, by default, so the repeats take its place - and the repeats
+// themselves at the wet level.
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
@@ -32,10 +34,21 @@ export const STUTTER = defineDevice({
       description: 'How much quieter each repeat is than the one before.' },
     { id: 'pitch', name: 'Pitch', min: -12, max: 0, default: 0, unit: 'st', step: 1, ui: 'number',
       description: 'How far each repeat drops in pitch from the one before, in semitones.' },
-    { id: 'mode', name: 'Mode', default: 0, options: ['insert', 'mix'], rate: 'k',
-      description: 'Insert mutes what is playing while the repeats run; mix leaves it under them.' },
+    { id: 'dry', name: 'Dry', min: 0, max: 1, default: 0,
+      description: 'The level of what is playing while a repeat runs. Zero cuts it, so the repeats take its place; one leaves it under them.' },
+    { id: 'wet', name: 'Wet', min: 0, max: 1, default: 1,
+      description: 'The level of the repeats.' },
     { id: 'seed', name: 'Seed', min: 0, max: 99, default: 0, step: 1, rate: 'k', ui: 'number',
       description: 'Another seed is another pattern of chances.' },
+  ],
+  figures: [
+    {
+      id: 'repeats',
+      kind: 'repeats',
+      title: 'repeats',
+      description: 'One catch and its repeats: each one as long as it plays for, at the level and the pitch it falls to, against the interval the next catch may start on.',
+      params: { grid: 'grid', repeats: 'repeats', decay: 'decay', pitch: 'pitch', interval: 'interval' },
+    },
   ],
 });
 
@@ -83,7 +96,6 @@ export class StutterProcessor {
     const sr = this.sampleRate;
     const interval = syncedSeconds(Math.round(at(params.interval, 0)), this.bpm, 2);
     const grid = Math.min(REPEAT_MAX_SEC * 0.9, syncedSeconds(Math.round(at(params.grid, 0)), this.bpm, 0.125));
-    const insert = Math.round(at(params.mode, 0)) === 0;
     const seed = Math.round(at(params.seed, 0));
     const total = Math.max(1, Math.round(at(params.repeats, 0)));
     for (let i = 0; i < count; i++) {
@@ -134,9 +146,12 @@ export class StutterProcessor {
         }
       }
       this.write = (this.write + 1) % this.size;
-      const dry = playing && insert ? 0 : 1;
-      outL[i] = l * dry + wetL;
-      if (outR !== outL) outR[i] = r * dry + wetR;
+      // The original at its own level only while a repeat is sounding: between repeats the
+      // track plays as it is, whatever the dry control says.
+      const dry = playing ? at(params.dry, i) : 1;
+      const wet = at(params.wet, i);
+      outL[i] = l * dry + wetL * wet;
+      if (outR !== outL) outR[i] = r * dry + wetR * wet;
     }
   }
 }

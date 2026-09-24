@@ -32,6 +32,17 @@ export const REVERB = defineDevice({
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.3, group: 'Tone' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB', group: 'Tone' },
   ],
+  figures: [
+    {
+      id: 'tail',
+      kind: 'decay',
+      group: 'Room',
+      title: 'tail',
+      description: 'How the tail falls away after a hit: nothing for the predelay, then sixty decibels down over the decay time. Drag across for the decay.',
+      params: { decay: 'decay', predelay: 'predelay' },
+      drag: { x: 'decay' },
+    },
+  ],
 });
 
 export class ReverbProcessor {

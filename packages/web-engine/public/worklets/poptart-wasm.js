@@ -246,6 +246,18 @@ const FIGURE_KINDS = new Map([
   // level it is working at right now marked on it. Only the threshold is required: a device with
   // no ratio control is a limiter, whose curve is a wall at the ceiling rather than a bend.
   ['transfer', ['threshold']],
+  // A waveshaper's curve: what comes out for what goes in, through the device's own function.
+  ['shaper', ['mode', 'drive']],
+  // The repeats a delay makes of one hit: when each lands and how loud.
+  ['echoes', ['time', 'feedback']],
+  // One catch of a beat repeat and the repeats it plays.
+  ['repeats', ['grid', 'repeats']],
+  // A reverb's tail falling away.
+  ['decay', ['decay']],
+  // A modulated effect's sweep over one LFO cycle, with a playhead where it is.
+  ['sweep', ['rate', 'depth']],
+  // A ducker's dip: the shape over a beat, and the signal it is pumping.
+  ['duck', ['amount', 'length']],
 ]);
 
 /**
@@ -411,6 +423,12 @@ function defineDevice(spec) {
   const sidechain = spec.sidechain === true;
   if (sidechain && kind !== 'fx') fail(id, 'only an effect can take a sidechain');
 
+  // Whether an effect is played by notes as well as fed audio: `.fx("Ducker").midi("kick")`
+  // triggers the dip on the kick track's notes. An instrument is always played by notes, so the
+  // flag is only an effect's to set, and an effect without it refuses `.midi()` by name.
+  const notes = spec.notes === true;
+  if (notes && kind !== 'fx') fail(id, 'an instrument takes notes already - only an effect declares notes');
+
   const license = String(spec.license ?? '').trim();
   if (!license) fail(id, 'every device records its license (it ends up in the About screen)');
 
@@ -429,6 +447,7 @@ function defineDevice(spec) {
     processor: String(spec.processor ?? '').trim() || null,
     channels: Object.freeze(channels),
     sidechain,
+    notes,
     params: Object.freeze(params),
     figures: Object.freeze(figures),
     panel: definePanel(id, spec.panel, params),
@@ -2090,15 +2109,18 @@ class Reporter {
    * Called once per rendered block with the parameters it was handed.
    *
    * `report` is whatever else a device has to say about what it is doing right now - a
-   * granulator's grains, and nothing else so far. It rides the same message because it is the
-   * same question the panel is asking: what is this device doing, as opposed to what was it set
-   * to, and a second channel for it would only be a second thing to turn on and off.
+   * granulator's grains, a compressor's last second of levels. It rides the same message because
+   * it is the same question the panel is asking: what is this device doing, as opposed to what
+   * was it set to, and a second channel for it would only be a second thing to turn on and off.
+   * Given as a function, so a device that copies a history out to answer does so only on the
+   * blocks that post, and not on the four in between.
    */
   tick(parameters, report = null) {
     if (!this.on) return;
     if (++this.blocks < REPORT_EVERY_BLOCKS) return;
     this.blocks = 0;
-    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report });
+    const said = typeof report === 'function' ? report() : report;
+    this.port.postMessage({ kind: 'values', values: lastPositions(this.descriptor, parameters, this.values), report: said ?? null });
   }
 }
 

@@ -365,6 +365,12 @@ const API_DOCS = {
     desc: 'Applies fn wherever condition is nonzero. The condition is checked only at the pattern\'s own events and never adds new ones.',
     eg: '.when(rand().gte(0.7), x => x.add(flip(1)))',
   },
+  sometimes: {
+    kind: 'method',
+    sig: 'sometimes(share, fn, { seed })',
+    desc: 'Applies fn at a random share of the pattern\'s events: 0.3 is three in ten, and sometimes(fn) alone is one in two. Each call tosses its own coin, so two sometimes() on one track fire independently; give both the same seed to make them agree. Same as when() with a rand() condition.',
+    eg: '.sometimes(0.25, x => x.flip(1))',
+  },
   as: {
     kind: 'method',
     sig: 'as(spec)',

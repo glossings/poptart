@@ -36,6 +36,16 @@ export const PHASER = defineDevice({
       description: 'How far the right channel\'s sweep sits behind the left\'s.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
   ],
+  figures: [
+    {
+      id: 'sweep',
+      kind: 'sweep',
+      title: 'sweep',
+      description: 'Where the notches are centered over one cycle of the LFO, in octaves around the center, left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      params: { rate: 'rate', depth: 'depth', center: 'center', sync: 'sync', spread: 'spread' },
+      drag: { y: 'depth' },
+    },
+  ],
 });
 
 /** One channel's chain of first-order allpasses and its feedback sample. */
@@ -100,6 +110,11 @@ export class PhaserProcessor {
       if (outR !== outL) outR[i] = r + (wetR - r) * mix;
     }
     if (!Number.isFinite(outL[count - 1])) for (const c of this.chains) c.reset();
+  }
+
+  /** Where the LFO is, so the picture's playhead follows the sound. */
+  report() {
+    return { phase: this.phase };
   }
 }
 

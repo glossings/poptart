@@ -539,8 +539,9 @@ no completion notes.
 
 [ ] Web build - poptart in the browser: native Web Audio synths/effects behind the same
     synth()/fx()/param() DSL, the sampler, pianoroll, arrange and the other widgets kept; DJ
-    mode, plugin hosting, OSC input, Link and the sample map stay desktop-only. A public, static
-    site (no backend, no accounts); AGPL section 13 means a source link in the UI.
+    mode and the sample map are out of scope for now, while plugin hosting, OSC input and Link
+    cannot run in a page. A public, static site (no backend, no accounts); AGPL section 13 means
+    a source link in the UI.
 
     BUILT, and deployable: `npm run build:web` writes dist/web, vercel.json points a host at it.
     The editor, the pattern language, the arrangement, the pianoroll and the widgets all run
@@ -596,14 +597,76 @@ no completion notes.
         resonating a track's audio is not exposed; Plaits and Rings are monophonic, as the modules are. Nine of Mutable's modules cannot be
         ported at all - five are analog hardware with no DSP published, three make control
         voltages rather than audio, and one was never published; sources.json says which.
-    (6) What the engine warns about instead of doing: MIDI input (Web MIDI), hardware audio
-        input, sidechain injection into a device, and the channel-strip controls beyond gain/
-        postgain/pan/dry/wetN - width, bassmono, bend, the grain channels. Recording too.
-    (7) Move the host behind a message boundary so it can go in a worker or an opaque-origin
+    (6) What the engine warns about instead of doing. Track-to-track MIDI is DONE: midi("lead")
+        as a source and .midi("kick") into an effect that declares `notes` (the Ducker) route
+        in the engine with the desktop's rules (engine/midi-routes.mjs). The output device is
+        DONE: every output is listed and switched in place with setSinkId (Chrome and Edge), the
+        names revealed by a one-shot microphone permission. Still missing, each warned by name:
+        - Hardware MIDI in (Web MIDI): midi("dev:…") sources, midikeys(), midicc(), MIDI
+          record, and .midi("dev:…") into an effect. The engine's feedCC is ready and nothing
+          calls it. Chrome, Edge and Firefox have Web MIDI; Safari does not.
+        - MIDI clock out (Web MIDI output), for the settings tab's clock row.
+        - Hardware audio in: input() and .audio(input(n)), through getUserMedia. The browser
+          processes a microphone for speech unless echoCancellation, noiseSuppression and
+          autoGainControl are all turned off, and its input latency is not ours to set.
+        - The channel-strip controls past gain/postgain/pan/dry/wetN: width, bassmono, out
+          (multichannel .o()), bend/bendrange, the grain channels. The scheduler sends each one
+          its neutral default on every evaluation, so the warnings appear even for a pattern that
+          never wrote them.
+        - More than two output channels: the settings tab offers stereo only.
+        - Recording (master, per track, MIDI) - a MediaRecorder or a worklet tap.
+        - Link, osc() input, plugins, the DJ desk, the sample map and the headphone cue: see
+          (9) to (14).
+    (7) A vocoder. One was written and taken out before the first release: it sounded wrong
+        (a bandpass bank with the carrier's bands copied from the modulator's, an emphasis tilt
+        and a flat doubling of the wet sum - the intelligibility was never there), it had no
+        picture, and a vocoder without a MIDI-played carrier is half of one - the language and
+        the scheduler already route `.midi("other")` into a slot, but the browser engine does not
+        deliver it to a device yet (see (6)). Bringing it back means a band-level picture (the
+        modulator's envelope per band, live), a carrier played from .midi() as well as taken
+        from .audio(), and a tuning pass against a voice.
+    (8) Move the host behind a message boundary so it can go in a worker or an opaque-origin
         frame. The seam is already there - the editor calls one function and the host is a route
         table - so this is a postMessage shim on each side rather than a redesign. Note the audio
         context cannot follow it: Web Audio is main-thread only, so the engine stays where it is
         and only the storage and the language would move.
+    (9) Plugins (VST/AU). A page cannot load one: a plugin is native code that expects the
+        operating system's windows, files and audio threads, and a page runs only sandboxed
+        WebAssembly. Two ways in, not exclusive:
+        - A local engine mode: the web editor drives a poptart engine running on the same machine
+          (the desktop's scsynth + VSTPlugin) over a local WebSocket, in place of the in-page host.
+          The route table is already the seam, so (8) is the first step. Plugin windows open
+          natively on that machine. A session runs on ONE engine - the page's audio and the
+          helper's run on separate clocks, and streaming audio between them adds tens of
+          milliseconds with jitter - so in-page devices and hosted plugins do not mix on one track
+          or bus. Chrome asks permission before a public site reaches localhost (one prompt). The
+          helper has to be installed, which for most people is installing the desktop app.
+        - Web Audio Modules (WAM 2): the open standard for plugins built for the browser, hosted
+          in the page on the page's clock with no helper. Only plugins their makers ported; not a
+          bought VST.
+    (10) The DJ desk and song player. Scope, not the browser: decoding is decodeAudioData, keylock
+        would be the Signalsmith Stretch already ported for Shift (see the Rubber Band entry).
+        The cost is memory - a decoded ten-minute stereo track is about 230 MB, two decks plus
+        stretch buffers is a lot for a tab - so look at decoding in chunks before building it.
+    (11) The sample map. Scope, not the browser: its maths is plain JS, the feature analysis
+        would run in a Worker, the cache in IndexedDB, and the browser's decoder replaces the
+        afconvert step. The folder is picked with the File System Access API, which keeps a handle
+        to the files rather than a copy (never copy user files) - Chrome and Edge only; elsewhere
+        the folder is picked again each visit. Indexing a large library is slower in a tab.
+    (12) The headphone cue. Two routes: on one interface with four or more outputs, a single
+        AudioContext plays the cue on 3/4 - same clock, no added delay, needs the multichannel
+        output from (6); on two devices, a second AudioContext on the headphones via setSinkId -
+        separate clocks, tens of milliseconds late and drifting, fine for pre-listening only.
+        The cue exists mostly for the DJ desk, so it is built with (10); the roll's audition
+        button could use it sooner.
+    (13) A Link bridge. A page cannot join Link (UDP multicast), so a small local helper joins the
+        session and relays tempo, beat and phase over a WebSocket. Check the existing ones before
+        writing one: Carabiner (Deep Symmetry) already exposes Link over a local TCP socket and
+        would need only a WebSocket shim in front of it. The local engine mode in (9) gets Link
+        for free, since the desktop already runs it.
+    (14) An OSC bridge. A page cannot listen on a UDP port, so a local relay forwards OSC to the
+        page over a WebSocket, where the engine's feedOsc is waiting. osc.js ships a UDP-to-
+        WebSocket relay that may do this as it is. Again free under the local engine mode in (9).
     The nine-oh-nine and the rest: there is NO redistributable recording of any classic drum
     machine except the eight-oh-eight, checked exhaustively 09-22. The sets that circulate are
     either unlicensed (the widely used ones have open, unanswered requests for a license file

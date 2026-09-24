@@ -26,6 +26,10 @@ import { BIQUAD_TYPES, biquadCoefficients, biquadMagnitude } from './dsp/biquad.
 import { FILTER_MODES, MultiFilter } from './dsp/filters.mjs';
 import { fillUnison } from './dsp/oscillator.mjs';
 import { WARP_MODES, crossModOf, warpPhase } from './dsp/warp.mjs';
+import { SHAPER_MODES, autoGainFor, shape } from './dsp/shapers.mjs';
+import { dbToGain } from './dsp/control.mjs';
+import { SYNC_OPTIONS, isFree, syncedHz, syncedSeconds } from './dsp/sync.mjs';
+import { lfoValue } from './dsp/moddelay.mjs';
 
 /** Points across one cycle of a drawn waveform. Half a frame is past what a panel can show. */
 const WAVE_POINTS = 256;
@@ -54,6 +58,9 @@ export const UNISON_AXIS_CENTS = 100;
 
 /** The sample rate a response curve is computed at when nobody says otherwise. */
 const NOMINAL_RATE = 48000;
+
+/** The tempo a picture on the beat grid is drawn at when no engine says otherwise. */
+const NOMINAL_BPM = 120;
 
 /** Points along an envelope. */
 const ENV_POINTS = 192;
@@ -124,6 +131,9 @@ export function subsumedParams(descriptor) {
 
 function figureData(descriptor, figure, values, opts) {
   const { sampleRate = NOMINAL_RATE, tables = null, modulated = new Map(), extras = null, waves = null, shapes = null, report = null } = opts;
+  // The tempo the device is running at, for a picture on the beat grid. A panel built with no
+  // engine behind it draws at the engine's own default.
+  const bpm = Number.isFinite(opts.bpm) && opts.bpm > 0 ? opts.bpm : NOMINAL_BPM;
   const read = (role) => roleValue(descriptor, figure, values, role);
   const common = {
     id: figure.id,
@@ -140,6 +150,15 @@ function figureData(descriptor, figure, values, opts) {
     drag: figure.drag
       ? Object.fromEntries(Object.entries(figure.drag).map(([axis, role]) => [axis, figure.params[role]]))
       : null,
+    // Where each dragged parameter sits on its own 0..1 curve, by parameter id, so a drag on the
+    // picture starts from where the knob is rather than from zero. The figures that predate this
+    // carry their own values and the client reads those; everything since reads this.
+    positions: figure.drag
+      ? Object.fromEntries(Object.values(figure.drag).map((role) => {
+        const param = descriptor.params.find((p) => p.id === figure.params[role]);
+        return [figure.params[role], param ? normalize(param, read(role) ?? param.default) : 0];
+      }))
+      : null,
   };
   switch (figure.kind) {
     case 'wavetable': return { ...common, ...wavetableFigure(descriptor, figure, read, { tables, extras }) };
@@ -153,6 +172,12 @@ function figureData(descriptor, figure, values, opts) {
     case 'grain': return { ...common, ...grainFigure(figure, read, { shapes, extras }) };
     case 'meter': return { ...common, ...meterFigure(figure, read, report) };
     case 'transfer': return { ...common, ...transferFigure(figure, read, report) };
+    case 'shaper': return { ...common, ...shaperFigure(read, report) };
+    case 'echoes': return { ...common, ...echoesFigure(read, bpm) };
+    case 'repeats': return { ...common, ...repeatsFigure(read, bpm) };
+    case 'decay': return { ...common, ...decayFigure(read) };
+    case 'sweep': return { ...common, ...sweepFigure(figure, read, descriptor, bpm, report) };
+    case 'duck': return { ...common, ...duckFigure(read, bpm, report) };
     default: return common;
   }
 }
@@ -786,8 +811,14 @@ function transferFigure(figure, read, report) {
     points[i] = { inDb, outDb: outAt(inDb) };
   }
   const live = report?.meters?.[figure.id];
+  // The last second of the level and the reduction, one entry a block, oldest first - the lane
+  // beside the curve that shows the attack and the release as they happen. Null when the device
+  // is not reporting, and the picture is the curve alone.
+  const history = live?.history && Array.isArray(live.history.inDb) && Array.isArray(live.history.grDb)
+    ? { inDb: live.history.inDb, grDb: live.history.grDb, blockSec: Number(live.history.blockSec) || 128 / NOMINAL_RATE }
+    : null;
   return {
-    threshold, ratio, knee, makeup, upward, pregain,
+    threshold, ratio, knee, makeup, upward, pregain, history,
     // A wall rather than a bend, which the panel names differently: a ceiling, not a threshold.
     limiting: !Number.isFinite(ratio),
     range: TRANSFER_RANGE,
@@ -796,5 +827,264 @@ function transferFigure(figure, read, report) {
     // effect on a stopped track has to say.
     inDb: Number.isFinite(live?.inDb) ? live.inDb : null,
     grDb: Number.isFinite(live?.grDb) ? live.grDb : 0,
+  };
+}
+
+// --- a waveshaper's curve ------------------------------------------------------------------
+
+/** Points across the input range of a shaper curve, -1..1. */
+const SHAPER_POINTS = 129;
+
+/**
+ * What comes out for what goes in, through the curve the device shapes with, at the drive and
+ * the bias it is set to - and scaled by the auto gain's correction where that is on, so the
+ * picture is of the level being heard and the heading can say what the correction is.
+ *
+ * The correction is read from the device's report while it is running, which is the ramped
+ * value the block is actually being multiplied by; a stopped device gets the same number from
+ * the same function the processor calls, so the still picture and the live one agree.
+ */
+function shaperFigure(read, report) {
+  const mode = Math.round(read('mode') ?? 0);
+  const driveDb = read('drive') ?? 0;
+  const bias = read('bias') ?? 0;
+  const harmonic = Math.round(read('harmonic') ?? 2);
+  const autogain = (read('autogain') ?? 1) >= 0.5;
+  const drive = dbToGain(driveDb);
+  const reported = Number(report?.meters?.autogain);
+  const comp = !autogain ? 1 : Number.isFinite(reported) && report?.meters?.autogain != null
+    ? dbToGain(reported)
+    : autoGainFor(mode, drive, bias, harmonic);
+  const points = new Array(SHAPER_POINTS);
+  for (let i = 0; i < SHAPER_POINTS; i++) {
+    const x = -1 + (2 * i) / (SHAPER_POINTS - 1);
+    points[i] = { x, y: shape(x, mode, drive, bias, harmonic) * comp };
+  }
+  return {
+    mode, modeName: SHAPER_MODES[mode] ?? SHAPER_MODES[0], drive: driveDb, bias, harmonic, autogain,
+    comp, compDb: 20 * Math.log10(Math.max(1e-6, comp)),
+    points,
+  };
+}
+
+// --- a delay's repeats -----------------------------------------------------------------------
+
+/** The most repeats an echoes figure draws, however high the feedback is. */
+const ECHO_MAX = 24;
+
+/** A repeat quieter than this is not drawn, and the picture ends where the last drawn one is. */
+const ECHO_FLOOR = 0.02;
+
+/**
+ * The repeats one hit makes: when each lands and how loud, per side.
+ *
+ * Walked the way the delay's own feedback path walks: a plain delay repeats each side down its
+ * own line, the right one later by the spread; a ping-pong sends each repeat into the other
+ * line, so it lands on the far side after that side's time. The level of each is the feedback
+ * raised to the number of times round - the tone in the loop is left out, being a color and not
+ * a level. The time is the synced one where sync is on, which is why the tempo comes in.
+ */
+function echoesFigure(read, bpm) {
+  const sync = Math.round(read('sync') ?? 0);
+  const time = read('time') ?? 0.375;
+  const seconds = syncedSeconds(sync, bpm, time);
+  const feedback = Math.max(0, read('feedback') ?? 0);
+  const pingpong = (read('pingpong') ?? 0) >= 0.5;
+  const spread = Math.min(1, Math.max(0, read('spread') ?? 0));
+  const timeL = seconds;
+  const timeR = seconds * (1 + 0.5 * spread);
+  const taps = [];
+  if (pingpong) {
+    let t = 0;
+    for (let n = 0; n < ECHO_MAX; n++) {
+      const level = Math.min(1, Math.pow(feedback, n));
+      if (n > 0 && level < ECHO_FLOOR) break;
+      t += n % 2 === 0 ? timeL : timeR;
+      taps.push({ t, level, side: n % 2 === 0 ? -1 : 1 });
+    }
+  } else {
+    for (let n = 0; n < ECHO_MAX; n++) {
+      const level = Math.min(1, Math.pow(feedback, n));
+      if (n > 0 && level < ECHO_FLOOR) break;
+      if (spread > 0) {
+        taps.push({ t: (n + 1) * timeL, level, side: -1 });
+        taps.push({ t: (n + 1) * timeR, level, side: 1 });
+      } else {
+        taps.push({ t: (n + 1) * timeL, level, side: 0 });
+      }
+    }
+  }
+  taps.sort((a, b) => a.t - b.t);
+  // Wide enough for the repeats that are drawn and for a few beats of grid, whichever is more.
+  const beatSec = 60 / bpm;
+  const span = Math.max(taps[taps.length - 1]?.t ?? 0, 4 * timeR, 2 * beatSec) * 1.05;
+  return {
+    time: seconds, feedback, pingpong, spread, sync, synced: !isFree(sync), syncName: SYNC_OPTIONS[sync] ?? null,
+    beatSec, span, taps,
+  };
+}
+
+// --- a beat repeat's catch -------------------------------------------------------------------
+
+/**
+ * One catch and the repeats it plays: each one as long as it lasts at its pitch, as loud as its
+ * decay leaves it, against the interval on which the next catch may start.
+ *
+ * A repeat dropped in pitch plays its slice slower, so it is longer - which is why each is drawn
+ * as a span rather than a tick, and why they stop lining up with the grid as the pitch falls.
+ */
+function repeatsFigure(read, bpm) {
+  const interval = syncedSeconds(Math.round(read('interval') ?? 0), bpm, 2);
+  const grid = syncedSeconds(Math.round(read('grid') ?? 0), bpm, 0.125);
+  const repeats = Math.max(1, Math.round(read('repeats') ?? 1));
+  const decay = Math.min(1, Math.max(0, read('decay') ?? 0));
+  const pitch = read('pitch') ?? 0;
+  const taps = [];
+  let t = 0;
+  for (let k = 0; k < repeats; k++) {
+    const rate = Math.pow(2, (pitch * k) / 12);
+    const length = grid / rate;
+    taps.push({ t, length, level: Math.pow(1 - decay, k), semitones: pitch * k });
+    t += length;
+  }
+  const span = Math.max(t, interval) * 1.05;
+  return { interval, grid, repeats, decay, pitch, span, taps, end: t };
+}
+
+// --- a reverb's tail -------------------------------------------------------------------------
+
+/** The decibel window a tail is drawn in: down to where the reverb's decay time is measured. */
+const DECAY_RANGE = Object.freeze({ topDb: 0, bottomDb: -60 });
+const DECAY_POINTS = 96;
+
+/**
+ * How the tail falls away after a hit: silence for the predelay, then a straight line down in
+ * decibels, sixty of them over the decay time - which is what the decay control is, an RT60.
+ */
+function decayFigure(read) {
+  const decay = Math.max(0.05, read('decay') ?? 2);
+  const predelay = Math.max(0, read('predelay') ?? 0);
+  const span = Math.max(0.3, (predelay + decay) * 1.15);
+  const points = new Array(DECAY_POINTS);
+  for (let i = 0; i < DECAY_POINTS; i++) {
+    const t = (i / (DECAY_POINTS - 1)) * span;
+    const db = t < predelay ? 0 : (-60 * (t - predelay)) / decay;
+    points[i] = { t, db: Math.max(DECAY_RANGE.bottomDb - 10, db) };
+  }
+  return { decay, predelay, span, points, range: DECAY_RANGE };
+}
+
+// --- a modulated effect's sweep --------------------------------------------------------------
+
+const SWEEP_POINTS = 96;
+
+/**
+ * What the LFO is doing to each copy over one of its cycles, read through the same function the
+ * delay line reads it with: for a chorus or a flanger the delay in milliseconds per voice and
+ * side, for a phaser the frequency the notches are centered on. The playhead is the phase the
+ * processor reports, so the line moves with the sound rather than with a guess about it.
+ */
+function sweepFigure(figure, read, descriptor, bpm, report) {
+  const sync = Math.round(read('sync') ?? 0);
+  const rateHz = syncedHz(sync, bpm, read('rate') ?? 1);
+  const shapeIx = Math.round(read('shape') ?? 0);
+  const spread = Math.min(1, Math.max(0, read('spread') ?? 0));
+  const depth = Math.max(0, read('depth') ?? 0);
+  const traces = [];
+  const curve = (label, side, fn) => {
+    const points = new Array(SWEEP_POINTS);
+    for (let i = 0; i < SWEEP_POINTS; i++) {
+      const x = i / (SWEEP_POINTS - 1);
+      points[i] = { x, y: fn(x) };
+    }
+    traces.push({ label, side, points });
+  };
+  const paramOf = (role) => descriptor?.params.find((p) => p.id === figure.params[role]) ?? null;
+  let axis;
+  if (figure.params.center) {
+    // A phaser: octaves either side of the center, as the processor sweeps it.
+    const center = read('center') ?? 1000;
+    const octaves = 3 * depth;
+    curve('L', -1, (x) => center * Math.pow(2, octaves * (lfoValue(x, 0) * 2 - 1)));
+    curve('R', 1, (x) => center * Math.pow(2, octaves * (lfoValue(x + spread * 0.5, 0) * 2 - 1)));
+    axis = { unit: 'Hz', log: true, min: RESPONSE_RANGE.lowHz, max: RESPONSE_RANGE.highHz };
+  } else {
+    // A chorus or a flanger: the delay in milliseconds, a voice per copy, the right side's LFO
+    // behind the left's by the spread - the reads ModDelay#next makes.
+    const base = read('delay') ?? 0;
+    const voices = Math.max(1, Math.round(read('voices') ?? 1));
+    for (let v = 0; v < voices; v++) {
+      const offset = v / voices;
+      const tag = voices > 1 ? String(v + 1) : '';
+      curve(`L${tag}`, -1, (x) => base + depth * lfoValue(x + offset, shapeIx));
+      curve(`R${tag}`, 1, (x) => base + depth * lfoValue(x + offset + spread * 0.5, shapeIx));
+    }
+    // The axis is the delay control's own range, fixed, so the depth knob is seen widening the
+    // sweep rather than the picture rescaling around it; a delay at the top of its range with
+    // depth on it runs off the top, which is true of it.
+    axis = { unit: 'ms', log: false, min: 0, max: paramOf('delay')?.max ?? base + depth };
+  }
+  const phase = Number(report?.phase);
+  return {
+    rateHz, periodSec: 1 / Math.max(1e-6, rateHz), sync, synced: !isFree(sync), syncName: SYNC_OPTIONS[sync] ?? null,
+    depth, spread, traces, axis,
+    // Null when the device is not reporting: a still picture of the sweep.
+    phase: Number.isFinite(phase) ? ((phase % 1) + 1) % 1 : null,
+  };
+}
+
+// --- a ducker's dip ------------------------------------------------------------------------
+
+const DUCK_POINTS = 192;
+
+/**
+ * The dip over one beat, as the shape controls draw it: down over the attack, back up along
+ * the curve over the length. Stepped through the same recursion the processor runs, at a
+ * coarser step, so the attack's rounding and the curve's bend are the ones being heard.
+ *
+ * While the device reports, the picture also carries the last second of what it did - the gain
+ * it applied, the signal it applied it to, and the key that triggered it where one is patched
+ * in - which is the picture of a pump that a still curve cannot be.
+ */
+function duckFigure(read, bpm, report) {
+  const sync = Math.round(read('sync') ?? 0);
+  const period = syncedSeconds(sync, bpm, 0.5);
+  const amount = Math.min(1, Math.max(0, read('amount') ?? 0));
+  const length = Math.min(1, Math.max(0.05, read('length') ?? 0.5));
+  const attackMs = Math.max(0, read('attack') ?? 0);
+  const curve = read('curve') ?? 0;
+  // What is triggering the dip: the clock, a track's notes, or a sidechain's audio. Only the
+  // audio key measures the recovery in seconds times two rather than a share of the beat, as the
+  // processor has it; the picture spans the recovery either way.
+  const trigger = report?.trigger ?? (report?.keyed ? 'audio' : 'clock');
+  const keyed = trigger === 'audio';
+  const recovery = length * (keyed ? 2 : period);
+  const span = keyed ? Math.max(0.1, recovery * 1.25) : period;
+  const steps = 2048;
+  const dt = span / steps;
+  const attackK = attackMs > 0 ? 1 - Math.exp(-dt / (attackMs * 0.001)) : 1;
+  const points = new Array(DUCK_POINTS);
+  let gain = 1;
+  let next = 0;
+  for (let i = 0; i < steps; i++) {
+    const t = i * dt;
+    // Recorded before the step, so the first point is the level the beat lands on.
+    if (i * (DUCK_POINTS - 1) >= next * steps) {
+      points[next] = { x: t / span, y: gain };
+      next += 1;
+    }
+    const x = Math.min(1, t / Math.max(0.001, recovery));
+    const target = 1 - amount * (1 - curveShape(x, curve));
+    gain += (target - gain) * (target < gain ? attackK : 1);
+  }
+  while (next < DUCK_POINTS) points[next++] = { x: 1, y: gain };
+  const h = report?.history;
+  const history = h && Array.isArray(h.gain) && Array.isArray(h.out)
+    ? { gain: h.gain, out: h.out, key: Array.isArray(h.key) ? h.key : null, blockSec: Number(h.blockSec) || 128 / NOMINAL_RATE }
+    : null;
+  return {
+    amount, length, attack: attackMs, curve, sync, synced: !isFree(sync), syncName: SYNC_OPTIONS[sync] ?? null,
+    period, recovery, span, keyed, trigger, threshold: read('threshold') ?? -24,
+    points, history,
   };
 }

@@ -7,6 +7,7 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
+import { History } from '../dsp/history.mjs';
 
 /** The lookahead, in seconds. Two milliseconds is under a hundred samples: inaudible as latency. */
 const LOOKAHEAD_SEC = 0.002;
@@ -51,6 +52,9 @@ export class LimiterProcessor {
     this.gain = 1;
     this.reduction = 0;
     this.level = -120;       // the loudest the input reached this block, after the gain, in dB
+    this.levels = new History(undefined, -120);
+    this.reductions = new History(undefined, 0);
+    this.blockSec = 128 / sampleRate;
   }
 
   process(inputs, outputs, count, params) {
@@ -89,10 +93,20 @@ export class LimiterProcessor {
     }
     this.reduction = reduction;
     this.level = loudest > 1e-6 ? 20 * Math.log10(loudest) : -120;
+    this.levels.push(this.level);
+    this.reductions.push(reduction < 1 ? 20 * Math.log10(reduction) : 0);
+    this.blockSec = count / this.sampleRate;
   }
 
-  /** Where the signal is and how much is being held back, for the picture. */
+  /** Where the signal is and how much is being held back, for the picture, and the last second of both. */
   report() {
-    return { meters: { curve: { inDb: this.level, grDb: this.reduction < 1 ? 20 * Math.log10(this.reduction) : 0 } } };
+    return {
+      meters: {
+        curve: {
+          inDb: this.level, grDb: this.reduction < 1 ? 20 * Math.log10(this.reduction) : 0,
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+        },
+      },
+    };
   }
 }

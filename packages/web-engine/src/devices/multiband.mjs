@@ -10,6 +10,7 @@
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
 import { Crossover } from '../dsp/biquad.mjs';
+import { History } from '../dsp/history.mjs';
 import { Detector, dbOf, gainComputer } from './compressor.mjs';
 
 const BANDS = ['Low', 'Mid', 'High'];
@@ -93,6 +94,11 @@ export class MultibandProcessor {
     // panel draws on each band's curve.
     this.levels = [-120, -120, -120];
     this.changes = [0, 0, 0];
+    // And the last second of each, for the lane beside each curve.
+    this.levelHistory = BANDS.map(() => new History(undefined, -120));
+    this.changeHistory = BANDS.map(() => new History(undefined, 0));
+    this.blockSec = 128 / sampleRate;
+    this.sampleRate = sampleRate;
   }
 
   process(inputs, outputs, count, params) {
@@ -166,16 +172,24 @@ export class MultibandProcessor {
       outL[i] = (l + (sumL - l) * mix) * out;
       if (outR !== outL) outR[i] = (r + (sumR - r) * mix) * out;
     }
+    for (let b = 0; b < 3; b++) {
+      this.levelHistory[b].push(this.levels[b]);
+      this.changeHistory[b].push(this.changes[b]);
+    }
+    this.blockSec = count / this.sampleRate;
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
     }
   }
 
-  /** Where each band sits on its own curve, for the three pictures the panel draws. */
+  /** Where each band sits on its own curve, and where it has been, for the three pictures the panel draws. */
   report() {
     const meters = {};
     BANDS.forEach((name, b) => {
-      meters[`${name.toLowerCase()}.curve`] = { inDb: this.levels[b], grDb: this.changes[b] };
+      meters[`${name.toLowerCase()}.curve`] = {
+        inDb: this.levels[b], grDb: this.changes[b],
+        history: { inDb: this.levelHistory[b].snapshot(), grDb: this.changeHistory[b].snapshot(), blockSec: this.blockSec },
+      };
     });
     return { meters };
   }

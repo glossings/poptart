@@ -27,7 +27,6 @@ import { OVERDRIVE, OverdriveProcessor } from './src/devices/overdrive.mjs';
 import { DISTORT, DistortProcessor } from './src/devices/distort.mjs';
 import { MULTIBAND, MultibandProcessor } from './src/devices/multiband.mjs';
 import { CRUSH, CrushProcessor } from './src/devices/crush.mjs';
-import { VOCODER, VocoderProcessor } from './src/devices/vocoder.mjs';
 import { FMSYNTH, FmSynth } from './src/devices/fmsynth.mjs';
 import { FLANGER, FlangerProcessor } from './src/devices/flanger.mjs';
 import { WAVETABLE, WavetableSynth } from './src/devices/wavetable.mjs';
@@ -194,9 +193,8 @@ test('sweeping a multiband crossover is smooth', () => {
   assertSmooth('multiband split', MultibandProcessor, MULTIBAND, 'lowsplit', 60, 1800);
 });
 
-test('sweeping a crush tone and a vocoder band edge is smooth', () => {
+test('sweeping a crush tone is smooth', () => {
   assertSmooth('crush tone', CrushProcessor, CRUSH, 'tone', 400, 16000, { bits: 16, rate: 24000 });
-  assertSmooth('vocoder low', VocoderProcessor, VOCODER, 'low', 80, 900);
 });
 
 // --- a synth's own controls ------------------------------------------------------------------

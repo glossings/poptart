@@ -49,7 +49,7 @@ const PANEL_GLIDE_SEC = 0.03;
  * says when they change: a granulator's grains move on their own, and an auto gain works out
  * its own correction.
  */
-const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq']);
+const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
 
 class Unsupported extends Error {
   constructor(what, why) {
@@ -66,10 +66,6 @@ const EMPTY_ANSWERS = {
   'GET /api/midiDevices': [],
   'GET /api/link': { enabled: false, peers: 0, playing: false, bpm: null, available: false },
   'GET /api/midiClock': { destinations: [], selected: null, active: null },
-  'GET /api/audioDevices': {
-    devices: [], selected: null, outputChannels: 2, outputChannelChoices: [2], audibleChannels: 2,
-    cueAvailable: false, cueSelected: null, cueActive: null,
-  },
   'GET /api/audioInputs': { available: false, devices: [], selected: [], names: {}, layout: null, active: null, warning: null },
   'GET /api/recordings': { items: [] },
   'GET /api/songfiles': { entries: [] },
@@ -137,6 +133,9 @@ export function createHost({
   builtInUrl = null,
   library = { packs: [], problems: [] },
   version = '0.1.1-web',
+  // Which device the page plays to (see audio-output.mjs). Absent in a host built without a
+  // page around it, which then answers as a machine with only the system default.
+  outputs = null,
 }) {
   const macroNames = {};
 
@@ -184,6 +183,8 @@ export function createHost({
     // granulator has in the air. Only the live poll has one; a panel being built has not.
     report,
     sampleRate: engine.sampleRate ?? engine.context?.sampleRate ?? undefined,
+    // The tempo the device is running at, for a picture drawn on the beat grid.
+    bpm: state?.bpm ?? undefined,
   });
 
   /**
@@ -1001,6 +1002,21 @@ export function createHost({
     // editor already handles: it drops the hold and lets the rest of the drag write code.
     'POST /api/channelHold': async (body) => ({ held: body?.value ?? null, why: 'the browser build does not hold a channel; the drag writes code instead' }),
     'POST /api/presetHold': async () => ({ why: 'presets are not held in the browser build' }),
+  };
+
+  // The output device. The desktop restarts its engine to change one; here only the context's
+  // destination moves, so the answer comes straight back and nothing stops playing.
+  const NO_OUTPUTS = {
+    devices: [], selected: null, outputChannels: 2, outputChannelChoices: [2], audibleChannels: 2,
+    cueAvailable: false, cueSelected: null, cueActive: null, canReveal: false, canChoose: false,
+    warning: null,
+  };
+  routes['GET /api/audioDevices'] = async () => (outputs ? outputs.describe() : structuredClone(NO_OUTPUTS));
+  routes['POST /api/audioDevice'] = async (body) => {
+    if (!outputs) throw new Unsupported('choosing an audio output', 'this host was built without one');
+    if (body?.reveal) return outputs.reveal();
+    const answer = await outputs.choose(body?.device ?? null);
+    return { ...answer, warning: null };
   };
 
   for (const [key, answer] of Object.entries(EMPTY_ANSWERS)) {

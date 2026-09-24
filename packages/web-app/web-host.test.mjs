@@ -580,7 +580,7 @@ test('the window a Wavetable opens carries its pictures, drawn from the table it
   assert.deepEqual(figures.map((f) => f.id),
     ['osc1.wave', 'osc1.spread', 'osc2.wave', 'osc2.spread', 'ampenv']);
   assert.equal(panel.width, 920, 'wide enough for the two oscillators side by side');
-  assert.deepEqual(panel.rows.map((row) => row.map((i) => panel.sections[i].title)), [['Osc 1', 'Osc 2'], ['Sub', 'Amp Env', 'Voice']]);
+  assert.deepEqual(panel.rows.map((row) => row.map((i) => panel.sections[i].title)), [['Osc 1', 'Osc 2'], ['Osc 1 Unison', 'Osc 2 Unison'], ['Sub', 'Amp Env', 'Voice']]);
 
   // The frames come from the shared table the synth in the audio thread is reading, so the picture
   // is of the sound and not of a second copy of it.
@@ -620,7 +620,7 @@ test('moving a parameter answers with the pictures it appears in, and only those
 
 test('a device with no figures declared opens a window of knobs, as it did before', async () => {
   const rig = makeHost();
-  await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("Wavetable").fx("Chorus")' });
+  await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("Wavetable").fx("Crush")' });
   const { panel } = await rig.host.call('POST', '/api/showEditor', { trackId: 'lead', slot: 1 });
   assert.deepEqual(panel.sections.flatMap((s) => s.figures), []);
   assert.ok(panel.sections.every((s) => s.widgets.length > 0), 'and every section still has its knobs');
