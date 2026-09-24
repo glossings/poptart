@@ -24,6 +24,10 @@ import { createEvaluator } from './evaluate.mjs';
 import { createSampleStore, registerPacks } from './samples.mjs';
 import { createHost } from './host.mjs';
 import { createAudioOutputs } from './audio-output.mjs';
+import { createWebMidi } from './midi.mjs';
+import { createAudioInputs } from './audio-input.mjs';
+import { createPrebake } from './prebake.mjs';
+import { createBlockEvaluator } from './block-eval.mjs';
 
 /** Where the pieces are served from. One place, so moving a folder is one edit. */
 export const PATHS = Object.freeze({
@@ -176,8 +180,60 @@ export async function boot({
   const restored = await Promise.race([outputs.restore(), new Promise((r) => setTimeout(() => r(null), 1500))]);
   if (restored) say(`playing to ${restored}`);
 
+  // MIDI from the controllers on this machine. Asked for only when something wants it (see
+  // midi.mjs); every message goes to the engine, which plays the tracks listening to that device,
+  // and a controller also to the language's own store, which a midicc() read in a pattern samples.
+  const midi = createWebMidi({
+    transport,
+    context,
+    warn,
+    onMessage: (device, msg) => {
+      engine.midiIn(device, msg.kind, msg.channel, msg.num, msg.value);
+      if (msg.kind === 'cc') patternCore.feedMidiCC(device, msg.channel, msg.num, msg.value);
+    },
+  });
+  // Clock out chosen on an earlier visit: the permission was given then, so this does not prompt.
+  if (midi.available && midi.clockWanted) midi.enable().catch((err) => warn(err.message));
+
+  // The output channel count chosen on an earlier visit, where the device still has them.
+  try {
+    const saved = Number(globalThis.localStorage?.getItem('poptart.outputChannels'));
+    if (saved > 2) engine.setOutputChannels(saved);
+  } catch { /* storage off */ }
+
+  // Audio in: the inputs picked in settings, or the default one the first time input() is read.
+  // The engine takes its channels off one node; the language is told the channel layout, which
+  // is what input("Scarlett", 1) is resolved against.
+  const inputs = createAudioInputs({
+    context,
+    onChange: (node, channels, layout) => {
+      engine.setHardwareInput(node, channels);
+      patternCore.setAudioInputLayout(layout);
+    },
+  });
+  engine.onAudioInputWanted = () => { inputs.want()?.catch?.(() => {}); };
+  inputs.restore().then((layout) => { if (layout?.length) say(`audio in: ${layout.map((d) => d.name).join(' + ')}`); });
+
+  // The ★ library and the prebake, run before any pattern so every buffer starts from them. The
+  // pinned file's format belongs to the desktop's pinned-defs.js, loaded here as it is there.
+  let prebake = null;
+  try {
+    await import('./pinned-defs.js');
+    prebake = createPrebake({
+      patternCore, storage, prebakeDefs, createBlockEvaluator,
+      pinnedDefs: globalThis.poptartPinnedDefs,
+      dehydrate: (code) => storage.dehydrateOnLoad(code),
+      log: say,
+    });
+    for (const line of await prebake.run()) warn(`prebake ${line}`);
+  } catch (err) {
+    warn(`the prebake did not run - ${err?.message ?? err}`);
+  }
+
   const host = createHost({
-    patternCore, engine, transport, evaluator, storage, samples, outputs,
+    patternCore, engine, transport, evaluator, storage, samples, outputs, midi, inputs,
+    slicing: { detectOnsets: webEngine.detectOnsets, monoOf: webEngine.monoOf },
+    prebake,
     catalog: webEngine.catalog,
     // What the generated device window is built and edited through. Handed in rather than
     // imported so the host stays a plain route table with no idea where a device comes from.

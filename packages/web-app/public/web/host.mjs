@@ -27,6 +27,9 @@
 // and the static build does not have to reproduce a relative path between two packages.
 
 import { registerPacks } from './samples.mjs';
+import { createLiveNotes } from './live-notes.mjs';
+import { createTrackRecorder } from './track-record.mjs';
+import { finishTake, mintName } from './takes.mjs';
 
 /** Where this program's source is. AGPL section 13 asks a page served over a network to say. */
 const SOURCE_URL = 'https://github.com/glossings/poptart';
@@ -63,11 +66,7 @@ class Unsupported extends Error {
 const EMPTY_ANSWERS = {
   // Each of these is the desktop's answer with nothing in it, field for field: the settings
   // tab reads every one of these names, and a missing one is a row that throws while drawing.
-  'GET /api/midiDevices': [],
   'GET /api/link': { enabled: false, peers: 0, playing: false, bpm: null, available: false },
-  'GET /api/midiClock': { destinations: [], selected: null, active: null },
-  'GET /api/audioInputs': { available: false, devices: [], selected: [], names: {}, layout: null, active: null, warning: null },
-  'GET /api/recordings': { items: [] },
   'GET /api/songfiles': { entries: [] },
   'GET /api/sampleMap/status': { state: 'off', building: false },
   'GET /api/sampleMap/sources': { sources: [], suggested: '' },
@@ -82,9 +81,6 @@ const EMPTY_ANSWERS = {
 
 /** Routes that are refused by name, with the reason the editor's console will show. */
 const REFUSALS = {
-  'POST /api/record': ['recording the master bus', 'not wired up yet'],
-  'POST /api/trackRecord/start': ['recording a track', 'not wired up yet'],
-  'POST /api/midiRecord/start': ['recording MIDI input', 'MIDI input is not wired up yet'],
   'POST /api/song/load': ['the DJ decks', 'they stay on the desktop'],
   'GET /api/browseDir': ['browsing the file system', 'a page cannot see your disk'],
   'GET /api/findSamples': ['searching your sample folders', 'a page cannot see your disk'],
@@ -94,11 +90,7 @@ const REFUSALS = {
   'POST /api/sampleMap/sources': ['the sample map', 'it stays on the desktop'],
   'POST /api/samplesDir': ['choosing a sample folder', 'a page cannot see your disk'],
   'POST /api/preferVst3': ['choosing between plugin formats', 'there are no plugins to host'],
-  'POST /api/previewSlice': ['auditioning a slice', 'the sampler\'s slices are not built yet'],
-  'GET /api/sampleFile': ['reading a sample source\'s files', 'the sampler\'s slices are not built yet'],
   'POST /api/patterns/wip/retention': ['expiring old sessions', 'nothing here is deleted on its own'],
-  'POST /api/pinned': ['the star library', 'it is kept here but not run yet'],
-  'POST /api/pinned/remove': ['the star library', 'it is kept here but not run yet'],
   // The DJ desk is two decks, a crossfader and a song player, none of which is here. Every one
   // of its routes says so rather than half-answering, which would be a desk that never updates.
   'GET /api/mix': ['the DJ desk', 'it stays on the desktop'],
@@ -136,6 +128,16 @@ export function createHost({
   // Which device the page plays to (see audio-output.mjs). Absent in a host built without a
   // page around it, which then answers as a machine with only the system default.
   outputs = null,
+  // The page's MIDI access (see midi.mjs). Absent where the browser has none, or in a test.
+  midi = null,
+  // The page's audio inputs (see audio-input.mjs). Absent in a test, or a page with no inputs.
+  inputs = null,
+  // The transient detector the sampler slices with, for the slice editor's auto-slice: the
+  // engine's own, handed in so the markers drawn are the chops a pattern with no set plays.
+  slicing = null,
+  // The prebake and the ★ library, run in the page (see prebake.mjs). Absent, both are kept and
+  // said not to run.
+  prebake = null,
 }) {
   const macroNames = {};
 
@@ -157,6 +159,50 @@ export function createHost({
   }
 
   /** Where one file of a pack is served from, or null when the pack is not known here. */
+  /** A sampler source's files, in index order, each with the key a slice set names it by. */
+  function filesOfRef(ref) {
+    if (ref.startsWith('rec:')) {
+      const name = ref.slice(4);
+      return (samples.names?.('rec') ?? []).includes(name) ? [{ key: `rec:${name}.wav`, name: `${name}.wav` }] : [];
+    }
+    if (ref.startsWith('file:')) return [];
+    const id = ref.startsWith('sp:') ? ref.slice(3) : ref;
+    const manifest = allPacks().find((p) => p.manifest.id === id)?.manifest ?? samples.addedPack?.(id);
+    return (manifest?.files ?? []).map((f) => ({ key: `${id}/${f.file}`, name: String(f.file).split('/').pop() }));
+  }
+
+  /** The pack and index a slice-set key names, or null. */
+  function fileOfKey(key) {
+    const k = String(key ?? '');
+    if (k.startsWith('rec:')) {
+      const name = k.slice(4).replace(/\.wav$/i, '');
+      const names = samples.names?.('rec') ?? [];
+      const index = names.indexOf(name);
+      return index < 0 ? null : { pack: 'rec', index, name };
+    }
+    const cut = k.indexOf('/');
+    if (cut < 0) return null;
+    const pack = k.slice(0, cut);
+    const file = k.slice(cut + 1);
+    const manifest = allPacks().find((p) => p.manifest.id === pack)?.manifest ?? samples.addedPack?.(pack);
+    const index = (manifest?.files ?? []).findIndex((f) => f.file === file);
+    return index < 0 ? null : { pack, index, name: file };
+  }
+
+  // Object URLs for files that live only in this browser's store, made once each.
+  const storedUrls = new Map();
+  async function urlOfFile({ pack, index }) {
+    const remote = fileUrlOf(pack, index);
+    if (remote) return remote;
+    const key = `${pack}/${index}`;
+    if (storedUrls.has(key)) return storedUrls.get(key);
+    const bytes = await samples.bytes?.(pack, index);
+    if (!bytes || typeof URL?.createObjectURL !== 'function') return null;
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+    storedUrls.set(key, url);
+    return url;
+  }
+
   function fileUrlOf(packId, index) {
     const found = allPacks().find((p) => p.manifest.id === packId);
     const entry = found?.manifest.files[index];
@@ -363,6 +409,48 @@ export function createHost({
   /** Every slot with an edit still in it, taken now. */
   const takeAllCaptures = () => Promise.all([...dirty.values()].map(({ label, slot }) => takeCapture(label, slot)));
 
+  // ---- live notes, and the MIDI that plays them -------------------------------------------------
+
+  // Every note played by hand, per track label - what capture and the MIDI recorder read.
+  const liveNotes = createLiveNotes({
+    nowCycle: () => transport.cycleAt(engine.getTime()),
+    recordStartCycle: patternCore.recordStartCycle,
+    snapshot: () => evaluator.transportForEditor(),
+  });
+  const labelOf = (id) => {
+    for (const [label, tid] of evaluator.trackIds ?? []) if (tid === id) return label;
+    return id;
+  };
+  // A device's note as it sounded on an instrument, logged under the track's label.
+  engine.onLiveNote = (trackId, note, vel, isOn) => liveNotes.edge(labelOf(trackId), note, vel, isOn);
+  // A pattern named a MIDI device: ask for access now (the browser's prompt, once).
+  engine.onMidiWanted = () => {
+    midi?.enable().catch((err) => { if (!midiRefused) { midiRefused = true; console.warn(`[poptart] ${err.message}`); } });
+  };
+  let midiRefused = false;
+  // Keys the computer keyboard has down, per label, so a stop can let them go.
+  const kbHeld = new Map();
+
+  // Bouncing a track to a recording, kept in this browser's recordings for sr("name").
+  const recorder = typeof engine.recordTrack === 'function' ? createTrackRecorder({
+    engine,
+    transport,
+    idOf: (label) => evaluator.trackIds.get(label) ?? label,
+    labelOf,
+    snapshot: () => evaluator.transportForEditor(),
+    finishTake,
+    mintName,
+    names: () => samples.names?.('rec') ?? [],
+    keep: async (name, bytes) => {
+      await samples.addFile(`${name}.wav`, bytes, 'rec');
+      if (patternCore?._pack && samples.addedPack) registerPacks(patternCore, [samples.addedPack('rec')]);
+    },
+  }) : null;
+  const needRecorder = () => {
+    if (!recorder) throw new Unsupported('recording', 'this host has no recorder');
+    return recorder;
+  };
+
   const routes = {
     // ---- what the editor asks before anything else -------------------------------------------
 
@@ -399,12 +487,30 @@ export function createHost({
 
     // ---- playing ------------------------------------------------------------------------------
 
-    'POST /api/evaluate': async (body) => evaluator.evaluate(body.code ?? '', {
-      start: body.start,
-      arrangeFrom: body.arrangeFrom,
-    }),
+    'POST /api/evaluate': async (body) => {
+      const result = await evaluator.evaluate(body.code ?? '', {
+        start: body.start,
+        arrangeFrom: body.arrangeFrom,
+      });
+      // A midicc() read in the pattern itself (not bound to a parameter) wants MIDI too, and only
+      // the language knows it was written.
+      if (midi && !midi.enabled && patternCore.midiInUse?.()) engine.onMidiWanted?.();
+      return result;
+    },
 
-    'POST /api/stop': async () => evaluator.stop(),
+    'POST /api/stop': async () => {
+      // Keys still down on the computer keyboard are let go, so nothing is left sounding.
+      const at = engine.getTime();
+      for (const [label, held] of kbHeld) {
+        const tid = evaluator.trackIds.get(label) ?? label;
+        for (const { note, index } of held.values()) {
+          engine.noteOff(tid, note, at);
+          liveNotes.edge(label, note, 0, false, index);
+        }
+      }
+      kbHeld.clear();
+      return evaluator.stop();
+    },
 
     'GET /api/highlight': async (_body, query) => evaluator.highlightWindow(
       Number(query.get('from') ?? 0),
@@ -428,19 +534,74 @@ export function createHost({
       return { released, arrange: clock.snapshot() };
     },
 
+    // A key on the computer keyboard (the roll's ⌨), played now and logged, as on the desktop.
     'POST /api/keyNote': async (body) => {
-      const tid = evaluator.trackIds.get(body.trackId) ?? body.trackId;
+      const label = String(body.trackId ?? '');
+      if (!label) return { ok: false, reason: 'no track' };
+      const note = Math.round(Number(body.note));
+      if (!Number.isFinite(note)) throw new Error('keyNote: note must be a number');
+      const index = body.index == null ? null : Number(body.index);
+      const key = Number.isFinite(index) ? `${note}:${Math.max(0, Math.round(index))}` : String(note);
+      const tid = evaluator.trackIds.get(label) ?? label;
       const at = engine.getTime();
-      if (body.isOn) engine.noteOn(tid, Number(body.note), body.vel ?? 1, at);
-      else engine.noteOff(tid, Number(body.note), at);
+      let held = kbHeld.get(label);
+      if (!held) kbHeld.set(label, (held = new Map()));
+      if (body.isOn) {
+        const vel = Math.max(0, Math.min(1, Number(body.vel ?? 1)));
+        if (vel <= 0) return { ok: true };
+        // A key pressed again without a keyup between: a new hit, cleanly.
+        if (held.has(key)) {
+          engine.noteOff(tid, note, at);
+          liveNotes.edge(label, note, 0, false, index);
+        }
+        engine.noteOn(tid, note, vel, at);
+        held.set(key, { note, index });
+        liveNotes.edge(label, note, vel, true, index);
+      } else {
+        if (!held.has(key)) return { ok: true };
+        engine.noteOff(tid, note, at);
+        held.delete(key);
+        liveNotes.edge(label, note, 0, false, index);
+      }
       return { ok: true };
     },
     'POST /api/previewNote': async (body) => routes['POST /api/keyNote'](body),
 
-    // Nothing typed at the keyboard is logged here yet, so a capture finds no events.
-    'POST /api/liveNotes': async () => {
+    // What a track has had played on it lately, held keys closed at now - the roll's capture.
+    'POST /api/liveNotes': async (body) => {
       const now = transport.cycleAt(engine.getTime());
-      return { events: [], now, transport: evaluator.transportForEditor() };
+      return { events: liveNotes.eventsFor(String(body?.trackId ?? ''), -Infinity, now), now, transport: evaluator.transportForEditor() };
+    },
+
+    // ---- track record: tap, arm, poll, cancel - and the master bus --------------------------------
+    'POST /api/trackRecord/tap': async (body) => needRecorder().tap(String(body?.label ?? ''), !!body?.on),
+    'POST /api/trackRecord/start': async (body) => needRecorder().start(body ?? {}),
+    'GET /api/trackRecord/status': async () => needRecorder().status(),
+    'POST /api/trackRecord/cancel': async () => needRecorder().cancel(),
+    'POST /api/record': async (body) => needRecorder().recordMaster(body ?? {}),
+    // The recordings, newest first, for sr("'s completion - a flat list, as on the desktop.
+    'GET /api/recordings': async () => ({
+      root: '',
+      items: (samples.names?.('rec') ?? []).slice().reverse().map((name) => ({ name, month: '' })),
+    }),
+
+    // ---- MIDI record: arm, poll, cancel - the desktop's answers, from the same log ------------------
+    'POST /api/midiRecord/start': async (body) => liveNotes.start(body ?? {}),
+    'GET /api/midiRecord/status': async () => liveNotes.status(),
+    'POST /api/midiRecord/cancel': async () => liveNotes.cancel(),
+
+    // ---- MIDI devices ----------------------------------------------------------------------------
+
+    // The inputs' names, for midicc("/midikeys(" completion. Asking is what prompts, and typing a
+    // MIDI builder is the moment somebody means to use MIDI.
+    'GET /api/midiDevices': async () => {
+      if (!midi) return [];
+      return midi.inputs();
+    },
+    'GET /api/midiClock': async () => (midi ? midi.clockState() : { destinations: [], selected: null, active: null }),
+    'POST /api/midiClock': async (body) => {
+      if (!midi) throw new Unsupported('MIDI clock out', 'this browser has no MIDI');
+      return midi.setClock(body?.device ?? null);
     },
 
     // ---- the pattern language's own registries -------------------------------------------------
@@ -457,7 +618,7 @@ export function createHost({
         packs: patternCore.packIds().map((p) => ({ ...p, files: patternCore.lookupPack(p.id, inLibrary(p))?.files ?? [] })),
         sliceSets: patternCore.sliceSetIds().map((p) => ({ ...p, set: patternCore.lookupSlices(p.id, inLibrary(p)) ?? [] })),
         autos: patternCore.autoIds().map((p) => ({ ...p, points: patternCore.lookupAuto(p.id, inLibrary(p)) ?? [] })),
-        pinned: [],
+        pinned: prebake ? await prebake.pinnedList() : [],
       };
     },
     'POST /api/liveRoll': async (body) => {
@@ -889,11 +1050,74 @@ export function createHost({
     // nothing to stream from, so the answer is where the file already is and the editor fetches
     // it from there.
     'GET /api/sampleAudio': async (_body, query) => {
+      // By key, as the slice editor and the pack player ask ("pack/file" or "rec:name.wav").
+      if (query.get('file')) {
+        const found = fileOfKey(query.get('file'));
+        if (!found) throw new Error(`there is no sample called ${JSON.stringify(query.get('file'))} here`);
+        const url = await urlOfFile(found);
+        if (!url) throw new Error(`${query.get('file')} is not in this browser's store`);
+        return { url };
+      }
       const pack = query.get('pack');
       const index = Number(query.get('i') ?? 0);
-      const url = fileUrlOf(pack, index);
+      const url = fileUrlOf(pack, index) ?? await urlOfFile({ pack, index });
       if (!url) throw new Error(`there is no sample ${JSON.stringify(`${pack}:${index}`)} here`);
       return { url };
+    },
+
+    // ---- the slice editor --------------------------------------------------------------------------
+
+    // One file of a sampler source, and the key a slice set names it by: "pack/file", or
+    // "rec:name.wav" for a recording - the same key the engine looks the markers up by.
+    'GET /api/sampleFile': async (_body, query) => {
+      const ref = String(query.get('ref') ?? '').trim();
+      if (!ref) throw new Error('sampleFile needs a source ref');
+      const files = filesOfRef(ref);
+      if (!files.length) return { ref, file: null, count: 0 };
+      const n = Number(query.get('i'));
+      const i = ((Math.round(Number.isFinite(n) ? n : 0) % files.length) + files.length) % files.length;
+      const body = { ref, file: files[i].key, key: files[i].key, index: i, count: files.length };
+      if (query.get('names')) body.names = files.map((f) => f.name);
+      return body;
+    },
+
+    // A file's transients at a sensitivity: the detector .slice() chops on, so at 1 the markers
+    // drawn are the slices a pattern with no set plays.
+    'GET /api/sampleSlices': async (_body, query) => {
+      const key = String(query.get('file') ?? '').trim();
+      const found = fileOfKey(key);
+      if (!found) throw new Error(`there is no sample called ${JSON.stringify(key)} here`);
+      const sensitivity = Math.min(8, Math.max(1 / 8, Number(query.get('sensitivity')) || 1));
+      const got = found.pack === 'rec' ? samples.named?.('rec', found.name) : samples.get(found.pack, found.index);
+      const buffer = got?.buffer ?? got;
+      if (!buffer || !slicing) return { file: key, sensitivity, slices: null };
+      return { file: key, sensitivity, slices: slicing.detectOnsets(slicing.monoOf(buffer), buffer.sampleRate, { sensitivity }) };
+    },
+
+    // A chop played through the track, as the editor draws it or as the roll's slice rows name it.
+    'POST /api/previewSlice': async (body) => {
+      const label = String(body?.trackId ?? '');
+      const tid = evaluator.trackIds.get(label);
+      if (!label || !tid) return { ok: false, why: 'track not evaluated' };
+      if (body.stop) { engine.hush(tid); return { ok: true }; }
+      const ref = String(body.ref ?? '');
+      const begin = Number(body.begin);
+      const end = Number(body.end);
+      if (!ref || !Number.isFinite(begin) || !Number.isFinite(end)) return { ok: false, why: 'bad request' };
+      const now = engine.getTime();
+      const cfg = { index: Math.round(Number(body.index) || 0), begin, end, vel: 1, secPerCycle: 1 / transport.cps };
+      for (const key of ['attack', 'decay', 'sustain', 'release', 'speed', 'stretch', 'note']) {
+        const v = Number(body[key]);
+        if (body[key] != null && Number.isFinite(v)) cfg[key] = v;
+      }
+      const k = Number(body.slice);
+      if (body.slice != null && Number.isFinite(k)) {
+        cfg.slice = Math.round(k);
+        const set = evaluator.schedulers?.get(label)?.sliceSetAt?.(now);
+        if (set) cfg.slices = set;
+      }
+      const info = engine.playSample(tid, ref, cfg, now, now + 30);
+      return { ok: !info?.skipped, why: info?.skipped ?? null, durSec: info?.durSec ?? null };
     },
     // The `se("` completion walks a samples folder on disk. There is no folder here, so the
     // listing is empty and the popup simply stays shut.
@@ -965,23 +1189,27 @@ export function createHost({
       await storage.renameSnippet(body.from, body.to);
       return { ok: true };
     },
-    // The star library and the prebake are STORED here and not yet RUN (see the TODO's web
-    // entry). Each of these says so in the field the editor reads, rather than answering as if
-    // it had done the work: a definition that resolves to nothing says why, a pin is refused
-    // by name below, and a saved prebake reports that it was kept and not evaluated.
+    // The ★ library and the prebake, run in the page as the desktop runs them (see prebake.mjs).
     'POST /api/snippets/resolveDefs': async (body) => ({
-      defs: (Array.isArray(body?.want) ? body.want : []).map((w) => ({
-        kind: String(w?.kind ?? ''), id: String(w?.id ?? ''), scope: String(w?.scope ?? ''),
-        code: null, why: 'the library is not run in the browser build yet',
-      })),
+      defs: prebake
+        ? await prebake.resolveDefs(Array.isArray(body?.want) ? body.want : [])
+        : (Array.isArray(body?.want) ? body.want : []).map((w) => ({ kind: String(w?.kind ?? ''), id: String(w?.id ?? ''), scope: String(w?.scope ?? ''), code: null, why: 'this host does not run the library' })),
     }),
 
-    'GET /api/pinned': async () => ({ defs: [], code: (await storage.readPinned()) ?? '' }),
+    'GET /api/pinned': async () => ({ pinned: prebake ? await prebake.pinnedList() : [] }),
+    'POST /api/pinned': async (body) => {
+      if (!prebake) throw new Unsupported('the star library', 'this host does not run it');
+      return prebake.pin(body ?? {});
+    },
+    'POST /api/pinned/remove': async (body) => {
+      if (!prebake) throw new Unsupported('the star library', 'this host does not run it');
+      return prebake.unpin({ kind: String(body?.kind ?? ''), id: String(body?.id ?? ''), scope: String(body?.scope ?? '') });
+    },
 
     'GET /api/prebake': async () => ({ code: (await storage.readPrebake()) ?? '' }),
     'POST /api/prebake': async (body) => {
       await storage.writePrebake(body.code ?? '');
-      return { ok: true, errors: ['kept, but the browser build does not run the prebake yet'] };
+      return { ok: true, errors: prebake ? await prebake.run() : ['kept, but this host does not run the prebake'] };
     },
 
     'POST /api/blobs/hydrate': async (body) => storage.hydrateForExport(body.code ?? ''),
@@ -1011,7 +1239,29 @@ export function createHost({
     cueAvailable: false, cueSelected: null, cueActive: null, canReveal: false, canChoose: false,
     warning: null,
   };
-  routes['GET /api/audioDevices'] = async () => (outputs ? outputs.describe() : structuredClone(NO_OUTPUTS));
+  // The inputs picked in settings. Opening one is instant here - nothing restarts - and the
+  // language hears the new channel layout at once, so input("name", n) resolves on the next eval.
+  routes['GET /api/audioInputs'] = async () => (inputs
+    ? inputs.describe()
+    : { available: false, devices: [], selected: [], names: {}, layout: null, active: null, warning: null, canReveal: false });
+  routes['POST /api/audioInputs'] = async (body) => {
+    if (!inputs) throw new Unsupported('choosing audio inputs', 'this page has none');
+    if (body?.reveal) { await inputs.want(); return inputs.describe(); }
+    return inputs.choose(Array.isArray(body?.uids) ? body.uids : []);
+  };
+
+  // How many output channels, and the counts this device can take - the engine's to say.
+  const channelInfo = () => (typeof engine.outputChannelChoices === 'function'
+    ? { outputChannels: engine.outputChannels, outputChannelChoices: engine.outputChannelChoices(), audibleChannels: Math.max(...engine.outputChannelChoices()) }
+    : {});
+  routes['GET /api/audioDevices'] = async () => ({ ...(outputs ? await outputs.describe() : structuredClone(NO_OUTPUTS)), ...channelInfo() });
+  // More than two outputs: .o(n) reaches the other pairs. Instant here, as the device switch is.
+  routes['POST /api/audioOutputChannels'] = async (body) => {
+    if (typeof engine.setOutputChannels !== 'function') throw new Unsupported('choosing output channels', 'this engine is stereo only');
+    const n = engine.setOutputChannels(Number(body?.channels) || 2);
+    try { globalThis.localStorage?.setItem('poptart.outputChannels', String(n)); } catch { /* storage off */ }
+    return channelInfo();
+  };
   routes['POST /api/audioDevice'] = async (body) => {
     if (!outputs) throw new Unsupported('choosing an audio output', 'this host was built without one');
     if (body?.reveal) return outputs.reveal();

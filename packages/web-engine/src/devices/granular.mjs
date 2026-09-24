@@ -169,7 +169,7 @@ class GrainVoice {
     const sr = this.sampleRate;
     const data = sample?.data;
     const len = data ? data.length : 0;
-    const ratioBase = Math.pow(2, (this.note - 60 + p.pitch) / 12) * (sample ? sample.sampleRate / sr : 1);
+    const ratioBase = Math.pow(2, (this.note - 60 + p.pitch + (p.bend ?? 0)) / 12) * (sample ? sample.sampleRate / sr : 1);
     const window = p.window;
     // A drawn window is a table rather than a formula (see drawnWindow).
     const table = drawn ?? null;
@@ -300,6 +300,11 @@ export class GranularSynth {
 
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note }); }
+
+  /** The track's .bend(), in semitones: read as each grain starts. */
+  setBend(semitones) {
+    this.p.bend = Number.isFinite(semitones) ? semitones : 0;
+  }
 
   allNotesOff() {
     this.events.length = 0;

@@ -393,6 +393,20 @@
               <input id="wavetableFolderInput" type="file" webkitdirectory multiple hidden />
               <div id="wavetableFolderNote" class="files-note"></div>
             </section>
+            <!-- The browser build keeps everything in this browser's storage, and a public site
+                 with no accounts has no other way to hand somebody their work: export writes it
+                 all to one file, import puts a file back. Shown only in the browser build. -->
+            <section id="storeSection" class="hidden">
+              <h2>your work</h2>
+              <div class="settings-actions">
+                <button id="storeExport" class="small"
+                  title="Downloads one file holding everything this browser keeps as text: patterns, sessions, snippets, the library, the prebake and the captured device states. Files you added and recordings are audio and are not in it.">export…</button>
+                <button id="storeImport" class="small"
+                  title="Puts an exported file back. Anything already here with the same name is kept, not overwritten.">import…</button>
+              </div>
+              <input id="storeImportInput" type="file" accept=".json,application/json" hidden />
+              <div id="storeNote" class="files-note"></div>
+            </section>
             <!-- The credits: the license this is under and where its source is, which a page
                  served over a network has to offer (AGPL section 13), and whose code each device
                  is, read from the catalog. Shown on the desktop too; the device rows only where

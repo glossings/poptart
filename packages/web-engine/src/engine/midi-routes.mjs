@@ -21,6 +21,12 @@
 //   - Taking a route away releases whatever it is holding, because the offs that would have
 //     released it will no longer reach it.
 //
+// A route may also come from a MIDI DEVICE - `midi("dev:Keystep")`, `midikeys("Keystep")`,
+// `.midi("dev:Keystep")` into an effect. Its name is matched against the device's own name the
+// way the desktop matches one: a case-insensitive fragment of it, so `Keystep` finds "Arturia
+// KeyStep 32". A device route may listen on one channel (1-16) or on all of them (0), and it holds
+// its sounding notes by channel and key, since two channels can play the same key at once.
+//
 // It knows nothing about audio. `deliver` is handed every note it decides to play - the engine
 // turns those into messages to a synth or an effect.
 
@@ -49,11 +55,58 @@ export class MidiRoutes {
   get size() { return this.routes.length; }
 
   /** Sets the route into (target, slot), replacing whatever fed it before. */
-  add(name, targetTrackId, slot, { note = null, transpose = 0, pcs = null, noteMap = null } = {}) {
+  add(name, targetTrackId, slot, { note = null, transpose = 0, pcs = null, noteMap = null, channel = 0 } = {}) {
     // The held table is kept across the replacement on purpose: notes sounding through the old
     // route still need their offs to find what they played.
     this.routes = this.routes.filter((r) => !(r.targetTrackId === targetTrackId && r.slot === slot));
-    this.routes.push({ name: String(name), targetTrackId, slot, note, transpose: transpose ?? 0, pcs: pcs ?? null, noteMap: noteMap ?? null });
+    this.routes.push({ name: String(name), targetTrackId, slot, note, transpose: transpose ?? 0, pcs: pcs ?? null, noteMap: noteMap ?? null, channel: Math.max(0, Math.round(Number(channel) || 0)) });
+  }
+
+  /** Whether any route listens to a MIDI device - the host asks for MIDI access only then. */
+  get wantsDevices() { return this.routes.some((r) => r.name.startsWith('dev:')); }
+
+  /** The device-name fragments the routes are listening for, as written. */
+  devicePatterns() {
+    return [...new Set(this.routes.filter((r) => r.name.startsWith('dev:')).map((r) => r.name.slice(4)))];
+  }
+
+  /** Whether a device route listens to this device on this channel. */
+  _fromDevice(route, deviceName, channel) {
+    if (!route.name.startsWith('dev:')) return false;
+    const want = route.name.slice(4).trim().toLowerCase();
+    if (want && !String(deviceName).toLowerCase().includes(want)) return false;
+    return !route.channel || route.channel === channel;
+  }
+
+  /**
+   * One note edge from a MIDI device, fanned out to every route listening to it. `onPlayed` is
+   * told each note a route actually played - what the live log records, as the note sounds.
+   */
+  deviceEdge(deviceName, channel, note, velocity, atTime, isOn, onPlayed = null) {
+    for (const r of this.routes) {
+      if (!this._fromDevice(r, deviceName, channel)) continue;
+      const held = this._heldFor(r);
+      const key = `${channel}:${note}`;
+      if (isOn && velocity > 0) {
+        // A key struck again before it came up: release the first strike, so neither hangs.
+        const again = held.get(key);
+        if (again != null) {
+          this.deliver(false, r.targetTrackId, r.slot, again, 0, atTime);
+          onPlayed?.(r.targetTrackId, r.slot, again, 0, false);
+        }
+        const played = this.pitch(r, r.note ?? note, atTime);
+        if (played == null) { held.delete(key); continue; }
+        held.set(key, played);
+        this.deliver(true, r.targetTrackId, r.slot, played, velocity, atTime);
+        onPlayed?.(r.targetTrackId, r.slot, played, velocity, true);
+      } else {
+        const played = held.get(key);
+        if (played == null) continue;
+        held.delete(key);
+        this.deliver(false, r.targetTrackId, r.slot, played, 0, atTime);
+        onPlayed?.(r.targetTrackId, r.slot, played, 0, false);
+      }
+    }
   }
 
   /** Takes the route into (target, slot) away, releasing what it holds. */

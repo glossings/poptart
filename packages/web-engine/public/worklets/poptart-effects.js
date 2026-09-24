@@ -2449,14 +2449,37 @@ class DelayProcessor {
 /** How many blocks a ring holds: about two thirds of a second at the usual rate and block size. */
 const HISTORY_BLOCKS = 256;
 
+/**
+ * How many blocks a dynamics lane folds into one entry: about four seconds on the lane at the
+ * usual rate. At one block an entry the lane was two thirds of a second, which is a close-up of
+ * one hit rather than a picture of the pumping.
+ */
+const DYNAMICS_BLOCKS_PER_ENTRY = 6;
+
 class History {
-  constructor(size = HISTORY_BLOCKS, fill = 0) {
+  /**
+   * `per` blocks are folded into each entry, keeping the largest of them (`keep: 'max'`), the
+   * smallest (`'min'`) or the last - a level wants its peak and a gain reduction its deepest
+   * point, so a transient never falls between two entries and vanishes.
+   */
+  constructor(size = HISTORY_BLOCKS, fill = 0, { per = 1, keep = 'last' } = {}) {
     this.buf = new Float32Array(size).fill(fill);
     this.at = 0;
+    this.per = Math.max(1, Math.round(per));
+    this.keep = keep;
+    this.count = 0;
+    this.acc = 0;
   }
 
   push(v) {
-    this.buf[this.at] = v;
+    if (this.count === 0) this.acc = v;
+    else if (this.keep === 'max') this.acc = Math.max(this.acc, v);
+    else if (this.keep === 'min') this.acc = Math.min(this.acc, v);
+    else this.acc = v;
+    this.count += 1;
+    if (this.count < this.per) return;
+    this.count = 0;
+    this.buf[this.at] = this.acc;
     this.at = (this.at + 1) % this.buf.length;
   }
 
@@ -2558,8 +2581,8 @@ class CompressorProcessor {
     this.reduction = 0;      // the last gain reduction in dB, for the panel's curve
     this.level = -120;       // and the level the detector was at, which is where on the curve
     // The last second or so of both, one entry a block, for the lane the panel scrolls.
-    this.levels = new History(undefined, -120);
-    this.reductions = new History(undefined, 0);
+    this.levels = new History(undefined, -120, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'max' });
+    this.reductions = new History(undefined, 0, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'min' });
     this.blockSec = 128 / sampleRate;
   }
 
@@ -2597,7 +2620,7 @@ class CompressorProcessor {
     this.level = loudest;
     this.levels.push(loudest);
     this.reductions.push(reduction);
-    this.blockSec = count / this.detector.sampleRate;
+    this.blockSec = (count / this.detector.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
   }
 
   /**
@@ -2669,8 +2692,8 @@ class LimiterProcessor {
     this.gain = 1;
     this.reduction = 0;
     this.level = -120;       // the loudest the input reached this block, after the gain, in dB
-    this.levels = new History(undefined, -120);
-    this.reductions = new History(undefined, 0);
+    this.levels = new History(undefined, -120, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'max' });
+    this.reductions = new History(undefined, 0, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'min' });
     this.blockSec = 128 / sampleRate;
   }
 
@@ -2712,7 +2735,7 @@ class LimiterProcessor {
     this.level = loudest > 1e-6 ? 20 * Math.log10(loudest) : -120;
     this.levels.push(this.level);
     this.reductions.push(reduction < 1 ? 20 * Math.log10(reduction) : 0);
-    this.blockSec = count / this.sampleRate;
+    this.blockSec = (count / this.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
   }
 
   /** Where the signal is and how much is being held back, for the picture, and the last second of both. */
@@ -3634,9 +3657,10 @@ class DuckerProcessor {
     this.hit = 0;             // a marker for the picture: one at a note, falling away after it
     // The last second, one entry a block: the gain the dip left it at, the loudest the output
     // got, and the key's envelope - what the panel draws the dip over.
-    this.gains = new History(undefined, 1);
-    this.peaks = new History(undefined, 0);
-    this.keys = new History(undefined, 0);
+    // Two blocks an entry: about three beats at 120, enough to see the pump repeat.
+    this.gains = new History(undefined, 1, { per: 2, keep: 'min' });
+    this.peaks = new History(undefined, 0, { per: 2, keep: 'max' });
+    this.keys = new History(undefined, 0, { per: 2, keep: 'max' });
     this.blockSec = 128 / sampleRate;
   }
 
@@ -3729,7 +3753,7 @@ class DuckerProcessor {
     this.gains.push(this.gain);
     this.peaks.push(peak);
     this.keys.push(keyed ? this.env : byNotes ? this.hit : 0);
-    this.blockSec = count / sr;
+    this.blockSec = (count / sr) * 2;
   }
 
   /** The last second of the dip, the signal under it and the key driving it, for the picture. */
@@ -3941,8 +3965,8 @@ class MultibandProcessor {
     this.levels = [-120, -120, -120];
     this.changes = [0, 0, 0];
     // And the last second of each, for the lane beside each curve.
-    this.levelHistory = BANDS.map(() => new History(undefined, -120));
-    this.changeHistory = BANDS.map(() => new History(undefined, 0));
+    this.levelHistory = BANDS.map(() => new History(undefined, -120, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'max' }));
+    this.changeHistory = BANDS.map(() => new History(undefined, 0, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'min' }));
     this.blockSec = 128 / sampleRate;
     this.sampleRate = sampleRate;
   }
@@ -4022,7 +4046,7 @@ class MultibandProcessor {
       this.levelHistory[b].push(this.levels[b]);
       this.changeHistory[b].push(this.changes[b]);
     }
-    this.blockSec = count / this.sampleRate;
+    this.blockSec = (count / this.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
     }
@@ -4326,6 +4350,85 @@ class GrainEchoProcessor {
   }
 }
 
+// ---- src/devices/recorder.mjs ------------------------------------
+// The recorder tap: what a track's record panel meters, and what a bounce captures.
+//
+// One per track that is being watched or recorded, hung off the track's output. It does two
+// things, each switched on by a message: METER posts the loudest sample and the average power
+// about twenty times a second, which is the panel's live waveform; RECORD copies every frame
+// between two times on the context's clock and posts them back in chunks, then says it is done.
+// The window is kept to the sample - a frame's time is its index on the context's own counter -
+// so a bounce is exactly as long as the cycles it was asked for, and needs no trimming for time.
+
+/** How often a meter reading is posted, in frames: about twenty a second at 48 kHz. */
+const METER_FRAMES = 2400;
+
+/** How much is copied before a chunk is posted back: about half a second. */
+const CHUNK_FRAMES = 24000;
+
+class RecorderTap {
+  constructor(sampleRate, post) {
+    this.sampleRate = sampleRate;
+    this.post = post;
+    this.metering = false;
+    this.peak = 0;
+    this.sum = 0;
+    this.count = 0;
+    this.take = null;       // { id, from, to (frames), l, r, filled, written }
+  }
+
+  receive(message) {
+    if (message?.kind === 'meter') {
+      this.metering = !!message.on;
+      this.peak = 0; this.sum = 0; this.count = 0;
+    } else if (message?.kind === 'record') {
+      const from = Math.round(message.start * this.sampleRate);
+      const to = Math.round(message.end * this.sampleRate);
+      this.take = { id: message.id, from, to, l: new Float32Array(CHUNK_FRAMES), r: new Float32Array(CHUNK_FRAMES), filled: 0, written: 0 };
+    } else if (message?.kind === 'cancel') {
+      this.take = null;
+    }
+  }
+
+  /** One block. `frame` is the context's frame count at the block's first sample. */
+  process(inL, inR, count, frame) {
+    if (this.metering) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.max(Math.abs(inL ? inL[i] : 0), Math.abs(inR ? inR[i] : 0));
+        if (a > this.peak) this.peak = a;
+        const m = ((inL ? inL[i] : 0) + (inR ? inR[i] : 0)) * 0.5;
+        this.sum += m * m;
+      }
+      this.count += count;
+      if (this.count >= METER_FRAMES) {
+        this.post({ kind: 'level', peak: this.peak, rms: Math.sqrt(this.sum / this.count) });
+        this.peak = 0; this.sum = 0; this.count = 0;
+      }
+    }
+    const take = this.take;
+    if (!take) return;
+    for (let i = 0; i < count; i++) {
+      const f = frame + i;
+      if (f < take.from) continue;
+      if (f >= take.to) { this._flush(); this.post({ kind: 'done', id: take.id, frames: take.written }); this.take = null; return; }
+      take.l[take.filled] = inL ? inL[i] : 0;
+      take.r[take.filled] = inR ? inR[i] : (inL ? inL[i] : 0);
+      take.filled += 1;
+      if (take.filled === take.l.length) this._flush();
+    }
+  }
+
+  _flush() {
+    const take = this.take;
+    if (!take || !take.filled) return;
+    const l = take.l.slice(0, take.filled);
+    const r = take.r.slice(0, take.filled);
+    this.post({ kind: 'chunk', id: take.id, l, r }, [l.buffer, r.buffer]);
+    take.written += take.filled;
+    take.filled = 0;
+  }
+}
+
 // ---- src/worklets/shared.mjs -------------------------------------
 // What every poptart worklet needs from the descriptor it is built against.
 //
@@ -4561,3 +4664,24 @@ for (const [descriptor, Impl] of EFFECTS) {
     constructor(options) { super(options, descriptor, new Impl(sampleRate, 128)); }
   });
 }
+
+// The recorder tap (see devices/recorder.mjs): not an effect, so no descriptor and no parameters,
+// but it lives in this file so that loading the effects loads it too.
+registerProcessor('poptart-recorder', class extends AudioWorkletProcessor {
+  constructor(options) {
+    super(options);
+    this.alive = true;
+    this.tap = new RecorderTap(sampleRate, (m, transfer) => this.port.postMessage(m, transfer ?? []));
+    this.port.onmessage = (event) => {
+      if (isDispose(event.data)) { this.alive = false; return; }
+      this.tap.receive(event.data);
+    };
+  }
+
+  process(inputs) {
+    if (!this.alive) return false;
+    const input = inputs[0] ?? [];
+    this.tap.process(input[0] ?? null, input[1] ?? null, input[0]?.length ?? 128, currentFrame);
+    return true;
+  }
+});

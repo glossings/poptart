@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { History, HISTORY_BLOCKS } from './src/dsp/history.mjs';
+import { DYNAMICS_BLOCKS_PER_ENTRY, History, HISTORY_BLOCKS } from './src/dsp/history.mjs';
 import { COMPRESSOR, CompressorProcessor } from './src/devices/compressor.mjs';
 import { DUCKER, DuckerProcessor } from './src/devices/ducker.mjs';
 import { CHORUS, ChorusProcessor } from './src/devices/chorus.mjs';
@@ -43,6 +43,16 @@ function run(Impl, descriptor, blocks, over = {}, sidechain = null) {
   return fx.report();
 }
 
+test('a folding history keeps the peak or the trough of each group, so a transient is never lost', () => {
+  const peaks = new History(3, 0, { per: 2, keep: 'max' });
+  const troughs = new History(3, 0, { per: 2, keep: 'min' });
+  for (const v of [1, 5, 2, 0, 7, 3]) { peaks.push(v); troughs.push(-v); }
+  assert.deepEqual(peaks.snapshot(), [5, 2, 7]);
+  assert.deepEqual(troughs.snapshot(), [-5, -2, -7]);
+  peaks.push(100);
+  assert.deepEqual(peaks.snapshot(), [5, 2, 7], 'half a group is not an entry yet');
+});
+
 test('a compressor reports where it is and where it has been', () => {
   const report = run(CompressorProcessor, COMPRESSOR, 400, { threshold: -30, ratio: 8 });
   const curve = report.meters.curve;
@@ -50,10 +60,12 @@ test('a compressor reports where it is and where it has been', () => {
   assert.ok(curve.grDb < -10, `and is pulled well down, got ${curve.grDb}`);
   assert.equal(curve.history.inDb.length, HISTORY_BLOCKS);
   assert.equal(curve.history.grDb.length, HISTORY_BLOCKS);
-  // Kept as single floats, so near rather than equal.
-  assert.ok(Math.abs(curve.history.inDb[HISTORY_BLOCKS - 1] - curve.inDb) < 1e-5, 'the newest entry is the current reading');
-  assert.ok(Math.abs(curve.history.grDb[HISTORY_BLOCKS - 1] - curve.grDb) < 1e-5);
-  assert.ok(Math.abs(curve.history.blockSec - BLOCK / SR) < 1e-9);
+  // Each entry is several blocks folded together, so the newest is near the current reading on a
+  // steady signal rather than equal to it.
+  assert.ok(Math.abs(curve.history.inDb[HISTORY_BLOCKS - 1] - curve.inDb) < 0.5, 'the newest entry is the current reading');
+  assert.ok(Math.abs(curve.history.grDb[HISTORY_BLOCKS - 1] - curve.grDb) < 0.5);
+  assert.ok(Math.abs(curve.history.blockSec - (BLOCK / SR) * DYNAMICS_BLOCKS_PER_ENTRY) < 1e-9, 'an entry is that many blocks long');
+  assert.ok(HISTORY_BLOCKS * curve.history.blockSec > 3, 'and the lane spans several seconds');
   // The first entries are the attack: the reduction deepens from nothing.
   assert.ok(curve.history.grDb[0] > curve.history.grDb[HISTORY_BLOCKS - 1]);
 });

@@ -10,7 +10,7 @@
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
 import { Crossover } from '../dsp/biquad.mjs';
-import { History } from '../dsp/history.mjs';
+import { DYNAMICS_BLOCKS_PER_ENTRY, History } from '../dsp/history.mjs';
 import { Detector, dbOf, gainComputer } from './compressor.mjs';
 
 const BANDS = ['Low', 'Mid', 'High'];
@@ -95,8 +95,8 @@ export class MultibandProcessor {
     this.levels = [-120, -120, -120];
     this.changes = [0, 0, 0];
     // And the last second of each, for the lane beside each curve.
-    this.levelHistory = BANDS.map(() => new History(undefined, -120));
-    this.changeHistory = BANDS.map(() => new History(undefined, 0));
+    this.levelHistory = BANDS.map(() => new History(undefined, -120, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'max' }));
+    this.changeHistory = BANDS.map(() => new History(undefined, 0, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'min' }));
     this.blockSec = 128 / sampleRate;
     this.sampleRate = sampleRate;
   }
@@ -176,7 +176,7 @@ export class MultibandProcessor {
       this.levelHistory[b].push(this.levels[b]);
       this.changeHistory[b].push(this.changes[b]);
     }
-    this.blockSec = count / this.sampleRate;
+    this.blockSec = (count / this.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
     }

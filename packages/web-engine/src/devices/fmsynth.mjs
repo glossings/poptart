@@ -268,7 +268,8 @@ class FmVoice {
     }
     const inc = new Float64Array(OPS);
     for (let o = 0; o < OPS; o++) {
-      const base = p.fixed[o] ? 100 : this.currentHz;
+      // A fixed operator holds its frequency; the rest follow the note, bent.
+      const base = p.fixed[o] ? 100 : this.currentHz * (p.bend ? Math.pow(2, p.bend / 12) : 1);
       inc[o] = (base * p.ratio[o] * Math.pow(2, p.detune[o] / 1200)) / this.sampleRate;
       this.envs[o].set({ attack: p.attack[o], decay: p.decay[o], sustain: p.sustain[o], release: p.release[o], curve: -4 });
     }
@@ -362,6 +363,11 @@ export class FmSynth {
 
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note }); }
+
+  /** The track's .bend(), in semitones. */
+  setBend(semitones) {
+    this.params.bend = Number.isFinite(semitones) ? semitones : 0;
+  }
 
   allNotesOff() {
     this.events.length = 0;

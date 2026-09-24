@@ -56,6 +56,7 @@ export { SHAPER_MODES, SHAPER_INDEX } from './dsp/shapers.mjs';
 export { FRAME_LENGTH, BASIC_FRAME_NAMES, buildTable, builtInTables } from './dsp/tables.mjs';
 
 export { WebAudioEngine } from './engine/web-audio-engine.mjs';
+export { detectOnsets, monoOf } from './engine/sample-plan.mjs';
 export { MIX_BAND_COUNT, MIX_BAND_FREQS, MIX_BAND_VALUES, MIX_TRACK_MAX } from './engine/analysis.mjs';
 export { SUPPORTED_CHANNELS } from './engine/track.mjs';
 export { renderShape, renderRange } from './engine/modulators.mjs';

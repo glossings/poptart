@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { FakeAudioContext, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
+import { panGains } from './src/engine/track.mjs';
 import { renderRange, renderShape } from './src/engine/modulators.mjs';
 import { SPECTRUM_BAND_FREQS, SpectrumTap } from './src/engine/analysis.mjs';
 
@@ -112,7 +113,7 @@ test('birth values are applied, so a track can be born silent', () => {
   const { engine } = makeEngine();
   const track = engine.createTrack('t1', { gain: 0, pan: -1 });
   assert.ok(track.chainIn.gain.rampedTo(0));
-  assert.ok(track.panner.pan.rampedTo(-1));
+  assert.ok(track.panL.gain.rampedTo(Math.SQRT2) && track.panR.gain.rampedTo(0), 'hard left: the left side +3 dB, the right silent');
 });
 
 test('an instrument becomes the track source and reaches the master', () => {
@@ -271,12 +272,21 @@ test('the channel strip controls this build has work; the ones it lacks warn onc
   engine.setParam('t1', -1, 'pan', 0.25, 0);
   engine.setParam('t1', -1, 'dry', 0, 0);
   assert.ok(track.chainIn.gain.rampedTo(0.5));
-  assert.ok(track.panner.pan.rampedTo(0.25));
+  const [l, r] = panGains(0.25);
+  assert.ok(track.panL.gain.rampedTo(l) && track.panR.gain.rampedTo(r));
   assert.ok(track.dryGain.gain.rampedTo(0));
 
-  engine.setParam('t1', -1, 'bassmono', 1, 0);
-  engine.setParam('t1', -1, 'bassmono', 1, 0);
-  const said = warnings.filter((w) => w.includes('bassmono'));
+  // Width and bass mono: the side scaled, and high-passed at the cutoff in place of the dry side.
+  engine.setParam('t1', -1, 'width', 2, 0);
+  assert.ok(track.width.gain.rampedTo(2));
+  engine.setParam('t1', -1, 'bassmono', 150, 0);
+  assert.ok(track.bassHp.frequency.rampedTo(150) && track.sideHigh.gain.rampedTo(1) && track.sideDry.gain.rampedTo(0));
+  assert.deepEqual(warnings, []);
+
+  // A DJ desk control is not a thing a track in the browser has.
+  engine.setParam('t1', -1, 'djf', 1, 0);
+  engine.setParam('t1', -1, 'djf', 1, 0);
+  const said = warnings.filter((w) => w.includes('djf'));
   assert.equal(said.length, 1, 'the gap belongs once, not once per tick');
   assert.ok(said[0].includes('not implemented'));
 });
@@ -331,11 +341,14 @@ test('a track can read a bus, which is how a group hears its members', () => {
   assert.equal(engine.buses.get('drums').reaches(group.input), false);
 });
 
-test('an input this build cannot give warns once and stays quiet', () => {
+test('a MIDI device route asks the host for MIDI access, and warns about nothing', () => {
   const { engine, warnings } = makeEngine();
-  engine.setInputSource('t1', 'midi', 'Keystation', 0, null, null, 0, null);
-  engine.setMidiNotes('t1', 'Keystation', 0, null, 0, null);
-  assert.equal(warnings.filter((w) => w.includes('MIDI input')).length, 1);
+  let asked = 0;
+  engine.onMidiWanted = () => { asked += 1; };
+  engine.setInputSource('t1', 'midi', 'dev:Keystation', 0, null, null, 0, null);
+  engine.setMidiNotes('t2', 'Keystation', 0, null, 0, null);
+  assert.equal(asked, 2);
+  assert.deepEqual(warnings, []);
 });
 
 test('an LFO takes the parameter over: a scalar set while it runs is ignored', () => {
@@ -624,9 +637,10 @@ test('a sample plays, and a missing one is reported rather than thrown', () => {
   assert.equal(played.fileSec, 2);
 
   assert.deepEqual(engine.playSample('t1', 'nope', {}, 0, 1), { skipped: 'source not ready' });
-  assert.deepEqual(engine.playSample('t1', 'kit', { vel: 0 }, 0, 1), { skipped: 'silent' });
+  // The desktop's words for the same three (osc-engine's playSample), so .log() reads alike.
+  assert.deepEqual(engine.playSample('t1', 'kit', { vel: 0 }, 0, 1), { skipped: 'vel 0' });
   assert.deepEqual(engine.playSample('t1', 'kit', { speed: 0 }, 0, 1), { skipped: 'speed 0' });
-  assert.deepEqual(engine.playSample('t1', 'kit', { begin: 0.5, end: 0.5 }, 0, 1), { skipped: 'empty window' });
+  assert.deepEqual(engine.playSample('t1', 'kit', { begin: 0.5, end: 0.5 }, 0, 1), { skipped: 'empty begin..end window' });
 });
 
 test('a sample note repitches around middle C, as it does on the desktop side', () => {
@@ -855,11 +869,24 @@ test('a reversed sample is cut where the window says, entered from the far end',
   const buffer = ctx.createBuffer(1, 8, 4); // two seconds
   engine.createTrack('t1');
 
-  engine.playSample('t1', 'kit', { speed: -1, begin: 0.25, end: 0.5, vel: 1 }, 0, 10);
+  // .loop(0): one backwards pass. The window is 0.5s..1.0s of a two-second file, so reversed it
+  // starts 1.0s from the far end.
+  engine.playSample('t1', 'kit', { speed: -1, begin: 0.25, end: 0.5, vel: 1, loop: 0 }, 0, 10);
   const source = ctx.created.filter((n) => n.kind === 'bufferSource').pop();
-  // The window is 0.5s..1.0s of a two-second file, so reversed it starts 1.0s from the far end.
   assert.ok(Math.abs(source.started.offset - 1) < 1e-9, `entered at ${source.started.offset}`);
   assert.ok(Math.abs(source.started.duration - 0.5) < 1e-9, `for ${source.started.duration}`);
+});
+
+test('a negative speed loops by default, backwards out of begin round the whole file, as on the desktop', () => {
+  const { ctx, engine } = makeEngine({ samples: { get: () => buffer } });
+  const buffer = ctx.createBuffer(1, 8, 4); // two seconds
+  engine.createTrack('t1');
+  const info = engine.playSample('t1', 'kit', { speed: -1, begin: 0.25, vel: 1 }, 0, 10);
+  assert.equal(info.loop, 1);
+  const source = ctx.created.filter((n) => n.kind === 'bufferSource').pop();
+  assert.equal(source.loop, true);
+  assert.ok(Math.abs(source.started.offset - 1.5) < 1e-9, 'entered at begin, mirrored into the reversed copy');
+  assert.deepEqual([source.loopStart, source.loopEnd], [0, 2], 'the loop is the whole file');
 });
 
 test('the reversed copy of a sample is made once, however many notes play it', () => {
@@ -904,4 +931,57 @@ test('a spectrum tap reads the loudest bin of each band, over the audible range'
   assert.equal(Math.max(...db), -10, 'the harmonic is read at its level');
   assert.equal(db.filter((v) => v === -10).length, 1, 'in one band');
   tap.dispose();
+});
+
+// --- bend, and which outputs a track plays to ---------------------------------------------------
+
+test('.bend() reaches the instrument timed, and every sample voice through the track\'s detune', () => {
+  const { engine, warnings } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(4800), rootNote: 60 }) } });
+  engine.loadInstrument('t1', 'Wavetable');
+  engine.setParam('t1', -1, 'bend', 2, 1.5);
+  const synth = engine.tracks.get('t1').source.node;
+  assert.deepEqual(synth.messages.filter((m) => m.kind === 'bend').map((m) => [m.semitones, m.time]), [[2, 1.5]]);
+  const track = engine.tracks.get('t1');
+  assert.ok(track.bendNode.offset.rampedTo(200), 'in cents, for the sample voices');
+  engine.playSample('t1', 'pt_kit', { vel: 1 }, 2, 2.5);
+  const voice = engine.ctx.created.filter((n) => n.kind === 'bufferSource').at(-1);
+  assert.ok(track.bendNode.outputs.includes(voice.detune), 'a voice follows the bend while it sounds');
+  engine.setParam('t1', -1, 'bendrange', 12, 0);
+  assert.deepEqual(warnings, [], 'the range is a MIDI matter, and quietly accepted');
+});
+
+test('.o() puts a track on the pair it names, wrapped at the pairs the output has', () => {
+  const { ctx, engine } = makeEngine();
+  ctx.destination.maxChannelCount = 8;
+  assert.deepEqual(engine.outputChannelChoices(), [2, 4, 6, 8]);
+  engine.createTrack('t1');
+  const track = engine.tracks.get('t1');
+  engine.setParam('t1', -1, 'out', 3, 0);
+  assert.ok(track.dryGain.outputs.includes(engine.master), 'stereo: every pair folds onto the first');
+  assert.equal(engine.setOutputChannels(6), 6);
+  assert.equal(ctx.destination.channelCount, 6);
+  const [split] = track._outNodes;
+  const merge = track._outNodes[1];
+  assert.deepEqual(split.links.filter((l) => l.target === merge).map((l) => [l.output, l.input]), [[0, 4], [1, 5]], '.o(3) is channels 5 and 6');
+  engine.setParam('t1', -1, 'out', 4, 0);
+  assert.ok(track.dryGain.outputs.includes(engine.master), '.o(4) of three pairs wraps to the first');
+  assert.equal(engine.setOutputChannels(7), 6, 'an odd count is taken down to a pair');
+});
+
+test('.grain() plays a cloud: a grain every 1/rate seconds, read where the track says, leveled by overlap', () => {
+  const { ctx, engine } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(48000), rootNote: 60 }) } });
+  engine.createTrack('t1');
+  engine.setParam('t1', -1, 'grainrate', 40, 0);
+  engine.setParam('t1', -1, 'grainsize', 0.05, 0);
+  const before = ctx.created.filter((n) => n.kind === 'bufferSource').length;
+  const info = engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1, begin: 0.5 }, 0, 1);
+  assert.equal(info.grain, true);
+  const grains = ctx.created.filter((n) => n.kind === 'bufferSource').slice(before);
+  // The first lay reaches 100 ms ahead: at 40 a second that is grains at 0, 25, 50 and 75 ms.
+  assert.deepEqual(grains.map((g) => Math.round(g.started.when * 1000)), [0, 25, 50, 75]);
+  assert.ok(grains.every((g) => Math.abs(g.started.offset - 0.5) < 1e-9), 'read from the event\'s begin, half way into the file');
+  assert.ok(grains.every((g) => Math.abs(g.stopped.when - g.started.when - 0.055) < 1e-9), 'each as long as the grain size');
+  // An event's own seed values win for its first grains.
+  engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1, grainRate: 10, grainSize: 0.2 }, 0, 1);
+  assert.equal(engine.tracks.get('t1').grain.rate, 10);
 });

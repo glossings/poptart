@@ -318,6 +318,11 @@ export class WavetableSynth {
   }
 
   /** Releases everything, the way the host's hush does. */
+  /** The track's .bend(), in semitones: every voice, sounding or to come. */
+  setBend(semitones) {
+    this.params.bend = Number.isFinite(semitones) ? semitones : 0;
+  }
+
   allNotesOff() {
     this.events.length = 0;
     for (const v of this.voices) if (v.active) v.noteOff();

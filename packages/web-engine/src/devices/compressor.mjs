@@ -9,7 +9,7 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
-import { History } from '../dsp/history.mjs';
+import { DYNAMICS_BLOCKS_PER_ENTRY, History } from '../dsp/history.mjs';
 
 export const COMPRESSOR = defineDevice({
   id: 'Compressor',
@@ -86,8 +86,8 @@ export class CompressorProcessor {
     this.reduction = 0;      // the last gain reduction in dB, for the panel's curve
     this.level = -120;       // and the level the detector was at, which is where on the curve
     // The last second or so of both, one entry a block, for the lane the panel scrolls.
-    this.levels = new History(undefined, -120);
-    this.reductions = new History(undefined, 0);
+    this.levels = new History(undefined, -120, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'max' });
+    this.reductions = new History(undefined, 0, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'min' });
     this.blockSec = 128 / sampleRate;
   }
 
@@ -125,7 +125,7 @@ export class CompressorProcessor {
     this.level = loudest;
     this.levels.push(loudest);
     this.reductions.push(reduction);
-    this.blockSec = count / this.detector.sampleRate;
+    this.blockSec = (count / this.detector.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
   }
 
   /**

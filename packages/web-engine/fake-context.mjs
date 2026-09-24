@@ -43,8 +43,11 @@ export class FakeNode {
     Object.assign(this, extra);
   }
 
-  connect(target) {
+  connect(target, output = 0, input = 0) {
     this.outputs.push(target);
+    // Which output went to which input, for the nodes where that is the point: a splitter's
+    // channel N into a merger's side.
+    (this.links ??= []).push({ target, output, input });
     if (target instanceof FakeParam) target.connectedFrom.push(this);
     return target instanceof FakeParam ? undefined : target;
   }
@@ -154,6 +157,10 @@ export class FakeAudioContext {
 
   createChannelSplitter(count = 2) {
     return this._make(new FakeNode('splitter', { channels: count }));
+  }
+
+  createChannelMerger(count = 2) {
+    return this._make(new FakeNode('merger', { channels: count }));
   }
 
   createBuffer(channels, length, sampleRate) {

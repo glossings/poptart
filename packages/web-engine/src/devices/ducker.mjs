@@ -70,9 +70,10 @@ export class DuckerProcessor {
     this.hit = 0;             // a marker for the picture: one at a note, falling away after it
     // The last second, one entry a block: the gain the dip left it at, the loudest the output
     // got, and the key's envelope - what the panel draws the dip over.
-    this.gains = new History(undefined, 1);
-    this.peaks = new History(undefined, 0);
-    this.keys = new History(undefined, 0);
+    // Two blocks an entry: about three beats at 120, enough to see the pump repeat.
+    this.gains = new History(undefined, 1, { per: 2, keep: 'min' });
+    this.peaks = new History(undefined, 0, { per: 2, keep: 'max' });
+    this.keys = new History(undefined, 0, { per: 2, keep: 'max' });
     this.blockSec = 128 / sampleRate;
   }
 
@@ -165,7 +166,7 @@ export class DuckerProcessor {
     this.gains.push(this.gain);
     this.peaks.push(peak);
     this.keys.push(keyed ? this.env : byNotes ? this.hit : 0);
-    this.blockSec = count / sr;
+    this.blockSec = (count / sr) * 2;
   }
 
   /** The last second of the dip, the signal under it and the key driving it, for the picture. */

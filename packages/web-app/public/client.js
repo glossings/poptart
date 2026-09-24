@@ -2208,7 +2208,9 @@ async function fetchMidiDevices() {
   try {
     midiDevices = await api('GET', '/api/midiDevices');
     if (firstFetch && midiDevices.length === 0) {
-      logLine('midikeys/midicc: engine reports no MIDI sources - they are scanned once at engine start, so restart poptart after plugging a device in', true);
+      logLine(window.__poptartHostReady
+        ? 'midikeys/midicc: no MIDI devices are connected - plug one in and it is picked up as it arrives'
+        : 'midikeys/midicc: engine reports no MIDI sources - they are scanned once at engine start, so restart poptart after plugging a device in', true);
     }
   } catch (err) {
     if (firstFetch) logLine(`midikeys/midicc: device list unavailable (${err.message})`, true);
@@ -17656,7 +17658,23 @@ audioCueSelect.addEventListener('change', async () => {
   }
 });
 
+/** The browser build's channel count: set in place, nothing restarts. */
+async function chooseWebOutputChannels(channels) {
+  audioChannelSelect.disabled = true;
+  try {
+    const res = await api('POST', '/api/audioOutputChannels', { channels });
+    renderChannelChoices(res.outputChannelChoices, res.outputChannels, res.audibleChannels);
+    logLine(res.outputChannels === 2 ? 'every .o(n) now plays to channels 1/2' : `.o(n) now wraps at ${res.outputChannels / 2} stereo pairs`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    refreshAudioDevices().catch(() => {});
+  } finally {
+    audioChannelSelect.disabled = false;
+  }
+}
+
 audioChannelSelect.addEventListener('change', async () => {
+  if (window.__poptartHostReady) { chooseWebOutputChannels(Number(audioChannelSelect.value)); return; }
   const channels = Number(audioChannelSelect.value);
   if (!scanSurvivesRestart('the output channel count')) {
     refreshAudioDevices().catch(() => {});
@@ -17809,7 +17827,7 @@ function setAudioDeviceWarning(warning) {
 
 async function refreshAudioInputs() {
   try {
-    const { available, devices, selected, names, layout, active, warning } = await api('GET', '/api/audioInputs');
+    const { available, devices, selected, names, layout, active, warning, canReveal } = await api('GET', '/api/audioInputs');
     audioInputNeedsApply = !!warning;
     audioInputSelection = new Set(selected);
     audioInputSaved = [...audioInputSelection].sort().join(',');
@@ -17820,6 +17838,22 @@ async function refreshAudioInputs() {
       // No helper (non-macOS, or a checkout without the built binary): the booted device's own
       // inputs still work with absolute channel numbers, there just can't be more than one device.
       audioInputList.textContent = 'combining several input devices is unavailable on this system';
+      audioInputApply.disabled = true;
+      renderAudioInputLayout(layout, active);
+      return;
+    }
+    if (!devices.length && canReveal) {
+      // The browser build: inputs are unnamed until the page may use a microphone.
+      audioInputList.textContent = '';
+      const ask = document.createElement('button');
+      ask.className = 'small';
+      ask.textContent = 'list inputs… (asks for the microphone)';
+      ask.title = 'the browser names its audio inputs only to a page allowed to use one - this opens the default input, which input() would open anyway';
+      ask.addEventListener('click', async () => {
+        try { await api('POST', '/api/audioInputs', { reveal: true }); } catch (e) { logLine(e.message ?? String(e), true); }
+        refreshAudioInputs().catch(() => {});
+      });
+      audioInputList.appendChild(ask);
       audioInputApply.disabled = true;
       renderAudioInputLayout(layout, active);
       return;
@@ -17861,7 +17895,8 @@ async function refreshAudioInputs() {
       });
     }
 
-    for (const d of devices) addRow(d.uid, `${d.name} · ${d.inChannels} in`);
+    // A browser says how many channels an input has only once it is open.
+    for (const d of devices) addRow(d.uid, d.inChannels ? `${d.name} · ${d.inChannels} in` : d.name);
     renderAudioInputLayout(layout, active);
     syncAudioInputApply();
   } catch (e) {
@@ -17870,8 +17905,30 @@ async function refreshAudioInputs() {
   }
 }
 
+/**
+ * The browser build's input switch: the picked inputs open in place, and nothing restarts or
+ * stops playing, so none of the desktop's restart handling applies.
+ */
+async function applyWebAudioInputs(uids) {
+  audioInputApply.disabled = true;
+  try {
+    const { layout, warning } = await api('POST', '/api/audioInputs', { uids });
+    audioInputSaved = [...uids].sort().join(',');
+    audioInputNeedsApply = false;
+    audioInputs = layout ?? null;
+    renderAudioInputLayout(layout, null);
+    setAudioDeviceWarning(warning);
+    logLine(uids.length ? `audio inputs open: ${(layout ?? []).map((d) => d.name).join(' + ')}` : 'audio inputs: the default input, when a pattern asks for one');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    syncAudioInputApply();
+  }
+}
+
 audioInputApply.addEventListener('click', async () => {
   const uids = [...audioInputSelection];
+  if (window.__poptartHostReady) { applyWebAudioInputs(uids); return; }
   if (!scanSurvivesRestart('the input devices')) return; // the selection stands; apply again later
   audioInputApply.disabled = true;
   engineStatus.textContent = 'restarting engine…';
@@ -18139,6 +18196,57 @@ async function readWavetables(files) {
     devicesEl.innerHTML = `Devices built from other projects' code, each under its own license (${link(about.notices, 'notices')}):<br>${lines.join('<br>')}`;
   } catch { /* the desktop has no compiled devices, and no route to ask */ }
 })();
+
+// ---------------------------------------------------------------------------------------------
+// Settings tab - your work (the browser build only). Everything this browser keeps as text, as
+// one file and back: the only way somebody takes their work off a public site with no accounts.
+// ---------------------------------------------------------------------------------------------
+
+const storeSection = document.getElementById('storeSection');
+const storeNote = document.getElementById('storeNote');
+const storeImportInput = document.getElementById('storeImportInput');
+
+async function exportStore() {
+  storeNote.textContent = 'exporting…';
+  try {
+    const bundle = await api('GET', '/api/export');
+    const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `poptart-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    const n = Object.keys(bundle.files ?? {}).length;
+    storeNote.textContent = `exported ${n} record${n === 1 ? '' : 's'}`;
+  } catch (e) {
+    storeNote.textContent = e.message ?? String(e);
+  }
+}
+
+async function importStore(file) {
+  storeNote.textContent = `reading ${file.name}…`;
+  try {
+    const bundle = JSON.parse(await file.text());
+    const { written, skipped } = await api('POST', '/api/import', { bundle, overwrite: false });
+    storeNote.textContent = `imported ${written}${skipped ? ` · kept ${skipped} already here` : ''}`;
+    refreshPatternFiles().catch(() => {});
+  } catch (e) {
+    storeNote.textContent = e instanceof SyntaxError ? `${file.name} is not a poptart export` : (e.message ?? String(e));
+  }
+}
+
+if (window.__poptartHostReady) {
+  storeSection.classList.remove('hidden');
+  document.getElementById('storeExport').addEventListener('click', exportStore);
+  document.getElementById('storeImport').addEventListener('click', () => storeImportInput.click());
+  storeImportInput.addEventListener('change', () => {
+    const file = storeImportInput.files?.[0];
+    storeImportInput.value = '';
+    if (file) importStore(file);
+  });
+}
 
 if (window.__poptartHostReady) {
   wavetableSection.classList.remove('hidden');
@@ -19551,7 +19659,10 @@ const PACK_BUFFER_CACHE = 48;
 async function packLoadBuffer(abs) {
   if (packBuffers.has(abs)) return packBuffers.get(abs);
   previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
-  const res = await fetch(`/api/sampleAudio?file=${encodeURIComponent(abs)}`);
+  let url = `/api/sampleAudio?file=${encodeURIComponent(abs)}`;
+  // The browser build has no server to stream from: the host answers with where the file is.
+  if (window.__poptartHostReady) ({ url } = await api('GET', url));
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`can't read ${packBasename(abs)} (${res.status})`);
   const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
   if (packBuffers.size >= PACK_BUFFER_CACHE) packBuffers.delete(packBuffers.keys().next().value);
@@ -23641,6 +23752,19 @@ document.addEventListener('dragover', (e) => {
 document.addEventListener('drop', (e) => {
   endFileDrag();
   const file = midiFileIn(e.dataTransfer);
+  // The browser build: audio dropped on the window is kept in this browser's own files, since a
+  // page has no disk to find it on - and, dropped on the code, written in as the s() that plays it.
+  const audio = !file && window.__poptartHostReady
+    ? Array.from(e.dataTransfer?.files ?? []).filter((f) => isAudioPath(f.name))
+    : [];
+  if (audio.length) {
+    e.preventDefault();
+    e.stopPropagation();
+    const onCode = cm.getWrapperElement().contains(e.target);
+    const at = onCode ? cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window') : null;
+    keepDroppedAudio(audio, at);
+    return;
+  }
   if (!file) {
     // Not ours: CodeMirror inserts a dropped text file itself, so leave drops on the editor to it.
     // Elsewhere, swallow the drop rather than letting the browser navigate away from the patch.
@@ -23651,6 +23775,22 @@ document.addEventListener('drop', (e) => {
   e.stopPropagation();
   openMidiImport(file);
 }, true);
+
+/** Files dropped on the browser build's window, into "your files" - and into the code at `at`. */
+async function keepDroppedAudio(files, at) {
+  const refs = [];
+  for (const file of files) {
+    try {
+      const res = await api('POST', '/api/files/add', { name: file.name, bytes: await file.arrayBuffer(), pack: 'files' });
+      refs.push(res.ref ?? `files:${file.name}`);
+    } catch (err) {
+      logLine(`${file.name}: ${err.message ?? err}`, true);
+    }
+  }
+  if (!refs.length) return;
+  if (at) cm.replaceRange(refs.map((r) => `s(${JSON.stringify(r)})`).join('\n'), at);
+  logLine(`kept in this browser: ${refs.join(', ')}${at ? '' : ` - play with s(${JSON.stringify(refs[0])})`}`);
+}
 
 const midiErr = (e) => String(e?.message ?? e).replace(/^\[[\w-]+\]\s*/, '');
 

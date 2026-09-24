@@ -148,12 +148,50 @@ test('.midi() into an effect that is not played by notes says so by name', () =>
   assert.equal(notes(slotNode(engine, 'keys', 1)).length, 0);
 });
 
-test('a MIDI device is still refused by name, and says a track\'s notes do work', () => {
+test('a device plays the track that names it by a fragment of its name, on its channel', () => {
   const { engine, warnings } = makeEngine();
   engine.loadInstrument('keys', 'Wavetable');
-  engine.setInputSource('keys', 'midi', 'dev:Keystep', 0);
-  assert.match(warnings.join('\n'), /MIDI devices are not wired up/);
-  assert.match(warnings.join('\n'), /track's notes/);
+  engine.loadInstrument('pad', 'Wavetable');
+  engine.setMidiNotes('keys', 'keystep', 0, null, 12, null);
+  engine.setInputSource('pad', 'midi', 'dev:KeyStep', 2, null, null, 0, null);
+  const live = [];
+  engine.onLiveNote = (...edge) => live.push(edge);
+  engine.midiIn('Arturia KeyStep 32', 'on', 1, 60, 0.5, 3);
+  engine.midiIn('Arturia KeyStep 32', 'on', 2, 62, 0.5, 3);
+  engine.midiIn('Arturia KeyStep 32', 'off', 1, 60, 0, 4);
+  engine.midiIn('Some Other Thing', 'on', 1, 64, 1, 5);
+  assert.deepEqual(notes(instrumentOf(engine, 'keys')).map((m) => [m.kind, m.note]), [['noteOn', 72], ['noteOn', 74], ['noteOff', 72]], 'all channels, an octave up');
+  assert.deepEqual(notes(instrumentOf(engine, 'pad')).map((m) => [m.kind, m.note]), [['noteOn', 62]], 'channel 2 only');
+  assert.deepEqual(live.map(([t, n, , on]) => [t, n, on]), [['keys', 72, true], ['keys', 74, true], ['pad', 62, true], ['keys', 72, false]]);
+  assert.deepEqual(warnings, []);
+});
+
+test('a key struck twice before it comes up releases the first strike', () => {
+  const { engine } = makeEngine();
+  engine.loadInstrument('keys', 'Wavetable');
+  engine.setMidiNotes('keys', 'keystep', 0, null, 0, null);
+  engine.midiIn('KeyStep', 'on', 1, 60, 1, 1);
+  engine.midiIn('KeyStep', 'on', 1, 60, 1, 2);
+  engine.midiIn('KeyStep', 'off', 1, 60, 0, 3);
+  assert.deepEqual(notes(instrumentOf(engine, 'keys')).map((m) => m.kind), ['noteOn', 'noteOff', 'noteOn', 'noteOff']);
+});
+
+test('a controller reaches every midicc() naming a fragment of its device, on its channel', () => {
+  const { engine } = makeEngine();
+  engine.loadInstrument('keys', 'Wavetable');
+  engine.loadEffect('keys', 'Filter', 1);
+  engine.setParamCC('keys', 1, 'Cutoff', { device: 'twister', cc: 12, channel: null, min: 0, max: 1 });
+  engine.setParamCC('keys', 1, 'Resonance', { device: 'Twister', cc: 12, channel: 3, min: 0, max: 1 });
+  const conns = engine.modulators.get('keys');
+  const cut = conns.get('1:Cutoff');
+  const res = conns.get('1:Resonance');
+  const fed = [];
+  cut.feed = (v) => fed.push(['cutoff', v]);
+  res.feed = (v) => fed.push(['res', v]);
+  engine.midiIn('Midi Fighter Twister', 'cc', 1, 12, 0.25, 0);
+  engine.midiIn('Midi Fighter Twister', 'cc', 3, 12, 0.75, 0);
+  engine.midiIn('Midi Fighter Twister', 'cc', 1, 13, 0.5, 0);
+  assert.deepEqual(fed, [['cutoff', 0.25], ['cutoff', 0.75], ['res', 0.75]]);
 });
 
 // --- the ducker, played by notes ---------------------------------------------------------------
@@ -197,4 +235,42 @@ test('an unrouted ducker follows the clock, and a note with no velocity triggers
   fx.noteOn(36, 1, 0.5);
   fx.setNoteRoute(false);
   assert.deepEqual(fx.pending, [], 'clearing the route forgets notes still to come');
+});
+
+// --- hardware audio input -----------------------------------------------------------------------
+
+test('input() takes its channels off the open inputs, and waits for them when none are open', () => {
+  const { ctx, engine } = makeEngine();
+  engine.loadInstrument('vox', 'Wavetable');
+  let wanted = 0;
+  engine.onAudioInputWanted = () => { wanted += 1; };
+  // input(3, 4): 0-indexed 2 and 3, set before anything is open.
+  engine.setInputSource('vox', 'audio', 'dev:', 0, null, [2, 3]);
+  assert.equal(wanted, 1, 'the host is asked for an input');
+  assert.equal(engine.tracks.get('vox')._headSource ?? null, null);
+  const hw = ctx.createGain();
+  engine.setHardwareInput(hw, 4);
+  const track = engine.tracks.get('vox');
+  const pick = track._headSource;
+  assert.ok(pick, 'wired once the input arrives');
+  const splitter = hw.outputs[0];
+  assert.deepEqual(splitter.links.filter((l) => l.target === pick).map((l) => [l.output, l.input]), [[2, 0], [3, 1]]);
+  assert.ok(pick.reaches(track.input));
+  // A mono input is heard on both sides.
+  engine.setInputSource('vox', 'audio', 'dev:', 0, null, [1, -1]);
+  const mono = engine.tracks.get('vox')._headSource;
+  assert.deepEqual(engine._hw.splitter.links.filter((l) => l.target === mono).map((l) => [l.output, l.input]), [[1, 0], [1, 1]]);
+  engine.clearInputSource('vox');
+  assert.equal(engine.tracks.get('vox')._headSource, null);
+});
+
+test('a hardware input into a sidechain keys the effect', () => {
+  const { ctx, engine } = makeEngine();
+  engine.loadInstrument('keys', 'Wavetable');
+  engine.loadEffect('keys', 'Ducker', 1);
+  engine.setHardwareInput(ctx.createGain(), 2);
+  engine.injectAudio('keys', 1, 'dev:', 1, [0, 1]);
+  assert.ok(engine.tracks.get('keys').sidechains.get(1), 'the sidechain is set');
+  engine.clearAudioInject('keys', 1);
+  assert.equal(engine.tracks.get('keys').sidechains.get(1), undefined);
 });

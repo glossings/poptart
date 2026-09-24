@@ -2143,6 +2143,8 @@ class VoiceParams {
 
     this.glide = 0;
     this.level = 0.7;
+    // Pitch bend in semitones, on every voice at once - the track's .bend(), not a knob.
+    this.bend = 0;
 
     /** Per-sample arrays for the fields a signal is moving this block, or null. Same names. */
     this.a = {};
@@ -2286,7 +2288,7 @@ class WavetableVoice {
     } else {
       this.currentHz = this.targetHz;
     }
-    const baseHz = this.currentHz;
+    const baseHz = p.bend ? this.currentHz * Math.pow(2, p.bend / 12) : this.currentHz;
 
     const osc1 = this.osc1;
     const osc2 = this.osc2;
@@ -2814,6 +2816,11 @@ class WavetableSynth {
   }
 
   /** Releases everything, the way the host's hush does. */
+  /** The track's .bend(), in semitones: every voice, sounding or to come. */
+  setBend(semitones) {
+    this.params.bend = Number.isFinite(semitones) ? semitones : 0;
+  }
+
   allNotesOff() {
     this.events.length = 0;
     for (const v of this.voices) if (v.active) v.noteOff();
@@ -3181,7 +3188,8 @@ class FmVoice {
     }
     const inc = new Float64Array(OPS);
     for (let o = 0; o < OPS; o++) {
-      const base = p.fixed[o] ? 100 : this.currentHz;
+      // A fixed operator holds its frequency; the rest follow the note, bent.
+      const base = p.fixed[o] ? 100 : this.currentHz * (p.bend ? Math.pow(2, p.bend / 12) : 1);
       inc[o] = (base * p.ratio[o] * Math.pow(2, p.detune[o] / 1200)) / this.sampleRate;
       this.envs[o].set({ attack: p.attack[o], decay: p.decay[o], sustain: p.sustain[o], release: p.release[o], curve: -4 });
     }
@@ -3275,6 +3283,11 @@ class FmSynth {
 
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note }); }
+
+  /** The track's .bend(), in semitones. */
+  setBend(semitones) {
+    this.params.bend = Number.isFinite(semitones) ? semitones : 0;
+  }
 
   allNotesOff() {
     this.events.length = 0;
@@ -3504,7 +3517,7 @@ class GrainVoice {
     const sr = this.sampleRate;
     const data = sample?.data;
     const len = data ? data.length : 0;
-    const ratioBase = Math.pow(2, (this.note - 60 + p.pitch) / 12) * (sample ? sample.sampleRate / sr : 1);
+    const ratioBase = Math.pow(2, (this.note - 60 + p.pitch + (p.bend ?? 0)) / 12) * (sample ? sample.sampleRate / sr : 1);
     const window = p.window;
     // A drawn window is a table rather than a formula (see drawnWindow).
     const table = drawn ?? null;
@@ -3635,6 +3648,11 @@ class GranularSynth {
 
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note }); }
+
+  /** The track's .bend(), in semitones: read as each grain starts. */
+  setBend(semitones) {
+    this.p.bend = Number.isFinite(semitones) ? semitones : 0;
+  }
 
   allNotesOff() {
     this.events.length = 0;
@@ -3891,7 +3909,8 @@ class SynthProcessor extends AudioWorkletProcessor {
 
   receive(message) {
     if (!message) return;
-    if (message.kind === 'noteOn' || message.kind === 'noteOff') {
+    // A bend is timestamped like a note, so it lands with the notes it belongs to.
+    if (message.kind === 'noteOn' || message.kind === 'noteOff' || message.kind === 'bend') {
       this.pending.push(message);
       return;
     }
@@ -3925,6 +3944,7 @@ class SynthProcessor extends AudioWorkletProcessor {
       const offset = offsetInBlock(event.time, currentFrame, sampleRate, blockSize);
       if (offset >= blockSize) { keep.push(event); continue; }
       if (event.kind === 'noteOn') this.synth.queueNoteOn(event.note, event.velocity, offset);
+      else if (event.kind === 'bend') this.synth.setBend?.(event.semitones);
       else this.synth.queueNoteOff(event.note, offset);
     }
     this.pending = keep;

@@ -124,7 +124,7 @@ test('the wavetable folder is a pack of its own, so tables and one-shots are sep
   assert.deepEqual(samples.addedPack('files').files.map((f) => f.file), ['kick.wav']);
   assert.deepEqual(samples.addedPack('wt').files.map((f) => f.file), ['saw.wav', 'square.wav']);
   assert.equal(samples.indexOf('wt', 'square.wav'), 1);
-  assert.deepEqual(samples.addedPacks().map((m) => m.id).sort(), ['files', 'wt']);
+  assert.deepEqual(samples.addedPacks().map((m) => m.id).sort(), ['files', 'rec', 'wt']);
   await assert.rejects(samples.addFile('x.wav', bytesOf('x'), 'nonesuch'), /no "nonesuch" pack/);
 });
 

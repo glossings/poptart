@@ -76,7 +76,7 @@ function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: c
     builtInUrl: (id, file) => `/web-engine/packs/${id}/${file}`,
     library,
   });
-  const rig = { host, engine, transport, evaluator, storage, ctx };
+  const rig = { host, engine, transport, evaluator, storage, ctx, samples };
   liveRigs.add(rig);
   return rig;
 }
@@ -865,5 +865,29 @@ test('a drawn curve that is not one is refused by name rather than played as sil
   await rig.host.call('POST', '/api/evaluate', { code: 'pad: n("0").synth("Granular")' });
   await rig.host.call('POST', '/api/deviceParam', { trackId: 'pad', slot: 0, id: 'window', sample: 'not a curve' });
   assert.ok(warnings.some((w) => /is not a drawn shape/.test(w)), warnings.join(' / '));
+  shutdown(rig);
+});
+
+// --- the slice editor ------------------------------------------------------------------------
+
+test('a sampler source names its files by the key a slice set uses, and says when it has none', async () => {
+  const rig = makeHost();
+  await rig.samples.addFile('kick.wav', new Uint8Array([1, 2, 3]));
+  await rig.samples.addFile('loops/amen.wav', new Uint8Array([4, 5, 6]));
+  const file = await rig.host.call('GET', '/api/sampleFile?ref=files&i=1&names=1');
+  assert.deepEqual([file.file, file.key, file.index, file.count], ['files/loops/amen.wav', 'files/loops/amen.wav', 1, 2]);
+  assert.deepEqual(file.names, ['kick.wav', 'amen.wav']);
+  assert.equal((await rig.host.call('GET', '/api/sampleFile?ref=files&i=5')).index, 1, 'an index past the end wraps');
+  assert.deepEqual(await rig.host.call('GET', '/api/sampleFile?ref=nothing'), { ref: 'nothing', file: null, count: 0 });
+  await assert.rejects(rig.host.call('GET', '/api/sampleSlices?file=files/nope.wav'), /no sample called/);
+  shutdown(rig);
+});
+
+test('auditioning a chop needs an evaluated track, and stopping one hushes it', async () => {
+  const rig = makeHost();
+  assert.deepEqual(await rig.host.call('POST', '/api/previewSlice', { trackId: 'drums', ref: 'files', begin: 0, end: 1 }), { ok: false, why: 'track not evaluated' });
+  await rig.host.call('POST', '/api/evaluate', { code: 'drums: s("pt_kit:0")' });
+  assert.deepEqual(await rig.host.call('POST', '/api/previewSlice', { trackId: 'drums', stop: true }), { ok: true });
+  assert.deepEqual(await rig.host.call('POST', '/api/previewSlice', { trackId: 'drums', ref: 'files' }), { ok: false, why: 'bad request' });
   shutdown(rig);
 });

@@ -41,7 +41,8 @@ class SynthProcessor extends AudioWorkletProcessor {
 
   receive(message) {
     if (!message) return;
-    if (message.kind === 'noteOn' || message.kind === 'noteOff') {
+    // A bend is timestamped like a note, so it lands with the notes it belongs to.
+    if (message.kind === 'noteOn' || message.kind === 'noteOff' || message.kind === 'bend') {
       this.pending.push(message);
       return;
     }
@@ -75,6 +76,7 @@ class SynthProcessor extends AudioWorkletProcessor {
       const offset = offsetInBlock(event.time, currentFrame, sampleRate, blockSize);
       if (offset >= blockSize) { keep.push(event); continue; }
       if (event.kind === 'noteOn') this.synth.queueNoteOn(event.note, event.velocity, offset);
+      else if (event.kind === 'bend') this.synth.setBend?.(event.semitones);
       else this.synth.queueNoteOff(event.note, offset);
     }
     this.pending = keep;

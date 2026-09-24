@@ -88,8 +88,8 @@ export function validateManifest(manifest) {
     }
 
     // Loop points in frames, for a recording that was cut as a sustained note rather than as a
-    // one-shot. Nothing reads them yet; they are kept because the alternative to carrying them
-    // now is rebuilding every pack later, and a rebuilt pack is a changed pack.
+    // one-shot: a note held past the recording loops this section until it is let go (see the
+    // engine's playSample).
     let loop = null;
     if (entry.loop) {
       const start = Number(entry.loop.start);

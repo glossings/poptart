@@ -71,6 +71,9 @@ export function createSampleStore({
         decoded.set(keyOf(manifest.id, index), {
           buffer: audio,
           rootNote: Number.isFinite(file.rootNote) ? file.rootNote : null,
+          // A sustain loop, in frames, for a recording cut as a held note: what a note longer
+          // than the recording loops through until it is let go.
+          loop: file.loop && Number.isFinite(file.loop.start) && file.loop.end > file.loop.start ? { start: file.loop.start, end: file.loop.end } : null,
         });
       } catch (err) {
         warn(`[samples] ${manifest.id}:${index} (${file.file}) did not load - ${err.message}`);
@@ -124,6 +127,8 @@ export function createSampleStore({
   const ADDED_PACKS = Object.freeze({
     files: { title: 'Your files', kind: 'files', decode: true },
     wt: { title: 'Your wavetables', kind: 'wavetables', decode: false },
+    // Bounces made in this browser, played by name with sr("name"): the desktop's recordings folder.
+    rec: { title: 'Your recordings', kind: 'recordings', decode: true },
   });
 
   /** The manifests of the added packs, by id. */
@@ -163,8 +168,33 @@ export function createSampleStore({
           });
         }
       }
+      // The PLAYED packs' files are decoded again, in the background and one at a time: listing
+      // them is not enough for a pattern naming one to sound, and a reload used to leave every
+      // file somebody added silent until it was added again. Not awaited - a page with a few
+      // hundred files should not wait on them to open.
+      for (const [pack, meta] of Object.entries(ADDED_PACKS)) {
+        if (meta.decode && added.get(pack)?.files.length) decodeStored(pack);
+      }
     }
     return [...added.values()];
+  }
+
+  /** Decodes an added pack's files from the store, skipping any already in memory. */
+  async function decodeStored(pack) {
+    if (!context || !store) return;
+    const files = added.get(pack)?.files ?? [];
+    for (let index = 0; index < files.length; index++) {
+      if (decoded.has(keyOf(pack, index))) continue;
+      try {
+        const held = await store.get(`samples/${pack}/${files[index].file}`);
+        if (!held?.bytes) continue;
+        const audio = await context.decodeAudioData(held.bytes.slice(0));
+        if (!decoded.has(keyOf(pack, index))) decoded.set(keyOf(pack, index), { buffer: audio, rootNote: null });
+      } catch (err) {
+        warn(`[samples] ${pack}:${index} (${files[index].file}) could not be decoded - ${err.message}`);
+      }
+    }
+    manifests.set(pack, added.get(pack));
   }
 
   /**
@@ -334,6 +364,30 @@ export function createSampleStore({
      * pack that already failed is not asked for again: with no network, every note of a pattern
      * would otherwise be one more download attempt.
      */
+    /**
+     * A file in one of the added packs by its name, with or without the .wav - how sr("bass")
+     * finds a bounce. Null for a name that is not there, or not decoded yet.
+     */
+    named(pack, name) {
+      const manifest = added.get(pack);
+      if (!manifest) return null;
+      const want = String(name);
+      const index = manifest.files.findIndex((f) => f.file === want || f.file === `${want}.wav`);
+      return index < 0 ? null : decoded.get(keyOf(pack, index)) ?? null;
+    },
+    /**
+     * The name a file goes by in a hand-drawn slice set: "pack/file" - the desktop keys a file by
+     * its path under the samples folder, which for a pack is the same two parts.
+     */
+    fileKey(pack, index) {
+      const manifest = manifests.get(pack) ?? added.get(pack);
+      const file = manifest?.files?.[index]?.file;
+      return file ? `${pack}/${file}` : null;
+    },
+    /** The names in an added pack, newest last, without their extension - sr("'s completion. */
+    names(pack) {
+      return (added.get(pack)?.files ?? []).map((f) => f.file.replace(/\.wav$/i, ''));
+    },
     get(pack, index) {
       const held = decoded.get(keyOf(pack, index));
       if (held) return held;

@@ -153,6 +153,10 @@ export function build({ out = DIST, quiet = false } = {}) {
     fs.copyFileSync(from, path.join(out, name));
   }
 
+  // The ★ library's file format, shared with the desktop server rather than copied: the page's
+  // host imports it beside itself (see public/web/prebake.mjs).
+  fs.copyFileSync(path.join(here, 'pinned-defs.js'), path.join(out, 'web', 'pinned-defs.js'));
+
   const indexPath = path.join(out, 'index.html');
   fs.writeFileSync(indexPath, replaceSketch(injectBoot(fs.readFileSync(indexPath, 'utf8'))));
 

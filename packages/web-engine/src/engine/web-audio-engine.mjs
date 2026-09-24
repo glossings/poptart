@@ -24,6 +24,7 @@ import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mj
 import { outlineOf } from '../dsp/outline.mjs';
 import { MIX_BAND_FREQS, MIX_TRACK_MAX, MixAnalysis, SpectrumTap } from './analysis.mjs';
 import { MidiRoutes } from './midi-routes.mjs';
+import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
 import { SUPPORTED_CHANNELS, Track, rampParam, teardownParamConnection } from './track.mjs';
 
@@ -110,6 +111,32 @@ function reversedBuffer(ctx, buffer) {
   return copy;
 }
 
+const pingPongBuffers = new WeakMap();
+
+/**
+ * A loop window forwards and then backwards, as one buffer - what a ping-pong loop plays, since
+ * a buffer source can only loop one way. Cached per buffer and window.
+ */
+function pingPongBuffer(ctx, buffer, lo, hi) {
+  if (typeof buffer.getChannelData !== 'function' || typeof ctx.createBuffer !== 'function') return null;
+  const key = `${lo}:${hi}`;
+  let byWindow = pingPongBuffers.get(buffer);
+  if (!byWindow) pingPongBuffers.set(buffer, (byWindow = new Map()));
+  if (byWindow.has(key)) return byWindow.get(key);
+  const from = Math.floor(lo * buffer.length);
+  const to = Math.max(from + 2, Math.floor(hi * buffer.length));
+  const n = to - from;
+  const out = ctx.createBuffer(buffer.numberOfChannels, n * 2, buffer.sampleRate);
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dst = out.getChannelData(ch);
+    for (let i = 0; i < n; i++) { dst[i] = src[from + i] ?? 0; dst[2 * n - 1 - i] = src[from + i] ?? 0; }
+  }
+  const made = { buffer: out, span: n / buffer.sampleRate };
+  byWindow.set(key, made);
+  return made;
+}
+
 export class WebAudioEngine {
   /**
    * @param {BaseAudioContext} ctx
@@ -151,12 +178,19 @@ export class WebAudioEngine {
 
     this.master = ctx.createGain();
     this.master.connect(ctx.destination);
+    // How many output channels the page plays to - two until somebody asks for more, and never
+    // more than the device takes. `.o(n)` picks a stereo pair among them, wrapping at the count.
+    this.outputChannels = 2;
 
     this.tracks = new Map();        // trackId -> Track
     this.buses = new Map();         // bus name -> GainNode
     this.modulators = new Map();    // trackId -> Map("slot:name" -> connection)
     this.envelopes = new Map();     // trackId -> Map("slot:name" -> EnvConnection), gated per note
     this.feeds = new Map();         // "device|cc" or "osc:address" -> Set(FeedConnection)
+    this._hw = null;                // the open hardware inputs: { node, splitter, channels }
+    this._taps = new Map();         // track id ('*' for the master) -> recorder tap
+    this._transients = new WeakMap(); // AudioBuffer -> slice starts (undefined while working, null for none)
+    this._hwRoutes = new Map();     // "head|track" / "side|track|slot" -> { chans, wire, dispose }
     this.warned = new Set();
     this.workletsReady = false;
     // Label to track id. A pattern names another track the way somebody wrote it - audio("kick")
@@ -519,6 +553,164 @@ export class WebAudioEngine {
     try { port?.postMessage(on ? { kind: 'noteOn', note, velocity, time: atTime } : { kind: 'noteOff', note, time: atTime }); } catch { /* no port */ }
   }
 
+  // -- the granular sample voice -----------------------------------------------------------------
+  //
+  // The desktop's poptart_sample_grain, on the main thread: a grain every 1/rate seconds, each a
+  // piece of the file `size` long under a window, placed by `pan` and read from the position -
+  // the event's begin, or the track's streamed position when the pattern drives it. Size, rate,
+  // pan and position are the track's channel controls, READ AS EACH GRAIN STARTS, so a signal on
+  // any of them moves grain by grain (see Track#setChannel). A short lookahead timer lays the
+  // grains down on the audio clock, so each starts on its sample. Overlapping grains are copies at
+  // unrelated phases, so their power adds; the cloud is divided by the square root of half its
+  // overlap, as the desktop's is, so a denser or longer grain thickens it without turning it up.
+
+  _playGrains(track, buffer, cfg, { rate, vel, onsetSec, offsetSec, fileSec, from }) {
+    const g = track.grain;
+    // The event's own values at its onset seed the track, so the first grain does not read
+    // whatever the last event left there (the scheduler sends them for exactly this).
+    if (Number.isFinite(cfg.grainSize)) g.size = cfg.grainSize;
+    if (Number.isFinite(cfg.grainRate)) g.rate = cfg.grainRate;
+    if (Number.isFinite(cfg.grainPan)) g.pan = cfg.grainPan;
+    const posLive = cfg.grainPosLive === 1;
+    const window = this._grainWindow(cfg.grainShape);
+    const start = Math.max(this.getTime(), onsetSec);
+    const gate = Number.isFinite(offsetSec) ? Math.max(0.001, offsetSec - start) : 1;
+    const attack = Math.max(0.0005, cfg.attack ?? 0);
+    const release = Math.max(0.015, cfg.release ?? 0.05);
+    const end = start + gate + release;
+
+    const amp = this.ctx.createGain();
+    amp.gain.setValueAtTime(0, start);
+    amp.gain.linearRampToValueAtTime(vel, start + attack);
+    amp.gain.setValueAtTime(vel, Math.max(start + attack, start + gate));
+    amp.gain.linearRampToValueAtTime(0, end);
+    amp.connect(track.input);
+
+    const mono = buffer.numberOfChannels === 1;
+    let next = start;
+    let count = 0;
+    const lay = () => {
+      const horizon = Math.min(end, this.getTime() + 0.1);
+      while (next < horizon) {
+        const size = Math.min(4, Math.max(0.002, g.size));
+        const density = Math.min(1000, Math.max(0.1, g.rate));
+        const pos = Math.min(1, Math.max(0, posLive ? g.pos : from / Math.max(1e-9, fileSec)));
+        const level = 1 / Math.sqrt(Math.max(1, size * density * 0.5));
+        this._grain(buffer, amp, next, size, pos * fileSec, rate, g.pan, level * (mono ? Math.SQRT2 : 1), window, track);
+        next += 1 / density;
+        count += 1;
+      }
+      if (next >= end) { clearInterval(timer); setTimeout(() => { try { amp.disconnect(); } catch { /* gone */ } }, Math.max(0, (end - this.getTime()) * 1000) + 500); }
+    };
+    const timer = setInterval(lay, 25);
+    timer?.unref?.(); // a node test's process need not wait on a cloud whose clock never moves
+    lay();
+    return { index: cfg.index ?? 0, grain: true, grainSize: g.size, grainRate: g.rate, durSec: gate, fileSec, amp: vel };
+  }
+
+  /** One grain: a piece of the file under the window, panned, onto the voice's envelope. */
+  _grain(buffer, into, at, size, offsetSec, rate, pan, level, window, track) {
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = rate;
+    if (track.bendNode) { try { track.bendNode.connect(src.detune); } catch { /* no detune */ } }
+    const shape = this.ctx.createGain();
+    shape.gain.value = 0;
+    try { shape.gain.setValueCurveAtTime(window.map((v) => v * level), at, size); } catch { shape.gain.value = level; }
+    const panner = this.ctx.createStereoPanner();
+    panner.pan.value = Math.min(1, Math.max(-1, pan));
+    src.connect(shape).connect(panner).connect(into);
+    // The read wraps within the file: a grain started near the end reads on from the start.
+    const offset = ((offsetSec % buffer.duration) + buffer.duration) % buffer.duration;
+    src.start(at, offset, size * rate + 0.01);
+    src.stop(at + size + 0.005);
+    src.onended = () => { try { src.disconnect(); shape.disconnect(); panner.disconnect(); } catch { /* gone */ } };
+  }
+
+  /** The window each grain is shaped by: a drawn one, or a Hann bell, as the desktop's default. */
+  _grainWindow(shape) {
+    const points = 64;
+    if (shape && this.shapes?.parseShapePoints && this.shapes?.sampleShape) {
+      try {
+        const parsed = this.shapes.parseShapePoints(shape);
+        if (parsed?.length) return Float32Array.from({ length: points }, (_, i) => Math.max(0, this.shapes.sampleShape(parsed, i / (points - 1))));
+      } catch { /* not a shape; the bell */ }
+    }
+    return Float32Array.from({ length: points }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (points - 1)));
+  }
+
+  // -- multichannel output ------------------------------------------------------------------------
+
+  /** The channel counts this output can be set to: pairs, up to what the device takes. */
+  outputChannelChoices() {
+    const max = Math.max(2, Math.min(32, Number(this.ctx.destination?.maxChannelCount) || 2));
+    const out = [];
+    for (let n = 2; n <= max; n += 2) out.push(n);
+    return out;
+  }
+
+  /**
+   * Plays to `n` output channels (even, and no more than the device has). Past two the master
+   * and the destination count their channels discretely - channel 3 is the third output, not a
+   * surround speaker - and every track is rewired onto the pair its `.o()` names.
+   */
+  setOutputChannels(n) {
+    const choices = this.outputChannelChoices();
+    const want = choices.includes(Number(n)) ? Number(n) : choices.filter((c) => c <= Number(n)).pop() ?? 2;
+    this.outputChannels = want;
+    const discrete = want > 2;
+    try {
+      this.ctx.destination.channelCount = want;
+      this.ctx.destination.channelCountMode = 'explicit';
+      this.ctx.destination.channelInterpretation = discrete ? 'discrete' : 'speakers';
+      this.master.channelCount = want;
+      this.master.channelCountMode = discrete ? 'explicit' : 'max';
+      this.master.channelInterpretation = discrete ? 'discrete' : 'speakers';
+    } catch (err) {
+      this._warnOnce(`channels:${want}`, `[web-engine] the output would not take ${want} channels - ${err?.message ?? err}`);
+    }
+    for (const track of this.tracks.values()) this._routeOut(track);
+    return want;
+  }
+
+  /**
+   * Puts a track's output on the pair its `.o()` names, wrapped at the pairs there are - the
+   * desktop's `(out - 1) mod pairs`. Pair one is a plain connection; any other goes through a
+   * merger onto its two channels.
+   */
+  _routeOut(track) {
+    const pairs = Math.max(1, Math.floor(this.outputChannels / 2));
+    const pair = ((((Math.round(track.outValue ?? 1) - 1) % pairs) + pairs) % pairs);
+    if (track._outPair === pair) return;
+    try { track.dryGain.disconnect(); } catch { /* not connected */ }
+    for (const node of track._outNodes ?? []) { try { node.disconnect(); } catch { /* gone */ } }
+    track._outNodes = null;
+    if (pair === 0) {
+      track.dryGain.connect(this.master);
+    } else {
+      const split = this.ctx.createChannelSplitter(2);
+      const merge = this.ctx.createChannelMerger(this.outputChannels);
+      track.dryGain.connect(split);
+      split.connect(merge, 0, pair * 2);
+      split.connect(merge, 1, pair * 2 + 1);
+      merge.connect(this.master);
+      track._outNodes = [split, merge];
+    }
+    track._outPair = pair;
+  }
+
+  /** Tells a track's instrument where the bend is, at the time the bend is set for. */
+  _bendInstrument(trackId, track, atTime) {
+    const source = track.source;
+    if (!source?.node?.port) return;
+    const descriptor = track.slots.get(0)?.descriptor;
+    if (descriptor?.build === 'wasm') {
+      if (track.bendSemis) this._warnOnce(`bend:${descriptor.id}`, `[web-engine] "${descriptor.id}" is a ported module that takes its pitch per note, so .bend() does not move it here. The sample voices and the other instruments do bend.`);
+      return;
+    }
+    try { source.node.port.postMessage({ kind: 'bend', semitones: track.bendSemis ?? 0, time: atTime }); } catch { /* gone */ }
+  }
+
   /** Releases everything on a track without cutting what is already sounding. */
   hush(trackId, againSec = 0) {
     const source = this.tracks.get(trackId)?.source;
@@ -542,6 +734,8 @@ export class WebAudioEngine {
       if (!track.setChannel(name, value, atTime, now)) {
         this._warnOnce(`channel:${name}`, `[web-engine] the "${name}" channel control is not implemented in the browser build yet, so it does nothing here. Implemented: ${SUPPORTED_CHANNELS.join(', ')} and wet1..wet20.`);
       }
+      if (name === 'bend') this._bendInstrument(trackId, track, atTime);
+      if (name === 'out') this._routeOut(track);
       return;
     }
     // A parameter a modulator owns is not ours to set: the modulator is the whole value, and a
@@ -847,6 +1041,7 @@ export class WebAudioEngine {
       if (!this.feeds.has(key)) this.feeds.set(key, new Set());
       this.feeds.get(key).add(conn);
       conn._feedKey = key;
+      this.onMidiWanted?.();
       return conn;
     }, 'a midi control', 'setParamCC');
   }
@@ -905,6 +1100,26 @@ export class WebAudioEngine {
   /** The host feeds a MIDI continuous controller in; every parameter watching it follows. */
   feedCC(device, cc, unit, atTime) {
     for (const conn of this.feeds.get(`cc|${String(device ?? '').toLowerCase()}|${cc}`) ?? []) conn.feed(unit, atTime);
+  }
+
+  /**
+   * A controller from a device by its full name: every midicc() whose device is a fragment of
+   * that name - the desktop's matching rule - and whose channel is this one, or unset.
+   */
+  _feedCCFrom(deviceName, channel, cc, unit, atTime) {
+    const name = String(deviceName).toLowerCase();
+    for (const [key, conns] of this.feeds) {
+      if (!key.startsWith('cc|')) continue;
+      const cut = key.lastIndexOf('|');
+      if (Number(key.slice(cut + 1)) !== cc) continue;
+      const want = key.slice(3, cut);
+      if (want && !name.includes(want)) continue;
+      for (const conn of conns) {
+        const ch = conn.ir?.channel;
+        if (ch && ch !== channel) continue;
+        conn.feed(unit, atTime);
+      }
+    }
   }
 
   /** The host feeds an OSC message in. */
@@ -1065,21 +1280,25 @@ export class WebAudioEngine {
   setInputSource(trackId, io, name, channel, scalePcs, hwChans, transpose, noteMap) {
     const track = this.createTrack(trackId);
     if (io === 'midi') {
-      if (String(name).startsWith('dev:')) {
-        this._warnOnce('midi-in', '[web-engine] MIDI devices are not wired up in the browser build yet, so a midi() source naming one is silent here. A track\'s notes - midi("lead") - play.');
-        return;
-      }
-      // Another track's notes, played on this one's instrument, through the source's pitch ops.
-      this.midiRoutes.add(name, trackId, 0, { transpose, pcs: scalePcs, noteMap });
+      // Another track's notes, or a MIDI device's, played on this one's instrument through the
+      // source's pitch ops. A device is heard once the host has MIDI access (see midiIn).
+      this.midiRoutes.add(name, trackId, 0, { transpose, pcs: scalePcs, noteMap, channel });
+      if (String(name).startsWith('dev:')) this.onMidiWanted?.();
+      return;
+    }
+    if (String(name).startsWith('dev:')) {
+      // A hardware input: two of its channels (or one, heard in both sides) as this track's head.
+      this.clearInputSource(trackId);
+      this._hwRoutes.set(`head|${trackId}`, { chans: hwChans ?? [0, 1], wire: (node) => {
+        node.connect(track.input);
+        track._headSource = node;
+      } });
+      this._wireHardware(`head|${trackId}`);
       return;
     }
     const from = this._sourceNode(name);
     if (!from) {
-      if (String(name).startsWith('dev:')) {
-        this._warnOnce('audio-in', '[web-engine] hardware audio input is not wired up in the browser build yet, so input() is silent here.');
-      } else {
-        this._warnOnce(`head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
-      }
+      this._warnOnce(`head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
       return;
     }
     this.clearInputSource(trackId);
@@ -1089,24 +1308,183 @@ export class WebAudioEngine {
 
   clearInputSource(trackId) {
     this.midiRoutes.remove(trackId, 0, this.getTime());
+    this._dropHardware(`head|${trackId}`);
     const track = this.tracks.get(trackId);
     if (!track?._headSource) return;
     try { track._headSource.disconnect(track.input); } catch { /* already detached */ }
     track._headSource = null;
   }
 
-  setMidiNotes() {
-    this._warnOnce('midi-in', '[web-engine] MIDI input is not wired up in the browser build yet, so midikeys() plays nothing here.');
+  // -- the recorder -----------------------------------------------------------------------------
+  //
+  // A tap on a track's output (see devices/recorder.mjs): a meter while a record panel is open,
+  // and a capture of an exact window on the context's clock for a bounce. `onRecLevel` hears the
+  // meter; `recordTrack` answers with the frames.
+
+  _tapFor(key, source) {
+    let tap = this._taps.get(key);
+    if (tap) return tap;
+    let node;
+    try {
+      node = new this.AudioWorkletNodeCtor(this.ctx, 'poptart-recorder', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 2, channelCountMode: 'explicit' });
+    } catch (err) {
+      this._warnOnce('recorder', `[web-engine] the recorder could not start - ${err?.message ?? err}`);
+      return null;
+    }
+    source.connect(node);
+    tap = { node, source, metering: false, takes: new Map(), serial: 0 };
+    node.port.onmessage = (event) => {
+      const m = event.data;
+      if (m?.kind === 'level') this.onRecLevel?.(key, m.peak, m.rms);
+      else if (m?.kind === 'chunk') tap.takes.get(m.id)?.chunks.push([m.l, m.r]);
+      else if (m?.kind === 'done') {
+        const take = tap.takes.get(m.id);
+        tap.takes.delete(m.id);
+        take?.resolve(joinChunks(take.chunks, this.ctx.sampleRate));
+        this._untapIfIdle(key);
+      }
+    };
+    this._taps.set(key, tap);
+    return tap;
   }
 
-  clearMidiNotes() { /* nothing was ever wired */ }
+  _untapIfIdle(key) {
+    const tap = this._taps.get(key);
+    if (!tap || tap.metering || tap.takes.size) return;
+    try { tap.node.port.postMessage({ kind: 'dispose' }); } catch { /* gone */ }
+    try { tap.source.disconnect(tap.node); } catch { /* gone */ }
+    this._taps.delete(key);
+  }
+
+  /** Opens or closes a track's meter - what an open record panel costs. */
+  tapTrack(trackId, on) {
+    const track = this.tracks.get(trackId);
+    if (on) {
+      if (!track) return false;
+      const tap = this._tapFor(trackId, track.panner);
+      if (!tap) return false;
+      tap.metering = true;
+      tap.node.port.postMessage({ kind: 'meter', on: true });
+      return true;
+    }
+    const tap = this._taps.get(trackId);
+    if (!tap) return false;
+    tap.metering = false;
+    try { tap.node.port.postMessage({ kind: 'meter', on: false }); } catch { /* gone */ }
+    this._untapIfIdle(trackId);
+    return true;
+  }
+
+  /**
+   * Captures a track's output from `startSec` to `endSec` on the context's clock. Resolves with
+   * `{ sampleRate, channels: 2, frames, left, right }`; `cancel()` on the promise drops the take.
+   * The master is recorded the same way, as the track id '*'.
+   */
+  recordTrack(trackId, startSec, endSec) {
+    const source = trackId === '*' ? this.master : this.tracks.get(trackId)?.panner;
+    if (!source) return Promise.reject(new Error(`there is no track "${trackId}" to record`));
+    const tap = this._tapFor(trackId, source);
+    if (!tap) return Promise.reject(new Error('the recorder could not start'));
+    const id = ++tap.serial;
+    let settle;
+    const promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+    tap.takes.set(id, { chunks: [], resolve: settle.resolve, reject: settle.reject });
+    tap.node.port.postMessage({ kind: 'record', id, start: startSec, end: endSec });
+    promise.cancel = () => {
+      const take = tap.takes.get(id);
+      if (!take) return;
+      tap.takes.delete(id);
+      try { tap.node.port.postMessage({ kind: 'cancel' }); } catch { /* gone */ }
+      take.reject(new Error('cancelled'));
+      this._untapIfIdle(trackId);
+    };
+    return promise;
+  }
+
+  // -- hardware audio input -------------------------------------------------------------------
+  //
+  // The host opens the input devices (see the page's audio-input.mjs) and hands in ONE node
+  // carrying all of their channels in layout order - the same "one device, channels numbered
+  // across it" model the desktop's combined device has, which is what input()'s channel numbers
+  // were resolved against. Each route takes its channels off that node through a splitter and a
+  // pair merger of its own. A route set before the host has an input to give waits for one, and
+  // asks for it: input(1) with nothing chosen opens the browser's default microphone.
+
+  /** The node carrying every open input channel, in layout order, and how many there are. */
+  setHardwareInput(node, channels) {
+    if (this._hw) { try { this._hw.splitter.disconnect(); this._hw.node.disconnect(this._hw.splitter); } catch { /* gone */ } }
+    this._hw = null;
+    if (node && channels > 0) {
+      const splitter = this.ctx.createChannelSplitter(Math.max(1, Math.min(32, channels)));
+      node.connect(splitter);
+      this._hw = { node, splitter, channels };
+    }
+    for (const key of this._hwRoutes.keys()) this._wireHardware(key);
+  }
+
+  /** Wires one route to the open input, rebuilding its channel picker; waits if there is none. */
+  _wireHardware(key) {
+    const route = this._hwRoutes.get(key);
+    if (!route) return;
+    route.dispose?.();
+    route.dispose = null;
+    if (!this._hw) { this.onAudioInputWanted?.(); return; }
+    const [a, b] = route.chans;
+    const pick = this.ctx.createChannelMerger(2);
+    const max = this._hw.channels - 1;
+    const left = Math.min(max, Math.max(0, a));
+    const right = b == null || b < 0 ? left : Math.min(max, b);
+    if (a > max || (b != null && b > max)) {
+      this._warnOnce(`hw:${a}:${b}`, `[web-engine] the open audio inputs have ${this._hw.channels} channel${this._hw.channels === 1 ? '' : 's'}, so input channel ${Math.max(a, b ?? 0) + 1} reads channel ${max + 1} instead.`);
+    }
+    this._hw.splitter.connect(pick, left, 0);
+    this._hw.splitter.connect(pick, right, 1);
+    route.wire(pick);
+    const splitter = this._hw.splitter;
+    route.dispose = () => {
+      try { splitter.disconnect(pick); } catch { /* gone */ }
+      try { pick.disconnect(); } catch { /* gone */ }
+    };
+  }
+
+  _dropHardware(key) {
+    const route = this._hwRoutes.get(key);
+    route?.dispose?.();
+    this._hwRoutes.delete(key);
+  }
+
+  /** `midikeys("Keystep")`: a MIDI device plays this track's instrument live. */
+  setMidiNotes(trackId, device, channel = 0, scalePcs = null, transpose = 0, noteMap = null) {
+    this.midiRoutes.add(`dev:${device}`, trackId, 0, { transpose, pcs: scalePcs, noteMap, channel });
+    this.onMidiWanted?.();
+  }
+
+  clearMidiNotes(trackId) {
+    const route = this.midiRoutes.routes.find((r) => r.targetTrackId === trackId && r.slot === 0);
+    if (route?.name.startsWith('dev:')) this.midiRoutes.remove(trackId, 0, this.getTime());
+  }
+
+  /**
+   * One message from a MIDI device, as the host's Web MIDI listener parsed it. `kind` is 'on',
+   * 'off' or 'cc'; `channel` 1-16; `value` a note's velocity or a controller's value, both 0..1.
+   * Played now - live input never goes through the lookahead, so its latency is the driver's.
+   */
+  midiIn(device, kind, channel, num, value, atTime = this.getTime()) {
+    if (kind === 'cc') { this._feedCCFrom(device, channel, num, value, atTime); return; }
+    if (kind !== 'on' && kind !== 'off') return;
+    const isOn = kind === 'on' && value > 0;
+    this.midiRoutes.deviceEdge(device, channel, num, isOn ? value : 0, atTime, isOn, (trackId, slot, note, velocity, on) => {
+      // What an instrument actually played, for the live log - capture and MIDI record.
+      if (slot === 0) this.onLiveNote?.(trackId, note, velocity, on);
+    });
+  }
 
   /**
    * Feeds another track or bus into an effect's second input - the carrier of a cross-modulator,
    * the key of a ducker, the modulator of a vocoder. Only a device that declares a sidechain has
    * one; on any other the call warns by name and the effect plays as written.
    */
-  injectAudio(trackId, slot, name, gain = 1) {
+  injectAudio(trackId, slot, name, gain = 1, hwChans = null) {
     const track = this.tracks.get(trackId);
     const filled = track?.slots.get(slot);
     if (!track || !filled) return;
@@ -1115,7 +1493,10 @@ export class WebAudioEngine {
       return;
     }
     if (String(name).startsWith('dev:')) {
-      this._warnOnce('audio-in', '[web-engine] hardware audio input is not wired up in the browser build yet, so input() is silent here.');
+      // A hardware input into the sidechain: a voice keying a ducker, a mic into a compressor.
+      this._dropHardware(`side|${trackId}|${slot}`);
+      this._hwRoutes.set(`side|${trackId}|${slot}`, { chans: hwChans ?? [0, 1], wire: (node) => track.setSidechain(slot, node, name, gain) });
+      this._wireHardware(`side|${trackId}|${slot}`);
       return;
     }
     const from = this._sourceNode(name);
@@ -1127,6 +1508,7 @@ export class WebAudioEngine {
   }
 
   clearAudioInject(trackId, slot) {
+    this._dropHardware(`side|${trackId}|${slot}`);
     this.tracks.get(trackId)?.clearSidechain(slot);
   }
 
@@ -1138,10 +1520,7 @@ export class WebAudioEngine {
   injectMidi(trackId, slot, name, note = null) {
     const filled = this.tracks.get(trackId)?.slots.get(slot);
     if (!filled) return;
-    if (String(name).startsWith('dev:')) {
-      this._warnOnce('midi-in', '[web-engine] MIDI devices are not wired up in the browser build yet, so .midi() from one does nothing here. A track\'s notes - .midi("kick") - play.');
-      return;
-    }
+    if (String(name).startsWith('dev:')) this.onMidiWanted?.();
     if (slot > 0 && !filled.descriptor.notes) {
       const takers = this.registry?.list?.('fx')?.filter((d) => d.notes).map((d) => d.id) ?? [];
       this._warnOnce(`inject-midi:${filled.descriptor.id}`, `[web-engine] "${filled.descriptor.id}" is not played by notes, so .midi() into it does nothing.${takers.length ? ` Effects that are: ${takers.join(', ')}.` : ''}`);
@@ -1349,97 +1728,201 @@ export class WebAudioEngine {
    */
   playSample(trackId, pack, cfg = {}, onsetSec, offsetSec) {
     const track = this.createTrack(trackId);
-    // The store may hand back a bare AudioBuffer, or the buffer together with the note it was
-    // recorded at. Both spellings are accepted because the rendered packs have no pitch worth
-    // naming and the sourced ones do, and requiring the wrapper everywhere would mean inventing
-    // a root note for a kick drum.
     // A named pack arrives as `sp:<id>` - the scheduler's spelling for a pack the language
     // defines, as against a folder or a recording - and the store keys packs by their bare id.
     const packId = typeof pack === 'string' && pack.startsWith('sp:') ? pack.slice(3) : pack;
     // Routed onward as an on/off pair, whether or not this sample has loaded yet: a kick keys a
     // ducker by being scheduled, not by being heard.
     if (this.midiRoutes.size && (cfg.vel ?? 1) > 0) this.midiRoutes.sampleEvent(trackId, cfg.vel ?? 1, onsetSec, offsetSec, cfg.note ?? null);
-    const got = this.samples?.get?.(packId, cfg.index ?? 0) ?? null;
+    // A recording, by name: sr("bass") arrives as rec:bass.
+    const isRec = typeof packId === 'string' && packId.startsWith('rec:');
+    const got = isRec
+      ? this.samples?.named?.('rec', packId.slice(4)) ?? null
+      : this.samples?.get?.(packId, cfg.index ?? 0) ?? null;
+    // The store may hand back a bare AudioBuffer, or the buffer with the note it was recorded at.
     const buffer = got?.buffer ?? got;
     if (!buffer) return { skipped: 'source not ready' };
     const rootNote = Number.isFinite(got?.rootNote) ? got.rootNote : SAMPLER_ANCHOR;
-    const vel = cfg.vel ?? 1;
-    if (vel <= 0) return { skipped: 'silent' };
-    const speed = cfg.speed ?? 1;
-    if (speed === 0) return { skipped: 'speed 0' };
 
-    const fileSec = buffer.duration;
-    const begin = Math.max(0, Math.min(1, cfg.begin ?? 0)) * fileSec;
-    const end = Math.max(0, Math.min(1, cfg.end ?? 1)) * fileSec;
-    if (end <= begin) return { skipped: 'empty window' };
+    // The slice positions `.slice(n)` indexes: the hand-drawn set's marks for this file where it
+    // has some, and the file's own transients otherwise - worked out on first ask, off the tick.
+    const key = isRec ? `rec:${packId.slice(4)}.wav` : this.samples?.fileKey?.(packId, cfg.index ?? 0) ?? null;
+    const authored = cfg.slices ? sliceEntryFor(cfg.slices, key) ?? sliceEntryFor(cfg.slices, key?.split('/').pop()) : null;
+    const slices = cfg.slice != null ? authored?.marks ?? this._transientsOf(buffer) : null;
+    const plan = planSample({ duration: buffer.duration, rootNote }, { ...cfg }, onsetSec, offsetSec, { slices, authoredFit: authored?.fit ?? null, anchor: SAMPLER_ANCHOR });
+    if (plan.skipped) return { skipped: plan.skipped };
+    if (plan.noSlices) this._warnOnce(`slices:${key}`, `[web-engine] .slice(): no transients were found in ${key ?? packId} - playing the whole sample.`);
 
-    // A note repitches around the anchor: with no root note recorded, c3 is the sample as it
-    // was recorded, which is the same anchor the desktop sampler uses. A pack that knows what
-    // pitch its files are at says so, and then the anchor is that pitch instead - which is what
-    // lets a multisampled instrument and a synthesized one-shot both answer to the same note.
-    const rate = Math.abs(speed) * (cfg.note != null ? Math.pow(2, (cfg.note - rootNote) / 12) : 1);
-
-    // A negative speed is the sample backwards. The rate is its magnitude either way; the
-    // direction is carried by reading a reversed copy, and the window is mirrored into it so
-    // that begin and end still name the same piece of sound, entered from the far end.
-    // A store that hands back something other than a real buffer cannot be reversed; that plays
-    // forwards and says so, because this call answers with a line rather than an exception and a
-    // note that does not sound at all is the worse of the two failures.
-    const backwards = speed < 0 ? reversedBuffer(this.ctx, buffer) : null;
-    if (speed < 0 && !backwards) {
+    const backwards = plan.speed < 0 ? reversedBuffer(this.ctx, buffer) : null;
+    if (plan.speed < 0 && !backwards) {
       this._warnOnce(`reverse:${packId}`, `[web-engine] "${packId}" cannot be played backwards here, so a negative speed plays it forwards.`);
     }
-    const reverse = backwards !== null;
-    const from = reverse ? fileSec - end : begin;
-    const to = reverse ? fileSec - begin : end;
+    const info = {
+      index: cfg.index ?? 0, begin: plan.begin, end: plan.end, loop: plan.loop, speed: plan.speed, stretch: plan.stretch,
+      durSec: plan.durSec, cut: plan.cut, amp: plan.amp, fileSec: plan.fileSec,
+      attack: plan.attack, decay: plan.decay, release: plan.release,
+      loopWrap: plan.windowed ? 'window' : 'file', loopDir: plan.pingpong ? 'pingpong' : 'forward',
+    };
 
+    // .grain(): a cloud of grains read from the file, in place of the file played through.
+    if (plan.grain) {
+      const fileSec = buffer.duration;
+      const from = backwards ? fileSec * (1 - plan.begin) : fileSec * plan.begin;
+      return { ...info, ...this._playGrains(track, backwards ?? buffer, cfg, { rate: Math.abs(plan.speed), vel: plan.amp, onsetSec: plan.onsetSec, offsetSec, fileSec, from }) };
+    }
+    // .stretch() other than one: the window played at its own pace with the pitch held.
+    if (plan.stretch !== 1) {
+      this._playWarp(track, buffer, plan);
+      return info;
+    }
+    // A recording cut as a held note carries a sustain loop: honored when nothing else asked for a
+    // loop and the note is played forwards, so a held key keeps sounding instead of running out.
+    const sustain = !plan.loop && plan.speed > 0 && got?.loop ? got.loop : null;
+    this._playPlain(track, buffer, backwards, plan, sustain);
+    return sustain ? { ...info, sustainLoop: true } : info;
+  }
+
+  /** An event's amplitude: attack to full, decay to sustain, held to the gate, then released. */
+  _envelope(amp, plan, start, gateEnd) {
+    const attack = Math.max(0.0005, plan.attack);
+    const release = Math.max(0.015, plan.release);
+    const sus = Math.min(1, Math.max(0, plan.sustain)) * plan.amp;
+    amp.gain.setValueAtTime(0, start);
+    amp.gain.linearRampToValueAtTime(plan.amp, start + attack);
+    if (plan.decay > 0) amp.gain.linearRampToValueAtTime(sus, start + attack + plan.decay);
+    const held = plan.decay > 0 ? sus : plan.amp;
+    const holdFrom = Math.max(start + attack + plan.decay, gateEnd);
+    amp.gain.setValueAtTime(gateEnd > start + attack + plan.decay ? held : held, holdFrom);
+    amp.gain.linearRampToValueAtTime(0, holdFrom + release);
+    return holdFrom + release;
+  }
+
+  /** The file read straight through at a rate: a one-shot, a loop, or a ping-pong loop. */
+  _playPlain(track, buffer, backwards, plan, sustain = null) {
+    const fileSec = buffer.duration;
+    const rate = Math.abs(plan.speed);
+    const reverse = backwards !== null;
+    // Positions in the buffer actually read: a backwards event reads the reversed copy, so every
+    // position is mirrored into it.
+    const at = (p) => (reverse ? fileSec * (1 - p) : fileSec * p);
     const source = this.ctx.createBufferSource();
-    source.buffer = backwards ?? buffer;
+    let offset;
+    let playFor = null;
+    if (plan.loop && plan.pingpong) {
+      // Ping-pong: the loop window forwards and then backwards, as one buffer looped whole.
+      const pp = pingPongBuffer(this.ctx, buffer, plan.loopLo, plan.loopHi);
+      if (pp) {
+        source.buffer = pp.buffer;
+        source.loop = true;
+        const entry = Math.min(plan.loopHi, Math.max(plan.loopLo, plan.loopEntry));
+        const into = (entry - plan.loopLo) * fileSec;
+        offset = plan.speed < 0 ? pp.span * 2 - into : into;
+      }
+    }
+    if (offset === undefined) {
+      source.buffer = backwards ?? buffer;
+      if (plan.loop) {
+        source.loop = true;
+        const lo = at(reverse ? plan.loopHi : plan.loopLo);
+        const hi = at(reverse ? plan.loopLo : plan.loopHi);
+        source.loopStart = Math.min(lo, hi);
+        source.loopEnd = Math.max(lo, hi);
+        offset = at(plan.loopEntry);
+      } else {
+        offset = at(reverse ? plan.end : plan.begin);
+        playFor = fileSec * (plan.end - plan.begin);
+      }
+    }
     source.playbackRate.value = rate;
-    if (cfg.loop) {
+    // A sustain loop: the attack plays once, then the loop section repeats until the note ends.
+    const sustained = sustain && sustain.end <= buffer.length && sustain.end > sustain.start;
+    if (sustained) {
       source.loop = true;
-      source.loopStart = from;
-      source.loopEnd = to;
+      source.loopStart = sustain.start / buffer.sampleRate;
+      source.loopEnd = sustain.end / buffer.sampleRate;
+      playFor = null;
     }
 
     const amp = this.ctx.createGain();
-    const attack = Math.max(0, cfg.attack ?? 0);
-    const release = Math.max(0.001, cfg.release ?? 0.05);
-    const start = Math.max(this.getTime(), onsetSec);
-    amp.gain.setValueAtTime(attack > 0 ? 0 : vel, start);
-    if (attack > 0) amp.gain.linearRampToValueAtTime(vel, start + attack);
-
     source.connect(amp);
     amp.connect(track.input);
-
-    const windowSec = (to - from) / rate;
-    const gateSec = Number.isFinite(offsetSec) ? Math.max(0, offsetSec - start) : windowSec;
-    const soundFor = cfg.loop ? gateSec : Math.min(windowSec, gateSec);
-    // The gate holds the level until it ends, and the release runs from there - the same
-    // envelope the desktop sampler gates. Starting the fade early would cut a sample short by
-    // its release and fade it over twice the time asked for.
-    const stopAt = start + soundFor;
-    amp.gain.setValueAtTime(vel, Math.max(start, stopAt));
-    amp.gain.linearRampToValueAtTime(0, stopAt + release);
-    source.start(start, from, cfg.loop ? undefined : (to - from));
-    source.stop(stopAt + release + 0.005);
+    const start = Math.max(this.getTime(), plan.onsetSec);
+    // Loops play to the gate; a one-shot to the gate or its own end, whichever comes first.
+    const gateEnd = plan.loop || plan.cut || sustained ? Math.max(start, plan.offsetSec) : start + plan.durSec;
+    const stopAt = this._envelope(amp, plan, start, gateEnd);
+    if (track.bendNode) { try { track.bendNode.connect(source.detune); } catch { /* no detune */ } }
+    if (playFor != null) source.start(start, offset, playFor);
+    else source.start(start, offset);
+    source.stop(stopAt + 0.005);
     source.onended = () => {
       try { source.disconnect(); amp.disconnect(); } catch { /* already detached */ }
     };
+  }
 
-    return {
-      index: cfg.index ?? 0,
-      begin: cfg.begin ?? 0,
-      end: cfg.end ?? 1,
-      loop: cfg.loop ?? 0,
-      speed,
-      durSec: soundFor,
-      fileSec,
-      amp: vel,
-      cut: soundFor < windowSec,
-      attack,
-      release,
+  /**
+   * .stretch(): the desktop's warp voice - Warp1's 100 ms Hann grains, eight overlapping, placed
+   * with a tenth of a window of random scatter, along a pointer that walks the window (or loops
+   * it) at the event's own pace while each grain plays at the rate. So the pitch is the rate's
+   * and the length is the stretch's, as on the desktop.
+   */
+  _playWarp(track, buffer, plan) {
+    const fileSec = buffer.duration;
+    const size = 0.1;
+    const overlaps = 8;
+    const density = overlaps / size;
+    const start = Math.max(this.getTime(), plan.onsetSec);
+    const gateEnd = plan.loop || plan.cut ? Math.max(start, plan.offsetSec) : start + plan.durSec;
+    const amp = this.ctx.createGain();
+    amp.connect(track.input);
+    const end = this._envelope(amp, plan, start, gateEnd);
+    const window = this._grainWindow(null);
+    const rate = Math.abs(plan.speed);
+    // Where the pointer is at a time, 0..1 of the file.
+    const span = Math.max(1e-6, plan.end - plan.begin);
+    const perSec = (span / Math.max(1e-6, plan.durSec)) * Math.sign(plan.speed);
+    const pointer = (t) => {
+      const walked = (t - start) * perSec;
+      if (!plan.loop) return Math.min(1, Math.max(0, (plan.speed < 0 ? plan.end : plan.begin) + walked));
+      const lo = plan.loopLo;
+      const width = Math.max(1e-6, plan.loopHi - plan.loopLo);
+      const from = plan.loopEntry - lo;
+      if (plan.pingpong) {
+        const ph = (((from + walked) % (2 * width)) + 2 * width) % (2 * width);
+        return lo + (width - Math.abs(ph - width));
+      }
+      return lo + ((((from + walked) % width) + width) % width);
     };
+    const mono = buffer.numberOfChannels === 1;
+    let next = start;
+    const lay = () => {
+      const horizon = Math.min(end, this.getTime() + 0.1);
+      while (next < horizon) {
+        const scatter = (Math.random() - 0.5) * 0.1 * size;
+        // Scatter is kept inside the file: a grain at the very start scattered earlier would
+        // otherwise wrap round and read the file's end into the attack.
+        const at = Math.min(Math.max(0, fileSec - size * rate), Math.max(0, pointer(next) * fileSec + scatter));
+        this._grain(buffer, amp, next, size, at, rate, 0, (2 / overlaps) * (mono ? Math.SQRT2 : 1), window, track);
+        next += 1 / density;
+      }
+      if (next >= end) clearInterval(timer);
+    };
+    const timer = setInterval(lay, 25);
+    timer?.unref?.();
+    lay();
+  }
+
+  /** A file's transient slice starts, worked out once and off the tick: undefined until then. */
+  _transientsOf(buffer) {
+    if (this._transients.has(buffer)) return this._transients.get(buffer);
+    this._transients.set(buffer, undefined);
+    setTimeout(() => {
+      try {
+        this._transients.set(buffer, typeof buffer.getChannelData === 'function' ? detectOnsets(monoOf(buffer), buffer.sampleRate) : null);
+      } catch {
+        this._transients.set(buffer, null);
+      }
+    }, 0);
+    return undefined;
   }
 
   /** The master level, which the host uses for its own fade in and out. */
@@ -1455,4 +1938,14 @@ export class WebAudioEngine {
     }
     this.buses.clear();
   }
+}
+
+/** A take's chunks as one pair of channels. */
+function joinChunks(chunks, sampleRate) {
+  const frames = chunks.reduce((n, [l]) => n + l.length, 0);
+  const left = new Float32Array(frames);
+  const right = new Float32Array(frames);
+  let at = 0;
+  for (const [l, r] of chunks) { left.set(l, at); right.set(r, at); at += l.length; }
+  return { sampleRate, channels: 2, frames, left, right };
 }

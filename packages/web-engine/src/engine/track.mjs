@@ -19,7 +19,20 @@
 import { argToValue, clampParam, defaultValues, findParam, normalize } from '../descriptor.mjs';
 
 /** Channel-strip controls this engine implements. The rest warn once - see the engine. */
-export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry']);
+export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos']);
+
+/**
+ * The strip's constant-power pan, the desktop's law: a sine/cosine pair referenced to the CENTER,
+ * so a track at pan 0 leaves at the level it came in at and one panned all the way out is +3 dB
+ * on the side it went to (see poptart.scd's Balance2 x sqrt(2)). Each side is scaled, never
+ * summed across - panning a stereo track hard right plays its right channel, as the desktop does,
+ * where the browser's own StereoPannerNode folds the left into it and gains up to 6 dB.
+ */
+export function panGains(pan) {
+  const p = Math.min(1, Math.max(-1, Number(pan) || 0));
+  const angle = ((p + 1) * Math.PI) / 4;
+  return [Math.cos(angle) * Math.SQRT2, Math.sin(angle) * Math.SQRT2];
+}
 
 /**
  * How long a set-by-value takes to reach its target. Long enough not to click, short enough to
@@ -139,13 +152,59 @@ export class Track {
     this.input = ctx.createGain();          // where a source (synth, sampler, bus read) arrives
     this.chainIn = ctx.createGain();        // the `gain` control: level INTO the chain
     this.postGain = ctx.createGain();       // the `postgain` control: level out of it
-    this.panner = ctx.createStereoPanner(); // the `pan` control
     this.dryGain = ctx.createGain();        // the `dry` control: level to the master
+
+    // THE STRIP, the desktop's order: width, then bass mono, then pan (see poptart.scd's track
+    // synth). Width is mid/side - the sum left alone, the difference scaled, 0 mono and 4 four
+    // times as wide - and it comes before the pan because narrowing then placing is a move and
+    // placing then widening only smears it back. Bass mono high-passes the SIDE only, so below
+    // the cutoff both channels are the mid; crossfaded in and out rather than switched.
+    // `panner` is the strip's output - what every send, tap and analyser reads - and keeps the
+    // name it had when it was one node.
+    this.postGain.channelCount = 2;          // a mono source is heard in both sides, as before
+    this.postGain.channelCountMode = 'explicit';
+    this.postGain.channelInterpretation = 'speakers';
+    const gain = (v) => { const g = ctx.createGain(); g.gain.value = v; return g; };
+    this.split = ctx.createChannelSplitter(2);
+    this.mid = gain(1);
+    this.width = gain(1);                    // the `width` control scales the side
+    this.sideDry = gain(1);                  // bass mono off: the side as it is
+    this.sideHigh = gain(0);                 // bass mono on: the side above the cutoff
+    this.bassHp = ctx.createBiquadFilter();
+    this.bassHp.type = 'highpass';
+    this.bassHp.frequency.value = 120;
+    this.sideOut = gain(1);
+    this.sideInv = gain(-1);
+    this.panL = gain(1);
+    this.panR = gain(1);
+    this.merge = ctx.createChannelMerger(2);
+    this.panner = gain(1);
+    this.panValue = 0;
+    this.bassmonoHz = 0;
+    this.grain = { size: 0.08, rate: 20, pan: 0, pos: 0 };
 
     this.input.connect(this.chainIn);
     this.chainIn.connect(this.postGain);    // replaced as soon as a slot is filled
-    this.postGain.connect(this.panner);
+    this.postGain.connect(this.split);
+    // mid = (L + R) / 2 and side = (L - R) / 2, each built from the two channels with a gain.
+    const half = (from, v, into) => { const g = gain(v); this.split.connect(g, from); g.connect(into); return g; };
+    this._halves = [half(0, 0.5, this.mid), half(1, 0.5, this.mid), half(0, 0.5, this.width), half(1, -0.5, this.width)];
+    this.width.connect(this.sideDry);
+    this.width.connect(this.bassHp);
+    this.bassHp.connect(this.sideHigh);
+    this.sideDry.connect(this.sideOut);
+    this.sideHigh.connect(this.sideOut);
+    this.sideOut.connect(this.sideInv);
+    // left = mid + side, right = mid - side, each scaled by its side of the pan.
+    this.mid.connect(this.panL);
+    this.sideOut.connect(this.panL);
+    this.mid.connect(this.panR);
+    this.sideInv.connect(this.panR);
+    this.panL.connect(this.merge, 0, 0);
+    this.panR.connect(this.merge, 0, 1);
+    this.merge.connect(this.panner);
     this.panner.connect(this.dryGain);
+    this.master = master;
     this.dryGain.connect(master);
 
     this.slots = new Map();                 // slot index -> Slot
@@ -285,7 +344,45 @@ export class Track {
     switch (name) {
       case 'gain': rampParam(this.chainIn.gain, value, atTime, now); return true;
       case 'postgain': rampParam(this.postGain.gain, value, atTime, now); return true;
-      case 'pan': rampParam(this.panner.pan, Math.min(1, Math.max(-1, value)), atTime, now); return true;
+      case 'pan': {
+        this.panValue = Math.min(1, Math.max(-1, value));
+        const [l, r] = panGains(this.panValue);
+        rampParam(this.panL.gain, l, atTime, now);
+        rampParam(this.panR.gain, r, atTime, now);
+        return true;
+      }
+      // Pitch bend, in semitones. The sample voices read it continuously off one constant per
+      // track, in cents, connected to each voice's detune - so a bend moves the ones already
+      // sounding, as the desktop's voices reading the track's bend bus do. The instrument is told
+      // by the engine, which knows what kind of instrument it is.
+      case 'bend': {
+        const semis = Math.min(48, Math.max(-48, Number(value) || 0));
+        this.bendSemis = semis;
+        rampParam(this.bendSource().offset, semis * 100, atTime, now);
+        return true;
+      }
+      // How far a plugin's pitch-bend message reaches: a MIDI matter, and the browser's
+      // instruments take the bend in semitones directly, so there is nothing to set.
+      case 'bendrange': return true;
+      // Which output pair the track plays to, from 1 - where it goes is the engine's to wire,
+      // since only it knows how many pairs there are (see WebAudioEngine#_routeOut).
+      case 'out': this.outValue = Number(value) || 1; return true;
+      // The granular voice's live controls, read by each grain as it starts (see the engine's
+      // _playGrains). Held here because a grain belongs to a voice, and the voice to the track.
+      case 'grainsize': this.grain.size = Number(value); return true;
+      case 'grainrate': this.grain.rate = Number(value); return true;
+      case 'grainpan': this.grain.pan = Number(value); return true;
+      case 'grainpos': this.grain.pos = Number(value); return true;
+      case 'width': rampParam(this.width.gain, Math.min(4, Math.max(0, value)), atTime, now); return true;
+      case 'bassmono': {
+        // 0 is off; anything else is the cutoff in Hz, held to the desktop's 20 Hz - 2 kHz.
+        const on = value > 0;
+        this.bassmonoHz = on ? Math.min(2000, Math.max(20, value)) : 0;
+        if (on) rampParam(this.bassHp.frequency, this.bassmonoHz, atTime, now);
+        rampParam(this.sideDry.gain, on ? 0 : 1, atTime, now);
+        rampParam(this.sideHigh.gain, on ? 1 : 0, atTime, now);
+        return true;
+      }
       case 'dry': rampParam(this.dryGain.gain, value, atTime, now); return true;
       default:
         if (name.startsWith('wet')) {
@@ -299,6 +396,16 @@ export class Track {
         }
         return false;
     }
+  }
+
+  /** The track's bend as a signal in cents, started on first use. */
+  bendSource() {
+    if (!this.bendNode) {
+      this.bendNode = this.ctx.createConstantSource();
+      this.bendNode.offset.value = (this.bendSemis ?? 0) * 100;
+      this.bendNode.start();
+    }
+    return this.bendNode;
   }
 
   /**
@@ -354,6 +461,8 @@ export class Track {
       this.chainIn.disconnect();
       this.postGain.disconnect();
       this.panner.disconnect();
+      this.merge.disconnect();
+      this.split.disconnect();
       this.dryGain.disconnect();
     } catch { /* already detached */ }
   }

@@ -26,6 +26,7 @@ import { OVERDRIVE, OverdriveProcessor } from '../devices/overdrive.mjs';
 import { MULTIBAND, MultibandProcessor } from '../devices/multiband.mjs';
 import { STUTTER, StutterProcessor } from '../devices/stutter.mjs';
 import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
+import { RecorderTap } from '../devices/recorder.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
 
 class EffectProcessor extends AudioWorkletProcessor {
@@ -84,3 +85,24 @@ for (const [descriptor, Impl] of EFFECTS) {
     constructor(options) { super(options, descriptor, new Impl(sampleRate, 128)); }
   });
 }
+
+// The recorder tap (see devices/recorder.mjs): not an effect, so no descriptor and no parameters,
+// but it lives in this file so that loading the effects loads it too.
+registerProcessor('poptart-recorder', class extends AudioWorkletProcessor {
+  constructor(options) {
+    super(options);
+    this.alive = true;
+    this.tap = new RecorderTap(sampleRate, (m, transfer) => this.port.postMessage(m, transfer ?? []));
+    this.port.onmessage = (event) => {
+      if (isDispose(event.data)) { this.alive = false; return; }
+      this.tap.receive(event.data);
+    };
+  }
+
+  process(inputs) {
+    if (!this.alive) return false;
+    const input = inputs[0] ?? [];
+    this.tap.process(input[0] ?? null, input[1] ?? null, input[0]?.length ?? 128, currentFrame);
+    return true;
+  }
+});

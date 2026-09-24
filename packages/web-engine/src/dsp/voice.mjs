@@ -84,6 +84,8 @@ export class VoiceParams {
 
     this.glide = 0;
     this.level = 0.7;
+    // Pitch bend in semitones, on every voice at once - the track's .bend(), not a knob.
+    this.bend = 0;
 
     /** Per-sample arrays for the fields a signal is moving this block, or null. Same names. */
     this.a = {};
@@ -227,7 +229,7 @@ export class WavetableVoice {
     } else {
       this.currentHz = this.targetHz;
     }
-    const baseHz = this.currentHz;
+    const baseHz = p.bend ? this.currentHz * Math.pow(2, p.bend / 12) : this.currentHz;
 
     const osc1 = this.osc1;
     const osc2 = this.osc2;

@@ -136,4 +136,8 @@ function removePinned(text, { kind, id, scope = '' }) {
   return `${src.slice(0, had.start)}${src.slice(had.end)}`;
 }
 
-module.exports = { HEADER, KINDS, parsePinned, upsertPinned, removePinned };
+// Loaded two ways: required by the desktop server, and imported by the browser build's host (see
+// public/web/prebake.mjs), where there is no `module` and the functions are left on globalThis.
+const api = { HEADER, KINDS, parsePinned, upsertPinned, removePinned };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+else globalThis.poptartPinnedDefs = api;

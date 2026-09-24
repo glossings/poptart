@@ -7,7 +7,7 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
-import { History } from '../dsp/history.mjs';
+import { DYNAMICS_BLOCKS_PER_ENTRY, History } from '../dsp/history.mjs';
 
 /** The lookahead, in seconds. Two milliseconds is under a hundred samples: inaudible as latency. */
 const LOOKAHEAD_SEC = 0.002;
@@ -52,8 +52,8 @@ export class LimiterProcessor {
     this.gain = 1;
     this.reduction = 0;
     this.level = -120;       // the loudest the input reached this block, after the gain, in dB
-    this.levels = new History(undefined, -120);
-    this.reductions = new History(undefined, 0);
+    this.levels = new History(undefined, -120, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'max' });
+    this.reductions = new History(undefined, 0, { per: DYNAMICS_BLOCKS_PER_ENTRY, keep: 'min' });
     this.blockSec = 128 / sampleRate;
   }
 
@@ -95,7 +95,7 @@ export class LimiterProcessor {
     this.level = loudest > 1e-6 ? 20 * Math.log10(loudest) : -120;
     this.levels.push(this.level);
     this.reductions.push(reduction < 1 ? 20 * Math.log10(reduction) : 0);
-    this.blockSec = count / this.sampleRate;
+    this.blockSec = (count / this.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
   }
 
   /** Where the signal is and how much is being held back, for the picture, and the last second of both. */
