@@ -88,154 +88,10 @@ export const PLAITS_PARAMS = Object.freeze([
 // Tides was ported and then retired: an lfo() on any control already is what it did. Its
 // wrapper is in this file's history and its entry in sources.json says so.
 
-export const PEAKS_VOICES = Object.freeze(['Bass Drum', 'Snare Drum', 'Hi-Hat', 'FM Drum']);
+// Peaks was ported and then retired, as Tides was: three of its drums are Plaits' own drum
+// engines and the fourth is what the FM synth does. Its wrapper is in this file's history and
+// its entry in sources.json says so.
 
-export const PEAKS_PARAMS = Object.freeze([
-  {
-    id: 'voice',
-    name: 'Voice',
-    default: 0,
-    options: PEAKS_VOICES,
-    rate: 'k',
-    group: 'Drum',
-    description: 'Which of the module\'s four drum models is struck. The four controls below mean something a little different in each.',
-  },
-  {
-    id: 'frequency',
-    name: 'Frequency',
-    min: 0,
-    max: 1,
-    default: 0.5,
-    group: 'Drum',
-    description: 'The pitch of the drum, an octave either way around the note played. The bass drum and the snare reach seven semitones either side of their own center, so a note far from it is heard at the edge of the range.',
-  },
-  { id: 'punch', name: 'Punch', min: 0, max: 1, default: 0.5, group: 'Drum', description: "How hard the drum is hit: the depth of the pitch sweep at the start and the weight behind it." },
-  { id: 'tone', name: 'Tone', min: 0, max: 1, default: 0.5, group: 'Drum', description: "The brightness of the drum - how much top the body and the transient keep." },
-  { id: 'decay', name: 'Decay', min: 0, max: 1, default: 0.4, group: 'Drum', description: "How long the drum rings on after it is struck." },
-]);
-
-void Generate(int frames) {
-  int voice = (int)(g_params[0] + 0.5f);
-  if (voice < 0) voice = 0;
-  if (voice > 3) voice = 3;
-
-  // The note sets the drum's pitch and the Frequency control moves it from there, an octave
-  // either way. Each model reads its frequency word on its own scale - the bass drum and the
-  // snare span seven semitones either side of a fixed center, the FM drum six octaves from C1 -
-  // so the note is mapped onto each one's own range rather than handed over as a raw fraction,
-  // which had a played note doing almost nothing on one drum and running off the end of another.
-  const float note = g_note + (g_params[1] - 0.5f) * 24.0f;
-  float freq;
-  if (voice == 3) {
-    freq = (note - 24.0f) / 72.0f;                       // C1 .. C7 across the word
-  } else {
-    const float center = voice == 0 ? 31.0f : 52.0f;     // the model's own fixed pitch
-    freq = 0.5f + (note - center) / 14.0f;               // +-7 semitones across the word
-  }
-  if (freq < 0.0f) freq = 0.0f;
-  if (freq > 1.0f) freq = 1.0f;
-
-  uint16_t p[4] = { ToU16(freq), ToU16(g_params[2]), ToU16(g_params[3]), ToU16(g_params[4]) };
-  switch (voice) {
-    case 0: g_bass.Configure(p, peaks::CONTROL_MODE_FULL); break;
-    case 1: g_snare.Configure(p, peaks::CONTROL_MODE_FULL); break;
-    case 2: g_hat.Configure(p, peaks::CONTROL_MODE_FULL); break;
-    default: g_fm.Configure(p, peaks::CONTROL_MODE_FULL); break;
-  }
-
-  // Whole chunks only, never a short one. The chunk is the module's own audio block and its
-  // voices carry state across it; handing one a partial block is not something the hardware ever
-  // does. The surplus waits in the fifo and starts the next block. See the same note in Braids,
-  // where a short block is not merely wrong but fatal.
-  while (frames > 0 && g_fifoCount + kChunk <= kFifo) {
-    for (int i = 0; i < kChunk; i++) {
-      uint8_t flags = g_high ? peaks::GATE_FLAG_HIGH : peaks::GATE_FLAG_LOW;
-      if (g_rising && i == 0) { flags |= peaks::GATE_FLAG_RISING | peaks::GATE_FLAG_HIGH; }
-      g_gate[i] = flags;
-    }
-    g_rising = false;
-    switch (voice) {
-      case 0: g_bass.Process(g_gate, g_chunk, (size_t)kChunk); break;
-      case 1: g_snare.Process(g_gate, g_chunk, (size_t)kChunk); break;
-      case 2: g_hat.Process(g_gate, g_chunk, (size_t)kChunk); break;
-      default: g_fm.Process(g_gate, g_chunk, (size_t)kChunk); break;
-    }
-    for (int i = 0; i < kChunk; i++) {
-      g_fifo[g_fifoCount++] = (float)g_chunk[i] / 32768.0f;
-    }
-    frames -= kChunk;
-  }
-}
-
-}  // namespace
-
-extern "C" {
-
-void pd_init(double sample_rate) {
-  if (!g_ready) {
-    g_bass.Init();
-    g_snare.Init();
-    g_hat.Init();
-    g_fm.Init();
-    g_ready = true;
-  }
-  g_ratio = 48000.0 / sample_rate;
-  g_fifoCount = 0;
-  g_frac = 0.0;
-  g_rising = false;
-  g_high = false;
-}
-
-int pd_param_count() { return 5; }
-int pd_max_block() { return ${maxBlock}; }
-float* pd_in() { return g_out; }
-float* pd_out() { return g_out; }
-float* pd_params() { return g_params; }
-
-void pd_note_on(float note, float velocity) {
-  (void)velocity;
-  g_note = note;
-  g_rising = true;
-  g_high = true;
-}
-
-void pd_note_off(float note) {
-  (void)note;
-  g_high = false;
-}
-
-void pd_process(int frames) {
-  if (!g_ready) return;
-  if (frames > ${maxBlock}) frames = ${maxBlock};
-
-  const double span = g_frac + g_ratio * (double)frames;
-  const int need = (int)span + 2;
-  if (need > g_fifoCount) Generate(need - g_fifoCount);
-
-  for (int i = 0; i < frames; i++) {
-    const double pos = g_frac + g_ratio * (double)i;
-    int i0 = (int)pos;
-    if (i0 + 1 >= g_fifoCount) i0 = g_fifoCount - 2;
-    if (i0 < 0) { g_out[i] = 0.0f; g_out[${maxBlock} + i] = 0.0f; continue; }
-    const float t = (float)(pos - (double)i0);
-    const float v = g_fifo[i0] + (g_fifo[i0 + 1] - g_fifo[i0]) * t;
-    g_out[i] = v;
-    g_out[${maxBlock} + i] = v;
-  }
-
-  const int consumed = (int)span;
-  if (consumed > 0 && consumed <= g_fifoCount) {
-    for (int i = consumed; i < g_fifoCount; i++) g_fifo[i - consumed] = g_fifo[i];
-    g_fifoCount -= consumed;
-  }
-  g_frac = span - (double)consumed;
-}
-
-}
-`;
-}
-
-/** In enum order, which is the shape index. See braids/settings.h. */
 export const BRAIDS_SHAPES = Object.freeze([
   'CSaw', 'Morph', 'Saw Square', 'Sine Triangle', 'Buzz',
   'Square Sub', 'Saw Sub', 'Square Sync', 'Saw Sync', 'Triple Saw', 'Triple Square',
@@ -365,8 +221,16 @@ float* pd_in() { return g_out; }
 float* pd_out() { return g_out; }
 float* pd_params() { return g_params; }
 
+static float g_note = 60.0f;
+static float g_bend = 0.0f;
+
+// The track's .bend(), in semitones, on top of whatever note is playing - applied every block,
+// so a bend moves a note that is already sounding.
+void pd_bend(float semitones) { g_bend = semitones; }
+
 void pd_note_on(float note, float velocity) {
   (void)velocity;
+  g_note = note;
   // Pitch is in 1/128ths of a semitone, counted from the same middle C poptart uses.
   g_osc.set_pitch((int16_t)(note * 128.0f));
   g_osc.Strike();
@@ -389,6 +253,14 @@ void pd_process(int frames) {
 
   g_osc.set_parameters((int16_t)(g_params[1] * 32767.0f), (int16_t)(g_params[2] * 32767.0f));
   g_envelope.Update((int32_t)(g_params[3] * 127.0f), (int32_t)(g_params[4] * 127.0f));
+  // The pitch again every block, so a bend moves the note that is sounding. Braids takes it in
+  // 1/128ths of a semitone, held to what an int16 can say.
+  {
+    float pitch = (g_note + g_bend) * 128.0f;
+    if (pitch < 0.0f) pitch = 0.0f;
+    if (pitch > 32767.0f) pitch = 32767.0f;
+    g_osc.set_pitch((int16_t)pitch);
+  }
 
   const double span = g_frac + g_ratio * (double)frames;
   const int need = (int)span + 2;
@@ -558,7 +430,15 @@ float* pd_in() { return g_out; }
 float* pd_out() { return g_out; }
 float* pd_params() { return g_params; }
 
+static float g_note = 48.0f;
+static float g_bend = 0.0f;
+
+// The track's .bend(), in semitones, on top of whatever note is playing - applied every block,
+// so a bend moves a note that is already sounding.
+void pd_bend(float semitones) { g_bend = semitones; }
+
 void pd_note_on(float note, float velocity) {
+  g_note = note;
   g_state.note = note;
   g_state.strength = velocity;
   g_state.gate = true;
@@ -595,6 +475,9 @@ void pd_process(int frames) {
   p->reverb_diffusion = 0.625f;
   p->reverb_lp = 0.7f;
   p->modulation_frequency = 0.5f;
+  // The bend rides the module's own pitch modulation input, which Elements adds to every
+  // voice's pitch every block - so the voices still ringing bend with the one just played.
+  g_state.modulation = g_bend;
 
   const double span = g_frac + g_ratio * (double)frames;
   const int need = (int)span + 2;
@@ -1214,11 +1097,19 @@ float* pd_in() { return g_out; }
 float* pd_out() { return g_out; }
 float* pd_params() { return g_params; }
 
+static float g_note = 36.0f;
+static float g_bend = 0.0f;
+
+// The track's .bend(), in semitones, on top of whatever note is playing - applied every block,
+// so a bend moves a note that is already sounding.
+void pd_bend(float semitones) { g_bend = semitones; }
+
 void pd_note_on(float note, float velocity) {
   (void)velocity;
   // Rings counts its pitch from the same middle C poptart does, split into a tonic and an
   // offset; keeping the tonic where the module rests puts the note where it was written.
-  g_state.note = note - 12.0f;
+  g_note = note - 12.0f;
+  g_state.note = g_note;
   g_state.strum = true;
 }
 
@@ -1247,6 +1138,10 @@ void pd_process(int frames) {
   // string was a click with no ring after it.
   if (model != g_model) { g_part.set_model((rings::ResonatorModel)model); g_model = model; }
   if (poly != g_poly) { g_part.set_polyphony(poly); g_poly = poly; }
+  // The bend rides the module's own FM input, in semitones: Rings adds it to every voice's pitch
+  // every block, so held strings bend together - where moving the note would reach only the
+  // voice last struck, and through the note filter's smoothing.
+  g_state.fm = g_bend;
 
   const double span = g_frac + g_ratio * (double)frames;
   const int need = (int)span + 2;
@@ -1390,6 +1285,12 @@ float* pd_in() { return g_out; }        // no input; never read
 float* pd_out() { return g_out; }
 float* pd_params() { return g_params; }
 
+static float g_bend = 0.0f;
+
+// The track's .bend(), in semitones, on top of whatever note is playing - applied every block,
+// so a bend moves a note that is already sounding.
+void pd_bend(float semitones) { g_bend = semitones; }
+
 void pd_note_on(float note, float velocity) {
   // Plaits counts middle C as 60 the way poptart does, so the number passes straight through.
   g_patch.note = note;
@@ -1416,6 +1317,8 @@ void pd_process(int frames) {
   g_patch.frequency_modulation_amount = g_params[7];
   g_patch.timbre_modulation_amount = g_params[8];
   g_patch.morph_modulation_amount = g_params[9];
+  // The bend rides the module's own note input, which it adds to the patch's note every block.
+  g_mods.note = g_bend;
 
   const double span = g_frac + g_ratio * (double)frames;
   const int need = (int)span + 2;

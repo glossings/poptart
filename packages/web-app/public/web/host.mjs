@@ -1221,8 +1221,18 @@ export function createHost({
 
     // ---- carrying work in and out ------------------------------------------------------------------
 
-    'GET /api/export': async () => storage.exportAll(),
-    'POST /api/import': async (body) => storage.importAll(body.bundle, { overwrite: !!body.overwrite }),
+    // `audio=1` carries the files added here, the wavetables and the recordings too.
+    'GET /api/export': async (_body, query) => storage.exportAll({ audio: query?.get?.('audio') === '1' }),
+    'POST /api/import': async (body) => {
+      const result = await storage.importAll(body.bundle, { overwrite: !!body.overwrite });
+      // Imported audio is in the store; the sample store reads its lists again and decodes the
+      // new files, and the language learns the packs' new names.
+      if (result.audio?.written && typeof samples.loadFiles === 'function') {
+        const packs = await samples.loadFiles();
+        if (patternCore?._pack) registerPacks(patternCore, packs.filter((m) => m.files.length));
+      }
+      return result;
+    },
 
     // ---- leases the desktop's panels take ------------------------------------------------------------
 

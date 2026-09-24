@@ -111,7 +111,8 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
 
   receive(message) {
     if (!message) return;
-    if (message.kind === 'noteOn' || message.kind === 'noteOff') {
+    // A bend is timestamped like a note, so it is applied at its sample in the block.
+    if (message.kind === 'noteOn' || message.kind === 'noteOff' || message.kind === 'bend') {
       this.pending.push(message);
       return;
     }
@@ -211,6 +212,7 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
       while (edge < edges.length && edges[edge].offset <= at) {
         const { event } = edges[edge];
         if (event.kind === 'noteOn') this.exports.pd_note_on?.(event.note, event.velocity ?? 1);
+        else if (event.kind === 'bend') this.exports.pd_bend?.(event.semitones ?? 0);
         else this.exports.pd_note_off?.(event.note);
         edge += 1;
       }

@@ -577,11 +577,9 @@ no completion notes.
         careful look rather than a glance: work through a manual checklist of the rest before this
         goes anywhere public.
     (3) What the page still does differently from the desktop, each deliberately:
-        - The export (settings, "your work") carries everything kept as TEXT - patterns, sessions,
-          snippets, the library, the prebake, captured states - and not the audio files added in
-          the browser or its recordings. Carrying those means a binary format for the bundle.
-        - .bend() does not move the ported modules (Plaits and the rest take pitch per note) and
-          says so once; the Wavetable, FM, Granular and every sample voice bend.
+        - An export with audio is one JSON file with the audio in base64, a third bigger than the
+          audio itself and built in memory - fine for a set's worth of recordings, heavy for a
+          wavetable folder of thousands. A zip, written as it goes, would carry more.
         - The warp (.stretch()) and grain voices schedule their grains from the main thread with a
           100 ms lookahead, so a page that stalls for longer than that drops grains. A worklet
           grain engine would not.

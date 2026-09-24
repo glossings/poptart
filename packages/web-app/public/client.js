@@ -18209,7 +18209,8 @@ const storeImportInput = document.getElementById('storeImportInput');
 async function exportStore() {
   storeNote.textContent = 'exporting…';
   try {
-    const bundle = await api('GET', '/api/export');
+    const withAudio = document.getElementById('storeExportAudio')?.checked;
+    const bundle = await api('GET', withAudio ? '/api/export?audio=1' : '/api/export');
     const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -18219,7 +18220,8 @@ async function exportStore() {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     const n = Object.keys(bundle.files ?? {}).length;
-    storeNote.textContent = `exported ${n} record${n === 1 ? '' : 's'}`;
+    const audioCount = Object.keys(bundle.audio?.bytes ?? {}).length;
+    storeNote.textContent = `exported ${n} record${n === 1 ? '' : 's'}${bundle.audio ? ` and ${audioCount} audio file${audioCount === 1 ? '' : 's'}` : ''}`;
   } catch (e) {
     storeNote.textContent = e.message ?? String(e);
   }
@@ -18229,8 +18231,9 @@ async function importStore(file) {
   storeNote.textContent = `reading ${file.name}…`;
   try {
     const bundle = JSON.parse(await file.text());
-    const { written, skipped } = await api('POST', '/api/import', { bundle, overwrite: false });
-    storeNote.textContent = `imported ${written}${skipped ? ` · kept ${skipped} already here` : ''}`;
+    const { written, skipped, audio } = await api('POST', '/api/import', { bundle, overwrite: false });
+    const kept = skipped + (audio?.skipped ?? 0);
+    storeNote.textContent = `imported ${written}${audio ? ` and ${audio.written} audio file${audio.written === 1 ? '' : 's'}` : ''}${kept ? ` · kept ${kept} already here` : ''}`;
     refreshPatternFiles().catch(() => {});
   } catch (e) {
     storeNote.textContent = e instanceof SyntaxError ? `${file.name} is not a poptart export` : (e.message ?? String(e));

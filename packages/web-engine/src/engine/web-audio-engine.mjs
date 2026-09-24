@@ -703,11 +703,6 @@ export class WebAudioEngine {
   _bendInstrument(trackId, track, atTime) {
     const source = track.source;
     if (!source?.node?.port) return;
-    const descriptor = track.slots.get(0)?.descriptor;
-    if (descriptor?.build === 'wasm') {
-      if (track.bendSemis) this._warnOnce(`bend:${descriptor.id}`, `[web-engine] "${descriptor.id}" is a ported module that takes its pitch per note, so .bend() does not move it here. The sample voices and the other instruments do bend.`);
-      return;
-    }
     try { source.node.port.postMessage({ kind: 'bend', semitones: track.bendSemis ?? 0, time: atTime }); } catch { /* gone */ }
   }
 

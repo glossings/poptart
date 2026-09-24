@@ -597,3 +597,54 @@ test('an effect makes no sound of its own: silence in, silence out, wherever its
   }
   assert.deepEqual(loud, []);
 });
+
+test('a bend moves the ported instruments\' notes while they sound', () => {
+  // An octave up, sent after the note has started: the pitch should double, measured as the
+  // rate the output crosses zero on the way up once it has settled. Settings are each module's
+  // plainest pitched sound, so the crossing count is the fundamental's.
+  const settings = {
+    Plaits: { decay: 1, engine: 8 },
+    Braids: { shape: 0, decay: 1 },                                  // a saw, held as long as it goes
+    Rings: { damping: 0.9, brightness: 0.3 },                        // a long, dark ring (Rings' damping is its sustain)
+    Elements: { bowlevel: 1, strikelevel: 0, damping: 0.1, brightness: 0.3 }, // bowed: it sounds for as long as it is held
+  };
+  // Where the loudest partial between 60 Hz and 1 kHz sits, from a direct transform of the settled
+  // output in 1 Hz steps. A bend moves every partial, and every mode of a resonator, by the same
+  // ratio, so this doubles for an octave whether the sound has a clean period (a saw) or not (a
+  // bowed resonator, whose inharmonic modes defeat a period estimate).
+  const rate = (id, bend) => {
+    const { node, descriptor } = portedDevice(id);
+    const params = paramsFor(descriptor, settings[id]);
+    const out = [[new Float32Array(BLOCK), new Float32Array(BLOCK)]];
+    node.port._send({ kind: 'noteOn', note: 48, velocity: 1, time: 0 });
+    const kept = [];
+    for (let block = 0; block < 120; block++) {
+      if (block === 8 && bend) node.port._send({ kind: 'bend', semitones: bend, time: 0 });
+      node.process([], out, params);
+      if (block >= 56) kept.push(...out[0][0]);
+    }
+    const n = kept.length;
+    let best = 0;
+    let bestHz = 0;
+    for (let hz = 60; hz <= 1000; hz += 1) {
+      let re = 0;
+      let im = 0;
+      const w = (2 * Math.PI * hz) / SR;
+      for (let i = 0; i < n; i++) {
+        const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
+        re += kept[i] * hann * Math.cos(w * i);
+        im -= kept[i] * hann * Math.sin(w * i);
+      }
+      const mag = re * re + im * im;
+      if (mag > best) { best = mag; bestHz = hz; }
+    }
+    return best > 1e-6 ? bestHz : 0;
+  };
+  for (const id of Object.keys(settings)) {
+    const flat = rate(id, 0);
+    const up = rate(id, 12);
+    assert.ok(flat > 0, `${id} should sound`);
+    const ratio = up / flat;
+    assert.ok(Math.abs(ratio - 2) < 0.1, `${id}: an octave of bend moved the pitch by ${ratio.toFixed(2)}x (${flat.toFixed(1)} -> ${up.toFixed(1)} Hz)`);
+  }
+});

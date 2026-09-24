@@ -400,10 +400,15 @@
               <h2>your work</h2>
               <div class="settings-actions">
                 <button id="storeExport" class="small"
-                  title="Downloads one file holding everything this browser keeps as text: patterns, sessions, snippets, the library, the prebake and the captured device states. Files you added and recordings are audio and are not in it.">export…</button>
+                  title="Downloads one file holding everything this browser keeps as text: patterns, sessions, snippets, the library, the prebake and the captured device states - and, with audio ticked, the files you added, your wavetables and your recordings.">export…</button>
                 <button id="storeImport" class="small"
                   title="Puts an exported file back. Anything already here with the same name is kept, not overwritten.">import…</button>
               </div>
+              <label class="settings-row settings-check"
+                title="Puts the files you added, your wavetables and your recordings in the export too. Much bigger - audio is most of what this browser keeps.">
+                <input id="storeExportAudio" type="checkbox" />
+                include audio
+              </label>
               <input id="storeImportInput" type="file" accept=".json,application/json" hidden />
               <div id="storeNote" class="files-note"></div>
             </section>

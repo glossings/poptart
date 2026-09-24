@@ -76,6 +76,24 @@ export function wipFallbackLabel(session) {
  *   naming and listing want. With it, code on its way OUT carries its state in full and code on
  *   its way IN is reduced to handles - the same two directions the desktop applies.
  */
+/** The packs whose audio lives only in this browser, and so travels in an export. */
+const AUDIO_PACKS = Object.freeze(['files', 'wt', 'rec']);
+
+/** Bytes as base64, in chunks: one call over a large file would overflow the argument list. */
+function toBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+function fromBase64(text) {
+  const binary = atob(text);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out.buffer;
+}
+
 export function createStorage(store, { meta = globalThis, now = () => Date.now(), blobs = null, maxSnapshots = MAX_SNAPSHOTS } = {}) {
   const { parseMeta, displayLabel, patternNameProblem, matchesQuery } = meta;
   if (typeof patternNameProblem !== 'function') {
@@ -236,13 +254,62 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
    * a pattern without the captured device state it references is a pattern that opens silent,
    * and deciding which parts matter is not a decision to make on somebody's behalf.
    */
-  async function exportAll() {
+  async function exportAll({ audio = false } = {}) {
     const files = {};
     for (const key of await store.keys('')) {
       const held = await store.get(key);
       if (held?.text != null) files[key] = { text: held.text, mtime: held.mtime ?? 0 };
     }
-    return { format: 'poptart-store-1', exported: new Date().toISOString(), files };
+    const out = { format: 'poptart-store-1', exported: new Date().toISOString(), files };
+    if (audio) out.audio = await exportAudio();
+    return out;
+  }
+
+  /**
+   * The audio this browser made or was given - the files added one at a time, a wavetable folder,
+   * the recordings - as each pack's list and each file's bytes, base64. Not the library packs a
+   * pattern downloaded: those have a home they can be fetched from again.
+   */
+  async function exportAudio() {
+    const packs = {};
+    const bytes = {};
+    for (const pack of AUDIO_PACKS) {
+      const manifest = await store.get(`samples/${pack}/manifest.json`);
+      if (!manifest?.files?.length) continue;
+      packs[pack] = { files: manifest.files };
+      for (const f of manifest.files) {
+        const held = await store.get(`samples/${pack}/${f.file}`);
+        if (held?.bytes) bytes[`${pack}/${f.file}`] = toBase64(held.bytes);
+      }
+    }
+    return { packs, bytes };
+  }
+
+  /** Puts an export's audio back: a pack's list merged with what is here, its files written. */
+  async function importAudio(audio, overwrite) {
+    let written = 0;
+    let skipped = 0;
+    for (const [pack, incoming] of Object.entries(audio?.packs ?? {})) {
+      if (!AUDIO_PACKS.includes(pack) || !Array.isArray(incoming?.files)) continue;
+      const key = `samples/${pack}/manifest.json`;
+      const have = (await store.get(key))?.files ?? [];
+      const names = new Set(have.map((f) => f.file));
+      const merged = [...have];
+      for (const f of incoming.files) {
+        const file = String(f?.file ?? '');
+        if (!file || file.includes('..') || file.startsWith('/')) { skipped += 1; continue; }
+        const b64 = audio.bytes?.[`${pack}/${file}`];
+        if (typeof b64 !== 'string') { skipped += 1; continue; }
+        const exists = names.has(file);
+        if (exists && !overwrite) { skipped += 1; continue; }
+        const raw = fromBase64(b64);
+        await store.put(`samples/${pack}/${file}`, { bytes: raw, mtime: now() });
+        if (!exists) { merged.push({ file, bytes: raw.byteLength }); names.add(file); }
+        written += 1;
+      }
+      await store.put(key, { files: merged, mtime: now() });
+    }
+    return { written, skipped };
   }
 
   /**
@@ -253,6 +320,7 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
     if (bundle?.format !== 'poptart-store-1') throw new Error('that is not a poptart export');
     let written = 0;
     let skipped = 0;
+    const audio = bundle.audio ? await importAudio(bundle.audio, overwrite) : null;
     for (const [key, value] of Object.entries(bundle.files ?? {})) {
       if (typeof value?.text !== 'string') continue;
       // A key out of a file somebody was handed: it names a record, and it is not allowed to
@@ -262,7 +330,7 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
       await store.put(key, { text: value.text, mtime: value.mtime ?? now() });
       written += 1;
     }
-    return { written, skipped };
+    return { written, skipped, ...(audio ? { audio } : {}) };
   }
 
   return {

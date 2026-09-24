@@ -255,3 +255,31 @@ test('a handle that is not the shape ids come in never becomes a key', async () 
 });
 
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+
+// --- audio in the export ----------------------------------------------------------------------
+
+test('an export with audio carries the added packs\' files, and an import puts them back beside what is there', async () => {
+  const fromStore = memoryStore();
+  const from = createStorage(fromStore, { meta });
+  const wav = (n) => Uint8Array.from({ length: 64 }, (_, i) => (i * n) % 256).buffer;
+  await fromStore.put('samples/files/manifest.json', { files: [{ file: 'kick.wav', bytes: 64 }], mtime: 1 });
+  await fromStore.put('samples/files/kick.wav', { bytes: wav(3), mtime: 1 });
+  await fromStore.put('samples/rec/manifest.json', { files: [{ file: 'bass.wav', bytes: 64 }], mtime: 1 });
+  await fromStore.put('samples/rec/bass.wav', { bytes: wav(5), mtime: 1 });
+  await fromStore.put('samples/pt_kit/kick.wav', { bytes: wav(7), mtime: 1 }); // a download: stays out
+
+  assert.equal((await from.exportAll()).audio, undefined, 'text only unless asked');
+  const bundle = JSON.parse(JSON.stringify(await from.exportAll({ audio: true })));
+  assert.deepEqual(Object.keys(bundle.audio.bytes).sort(), ['files/kick.wav', 'rec/bass.wav']);
+
+  const toStore = memoryStore();
+  await toStore.put('samples/files/manifest.json', { files: [{ file: 'snare.wav', bytes: 64 }], mtime: 1 });
+  await toStore.put('samples/files/snare.wav', { bytes: wav(9), mtime: 1 });
+  const to = createStorage(toStore, { meta });
+  const result = await to.importAll(bundle);
+  assert.deepEqual(result.audio, { written: 2, skipped: 0 });
+  assert.deepEqual((await toStore.get('samples/files/manifest.json')).files.map((f) => f.file), ['snare.wav', 'kick.wav'], 'merged after what was here, so its indexes stand');
+  assert.deepEqual(new Uint8Array((await toStore.get('samples/rec/bass.wav')).bytes), new Uint8Array(wav(5)), 'byte for byte');
+  // Again: everything is already here, so nothing is written over.
+  assert.deepEqual((await to.importAll(bundle)).audio, { written: 0, skipped: 2 });
+});

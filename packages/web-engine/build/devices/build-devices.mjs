@@ -326,7 +326,7 @@ void pd_process(int frames) {
 
 const EXPORTS = ['_pd_init', '_pd_param_count', '_pd_max_block', '_pd_in', '_pd_out', '_pd_params', '_pd_process'];
 /** An instrument exports two more: it is played rather than fed. */
-const SYNTH_EXPORTS = [...EXPORTS, '_pd_note_on', '_pd_note_off'];
+const SYNTH_EXPORTS = [...EXPORTS, '_pd_note_on', '_pd_note_off', '_pd_bend'];
 
 function emccPath() {
   const root = process.env.EMSDK;
