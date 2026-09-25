@@ -275,3 +275,23 @@ test('a pack written as a list plays the files it names, whole packs spread out,
   assert.equal(samples.fileKey('kit', 0), 'kicks/Deep/k.wav', 'slices are looked up by the file it lands on');
   assert.equal(samples.resolveEntry('drums', 0), null, 'a real pack is itself, never a definition');
 });
+
+test('what was downloaded is measured by prefix without reading it back, and can be let go', async () => {
+  const { memoryStore } = await import('./public/web/kv.mjs');
+  const store = memoryStore();
+  const context = { decodeAudioData: async (bytes) => ({ length: bytes.byteLength }) };
+  const fetchImpl = async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(100) });
+  const samples = createSampleStore({ context, store, fetchImpl });
+  samples.register([{ id: 'bd', cachePrefix: 'remote/https://raw.invalid/kit/sha/', files: [{ file: 'bd/1.wav' }, { file: 'bd/2.wav' }] }], urlFor);
+  samples.register([PACK], urlFor);
+  samples.get('bd', 0);
+  samples.get('pt_piano', 0);
+  assert.ok(await until(() => samples.has('bd') && samples.has('pt_piano')));
+  await store.put('remote/listing/github:kit', { at: 0, listing: {} });
+  assert.deepEqual(await samples.downloaded('remote/'), { bytes: 200, files: 2 });
+
+  await samples.forgetDownloads('remote/');
+  assert.deepEqual(await samples.downloaded('remote/'), { bytes: 0, files: 0 });
+  assert.deepEqual(await store.keys('remote/'), [], 'the files and the lists of them');
+  assert.equal((await store.keys('samples/pt_piano/')).length, 2, 'the library\'s downloads are another prefix, and stay');
+});

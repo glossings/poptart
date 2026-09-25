@@ -17805,7 +17805,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshLink(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -18459,6 +18459,9 @@ document.getElementById('aboutOpen').onclick = () => {
   bringPanelToFront(aboutPanelEl);
 };
 document.getElementById('aboutClose').onclick = () => aboutPanelEl.classList.add('hidden');
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !aboutPanelEl.classList.contains('hidden')) aboutPanelEl.classList.add('hidden');
+});
 // The desktop shell hands a window.open() of a web address to the system browser (main.js).
 document.getElementById('discordOpen').onclick = () => window.open('https://discord.gg/g5F59UdN8b', '_blank', 'noopener');
 
@@ -18549,6 +18552,9 @@ const sampleFolderReconnect = document.getElementById('sampleFolderReconnect');
 const sampleFolderForget = document.getElementById('sampleFolderForget');
 const sampleFolderInput = document.getElementById('sampleFolderInput');
 const sampleFolderNote = document.getElementById('sampleFolderNote');
+const downloadsSection = document.getElementById('downloadsSection');
+const downloadsForget = document.getElementById('downloadsForget');
+const downloadsNote = document.getElementById('downloadsNote');
 
 if (window.__poptartHostReady) {
   wavetableSection.classList.remove('hidden');
@@ -18609,6 +18615,27 @@ if (window.__poptartHostReady) {
     loadSamples().catch(() => {});
   });
   refreshSampleFolder();
+  downloadsSection.classList.remove('hidden');
+  downloadsForget.addEventListener('click', async () => {
+    downloadsForget.disabled = true;
+    downloadsNote.textContent = 'forgetting\u2026';
+    await api('POST', '/api/downloads/forget').catch((e) => logLine(e.message ?? String(e), true));
+    await refreshDownloads();
+  });
+  refreshDownloads();
+}
+
+/** The downloaded-packs row: how much samples() has kept in this browser. */
+async function refreshDownloads() {
+  try {
+    const { bytes, files } = await api('GET', '/api/downloads');
+    downloadsNote.textContent = files
+      ? `${files} file${files === 1 ? '' : 's'} from samples() repositories, ${wavetableSize(bytes)}`
+      : 'nothing downloaded by samples()';
+    downloadsForget.disabled = !files;
+  } catch {
+    // A host without a store: the section says nothing.
+  }
 }
 
 /**
@@ -19023,7 +19050,8 @@ function mapStatusLine(st = mapStatus) {
     return st.phase === 'place' ? 'placing…' : 'scanning folders…';
   }
   if (!st.sources?.length) return 'add a folder to build the map';
-  return `${(st.count ?? 0).toLocaleString()} sounds on the map`;
+  const unread = st.unread ? ` - ${st.unread.toLocaleString()} could not be read, rebuild to try again` : '';
+  return `${(st.count ?? 0).toLocaleString()} sounds on the map${unread}`;
 }
 
 function mapRenderStatus() {

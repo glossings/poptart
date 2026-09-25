@@ -45,6 +45,58 @@ export function createSampleStore({
   const cacheKeyOf = (manifest, file) =>
     manifest?.cachePrefix ? `${manifest.cachePrefix}/${file}` : `samples/${manifest?.id}/${file}`;
 
+  // What each downloaded file weighs, by its cache key: kept beside the files so the settings row
+  // can say how much a kind of download is using without reading hundreds of megabytes back out of
+  // the store to measure them. Written a moment after the last change, not per file.
+  const LEDGER_KEY = 'samples/downloads.json';
+  let ledger = null;
+  let ledgerRead = null;
+  let ledgerTimer = null;
+  // Read once, as one promise: two packs caching their first files together would otherwise each
+  // make a ledger of their own, and whichever was assigned second would lose the other's entries.
+  function ledgerNow() {
+    ledgerRead ??= (async () => {
+      const held = store ? await store.get(LEDGER_KEY).catch(() => null) : null;
+      ledger = new Map(Object.entries(held?.sizes ?? {}));
+      return ledger;
+    })();
+    return ledgerRead;
+  }
+  function saveLedger() {
+    clearTimeout(ledgerTimer);
+    ledgerTimer = setTimeout(() => {
+      store?.put(LEDGER_KEY, { sizes: Object.fromEntries(ledger) }).catch(() => {});
+    }, 500);
+    ledgerTimer?.unref?.();
+  }
+
+  /** How much the downloads under a cache-key prefix weigh, and how many files that is. */
+  async function downloaded(prefix) {
+    let bytes = 0;
+    let files = 0;
+    for (const [key, size] of await ledgerNow()) {
+      if (!key.startsWith(prefix)) continue;
+      bytes += size;
+      files += 1;
+    }
+    return { bytes, files };
+  }
+
+  /**
+   * Deletes the downloads under a cache-key prefix. Whatever is already in memory keeps playing
+   * until the page closes; after that a file is downloaded again the next time it is played.
+   */
+  async function forgetDownloads(prefix) {
+    if (!store) return 0;
+    const keys = await store.keys(prefix);
+    for (const key of keys) await store.delete(key).catch(() => {});
+    const held = await ledgerNow();
+    for (const key of [...held.keys()]) if (key.startsWith(prefix)) held.delete(key);
+    clearTimeout(ledgerTimer);
+    await store.put(LEDGER_KEY, { sizes: Object.fromEntries(held) }).catch(() => {});
+    return keys.length;
+  }
+
   /** The bytes of one file, from the cache if it is there and the network if it is not. */
   async function bytesFor(manifest, file, url) {
     const cacheKey = cacheKeyOf(manifest, file);
@@ -58,7 +110,13 @@ export function createSampleStore({
     const bytes = await res.arrayBuffer();
     // Cached as it arrived. A failure to cache is not a failure to load: a private window has no
     // durable store and the pack still has to play.
-    if (store) await store.put(cacheKey, { bytes, mtime: Date.now() }).catch(() => {});
+    if (store) {
+      const kept = await store.put(cacheKey, { bytes, mtime: Date.now() }).then(() => true, () => false);
+      if (kept) {
+        (await ledgerNow()).set(cacheKey, bytes.byteLength);
+        saveLedger();
+      }
+    }
     return bytes;
   }
 
@@ -433,6 +491,8 @@ export function createSampleStore({
   }
 
   return {
+    downloaded,
+    forgetDownloads,
     addFile,
     flushPack,
     clearPack,

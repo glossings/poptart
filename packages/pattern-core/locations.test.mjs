@@ -372,3 +372,8 @@ test('a pattern of NAMES is tagged for highlighting; the drawn data beside it is
   assert.equal(injectLocations('.bus("<reverb delay>")', 0), '.bus(mini("<reverb delay>", 6))');
   assert.equal(injectLocations('.bsend("reverb", "0 .5")', 0), '.bsend(mini("reverb", 8), mini("0 .5", 18))');
 });
+
+test('injectLocations leaves where samples() reads from alone: a repository, a URL', () => {
+  assert.equal(injectLocations('samples("tidalcycles/dirt-samples")', 0), 'samples("tidalcycles/dirt-samples")');
+  assert.equal(injectLocations("samples('https://example.com/strudel.json')", 0), "samples('https://example.com/strudel.json')");
+});

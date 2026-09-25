@@ -32,10 +32,14 @@ export const INDEX_FORMAT = 'poptart-packs-1';
  * branch, because a tagged URL is cached permanently and a branch URL is not - and because a
  * pack that changes underneath a saved song is a song that stops sounding the way it was written.
  *
+ * Tags are semver, and this names one exactly: a patch fixes a file, a minor changes sounds under
+ * the same names and numbers (a level, a better take), and only a major renames or renumbers -
+ * the one kind of change that breaks a song. A tag once pushed is never moved.
+ *
  * It is one string so that moving the packs - to another CDN, to a folder on the same site, to a
  * local copy while working offline - is one edit and needs no change anywhere else.
  */
-export const DEFAULT_PACK_BASE = 'https://cdn.jsdelivr.net/gh/glossings/poptart-packs@v1';
+export const DEFAULT_PACK_BASE = 'https://cdn.jsdelivr.net/gh/glossings/poptart-packs@v1.1.0';
 
 const isText = (v) => typeof v === 'string' && v.trim().length > 0;
 

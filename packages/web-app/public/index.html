@@ -414,6 +414,15 @@
               <input id="sampleFolderInput" type="file" webkitdirectory multiple hidden />
               <div id="sampleFolderNote" class="files-note"></div>
             </section>
+            <!-- What samples("user/repo") has downloaded and kept in this browser. Browser build only. -->
+            <section id="downloadsSection" class="hidden">
+              <h2>downloaded packs</h2>
+              <div class="settings-actions">
+                <button id="downloadsForget" class="small" disabled
+                  title="delete the files samples() downloaded from repositories. A pattern that plays them downloads them again; the sample map keeps its place for them">forget</button>
+              </div>
+              <div id="downloadsNote" class="files-note"></div>
+            </section>
             <!-- The wavetable folder. Only the browser build has one: there the files are kept in
                  the browser rather than read off a disk it cannot see, so the row is a folder to
                  read once rather than a path to remember. The client hides this section on the

@@ -102,3 +102,18 @@ test('a file that cannot be read is tried again next time, not remembered as bad
   assert.ok(later.map.pointOf('kicks/kick3.wav'), 'read the second time');
   assert.deepEqual(later.analyzed, [1], 'and only it');
 });
+
+test('a build stops asking a server that has stopped answering, and builds from what it read', async () => {
+  const many = { id: 'lib', description: 'cdn', files: Array.from({ length: 40 }, (_, i) => ({ file: `hit${i}.wav` })) };
+  const asked = [];
+  const map = createWebSampleMap({
+    core,
+    packs: () => [PACKS[0], many],
+    bytesOf: async (pack, index) => { asked.push(`${pack}:${index}`); return pack === 'lib' ? null : { slice: () => ({ pack, index }) }; },
+    decode: async ({ index }) => sound('kick', index),
+  });
+  await map.refresh();
+  assert.equal(asked.filter((a) => a.startsWith('lib')).length, 8, 'eight refusals in a row, then no more asking');
+  assert.equal(map.snapshot().points.length, 6, 'the kicks that did read are on the map');
+  assert.equal(map.status().unread, 40, 'and the rest are counted for the next build');
+});

@@ -46,7 +46,12 @@
 
       token(stream, state) {
         if (stream.sol() && opensLevel(state)) state.levels.push(state.depth);
-        const style = js.token(stream, state.js);
+        let style = js.token(stream, state.js);
+        const inSwitch = state.js.lexical?.info === 'switch';
+        // A track may be named with a word JavaScript keeps for itself - `break: s("amen")` - and
+        // is a label like any other, not the keyword. Only `default:` in a real switch keeps it.
+        if (style === 'keyword' && !inSwitch && /^\s*$/.test(stream.string.slice(0, stream.start))
+          && /^\s*:(?!:)/.test(stream.string.slice(stream.pos))) style = 'variable';
         // Brackets come back one per token with no style; anything in a string, a comment or a
         // template string (the `}` that ends an interpolation included) is styled, and skipped.
         const text = stream.current();

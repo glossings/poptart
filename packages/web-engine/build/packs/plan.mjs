@@ -134,7 +134,7 @@ export async function planInstruments(plan, source, refs, paths, readSfz) {
     }
     let chosen = null;
     try {
-      chosen = chooseFromSfz(sfzPath, await readSfz(sfzPath), { note: plan.note });
+      chosen = chooseFromSfz(sfzPath, await readSfz(sfzPath), { note: instrument.note ?? plan.note });
     } catch (err) {
       problems.push(`${plan.id}: ${instrument.dir} could not be read - ${err.message}`);
       continue;
@@ -148,7 +148,9 @@ export async function planInstruments(plan, source, refs, paths, readSfz) {
       sourcePath: chosen.path,
       source,
       sourceRef: refs.audio,
-      rootNote: chosen.rootNote,
+      // An instrument taken from another key may be FILED there rather than pitched there - a
+      // drum on the next key along - and says what its root really is.
+      rootNote: instrument.rootNote ?? chosen.rootNote,
       extra: chosen.loop ? { loop: chosen.loop } : {},
     }));
   }

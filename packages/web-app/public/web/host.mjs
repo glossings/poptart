@@ -78,6 +78,9 @@ const EMPTY_ANSWERS = {
   'POST /api/captureEditors': { ok: true },
 };
 
+/** Where samples() keeps what it downloads (remote-packs.mjs, manifestsOf and its listings). */
+const REMOTE_PREFIX = 'remote/';
+
 /** The pack panel's root here: every pack the page knows, as folders (see 'GET /api/browseDir'). */
 const PACK_ROOT = '/packs';
 const PACK_ROOT_PREFIX = /^\/packs\//;
@@ -967,6 +970,15 @@ export function createHost({
     'POST /api/sampleFolder/keep': async () => {
       if (!(await localFolder?.keepCopy())) throw new Error('there is no folder from this visit to keep a copy of');
       return localFolder.status();
+    },
+    // What samples() has downloaded and kept - a repository's files and the lists of them - and
+    // letting it go. Everything under `remote/` in the store (remote-packs.mjs); the sample map's
+    // analysis of those files is kept apart and stays, so a repository used again is on the map
+    // without being read again.
+    'GET /api/downloads': async () => (await samples.downloaded?.(REMOTE_PREFIX)) ?? { bytes: 0, files: 0 },
+    'POST /api/downloads/forget': async () => {
+      await samples.forgetDownloads?.(REMOTE_PREFIX);
+      return (await samples.downloaded?.(REMOTE_PREFIX)) ?? { bytes: 0, files: 0 };
     },
     'POST /api/sampleFolder/forget': async () => {
       await localFolder?.forget();

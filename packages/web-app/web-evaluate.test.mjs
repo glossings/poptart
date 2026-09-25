@@ -318,3 +318,10 @@ test('an evaluation that fails leaves the key the playing tracks are in', () => 
     shutdown(rig);
   }
 });
+
+test('a track may be named with a word JavaScript keeps for itself', () => {
+  const rig = makeRig();
+  const result = rig.evaluator.evaluate('break: s("bd*4")\ndefault: s("hh*8")');
+  assert.deepEqual(result.tracks.map((t) => t.label), ['break', 'default']);
+  shutdown(rig);
+});

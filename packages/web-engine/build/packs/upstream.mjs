@@ -179,7 +179,9 @@ export const VCSL_PACKS = Object.freeze([
       { dir: 'Membranophones/Struck Membranophones/Bongos', name: 'bongo' },
       { dir: 'Membranophones/Struck Membranophones/Conga', name: 'conga' },
       { dir: 'Membranophones/Struck Membranophones/Darbuka', name: 'darbuka' },
-      { dir: 'Membranophones/Struck Membranophones/Frame Drum', name: 'frame' },
+      // Its key 60 is a hand rubbed across the head, 40 dB under everything else in the pack;
+      // the stroke is filed on 61, but it is no more a C# than the rub was a C.
+      { dir: 'Membranophones/Struck Membranophones/Frame Drum', name: 'frame', note: 61, rootNote: 60 },
       { dir: 'Membranophones/Struck Membranophones/Timpani 1', name: 'timp' },
       { dir: 'Idiophones/Struck Idiophones/Claps', name: 'clap' },
       { dir: 'Idiophones/Struck Idiophones/Claves', name: 'claves' },

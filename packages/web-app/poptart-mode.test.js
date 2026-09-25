@@ -136,3 +136,15 @@ test('the tokens are still JavaScript\'s', () => {
   }
   assert.ok(styles.includes('string'), `expected a string token in ${JSON.stringify(styles)}`);
 });
+
+test('a track named with a keyword is a label, and a switch keeps its keywords', () => {
+  const styleOf = (code, word) => {
+    let found = null;
+    CodeMirror.runMode(code, 'poptart', (text, style) => { if (text === word && found == null) found = style; });
+    return found;
+  };
+  assert.equal(styleOf('break: s("amen")', 'break'), 'variable', 'the same as kick: gets');
+  assert.equal(styleOf('default: s("bd")', 'default'), 'variable');
+  assert.equal(styleOf('switch (x) {\n  default: return 2\n}', 'default'), 'keyword');
+  assert.equal(styleOf('if (x) break', 'break'), 'keyword');
+});

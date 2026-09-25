@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { buildIndex, creditLine, fileUrl, isSafeRelativePath, validateIndex, INDEX_FORMAT } from './src/packs/library.mjs';
 import { validateManifest } from './src/packs/manifest.mjs';
 import { chooseRegion, noteNumber, parseSfz, readOpcodes, regionRoot, samplePath } from './build/packs/sfz.mjs';
-import { chooseFromSfz, findSfz, servedName } from './build/packs/plan.mjs';
+import { chooseFromSfz, findSfz, planInstruments, servedName } from './build/packs/plan.mjs';
 import { DIAL_SWEEP, defaultFile, packPlans, voiceFiles } from './build/packs/upstream.mjs';
 
 // ---- reading an SFZ ---------------------------------------------------------------------------
@@ -279,4 +279,20 @@ test('the credit line names the license and everyone who has to be named', () =>
   const line = creditLine(manifest);
   assert.ok(line.includes('CC-BY-4.0'));
   assert.ok(line.includes('A Person'));
+});
+
+test('an instrument can name the key it is taken from, and the root it really has', async () => {
+  const sfz = [
+    '<region> sample=Frame Drum/Hand.wav pitch_keycenter=60 lokey=60 hikey=60',
+    '<region> lovel=0 hivel=83 sample=Frame Drum/Hit_v2.wav pitch_keycenter=61 lokey=61 hikey=61',
+    '<region> lovel=84 hivel=127 sample=Frame Drum/Hit_v3.wav pitch_keycenter=61 lokey=61 hikey=61',
+  ].join('\n');
+  const plan = { id: 'pt_perc', note: 60, instruments: [
+    { dir: 'M/Frame Drum', name: 'frame', note: 61, rootNote: 60 },
+    { dir: 'M/Frame Drum', name: 'rub' },
+    { dir: 'M/Frame Drum', name: 'pitched', note: 61 },
+  ] };
+  const { manifest } = await planInstruments(plan, { homepage: 'https://x.invalid' }, { audio: 'a' }, ['M/Frame Drum.sfz'], async () => sfz);
+  assert.deepEqual(manifest.files.map((f) => f.from), ['M/Frame Drum/Hit_v3.wav', 'M/Frame Drum/Hand.wav', 'M/Frame Drum/Hit_v3.wav']);
+  assert.deepEqual(manifest.files.map((f) => f.rootNote), [60, 60, 61], 'a key it is only filed under says so; otherwise the key is the pitch');
 });

@@ -24,6 +24,7 @@ import { buildIndex, creditLine } from '../src/packs/library.mjs';
 import { validateManifest } from '../src/packs/manifest.mjs';
 import { SOURCES, freepatsUrl, packPlans } from './packs/upstream.mjs';
 import { chooseFromSfz, entryFor, planInstruments, planNamedFiles } from './packs/plan.mjs';
+import { normalizeWav, PEAK_DB } from './packs/normalize.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const LOCK_PATH = path.join(here, 'packs', 'upstream.lock.json');
@@ -318,12 +319,22 @@ async function main(argv) {
     const packDir = path.join(opts.out, manifest.id);
     fs.mkdirSync(packDir, { recursive: true });
     let total = 0;
+    // The sampled libraries' one-shots are brought to one peak (normalize.mjs). Not the drum
+    // machine's dial sweeps, whose level moving with the dial is part of what the sweep shows,
+    // and not the synth banks, which arrive as FLAC at full scale already.
+    const normalize = !!plan.instruments;
     for (const fetchable of built.fetches) {
       const target = path.join(packDir, fetchable.entry.file);
-      const data = fetchable.local ? fs.readFileSync(fetchable.local) : await bytes(fetchable.url);
+      let data = fetchable.local ? fs.readFileSync(fetchable.local) : await bytes(fetchable.url);
+      if (normalize) {
+        const scaled = normalizeWav(data);
+        if (scaled.gainDb == null) log(`    ${fetchable.entry.file}: left at its own level (not a WAV this can scale)`);
+        data = scaled.bytes;
+      }
       fs.writeFileSync(target, data);
       total += data.length;
     }
+    if (normalize) log(`  peaks set to ${PEAK_DB} dBFS`);
     sizes[manifest.id] = total;
     fs.writeFileSync(path.join(packDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     log(`  ${manifest.files.length} files, ${(total / 1e6).toFixed(1)} MB`);

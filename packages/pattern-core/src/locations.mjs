@@ -84,12 +84,14 @@ const NAME_ARG_CALLS = new Set([
   // listed - its argument wants highlighting exactly as pianoroll("<a b>") does.
   '_slices',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
+  // A place to read sample packs from - "user/repo", a URL - which a "/" would make a division.
+  'samples',
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
+const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain

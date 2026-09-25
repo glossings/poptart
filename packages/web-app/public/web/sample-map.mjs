@@ -24,6 +24,13 @@ const SETTINGS_KEY = 'settings/sample-map';
 const CACHE_FORMAT = 1;
 const NEIGHBORS = 15;
 const BATCH = 16;
+/**
+ * How many files in a row may fail to be read before a build stops reading. A server that has
+ * started refusing - a CDN turning a burst of requests away - refuses the rest too, and asking it
+ * for every one of them is a few hundred more refusals and a longer wait for the same answer. The
+ * map is built from what was read, and the next build asks again for the rest.
+ */
+const MAX_UNREAD_RUN = 8;
 /** The packs that are not sounds to build a kit from: a wavetable folder, bounces of songs. */
 const NOT_ON_MAP = new Set(['wt', 'rec']);
 
@@ -75,7 +82,8 @@ export function createWebSampleMap({ core, store = null, packs, bytesOf, decode,
   let map = null;
   let loaded = null;
   let refreshing = null;
-  const status = { building: false, phase: 'idle', done: 0, total: 0, count: 0, error: null };
+  // `unread` is how many files the last build could not read, which the next one tries again.
+  const status = { building: false, phase: 'idle', done: 0, total: 0, count: 0, error: null, unread: 0 };
 
   // What a file's analysis is good for: its pack's origin and the file's name in it. A library
   // pack at another commit, or a folder chosen again, is a different file under the same name.
@@ -172,27 +180,42 @@ export function createWebSampleMap({ core, store = null, packs, bytesOf, decode,
       });
       report('analyze', 0, todo.length);
       let analyzed = 0;
-      for (let at = 0; at < todo.length; at += BATCH) {
+      let unreadRun = 0;
+      let unreadTotal = 0;
+      let at = 0;
+      for (; at < todo.length && unreadRun < MAX_UNREAD_RUN; at += BATCH) {
         const batch = todo.slice(at, at + BATCH);
         // Read and decoded one at a time, as the sample store decodes: in parallel it competes
         // with the audio thread for as long as it takes.
         const heads = [];
         const unread = [];
         for (const f of batch) {
-          try { heads.push(await headOf(f)); unread.push(false); } catch { heads.push(null); unread.push(true); }
+          if (unreadRun >= MAX_UNREAD_RUN) { heads.push(null); unread.push(true); continue; }
+          try {
+            heads.push(await headOf(f));
+            unread.push(false);
+            unreadRun = 0;
+          } catch {
+            heads.push(null);
+            unread.push(true);
+            unreadRun += 1;
+          }
         }
         const results = await run.analyze(heads);
         batch.forEach((f, i) => {
           // A file that could not be READ (a network blip, a folder not allowed yet) leaves no
           // entry, so the next build tries it again; one that read but would not decode is kept
           // as seen, with no vector, so it is not tried every time.
-          if (unread[i]) return;
+          if (unread[i]) { unreadTotal += 1; return; }
           const r = results[i];
           entries.set(f.path, { path: f.path, source: f.source, sig: f.sig, version: core.FEATURE_VERSION, seconds: r?.seconds ?? 0, features: r ? Float32Array.from(r.features) : null });
           if (r) analyzed += 1;
         });
         report('analyze', Math.min(todo.length, at + batch.length), todo.length);
       }
+      const unread = unreadTotal + Math.max(0, todo.length - at);
+      status.unread = unread;
+      if (unread) log(`sample map: ${unread} file${unread === 1 ? '' : 's'} could not be read${unreadRun >= MAX_UNREAD_RUN ? ' - their server stopped answering, so the map was built without them' : ''}. Rebuild to try again.`);
       const cur = current(found);
       if (force || analyzed > 0 || !matches(cur)) {
         report('place', 0, 1);
