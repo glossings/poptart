@@ -138,7 +138,7 @@ export function highlightGrid(patternCore, sig, start, end, from, count, clock =
  * evaluation that made it, and so do the engine track ids, the song clock and the definitions
  * the buffer declared. An evaluation that rebuilt them would cut every sound on every keystroke.
  */
-export function createEvaluator({ patternCore, engine, transport, prebakeDefs = new Map(), log = null }) {
+export function createEvaluator({ patternCore, engine, transport, prebakeDefs = new Map(), log = null, remotePacks = null }) {
   const schedulers = new Map();        // label -> Scheduler
   const trackIds = new Map();          // label -> engine track id
   // The engine keys its tracks by those ids, and every routing name a pattern carries is the
@@ -231,6 +231,14 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       setscale: (name) => {
         patternCore.setGlobalScale(name);
         return SCALE_BLOCK;
+      },
+      // Sample packs from a repository (remote-packs.mjs). The host reads every samples() in the
+      // buffer before evaluating, so by here a literal one has usually been read already; this
+      // starts one that was not, such as a name built at run time. A setup line, so it plays
+      // nothing and returns nothing.
+      samples: (source) => {
+        if (!remotePacks) throw new Error('samples() needs the browser build\'s sample loader');
+        remotePacks.use(source);
       },
     };
     const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders });

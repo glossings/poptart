@@ -1550,6 +1550,16 @@ li.CodeMirror-hint-active {
   font-size: 12px;
 }
 
+/* Import / export, under save: the same footer, so no rule between them. */
+.theme-file-row {
+  border-top: none;
+  padding-top: 0;
+}
+
+.theme-file-row button {
+  flex: 1;
+}
+
 /* --------------------------------------------------------------- folder picker */
 
 .dir-picker-backdrop {

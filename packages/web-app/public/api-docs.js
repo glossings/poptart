@@ -233,6 +233,12 @@ const API_DOCS = {
     desc: 'Sets the tempo in beats per minute, with 4 beats to a cycle. Accepts a pattern or signal as well as a number.',
     eg: 'setbpm(140)',
   },
+  samples: {
+    kind: 'builder',
+    sig: 'samples(repo)',
+    desc: 'Reads sample packs from a public GitHub repository: one pack per folder of audio files, named after the folder, files in name order. "user/repo@branch" picks a branch, tag or commit, and a path after the repository keeps only that folder. A repository with a strudel.json at its top is read from that file instead. Browser build only.',
+    eg: 'samples("user/drum-kits")',
+  },
   setscale: {
     kind: 'builder',
     sig: 'setscale(name)',

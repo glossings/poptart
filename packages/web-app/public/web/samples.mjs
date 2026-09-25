@@ -39,9 +39,15 @@ export function createSampleStore({
   const failed = new Map();      // pack id -> { why, at }, so a broken pack is reported once
   const known = new Map();       // pack id -> { manifest, urlFor } for a pack that loads on demand
 
+  // Where a file's bytes are kept. By pack and file for the packs this app ships, whose ids are
+  // its own; a pack from somewhere else (samples(), remote-packs.mjs) names a prefix of its own
+  // instead, since two repositories can both have a "bd" folder holding a "1.wav".
+  const cacheKeyOf = (manifest, file) =>
+    manifest?.cachePrefix ? `${manifest.cachePrefix}/${file}` : `samples/${manifest?.id}/${file}`;
+
   /** The bytes of one file, from the cache if it is there and the network if it is not. */
-  async function bytesFor(packId, file, url) {
-    const cacheKey = `samples/${packId}/${file}`;
+  async function bytesFor(manifest, file, url) {
+    const cacheKey = cacheKeyOf(manifest, file);
     if (store) {
       const held = await store.get(cacheKey).catch(() => null);
       if (held?.bytes) return held.bytes;
@@ -68,7 +74,7 @@ export function createSampleStore({
     const misses = [];
     for (const file of manifest.files) {
       try {
-        const bytes = await bytesFor(manifest.id, file.file, urlFor(manifest.id, file.file));
+        const bytes = await bytesFor(manifest, file.file, urlFor(manifest.id, file.file));
         // decodeAudioData detaches the buffer it is given, and the same bytes may be decoded
         // again after a context change, so it gets a copy.
         const audio = await context.decodeAudioData(bytes.slice(0));
@@ -344,12 +350,12 @@ export function createSampleStore({
     const entry = manifest?.files[index];
     if (!entry) return null;
     if (store) {
-      const held = await store.get(`samples/${pack}/${entry.file}`).catch(() => null);
+      const held = await store.get(cacheKeyOf(manifest, entry.file)).catch(() => null);
       if (held?.bytes) return held.bytes;
     }
     const lazy = known.get(pack);
     if (lazy?.urlFor && fetchImpl) {
-      try { return await bytesFor(pack, entry.file, lazy.urlFor(pack, entry.file)); } catch { return null; }
+      try { return await bytesFor(manifest, entry.file, lazy.urlFor(pack, entry.file)); } catch { return null; }
     }
     return null;
   }
@@ -362,6 +368,19 @@ export function createSampleStore({
    */
   function register(list, urlFor) {
     for (const manifest of list) known.set(manifest.id, { manifest, urlFor });
+  }
+
+  /**
+   * Drops a registered pack and whatever of it is in memory, so a different pack can take its
+   * name - a samples() source whose folder has the name another one already had. The bytes stay
+   * cached under their own source (cacheKeyOf), so going back to the first costs no download.
+   */
+  function forget(pack) {
+    const manifest = manifests.get(pack) ?? known.get(pack)?.manifest;
+    for (let i = 0; i < (manifest?.files.length ?? 0); i++) decoded.delete(keyOf(pack, i));
+    manifests.delete(pack);
+    known.delete(pack);
+    failed.delete(pack);
   }
 
   return {
@@ -430,6 +449,7 @@ export function createSampleStore({
       return ensure(lazy.manifest, lazy.urlFor);
     },
     register,
+    forget,
     put,
     loaded: () => [...manifests.keys()],
     problems: () => Object.fromEntries([...failed].map(([id, f]) => [id, f.why])),

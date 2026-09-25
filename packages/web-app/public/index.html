@@ -744,6 +744,11 @@
         <input id="themeNameInput" type="text" placeholder="name this theme…" spellcheck="false" />
         <button id="themeSaveBtn" class="small" title="save the current colors as a named theme">save</button>
       </div>
+      <div class="theme-save-row theme-file-row">
+        <button id="themeImport" class="small" title="add a theme from a .json file">import</button>
+        <button id="themeExport" class="small" title="download the theme in use as a .json file">export</button>
+      </div>
+      <input id="themeImportInput" type="file" accept=".json,application/json" hidden />
     </div>
 
     <div id="dirPickerBackdrop" class="dir-picker-backdrop hidden">
@@ -1102,6 +1107,7 @@
     <script src="chords.js"></script>
     <script src="api-docs.js"></script>
     <script src="pattern-meta.js"></script>
+    <script src="theme-file.js"></script>
     <script src="snippet-code.js"></script>
     <script src="client.js"></script>
   </body>

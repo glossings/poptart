@@ -148,6 +148,18 @@ export function injectAnalytics(html) {
  * control takes 0..1, which is what an lfo() runs over unless told otherwise, so neither needs
  * a range.
  */
+/**
+ * The guide as the browser build serves it: the same page, marked as this build's, which is
+ * what shows its `data-build="web"` passages, hides the desktop's, and turns its `data-run`
+ * examples into ones that play (public/docs.js).
+ */
+export function markDocsWeb(html) {
+  if (/<html[^>]*\bclass="web"/.test(html)) return html;
+  const anchor = '<html lang="en">';
+  if (!html.includes(anchor)) throw new Error('could not find the guide\'s <html> tag to mark');
+  return html.replace(anchor, '<html lang="en" class="web">');
+}
+
 export const WEB_SKETCH = [
   'kick: s("pt_kit:0*4")',
   'hat: s("pt_kit:4*8")',
@@ -200,6 +212,9 @@ export function build({ out = DIST, quiet = false } = {}) {
 
   const indexPath = path.join(out, 'index.html');
   fs.writeFileSync(indexPath, replaceSketch(injectAnalytics(injectBoot(fs.readFileSync(indexPath, 'utf8')))));
+
+  const docsPath = path.join(out, 'docs.html');
+  fs.writeFileSync(docsPath, injectAnalytics(markDocsWeb(fs.readFileSync(docsPath, 'utf8'))));
 
   // The desktop server's own file, which the browser build has no use for and should not ship.
   for (const gone of ['docs.html.map']) {

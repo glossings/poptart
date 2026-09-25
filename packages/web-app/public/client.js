@@ -16902,6 +16902,9 @@ async function evaluate(start, { byHand = false } = {}) {
     refoldAll();
     // A pack's file list is the buffer's to change (a `_pack()` line), and an eval is when it does.
     prNamesStale();
+    // So is the list of packs, when the buffer reads a repository in: the sounds tab and s("
+    // completion ask for it again.
+    if (/\bsamples\s*\(/.test(code)) loadSamples();
     if (prState && prNamesWanted()) prIndexLabels(); // re-asks now; redraws only if the list changed
     if (start) playing = true; // Update keeps the current play state; Play begins it
     // Only for an eval the player asked for. The panels re-evaluate as you drag - a piano roll
@@ -24549,6 +24552,55 @@ function saveTheme() {
   applyTheme(name);
   logLine(existed ? `updated theme "${name}"` : `saved theme "${name}"`);
 }
+
+// The theme in use, as a file (theme-file.js). Every color is written out, not just the ones that
+// differ from the base, so the file looks the same wherever it is opened.
+function exportTheme() {
+  const cur = themeSelect.value;
+  const name = cur === 'custom' ? (themeNameInput.value.trim() || 'custom') : cur;
+  const computed = getComputedStyle(document.documentElement);
+  const vars = Object.fromEntries(THEME_VARS.map(([v]) => [v, cssColorToHex(computed.getPropertyValue(v))]));
+  const base = document.documentElement.dataset.theme ?? 'poptart';
+  const file = `${name.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'theme'}.json`;
+  const url = URL.createObjectURL(new Blob([themeFileText({ name, base, vars })], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = file;
+  a.click();
+  URL.revokeObjectURL(url);
+  logLine(`exported theme "${name}" as ${file}`);
+}
+
+async function importTheme(file) {
+  if (!file) return;
+  let theme;
+  try {
+    theme = parseThemeFile(await file.text(), {
+      presets: PRESET_THEMES,
+      varNames: THEME_VARS.map(([v]) => v),
+      fallbackName: file.name.replace(/\.json$/i, ''),
+    });
+  } catch (e) {
+    logLine(`could not import ${file.name}: ${e.message ?? e}`, true);
+    return;
+  }
+  const map = savedThemes();
+  const name = freeThemeName(theme.name, theme, { taken: map, reserved: [...PRESET_THEMES, 'custom'] });
+  map[name] = { base: theme.base, vars: theme.vars };
+  writeSavedThemes(map);
+  rebuildThemeOptions();
+  applyTheme(name);
+  logLine(`imported theme "${name}"`);
+  if (theme.dropped) logLine(`${theme.dropped} entr${theme.dropped === 1 ? 'y' : 'ies'} in ${file.name} were not a known color and were left out`, true);
+}
+
+const themeImportInput = document.getElementById('themeImportInput');
+document.getElementById('themeExport').addEventListener('click', exportTheme);
+document.getElementById('themeImport').addEventListener('click', () => themeImportInput.click());
+themeImportInput.addEventListener('change', () => {
+  importTheme(themeImportInput.files?.[0]);
+  themeImportInput.value = ''; // the same file picked again is still a change
+});
 
 themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
 themeEditBtn.addEventListener('click', () => {

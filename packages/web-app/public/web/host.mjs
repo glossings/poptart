@@ -124,6 +124,7 @@ export function createHost({
   builtIn = [],
   builtInUrl = null,
   library = { packs: [], problems: [] },
+  remotePacks = null,
   version = '0.1.1-web',
   // Which device the page plays to (see audio-output.mjs). Absent in a host built without a
   // page around it, which then answers as a machine with only the system default.
@@ -155,6 +156,7 @@ export function createHost({
     const out = [];
     for (const m of builtIn) out.push({ manifest: m, urlFor: builtInUrl });
     for (const m of library.packs) out.push({ manifest: m, urlFor: library.urlFor ?? null });
+    for (const p of remotePacks?.packs() ?? []) out.push(p);
     return out;
   }
 
@@ -488,6 +490,9 @@ export function createHost({
     // ---- playing ------------------------------------------------------------------------------
 
     'POST /api/evaluate': async (body) => {
+      // A repository named with samples() is read before the pattern is built, so the first
+      // evaluate already knows its pack names (remote-packs.mjs; bounded wait).
+      await remotePacks?.prepare(body.code ?? '');
       const result = await evaluator.evaluate(body.code ?? '', {
         start: body.start,
         arrangeFrom: body.arrangeFrom,

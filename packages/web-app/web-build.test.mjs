@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { build, injectAnalytics, injectBoot, replaceSketch, WEB_SKETCH } from './build-web.mjs';
+import { build, injectAnalytics, injectBoot, markDocsWeb, replaceSketch, WEB_SKETCH } from './build-web.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-web-build-'));
@@ -223,4 +223,12 @@ test('the visit counter reports the page, never a pattern in the link, and one v
   assert.deepEqual(beforeSend({ type: 'pageview', url: shared }), { type: 'pageview', url: 'https://pastree.cc/' });
   assert.equal(beforeSend({ type: 'pageview', url: 'https://pastree.cc/#s=abc' }), null, 'a checkpoint is not another visit');
   assert.equal(beforeSend({ type: 'event', url: shared }).url, 'https://pastree.cc/');
+});
+
+test('the guide is marked as the browser build\'s, once', () => {
+  const page = '<!doctype html>\n<html lang="en">\n<head></head></html>';
+  const marked = markDocsWeb(page);
+  assert.match(marked, /<html lang="en" class="web">/);
+  assert.equal(markDocsWeb(marked), marked);
+  assert.throws(() => markDocsWeb('<p>no html tag</p>'), /<html>/);
 });

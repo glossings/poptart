@@ -2572,10 +2572,18 @@ function setscale(name) {
   return SCALE_BLOCK;
 }
 
+// samples("user/repo") reads sample packs in from a repository, and that is the browser build's
+// (public/web/remote-packs.mjs): the desktop's packs are folders in the samples folder. Bound here
+// all the same, so a pattern written in the browser opens and plays on the desktop with one line
+// in the console instead of an error.
+function samples(source) {
+  eventLogQueue.push(`[samples] samples(${JSON.stringify(String(source ?? ''))}) reads packs in the browser build only - on the desktop a pack is a folder in the samples folder`);
+}
+
 // The builders the HOST provides (as opposed to pattern-core's), bound alongside BUILDER_NAMES in
 // every evaluated block. Read out of this source by api-docs.test.js, so adding one here is what
 // makes the editor's reference cover it.
-const HOST_BUILDERS = { setbpm, setscale };
+const HOST_BUILDERS = { setbpm, setscale, samples };
 
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,

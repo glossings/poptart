@@ -28,6 +28,7 @@ import { createWebMidi } from './midi.mjs';
 import { createAudioInputs } from './audio-input.mjs';
 import { createPrebake } from './prebake.mjs';
 import { createBlockEvaluator } from './block-eval.mjs';
+import { createRemotePacks } from './remote-packs.mjs';
 
 /** Where the pieces are served from. One place, so moving a folder is one edit. */
 export const PATHS = Object.freeze({
@@ -109,6 +110,10 @@ export async function boot({
   AudioContextCtor = globalThis.AudioContext ?? globalThis.webkitAudioContext,
   fetchImpl = fetch.bind(globalThis),
   packBase = null,
+  // A page that plays examples rather than somebody's work - the guide. It keeps nothing, opens
+  // no store another tab might be holding, and runs no prebake, so an example plays the same for
+  // everyone whatever their own setup redefines.
+  isolated = false,
 } = {}) {
   const patternCore = await import(PATHS.patternCore);
   const webEngine = await import(PATHS.engine);
@@ -127,10 +132,10 @@ export async function boot({
 
   // Storage first, so that a store which refuses to open is one line in the console rather than
   // a page that appears to work and silently keeps nothing.
-  const opened = await openStore();
-  if (opened.kind !== 'durable') {
+  const opened = isolated ? { kind: 'isolated', store: memoryStore() } : await openStore();
+  if (opened.kind === 'ephemeral') {
     warn(`nothing will be saved in this window - ${opened.reason ?? 'the browser would not open a store'}`);
-  } else if (!opened.persisted) {
+  } else if (opened.kind === 'durable' && !opened.persisted) {
     say('saving locally; the browser may clear this site\'s data if it runs short of room');
   }
   const store = opened.store ?? memoryStore();
@@ -156,7 +161,17 @@ export async function boot({
   // The prebake is somebody's own setup file, and it runs before any pattern so its bindings are
   // in scope for every one of them.
   const prebakeDefs = new Map();
-  const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say });
+  // Packs a pattern reads in from a repository with samples(): kept in the same store as the
+  // rest, so a repository's listing and its files come down once per browser.
+  const remotePacks = createRemotePacks({
+    fetchImpl,
+    store,
+    samples,
+    onPacks: (manifests) => registerPacks(patternCore, manifests),
+    warn,
+    say,
+  });
+  const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say, remotePacks });
 
   const builtIn = await readBuiltInPacks(fetchImpl);
   const builtInUrl = (id, file) => `${PATHS.builtInPacks}/${id}/${file}`;
@@ -166,7 +181,7 @@ export async function boot({
   }
   // The files added from this browser before - one-offs and a wavetable folder - so a pattern
   // that names one plays again without being pointed at it a second time.
-  const added = await samples.loadFiles();
+  const added = isolated ? [] : await samples.loadFiles();
   registerPacks(patternCore, added.filter((m) => m.files.length));
   engine.setTempo(transport.cps * 240, transport.secAt(0));
 
@@ -241,18 +256,20 @@ export async function boot({
   // The ★ library and the prebake, run before any pattern so every buffer starts from them. The
   // pinned file's format belongs to the desktop's pinned-defs.js, loaded here as it is there.
   let prebake = null;
-  try {
-    await import('./pinned-defs.js');
-    prebake = createPrebake({
-      patternCore, storage, prebakeDefs, createBlockEvaluator,
-      pinnedDefs: globalThis.poptartPinnedDefs,
-      dehydrate: (code) => storage.dehydrateOnLoad(code),
-      log: say,
-      afterClear: () => restorePacks(patternCore),
-    });
-    for (const line of await prebake.run()) warn(`prebake ${line}`);
-  } catch (err) {
-    warn(`the prebake did not run - ${err?.message ?? err}`);
+  if (!isolated) {
+    try {
+      await import('./pinned-defs.js');
+      prebake = createPrebake({
+        patternCore, storage, prebakeDefs, createBlockEvaluator,
+        pinnedDefs: globalThis.poptartPinnedDefs,
+        dehydrate: (code) => storage.dehydrateOnLoad(code),
+        log: say,
+        afterClear: () => restorePacks(patternCore),
+      });
+      for (const line of await prebake.run()) warn(`prebake ${line}`);
+    } catch (err) {
+      warn(`the prebake did not run - ${err?.message ?? err}`);
+    }
   }
 
   const host = createHost({
@@ -283,6 +300,7 @@ export async function boot({
     builtIn,
     builtInUrl,
     library,
+    remotePacks,
   });
 
   say(`ready - ${webEngine.catalog.list().length} devices, ${builtIn.length + library.packs.length} packs`);

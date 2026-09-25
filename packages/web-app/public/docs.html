@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>poptart — the guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <style>
       :root {
         --bg: #16181d;
@@ -140,11 +141,67 @@
         color: var(--text);
         font-size: 13.5px;
       }
-      /* tiny inline syntax accents, applied by hand in the markup */
-      .s { color: var(--ok); }       /* strings */
-      .f { color: var(--accent); }   /* builder / function names */
-      .c { color: var(--text-dim); font-style: italic; } /* comments */
-      .k { color: #c58fd8; }         /* keywords */
+      /* The code's colors: docs.js highlights every example with the editor's own mode. */
+      .cm-s-docs .cm-string, .cm-s-docs .cm-string-2 { color: var(--ok); }
+      .cm-s-docs .cm-number, .cm-s-docs .cm-atom { color: var(--warn); }
+      .cm-s-docs .cm-keyword { color: #c58fd8; }
+      .cm-s-docs .cm-variable, .cm-s-docs .cm-def { color: var(--accent); }
+      .cm-s-docs .cm-property { color: var(--code); }
+      .cm-s-docs .cm-comment { color: var(--text-dim); font-style: italic; }
+      .cm-s-docs .cm-operator { color: var(--text-dim); }
+
+      /* Built for one build only: build-web.mjs marks the browser build's copy with class "web". */
+      html:not(.web) [data-build="web"],
+      html.web [data-build="desktop"] { display: none !important; }
+
+      /* An example that plays (browser build): the editor where the <pre> was, and its buttons. */
+      .example {
+        background: var(--bg-raised);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        margin: 18px 0;
+        overflow: hidden;
+      }
+      .callout .example { margin: 10px 0 4px; }
+      .example.playing { border-color: var(--accent); }
+      .example .CodeMirror {
+        height: auto;
+        padding: 12px 8px 4px;
+        background: transparent;
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 13.5px;
+        line-height: 1.55;
+      }
+      .example .CodeMirror-cursor { border-left-color: var(--text); }
+      .example .CodeMirror-selected { background: var(--accent-soft) !important; }
+      .example-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px 10px;
+      }
+      .example-bar button {
+        font: 600 12px var(--sans);
+        color: var(--text);
+        background: var(--bg-panel);
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      .example-bar button:first-child { min-width: 64px; }
+      .example-bar button:hover { border-color: var(--accent); }
+      .example-bar button:disabled { opacity: 0.5; cursor: default; }
+      .example-status {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--warn);
+        font: 12px var(--mono);
+      }
 
       .callout {
         border: 1px solid var(--border-strong);
@@ -213,17 +270,26 @@
       <main>
         <header class="hero" id="intro">
           <h1>poptart, from scratch</h1>
-          <p class="lede">A livecoding instrument that plays real plugins from terse patterns.</p>
+          <p class="lede" data-build="desktop">A livecoding instrument that plays real plugins from terse patterns.</p>
+          <p class="lede" data-build="web">A livecoding instrument that plays its own synths, samplers and effects from terse patterns, in the browser.</p>
           <p>
             Thirteen short <em>studies</em>, each building on the last. Read them in order once and
             you'll be able to play; after that, dip in for whatever you need. Keep the editor open in
             the other tab and try each idea as you meet it — everything here is plain text you can
             paste and bend.
           </p>
-          <p class="lead-in">
+          <p class="lead-in" data-build="desktop">
             The one-sentence version: you write little patterns, poptart turns them into notes and
             knob-turns, and sends those to actual VST/VST3 instruments and effects running inside a
             SuperCollider audio engine. The real thing, modulated continuously while it plays.
+          </p>
+          <p class="lead-in" data-build="web">
+            The one-sentence version: you write little patterns, poptart turns them into notes and
+            knob-turns, and plays them on instruments and effects that run inside this page — no
+            plugins, nothing to install, modulated continuously while it plays. Most examples below
+            have a <strong>▶ play</strong> button: press it to hear the idea, edit the code and press
+            it again ({mod+enter} inside the example does the same), or <strong>open ↗</strong> it
+            in the app to keep going.
           </p>
         </header>
 
@@ -241,8 +307,11 @@
             A buffer is split into <strong>blocks</strong>. A block that starts with a label — a name
             and a colon at the start of a line — is a <strong>track</strong>:
           </p>
-          <pre><code><span class="f">bass</span>: note(<span class="s">"c2 c2 g1 a1"</span>).synth(<span class="s">"Serum 2"</span>)
-<span class="f">drums</span>: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)</code></pre>
+          <pre data-build="desktop"><code>bass: note("c2 c2 g1 a1").synth("Serum 2")
+drums: s("bd*4, ~ hh ~ hh")</code></pre>
+          <pre data-run data-build="web"><code>bass: note("c2 c2 g1 a1").synth("Wavetable")
+  .fx("Filter").param("Cutoff", 0.45)
+drums: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4")</code></pre>
           <p>
             Two labels, two tracks, playing together. Call them whatever you like. Lines that continue
             an expression (a <code>.param(…)</code> chain) stay attached to the block above, so one
@@ -261,11 +330,19 @@
             <code>$:</code> one that makes no sound is only worth a line in the console, since setup
             belongs on a bare line anyway.
           </p>
-          <div class="callout">
+          <div class="callout" data-build="desktop">
             <span class="tag">panels</span>
             The sidebar has four tabs. <strong>session</strong>: the live tracks and macro knobs.
             <strong>sounds</strong>: your plugins, their parameters, your samples. <strong>files</strong>:
             save and load buffers. <strong>settings</strong>: audio device, sample folder, editor
+            options, the startup <em>prebake</em>.
+          </div>
+          <div class="callout" data-build="web">
+            <span class="tag">panels</span>
+            The sidebar has four tabs. <strong>session</strong>: the live tracks and macro knobs.
+            <strong>sounds</strong>: the built-in devices, their parameters, the sample packs.
+            <strong>files</strong>: save, load and share buffers, and back up everything this
+            browser keeps. <strong>settings</strong>: audio output and inputs, MIDI, editor
             options, the startup <em>prebake</em>.
           </div>
           <div class="callout">
@@ -276,6 +353,11 @@
             <code>// @title kick drift</code>, <code>// @by aria @tags techno</code> — and the search
             box finds it by name, tag or code (<code>tag:techno</code>, <code>by:aria</code>). Every
             evaluation is also a browser-history entry, so Back walks you through what you played.
+            <span data-build="web">All of it is kept in this browser's own storage. The files tab's
+            <strong>share</strong> copies a link that opens the whole pattern — the link carries the
+            code and any captured presets, while files you added to this browser are named in it but
+            not carried — and its <strong>backup</strong> section exports everything this browser
+            keeps to one file, and imports it back.</span>
           </div>
           <div class="callout">
             <span class="tag">help as you type</span>
@@ -311,6 +393,13 @@
             care whether they're holding a melody, an LFO or a knob. Keep "a value that changes over
             time" in mind and the API stops being a list to memorise.
           </p>
+          <p data-build="web">
+            Both kinds in one track: a stepped melody with edges, and a smooth sine that sweeps the
+            filter under it, one pass every four cycles.
+          </p>
+          <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;6 7&gt;").scale("C minor").synth("Wavetable")
+  .fx("Filter").param("Cutoff", sine(0.25).range(0.3, 0.8))
+  .fx("Reverb")</code></pre>
         </section>
 
         <!-- ================================================================= -->
@@ -319,11 +408,11 @@
           <h3>Mini-notation: the string language</h3>
           <p>
             The strings inside <code>note("…")</code>, <code>s("…")</code>, <code>.param("…", "…")</code>
-            and friends are a tiny rhythm language borrowed from Tidal and Strudel. Space-separated
+            and friends are a tiny rhythm language. Space-separated
             items divide the cycle evenly; <code>~</code> is a rest:
           </p>
-          <pre><code><span class="s">"0 1 2 3"</span>        <span class="c">// four equal steps</span>
-<span class="s">"0 ~ 2 ~"</span>        <span class="c">// two notes, two gaps</span></code></pre>
+          <pre><code>"0 1 2 3"        // four equal steps
+"0 ~ 2 ~"        // two notes, two gaps</code></pre>
           <table>
             <tr><th>Syntax</th><th>Means</th></tr>
             <tr><td><code>[a b]</code></td><td>Sub-group: the pair shares one step's worth of time.</td></tr>
@@ -346,6 +435,16 @@
             but spaced out it's <em>multiply</em> (<code>2 * 4</code>); put a space before a
             <code>-</code>. Polymeter <code>{a b, c d}</code> isn't in yet.
           </p>
+          <p data-build="web">
+            A beat that uses most of the table — sub-groups, a stack, alternation, fast, degrade and
+            a Euclidean line. The kit is <code>pt_kit</code>, one of the built-in packs
+            (<a href="#s8">Study 8</a>): <code>0</code> kick, <code>1</code> snare, <code>2</code>
+            rim, <code>3</code> clap, <code>4</code> hat, <code>5</code> open hat.
+          </p>
+          <pre data-run data-build="web"><code>kick: s("pt_kit:0 [~ pt_kit:0] ~ pt_kit:0")
+snare: s("~ pt_kit:1 ~ &lt;pt_kit:1 [pt_kit:1 pt_kit:3]&gt;")
+hat: s("pt_kit:4*8?0.2, ~ pt_kit:5")
+rim: s("pt_kit:2.e(3,8)").vel(0.6)</code></pre>
           <div class="callout">
             <span class="tag">tip</span>
             The randomness in <code>?</code>, <code>|</code>, <code>r</code>, <code>i</code> and
@@ -360,14 +459,15 @@
           <h3>Notes, degrees, and scales</h3>
           <p>
             <code>note(…)</code> is <strong>absolute pitch</strong>: note names or MIDI numbers,
-            <code>note("c4 e4 g4")</code>, <code>note("60 64 67")</code>. <code>c5 = 60</code>, as in
-            Strudel; sharps and flats are <code>c#4</code> / <code>db4</code>.
+            <code>note("c4 e4 g4")</code>, <code>note("60 64 67")</code>. <code>c3 = 60</code>;
+            sharps and flats are <code>c#4</code> / <code>db4</code>.
           </p>
           <p>
             <code>n(…)</code> is <strong>scale degrees</strong>: <code>0</code> is the root, <code>1</code>
             the next note up, <code>7</code> the octave — and they mean nothing until you name the scale:
           </p>
-          <pre><code><span class="f">n</span>(<span class="s">"0 2 4 6"</span>).<span class="f">scale</span>(<span class="s">"F minor"</span>)   <span class="c">// degrees → the notes of F minor</span></code></pre>
+          <pre data-build="desktop"><code>n("0 2 4 6").scale("F minor")   // degrees → the notes of F minor</code></pre>
+          <pre data-run data-build="web"><code>keys: n("0 2 4 6").scale("F minor").synth("Wavetable")   // degrees → the notes of F minor</code></pre>
           <p>
             A scale is <code>"&lt;root&gt; &lt;mode&gt;"</code> — <code>"F minor"</code>,
             <code>"c dorian"</code>, <code>"Bb mixolydian"</code>. The usual modes, pentatonics, blues,
@@ -385,10 +485,15 @@
             <span class="tag">one key, one edit</span>
             A patch is nearly always in one key, so the key can live in the <em>document</em>:
             <code>setscale("F minor")</code> sets it and <code>.sc()</code> reads it.
-            <pre><code><span class="f">setscale</span>(<span class="s">"C minor"</span>)
+            <pre data-build="desktop"><code>setscale("C minor")
 
-bass: <span class="f">n</span>(<span class="s">"0 3 5"</span>).<span class="f">sc</span>(3).<span class="f">synth</span>(<span class="s">"Serum 2"</span>)    <span class="c">// root in octave 3</span>
-lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f">sc</span>(5).<span class="f">synth</span>(<span class="s">"Diva"</span>)</code></pre>
+bass: n("0 3 5").sc(3).synth("Serum 2")    // root in octave 3
+lead: n("0 2 4 7").sc(5).synth("Diva")</code></pre>
+            <pre data-run data-build="web"><code>setscale("C minor")
+
+bass: n("0 3 5").sc(3).synth("Wavetable")    // root in octave 3
+  .fx("Filter").param("Cutoff", 0.4)
+lead: n("0 2 4 7").sc(5).synth("FM").vel(0.7)</code></pre>
             <code>setscale</code> is <strong>hoisted</strong>: the last one in the buffer is the key the
             whole buffer plays in, including the patterns above it. Re-keying a set is one edit,
             wherever it's convenient to make it. The piano roll follows along.
@@ -396,7 +501,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             Notes work on either side of the instrument, and the pitch kind survives arithmetic —
             <code>note("c4 f#4").add(12).scale("C major")</code> still knows it's holding notes. A bare
-            <code>synth("…")</code> with no notes plays a C2 every cycle, so a fresh instrument makes
+            <code>synth("…")</code> with no notes plays a C3 (MIDI 60) every cycle, so a fresh instrument makes
             sound while you decide what it should play.
           </p>
         </section>
@@ -408,7 +513,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <p>
             <code>pianoroll()</code> is a note pattern you <strong>draw</strong> instead of type:
           </p>
-          <pre><code>lead: <span class="f">pianoroll</span>().synth(<span class="s">"Serum 2"</span>)   <span class="c">// double-click the word pianoroll</span></code></pre>
+          <pre data-build="desktop"><code>lead: pianoroll().synth("Serum 2")   // double-click the word pianoroll</code></pre>
+          <pre data-build="web"><code>lead: pianoroll().synth("Wavetable")   // double-click the word pianoroll</code></pre>
           <p>
             Double-click the name and a grid opens over the editor — a piano keyboard down the side, a
             loop bar along the top, a playhead sweeping as it plays. Draw; every stroke is written
@@ -458,7 +564,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             end out. Changing
             <strong>grid</strong> re-meshes without moving the music (a quarter note on the 1/4 grid is
             four cells on the 1/16 grid). <strong>🎧</strong> auditions notes as you draw — through the
-            track's plugin, or on a sampler track as the file itself, at the note's pitch.
+            track's <span data-build="desktop">plugin</span><span data-build="web">instrument</span>, or on a sampler track as the file itself, at the note's pitch.
             <strong>⌨</strong> plays the roll's track from your typing keyboard (<a href="#s9">Study 9</a>).
             <strong>→♪</strong> converts the roll to the equivalent <code>&lt;…&gt;*grid</code>
             mini-notation, written into the pattern — handy when a drawn idea is done and you want to
@@ -474,7 +580,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             as it does the chops on <strong>slice</strong>
             (<strong>settings → piano roll → file names on the index axis</strong> labels the rows
             with the files' names instead of their numbers) — so
-            <code>pianoroll("chops").s("breaks")</code> sequences a break by file, with lengths, velocity
+            <code data-build="desktop">pianoroll("chops").s("breaks")</code><code data-build="web">pianoroll("beat").s("pt_kit")</code> sequences a <span data-build="desktop">break</span><span data-build="web">kit</span> by file, with lengths, velocity
             and probability meaning exactly what they do on the keyboard. On <strong>slice</strong>
             the rows are the chops of whatever file the note plays, which is how a break gets
             rearranged hit by hit. Switching views moves nothing and keeps your selection: draw a
@@ -513,6 +619,9 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             chops writes its slice behind the index — <code>60:0:3</code> is chop 3 of the pack's
             first file — and one that doesn't writes neither field.
           </p>
+          <pre data-run data-build="web"><code>lead: pianoroll("60,0,4 63,4,4 67,8,4 70,12,2 72,14,2", { grid: 16 })
+  .synth("Wavetable")
+  .fx("Delay").param("Sync", "1/8.")</code></pre>
           <h4>Arranging: painting parts into a song</h4>
           <p>
             Every labeled block loops forever. To turn loops into a song, press
@@ -545,16 +654,21 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <code>kick2: copy("kick").fast(2)</code> is everything kick is, twice as fast, and
             <code>pianoroll("kickB").copy("kick")</code> is kick's chain playing a different roll.
           </p>
-          <pre><code>kick: group({
-  kickMain: s(<span class="s">"mbd*4"</span>)
-  kickFill: s(<span class="s">"mbd*4"</span>).i(3)
-}).postgain(<span class="n">0.8</span>)</code></pre>
+          <pre data-build="desktop"><code>kick: group({
+  kickMain: s("mbd*4")
+  kickFill: s("mbd*4").i(3)
+}).postgain(0.8)</code></pre>
+          <pre data-run data-build="web"><code>drums: group({
+  kick: s("pt_kit:0*4")
+  snare: s("~ pt_kit:1 ~ pt_kit:1")
+  hats: s("pt_kit:4*8").vel("1 .5")
+}).fx("Reverb").param("Mix", 0.15).postgain(0.8)</code></pre>
           <p>
             <strong>The group is the mixdown.</strong> Every track in a group sends into the
             group's bus and plays nothing directly, so a <code>.postgain()</code>, an
             <code>.fx()</code> or a <code>.bus()</code> written on the group takes all of them, and
-            the mixer and the DJ desk show the group alone — one fader, one meter, one gate for the
-            lot. Both carry a caret for looking inside: unfold a strip (or a stem on the desk) and
+            the mixer<span data-build="desktop"> and the DJ desk</span> show<span data-build="web">s</span> the group alone — one fader, one meter, one gate for the
+            lot. <span data-build="desktop">Both carry</span><span data-build="web">It carries</span> a caret for looking inside: unfold a strip<span data-build="desktop"> (or a stem on the desk)</span> and
             the tracks in the group appear stepped in under it, each with its own gate, solo and
             fader. Soloing one holds its group open, so what you hear is that part alone. A subgroup sends into <em>its</em> group
             in turn, and a bodyless <code>main: group()</code> is the root every ungrouped track
@@ -668,47 +782,99 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
         <section id="s5">
           <h2>Study 5</h2>
           <h3>Instruments &amp; effects</h3>
-          <p>
+          <p data-build="desktop">
             <code>.synth("…")</code> loads a VST/VST3 <em>instrument</em>; <code>.fx("…")</code>
-            chains an <em>effect</em> after it (and after any earlier <code>.fx()</code>). Up to eight
-            slots — one instrument, seven effects. The strings are the plugins' real names.
+            chains an <em>effect</em> after it (and after any earlier <code>.fx()</code>). Up to
+            twenty-one slots — one instrument, twenty effects. The strings are the plugins' real names.
           </p>
-          <div class="callout">
+          <div class="callout" data-build="desktop">
             <span class="tag">your rig, not mine</span>
             This guide writes <code>"Serum 2"</code>, <code>"Diva"</code> and so on as stand-ins —
             <strong>substitute plugins you actually have</strong>. Open <strong>sounds</strong>, hit
             <strong>rescan</strong>, and click any result to copy its exact name. Names also
             autocomplete inside the quotes.
           </div>
-          <pre><code><span class="f">lead</span>: note(<span class="s">"c4 e4 g4 b4"</span>)
-  .synth(<span class="s">"Serum 2"</span>)
-  .fx(<span class="s">"ValhallaDelay"</span>)
-  .fx(<span class="s">"Pro-Q 3"</span>)</code></pre>
+          <pre data-build="desktop"><code>lead: note("c4 e4 g4 b4")
+  .synth("Serum 2")
+  .fx("ValhallaDelay")
+  .fx("Pro-Q 3")</code></pre>
+          <p data-build="web">
+            <code>.synth("…")</code> loads an <em>instrument</em>; <code>.fx("…")</code> chains an
+            <em>effect</em> after it (and after any earlier <code>.fx()</code>), up to twenty effects.
+            Every one of them is built into the page, so there is nothing to install or scan: the
+            <strong>sounds</strong> tab lists them all, and their names autocomplete inside the quotes.
+          </p>
+          <table data-build="web">
+            <tr><th>Instruments</th><th></th></tr>
+            <tr><td><code>Wavetable</code></td><td>Two wavetable oscillators with warping and cross-modulation, a sub and noise.</td></tr>
+            <tr><td><code>FM</code></td><td>Eight operators and a modulation matrix: every operator can modulate every other, each with its own ratio, wave and envelope.</td></tr>
+            <tr><td><code>Granular</code></td><td>A sample played as a cloud of grains from around a position, transposed to the note.</td></tr>
+            <tr><td><code>Plaits</code></td><td>A macro oscillator: twenty-four synthesis models (<code>Engine</code>) behind three controls, with its own low-pass gate. Monophonic.</td></tr>
+            <tr><td><code>Braids</code></td><td>Forty-eight models (<code>Shape</code>) behind two controls, with an attack-decay envelope.</td></tr>
+            <tr><td><code>Rings</code></td><td>A resonator struck by its own exciter; six models from a modal bar to a string with a reverb.</td></tr>
+            <tr><td><code>Elements</code></td><td>A modal resonator played by a bow, a breath and a mallet. Monophonic.</td></tr>
+          </table>
+          <table data-build="web">
+            <tr><th>Effects</th><th></th></tr>
+            <tr><td><code>Filter</code> · <code>EQ</code></td><td>A resonant multimode filter (ladder, comb, formant and the classical shapes) · a four-band parametric equalizer.</td></tr>
+            <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>Waveshaping with nine curves · drive on one band of the spectrum · bit depth and sample rate reduction.</td></tr>
+            <tr><td><code>Compressor</code> · <code>Multiband</code> · <code>Limiter</code> · <code>Ducker</code></td><td>Dynamics. The compressor and the ducker take a sidechain (<a href="#s10">Study 10</a>); the ducker can also dip on the beat or on another track's notes.</td></tr>
+            <tr><td><code>Delay</code> · <code>GrainEcho</code> · <code>Stutter</code></td><td>A stereo delay, free or synced · a delay whose repeats are grains · a grid-synced repeat.</td></tr>
+            <tr><td><code>Chorus</code> · <code>Flanger</code> · <code>Phaser</code></td><td>Modulated delays and allpasses.</td></tr>
+            <tr><td><code>Reverb</code> · <code>Convolver</code> · <code>CloudSeed</code> · <code>Galactic</code></td><td>An algorithmic reverb · five synthesized spaces, or any sample as the impulse · two very large reverbs.</td></tr>
+            <tr><td><code>Clouds</code> · <code>Shift</code></td><td>A granular processor over the last few seconds of its input · pitch shifting with separate formant control.</td></tr>
+          </table>
+          <pre data-run data-build="web"><code>lead: note("c4 e4 g4 b4")
+  .synth("Wavetable")
+  .fx("Chorus")
+  .fx("Delay")</code></pre>
 
           <h4>Parameters</h4>
-          <p>
+          <p data-build="desktop">
             <code>.param("&lt;real name&gt;", value)</code> sets any knob on whatever plugin is last in
             the chain — the plugin's own parameter names, no alias layer:
           </p>
-          <pre><code>.param(<span class="s">"Filter 1 On"</span>, 1)
-.param(<span class="s">"Filter 1 Freq"</span>, 0.6)</code></pre>
-          <p>
+          <pre data-build="desktop"><code>.param("Filter 1 On", 1)
+.param("Filter 1 Freq", 0.6)</code></pre>
+          <p data-build="desktop">
             To find names, evaluate once so the plugin loads, then open the <strong>params</strong>
             panel (sounds tab) — every parameter of every plugin in the chain, searchable, click to
             copy. They autocomplete inside <code>.param("…")</code> too. Values are
             <strong>0..1</strong> unless a mapping file in <code>mappings/*.json</code> gives them real
             units (one ships for Serum 2, so <code>.range(200, 5000)</code> on its cutoff means Hertz).
           </p>
-          <div class="callout">
+          <div class="callout" data-build="desktop">
             <span class="tag">duplicate names</span>
             Some plugins reuse a name across sections (Diva has three <code>Frequency</code>s). Plain
             <code>.param("Frequency", …)</code> hits the first; <code>"Frequency#95"</code> picks by
             index. The params panel and autocomplete show the <code>#index</code> form whenever a name
             collides.
           </div>
+          <p data-build="web">
+            <code>.param("&lt;name&gt;", value)</code> sets a control on whatever device is last in
+            the chain, by the name its panel shows:
+          </p>
+          <pre data-build="web"><code>.fx("Filter")
+.param("Mode", "ladder")
+.param("Cutoff", 0.6)</code></pre>
+          <p data-build="web">
+            Every value is a <strong>0..1 position</strong> on the control, on every device, and the
+            device maps it onto its real range: <code>Cutoff</code> sweeps 20 Hz to 20 kHz by ratio,
+            so <code>0.5</code> is about 630 Hz, and a semitone or octave control lands on whole
+            steps. A control that picks from a list takes the option's label
+            (<code>"ladder"</code>) or its index, and a switch takes 0 or 1. Because every control
+            runs 0..1, an LFO or a macro can drive any of them as it is; <code>.range()</code>
+            narrows the sweep. To find names, evaluate once, then open the <strong>params</strong>
+            panel (sounds tab) — every control of every device in the chain, searchable, click to
+            copy. They autocomplete inside <code>.param("…")</code> too.
+          </p>
+          <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("Plaits")
+  .param("Engine", "Chord")
+  .param("Timbre", sine(0.2))
+  .fx("Reverb").param("Mix", 0.35)</code></pre>
 
           <h4>Design a sound, keep it in the code</h4>
-          <p>
+          <p data-build="desktop">
             Double-click the <code>synth</code> or <code>fx</code> name (or click <strong>ui</strong>
             in the track panel) to open the plugin's own window for the fiddly stuff — unison,
             wavetables, a preset from its browser. Change anything there and the plugin's whole state
@@ -716,12 +882,26 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <code>.preset("lead")</code> and a folded definition lands at the foot of the buffer.
             Nothing to press, and the patch sounds identical on a cold start.
           </p>
-          <pre><code>lead: note(<span class="s">"c4 e4 g4"</span>).synth(<span class="s">"Serum 2"</span>).preset(<span class="s">"&lt;lead growl&gt;"</span>)  <span class="c">// swap whole programs per cycle</span></code></pre>
-          <p>
+          <pre data-build="desktop"><code>lead: note("c4 e4 g4").synth("Serum 2").preset("&lt;lead growl&gt;")  // swap whole programs per cycle</code></pre>
+          <p data-build="desktop">
             Presets are just names, so they pattern. Double-click <code>preset</code> to open the panel
             where names are picked, made, copied and shaped by ear. <strong>export</strong> hands someone
             a single file that plays exactly what you hear; <strong>link</strong> puts a plain patch
             (no presets) on the clipboard.
+          </p>
+          <p data-build="web">
+            Double-click the <code>synth</code> or <code>fx</code> name to open the device's panel
+            for the fiddly stuff — oscillators, envelopes, the wavetable, the filter's curve. Change
+            anything there and, when the panel closes, the device's whole state is captured into the
+            code for you as a named <strong>preset</strong>: the call gains
+            <code>.preset("lead")</code> and a folded definition lands at the foot of the buffer.
+            Nothing to press, and the patch sounds identical on a cold start.
+          </p>
+          <pre data-build="web"><code>lead: note("c4 e4 g4").synth("Wavetable").preset("&lt;lead growl&gt;")  // swap whole programs per cycle</code></pre>
+          <p data-build="web">
+            Presets are just names, so they pattern. Double-click <code>preset</code> to open the panel
+            where names are picked, made, copied and shaped by ear. A share link (files tab) carries
+            the captured presets along with the code, so whoever opens it hears what you hear.
           </p>
         </section>
 
@@ -743,7 +923,8 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             in the same place every time round. Write the unit for a rate that ignores the tempo
             instead: <code>sine("0.5hz")</code>.
           </p>
-          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, sine(0.3).range(200, 5000))</code></pre>
+          <pre data-build="desktop"><code>.param("Filter 1 Freq", sine(0.3).range(200, 5000))</code></pre>
+          <pre data-build="web"><code>.fx("Filter").param("Cutoff", sine(0.3).range(0.2, 0.8))</code></pre>
           <p>
             <code>lfo("…", { rate, mode })</code> is a <strong>hand-drawn</strong> shape. Double-click
             the word <code>lfo</code> and a shape editor opens — drag points, bend segments — writing
@@ -753,24 +934,37 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <code>retrigger</code> (phase resets on each note), <code>envelope</code> (once per note,
             then hold). The editor's playhead follows all three.
           </p>
+          <pre data-run data-build="web"><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
+  .param("Osc 1 Table", "Vocal")
+  .param("Osc 1 Position", lfo("0,0 0.5,1,-3 1,0", { rate: 0.5 }))
+  .fx("Reverb")</code></pre>
           <h4>Envelopes</h4>
           <p>
             <code>env({ attack, decay, sustain, release, curve })</code> is an ADSR retriggered by the
             track's own notes — times in seconds, sustain 0..1, <code>.range()</code> to scale:
           </p>
-          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, env({ attack: 0.01, decay: 0.3, sustain: 0.2 }).range(300, 6000))</code></pre>
+          <pre data-build="desktop"><code>.param("Filter 1 Freq", env({ attack: 0.01, decay: 0.3, sustain: 0.2 }).range(300, 6000))</code></pre>
+          <pre data-run data-build="web"><code>bass: note("c2 c2 c3 c2 eb2 c2 g2 bb1").synth("Wavetable")
+  .fx("Filter").param("Mode", "ladder")
+  .param("Cutoff", env({ attack: 0.01, decay: 0.2, sustain: 0.1 }).range(0.25, 0.7))
+  .param("Resonance", sine(0.125).range(0.3, 0.8))
+kick: s("pt_kit:0*4")</code></pre>
           <h4>Knobs</h4>
           <p>
             The <strong>session</strong> tab has eight macro knobs, bound as <code>macro1</code>…<code>macro8</code>;
             drop one anywhere a signal goes. <code>midicc("Twister")(12)</code> is a hardware knob as a
-            signal, bound natively — a real knob driving a real knob, no lag. <code>osc("/1/fader3")</code>
-            is the same for anything that sends OSC (a tablet controller, a Max patch) to poptart's
-            input port, 57160 by default.
+            signal<span data-build="desktop">, bound natively — a real knob driving a real knob, no lag.
+            <code>osc("/1/fader3")</code> is the same for anything that sends OSC (a tablet controller,
+            another program) to poptart's input port, 57160 by default.</span><span data-build="web">,
+            read through the browser's Web MIDI (Chrome, Edge and Firefox have it; Safari does not).
+            The browser asks for permission the first time a pattern names a MIDI device.</span>
           </p>
-          <pre><code>.param(<span class="s">"Filter 1 Freq"</span>, macro1.range(200, 4000))</code></pre>
+          <pre data-build="desktop"><code>.param("Filter 1 Freq", macro1.range(200, 4000))</code></pre>
+          <pre data-build="web"><code>.fx("Filter").param("Cutoff", macro1.range(0.2, 0.7))</code></pre>
           <div class="callout">
             <span class="tag">tip</span>
-            <code>.range()</code>'s bounds can be signals too: <code>lfo().range("200 300", 4000)</code>
+            <code>.range()</code>'s bounds can be signals too:
+            <code data-build="desktop">lfo().range("200 300", 4000)</code><code data-build="web">lfo().range("0.2 0.3", 0.8)</code>
             sweeps from a stepped floor.
           </div>
         </section>
@@ -781,7 +975,7 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
           <h3>The channel strip &amp; the mixer</h3>
           <p>
             These take numbers, mini strings or any signal. All of them but <code>.gain(v)</code> live
-            after the whole plugin chain; <code>.gain(v)</code> is the level going <em>into</em> it.
+            after the whole <span data-build="desktop">plugin</span><span data-build="web">device</span> chain; <code>.gain(v)</code> is the level going <em>into</em> it.
           </p>
           <table>
             <tr><th>Method</th><th>Does</th></tr>
@@ -793,12 +987,19 @@ lead: <span class="f">n</span>(<span class="s">"0 2 4 7"</span>).<span class="f"
             <tr><td><code>.bus(name, amt)</code></td><td>Aux send to a named bus; another track reads it with <code>audio("name")</code>. <code>.dry(0)</code> kills the dry; <code>.bsend()</code> is both at once. Both arguments pattern: <code>.bus("&lt;reverb delay&gt;")</code> re-routes as it turns over, and the amount rides a signal.</td></tr>
             <tr><td><code>.o(n)</code></td><td>Which output pair: <code>.o(2)</code> = channels 3/4 (raise <em>output channels</em> in settings first).</td></tr>
           </table>
-          <pre><code>pad: note(<span class="s">"c3 e3 g3"</span>).synth(<span class="s">"Diva"</span>)
-  .width(0.6)                     <span class="c">// rein the patch's stereo in…</span>
-  .pan(sine(0.2).range(-1, 1))    <span class="c">// …then move it around</span>
-  .bus(<span class="s">"space"</span>, 0.3)
+          <pre data-build="desktop"><code>pad: note("c3 e3 g3").synth("Diva")
+  .width(0.6)                     // rein the patch's stereo in…
+  .pan(sine(0.2).range(-1, 1))    // …then move it around
+  .bus("space", 0.3)
 
-verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</span>)</code></pre>
+verb: audio("space").fx("ValhallaRoom")</code></pre>
+          <pre data-run data-build="web"><code>pad: note("c3 e3 g3").synth("Wavetable")
+  .param("Osc 1 Unison", 0.5)
+  .width(0.6)                     // rein the patch's stereo in…
+  .pan("&lt;-0.5 0.5&gt;")              // …then place it, a side per cycle
+  .bus("space", 0.3)
+
+verb: audio("space").fx("Reverb").param("Mix", 1)</code></pre>
           <h4>The mixer: {app+g}</h4>
           <p>
             A strip per track — meter, fader, pan, width, mute/solo, a <strong>▽ mono</strong> button
@@ -821,25 +1022,77 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
         <section id="s8">
           <h2>Study 8</h2>
           <h3>The sampler</h3>
-          <p>
+          <p data-build="desktop">
             <code>s("pack")</code> plays a folder of audio files from your sample library
             (<code>~/.poptart/samples</code> by default — settings tab). Files are numbered in filename
             order, and everything runs through the same <code>.fx()</code> chain as an instrument. The
             <strong>sounds</strong> tab lists every pack; hold a file row to audition it.
           </p>
-          <pre><code>drums: s(<span class="s">"bd*4, ~ hh ~ hh"</span>)   <span class="c">// "bd:4" picks a file inline = s("bd").i(4)</span>
-  .i(<span class="s">"&lt;0 1 2&gt;"</span>)          <span class="c">// which file of the pack</span>
-  .begin(0).end(1)          <span class="c">// play region, 0..1</span>
-  .loop()                   <span class="c">// run off the end and carry on from 0 (.loopwrap(1) loops the region)</span>
-  .speed(<span class="s">"1 -1"</span>)           <span class="c">// playback rate; negative = backwards</span>
-  .flip(<span class="s">"&lt;0 1&gt;"</span>)           <span class="c">// reverse INTO the beat, landing on the next hit</span>
-  .stretch(2)               <span class="c">// timestretch, pitch preserved</span>
-  .slice(<span class="s">"0 1 2 3"</span>)         <span class="c">// the nth chop (auto-detected transients, WAV only)</span>
-  .slices(<span class="s">"break"</span>)          <span class="c">// ...or the chop map you drew for this file — double-click `slice`</span>
-  .splice(<span class="s">"&lt;0 1 2&gt;*8"</span>)      <span class="c">// slice(), each chop fitted to its own hit — 8ths here, whatever their length (.splicemode("stretch") holds the pitch)</span>
-  .note(<span class="s">"45 _ 52 57"</span>)       <span class="c">// repitch by MIDI note (c2 = as recorded)</span>
-  .vel(<span class="s">"1 .5 ~ 1"</span>)          <span class="c">// per-hit volume (on synths: MIDI velocity)</span>
-  .adsr(0.1, 0.2, 0.6, 0.2) <span class="c">// amplitude envelope, as multiples of the hit's length</span></code></pre>
+          <p data-build="web">
+            <code>s("pack")</code> plays a pack of audio files, numbered from 0, and everything runs
+            through the same <code>.fx()</code> chain as an instrument. Two packs are part of the
+            page and play straight away: <code>pt_kit</code>, a synthesized drum kit (0 kick,
+            1 snare, 2 rim, 3 clap, 4 hat, 5 hatopen, 6 tomlo, 7 tomhi), and <code>pt_keys</code>,
+            melodic one-shots at middle C (0 pluck, 1 bell, 2 bass, 3 pad, 4 stab). The others are
+            downloaded the first time a pattern names one — the pack joins in once it has arrived —
+            and kept by this browser after that: <code>pt_drumbox</code>, a drum machine kit, with a
+            sweep of each of its voices (<code>pt_drumbox_kick</code>, <code>_snare</code>,
+            <code>_hatopen</code>, <code>_tomlo</code>, <code>_tommid</code>, <code>_tomhi</code>,
+            <code>_congalo</code>, <code>_congamid</code>, <code>_congahi</code>,
+            <code>_cymbal</code>); <code>pt_mallets</code>, <code>pt_piano</code>,
+            <code>pt_perc</code> and <code>pt_synth</code>. The <strong>sounds</strong> tab lists
+            every pack; hold a file row to audition it.
+          </p>
+          <p data-build="web">
+            <strong>Your own files:</strong> drop audio files on the window and they are kept in this
+            browser as the <code>files</code> pack, played by name — <code>s("files:loop.wav")</code>.
+            Dropped on the code, the <code>s()</code> that plays each one is written in where it
+            lands. A share link names these files but does not carry them.
+          </p>
+          <p data-build="web">
+            <strong>Packs from a repository:</strong> <code>samples("user/repo")</code> reads a public
+            GitHub repository and makes a pack of each folder of audio files in it, named after the
+            folder, its files in name order. Files at the top of the repository are a pack named after
+            the repository, and two folders with the same name are told apart by the folder above them
+            (<code>808_kicks</code>, <code>909_kicks</code>). The sounds tab lists them once the
+            pattern has been evaluated. Because the line is code, a share link carries it, and whoever
+            opens the link hears the same files.
+          </p>
+          <pre data-build="web"><code>samples("user/drum-kits")               // every folder of audio files is a pack
+samples("user/drum-kits@v2")            // a branch, tag or commit
+samples("user/drum-kits/808")           // only what is under that folder
+
+beat: s("kicks:0*4, ~ snares:2")</code></pre>
+          <pre data-run data-build="web"><code>drums: s("pt_kit:0*4, ~ pt_kit:3 ~ pt_kit:3, pt_kit:4*8").vel("1 .6")
+bass: s("pt_keys:2").note("c2 ~ c2 eb2 ~ c2 g1 bb1")
+bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
+  .fx("Delay").param("Sync", "1/8.")</code></pre>
+          <pre data-build="desktop"><code>drums: s("bd*4, ~ hh ~ hh")   // "bd:4" picks a file inline = s("bd").i(4)
+  .i("&lt;0 1 2&gt;")          // which file of the pack
+  .begin(0).end(1)          // play region, 0..1
+  .loop()                   // run off the end and carry on from 0 (.loopwrap(1) loops the region)
+  .speed("1 -1")           // playback rate; negative = backwards
+  .flip("&lt;0 1&gt;")           // reverse INTO the beat, landing on the next hit
+  .stretch(2)               // timestretch, pitch preserved
+  .slice("0 1 2 3")         // the nth chop (auto-detected transients, WAV only)
+  .slices("break")          // ...or the chop map you drew for this file — double-click `slice`
+  .splice("&lt;0 1 2&gt;*8")      // slice(), each chop fitted to its own hit — 8ths here, whatever their length (.splicemode("stretch") holds the pitch)
+  .note("45 _ 52 57")       // repitch by MIDI note (c3 = as recorded)
+  .vel("1 .5 ~ 1")          // per-hit volume (on synths: MIDI velocity)
+  .adsr(0.1, 0.2, 0.6, 0.2) // amplitude envelope, as multiples of the hit's length</code></pre>
+          <pre data-build="web"><code>drums: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4")   // "pt_kit:4" picks a file inline = s("pt_kit").i(4)
+  .i("&lt;0 1 2&gt;")          // which file of the pack
+  .begin(0).end(1)          // play region, 0..1
+  .loop()                   // run off the end and carry on from 0 (.loopwrap(1) loops the region)
+  .speed("1 -1")           // playback rate; negative = backwards
+  .flip("&lt;0 1&gt;")           // reverse INTO the beat, landing on the next hit
+  .stretch(2)               // timestretch, pitch preserved
+  .slice("0 1 2 3")         // the nth chop (auto-detected transients)
+  .slices("break")          // ...or the chop map you drew for this file — double-click `slice`
+  .splice("&lt;0 1 2&gt;*8")      // slice(), each chop fitted to its own hit — 8ths here, whatever their length (.splicemode("stretch") holds the pitch)
+  .note("45 _ 52 57")       // repitch by MIDI note (c3 = as recorded)
+  .vel("1 .5 ~ 1")          // per-hit volume (on synths: MIDI velocity)
+  .adsr(0.1, 0.2, 0.6, 0.2) // amplitude envelope, as multiples of the hit's length</code></pre>
           <p>
             On a sampler, <code>.note()</code> / <code>.n()</code> <strong>repitch</strong>, and
             <code>.scale()</code> works as in <a href="#s3">Study 3</a>. Patterned
@@ -890,20 +1143,40 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             around <code>.begin()</code>, instead of one pass through it. It is still one voice per
             hit, so <code>.adsr()</code> is the envelope of the whole cloud, <code>.note()</code>
             pitches it, and the hit's length is how long it sounds.
-            <pre><code>cloud: s(<span class="s">"pad"</span>).note(<span class="s">"c3 eb3 g3"</span>)
-  .grain()                            <span class="c">// .grain("&lt;0 1&gt;") alternates plain and granular hits</span>
-  .grainsize(0.08)                    <span class="c">// seconds per grain</span>
-  .grainrate(40)                      <span class="c">// grains per second — size x rate is how many overlap</span>
-  .grainshape(<span class="s">"pluck"</span>)                <span class="c">// each grain's window — double-click `grainshape` to draw it</span>
-  .begin(saw(0.25).range(0.2, 0.6)    <span class="c">// position: a slow scan through the file…</span>
-    .add(rand().mul(0.02)))           <span class="c">// …with every grain scattered around it</span>
-  .grainpan(rand().range(-0.6, 0.6))  <span class="c">// and placed somewhere of its own</span>
+            <pre data-build="desktop"><code>cloud: s("pad").note("c3 eb3 g3")
+  .grain()                            // .grain("&lt;0 1&gt;") alternates plain and granular hits
+  .grainsize(0.08)                    // seconds per grain
+  .grainrate(40)                      // grains per second — size x rate is how many overlap
+  .grainshape("pluck")                // each grain's window — double-click `grainshape` to draw it
+  .begin(saw(0.25).range(0.2, 0.6)    // position: a slow scan through the file…
+    .add(rand().mul(0.02)))           // …with every grain scattered around it
+  .grainpan(rand().range(-0.6, 0.6))  // and placed somewhere of its own
   .adsr(0.4, 0.2, 0.8, 1.5)</code></pre>
-            Size, rate, pan and a <code>.begin()</code> with no rhythm of its own are read by each
+            <span data-build="desktop">Size, rate, pan and a <code>.begin()</code> with no rhythm of its own are read by each
             grain as it starts, not once per hit — which is why <code>rand()</code> scatters grains
             rather than notes, and why an LFO on any of them is heard moving inside a held note. A
             <code>.begin("0 0.5")</code> still makes hits, and each hit stays where it was put.
-            <code>.bend()</code> repitches grains the same way. The window takes what
+            <code>.bend()</code> repitches grains the same way.</span>
+            <pre data-run data-build="web"><code>cloud: s("pt_keys:3").note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;")
+  .grain()                    // .grain("&lt;0 1&gt;") alternates plain and granular hits
+  .grainsize(0.08)            // seconds per grain
+  .grainrate(40)              // grains per second — size x rate is how many overlap
+  .grainshape("pluck")        // each grain's window — double-click `grainshape` to draw it
+  .begin(0.3)                 // where in the file the grains are cut from
+  .grainpan(0.3)              // and where they sit in the stereo field
+  .adsr(0.4, 0.2, 0.8, 1.5)
+  .fx("Reverb")</code></pre>
+            <span data-build="web">In the browser build the grain controls and <code>.begin()</code>
+            take numbers and mini-notation, set per hit; an LFO or <code>rand()</code> on them is not
+            connected. For a cloud that moves inside a held note, the <code>Granular</code>
+            instrument takes a signal on its <code>Position</code>, <code>Spray</code>,
+            <code>Size</code> and <code>Density</code>:</span>
+            <pre data-run data-build="web"><code>cloud: note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;").synth("Granular")
+  .param("Sample", "pt_keys:3")
+  .param("Position", saw(0.25).range(0.2, 0.6))
+  .param("Spray", 0.3)
+  .fx("Reverb")</code></pre>
+            The window takes what
             <code>lfo()</code> takes — drawn points, a shape's name, or
             <code>"&lt;pluck swell&gt;"</code> — and opens in the same editor.
           </div>
@@ -911,8 +1184,9 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             <span class="tag">loops &amp; breaks</span>
             <code>.fit()</code> repitches the whole file to a number of cycles (bare, the nearest power
             of two). <code>.begin()</code> then picks where to start inside it — so
-            <code>s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code> is eight random slice
-            starts a bar. If a fitted loop drops out, the region ran dry before the step ended:
+            <code data-build="desktop">s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code><code data-build="web">s("files:loop.wav").fit().begin(irand(8).seg(8).div(8))</code>
+            is eight random slice starts a bar<span data-build="web"> (the built-in packs are
+            one-shots, so this is for a loop of your own, dropped on the window)</span>. If a fitted loop drops out, the region ran dry before the step ended:
             <code>.loop()</code> it, fire shorter steps, or start earlier. <code>.log()</code> on the
             track prints that arithmetic per hit.
           </div>
@@ -921,17 +1195,28 @@ verb: audio(<span class="s">"space"</span>).fx(<span class="s">"ValhallaRoom"</s
             channel from inside a transform — <code>.mul(speed("-1"))</code> flips whatever speed is
             in force:
           </p>
-          <pre><code>tops: s(<span class="s">"breaks:19"</span>).fit().begin(irand(8).seg(8).div(8))
-  .when(rand().gte(0.7), x =&gt; x.mul(speed(<span class="s">"-1"</span>)))   <span class="c">// ~30% of bars backwards</span></code></pre>
+          <pre data-build="desktop"><code>tops: s("breaks:19").fit().begin(irand(8).seg(8).div(8))
+  .when(rand().gte(0.7), x =&gt; x.mul(speed("-1")))   // ~30% of bars backwards</code></pre>
+          <pre data-run data-build="web"><code>kick: s("pt_kit:0*4")
+hats: s("pt_kit:5*8").vel("1 .5")
+  .when(rand().gte(0.7), x =&gt; x.mul(speed("-1")))   // ~30% of bars backwards</code></pre>
 
           <h4>One exact file: <code>se()</code> and <code>sr()</code></h4>
-          <p>
+          <p data-build="desktop">
             <code>se("path")</code> names a file under the samples folder; <code>sr("name")</code> names
             one of your own bounces. Both are the same sampler. A path holds characters mini-notation
             reads as operators, so put it in <strong>single quotes</strong>:
           </p>
-          <pre><code>stab: se(<span class="s">"'hits/stab 01.wav'"</span>).slice(<span class="s">"0 2"</span>)
-loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8-cycle bounce, played whole</span></code></pre>
+          <pre data-build="desktop"><code>stab: se("'hits/stab 01.wav'").slice("0 2")
+loop: sr("bass").slow(8)          // an 8-cycle bounce, played whole</code></pre>
+          <p data-build="web">
+            <code>sr("name")</code> names one of your own bounces (below), kept in this browser.
+            <code>se("path")</code> names a file under the desktop app's samples folder, which the
+            browser build does not have; a file dropped on the window is reached through its pack
+            instead:
+          </p>
+          <pre data-build="web"><code>stab: s("files:stab.wav").slice("0 2")   // a file dropped on the window
+loop: sr("bass").slow(8)                 // an 8-cycle bounce, played whole</code></pre>
 
           <h4>A kit of your own: <code>sp()</code></h4>
           <p>
@@ -941,7 +1226,7 @@ loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8
             reorder with the arrows. Index it like any pack: <code>sp("kit:0 kit:2 kit:1 kit:2")</code>,
             or draw it in a piano roll's index rows.
           </p>
-          <p>
+          <p data-build="desktop">
             The browser's <strong>search box</strong> looks through everything under the folder
             you're in, not just what's listed: type <code>break</code> in your samples folder and
             every file with that anywhere in its path comes back, wherever it's buried. Several
@@ -952,11 +1237,15 @@ loop: sr(<span class="s">"bass"</span>).slow(8)          <span class="c">// an 8
           <h4>Bounce a track: {app+b}</h4>
           <p>
             Cursor in a block, <strong>{app+b}</strong>: that track's audio is recorded from the next
-            phrase boundary for the chosen cycles, filed under <code>~/.poptart/recordings/</code>, and
-            the bounce is written in below the (now muted) source under the same label:
+            phrase boundary for the chosen cycles, filed <span data-build="desktop">under
+            <code>~/.poptart/recordings/</code></span><span data-build="web">in this browser's
+            recordings</span>, and the bounce is written in below the (now muted) source under the
+            same label:
           </p>
-          <pre><code>_bass: note(<span class="s">"c2 eb2 g2 _"</span>).synth(<span class="s">"Serum 2"</span>).record({ cycles: 8 })
-bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
+          <pre data-build="desktop"><code>_bass: note("c2 eb2 g2 _").synth("Serum 2").record({ cycles: 8 })
+bass: sr("bass").slow(8)</code></pre>
+          <pre data-build="web"><code>_bass: note("c2 eb2 g2 _").synth("Wavetable").record({ cycles: 8 })
+bass: sr("bass").slow(8)</code></pre>
           <p>
             Same label on purpose: the bounce takes the original's place, so the mix doesn't move and
             un-muting one line puts the synth back. <code>.record({ cycles })</code> in a chain gives
@@ -970,10 +1259,11 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
           <h3>Playing live</h3>
           <table>
             <tr><th>Source</th><th>What it is</th></tr>
-            <tr><td><code>midikeys("KeyStep")(1)</code></td><td>A MIDI keyboard on channel 1 — notes, velocity, bend, aftertouch — routed engine-side, so latency is the MIDI driver's, not the clock's.</td></tr>
+            <tr><td><code>midikeys("KeyStep")(1)</code></td><td>A MIDI keyboard on channel 1 — notes, velocity, bend, aftertouch — <span data-build="desktop">routed engine-side, so latency is the MIDI driver's, not the clock's.</span><span data-build="web">read through the browser's Web MIDI (Chrome, Edge and Firefox; Safari has none), which asks for permission the first time a pattern names a device. The name is any part of the device's own name.</span></td></tr>
             <tr><td>the piano roll's <strong>⌨</strong></td><td>Your typing keyboard, playing the open roll's <em>track</em>: home row = white keys, the row above = black, <code>z</code>/<code>x</code> octave, <code>c</code>/<code>v</code> velocity. On an index roll the keys count files instead. Click ⌨ again (or close the roll) and they type as usual.</td></tr>
           </table>
-          <pre><code>keys: pianoroll().synth(<span class="s">"Serum 2"</span>).scale(<span class="s">"F minor"</span>)  <span class="c">// double-click pianoroll, hit ⌨, play</span></code></pre>
+          <pre data-build="desktop"><code>keys: pianoroll().synth("Serum 2").scale("F minor")  // double-click pianoroll, hit ⌨, play</code></pre>
+          <pre data-build="web"><code>keys: pianoroll().synth("Wavetable").scale("F minor")  // double-click pianoroll, hit ⌨, play</code></pre>
           <p>
             Live notes gate <code>env()</code> and retrigger note-synced <code>lfo()</code> shapes like
             pattern notes do, and <code>.scale()</code> snaps them to the key.
@@ -983,9 +1273,12 @@ bass: sr(<span class="s">"bass"</span>).slow(8)</code></pre>
             it rather than replacing it — the one note method that layers. So a roll can sit under a live
             keyboard, or under a pattern, and you keep hearing what is already there while you draw:
           </p>
-          <pre><code><span class="k">const</span> kb = <span class="f">midikeys</span>(<span class="s">"KeyStep"</span>)
-keys: kb(1).<span class="f">pianoroll</span>().synth(<span class="s">"Serum 2"</span>)      <span class="c">// play live over a drawn part</span>
-riff: <span class="f">n</span>(<span class="s">"&lt;0 1 2&gt;"</span>).sc(3).<span class="f">pianoroll</span>()            <span class="c">// draw a counter-line under a pattern</span></code></pre>
+          <pre data-build="desktop"><code>const kb = midikeys("KeyStep")
+keys: kb(1).pianoroll().synth("Serum 2")      // play live over a drawn part
+riff: n("&lt;0 1 2&gt;").sc(3).pianoroll()            // draw a counter-line under a pattern</code></pre>
+          <pre data-build="web"><code>const kb = midikeys("KeyStep")
+keys: kb(1).pianoroll().synth("Wavetable")    // play live over a drawn part
+riff: n("&lt;0 1 2&gt;").sc(3).pianoroll()            // draw a counter-line under a pattern</code></pre>
           <p>
             <strong>● rec</strong> and <strong>capture</strong> below write into that roll, so the take
             lands in the part you are already playing.
@@ -1012,21 +1305,35 @@ riff: <span class="f">n</span>(<span class="s">"&lt;0 1 2&gt;"</span>).sc(3).<sp
           <h2>Study 10</h2>
           <h3>Routing: <code>midi()</code> &amp; <code>audio()</code></h3>
           <p>
-            Two builders move MIDI and audio between tracks, hardware and plugins. Each works in two
+            Two builders move MIDI and audio between tracks, hardware and <span data-build="desktop">plugins</span><span data-build="web">devices</span>. Each works in two
             positions, and the position decides what it does.
           </p>
           <h4>At the head of a track: a source</h4>
-          <pre><code><span class="f">midi</span>(<span class="s">"KeyStep 32"</span>).synth(<span class="s">"Serum 2"</span>)         <span class="c">// play Serum from a MIDI device</span>
-<span class="f">audio</span>(<span class="s">"drums"</span>).fx(<span class="s">"ValhallaRoom"</span>)           <span class="c">// run another track through a reverb</span>
-<span class="f">input</span>(3).fx(<span class="s">"Amp Room"</span>)                    <span class="c">// a hardware input (channels from 1; two = stereo)</span></code></pre>
+          <pre data-build="desktop"><code>midi("KeyStep 32").synth("Serum 2")         // play Serum from a MIDI device
+audio("drums").fx("ValhallaRoom")           // run another track through a reverb
+input(3).fx("Amp Room")                    // a hardware input (channels from 1; two = stereo)</code></pre>
+          <pre data-build="web"><code>midi("KeyStep 32").synth("Wavetable")       // play the Wavetable from a MIDI device
+audio("drums").fx("Reverb")                 // run another track through a reverb
+input(1).fx("Overdrive")                    // a microphone or interface input (channels from 1; two = stereo)</code></pre>
+          <pre data-run data-build="web"><code>drums: s("pt_kit:0*4, ~ pt_kit:1 ~ pt_kit:1")
+room: audio("drums").fx("Convolver").param("Impulse", "hall").param("Mix", 1).postgain(0.5)</code></pre>
           <h4>After an <code>.fx()</code>: an injector</h4>
-          <pre><code>bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Kickstart"</span>).midi(<span class="s">"kick"</span>)  <span class="c">// duck to kick's rhythm</span>
-bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).fx(<span class="s">"Pro-C 2"</span>).audio(<span class="s">"kick"</span>)   <span class="c">// Pro-C's sidechain hears kick</span>
-kick: s(<span class="s">"bd*4"</span>)</code></pre>
-          <p>
+          <pre data-build="desktop"><code>bass: note("c2*8").synth("Serum 2").fx("Kickstart").midi("kick")  // duck to kick's rhythm
+bass: note("c2*8").synth("Serum 2").fx("Pro-C 2").audio("kick")   // Pro-C's sidechain hears kick
+kick: s("bd*4")</code></pre>
+          <p data-build="desktop">
             <code>.midi("kick")</code> replays the source's notes into the plugin (for MIDI-triggered
             duckers); <code>.audio("kick")</code> feeds its audio into the sidechain input (for
             compressors). <code>.audio(input(1))</code> sidechains off a live mic.
+          </p>
+          <pre data-run data-build="web"><code>kick: s("pt_kit:0*4")
+bass: note("c2*8").synth("Wavetable").fx("Ducker").midi("kick")          // duck to kick's rhythm
+pad: note("[c3,eb3,g3]").synth("Wavetable").fx("Compressor").audio("kick")  // the compressor's sidechain hears kick</code></pre>
+          <p data-build="web">
+            <code>.midi("kick")</code> replays the source's notes into the effect — the
+            <code>Ducker</code> dips on each one; <code>.audio("kick")</code> feeds its audio into the
+            sidechain input, which the <code>Compressor</code> and the <code>Ducker</code> have.
+            <code>.audio(input(1))</code> sidechains off a live mic.
           </p>
           <p>
             A name resolves <strong>track-first</strong>, then against connected devices by substring.
@@ -1035,9 +1342,19 @@ kick: s(<span class="s">"bd*4"</span>)</code></pre>
           <div class="callout">
             <span class="tag">tip</span>
             For a trigger with no track of its own, make a muted one and point at it:
-            <code>_trig: note("c5 ~ c5 ~")</code> then <code>.fx("Kickstart").midi("trig")</code>.
+            <code>_trig: note("c5 ~ c5 ~")</code> then <code data-build="desktop">.fx("Kickstart").midi("trig")</code><code data-build="web">.fx("Ducker").midi("trig")</code>.
           </div>
-          <div class="callout">
+          <div class="callout" data-build="web">
+            <span class="tag">note</span>
+            Audio input asks the browser for permission the first time a pattern uses
+            <code>input()</code>; with nothing picked in settings it opens the browser's default
+            input. Several inputs picked in settings are combined and numbered across, in the order
+            they were picked, and <code>input("USB", 1)</code> names whose channel 1 you mean. poptart
+            asks the browser to leave out its speech processing (echo cancellation, noise
+            suppression, automatic gain) on these inputs, and many browsers hand a page two channels
+            per input at most.
+          </div>
+          <div class="callout" data-build="desktop">
             <span class="tag">note</span>
             Hardware <em>audio</em> input needs a device that exposes inputs — pick one in settings.
             To use several interfaces at once, tick them under <strong>extra inputs</strong>; poptart
@@ -1053,9 +1370,9 @@ kick: s(<span class="s">"bd*4"</span>)</code></pre>
             Since patterns are signals, you reshape them with methods. <strong>Arithmetic</strong> takes
             its structure from the left side; the right can be a number, a string or another signal:
           </p>
-          <pre><code>note(<span class="s">"c3 e3 g3"</span>).add(12)                      <span class="c">// up an octave</span>
-n(<span class="s">"0 2 4"</span>).add(<span class="s">"&lt;0 7&gt;"</span>).scale(<span class="s">"C major"</span>)     <span class="c">// transpose every other cycle</span>
-pianoroll(<span class="s">"lead"</span>).sc().add(n(<span class="s">"&lt;0 2 -1&gt;"</span>))      <span class="c">// ...in scale tones: n() names the unit</span></code></pre>
+          <pre><code>note("c3 e3 g3").add(12)                      // up an octave
+n("0 2 4").add("&lt;0 7&gt;").scale("C major")     // transpose every other cycle
+pianoroll("lead").sc().add(n("&lt;0 2 -1&gt;"))      // ...in scale tones: n() names the unit</code></pre>
           <p>
             A number (or a bare string) works in semitones; an <code>n()</code> operand moves the whole
             operation into <strong>scale degrees</strong> — in the key the notes last went through, else
@@ -1078,7 +1395,7 @@ pianoroll(<span class="s">"lead"</span>).sc().add(n(<span class="s">"&lt;0 2 -1&
             <tr><td><code>.echo(n, dt, fn?)</code></td><td><code>n</code> delayed copies, <code>dt</code> cycles apart — a pattern-level tape echo.</td></tr>
             <tr><td><code>.arp(pat)</code></td><td>Arpeggiate chords: <code>note("[c3,e3,g3]").arp("0 1 2 3")</code>. Indices past the top wrap up an octave.</td></tr>
             <tr><td><code>.hold(trig)</code> / <code>.seg(n)</code></td><td>Sample-and-hold at <code>trig</code>'s onsets, or on an even grid of <code>n</code> per cycle: <code>rand().seg(8)</code> is stepped random.</td></tr>
-            <tr><td><code>.swing(amt, grid)</code> / <code>.nudge(v)</code></td><td>Groove: <code>s("hh*8").swing(1/3)</code> is the triplet shuffle; nudge offsets each hit by a fraction of its step.</td></tr>
+            <tr><td><code>.swing(amt, grid)</code> / <code>.nudge(v)</code></td><td>Groove: <code data-build="desktop">s("hh*8").swing(1/3)</code><code data-build="web">s("pt_kit:4*8").swing(1/3)</code> is the triplet shuffle; nudge offsets each hit by a fraction of its step.</td></tr>
             <tr><td><code>.vel(v)</code> / <code>.clip(v)</code></td><td>Per-note velocity and length multiplier — on synths and samplers alike.</td></tr>
           </table>
           <p>
@@ -1086,6 +1403,12 @@ pianoroll(<span class="s">"lead"</span>).sc().add(n(<span class="s">"&lt;0 2 -1&
             <code>.ply("&lt;2 4&gt;")</code>, <code>.seg("4 8")</code>, <code>.fast(macro1.range(1, 4))</code>.
             If you find one that doesn't, it's a bug.
           </p>
+          <pre data-run data-build="web"><code>arp: note("&lt;[c3,eb3,g3] [ab2,c3,eb3] [bb2,d3,f3] [g2,bb2,d3]&gt;")
+  .arp("0 1 2 3 2 1 0 1")                 // up and back down, past the top an octave higher
+  .when("&lt;0 0 0 1&gt;", x =&gt; x.add(12))      // every fourth bar up an octave
+  .echo(2, 3/16, x =&gt; x.vel(0.4))         // two quieter repeats, a dotted eighth apart
+  .synth("Wavetable")
+hats: s("pt_kit:4*8").swing(1/3).degrade(0.2)</code></pre>
           <p>
             <code>choose("0", "3", "7")</code> picks one option per cycle (weight one with a
             <code>[value, weight]</code> pair); <code>irand(8)</code> is a random integer 0…7. Both drop
@@ -1108,32 +1431,42 @@ pianoroll(<span class="s">"lead"</span>).sc().add(n(<span class="s">"&lt;0 2 -1&
           <h4>Extend the language</h4>
           <p>
             <code>Signal.prototype</code> is the shared prototype of every pattern, LFO and mini string.
-            Add a method to it and everything — <em>including bare strings</em> — picks it up, exactly
-            like Strudel's <code>Pattern.prototype</code>:
+            Add a method to it and everything — <em>including bare strings</em> — picks it up:
           </p>
-          <pre><code>Signal.prototype.acid = function () {
-  return this.param(<span class="s">"Filter 1 Freq"</span>, 0.3).param(<span class="s">"Filter 1 Reso"</span>, 0.8);
+          <pre data-build="desktop"><code>Signal.prototype.acid = function () {
+  return this.param("Filter 1 Freq", 0.3).param("Filter 1 Reso", 0.8);
 };
 
-bass: note(<span class="s">"c2*8"</span>).synth(<span class="s">"Serum 2"</span>).acid()</code></pre>
+bass: note("c2*8").synth("Serum 2").acid()</code></pre>
+          <pre data-run data-build="web"><code>Signal.prototype.acid = function () {
+  return this.fx("Filter").param("Mode", "ladder").param("Cutoff", 0.3).param("Resonance", 0.8);
+};
+
+bass: note("c2 c2 c3 c2 eb2 c2 g2 bb1").synth("Wavetable").acid()</code></pre>
           <p>
             Such lines, and <code>const …</code> declarations, are ordinary setup: put them on their own
             column-0 line anywhere in the buffer. Three pitch helpers are exposed for writing your own:
             <code>noteToMidi("c4")</code>, <code>degreeToMidi(2, "c minor")</code>,
             <code>parseScaleName("f dorian")</code>.
           </p>
-          <pre><code><span class="c">// a chord builder: intervals above a root, stacked into one mini "," layer</span>
-const chord = (root, ...ivs) =&gt; note(ivs.map((iv) =&gt; noteToMidi(root) + iv).join(<span class="s">","</span>));
+          <pre data-build="desktop"><code>// a chord builder: intervals above a root, stacked into one mini "," layer
+const chord = (root, ...ivs) =&gt; note(ivs.map((iv) =&gt; noteToMidi(root) + iv).join(","));
 
-pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Serum 2"</span>)   <span class="c">// Cmaj7</span></code></pre>
+pad: chord("c3", 0, 4, 7, 11).synth("Serum 2")   // Cmaj7</code></pre>
+          <pre data-run data-build="web"><code>// a chord builder: the root, raised by each interval in one "," stack
+const chord = (root, ...ivs) =&gt; note(root).add(ivs.join());
+
+pad: chord("c3", 0, 4, 7, 11).synth("Wavetable").fx("Reverb")   // Cmaj7</code></pre>
 
           <h4>Prebake: setup that runs at startup</h4>
           <p>
             Anything you'd paste at the top of every session — helpers, custom scales, prototype
             extensions — goes in the <strong>prebake</strong>, run once at load. Edit it from
-            <strong>settings → edit prebake…</strong> (saving re-runs it) or in
+            <strong>settings → edit prebake…</strong> (saving re-runs it)<span data-build="desktop"> or in
             <code>~/.poptart/prebake.js</code>; a <code>~/.poptart/prebake/</code> folder of
-            <code>*.js</code> files runs after it, in name order. Its top-level bindings are in scope in
+            <code>*.js</code> files runs after it, in name order</span><span data-build="web">; it is kept
+            in this browser's storage, and the files tab's backup export carries it along with
+            everything else</span>. Its top-level bindings are in scope in
             every buffer: <code>drums: kick</code> just works.
           </p>
 
@@ -1167,8 +1500,10 @@ pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Seru
             always. Names are settled on the way in: a definition your buffer already has, identical,
             is reused — so inserting the same snippet twice changes nothing the second time — and one
             that clashes is renamed (<code>bass</code> → <code>bass2</code>, references and all), with
-            a line in the console saying so. A snippet is a plain file in
-            <code>~/.poptart/snippets/</code>, readable and playable on its own.
+            a line in the console saying so. <span data-build="desktop">A snippet is a plain file in
+            <code>~/.poptart/snippets/</code>, readable and playable on its own.</span><span data-build="web">Snippets
+            are kept in this browser's storage, beside your patterns, and travel in the backup
+            export.</span>
           </p>
           <p>
             <strong>Shift+right-click</strong> anywhere in the editor gets the browser's own menu back.
@@ -1180,12 +1515,12 @@ pad: chord(<span class="s">"c3"</span>, 0, 4, 7, 11).synth(<span class="s">"Seru
             <code>hotkey(combo, handler)</code> and script the editor through the <code>editor</code>
             handle (<code>getSelection</code>, <code>replaceCode</code>, <code>getCode</code>, …):
           </p>
-          <pre><code><span class="c">// rotate the selected space-separated steps by one</span>
-hotkey(<span class="s">"alt+r"</span>, () =&gt; {
+          <pre><code>// rotate the selected space-separated steps by one
+hotkey("alt+r", () =&gt; {
   const { from, to, text } = editor.getSelection();
-  editor.replaceCode(rotate(text.trim().split(/\s+/), 1).join(<span class="s">" "</span>), from, to);
+  editor.replaceCode(rotate(text.trim().split(/\s+/), 1).join(" "), from, to);
 });</code></pre>
-          <p>
+          <p data-build="desktop">
             The <code>editor</code> handle follows the caret: in DJ mode a hotkey pressed while
             you're typing in deck B reads and writes deck B's code, not deck A's.
           </p>
@@ -1205,12 +1540,13 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
           <h3>Cheat sheet</h3>
           <table>
             <tr><th>Sources</th><th></th></tr>
-            <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c5 = 60)</td></tr>
+            <tr><td><code>note("c4 e4")</code></td><td>absolute pitch (c3 = 60)</td></tr>
             <tr><td><code>n("0 2 4").scale("F minor")</code></td><td>scale degrees</td></tr>
             <tr><td><code>pianoroll("name")</code></td><td>a drawn note pattern (double-click to open)</td></tr>
             <tr><td><strong>{mod+g}</strong> · <code>group({…})</code> · <strong>{app+a}</strong></td><td>wrap the selected tracks in a group (the braces are the membership; groups nest, and <code>main: group()</code> is where mastering goes) · the mixdown the tracks in its braces send into · the arrangement page: a row per track, clips say when each plays, group rows fold their members away</td></tr>
-            <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C2)</td></tr>
-            <tr><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
+            <tr><td><code>synth("…")</code> / <code>.synth("…")</code></td><td>instrument (default C3)</td></tr>
+            <tr data-build="desktop"><td><code>s("bd hh")</code> · <code>se("'a/b.wav'")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · exact file · bounce · your own kit</td></tr>
+            <tr data-build="web"><td><code>s("pt_kit:0 pt_kit:4")</code> · <code>s("files:name.wav")</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>sampler: pack · a file dropped on the window · bounce · your own kit</td></tr>
             <tr><td><code>midikeys("…")(ch)</code></td><td>live MIDI input (the typing keyboard is the roll's ⌨)</td></tr>
             <tr><td><code>midi("kick")</code> · <code>audio("mic")</code> · <code>input(3)</code></td><td>source: another track, a bus, a hardware input</td></tr>
             <tr><td><code>choose(a, b, c)</code> · <code>irand(n)</code></td><td>random pick / integer per cycle</td></tr>
@@ -1231,7 +1567,7 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>env({a, d, s, r})</code></td><td>per-note ADSR</td></tr>
             <tr><td><code>dur()</code></td><td>current note's length, in seconds</td></tr>
             <tr><td><code>.range(lo, hi)</code></td><td>rescale a 0..1 signal</td></tr>
-            <tr><td><code>macro1…macro8</code> · <code>midicc("…")(cc, ch)</code> · <code>osc("/addr")</code></td><td>live knobs</td></tr>
+            <tr><td><code>macro1…macro8</code> · <code>midicc("…")(cc, ch)</code><span data-build="desktop"> · <code>osc("/addr")</code></span></td><td>live knobs</td></tr>
           </table>
           <table>
             <tr><th>Transforms</th><th></th></tr>
@@ -1249,7 +1585,8 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
             <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats/cycle) · the key (hoisted)</td></tr>
             <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
             <tr><td><code>{mod+enter}</code> · <code>{mod+.}</code> · <code>{app+b}</code> · <code>{app+g}</code></td><td>eval · stop · bounce · mixer</td></tr>
-            <tr><td><code>{app+a}</code> · <code>{app+l}</code> · <code>{app+d}</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode (the lit header button)</td></tr>
+            <tr data-build="desktop"><td><code>{app+a}</code> · <code>{app+l}</code> · <code>{app+d}</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in · DJ mode (the lit header button)</td></tr>
+            <tr data-build="web"><td><code>{app+a}</code> · <code>{app+l}</code></td><td>flip code ↔ arrange (a selected clip lands you on its block) · release the loop region it is in</td></tr>
             <tr><td>right-click · <code>{app+j}</code></td><td>save the selection as a snippet · insert one</td></tr>
           </table>
         </section>
@@ -1275,5 +1612,11 @@ hotkey(<span class="s">"alt+r"</span>, () =&gt; {
         paintChordLabels();
       })();
     </script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="poptart-mode.js"></script>
+    <script src="pattern-meta.js"></script>
+    <script src="docs.js"></script>
   </body>
 </html>
